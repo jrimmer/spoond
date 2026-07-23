@@ -24,10 +24,10 @@ func main() {
 
 func run() error {
 	var (
-		configOnly   = flag.Bool("config", false, "print resolved config and exit")
-		register     = flag.Bool("register", false, "register the runner with Forgejo and exit")
-		testHyper    = flag.String("test-hyper", "", "connect to Hyper, boot a VM from the given image ID, exec 'echo hello', and tear down (verifiable checkpoint for T4)")
-		hyperAddr    = flag.String("hyper-addr", "", "override HYPER_ADDR for --test-hyper")
+		configOnly    = flag.Bool("config", false, "print resolved config and exit")
+		register      = flag.Bool("register", false, "register the runner with Forgejo and exit")
+		testHyper     = flag.String("test-hyper", "", "connect to Hyper, boot a VM from the given image ID, exec 'echo hello', and tear down (verifiable checkpoint for T4)")
+		hyperAddr     = flag.String("hyper-addr", "", "override HYPER_ADDR for --test-hyper")
 		healthTimeout = flag.Duration("health-timeout", 30*time.Second, "timeout for guest-agent health polling (default 30s)")
 	)
 	flag.Parse()
