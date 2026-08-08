@@ -102,8 +102,9 @@ func (w *worker) snapshot() (workerState, time.Time) {
 	return w.state, w.idleSince
 }
 
-// run is the worker's main loop. It registers, fetches, executes, and
-// re-registers (ephemeral registrations are invalidated after one job).
+// run is the worker's main loop. It registers once, then polls for
+// jobs. After a job completes, the ephemeral registration is invalidated
+// so it re-registers fresh before polling again.
 func (w *worker) run(ctx context.Context) {
 	var version int64
 	for {
@@ -121,24 +122,35 @@ func (w *worker) run(ctx context.Context) {
 		}
 		w.setState(workerIdle)
 
-		job, newVer, err := w.impl.Fetch(ctx, version)
-		if err != nil {
-			log.Printf("worker %d: fetch: %v", w.id, err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		version = newVer
-		if job == nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
+		// Poll for jobs on this stable registration.
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			if st, _ := w.snapshot(); st == workerStopped {
+				return
+			}
+			job, newVer, err := w.impl.Fetch(ctx, version)
+			if err != nil {
+				log.Printf("worker %d: fetch: %v", w.id, err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			version = newVer
+			if job == nil {
+				time.Sleep(2 * time.Second)
+				continue
+			}
 
-		w.setState(workerBusy)
-		log.Printf("worker %d: executing job %d", w.id, job.ID)
-		if err := w.impl.Run(ctx, job); err != nil {
-			log.Printf("worker %d: job %d failed: %v", w.id, job.ID, err)
+			w.setState(workerBusy)
+			log.Printf("worker %d: executing job %d", w.id, job.ID)
+			if err := w.impl.Run(ctx, job); err != nil {
+				log.Printf("worker %d: job %d failed: %v", w.id, job.ID, err)
+			}
+			// Ephemeral registration invalidated after one job; break
+			// out to re-register fresh.
+			break
 		}
-		// ephemeral: registration invalidated after one job; loop re-registers
 	}
 }
 
