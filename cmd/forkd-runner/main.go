@@ -100,5 +100,9 @@ func main() {
 		if err := exec.Run(ctx, job); err != nil {
 			log.Printf("job %d failed: %v", job.ID, err)
 		}
+		// Ephemeral runners are invalidated after one job; exit so
+		// systemd restarts us and we re-register fresh.
+		log.Printf("job %d done, exiting (ephemeral)", job.ID)
+		return
 	}
 }
