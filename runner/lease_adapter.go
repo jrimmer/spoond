@@ -22,7 +22,7 @@ func NewHTTPLeaseClient(baseURL, token string) *HTTPLeaseClient {
 	return &HTTPLeaseClient{
 		BaseURL: baseURL,
 		Token:   token,
-		Client:  &http.Client{Timeout: 60 * time.Second},
+		Client:  &http.Client{Timeout: 600 * time.Second},
 	}
 }
 
