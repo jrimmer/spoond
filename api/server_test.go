@@ -288,8 +288,8 @@ func TestBuildShellArgs(t *testing.T) {
 	if !strings.Contains(joined, "cd '/tmp' &&") {
 		t.Fatalf("expected cd with quoted cwd, got: %s", joined)
 	}
-	if !strings.Contains(joined, "export FOO='bar';") {
-		t.Fatalf("expected export with quoted value, got: %s", joined)
+	if !strings.Contains(joined, "export 'FOO'='bar';") {
+		t.Fatalf("expected export with quoted key and value, got: %s", joined)
 	}
 	if !strings.Contains(joined, "echo hi") {
 		t.Fatalf("expected command preserved, got: %s", joined)
@@ -300,7 +300,7 @@ func TestBuildShellArgs(t *testing.T) {
 func TestBuildShellArgsQuoting(t *testing.T) {
 	args := buildShellArgs("echo", "", map[string]string{"X": "it's"})
 	joined := args[2]
-	if !strings.Contains(joined, `export X='it'\''s';`) {
+	if !strings.Contains(joined, `export 'X'='it'\''s';`) {
 		t.Fatalf("expected single-quote escaping, got: %s", joined)
 	}
 }

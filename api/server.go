@@ -53,6 +53,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 type ctxOwnerKey struct{}
 
+// maxExecTimeout caps a single exec call so it cannot run far past the
+// lease TTL or tie up the controller indefinitely.
+const maxExecTimeout = 300 // seconds
+
 func ownerFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxOwnerKey{}).(string)
 	return v
@@ -84,13 +88,17 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
 		return
 	}
-	ttl := time.Duration(req.TTL) * time.Second
-	if ttl <= 0 {
-		ttl = s.svc.defaultTTL
+	// Cap the requested TTL in seconds BEFORE converting to a duration,
+	// so a huge ttl value cannot overflow time.Duration and bypass the
+	// maxTTL cap (yielding a near-zero lease).
+	ttlSecs := req.TTL
+	if ttlSecs <= 0 {
+		ttlSecs = int(s.svc.defaultTTL / time.Second)
 	}
-	if ttl > s.svc.maxTTL {
-		ttl = s.svc.maxTTL
+	if maxSecs := int(s.svc.maxTTL / time.Second); ttlSecs > maxSecs {
+		ttlSecs = maxSecs
 	}
+	ttl := time.Duration(ttlSecs) * time.Second
 	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl)
 	if err != nil {
 		s.svc.log.Printf("create: grant %s: %v", req.Image, err)
@@ -139,6 +147,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if timeout <= 0 {
 		timeout = 30
 	}
+	if timeout > maxExecTimeout {
+		timeout = maxExecTimeout
+	}
 	args := buildShellArgs(req.Cmd, req.Cwd, req.Env)
 	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, args, timeout)
 	if err != nil {
@@ -177,14 +188,16 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildShellArgs wraps a command with cwd/env into a single shell
-// invocation, since forkd's exec takes argv and no cwd/env.
+// invocation, since forkd's exec takes argv and no cwd/env. Both env
+// keys and values are shell-quoted so a hostile key cannot inject
+// shell metacharacters.
 func buildShellArgs(cmd, cwd string, env map[string]string) []string {
 	var parts []string
 	if cwd != "" {
 		parts = append(parts, "cd "+shellQuote(cwd)+" &&")
 	}
 	for k, v := range env {
-		parts = append(parts, "export "+k+"="+shellQuote(v)+";")
+		parts = append(parts, "export "+shellQuote(k)+"="+shellQuote(v)+";")
 	}
 	parts = append(parts, cmd)
 	return []string{"/bin/sh", "-c", strings.Join(parts, " ")}

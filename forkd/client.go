@@ -127,7 +127,7 @@ func (c *Client) SnapshotExists(ctx context.Context, tag string) (bool, error) {
 	var out SnapshotInfo
 	err := c.do(ctx, http.MethodGet, "/v1/snapshots/"+tag+"/info", nil, &out)
 	if err == nil {
-		return true, nil
+		return out.Bootable, nil
 	}
 	if fe, ok := err.(*Error); ok && fe.StatusCode == http.StatusNotFound {
 		return false, nil
