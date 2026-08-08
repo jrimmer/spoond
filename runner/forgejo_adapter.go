@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -22,10 +23,13 @@ type ForgejoAdapter struct {
 
 // NewForgejoAdapter builds a Forgejo runner protocol adapter.
 // baseURL is the Forgejo instance URL (e.g. https://code.lacy.casa).
+// The runner protocol is mounted under /api/actions, matching the
+// official forgejo-runner.
 func NewForgejoAdapter(baseURL string, hc *http.Client) *ForgejoAdapter {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
+	baseURL = strings.TrimRight(baseURL, "/") + "/api/actions"
 	return &ForgejoAdapter{
 		svc: runnerv1connect.NewRunnerServiceClient(hc, baseURL),
 	}
