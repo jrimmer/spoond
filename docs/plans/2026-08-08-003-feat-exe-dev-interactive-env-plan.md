@@ -72,6 +72,12 @@ The forkd lease API currently supports batch execution (create → exec → rele
 
 **KTD5. LLM dev image.** Bake a `dev-base` image with tmux, ssh server, git, and an LLM coding agent CLI (e.g. a Go/Lua agent like `jem`, or a generic LLM CLI). This is the "ready to go" dev environment.
 
+**KTD6. SSH-as-API control plane (exe.dev's core design).** exe.dev's entire control plane is an SSH REPL: `ssh exe.dev new --json`, `ssh exe.dev ls --json`, `ssh exe.dev rm <vm>`. The HTTPS API is literally "the SSH API shoved into a POST body" (`POST https://exe.dev/exec`). One API to learn, debuggable interactively over SSH, scriptable over HTTPS. This is a better model than a bespoke CLI — same interface for humans and automation. The `forkd-dev` CLI should be an SSH REPL (or expose an SSH-command surface) rather than a standalone binary.
+
+**KTD7. `cp` clone as a first-class operation.** exe.dev's `ssh exe.dev cp my-vm my-vm-copy` clones a VM (with optional `--cpu/--memory/--disk`). This is a killer dev-workflow feature (copy a working env, experiment, discard). Forkd's snapshot-diff/branch mechanism can do this natively — a `forkd-dev cp` should be in scope.
+
+**KTD8. Off-VM credential integrations.** exe.dev holds credentials off-VM (GitHub, LLM, Slack, AWS/GCP WIF) and exposes them to the VM via integration hostnames (`https://github.int.exe.xyz/...`) — the VM never sees the token. This is the same security model as CFOS gatekeepers, and the pattern forkd sandboxes should follow: credentials held off-VM, sandbox gets a capability, not a key.
+
 ### High-Level Technical Design
 
 ```mermaid
@@ -177,9 +183,9 @@ forkd-dev status <id>                                          → running/suspe
 
 **Verification:** a real ssh (and mosh) connection from outside reaches the sandbox's tmux session.
 
-### U3. `forkd-dev` CLI
+### U3. `forkd-dev` control plane (SSH-as-API)
 
-**Goal:** A small CLI exposing create/ssh/suspend/resume/dispose/keep-alive/status for interactive dev sandboxes.
+**Goal:** An SSH REPL (or SSH-command surface) exposing create/ssh/suspend/resume/dispose/keep-alive/status/cp for interactive dev sandboxes — mirroring exe.dev's "the API is SSH" design.
 
 **Requirements:** R3, R6
 
@@ -187,20 +193,22 @@ forkd-dev status <id>                                          → running/suspe
 
 **Files:**
 - `cmd/forkd-dev/main.go` (new)
+- `forkddev/server.go` (new — SSH command dispatcher)
+- `forkddev/server_test.go` (new)
 - `forkddev/client.go` (new)
-- `forkddev/client_test.go` (new)
 
-**Approach:** A Go CLI that talks to the lease API (and the ssh gateway). `create` returns an ssh command; `ssh` shells out to the ssh/mosh client; `suspend`/`resume`/`dispose`/`keep-alive` call the API. `status` shows the sandbox state.
+**Approach:** A small SSH server (or an SSH-command dispatcher) that accepts commands like `ssh forkd-dev new --json`, `ssh forkd-dev ls --json`, `ssh forkd-dev suspend <id>`, `ssh forkd-dev cp <id> <new>`. Each command maps to a lease-API call. JSON output for automation, human-readable for interactive use. This is the exe.dev model (KTD6): one interface for humans and scripts.
 
-**Patterns to follow:** `cmd/forkd-runner/main.go` (env config, CLI structure); `forkd/client.go` (HTTP client).
+**Patterns to follow:** exe.dev's SSH REPL design (KTD6); `cmd/forkd-runner/main.go` (env config); `forkd/client.go` (HTTP client).
 
 **Test scenarios:**
-- Happy path: `create` returns a sandbox id + ssh command.
-- Happy path: `status` reflects running/suspended/disposed.
+- Happy path: `new` returns a sandbox id + ssh command.
+- Happy path: `ls --json` reflects running/suspended/disposed.
+- Happy path: `cp` clones a sandbox.
 - Error path: `dispose` on a nonexistent id returns a clear error.
-- Integration: `create` → `ssh` → `suspend` → `resume` → `dispose` works end-to-end.
+- Integration: `new` → `ssh` → `suspend` → `resume` → `dispose` works end-to-end over SSH.
 
-**Verification:** `go test ./forkddev/...` passes; the full CLI lifecycle works against a live backend.
+**Verification:** `go test ./forkddev/...` passes; the full lifecycle works over an SSH session against a live backend.
 
 ### U4. Bake `dev-base` image (LLM dev environment)
 
@@ -213,7 +221,7 @@ forkd-dev status <id>                                          → running/suspe
 **Files:**
 - `deploy/bake-dev-base.sh` (new)
 
-**Approach:** Build a Docker image with tmux, openssh-server, git, and an LLM coding agent (e.g. `jem` — the Go+Lua agent in the homelab, or a generic LLM CLI), then `forkd from-image` it. Apply the PATH-symlink fix and `--size-mib` lessons from the go-base bake.
+**Approach:** Build a Docker image with tmux, openssh-server, git, and an LLM coding agent, then `forkd from-image` it. Apply the PATH-symlink fix and `--size-mib` lessons from the go-base bake. **Candidate agent: Shelley** (`github.com/boldsoftware/shelley`) — a Go, mobile-friendly, web-based, multi-conversation, multi-model, single-user coding agent. It's "built for but not exclusive to exe.dev," does not come with auth/sandboxing ("bring your own"), and runs on port 9999 in exe.dev's default image. It's a strong fit for `dev-base` (Go binary, web UI, no sandboxing needed since forkd provides isolation). `jem` (the homelab's Go+Lua agent) is the alternative. **Image spec is deferred to implementation time** (per Jason).
 
 **Patterns to follow:** `deploy/bake-go-base.sh` (PATH fix, `FORKD_SCRIPTS_DIR`, `--size-mib`).
 
@@ -246,14 +254,41 @@ forkd-dev status <id>                                          → running/suspe
 
 **Verification:** `go test ./api/...` passes; a sandbox with a short timeout auto-suspends after idle and resumes on demand.
 
+### U6. `cp` clone operation
+
+**Goal:** Add a `cp` operation that clones a persistent sandbox (with optional `--cpu/--memory/--disk`), mirroring exe.dev's `ssh exe.dev cp my-vm my-vm-copy`.
+
+**Requirements:** R2, R3
+
+**Dependencies:** U1, U3
+
+**Files:**
+- `api/service.go` (modify — clone endpoint)
+- `api/service_test.go` (new tests)
+- `forkddev/server.go` (modify — `cp` command)
+
+**Approach:** A `POST /api/sandboxes/{id}/clone` endpoint that snapshots the source sandbox's disk and spawns a new sandbox from it (forkd's snapshot-diff/branch mechanism). The clone gets a fresh id, independent state, and its own lifecycle. `forkd-dev cp <id> <new>` maps to this.
+
+**Patterns to follow:** exe.dev's `cp` (KTD7); forkd's snapshot-diff/branch mechanism.
+
+**Test scenarios:**
+- Happy path: `cp` clones a sandbox with independent state.
+- Happy path: `cp --memory/--cpu` resizes the clone.
+- Edge case: cloning a suspended sandbox works.
+- Error path: cloning a nonexistent id returns a clear error.
+- Integration: `cp` a running sandbox, modify the clone, original is unaffected.
+
+**Verification:** `go test ./api/...` passes; `forkd-dev cp` clones a sandbox end-to-end with independent state.
+
 ## Deferred to Follow-Up Work
 
 - exe.dev's full platform (billing, sharing, HTTPS web access, multi-user)
 - Web-based terminal (browser ssh) — start with native ssh/mosh
 - The CFOS `executeCode` batch path (separate plan)
+- **Shelley integration** — a follow-up ce-plan to evaluate and integrate Shelley (`github.com/boldsoftware/shelley`) as the `dev-base` coding agent (Go, web-based, multi-model, single-user, no auth/sandboxing — forkd provides isolation). This plan notes it as the candidate agent (U4) but defers the full integration design.
 
 ## Open Questions
 
-- Which LLM coding agent should the `dev-base` image include? (`jem` is the homelab's Go+Lua agent; confirm it's the right choice or use a generic LLM CLI.)
-- Should the ssh gateway be a dedicated service or a Caddy TCP proxy? (Depends on existing Caddy setup and external reachability.)
-- What's the default suspend timeout, and should it be per-sandbox or global?
+- **RESOLVED: Which LLM coding agent in `dev-base`?** Shelley (`github.com/boldsoftware/shelley`) is the leading candidate — Go, web-based, mobile-friendly, multi-model, single-user, no auth/sandboxing (forkd provides isolation). `jem` (homelab Go+Lua agent) is the alternative. **Image spec deferred to implementation time** (per Jason). A Shelley integration follow-up ce-plan is proposed.
+- **RESOLVED: Dedicated ssh gateway vs Caddy TCP proxy?** Deferred to implementation — depends on existing Caddy setup and external reachability. The plan supports either (U2).
+- **RESOLVED: Default suspend timeout?** Deferred to implementation — per-sandbox configurable (U5), no global default set at plan time.
