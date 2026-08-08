@@ -27,8 +27,77 @@ type EvalContext struct {
 func (c *EvalContext) Eval(s string) string {
 	return exprRe.ReplaceAllStringFunc(s, func(m string) string {
 		inner := exprRe.FindStringSubmatch(m)[1]
-		return c.lookup(strings.TrimSpace(inner))
+		return c.evalExpr(strings.TrimSpace(inner))
 	})
+}
+
+// evalExpr resolves a single expression body, supporting the GitHub
+// Actions `||` fallback operator: `${{ vars.X || 'default' }}` returns
+// the first non-empty operand.
+func (c *EvalContext) evalExpr(expr string) string {
+	// Split on top-level `||` (not inside quotes).
+	parts := splitTopLevelOr(expr)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Strip surrounding quotes for string literals.
+		if len(part) >= 2 && (part[0] == '\'' || part[0] == '"') && part[len(part)-1] == part[0] {
+			part = part[1 : len(part)-1]
+		}
+		// If it's a lookup expression, resolve it. Only treat known
+		// context prefixes (github./env./secrets./vars./steps.) as
+		// lookups — a bare string like a URL with dots must not be
+		// misdetected as one.
+		if isLookupExpr(part) {
+			if v := c.lookup(part); v != "" {
+				return v
+			}
+			continue
+		}
+		// Literal (or already-resolved) value.
+		if part != "" {
+			return part
+		}
+	}
+	return ""
+}
+
+// isLookupExpr reports whether an expression body is a context lookup
+// (github.*, env.*, secrets.*, vars.*, steps.*) rather than a literal.
+func isLookupExpr(expr string) bool {
+	for _, prefix := range []string{"github.", "env.", "secrets.", "vars.", "steps."} {
+		if strings.HasPrefix(expr, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitTopLevelOr splits an expression on `||` operators that are not
+// inside single or double quotes.
+func splitTopLevelOr(expr string) []string {
+	var parts []string
+	var cur strings.Builder
+	inSingle, inDouble := false, false
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		switch {
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+		case ch == '|' && i+1 < len(expr) && expr[i+1] == '|' && !inSingle && !inDouble:
+			parts = append(parts, cur.String())
+			cur.Reset()
+			i++ // skip second '|'
+			continue
+		}
+		cur.WriteByte(ch)
+	}
+	parts = append(parts, cur.String())
+	return parts
 }
 
 // lookup resolves a single expression body like "github.repository" or
