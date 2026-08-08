@@ -1,0 +1,55 @@
+# forkd image manifest
+#
+# Source of truth for baked forkd snapshot images. One image per
+# capability — name by capability, never by repo or project. Many Go
+# repos share one `go-base`; many review jobs share one `llm-review`.
+#
+# This file is what the image-inquiry process consults. When you point
+# the agent at a repo, it detects the repo's language/capability, checks
+# this manifest, and only bakes a NEW image when a genuinely new
+# capability is missing.
+#
+# Fields:
+#   name        baked snapshot tag (must exist on the forkd host)
+#   capability  the job capability this image provides (one per image)
+#   labels      runs-on labels that map to this image (IMAGE_MAP keys)
+#   description what's in it / what it's for
+#   baked       true once the snapshot exists on the host
+#   rootfs      the ext4 rootfs backing the snapshot (if known)
+#   notes       freeform
+
+images:
+  - name: py-base
+    capability: python
+    labels: [python, py, py-base]
+    description: Python 3.12 slim base for Python build/test/CI jobs
+    baked: true
+    rootfs: /var/cache/forkd/python-3-12-slim.ext4
+    notes: First image baked 2026-08-07. DEFAULT_IMAGE fallback for the runner.
+
+  # --- Planned / not yet baked -------------------------------------
+  # Bake these when the first repo needs them. One per language.
+  #
+  # - name: go-base
+  #   capability: golang
+  #   labels: [golang, go]
+  #   description: Go toolchain for Go build/test/CI jobs
+  #   baked: false
+  #
+  # - name: rust-base
+  #   capability: rust
+  #   labels: [rust]
+  #   description: Rust toolchain for Rust build/test/CI jobs
+  #   baked: false
+  #
+  # - name: elixir-base
+  #   capability: elixir
+  #   labels: [elixir]
+  #   description: Elixir/Erlang toolchain for Elixir build/test/CI jobs
+  #   baked: false
+  #
+  # - name: llm-review
+  #   capability: llm-review
+  #   labels: [llm-review]
+  #   description: LLM CLI + git for code-review jobs (language-agnostic)
+  #   baked: false
