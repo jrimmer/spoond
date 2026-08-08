@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -67,15 +66,11 @@ func main() {
 		}
 	}
 
-	proto := runner.NewClient(forgejoURL, nil)
-	lease := &runner.HTTPLeaseClient{
-		BaseURL: leaseURL,
-		Token:   leaseToken,
-		Client:  &http.Client{Timeout: 60 * time.Second},
-	}
+	proto := runner.NewForgejoAdapter(forgejoURL, nil)
+	lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
 	exec := &runner.Executor{
-		Lease:        lease,
-		Proto:        proto,
+		Sandbox:      lease,
+		Sink:         proto,
 		Labels:       imageMap,
 		DefaultImage: defaultImage,
 		TTL:          ttl,
@@ -90,20 +85,20 @@ func main() {
 
 	var tasksVersion int64
 	for {
-		task, newVersion, err := proto.FetchTask(ctx, tasksVersion)
+		job, newVersion, err := proto.Fetch(ctx, tasksVersion)
 		if err != nil {
 			log.Printf("fetch task: %v", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		tasksVersion = newVersion
-		if task == nil {
+		if job == nil {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		log.Printf("executing task %d", task.GetId())
-		if err := exec.Run(ctx, task); err != nil {
-			log.Printf("task %d failed: %v", task.GetId(), err)
+		log.Printf("executing job %d", job.ID)
+		if err := exec.Run(ctx, job); err != nil {
+			log.Printf("job %d failed: %v", job.ID, err)
 		}
 	}
 }

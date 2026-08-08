@@ -3,12 +3,9 @@ package runner
 import (
 	"context"
 	"testing"
-
-	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// fakeLease is an in-memory LeaseClient for tests.
+// fakeLease is an in-memory SandboxProvider for tests.
 type fakeLease struct {
 	created []string
 	execs   []string
@@ -48,33 +45,31 @@ func (f *fakeLease) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// fakeProto is a no-op protocol client for tests.
-type fakeProto struct {
-	updates []*runnerv1.TaskState
+// fakeSink is a no-op JobSink for tests.
+type fakeSink struct {
+	reports []*JobState
 	logs    []string
 }
 
-func (f *fakeProto) UpdateTask(ctx context.Context, state *runnerv1.TaskState, outputs map[string]string) error {
-	f.updates = append(f.updates, state)
+func (f *fakeSink) Report(ctx context.Context, state *JobState, outputs map[string]string) error {
+	f.reports = append(f.reports, state)
 	return nil
 }
 
-func (f *fakeProto) UpdateLog(ctx context.Context, taskID, index int64, rows []*runnerv1.LogRow, noMore bool) error {
+func (f *fakeSink) Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error {
 	for _, r := range rows {
-		f.logs = append(f.logs, r.GetContent())
+		f.logs = append(f.logs, r.Content)
 	}
 	return nil
 }
 
-func testTask(t *testing.T, payload string) *runnerv1.Task {
-	t.Helper()
-	ctx, _ := structpb.NewStruct(map[string]any{"repository": "test/repo"})
-	return &runnerv1.Task{
-		Id:              1,
-		WorkflowPayload: []byte(payload),
-		Context:         ctx,
-		Secrets:         map[string]string{},
-		Vars:            map[string]string{},
+func testJob(payload string) *Job {
+	return &Job{
+		ID:       1,
+		Workflow: []byte(payload),
+		Secrets:  map[string]string{},
+		Vars:     map[string]string{},
+		Context:  map[string]string{"repository": "test/repo"},
 	}
 }
 
@@ -87,15 +82,15 @@ jobs:
       - run: echo hello
 `
 	lease := newFakeLease()
-	proto := &fakeProto{}
+	sink := &fakeSink{}
 	exec := &Executor{
-		Lease:        lease,
-		Proto:        proto,
+		Sandbox:      lease,
+		Sink:         sink,
 		Labels:       map[string]string{"ubuntu-latest": "py-base"},
 		DefaultImage: "py-base",
 		TTL:          600,
 	}
-	if err := exec.Run(context.Background(), testTask(t, payload)); err != nil {
+	if err := exec.Run(context.Background(), testJob(payload)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if len(lease.created) != 1 {
@@ -107,8 +102,8 @@ jobs:
 	if lease.deleted[0] != lease.created[0] {
 		t.Fatalf("released %s but created %s", lease.deleted[0], lease.created[0])
 	}
-	if len(proto.updates) != 1 || proto.updates[0].GetResult() != runnerv1.Result_RESULT_SUCCESS {
-		t.Fatalf("expected success update, got %+v", proto.updates)
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultSuccess {
+		t.Fatalf("expected success report, got %+v", sink.reports)
 	}
 }
 
@@ -122,19 +117,19 @@ jobs:
 `
 	lease := newFakeLease()
 	lease.results["exit 1"] = &ExecResult{Stderr: "boom\n", Exit: 1}
-	proto := &fakeProto{}
+	sink := &fakeSink{}
 	exec := &Executor{
-		Lease:        lease,
-		Proto:        proto,
+		Sandbox:      lease,
+		Sink:         sink,
 		Labels:       map[string]string{"ubuntu-latest": "py-base"},
 		DefaultImage: "py-base",
 		TTL:          600,
 	}
-	if err := exec.Run(context.Background(), testTask(t, payload)); err != nil {
+	if err := exec.Run(context.Background(), testJob(payload)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if len(proto.updates) != 1 || proto.updates[0].GetResult() != runnerv1.Result_RESULT_FAILURE {
-		t.Fatalf("expected failure update, got %+v", proto.updates)
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultFailure {
+		t.Fatalf("expected failure report, got %+v", sink.reports)
 	}
 	// Sandbox must still be released on failure.
 	if len(lease.deleted) != 1 {
@@ -151,18 +146,15 @@ jobs:
       - run: echo hi
 `
 	lease := newFakeLease()
-	proto := &fakeProto{}
+	sink := &fakeSink{}
 	exec := &Executor{
-		Lease:        lease,
-		Proto:        proto,
-		Labels:       map[string]string{"ubuntu-latest": "py-base"},
-		DefaultImage: "py-base",
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{},
+		DefaultImage: "no-such-image",
 		TTL:          600,
 	}
-	// Force create to fail by using an unknown image.
-	exec.Labels = map[string]string{}
-	exec.DefaultImage = "no-such-image"
-	_ = exec.Run(context.Background(), testTask(t, payload))
+	_ = exec.Run(context.Background(), testJob(payload))
 	// No sandbox was created, so nothing to release.
 	if len(lease.created) != 0 {
 		t.Fatalf("expected no sandbox created, got %d", len(lease.created))

@@ -8,12 +8,12 @@ import (
 
 // Workflow is the parsed expanded workflow payload.
 type Workflow struct {
-	Name string          `yaml:"name"`
-	Jobs map[string]*Job `yaml:"jobs"`
+	Name string                  `yaml:"name"`
+	Jobs map[string]*WorkflowJob `yaml:"jobs"`
 }
 
-// Job is a single job in the workflow.
-type Job struct {
+// WorkflowJob is a single job in the workflow.
+type WorkflowJob struct {
 	RunsOn any    `yaml:"runs-on"`
 	Steps  []Step `yaml:"steps"`
 }
@@ -39,7 +39,7 @@ func ParseWorkflow(payload []byte) (*Workflow, error) {
 
 // RunsOnLabels returns the runs-on labels for a job, handling both
 // string and list forms.
-func (j *Job) RunsOnLabels() []string {
+func (j *WorkflowJob) RunsOnLabels() []string {
 	switch v := j.RunsOn.(type) {
 	case string:
 		return []string{v}
