@@ -5,7 +5,7 @@
 //
 //	FORGEJO_URL       Forgejo instance base URL (e.g. https://code.lacy.casa)
 //	RUNNER_TOKEN       Runner registration token
-//	RUNNER_NAME        Runner name (default "forkd-runner")
+//	RUNNER_NAME        Runner name prefix (default "forkd-runner")
 //	RUNNER_LABELS      Comma-separated labels (default "ubuntu-latest")
 //	LEASE_URL          Lease API base URL (default http://127.0.0.1:8890)
 //	LEASE_TOKEN        Lease API bearer token
@@ -13,6 +13,11 @@
 //	                   (e.g. "ubuntu-latest=py-base")
 //	DEFAULT_IMAGE      Image tag when no label maps (default "py-base")
 //	LEASE_TTL          Sandbox lease TTL seconds (default 600)
+//	RUNNER_FLOOR       Minimum registered runners (default 3)
+//	RUNNER_MAX         Maximum registered runners (default 12)
+//	RUNNER_SCALE_STEP  Runners added/removed per scale event (default 3)
+//	SCALE_UP_DELAY     All-busy duration before scaling up (default 10s)
+//	SCALE_DOWN_DELAY   Idle duration before scaling down (default 60s)
 package main
 
 import (
@@ -29,6 +34,25 @@ import (
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envIntOr(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envDurOr(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return def
 }
@@ -66,43 +90,36 @@ func main() {
 		}
 	}
 
-	proto := runner.NewForgejoAdapter(forgejoURL, nil)
-	lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
-	exec := &runner.Executor{
-		Sandbox:      lease,
-		Sink:         proto,
-		Labels:       imageMap,
-		DefaultImage: defaultImage,
-		TTL:          ttl,
+	// Adaptive pool config.
+	poolCfg := runner.PoolConfig{
+		Floor:          envIntOr("RUNNER_FLOOR", 3),
+		Max:            envIntOr("RUNNER_MAX", 12),
+		ScaleStep:      envIntOr("RUNNER_SCALE_STEP", 3),
+		ScaleUpDelay:   envDurOr("SCALE_UP_DELAY", 10*time.Second),
+		ScaleDownDelay: envDurOr("SCALE_DOWN_DELAY", 60*time.Second),
+		PollInterval:   5 * time.Second,
+	}
+
+	// newWorker builds a fresh ForgejoAdapter + Executor per worker so
+	// each registered runner has its own auth headers and job loop.
+	newWorker := func() runner.RunnerWorker {
+		proto := runner.NewForgejoAdapter(forgejoURL, nil)
+		lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+		exec := &runner.Executor{
+			Sandbox:      lease,
+			Sink:         proto,
+			Labels:       imageMap,
+			DefaultImage: defaultImage,
+			TTL:          ttl,
+		}
+		return &runner.WorkerImpl{Adapter: proto, Exec: exec}
 	}
 
 	ctx := context.Background()
-	runnerID, err := proto.Register(ctx, name, token, labels, true)
-	if err != nil {
-		log.Fatalf("register: %v", err)
-	}
-	log.Printf("registered runner %s (id=%d)", name, runnerID)
+	pool := runner.NewRunnerPool(poolCfg, newWorker, name, token, labels)
+	log.Printf("starting adaptive runner pool: floor=%d max=%d step=%d", poolCfg.Floor, poolCfg.Max, poolCfg.ScaleStep)
+	pool.Start(ctx)
 
-	var tasksVersion int64
-	for {
-		job, newVersion, err := proto.Fetch(ctx, tasksVersion)
-		if err != nil {
-			log.Printf("fetch task: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		tasksVersion = newVersion
-		if job == nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		log.Printf("executing job %d", job.ID)
-		if err := exec.Run(ctx, job); err != nil {
-			log.Printf("job %d failed: %v", job.ID, err)
-		}
-		// Ephemeral runners are invalidated after one job; exit so
-		// systemd restarts us and we re-register fresh.
-		log.Printf("job %d done, exiting (ephemeral)", job.ID)
-		return
-	}
+	// Block forever; workers run in goroutines.
+	select {}
 }

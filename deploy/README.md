@@ -21,9 +21,14 @@ On vm2, create `/etc/forkd-backend.env` with the consumer tokens:
 ```bash
 cat > /etc/forkd-backend.env <<'EOF'
 CONSUMER_TOKENS=<token>=<consumer>,<token2>=<consumer2>
+POOL_SIZE=3
 EOF
 chmod 600 /etc/forkd-backend.env
 ```
+
+`POOL_SIZE` pre-forks that many sandboxes per image so grants are served
+from the warm pool (milliseconds) instead of cold-spawning. 0 disables
+the pool (default).
 
 Then:
 
