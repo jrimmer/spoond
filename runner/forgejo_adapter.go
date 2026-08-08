@@ -2,8 +2,10 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,14 +184,41 @@ func resultToProto(r Result) runnerv1.Result {
 	return runnerv1.Result_RESULT_UNSPECIFIED
 }
 
-// structToMap flattens a protobuf Struct into a string map.
+// structToMap flattens a protobuf Struct into a string map, recursing
+// into nested Structs/Values so dot-notation lookups like
+// github.event.pull_request.number resolve. Nested objects become
+// dot-notation keys; scalar values become their string form.
 func structToMap(s *structpb.Struct) map[string]string {
+	out := map[string]string{}
 	if s == nil {
-		return map[string]string{}
+		return out
 	}
-	out := make(map[string]string, len(s.GetFields()))
+	var walk func(prefix string, v *structpb.Value)
+	walk = func(prefix string, v *structpb.Value) {
+		switch k := v.GetKind().(type) {
+		case *structpb.Value_StructValue:
+			for fk, fv := range k.StructValue.GetFields() {
+				key := fk
+				if prefix != "" {
+					key = prefix + "." + fk
+				}
+				walk(key, fv)
+			}
+		case *structpb.Value_StringValue:
+			out[prefix] = k.StringValue
+		case *structpb.Value_NumberValue:
+			out[prefix] = strconv.FormatFloat(k.NumberValue, 'f', -1, 64)
+		case *structpb.Value_BoolValue:
+			out[prefix] = strconv.FormatBool(k.BoolValue)
+		case *structpb.Value_ListValue:
+			// Represent lists as JSON for simplicity.
+			if b, err := json.Marshal(k.ListValue.AsSlice()); err == nil {
+				out[prefix] = string(b)
+			}
+		}
+	}
 	for k, v := range s.GetFields() {
-		out[k] = v.GetStringValue()
+		walk(k, v)
 	}
 	return out
 }

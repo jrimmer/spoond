@@ -104,6 +104,24 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		for k, v := range step.Env {
 			env[k] = ctx2.Eval(v)
 		}
+		// Debug: log which env keys are set (values redacted for secrets).
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		e.log(ctx, job, logIndex, "step env keys: "+strings.Join(keys, ","))
+		logIndex++
+		// Debug: log which secret keys are available (values redacted).
+		sk := make([]string, 0, len(job.Secrets))
+		for k := range job.Secrets {
+			sk = append(sk, k)
+		}
+		e.log(ctx, job, logIndex, "job secret keys: "+strings.Join(sk, ","))
+		logIndex++
+		// Debug: log resolved value lengths for the review-critical vars.
+		e.log(ctx, job, logIndex, fmt.Sprintf("resolved: FORGEJO_TOKEN=%d FORGEJO_API=%d PR_NUMBER=%d LLM_API_KEY=%d",
+			len(env["FORGEJO_TOKEN"]), len(env["FORGEJO_API"]), len(env["PR_NUMBER"]), len(env["LLM_API_KEY"])))
+		logIndex++
 		// Use the workspace as cwd only if the repo was checked out.
 		cwd := ""
 		if checkedOut {
