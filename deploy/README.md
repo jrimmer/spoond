@@ -1,18 +1,71 @@
-# forkd-runner deployment
+# forkd-service deployment
 
-The Forgejo Actions runner runs as a systemd service on vm2 (10.1.0.11),
-alongside forkd-backend and forkd-controller. It runs an **adaptive pool**
-of concurrent runner workers: one process registers N runners with
-Forgejo, scales up when all are busy, and scales back down to a floor
-when load subsides.
+Two systemd services run on vm2 (10.1.0.11):
 
-## Build
+1. **forkd-backend** — the lease API (`:8890`) with the warm pool
+2. **forkd-runner** — the Forgejo Actions runner (adaptive pool)
+
+## 1. forkd-backend (lease API)
+
+### Build
+
+```bash
+go build -o forkd-backend ./cmd/forkd-backend
+```
+
+### Deploy
+
+```bash
+scp forkd-backend root@10.1.0.11:/opt/forkd-backend/
+scp deploy/forkd-backend.service root@10.1.0.11:/etc/systemd/system/
+```
+
+On vm2, create `/etc/forkd-backend.env`:
+
+```bash
+cat > /etc/forkd-backend.env <<'EOF'
+CONSUMER_TOKENS=<token>=<consumer>,<token2>=<consumer2>
+POOL_SIZE=3
+TLS_CERT=/etc/forkd-backend/tls/fullchain.pem
+TLS_KEY=/etc/forkd-backend/tls/privkey.pem
+EOF
+chmod 600 /etc/forkd-backend.env
+```
+
+- `CONSUMER_TOKENS` — comma-separated `token=consumer` pairs; consumers
+  authenticate with these bearer tokens
+- `POOL_SIZE` — pre-fork that many sandboxes per image so grants are served
+  from the warm pool (milliseconds) instead of cold-spawning. 0 disables
+- `TLS_CERT`/`TLS_KEY` — serve HTTPS. On vm2 this uses the Let's Encrypt
+  cert for `vm2.lacy.casa` (see TLS below)
+
+Then:
+
+```bash
+systemctl daemon-reload
+systemctl enable --now forkd-backend
+systemctl status forkd-backend
+```
+
+### Verify
+
+```bash
+curl -s -H "Authorization: Bearer <token>" https://vm2.lacy.casa:8890/api/images
+```
+
+## 2. forkd-runner (Forgejo Actions)
+
+Runs an **adaptive pool** of concurrent runner workers: one process
+registers N runners with Forgejo, scales up when all are busy, and scales
+back down to a floor when load subsides.
+
+### Build
 
 ```bash
 go build -o forkd-runner ./cmd/forkd-runner
 ```
 
-## Deploy
+### Deploy
 
 ```bash
 scp forkd-runner root@10.1.0.11:/opt/forkd-runner/
@@ -54,7 +107,7 @@ systemctl enable --now forkd-runner
 systemctl status forkd-runner
 ```
 
-## Verify
+### Verify
 
 ```bash
 # pool starts at floor
@@ -67,8 +120,6 @@ journalctl -u forkd-runner | grep -E 'spawned worker|stopped worker'
 
 ## TLS
 
-The runner talks to the lease API over HTTPS (`LEASE_URL`). The backend
-serves TLS on `:8890` using vm2's Let's Encrypt cert for
-`vm2.lacy.casa`; vm2's `/etc/hosts` pins that hostname to 10.1.0.11 so
-the runner reaches the backend directly (not via Caddy).
-
+The backend serves TLS on `:8890` using vm2's Let's Encrypt cert for
+`vm2.lacy.casa`. vm2's `/etc/hosts` pins that hostname to 10.1.0.11 so the
+runner reaches the backend directly (not via Caddy).

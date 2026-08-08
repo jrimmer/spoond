@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Config holds all runtime configuration for the hyper-forgejo-runner.
+// Config holds all runtime configuration for the forkd-service runner.
 // Values are sourced from environment variables with sensible defaults.
 type Config struct {
 	// ForgejoURL is the base URL of the Forgejo instance (e.g. https://code.lacy.casa).

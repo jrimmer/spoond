@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/hyper-forgejo-runner/forkd"
+	"github.com/jrimmer/forkd-service/forkd"
 )
 
 // fakeForkd is a minimal in-memory forkd controller for tests.

@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jrimmer/hyper-forgejo-runner/runner"
+	"github.com/jrimmer/forkd-service/runner"
 )
 
 // fakeSandbox is an in-memory SandboxProvider for tests.

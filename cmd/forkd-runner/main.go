@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/hyper-forgejo-runner/runner"
+	"github.com/jrimmer/forkd-service/runner"
 )
 
 func envOr(key, def string) string {

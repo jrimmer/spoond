@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/hyper-forgejo-runner/runner"
+	"github.com/jrimmer/forkd-service/runner"
 )
 
 // Config wires the adapter.

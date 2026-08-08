@@ -1,4 +1,4 @@
-module github.com/jrimmer/hyper-forgejo-runner
+module github.com/jrimmer/forkd-service
 
 go 1.25.0
 
