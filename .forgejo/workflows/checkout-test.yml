@@ -1,0 +1,9 @@
+name: checkout-test
+on: [push]
+jobs:
+  test:
+    runs-on: forkd
+    steps:
+      - uses: actions/checkout@v4
+      - run: ls -la && test -f go.mod && echo "REPO CHECKED OUT OK"
+      - run: cat go.mod | head -1
