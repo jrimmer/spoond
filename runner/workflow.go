@@ -14,8 +14,9 @@ type Workflow struct {
 
 // WorkflowJob is a single job in the workflow.
 type WorkflowJob struct {
-	RunsOn any    `yaml:"runs-on"`
-	Steps  []Step `yaml:"steps"`
+	RunsOn any               `yaml:"runs-on"`
+	Env    map[string]string `yaml:"env"`
+	Steps  []Step            `yaml:"steps"`
 }
 
 // Step is a single step in a job.

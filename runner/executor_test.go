@@ -10,6 +10,7 @@ import (
 type fakeLease struct {
 	created []string
 	execs   []string
+	envs    []map[string]string
 	deleted []string
 	results map[string]*ExecResult // keyed by cmd
 }
@@ -35,6 +36,7 @@ func (e *fakeErr) Error() string { return e.msg }
 
 func (f *fakeLease) Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error) {
 	f.execs = append(f.execs, cmd)
+	f.envs = append(f.envs, env)
 	if r, ok := f.results[cmd]; ok {
 		return r, nil
 	}
@@ -336,5 +338,39 @@ jobs:
 	}
 	if len(sink.reports) != 1 || sink.reports[0].Result != ResultFailure {
 		t.Fatalf("expected failure, got %+v", sink.reports)
+	}
+}
+
+func TestExecutorJobLevelEnv(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      JOB_VAR: job-value
+    steps:
+      - run: echo $JOB_VAR
+`
+	lease := newFakeLease()
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	if err := exec.Run(context.Background(), testJob(payload)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// The run step should receive the job-level env var.
+	found := false
+	for _, env := range lease.envs {
+		if env["JOB_VAR"] == "job-value" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected job-level env JOB_VAR=job-value in exec env, got: %+v", lease.envs)
 	}
 }

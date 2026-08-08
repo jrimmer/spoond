@@ -96,6 +96,11 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		// Evaluate the step's run command with context.
 		cmd := ctx2.Eval(step.Run)
 		env := map[string]string{}
+		// Job-level env first (lower precedence), then step-level env
+		// (higher precedence) — matches GitHub Actions semantics.
+		for k, v := range wfJob.Env {
+			env[k] = ctx2.Eval(v)
+		}
 		for k, v := range step.Env {
 			env[k] = ctx2.Eval(v)
 		}
