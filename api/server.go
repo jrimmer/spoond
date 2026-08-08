@@ -10,9 +10,9 @@ import (
 
 // Server is the HTTP lease API.
 type Server struct {
-	svc  *Service
-	reg  *ImageRegistry
-	mux  *http.ServeMux
+	svc *Service
+	reg *ImageRegistry
+	mux *http.ServeMux
 }
 
 // NewServer wires the lease API routes onto a mux.
@@ -61,11 +61,11 @@ func ownerFrom(ctx context.Context) string {
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Image      string `json:"image"`
-		TTL        int    `json:"ttl"` // seconds
-		MemoryMiB  int    `json:"memory_mib"`
-		Network    string `json:"network"`
-		InitCmd    string `json:"init_cmd"`
+		Image     string `json:"image"`
+		TTL       int    `json:"ttl"` // seconds
+		MemoryMiB int    `json:"memory_mib"`
+		Network   string `json:"network"`
+		InitCmd   string `json:"init_cmd"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -93,7 +93,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to grant sandbox: "+err.Error())
+		s.svc.log.Printf("create: grant %s: %v", req.Image, err)
+		writeError(w, http.StatusInternalServerError, "failed to grant sandbox")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -107,20 +108,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 // handleList returns the caller's leases.
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
-	s.svc.store.mu.Lock()
-	defer s.svc.store.mu.Unlock()
-	var out []map[string]any
-	for _, l := range s.svc.store.leases {
-		if l.Owner == owner && !l.released {
-			out = append(out, map[string]any{
-				"id":      l.ID,
-				"image":   l.Image,
-				"address": l.Address,
-				"expires": l.ExpiresAt.Unix(),
-			})
-		}
-	}
-	writeJSON(w, http.StatusOK, out)
+	leases := s.svc.list(owner)
+	writeJSON(w, http.StatusOK, map[string]any{"sandboxes": leases})
 }
 
 // handleExec runs a command in a sandbox owned by the caller.
@@ -153,13 +142,14 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	args := buildShellArgs(req.Cmd, req.Cwd, req.Env)
 	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, args, timeout)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "exec failed: "+err.Error())
+		s.svc.log.Printf("exec: %s: %v", lease.ForkdID, err)
+		writeError(w, http.StatusInternalServerError, "exec failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"stdout":   res.Stdout,
-		"stderr":   res.Stderr,
-		"exit":     res.ExitCode,
+		"stdout": res.Stdout,
+		"stderr": res.Stderr,
+		"exit":   res.ExitCode,
 	})
 }
 

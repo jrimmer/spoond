@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"sync"
-	"time"
 )
 
 // ImageRegistry validates requested image tags against forkd-controller
@@ -17,17 +15,12 @@ type ImageRegistry struct {
 	// known is an optional static set of tags to surface when the
 	// controller's list endpoint returns nothing.
 	known map[string]bool
-
-	mu    sync.Mutex
-	cache map[string]bool
-	at    time.Time
-	ttl   time.Duration
 }
 
-// NewImageRegistry returns a registry backed by forkd-controller with
-// a short cache TTL. knownTags is an optional static set surfaced when
-// the controller list is empty.
-func NewImageRegistry(fc ForkdClient, ttl time.Duration, knownTags ...string) *ImageRegistry {
+// NewImageRegistry returns a registry backed by forkd-controller.
+// knownTags is an optional static set surfaced when the controller list
+// is empty.
+func NewImageRegistry(fc ForkdClient, knownTags ...string) *ImageRegistry {
 	known := make(map[string]bool, len(knownTags))
 	for _, t := range knownTags {
 		known[t] = true
@@ -35,14 +28,11 @@ func NewImageRegistry(fc ForkdClient, ttl time.Duration, knownTags ...string) *I
 	return &ImageRegistry{
 		forkd: fc,
 		known: known,
-		cache: make(map[string]bool),
-		ttl:   ttl,
 	}
 }
 
 // Has reports whether tag is a known, bootable snapshot. It checks the
-// per-tag info endpoint directly (no cache) so validation is always
-// current.
+// per-tag info endpoint directly so validation is always current.
 func (r *ImageRegistry) Has(ctx context.Context, tag string) (bool, error) {
 	return r.forkd.SnapshotExists(ctx, tag)
 }

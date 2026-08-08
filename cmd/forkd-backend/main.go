@@ -75,7 +75,7 @@ func main() {
 	if v := os.Getenv("KNOWN_IMAGES"); v != "" {
 		knownTags = strings.Split(v, ",")
 	}
-	reg := api.NewImageRegistry(fc, 30*time.Second, knownTags...)
+	reg := api.NewImageRegistry(fc, knownTags...)
 	srv := api.NewServer(svc, reg)
 
 	ctx, cancel := context.WithCancel(context.Background())

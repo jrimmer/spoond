@@ -34,22 +34,22 @@ func NewClient(baseURL, token string) *Client {
 
 // SnapshotInfo mirrors the controller's SnapshotInfo JSON shape.
 type SnapshotInfo struct {
-	Tag          string `json:"tag"`
-	Dir          string `json:"dir"`
+	Tag           string `json:"tag"`
+	Dir           string `json:"dir"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
-	Status       string `json:"status,omitempty"`
-	Bootable     bool   `json:"bootable,omitempty"`
+	Status        string `json:"status,omitempty"`
+	Bootable      bool   `json:"bootable,omitempty"`
 }
 
 // SandboxInfo mirrors the controller's SandboxInfo JSON shape.
 type SandboxInfo struct {
-	ID            string `json:"id"`
-	SnapshotTag   string `json:"snapshot_tag"`
-	Netns         string `json:"netns,omitempty"`
-	GuestAddr     string `json:"guest_addr,omitempty"`
-	CreatedAtUnix int64  `json:"created_at_unix"`
-	PID           int    `json:"pid,omitempty"`
-	MemoryLimitMiB int   `json:"memory_limit_mib,omitempty"`
+	ID             string `json:"id"`
+	SnapshotTag    string `json:"snapshot_tag"`
+	Netns          string `json:"netns,omitempty"`
+	GuestAddr      string `json:"guest_addr,omitempty"`
+	CreatedAtUnix  int64  `json:"created_at_unix"`
+	PID            int    `json:"pid,omitempty"`
+	MemoryLimitMiB int    `json:"memory_limit_mib,omitempty"`
 }
 
 // ExecResult is the outcome of a command run inside a sandbox.

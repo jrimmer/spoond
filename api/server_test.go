@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,7 +77,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeForkd) {
 	t.Helper()
 	ff := newFakeForkd()
 	svc := NewService(ff, map[string]string{"token-a": "consumer-a", "token-b": "consumer-b"}, 0, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, time.Minute, "py-base")
+	reg := NewImageRegistry(ff, "py-base")
 	srv := NewServer(svc, reg)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -119,15 +120,17 @@ func TestCreateAndList(t *testing.T) {
 		t.Fatalf("list status %d", resp.StatusCode)
 	}
 	_ = list
-	// The list endpoint returns a bare array; decode it directly.
+	// The list endpoint returns {sandboxes: [...]}; decode it directly.
 	req, _ := http.NewRequest("GET", ts.URL+"/api/sandboxes", nil)
 	req.Header.Set("Authorization", "Bearer token-a")
 	lresp, _ := http.DefaultClient.Do(req)
-	var leases []map[string]any
-	_ = json.NewDecoder(lresp.Body).Decode(&leases)
+	var listResp struct {
+		Sandboxes []map[string]any `json:"sandboxes"`
+	}
+	_ = json.NewDecoder(lresp.Body).Decode(&listResp)
 	lresp.Body.Close()
-	if len(leases) != 1 || leases[0]["id"] != id {
-		t.Fatalf("expected 1 lease with id %s, got %+v", id, leases)
+	if len(listResp.Sandboxes) != 1 || listResp.Sandboxes[0]["id"] != id {
+		t.Fatalf("expected 1 lease with id %s, got %+v", id, listResp.Sandboxes)
 	}
 }
 
@@ -206,5 +209,98 @@ func TestImages(t *testing.T) {
 	imgs, _ := body["images"].([]any)
 	if len(imgs) != 1 || imgs[0] != "py-base" {
 		t.Fatalf("expected [py-base], got %v", imgs)
+	}
+}
+
+// TestTTLSweeper verifies the background sweeper reclaims expired
+// leases and kills the underlying sandbox.
+func TestTTLSweeper(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
+	reg := NewImageRegistry(ff, "py-base")
+	srv := NewServer(svc, reg)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Create a lease with a 1-second TTL.
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 1})
+	id := create["id"].(string)
+
+	// Run the sweeper once with a short tick.
+	svc.sweepInterval = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.Start(ctx)
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
+
+	// The lease should be gone and the sandbox killed.
+	if len(ff.killed) != 1 {
+		t.Fatalf("expected 1 kill, got %d", len(ff.killed))
+	}
+	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 after TTL expiry, got %d", resp.StatusCode)
+	}
+}
+
+// TestWarmPoolGrant verifies a grant is served from the warm pool when
+// sandboxes are pre-forked.
+func TestWarmPoolGrant(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 2, 60*time.Second, 10*time.Minute)
+	reg := NewImageRegistry(ff, "py-base")
+	srv := NewServer(svc, reg)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Pre-fork 2 sandboxes into the pool.
+	ctx := context.Background()
+	svc.warmPool(ctx, "py-base")
+	svc.store.mu.Lock()
+	poolLen := len(svc.store.pool["py-base"])
+	svc.store.mu.Unlock()
+	if poolLen != 2 {
+		t.Fatalf("expected 2 warm sandboxes in pool, got %d", poolLen)
+	}
+
+	// Grant should consume from the pool without spawning.
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	if create["id"] == "" {
+		t.Fatal("expected a lease id")
+	}
+	// One pool sandbox consumed, one remains.
+	svc.store.mu.Lock()
+	poolLen = len(svc.store.pool["py-base"])
+	svc.store.mu.Unlock()
+	if poolLen != 1 {
+		t.Fatalf("expected 1 sandbox remaining in pool after grant, got %d", poolLen)
+	}
+}
+
+// TestBuildShellArgs verifies cwd/env are quoted and the command is
+// wrapped in a single shell invocation.
+func TestBuildShellArgs(t *testing.T) {
+	args := buildShellArgs("echo hi", "/tmp", map[string]string{"FOO": "bar"})
+	if len(args) != 3 || args[0] != "/bin/sh" || args[1] != "-c" {
+		t.Fatalf("unexpected args: %v", args)
+	}
+	joined := args[2]
+	if !strings.Contains(joined, "cd '/tmp' &&") {
+		t.Fatalf("expected cd with quoted cwd, got: %s", joined)
+	}
+	if !strings.Contains(joined, "export FOO='bar';") {
+		t.Fatalf("expected export with quoted value, got: %s", joined)
+	}
+	if !strings.Contains(joined, "echo hi") {
+		t.Fatalf("expected command preserved, got: %s", joined)
+	}
+}
+
+// TestBuildShellArgsQuoting verifies embedded single quotes are escaped.
+func TestBuildShellArgsQuoting(t *testing.T) {
+	args := buildShellArgs("echo", "", map[string]string{"X": "it's"})
+	joined := args[2]
+	if !strings.Contains(joined, `export X='it'\''s';`) {
+		t.Fatalf("expected single-quote escaping, got: %s", joined)
 	}
 }

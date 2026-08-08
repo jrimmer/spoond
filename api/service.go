@@ -18,14 +18,14 @@ import (
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
 type Lease struct {
-	ID         string    // unguessable lease id
-	Owner      string    // consumer id that owns this lease
-	Image      string    // snapshot tag
-	ForkdID    string    // underlying forkd sandbox id
-	Address    string    // guest address, e.g. "10.42.0.2:8888"
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	released   bool
+	ID        string // unguessable lease id
+	Owner     string // consumer id that owns this lease
+	Image     string // snapshot tag
+	ForkdID   string // underlying forkd sandbox id
+	Address   string // guest address, e.g. "10.42.0.2:8888"
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	released  bool
 }
 
 // Store holds the live leases and the warm pool.
@@ -74,7 +74,9 @@ type Service struct {
 	defaultTTL time.Duration
 	// maxTTL caps a requested ttl.
 	maxTTL time.Duration
-	log    *log.Logger
+	// sweepInterval is the TTL-sweeper tick (overridable in tests).
+	sweepInterval time.Duration
+	log           *log.Logger
 }
 
 // NewService builds a lease service. tokens maps consumer tokens to
@@ -82,20 +84,22 @@ type Service struct {
 // pre-forking). defaultTTL and maxTTL bound lease lifetimes.
 func NewService(fc ForkdClient, tokens map[string]string, poolSize int, defaultTTL, maxTTL time.Duration) *Service {
 	return &Service{
-		forkd:     fc,
-		store:     newStore(),
-		tokens:    tokens,
-		poolSize:  poolSize,
-		defaultTTL: defaultTTL,
-		maxTTL:    maxTTL,
-		log:       log.Default(),
+		forkd:         fc,
+		store:         newStore(),
+		tokens:        tokens,
+		poolSize:      poolSize,
+		defaultTTL:    defaultTTL,
+		maxTTL:        maxTTL,
+		sweepInterval: 5 * time.Second,
+		log:           log.Default(),
 	}
 }
 
-// Start begins the TTL sweeper. It runs until ctx is cancelled.
+// Start begins the TTL sweeper and warm-pool refill. It runs until ctx
+// is cancelled.
 func (s *Service) Start(ctx context.Context) {
 	go func() {
-		t := time.NewTicker(5 * time.Second)
+		t := time.NewTicker(s.sweepInterval)
 		defer t.Stop()
 		for {
 			select {
@@ -103,9 +107,27 @@ func (s *Service) Start(ctx context.Context) {
 				return
 			case <-t.C:
 				s.sweepExpired(ctx)
+				s.refillPool(ctx)
 			}
 		}
 	}()
+}
+
+// refillPool pre-forks poolSize sandboxes for each known image so
+// grants can be served from the warm pool instead of cold-spawning.
+func (s *Service) refillPool(ctx context.Context) {
+	if s.poolSize <= 0 {
+		return
+	}
+	s.store.mu.Lock()
+	images := make([]string, 0, len(s.store.pool))
+	for img := range s.store.pool {
+		images = append(images, img)
+	}
+	s.store.mu.Unlock()
+	for _, img := range images {
+		s.warmPool(ctx, img)
+	}
 }
 
 // sweepExpired kills and removes leases whose TTL has passed.
@@ -125,6 +147,9 @@ func (s *Service) sweepExpired(ctx context.Context) {
 }
 
 // release kills the underlying forkd sandbox and removes the lease.
+// The lease is only removed from the store after a successful kill, so
+// a transient Kill failure leaves it in place for the sweeper to retry
+// rather than leaking the sandbox.
 func (s *Service) release(ctx context.Context, l *Lease) {
 	s.store.mu.Lock()
 	if l.released {
@@ -132,11 +157,18 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 		return
 	}
 	l.released = true
-	delete(s.store.leases, l.ID)
 	s.store.mu.Unlock()
 	if err := s.forkd.Kill(ctx, l.ForkdID); err != nil {
-		s.log.Printf("release: kill %s: %v", l.ForkdID, err)
+		s.log.Printf("release: kill %s failed: %v (will retry)", l.ForkdID, err)
+		// Re-open the lease so the sweeper retries the kill.
+		s.store.mu.Lock()
+		l.released = false
+		s.store.mu.Unlock()
+		return
 	}
+	s.store.mu.Lock()
+	delete(s.store.leases, l.ID)
+	s.store.mu.Unlock()
 }
 
 // grant creates a new lease for owner from the warm pool (or spawns a
@@ -145,10 +177,15 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 	// Try the warm pool first.
 	s.store.mu.Lock()
 	pool := s.store.pool[image]
-	var forkdID string
+	var forkdID, addr string
 	if len(pool) > 0 {
 		forkdID = pool[len(pool)-1]
 		s.store.pool[image] = pool[:len(pool)-1]
+	}
+	// Ensure the image is registered so the warm-pool refill knows to
+	// pre-fork it.
+	if _, known := s.store.pool[image]; !known {
+		s.store.pool[image] = nil
 	}
 	s.store.mu.Unlock()
 
@@ -161,6 +198,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 			return nil, errNoSandbox
 		}
 		forkdID = sbs[0].ID
+		addr = sbs[0].GuestAddr
 	}
 
 	lease := &Lease{
@@ -168,6 +206,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		Owner:     owner,
 		Image:     image,
 		ForkdID:   forkdID,
+		Address:   addr,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(ttl),
 	}
@@ -186,6 +225,24 @@ func (s *Service) lookup(owner, id string) *Lease {
 		return nil
 	}
 	return l
+}
+
+// list returns the caller's live leases as plain maps.
+func (s *Service) list(owner string) []map[string]any {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	var out []map[string]any
+	for _, l := range s.store.leases {
+		if l.Owner == owner && !l.released {
+			out = append(out, map[string]any{
+				"id":      l.ID,
+				"image":   l.Image,
+				"address": l.Address,
+				"expires": l.ExpiresAt.Unix(),
+			})
+		}
+	}
+	return out
 }
 
 // warmPool pre-forks poolSize sandboxes per image tag.
@@ -217,4 +274,3 @@ var errNoSandbox = &leaseError{"no sandbox granted"}
 type leaseError struct{ msg string }
 
 func (e *leaseError) Error() string { return e.msg }
-
