@@ -120,6 +120,7 @@ func (w *worker) run(ctx context.Context) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		log.Printf("worker %d: registered %s", w.id, w.name)
 		w.setState(workerIdle)
 
 		// Poll for jobs on this stable registration.
