@@ -70,6 +70,10 @@ CFOS's execution currently depends on Cloudflare Workers — a managed, external
 
 **KTD4. Image per gadget language.** Gadget code is JS/TS (Workers-style). Bake a `js-base` (or reuse a node-capable image) for gadget execution; language bases (`go-base`, `elixir-base`) serve agent code that needs them.
 
+**KTD5. `executeCode` is stateless — no persistent-sandbox mode needed.** Research (Cloudflare OS blog, Aug 5 2026, and the `executeCodeMode` implementation on CT144) confirms each `executeCode` call loads a fresh Dynamic Worker (V8 isolate), runs it once, returns a log string, and tears down. No state persists between calls. CFOS's persistent state (SQLite, conversation history, app state) lives in its own Durable Objects / storage, NOT in the execution sandbox. So the forkd batch lease model (create → exec → release) maps cleanly; the persistent-sandbox/suspend-resume work belongs to the separate exe.dev plan.
+
+**KTD6. The gatekeeper bindings bridge is the core technical risk.** CFOS generated code receives resources as typed bindings (`const issues = await env.PROJECT.listIssues(...)`) that are RPC stubs to Gatekeepers (which hold credentials, enforce policy, mediate side effects). The forkd sandbox must (a) run JS (Node.js) and (b) reach the gatekeeper bindings via an HTTP/RPC bridge back to CFOS. This is the hard part of U1/U4 — not "run code in a sandbox" but "run JS in a sandbox with access to CFOS's gatekeeper RPC."
+
 ### High-Level Technical Design
 
 ```mermaid
@@ -126,7 +130,9 @@ flowchart LR
 - `cfos/adapter.go` (new)
 - `cfos/adapter_test.go` (new)
 
-**Approach:** A thin HTTP service with a `POST /v1/execute` endpoint mirroring CFOS's `executeCode` contract (code, bindings, initiator, model). It authenticates with a forkd consumer token, maps the request to a command-adapter `runRequest`, calls the lease API, and returns stdout/stderr/exit. Bindings that have no forkd equivalent are passed through as env or explicitly rejected.
+**Approach:** A thin HTTP service with a `POST /v1/execute` endpoint mirroring CFOS's `executeCode` contract (code, bindings, initiator, model). It authenticates with a forkd consumer token, maps the request to a command-adapter `runRequest`, calls the lease API, and returns stdout/stderr/exit. Each call is stateless (per KTD5): create a sandbox, run the code, return output, release. Bindings that have no forkd equivalent are passed through as env or explicitly rejected.
+
+**Execution note:** The gatekeeper bindings bridge (KTD6) is the highest-risk piece. Start with a minimal proof: run a JS snippet in a `js-base` sandbox that calls a gatekeeper binding over HTTP and returns the result, before building the full adapter surface.
 
 **Patterns to follow:** `commandadapter/server.go` (auth, runRequest/runResponse shape, writeJSON/writeError).
 
@@ -215,5 +221,5 @@ flowchart LR
 
 ## Open Questions
 
-- Does CFOS's `executeCode` need Durable Objects semantics (persistent state across calls), or is each call stateless? If stateful, the adapter needs a persistent-sandbox mode (ties into the exe.dev plan).
-- Which CFOS bindings must be available inside the sandbox for the first working version?
+- **RESOLVED: Does `executeCode` need Durable Objects semantics?** No — each call is stateless (fresh Dynamic Worker, run once, tear down). Persistent state lives in CFOS's own Durable Objects/storage, not the sandbox. (KTD5)
+- **Which CFOS bindings must be available in the sandbox for v1?** The gatekeeper bindings (env.PROJECT, etc.) are the core requirement. The minimal v1 should support at least one gatekeeper binding end-to-end to prove the bridge (KTD6).
