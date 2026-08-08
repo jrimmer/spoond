@@ -25,6 +25,10 @@ type ForgejoAdapter struct {
 	// be sent as headers on subsequent calls.
 	runnerUUID  string
 	runnerToken string
+	// internalBaseURL, when set, overrides github.api_url and
+	// github.server_url in the job Context so workflows talk to the
+	// internal Forgejo address (never via the public/Pangolin route).
+	internalBaseURL string
 }
 
 // NewForgejoAdapter builds a Forgejo runner protocol adapter.
@@ -32,6 +36,13 @@ type ForgejoAdapter struct {
 // The runner protocol is mounted under /api/actions, matching the
 // official forgejo-runner.
 func NewForgejoAdapter(baseURL string, hc *http.Client) *ForgejoAdapter {
+	return NewForgejoAdapterWithInternal(baseURL, "", hc)
+}
+
+// NewForgejoAdapterWithInternal is like NewForgejoAdapter but also
+// accepts an internal base URL used to override github.api_url and
+// github.server_url in the job Context.
+func NewForgejoAdapterWithInternal(baseURL, internalBaseURL string, hc *http.Client) *ForgejoAdapter {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -49,7 +60,7 @@ func NewForgejoAdapter(baseURL string, hc *http.Client) *ForgejoAdapter {
 			}
 		})),
 	)
-	return &ForgejoAdapter{svc: svc}
+	return &ForgejoAdapter{svc: svc, internalBaseURL: strings.TrimRight(internalBaseURL, "/")}
 }
 
 // authCtxKey is the context key for runner auth headers.
@@ -111,12 +122,23 @@ func (a *ForgejoAdapter) Fetch(ctx context.Context, version int64) (*Job, int64,
 	if task == nil {
 		return nil, resp.Msg.GetTasksVersion(), nil
 	}
+	ctxMap := structToMap(task.GetContext())
+	// Override github.api_url / github.server_url to the internal base
+	// URL so workflows never route through the public/Pangolin address.
+	if a.internalBaseURL != "" {
+		if _, ok := ctxMap["github.api_url"]; ok {
+			ctxMap["github.api_url"] = a.internalBaseURL
+		}
+		if _, ok := ctxMap["github.server_url"]; ok {
+			ctxMap["github.server_url"] = a.internalBaseURL
+		}
+	}
 	job := &Job{
 		ID:       task.GetId(),
 		Workflow: task.GetWorkflowPayload(),
 		Secrets:  task.GetSecrets(),
 		Vars:     task.GetVars(),
-		Context:  structToMap(task.GetContext()),
+		Context:  ctxMap,
 	}
 	return job, resp.Msg.GetTasksVersion(), nil
 }

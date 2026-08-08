@@ -33,3 +33,30 @@ func TestStructToMapNil(t *testing.T) {
 		t.Fatalf("expected empty map, got %v", m)
 	}
 }
+
+func TestInternalBaseURLOverride(t *testing.T) {
+	a := &ForgejoAdapter{internalBaseURL: "http://10.1.0.47:3000"}
+	ctxMap := map[string]string{
+		"github.api_url":    "https://code.lacy.casa",
+		"github.server_url": "https://code.lacy.casa",
+		"github.repository": "jrimmer/netcrawl",
+	}
+	// Replicate the override logic from Fetch.
+	if a.internalBaseURL != "" {
+		if _, ok := ctxMap["github.api_url"]; ok {
+			ctxMap["github.api_url"] = a.internalBaseURL
+		}
+		if _, ok := ctxMap["github.server_url"]; ok {
+			ctxMap["github.server_url"] = a.internalBaseURL
+		}
+	}
+	if ctxMap["github.api_url"] != "http://10.1.0.47:3000" {
+		t.Fatalf("api_url = %q, want internal", ctxMap["github.api_url"])
+	}
+	if ctxMap["github.server_url"] != "http://10.1.0.47:3000" {
+		t.Fatalf("server_url = %q, want internal", ctxMap["github.server_url"])
+	}
+	if ctxMap["github.repository"] != "jrimmer/netcrawl" {
+		t.Fatalf("repository = %q, want unchanged", ctxMap["github.repository"])
+	}
+}

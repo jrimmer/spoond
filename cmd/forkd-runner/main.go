@@ -105,7 +105,7 @@ func main() {
 	// newWorker builds a fresh ForgejoAdapter + Executor per worker so
 	// each registered runner has its own auth headers and job loop.
 	newWorker := func() runner.RunnerWorker {
-		proto := runner.NewForgejoAdapter(forgejoURL, nil)
+		proto := runner.NewForgejoAdapterWithInternal(forgejoURL, envOr("REPO_BASE_URL", ""), nil)
 		lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
 		exec := &runner.Executor{
 			Sandbox:      lease,
