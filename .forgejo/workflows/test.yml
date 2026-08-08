@@ -1,0 +1,8 @@
+name: forkd-test
+on: [push]
+jobs:
+  test:
+    runs-on: forkd
+    steps:
+      - run: echo "hello from forkd sandbox"
+      - run: python3 -c "print(6*7)"

@@ -13,7 +13,7 @@ Forgejo Actions runs on `act_runner` (10.1.0.47), which executes jobs as Docker 
 
 - **Isolation** — each job gets a fresh VM, no shared state
 - **No Docker dependency** — Hyper manages the lifecycle
-- **Unified platform** — same execution engine as exe.dev/Replit-like product
+- **Unified platform** — same execution engine as the command adapter (exe.dev/Replit-style product)
 
 `sandbox-api` already bridges Forgejo and Hyper for a subset of workflows, but it's a REST API that requires custom workflow YAML per repo. `hyper-runner` replaces `act_runner` directly — it speaks the Forgejo runner gRPC protocol natively, so **existing `.forgejo/workflows/*.yml` files work unmodified**.
 
