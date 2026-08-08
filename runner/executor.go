@@ -89,6 +89,9 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			state.Steps = append(state.Steps, *stepState)
 			continue
 		}
+		// Debug: log the step shape so we can see what Forgejo sends.
+		e.log(ctx, job, logIndex, fmt.Sprintf("step %d: uses=%q run=%q", i, step.Uses, step.Run))
+		logIndex++
 		// Evaluate the step's run command with context.
 		cmd := ctx2.Eval(step.Run)
 		env := map[string]string{}
