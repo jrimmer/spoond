@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -187,4 +188,24 @@ func (c *Client) Exec(ctx context.Context, id string, args []string, timeoutSecs
 func (c *Client) Ping(ctx context.Context, id string) error {
 	var out map[string]any
 	return c.do(ctx, http.MethodPost, "/v1/sandboxes/"+id+"/ping", nil, &out)
+}
+
+// Metrics fetches the controller's Prometheus metrics as raw text.
+func (c *Client) Metrics(ctx context.Context) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/metrics", nil)
+	if err != nil {
+		return nil, fmt.Errorf("forkd: build metrics request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("forkd: metrics: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &Error{StatusCode: resp.StatusCode, Message: "metrics"}
+	}
+	return io.ReadAll(resp.Body)
 }

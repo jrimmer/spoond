@@ -60,6 +60,7 @@ type ForkdClient interface {
 	Kill(ctx context.Context, id string) error
 	Exec(ctx context.Context, id string, args []string, timeoutSecs int) (*forkd.ExecResult, error)
 	Ping(ctx context.Context, id string) error
+	Metrics(ctx context.Context) ([]byte, error)
 }
 
 // Service is the lease API backend.

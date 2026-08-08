@@ -24,6 +24,7 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return s
 }
 
@@ -33,6 +34,20 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleMetrics proxies forkd-controller's Prometheus metrics so the
+// controller can stay loopback-bound while VictoriaMetrics scrapes the
+// backend. Requires a consumer token (auth middleware).
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	body, err := s.svc.forkd.Metrics(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to fetch metrics")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // Handler returns the HTTP handler with auth middleware applied.

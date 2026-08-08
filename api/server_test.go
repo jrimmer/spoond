@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,6 +72,10 @@ func (f *fakeForkd) Exec(ctx context.Context, id string, args []string, timeoutS
 }
 
 func (f *fakeForkd) Ping(ctx context.Context, id string) error { return nil }
+
+func (f *fakeForkd) Metrics(ctx context.Context) ([]byte, error) {
+	return []byte("# HELP forkd_sandboxes_active\n# TYPE forkd_sandboxes_active gauge\nforkd_sandboxes_active 0\n"), nil
+}
 
 // newTestServer builds a lease API server backed by a fake forkd.
 func newTestServer(t *testing.T) (*httptest.Server, *fakeForkd) {
@@ -163,6 +168,32 @@ func TestHealthzNoAuth(t *testing.T) {
 	resp, _ := doReq(t, "GET", ts.URL+"/healthz", "", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestMetricsRequiresAuth(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, _ := doReq(t, "GET", ts.URL+"/metrics", "", nil)
+	if resp.StatusCode != 401 {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestMetricsWithAuth(t *testing.T) {
+	ts, _ := newTestServer(t)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer token-a")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(raw), "forkd_sandboxes_active") {
+		t.Fatalf("expected forkd metrics in body, got: %s", raw)
 	}
 }
 
