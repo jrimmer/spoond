@@ -158,6 +158,14 @@ func TestCreateBadToken(t *testing.T) {
 	}
 }
 
+func TestHealthzNoAuth(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, _ := doReq(t, "GET", ts.URL+"/healthz", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
 func TestExec(t *testing.T) {
 	ts, _ := newTestServer(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})

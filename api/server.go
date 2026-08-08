@@ -23,7 +23,16 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s
+}
+
+// handleHealthz reports liveness without auth, for Gatus/load-balancer
+// checks. It returns 200 if the service is up.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 // Handler returns the HTTP handler with auth middleware applied.
@@ -32,9 +41,13 @@ func (s *Server) Handler() http.Handler {
 }
 
 // authMiddleware authenticates the bearer token and injects the
-// consumer id into the request context.
+// consumer id into the request context. /healthz is exempt (liveness).
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(auth, "Bearer ")
 		if token == "" || token == auth {
