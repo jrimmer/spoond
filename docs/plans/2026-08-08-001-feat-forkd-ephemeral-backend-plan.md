@@ -15,11 +15,11 @@ origin: docs/plans/2026-07-12-hyper-runner.md
 
 ## Goal Capsule
 
-Build a general-purpose ephemeral sandbox backend on top of forkd, exposed as a thin HTTP lease/pool API. The API is the shared contract for future consumers (Forgejo runner, exe.dev-style containers, pi/code harnesses, Cloudflare OS / sandstorm). This plan delivers the backend itself and validates it with a direct client smoke test; the Forgejo runner integration is a scoped follow-up phase (U4) because the runner code does not yet exist in the repo.
+Build a general-purpose ephemeral sandbox backend on top of forkd, exposed as a thin HTTP lease/pool API. The API is the shared contract for future consumers (Forgejo runner, command adapter, pi/code harnesses, Cloudflare OS / sandstorm). This plan delivers the backend itself and validates it with a direct client smoke test; the Forgejo runner integration is a scoped follow-up phase (U4) because the runner code does not yet exist in the repo.
 
 **Authority hierarchy:** the plan is the authority for scope and sequencing. The user (Jason) owns product decisions; the implementer owns execution details the plan leaves open.
 
-**Stop conditions:** stop when the lease API is implemented, tested, and validated by a direct client (create → exec → TTL-expire → release) against a live forkd-controller. Do not build the Forgejo runner, exe.dev / pi / sandstorm consumers in this plan — they are deferred follow-up work.
+**Stop conditions:** stop when the lease API is implemented, tested, and validated by a direct client (create → exec → TTL-expire → release) against a live forkd-controller. Do not build the Forgejo runner, command adapter / pi / sandstorm consumers in this plan — they are deferred follow-up work.
 
 **Tail ownership:** the implementer owns the code, tests, and deployment of the backend. The user owns the decision to build the Forgejo runner (U4) and to decommission the old Hyper runner.
 
@@ -31,7 +31,7 @@ forkd is installed and proven on vm2 (10.1.0.11): 10 microVMs fork from a warm p
 
 ### Problem Frame
 
-The homelab has four distinct consumers that all want the same thing: a fast, isolated, ephemeral compute environment. The Forgejo runner needs per-job microVMs. exe.dev-style containers need pre-cached code/analysis environments. pi and code harnesses need on-demand sandboxes. Cloudflare OS (sandstorm) needs an ephemeral backend. Today each would re-implement the same glue (auth, TTL enforcement, warm-pool management, error handling) on top of forkd, producing four drifting wrappers. The Hyper runner (`hyper-forgejo-runner`) is the existing partial answer but is Hyper-specific and not general. The missing piece is a shared lease/pool contract that keeps every consumer thin.
+The homelab has four distinct consumers that all want the same thing: a fast, isolated, ephemeral compute environment. The Forgejo runner needs per-job microVMs. The command adapter needs pre-cached code/analysis environments. pi and code harnesses need on-demand sandboxes. Cloudflare OS (sandstorm) needs an ephemeral backend. Today each would re-implement the same glue (auth, TTL enforcement, warm-pool management, error handling) on top of forkd, producing four drifting wrappers. The Hyper runner (`hyper-forgejo-runner`) is the existing partial answer but is Hyper-specific and not general. The missing piece is a shared lease/pool contract that keeps every consumer thin.
 
 ### Requirements
 
@@ -55,7 +55,7 @@ The homelab has four distinct consumers that all want the same thing: a fast, is
 
 **Deferred to Follow-Up Work:**
 - Forgejo runner integration (U4) — the runner code does not yet exist in the repo; building it is a separate effort
-- exe.dev-style container consumer
+- exe.dev-style container consumer → **command adapter** (synchronous, caller-driven: "run this command/snippet in a sandbox, return the result")
 - pi / code-harness consumer
 - Cloudflare OS (sandstorm) backend integration
 - Admin image-baking API (start with CLI)
@@ -89,7 +89,7 @@ The homelab has four distinct consumers that all want the same thing: a fast, is
 flowchart LR
     subgraph Consumers
         FJ[Forgejo Runner]
-        EX[exe.dev-style]
+        EX[Command Adapter]
         PI[pi / code harness]
         CO[Cloudflare OS]
     end
