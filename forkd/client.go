@@ -121,13 +121,14 @@ func (c *Client) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error) {
 }
 
 // SnapshotExists reports whether a snapshot tag is registered and
-// bootable. It uses the per-tag info endpoint, which is reliable even
-// when the list endpoint is empty.
+// restorable. It uses the per-tag info endpoint, which is reliable even
+// when the list endpoint is empty. (The info endpoint returns 200 for a
+// restorable snapshot; bootability is only annotated in the list view.)
 func (c *Client) SnapshotExists(ctx context.Context, tag string) (bool, error) {
 	var out SnapshotInfo
 	err := c.do(ctx, http.MethodGet, "/v1/snapshots/"+tag+"/info", nil, &out)
 	if err == nil {
-		return out.Bootable, nil
+		return true, nil
 	}
 	if fe, ok := err.(*Error); ok && fe.StatusCode == http.StatusNotFound {
 		return false, nil
