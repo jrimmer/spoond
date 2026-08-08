@@ -12,6 +12,8 @@
 //	IMAGE_MAP          runs-on label -> image tag, comma-separated
 //	                   (e.g. "ubuntu-latest=py-base")
 //	DEFAULT_IMAGE      Image tag when no label maps (default "py-base")
+//	REPO_BASE_URL      Git host base URL for actions/checkout clones
+//	                   (default https://code.lacy.casa)
 //	LEASE_TTL          Sandbox lease TTL seconds (default 600)
 //	RUNNER_FLOOR       Minimum registered runners (default 3)
 //	RUNNER_MAX         Maximum registered runners (default 12)
@@ -111,6 +113,7 @@ func main() {
 			Labels:       imageMap,
 			DefaultImage: defaultImage,
 			TTL:          ttl,
+			RepoBaseURL:  envOr("REPO_BASE_URL", "https://code.lacy.casa"),
 		}
 		return &runner.WorkerImpl{Adapter: proto, Exec: exec}
 	}

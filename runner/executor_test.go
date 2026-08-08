@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -202,5 +203,95 @@ func TestEvalContext(t *testing.T) {
 	want := "echo test/repo bar secret 1"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+// checkoutRecordingLease records exec commands so tests can assert the
+// checkout sequence.
+type checkoutRecordingLease struct {
+	*fakeLease
+	cmds []string
+}
+
+func (f *checkoutRecordingLease) Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error) {
+	f.cmds = append(f.cmds, cmd)
+	return &ExecResult{Stdout: "ok\n", Exit: 0}, nil
+}
+
+func TestExecutorCheckoutClonesRepo(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test ./...
+`
+	lease := &checkoutRecordingLease{fakeLease: newFakeLease()}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+		RepoBaseURL:  "https://code.lacy.casa",
+	}
+	job := testJob(payload)
+	job.Secrets = map[string]string{"GITHUB_TOKEN": "tok123"}
+	job.Context = map[string]string{"repository": "lacy.casa/forkd-service"}
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultSuccess {
+		t.Fatalf("expected success, got %+v", sink.reports)
+	}
+	// The checkout step should have issued mkdir + git clone with the
+	// repo URL and token header, and the run step should use /workspace.
+	var sawClone, sawRun bool
+	for _, c := range lease.cmds {
+		if strings.Contains(c, "git") && strings.Contains(c, "lacy.casa/forkd-service.git") {
+			sawClone = true
+			if !strings.Contains(c, "Authorization: token tok123") {
+				t.Fatalf("clone missing token header: %s", c)
+			}
+		}
+		if strings.Contains(c, "go test ./...") {
+			sawRun = true
+		}
+	}
+	if !sawClone {
+		t.Fatalf("expected git clone command, got: %v", lease.cmds)
+	}
+	if !sawRun {
+		t.Fatalf("expected run step to execute, got: %v", lease.cmds)
+	}
+}
+
+func TestExecutorCheckoutMissingRepo(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo hi
+`
+	lease := &checkoutRecordingLease{fakeLease: newFakeLease()}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	job := testJob(payload)
+	job.Context = map[string]string{} // no repository
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultFailure {
+		t.Fatalf("expected failure, got %+v", sink.reports)
 	}
 }

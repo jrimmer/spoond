@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -17,7 +18,17 @@ type Executor struct {
 	DefaultImage string
 	// TTL is the sandbox lease TTL in seconds.
 	TTL int
+	// RepoBaseURL is the git host base URL used to construct clone URLs
+	// for actions/checkout (e.g. https://code.lacy.casa). The repo path
+	// comes from the github.repository context.
+	RepoBaseURL string
+	// WorkspaceDir is the directory inside the sandbox where the repo is
+	// checked out and run steps execute. Defaults to /workspace.
+	WorkspaceDir string
 }
+
+// checkoutRe matches a uses: actions/checkout step (any version).
+var checkoutRe = regexp.MustCompile(`(?i)^actions/checkout(@.*)?$`)
 
 // Run executes a job's workflow in a sandbox, streaming logs and
 // reporting the final state. It always releases the sandbox.
@@ -55,6 +66,12 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		Steps:   map[string]map[string]string{},
 	}
 
+	// Workspace where the repo is checked out and run steps execute.
+	ws := e.WorkspaceDir
+	if ws == "" {
+		ws = "/workspace"
+	}
+
 	var logIndex int64
 	for i, step := range wfJob.Steps {
 		stepState := &StepState{
@@ -62,13 +79,23 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			Result:   ResultSuccess,
 			LogIndex: logIndex,
 		}
+		// actions/checkout: clone the repo into the workspace.
+		if step.Uses != "" && checkoutRe.MatchString(step.Uses) {
+			if err := e.checkout(ctx, sandboxID, ws, job, ctx2, stepState, &logIndex); err != nil {
+				state.Result = ResultFailure
+				state.Steps = append(state.Steps, *stepState)
+				break
+			}
+			state.Steps = append(state.Steps, *stepState)
+			continue
+		}
 		// Evaluate the step's run command with context.
 		cmd := ctx2.Eval(step.Run)
 		env := map[string]string{}
 		for k, v := range step.Env {
 			env[k] = ctx2.Eval(v)
 		}
-		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, "", env, 300)
+		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, ws, env, 300)
 		if err != nil {
 			stepState.Result = ResultFailure
 			state.Result = ResultFailure
@@ -93,6 +120,61 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		}
 	}
 	return e.Sink.Report(ctx, state, nil)
+}
+
+// checkout clones the job's repository into the workspace inside the
+// sandbox. It is the forkd equivalent of actions/checkout: the runner
+// provides the environment, the workflow asks for the code.
+func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job, ctx2 *EvalContext, stepState *StepState, logIndex *int64) error {
+	repo := ctx2.Eval("${{ github.repository }}")
+	if repo == "" {
+		stepState.Result = ResultFailure
+		e.log(ctx, job, *logIndex, "checkout: github.repository is empty")
+		*logIndex++
+		stepState.LogLength = 1
+		return fmt.Errorf("checkout: github.repository is empty")
+	}
+	base := e.RepoBaseURL
+	if base == "" {
+		base = "https://code.lacy.casa"
+	}
+	base = strings.TrimRight(base, "/")
+	cloneURL := base + "/" + repo + ".git"
+
+	// Auth via GITHUB_TOKEN (provided by Forgejo in job secrets), sent
+	// as an extra header so the token never appears in the URL.
+	token := ctx2.Eval("${{ secrets.GITHUB_TOKEN }}")
+	authArg := ""
+	if token != "" {
+		authArg = `-c http.extraheader="Authorization: token ` + token + `"`
+	}
+
+	// Ensure the workspace exists, then clone into it.
+	cmds := []string{
+		"mkdir -p " + ws,
+		"git " + authArg + " clone --depth 1 " + cloneURL + " " + ws,
+	}
+	for _, c := range cmds {
+		res, err := e.Sandbox.Exec(ctx, sandboxID, c, "", nil, 300)
+		if err != nil {
+			stepState.Result = ResultFailure
+			e.log(ctx, job, *logIndex, "checkout: "+err.Error())
+			*logIndex++
+			stepState.LogLength = 1
+			return err
+		}
+		rows := splitLog(res.Stdout, res.Stderr)
+		if len(rows) > 0 {
+			e.log(ctx, job, *logIndex, strings.Join(rows, "\n"))
+			*logIndex += int64(len(rows))
+			stepState.LogLength += int64(len(rows))
+		}
+		if res.Exit != 0 {
+			stepState.Result = ResultFailure
+			return fmt.Errorf("checkout: command failed: %s", c)
+		}
+	}
+	return nil
 }
 
 // imageFor maps a job's runs-on labels to an image tag.
