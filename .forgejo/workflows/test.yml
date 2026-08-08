@@ -6,3 +6,4 @@ jobs:
     steps:
       - run: echo "hello from forkd sandbox"
       - run: python3 -c "print(6*7)"
+trigger
