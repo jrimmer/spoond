@@ -65,6 +65,21 @@ func TestSpawn(t *testing.T) {
 	}
 }
 
+func TestSpawnOmitsZeroMemoryLimit(t *testing.T) {
+	c, calls := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(201)
+		_, _ = w.Write([]byte(`[{"id":"sb-0000","snapshot_tag":"py-base"}]`))
+	})
+	_, err := c.Spawn(context.Background(), "py-base", 1, true, 0)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	body := (*calls)[0]["body"].(map[string]any)
+	if _, present := body["memory_limit_mib"]; present {
+		t.Fatalf("expected memory_limit_mib omitted when 0, got %+v", body)
+	}
+}
+
 func TestSpawnUnknownTag(t *testing.T) {
 	c, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)

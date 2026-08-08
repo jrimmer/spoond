@@ -54,6 +54,7 @@ func newID() string {
 // service needs. *forkd.Client satisfies it; tests use a fake.
 type ForkdClient interface {
 	ListSnapshots(ctx context.Context) ([]forkd.SnapshotInfo, error)
+	SnapshotExists(ctx context.Context, tag string) (bool, error)
 	Spawn(ctx context.Context, tag string, n int, perChildNetns bool, memoryLimitMiB int) ([]forkd.SandboxInfo, error)
 	ListSandboxes(ctx context.Context) ([]forkd.SandboxInfo, error)
 	Kill(ctx context.Context, id string) error

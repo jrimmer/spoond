@@ -31,6 +31,15 @@ func (f *fakeForkd) ListSnapshots(ctx context.Context) ([]forkd.SnapshotInfo, er
 	return f.snapshots, nil
 }
 
+func (f *fakeForkd) SnapshotExists(ctx context.Context, tag string) (bool, error) {
+	for _, s := range f.snapshots {
+		if s.Tag == tag {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeForkd) Spawn(ctx context.Context, tag string, n int, perChildNetns bool, memoryLimitMiB int) ([]forkd.SandboxInfo, error) {
 	var out []forkd.SandboxInfo
 	for i := 0; i < n; i++ {
@@ -67,7 +76,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeForkd) {
 	t.Helper()
 	ff := newFakeForkd()
 	svc := NewService(ff, map[string]string{"token-a": "consumer-a", "token-b": "consumer-b"}, 0, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, time.Minute)
+	reg := NewImageRegistry(ff, time.Minute, "py-base")
 	srv := NewServer(svc, reg)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

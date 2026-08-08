@@ -69,7 +69,13 @@ func main() {
 
 	fc := forkd.NewClient(forkdURL, forkdToken)
 	svc := api.NewService(fc, tokens, poolSize, defaultTTL, maxTTL)
-	reg := api.NewImageRegistry(fc, 30*time.Second)
+	// knownTags surfaces baked images even when the controller's list
+	// endpoint is empty; add tags here as you bake them.
+	knownTags := []string{}
+	if v := os.Getenv("KNOWN_IMAGES"); v != "" {
+		knownTags = strings.Split(v, ",")
+	}
+	reg := api.NewImageRegistry(fc, 30*time.Second, knownTags...)
 	srv := api.NewServer(svc, reg)
 
 	ctx, cancel := context.WithCancel(context.Background())

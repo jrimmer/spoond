@@ -120,14 +120,32 @@ func (c *Client) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error) {
 	return out, nil
 }
 
+// SnapshotExists reports whether a snapshot tag is registered and
+// bootable. It uses the per-tag info endpoint, which is reliable even
+// when the list endpoint is empty.
+func (c *Client) SnapshotExists(ctx context.Context, tag string) (bool, error) {
+	var out SnapshotInfo
+	err := c.do(ctx, http.MethodGet, "/v1/snapshots/"+tag+"/info", nil, &out)
+	if err == nil {
+		return true, nil
+	}
+	if fe, ok := err.(*Error); ok && fe.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	return false, err
+}
+
 // Spawn forks n sandboxes from the given snapshot tag. It returns the
 // created sandboxes. perChildNetns places each child in its own netns.
+// memoryLimitMiB is omitted when 0 (forkd rejects an explicit 0 limit).
 func (c *Client) Spawn(ctx context.Context, tag string, n int, perChildNetns bool, memoryLimitMiB int) ([]SandboxInfo, error) {
 	req := map[string]any{
-		"snapshot_tag":     tag,
-		"n":                n,
-		"per_child_netns":  perChildNetns,
-		"memory_limit_mib": memoryLimitMiB,
+		"snapshot_tag":    tag,
+		"n":               n,
+		"per_child_netns": perChildNetns,
+	}
+	if memoryLimitMiB > 0 {
+		req["memory_limit_mib"] = memoryLimitMiB
 	}
 	var out []SandboxInfo
 	if err := c.do(ctx, http.MethodPost, "/v1/sandboxes", req, &out); err != nil {
