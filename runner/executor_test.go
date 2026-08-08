@@ -211,10 +211,12 @@ func TestEvalContext(t *testing.T) {
 type checkoutRecordingLease struct {
 	*fakeLease
 	cmds []string
+	cwds []string
 }
 
 func (f *checkoutRecordingLease) Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error) {
 	f.cmds = append(f.cmds, cmd)
+	f.cwds = append(f.cwds, cwd)
 	return &ExecResult{Stdout: "ok\n", Exit: 0}, nil
 }
 
@@ -265,6 +267,47 @@ jobs:
 	}
 	if !sawRun {
 		t.Fatalf("expected run step to execute, got: %v", lease.cmds)
+	}
+	// The run step after checkout must use /workspace as cwd.
+	for i, c := range lease.cmds {
+		if strings.Contains(c, "go test ./...") {
+			if lease.cwds[i] != "/workspace" {
+				t.Fatalf("run step cwd = %q, want /workspace", lease.cwds[i])
+			}
+		}
+	}
+}
+
+func TestExecutorRunWithoutCheckoutUsesEmptyCwd(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`
+	lease := &checkoutRecordingLease{fakeLease: newFakeLease()}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	if err := exec.Run(context.Background(), testJob(payload)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultSuccess {
+		t.Fatalf("expected success, got %+v", sink.reports)
+	}
+	// No checkout step -> run step must use empty cwd (not /workspace).
+	for i, c := range lease.cmds {
+		if strings.Contains(c, "echo hello") {
+			if lease.cwds[i] != "" {
+				t.Fatalf("run step cwd = %q, want empty (no checkout)", lease.cwds[i])
+			}
+		}
 	}
 }
 

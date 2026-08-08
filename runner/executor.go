@@ -71,6 +71,9 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	if ws == "" {
 		ws = "/workspace"
 	}
+	// checkedOut tracks whether a checkout step has run; run steps only
+	// use the workspace as cwd once the repo is present there.
+	checkedOut := false
 
 	var logIndex int64
 	for i, step := range wfJob.Steps {
@@ -86,19 +89,22 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 				state.Steps = append(state.Steps, *stepState)
 				break
 			}
+			checkedOut = true
 			state.Steps = append(state.Steps, *stepState)
 			continue
 		}
-		// Debug: log the step shape so we can see what Forgejo sends.
-		e.log(ctx, job, logIndex, fmt.Sprintf("step %d: uses=%q run=%q", i, step.Uses, step.Run))
-		logIndex++
 		// Evaluate the step's run command with context.
 		cmd := ctx2.Eval(step.Run)
 		env := map[string]string{}
 		for k, v := range step.Env {
 			env[k] = ctx2.Eval(v)
 		}
-		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, ws, env, 300)
+		// Use the workspace as cwd only if the repo was checked out.
+		cwd := ""
+		if checkedOut {
+			cwd = ws
+		}
+		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, cwd, env, 300)
 		if err != nil {
 			stepState.Result = ResultFailure
 			state.Result = ResultFailure
