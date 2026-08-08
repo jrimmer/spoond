@@ -181,8 +181,12 @@ func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job,
 		authArg = `-c http.extraheader="Authorization: token ` + token + `"`
 	}
 
-	// Ensure the workspace exists, then clone into it.
+	// Ensure the workspace exists and is clean, then clone into it.
+	// The warm pool reuses the same rootfs across jobs, so /workspace may
+	// hold a previous job's checkout (and its _build artifacts). Remove it
+	// first so `git clone` never fails with "destination path already exists".
 	cmds := []string{
+		"rm -rf " + ws,
 		"mkdir -p " + ws,
 		"git " + authArg + " clone --depth 1 " + cloneURL + " " + ws,
 	}
