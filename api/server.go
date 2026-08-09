@@ -1,11 +1,20 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"golang.org/x/sys/unix"
 )
 
 // Server is the HTTP lease API.
@@ -23,6 +32,8 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/stream", s.handleStream)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -145,6 +156,184 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"persistent": lease.Persistent,
 		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
 	})
+}
+
+// handleEndpoint resolves a lease to the sandbox's live network endpoint
+// (netns + guest addr). Used by the SSH gateway to reach sshd inside the
+// VM. The lease owner must match (a lease id is a capability: anyone who
+// holds it can resolve + connect).
+func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease := s.svc.lookup(owner, id)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "sandbox not running")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":         lease.ID,
+		"forkd_id":   ep.ForkdID,
+		"image":      lease.Image,
+		"netns":      ep.Netns,
+		"guest_addr": ep.GuestAddr,
+	})
+}
+
+// handleStream opens a WebSocket to a sandbox and relays an interactive
+// PTY session: the client sends {"args":[...],"cwd":...} as the first
+// message; output streams back as text frames; client text frames are
+// written to the process stdin. Protocol matches the agent's "stream"
+// action (line-delimited JSON on the agent side).
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease := s.svc.lookup(owner, id)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "sandbox not running")
+		return
+	}
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(*http.Request) bool { return true }, // consumer-token auth above
+	}
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer ws.Close()
+
+	// First message: the exec request.
+	mt, payload, err := ws.ReadMessage()
+	if err != nil {
+		return
+	}
+	if mt != websocket.TextMessage {
+		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"first message must be JSON text"}`))
+		return
+	}
+	var req struct {
+		Args []string          `json:"args"`
+		Cwd  string            `json:"cwd"`
+		Env  map[string]string `json:"env"`
+		Pty  *bool             `json:"pty"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"bad request JSON"}`))
+		return
+	}
+	if len(req.Args) == 0 {
+		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"args required"}`))
+		return
+	}
+	pty := true
+	if req.Pty != nil {
+		pty = *req.Pty
+	}
+
+	// Dial the agent inside the sandbox's netns.
+	agentAddr := net.JoinHostPort(ep.GuestHost, "8888")
+	agent, err := dialInNetns(ep.Netns, agentAddr)
+	if err != nil {
+		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"agent unreachable: `+err.Error()+`"}`))
+		return
+	}
+	defer agent.Close()
+
+	startReq := map[string]any{
+		"action": "stream",
+		"args":   req.Args,
+		"cwd":    req.Cwd,
+		"env":    req.Env,
+		"pty":    pty,
+	}
+	line, _ := json.Marshal(startReq)
+	if _, err := agent.Write(append(line, '\n')); err != nil {
+		return
+	}
+
+	// Agent -> WS relay (line-delimited JSON).
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		br := bufio.NewReader(agent)
+		for {
+			ln, err := br.ReadBytes('\n')
+			if len(ln) > 0 {
+				_ = ws.WriteMessage(websocket.TextMessage, ln)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// WS -> agent relay: {"in":"...","action":"stop"} messages.
+	for {
+		mt, payload, err := ws.ReadMessage()
+		if err != nil {
+			break
+		}
+		if mt != websocket.TextMessage {
+			continue
+		}
+		var msg struct {
+			In     string `json:"in"`
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			continue
+		}
+		if msg.Action == "stop" {
+			break
+		}
+		if msg.In != "" {
+			out, _ := json.Marshal(map[string]string{"in": msg.In})
+			if _, err := agent.Write(append(out, '\n')); err != nil {
+				break
+			}
+		}
+	}
+
+	<-agentDone
+}
+
+// dialInNetns enters the given network namespace on a locked thread,
+// dials addr, and returns the connection (usable from any thread once
+// established — the socket is already bound in the target netns).
+func dialInNetns(netns, addr string) (net.Conn, error) {
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		f, err := os.Open(filepath.Join("/var/run/netns", netns))
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("open netns %s: %w", netns, err)}
+			return
+		}
+		defer f.Close()
+		if err := unix.Setns(int(f.Fd()), unix.CLONE_NEWNET); err != nil {
+			ch <- result{nil, fmt.Errorf("setns %s: %w", netns, err)}
+			return
+		}
+		d, err := net.DialTimeout("tcp", addr, 10*time.Second)
+		ch <- result{d, err}
+	}()
+	r := <-ch
+	return r.conn, r.err
 }
 
 // handleKeepAlive extends a persistent lease's expiry. The caller must

@@ -9,7 +9,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +28,7 @@ type Lease struct {
 	Address    string // guest address, e.g. "10.42.0.2:8888"
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
-	Persistent bool   // interactive/persistent lease: not TTL-swept, keep-alive extends
+	Persistent bool // interactive/persistent lease: not TTL-swept, keep-alive extends
 	released   bool
 }
 
@@ -297,6 +299,39 @@ func (s *Service) lookup(owner, id string) *Lease {
 		return nil
 	}
 	return l
+}
+
+// Endpoint describes how to reach a leased sandbox's guest agent.
+type Endpoint struct {
+	ForkdID   string
+	Netns     string
+	GuestAddr string
+	GuestHost string
+}
+
+// resolveEndpoint finds the live sandbox info (netns + guest addr) for a
+// lease by asking the controller. GuestHost is the host part of the
+// guest address (the agent port is always 8888).
+func (s *Service) resolveEndpoint(ctx context.Context, l *Lease) (*Endpoint, error) {
+	sbs, err := s.forkd.ListSandboxes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, sb := range sbs {
+		if sb.ID == l.ForkdID {
+			host, _, err := net.SplitHostPort(sb.GuestAddr)
+			if err != nil {
+				host = sb.GuestAddr
+			}
+			return &Endpoint{
+				ForkdID:   sb.ID,
+				Netns:     sb.Netns,
+				GuestAddr: sb.GuestAddr,
+				GuestHost: host,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("sandbox %s not running", l.ForkdID)
 }
 
 // list returns the caller's live leases as plain maps.
