@@ -83,9 +83,12 @@ type Service struct {
 
 // NewService builds a lease service. tokens maps consumer tokens to
 // consumer ids. poolSize is the warm-pool size per image (0 disables
-// pre-forking). defaultTTL and maxTTL bound lease lifetimes.
-func NewService(fc ForkdClient, tokens map[string]string, poolSize int, defaultTTL, maxTTL time.Duration) *Service {
-	return &Service{
+// pre-forking). defaultTTL and maxTTL bound lease lifetimes. knownImages
+// seeds the warm-pool map so refillPool pre-forks every image at
+// startup — without this, an image only becomes warm after its first
+// grant, leaving the pool cold after a backend restart.
+func NewService(fc ForkdClient, tokens map[string]string, poolSize int, defaultTTL, maxTTL time.Duration, knownImages ...string) *Service {
+	s := &Service{
 		forkd:         fc,
 		store:         newStore(),
 		tokens:        tokens,
@@ -95,6 +98,17 @@ func NewService(fc ForkdClient, tokens map[string]string, poolSize int, defaultT
 		sweepInterval: 5 * time.Second,
 		log:           log.Default(),
 	}
+	for _, img := range knownImages {
+		if img == "" {
+			continue
+		}
+		s.store.mu.Lock()
+		if _, ok := s.store.pool[img]; !ok {
+			s.store.pool[img] = nil
+		}
+		s.store.mu.Unlock()
+	}
+	return s
 }
 
 // Start begins the TTL sweeper and warm-pool refill. It runs until ctx

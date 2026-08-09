@@ -450,3 +450,20 @@ func TestGrantDropsStalePooledSandbox(t *testing.T) {
 	}
 }
 
+// TestNewServiceSeedsPoolFromKnownImages verifies NewService registers
+// known images so refillPool warms all of them at startup (not just the
+// ones that happen to get granted).
+func TestNewServiceSeedsPoolFromKnownImages(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute, "py-base", "go-base", "elixir-base", "llm-review")
+	if len(svc.store.pool) != 4 {
+		t.Fatalf("expected 4 seeded images, got %d: %v", len(svc.store.pool), svc.store.pool)
+	}
+	// Empty pool entries must exist so refillPool sees cur=0 < poolSize.
+	for _, img := range []string{"py-base", "go-base", "elixir-base", "llm-review"} {
+		if _, ok := svc.store.pool[img]; !ok {
+			t.Fatalf("image %s not seeded", img)
+		}
+	}
+}
+
