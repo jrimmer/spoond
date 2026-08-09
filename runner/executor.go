@@ -145,6 +145,9 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		if res.Exit != 0 {
 			stepState.Result = ResultFailure
 			state.Result = ResultFailure
+			e.log(ctx, job, logIndex, fmt.Sprintf("step exited %d (stderr tail: %s)", res.Exit, tailStr(res.Stderr, 300)))
+			logIndex++
+			stepState.LogLength++
 		}
 		state.Steps = append(state.Steps, *stepState)
 		if res.Exit != 0 {
@@ -250,4 +253,12 @@ func splitLog(stdout, stderr string) []string {
 		}
 	}
 	return out
+}
+
+// tailStr returns the last n characters of s, for compact error logging.
+func tailStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
