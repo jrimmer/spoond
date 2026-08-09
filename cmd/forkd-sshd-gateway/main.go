@@ -35,6 +35,8 @@ import (
 )
 
 var (
+	// gatewayHost is the public hostname advertised in MOTDs.
+	gatewayHost = flag.String("gateway-host", "sandbox.lacy.casa", "public hostname advertised in MOTDs")
 	listenAddr  = flag.String("listen", ":2222", "listen address")
 	hostKeyPath = flag.String("host-key", "/etc/forkd-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
 	backendURL  = flag.String("backend", "https://127.0.0.1:8890", "forkd-backend base URL")
@@ -49,6 +51,7 @@ type endpoint struct {
 	ForkdID   string `json:"forkd_id"`
 	Netns     string `json:"netns"`
 	GuestAddr string `json:"guest_addr"`
+	Image     string `json:"image"`
 }
 
 func main() {
@@ -106,15 +109,53 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 		return
 	}
 	defer sconn.Close()
-	leaseID := sconn.User()
-	log.Printf("conn: user=%s addr=%s", leaseID, sconn.RemoteAddr())
+	user := sconn.User()
+	log.Printf("conn: user=%s addr=%s", user, sconn.RemoteAddr())
 
 	go ssh.DiscardRequests(reqs)
+
+	// Resolve the target: a 32-hex lease id attaches an existing sandbox;
+	// new[-<image>] auto-creates a persistent one (SSH-as-API).
+	leaseID := user
+	motd := ""
+	if !isLeaseID(user) {
+		created, img, err := createSandbox(context.Background(), user)
+		if err != nil {
+			errMsg := "forkd: " + err.Error() + "\n"
+			log.Printf("create for %q failed: %v", user, err)
+			// Deliver the error on the first session channel.
+			for nc := range chans {
+				if nc.ChannelType() != "session" {
+					nc.Reject(ssh.UnknownChannelType, "only session channels supported")
+					continue
+				}
+				ch, _, _ := nc.Accept()
+				ch.Write([]byte(errMsg))
+				ch.Close()
+				return
+			}
+			return
+		}
+		leaseID = created
+		motd = fmt.Sprintf("forkd: created sandbox %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. Reconnect: ssh %s@%s\n",
+			created, img, created, *gatewayHost)
+		log.Printf("created sandbox %s (%s) for user %q", created, img, user)
+	}
 
 	client, err := dialSandbox(context.Background(), leaseID, gatewayKey)
 	if err != nil {
 		log.Printf("dial sandbox for %s: %v", leaseID, err)
 		// Tell the client what happened with a session-level error.
+		for nc := range chans {
+			if nc.ChannelType() != "session" {
+				nc.Reject(ssh.UnknownChannelType, "only session channels supported")
+				continue
+			}
+			ch, _, _ := nc.Accept()
+			fmt.Fprintf(ch, "forkd: cannot reach sandbox %s: %v\n", leaseID, err)
+			ch.Close()
+			return
+		}
 		return
 	}
 	defer client.Close()
@@ -124,8 +165,84 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 			newChan.Reject(ssh.UnknownChannelType, "only session channels supported")
 			continue
 		}
-		go handleSession(newChan, client)
+		go handleSession(newChan, client, motd)
 	}
+}
+
+// isLeaseID reports whether s is a 32-char lowercase hex lease id.
+func isLeaseID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// imageAliases maps SSH username image names to backend snapshot tags.
+var imageAliases = map[string]string{
+	"dev":    "dev-base",
+	"go":     "go-base",
+	"py":     "py-base",
+	"python": "py-base",
+	"elixir": "elixir-base",
+	"llm":    "llm-review",
+	"base":   "dev-base",
+}
+
+// createSandbox parses an SSH username of the form new[-<image>] and
+// creates a persistent sandbox in the backend. Returns the new lease id
+// and the resolved image tag.
+func createSandbox(ctx context.Context, user string) (string, string, error) {
+	image := "dev-base"
+	alias := ""
+	if user != "new" {
+		rest, ok := strings.CutPrefix(user, "new-")
+		if !ok || rest == "" {
+			return "", "", fmt.Errorf("unknown command %q — use a lease id or new[-<image>] (new, new-dev, new-go, new-py, new-elixir, new-llm)", user)
+		}
+		alias = rest
+	}
+	if alias != "" {
+		tag, ok := imageAliases[alias]
+		if !ok {
+			return "", "", fmt.Errorf("unknown image %q — try dev, go, py, elixir, llm", alias)
+		}
+		image = tag
+	}
+
+	// Interactive SSH requires an image with sshd. Only dev-base has it
+	// today; CI images (go/py/elixir/llm) are for workflows, not shells.
+	// Reject before creating so we don't orphan a sandbox.
+	if image != "dev-base" {
+		return "", "", fmt.Errorf("image %q is a CI image with no sshd — interactive SSH requires dev-base (use new or new-dev)", image)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"image":      image,
+		"persistent": true,
+		"ttl":        3600,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes", payload)
+	if err != nil {
+		return "", "", err
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(b, &created); err != nil {
+		return "", "", fmt.Errorf("create response: %w", err)
+	}
+	if created.ID == "" {
+		return "", "", fmt.Errorf("create response missing id: %s", strings.TrimSpace(string(b)))
+	}
+	return created.ID, image, nil
 }
 
 // dialSandbox resolves the lease to its netns+address and opens a nested
@@ -200,12 +317,18 @@ func dialSandbox(ctx context.Context, leaseID string, gatewayKey ssh.Signer) (*s
 	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
-func handleSession(newChan ssh.NewChannel, client *ssh.Client) {
+func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		return
 	}
 	defer ch.Close()
+
+	// Show the MOTD (e.g. "created sandbox …") on new auto-created
+	// sandboxes, before the nested shell output begins.
+	if motd != "" {
+		ch.Write([]byte(motd))
+	}
 
 	// Open a session channel on the nested client. dev-base's login hook
 	// attaches to (or creates) the tmux session, so a plain shell gets
@@ -384,9 +507,10 @@ func backendJSON(ctx context.Context, method, path string, body []byte) ([]byte,
 
 // restartSSHD pkill's and restarts sshd inside the sandbox via the
 // backend exec API. The agent socket survives Firecracker restore; the
-// pre-snapshot sshd listener does not.
+// pre-snapshot sshd listener does not. Returns a clear error when the
+// image has no sshd (CI images are not interactive).
 func restartSSHD(ctx context.Context, leaseID string) error {
-	cmd := "pkill -x sshd 2>/dev/null; sleep 1; mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; sleep 1; pgrep -x sshd >/dev/null || echo SSHD_NOT_RUNNING"
+	cmd := "command -v /usr/sbin/sshd >/dev/null 2>&1 || echo NO_SSHD_BINARY; pkill -x sshd 2>/dev/null; sleep 1; mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; sleep 1; pgrep -x sshd >/dev/null || echo SSHD_NOT_RUNNING"
 	payload, err := json.Marshal(map[string]any{"cmd": cmd})
 	if err != nil {
 		return err
@@ -399,6 +523,9 @@ func restartSSHD(ctx context.Context, leaseID string) error {
 		Stdout string `json:"stdout"`
 	}
 	_ = json.Unmarshal(b, &out)
+	if strings.Contains(out.Stdout, "NO_SSHD_BINARY") {
+		return fmt.Errorf("image has no sshd — interactive SSH requires dev-base (use new or new-dev)")
+	}
 	if strings.Contains(out.Stdout, "SSHD_NOT_RUNNING") {
 		return fmt.Errorf("sshd did not start")
 	}

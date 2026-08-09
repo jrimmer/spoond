@@ -10,7 +10,8 @@ ExecStart=/opt/forkd-gateway/forkd-sshd-gateway \
   --gateway-key /etc/forkd-gateway/gateway_ed25519 \
   --client-keys /etc/forkd-gateway/keys/jason.pub \
   --backend https://127.0.0.1:8890 \
-  --backend-token <CONSUMER_TOKEN>
+  --backend-token <CONSUMER_TOKEN> \
+  --gateway-host sandbox.lacy.casa
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
