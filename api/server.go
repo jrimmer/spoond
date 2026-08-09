@@ -179,12 +179,14 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		timeout = maxExecTimeout
 	}
 	args := buildShellArgs(req.Cmd, req.Cwd, req.Env)
+	start := time.Now()
 	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, args, timeout)
 	if err != nil {
-		s.svc.log.Printf("exec: %s: %v", lease.ForkdID, err)
+		s.svc.log.Printf("exec: %s: %v (dur=%s)", lease.ForkdID, err, time.Since(start))
 		writeError(w, http.StatusInternalServerError, "exec failed")
 		return
 	}
+	s.svc.log.Printf("exec: %s: exit=%d stdout=%d stderr=%d dur=%s", lease.ForkdID, res.ExitCode, len(res.Stdout), len(res.Stderr), time.Since(start))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stdout": res.Stdout,
 		"stderr": res.Stderr,
