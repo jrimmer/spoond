@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 )
@@ -150,11 +151,26 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			stepState.LogLength++
 		}
 		state.Steps = append(state.Steps, *stepState)
+		e.log(ctx, job, logIndex, fmt.Sprintf("step %d (%s) exit=%d", i, stepName(&step), res.Exit))
+		logIndex++
+		stepState.LogLength++
 		if res.Exit != 0 {
 			break
 		}
 	}
+	log.Printf("executor: job %d final result=%d steps=%d", job.ID, int(state.Result), len(state.Steps))
 	return e.Sink.Report(ctx, state, nil)
+}
+
+// stepName returns a short label for a step for logging.
+func stepName(step *Step) string {
+	if step.Uses != "" {
+		return "uses:" + step.Uses
+	}
+	if step.Name != "" {
+		return step.Name
+	}
+	return "run"
 }
 
 // checkout clones the job's repository into the workspace inside the
