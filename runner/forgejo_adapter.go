@@ -151,10 +151,18 @@ func (a *ForgejoAdapter) Fetch(ctx context.Context, version int64) (*Job, int64,
 	// (github.server_url). Set both forms unconditionally so reviewdog's
 	// GITEA_ADDRESS and similar resolve to the internal host, not
 	// code.lacy.casa (which 302-redirects through Pangolin to HTML).
+	//
+	// api_url must keep the /api/v1 suffix (workflows build REST paths
+	// like ${{ github.api_url }}/repos/... and POST to them); server_url
+	// stays bare (tools like reviewdog append their own /api/v1).
 	if a.internalBaseURL != "" {
-		ctxMap["github.api_url"] = a.internalBaseURL
+		apiURL := a.internalBaseURL
+		if !strings.HasSuffix(apiURL, "/api/v1") {
+			apiURL = strings.TrimRight(apiURL, "/") + "/api/v1"
+		}
+		ctxMap["github.api_url"] = apiURL
 		ctxMap["github.server_url"] = a.internalBaseURL
-		ctxMap["api_url"] = a.internalBaseURL
+		ctxMap["api_url"] = apiURL
 		ctxMap["server_url"] = a.internalBaseURL
 	}
 	job := &Job{

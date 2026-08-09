@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/types/known/structpb"
@@ -43,16 +44,20 @@ func TestInternalBaseURLOverride(t *testing.T) {
 	}
 	// Replicate the override logic from Fetch.
 	if a.internalBaseURL != "" {
-		ctxMap["github.api_url"] = a.internalBaseURL
+		apiURL := a.internalBaseURL
+		if !strings.HasSuffix(apiURL, "/api/v1") {
+			apiURL = strings.TrimRight(apiURL, "/") + "/api/v1"
+		}
+		ctxMap["github.api_url"] = apiURL
 		ctxMap["github.server_url"] = a.internalBaseURL
-		ctxMap["api_url"] = a.internalBaseURL
+		ctxMap["api_url"] = apiURL
 		ctxMap["server_url"] = a.internalBaseURL
 	}
-	if ctxMap["api_url"] != "http://10.1.0.47:3000" {
-		t.Fatalf("api_url = %q, want internal", ctxMap["api_url"])
+	if ctxMap["api_url"] != "http://10.1.0.47:3000/api/v1" {
+		t.Fatalf("api_url = %q, want internal with /api/v1 suffix", ctxMap["api_url"])
 	}
 	if ctxMap["server_url"] != "http://10.1.0.47:3000" {
-		t.Fatalf("server_url = %q, want internal", ctxMap["server_url"])
+		t.Fatalf("server_url = %q, want internal bare", ctxMap["server_url"])
 	}
 	if ctxMap["github.server_url"] != "http://10.1.0.47:3000" {
 		t.Fatalf("github.server_url = %q, want internal", ctxMap["github.server_url"])
@@ -72,9 +77,13 @@ func TestInternalBaseURLOverrideInjectsMissingKeys(t *testing.T) {
 		"repository": "jrimmer/netcrawl",
 	}
 	if a.internalBaseURL != "" {
-		ctxMap["github.api_url"] = a.internalBaseURL
+		apiURL := a.internalBaseURL
+		if !strings.HasSuffix(apiURL, "/api/v1") {
+			apiURL = strings.TrimRight(apiURL, "/") + "/api/v1"
+		}
+		ctxMap["github.api_url"] = apiURL
 		ctxMap["github.server_url"] = a.internalBaseURL
-		ctxMap["api_url"] = a.internalBaseURL
+		ctxMap["api_url"] = apiURL
 		ctxMap["server_url"] = a.internalBaseURL
 	}
 	if ctxMap["server_url"] != "http://10.1.0.47:3000" {
@@ -82,6 +91,9 @@ func TestInternalBaseURLOverrideInjectsMissingKeys(t *testing.T) {
 	}
 	if ctxMap["github.server_url"] != "http://10.1.0.47:3000" {
 		t.Fatalf("github.server_url = %q, want internal even when missing from source context", ctxMap["github.server_url"])
+	}
+	if ctxMap["api_url"] != "http://10.1.0.47:3000/api/v1" {
+		t.Fatalf("api_url = %q, want internal /api/v1 even when missing from source context", ctxMap["api_url"])
 	}
 	if ctxMap["repository"] != "jrimmer/netcrawl" {
 		t.Fatalf("repository = %q, want unchanged", ctxMap["repository"])
