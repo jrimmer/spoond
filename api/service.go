@@ -276,6 +276,86 @@ func (s *Service) warmPool(ctx context.Context, image string) {
 	}
 }
 
+// LiveLeases returns the count of active (unreleased) leases. Used by
+// the shutdown log line.
+func (s *Service) LiveLeases() []string {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	ids := make([]string, 0, len(s.store.leases))
+	for id, l := range s.store.leases {
+		if !l.released {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// Shutdown kills every lease and pooled sandbox. Called on SIGTERM/
+// SIGINT so a backend restart never orphans warm VMs in the controller
+// (the controller has no client-liveness concept, so orphaned VMs
+// would otherwise hold netns slots forever).
+func (s *Service) Shutdown(ctx context.Context) {
+	s.store.mu.Lock()
+	all := make([]*Lease, 0, len(s.store.leases))
+	for _, l := range s.store.leases {
+		all = append(all, l)
+	}
+	// Pool ids are not full leases; kill them directly.
+	poolIDs := make([]string, 0)
+	for _, ids := range s.store.pool {
+		poolIDs = append(poolIDs, ids...)
+	}
+	s.store.mu.Unlock()
+
+	for _, l := range all {
+		s.release(ctx, l)
+	}
+	for _, id := range poolIDs {
+		if err := s.forkd.Kill(ctx, id); err != nil {
+			s.log.Printf("shutdown: kill pooled %s failed: %v", id, err)
+		}
+	}
+}
+
+// ReconcileOrphans kills controller sandboxes that this backend did not
+// create. On startup the in-memory lease/pool maps are empty, so any
+// live sandbox belongs to a previous backend incarnation (or a foreign
+// client); killing them frees netns slots that would otherwise be held
+// forever.
+func (s *Service) ReconcileOrphans(ctx context.Context) {
+	sbs, err := s.forkd.ListSandboxes(ctx)
+	if err != nil {
+		s.log.Printf("reconcile: list sandboxes failed: %v", err)
+		return
+	}
+	s.store.mu.Lock()
+	mine := make(map[string]bool)
+	for _, l := range s.store.leases {
+		mine[l.ForkdID] = true
+	}
+	for _, ids := range s.store.pool {
+		for _, id := range ids {
+			mine[id] = true
+		}
+	}
+	s.store.mu.Unlock()
+
+	killed := 0
+	for _, sb := range sbs {
+		if mine[sb.ID] {
+			continue
+		}
+		if err := s.forkd.Kill(ctx, sb.ID); err != nil {
+			s.log.Printf("reconcile: kill orphan %s failed: %v", sb.ID, err)
+			continue
+		}
+		killed++
+	}
+	if killed > 0 {
+		s.log.Printf("reconcile: killed %d orphaned sandbox(es) from a previous incarnation", killed)
+	}
+}
+
 var errNoSandbox = &leaseError{"no sandbox granted"}
 
 // leaseError is a simple sentinel error.

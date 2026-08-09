@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -343,3 +344,72 @@ func TestBuildShellArgsQuoting(t *testing.T) {
 		t.Fatalf("expected single-quote escaping, got: %s", joined)
 	}
 }
+
+// TestShutdownKillsLeasesAndPool verifies graceful shutdown releases
+// every lease and pooled sandbox so a backend restart never orphans VMs.
+func TestShutdownKillsLeasesAndPool(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
+	svc.log = log.New(io.Discard, "", 0)
+
+	// Grant a lease and warm the pool.
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc.warmPool(ctx, "py-base") // fills pool to 2
+	if got := len(ff.sandboxes); got < 2 {
+		t.Fatalf("expected >=2 sandboxes after warm, got %d", got)
+	}
+
+	svc.Shutdown(ctx)
+	// Every sandbox the fake ever created should be killed:
+	// l.ForkdID + 2 pooled = 3.
+	_ = l
+	if len(ff.killed) < 3 {
+		t.Fatalf("expected >=3 kills (lease + 2 pool), got %d: %v", len(ff.killed), ff.killed)
+	}
+	if len(ff.sandboxes) != 0 {
+		t.Fatalf("expected all sandboxes killed, %d remain", len(ff.sandboxes))
+	}
+}
+
+// TestReconcileOrphansKillsForeignSandboxes verifies startup
+// reconciliation kills controller sandboxes that this backend did not
+// create (e.g. leftovers from a previous incarnation).
+func TestReconcileOrphansKillsForeignSandboxes(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
+	svc.log = log.New(io.Discard, "", 0)
+
+	ctx := context.Background()
+	// A foreign sandbox already exists in the controller (previous incarnation).
+	foreign, err := ff.Spawn(ctx, "py-base", 1, true, 0)
+	if err != nil {
+		t.Fatalf("foreign spawn: %v", err)
+	}
+	// Grant our own lease (would be empty at true startup, but proves the
+	// mine/not-mine split).
+	ours, err := svc.grant(ctx, "c", "py-base", 0, time.Minute)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	svc.ReconcileOrphans(ctx)
+
+	// Foreign killed, ours kept.
+	killedForeign := false
+	for _, id := range ff.killed {
+		if id == foreign[0].ID {
+			killedForeign = true
+		}
+	}
+	if !killedForeign {
+		t.Fatalf("expected foreign sandbox %s killed, killed: %v", foreign[0].ID, ff.killed)
+	}
+	if _, stillAlive := ff.sandboxes[ours.ForkdID]; !stillAlive {
+		t.Fatalf("our own sandbox %s should not be killed", ours.ForkdID)
+	}
+}
+

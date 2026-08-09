@@ -17,8 +17,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jrimmer/forkd-service/api"
@@ -82,10 +84,30 @@ func main() {
 	defer cancel()
 	svc.Start(ctx)
 
+	// Kill any sandboxes left by a previous backend incarnation before
+	// warming the pool, so netns slots are never double-booked.
+	svc.ReconcileOrphans(ctx)
+
 	httpSrv := &http.Server{
 		Addr:    bindAddr,
 		Handler: srv.Handler(),
 	}
+
+	// Graceful shutdown: on SIGTERM/SIGINT kill every lease and pooled
+	// sandbox before exiting. Without this, a backend restart orphans
+	// its warm VMs in the controller (which has no client-liveness), and
+	// they hold netns slots until manually reaped.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigCh
+		log.Printf("received %v, shutting down (releasing %d leases + warm pool)", sig, len(svc.LiveLeases()))
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+		svc.Shutdown(shutdownCtx)
+		_ = httpSrv.Shutdown(shutdownCtx)
+		cancel()
+	}()
 
 	log.Printf("forkd-backend listening on %s (forkd at %s, %d consumer(s), pool=%d)", bindAddr, forkdURL, len(tokens), poolSize)
 	var err error
