@@ -320,7 +320,7 @@ func TestWarmPoolGrant(t *testing.T) {
 // wrapped in a single shell invocation.
 func TestBuildShellArgs(t *testing.T) {
 	args := buildShellArgs("echo hi", "/tmp", map[string]string{"FOO": "bar"})
-	if len(args) != 3 || args[0] != "/bin/sh" || args[1] != "-c" {
+	if len(args) != 3 || args[0] != "/bin/bash" || args[1] != "-c" {
 		t.Fatalf("unexpected args: %v", args)
 	}
 	joined := args[2]

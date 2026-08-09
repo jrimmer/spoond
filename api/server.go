@@ -233,7 +233,13 @@ func buildShellArgs(cmd, cwd string, env map[string]string) []string {
 		parts = append(parts, "export "+shellQuote(k)+"="+shellQuote(v)+";")
 	}
 	parts = append(parts, cmd)
-	return []string{"/bin/sh", "-c", strings.Join(parts, " ")}
+	// Use bash, not sh. GitHub Actions / Forgejo wrap `run:` steps with
+	// `set -euo pipefail`; /bin/sh on Debian is dash, which rejects
+	// `-o pipefail` (dash only accepts `-o` options in POSIX form), so
+	// steps that contain a pipe fail with "set: Illegal option -o
+	// pipefail". Bash is present in all base images and is the GitHub
+	// Actions default shell.
+	return []string{"/bin/bash", "-c", strings.Join(parts, " ")}
 }
 
 // shellQuote wraps s in single quotes, escaping embedded single quotes.
