@@ -78,6 +78,11 @@ type Service struct {
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
 	log           *log.Logger
+	// spawnMu serializes all forkd Spawn calls. forkd's restore_many
+	// restores children concurrently and collides on the single shared
+	// forkd-tap0 device ("Resource busy"), so concurrent job grants must
+	// not spawn at the same time.
+	spawnMu sync.Mutex
 }
 
 // NewService builds a lease service. tokens maps consumer tokens to
@@ -191,7 +196,9 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 	s.store.mu.Unlock()
 
 	if forkdID == "" {
+		s.spawnMu.Lock()
 		sbs, err := s.forkd.Spawn(ctx, image, 1, true, memoryMiB)
+		s.spawnMu.Unlock()
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +270,9 @@ func (s *Service) warmPool(ctx context.Context, image string) {
 	// restores run at once, failing the whole batch. Serializing keeps
 	// each restore under the timeout.
 	for i := cur; i < s.poolSize; i++ {
+		s.spawnMu.Lock()
 		sbs, err := s.forkd.Spawn(ctx, image, 1, true, 0)
+		s.spawnMu.Unlock()
 		if err != nil {
 			s.log.Printf("warmPool: spawn %s: %v", image, err)
 			return
