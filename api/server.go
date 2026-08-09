@@ -187,6 +187,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.log.Printf("exec: %s: exit=%d stdout=%d stderr=%d dur=%s", lease.ForkdID, res.ExitCode, len(res.Stdout), len(res.Stderr), time.Since(start))
+	if res.ExitCode != 0 {
+		s.svc.log.Printf("exec: %s: stderr=%q", lease.ForkdID, tailStr(res.Stderr, 500))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stdout": res.Stdout,
 		"stderr": res.Stderr,
@@ -246,4 +249,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// tailStr returns the last n bytes of s, prefixed with a truncation marker
+// if s was longer than n. Used for logging stderr tails on exec failures.
+func tailStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "...[truncated]..." + s[len(s)-n:]
 }
