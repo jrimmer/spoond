@@ -35,6 +35,14 @@ images:
     rootfs: /var/cache/forkd/golang-1-25.ext4
     notes: "Re-baked 2026-08-09 from golang:1.25 (was 1.24 — go.mod needed >=1.25.0). Memory 2 GiB (512 MiB OOM'd the Go compiler). PATH fix: symlink go/gofmt into /usr/local/bin (guest agent uses default PATH, not Docker ENV). GOCACHE/GOPATH default to /root (rootfs, 935M free) — do NOT point them at /tmp (256M tmpfs). Built via CLI snapshot --mem-size-mib 2048 + branch (M2.1)."
 
+  - name: dev-base
+    capability: interactive-dev
+    labels: [dev]
+    description: "Interactive dev environment: tmux 3.4 + sshd + git + python3 + build tools. SSH in, attach to tmux session 'dev'."
+    baked: true
+    rootfs: /var/cache/forkd/dev-base-rootfs.ext4
+    notes: "Baked 2026-08-09 from ubuntu:24.04 + tmux/openssh-server/git/python3/build-essential. 2 GiB memory. /forkd-init.sh patched to: mount devpts, generate ssh host keys, start sshd, and attach-to-or-create tmux session 'dev' on SSH login (via /etc/profile.d/forkd-tmux.sh, skip with FORKD_NO_TMUX). For exe.dev interactive sessions (ticket #18, U4). Branch-built so the memory state has sshd running."
+
   - name: elixir-base
     capability: elixir
     labels: [elixir]
