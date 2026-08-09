@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -159,7 +160,18 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	}
 	l.released = true
 	s.store.mu.Unlock()
-	if err := s.forkd.Kill(ctx, l.ForkdID); err != nil {
+	err := s.forkd.Kill(ctx, l.ForkdID)
+	if err != nil {
+		// A 404 means the sandbox is already gone (e.g. the controller
+		// restarted and forgot it) — that's the goal state, not a
+		// failure. Treat it as released so we don't retry forever.
+		if strings.Contains(err.Error(), "not found") {
+			s.log.Printf("release: kill %s: already gone (removing lease)", l.ForkdID)
+			s.store.mu.Lock()
+			delete(s.store.leases, l.ID)
+			s.store.mu.Unlock()
+			return
+		}
 		s.log.Printf("release: kill %s failed: %v (will retry)", l.ForkdID, err)
 		// Re-open the lease so the sweeper retries the kill.
 		s.store.mu.Lock()
@@ -175,21 +187,38 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 // grant creates a new lease for owner from the warm pool (or spawns a
 // fresh sandbox when the pool is empty).
 func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration) (*Lease, error) {
-	// Try the warm pool first.
-	s.store.mu.Lock()
-	pool := s.store.pool[image]
+	// Try the warm pool first, validating that the pooled sandbox still
+	// exists in the controller. After a controller restart the backend's
+	// in-memory pool holds stale IDs (the controller forgot them); a
+	// stale ID would 404 on exec and leave the consumer hanging.
 	var forkdID, addr string
-	if len(pool) > 0 {
-		forkdID = pool[len(pool)-1]
-		s.store.pool[image] = pool[:len(pool)-1]
-	}
-	// Ensure the image is registered so the warm-pool refill knows to
-	// pre-fork it.
-	if _, known := s.store.pool[image]; !known {
-		s.store.pool[image] = nil
-	}
-	s.store.mu.Unlock()
+	for {
+		s.store.mu.Lock()
+		pool := s.store.pool[image]
+		if len(pool) > 0 {
+			forkdID = pool[len(pool)-1]
+			s.store.pool[image] = pool[:len(pool)-1]
+		}
+		// Ensure the image is registered so the warm-pool refill knows to
+		// pre-fork it.
+		if _, known := s.store.pool[image]; !known {
+			s.store.pool[image] = nil
+		}
+		s.store.mu.Unlock()
 
+		if forkdID == "" {
+			break
+		}
+		// Verify the pooled sandbox is still alive; if not, drop it and
+		// try the next one (or cold-spawn below).
+		if err := s.forkd.Ping(ctx, forkdID); err == nil {
+			addr = ""
+			break
+		}
+		s.log.Printf("grant: pooled %s (%s) is stale (controller forgot it), dropping", forkdID, image)
+		_ = s.forkd.Kill(ctx, forkdID)
+		forkdID = ""
+	}
 	if forkdID == "" {
 		sbs, err := s.forkd.Spawn(ctx, image, 1, true, memoryMiB)
 		if err != nil {

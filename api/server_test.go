@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -17,10 +18,11 @@ import (
 
 // fakeForkd is a minimal in-memory forkd controller for tests.
 type fakeForkd struct {
-	snapshots []forkd.SnapshotInfo
-	sandboxes map[string]forkd.SandboxInfo
-	nextID    int
-	killed    []string
+	snapshots     []forkd.SnapshotInfo
+	sandboxes     map[string]forkd.SandboxInfo
+	nextID        int
+	killed        []string
+	deadSandboxes map[string]bool
 }
 
 func newFakeForkd() *fakeForkd {
@@ -72,7 +74,12 @@ func (f *fakeForkd) Exec(ctx context.Context, id string, args []string, timeoutS
 	return &forkd.ExecResult{Stdout: "ok\n", Stderr: "", ExitCode: 0}, nil
 }
 
-func (f *fakeForkd) Ping(ctx context.Context, id string) error { return nil }
+func (f *fakeForkd) Ping(ctx context.Context, id string) error {
+	if f.deadSandboxes != nil && f.deadSandboxes[id] {
+		return fmt.Errorf("forkd: sandbox %s not found (status 404)", id)
+	}
+	return nil
+}
 
 func (f *fakeForkd) Metrics(ctx context.Context) ([]byte, error) {
 	return []byte("# HELP forkd_sandboxes_active\n# TYPE forkd_sandboxes_active gauge\nforkd_sandboxes_active 0\n"), nil
@@ -410,6 +417,36 @@ func TestReconcileOrphansKillsForeignSandboxes(t *testing.T) {
 	}
 	if _, stillAlive := ff.sandboxes[ours.ForkdID]; !stillAlive {
 		t.Fatalf("our own sandbox %s should not be killed", ours.ForkdID)
+	}
+}
+
+// TestGrantDropsStalePooledSandbox verifies grant validates pooled
+// sandboxes against the controller and cold-spawns when the pooled one
+// is gone (e.g. after a controller restart).
+func TestGrantDropsStalePooledSandbox(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
+	svc.log = log.New(io.Discard, "", 0)
+
+	ctx := context.Background()
+	// Warm the pool, then mark its member stale (as if the controller
+	// restarted and forgot it).
+	svc.warmPool(ctx, "py-base")
+	ff.deadSandboxes = map[string]bool{}
+	for id := range ff.sandboxes {
+		ff.deadSandboxes[id] = true
+	}
+
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// The granted sandbox must be a FRESH spawn (not the stale pooled id).
+	if ff.deadSandboxes[l.ForkdID] {
+		t.Fatalf("granted stale pooled sandbox %s", l.ForkdID)
+	}
+	if len(ff.killed) == 0 {
+		t.Fatalf("expected stale pooled sandbox to be killed")
 	}
 }
 
