@@ -30,10 +30,10 @@ images:
   - name: go-base
     capability: golang
     labels: [go, golang]
-    description: "Go 1.24 toolchain (go/gofmt symlinked into /usr/local/bin) + git for Go build/test/CI jobs"
+    description: "Go 1.25.12 toolchain (go/gofmt symlinked into /usr/local/bin) + git for Go build/test/CI jobs"
     baked: true
-    rootfs: /var/cache/forkd/go-base-local.ext4
-    notes: "Baked 2026-08-08 from golang:1.24. PATH fix: symlink go/gofmt into /usr/local/bin (guest agent uses default PATH, not Docker ENV)."
+    rootfs: /var/cache/forkd/golang-1-25.ext4
+    notes: "Re-baked 2026-08-09 from golang:1.25 (was 1.24 — go.mod needed >=1.25.0). Memory 2 GiB (512 MiB OOM'd the Go compiler). PATH fix: symlink go/gofmt into /usr/local/bin (guest agent uses default PATH, not Docker ENV). GOCACHE/GOPATH default to /root (rootfs, 935M free) — do NOT point them at /tmp (256M tmpfs). Built via CLI snapshot --mem-size-mib 2048 + branch (M2.1)."
 
   - name: elixir-base
     capability: elixir
