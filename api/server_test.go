@@ -361,7 +361,7 @@ func TestShutdownKillsLeasesAndPool(t *testing.T) {
 
 	// Grant a lease and warm the pool.
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute)
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestReconcileOrphansKillsForeignSandboxes(t *testing.T) {
 	}
 	// Grant our own lease (would be empty at true startup, but proves the
 	// mine/not-mine split).
-	ours, err := svc.grant(ctx, "c", "py-base", 0, time.Minute)
+	ours, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestGrantDropsStalePooledSandbox(t *testing.T) {
 		ff.deadSandboxes[id] = true
 	}
 
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute)
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -467,3 +467,88 @@ func TestNewServiceSeedsPoolFromKnownImages(t *testing.T) {
 	}
 }
 
+
+// TestPersistentLeaseSurvivesSweep verifies a persistent lease is not
+// reclaimed by the TTL sweeper, even after its initial expiry.
+func TestPersistentLeaseSurvivesSweep(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
+	svc.log = log.New(io.Discard, "", 0)
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, true) // persistent, short TTL
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond) // pass the initial expiry
+
+	svc.sweepExpired(ctx)
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatalf("persistent lease was swept despite being persistent")
+	}
+}
+
+// TestNonPersistentLeaseIsSwept verifies the sweeper still reclaims
+// ordinary leases on expiry (regression guard).
+func TestNonPersistentLeaseIsSwept(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
+	svc.log = log.New(io.Discard, "", 0)
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, false)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	svc.sweepExpired(ctx)
+	if svc.lookup("c", l.ID) != nil {
+		t.Fatalf("non-persistent lease should have been swept")
+	}
+}
+
+// TestKeepAliveExtendsPersistentLease verifies keepalive pushes the
+// expiry forward for persistent leases.
+func TestKeepAliveExtendsPersistentLease(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
+	svc.log = log.New(io.Discard, "", 0)
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, true)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	before := l.ExpiresAt
+	time.Sleep(5 * time.Millisecond)
+
+	extended, err := svc.keepAlive("c", l.ID, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("keepAlive: %v", err)
+	}
+	if !extended.ExpiresAt.After(before) {
+		t.Fatalf("expected expiry to extend, before=%v after=%v", before, extended.ExpiresAt)
+	}
+	// Unknown owner must not be able to extend someone else's lease.
+	if _, err := svc.keepAlive("other", l.ID, time.Minute); err == nil {
+		t.Fatalf("expected error extending another owner's lease")
+	}
+}
+
+// TestKeepAliveRejectsNonPersistent verifies keepalive refuses ordinary
+// leases (their TTL is fixed by contract).
+func TestKeepAliveRejectsNonPersistent(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
+	svc.log = log.New(io.Discard, "", 0)
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.keepAlive("c", l.ID, time.Minute); err != errNotPersistent {
+		t.Fatalf("expected errNotPersistent, got %v", err)
+	}
+}

@@ -22,6 +22,7 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -93,11 +94,12 @@ func ownerFrom(ctx context.Context) string {
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Image     string `json:"image"`
-		TTL       int    `json:"ttl"` // seconds
-		MemoryMiB int    `json:"memory_mib"`
-		Network   string `json:"network"`
-		InitCmd   string `json:"init_cmd"`
+		Image      string `json:"image"`
+		TTL        int    `json:"ttl"` // seconds
+		MemoryMiB  int    `json:"memory_mib"`
+		Network    string `json:"network"`
+		InitCmd    string `json:"init_cmd"`
+		Persistent bool   `json:"persistent"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -126,18 +128,51 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if maxSecs := int(s.svc.maxTTL / time.Second); ttlSecs > maxSecs {
 		ttlSecs = maxSecs
 	}
+	// The TTL cap above already bounds persistent leases; keep-alive
+	// lets the consumer extend them (up to maxTTL per call).
 	ttl := time.Duration(ttlSecs) * time.Second
-	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl)
+	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent)
 	if err != nil {
 		s.svc.log.Printf("create: grant %s: %v", req.Image, err)
 		writeError(w, http.StatusInternalServerError, "failed to grant sandbox")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":      lease.ID,
-		"address": lease.Address,
-		"image":   lease.Image,
-		"ttl":     int(ttl.Seconds()),
+		"id":         lease.ID,
+		"address":    lease.Address,
+		"image":      lease.Image,
+		"ttl":        int(ttl.Seconds()),
+		"persistent": lease.Persistent,
+		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleKeepAlive extends a persistent lease's expiry. The caller must
+// own the lease. Body may carry {"ttl": seconds} (capped at maxTTL).
+func (s *Server) handleKeepAlive(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		TTL int `json:"ttl"` // seconds; 0 = maxTTL
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	ttl := time.Duration(req.TTL) * time.Second
+	lease, err := s.svc.keepAlive(owner, id, ttl)
+	if err != nil {
+		switch err {
+		case errNotFound:
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errNotPersistent:
+			writeError(w, http.StatusBadRequest, "sandbox is not a persistent lease")
+		default:
+			writeError(w, http.StatusInternalServerError, "keepalive failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":         lease.ID,
+		"persistent": true,
+		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
 	})
 }
 

@@ -19,14 +19,15 @@ import (
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
 type Lease struct {
-	ID        string // unguessable lease id
-	Owner     string // consumer id that owns this lease
-	Image     string // snapshot tag
-	ForkdID   string // underlying forkd sandbox id
-	Address   string // guest address, e.g. "10.42.0.2:8888"
-	CreatedAt time.Time
-	ExpiresAt time.Time
-	released  bool
+	ID         string // unguessable lease id
+	Owner      string // consumer id that owns this lease
+	Image      string // snapshot tag
+	ForkdID    string // underlying forkd sandbox id
+	Address    string // guest address, e.g. "10.42.0.2:8888"
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	Persistent bool   // interactive/persistent lease: not TTL-swept, keep-alive extends
+	released   bool
 }
 
 // Store holds the live leases and the warm pool.
@@ -146,13 +147,15 @@ func (s *Service) refillPool(ctx context.Context) {
 	}
 }
 
-// sweepExpired kills and removes leases whose TTL has passed.
+// sweepExpired kills and removes leases whose TTL has passed. Persistent
+// leases are consumer-managed: they are never swept (the consumer keeps
+// them alive explicitly via keep-alive, and disposes via delete).
 func (s *Service) sweepExpired(ctx context.Context) {
 	s.store.mu.Lock()
 	var expired []*Lease
 	now := time.Now()
 	for _, l := range s.store.leases {
-		if !l.released && now.After(l.ExpiresAt) {
+		if !l.released && !l.Persistent && now.After(l.ExpiresAt) {
 			expired = append(expired, l)
 		}
 	}
@@ -160,6 +163,28 @@ func (s *Service) sweepExpired(ctx context.Context) {
 	for _, l := range expired {
 		s.release(ctx, l)
 	}
+}
+
+// keepAlive extends a persistent lease's expiry so the sweeper never
+// reclaims it. Non-persistent leases are rejected (their TTL is fixed).
+func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l, ok := s.store.leases[id]
+	if !ok || l.Owner != owner || l.released {
+		return nil, errNotFound
+	}
+	if !l.Persistent {
+		return nil, errNotPersistent
+	}
+	if ttl <= 0 {
+		ttl = s.maxTTL
+	}
+	if ttl > s.maxTTL {
+		ttl = s.maxTTL
+	}
+	l.ExpiresAt = time.Now().Add(ttl)
+	return l, nil
 }
 
 // release kills the underlying forkd sandbox and removes the lease.
@@ -199,8 +224,10 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 }
 
 // grant creates a new lease for owner from the warm pool (or spawns a
-// fresh sandbox when the pool is empty).
-func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration) (*Lease, error) {
+// fresh sandbox when the pool is empty). Persistent leases are intended
+// for interactive use: they are not TTL-swept (see keepAlive) and the
+// consumer drives their lifecycle.
+func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool) (*Lease, error) {
 	// Try the warm pool first, validating that the pooled sandbox still
 	// exists in the controller. After a controller restart the backend's
 	// in-memory pool holds stale IDs (the controller forgot them); a
@@ -246,13 +273,14 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 	}
 
 	lease := &Lease{
-		ID:        newID(),
-		Owner:     owner,
-		Image:     image,
-		ForkdID:   forkdID,
-		Address:   addr,
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(ttl),
+		ID:         newID(),
+		Owner:      owner,
+		Image:      image,
+		ForkdID:    forkdID,
+		Address:    addr,
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(ttl),
+		Persistent: persistent,
 	}
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
@@ -279,10 +307,11 @@ func (s *Service) list(owner string) []map[string]any {
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
 			out = append(out, map[string]any{
-				"id":      l.ID,
-				"image":   l.Image,
-				"address": l.Address,
-				"expires": l.ExpiresAt.Unix(),
+				"id":         l.ID,
+				"image":      l.Image,
+				"address":    l.Address,
+				"expires":    l.ExpiresAt.Unix(),
+				"persistent": l.Persistent,
 			})
 		}
 	}
@@ -400,6 +429,8 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 }
 
 var errNoSandbox = &leaseError{"no sandbox granted"}
+var errNotFound = &leaseError{"sandbox not found"}
+var errNotPersistent = &leaseError{"sandbox is not a persistent lease"}
 
 // leaseError is a simple sentinel error.
 type leaseError struct{ msg string }
