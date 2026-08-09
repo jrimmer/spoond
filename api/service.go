@@ -257,16 +257,23 @@ func (s *Service) warmPool(ctx context.Context, image string) {
 	if cur >= s.poolSize {
 		return
 	}
-	sbs, err := s.forkd.Spawn(ctx, image, s.poolSize-cur, true, 0)
-	if err != nil {
-		s.log.Printf("warmPool: spawn %s: %v", image, err)
-		return
+	// Spawn one child at a time. forkd's restore_many restores all N
+	// children concurrently, and a large snapshot (e.g. elixir-base at
+	// 2 GiB) can take longer than forkd's 5s socket timeout when several
+	// restores run at once, failing the whole batch. Serializing keeps
+	// each restore under the timeout.
+	for i := cur; i < s.poolSize; i++ {
+		sbs, err := s.forkd.Spawn(ctx, image, 1, true, 0)
+		if err != nil {
+			s.log.Printf("warmPool: spawn %s: %v", image, err)
+			return
+		}
+		s.store.mu.Lock()
+		for _, sb := range sbs {
+			s.store.pool[image] = append(s.store.pool[image], sb.ID)
+		}
+		s.store.mu.Unlock()
 	}
-	s.store.mu.Lock()
-	for _, sb := range sbs {
-		s.store.pool[image] = append(s.store.pool[image], sb.ID)
-	}
-	s.store.mu.Unlock()
 }
 
 var errNoSandbox = &leaseError{"no sandbox granted"}
