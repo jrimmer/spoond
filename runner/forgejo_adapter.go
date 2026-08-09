@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -125,20 +124,11 @@ func (a *ForgejoAdapter) Fetch(ctx context.Context, version int64) (*Job, int64,
 		return nil, resp.Msg.GetTasksVersion(), nil
 	}
 	ctxMap := structToMap(task.GetContext())
-	// Debug: log context keys + value lengths (never values — the
-	// context can carry github.token) plus the specific PR-number fields
-	// so we can see what Forgejo sent for github.event.pull_request.number.
-	keys := make([]string, 0, len(ctxMap))
-	for k := range ctxMap {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var sb strings.Builder
-	for _, k := range keys {
-		sb.WriteString(k + "=" + strconv.Itoa(len(ctxMap[k])) + ";")
-	}
-	log.Printf("task %d context keys: %s", task.GetId(), sb.String())
-	for _, k := range []string{"event.pull_request.number", "github.event.pull_request.number", "number", "pull_request.number", "event.number", "github.event.number"} {
+	// Debug (light): log the resolved PR-number fields so context
+	// misresolution (e.g. github.event.pull_request.number) is visible
+	// in the runner journal without dumping the whole context or any
+	// values (the context can carry github.token).
+	for _, k := range []string{"event.pull_request.number", "event.number", "run_number"} {
 		if v, ok := ctxMap[k]; ok {
 			log.Printf("task %d context %s = %q", task.GetId(), k, v)
 		}
