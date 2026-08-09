@@ -1,9 +1,10 @@
 # forkd-service deployment
 
-Two systemd services run on vm2 (10.1.0.11):
+Three systemd units run on vm2 (10.1.0.11):
 
 1. **forkd-backend** — the lease API (`:8890`) with the warm pool
 2. **forkd-runner** — the Forgejo Actions runner (adaptive pool)
+3. **forkd-spawn-watchdog** — spawn-outage auto-recovery + diagnostics (timer)
 
 ## 1. forkd-backend (lease API)
 
@@ -116,6 +117,51 @@ journalctl -u forkd-runner | grep 'pool: spawned'
 # scale-up: fire N concurrent jobs; pool grows by SCALE_STEP
 # scale-down: after jobs finish, pool returns to FLOOR
 journalctl -u forkd-runner | grep -E 'spawned worker|stopped worker'
+```
+
+## 3. forkd-spawn-watchdog (auto-recovery + diagnostics)
+
+A systemd timer that detects the forkd spawn outage ("socket ... never
+appeared within 10s" / empty warm pool while the backend is active),
+captures a diagnostics tarball, and recovers: kills leaked firecrackers,
+removes stale daemon dirs (NEVER `/var/run/netns`), restarts the
+controller. The warm pool then refills via the backend.
+
+### Install
+
+```bash
+scp deploy/forkd-spawn-watchdog.sh root@10.1.0.11:/usr/local/bin/
+scp deploy/forkd-watchdog.service deploy/forkd-watchdog.timer root@10.1.0.11:/etc/systemd/system/
+```
+
+On vm2:
+
+```bash
+chmod +x /usr/local/bin/forkd-spawn-watchdog.sh
+systemctl daemon-reload
+systemctl enable --now forkd-watchdog.timer
+systemctl list-timers forkd-watchdog
+```
+
+### Behaviour
+
+- Runs every 5 minutes (`forkd-watchdog.timer` → `forkd-watchdog.service`)
+- **Healthy**: exits 0 quietly, no tarball, no recovery
+- **Triggered**: logs the reason, captures `/var/log/forkd/watchdog/forkd-watchdog-<ts>.tar.gz`
+  (trigger, controller/backend/runner journals, firecracker ps, daemon-dir
+  inventory, netns list, sandboxes.json, dmesg, service status — newest 5
+  kept), then kills firecrackers, removes stale daemon dirs, restarts the
+  controller, and logs the tarball path to journald for triage
+- **Test mode** (no recovery): `FORKD_WATCHDOG_TEST_CAPTURE=1 /usr/local/bin/forkd-spawn-watchdog.sh`
+
+### Verify
+
+```bash
+# healthy (exit 0, no output)
+/usr/local/bin/forkd-spawn-watchdog.sh
+# capture-only smoke test (creates one tarball, does NOT recover)
+FORKD_WATCHDOG_TEST_CAPTURE=1 /usr/local/bin/forkd-spawn-watchdog.sh
+ls -l /var/log/forkd/watchdog/
 ```
 
 ## TLS

@@ -1,0 +1,6 @@
+[Unit]
+Description=forkd spawn-outage watchdog (auto-recovery)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/forkd-spawn-watchdog.sh
