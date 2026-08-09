@@ -374,3 +374,44 @@ jobs:
 		t.Fatalf("expected job-level env JOB_VAR=job-value in exec env, got: %+v", lease.envs)
 	}
 }
+
+func TestExecutorInjectsCIEnvVars(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+`
+	lease := newFakeLease()
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	job := testJob(payload)
+	// Flat context keys are looked up under github.* by EvalContext.
+	job.Context = map[string]string{
+		"repository": "jrimmer/netcrawl",
+		"sha":        "abc123",
+	}
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(lease.envs) == 0 {
+		t.Fatalf("expected exec env captured")
+	}
+	env := lease.envs[0]
+	if env["CI_REPO_OWNER"] != "jrimmer" {
+		t.Fatalf("CI_REPO_OWNER = %q, want jrimmer (env=%+v)", env["CI_REPO_OWNER"], env)
+	}
+	if env["CI_REPO_NAME"] != "netcrawl" {
+		t.Fatalf("CI_REPO_NAME = %q, want netcrawl (env=%+v)", env["CI_REPO_NAME"], env)
+	}
+	if env["CI_COMMIT"] != "abc123" {
+		t.Fatalf("CI_COMMIT = %q, want abc123 (env=%+v)", env["CI_COMMIT"], env)
+	}
+}

@@ -105,6 +105,28 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		for k, v := range step.Env {
 			env[k] = ctx2.Eval(v)
 		}
+		// Inject the generic CI repo/commit vars that tools like
+		// reviewdog's gitea reporter require (it looks for
+		// CI_REPO_OWNER/CI_REPO_NAME/CI_COMMIT/CI_PULL_REQUEST).
+		// GitHub Actions sets these implicitly; our runner must too so
+		// `-reporter=gitea-pr-review` can resolve owner/repo/PR.
+		// Step-level env wins, so explicit overrides are honoured.
+		if v := ctx2.Eval("${{ github.repository }}"); v != "" {
+			if owner, name, ok := strings.Cut(v, "/"); ok {
+				if env["CI_REPO_OWNER"] == "" {
+					env["CI_REPO_OWNER"] = owner
+				}
+				if env["CI_REPO_NAME"] == "" {
+					env["CI_REPO_NAME"] = name
+				}
+			}
+		}
+		if env["CI_COMMIT"] == "" {
+			env["CI_COMMIT"] = ctx2.Eval("${{ github.sha }}")
+		}
+		if env["CI_PULL_REQUEST"] == "" {
+			env["CI_PULL_REQUEST"] = ctx2.Eval("${{ github.event.pull_request.number }}")
+		}
 		// Debug: log which env keys are set (values redacted for secrets).
 		keys := make([]string, 0, len(env))
 		for k := range env {
