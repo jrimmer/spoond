@@ -278,9 +278,15 @@ def handle(conn: socket.socket, addr) -> None:
 
         elif action == "stream":
             args = cmd["args"]
-            cwd = cmd.get("cwd")
+            cwd = cmd.get("cwd") or None
             env = cmd.get("env")
             use_pty = cmd.get("pty", True)
+
+            kwargs = {}
+            if cwd:
+                kwargs["cwd"] = cwd
+            if env:
+                kwargs["env"] = env
 
             if use_pty:
                 master, slave = pty.openpty()
@@ -289,9 +295,8 @@ def handle(conn: socket.socket, addr) -> None:
                     stdin=slave,
                     stdout=slave,
                     stderr=slave,
-                    cwd=cwd,
-                    env=env,
                     close_fds=True,
+                    **kwargs,
                 )
                 os.close(slave)
                 out_fd = master
@@ -302,8 +307,7 @@ def handle(conn: socket.socket, addr) -> None:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    cwd=cwd,
-                    env=env,
+                    **kwargs,
                 )
                 out_fd = proc.stdout.fileno()
                 in_fd = proc.stdin.fileno()
