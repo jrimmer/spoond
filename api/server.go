@@ -33,7 +33,7 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
-	s.mux.HandleFunc("POST /api/sandboxes/{id}/stream", s.handleStream)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
