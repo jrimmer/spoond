@@ -1,0 +1,20 @@
+[Unit]
+Description=forkd SSH gateway (sandbox.lacy.casa interactive access)
+After=network.target forkd-backend.service
+Requires=forkd-backend.service
+
+[Service]
+ExecStart=/opt/forkd-gateway/forkd-sshd-gateway \
+  --listen :2222 \
+  --host-key /etc/forkd-gateway/ssh_host_ed25519_key \
+  --gateway-key /etc/forkd-gateway/gateway_ed25519 \
+  --client-keys /etc/forkd-gateway/keys/jason.pub \
+  --backend https://127.0.0.1:8890 \
+  --backend-token <CONSUMER_TOKEN>
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
