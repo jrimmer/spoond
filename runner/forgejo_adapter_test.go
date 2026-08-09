@@ -43,18 +43,34 @@ func TestInternalBaseURLOverride(t *testing.T) {
 	}
 	// Replicate the override logic from Fetch.
 	if a.internalBaseURL != "" {
-		if _, ok := ctxMap["github.api_url"]; ok {
-			ctxMap["github.api_url"] = a.internalBaseURL
-		}
-		if _, ok := ctxMap["github.server_url"]; ok {
-			ctxMap["github.server_url"] = a.internalBaseURL
-		}
+		ctxMap["github.api_url"] = a.internalBaseURL
+		ctxMap["github.server_url"] = a.internalBaseURL
 	}
 	if ctxMap["github.api_url"] != "http://10.1.0.47:3000" {
 		t.Fatalf("api_url = %q, want internal", ctxMap["github.api_url"])
 	}
 	if ctxMap["github.server_url"] != "http://10.1.0.47:3000" {
 		t.Fatalf("server_url = %q, want internal", ctxMap["github.server_url"])
+	}
+	if ctxMap["github.repository"] != "jrimmer/netcrawl" {
+		t.Fatalf("repository = %q, want unchanged", ctxMap["github.repository"])
+	}
+}
+
+func TestInternalBaseURLOverrideInjectsMissingKeys(t *testing.T) {
+	a := &ForgejoAdapter{internalBaseURL: "http://10.1.0.47:3000"}
+	// Forgejo may omit github.server_url entirely; the override must
+	// still inject it so workflows like reviewdog's GITEA_ADDRESS
+	// (github.server_url) resolve to the internal host.
+	ctxMap := map[string]string{
+		"github.repository": "jrimmer/netcrawl",
+	}
+	if a.internalBaseURL != "" {
+		ctxMap["github.api_url"] = a.internalBaseURL
+		ctxMap["github.server_url"] = a.internalBaseURL
+	}
+	if ctxMap["github.server_url"] != "http://10.1.0.47:3000" {
+		t.Fatalf("server_url = %q, want internal even when missing from source context", ctxMap["github.server_url"])
 	}
 	if ctxMap["github.repository"] != "jrimmer/netcrawl" {
 		t.Fatalf("repository = %q, want unchanged", ctxMap["github.repository"])

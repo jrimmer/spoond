@@ -125,13 +125,12 @@ func (a *ForgejoAdapter) Fetch(ctx context.Context, version int64) (*Job, int64,
 	ctxMap := structToMap(task.GetContext())
 	// Override github.api_url / github.server_url to the internal base
 	// URL so workflows never route through the public/Pangolin address.
+	// Set unconditionally (even if Forgejo omitted the keys) so
+	// workflows that reference github.server_url — e.g. reviewdog's
+	// GITEA_ADDRESS — resolve to the internal host, not code.lacy.casa.
 	if a.internalBaseURL != "" {
-		if _, ok := ctxMap["github.api_url"]; ok {
-			ctxMap["github.api_url"] = a.internalBaseURL
-		}
-		if _, ok := ctxMap["github.server_url"]; ok {
-			ctxMap["github.server_url"] = a.internalBaseURL
-		}
+		ctxMap["github.api_url"] = a.internalBaseURL
+		ctxMap["github.server_url"] = a.internalBaseURL
 	}
 	job := &Job{
 		ID:       task.GetId(),
