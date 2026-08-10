@@ -62,6 +62,7 @@ run_file test_stream.sh
 run_file test_gateway.sh
 run_file test_ctl.sh
 run_file test_ctl_new.sh
+run_file test_netpolicy.sh
 run_file test_proxy.sh
 
 summary

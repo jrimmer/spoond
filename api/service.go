@@ -33,6 +33,8 @@ type Lease struct {
 	Workspace  string    // workspace name when workspace-backed (suspend/resume support)
 	Suspended  bool      // workspace-backed lease is currently suspended
 	Name       string    // optional friendly name/tag (unique per owner; resolved by ssh/proxy)
+	NetPolicy  string    // egress policy: none|lan|internet|restricted ("" = lan)
+	NetAllow   []string  // allowlist for restricted policy
 	released   bool
 }
 
@@ -94,6 +96,40 @@ type Service struct {
 	// sweeper reclaims it (auto-suspend). 0 disables idle sweeping.
 	idleTimeout time.Duration
 	log         *log.Logger
+	// netpol applies egress policy to a lease's child netns. Nil means
+	// policy enforcement is disabled (tests, or deployments without
+	// root ip netns access).
+	netpol PolicyApplier
+	// netpolDNS is the resolver set allowed under PolicyRestricted.
+	netpolDNS []string
+}
+
+// SetNetpol installs the egress-policy applier and the DNS resolvers
+// allowed under the restricted policy. Call before serving.
+func (s *Service) SetNetpol(a PolicyApplier, dns []string) {
+	s.netpol = a
+	s.netpolDNS = dns
+}
+
+// applyNetpol enforces a lease's egress policy inside its child netns.
+// It is called after grant (fresh sandbox), after resume (new sandbox),
+// and after restart. A nil applier disables enforcement.
+func (s *Service) applyNetpol(ctx context.Context, l *Lease) error {
+	if s.netpol == nil {
+		return nil
+	}
+	if l.NetPolicy == "" || l.NetPolicy == string(PolicyLAN) {
+		return nil // lan is the default; the netns FORWARD chain allows it
+	}
+	ep, err := s.resolveEndpoint(ctx, l)
+	if err != nil {
+		return fmt.Errorf("resolve endpoint for policy: %w", err)
+	}
+	allow := l.NetAllow
+	if allow == nil {
+		allow = []string{}
+	}
+	return s.netpol.Apply(ctx, ep.Netns, NetworkPolicy(l.NetPolicy), allow)
 }
 
 // NewService builds a lease service. tokens maps consumer tokens to
@@ -298,7 +334,7 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 // fresh sandbox when the pool is empty). Persistent leases are intended
 // for interactive use: they are not TTL-swept (see keepAlive) and the
 // consumer drives their lifecycle.
-func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool) (*Lease, error) {
+func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool, netPolicy string, netAllow []string) (*Lease, error) {
 	lease := &Lease{
 		ID:         newID(),
 		Owner:      owner,
@@ -307,6 +343,8 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		ExpiresAt:  time.Now().Add(ttl),
 		Persistent: persistent,
 		LastActive: time.Now(),
+		NetPolicy:  netPolicy,
+		NetAllow:   netAllow,
 	}
 
 	// Persistent leases are workspace-backed so they can suspend/resume
@@ -321,6 +359,9 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		lease.ForkdID = ws.LiveSandboxID
 		if err := s.fillEndpoint(ctx, lease); err != nil {
 			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
+		}
+		if err := s.applyNetpol(ctx, lease); err != nil {
+			return nil, fmt.Errorf("apply network policy: %w", err)
 		}
 		s.store.mu.Lock()
 		s.store.leases[lease.ID] = lease
@@ -374,6 +415,9 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 
 	lease.ForkdID = forkdID
 	lease.Address = addr
+	if err := s.applyNetpol(ctx, lease); err != nil {
+		return nil, fmt.Errorf("apply network policy: %w", err)
+	}
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
 	s.store.mu.Unlock()
@@ -459,6 +503,9 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 	if err := s.fillEndpoint(ctx, l); err != nil {
 		return nil, err
 	}
+	if err := s.applyNetpol(ctx, l); err != nil {
+		return nil, err
+	}
 	return l, nil
 }
 
@@ -507,6 +554,9 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	l.LastActive = time.Now()
 	s.store.mu.Unlock()
 	if err := s.fillEndpoint(ctx, l); err != nil {
+		return nil, err
+	}
+	if err := s.applyNetpol(ctx, l); err != nil {
 		return nil, err
 	}
 	return l, nil
@@ -578,6 +628,9 @@ func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl 
 		lease.ForkdID = ws.LiveSandboxID
 		if err := s.fillEndpoint(ctx, lease); err != nil {
 			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
+		}
+		if err := s.applyNetpol(ctx, lease); err != nil {
+			return nil, fmt.Errorf("apply network policy: %w", err)
 		}
 		s.store.mu.Lock()
 		s.store.leases[lease.ID] = lease
@@ -664,13 +717,15 @@ func (s *Service) list(owner string) []map[string]any {
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
 			out = append(out, map[string]any{
-				"id":         l.ID,
-				"image":      l.Image,
-				"address":    l.Address,
-				"expires":    l.ExpiresAt.Unix(),
-				"persistent": l.Persistent,
-				"suspended":  l.Suspended,
-				"name":       l.Name,
+				"id":               l.ID,
+				"image":            l.Image,
+				"address":          l.Address,
+				"expires":          l.ExpiresAt.Unix(),
+				"persistent":       l.Persistent,
+				"suspended":        l.Suspended,
+				"name":             l.Name,
+				"net_policy":       l.NetPolicy,
+				"egress_allowlist": l.NetAllow,
 			})
 		}
 	}

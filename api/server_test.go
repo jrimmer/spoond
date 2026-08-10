@@ -26,6 +26,7 @@ type fakeForkd struct {
 	suspended     []string
 	resumed       []string
 	deadSandboxes map[string]bool
+	netns         string // reported for spawned sandboxes ("" = none)
 }
 
 func newFakeForkd() *fakeForkd {
@@ -54,7 +55,7 @@ func (f *fakeForkd) Spawn(ctx context.Context, tag string, n int, perChildNetns 
 	for i := 0; i < n; i++ {
 		id := "sb-" + string(rune('a'+f.nextID))
 		f.nextID++
-		f.sandboxes[id] = forkd.SandboxInfo{ID: id, SnapshotTag: tag, GuestAddr: "10.42.0.2:8888"}
+		f.sandboxes[id] = forkd.SandboxInfo{ID: id, SnapshotTag: tag, GuestAddr: "10.42.0.2:8888", Netns: f.netns}
 		out = append(out, f.sandboxes[id])
 	}
 	return out, nil
@@ -520,7 +521,7 @@ func TestShutdownKillsLeasesAndPool(t *testing.T) {
 
 	// Grant a lease and warm the pool.
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -557,7 +558,7 @@ func TestReconcileOrphansKillsForeignSandboxes(t *testing.T) {
 	}
 	// Grant our own lease (would be empty at true startup, but proves the
 	// mine/not-mine split).
-	ours, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
+	ours, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -596,7 +597,7 @@ func TestGrantDropsStalePooledSandbox(t *testing.T) {
 		ff.deadSandboxes[id] = true
 	}
 
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -634,7 +635,7 @@ func TestPersistentLeaseSurvivesSweep(t *testing.T) {
 	svc.log = log.New(io.Discard, "", 0)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, true) // persistent, short TTL
+	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, true, "", nil) // persistent, short TTL
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -654,7 +655,7 @@ func TestNonPersistentLeaseIsSwept(t *testing.T) {
 	svc.log = log.New(io.Discard, "", 0)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, false)
+	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -674,7 +675,7 @@ func TestKeepAliveExtendsPersistentLease(t *testing.T) {
 	svc.log = log.New(io.Discard, "", 0)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, true)
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, true, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -702,7 +703,7 @@ func TestKeepAliveRejectsNonPersistent(t *testing.T) {
 	svc.log = log.New(io.Discard, "", 0)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false)
+	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

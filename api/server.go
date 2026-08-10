@@ -138,12 +138,14 @@ func ownerFrom(ctx context.Context) string {
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Image      string `json:"image"`
-		TTL        int    `json:"ttl"` // seconds
-		MemoryMiB  int    `json:"memory_mib"`
-		Network    string `json:"network"`
-		InitCmd    string `json:"init_cmd"`
-		Persistent bool   `json:"persistent"`
+		Image      string   `json:"image"`
+		TTL        int      `json:"ttl"` // seconds
+		MemoryMiB  int      `json:"memory_mib"`
+		Network    string   `json:"network"`
+		InitCmd    string   `json:"init_cmd"`
+		Persistent bool     `json:"persistent"`
+		NetPolicy  string   `json:"network_policy"`
+		NetAllow   []string `json:"egress_allowlist"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -151,6 +153,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Image == "" {
 		writeError(w, http.StatusBadRequest, "image is required")
+		return
+	}
+	// Egress policy: default lan; must be a known policy name. The
+	// restricted policy requires a non-empty allowlist.
+	if req.NetPolicy == "" {
+		req.NetPolicy = string(PolicyLAN)
+	}
+	if !ValidNetworkPolicy(req.NetPolicy) {
+		writeError(w, http.StatusBadRequest, "network_policy must be none|lan|internet|restricted")
+		return
+	}
+	if req.NetPolicy == string(PolicyRestricted) && len(req.NetAllow) == 0 {
+		writeError(w, http.StatusBadRequest, "restricted policy requires egress_allowlist")
 		return
 	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
@@ -175,7 +190,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// The TTL cap above already bounds persistent leases; keep-alive
 	// lets the consumer extend them (up to maxTTL per call).
 	ttl := time.Duration(ttlSecs) * time.Second
-	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent)
+	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent, req.NetPolicy, req.NetAllow)
 	if err != nil {
 		s.svc.log.Printf("create: grant %s: %v", req.Image, err)
 		writeError(w, http.StatusInternalServerError, "failed to grant sandbox")

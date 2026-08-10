@@ -85,6 +85,13 @@ func main() {
 		knownTags = strings.Split(v, ",")
 	}
 	svc := api.NewServiceWithIdle(fc, tokens, poolSize, defaultTTL, maxTTL, idleTimeout, knownTags...)
+	// Egress policy enforcement (ticket #13): install iptables FORWARD
+	// rules in each lease's child netns. NETPOL_DNS lists resolvers the
+	// restricted policy always permits so guests can resolve allowlisted
+	// names; empty NETPOL_DNS disables enforcement (no root/netns access).
+	if dns := os.Getenv("NETPOL_DNS"); dns != "" {
+		svc.SetNetpol(&api.NetnsPolicyApplier{}, strings.Split(dns, ","))
+	}
 	reg := api.NewImageRegistry(fc, knownTags...)
 	// LLM gateway model map: "exe.dev-id=upstream-id,exe.dev-id2=upstream2".
 	// Shelley sends exe.dev catalog ids; the gateway rewrites them to the
