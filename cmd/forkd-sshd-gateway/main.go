@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -616,10 +617,10 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	// Deliver the MOTD ("created sandbox …") on new auto-created
 	// sandboxes. Writing it to the outer channel races the prompt
 	// (dev-base's login hook attaches tmux, and a late write lands on
-	// the line the user is typing). Instead, show it INSIDE tmux via
-	// `tmux display-message -t dev`, which renders in the status bar —
-	// visible, non-destructive. Images without tmux fall back to a raw
-	// channel write.
+	// the line the user is typing). Instead, show it INSIDE tmux: a
+	// transient `display-message` (status-bar popup) plus a persistent
+	// `status-right` so the lease id stays visible. Images without
+	// tmux fall back to a raw channel write.
 	if motd != "" {
 		go func() {
 			<-motdReady
@@ -629,13 +630,20 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 				s2, err := client.NewSession()
 				if err == nil {
 					msg := strings.ReplaceAll(motd, "\n", " ")
+					// Extract the lease id (first 32-hex token) for the
+					// persistent status-right display.
+					id := ""
+					if m := regexp.MustCompile(`[0-9a-f]{32}`).FindString(msg); m != "" {
+						id = m
+					}
 					// `tmux display-message -t dev` from a second
 					// session renders on the attached client's status
-					// bar. Fall back to the raw channel write if tmux
-					// isn't running (non-dev-base images).
-					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null || echo __NO_TMUX__")
+					// bar; `set-option status-right` keeps the id
+					// visible. Fall back to the raw channel write if
+					// tmux isn't running (non-dev-base images).
+					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null; tmux set-option -t dev status-right 'forkd: " + id + "' 2>/dev/null; echo __TMUX_DONE__")
 					s2.Close()
-					if err == nil && !strings.Contains(string(out), "__NO_TMUX__") {
+					if err == nil && strings.Contains(string(out), "__TMUX_DONE__") {
 						return
 					}
 				}
