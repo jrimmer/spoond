@@ -394,7 +394,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 	}
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, cp <id> [tag]"
+		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, cp <id> [tag]"
 	case "new":
 		user := "new"
 		if len(fields) > 1 {
@@ -424,6 +424,24 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 			return `{"error":"usage: keepalive <lease-id>"}`
 		}
 		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/keepalive", nil)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	case "suspend":
+		if len(fields) < 2 {
+			return `{"error":"usage: suspend <lease-id>"}`
+		}
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/suspend", nil)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	case "resume":
+		if len(fields) < 2 {
+			return `{"error":"usage: resume <lease-id>"}`
+		}
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/resume", nil)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}

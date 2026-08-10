@@ -56,6 +56,28 @@ if [ -n "$CTLID" ]; then
 fi
 
 echo
+echo "== ctl: suspend/resume =="
+if [ -n "$CTLID" ]; then
+  OUT=$(timeout 60 $SSH "suspend $CTLID" 2>&1)
+  assert_contains "suspend returns JSON" "$OUT" '"status":"suspended"'
+  # the workspace should now be suspended in the controller
+  WS_STATE=$(curl -s --max-time 8 http://127.0.0.1:8889/v1/workspaces)
+  if echo "$WS_STATE" | grep -q "\"name\":\"ws-$CTLID\".*\"status\":\"suspended\""; then
+    ok "workspace $CTLID suspended in controller"
+  else
+    bad "workspace $CTLID suspended in controller"
+  fi
+  OUT=$(timeout 90 $SSH "resume $CTLID" 2>&1)
+  assert_contains "resume returns JSON" "$OUT" '"status":"running"'
+  WS_STATE2=$(curl -s --max-time 8 http://127.0.0.1:8889/v1/workspaces)
+  if echo "$WS_STATE2" | grep -q "\"name\":\"ws-$CTLID\".*\"status\":\"running\""; then
+    ok "workspace $CTLID running after resume"
+  else
+    bad "workspace $CTLID running after resume"
+  fi
+fi
+
+echo
 echo "== ctl: rejections =="
 OUT=$(timeout 20 $SSH "frobnicate" 2>&1)
 assert_contains "unknown command rejected" "$OUT" "unknown command"

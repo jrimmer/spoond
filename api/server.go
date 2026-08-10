@@ -33,6 +33,8 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/suspend", s.handleSuspend)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/resume", s.handleResume)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
@@ -365,6 +367,56 @@ func (s *Server) handleKeepAlive(w http.ResponseWriter, r *http.Request) {
 		"id":         lease.ID,
 		"persistent": true,
 		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleSuspend suspends a workspace-backed persistent lease: the
+// controller snapshots the sandbox and stops it. The lease stays and can
+// be resumed.
+func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease, err := s.svc.suspend(r.Context(), owner, id)
+	if err != nil {
+		switch err {
+		case errNotFound:
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errNotPersistent:
+			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+		default:
+			s.svc.log.Printf("suspend %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "suspend failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      lease.ID,
+		"status":  "suspended",
+		"message": "sandbox suspended; state snapshot kept (resume to restore)",
+	})
+}
+
+// handleResume restores a suspended workspace-backed lease.
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease, err := s.svc.resume(r.Context(), owner, id)
+	if err != nil {
+		switch err {
+		case errNotFound:
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errNotPersistent:
+			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+		default:
+			s.svc.log.Printf("resume %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "resume failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      lease.ID,
+		"status":  "running",
+		"address": lease.Address,
 	})
 }
 

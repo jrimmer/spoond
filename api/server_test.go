@@ -20,15 +20,19 @@ import (
 type fakeForkd struct {
 	snapshots     []forkd.SnapshotInfo
 	sandboxes     map[string]forkd.SandboxInfo
+	workspaces    map[string]*forkd.WorkspaceInfo
 	nextID        int
 	killed        []string
+	suspended     []string
+	resumed       []string
 	deadSandboxes map[string]bool
 }
 
 func newFakeForkd() *fakeForkd {
 	return &fakeForkd{
-		snapshots: []forkd.SnapshotInfo{{Tag: "py-base", Bootable: true}},
-		sandboxes: make(map[string]forkd.SandboxInfo),
+		snapshots:  []forkd.SnapshotInfo{{Tag: "py-base", Bootable: true}},
+		sandboxes:  make(map[string]forkd.SandboxInfo),
+		workspaces: make(map[string]*forkd.WorkspaceInfo),
 	}
 }
 
@@ -91,6 +95,55 @@ func (f *fakeForkd) Branch(ctx context.Context, id, tag string) (string, error) 
 	}
 	f.snapshots = append(f.snapshots, forkd.SnapshotInfo{Tag: branchTag})
 	return branchTag, nil
+}
+
+func (f *fakeForkd) CreateWorkspace(ctx context.Context, name, tag string, perChildNetns bool) (*forkd.WorkspaceInfo, error) {
+	f.nextID++
+	sbID := fmt.Sprintf("sb-%d", f.nextID)
+	ws := &forkd.WorkspaceInfo{
+		ID:                "ws-" + sbID,
+		Name:              name,
+		SourceSnapshotTag: tag,
+		Status:            "running",
+		LiveSandboxID:     sbID,
+	}
+	f.workspaces[name] = ws
+	f.sandboxes[sbID] = forkd.SandboxInfo{ID: sbID, GuestAddr: "10.42.0." + fmt.Sprint(f.nextID+1) + ":8888"}
+	return ws, nil
+}
+
+func (f *fakeForkd) SuspendWorkspace(ctx context.Context, name string) error {
+	ws, ok := f.workspaces[name]
+	if !ok {
+		return fmt.Errorf("forkd: workspace %s not found (status 404)", name)
+	}
+	ws.Status = "suspended"
+	f.suspended = append(f.suspended, name)
+	return nil
+}
+
+func (f *fakeForkd) ResumeWorkspace(ctx context.Context, name string) (*forkd.WorkspaceInfo, error) {
+	ws, ok := f.workspaces[name]
+	if !ok {
+		return nil, fmt.Errorf("forkd: workspace %s not found (status 404)", name)
+	}
+	f.nextID++
+	newID := fmt.Sprintf("sb-%d", f.nextID)
+	ws.Status = "running"
+	ws.LiveSandboxID = newID
+	f.sandboxes[newID] = forkd.SandboxInfo{ID: newID, GuestAddr: "10.42.0." + fmt.Sprint(f.nextID+1) + ":8888"}
+	f.resumed = append(f.resumed, name)
+	return ws, nil
+}
+
+func (f *fakeForkd) DeleteWorkspace(ctx context.Context, name string) error {
+	ws, ok := f.workspaces[name]
+	if !ok {
+		return fmt.Errorf("forkd: workspace %s not found (status 404)", name)
+	}
+	delete(f.workspaces, name)
+	f.killed = append(f.killed, ws.LiveSandboxID)
+	return nil
 }
 
 func (f *fakeForkd) Metrics(ctx context.Context) ([]byte, error) {
@@ -302,8 +355,9 @@ func TestTTLSweeper(t *testing.T) {
 	}
 }
 
-// TestIdleSweeper verifies persistent leases are auto-suspended after
-// idleTimeout without activity, and that touch() keeps them alive.
+// TestIdleSweeper verifies persistent leases are auto-suspended (not
+// deleted) after idleTimeout without activity, and that touch() keeps
+// them alive.
 func TestIdleSweeper(t *testing.T) {
 	ff := newFakeForkd()
 	svc := NewServiceWithIdle(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute, 400*time.Millisecond)
@@ -327,20 +381,71 @@ func TestIdleSweeper(t *testing.T) {
 	cancel()
 
 	// Still alive: touches outpace the idle timeout.
-	if len(ff.killed) != 0 {
-		t.Fatalf("expected 0 kills while touched, got %d", len(ff.killed))
+	if len(ff.suspended) != 0 {
+		t.Fatalf("expected 0 suspends while touched, got %d", len(ff.suspended))
 	}
 
-	// Now stop touching; the sweeper should reclaim it within ~1s.
+	// Now stop touching; the sweeper should suspend the workspace within
+	// ~1s. The lease is workspace-backed, so it is suspended, not killed.
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	svc.Start(ctx2)
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(ff.killed) == 0 {
+	for time.Now().Before(deadline) && len(ff.suspended) == 0 {
 		time.Sleep(100 * time.Millisecond)
 	}
 	cancel2()
+	if len(ff.suspended) != 1 {
+		t.Fatalf("expected 1 idle suspend, got %d", len(ff.suspended))
+	}
+	if len(ff.killed) != 0 {
+		t.Fatalf("expected 0 kills on idle, got %d (suspended lease should stay)", len(ff.killed))
+	}
+	// The lease is still listable (suspended, not released).
+	resp, _ := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 listing after suspend, got %d", resp.StatusCode)
+	}
+	if len(ff.suspended) != 1 {
+		t.Fatalf("expected 1 idle suspend, got %d", len(ff.suspended))
+	}
+}
+
+// TestSuspendResume verifies explicit suspend/resume verbs on a
+// workspace-backed persistent lease, and that resume refreshes the
+// sandbox id.
+func TestSuspendResume(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
+	reg := NewImageRegistry(ff, "py-base")
+	srv := NewServer(svc, reg)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := create["id"].(string)
+
+	// Suspend.
+	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 suspend, got %d", resp.StatusCode)
+	}
+	if len(ff.suspended) != 1 {
+		t.Fatalf("expected 1 suspend, got %d", len(ff.suspended))
+	}
+
+	// Resume.
+	resp2, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/resume", "token-a", nil)
+	if resp2.StatusCode != 200 {
+		t.Fatalf("expected 200 resume, got %d", resp2.StatusCode)
+	}
+	if len(ff.resumed) != 1 {
+		t.Fatalf("expected 1 resume, got %d", len(ff.resumed))
+	}
+
+	// Delete releases the workspace.
+	doReq(t, "DELETE", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
 	if len(ff.killed) != 1 {
-		t.Fatalf("expected 1 idle kill, got %d", len(ff.killed))
+		t.Fatalf("expected 1 workspace delete/kill, got %d", len(ff.killed))
 	}
 }
 

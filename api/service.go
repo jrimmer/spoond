@@ -30,6 +30,8 @@ type Lease struct {
 	ExpiresAt  time.Time
 	Persistent bool      // interactive/persistent lease: not TTL-swept, keep-alive extends
 	LastActive time.Time // last activity (exec/stream/proxy/keepalive), for idle sweep
+	Workspace  string    // workspace name when workspace-backed (suspend/resume support)
+	Suspended  bool      // workspace-backed lease is currently suspended
 	released   bool
 }
 
@@ -66,6 +68,10 @@ type ForkdClient interface {
 	Exec(ctx context.Context, id string, args []string, timeoutSecs int) (*forkd.ExecResult, error)
 	Ping(ctx context.Context, id string) error
 	Branch(ctx context.Context, id, tag string) (string, error)
+	CreateWorkspace(ctx context.Context, name, tag string, perChildNetns bool) (*forkd.WorkspaceInfo, error)
+	SuspendWorkspace(ctx context.Context, name string) error
+	ResumeWorkspace(ctx context.Context, name string) (*forkd.WorkspaceInfo, error)
+	DeleteWorkspace(ctx context.Context, name string) error
 	Metrics(ctx context.Context) ([]byte, error)
 }
 
@@ -165,10 +171,13 @@ func (s *Service) refillPool(ctx context.Context) {
 // leases are not TTL-swept (the consumer keeps them alive via keep-alive,
 // and disposes via delete), but when idleTimeout is set they are
 // auto-suspended after that long without activity (exec/stream/proxy/
-// keep-alive all bump LastActive).
+// keep-alive all bump LastActive). Workspace-backed leases are suspended
+// (state snapshot kept, cheap to resume); plain persistent leases are
+// released as before.
 func (s *Service) sweepExpired(ctx context.Context) {
 	s.store.mu.Lock()
 	var expired []*Lease
+	var idleSuspend []*Lease
 	now := time.Now()
 	for _, l := range s.store.leases {
 		if l.released {
@@ -179,11 +188,25 @@ func (s *Service) sweepExpired(ctx context.Context) {
 			continue
 		}
 		if l.Persistent && s.idleTimeout > 0 && now.After(l.LastActive.Add(s.idleTimeout)) {
-			s.log.Printf("idle sweep: reclaiming persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
-			expired = append(expired, l)
+			if l.Workspace != "" && !l.Suspended {
+				s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
+				idleSuspend = append(idleSuspend, l)
+			} else if l.Workspace == "" {
+				s.log.Printf("idle sweep: reclaiming persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
+				expired = append(expired, l)
+			}
 		}
 	}
 	s.store.mu.Unlock()
+	for _, l := range idleSuspend {
+		if err := s.forkd.SuspendWorkspace(ctx, l.Workspace); err != nil {
+			s.log.Printf("idle sweep: suspend %s: %v", l.ID, err)
+			continue
+		}
+		s.store.mu.Lock()
+		l.Suspended = true
+		s.store.mu.Unlock()
+	}
 	for _, l := range expired {
 		s.release(ctx, l)
 	}
@@ -234,7 +257,19 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	}
 	l.released = true
 	s.store.mu.Unlock()
-	err := s.forkd.Kill(ctx, l.ForkdID)
+
+	// Workspace-backed leases: delete the workspace (kills the live
+	// sandbox if any AND removes the state snapshot). Plain leases: kill
+	// the sandbox.
+	var err error
+	if l.Workspace != "" {
+		err = s.forkd.DeleteWorkspace(ctx, l.Workspace)
+		if err != nil && strings.Contains(err.Error(), "not found") {
+			err = nil // workspace already gone
+		}
+	} else {
+		err = s.forkd.Kill(ctx, l.ForkdID)
+	}
 	if err != nil {
 		// A 404 means the sandbox is already gone (e.g. the controller
 		// restarted and forgot it) — that's the goal state, not a
@@ -263,6 +298,35 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 // for interactive use: they are not TTL-swept (see keepAlive) and the
 // consumer drives their lifecycle.
 func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool) (*Lease, error) {
+	lease := &Lease{
+		ID:         newID(),
+		Owner:      owner,
+		Image:      image,
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(ttl),
+		Persistent: persistent,
+		LastActive: time.Now(),
+	}
+
+	// Persistent leases are workspace-backed so they can suspend/resume
+	// (the workspace keeps a state snapshot while stopped). TTL leases
+	// use the warm pool for fast grants.
+	if persistent {
+		ws, err := s.forkd.CreateWorkspace(ctx, "ws-"+lease.ID, image, true)
+		if err != nil {
+			return nil, fmt.Errorf("create workspace: %w", err)
+		}
+		lease.Workspace = ws.Name
+		lease.ForkdID = ws.LiveSandboxID
+		if err := s.fillEndpoint(ctx, lease); err != nil {
+			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
+		}
+		s.store.mu.Lock()
+		s.store.leases[lease.ID] = lease
+		s.store.mu.Unlock()
+		return lease, nil
+	}
+
 	// Try the warm pool first, validating that the pooled sandbox still
 	// exists in the controller. After a controller restart the backend's
 	// in-memory pool holds stale IDs (the controller forgot them); a
@@ -307,21 +371,94 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		addr = sbs[0].GuestAddr
 	}
 
-	lease := &Lease{
-		ID:         newID(),
-		Owner:      owner,
-		Image:      image,
-		ForkdID:    forkdID,
-		Address:    addr,
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(ttl),
-		Persistent: persistent,
-		LastActive: time.Now(),
-	}
+	lease.ForkdID = forkdID
+	lease.Address = addr
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
 	s.store.mu.Unlock()
 	return lease, nil
+}
+
+// fillEndpoint looks up a lease's sandbox in the controller and fills in
+// the Address (guest addr). Used after workspace create/resume where the
+// controller response does not carry the endpoint.
+func (s *Service) fillEndpoint(ctx context.Context, lease *Lease) error {
+	if lease.ForkdID == "" {
+		return fmt.Errorf("no sandbox id")
+	}
+	sbs, err := s.forkd.ListSandboxes(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sb := range sbs {
+		if sb.ID == lease.ForkdID {
+			lease.Address = sb.GuestAddr
+			return nil
+		}
+	}
+	return fmt.Errorf("sandbox %s not in controller list", lease.ForkdID)
+}
+
+// suspend suspends a workspace-backed persistent lease: the controller
+// snapshots the sandbox and stops it. The lease stays; resume restores.
+func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error) {
+	s.store.mu.Lock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		s.store.mu.Unlock()
+		return nil, errNotFound
+	}
+	if !l.Persistent {
+		s.store.mu.Unlock()
+		return nil, errNotPersistent
+	}
+	if l.Workspace == "" {
+		s.store.mu.Unlock()
+		return nil, errNotPersistent // not workspace-backed (older lease)
+	}
+	s.store.mu.Unlock()
+
+	if err := s.forkd.SuspendWorkspace(ctx, l.Workspace); err != nil {
+		return nil, err
+	}
+	s.store.mu.Lock()
+	l.Suspended = true
+	s.store.mu.Unlock()
+	return l, nil
+}
+
+// resume restores a suspended workspace-backed lease and refreshes the
+// lease's sandbox id (resume spawns a fresh sandbox).
+func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) {
+	s.store.mu.Lock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		s.store.mu.Unlock()
+		return nil, errNotFound
+	}
+	if !l.Persistent {
+		s.store.mu.Unlock()
+		return nil, errNotPersistent
+	}
+	if l.Workspace == "" {
+		s.store.mu.Unlock()
+		return nil, errNotPersistent
+	}
+	s.store.mu.Unlock()
+
+	ws, err := s.forkd.ResumeWorkspace(ctx, l.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	s.store.mu.Lock()
+	l.ForkdID = ws.LiveSandboxID
+	l.LastActive = time.Now()
+	l.Suspended = false
+	s.store.mu.Unlock()
+	if err := s.fillEndpoint(ctx, l); err != nil {
+		return nil, err
+	}
+	return l, nil
 }
 
 // grantFromSnapshot spawns a sandbox directly from a specific snapshot
@@ -329,6 +466,30 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 // the branch tag is fresh, has no pool, and must not be registered as a
 // refillable image (refillPool would start pre-forking clone tags).
 func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl time.Duration, persistent bool) (*Lease, error) {
+	lease := &Lease{
+		ID:         newID(),
+		Owner:      owner,
+		Image:      tag,
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(ttl),
+		Persistent: persistent,
+		LastActive: time.Now(),
+	}
+	if persistent {
+		ws, err := s.forkd.CreateWorkspace(ctx, "ws-"+lease.ID, tag, true)
+		if err != nil {
+			return nil, fmt.Errorf("create workspace: %w", err)
+		}
+		lease.Workspace = ws.Name
+		lease.ForkdID = ws.LiveSandboxID
+		if err := s.fillEndpoint(ctx, lease); err != nil {
+			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
+		}
+		s.store.mu.Lock()
+		s.store.leases[lease.ID] = lease
+		s.store.mu.Unlock()
+		return lease, nil
+	}
 	sbs, err := s.forkd.Spawn(ctx, tag, 1, true, 0)
 	if err != nil {
 		return nil, err
@@ -336,17 +497,8 @@ func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl 
 	if len(sbs) == 0 {
 		return nil, errNoSandbox
 	}
-	lease := &Lease{
-		ID:         newID(),
-		Owner:      owner,
-		Image:      tag,
-		ForkdID:    sbs[0].ID,
-		Address:    sbs[0].GuestAddr,
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(ttl),
-		Persistent: persistent,
-		LastActive: time.Now(),
-	}
+	lease.ForkdID = sbs[0].ID
+	lease.Address = sbs[0].GuestAddr
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
 	s.store.mu.Unlock()
