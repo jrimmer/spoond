@@ -47,6 +47,7 @@ func main() {
 	forkdURL := envOr("FORKD_URL", "http://127.0.0.1:8889")
 	forkdToken := os.Getenv("FORKD_TOKEN")
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
+	proxyAddr := envOr("PROXY_ADDR", "") // e.g. 0.0.0.0:8891 (Caddy wildcard front)
 	tlsCert := os.Getenv("TLS_CERT")
 	tlsKey := os.Getenv("TLS_KEY")
 	poolSize := envIntOr("POOL_SIZE", 0)
@@ -94,6 +95,19 @@ func main() {
 		Handler: srv.Handler(),
 	}
 
+	// Optional second listener: the public HTTP proxy (wildcard
+	// *.sandbox.lacy.casa via Caddy). Plain HTTP — Caddy terminates TLS.
+	var proxySrv *http.Server
+	if proxyAddr != "" {
+		proxySrv = &http.Server{Addr: proxyAddr, Handler: srv.ProxyHandler()}
+		go func() {
+			log.Printf("forkd proxy listening on %s (wildcard sandbox hostnames)", proxyAddr)
+			if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("proxy: %v", err)
+			}
+		}()
+	}
+
 	// Graceful shutdown: on SIGTERM/SIGINT kill every lease and pooled
 	// sandbox before exiting. Without this, a backend restart orphans
 	// its warm VMs in the controller (which has no client-liveness), and
@@ -107,6 +121,9 @@ func main() {
 		defer shutdownCancel()
 		svc.Shutdown(shutdownCtx)
 		_ = httpSrv.Shutdown(shutdownCtx)
+		if proxySrv != nil {
+			_ = proxySrv.Shutdown(shutdownCtx)
+		}
 		cancel()
 	}()
 

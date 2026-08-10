@@ -301,6 +301,19 @@ func (s *Service) lookup(owner, id string) *Lease {
 	return l
 }
 
+// lookupAny returns a live lease by id regardless of owner. Used by the
+// public HTTP proxy where the lease id in the hostname is the capability
+// (same model as the SSH gateway).
+func (s *Service) lookupAny(id string) *Lease {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.released {
+		return nil
+	}
+	return l
+}
+
 // Endpoint describes how to reach a leased sandbox's guest agent.
 type Endpoint struct {
 	ForkdID   string
