@@ -81,6 +81,18 @@ func (f *fakeForkd) Ping(ctx context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeForkd) Branch(ctx context.Context, id, tag string) (string, error) {
+	if f.deadSandboxes != nil && f.deadSandboxes[id] {
+		return "", fmt.Errorf("forkd: sandbox %s not found (status 404)", id)
+	}
+	branchTag := tag
+	if branchTag == "" {
+		branchTag = "branch-" + id
+	}
+	f.snapshots = append(f.snapshots, forkd.SnapshotInfo{Tag: branchTag})
+	return branchTag, nil
+}
+
 func (f *fakeForkd) Metrics(ctx context.Context) ([]byte, error) {
 	return []byte("# HELP forkd_sandboxes_active\n# TYPE forkd_sandboxes_active gauge\nforkd_sandboxes_active 0\n"), nil
 }
@@ -290,6 +302,48 @@ func TestTTLSweeper(t *testing.T) {
 	}
 }
 
+// TestIdleSweeper verifies persistent leases are auto-suspended after
+// idleTimeout without activity, and that touch() keeps them alive.
+func TestIdleSweeper(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewServiceWithIdle(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute, 400*time.Millisecond)
+	reg := NewImageRegistry(ff, "py-base")
+	srv := NewServer(svc, reg)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Persistent lease; idle timeout is 400ms.
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := create["id"].(string)
+
+	// Keep it alive with periodic touches (exec counts as activity).
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.sweepInterval = 50 * time.Millisecond
+	svc.Start(ctx)
+	for i := 0; i < 6; i++ {
+		time.Sleep(150 * time.Millisecond)
+		svc.touch(id)
+	}
+	cancel()
+
+	// Still alive: touches outpace the idle timeout.
+	if len(ff.killed) != 0 {
+		t.Fatalf("expected 0 kills while touched, got %d", len(ff.killed))
+	}
+
+	// Now stop touching; the sweeper should reclaim it within ~1s.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	svc.Start(ctx2)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(ff.killed) == 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel2()
+	if len(ff.killed) != 1 {
+		t.Fatalf("expected 1 idle kill, got %d", len(ff.killed))
+	}
+}
+
 // TestWarmPoolGrant verifies a grant is served from the warm pool when
 // sandboxes are pre-forked.
 func TestWarmPoolGrant(t *testing.T) {
@@ -466,7 +520,6 @@ func TestNewServiceSeedsPoolFromKnownImages(t *testing.T) {
 		}
 	}
 }
-
 
 // TestPersistentLeaseSurvivesSweep verifies a persistent lease is not
 // reclaimed by the TTL sweeper, even after its initial expiry.

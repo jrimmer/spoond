@@ -190,6 +190,23 @@ func (c *Client) Ping(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/v1/sandboxes/"+id+"/ping", nil, &out)
 }
 
+// Branch snapshots a running sandbox into a new snapshot tag (the
+// controller pauses the source for ~0.5-8s while capturing). Returns
+// the new snapshot tag.
+func (c *Client) Branch(ctx context.Context, id, tag string) (string, error) {
+	req := map[string]any{"tag": tag}
+	var out struct {
+		Tag string `json:"tag"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+id+"/branch", req, &out); err != nil {
+		return "", err
+	}
+	if out.Tag == "" {
+		return "", fmt.Errorf("branch response missing tag")
+	}
+	return out.Tag, nil
+}
+
 // Metrics fetches the controller's Prometheus metrics as raw text.
 func (c *Client) Metrics(ctx context.Context) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/metrics", nil)

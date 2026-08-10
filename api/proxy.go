@@ -42,6 +42,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sandbox not found", http.StatusNotFound)
 		return
 	}
+	s.svc.touch(lease.ID) // proxied web traffic is activity for the idle sweeper
 	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
 	if err != nil {
 		http.Error(w, "sandbox not running", http.StatusBadGateway)

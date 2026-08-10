@@ -28,7 +28,8 @@ type Lease struct {
 	Address    string // guest address, e.g. "10.42.0.2:8888"
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
-	Persistent bool // interactive/persistent lease: not TTL-swept, keep-alive extends
+	Persistent bool      // interactive/persistent lease: not TTL-swept, keep-alive extends
+	LastActive time.Time // last activity (exec/stream/proxy/keepalive), for idle sweep
 	released   bool
 }
 
@@ -64,6 +65,7 @@ type ForkdClient interface {
 	Kill(ctx context.Context, id string) error
 	Exec(ctx context.Context, id string, args []string, timeoutSecs int) (*forkd.ExecResult, error)
 	Ping(ctx context.Context, id string) error
+	Branch(ctx context.Context, id, tag string) (string, error)
 	Metrics(ctx context.Context) ([]byte, error)
 }
 
@@ -81,7 +83,10 @@ type Service struct {
 	maxTTL time.Duration
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
-	log           *log.Logger
+	// idleTimeout is how long a persistent lease may sit idle before the
+	// sweeper reclaims it (auto-suspend). 0 disables idle sweeping.
+	idleTimeout time.Duration
+	log         *log.Logger
 }
 
 // NewService builds a lease service. tokens maps consumer tokens to
@@ -91,6 +96,12 @@ type Service struct {
 // startup — without this, an image only becomes warm after its first
 // grant, leaving the pool cold after a backend restart.
 func NewService(fc ForkdClient, tokens map[string]string, poolSize int, defaultTTL, maxTTL time.Duration, knownImages ...string) *Service {
+	return NewServiceWithIdle(fc, tokens, poolSize, defaultTTL, maxTTL, 0, knownImages...)
+}
+
+// NewServiceWithIdle is NewService plus an idle auto-suspend timeout for
+// persistent leases. idleTimeout 0 disables idle sweeping.
+func NewServiceWithIdle(fc ForkdClient, tokens map[string]string, poolSize int, defaultTTL, maxTTL, idleTimeout time.Duration, knownImages ...string) *Service {
 	s := &Service{
 		forkd:         fc,
 		store:         newStore(),
@@ -98,6 +109,7 @@ func NewService(fc ForkdClient, tokens map[string]string, poolSize int, defaultT
 		poolSize:      poolSize,
 		defaultTTL:    defaultTTL,
 		maxTTL:        maxTTL,
+		idleTimeout:   idleTimeout,
 		sweepInterval: 5 * time.Second,
 		log:           log.Default(),
 	}
@@ -150,20 +162,40 @@ func (s *Service) refillPool(ctx context.Context) {
 }
 
 // sweepExpired kills and removes leases whose TTL has passed. Persistent
-// leases are consumer-managed: they are never swept (the consumer keeps
-// them alive explicitly via keep-alive, and disposes via delete).
+// leases are not TTL-swept (the consumer keeps them alive via keep-alive,
+// and disposes via delete), but when idleTimeout is set they are
+// auto-suspended after that long without activity (exec/stream/proxy/
+// keep-alive all bump LastActive).
 func (s *Service) sweepExpired(ctx context.Context) {
 	s.store.mu.Lock()
 	var expired []*Lease
 	now := time.Now()
 	for _, l := range s.store.leases {
-		if !l.released && !l.Persistent && now.After(l.ExpiresAt) {
+		if l.released {
+			continue
+		}
+		if !l.Persistent && now.After(l.ExpiresAt) {
+			expired = append(expired, l)
+			continue
+		}
+		if l.Persistent && s.idleTimeout > 0 && now.After(l.LastActive.Add(s.idleTimeout)) {
+			s.log.Printf("idle sweep: reclaiming persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
 			expired = append(expired, l)
 		}
 	}
 	s.store.mu.Unlock()
 	for _, l := range expired {
 		s.release(ctx, l)
+	}
+}
+
+// touch records activity on a lease so the idle sweeper doesn't reclaim
+// it. Returns nil for unknown/released leases.
+func (s *Service) touch(id string) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if l := s.store.leases[id]; l != nil && !l.released {
+		l.LastActive = time.Now()
 	}
 }
 
@@ -186,6 +218,7 @@ func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error)
 		ttl = s.maxTTL
 	}
 	l.ExpiresAt = time.Now().Add(ttl)
+	l.LastActive = time.Now() // keep-alive is activity
 	return l, nil
 }
 
@@ -283,6 +316,36 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		CreatedAt:  time.Now(),
 		ExpiresAt:  time.Now().Add(ttl),
 		Persistent: persistent,
+		LastActive: time.Now(),
+	}
+	s.store.mu.Lock()
+	s.store.leases[lease.ID] = lease
+	s.store.mu.Unlock()
+	return lease, nil
+}
+
+// grantFromSnapshot spawns a sandbox directly from a specific snapshot
+// tag (not via the warm pool) and grants a lease on it. Used by clone:
+// the branch tag is fresh, has no pool, and must not be registered as a
+// refillable image (refillPool would start pre-forking clone tags).
+func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl time.Duration, persistent bool) (*Lease, error) {
+	sbs, err := s.forkd.Spawn(ctx, tag, 1, true, 0)
+	if err != nil {
+		return nil, err
+	}
+	if len(sbs) == 0 {
+		return nil, errNoSandbox
+	}
+	lease := &Lease{
+		ID:         newID(),
+		Owner:      owner,
+		Image:      tag,
+		ForkdID:    sbs[0].ID,
+		Address:    sbs[0].GuestAddr,
+		CreatedAt:  time.Now(),
+		ExpiresAt:  time.Now().Add(ttl),
+		Persistent: persistent,
+		LastActive: time.Now(),
 	}
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease

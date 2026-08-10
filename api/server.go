@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -197,6 +199,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
+	s.svc.touch(id) // stream attach is activity for the idle sweeper
 	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "sandbox not running")
@@ -381,6 +384,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
+	s.svc.touch(id) // exec is activity for the idle sweeper
 	var req struct {
 		Cmd     string            `json:"cmd"`
 		Cwd     string            `json:"cwd"`
@@ -432,6 +436,54 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.svc.release(r.Context(), lease)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleClone branches a running sandbox into a new snapshot tag and
+// grants a fresh lease on the branch. Optional {"tag": "..."} names the
+// branch; otherwise the controller auto-generates one. The clone is a
+// persistent lease (the source's tmux state, filesystem, and installed
+// packages carry over).
+func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease := s.svc.lookup(owner, id)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	var req struct {
+		Tag string `json:"tag"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // optional body
+
+	// Branch the running sandbox to a new snapshot tag.
+	tag := req.Tag
+	if tag == "" {
+		tag = "clone-" + lease.ID[:8] + "-" + strconv.FormatInt(time.Now().Unix(), 10)
+	}
+	newTag, err := s.svc.forkd.Branch(r.Context(), lease.ForkdID, tag)
+	if err != nil {
+		s.svc.log.Printf("clone %s: branch: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to branch sandbox")
+		return
+	}
+
+	// Spawn a sandbox from the branch and grant a lease on it.
+	ttl := s.svc.maxTTL
+	cloned, err := s.svc.grantFromSnapshot(r.Context(), owner, newTag, ttl, true)
+	if err != nil {
+		s.svc.log.Printf("clone %s: grant from %s: %v", id, newTag, err)
+		writeError(w, http.StatusInternalServerError, "failed to spawn clone")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":         cloned.ID,
+		"image":      cloned.Image,
+		"source":     id,
+		"branch_tag": newTag,
+		"persistent": cloned.Persistent,
+		"expires_at": cloned.ExpiresAt.UTC().Format(time.RFC3339),
+	})
 }
 
 // handleImages lists available image tags.

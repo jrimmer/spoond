@@ -115,6 +115,14 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 
 	go ssh.DiscardRequests(reqs)
 
+	// The control plane is a reserved username: `ssh ctl@... "cmd"`.
+	// Exec requests become API calls (new/ls/rm/keepalive/cp) and the
+	// response is JSON on stdout — no sandbox is dialed.
+	if user == "ctl" {
+		handleControlPlane(chans, gatewayKey)
+		return
+	}
+
 	// Resolve the target: a 32-hex lease id attaches an existing sandbox;
 	// new[-<image>] auto-creates a persistent one (SSH-as-API).
 	leaseID := user
@@ -316,6 +324,134 @@ func dialSandbox(ctx context.Context, leaseID string, gatewayKey ssh.Signer) (*s
 		return nil, fmt.Errorf("nested ssh to %s: %w", target, err)
 	}
 	return ssh.NewClient(clientConn, chans, reqs), nil
+}
+
+// handleControlPlane implements the SSH-as-API control plane for the
+// reserved `ctl` username. It accepts the first session channel, runs
+// the exec command as a forkd API call, writes JSON to the channel and
+// closes it. Usage:
+//
+//	ssh ctl@sandbox.lacy.casa "new [image]"     create a persistent lease
+//	ssh ctl@sandbox.lacy.casa "ls"              list leases
+//	ssh ctl@sandbox.lacy.casa "rm <lease-id>"   delete a lease
+//	ssh ctl@sandbox.lacy.casa "keepalive <id>"  extend a lease
+//	ssh ctl@sandbox.lacy.casa "cp <id> [tag]"   clone a sandbox (branch)
+//	ssh ctl@sandbox.lacy.casa "help"
+func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer) {
+	// Accept the first session channel; anything else is rejected.
+	var ch ssh.Channel
+	var reqs <-chan *ssh.Request
+	for nc := range chans {
+		if nc.ChannelType() != "session" {
+			nc.Reject(ssh.UnknownChannelType, "only session channels supported")
+			continue
+		}
+		var err error
+		ch, reqs, err = nc.Accept()
+		if err != nil {
+			return
+		}
+		break
+	}
+	if ch == nil {
+		return
+	}
+	defer ch.Close()
+
+	// Read the exec request from the channel's request stream.
+	for req := range reqs {
+		if req.Type != "exec" {
+			if req.WantReply {
+				req.Reply(false, nil)
+			}
+			continue
+		}
+		var msg struct {
+			Command string
+		}
+		if err := ssh.Unmarshal(req.Payload, &msg); err != nil {
+			fmt.Fprintf(ch, `{"error":"bad exec payload: %v"}`+"\n", err)
+			if req.WantReply {
+				req.Reply(false, nil)
+			}
+			return
+		}
+		if req.WantReply {
+			req.Reply(true, nil)
+		}
+		out := runControlCommand(context.Background(), msg.Command, gatewayKey)
+		ch.Write([]byte(out + "\n"))
+		return
+	}
+}
+
+// runControlCommand executes one control-plane command and returns the
+// JSON-ish response text written to the client.
+func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) string {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return `{"error":"empty command — try new, ls, rm, keepalive, cp, help"}`
+	}
+	switch fields[0] {
+	case "help", "--help", "-h":
+		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, cp <id> [tag]"
+	case "new":
+		user := "new"
+		if len(fields) > 1 {
+			user = "new-" + fields[1]
+		}
+		id, img, err := createSandbox(ctx, user)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return fmt.Sprintf(`{"id":%q,"image":%q,"created":true}`, id, img)
+	case "ls":
+		b, err := backendJSON(ctx, http.MethodGet, "/api/sandboxes", nil)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	case "rm":
+		if len(fields) < 2 {
+			return `{"error":"usage: rm <lease-id>"}`
+		}
+		if err := backendJSONErr(ctx, http.MethodDelete, "/api/sandboxes/"+fields[1], nil); err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return fmt.Sprintf(`{"id":%q,"deleted":true}`, fields[1])
+	case "keepalive", "ka":
+		if len(fields) < 2 {
+			return `{"error":"usage: keepalive <lease-id>"}`
+		}
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/keepalive", nil)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	case "cp", "clone":
+		if len(fields) < 2 {
+			return `{"error":"usage: cp <lease-id> [tag]"}`
+		}
+		payload := []byte("{}")
+		if len(fields) > 2 {
+			p, _ := json.Marshal(map[string]string{"tag": fields[2]})
+			payload = p
+		}
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/clone", payload)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	default:
+		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, help"}`, fields[0])
+	}
+}
+
+// backendJSONErr is backendJSON for calls that expect no response body;
+// it returns only the error (nil on success).
+func backendJSONErr(ctx context.Context, method, path string, payload []byte) error {
+	_, err := backendJSON(ctx, method, path, payload)
+	return err
 }
 
 func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {

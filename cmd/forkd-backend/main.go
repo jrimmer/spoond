@@ -51,6 +51,8 @@ func main() {
 	tlsCert := os.Getenv("TLS_CERT")
 	tlsKey := os.Getenv("TLS_KEY")
 	poolSize := envIntOr("POOL_SIZE", 0)
+	idleTimeoutSecs := envIntOr("IDLE_TIMEOUT_SECS", 0) // persistent-lease auto-suspend
+	idleTimeout := time.Duration(idleTimeoutSecs) * time.Second
 	defaultTTL := time.Duration(envIntOr("DEFAULT_TTL_SECS", 300)) * time.Second
 	maxTTL := time.Duration(envIntOr("MAX_TTL_SECS", 3600)) * time.Second
 
@@ -78,7 +80,7 @@ func main() {
 	if v := os.Getenv("KNOWN_IMAGES"); v != "" {
 		knownTags = strings.Split(v, ",")
 	}
-	svc := api.NewService(fc, tokens, poolSize, defaultTTL, maxTTL, knownTags...)
+	svc := api.NewServiceWithIdle(fc, tokens, poolSize, defaultTTL, maxTTL, idleTimeout, knownTags...)
 	reg := api.NewImageRegistry(fc, knownTags...)
 	srv := api.NewServer(svc, reg)
 
