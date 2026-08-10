@@ -67,6 +67,9 @@ if [ -n "$CTLID" ]; then
   else
     bad "workspace $CTLID suspended in controller"
   fi
+  # exec while suspended must fail cleanly (409 conflict, not hang)
+  CODE=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/sandboxes/$CTLID/exec" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"cmd":"echo should-not-run"}')
+  assert_eq "exec on suspended lease 409" "$CODE" "409"
   OUT=$(timeout 90 $SSH "resume $CTLID" 2>&1)
   assert_contains "resume returns JSON" "$OUT" '"status":"running"'
   WS_STATE2=$(curl -s --max-time 8 http://127.0.0.1:8889/v1/workspaces)
@@ -75,6 +78,9 @@ if [ -n "$CTLID" ]; then
   else
     bad "workspace $CTLID running after resume"
   fi
+  # exec after resume must work (state restored, fresh sandbox id)
+  OUT2=$(api POST "/api/sandboxes/$CTLID/exec" '{"cmd":"echo RESUMED_OK"}')
+  assert_contains "exec works after resume" "$OUT2" "RESUMED_OK"
 fi
 
 echo

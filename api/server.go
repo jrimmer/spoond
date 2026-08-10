@@ -202,6 +202,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id) // stream attach is activity for the idle sweeper
+	// A suspended workspace-backed lease has no running sandbox; resume
+	// first.
+	if lease.Suspended {
+		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		return
+	}
 	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "sandbox not running")
@@ -437,6 +443,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id) // exec is activity for the idle sweeper
+	// A suspended workspace-backed lease has no running sandbox; resume
+	// first.
+	if lease.Suspended {
+		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		return
+	}
 	var req struct {
 		Cmd     string            `json:"cmd"`
 		Cwd     string            `json:"cwd"`
