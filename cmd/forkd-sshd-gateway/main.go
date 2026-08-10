@@ -569,12 +569,15 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	}
 	defer ch.Close()
 
-	// Show the MOTD (e.g. "created sandbox …") on new auto-created
-	// sandboxes. dev-base's login hook attaches tmux, whose attach
-	// clears the screen — so a write BEFORE the shell would be wiped.
-	// Instead, delay the MOTD until after the nested shell has started
-	// (and tmux has had a beat to draw), then relay it. (Goroutine
-	// starts after `started`/`startErr` are declared below.)
+	// Deliver the MOTD ("created sandbox …") on new auto-created
+	// sandboxes. We write it to the channel BEFORE the nested shell
+	// starts: tmux's attach clears the screen, but the text stays in
+	// the terminal's scrollback buffer, so when the user exits tmux
+	// the MOTD is still visible ("when I exit tmux it's still there").
+	// The tmux status-right (set below) covers in-session visibility.
+	if motd != "" {
+		_, _ = ch.Write([]byte(motd))
+	}
 
 	// Open a session channel on the nested client. dev-base's login hook
 	// attaches to (or creates) the tmux session, so a plain shell gets
@@ -615,12 +618,12 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	motdReady := make(chan struct{}, 1)
 
 	// Deliver the MOTD ("created sandbox …") on new auto-created
-	// sandboxes. Writing it to the outer channel races the prompt
-	// (dev-base's login hook attaches tmux, and a late write lands on
-	// the line the user is typing). Instead, show it INSIDE tmux: a
-	// transient `display-message` (status-bar popup) plus a persistent
-	// `status-right` so the lease id stays visible. Images without
-	// tmux fall back to a raw channel write.
+	// sandboxes. The MOTD itself is written to the channel BEFORE the
+	// nested shell starts (above) so it survives in the terminal's
+	// scrollback. This goroutine only adds tmux presentation: a
+	// transient `display-message` popup plus a persistent `status-right`
+	// so the lease id stays visible in-session. Images without tmux are
+	// unaffected (the pre-shell write already delivered the MOTD).
 	if motd != "" {
 		go func() {
 			<-motdReady
@@ -639,9 +642,8 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 					// `tmux display-message -t dev` from a second
 					// session renders on the attached client's status
 					// bar; `set-option status-right` keeps the id
-					// visible. Fall back to the raw channel write if
-					// tmux isn't running (non-dev-base images).
-					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null; tmux set-option -t dev status-right 'vm id: " + id + "' 2>/dev/null; echo __TMUX_DONE__")
+					// visible.
+					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null; tmux set-option -t dev status-right 'id: " + id + "' 2>/dev/null; echo __TMUX_DONE__")
 					s2.Close()
 					if err == nil && strings.Contains(string(out), "__TMUX_DONE__") {
 						return
@@ -649,7 +651,6 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 				}
 				time.Sleep(750 * time.Millisecond)
 			}
-			_, _ = ch.Write([]byte(motd))
 		}()
 	}
 
