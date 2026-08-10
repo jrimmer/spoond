@@ -569,16 +569,6 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	}
 	defer ch.Close()
 
-	// Deliver the MOTD ("created sandbox …") on new auto-created
-	// sandboxes. We write it to the channel BEFORE the nested shell
-	// starts: tmux's attach clears the screen, but the text stays in
-	// the terminal's scrollback buffer, so when the user exits tmux
-	// the MOTD is still visible ("when I exit tmux it's still there").
-	// The tmux status-right (set below) covers in-session visibility.
-	if motd != "" {
-		_, _ = ch.Write([]byte(motd))
-	}
-
 	// Open a session channel on the nested client. dev-base's login hook
 	// attaches to (or creates) the tmux session, so a plain shell gets
 	// Jason into his tmux automatically.
@@ -745,6 +735,15 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	// Wait for both relays to finish (EOF on each stream).
 	<-done
 	<-done
+
+	// The nested session has ended (user exited tmux/shell). Now show
+	// the MOTD so the lease id is visible after the session — the user
+	// asked for the id "on the command line in case they don't take
+	// note of it before exiting"; writing it now lands it right where
+	// they're looking when the connection closes.
+	if motd != "" {
+		_, _ = ch.Write([]byte(motd))
+	}
 
 	// Forward the nested exit status to the client channel so the ssh
 	// client knows the command finished (otherwise it hangs).
