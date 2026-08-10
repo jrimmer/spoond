@@ -19,9 +19,16 @@ Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.lacy.casa` on CT144
 
 **Authority hierarchy:** the plan is the authority for scope and sequencing. The user (Jason) owns product decisions; the implementer owns execution details the plan leaves open.
 
-**Stop conditions:** stop when CFOS's `executeCode` path executes agent/gadget code in a forkd microVM (obtained via the lease API) and returns results to the CFOS chat, with the Cloudflare Workers execution path no longer used for that flow. Do not build the full exe.dev-style interactive dev environment in this plan — that is a separate follow-up.
+**Stop conditions:** stop when CFOS's chat agent brain runs in/on forkd microVMs (obtained via the lease API) with forkd-service offering the CFOS driver the way it offers Shelly — CFOS configured (not patched) to use it, and the CFOS chat works end-to-end. Do not build the full exe.dev-style interactive dev environment in this plan — that is a separate follow-up.
 
-**Tail ownership:** the implementer owns the code, tests, and deployment of the forkd execution adapter for CFOS. The user owns the decision to decommission the Cloudflare Workers execution path and any CFOS-side changes.
+**Tail ownership:** the implementer owns the code, tests, and deployment of the forkd-side CFOS driver. The user owns the decision to decommission the Cloudflare Workers execution path and any CFOS-side changes.
+
+> **2026-08-10 RESEARCH UPDATE (drives this revision):** after code-level research into the CFOS codebase (workshop-backend `overseer.ts`, `agent.ts`, `ai-models.ts`, `server.ts`, wrangler config at `os.lacy.casa` = 10.1.0.55:8787):
+> - CFOS is NOT a plain consumer of public Cloudflare Workers APIs. It runs on workerd with its own runtime extensions (`worker_loaders` is a non-standard wrangler key; capnweb RPC; `cloudflare:workers` module).
+> - Its "interface to CF Workers" is really three seams: (1) the chat agent loop (`runAgent` in `agent.ts`), abstracted behind `AgentHooks` + `ModelHandle`; (2) code execution (`executeCode` tool → `executeCodeMode` → `LOADER.load(workerDef)`), a private dynamic-worker loader, synchronous, stateless per call; (3) persistent/async work: Gadgets (Durable Objects with SQLite, `ctx.restore()`, tails, alarms) and Gatekeepers (separate Workers holding credentials, reached via RPC stubs).
+> - **The model routing is the driver socket.** `getModel()` in `ai-models.ts` has three modes including *direct provider access with the config's own `apiUrl`/`apiToken`* — CFOS already supports pointing a chat model at an arbitrary OpenAI-compatible endpoint with zero code change. The frontend's backend URL is also plain config (`VITE_BACKEND_HOST`).
+> - **Conclusion: no CFOS patches are needed.** Earlier plan revisions (KTD1/KTD2, HTTP bridge, `executeCodeMode` forkd branch, `/api/forkd-bridge/*` endpoints) were implemented and then **reverted** (2026-08-10) because they put forkd-awareness inside CFOS — architecturally backwards. The preferred direction (user-confirmed, "B as a sort of CFOS driver") is: forkd-service *offers* the CFOS driver the way it offers Shelly — agent brain in a forkd microVM, LLM gateway + attach hosted by forkd-service, OpenAI-compatible endpoint, keys off-VM, thin images — and CFOS config-only points at it.
+
 
 ## Product Contract
 
@@ -62,30 +69,34 @@ CFOS's execution currently depends on Cloudflare Workers — a managed, external
 
 ### Key Technical Decisions
 
-**KTD1. Adapter as a separate Go component in forkd-service.** A new `cfos/` package (or `cmd/cfos-adapter`) that speaks the forkd lease API and exposes a narrow interface CFOS can call. Keeps CFOS-specific logic out of the core lease API.
+**KTD1. Driver, not adapter — forkd-service offers the CFOS brain the way it offers Shelly.** A new forkd-service component (e.g. `cmd/cfos-driver`) runs an agent brain in a forkd microVM (image attach + LLM gateway, keys off-VM), and exposes an OpenAI-compatible endpoint. CFOS points its existing model config at that endpoint — **no CFOS code changes** (the "config-only" requirement confirmed by `getModel()`'s direct-provider mode with `apiUrl`/`apiToken`). The driver's job is to look like a model to CFOS and like forkd to the sandboxes.
 
-**KTD2. HTTP bridge, not a CFOS fork.** CFOS is upstream (`github.com/cloudflare/cloudflare-os`); we don't fork it. The adapter is a sidecar service CFOS calls over HTTP, so CFOS stays close to upstream and the forkd integration is a thin, replaceable seam.
+**KTD2. The driver speaks the CFOS agent protocol over the bridge.** CFOS chat messages arrive at the driver as OpenAI-compatible chat requests; the driver's agent (in-sandbox) uses tools (executeCode-in-forkd, read/write files, gatekeeper calls). The gatekeeper/gadget bindings bridge (KTD6) is the part of the driver that translates RPC stubs to HTTP calls **outbound from the sandbox back to CFOS** — reverse direction of the earlier (reverted) bridge. CFOS stays upstream-clean.
 
-**KTD3. Reuse the command adapter pattern.** The existing `commandadapter` (synchronous `POST /v1/run` → stdout/stderr/exit) is the natural fit for `executeCode`. Extend or wrap it rather than inventing a new execution path.
+**KTD3. Reuse the command adapter pattern.** The existing `commandadapter` (synchronous `POST /v1/run` → stdout/stderr/exit) is the natural fit for in-driver `executeCode`. Extend or wrap it rather than inventing a new execution path.
 
 **KTD4. Image per gadget language.** Gadget code is JS/TS (Workers-style). Bake a `js-base` (or reuse a node-capable image) for gadget execution; language bases (`go-base`, `elixir-base`) serve agent code that needs them.
 
-**KTD5. `executeCode` is stateless — no persistent-sandbox mode needed.** Research (Cloudflare OS blog, Aug 5 2026, and the `executeCodeMode` implementation on CT144) confirms each `executeCode` call loads a fresh Dynamic Worker (V8 isolate), runs it once, returns a log string, and tears down. No state persists between calls. CFOS's persistent state (SQLite, conversation history, app state) lives in its own Durable Objects / storage, NOT in the execution sandbox. So the forkd batch lease model (create → exec → release) maps cleanly; the persistent-sandbox/suspend-resume work belongs to the separate exe.dev plan.
+**KTD5. `executeCode` is stateless — no persistent-sandbox mode needed.** Research (Cloudflare OS blog, Aug 5 2026, and the `executeCodeMode` implementation) confirms each `executeCode` call loads a fresh Dynamic Worker (V8 isolate), runs it once, returns a log string, and tears down. No state persists between calls. CFOS's persistent state (SQLite, conversation history, app state) lives in its own Durable Objects / storage, NOT in the execution sandbox. So the forkd batch lease model (create → exec → release) maps cleanly; the persistent-sandbox/suspend-resume work belongs to the separate exe.dev plan.
 
-**KTD6. The gatekeeper bindings bridge is the core technical risk.** CFOS generated code receives resources as typed bindings (`const issues = await env.PROJECT.listIssues(...)`) that are RPC stubs to Gatekeepers (which hold credentials, enforce policy, mediate side effects). The forkd sandbox must (a) run JS (Node.js) and (b) reach the gatekeeper bindings via an HTTP/RPC bridge back to CFOS. This is the hard part of U1/U4 — not "run code in a sandbox" but "run JS in a sandbox with access to CFOS's gatekeeper RPC."
+**KTD6. The gatekeeper bindings bridge is the core technical risk.** CFOS generated code receives resources as typed bindings (`const issues = await env.PROJECT.listIssues(...)`) that are RPC stubs to Gatekeepers (which hold credentials, enforce policy, mediate side effects). The forkd sandbox must (a) run JS (Node.js) and (b) reach the gatekeeper bindings via an HTTP/RPC bridge back to CFOS. This is the hard part of the driver — not "run code in a sandbox" but "run JS in a sandbox with access to CFOS's gatekeeper RPC."
+
+**KTD7. Shelly is the template for the driver.** Shelly = agent in a forkd microVM, forkd-service hosts LLM gateway + attach, keys never enter the image, OpenAI-compatible endpoint exposed. The CFOS driver is the same shape with CFOS-specific tools; reuse the Shelly attach/gateway machinery rather than building a parallel mechanism.
 
 ### High-Level Technical Design
 
 ```mermaid
 flowchart LR
-    subgraph CFOS [CT144 - cfos.service]
+    subgraph CFOS [CT144 - cfos.service (unpatched)]
         FE[Frontend]
-        CHAT[Chat / Overseer]
-        EX[executeCode]
+        CHAT[Chat / Overseer runAgent]
+        GK[Gatekeepers / Gadget DOs]
     end
-    subgraph Adapter [forkd-service cfos adapter]
-        BR[HTTP Bridge]
+    subgraph Driver [forkd-service cfos-driver]
+        LLM[OpenAI-compat endpoint]
+        AGT[Agent brain in sandbox]
         CA[Command Adapter /v1/run]
+        BR[gatekeeper bridge → CFOS]
     end
     subgraph Backend [vm2 - forkd-backend]
         API[Lease API :8890]
@@ -95,18 +106,21 @@ flowchart LR
         CTRL[forkd-controller]
         SNAP[(snapshot tags)]
     end
-    EX --> BR
-    BR --> CA
+    CHAT -- "model config (apiUrl)" --> LLM
+    LLM --> AGT
+    AGT --> CA
+    AGT -- "RPC stubs over HTTP" --> BR
+    BR --> GK
     CA --> API
     API --> POOL --> CTRL --> SNAP
 ```
 
-**executeCode flow:**
-1. CFOS `executeCode` call → adapter HTTP bridge
-2. Adapter maps bindings/context, selects image tag
-3. Adapter calls command adapter `POST /v1/run` (or lease API directly) with code + image
-4. forkd-backend grants a warm-pool sandbox, executes, returns stdout/stderr/exit
-5. Adapter returns result to CFOS chat; sandbox released
+**Chat flow (B1 + driver):**
+1. CFOS chat turn → `getModel()` direct-provider route → OpenAI-compatible `apiUrl` = forkd cfos-driver endpoint (CFOS config only)
+2. Driver receives chat messages; its in-sandbox agent runs the CFOS agent protocol (system prompt, tools)
+3. Agent's tools execute in forkd microVMs (command adapter / lease API), stateless per call
+4. Gatekeeper calls from the sandbox go back over the driver's bridge to CFOS's existing gatekeepers
+5. Model stream returns to CFOS chat; CFOS storage/UX unchanged
 
 ### Assumptions
 
@@ -117,37 +131,35 @@ flowchart LR
 
 ## Implementation Units
 
-### U1. CFOS adapter service (HTTP bridge)
+> **STATUS: ON HOLD (2026-08-10).** The user asked to pause implementation pending a decision on how much this matters vs. other forkd-service work. The units below are the revised plan (driver shape) — **do not implement until the user lifts the hold.** What was already built (U1/U2 adapter, U3 js-base bake) remains in the repo/deployed state and is reusable; the A-design CFOS patches were reverted.
 
-**Goal:** Stand up a Go HTTP service that accepts CFOS `executeCode`-shaped requests and forwards them to the forkd command adapter / lease API, returning results.
+### U1. CFOS driver — OpenAI-compatible model endpoint (replaces old "adapter")
 
-**Requirements:** R1, R2, R5
+**Goal:** forkd-service exposes an OpenAI-compatible chat endpoint (`cmd/cfos-driver`) that CFOS can point a model at via existing config (`AiModelConfig.apiUrl`/`apiToken`, direct-provider mode). The driver hosts an agent brain in a forkd microVM (Shelly-style attach + LLM gateway, keys off-VM) and speaks the CFOS agent protocol to its tools.
 
-**Dependencies:** none
+**Requirements:** R1, R2, R3
+
+**Dependencies:** U3 (js-base image), Shelly attach/gateway machinery (reuse, per KTD7)
 
 **Files:**
-- `cmd/cfos-adapter/main.go` (new)
-- `cfos/adapter.go` (new)
-- `cfos/adapter_test.go` (new)
+- `cmd/cfos-driver/main.go` (new)
+- `cfos/driver.go`, `cfos/driver_test.go` (new)
 
-**Approach:** A thin HTTP service with a `POST /v1/execute` endpoint mirroring CFOS's `executeCode` contract (code, bindings, initiator, model). It authenticates with a forkd consumer token, maps the request to a command-adapter `runRequest`, calls the lease API, and returns stdout/stderr/exit. Each call is stateless (per KTD5): create a sandbox, run the code, return output, release. Bindings that have no forkd equivalent are passed through as env or explicitly rejected.
+**Approach:** OpenAI-compatible `/v1/chat/completions` (streaming) in front of an agent loop that runs in a forkd microVM. Chat messages + tool definitions come from CFOS; the agent executes tools (executeCode-in-forkd, file ops, gatekeeper calls via the KTD6 bridge). Each turn uses a lease (create → run → release); conversation state stays in CFOS (per KTD5).
 
-**Execution note:** The gatekeeper bindings bridge (KTD6) is the highest-risk piece. Start with a minimal proof: run a JS snippet in a `js-base` sandbox that calls a gatekeeper binding over HTTP and returns the result, before building the full adapter surface.
-
-**Patterns to follow:** `commandadapter/server.go` (auth, runRequest/runResponse shape, writeJSON/writeError).
+**Patterns to follow:** Shelly integration (attach + LLM gateway), `commandadapter/server.go` (auth, response shape), pi-ai streaming shape (SSE, `text/event-stream`).
 
 **Test scenarios:**
-- Happy path: a valid `executeCode` request runs in a sandbox and returns stdout/exit 0.
-- Error path: invalid/missing code returns 400.
-- Error path: lease API unreachable returns 502 with a clear message.
-- Auth: missing/invalid consumer token returns 401.
-- Integration: a real request executes in a forkd sandbox and returns the expected output.
+- Happy path: OpenAI-compatible request → driver → agent in sandbox → streamed reply.
+- Tool path: agent calls `executeCode` → command adapter → stdout back in stream.
+- Auth: missing/invalid token returns 401.
+- Integration: CFOS chat pointed at driver (config only) completes a turn.
 
-**Verification:** `go test ./cfos/...` passes; a live request to the adapter executes in a forkd sandbox and returns output.
+**Verification:** `go test ./cfos/...` passes; a live CFOS chat turn routed to the driver completes end-to-end.
 
 ### U2. Image selection for gadget/agent code
 
-**Goal:** Select the correct forkd image tag for a CFOS execution request based on the code's language/capability.
+**Goal:** Select the correct forkd image tag for CFOS agent/gadget code based on language/capability.
 
 **Requirements:** R6
 
@@ -157,13 +169,10 @@ flowchart LR
 - `cfos/image.go` (new)
 - `cfos/image_test.go` (new)
 
-**Approach:** Reuse the image-inquiry logic from `images/validate-image.py` (capability detection) as a Go function, or a simple label→image map. Default to `js-base` for Workers-style gadget code; allow language bases for agent code. Reject unknown capabilities with a clear error.
-
-**Patterns to follow:** `runner/executor.go` `imageFor()`; `images/manifest.yaml` capability model.
+**Approach:** Simple label→image map, defaulting to `js-base` for Workers-style gadget code; language bases for agent code. Reject unknown capabilities with a clear error. (Unit-tested in the first pass — already committed as `cfos/image.go`.)
 
 **Test scenarios:**
-- Happy path: JS/TS code maps to `js-base`.
-- Happy path: Go code maps to `go-base`.
+- Happy path: JS/TS → `js-base`; Go → `go-base`; Python → `py-base`.
 - Edge case: unknown capability returns a clear "no image" error.
 - Integration: a JS gadget executes in a `js-base` sandbox.
 
@@ -178,48 +187,50 @@ flowchart LR
 **Dependencies:** none
 
 **Files:**
-- `deploy/bake-js-base.sh` (new, or extend existing bake scripts)
+- `deploy/bake-js-base.sh` (exists from first pass — verify)
 
-**Approach:** Use `forkd from-image node:22 --tag js-base` with the PATH-symlink fix (Node is already in `/usr/local/bin` in the node image, so likely no fix needed — verify). Confirm git is present for checkout.
-
-**Patterns to follow:** `deploy/bake-go-base.sh` (the PATH fix + `FORKD_SCRIPTS_DIR` + `--size-mib` lessons from the go-base bake).
+**Approach:** `forkd from-image node:22 --tag js-base --extra 'git ca-certificates curl'` (the `--extra` takes ONE quoted string). Already done + verified in the first pass: node v22.23.2 + git 2.39.5, `JS_BASE_OK`, registered in KNOWN_IMAGES.
 
 **Test scenarios:**
 - Happy path: `node --version` and `git --version` resolve in a spawned `js-base` sandbox.
-- Edge case: rootfs size sufficient (node image is large; use `--size-mib` if needed).
+- Edge case: rootfs size sufficient (use `--size-mib` if needed).
 
 **Verification:** `forkd images` lists `js-base`; a spawned sandbox runs `node --version` and `git --version`.
 
-### U4. Wire adapter into CFOS executeCode path
+### U4. Wire CFOS to the driver (config only) + gatekeeper bridge
 
-**Goal:** Point CFOS's `executeCode` at the forkd adapter instead of Cloudflare Workers.
+**Goal:** Point CFOS's chat model at the forkd driver — **configuration only, no CFOS code changes.** Prove the gatekeeper binding bridge (KTD6) end-to-end: sandboxed code calls a gatekeeper over the driver's outbound bridge and gets a result.
 
 **Requirements:** R1, R2, R3
 
 **Dependencies:** U1, U2, U3
 
 **Files:**
-- CFOS-side: `packages/workshop-backend/src/overseer.ts` (modify `executeCodeMode` to call the adapter) — note: CFOS is upstream, so this is a local patch or a documented seam
-- `deploy/cfos-adapter.service` (new, systemd unit)
+- `deploy/cfos-driver.service` (new, systemd unit)
+- CFOS config: model entry with `apiUrl` = driver endpoint (no source changes)
+- `cfos/bridge.go`, `cfos/bridge_test.go` (new) — outbound bridge: sandbox → CFOS gatekeepers
 
-**Approach:** Replace the `LOADER.load(workerDef)` Workers path in `executeCodeMode` with an HTTP call to the forkd adapter. Map the `env` bindings to adapter request fields. Keep the CFOS frontend/chat unchanged. Deploy the adapter as a systemd service on CT144 (or a host CFOS can reach).
+**Approach:** Add a model to CFOS config pointing at the driver's OpenAI-compatible endpoint. The driver's sandboxed agent calls gatekeepers via the outbound bridge (HTTP from sandbox → CFOS's existing gatekeeper RPC surface). Verify a CFOS chat turn that uses a gatekeeper binding completes.
 
 **Patterns to follow:** `deploy/forkd-runner.service` (systemd unit pattern).
 
 **Test scenarios:**
-- Happy path: a CFOS chat `executeCode` call runs in a forkd microVM and returns output to the chat.
-- Integration: bindings (e.g. a gatekeeper) are passed through and usable in the sandbox.
-- Error path: adapter down → CFOS surfaces a clear error, no orphaned sandboxes.
+- Happy path: CFOS chat turn with a gatekeeper binding completes via driver + bridge.
+- Error path: driver down → CFOS surfaces a clear error; no orphaned sandboxes.
+- Integration: a real gatekeeper call (e.g. GitHub issues) returns data to the sandbox.
 
-**Verification:** a live CFOS `executeCode` call executes in a forkd microVM and returns output; no orphaned microVMs after the run.
+**Verification:** a live CFOS chat turn routed to the driver completes end-to-end; gatekeeper data returns; no orphaned microVMs.
 
 ## Deferred to Follow-Up Work
 
 - exe.dev-style interactive dev environment (ssh/mosh into a persistent forkd microVM) — separate plan
 - Full CFOS Workers feature parity (Workers logs, R2, Durable Objects semantics)
 - Migrating CFOS hosting off CT144
+- CFOS Gadget execution on forkd (persistent DOs) — beyond the chat-agent driver scope of this plan
 
 ## Open Questions
 
+- **RESOLVED (2026-08-10): Does the integration require CFOS patches?** No. CFOS's `getModel()` direct-provider mode accepts arbitrary OpenAI-compatible `apiUrl`/`apiToken`; the frontend backend URL is config (`VITE_BACKEND_HOST`). The driver shape is config-only for CFOS. (This supersedes the earlier "HTTP bridge into executeCodeMode" design, which was reverted.)
 - **RESOLVED: Does `executeCode` need Durable Objects semantics?** No — each call is stateless (fresh Dynamic Worker, run once, tear down). Persistent state lives in CFOS's own Durable Objects/storage, not the sandbox. (KTD5)
 - **Which CFOS bindings must be available in the sandbox for v1?** The gatekeeper bindings (env.PROJECT, etc.) are the core requirement. The minimal v1 should support at least one gatekeeper binding end-to-end to prove the bridge (KTD6).
+- **PENDING (user decision):** whether the CFOS driver is worth building now vs. other forkd-service work. Implementation is on hold until then.
