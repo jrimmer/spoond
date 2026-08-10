@@ -431,27 +431,21 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 		log.Printf("nested session never started")
 		return
 	}
-	log.Printf("session relay starting")
-
-	done := make(chan struct{}, 2)
-
 	// Relay: client channel -> nested stdin, nested stdout/stderr ->
 	// client channel. Wait for BOTH output relays: firing on either one
 	// alone tears down the channel while the other still has buffered
 	// output (banner arrives, exec output gets truncated).
+	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(stdin, ch)
 		stdin.Close()
-		log.Printf("relay stdin closed")
 	}()
 	go func() {
-		n, _ := io.Copy(ch, stdout)
-		log.Printf("relay stdout copied %d bytes", n)
+		_, _ = io.Copy(ch, stdout)
 		done <- struct{}{}
 	}()
 	go func() {
-		n, _ := io.Copy(ch, stderr)
-		log.Printf("relay stderr copied %d bytes", n)
+		_, _ = io.Copy(ch, stderr)
 		done <- struct{}{}
 	}()
 
