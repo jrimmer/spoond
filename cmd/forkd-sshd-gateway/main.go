@@ -791,13 +791,15 @@ func backendClientLong() *http.Client {
 // backendJSONRetry is backendJSON with a longer retry window for
 // create paths. The backend can briefly be unreachable during its idle
 // sweep + restart (systemd RestartSec=3, then pool refill); a 3s
-// window drops interactive `new@` sessions. This widens the window to
-// ~30s of transport-error retries so a backend blip rides through
-// instead of killing the SSH connection. HTTP/validation errors are
+// window drops interactive `new@` sessions. This retries transport
+// errors with 1/2/4s backoff (~7s total) — long enough to ride out a
+// brief restart blip, short enough that an interactive user isn't left
+// hanging. If the backend hasn't come back by then it's down for a real
+// restart, and waiting longer won't help. HTTP/validation errors are
 // still returned immediately (never retried).
 func backendJSONRetry(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	var lastErr error
-	backoff := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 8 * time.Second, 8 * time.Second}
+	backoff := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
 	for attempt := 0; attempt <= len(backoff); attempt++ {
 		if attempt > 0 {
 			select {
