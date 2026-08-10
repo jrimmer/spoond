@@ -32,6 +32,7 @@ type Lease struct {
 	LastActive time.Time // last activity (exec/stream/proxy/keepalive), for idle sweep
 	Workspace  string    // workspace name when workspace-backed (suspend/resume support)
 	Suspended  bool      // workspace-backed lease is currently suspended
+	Name       string    // optional friendly name/tag (unique per owner; resolved by ssh/proxy)
 	released   bool
 }
 
@@ -461,6 +462,99 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 	return l, nil
 }
 
+// restart reboots a workspace-backed persistent lease: suspend (snapshot
+// + stop) then resume (fresh sandbox from the state snapshot). Idempotent
+// for suspended leases (resume alone). Plain leases get a kill + cold
+// spawn; non-workspace persistent leases return notPersistent.
+func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error) {
+	s.store.mu.Lock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		s.store.mu.Unlock()
+		return nil, errNotFound
+	}
+	if !l.Persistent {
+		s.store.mu.Unlock()
+		return nil, errNotPersistent
+	}
+	workspace := l.Workspace
+	suspended := l.Suspended
+	s.store.mu.Unlock()
+
+	if workspace != "" {
+		if !suspended {
+			if err := s.forkd.SuspendWorkspace(ctx, workspace); err != nil {
+				return nil, err
+			}
+		}
+		return s.resume(ctx, owner, id)
+	}
+	// Plain persistent lease: kill the sandbox, then cold-spawn the image
+	// and re-grant the lease on the fresh sandbox.
+	if err := s.forkd.Kill(ctx, l.ForkdID); err != nil {
+		return nil, err
+	}
+	sbs, err := s.forkd.Spawn(ctx, l.Image, 1, false, 0)
+	if err != nil {
+		return nil, err
+	}
+	if len(sbs) == 0 {
+		return nil, fmt.Errorf("spawn returned no sandboxes")
+	}
+	s.store.mu.Lock()
+	l.ForkdID = sbs[0].ID
+	l.Suspended = false
+	l.LastActive = time.Now()
+	s.store.mu.Unlock()
+	if err := s.fillEndpoint(ctx, l); err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// setName assigns a friendly name to a lease. Names must be non-empty,
+// at most 63 chars, [a-z0-9][a-z0-9-]* (lowercase, hyphenable, no dots —
+// dots belong to the proxy hostname), and unique per owner.
+func (s *Service) setName(owner, id, name string) (*Lease, error) {
+	if name == "" || len(name) > 63 {
+		return nil, fmt.Errorf("name must be 1-63 chars")
+	}
+	for i, r := range name {
+		ok := r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' && i > 0
+		if !ok {
+			return nil, fmt.Errorf("name must match [a-z0-9][a-z0-9-]*")
+		}
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		return nil, errNotFound
+	}
+	for _, other := range s.store.leases {
+		if other != l && other.Owner == owner && !other.released && other.Name == name {
+			return nil, fmt.Errorf("name %q already in use by lease %s", name, other.ID)
+		}
+	}
+	l.Name = name
+	return l, nil
+}
+
+// lookupByName returns a live lease with the given name regardless of
+// owner. Used by the SSH gateway (username = name) and the public proxy
+// (<name>.sandbox.lacy.casa); both treat the name as the capability, the
+// same model as lease ids. Names are unique per owner.
+func (s *Service) lookupByName(name string) *Lease {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	for _, l := range s.store.leases {
+		if !l.released && l.Name == name {
+			return l
+		}
+	}
+	return nil
+}
+
 // grantFromSnapshot spawns a sandbox directly from a specific snapshot
 // tag (not via the warm pool) and grants a lease on it. Used by clone:
 // the branch tag is fresh, has no pool, and must not be registered as a
@@ -575,6 +669,8 @@ func (s *Service) list(owner string) []map[string]any {
 				"address":    l.Address,
 				"expires":    l.ExpiresAt.Unix(),
 				"persistent": l.Persistent,
+				"suspended":  l.Suspended,
+				"name":       l.Name,
 			})
 		}
 	}

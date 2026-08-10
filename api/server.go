@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -51,10 +52,14 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/suspend", s.handleSuspend)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/resume", s.handleResume)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/restart", s.handleRestart)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/tag", s.handleTag)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/prompt", s.handlePrompt)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
+	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	if s.llm != nil {
@@ -426,6 +431,146 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRestart reboots a persistent lease (workspace-backed: snapshot +
+// resume; plain: kill + cold spawn).
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease, err := s.svc.restart(r.Context(), owner, id)
+	if err != nil {
+		switch err {
+		case errNotFound:
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errNotPersistent:
+			writeError(w, http.StatusBadRequest, "sandbox is not a persistent lease")
+		default:
+			s.svc.log.Printf("restart %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "restart failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      lease.ID,
+		"status":  "running",
+		"message": "sandbox restarted",
+	})
+}
+
+// handleTag assigns a friendly name to a lease.
+func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	lease, err := s.svc.setName(owner, id, req.Name)
+	if err != nil {
+		if err == errNotFound {
+			writeError(w, http.StatusNotFound, "sandbox not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":   lease.ID,
+		"name": lease.Name,
+		"ok":   true,
+	})
+}
+
+// handlePrompt sends a message to the Shelley coding agent running inside
+// a lease and returns the agent's reply. Requires the agent to be up
+// (see the `shelly` ctl verb / runShelly). Implements `shelley prompt`
+// from exe.dev's CLI surface as an LLM-callable API command.
+func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		Message string `json:"message"`
+		Model   string `json:"model,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Message) == "" {
+		writeError(w, http.StatusBadRequest, "{\"message\":\"...\"} required")
+		return
+	}
+	lease := s.svc.lookup(owner, id)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	if lease.Suspended {
+		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		return
+	}
+	model := req.Model
+	if model == "" {
+		model = "gpt-oss-20b-fireworks"
+	}
+	msg64 := base64.StdEncoding.EncodeToString([]byte(req.Message))
+	mod64 := base64.StdEncoding.EncodeToString([]byte(model))
+	script := fmt.Sprintf(`set -e
+MSG=$(echo %s | base64 -d)
+MOD=$(echo %s | base64 -d)
+RESP=$(curl -sf --max-time 60 -H 'Content-Type: application/json' \
+  -d "{\"message\":$(printf '%%s' "$MSG" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'),\"model\":\"$MOD\"}" \
+  http://127.0.0.1:9000/api/conversations/new) || { echo "SHELLEY_NOT_RUNNING"; exit 1; }
+CID=$(echo "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["conversation_id"])')
+for i in $(seq 1 40); do
+  sleep 5
+  OUT=$(curl -sf --max-time 10 http://127.0.0.1:9000/api/conversation/$CID 2>/dev/null || true)
+  AGENT=$(echo "$OUT" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+for m in d.get("messages", []):
+    if m.get("type") == "agent":
+        ld = json.loads(m.get("llm_data") or "{}")
+        content = ld.get("Content") or []
+        text = " ".join(c.get("Text","") for c in content if isinstance(c, dict))
+        if text.strip():
+            print(text)
+            raise SystemExit
+' 2>/dev/null || true)
+  if [ -n "$AGENT" ]; then echo "$AGENT"; exit 0; fi
+done
+echo "AGENT_TIMEOUT"`, msg64, mod64)
+
+	s.svc.log.Printf("prompt %s: %s", id, req.Message)
+	start := time.Now()
+	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, buildShellArgs(script, "", nil), 240)
+	if err != nil {
+		s.svc.log.Printf("prompt %s: %v (dur=%s)", id, err, time.Since(start))
+		writeError(w, http.StatusBadGateway, "agent exec failed: "+err.Error())
+		return
+	}
+	s.svc.log.Printf("prompt %s: exit=%d stdout=%d dur=%s", id, res.ExitCode, len(res.Stdout), time.Since(start))
+	out := res.Stdout
+	if strings.Contains(out, "SHELLEY_NOT_RUNNING") {
+		writeError(w, http.StatusConflict, "shelley agent is not running in this sandbox — use the shelly ctl verb first")
+		return
+	}
+	if strings.Contains(out, "AGENT_TIMEOUT") {
+		writeError(w, http.StatusGatewayTimeout, "agent did not reply within 200s")
+		return
+	}
+	if res.ExitCode != 0 {
+		writeError(w, http.StatusBadGateway, "agent exec failed: "+tailStr(res.Stderr, 500))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      id,
+		"message": req.Message,
+		"reply":   strings.TrimSpace(out),
+	})
+}
+
 // handleResume restores a suspended workspace-backed lease.
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
@@ -582,6 +727,22 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"images": tags})
+}
+
+// handleByName resolves a friendly lease name to its lease id. Used by
+// the SSH gateway (username = name) and for script/LLM convenience.
+func (s *Server) handleByName(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	lease := s.svc.lookupByName(name)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "no sandbox named "+name)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":    lease.ID,
+		"name":  lease.Name,
+		"image": lease.Image,
+	})
 }
 
 // buildShellArgs wraps a command with cwd/env into a single shell

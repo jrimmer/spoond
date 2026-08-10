@@ -52,12 +52,17 @@ func (s *Server) ProxyHandler() http.Handler {
 func (s *Server) SetAssetsDir(dir string) { s.assetsDir = dir }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	leaseID, port, ok := parseProxyHost(r.Host)
+	label, port, ok := parseProxyHost(r.Host)
 	if !ok {
 		http.Error(w, "unknown sandbox hostname", http.StatusNotFound)
 		return
 	}
-	lease := s.svc.lookupAny(leaseID)
+	var lease *Lease
+	if len(label) == 32 && isHex(label) {
+		lease = s.svc.lookupAny(label)
+	} else {
+		lease = s.svc.lookupByName(label)
+	}
 	if lease == nil {
 		http.Error(w, "sandbox not found", http.StatusNotFound)
 		return
@@ -125,12 +130,33 @@ func parseProxyHost(host string) (leaseID string, port int, ok bool) {
 		if p, err := strconv.Atoi(label[i+1:]); err == nil && p > 0 && p < 65536 {
 			return label[:i], p, true
 		}
+		// A bad port suffix on a 32-hex id is a malformed proxy URL, not
+		// a name. A non-id prefix is just a hyphenated name candidate.
+		if len(label[:i]) == 32 && isHex(label[:i]) {
+			return "", 0, false
+		}
 	}
-	// No port suffix: the whole label must look like a lease id.
-	if len(label) != 32 || !isHex(label) {
+	// No port suffix: the label is either a 32-hex lease id or a friendly
+	// name assigned via the tag endpoint. Both resolve to a lease.
+	if !isValidLabel(label) {
 		return "", 0, false
 	}
 	return label, defaultProxyPort, true
+}
+
+// isValidLabel accepts a 32-hex lease id or a friendly name
+// ([a-z0-9][a-z0-9-]{0,62}, no dots — the suffix owns the dots).
+func isValidLabel(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	for i, c := range s {
+		ok := c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' && i > 0
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func isHex(s string) bool {

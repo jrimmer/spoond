@@ -862,3 +862,68 @@ func TestLLMGateway(t *testing.T) {
 		t.Fatalf("expected 400 for malformed path, got %d", resp5.StatusCode)
 	}
 }
+
+// TestTagAndRestart covers the new ctl surface: friendly names (tag) and
+// reboot (restart) on workspace-backed persistent leases.
+func TestTagAndRestart(t *testing.T) {
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
+	reg := NewImageRegistry(ff, "py-base")
+	srv := NewServer(svc, reg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	create := func() string {
+		_, m := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+		id, _ := m["id"].(string)
+		if id == "" {
+			t.Fatalf("create: no id in %v", m)
+		}
+		return id
+	}
+	id := create()
+
+	// tag: assign a friendly name, then resolve it back.
+	_, m := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/tag", "token-a", map[string]any{"name": "webby"})
+	if m["ok"] != true || m["name"] != "webby" {
+		t.Fatalf("tag response: %v", m)
+	}
+	// duplicate name on a second lease must fail.
+	id2 := create()
+	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id2+"/tag", "token-a", map[string]any{"name": "webby"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("duplicate name: status %d, want 400", resp.StatusCode)
+	}
+	// name resolution endpoint.
+	_, m = doReq(t, "GET", ts.URL+"/api/names/webby", "token-a", nil)
+	if m["id"] != id {
+		t.Fatalf("names response: %v", m)
+	}
+	// invalid name rejected.
+	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id2+"/tag", "token-a", map[string]any{"name": "Bad Name!"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid name: status %d, want 400", resp.StatusCode)
+	}
+
+	// restart: workspace-backed lease -> suspend+resume, still listable.
+	_, m = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/restart", "token-a", map[string]any{})
+	if m["status"] != "running" {
+		t.Fatalf("restart response: %v", m)
+	}
+	// list still contains both, with names.
+	_, m = doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	sbs, _ := m["sandboxes"].([]any)
+	if len(sbs) != 2 {
+		t.Fatalf("want 2 sandboxes, got %d", len(sbs))
+	}
+	// prompt endpoint exists and answers (fake exec returns empty output;
+	// the SHELLEY_NOT_RUNNING 409 path needs a live agent, covered by the
+	// integration suite).
+	resp, m = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/prompt", "token-a", map[string]any{"message": "hi"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("prompt: status %d, want 200 (fake exec empty)", resp.StatusCode)
+	}
+	if _, ok := m["reply"]; !ok {
+		t.Fatalf("prompt response missing reply: %v", m)
+	}
+}

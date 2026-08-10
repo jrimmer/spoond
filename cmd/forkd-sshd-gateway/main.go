@@ -132,9 +132,21 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 	}
 
 	// Resolve the target: a 32-hex lease id attaches an existing sandbox;
-	// new[-<image>] auto-creates a persistent one (SSH-as-API).
+	// a friendly name resolves to its lease; new[-<image>] auto-creates a
+	// persistent one (SSH-as-API).
 	leaseID := user
 	motd := ""
+	if !isLeaseID(user) {
+		// Try a friendly name first (assigned via `ctl tag <id> <name>`).
+		// Anything that's not a lease id and not a new-* create verb is a
+		// candidate name; createSandbox rejects unknown verbs below.
+		if !strings.HasPrefix(user, "new") {
+			if id, ok := resolveName(context.Background(), user); ok {
+				leaseID = id
+				user = id // keep motd generic below
+			}
+		}
+	}
 	if !isLeaseID(user) {
 		created, img, err := createSandbox(context.Background(), user)
 		if err != nil {
@@ -402,7 +414,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 	}
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, cp <id> [tag], shelly <id>"
+		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, prompt <id> <message>"
 	case "new":
 		user := "new"
 		if len(fields) > 1 {
@@ -473,8 +485,38 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 			return `{"error":"usage: shelly <lease-id>"}`
 		}
 		return runShelly(ctx, fields[1])
+	case "restart":
+		if len(fields) < 2 {
+			return `{"error":"usage: restart <lease-id>"}`
+		}
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/restart", nil)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	case "tag":
+		if len(fields) < 3 {
+			return `{"error":"usage: tag <lease-id> <name>"}`
+		}
+		p, _ := json.Marshal(map[string]string{"name": fields[2]})
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/tag", p)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	case "prompt":
+		if len(fields) < 3 {
+			return `{"error":"usage: prompt <lease-id> <message...>"}`
+		}
+		msg := strings.Join(fields[2:], " ")
+		p, _ := json.Marshal(map[string]string{"message": msg})
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/prompt", p)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
 	default:
-		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, help"}`, fields[0])
+		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, restart, tag, prompt, help"}`, fields[0])
 	}
 }
 
@@ -738,6 +780,21 @@ func resolveEndpoint(ctx context.Context, leaseID string) (*endpoint, error) {
 		return nil, err
 	}
 	return &ep, nil
+}
+
+// resolveName looks up a friendly lease name and returns its lease id.
+func resolveName(ctx context.Context, name string) (string, bool) {
+	b, err := backendJSON(ctx, http.MethodGet, "/api/names/"+name, nil)
+	if err != nil {
+		return "", false
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil || out.ID == "" {
+		return "", false
+	}
+	return out.ID, true
 }
 
 // runShelly implements the `shelly <lease-id>` ctl verb: it bootstraps
