@@ -641,7 +641,7 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 					// bar; `set-option status-right` keeps the id
 					// visible. Fall back to the raw channel write if
 					// tmux isn't running (non-dev-base images).
-					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null; tmux set-option -t dev status-right 'forkd: " + id + "' 2>/dev/null; echo __TMUX_DONE__")
+					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null; tmux set-option -t dev status-right 'vm id: " + id + "' 2>/dev/null; echo __TMUX_DONE__")
 					s2.Close()
 					if err == nil && strings.Contains(string(out), "__TMUX_DONE__") {
 						return
