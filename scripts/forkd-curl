@@ -1,0 +1,40 @@
+#!/bin/bash
+# forkd-curl — authenticated curl wrapper for the forkd-service lease API.
+#
+# The forkd-service backend runs on a single host (backend + controller +
+# gateway together) and serves TLS on :8890 with a certificate for the
+# backend hostname. This wrapper:
+#   - injects the consumer token (read at runtime — never stored here)
+#   - validates TLS against the real cert by resolving the API hostname
+#     to loopback (no -k needed for the local-backend deployment)
+#
+# Usage:
+#   forkd-curl -s -X POST https://vm2.lacy.casa:8890/api/sandboxes \
+#     -H 'Content-Type: application/json' -d '{"image":"dev-base","ttl":1800}'
+#
+# Env:
+#   FORKD_API         base URL (default https://127.0.0.1:8890)
+#   FORKD_TOKEN_FILE  env file with CONSUMER_TOKENS= (default /etc/forkd-backend.env)
+#   FORKD_TOKEN       explicit token, overrides FORKD_TOKEN_FILE
+set -eu
+
+FORKD_API="${FORKD_API:-https://127.0.0.1:8890}"
+FORKD_TOKEN_FILE="${FORKD_TOKEN_FILE:-/etc/forkd-backend.env}"
+
+TOKEN="${FORKD_TOKEN:-}"
+if [ -z "$TOKEN" ] && [ -f "$FORKD_TOKEN_FILE" ]; then
+  # Format: CONSUMER_TOKENS=<token>=<consumer-id> — take the part before '='.
+  TOKEN=$(grep -oE 'CONSUMER_TOKENS=[^ ]+' "$FORKD_TOKEN_FILE" | cut -d= -f2- | cut -d= -f1)
+fi
+if [ -z "$TOKEN" ]; then
+  echo "forkd-curl: no consumer token (set FORKD_TOKEN or FORKD_TOKEN_FILE)" >&2
+  exit 1
+fi
+
+# Resolve the API hostname to loopback so TLS validates against the
+# hostname cert (forkd-service runs backend+controller on one host).
+HOST=$(printf '%s' "$FORKD_API" | sed -E 's|^https?://([^:/]+).*|\1|')
+PORT=$(printf '%s' "$FORKD_API" | sed -nE 's|^https?://[^:/]+:([0-9]+).*|\1|p')
+[ -n "$PORT" ] || PORT=8890
+
+exec curl --resolve "$HOST:$PORT:127.0.0.1" -H "Authorization: Bearer $TOKEN" "$@"
