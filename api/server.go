@@ -23,11 +23,26 @@ type Server struct {
 	svc *Service
 	reg *ImageRegistry
 	mux *http.ServeMux
+	llm *llmGateway
 }
 
-// NewServer wires the lease API routes onto a mux.
+// NewServer wires the lease API routes onto a mux. openRouterURL and
+// openRouterKey are the LLM gateway upstream (empty = gateway disabled);
+// the key is held process-side and never exposed to sandboxes.
 func NewServer(svc *Service, reg *ImageRegistry) *Server {
+	return NewServerWithLLM(svc, reg, "", "", "", nil)
+}
+
+// NewServerWithLLM wires the lease API routes plus an optional per-lease
+// LLM gateway. openRouterURL is the OpenAI-compatible API base; the key
+// stays in this process. defaultModel is the upstream fallback model
+// (applied when a requested id isn't in modelMap); modelMap translates
+// exe.dev catalog model ids to upstream ids.
+func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux()}
+	if openRouterURL != "" {
+		s.llm = newLLMGateway(svc.log, svc.lookupAny, openRouterURL, openRouterKey, defaultModel, modelMap)
+	}
 	s.mux.HandleFunc("POST /api/sandboxes", s.handleCreate)
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
@@ -41,6 +56,12 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	if s.llm != nil {
+		// The LLM gateway is auth-exempt (lease id in path is the
+		// capability); it MUST be mounted on the outer handler after
+		// authMiddleware. Handler() does that via authExempt prefix.
+		s.mux.Handle(llmGatewayPrefix, s.llm)
+	}
 	return s
 }
 
@@ -72,10 +93,12 @@ func (s *Server) Handler() http.Handler {
 }
 
 // authMiddleware authenticates the bearer token and injects the
-// consumer id into the request context. /healthz is exempt (liveness).
+// consumer id into the request context. /healthz is exempt (liveness);
+// the /llm/ prefix is exempt too — the lease id in the path is the
+// capability, and sandboxes hold no consumer token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -710,3 +710,155 @@ func TestKeepAliveRejectsNonPersistent(t *testing.T) {
 		t.Fatalf("expected errNotPersistent, got %v", err)
 	}
 }
+
+// TestLLMGateway verifies the per-lease LLM gateway: capability is the
+// lease id in the path, the upstream is hit with the server-side key,
+// unknown/suspended leases are rejected, and the /llm/ prefix bypasses
+// consumer-token auth.
+func TestLLMGateway(t *testing.T) {
+	// Fake upstream that records the auth header + model it received.
+	var gotAuth string
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if r.Method == "POST" {
+			var body struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			gotModel = body.Model
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upstream.Close)
+
+	ff := newFakeForkd()
+	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
+	reg := NewImageRegistry(ff, "py-base")
+	srv := NewServerWithLLM(svc, reg, upstream.URL, "sk-server-secret", "fallback-model", map[string]string{"gpt-oss-20b-fireworks": "gpt-oss:20b"})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Create a persistent lease so lookupAny finds it.
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := create["id"].(string)
+
+	// 1. No bearer token: /llm/ must be auth-exempt (lease id is the cap).
+	req, _ := http.NewRequest("POST", ts.URL+"/llm/"+id+"/openai/chat/completions", strings.NewReader(`{"model":"gpt-oss-20b-fireworks"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 (auth-exempt, valid lease), got %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"path":"/chat/completions"`) {
+		t.Fatalf("expected upstream path /chat/completions, got %s", body)
+	}
+	if gotAuth != "Bearer sk-server-secret" {
+		t.Fatalf("expected server-side key injected, got %q", gotAuth)
+	}
+	if gotModel != "gpt-oss:20b" {
+		t.Fatalf("expected model remapped to gpt-oss:20b, got %q", gotModel)
+	}
+
+	// 1a. Unmapped model falls back to the gateway default.
+	req1a, _ := http.NewRequest("POST", ts.URL+"/llm/"+id+"/openai/chat/completions", strings.NewReader(`{"model":"gpt-5.4-nano"}`))
+	req1a.Header.Set("Content-Type", "application/json")
+	resp1a, err := http.DefaultClient.Do(req1a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp1a.Body)
+	resp1a.Body.Close()
+	if resp1a.StatusCode != 200 {
+		t.Fatalf("expected 200 for unmapped model, got %d", resp1a.StatusCode)
+	}
+	if gotModel != "fallback-model" {
+		t.Fatalf("expected unmapped model -> default fallback-model, got %q", gotModel)
+	}
+
+	// 1b. Multi-segment provider prefix: /fireworks/inference/... strips
+	// the whole provider prefix before forwarding.
+	req1b, _ := http.NewRequest("POST", ts.URL+"/llm/"+id+"/fireworks/inference/chat/completions", strings.NewReader(`{}`))
+	resp1b, err := http.DefaultClient.Do(req1b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body1b, _ := io.ReadAll(resp1b.Body)
+	resp1b.Body.Close()
+	if resp1b.StatusCode != 200 {
+		t.Fatalf("expected 200 for fireworks provider, got %d: %s", resp1b.StatusCode, body1b)
+	}
+	if !strings.Contains(string(body1b), `"path":"/chat/completions"`) {
+		t.Fatalf("expected upstream path /chat/completions for fireworks, got %s", body1b)
+	}
+
+	// 1c. Shelley fireworks path carries /v1 under the provider prefix;
+	// the upstream base (…/v1) must not be doubled.
+	req1c, _ := http.NewRequest("POST", ts.URL+"/llm/"+id+"/fireworks/inference/v1/chat/completions", strings.NewReader(`{}`))
+	resp1c, err := http.DefaultClient.Do(req1c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body1c, _ := io.ReadAll(resp1c.Body)
+	resp1c.Body.Close()
+	if resp1c.StatusCode != 200 {
+		t.Fatalf("expected 200 for fireworks /v1 path, got %d: %s", resp1c.StatusCode, body1c)
+	}
+	if !strings.Contains(string(body1c), `"path":"/v1/chat/completions"`) {
+		t.Fatalf("expected upstream path /v1/chat/completions (no double /v1), got %s", body1c)
+	}
+
+	// 2. Unknown lease -> 404.
+	req2, _ := http.NewRequest("POST", ts.URL+"/llm/deadbeefdeadbeefdeadbeefdeadbeef/openai/chat/completions", strings.NewReader(`{}`))
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != 404 {
+		t.Fatalf("expected 404 for unknown lease, got %d", resp2.StatusCode)
+	}
+
+	// 3. Unsupported provider -> 501.
+	req3, _ := http.NewRequest("POST", ts.URL+"/llm/"+id+"/anthropic/v1/messages", strings.NewReader(`{}`))
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != 501 {
+		t.Fatalf("expected 501 for anthropic provider, got %d", resp3.StatusCode)
+	}
+
+	// 4. Suspended lease -> 409.
+	respS, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	if respS.StatusCode != 200 {
+		t.Fatalf("suspend status %d", respS.StatusCode)
+	}
+	req4, _ := http.NewRequest("POST", ts.URL+"/llm/"+id+"/openai/chat/completions", strings.NewReader(`{}`))
+	resp4, err := http.DefaultClient.Do(req4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp4.Body.Close()
+	if resp4.StatusCode != 409 {
+		t.Fatalf("expected 409 for suspended lease, got %d", resp4.StatusCode)
+	}
+
+	// 5. Malformed path -> 400.
+	req5, _ := http.NewRequest("POST", ts.URL+"/llm/just-a-lease-id", nil)
+	resp5, err := http.DefaultClient.Do(req5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp5.Body.Close()
+	if resp5.StatusCode != 400 {
+		t.Fatalf("expected 400 for malformed path, got %d", resp5.StatusCode)
+	}
+}

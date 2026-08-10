@@ -28,7 +28,16 @@ const defaultProxyPort = 3000
 // → guest:3000, <lease-id>-<port>.sandbox.lacy.casa → guest:<port>.
 // The lease id in the hostname is the capability (same model as SSH).
 func (s *Server) ProxyHandler() http.Handler {
-	return http.HandlerFunc(s.handleProxy)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The LLM gateway also lives on the plain-HTTP proxy listener:
+		// guests reach it at http://10.43.0.1:8891/llm/<lease-id>/...,
+		// avoiding TLS validation of the backend's self-signed cert.
+		if s.llm != nil && strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
+			s.llm.ServeHTTP(w, r)
+			return
+		}
+		s.handleProxy(w, r)
+	})
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {

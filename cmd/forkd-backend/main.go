@@ -10,6 +10,10 @@
 //	POOL_SIZE        warm-pool size per image (default 0 = disabled)
 //	DEFAULT_TTL_SECS default lease TTL (default 300)
 //	MAX_TTL_SECS     max lease TTL (default 3600)
+//	LLM_UPSTREAM_URL OpenAI-compatible LLM API base for the per-lease
+//	                 LLM gateway (e.g. https://openrouter.ai/api/v1)
+//	LLM_UPSTREAM_KEY server-side key for that upstream (never sent to
+//	                 sandboxes; empty disables the gateway)
 package main
 
 import (
@@ -82,7 +86,19 @@ func main() {
 	}
 	svc := api.NewServiceWithIdle(fc, tokens, poolSize, defaultTTL, maxTTL, idleTimeout, knownTags...)
 	reg := api.NewImageRegistry(fc, knownTags...)
-	srv := api.NewServer(svc, reg)
+	// LLM gateway model map: "exe.dev-id=upstream-id,exe.dev-id2=upstream2".
+	// Shelley sends exe.dev catalog ids; the gateway rewrites them to the
+	// configured upstream's models. Unmapped ids fall back to defaultModel.
+	llmModelMap := map[string]string{}
+	if v := os.Getenv("LLM_MODEL_MAP"); v != "" {
+		for _, pair := range strings.Split(v, ",") {
+			parts := strings.SplitN(pair, "=", 2)
+			if len(parts) == 2 {
+				llmModelMap[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), os.Getenv("LLM_UPSTREAM_KEY"), os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
