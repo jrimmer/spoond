@@ -1,0 +1,16 @@
+[Unit]
+Description=forkd CFOS/Sandstorm execution adapter (ticket #17)
+After=network.target forkd-backend.service
+Requires=forkd-backend.service
+
+[Service]
+ExecStart=/opt/cfos-adapter/cfos-adapter
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/etc/cfos-adapter.env
+Environment=ADAPTER_ADDR=:8893
+# Leases are short-lived; grant plenty of headroom for exec timeouts.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

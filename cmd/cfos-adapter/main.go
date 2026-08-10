@@ -12,6 +12,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"log"
 	"net/http"
 	"os"
@@ -33,6 +34,14 @@ func main() {
 	defaultImage := envOr("DEFAULT_IMAGE", "js-base")
 
 	lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+	// The backend serves a self-signed cert without an IP SAN for
+	// 127.0.0.1 (same as the gateway's backendClient); skip verify.
+	lease.Client = &http.Client{
+		Timeout: 600 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	srv := cfos.New(cfos.Config{
 		Sandbox:      lease,
 		Tokens:       map[string]string{adapterToken: "cfos"},

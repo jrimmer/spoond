@@ -510,7 +510,10 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 		}
 		msg := strings.Join(fields[2:], " ")
 		p, _ := json.Marshal(map[string]string{"message": msg})
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/prompt", p)
+		// The in-guest agent can take minutes to reply; backendJSON's
+		// default client would drop the response at 10s. Use the
+		// long-timeout client for this verb only.
+		b, err := backendJSONWith(ctx, backendClientLong(), http.MethodPost, "/api/sandboxes/"+fields[1]+"/prompt", p)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -686,12 +689,31 @@ func backendClient() *http.Client {
 	}
 }
 
+// backendClientLong is used for long-running backend calls (e.g. the
+// prompt verb, whose in-guest agent can take minutes to reply). The
+// lease exec timeout (240s) bounds the real work; give the client
+// enough headroom so the backend response is not dropped mid-flight.
+func backendClientLong() *http.Client {
+	return &http.Client{
+		Timeout: 280 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+}
+
 // backendJSON performs a JSON request against the backend with the
 // consumer token and returns the response body (or an error on non-2xx).
 // Transient connection errors (refused/reset/timeout — e.g. backend busy
 // refilling the warm pool) are retried with backoff; the gateway should
 // not drop an SSH session because one loopback request got refused.
 func backendJSON(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	return backendJSONWith(ctx, backendClient(), method, path, body)
+}
+
+// backendJSONWith is backendJSON with an explicit client (e.g. the
+// long-timeout client for slow verbs like prompt).
+func backendJSONWith(ctx context.Context, client *http.Client, method, path string, body []byte) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
 		if attempt > 0 {
@@ -701,7 +723,7 @@ func backendJSON(ctx context.Context, method, path string, body []byte) ([]byte,
 			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
 			}
 		}
-		b, err := backendJSONOnce(ctx, method, path, body)
+		b, err := backendJSONOnceWith(ctx, client, method, path, body)
 		if err == nil {
 			return b, nil
 		}
@@ -717,6 +739,10 @@ func backendJSON(ctx context.Context, method, path string, body []byte) ([]byte,
 }
 
 func backendJSONOnce(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	return backendJSONOnceWith(ctx, backendClient(), method, path, body)
+}
+
+func backendJSONOnceWith(ctx context.Context, client *http.Client, method, path string, body []byte) ([]byte, error) {
 	url := strings.TrimRight(*backendURL, "/") + path
 	var rd io.Reader
 	if body != nil {
@@ -730,7 +756,6 @@ func backendJSONOnce(ctx context.Context, method, path string, body []byte) ([]b
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := backendClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
