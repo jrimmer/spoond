@@ -1,7 +1,11 @@
 [Unit]
 Description=forkd SSH gateway (sandbox.lacy.casa interactive access)
 After=network.target forkd-backend.service
-Requires=forkd-backend.service
+# Soft dependency: start after the backend, but do NOT tear down the
+# gateway when the backend restarts (Requires= would stop us too — the
+# backend restarts on sweep/failure and the gateway must keep serving
+# long enough for its create-retry to ride through the blip).
+Wants=forkd-backend.service
 
 [Service]
 ExecStart=/opt/forkd-gateway/forkd-sshd-gateway \

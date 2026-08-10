@@ -236,7 +236,18 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		}
 	}
 	s.store.mu.Unlock()
+	// Suspend idle workspace leases in small, staggered batches. Each
+	// suspend is a controller snapshot write that briefly blocks the
+	// controller's accept loop; a large backlog (e.g. after a long test
+	// session) must not produce one big pause that drops incoming
+	// connections. Cap per tick and space them out — with the 5s sweep
+	// tick, 13 idle leases clear in ~25s instead of a single burst.
+	const maxSuspendPerTick = 3
+	suspended := 0
 	for _, l := range idleSuspend {
+		if suspended >= maxSuspendPerTick {
+			break
+		}
 		if err := s.forkd.SuspendWorkspace(ctx, l.Workspace); err != nil {
 			s.log.Printf("idle sweep: suspend %s: %v", l.ID, err)
 			continue
@@ -244,6 +255,8 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		s.store.mu.Lock()
 		l.Suspended = true
 		s.store.mu.Unlock()
+		suspended++
+		time.Sleep(500 * time.Millisecond)
 	}
 	for _, l := range expired {
 		s.release(ctx, l)

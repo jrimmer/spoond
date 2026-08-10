@@ -271,7 +271,7 @@ func createSandbox(ctx context.Context, user string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes", payload)
+	b, err := backendJSONRetry(ctx, http.MethodPost, "/api/sandboxes", payload)
 	if err != nil {
 		return "", "", err
 	}
@@ -788,6 +788,39 @@ func backendClientLong() *http.Client {
 // Transient connection errors (refused/reset/timeout — e.g. backend busy
 // refilling the warm pool) are retried with backoff; the gateway should
 // not drop an SSH session because one loopback request got refused.
+// backendJSONRetry is backendJSON with a longer retry window for
+// create paths. The backend can briefly be unreachable during its idle
+// sweep + restart (systemd RestartSec=3, then pool refill); a 3s
+// window drops interactive `new@` sessions. This widens the window to
+// ~30s of transport-error retries so a backend blip rides through
+// instead of killing the SSH connection. HTTP/validation errors are
+// still returned immediately (never retried).
+func backendJSONRetry(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	var lastErr error
+	backoff := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 8 * time.Second, 8 * time.Second}
+	for attempt := 0; attempt <= len(backoff); attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff[attempt-1]):
+			}
+		}
+		b, err := backendJSONOnceWith(ctx, backendClient(), method, path, body)
+		if err == nil {
+			return b, nil
+		}
+		lastErr = err
+		var uerr *url.Error
+		if !errors.As(err, &uerr) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// backendJSON is backendJSONWith for the short-timeout client; used for
+// verbs that should fail fast (list, exec, keepalive).
 func backendJSON(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	return backendJSONWith(ctx, backendClient(), method, path, body)
 }
