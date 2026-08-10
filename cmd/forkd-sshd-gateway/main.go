@@ -149,6 +149,15 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 	// persistent one (SSH-as-API).
 	leaseID := user
 	motd := ""
+	// Reconnect hint, shown on create AND attach so the user can always
+	// get back. Port comes from the listen address (default :2222).
+	_, gwPort, _ := net.SplitHostPort(*listenAddr)
+	if gwPort == "" {
+		gwPort = "22"
+	}
+	reconnect := func(id string) string {
+		return fmt.Sprintf("Reconnect: ssh %s@%s -p %s", id, *gatewayHost, gwPort)
+	}
 	if !isLeaseID(user) {
 		// Try a friendly name first (assigned via `ctl tag <id> <name>`).
 		// Anything that's not a lease id and not a new-* create verb is a
@@ -179,9 +188,15 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 			return
 		}
 		leaseID = created
-		motd = fmt.Sprintf("forkd: created sandbox %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. Reconnect: ssh %s@%s\n",
-			created, img, created, *gatewayHost)
+		motd = fmt.Sprintf("forkd: created sandbox %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+			created, img, reconnect(created))
 		log.Printf("created sandbox %s (%s) for user %q", created, img, user)
+	} else {
+		// Attaching to an existing lease: show the id in the tmux footer
+		// and print the reconnect hint when the session ends, same as
+		// create — the id is just as easy to forget on reconnect.
+		motd = fmt.Sprintf("forkd: attached to sandbox %s — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+			leaseID, reconnect(leaseID))
 	}
 
 	client, err := dialSandbox(context.Background(), leaseID, gatewayKey)
