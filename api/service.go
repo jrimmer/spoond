@@ -35,6 +35,7 @@ type Lease struct {
 	Name       string    // optional friendly name/tag (unique per owner; resolved by ssh/proxy)
 	NetPolicy  string    // egress policy: none|lan|internet|restricted ("" = lan)
 	NetAllow   []string  // allowlist for restricted policy
+	Comment    string    // optional free-text annotation (set/cleared via ctl comment)
 	released   bool
 }
 
@@ -590,6 +591,23 @@ func (s *Service) setName(owner, id, name string) (*Lease, error) {
 	return l, nil
 }
 
+// setComment sets or clears the free-text annotation on a lease.
+// Empty string clears it; comments are informational only (no
+// uniqueness constraint, unlike names).
+func (s *Service) setComment(owner, id, comment string) (*Lease, error) {
+	if len(comment) > 512 {
+		return nil, fmt.Errorf("comment must be <= 512 chars")
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		return nil, errNotFound
+	}
+	l.Comment = comment
+	return l, nil
+}
+
 // lookupByName returns a live lease with the given name regardless of
 // owner. Used by the SSH gateway (username = name) and the public proxy
 // (<name>.sandbox.lacy.casa); both treat the name as the capability, the
@@ -724,6 +742,7 @@ func (s *Service) list(owner string) []map[string]any {
 				"persistent":       l.Persistent,
 				"suspended":        l.Suspended,
 				"name":             l.Name,
+				"comment":          l.Comment,
 				"net_policy":       l.NetPolicy,
 				"egress_allowlist": l.NetAllow,
 			})

@@ -54,6 +54,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/resume", s.handleResume)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restart", s.handleRestart)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/tag", s.handleTag)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/comment", s.handleComment)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/prompt", s.handlePrompt)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
@@ -495,6 +496,34 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 		"id":   lease.ID,
 		"name": lease.Name,
 		"ok":   true,
+	})
+}
+
+// handleComment sets or clears the free-text annotation on a lease.
+// An empty comment clears it.
+func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		Comment string `json:"comment"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	lease, err := s.svc.setComment(owner, id, req.Comment)
+	if err != nil {
+		if err == errNotFound {
+			writeError(w, http.StatusNotFound, "sandbox not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      lease.ID,
+		"comment": lease.Comment,
+		"ok":      true,
 	})
 }
 

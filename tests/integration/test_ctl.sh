@@ -38,6 +38,23 @@ OUT=$(timeout 20 $SSH "ls" 2>&1)
 assert_contains "ls lists leases" "$OUT" "$CTLID"
 
 echo
+echo "== ctl: whoami =="
+OUT=$(timeout 20 $SSH "whoami" 2>&1)
+assert_contains "whoami returns user ctl" "$OUT" '"user":"ctl"'
+assert_contains "whoami includes key fingerprint" "$OUT" "SHA256:"
+
+echo
+echo "== ctl: comment =="
+if [ -n "$CTLID" ]; then
+  OUT=$(timeout 20 $SSH "comment $CTLID integration test box" 2>&1)
+  assert_contains "comment set returns JSON" "$OUT" '"comment":"integration test box"'
+  OUT=$(timeout 20 $SSH "ls" 2>&1)
+  assert_contains "ls shows comment" "$OUT" "integration test box"
+  OUT=$(timeout 20 $SSH "comment $CTLID" 2>&1)
+  assert_contains "comment clears" "$OUT" '"comment":""'
+fi
+
+echo
 echo "== ctl: keepalive =="
 if [ -n "$CTLID" ]; then
   OUT=$(timeout 20 $SSH "keepalive $CTLID" 2>&1)

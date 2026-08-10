@@ -86,7 +86,12 @@ func main() {
 			// the lease id in the username is the real capability).
 			for _, pk := range allowed {
 				if string(pk.Marshal()) == string(key.Marshal()) {
-					return &ssh.Permissions{}, nil
+					// Record the authenticated key for `ctl whoami`.
+					return &ssh.Permissions{
+						Extensions: map[string]string{
+							"forkd-key-id": fmt.Sprintf("%s %s", ssh.FingerprintSHA256(pk), pk.Type()),
+						},
+					}, nil
 				}
 			}
 			return nil, fmt.Errorf("unknown client key")
@@ -121,13 +126,20 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 	user := sconn.User()
 	log.Printf("conn: user=%s addr=%s", user, sconn.RemoteAddr())
 
+	// The authenticated key identity (from PublicKeyCallback) rides in
+	// the connection permissions, for `ctl whoami`.
+	keyID := ""
+	if sconn.Permissions != nil && sconn.Permissions.Extensions != nil {
+		keyID = sconn.Permissions.Extensions["forkd-key-id"]
+	}
+
 	go ssh.DiscardRequests(reqs)
 
 	// The control plane is a reserved username: `ssh ctl@... "cmd"`.
 	// Exec requests become API calls (new/ls/rm/keepalive/cp) and the
 	// response is JSON on stdout — no sandbox is dialed.
 	if user == "ctl" {
-		handleControlPlane(chans, gatewayKey)
+		handleControlPlane(chans, gatewayKey, keyID)
 		return
 	}
 
@@ -357,7 +369,7 @@ func dialSandbox(ctx context.Context, leaseID string, gatewayKey ssh.Signer) (*s
 //	ssh ctl@sandbox.lacy.casa "keepalive <id>"  extend a lease
 //	ssh ctl@sandbox.lacy.casa "cp <id> [tag]"   clone a sandbox (branch)
 //	ssh ctl@sandbox.lacy.casa "help"
-func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer) {
+func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyID string) {
 	// Accept the first session channel; anything else is rejected.
 	var ch ssh.Channel
 	var reqs <-chan *ssh.Request
@@ -399,7 +411,7 @@ func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer) {
 		if req.WantReply {
 			req.Reply(true, nil)
 		}
-		out := runControlCommand(context.Background(), msg.Command, gatewayKey)
+		out := runControlCommand(context.Background(), msg.Command, gatewayKey, keyID)
 		ch.Write([]byte(out + "\n"))
 		return
 	}
@@ -407,14 +419,19 @@ func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer) {
 
 // runControlCommand executes one control-plane command and returns the
 // JSON-ish response text written to the client.
-func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) string {
+func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, keyID string) string {
 	fields := strings.Fields(cmd)
 	if len(fields) == 0 {
 		return `{"error":"empty command — try new, ls, rm, keepalive, cp, help"}`
 	}
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, prompt <id> <message>"
+		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>"
+	case "whoami":
+		if keyID == "" {
+			return `{"user":"ctl","key":"unknown"}`
+		}
+		return fmt.Sprintf(`{"user":"ctl","key":%q}`, keyID)
 	case "new":
 		user := "new"
 		if len(fields) > 1 {
@@ -500,6 +517,20 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 		}
 		p, _ := json.Marshal(map[string]string{"name": fields[2]})
 		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/tag", p)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		return strings.TrimSpace(string(b))
+	case "comment":
+		if len(fields) < 2 {
+			return `{"error":"usage: comment <lease-id> [text...] (no text clears)"}`
+		}
+		text := ""
+		if len(fields) > 2 {
+			text = strings.Join(fields[2:], " ")
+		}
+		p, _ := json.Marshal(map[string]string{"comment": text})
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/comment", p)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}

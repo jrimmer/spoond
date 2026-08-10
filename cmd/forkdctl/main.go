@@ -75,6 +75,16 @@ func main() {
 		}
 		printJSON(runCtl(host, port, key, fmt.Sprintf("tag %s %s", rest[0], rest[1])))
 		return
+	case "comment":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: forkdctl comment <id> [text...] (no text clears)")
+			os.Exit(1)
+		}
+		printJSON(runCtl(host, port, key, fmt.Sprintf("comment %s %s", rest[0], strings.Join(rest[1:], " "))))
+		return
+	case "whoami":
+		printJSON(runCtl(host, port, key, "whoami"))
+		return
 	case "restart", "resume", "suspend", "keepalive", "shelly", "agent":
 		if len(rest) < 1 {
 			fmt.Fprintf(os.Stderr, "usage: forkdctl %s <id>\n", verb)
@@ -190,6 +200,8 @@ usage:
   forkdctl cp <id> [tag]          clone a sandbox
   forkdctl shelly <id>            install + start the Shelley coding agent
   forkdctl tag <id> <name>        give the sandbox a friendly name
+  forkdctl comment <id> [text]    set/clear a free-text annotation
+  forkdctl whoami                 show the authenticated key identity
   forkdctl prompt <id> <message>  ask the agent in a sandbox something
   forkdctl ssh <id|name>          drop into a shell
   forkdctl help

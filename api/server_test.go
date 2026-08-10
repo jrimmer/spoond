@@ -313,6 +313,44 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+func TestComment(t *testing.T) {
+	ts, _ := newTestServer(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+
+	// set a comment
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-a", map[string]any{"comment": "integration demo box"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("comment set status %d", resp.StatusCode)
+	}
+	if body["comment"] != "integration demo box" {
+		t.Fatalf("comment echo mismatch: %v", body["comment"])
+	}
+
+	// list includes it
+	_, list := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
+	sbs, _ := list["sandboxes"].([]any)
+	if len(sbs) != 1 {
+		t.Fatalf("expected 1 sandbox, got %d", len(sbs))
+	}
+	first, _ := sbs[0].(map[string]any)
+	if first["comment"] != "integration demo box" {
+		t.Fatalf("list comment mismatch: %v", first["comment"])
+	}
+
+	// clear it
+	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-a", map[string]any{"comment": ""})
+	if resp.StatusCode != 200 || body["comment"] != "" {
+		t.Fatalf("comment clear failed: %d %v", resp.StatusCode, body["comment"])
+	}
+
+	// cross-consumer denied
+	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-b", map[string]any{"comment": "nope"})
+	if resp.StatusCode != 404 {
+		t.Fatalf("cross-consumer comment expected 404, got %d", resp.StatusCode)
+	}
+}
+
 func TestImages(t *testing.T) {
 	ts, _ := newTestServer(t)
 	resp, body := doReq(t, "GET", ts.URL+"/api/images", "token-a", nil)
