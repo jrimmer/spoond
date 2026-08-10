@@ -27,8 +27,11 @@ if [ -n "$SSHHOST" ]; then
   ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" "mkdir -p /tmp/forkd-itest"
   scp -q -r "$DIR/." "$SSHHOST:/tmp/forkd-itest/"
   # gateway test needs the backend token in its env file; run.sh picks it up from /etc
-  timeout 600 ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" \
-    "cd /tmp/forkd-itest && BE_API='$BE_API' bash run.sh"
+  # The cap runs REMOTELY (vm2 has GNU timeout; the local machine may
+  # be macOS/zsh where `timeout` doesn't exist). If the remote run
+  # hangs, timeout kills it and ssh returns.
+  ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" \
+    "cd /tmp/forkd-itest && timeout 600 env BE_API='$BE_API' bash run.sh"
   RC=$?
   exit $RC
 fi
