@@ -45,11 +45,14 @@ fi
 sed -i 's/^UsePAM yes/UsePAM no/' /etc/ssh/sshd_config 2>/dev/null || true
 /usr/sbin/sshd 2>/dev/null || echo "sshd failed to start"
 
-# dev-base: attach to (or create) the tmux session on login.
+# dev-base: attach to (or create) the tmux session on login. `exec`
+# makes tmux the shell: exiting tmux ends the SSH connection (one
+# exit, no double-^D). Detach (Ctrl-b d) leaves the session running
+# and closes the connection; reconnect via ssh <id>@….
 if [ -d /etc/profile.d ]; then
   cat > /etc/profile.d/forkd-tmux.sh <<'EOF2'
 if [ -z "$TMUX" ] && [ -z "$FORKD_NO_TMUX" ] && [ -n "$SSH_CONNECTION" ]; then
-  tmux attach -t dev 2>/dev/null || tmux new -s dev
+  exec tmux attach -t dev 2>/dev/null || exec tmux new -s dev
 fi
 EOF2
   chmod +x /etc/profile.d/forkd-tmux.sh
