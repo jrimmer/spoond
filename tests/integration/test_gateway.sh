@@ -45,6 +45,10 @@ echo
 echo "== gateway: interactive pty (exec path with -tt) =="
 OUT3=$(timeout 40 ssh -tt $SSHOPTS "new@127.0.0.1" -p 2222 "echo GW_PTY_OK; exit" 2>&1)
 assert_contains "pty exec works" "$OUT3" "GW_PTY_OK"
+# the pty run auto-created a SECOND persistent lease (workspace-backed);
+# capture it so cleanup can dispose it too.
+PTYID=$(echo "$OUT3" | grep -oP '(?<=sandbox )[a-f0-9]{32}' | head -1)
+if [ -n "$PTYID" ]; then ok "captured pty lease id ($PTYID)"; else bad "captured pty lease id"; fi
 
 echo
 echo "== gateway: rejections =="
@@ -57,9 +61,12 @@ assert_contains "unknown lease rejected" "$OUT6" "cannot reach"
 
 echo
 echo "== gateway: cleanup =="
-# destroy the auto-created sandbox
+# destroy the auto-created sandboxes (new@ + pty new@)
 if [ -n "$NEWID" ]; then
   api DELETE "/api/sandboxes/$NEWID" >/dev/null && ok "deleted auto-created sandbox $NEWID" || bad "delete auto-created sandbox"
+fi
+if [ -n "${PTYID:-}" ]; then
+  api DELETE "/api/sandboxes/$PTYID" >/dev/null && ok "deleted pty sandbox $PTYID" || bad "delete pty sandbox"
 fi
 # restore unit without test key
 cp /tmp/gateway-unit.bak "$UNIT"

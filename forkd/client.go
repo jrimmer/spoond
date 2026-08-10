@@ -91,25 +91,41 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("forkd: %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var eb struct {
-			Error string `json:"error"`
+	// Retry transient network errors (connection refused/reset) with
+	// backoff: the controller can briefly refuse connections under load
+	// (15+ sandboxes, tap/cgroup contention). HTTP-level errors are not
+	// retried — those are real answers.
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return lastErr
+			case <-time.After(time.Duration(attempt) * 150 * time.Millisecond):
+			}
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&eb)
-		return &Error{StatusCode: resp.StatusCode, Message: eb.Error}
-	}
-	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return fmt.Errorf("forkd: decode response: %w", err)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("forkd: %s %s: %w", method, path, err)
+			continue
 		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			var eb struct {
+				Error string `json:"error"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&eb)
+			return &Error{StatusCode: resp.StatusCode, Message: eb.Error}
+		}
+		if out != nil {
+			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+				return fmt.Errorf("forkd: decode response: %w", err)
+			}
+		}
+		return nil
 	}
-	return nil
+	return lastErr
 }
 
 // ListSnapshots returns the registered snapshot tags.
