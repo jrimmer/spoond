@@ -94,15 +94,16 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	// Retry transient network errors (connection refused/reset) with
 	// backoff: the controller can briefly refuse connections under load
-	// (15+ sandboxes, tap/cgroup contention). HTTP-level errors are not
-	// retried — those are real answers.
+	// (15+ sandboxes, tap/cgroup contention; it also blocks its accept
+	// loop during heavy branch/snapshot writes). HTTP-level errors are
+	// not retried — those are real answers. Budget: ~4.7s total.
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < 6; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
 				return lastErr
-			case <-time.After(time.Duration(attempt) * 150 * time.Millisecond):
+			case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
 			}
 		}
 		resp, err := c.http.Do(req)
