@@ -569,10 +569,11 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	defer ch.Close()
 
 	// Show the MOTD (e.g. "created sandbox …") on new auto-created
-	// sandboxes, before the nested shell output begins.
-	if motd != "" {
-		ch.Write([]byte(motd))
-	}
+	// sandboxes. dev-base's login hook attaches tmux, whose attach
+	// clears the screen — so a write BEFORE the shell would be wiped.
+	// Instead, delay the MOTD until after the nested shell has started
+	// (and tmux has had a beat to draw), then relay it. (Goroutine
+	// starts after `started`/`startErr` are declared below.)
 
 	// Open a session channel on the nested client. dev-base's login hook
 	// attaches to (or creates) the tmux session, so a plain shell gets
@@ -605,6 +606,25 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 
 	started := make(chan struct{}, 1)
 	startErr := make(chan error, 1)
+	// motdReady is signaled by the request loop when the nested session
+	// actually starts (shell OR exec). It is SEPARATE from `started`
+	// because the main flow below also consumes `started` — a single
+	// value can only have one receiver, so the MOTD goroutine must not
+	// compete for it.
+	motdReady := make(chan struct{}, 1)
+
+	// Relay the MOTD once the nested shell has started and tmux has had
+	// a beat to draw (its attach clears the screen, wiping a pre-shell
+	// write). We deliberately do NOT read startErr here — the shell's
+	// error is consumed by the flow below; a failed shell closes ch,
+	// and this write then errors harmlessly.
+	if motd != "" {
+		go func() {
+			<-motdReady
+			time.Sleep(1200 * time.Millisecond)
+			_, _ = ch.Write([]byte(motd))
+		}()
+	}
 
 	// Forward client requests. pty/env/window-change go through as-is;
 	// shell/exec START the nested session (SendRequest alone never
@@ -627,6 +647,7 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 				err := sess.Shell()
 				started <- struct{}{}
 				startErr <- err
+				motdReady <- struct{}{}
 				// Reply to the CLIENT's shell request (OpenSSH blocks
 				// until it gets channel success/failure).
 				if req.WantReply {
@@ -650,6 +671,7 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 				err := sess.Start(msg.Command)
 				started <- struct{}{}
 				startErr <- err
+				motdReady <- struct{}{}
 				// Reply to the CLIENT's exec request.
 				if req.WantReply {
 					_ = req.Reply(err == nil, nil)
