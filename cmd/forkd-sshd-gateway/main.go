@@ -613,15 +613,34 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	// compete for it.
 	motdReady := make(chan struct{}, 1)
 
-	// Relay the MOTD once the nested shell has started and tmux has had
-	// a beat to draw (its attach clears the screen, wiping a pre-shell
-	// write). We deliberately do NOT read startErr here — the shell's
-	// error is consumed by the flow below; a failed shell closes ch,
-	// and this write then errors harmlessly.
+	// Deliver the MOTD ("created sandbox …") on new auto-created
+	// sandboxes. Writing it to the outer channel races the prompt
+	// (dev-base's login hook attaches tmux, and a late write lands on
+	// the line the user is typing). Instead, show it INSIDE tmux via
+	// `tmux display-message -t dev`, which renders in the status bar —
+	// visible, non-destructive. Images without tmux fall back to a raw
+	// channel write.
 	if motd != "" {
 		go func() {
 			<-motdReady
-			time.Sleep(1200 * time.Millisecond)
+			// Give the guest's login hook a beat to attach tmux.
+			time.Sleep(1500 * time.Millisecond)
+			for attempt := 0; attempt < 4; attempt++ {
+				s2, err := client.NewSession()
+				if err == nil {
+					msg := strings.ReplaceAll(motd, "\n", " ")
+					// `tmux display-message -t dev` from a second
+					// session renders on the attached client's status
+					// bar. Fall back to the raw channel write if tmux
+					// isn't running (non-dev-base images).
+					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null || echo __NO_TMUX__")
+					s2.Close()
+					if err == nil && !strings.Contains(string(out), "__NO_TMUX__") {
+						return
+					}
+				}
+				time.Sleep(750 * time.Millisecond)
+			}
 			_, _ = ch.Write([]byte(motd))
 		}()
 	}
