@@ -45,21 +45,26 @@ fi
 sed -i 's/^UsePAM yes/UsePAM no/' /etc/ssh/sshd_config 2>/dev/null || true
 /usr/sbin/sshd 2>/dev/null || echo "sshd failed to start"
 
-# dev-base: attach to (or create) the tmux session on login. `exec`
-# makes tmux the shell: exiting tmux ends the SSH connection (one
-# exit, no double-^D). Detach (Ctrl-b d) leaves the session running
-# and closes the connection; reconnect via ssh <id>@….
-# Unknown TERM (e.g. xterm-kitty from some terminals) makes tmux
-# refuse; fall back to a standard TERM so attach still works.
-# (The rootfs was already patched in step 0b; this block re-applies
-# it in the live sandbox before branching so the snapshot captures it.)
+# dev-base: attach to (or create) the tmux session on login, then end
+# the SSH session when tmux exits (single exit — no double-^D).
+# Detach (Ctrl-b d) leaves the session running and closes the
+# connection; reconnect via ssh <id>@….
+# NOTE: `exec a || exec b` is a trap — exec replaces the shell, so if
+# `a` fails the fallback never runs (no shell left) and the connection
+# dies. Use `tmux new -A` (attach-or-create) guarded by an if.
+# Unknown TERM (e.g. xterm-kitty) makes tmux refuse; fall back to a
+# standard TERM so attach still works. If tmux fails entirely, fall
+# through to a plain shell instead of killing the session.
 if [ -d /etc/profile.d ]; then
   cat > /etc/profile.d/forkd-tmux.sh <<'EOF2'
 if [ -z "$TMUX" ] && [ -z "$FORKD_NO_TMUX" ] && [ -n "$SSH_CONNECTION" ]; then
   case "$TERM" in
-    xterm-kitty|alacritty|wezterm) export TERM=xterm-256color ;;
+    xterm-kitty|alacritty|wezterm|dumb) export TERM=xterm-256color ;;
   esac
-  exec tmux attach -t dev 2>/dev/null || exec tmux new -s dev
+  if tmux new -A -s dev 2>/dev/null; then
+    exit 0
+  fi
+  echo "forkd: tmux unavailable (TERM=$TERM) — plain shell"
 fi
 EOF2
   chmod +x /etc/profile.d/forkd-tmux.sh
@@ -80,13 +85,16 @@ curl -s -X POST "$API/v1/sandboxes/$SB/exec" -H "Content-Type: application/json"
 echo "=== 6. UsePAM no + devpts + sshd LIVE + verify pty + verify exec ==="
 curl -s -X POST "$API/v1/sandboxes/$SB/exec" -H "Content-Type: application/json" -d '{"args":["bash","-c","mkdir -p /dev/pts /run/sshd; mount -t devpts devpts /dev/pts 2>/dev/null; sed -i \"s/^UsePAM yes/UsePAM no/\" /etc/ssh/sshd_config; grep -n UsePAM /etc/ssh/sshd_config; /usr/sbin/sshd 2>/dev/null; sleep 1; python3 -c \"import pty; m,s=pty.openpty(); print(\\\\\"PTY_OK\\\\\")\""]}' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stdout',''))"
 
-echo "=== 6b. LIVE tmux hook: exec + TERM fallback (captured by branch) ===\n"
+echo "=== 6b. LIVE tmux hook: new -A + guarded fallback (captured by branch) ===\n"
 HOOK=$(cat <<'HOOK_EOF'
 if [ -z "$TMUX" ] && [ -z "$FORKD_NO_TMUX" ] && [ -n "$SSH_CONNECTION" ]; then
   case "$TERM" in
-    xterm-kitty|alacritty|wezterm) export TERM=xterm-256color ;;
+    xterm-kitty|alacritty|wezterm|dumb) export TERM=xterm-256color ;;
   esac
-  exec tmux attach -t dev 2>/dev/null || exec tmux new -s dev
+  if tmux new -A -s dev 2>/dev/null; then
+    exit 0
+  fi
+  echo "forkd: tmux unavailable (TERM=$TERM) — plain shell"
 fi
 HOOK_EOF
 )
