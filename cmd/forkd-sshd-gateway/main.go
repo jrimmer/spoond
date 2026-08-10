@@ -46,6 +46,14 @@ var (
 	// gatewayKeyPath is the identity the gateway uses to connect INTO
 	// sandboxes. Its public half is baked into dev-base authorized_keys.
 	gatewayKeyPath = flag.String("gateway-key", "/etc/forkd-gateway/gateway_ed25519", "gateway identity key for nested connections")
+	// shellyBinaryURL is where the `shelly` ctl verb fetches the agent
+	// binary from inside the sandbox (host-side asset server on the
+	// plain-HTTP proxy listener; guests reach it via forkd-br0).
+	shellyBinaryURL = flag.String("shelly-binary-url", "http://10.43.0.1:8891/assets/shelley", "URL the sandbox fetches the shelley binary from")
+	// shellyModel is the default model id written into shelley.json. It
+	// must be an id the LLM gateway's LLM_MODEL_MAP understands (the
+	// exe.dev catalog id, not the upstream id).
+	shellyModel = flag.String("shelly-model", "gpt-oss-20b-fireworks", "default model id for the shelley agent")
 )
 
 type endpoint struct {
@@ -394,7 +402,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 	}
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, cp <id> [tag]"
+		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, cp <id> [tag], shelly <id>"
 	case "new":
 		user := "new"
 		if len(fields) > 1 {
@@ -460,8 +468,13 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer) s
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
 		return strings.TrimSpace(string(b))
+	case "shelly", "agent":
+		if len(fields) < 2 {
+			return `{"error":"usage: shelly <lease-id>"}`
+		}
+		return runShelly(ctx, fields[1])
 	default:
-		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, help"}`, fields[0])
+		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, help"}`, fields[0])
 	}
 }
 
@@ -725,6 +738,57 @@ func resolveEndpoint(ctx context.Context, leaseID string) (*endpoint, error) {
 		return nil, err
 	}
 	return &ep, nil
+}
+
+// runShelly implements the `shelly <lease-id>` ctl verb: it bootstraps
+// the coding agent inside the lease. The binary is fetched from the
+// backend's asset server (plain HTTP on the proxy listener, reachable
+// from guests at 10.43.0.1), a shelley.json is written pointing at the
+// lease's LLM gateway, and the agent server is started on :9000
+// (detached via setsid so the one-shot exec does not kill it). Returns
+// JSON with the public web URL.
+func runShelly(ctx context.Context, leaseID string) string {
+	if _, err := resolveEndpoint(ctx, leaseID); err != nil {
+		return fmt.Sprintf(`{"error":"%v"}`, err)
+	}
+	gw := "http://10.43.0.1:8891/llm/" + leaseID
+	script := fmt.Sprintf(`set -e
+if [ ! -x /root/shelley ]; then
+  curl -sf --max-time 180 %s -o /root/shelley
+  chmod +x /root/shelley
+fi
+printf '{"llm_gateway":%q,"default_model":%q}' > /root/shelley.json
+if [ -f /root/shelley.pid ]; then kill $(cat /root/shelley.pid) 2>/dev/null || true; rm -f /root/shelley.pid; fi
+setsid /root/shelley --config /root/shelley.json serve --port 9000 --socket none >/root/shelley.log 2>&1 < /dev/null &
+echo $! > /root/shelley.pid
+sleep 6
+if curl -sf --max-time 5 http://127.0.0.1:9000/version >/dev/null 2>&1; then
+  echo SHELLEY_UP
+else
+  echo SHELLEY_DOWN; tail -5 /root/shelley.log
+fi`, *shellyBinaryURL, gw, *shellyModel)
+	payload, err := json.Marshal(map[string]any{"cmd": script, "timeout": 200})
+	if err != nil {
+		return fmt.Sprintf(`{"error":"%v"}`, err)
+	}
+	b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+leaseID+"/exec", payload)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"%v"}`, err)
+	}
+	var out struct {
+		Exit   int    `json:"exit"`
+		Stdout string `json:"stdout"`
+		Stderr string `json:"stderr"`
+	}
+	_ = json.Unmarshal(b, &out)
+	if !strings.Contains(out.Stdout, "SHELLEY_UP") {
+		detail := strings.TrimSpace(out.Stdout)
+		if out.Stderr != "" {
+			detail += " | stderr: " + strings.TrimSpace(out.Stderr)
+		}
+		return fmt.Sprintf(`{"id":%q,"status":"failed","exit":%d,"detail":%q}`, leaseID, out.Exit, detail)
+	}
+	return fmt.Sprintf(`{"id":%q,"status":"started","url":"https://%s-9000.sandbox.lacy.casa"}`, leaseID, leaseID)
 }
 
 func loadOrGenerateHostKey(path string) ssh.Signer {

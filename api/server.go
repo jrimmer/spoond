@@ -20,10 +20,11 @@ import (
 
 // Server is the HTTP lease API.
 type Server struct {
-	svc *Service
-	reg *ImageRegistry
-	mux *http.ServeMux
-	llm *llmGateway
+	svc       *Service
+	reg       *ImageRegistry
+	mux       *http.ServeMux
+	llm       *llmGateway
+	assetsDir string // static assets dir served at /assets/ on the proxy listener
 }
 
 // NewServer wires the lease API routes onto a mux. openRouterURL and

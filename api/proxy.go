@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -36,9 +37,19 @@ func (s *Server) ProxyHandler() http.Handler {
 			s.llm.ServeHTTP(w, r)
 			return
 		}
+		// Static assets (e.g. the shelley agent binary) served to guests
+		// at http://10.43.0.1:8891/assets/<file>. This is how a lease
+		// fetches tooling that is too big for the exec API cmdline.
+		if s.assetsDir != "" && strings.HasPrefix(r.URL.Path, "/assets/") {
+			http.ServeFile(w, r, filepath.Join(s.assetsDir, strings.TrimPrefix(r.URL.Path, "/assets/")))
+			return
+		}
 		s.handleProxy(w, r)
 	})
 }
+
+// SetAssetsDir enables static asset serving on the proxy listener.
+func (s *Server) SetAssetsDir(dir string) { s.assetsDir = dir }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	leaseID, port, ok := parseProxyHost(r.Host)

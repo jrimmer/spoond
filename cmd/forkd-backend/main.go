@@ -99,6 +99,11 @@ func main() {
 		}
 	}
 	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), os.Getenv("LLM_UPSTREAM_KEY"), os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
+	// Static assets (shelley binary etc.) served to guests on the proxy
+	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).
+	if d := os.Getenv("ASSETS_DIR"); d != "" {
+		srv.SetAssetsDir(d)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
