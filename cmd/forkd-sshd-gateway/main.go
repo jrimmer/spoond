@@ -24,6 +24,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -432,24 +433,30 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 	}
 	log.Printf("session relay starting")
 
-	done := make(chan struct{}, 1)
+	done := make(chan struct{}, 2)
 
 	// Relay: client channel -> nested stdin, nested stdout/stderr ->
-	// client channel.
+	// client channel. Wait for BOTH output relays: firing on either one
+	// alone tears down the channel while the other still has buffered
+	// output (banner arrives, exec output gets truncated).
 	go func() {
 		_, _ = io.Copy(stdin, ch)
 		stdin.Close()
+		log.Printf("relay stdin closed")
 	}()
 	go func() {
-		_, _ = io.Copy(ch, stdout)
+		n, _ := io.Copy(ch, stdout)
+		log.Printf("relay stdout copied %d bytes", n)
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(ch, stderr)
+		n, _ := io.Copy(ch, stderr)
+		log.Printf("relay stderr copied %d bytes", n)
 		done <- struct{}{}
 	}()
 
-	// Wait for the nested session to end or the client channel to close.
+	// Wait for both relays to finish (EOF on each stream).
+	<-done
 	<-done
 
 	// Forward the nested exit status to the client channel so the ssh
@@ -478,7 +485,35 @@ func backendClient() *http.Client {
 
 // backendJSON performs a JSON request against the backend with the
 // consumer token and returns the response body (or an error on non-2xx).
+// Transient connection errors (refused/reset/timeout — e.g. backend busy
+// refilling the warm pool) are retried with backoff; the gateway should
+// not drop an SSH session because one loopback request got refused.
 func backendJSON(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
+		}
+		b, err := backendJSONOnce(ctx, method, path, body)
+		if err == nil {
+			return b, nil
+		}
+		lastErr = err
+		// Only retry transient transport failures, not HTTP/validation errors.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			continue
+		}
+		return nil, err
+	}
+	return nil, lastErr
+}
+
+func backendJSONOnce(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	url := strings.TrimRight(*backendURL, "/") + path
 	var rd io.Reader
 	if body != nil {

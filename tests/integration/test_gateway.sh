@@ -1,0 +1,71 @@
+#!/bin/bash
+source "$(dirname "$0")/lib.sh"
+# test_gateway.sh — SSH gateway integration tests.
+# Requires: lib.sh sourced, run ON vm2 (needs local systemd + gateway keys dir).
+# Adds a temporary test key to the allowlist, tests, then restores the unit.
+set -u
+UNIT=/etc/systemd/system/forkd-sshd-gateway.service
+KEYS=/etc/forkd-gateway/keys
+GWKEY=/tmp/itest_gw_key
+GWKEY_PUB=/tmp/itest_gw_key.pub
+SSHOPTS="-i $GWKEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
+
+echo "== gateway: temporary test key setup =="
+if [ ! -f /etc/forkd-gateway/keys ]; then
+  # sanity: keys dir exists
+  ls -d "$KEYS" >/dev/null 2>&1 || { echo "  ❌ gateway keys dir missing"; exit 1; }
+fi
+[ -f "$GWKEY" ] || ssh-keygen -t ed25519 -f "$GWKEY" -N "" -C "integration-test" >/dev/null 2>&1
+cp "$GWKEY_PUB" "$KEYS/itest.pub"
+cp "$UNIT" /tmp/gateway-unit.bak
+# append itest.pub to client-keys (idempotent-ish: strip any previous itest, re-add)
+sed -i 's|,/etc/forkd-gateway/keys/itest.pub||; s|--client-keys \([^ ]*\)|--client-keys \1,/etc/forkd-gateway/keys/itest.pub|' "$UNIT"
+systemctl daemon-reload && systemctl restart forkd-sshd-gateway
+sleep 2
+systemctl is-active forkd-sshd-gateway >/dev/null && ok "gateway restarted with test key" || bad "gateway restarted with test key"
+
+echo
+echo "== gateway: auto-create (ssh new@) =="
+OUT=$(timeout 40 ssh $SSHOPTS "new@127.0.0.1" -p 2222 "echo GW_CREATE_OK; hostname; exit" 2>&1)
+assert_contains "new@ creates sandbox (MOTD)" "$OUT" "forkd: created sandbox"
+assert_contains "new@ drops into guest" "$OUT" "GW_CREATE_OK"
+assert_contains "new@ guest hostname is 10.42" "$OUT" "10.42"
+NEWID=$(echo "$OUT" | grep -oP '(?<=sandbox )[a-f0-9]{32}' | head -1)
+if [ -n "$NEWID" ]; then ok "captured new lease id ($NEWID)"; else bad "captured new lease id"; fi
+
+echo
+echo "== gateway: attach existing (ssh <id>@) =="
+if [ -n "$NEWID" ]; then
+  OUT2=$(timeout 40 ssh $SSHOPTS "$NEWID@127.0.0.1" -p 2222 "echo GW_REATTACH_OK; hostname; exit" 2>&1)
+  assert_contains "reattach reaches same sandbox" "$OUT2" "GW_REATTACH_OK"
+  assert_contains "reattach same hostname" "$OUT2" "10.42"
+fi
+
+echo
+echo "== gateway: interactive pty (exec path with -tt) =="
+OUT3=$(timeout 40 ssh -tt $SSHOPTS "new@127.0.0.1" -p 2222 "echo GW_PTY_OK; exit" 2>&1)
+assert_contains "pty exec works" "$OUT3" "GW_PTY_OK"
+
+echo
+echo "== gateway: rejections =="
+OUT4=$(timeout 20 ssh $SSHOPTS "new-go@127.0.0.1" -p 2222 "echo never" 2>&1)
+assert_contains "CI image rejected" "$OUT4" "CI image with no sshd"
+OUT5=$(timeout 20 ssh $SSHOPTS "new-bogus@127.0.0.1" -p 2222 "echo never" 2>&1)
+assert_contains "unknown image rejected" "$OUT5" "unknown image"
+OUT6=$(timeout 20 ssh $SSHOPTS "deadbeefdeadbeefdeadbeefdeadbeef@127.0.0.1" -p 2222 "echo never" 2>&1)
+assert_contains "unknown lease rejected" "$OUT6" "cannot reach"
+
+echo
+echo "== gateway: cleanup =="
+# destroy the auto-created sandbox
+if [ -n "$NEWID" ]; then
+  api DELETE "/api/sandboxes/$NEWID" >/dev/null && ok "deleted auto-created sandbox $NEWID" || bad "delete auto-created sandbox"
+fi
+# restore unit without test key
+cp /tmp/gateway-unit.bak "$UNIT"
+rm -f "$KEYS/itest.pub" "$GWKEY" "$GWKEY_PUB"
+systemctl daemon-reload && systemctl restart forkd-sshd-gateway
+sleep 2
+systemctl is-active forkd-sshd-gateway >/dev/null && ok "gateway restored (jason key only)" || bad "gateway restored"
+echo
+echo "== gateway done =="
