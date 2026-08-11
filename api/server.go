@@ -64,6 +64,10 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stat", s.handleStat)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
+	// Sharing (T6/#33).
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/share", s.handleShareGrant)
+	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/share/{grantee}", s.handleShareRevoke)
+	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -280,7 +284,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
-	lease := s.svc.lookup(owner, id)
+	// Shared leases are attachable over SSH (T6/#33).
+	lease := s.svc.lookupWithShare(owner, id, ShareSSH)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
@@ -307,7 +312,7 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
-	lease := s.svc.lookup(owner, id)
+	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
@@ -608,7 +613,8 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "{\"message\":\"...\"} required")
 		return
 	}
-	lease := s.svc.lookup(owner, id)
+	// Shared leases accept agent prompts too (T6/#33).
+	lease := s.svc.lookupWithShare(owner, id, ShareSSH)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
@@ -716,7 +722,8 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
-	lease := s.svc.lookup(owner, id)
+	// Shared leases are executable over the API (T6/#33).
+	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
@@ -775,7 +782,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
-	lease := s.svc.lookup(owner, id)
+	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return

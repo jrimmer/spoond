@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -494,7 +495,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id> — add --json for raw output"
+		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {
@@ -726,8 +727,80 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		default:
 			return `{"error":"unknown ssh-key subcommand — ls, add, rm"}`
 		}
+	case "share":
+		// Sharing (T6/#33). share add <lease-id> <user-id> [ssh|http] [ttl] /
+		// share ls / share rm <lease-id> <user-id>
+		if len(fields) < 2 {
+			return `{"error":"usage: share add <lease-id> <user-id> [ssh|http] [ttl] | share ls | share rm <lease-id> <user-id>"}`
+		}
+		sub := fields[1]
+		switch sub {
+		case "add":
+			if len(fields) < 4 {
+				return `{"error":"usage: share add <lease-id> <user-id> [ssh|http] [ttl]"}`
+			}
+			mode := "http"
+			ttl := 0
+			if len(fields) > 4 && (fields[4] == "ssh" || fields[4] == "http") {
+				mode = fields[4]
+			}
+			if len(fields) > 5 {
+				if n, err := strconv.Atoi(fields[5]); err == nil {
+					ttl = n
+				}
+			}
+			p, _ := json.Marshal(map[string]any{"grantee": fields[2], "mode": mode, "ttl": ttl})
+			b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[2]+"/share", p)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return strings.TrimSpace(string(b))
+		case "ls":
+			b, err := backendJSON(ctx, http.MethodGet, "/api/shares", nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			if jsonMode {
+				return strings.TrimSpace(string(b))
+			}
+			var resp struct {
+				Shares []struct {
+					LeaseID string `json:"lease_id"`
+					Grantee string `json:"grantee"`
+					Mode    string `json:"mode"`
+					Expires string `json:"expires_at"`
+				} `json:"shares"`
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(b, &resp); err != nil || resp.Error != "" {
+				return strings.TrimSpace(string(b))
+			}
+			if len(resp.Shares) == 0 {
+				return "no shares"
+			}
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "%-36s %-12s %-6s %s\n", "LEASE", "GRANTEE", "MODE", "EXPIRES")
+			for _, sh := range resp.Shares {
+				exp := "never"
+				if sh.Expires != "" {
+					exp = sh.Expires
+				}
+				fmt.Fprintf(&sb, "%-36s %-12s %-6s %s\n", sh.LeaseID, sh.Grantee, sh.Mode, exp)
+			}
+			return strings.TrimSuffix(sb.String(), "\n")
+		case "rm":
+			if len(fields) < 4 {
+				return `{"error":"usage: share rm <lease-id> <user-id>"}`
+			}
+			if err := backendJSONErr(ctx, http.MethodDelete, "/api/sandboxes/"+fields[2]+"/share/"+fields[3], nil); err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return fmt.Sprintf(`{"revoked":%q,"grantee":%q}`, fields[2], fields[3])
+		default:
+			return `{"error":"unknown share subcommand — add, ls, rm"}`
+		}
 	default:
-		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, restart, tag, prompt, ssh-key, help"}`, fields[0])
+		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, restart, tag, prompt, ssh-key, share, help"}`, fields[0])
 	}
 }
 

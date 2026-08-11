@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,18 +41,38 @@ type Lease struct {
 	released   bool
 }
 
+// ShareMode selects which surfaces a share covers.
+type ShareMode string
+
+const (
+	ShareSSH  ShareMode = "ssh"  // SSH attach / ctl access
+	ShareHTTP ShareMode = "http" // proxy / exec API access
+)
+
+// Share grants a user access to a lease owned by someone else (T6/#33).
+type Share struct {
+	LeaseID   string    // the shared lease
+	Grantee   string    // user id receiving access
+	Mode      ShareMode // ssh | http
+	ExpiresAt time.Time // zero = never expires
+	CreatedAt time.Time
+}
+
 // Store holds the live leases and the warm pool.
 type Store struct {
 	mu     sync.Mutex
 	leases map[string]*Lease
 	// pool holds pre-forked forkd sandbox ids per image tag.
 	pool map[string][]string
+	// shares maps lease id -> grantee id -> share (T6/#33).
+	shares map[string]map[string]*Share
 }
 
 func newStore() *Store {
 	return &Store{
 		leases: make(map[string]*Lease),
 		pool:   make(map[string][]string),
+		shares: make(map[string]map[string]*Share),
 	}
 }
 
@@ -736,6 +757,102 @@ func (s *Service) lookupUserScoped(owner, label string) *Lease {
 		}
 	}
 	return nil
+}
+
+// GrantShare shares a lease with another user (T6/#33). Only the owner
+// can grant; an existing share is replaced. mode selects the surface
+// (ssh | http); ttl limits the share lifetime (0 = never expires).
+func (s *Service) GrantShare(owner, leaseID, grantee string, mode ShareMode, ttl time.Duration) error {
+	l := s.lookup(owner, leaseID)
+	if l == nil {
+		return fmt.Errorf("sandbox not found")
+	}
+	if grantee == "" || grantee == owner {
+		return fmt.Errorf("grantee must be a different user")
+	}
+	if s.identities != nil && s.identities.UserByID(grantee) == nil {
+		return fmt.Errorf("no such user: %s", grantee)
+	}
+	if mode != ShareSSH && mode != ShareHTTP {
+		return fmt.Errorf("share mode must be ssh or http")
+	}
+	sh := &Share{
+		LeaseID:   leaseID,
+		Grantee:   grantee,
+		Mode:      mode,
+		CreatedAt: time.Now(),
+	}
+	if ttl > 0 {
+		sh.ExpiresAt = time.Now().Add(ttl)
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if s.store.shares[leaseID] == nil {
+		s.store.shares[leaseID] = make(map[string]*Share)
+	}
+	s.store.shares[leaseID][grantee] = sh
+	return nil
+}
+
+// RevokeShare removes a grant (T6/#33). Only the owner can revoke.
+// Idempotent.
+func (s *Service) RevokeShare(owner, leaseID, grantee string) error {
+	l := s.lookup(owner, leaseID)
+	if l == nil {
+		return fmt.Errorf("sandbox not found")
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if m := s.store.shares[leaseID]; m != nil {
+		delete(m, grantee)
+		if len(m) == 0 {
+			delete(s.store.shares, leaseID)
+		}
+	}
+	return nil
+}
+
+// ListShares returns shares granted on the caller's leases (T6/#33),
+// newest first.
+func (s *Service) ListShares(owner string) []*Share {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	var out []*Share
+	for _, m := range s.store.shares {
+		for _, sh := range m {
+			l := s.store.leases[sh.LeaseID]
+			if l == nil || l.released || l.Owner != owner {
+				continue
+			}
+			cp := *sh
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out
+}
+
+// lookupWithShare returns a live lease the caller may access, either as
+// owner or via a valid share covering mode. Used by exec/proxy/endpoint
+// so shared leases work without weakening owner scoping.
+func (s *Service) lookupWithShare(caller, leaseID string, mode ShareMode) *Lease {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[leaseID]
+	if l == nil || l.released {
+		return nil
+	}
+	if l.Owner == caller {
+		return l
+	}
+	sh := s.store.shares[leaseID][caller]
+	if sh == nil || sh.Mode != mode {
+		return nil
+	}
+	if !sh.ExpiresAt.IsZero() && time.Now().After(sh.ExpiresAt) {
+		return nil
+	}
+	return l
 }
 
 // grantFromSnapshot spawns a sandbox directly from a specific snapshot
