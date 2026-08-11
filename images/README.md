@@ -83,3 +83,39 @@ Then:
 1. Add `<name>` to `KNOWN_IMAGES` in `/etc/forkd-backend.env`
 2. Add `<label>=<name>` to `IMAGE_MAP` in `/etc/forkd-runner.env`
 3. Mark `baked: true` in `images/manifest.yaml`
+
+### Baking Rust images
+
+Rust images need special attention due to the size of the toolchain and
+build artifacts. See the `rust-base` entry in `manifest.yaml` for
+detailed notes. Key requirements:
+
+- **Rootfs**: 8+ GiB (`--size-mib 8192`). The Rust toolchain (~1.5 GiB)
+  + cargo registry + build artifacts for `cargo test` exceed 4 GiB.
+  See issue #38 for the sparse-rootfs proposal that would make this a
+  non-issue.
+- **Memory**: 4+ GiB (`--mem-size-mib 4096`). 512 MiB OOM-kills `cargo
+  check` during tokio compilation. See issue #39 for `--mem-size-mib`
+  support in `forkd from-image`.
+- **python3**: Required for `forkd-agent.py` (PID 1 guest agent). Pass
+  `--extra python3` to `forkd from-image`.
+- **rustup**: Docker `rust:*` images ship rustup without a default
+  toolchain. Run `rustup default stable` inside the sandbox **before
+  snapshotting** so the toolchain is pre-installed and rustup doesn't
+  try to download it at runtime. If the project has a
+  `rust-toolchain.toml` with `channel = "stable"`, rustup will try to
+  download the latest stable on first build — ensure it fits on the
+  rootfs or pre-install it during bake.
+- **PATH**: Ensure `/etc/environment` includes `/usr/local/cargo/bin`
+  so `forkd-agent.py` (issue #41, PR #44) sets the correct container
+  PATH for exec commands.
+
+Recommended bake command (once #38/#39 are resolved):
+
+```bash
+forkd from-image rust:1.85-bookworm --tag rust-base \
+  --extra python3 --size-mib 8192 --mem-size-mib 4096
+```
+
+After baking, run `rustup default stable` inside the sandbox before
+snapshotting so the stable toolchain is pre-installed.
