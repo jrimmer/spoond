@@ -1,10 +1,23 @@
-name: forkd-test
-on: [push]
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
 jobs:
   test:
     runs-on: go
     steps:
       - uses: actions/checkout@v4
       - run: go version
-      - run: go build ./...
-      - run: go test ./...
+      - name: gofmt check
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: go build
+        run: go build ./...
+      - name: go test
+        run: go test ./...

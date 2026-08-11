@@ -1,0 +1,38 @@
+name: LLM Review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  llm-review:
+    name: AI architecture & design review
+    runs-on: llm-review
+    env:
+      FORGEJO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FORGEJO_API: "${{ github.api_url }}/repos/${{ github.repository }}"
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openai-compatible' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'mimo-v2.5-free' }}
+      LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT || 'https://opencode.ai/zen/v1/chat/completions' }}
+      LLM_MODELS_ENDPOINT: ${{ vars.LLM_MODELS_ENDPOINT || 'https://opencode.ai/zen/v1/models' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Get PR diff
+        run: |
+          curl -s -H "Authorization: token $FORGEJO_TOKEN" \
+            "$FORGEJO_API/pulls/$PR_NUMBER.diff" \
+            -o /tmp/pr.diff
+          echo "diff_size=$(wc -c < /tmp/pr.diff)"
+
+      - name: Run LLM review
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: python3 .forgejo/scripts/llm-review.py
