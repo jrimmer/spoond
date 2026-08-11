@@ -184,9 +184,12 @@ func (s *Service) applyNetpol(ctx context.Context, l *Lease) error {
 	if s.netpol == nil {
 		return nil
 	}
-	if l.NetPolicy == "" || l.NetPolicy == string(PolicyLAN) {
-		return nil // lan is the default; the netns FORWARD chain allows it
+	if l.NetPolicy == "" {
+		l.NetPolicy = string(PolicyLAN)
 	}
+	// Always apply rules — the netns pool reuses network namespaces, so a
+	// previous lease may have left stale FORWARD rules (e.g. restricted).
+	// policyCommands flushes FORWARD first, making this idempotent.
 	ep, err := s.resolveEndpoint(ctx, l)
 	if err != nil {
 		return fmt.Errorf("resolve endpoint for policy: %w", err)
