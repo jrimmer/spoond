@@ -100,7 +100,7 @@ func (s *Server) proxyAuthOK(w http.ResponseWriter, r *http.Request) bool {
 func (s *Server) SetAssetsDir(dir string) { s.assetsDir = dir }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	label, port, ok := parseProxyHost(r.Host)
+	label, hostUser, port, ok := parseProxyHost2(r.Host)
 	if !ok {
 		http.Error(w, "unknown sandbox hostname", http.StatusNotFound)
 		return
@@ -108,9 +108,28 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	var lease *Lease
 	// Under forward-auth, the authenticated owner scopes every lookup
 	// (U7/T7): a user only ever reaches their own leases, by id or
-	// friendly name. In the capability model (off) the hostname is the
-	// credential and owner-blind lookups are used, as before.
+	// friendly name. A per-user hostname segment (<label>.<user>...) must
+	// match the authenticated owner. In the capability model (off) the
+	// hostname is the credential and owner-blind lookups are used.
 	if owner := proxyOwnerFrom(r.Context()); owner != "" {
+		if hostUser != "" {
+			// Resolve the user segment to an identity id and require
+			// it to be the authenticated owner (no cross-user URLs).
+			// With no identity store (legacy single-user) the segment
+			// must equal the raw Remote-User owner.
+			if s.svc.identities == nil {
+				if hostUser != owner {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+			} else {
+				hu := s.svc.identities.UserByName(hostUser)
+				if hu == nil || hu.ID != owner {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+			}
+		}
 		lease = s.svc.lookupUserScoped(owner, label)
 	} else if len(label) == 32 && isHex(label) {
 		lease = s.svc.lookupAny(label)
@@ -196,6 +215,46 @@ func parseProxyHost(host string) (leaseID string, port int, ok bool) {
 		return "", 0, false
 	}
 	return label, defaultProxyPort, true
+}
+
+// parseProxyHost2 is the U7/T7 extension of parseProxyHost. It accepts
+// the legacy single-label form plus the per-user form:
+//
+//	<label>.sandbox.lacy.casa              → user "" (any/legacy)
+//	<label>.<user>.sandbox.lacy.casa       → user <user>
+//
+// Returns user="" when the hostname has no user segment. The caller
+// (handleProxy) decides whether the user segment is allowed for the
+// authenticated owner.
+func parseProxyHost2(host string) (label, user string, port int, ok bool) {
+	h := strings.ToLower(strings.TrimSpace(host))
+	// Strip any explicit :port from the Host header (rare on 443, cheap).
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.HasSuffix(h, "]") {
+		if _, err := strconv.Atoi(h[i+1:]); err == nil {
+			h = h[:i]
+		}
+	}
+	if !strings.HasSuffix(h, proxyHostSuffix) {
+		return "", "", 0, false
+	}
+	pre := strings.TrimSuffix(h, proxyHostSuffix)
+	if pre == "" {
+		return "", "", 0, false
+	}
+	// Two-label form: label.<user>.
+	if i := strings.IndexByte(pre, '.'); i >= 0 {
+		label, user = pre[:i], pre[i+1:]
+		if !isValidLabel(label) || !isValidLabel(user) {
+			return "", "", 0, false
+		}
+		return label, user, defaultProxyPort, true
+	}
+	// Single-label form: delegate to parseProxyHost (port suffix etc.).
+	label, port, ok = parseProxyHost(host)
+	if !ok {
+		return "", "", 0, false
+	}
+	return label, "", port, true
 }
 
 // isValidLabel accepts a 32-hex lease id or a friendly name
