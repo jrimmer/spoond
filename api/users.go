@@ -154,7 +154,10 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUsersByKey resolves an SSH key fingerprint to a user. The
-// gateway calls this in its PublicKeyCallback.
+// gateway calls this in its PublicKeyCallback and only needs id + name;
+// returning the full UserView (admin flag, all fingerprints, quotas) to
+// any token holder would make it a directory oracle (security review
+// #37 rescan F5).
 func (s *Server) handleUsersByKey(w http.ResponseWriter, r *http.Request) {
 	fp := strings.TrimSpace(r.URL.Query().Get("fingerprint"))
 	if fp == "" {
@@ -166,7 +169,10 @@ func (s *Server) handleUsersByKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no user for key")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
+	writeJSON(w, http.StatusOK, map[string]any{"user": map[string]any{
+		"id":   u.ID,
+		"name": u.Name,
+	}})
 }
 
 // handleUsersQuota updates a user's lease quota (admin only; T4/#31).

@@ -1,6 +1,67 @@
 # Security model & hardening notes
 
-Status of the adversarial review findings (issue #37) after the fix pass.
+Status of the adversarial review findings (issue #37) after the fix pass
+and the independent clean-room rescan (deleg_3a249d37, two fresh reviewers).
+
+## Rescan fixes (second pass, commit after 35540b5)
+
+- **F1 clone quota** — `grantFromSnapshot` now calls `reserveQuota` +
+  deferred release (clone can't bypass `max_leases`); clone surfaces 429
+  like create.
+- **F2 proxy header leak** — the reverse-proxy `Rewrite` strips
+  `X-Proxy-Auth`, `Remote-User`, `X-Spoond-User-Id`, `X-Bootstrap-Token`
+  before the guest app sees them; a tenant can no longer harvest the
+  forward-auth secret from inside their own sandbox.
+- **F3 guest isolation** — default egress policy is now `restricted`, not
+  `lan`: a guest can only reach the host bridge IP (10.43.0.1: LLM
+  gateway, shelly assets, proxy) + its allowlist, NOT peer sandboxes.
+  Every sandbox carries an unauthenticated root exec agent on :8888 and
+  a shelley agent on :9000, so guest→guest must be blocked by default;
+  operators who need full LAN egress opt in with `network_policy=lan`.
+  (The agent itself still binds 0.0.0.0:8888 because forkd-controller
+  dials it from the host — full agent-auth is a controller-side change.)
+- **F4 proxy capability names** — in capability mode (no auth) only the
+  unguessable 32-hex lease id resolves; guessable friendly names are 404
+  unless forward-auth is on (where lookups are owner-scoped). Legacy
+  single-user deployments (no identity store) keep friendly names.
+- **F5 by-key oracle** — `GET /api/users/by-key` now returns only id +
+  name (was full UserView: admin flag, fingerprints, quotas).
+- **F6 memory cap** — `memory_mib` is clamped server-side to
+  `maxLeaseMemoryMiB` (16 GiB); negatives → 0.
+- **F7 bootstrap token** — the SSH gateway no longer forwards
+  `X-Bootstrap-Token` (replaying it on the most exposed surface
+  recreated the fresh-store admin race); bootstrap is an operator action
+  via direct API call. `--bootstrap-token` flag accepted but ignored.
+- **F8 attach scoping** — SSH attach/`restartSSHD` now use the
+  user-scoped context (`gwCtx`), so `/endpoint` + exec run as the SSH
+  user, not the gateway service identity (was: broken attach in store
+  mode + gateway-owned leases attachable by any user).
+- **F9 activity cap** — per-owner `busyMax` (8) on exec/stream → 429
+  beyond it (quota covers lease count, not in-flight activity).
+- **F10 LLM body cap** — gateway request body limited to 1 MiB; both
+  HTTP listeners get `ReadHeaderTimeout` + `MaxHeaderBytes`.
+- **F11 prompt JSON injection** — `model` is now `json.dumps`-escaped
+  like `message` (was raw interpolation into the agent JSON).
+- **F12 nil-identity panic** — impersonation block guards `identities !=
+  nil` (gateway token without a store no longer crashes).
+- **F13 assets containment** — `/assets/` does an explicit
+  `filepath.Join` containment check instead of relying on the stdlib's
+  incidental dot-dot rejection.
+- **Unit hardening** — gateway token moved out of `ExecStart` into
+  `/etc/spoond-gateway.env` (0600, `SPOOND_GATEWAY_TOKEN`); install
+  script writes it.
+
+Known/accepted residuals (documented, not code-changed):
+- Legacy consumer-owned leases keep the capability-model LLM path
+  (operator-controlled tokens); `requireKey` covers identity-store users.
+- `InsecureSkipVerify` on the gateway→backend loopback TLS (self-signed
+  cert; local-only). Prefer a pinned CA or Unix socket in locked-down
+  deployments.
+- The in-guest agent channel is unauthenticated by contract with
+  forkd-controller; default restricted policy is the spoond-side
+  mitigation.
+- `PROXY_AUTH_MODE` still defaults to off (capability model) — flipping
+  it requires the staged Caddy forward-auth deploy (U7).
 
 ## Multi-user boundaries (epic #26)
 

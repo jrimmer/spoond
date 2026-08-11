@@ -65,6 +65,16 @@ install -m 644 deploy/spoond-backend.service /etc/systemd/system/
 install -m 644 deploy/spoond-sshd-gateway.service /etc/systemd/system/
 install -m 644 deploy/spoond-watchdog.service /etc/systemd/system/
 install -m 644 deploy/spoond-watchdog.timer /etc/systemd/system/
+# Gateway credential file (0600): the unit reads SPOOND_GATEWAY_TOKEN
+# from here instead of embedding it in ExecStart (security review #37
+# rescan — the token is admin-equivalent and must not be world-readable
+# via the unit or /proc/<pid>/cmdline).
+if [ ! -f /etc/spoond-gateway.env ]; then
+  umask 077
+  echo "SPOOND_GATEWAY_TOKEN=<CONSUMER_TOKEN>" > /etc/spoond-gateway.env
+  chmod 600 /etc/spoond-gateway.env
+  echo "  wrote /etc/spoond-gateway.env (0600) — set SPOOND_GATEWAY_TOKEN"
+fi
 systemctl daemon-reload
 
 # 4. Optional: forkd-controller

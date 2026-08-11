@@ -46,7 +46,17 @@ func (s *Server) ProxyHandler() http.Handler {
 		// at http://10.43.0.1:8891/assets/<file>. This is how a lease
 		// fetches tooling that is too big for the exec API cmdline.
 		if s.assetsDir != "" && strings.HasPrefix(r.URL.Path, "/assets/") {
-			http.ServeFile(w, r, filepath.Join(s.assetsDir, strings.TrimPrefix(r.URL.Path, "/assets/")))
+			// Containment (security review #37 rescan): never rely on the
+			// stdlib's incidental dot-dot rejection for a host-filesystem
+			// read on an unauthenticated path. Resolve inside assetsDir
+			// and refuse anything that escapes it.
+			rel := strings.TrimPrefix(r.URL.Path, "/assets/")
+			p := filepath.Join(s.assetsDir, filepath.FromSlash(rel))
+			if !strings.HasPrefix(p, filepath.Clean(s.assetsDir)+string(filepath.Separator)) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			http.ServeFile(w, r, p)
 			return
 		}
 		// Forward-auth gate (U7/T7): off/"") = capability model.
@@ -159,9 +169,22 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		lease = s.svc.lookupUserScoped(owner, label)
 	} else if len(label) == 32 && isHex(label) {
+		// Capability model: ONLY the unguessable 32-hex lease id is a
+		// credential. Friendly names are NOT capabilities (they're
+		// guessable: "web", "demo", "api"...) and resolving them
+		// cross-tenant here would expose every tenant's sandbox to
+		// anyone on the network (security review #37 rescan F4).
+		// Friendly-name routing requires forward-auth, where lookups
+		// are owner-scoped.
 		lease = s.svc.lookupAny(label)
-	} else {
+	} else if s.svc.identities == nil && label != "" {
+		// Legacy single-user mode (no identity store): there is only
+		// one tenant, so a friendly name carries no cross-tenant
+		// exposure. Keep the old behavior for these deployments.
 		lease = s.svc.lookupByName(label)
+	} else {
+		http.Error(w, "unknown sandbox hostname", http.StatusNotFound)
+		return
 	}
 	if lease == nil {
 		http.Error(w, "sandbox not found", http.StatusNotFound)
@@ -184,6 +207,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			// Preserve the original Host so sandbox apps see the public
 			// hostname (virtual hosting works as expected).
 			pr.Out.Host = pr.In.Host
+			// Security review #37 rescan F2: NEVER forward the forward-auth
+			// gate headers to the guest app. Guests are tenant-controlled;
+			// if X-Proxy-Auth (the shared secret with Caddy) or Remote-User
+			// reached them, any tenant could harvest the secret and
+			// impersonate anyone through the proxy. Strip all gate/auth
+			// headers here (Caddy also strips on ingress — defense in
+			// depth, spoond must too since :8891 is directly reachable).
+			for _, h := range []string{"X-Proxy-Auth", "Remote-User", "X-Spoond-User-Id", "X-Bootstrap-Token"} {
+				pr.Out.Header.Del(h)
+			}
 		},
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {

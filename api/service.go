@@ -892,6 +892,13 @@ func (s *Service) lookupWithShare(caller, leaseID string, mode ShareMode) *Lease
 // the branch tag is fresh, has no pool, and must not be registered as a
 // refillable image (refillPool would start pre-forking clone tags).
 func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl time.Duration, persistent bool) (*Lease, error) {
+	// Quota enforcement (security review #37 rescan F1): clone must not
+	// bypass the per-user lease cap. Reserve atomically and release on
+	// completion (the reservation becomes the real lease on success).
+	if err := s.reserveQuota(owner); err != nil {
+		return nil, err
+	}
+	defer func() { s.releaseQuotaReservation(owner) }()
 	lease := &Lease{
 		ID:         newID(),
 		Owner:      owner,

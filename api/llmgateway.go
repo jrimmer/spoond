@@ -238,7 +238,11 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// keeps body, length, and streaming fully under our control.
 	var body []byte
 	if r.Body != nil {
-		body, _ = io.ReadAll(r.Body)
+		// Cap the request body (security review #37 rescan F10): an
+		// unbounded ReadAll lets a caller push arbitrary memory into the
+		// gateway (and upstream). LLM chat bodies are small; 1 MiB is
+		// generous for any chat/completions payload.
+		body, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		r.Body.Close()
 	}
 	if g.modelMap != nil || g.defaultModel != "" {

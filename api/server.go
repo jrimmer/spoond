@@ -50,6 +50,35 @@ type Server struct {
 	// authFails (security review #37 L5) throttles repeated failed
 	// token auths per client IP.
 	authFails *authFailLimiter
+	// busy (security review #37 rescan F9) caps concurrent exec/stream
+	// operations per owner so a tenant can't saturate the controller
+	// with in-flight activity (quota covers lease count, not activity).
+	busyMu    sync.Mutex
+	busyCount map[string]int
+	busyMax   int
+}
+
+// acquireBusy reserves an exec/stream slot for owner. Returns false when
+// the per-owner cap is already reached (caller should 429).
+func (s *Server) acquireBusy(owner string) bool {
+	s.busyMu.Lock()
+	defer s.busyMu.Unlock()
+	if s.busyCount[owner] >= s.busyMax {
+		return false
+	}
+	s.busyCount[owner]++
+	return true
+}
+
+// releaseBusy frees an exec/stream slot acquired by acquireBusy.
+func (s *Server) releaseBusy(owner string) {
+	s.busyMu.Lock()
+	defer s.busyMu.Unlock()
+	if s.busyCount[owner] <= 1 {
+		delete(s.busyCount, owner)
+	} else {
+		s.busyCount[owner]--
+	}
 }
 
 // SetBootstrapToken configures the first-user bootstrap gate
@@ -101,7 +130,8 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // (applied when a requested id isn't in modelMap); modelMap translates
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
-	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter()}
+	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
+		busyCount: map[string]int{}, busyMax: 8}
 	if openRouterURL != "" {
 		// svc.identities must be installed (SetIdentities) before
 		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
@@ -247,12 +277,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// exist in the identity store.
 		if s.svc.gatewayToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.svc.gatewayToken)) == 1 {
 			if uid := r.Header.Get("X-Spoond-User-Id"); uid != "" {
-				if u := s.svc.identities.UserByID(uid); u != nil {
-					ctx = context.WithValue(ctx, ctxOwnerKey{}, u.ID)
-					ctx = context.WithValue(ctx, ctxUserKey{}, u)
-				} else {
-					writeError(w, http.StatusForbidden, "unknown impersonated user")
-					return
+				// Nil-identity guard (security review #37 rescan F12): the
+				// gateway token can be configured without an identity store
+				// (legacy single-consumer deployments); without this check a
+				// request carrying X-Spoond-User-Id would nil-deref and
+				// crash the goroutine.
+				if s.svc.identities != nil {
+					if u := s.svc.identities.UserByID(uid); u != nil {
+						ctx = context.WithValue(ctx, ctxOwnerKey{}, u.ID)
+						ctx = context.WithValue(ctx, ctxUserKey{}, u)
+					} else {
+						writeError(w, http.StatusForbidden, "unknown impersonated user")
+						return
+					}
 				}
 			}
 		}
@@ -332,6 +369,19 @@ func ownerFrom(ctx context.Context) string {
 	return v
 }
 
+// maxLeaseMemoryMiB caps the per-lease memory a caller may request
+// (security review #37 rescan F6). 16 GiB — generous for compute
+// workloads, bounded against host OOM.
+const maxLeaseMemoryMiB = 16 * 1024
+
+// hostBridgeAllow is the host-side bridge IP that every guest needs
+// even under the default restricted policy: the LLM gateway, shelly
+// binary assets, and the public proxy all live on the host and guests
+// reach them via the bridge (security review #37 rescan F3). This must
+// match the bridge IP used by forkd-controller (10.43.0.1) — the same
+// constant the gateway uses for SHELLY_BINARY_URL / LLM_GATEWAY_URL.
+var hostBridgeAllow = []string{"10.43.0.1"}
+
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -352,18 +402,26 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "image is required")
 		return
 	}
-	// Egress policy: default lan; must be a known policy name. The
-	// restricted policy requires a non-empty allowlist.
+	// Egress policy (security review #37 rescan F3): default restricted —
+	// NOT lan. The default must not let a guest reach other tenants'
+	// sandboxes on the shared bridge (each sandbox carries an
+	// unauthenticated root exec agent on :8888 and a shelley agent on
+	// :9000). Restricted allows the host bridge (LLM gateway, shelly
+	// assets, proxy) + configured allowlist, and blocks guest→guest.
+	// Operators who need full LAN egress opt in explicitly.
 	if req.NetPolicy == "" {
-		req.NetPolicy = string(PolicyLAN)
+		req.NetPolicy = string(PolicyRestricted)
 	}
 	if !ValidNetworkPolicy(req.NetPolicy) {
 		writeError(w, http.StatusBadRequest, "network_policy must be none|lan|internet|restricted")
 		return
 	}
-	if req.NetPolicy == string(PolicyRestricted) && len(req.NetAllow) == 0 {
-		writeError(w, http.StatusBadRequest, "restricted policy requires egress_allowlist")
-		return
+	if req.NetPolicy == string(PolicyRestricted) {
+		// Guests always need the host bridge IP (LLM gateway, assets,
+		// proxy) even under restricted; without it every default lease
+		// would lose guest-side LLM/proxy access. Appending it here
+		// keeps the default functional while still blocking peers.
+		req.NetAllow = append(req.NetAllow, hostBridgeAllow...)
 	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
 	if err != nil {
@@ -393,6 +451,17 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		if userMax := time.Duration(u.MaxTTL) * time.Second; ttl > userMax {
 			ttl = userMax
 		}
+	}
+	// Cap the memory request (security review #37 rescan F6): an
+	// uncapped memory_mib lets a tenant drive a cold spawn with an
+	// absurd limit and exhaust host RAM (the warm pool is off by
+	// default, so most spawns are cold). The controller clamps per-VM
+	// but must never receive an attacker-chosen unbounded value.
+	if req.MemoryMiB < 0 {
+		req.MemoryMiB = 0
+	}
+	if req.MemoryMiB > maxLeaseMemoryMiB {
+		req.MemoryMiB = maxLeaseMemoryMiB
 	}
 	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent, req.NetPolicy, req.NetAllow)
 	if err != nil {
@@ -450,6 +519,12 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
+	// Per-owner activity cap (security review #37 rescan F9).
+	if !s.acquireBusy(owner) {
+		http.Error(w, "too many concurrent exec/stream operations; try again shortly", http.StatusTooManyRequests)
+		return
+	}
+	defer s.releaseBusy(owner)
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
@@ -505,8 +580,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		pty = *req.Pty
 	}
 
-	// Dial the agent inside the sandbox's netns.
-	agentAddr := net.JoinHostPort(ep.GuestHost, "8888")
+	// Dial the agent inside the sandbox's netns. The agent binds
+	// 127.0.0.1:8888 (security review #37 rescan F3) — it must NOT be
+	// reachable from peer sandboxes on the bridge. dialInNetns enters
+	// the guest netns, so loopback resolves to the guest's own agent.
+	agentAddr := net.JoinHostPort("127.0.0.1", "8888")
 	agent, err := dialInNetns(ep.Netns, agentAddr)
 	if err != nil {
 		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"agent unreachable: `+err.Error()+`"}`))
@@ -771,7 +849,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 MSG=$(echo %s | base64 -d)
 MOD=$(echo %s | base64 -d)
 RESP=$(curl -sf --max-time 60 -H 'Content-Type: application/json' \
-  -d "{\"message\":$(printf '%%s' "$MSG" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'),\"model\":\"$MOD\"}" \
+  -d "{\"message\":$(printf '%%s' "$MSG" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'),\"model\":$(printf '%%s' "$MOD" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}" \
   http://127.0.0.1:9000/api/conversations/new) || { echo "SHELLEY_NOT_RUNNING"; exit 1; }
 CID=$(echo "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["conversation_id"])')
 for i in $(seq 1 40); do
@@ -860,6 +938,12 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
+	// Per-owner activity cap (security review #37 rescan F9).
+	if !s.acquireBusy(owner) {
+		writeError(w, http.StatusTooManyRequests, "too many concurrent exec/stream operations; try again shortly")
+		return
+	}
+	defer s.releaseBusy(owner)
 	// Shared leases are executable over the API (T6/#33).
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
@@ -1095,6 +1179,12 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 	cloned, err := s.svc.grantFromSnapshot(r.Context(), owner, newTag, ttl, true)
 	if err != nil {
 		s.svc.log.Printf("clone %s: grant from %s: %v", id, newTag, err)
+		// Quota enforcement (security review #37 rescan F1): clone must
+		// surface the same 429 as create, not a generic 500.
+		if err == errQuotaExceeded {
+			writeError(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to spawn clone")
 		return
 	}

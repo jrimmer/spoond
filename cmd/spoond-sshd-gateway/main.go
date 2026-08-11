@@ -56,12 +56,16 @@ var (
 	flags = flag.NewFlagSet("spoond-gateway", flag.ExitOnError)
 
 	// gatewayHost is the public hostname advertised in MOTDs.
-	gatewayHost  = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
-	listenAddr   = flags.String("listen", ":2222", "listen address")
-	hostKeyPath  = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
-	backendURL   = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
-	backendTok   = flags.String("backend-token", "", "spoond-backend consumer token (required)")
-	bootstrapTok = flags.String("bootstrap-token", "", "spoond-backend BOOTSTRAP_TOKEN (first-user bootstrap; security review #37 M4)")
+	gatewayHost = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
+	listenAddr  = flags.String("listen", ":2222", "listen address")
+	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
+	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
+	backendTok  = flags.String("backend-token", "", "spoond-backend consumer token (required)")
+	// DEPRECATED/ignored (security review #37 rescan F7): the gateway
+	// must NOT forward the bootstrap token — bootstrap is an operator
+	// action against the backend directly. The flag is accepted so
+	// existing units keep working after upgrade.
+	bootstrapTok = flags.String("bootstrap-token", "", "DEPRECATED: ignored; bootstrap via direct backend API call")
 	clientKeys   = flags.String("client-keys", "", "comma-separated paths to authorized client public keys, or a directory scanned for *.pub files")
 	// gatewayKeyPath is the identity the gateway uses to connect INTO
 	// sandboxes. Its public half is baked into dev-base authorized_keys.
@@ -278,7 +282,13 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 			leaseID, reconnect(leaseID))
 	}
 
-	client, err := dialSandbox(context.Background(), leaseID, gatewayKey)
+	// Security review #37 rescan F8: dial with the USER-scoped context,
+	// not Background — resolveEndpoint/restartSSHD must run as the SSH
+	// user (X-Spoond-User-Id) or attach would resolve as the gateway
+	// service identity: user-owned leases would 404 (broken attach in
+	// store mode) and gateway-owned leases would be attachable by any
+	// user without an ownership check.
+	client, err := dialSandbox(gwCtx, leaseID, gatewayKey)
 	if err != nil {
 		log.Printf("dial sandbox for %s: %v", leaseID, err)
 		// Tell the client what happened with a session-level error.
@@ -1302,12 +1312,14 @@ func backendJSONOnceWith(ctx context.Context, client *http.Client, method, path 
 	if uid, _ := ctx.Value(ctxUserIDKey{}).(string); uid != "" {
 		req.Header.Set("X-Spoond-User-Id", uid)
 	}
-	// First-user bootstrap (security review #37 M4): forward the
-	// bootstrap token on every call; the backend only honors it for the
-	// store-empty first user creation.
-	if *bootstrapTok != "" {
-		req.Header.Set("X-Bootstrap-Token", *bootstrapTok)
-	}
+	// Deliberately NOT forwarding X-Bootstrap-Token (security review
+	// #37 rescan F7): the bootstrap token gates the first-user create on
+	// a fresh store, and the SSH gateway is the most exposed component.
+	// Replaying it unconditionally from here would hand any allowlisted
+	// key holder admin on a fresh deployment (gateway starts while the
+	// backend is down → allowlist keys authenticate → `ssh-key add`
+	// creates the first user as admin). Bootstrap is an operator action
+	// via direct API call (curl with the backend's BOOTSTRAP_TOKEN).
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

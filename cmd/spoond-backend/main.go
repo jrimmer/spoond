@@ -163,16 +163,25 @@ func Main(args []string) int {
 	// warming the pool, so netns slots are never double-booked.
 	svc.ReconcileOrphans(ctx)
 
-	httpSrv := &http.Server{
-		Addr:    bindAddr,
-		Handler: srv.Handler(),
+	// Slow-loris / header hardening (security review #37 rescan F10):
+	// both listeners get read-header timeouts + header size caps so a
+	// LAN/guest client can't hold connections open forever with trickled
+	// headers or send megabyte header floods.
+	newHTTPServer := func(addr string, handler http.Handler) *http.Server {
+		return &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+		}
 	}
+	httpSrv := newHTTPServer(bindAddr, srv.Handler())
 
 	// Optional second listener: the public HTTP proxy (wildcard
 	// *.sandbox.lacy.casa via Caddy). Plain HTTP — Caddy terminates TLS.
 	var proxySrv *http.Server
 	if proxyAddr != "" {
-		proxySrv = &http.Server{Addr: proxyAddr, Handler: srv.ProxyHandler()}
+		proxySrv = newHTTPServer(proxyAddr, srv.ProxyHandler())
 		go func() {
 			log.Printf("forkd proxy listening on %s (wildcard sandbox hostnames)", proxyAddr)
 			if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

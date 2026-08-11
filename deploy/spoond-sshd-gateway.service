@@ -8,13 +8,18 @@ After=network.target spoond-backend.service
 Wants=spoond-backend.service
 
 [Service]
+# Credential hygiene (security review #37 rescan): the backend token
+# lives in a 0600 EnvironmentFile, NOT in ExecStart — a world-readable
+# unit or /proc/<pid>/cmdline must not expose the token (which is
+# admin-equivalent: it can impersonate any user via X-Spoond-User-Id).
+EnvironmentFile=/etc/spoond-gateway.env
 ExecStart=/opt/spoond/spoond gateway \
   --listen :2222 \
   --host-key /etc/spoond-gateway/ssh_host_ed25519_key \
   --gateway-key /etc/spoond-gateway/gateway_ed25519 \
   --client-keys /etc/spoond-gateway/keys \
   --backend https://127.0.0.1:8890 \
-  --backend-token <CONSUMER_TOKEN> \
+  --backend-token ${SPOOND_GATEWAY_TOKEN} \
   --gateway-host sandbox.lacy.casa
 Restart=on-failure
 RestartSec=5
