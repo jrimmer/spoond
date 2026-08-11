@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/forkd-service/runner"
+	"github.com/jrimmer/spoond/runner"
 )
 
 // Config wires the adapter.

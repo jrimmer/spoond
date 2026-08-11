@@ -30,7 +30,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/forkd-service/runner"
+	"github.com/jrimmer/spoond/runner"
 )
 
 func envOr(key, def string) string {

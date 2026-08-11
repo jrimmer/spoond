@@ -243,7 +243,7 @@ jobs:
 	}
 	job := testJob(payload)
 	job.Secrets = map[string]string{"GITHUB_TOKEN": "tok123"}
-	job.Context = map[string]string{"repository": "lacy.casa/forkd-service"}
+	job.Context = map[string]string{"repository": "lacy.casa/spoond"}
 	if err := exec.Run(context.Background(), job); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -254,7 +254,7 @@ jobs:
 	// repo URL and token header, and the run step should use /workspace.
 	var sawClone, sawRun bool
 	for _, c := range lease.cmds {
-		if strings.Contains(c, "git") && strings.Contains(c, "lacy.casa/forkd-service.git") {
+		if strings.Contains(c, "git") && strings.Contains(c, "lacy.casa/spoond.git") {
 			sawClone = true
 			if !strings.Contains(c, "Authorization: token tok123") {
 				t.Fatalf("clone missing token header: %s", c)

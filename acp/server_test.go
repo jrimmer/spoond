@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jrimmer/forkd-service/runner"
+	"github.com/jrimmer/spoond/runner"
 )
 
 // fakeAgent is an in-memory Agent for protocol tests.

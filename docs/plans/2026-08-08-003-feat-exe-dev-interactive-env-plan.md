@@ -11,7 +11,7 @@ origin: docs/plans/2026-08-08-001-feat-forkd-ephemeral-backend-plan.md
 
 # exe.dev-style Interactive Dev Environment on forkd - Plan
 
-**Target repo:** `lacy.casa/forkd-service` (at `forgejo-work/hyper-forgejo-runner/`)
+**Target repo:** `lacy.casa/spoond` (at `forgejo-work/hyper-forgejo-runner/`)
 
 ## Goal Capsule
 

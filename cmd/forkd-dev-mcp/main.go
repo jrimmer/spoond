@@ -1,4 +1,4 @@
-// forkd-dev-mcp is the MCP server for forkd-service (ticket #23).
+// forkd-dev-mcp is the MCP server for spoond (ticket #23).
 //
 // It exposes forkd microVM sandboxes as MCP tools (shell, file ops,
 // status) so any MCP-capable agent (Goose, Codex, Claude Code,
@@ -26,8 +26,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/jrimmer/forkd-service/mcp"
-	"github.com/jrimmer/forkd-service/runner"
+	"github.com/jrimmer/spoond/mcp"
+	"github.com/jrimmer/spoond/runner"
 )
 
 func envOr(key, def string) string {

@@ -1,4 +1,4 @@
-module github.com/jrimmer/forkd-service
+module github.com/jrimmer/spoond
 
 go 1.25.0
 

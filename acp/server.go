@@ -1,5 +1,5 @@
 // Package acp implements forkd-acp (ticket #24): a native Agent Client
-// Protocol (ACP) agent endpoint for forkd-service.
+// Protocol (ACP) agent endpoint for spoond.
 //
 // ACP is the JSON-RPC 2.0 / NDJSON-over-stdio contract that hosts like
 // Buzz's buzz-acp use to attach agent CLIs. The agent's tools execute

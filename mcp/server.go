@@ -31,7 +31,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/forkd-service/runner"
+	"github.com/jrimmer/spoond/runner"
 )
 
 // Server is the MCP server. It reads JSON-RPC messages from in and

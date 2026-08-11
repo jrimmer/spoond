@@ -1,4 +1,4 @@
-# forkd-service
+# spoond
 
 Fast, isolated, ephemeral compute for people and agents: a lease API in
 front of **forkd microVMs** on a warm pool. Consumers request a sandbox,
@@ -7,7 +7,7 @@ environment in milliseconds, with an SSH gateway, HTTP proxy, LLM
 gateway, and native MCP/ACP agent endpoints on top.
 
 ```
-forkd-service (this repo)          forkd controller (separate repo)
+spoond (this repo)          forkd controller (separate repo)
 ┌──────────────────────────┐      ┌───────────────────────────────┐
 │ lease API  :8890         │ ───▶ │ Firecracker microVM lifecycle  │
 │ SSH gateway :2222        │      │ netns slots, snapshots,        │

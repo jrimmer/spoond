@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for wanting to help with forkd-service! This project is
+Thanks for wanting to help with spoond! This project is
 Apache-2.0 licensed (see `LICENSE`) and developed in the open.
 
 ## Code of conduct
@@ -11,7 +11,7 @@ maintainer-driven; questions are welcome in issues before opening PRs.
 ## Getting started
 
 ```bash
-git clone <repo-url> forkd-service && cd forkd-service
+git clone <repo-url> spoond && cd spoond
 go build ./...
 go test ./...
 ```

@@ -11,7 +11,7 @@ origin: docs/plans/2026-08-08-001-feat-forkd-ephemeral-backend-plan.md
 
 # CFOS/Sandstorm on forkd - Plan
 
-**Target repo:** `lacy.casa/forkd-service` (at `forgejo-work/hyper-forgejo-runner/`)
+**Target repo:** `lacy.casa/spoond` (at `forgejo-work/hyper-forgejo-runner/`)
 
 ## Goal Capsule
 
@@ -19,7 +19,7 @@ Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.lacy.casa` on CT144
 
 **Authority hierarchy:** the plan is the authority for scope and sequencing. The user (Jason) owns product decisions; the implementer owns execution details the plan leaves open.
 
-**Stop conditions:** stop when CFOS's chat agent brain runs in/on forkd microVMs (obtained via the lease API) with forkd-service offering the CFOS driver the way it offers Shelly — CFOS configured (not patched) to use it, and the CFOS chat works end-to-end. Do not build the full exe.dev-style interactive dev environment in this plan — that is a separate follow-up.
+**Stop conditions:** stop when CFOS's chat agent brain runs in/on forkd microVMs (obtained via the lease API) with spoond offering the CFOS driver the way it offers Shelly — CFOS configured (not patched) to use it, and the CFOS chat works end-to-end. Do not build the full exe.dev-style interactive dev environment in this plan — that is a separate follow-up.
 
 **Tail ownership:** the implementer owns the code, tests, and deployment of the forkd-side CFOS driver. The user owns the decision to decommission the Cloudflare Workers execution path and any CFOS-side changes.
 
@@ -27,7 +27,7 @@ Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.lacy.casa` on CT144
 > - CFOS is NOT a plain consumer of public Cloudflare Workers APIs. It runs on workerd with its own runtime extensions (`worker_loaders` is a non-standard wrangler key; capnweb RPC; `cloudflare:workers` module).
 > - Its "interface to CF Workers" is really three seams: (1) the chat agent loop (`runAgent` in `agent.ts`), abstracted behind `AgentHooks` + `ModelHandle`; (2) code execution (`executeCode` tool → `executeCodeMode` → `LOADER.load(workerDef)`), a private dynamic-worker loader, synchronous, stateless per call; (3) persistent/async work: Gadgets (Durable Objects with SQLite, `ctx.restore()`, tails, alarms) and Gatekeepers (separate Workers holding credentials, reached via RPC stubs).
 > - **The model routing is the driver socket.** `getModel()` in `ai-models.ts` has three modes including *direct provider access with the config's own `apiUrl`/`apiToken`* — CFOS already supports pointing a chat model at an arbitrary OpenAI-compatible endpoint with zero code change. The frontend's backend URL is also plain config (`VITE_BACKEND_HOST`).
-> - **Conclusion: no CFOS patches are needed.** Earlier plan revisions (KTD1/KTD2, HTTP bridge, `executeCodeMode` forkd branch, `/api/forkd-bridge/*` endpoints) were implemented and then **reverted** (2026-08-10) because they put forkd-awareness inside CFOS — architecturally backwards. The preferred direction (user-confirmed, "B as a sort of CFOS driver") is: forkd-service *offers* the CFOS driver the way it offers Shelly — agent brain in a forkd microVM, LLM gateway + attach hosted by forkd-service, OpenAI-compatible endpoint, keys off-VM, thin images — and CFOS config-only points at it.
+> - **Conclusion: no CFOS patches are needed.** Earlier plan revisions (KTD1/KTD2, HTTP bridge, `executeCodeMode` forkd branch, `/api/forkd-bridge/*` endpoints) were implemented and then **reverted** (2026-08-10) because they put forkd-awareness inside CFOS — architecturally backwards. The preferred direction (user-confirmed, "B as a sort of CFOS driver") is: spoond *offers* the CFOS driver the way it offers Shelly — agent brain in a forkd microVM, LLM gateway + attach hosted by spoond, OpenAI-compatible endpoint, keys off-VM, thin images — and CFOS config-only points at it.
 
 
 ## Product Contract
@@ -69,7 +69,7 @@ CFOS's execution currently depends on Cloudflare Workers — a managed, external
 
 ### Key Technical Decisions
 
-**KTD1. Driver, not adapter — forkd-service offers the CFOS brain the way it offers Shelly.** A new forkd-service component (e.g. `cmd/cfos-driver`) runs an agent brain in a forkd microVM (image attach + LLM gateway, keys off-VM), and exposes an OpenAI-compatible endpoint. CFOS points its existing model config at that endpoint — **no CFOS code changes** (the "config-only" requirement confirmed by `getModel()`'s direct-provider mode with `apiUrl`/`apiToken`). The driver's job is to look like a model to CFOS and like forkd to the sandboxes.
+**KTD1. Driver, not adapter — spoond offers the CFOS brain the way it offers Shelly.** A new spoond component (e.g. `cmd/cfos-driver`) runs an agent brain in a forkd microVM (image attach + LLM gateway, keys off-VM), and exposes an OpenAI-compatible endpoint. CFOS points its existing model config at that endpoint — **no CFOS code changes** (the "config-only" requirement confirmed by `getModel()`'s direct-provider mode with `apiUrl`/`apiToken`). The driver's job is to look like a model to CFOS and like forkd to the sandboxes.
 
 **KTD2. The driver speaks the CFOS agent protocol over the bridge.** CFOS chat messages arrive at the driver as OpenAI-compatible chat requests; the driver's agent (in-sandbox) uses tools (executeCode-in-forkd, read/write files, gatekeeper calls). The gatekeeper/gadget bindings bridge (KTD6) is the part of the driver that translates RPC stubs to HTTP calls **outbound from the sandbox back to CFOS** — reverse direction of the earlier (reverted) bridge. CFOS stays upstream-clean.
 
@@ -81,7 +81,7 @@ CFOS's execution currently depends on Cloudflare Workers — a managed, external
 
 **KTD6. The gatekeeper bindings bridge is the core technical risk.** CFOS generated code receives resources as typed bindings (`const issues = await env.PROJECT.listIssues(...)`) that are RPC stubs to Gatekeepers (which hold credentials, enforce policy, mediate side effects). The forkd sandbox must (a) run JS (Node.js) and (b) reach the gatekeeper bindings via an HTTP/RPC bridge back to CFOS. This is the hard part of the driver — not "run code in a sandbox" but "run JS in a sandbox with access to CFOS's gatekeeper RPC."
 
-**KTD7. Shelly is the template for the driver.** Shelly = agent in a forkd microVM, forkd-service hosts LLM gateway + attach, keys never enter the image, OpenAI-compatible endpoint exposed. The CFOS driver is the same shape with CFOS-specific tools; reuse the Shelly attach/gateway machinery rather than building a parallel mechanism.
+**KTD7. Shelly is the template for the driver.** Shelly = agent in a forkd microVM, spoond hosts LLM gateway + attach, keys never enter the image, OpenAI-compatible endpoint exposed. The CFOS driver is the same shape with CFOS-specific tools; reuse the Shelly attach/gateway machinery rather than building a parallel mechanism.
 
 ### High-Level Technical Design
 
@@ -92,7 +92,7 @@ flowchart LR
         CHAT[Chat / Overseer runAgent]
         GK[Gatekeepers / Gadget DOs]
     end
-    subgraph Driver [forkd-service cfos-driver]
+    subgraph Driver [spoond cfos-driver]
         LLM[OpenAI-compat endpoint]
         AGT[Agent brain in sandbox]
         CA[Command Adapter /v1/run]
@@ -131,11 +131,11 @@ flowchart LR
 
 ## Implementation Units
 
-> **STATUS: ON HOLD (2026-08-10).** The user asked to pause implementation pending a decision on how much this matters vs. other forkd-service work. The units below are the revised plan (driver shape) — **do not implement until the user lifts the hold.** What was already built (U1/U2 adapter, U3 js-base bake) remains in the repo/deployed state and is reusable; the A-design CFOS patches were reverted.
+> **STATUS: ON HOLD (2026-08-10).** The user asked to pause implementation pending a decision on how much this matters vs. other spoond work. The units below are the revised plan (driver shape) — **do not implement until the user lifts the hold.** What was already built (U1/U2 adapter, U3 js-base bake) remains in the repo/deployed state and is reusable; the A-design CFOS patches were reverted.
 
 ### U1. CFOS driver — OpenAI-compatible model endpoint (replaces old "adapter")
 
-**Goal:** forkd-service exposes an OpenAI-compatible chat endpoint (`cmd/cfos-driver`) that CFOS can point a model at via existing config (`AiModelConfig.apiUrl`/`apiToken`, direct-provider mode). The driver hosts an agent brain in a forkd microVM (Shelly-style attach + LLM gateway, keys off-VM) and speaks the CFOS agent protocol to its tools.
+**Goal:** spoond exposes an OpenAI-compatible chat endpoint (`cmd/cfos-driver`) that CFOS can point a model at via existing config (`AiModelConfig.apiUrl`/`apiToken`, direct-provider mode). The driver hosts an agent brain in a forkd microVM (Shelly-style attach + LLM gateway, keys off-VM) and speaks the CFOS agent protocol to its tools.
 
 **Requirements:** R1, R2, R3
 
@@ -233,4 +233,4 @@ flowchart LR
 - **RESOLVED (2026-08-10): Does the integration require CFOS patches?** No. CFOS's `getModel()` direct-provider mode accepts arbitrary OpenAI-compatible `apiUrl`/`apiToken`; the frontend backend URL is config (`VITE_BACKEND_HOST`). The driver shape is config-only for CFOS. (This supersedes the earlier "HTTP bridge into executeCodeMode" design, which was reverted.)
 - **RESOLVED: Does `executeCode` need Durable Objects semantics?** No — each call is stateless (fresh Dynamic Worker, run once, tear down). Persistent state lives in CFOS's own Durable Objects/storage, not the sandbox. (KTD5)
 - **Which CFOS bindings must be available in the sandbox for v1?** The gatekeeper bindings (env.PROJECT, etc.) are the core requirement. The minimal v1 should support at least one gatekeeper binding end-to-end to prove the bridge (KTD6).
-- **PENDING (user decision):** whether the CFOS driver is worth building now vs. other forkd-service work. Implementation is on hold until then.
+- **PENDING (user decision):** whether the CFOS driver is worth building now vs. other spoond work. Implementation is on hold until then.

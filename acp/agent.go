@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jrimmer/forkd-service/runner"
+	"github.com/jrimmer/spoond/runner"
 )
 
 // ---------- LLM gateway client ----------

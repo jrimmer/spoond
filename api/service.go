@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/forkd-service/forkd"
+	"github.com/jrimmer/spoond/forkd"
 )
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.

@@ -27,8 +27,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jrimmer/forkd-service/api"
-	"github.com/jrimmer/forkd-service/forkd"
+	"github.com/jrimmer/spoond/api"
+	"github.com/jrimmer/spoond/forkd"
 )
 
 func envOr(key, def string) string {

@@ -11,7 +11,7 @@ import (
 // NetworkPolicy is a sandbox's egress policy, enforced with iptables
 // FORWARD rules inside the sandbox's child network namespace. This is a
 // service-layer concern (hexagonal): the controller only hands out a
-// netns per sandbox; forkd-service decides what may leave it.
+// netns per sandbox; spoond decides what may leave it.
 type NetworkPolicy string
 
 const (

@@ -1,5 +1,5 @@
 // forkd-acp is the native Agent Client Protocol (ACP) endpoint for
-// forkd-service (ticket #24).
+// spoond (ticket #24).
 //
 // Hosts like Buzz's buzz-acp spawn it as a subprocess and speak
 // newline-delimited JSON-RPC 2.0 over stdio: initialize, session/new,
@@ -28,8 +28,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/jrimmer/forkd-service/acp"
-	"github.com/jrimmer/forkd-service/runner"
+	"github.com/jrimmer/spoond/acp"
+	"github.com/jrimmer/spoond/runner"
 )
 
 func envOr(key, def string) string {
