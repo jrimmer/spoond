@@ -59,10 +59,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (forkd microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl"} {
+	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl", "doctor"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}
 	}
-	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, noacp, nomcp, norunner, noctl\n")
+	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, noacp, nomcp, norunner, noctl, nodoctor\n")
 }

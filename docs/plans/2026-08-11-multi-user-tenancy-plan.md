@@ -13,7 +13,7 @@ product_contract_source: ce-plan
 ## Goal Capsule
 
 - **Objective:** make spoond multi-user — people and agents authenticate as first-class identities, and every lease, ctl action, proxy route, and LLM call is owner-scoped.
-- **Authority:** Jason decides both decision gates (KTD-1 agent identity model, KTD-2 admin role) before T1/T5 implementation; this plan recommends defaults so work can start on non-gated units immediately.
+- **Authority:** both decision gates are **resolved (Jason, 2026-08-11)**: KTD-1 separate keypair per agent; KTD-2 first user is admin. No implementation blockers remain.
 - **Execution profile:** code, phased. T1 first; T2/T3 depend on T1; T4/T7/T8 depend on identity+ownership; T6 last (needs T2).
 - **Stop conditions:** v1.1 ships when T1–T8 each pass their verification contract; multi-user is the headline, single-user keeps working (no regression in the existing 219-test suite).
 - **Tail ownership:** the two decision gates are Jason's; implementation units are the executor's; the owner-serialization gap (R9) rides in T2.
@@ -63,8 +63,15 @@ The v1.0 foundation (seed work in #22) deliberately kept identity implicit: `--c
 
 ### Key Technical Decisions
 
-- **KTD-1. Agent identity model: separate keypair per agent (Buzz-style), recommended.** Namespaced leases under an owner are cheaper but conflate identity with ownership and make audit trails unusable ("who did what" becomes "which owner's namespace"). A per-agent keypair gives each agent its own leases, quota, and audit trail, which is the whole point of the epic. The cost is one more key-management surface, which T3's agent-registration verb absorbs. **Decision gate: Jason confirms before T1/T3.**
-- **KTD-2. Admin role: single admin for v1.1, role model later.** One `admin` flag on the identity satisfies T5's "admin sees all" with zero role-management machinery; a full RBAC model can be layered on the same identity table without migration. **Decision gate: Jason confirms before T5.**
+- **KTD-1. Agent identity model: separate keypair per agent (Buzz-style).**
+  **DECIDED (Jason, 2026-08-11): separate keypair per agent.** Namespaced
+  leases under an owner were the rejected alternative — they conflate
+  identity with ownership and make audit trails unusable. Each agent gets
+  its own keypair, leases, quota, and audit trail.
+- **KTD-2. Admin role: single admin for v1.1, role model later.**
+  **DECIDED (Jason, 2026-08-11): first user is admin.** One `admin` flag on
+  the identity satisfies T5's "admin sees all" with zero role-management
+  machinery; RBAC can layer on the same identity table without migration.
 - **KTD-3. Backward compatibility is a hard requirement.** Existing single-user deployments (one key, one consumer token, jason's leases) keep working unchanged; the new identity layer defaults to "first key = admin".
 - **KTD-4. Identity source of truth stays in the backend.** The gateway asks the backend for key→user resolution (it already calls it for leases); keys never live only in the gateway config.
 

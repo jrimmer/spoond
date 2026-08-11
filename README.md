@@ -47,10 +47,22 @@ spoond (this repo)                 forkd controller (separate repo)
 - **Forgejo Actions runner** — `spoond runner` adaptively leases
   sandboxes as CI workers.
 
+## Install
+
+Two paths — see [docs/install.md](docs/install.md):
+
+```bash
+git clone https://github.com/jrimmer/spoond && cd spoond
+./deploy/install-spoond.sh --with-forkd   # forkd + spoond (full stack)
+./deploy/install-spoond.sh                # spoond only (existing forkd-controller)
+/opt/spoond/spoond doctor                 # verify all dependencies
+```
+
 ## Docs
 
 | Doc | Contents |
 |---|---|
+| [Install](docs/install.md) | forkd + spoond (full stack) or spoond-only; install script + verification |
 | [Setup](docs/setup.md) | prerequisites, build, env/flag reference, systemd, TLS |
 | [API reference](docs/api.md) | every endpoint: auth, request/response, errors |
 | [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
@@ -77,7 +89,7 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
 Supported exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`,
-`norunner`, `noctl`.
+`norunner`, `noctl`, `nodoctor`.
 
 ```bash
 ./spoond backend    # lease API
@@ -86,6 +98,7 @@ Supported exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`,
 ./spoond mcp        # MCP endpoint
 ./spoond runner     # Forgejo Actions runner
 ./spoond ctl        # control-plane CLI
+./spoond doctor     # dependency/connectivity checks (forkd, LLM, listeners, pool)
 ```
 
 ## Run
