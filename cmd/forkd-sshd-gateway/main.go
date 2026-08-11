@@ -36,21 +36,35 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// envOr returns the value of env key or def when unset/empty. Used for
+// flag defaults so the same knobs are settable via environment
+// (FORKD_GATEWAY_HOST, SHELLY_BINARY_URL, LLM_GATEWAY_URL).
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 var (
 	// gatewayHost is the public hostname advertised in MOTDs.
-	gatewayHost = flag.String("gateway-host", "sandbox.lacy.casa", "public hostname advertised in MOTDs")
+	gatewayHost = flag.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
 	listenAddr  = flag.String("listen", ":2222", "listen address")
 	hostKeyPath = flag.String("host-key", "/etc/forkd-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
 	backendURL  = flag.String("backend", "https://127.0.0.1:8890", "forkd-backend base URL")
 	backendTok  = flag.String("backend-token", "", "forkd-backend consumer token (required)")
-	clientKeys  = flag.String("client-keys", "", "comma-separated paths to authorized client public keys")
+	clientKeys  = flag.String("client-keys", "", "comma-separated paths to authorized client public keys, or a directory scanned for *.pub files")
 	// gatewayKeyPath is the identity the gateway uses to connect INTO
 	// sandboxes. Its public half is baked into dev-base authorized_keys.
 	gatewayKeyPath = flag.String("gateway-key", "/etc/forkd-gateway/gateway_ed25519", "gateway identity key for nested connections")
 	// shellyBinaryURL is where the `shelly` ctl verb fetches the agent
 	// binary from inside the sandbox (host-side asset server on the
 	// plain-HTTP proxy listener; guests reach it via forkd-br0).
-	shellyBinaryURL = flag.String("shelly-binary-url", "http://10.43.0.1:8891/assets/shelley", "URL the sandbox fetches the shelley binary from")
+	shellyBinaryURL = flag.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.43.0.1:8891/assets/shelley"), "URL the sandbox fetches the shelley binary from")
+	// llmGatewayURL is the per-lease LLM gateway base the shelley agent
+	// is pointed at (host-side proxy listener; guests reach it via
+	// forkd-br0). The lease id is appended.
+	llmGatewayURL = flag.String("llm-gateway-url", envOr("LLM_GATEWAY_URL", "http://10.43.0.1:8891/llm/"), "base URL of the per-lease LLM gateway (lease id appended)")
 	// shellyModel is the default model id written into shelley.json. It
 	// must be an id the LLM gateway's LLM_MODEL_MAP understands (the
 	// exe.dev catalog id, not the upstream id).
@@ -1075,7 +1089,7 @@ func runShelly(ctx context.Context, leaseID string) string {
 	if _, err := resolveEndpoint(ctx, leaseID); err != nil {
 		return fmt.Sprintf(`{"error":"%v"}`, err)
 	}
-	gw := "http://10.43.0.1:8891/llm/" + leaseID
+	gw := *llmGatewayURL + leaseID
 	script := fmt.Sprintf(`set -e
 if [ ! -x /root/shelley ]; then
   curl -sf --max-time 180 %s -o /root/shelley
@@ -1112,7 +1126,7 @@ fi`, *shellyBinaryURL, gw, *shellyModel)
 		}
 		return fmt.Sprintf(`{"id":%q,"status":"failed","exit":%d,"detail":%q}`, leaseID, out.Exit, detail)
 	}
-	return fmt.Sprintf(`{"id":%q,"status":"started","url":"https://%s-9000.sandbox.lacy.casa"}`, leaseID, leaseID)
+	return fmt.Sprintf(`{"id":%q,"status":"started","url":"https://%s-9000.%s"}`, leaseID, leaseID, *gatewayHost)
 }
 
 func loadOrGenerateHostKey(path string) ssh.Signer {
@@ -1166,12 +1180,24 @@ func ed25519Generate(path string) (ssh.PublicKey, ssh.Signer, error) {
 	return signer.PublicKey(), signer, nil
 }
 
-func loadAuthorizedKeys(csv string) ([]ssh.PublicKey, error) {
+func loadAuthorizedKeys(spec string) ([]ssh.PublicKey, error) {
 	var out []ssh.PublicKey
-	if csv == "" {
+	if spec == "" {
 		return out, nil
 	}
-	for _, p := range strings.Split(csv, ",") {
+	// #26 seed: a directory scans all *.pub files at startup, so adding
+	// a user = dropping a key + restart. A comma-separated list of file
+	// paths (the original contract) still works unchanged.
+	paths := []string{spec}
+	if st, err := os.Stat(spec); err == nil && st.IsDir() {
+		paths, err = filepath.Glob(filepath.Join(spec, "*.pub"))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		paths = strings.Split(spec, ",")
+	}
+	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue

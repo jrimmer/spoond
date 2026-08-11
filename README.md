@@ -1,45 +1,107 @@
 # forkd-service
 
-The **forkd lease service**: a fast, isolated, ephemeral compute API backed
-by forkd microVMs on a warm pool. Consumers request a sandbox, run work in
-it, and release it — each job gets its own isolated KVM environment in
-milliseconds.
+Fast, isolated, ephemeral compute for people and agents: a lease API in
+front of **forkd microVMs** on a warm pool. Consumers request a sandbox,
+run work in it, and release it — each job gets its own isolated KVM
+environment in milliseconds, with an SSH gateway, HTTP proxy, LLM
+gateway, and native MCP/ACP agent endpoints on top.
 
-## Components
+```
+forkd-service (this repo)          forkd controller (separate repo)
+┌──────────────────────────┐      ┌───────────────────────────────┐
+│ lease API  :8890         │ ───▶ │ Firecracker microVM lifecycle  │
+│ SSH gateway :2222        │      │ netns slots, snapshots,        │
+│ HTTP proxy  :8891        │      │ workspaces (suspend/resume)    │
+│ ctl plane (SSH-as-API)   │      │ (deeplethe/forkd, Apache-2.0)  │
+│ MCP / ACP agent servers  │      └───────────────────────────────┘
+│ LLM gateway  /llm/<id>   │
+└──────────────────────────┘
+```
 
-This repo is the service/API layer. The runners that consume it
-(Forgejo Actions, command adapter) live alongside in `cmd/`/`runner/`.
+## What it gives you
 
-| Path               | What it is                                                       |
-|--------------------|------------------------------------------------------------------|
-| `cmd/forkd-backend` | The lease API frontend (`:8890`): sandboxes, images, exec, pool |
-| `api/`             | Backend server logic (sandbox service, warm pool, TLS)           |
-| `forkd/`           | forkd controller client                                          |
-| `cmd/forkd-runner` | Forgejo Actions runner (adaptive pool of concurrent workers)    |
-| `runner/`          | Runner internals: Forgejo adapter, lease client, executor, pool  |
-| `commandadapter/`  | Command adapter that leases sandboxes                            |
-| `workflow/`        | Workflow parser/types                                            |
-| `deploy/`          | systemd units + deploy docs                                      |
+- **Lease API** — `POST /api/sandboxes` (image, TTL, persistent,
+  network policy) → exec, stream (WebSocket PTY), keepalive, suspend/
+  resume, clone, tag, comment, delete. Auth via bearer tokens
+  (`CONSUMER_TOKENS=token=owner,...`).
+- **SSH gateway** — `ssh new@sandbox.example` auto-creates a persistent
+  sandbox; `ssh <lease-id>@sandbox.example` re-attaches; friendly names
+  after `tag`. Sessions land in a tmux session.
+- **Control plane over SSH** — `ssh ctl@sandbox.example "ls"` (pretty
+  table by default; `--json` for raw). Verbs: `new`, `ls`, `stat`,
+  `rm`, `keepalive`, `suspend`, `resume`, `restart`, `cp` (clone),
+  `tag`, `comment`, `whoami`, `shelly`, `prompt`.
+- **HTTP proxy** — `<lease-id>.sandbox.example` and `<id>-<port>`
+  public URLs for sandbox web servers (Caddy fronts TLS).
+- **LLM gateway** — per-lease OpenAI-compatible endpoint
+  (`/llm/<lease-id>/openai/chat/completions`); upstream keys stay on
+  the host, never inside sandboxes.
+- **Native agent endpoints** — `forkd-dev-mcp` (#23, MCP stdio server:
+  shell/read_file/write_file/edit_file/list_files/status tools) and
+  `forkd-acp` (#24, Agent Client Protocol: session = lease, agent loop
+  through the LLM gateway). Point Goose/Claude/Codex-style clients at
+  them to get sandboxed tool execution.
+- **Per-sandbox network policy** — `none` | `lan` | `internet` |
+  `restricted` (with egress allowlist), enforced with iptables in the
+  child netns.
+- **Forgejo Actions runner** — `cmd/forkd-runner` adaptively leases
+  sandboxes as CI workers.
+
+## Status
+
+**v1.0 — single-operator.** The data model already carries an owner on
+every lease and the gateway keys directory, but the published version is
+honest about being a single-user system: one operator, one SSH key
+allowlist, one set of consumer tokens. Multi-user tenancy (people AND
+agents as first-class identities — per-user keys, ownership scoping,
+quotas, sharing) is the v1.1 direction; the foundation ships in v1.0.
 
 ## Build
 
 ```bash
 go build -o forkd-backend ./cmd/forkd-backend
-go build -o forkd-runner   ./cmd/forkd-runner
+go build -o forkd-sshd-gateway ./cmd/forkd-sshd-gateway
+go build -o forkd-acp ./cmd/forkd-acp
+go build -o forkd-dev-mcp ./cmd/forkd-dev-mcp
 ```
 
-## Deploy
+## Run
 
-See [`deploy/README.md`](deploy/README.md) for the lease API (backend) and
-the Forgejo Actions runner — build, systemd units, env, warm pool, TLS.
+See [`deploy/README.md`](deploy/README.md) for the backend, gateway,
+runner, and watchdog units. All knobs are env/flags with sane defaults;
+the three binaries are:
+
+| Binary | Role | Key env |
+|---|---|---|
+| `forkd-backend` | lease API + warm pool + proxy | `FORKD_URL`, `CONSUMER_TOKENS`, `POOL_SIZE`, `KNOWN_IMAGES`, `PROXY_ADDR`, `LLM_*` |
+| `forkd-sshd-gateway` | SSH gateway + ctl plane | `--backend`, `--backend-token`, `--client-keys`, `--gateway-host` |
+| `forkd-acp` / `forkd-dev-mcp` | agent endpoints | `FORKD_BACKEND_URL`, `FORKD_TOKEN`, `FORKD_LLM_MODEL` |
+
+## Configuration knobs
+
+The repo targets a homelab by default (addresses like `10.43.0.1`,
+hostnames like `sandbox.lacy.casa` appear as *defaults only*); every
+knob is overridable so the software runs anywhere the forkd controller
+does. Notable overrides: `FORKD_GATEWAY_HOST`, `SHELLY_BINARY_URL`,
+`LLM_GATEWAY_URL`, `BE_API` (integration tests).
 
 ## Tests
 
 ```bash
-go test ./...
+go test ./...            # unit tests (fast, no infra)
 ```
 
-## History
+Integration (`tests/integration/`) exercises the full stack — lease
+API, SSH gateway, ctl plane, MCP/ACP, HTTP proxy, network policy —
+against a **live forkd homelab** (warm pool + controller + images). It
+cannot run on CI without that infrastructure; the GitHub Actions
+workflow gates it behind a manual trigger with a note.
 
-Previously `hyper-forgejo-runner`. Renamed to `forkd-service` when the
-decommissioned Hyper runner was replaced by the forkd lease service.
+```bash
+SSHHOST=root@<vm> BE_API=https://127.0.0.1:8890 bash tests/integration/run.sh
+```
+
+## License
+
+Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+Contributions welcome: see [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -63,5 +65,52 @@ func TestRunControlCommandJSONFlag(t *testing.T) {
 	// default pretty
 	if got := runControlCommand(t.Context(), "whoami", nil, "jrimmer"); got != "user: ctl (key: jrimmer)" {
 		t.Fatalf("whoami default: %q", got)
+	}
+}
+
+func TestLoadAuthorizedKeysDirScan(t *testing.T) {
+	// Generate two key pairs in a temp dir; a directory scan must load
+	// both .pub files; a CSV of paths must also work unchanged.
+	dir := t.TempDir()
+	// ed25519Generate(path) writes the private key to path and the
+	// public key to path+".pub" — use bare basenames so the .pub files
+	// hold real authorized keys.
+	k1 := filepath.Join(dir, "alice")
+	k2 := filepath.Join(dir, "bob")
+	k3 := filepath.Join(dir, "ignore.txt")
+	genKeyFile(t, k1)
+	genKeyFile(t, k2)
+	writeTestFile(t, k3, "not a key")
+
+	keys, err := loadAuthorizedKeys(dir)
+	if err != nil {
+		t.Fatalf("dir scan: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("dir scan: want 2 keys, got %d", len(keys))
+	}
+
+	keys, err = loadAuthorizedKeys(k1 + ".pub," + k2 + ".pub")
+	if err != nil {
+		t.Fatalf("csv: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("csv: want 2 keys, got %d", len(keys))
+	}
+}
+
+func genKeyFile(t *testing.T, path string) {
+	t.Helper()
+	_, priv, err := ed25519Generate(path)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	_ = priv
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 }

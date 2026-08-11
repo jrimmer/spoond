@@ -1,0 +1,35 @@
+# Secrets / credentials — never commit
+*.env
+*.pem
+*.key
+*.pkcs8
+*.crt
+*.pub
+/dev/.dev.vars
+.dev.vars
+
+# Build artifacts / binaries (source of truth is the build)
+/forkd-sshd-gateway
+/forkd-backend
+/forkd-runner
+/forkd-acp
+/forkd-dev-mcp
+/forkdctl
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+*.iml
+
+# Logs / scratch
+/tmp/
+*.log
+*.pid
