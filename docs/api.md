@@ -31,8 +31,8 @@ Request:
 | `persistent` | bool | `false` | workspace-backed: not TTL-swept, supports suspend/resume |
 | `memory_mib` | int | *(image default)* | guest memory request |
 | `network` | string | *(image default)* | legacy network mode |
-| `network_policy` | string | `lan` | `none` \| `lan` \| `internet` \| `restricted` |
-| `egress_allowlist` | []string | *(none)* | required when `network_policy=restricted`; IPs/CIDRs/domains |
+| `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
+| `egress_allowlist` | []string | *(host bridge only)* | additional IPs/CIDRs/domains for `network_policy=restricted` |
 | `init_cmd` | string | *(none)* | command run at sandbox start |
 
 Response `201 Created`:
@@ -171,8 +171,10 @@ for Gatus/load balancers.
 
 ### `GET /metrics`
 
-Proxies forkd-controller's Prometheus metrics (unauthenticated;
-loopback listener only).
+Proxies forkd-controller's Prometheus metrics. Admin-only (identity
+store present) — requires the caller's token to resolve to an admin
+user; `403` for non-admins and legacy consumer tokens when a store is
+present.
 
 ---
 
@@ -186,28 +188,133 @@ own `127.0.0.1:9000` Shelley agent instead.
 
 Per-user key auth (epic #26 T8): when the lease owner has an LLM key
 configured, requests must present it as `Authorization: Bearer
-<user-llm-key>`. Missing/wrong/foreign keys → `401`. Owners without a
-key (and deployments without an identity store) keep the open behavior.
-The user key is replaced by the server-side upstream key before
-forwarding, so it never reaches the provider.
+<user-key>`. Missing/wrong/foreign keys → `401`. Owners without a key
+keep the open behavior — **unless the deployment sets
+`LLM_OPEN_LEGACY=0`** (security review #37 C2): with an identity store
+present, keyless identity users are then denied outright (`401`) and
+only legacy consumer-owned leases stay open. The user key is replaced by
+the server-side upstream key before forwarding, so it never reaches the
+provider.
 
-## Users & identity
+## Users & identity (epic #26)
+
+The user store (`USERS_FILE`) makes people and agents first-class
+identities. User endpoints are admin-gated except `/me`, `/by-name`,
+`/by-key`, and `/identity-status`; **`GET /api/users` is admin-only**
+(security review #37 C1 — the full directory is not enumerable by any
+token holder).
+
+### `POST /api/users` — create a user
+
+Bootstrap: when the store is empty, the first create is open (or gated
+by `X-Bootstrap-Token: <BOOTSTRAP_TOKEN>` when configured — security
+review #37 H3/M4) and the first user becomes admin. After that, admin
+only.
+
+Request:
+
+```json
+{
+  "name": "jason",
+  "kind": "person",
+  "fingerprints": ["SHA256:AbC…", "SHA256:DeF…"],
+  "token": "optional-bearer-token"
+}
+```
+
+- `kind`: `person` | `agent` — agents are non-interactive identities
+  (MCP/ACP endpoints authenticate as their agent user; epic #26 U4).
+- `fingerprints`: SSH public-key fingerprints (use `ssh-keygen -lf
+  pubkey.pub`) — the gateway's `PublicKeyCallback` resolves these.
+- `token`: optional per-user bearer token (like `CONSUMER_TOKENS`
+  entries, but bound to the identity).
+
+Response `201 Created`: `{"user": {id, name, kind, admin, …}}` (token
+hash, LLM key hash, and fingerprints are never exposed).
+
+### `GET /api/users` — list users (admin only)
+
+`403` for non-admin callers (security review #37 C1).
+
+### `GET /api/users/me` — current user
+
+Self-service: `{"user": {id, name, kind, admin, max_leases, max_ttl}}`.
+
+### `GET /api/users/by-name/{name}` — minimal lookup
+
+`{"user": {id, name}}` — the minimal shape for share-granting and
+gateway name resolution (no admin flags or fingerprints).
+
+### `GET /api/users/by-key?fingerprint=…` — resolve SSH key
+
+`{"user": {id, name}}` — the gateway calls this in its
+`PublicKeyCallback`; minimal shape (security review #37 rescan F5).
+
+### `DELETE /api/users/{id}` — remove a user (admin only)
+
+Removes the identity and its keys. **This is what actually revokes SSH
+access** — the gateway treats the identity store as authoritative when
+present, so removing the user invalidates all their keys immediately
+(security review #37 H1).
+
+### `POST /api/users/{id}/quota` — set lease quota (admin only)
+
+Request `{"max_leases": N, "max_ttl": S}` — concurrent-lease cap and
+per-user TTL ceiling (epic #26 U5). `0` = unlimited/unset. Over-cap
+creates return `429`.
 
 ### `POST /api/users/{id}/llm-key` — set/rotate/revoke a user's LLM gateway key
 
 Admin only. Request: `{"llm_key": "<slk-…>"}`; an empty `llm_key`
 revokes (the owner's leases revert to the open gateway). The key is
-stored as a SHA-256 hash and never returned in responses. Response
-`200 OK` with the user object (no `llm_key_hash` field). `404` unknown
-user; `403` non-admin.
+stored as a salted SHA-256 hash and never returned in responses.
+Response `200 OK` with the user object (no `llm_key_hash` field). `404`
+unknown user; `403` non-admin.
+
+### `GET /api/identity-status`
+
+`{"identity_store": true|false}` — tells the SSH gateway whether the
+backend has an identity store, so the gateway knows whether key
+resolution must be authoritative (security review #37 H1). Unauthenticated.
+
+## Shares (epic #26 U9)
+
+A lease owner can grant another user access to a lease for a limited
+time — sharing a workspace with a collaborator or an agent without
+copying the lease id/capability.
+
+### `POST /api/sandboxes/{id}/share` — grant (owner only)
+
+Request: `{"grantee": "<user-id>", "mode": "ssh"|"http", "ttl": 3600}`.
+`grantee` must be an existing user id (or resolvable name); `ttl` in
+seconds (0 = no expiry); `mode` selects which operations the grantee
+may perform: `ssh` → `/endpoint`, `/prompt` (interactive/agent access);
+`http` → `/exec`, `/stream`, `/stat`, proxy. Response `201 Created` with
+the share record. `400` unknown grantee, `403` non-owner.
+
+### `GET /api/sandboxes/{id}/share` — list (owner only)
+
+`{"shares": [{grantee, mode, expires_at, …}]}`.
+
+### `DELETE /api/sandboxes/{id}/share/{grantee}` — revoke (owner only)
+
+`200 OK` — the grantee loses access immediately. `404` if not shared.
+
+Grantee access is enforced owner-scoped (`lookupWithShare`): a shared
+lease behaves like the grantee's own for the granted operations until
+expiry or revocation.
 
 ---
 
 ## Auth & ownership model
 
-- Every request is authenticated by consumer token → consumer id.
-- Leases belong to the consumer that created them; operations check
-  `owner == lease.Owner`.
+- Every request is authenticated by consumer token → consumer id, or by
+  per-user token → identity user.
+- Leases belong to the consumer/user that created them; operations check
+  `owner == lease.Owner` (shares are the explicit exception).
+- The SSH gateway authenticates users by SSH key (identity store
+  authoritative when present) and calls the backend as that user
+  (trusted impersonation via `X-Spoond-User-Id`).
 - Persistent leases survive TTL sweeps; `keepalive` extends them;
   `IDLE_TIMEOUT_SECS` can auto-suspend idle persistent leases.
 - The lease id doubles as a capability (e.g. `GET /api/…/endpoint` is

@@ -45,20 +45,34 @@ What the script does (idempotent, `.prev` backups):
    (forkd-controller, lease API, gateway port, LLM upstream, warm pool, TLS,
    disk).
 
-**First-run steps after the script:**
+**First-run steps after the script (v1.1 — identity store mode):**
 
 ```bash
-# 1. Set real consumer tokens + optional TLS:
-sudoedit /etc/spoond-backend.env   # CONSUMER_TOKENS=token=consumer,...
+# 1. Set real consumer tokens + optional TLS, and enable the identity store:
+sudoedit /etc/spoond-backend.env
+#   CONSUMER_TOKENS=token=consumer,...
+#   USERS_FILE=/etc/spoond-backend-users.json   ← multi-user tenancy (v1.1)
+#   BOOTSTRAP_TOKEN=$(openssl rand -hex 24)      ← gate first-user bootstrap
+#   GATEWAY_TOKEN=<same token the gateway uses>   ← SSH user impersonation
+sudo systemctl restart spoond-backend
 
-# 2. Add your SSH public key (you = the operator):
-echo "ssh-ed25519 AAAA... you@laptop" | sudo tee /etc/spoond-gateway/keys/you.pub
-sudo systemctl restart spoond-sshd-gateway
+# 2. Bootstrap the first (admin) user with your SSH public key.
+#    With BOOTSTRAP_TOKEN set this is a direct API call:
+FP=$(ssh-keygen -lf ~/.ssh/id_ed25519.pub | awk '{print $2}')
+curl -s -X POST https://127.0.0.1:8890/api/users \
+  -H "Authorization: Bearer $CONSUMER_TOKEN" -H "X-Bootstrap-Token: $BOOTSTRAP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"you\",\"kind\":\"person\",\"fingerprints\":[\"$FP\"]}"
 
 # 3. Verify:
 sudo /opt/spoond/spoond doctor
 ssh new@<this-host> -p 2222     # creates a sandbox, drops you in
 ```
+
+> **Legacy single-user mode** (no `USERS_FILE`): instead of step 2, drop
+> your public key into the gateway allowlist and restart:
+> `echo "ssh-ed25519 AAAA… you@laptop" | sudo tee /etc/spoond-gateway/keys/you.pub &&
+> sudo systemctl restart spoond-sshd-gateway`
 
 ## Path 2: spoond only
 

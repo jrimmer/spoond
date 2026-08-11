@@ -22,11 +22,12 @@ ssh ctl@sandbox.example.com -p 2222 "stat <id>"
 | Verb | Usage | Notes |
 |---|---|---|
 | `help` | `help` | list all verbs |
-| `whoami` | `whoami` | current key identity |
+| `whoami` | `whoami` | current key identity (user id/name when the identity store is active) |
 | `new` | `new [dev\|go\|py\|elixir\|llm]` | create a sandbox; `new` alone = dev-base |
 | `ls` | `ls [--json]` | list leases (pretty table default) |
 | `stat` | `stat <id> [--json]` | guest metrics (cpu/mem/disk/net) |
 | `rm` | `rm <id>` | delete a lease |
+| `exec` | `exec <id> <command…>` | run a command via the API and print stdout |
 | `keepalive` | `keepalive <id>` (alias `ka`) | extend persistent lease |
 | `suspend` | `suspend <id>` | snapshot + stop (workspace-backed only) |
 | `resume` | `resume <id>` | start from snapshot |
@@ -34,6 +35,8 @@ ssh ctl@sandbox.example.com -p 2222 "stat <id>"
 | `cp` | `cp <id> [tag]` (alias `clone`) | branch snapshot + spawn clone |
 | `tag` | `tag <id> <name>` | friendly name (then `ssh <name>@…`) |
 | `comment` | `comment <id> [text…]` | annotate; no text clears |
+| `share` | `share add <id> <user> [ssh\|http] [ttl]` / `share ls <id>` / `share rm <id> <user>` | grant/list/revoke lease access (epic #26 U9) |
+| `ssh-key` | `ssh-key ls` / `ssh-key add <pubkey> <name>` / `ssh-key rm <user-id>` | manage users & SSH keys (v1.1; `ls`/`add` are admin after bootstrap) |
 | `shelly` | `shelly <id>` (alias `agent`) | start the in-sandbox Shelley coding agent |
 | `prompt` | `prompt <id> <message…>` | message the Shelley agent (waits for reply) |
 

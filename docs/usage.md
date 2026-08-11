@@ -178,17 +178,70 @@ FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
 
 ## Network policies
 
-| Policy | Egress |
-|---|---|
-| `none` | none (loopback only) |
-| `lan` | RFC1918 + link-local (default) |
-| `internet` | full egress via host NAT |
-| `restricted` | allowlisted IPs/CIDRs/domains only |
+| Policy | Egress | Default |
+|---|---|---|
+| `none` | none (loopback only) | |
+| `lan` | RFC1918 + link-local (opt-in) | |
+| `internet` | full egress via host NAT | |
+| `restricted` | allowlisted IPs/CIDRs/domains only | ✅ default (v1.1) |
+
+The default is **`restricted`** (security review #37 rescan F3): guests
+can reach the host bridge (LLM gateway, assets, proxy) plus anything in
+`egress_allowlist`, but NOT peer sandboxes — each sandbox carries an
+unauthenticated root exec agent and a Shelley agent, so guest→guest
+must be blocked unless you explicitly opt in with `network_policy=lan`.
 
 ```bash
 curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
   -d '{"image":"dev-base","network_policy":"restricted","egress_allowlist":["10.1.0.47","github.com"]}'
 ```
+
+## Multi-user tenancy (v1.1)
+
+With `USERS_FILE` set, people and agents are first-class identities.
+Operational flow for an admin:
+
+```bash
+# 1. Bootstrap the first (admin) user with your SSH public key
+ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… you@laptop you"
+# (first user is admin; with BOOTSTRAP_TOKEN set, do this via direct
+#  API call — see docs/setup.md "First-user bootstrap")
+
+# 2. Add teammates/agents (admin)
+ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… alice@mbp alice"
+ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… ci@runner ci"
+
+# 3. List users, set quotas (admin)
+ssh ctl@sandbox.example.com "ssh-key ls"
+curl -s -X POST https://sandbox.example.com/api/users/<alice-id>/quota \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"max_leases": 4, "max_ttl": 7200}'
+
+# 4. Everyone uses their own key; leases are ownership-scoped
+ssh alice@sandbox.example.com            # fresh sandbox, owned by alice
+ssh ctl@sandbox.example.com "ls --json"  # alice sees only her own
+```
+
+**Sharing a sandbox** (epic #26 U9) — hand a collaborator or an agent
+limited access without copying the lease capability:
+
+```bash
+ssh ctl@sandbox.example.com "share add <id> alice http 3600"   # 1h exec/stream
+ssh ctl@sandbox.example.com "share add <id> ci ssh"            # interactive, no expiry
+ssh ctl@sandbox.example.com "share ls <id>"
+ssh ctl@sandbox.example.com "share rm <id> alice"              # revoke immediately
+```
+
+**Per-user LLM keys** — an admin gives a user their own gateway key
+(`POST /api/users/<id>/llm-key`); that user's `/llm/` requests must then
+present it. Guests' leases stay isolated: exec/stream/stat/endpoint are
+owner-scoped everywhere, and a shared lease is the only way in.
+
+**Per-user proxy hostnames** — with forward-auth enabled
+(`PROXY_AUTH_MODE=forward-auth`), each user gets
+`<label>.<user>.sandbox.example` and lookups are scoped to the
+authenticated owner; in the default capability model, only the
+unguessable 32-hex lease id hostname resolves.
 
 ## LLM-driven usage pattern
 

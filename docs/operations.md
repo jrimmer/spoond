@@ -12,7 +12,8 @@ diagnostics, and common failure modes.
 | Controller (forkd) | `systemctl is-active forkd-controller` |
 | Warm pool | `pgrep -c firecracker` (expect `POOL_SIZE × images`) |
 | Lease API | `curl -s https://127.0.0.1:8890/healthz` |
-| Metrics | `curl -s https://127.0.0.1:8890/metrics` |
+| Metrics | `curl -s -H "Authorization: Bearer $ADMIN_TOKEN" https://127.0.0.1:8890/metrics` (admin-only in identity-store mode) |
+| Identity store | `test -f /etc/spoond-backend-users.json && stat -c '%a' /etc/spoond-backend-users.json` (expect `600`) |
 
 ## Warm pool
 
@@ -90,9 +91,30 @@ curl -s http://127.0.0.1:8889/v1/sandboxes > /tmp/controller-sandboxes.json
 
 The backend has no persistent state to back up (leases are in-memory;
 workspaces live in the controller). Backup the controller's workspace
-snapshots and the gateway key dir instead:
+snapshots, the gateway key dir, and — in identity-store mode — the
+**user store** (it holds users, key fingerprints, quotas; losing it
+loses all SSH identities):
 
 ```bash
-# controller workspace dir + gateway keys
-tar czf /backup/forkd-$(date +%F).tar.gz /var/lib/forkd /etc/forkd-gateway
+# controller workspace dir + gateway keys + user store
+tar czf /backup/forkd-$(date +%F).tar.gz \
+  /var/lib/forkd /etc/forkd-gateway /etc/spoond-backend-users.json
 ```
+
+## Users & identity (v1.1)
+
+- **Revoking access** = `DELETE /api/users/{id}` (or
+  `ssh-key rm <user-id>`); with the identity store present the gateway
+  treats it as authoritative, so removal is immediate — no key-dir
+  cleanup needed.
+- **Quotas** are per-user (`max_leases`/`max_ttl` via
+  `POST /api/users/{id}/quota`); over-cap creates return `429`. A user
+  with `max_leases: 0` is unlimited.
+- **Salt rotation / token hashes**: token and LLM-key hashes are
+  HMAC-SHA256 with a per-store salt (sidecar `<users-file>.salt`); back
+  up the salt alongside the store or existing hashes become
+  unverifiable on restore.
+- **Forward-auth proxy** (`PROXY_AUTH_MODE=forward-auth`): the
+  `PROXY_AUTH_SECRET` is shared with the IdP/Caddy; ensure Caddy strips
+  inbound `X-Proxy-Auth`/`Remote-User` headers so guests can't spoof
+  them, and keep `PROXY_AUTH_TRUSTED_PEERS` to the proxy's own CIDR.

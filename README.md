@@ -23,14 +23,22 @@ spoond (this repo)                 forkd controller (separate repo)
 - **Lease API** — `POST /api/sandboxes` (image, TTL, persistent,
   network policy) → exec, stream (WebSocket PTY), keepalive, suspend/
   resume, clone, tag, comment, delete. Auth via bearer tokens
-  (`CONSUMER_TOKENS=token=owner,...`).
+  (`CONSUMER_TOKENS=token=owner,...`) or per-user identity tokens.
+- **Multi-user tenancy (v1.1)** — people AND agents are first-class
+  identities: per-user SSH keys, per-user tokens, quotas
+  (`max_leases`/`max_ttl`), admin roles, lease sharing with expiry,
+  per-user LLM gateway keys, and per-user proxy hostnames
+  (`<label>.<user>.sandbox.example`). See
+  [docs/security.md](docs/security.md) and the [Users & identity API
+  section](docs/api.md#users--identity).
 - **SSH gateway** — `ssh new@sandbox.example` auto-creates a persistent
   sandbox; `ssh <lease-id>@sandbox.example` re-attaches; friendly names
   after `tag`. Sessions land in a tmux session.
 - **Control plane over SSH** — `ssh ctl@sandbox.example "ls"` (pretty
   table by default; `--json` for raw). Verbs: `new`, `ls`, `stat`,
   `rm`, `keepalive`, `suspend`, `resume`, `restart`, `cp` (clone),
-  `tag`, `comment`, `whoami`, `shelly`, `prompt`.
+  `tag`, `comment`, `exec`, `share`, `ssh-key` (admin), `whoami`,
+  `shelly`, `prompt`.
 - **HTTP proxy** — `<lease-id>.sandbox.example` and `<id>-<port>`
   public URLs for sandbox web servers (Caddy fronts TLS).
 - **LLM gateway** — per-lease OpenAI-compatible endpoint
@@ -66,18 +74,26 @@ git clone https://github.com/jrimmer/spoond && cd spoond
 | [Setup](docs/setup.md) | prerequisites, build, env/flag reference, systemd, TLS |
 | [API reference](docs/api.md) | every endpoint: auth, request/response, errors |
 | [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
-| [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies |
-| [Operations](docs/operations.md) | pool, watchdog, failure runbook, backups |
+| [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user | 
+| [Operations](docs/operations.md) | pool, watchdog, failure runbook, backups, identity ops |
+| [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
 | [deploy/](deploy/README.md) | systemd units for vm2-style deployments |
 
 ## Status
 
-**v1.0 — single-operator.** The data model already carries an owner on
-every lease and the gateway keys directory, but the published version is
-honest about being a single-user system: one operator, one SSH key
-allowlist, one set of consumer tokens. Multi-user tenancy (people AND
-agents as first-class identities — per-user keys, ownership scoping,
-quotas, sharing) is the v1.1 direction; the foundation ships in v1.0.
+**v1.1 — multi-user tenancy.** People and agents are first-class
+identities (epic #26): a user store with per-user SSH keys and bearer
+tokens, ownership-scoped leases, quotas, admin roles, lease sharing with
+expiry, per-user LLM gateway keys, per-user proxy hostnames, and a
+forward-auth proxy mode for integrating an IdP (Caddy/Authelia-style).
+Security hardening across the board — see
+[docs/security.md](docs/security.md) for the adversarial-review findings
+and fixes that shipped with 1.1 (admin-gated directory, closed LLM
+gateway, atomic quotas, salted hashes, constant-time compares, guest
+network isolation, rate limiting, and more).
+
+Prior: **v1.0 — single-operator** (one operator, one SSH key allowlist,
+one set of consumer tokens).
 
 ## Build
 
