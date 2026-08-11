@@ -41,6 +41,83 @@ import threading
 import time
 import traceback
 
+# ---------------------------------------------------------------------------
+# Container environment
+#
+# forkd-agent runs as PID 1 inside the sandbox VM.  Its own environment is
+# inherited from the kernel boot / init script, which may leak host PATH
+# values (e.g. /opt/homebrew/bin, /Users/.../.cargo/bin) into the guest.
+# Every exec/stream command would then resolve binaries against the host
+# PATH instead of the container's, causing "command not found" or silent
+# wrong-binary usage.
+#
+# To fix this we read /etc/environment (the standard Linux system-wide
+# env file, written by pam_env and most Docker/base images) at startup
+# and use its PATH as the default for all subprocess calls.  If the file
+# is missing or has no PATH, we fall back to a sane Linux default.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _load_container_env(path: str = "/etc/environment") -> dict:
+    """Parse /etc/environment for KEY=VALUE pairs (pam_env format).
+
+    Unlike shell scripts, /etc/environment has no `export` keyword and
+    no command substitution — just simple KEY=VALUE lines, optionally
+    quoted.  This is the canonical source of system-wide environment
+    defaults on Linux.
+    """
+    env: dict = {}
+    try:
+        with open(path) as f:
+            for raw in f:
+                s = raw.strip()
+                if not s or s.startswith("#"):
+                    continue
+                key, sep, val = s.partition("=")
+                if not sep:
+                    continue
+                key = key.strip()
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                    val = val[1:-1]
+                env[key] = val
+    except FileNotFoundError:
+        pass
+    return env
+
+
+# Base environment for all subprocess calls: start from the agent's own
+# environ (to keep HOME, USER, etc.) but override PATH with the
+# container's value.  Callers can still override individual vars per
+# command — see _subprocess_env() below.
+_CONTAINER_ENV = _load_container_env()
+_CONTAINER_PATH = _CONTAINER_ENV.get("PATH", _DEFAULT_PATH)
+GUEST_ENV = dict(os.environ)
+GUEST_ENV["PATH"] = _CONTAINER_PATH
+# Carry over any other /etc/environment vars not already in environ.
+for _k, _v in _CONTAINER_ENV.items():
+    if _k not in GUEST_ENV:
+        GUEST_ENV[_k] = _v
+
+
+def _subprocess_env(caller_env: dict | None = None) -> dict | None:
+    """Build the env dict for a subprocess call.
+
+    If the caller provides an env, it is merged on top of GUEST_ENV so
+    that PATH (and other container defaults) are still present unless
+    the caller explicitly overrides them.  If the caller provides
+    nothing, GUEST_ENV is returned as-is.  Returns None only if both
+    GUEST_ENV is empty and caller_env is None (which won't happen in
+    practice — GUEST_ENV always has at least PATH).
+    """
+    if caller_env is None:
+        return GUEST_ENV
+    merged = dict(GUEST_ENV)
+    merged.update(caller_env)
+    return merged
+
 # Optional warm-up: importing numpy into PID 1's memory is the canonical
 # demo of "fork from warmed state". If the image doesn't have numpy, we
 # still serve the agent — just without that particular warm import.
@@ -239,13 +316,19 @@ def handle(conn: socket.socket, addr) -> None:
                     "pid": os.getpid(),
                     "agent_lang": AGENT_LANG,
                     "warmup_ready": _warmup_ready,
+                    "path": _CONTAINER_PATH,
                 },
             )
 
         elif action == "exec":
             args = cmd["args"]
             timeout = cmd.get("timeout", 30)
-            r = subprocess.run(args, capture_output=True, timeout=timeout)
+            r = subprocess.run(
+                args,
+                capture_output=True,
+                timeout=timeout,
+                env=_subprocess_env(cmd.get("env")),
+            )
             _send_json(
                 conn,
                 {
@@ -279,7 +362,7 @@ def handle(conn: socket.socket, addr) -> None:
         elif action == "stream":
             args = cmd["args"]
             cwd = cmd.get("cwd") or None
-            env = cmd.get("env")
+            env = _subprocess_env(cmd.get("env"))
             use_pty = cmd.get("pty", True)
 
             kwargs = {}
