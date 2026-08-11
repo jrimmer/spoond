@@ -7,7 +7,7 @@ environment in milliseconds, with an SSH gateway, HTTP proxy, LLM
 gateway, and native MCP/ACP agent endpoints on top.
 
 ```
-spoond (this repo)          forkd controller (separate repo)
+spoond (this repo)                 forkd controller (separate repo)
 ┌──────────────────────────┐      ┌───────────────────────────────┐
 │ lease API  :8890         │ ───▶ │ Firecracker microVM lifecycle  │
 │ SSH gateway :2222        │      │ netns slots, snapshots,        │
@@ -36,9 +36,9 @@ spoond (this repo)          forkd controller (separate repo)
 - **LLM gateway** — per-lease OpenAI-compatible endpoint
   (`/llm/<lease-id>/openai/chat/completions`); upstream keys stay on
   the host, never inside sandboxes.
-- **Native agent endpoints** — `forkd-dev-mcp` (#23, MCP stdio server:
+- **Native agent endpoints** — `forkd-dev-mcp` (MCP stdio server:
   shell/read_file/write_file/edit_file/list_files/status tools) and
-  `forkd-acp` (#24, Agent Client Protocol: session = lease, agent loop
+  `forkd-acp` (Agent Client Protocol: session = lease, agent loop
   through the LLM gateway). Point Goose/Claude/Codex-style clients at
   them to get sandboxed tool execution.
 - **Per-sandbox network policy** — `none` | `lan` | `internet` |
@@ -46,6 +46,17 @@ spoond (this repo)          forkd controller (separate repo)
   child netns.
 - **Forgejo Actions runner** — `cmd/forkd-runner` adaptively leases
   sandboxes as CI workers.
+
+## Docs
+
+| Doc | Contents |
+|---|---|
+| [Setup](docs/setup.md) | prerequisites, build, env/flag reference, systemd, TLS |
+| [API reference](docs/api.md) | every endpoint: auth, request/response, errors |
+| [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
+| [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies |
+| [Operations](docs/operations.md) | pool, watchdog, failure runbook, backups |
+| [deploy/](deploy/README.md) | systemd units for vm2-style deployments |
 
 ## Status
 
@@ -67,15 +78,16 @@ go build -o forkd-dev-mcp ./cmd/forkd-dev-mcp
 
 ## Run
 
-See [`deploy/README.md`](deploy/README.md) for the backend, gateway,
-runner, and watchdog units. All knobs are env/flags with sane defaults;
-the three binaries are:
+See [docs/setup.md](docs/setup.md) for the full guide; the short form:
 
-| Binary | Role | Key env |
-|---|---|---|
-| `forkd-backend` | lease API + warm pool + proxy | `FORKD_URL`, `CONSUMER_TOKENS`, `POOL_SIZE`, `KNOWN_IMAGES`, `PROXY_ADDR`, `LLM_*` |
-| `forkd-sshd-gateway` | SSH gateway + ctl plane | `--backend`, `--backend-token`, `--client-keys`, `--gateway-host` |
-| `forkd-acp` / `forkd-dev-mcp` | agent endpoints | `FORKD_BACKEND_URL`, `FORKD_TOKEN`, `FORKD_LLM_MODEL` |
+```bash
+export CONSUMER_TOKENS='abc=forgejo'
+export POOL_SIZE=3
+./forkd-backend
+
+./forkd-sshd-gateway --backend https://127.0.0.1:8890 \
+  --backend-token abc --client-keys /etc/forkd-gateway/keys
+```
 
 ## Configuration knobs
 

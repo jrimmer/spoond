@@ -3,8 +3,15 @@
 Three systemd units run on vm2 (10.1.0.11):
 
 1. **forkd-backend** — the lease API (`:8890`) with the warm pool
-2. **forkd-runner** — the Forgejo Actions runner (adaptive pool)
-3. **forkd-spawn-watchdog** — spawn-outage auto-recovery + diagnostics (timer)
+2. **forkd-sshd-gateway** — the SSH gateway (`:2222`) + ctl plane
+3. **forkd-runner** — the Forgejo Actions runner (adaptive pool)
+4. **forkd-spawn-watchdog** — spawn-outage auto-recovery + diagnostics (timer)
+
+> Full user docs: [docs/setup.md](../docs/setup.md),
+> [docs/api.md](../docs/api.md), [docs/ctl.md](../docs/ctl.md),
+> [docs/usage.md](../docs/usage.md),
+> [docs/operations.md](../docs/operations.md). This file is the
+> deploy-specific quick reference.
 
 ## 1. forkd-backend (lease API)
 
@@ -54,7 +61,35 @@ systemctl status forkd-backend
 curl -s -H "Authorization: Bearer <token>" https://vm2.lacy.casa:8890/api/images
 ```
 
-## 2. forkd-runner (Forgejo Actions)
+## 2. forkd-sshd-gateway (SSH gateway + ctl plane)
+
+### Build
+
+```bash
+go build -o forkd-sshd-gateway ./cmd/forkd-sshd-gateway
+```
+
+### Deploy
+
+```bash
+scp forkd-sshd-gateway root@10.1.0.11:/opt/forkd-gateway/
+scp deploy/forkd-sshd-gateway.service root@10.1.0.11:/etc/systemd/system/
+```
+
+The unit runs with `--client-keys /etc/forkd-gateway/keys` — a
+**directory**; each `*.pub` file is a user. Add a user = drop their
+`.pub` into the dir + restart. Only the key's owner may connect; the
+username selects the capability (`ctl`, `new-*`, `<lease-id>`, or a
+friendly name).
+
+### Verify
+
+```bash
+ssh ctl@sandbox.lacy.casa -p 2222 "ls"
+ssh new@sandbox.lacy.casa -p 2222    # auto-create + attach
+```
+
+## 3. forkd-runner (Forgejo Actions)
 
 Runs an **adaptive pool** of concurrent runner workers: one process
 registers N runners with Forgejo, scales up when all are busy, and scales
@@ -119,7 +154,7 @@ journalctl -u forkd-runner | grep 'pool: spawned'
 journalctl -u forkd-runner | grep -E 'spawned worker|stopped worker'
 ```
 
-## 3. forkd-spawn-watchdog (auto-recovery + diagnostics)
+## 4. forkd-spawn-watchdog (auto-recovery + diagnostics)
 
 A systemd timer that detects the forkd spawn outage ("socket ... never
 appeared within 10s" / empty warm pool while the backend is active),
