@@ -125,5 +125,4 @@ func Main(args []string) int {
 
 	// Block forever; workers run in goroutines.
 	select {}
-	return 0
 }
