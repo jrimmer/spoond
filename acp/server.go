@@ -49,31 +49,31 @@ type Request struct {
 
 // InitializeParams is the client's initialize payload.
 type InitializeParams struct {
-	ProtocolVersion int `json:"protocolVersion"`
+	ProtocolVersion    int            `json:"protocolVersion"`
 	ClientCapabilities map[string]any `json:"clientCapabilities,omitempty"`
-	ClientInfo map[string]any `json:"clientInfo,omitempty"`
+	ClientInfo         map[string]any `json:"clientInfo,omitempty"`
 }
 
 // SessionNewParams creates a session.
 type SessionNewParams struct {
-	Cwd           string     `json:"cwd,omitempty"`
-	McpServers    []McpServer `json:"mcpServers,omitempty"`
-	PermissionMode string    `json:"permissionMode,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	Cwd            string         `json:"cwd,omitempty"`
+	McpServers     []McpServer    `json:"mcpServers,omitempty"`
+	PermissionMode string         `json:"permissionMode,omitempty"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
 }
 
 // McpServer describes an MCP server the client offers to attach.
 type McpServer struct {
-	Name    string `json:"name"`
-	Command string `json:"command,omitempty"`
+	Name    string   `json:"name"`
+	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
-	URL     string `json:"url,omitempty"`
+	URL     string   `json:"url,omitempty"`
 }
 
 // PromptParams is a session/prompt turn.
 type PromptParams struct {
-	SessionID   string        `json:"sessionId"`
-	Prompt      []PromptPart  `json:"prompt"`
+	SessionID   string              `json:"sessionId"`
+	Prompt      []PromptPart        `json:"prompt"`
 	Permissions []PermissionRequest `json:"permissions,omitempty"`
 }
 
@@ -112,9 +112,9 @@ type RPCError struct {
 
 // InitializeResult is the agent's initialize response.
 type InitializeResult struct {
-	ProtocolVersion int `json:"protocolVersion"`
+	ProtocolVersion   int            `json:"protocolVersion"`
 	AgentCapabilities map[string]any `json:"agentCapabilities"`
-	AgentInfo map[string]any `json:"agentInfo"`
+	AgentInfo         map[string]any `json:"agentInfo"`
 }
 
 // SessionNewResult returns the new session id.
@@ -143,10 +143,10 @@ type UpdateParams struct {
 
 // AgentMessage is a text message from the agent.
 type AgentMessage struct {
-	Type string `json:"type"`
-	MessageID string `json:"messageId,omitempty"`
-	Role string `json:"role,omitempty"`
-	Content []AgentContent `json:"content,omitempty"`
+	Type      string         `json:"type"`
+	MessageID string         `json:"messageId,omitempty"`
+	Role      string         `json:"role,omitempty"`
+	Content   []AgentContent `json:"content,omitempty"`
 }
 
 // AgentContent is one content block of an agent message.
@@ -157,7 +157,7 @@ type AgentContent struct {
 
 // Stop reasons.
 var (
-	StopReasonEndTurn = map[string]any{"type": "end_turn"}
+	StopReasonEndTurn  = map[string]any{"type": "end_turn"}
 	StopReasonMaxTurns = map[string]any{"type": "max_turns"}
 	StopReasonError    = map[string]any{"type": "error", "error": "agent error"}
 )
@@ -183,21 +183,21 @@ type Agent interface {
 
 // Server is the ACP JSON-RPC server over stdio.
 type Server struct {
-	log *log.Logger
-	agent Agent
-	in io.Reader
-	out io.Writer
-	mu sync.Mutex
+	log      *log.Logger
+	agent    Agent
+	in       io.Reader
+	out      io.Writer
+	mu       sync.Mutex
 	sessions map[string]*session
-	seq int64
-	closed bool
+	seq      int64
+	closed   bool
 }
 
 type session struct {
-	id string
+	id      string
 	leaseID string
-	cwd string
-	cancel context.CancelFunc
+	cwd     string
+	cancel  context.CancelFunc
 }
 
 // Config wires the server.
@@ -214,10 +214,10 @@ func New(cfg Config) *Server {
 		cfg.Log = log.Default()
 	}
 	return &Server{
-		log: cfg.Log,
-		agent: cfg.Agent,
-		in: cfg.In,
-		out: cfg.Out,
+		log:      cfg.Log,
+		agent:    cfg.Agent,
+		in:       cfg.In,
+		out:      cfg.Out,
 		sessions: map[string]*session{},
 	}
 }
@@ -249,7 +249,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte) error {
 		_ = json.Unmarshal(req.Params, &p)
 		return s.send(Response{
 			JSONRPC: "2.0",
-			ID: req.ID,
+			ID:      req.ID,
 			Result: InitializeResult{
 				ProtocolVersion: protocolVersion,
 				AgentCapabilities: map[string]any{

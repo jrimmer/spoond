@@ -19,7 +19,8 @@ import (
 //	stdin:   start bash, send stdin, expect roundtrip output
 //
 // Usage: wsclient -mode stream|stdin -url wss://host -token T -lease ID
-//   -args "echo hi"  (stream mode: command string, shell-quoted)
+//
+//	-args "echo hi"  (stream mode: command string, shell-quoted)
 func main() {
 	mode := flag.String("mode", "stream", "stream|stdin")
 	url := flag.String("url", "", "backend base URL, e.g. https://127.0.0.1:8890")

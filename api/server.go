@@ -748,7 +748,7 @@ echo "== df =="; df -P /
 
 // statResult is the shaped /stat response.
 type statResult struct {
-	CPU  struct {
+	CPU struct {
 		Load1 float64 `json:"load1"`
 	} `json:"cpu"`
 	Mem struct {

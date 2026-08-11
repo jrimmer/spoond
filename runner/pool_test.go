@@ -9,12 +9,12 @@ import (
 
 // fakeWorker is a controllable runnerWorker for pool tests.
 type fakeWorker struct {
-	mu       sync.Mutex
-	regs     int
-	fetches  int
-	busy     bool // when true, Fetch blocks (simulates a running job)
-	stopCh   chan struct{}
-	stopped  bool
+	mu          sync.Mutex
+	regs        int
+	fetches     int
+	busy        bool // when true, Fetch blocks (simulates a running job)
+	stopCh      chan struct{}
+	stopped     bool
 	registerErr error
 }
 

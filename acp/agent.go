@@ -37,8 +37,8 @@ type ChatMessage struct {
 
 // ChatTool is an OpenAI-style function tool.
 type ChatTool struct {
-	Type     string        `json:"type"`
-	Function ChatToolFunc  `json:"function"`
+	Type     string       `json:"type"`
+	Function ChatToolFunc `json:"function"`
 }
 
 type ChatToolFunc struct {
@@ -49,19 +49,19 @@ type ChatToolFunc struct {
 
 // ChatRequest is the chat/completions body we send.
 type ChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Tools    []ChatTool    `json:"tools,omitempty"`
-	MaxTokens int          `json:"max_tokens,omitempty"`
+	Model     string        `json:"model"`
+	Messages  []ChatMessage `json:"messages"`
+	Tools     []ChatTool    `json:"tools,omitempty"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
 }
 
 // ChatResponse is the chat/completions response we parse.
 type ChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Role         string `json:"role"`
-			Content      string `json:"content"`
-			ToolCalls    []ToolCall `json:"tool_calls"`
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -213,14 +213,14 @@ func toolsToChatTools() []ChatTool {
 // SandboxAgent implements acp.Agent: sessions map to forkd leases,
 // prompts run the LLM loop with in-sandbox tools.
 type SandboxAgent struct {
-	log     *log.Logger
-	sandbox runner.SandboxProvider
-	llm     *LLMClient
-	image   string
-	ttl     int
+	log      *log.Logger
+	sandbox  runner.SandboxProvider
+	llm      *LLMClient
+	image    string
+	ttl      int
 	maxTurns int
-	mu      sync.Mutex
-	cancel  map[string]context.CancelFunc
+	mu       sync.Mutex
+	cancel   map[string]context.CancelFunc
 }
 
 // NewAgent builds the production agent.
@@ -289,8 +289,8 @@ func (a *SandboxAgent) Prompt(ctx context.Context, leaseID, system, user string,
 		Method: "session/update",
 		Params: UpdateParams{
 			Update: AgentMessage{
-				Type: "agent_message",
-				Role: "assistant",
+				Type:    "agent_message",
+				Role:    "assistant",
 				Content: []AgentContent{{Type: "text", Text: "Starting turn in forkd sandbox " + leaseID}},
 			},
 		},
@@ -301,9 +301,9 @@ func (a *SandboxAgent) Prompt(ctx context.Context, leaseID, system, user string,
 			return nil, pctx.Err()
 		}
 		resp, err := a.llm.ChatCompletion(pctx, leaseID, &ChatRequest{
-			Model:    a.llm.Model,
-			Messages: messages,
-			Tools:    toolsToChatTools(),
+			Model:     a.llm.Model,
+			Messages:  messages,
+			Tools:     toolsToChatTools(),
 			MaxTokens: 2048,
 		})
 		if err != nil {
@@ -350,8 +350,8 @@ func (a *SandboxAgent) Prompt(ctx context.Context, leaseID, system, user string,
 				Method: "session/update",
 				Params: UpdateParams{
 					Update: AgentMessage{
-						Type: "tool_result",
-						Role: "tool",
+						Type:    "tool_result",
+						Role:    "tool",
 						Content: []AgentContent{{Type: "text", Text: fmt.Sprintf("%s: %s", tc.Function.Name, result)}},
 					},
 				},

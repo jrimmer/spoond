@@ -37,16 +37,16 @@ import (
 // Server is the MCP server. It reads JSON-RPC messages from in and
 // writes responses to out.
 type Server struct {
-	log       *log.Logger
-	sandbox   runner.SandboxProvider
-	image     string
-	ttl       int
-	timeout   int
-	in        io.Reader
-	out       io.Writer
-	tools     []Tool
-	mu        sync.Mutex
-	closed    bool
+	log     *log.Logger
+	sandbox runner.SandboxProvider
+	image   string
+	ttl     int
+	timeout int
+	in      io.Reader
+	out     io.Writer
+	tools   []Tool
+	mu      sync.Mutex
+	closed  bool
 }
 
 // Config wires the server.
@@ -68,9 +68,9 @@ type Config struct {
 
 // Tool describes one MCP tool.
 type Tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema map[string]any  `json:"inputSchema"`
+	Name        string                                                      `json:"name"`
+	Description string                                                      `json:"description"`
+	InputSchema map[string]any                                              `json:"inputSchema"`
 	Handler     func(ctx context.Context, args map[string]any) (any, error) `json:"-"`
 }
 
@@ -143,7 +143,7 @@ func New(cfg Config) *Server {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"path":      map[string]any{"type": "string", "description": "Absolute path to edit"},
+					"path":       map[string]any{"type": "string", "description": "Absolute path to edit"},
 					"old_string": map[string]any{"type": "string", "description": "Exact text to find (must be unique)"},
 					"new_string": map[string]any{"type": "string", "description": "Replacement text"},
 				},
@@ -166,7 +166,7 @@ func New(cfg Config) *Server {
 			Name:        "status",
 			Description: "Report sandbox status: OS, kernel, architecture, lease info. No arguments.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-			Handler:    s.toolStatus,
+			Handler:     s.toolStatus,
 		},
 	}
 	return s
