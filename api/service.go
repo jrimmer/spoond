@@ -373,7 +373,39 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 // fresh sandbox when the pool is empty). Persistent leases are intended
 // for interactive use: they are not TTL-swept (see keepAlive) and the
 // consumer drives their lifecycle.
+// errQuotaExceeded is returned when a user hits their concurrent-lease
+// cap (T4/#31). The API layer maps it to HTTP 429.
+var errQuotaExceeded = fmt.Errorf("lease quota exceeded")
+
+// checkQuota enforces a user's concurrent-lease cap before granting.
+// Returns errQuotaExceeded when the cap is hit. Owners without an
+// identity-store user (legacy consumer tokens) are uncapped.
+func (s *Service) checkQuota(owner string) error {
+	if s.identities == nil {
+		return nil
+	}
+	u := s.identities.UserByID(owner)
+	if u == nil || u.MaxLeases <= 0 {
+		return nil
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	active := 0
+	for _, l := range s.store.leases {
+		if !l.released && l.Owner == owner {
+			active++
+		}
+	}
+	if active >= u.MaxLeases {
+		return errQuotaExceeded
+	}
+	return nil
+}
+
 func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool, netPolicy string, netAllow []string) (*Lease, error) {
+	if err := s.checkQuota(owner); err != nil {
+		return nil, err
+	}
 	lease := &Lease{
 		ID:         newID(),
 		Owner:      owner,

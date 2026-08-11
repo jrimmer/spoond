@@ -18,6 +18,8 @@ type UserView struct {
 	Admin        bool          `json:"admin"`
 	Fingerprints []string      `json:"fingerprints"`
 	CreatedAt    string        `json:"created_at"`
+	MaxLeases    int           `json:"max_leases"`
+	MaxTTL       int           `json:"max_ttl"`
 }
 
 func toUserView(u *identity.User) UserView {
@@ -28,6 +30,8 @@ func toUserView(u *identity.User) UserView {
 		Admin:        u.Admin,
 		Fingerprints: u.Fingerprints,
 		CreatedAt:    u.CreatedAt,
+		MaxLeases:    u.MaxLeases,
+		MaxTTL:       u.MaxTTL,
 	}
 }
 
@@ -103,6 +107,36 @@ func (s *Server) handleUsersByKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no user for key")
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
+}
+
+// handleUsersQuota updates a user's lease quota (admin only; T4/#31).
+func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	var req struct {
+		MaxLeases int `json:"max_leases"`
+		MaxTTL    int `json:"max_ttl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.MaxLeases < 0 || req.MaxTTL < 0 {
+		writeError(w, http.StatusBadRequest, "quota values must be >= 0")
+		return
+	}
+	if err := s.svc.identities.SetQuota(id, req.MaxLeases, req.MaxTTL); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	u := s.svc.identities.UserByID(id)
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
 }
 

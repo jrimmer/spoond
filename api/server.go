@@ -71,6 +71,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
 		s.mux.HandleFunc("POST /api/users", s.handleUsersCreate)
 		s.mux.HandleFunc("GET /api/users/by-key", s.handleUsersByKey)
+		s.mux.HandleFunc("POST /api/users/{id}/quota", s.handleUsersQuota)
 		s.mux.HandleFunc("DELETE /api/users/{id}", s.handleUsersDelete)
 	}
 	if s.llm != nil {
@@ -216,8 +217,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// The TTL cap above already bounds persistent leases; keep-alive
 	// lets the consumer extend them (up to maxTTL per call).
 	ttl := time.Duration(ttlSecs) * time.Second
+	// Per-user TTL clamp (T4/#31): a user's max_ttl, when set, is the
+	// hard ceiling even below the global max.
+	if u := userFrom(r.Context()); u != nil && u.MaxTTL > 0 {
+		if userMax := time.Duration(u.MaxTTL) * time.Second; ttl > userMax {
+			ttl = userMax
+		}
+	}
 	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent, req.NetPolicy, req.NetAllow)
 	if err != nil {
+		if err == errQuotaExceeded {
+			writeError(w, http.StatusTooManyRequests, err.Error())
+			return
+		}
 		s.svc.log.Printf("create: grant %s: %v", req.Image, err)
 		writeError(w, http.StatusInternalServerError, "failed to grant sandbox")
 		return
