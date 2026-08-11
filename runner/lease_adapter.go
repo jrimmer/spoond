@@ -15,7 +15,7 @@ type HTTPLeaseClient struct {
 	BaseURL   string
 	Token     string
 	Client    *http.Client
-	NetPolicy string   // egress policy: none|lan|internet|restricted (default: lan)
+	NetPolicy string   // egress policy: none|lan|internet|restricted (default: internet for CI)
 	NetAllow  []string // allowlist IPs/CIDRs for restricted policy
 }
 
