@@ -12,11 +12,11 @@ import (
 // HTTPLeaseClient is a SandboxProvider backed by the forkd-backend
 // lease HTTP API.
 type HTTPLeaseClient struct {
-	BaseURL    string
-	Token      string
-	Client     *http.Client
-	NetPolicy  string   // egress policy: none|lan|internet|restricted (default: lan)
-	NetAllow   []string // allowlist IPs/CIDRs for restricted policy
+	BaseURL   string
+	Token     string
+	Client    *http.Client
+	NetPolicy string   // egress policy: none|lan|internet|restricted (default: lan)
+	NetAllow  []string // allowlist IPs/CIDRs for restricted policy
 }
 
 // NewHTTPLeaseClient builds a lease API adapter.
