@@ -13,9 +13,13 @@ if [ ! -x "$MCP_BIN" ]; then
   exit 0
 fi
 
-# rpc <name> <args-json> — send one JSON-RPC request, print the result line
+# rpc <name> <args-json> — send one JSON-RPC request, print the result line.
+# NOTE: params must be a complete JSON object (own braces). Avoid
+# ${3:-{}} as the default — bash's brace counting in the expansion
+# appends an extra '}' to multi-brace params.
 rpc() {
-  local id="$1" method="$2" params="${3:-{}}"
+  local id="$1" method="$2" params="${3:-}"
+  [ -z "$params" ] && params="{}"
   printf '{"jsonrpc":"2.0","id":%s,"method":"%s","params":%s}\n' "$id" "$method" "$params"
 }
 

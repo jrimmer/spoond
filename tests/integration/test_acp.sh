@@ -1,11 +1,13 @@
 #!/bin/bash
-# test_acp.sh — ACP smoke test (ticket #24): spawn forkd-acp, run the
-# protocol handshake (initialize, session/new, session/prompt), confirm
-# the agent loop executes in a forkd sandbox.
+# test_acp.sh — ACP smoke test (ticket #24): spawn ONE forkd-acp,
+# drive initialize → session/new → session/prompt over the same
+# process, confirm the protocol handshake works and the prompt returns
+# a result without hanging.
 #
-# The live prompt needs an LLM upstream; if the gateway is unreachable
-# the test still validates the protocol surface and reports the agent
-# error as the sandbox-bound outcome.
+# ACP sessions live inside a server process, so all requests must go
+# through a single spawn. The live prompt needs the LLM gateway; if
+# the upstream is unreachable the prompt still returns a JSON-RPC
+# error (never hangs) — which is what we assert here.
 set -u
 # shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
@@ -18,28 +20,37 @@ if [ ! -x "$ACP_BIN" ]; then
 fi
 
 rpc() {
-  local id="$1" method="$2" params="${3:-{}}"
+  local id="$1" method="$2" params="${3:-}"
+  [ -z "$params" ] && params="{}"
   printf '{"jsonrpc":"2.0","id":%s,"method":"%s","params":%s}\n' "$id" "$method" "$params"
 }
 
-# initialize
-INIT=$( { rpc 1 initialize '{"protocolVersion":1,"clientInfo":{"name":"itest"}}'; sleep 1; } | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 15 "$ACP_BIN" 2>/dev/null | head -1 )
+# Feed the whole conversation to ONE server process, sleep between
+# requests so the server has time to respond, then read all output.
+OUT=$( {
+  rpc 1 initialize '{"protocolVersion":1,"clientInfo":{"name":"itest"}}'
+  sleep 1
+  rpc 2 session/new '{"cwd":"/root"}'
+  sleep 3
+  rpc 3 session/prompt '{"sessionId":"sess-0","prompt":[{"type":"text","text":"run uname -a and tell me the kernel"}]}'
+  sleep 25
+} | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" 2>/dev/null )
+
+INIT=$(echo "$OUT" | sed -n '1p')
+NEW=$(echo "$OUT" | sed -n '2p')
+PROMPT=$(echo "$OUT" | tail -1)
+
 assert_contains "acp initialize ok" "$INIT" "forkd-acp"
 assert_contains "acp protocol version" "$INIT" "protocolVersion"
-
-# session/new
-NEW=$( { rpc 2 session/new '{"cwd":"/root"}'; sleep 3; } | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 30 "$ACP_BIN" 2>/dev/null | head -1 )
 assert_contains "acp session/new ok" "$NEW" "sessionId"
-SID=$(echo "$NEW" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('sessionId',''))" 2>/dev/null)
-assert_eq "acp session id non-empty" "$SID" "$SID"
 
-# session/prompt — the loop will either produce updates (LLM reachable)
-# or an error (gateway unavailable); either way it must NOT hang and
-# must reference the sandbox session.
-PROMPT=$( { rpc 3 session/prompt "{\"sessionId\":\"$SID\",\"prompt\":[{\"type\":\"text\",\"text\":\"run uname -a and tell me the kernel\"}]}"; sleep 20; } | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" 2>/dev/null | tail -1 )
-if echo "$PROMPT" | grep -q "error"; then
-  echo "  (prompt returned an error — LLM gateway may be unreachable; protocol path exercised)"
-  ok "acp prompt returns a JSON-RPC result (error surfaced, no hang)"
+# The prompt must return a JSON-RPC result or error — either way it is
+# a protocol-level response, never a hang/empty.
+if echo "$PROMPT" | grep -q '"stopReason"'; then
+  ok "acp prompt returns stop reason"
+elif echo "$PROMPT" | grep -q '"error"'; then
+  echo "  (prompt returned an error — LLM gateway upstream unreachable; protocol path exercised)"
+  ok "acp prompt surfaces a JSON-RPC error (no hang)"
 else
-  assert_contains "acp prompt returns stop reason" "$PROMPT" "stopReason"
+  bad "acp prompt returns a response (got: $(echo "$PROMPT" | head -c 120))"
 fi
