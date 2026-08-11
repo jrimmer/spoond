@@ -29,7 +29,8 @@ echo "== stat/pretty: temporary test key setup =="
 [ -f "$GWKEY" ] || ssh-keygen -t ed25519 -f "$GWKEY" -N "" -C "integration-test" >/dev/null 2>&1
 cp "$GWKEY_PUB" "$KEYS/itest_stat.pub"
 cp "$UNIT" /tmp/stat-unit.bak
-sed -i 's|,/etc/forkd-gateway/keys/itest_stat.pub||; s|--client-keys \([^ ]*\)|--client-keys \1,/etc/forkd-gateway/keys/itest_stat.pub|' "$UNIT"
+# The unit uses --client-keys <dir> (dir scan): dropping itest_stat.pub
+# into the dir is all that's needed; the restart picks it up.
 systemctl daemon-reload && systemctl restart spoond-sshd-gateway
 sleep 2
 systemctl is-active spoond-sshd-gateway >/dev/null && ok "gateway restarted with test key" || bad "gateway restarted with test key"

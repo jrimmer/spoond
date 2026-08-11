@@ -15,7 +15,8 @@ echo "== ctl: temporary test key setup =="
 [ -f "$GWKEY" ] || ssh-keygen -t ed25519 -f "$GWKEY" -N "" -C "integration-test" >/dev/null 2>&1
 cp "$GWKEY_PUB" "$KEYS/itest.pub"
 cp "$UNIT" /tmp/ctl-unit.bak
-sed -i 's|,/etc/forkd-gateway/keys/itest.pub||; s|--client-keys \([^ ]*\)|--client-keys \1,/etc/forkd-gateway/keys/itest.pub|' "$UNIT"
+# The unit uses --client-keys <dir> (dir scan): dropping itest.pub into
+# the dir is all that's needed; the restart picks it up. Restore = rm.
 systemctl daemon-reload && systemctl restart spoond-sshd-gateway
 sleep 2
 systemctl is-active spoond-sshd-gateway >/dev/null && ok "gateway restarted with test key" || bad "gateway restarted with test key"
