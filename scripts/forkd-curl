@@ -1,7 +1,7 @@
 #!/bin/bash
-# forkd-curl — authenticated curl wrapper for the forkd-service lease API.
+# forkd-curl — authenticated curl wrapper for the spoond lease API.
 #
-# The forkd-service backend runs on a single host (backend + controller +
+# The spoond backend runs on a single host (backend + controller +
 # gateway together) and serves TLS on :8890 with a certificate for the
 # backend hostname. This wrapper:
 #   - injects the consumer token (read at runtime — never stored here)
@@ -32,7 +32,7 @@ if [ -z "$TOKEN" ]; then
 fi
 
 # Resolve the API hostname to loopback so TLS validates against the
-# hostname cert (forkd-service runs backend+controller on one host).
+# hostname cert (spoond runs backend+controller on one host).
 HOST=$(printf '%s' "$FORKD_API" | sed -E 's|^https?://([^:/]+).*|\1|')
 PORT=$(printf '%s' "$FORKD_API" | sed -nE 's|^https?://[^:/]+:([0-9]+).*|\1|p')
 [ -n "$PORT" ] || PORT=8890
