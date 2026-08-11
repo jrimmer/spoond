@@ -12,23 +12,33 @@ import (
 // HTTPLeaseClient is a SandboxProvider backed by the forkd-backend
 // lease HTTP API.
 type HTTPLeaseClient struct {
-	BaseURL string
-	Token   string
-	Client  *http.Client
+	BaseURL    string
+	Token      string
+	Client     *http.Client
+	NetPolicy  string   // egress policy: none|lan|internet|restricted (default: lan)
+	NetAllow   []string // allowlist IPs/CIDRs for restricted policy
 }
 
 // NewHTTPLeaseClient builds a lease API adapter.
 func NewHTTPLeaseClient(baseURL, token string) *HTTPLeaseClient {
 	return &HTTPLeaseClient{
-		BaseURL: baseURL,
-		Token:   token,
-		Client:  &http.Client{Timeout: 600 * time.Second},
+		BaseURL:   baseURL,
+		Token:     token,
+		Client:    &http.Client{Timeout: 600 * time.Second},
+		NetPolicy: "lan", // CI sandboxes need LAN egress to reach Forgejo
 	}
 }
 
 // Create grants a new sandbox lease.
 func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (string, error) {
-	body, _ := json.Marshal(map[string]any{"image": image, "ttl": ttl})
+	payload := map[string]any{"image": image, "ttl": ttl}
+	if c.NetPolicy != "" {
+		payload["network_policy"] = c.NetPolicy
+	}
+	if len(c.NetAllow) > 0 {
+		payload["egress_allowlist"] = c.NetAllow
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/sandboxes", bytes.NewReader(body))
 	if err != nil {
 		return "", err

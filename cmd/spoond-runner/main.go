@@ -107,6 +107,13 @@ func Main(args []string) int {
 	newWorker := func() runner.RunnerWorker {
 		proto := runner.NewForgejoAdapterWithInternal(forgejoURL, envOr("REPO_BASE_URL", ""), nil)
 		lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+	lease.NetPolicy = envOr("LEASE_NETPOL", "lan")
+	if v := os.Getenv("LEASE_NET_ALLOW"); v != "" {
+		lease.NetAllow = strings.Split(v, ",")
+		for i, a := range lease.NetAllow {
+			lease.NetAllow[i] = strings.TrimSpace(a)
+		}
+	}
 		exec := &runner.Executor{
 			Sandbox:      lease,
 			Sink:         proto,
