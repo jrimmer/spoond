@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/jrimmer/spoond/identity"
 )
 
 // llmGatewayPrefix is the path prefix for the per-lease LLM gateway.
@@ -38,11 +41,18 @@ const llmGatewayPrefix = "/llm/"
 type llmGateway struct {
 	log          *log.Logger
 	lookup       func(leaseID string) *Lease
+	users        *identity.Store // per-user LLM keys (U8/T8); nil = legacy open mode
 	upstreamURL  *url.URL
 	key          string
 	providers    []string          // ordered longest-first provider prefixes
 	modelMap     map[string]string // exe.dev catalog id -> upstream model
 	defaultModel string            // fallback when the requested id isn't mapped
+	// Per-user concurrent request cap (U8/T8): maxConcurrent 0 =
+	// unlimited. inflight counts in-flight forwarded requests per lease
+	// owner (the authenticated user after the key check).
+	maxConcurrent int
+	inflightMu    sync.Mutex
+	inflight      map[string]int
 }
 
 // newLLMGateway wires the OpenAI-compatible upstream. upstreamURL is the
@@ -51,8 +61,10 @@ type llmGateway struct {
 // catalog model ids to upstream model ids (e.g. "gpt-oss-20b-fireworks"
 // -> "gpt-oss:20b"); defaultModel is applied when a requested id is
 // neither mapped nor known to the upstream (Shelley also probes
-// gpt-5.x/claude ids for slug generation etc.).
-func newLLMGateway(log *log.Logger, lookup func(string) *Lease, upstreamURL, key, defaultModel string, modelMap map[string]string) *llmGateway {
+// gpt-5.x/claude ids for slug generation etc.). users is the identity
+// store consulted for per-user LLM keys; nil keeps the gateway open for
+// every lease (legacy single-user behavior).
+func newLLMGateway(log *log.Logger, lookup func(string) *Lease, users *identity.Store, upstreamURL, key, defaultModel string, modelMap map[string]string) *llmGateway {
 	u, err := url.Parse(strings.TrimSuffix(upstreamURL, "/"))
 	if err != nil {
 		panic("llm gateway: bad upstream URL: " + err.Error())
@@ -60,11 +72,13 @@ func newLLMGateway(log *log.Logger, lookup func(string) *Lease, upstreamURL, key
 	return &llmGateway{
 		log:          log,
 		lookup:       lookup,
+		users:        users,
 		upstreamURL:  u,
 		key:          key,
 		providers:    []string{"/fireworks/inference", "/openai", "/xai"},
 		modelMap:     modelMap,
 		defaultModel: defaultModel,
+		inflight:     map[string]int{},
 	}
 }
 
@@ -102,7 +116,12 @@ func (g *llmGateway) mapModel(body []byte) []byte {
 
 // ServeHTTP handles a /llm/ request. The main server's authMiddleware
 // exempts this prefix (capability = lease id in path), so the handler
-// itself validates the lease.
+// itself validates the lease. When the lease owner has a per-user LLM
+// key configured (U8/T8), the request must present it in the standard
+// OpenAI-compatible Authorization header; the user key only authorizes
+// the caller and never reaches the upstream (the host key below
+// authenticates to the provider). Owners without a key keep the legacy
+// open behavior.
 func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, llmGatewayPrefix)
 	slash := strings.IndexByte(rest, '/')
@@ -121,6 +140,46 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if lease.Suspended {
 		http.Error(w, "sandbox is suspended; resume it first", http.StatusConflict)
 		return
+	}
+
+	// Per-user LLM key auth (U8/T8): when the lease owner has a key
+	// configured, the caller must present it. A key that verifies is by
+	// construction the owner's key, so this check doubles as the
+	// lease-owner check (the U9 share case extends this predicate).
+	// Legacy deployments (no identity store, or owner without a key)
+	// keep today's open behavior.
+	if g.users != nil {
+		owner := g.users.UserByID(lease.Owner)
+		if owner != nil && owner.LLMKeyHash != "" {
+			auth := r.Header.Get("Authorization")
+			key := strings.TrimPrefix(auth, "Bearer ")
+			if key == "" || key == auth || !g.users.LLMKeyOK(owner.ID, key) {
+				http.Error(w, "missing or invalid LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
+				return
+			}
+		}
+	}
+
+	// Per-user concurrent request cap (U8/T8): count only forwarded
+	// requests (auth already passed). maxConcurrent 0 = unlimited.
+	if g.maxConcurrent > 0 {
+		g.inflightMu.Lock()
+		if g.inflight[lease.Owner] >= g.maxConcurrent {
+			g.inflightMu.Unlock()
+			http.Error(w, "too many concurrent LLM requests for this user", http.StatusTooManyRequests)
+			return
+		}
+		g.inflight[lease.Owner]++
+		g.inflightMu.Unlock()
+		defer func() {
+			g.inflightMu.Lock()
+			if g.inflight[lease.Owner] <= 1 {
+				delete(g.inflight, lease.Owner)
+			} else {
+				g.inflight[lease.Owner]--
+			}
+			g.inflightMu.Unlock()
+		}()
 	}
 
 	// Match the longest provider prefix and forward the remainder to the

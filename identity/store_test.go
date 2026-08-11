@@ -122,6 +122,76 @@ func TestPersistence(t *testing.T) {
 	}
 }
 
+func TestSetLLMKey(t *testing.T) {
+	s, _ := NewStore("")
+	u, _ := s.AddUser("jason", KindPerson, []string{"SHA256:fp"}, "tok")
+	if s.LLMKeyOK(u.ID, "anything") {
+		t.Fatal("no key set yet")
+	}
+	if err := s.SetLLMKey(u.ID, "slk-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.LLMKeyOK(u.ID, "slk-secret") {
+		t.Fatal("correct key must verify")
+	}
+	if s.LLMKeyOK(u.ID, "slk-wrong") {
+		t.Fatal("wrong key must not verify")
+	}
+	if s.LLMKeyOK("u-nope", "slk-secret") {
+		t.Fatal("unknown user must not verify")
+	}
+	// Only the hash is stored, never the plaintext key.
+	got := s.UserByID(u.ID)
+	if got.LLMKeyHash == "" || got.LLMKeyHash == "slk-secret" || len(got.LLMKeyHash) != 64 {
+		t.Fatalf("bad LLMKeyHash %q (want 64-hex SHA256, not plaintext)", got.LLMKeyHash)
+	}
+	// Clearing (empty key) revokes and reverts to open mode.
+	if err := s.SetLLMKey(u.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if s.LLMKeyOK(u.ID, "slk-secret") {
+		t.Fatal("cleared key must not verify")
+	}
+	// Whitespace-only clears too; rotation replaces the old key.
+	if err := s.SetLLMKey(u.ID, "   "); err != nil {
+		t.Fatal(err)
+	}
+	if s.LLMKeyOK(u.ID, "slk-secret") {
+		t.Fatal("whitespace clear must revoke")
+	}
+	if err := s.SetLLMKey(u.ID, "slk-rotated"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.LLMKeyOK(u.ID, "slk-rotated") || s.LLMKeyOK(u.ID, "slk-secret") {
+		t.Fatal("rotation must replace the old key")
+	}
+	// Unknown user.
+	if err := s.SetLLMKey("u-nope", "x"); err == nil {
+		t.Fatal("expected error for unknown user")
+	}
+}
+
+func TestSetLLMKeyPersistence(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "users.json")
+	s, _ := NewStore(file)
+	u, _ := s.AddUser("jason", KindPerson, []string{"SHA256:fp"}, "tok")
+	if err := s.SetLLMKey(u.ID, "slk-persist"); err != nil {
+		t.Fatal(err)
+	}
+	// Reload from disk: the hash must round-trip and still verify.
+	s2, err := NewStore(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s2.LLMKeyOK(u.ID, "slk-persist") {
+		t.Fatal("LLM key lost on reload")
+	}
+	if s2.LLMKeyOK(u.ID, "wrong") {
+		t.Fatal("wrong key verifies after reload")
+	}
+}
+
 func TestFingerprintFormat(t *testing.T) {
 	fp := FingerprintSHA256([]byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test"))
 	if len(fp) != len("SHA256:")+43 {

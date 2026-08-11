@@ -13,6 +13,7 @@ package identity
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -41,7 +42,11 @@ type User struct {
 	Admin        bool     `json:"admin"`        // KTD-2: first user is admin
 	Fingerprints []string `json:"fingerprints"` // SHA256 fingerprints of SSH keys
 	TokenHash    string   `json:"token_hash"`   // SHA256 of the bearer token ("" = none)
-	CreatedAt    string   `json:"created_at"`   // RFC3339
+	// LLMKeyHash is the SHA256 of the user's LLM gateway key (U8/T8,
+	// "" = none). When set, /llm/ requests on this user's leases must
+	// present the matching key; the API layer never exposes it.
+	LLMKeyHash string `json:"llm_key_hash"` // SHA256 of the LLM gateway key ("" = none)
+	CreatedAt  string `json:"created_at"`   // RFC3339
 	// Quota (T4/#31). 0 = no per-user cap (global defaults apply).
 	MaxLeases int `json:"max_leases"` // max concurrent leases (0 = unlimited)
 	MaxTTL    int `json:"max_ttl"`    // max lease TTL seconds (0 = global max applies)
@@ -127,9 +132,10 @@ func (s *Store) save() error {
 	return os.Rename(tmp, s.file)
 }
 
-// hashToken returns the SHA256 hex of a bearer token.
-func hashToken(token string) string {
-	h := sha256.Sum256([]byte(token))
+// hashSecret returns the SHA256 hex of a bearer token or LLM gateway
+// key. Only hashes are ever stored or compared (U8/T8).
+func hashSecret(secret string) string {
+	h := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(h[:])
 }
 
@@ -172,7 +178,7 @@ func (s *Store) AddUser(name string, kind Kind, fingerprints []string, token str
 		u.Fingerprints = append(u.Fingerprints, fp)
 	}
 	if token != "" {
-		u.TokenHash = hashToken(token)
+		u.TokenHash = hashSecret(token)
 		if owner, dup := s.byToken[u.TokenHash]; dup {
 			return nil, fmt.Errorf("token already belongs to user %s", owner)
 		}
@@ -232,7 +238,7 @@ func (s *Store) UserByFingerprint(fp string) *User {
 func (s *Store) UserByToken(token string) *User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	id, ok := s.byToken[hashToken(token)]
+	id, ok := s.byToken[hashSecret(token)]
 	if !ok {
 		return nil
 	}
@@ -332,6 +338,39 @@ func (s *Store) SetQuota(userID string, maxLeases, maxTTL int) error {
 	u.MaxLeases = maxLeases
 	u.MaxTTL = maxTTL
 	return s.save()
+}
+
+// SetLLMKey sets or rotates a user's LLM gateway key (U8/T8). Only the
+// SHA256 hash is stored, never the key itself. An empty (or
+// whitespace-only) key clears the user's key, reverting their leases to
+// the legacy open-gateway behavior.
+func (s *Store) SetLLMKey(userID, llmKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.users[userID]
+	if u == nil {
+		return fmt.Errorf("no such user")
+	}
+	llmKey = strings.TrimSpace(llmKey)
+	if llmKey == "" {
+		u.LLMKeyHash = ""
+	} else {
+		u.LLMKeyHash = hashSecret(llmKey)
+	}
+	return s.save()
+}
+
+// LLMKeyOK reports whether llmKey is the user's configured LLM gateway
+// key, compared in constant time over the SHA256 hashes. Returns false
+// when the user does not exist or has no key set.
+func (s *Store) LLMKeyOK(userID, llmKey string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u := s.users[userID]
+	if u == nil || u.LLMKeyHash == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(u.LLMKeyHash), []byte(hashSecret(llmKey))) == 1
 }
 
 // Count returns the number of users (used for the bootstrap check).

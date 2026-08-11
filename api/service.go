@@ -720,6 +720,24 @@ func (s *Service) lookupByNameForOwner(owner, name string) *Lease {
 	return nil
 }
 
+// lookupUserScoped resolves a proxy hostname label (hex lease id or
+// friendly name) to a lease owned by the given user. Used by the HTTP
+// proxy under forward-auth (U7/T7): the proxy never resolves another
+// owner's leases by id or name.
+func (s *Service) lookupUserScoped(owner, label string) *Lease {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	for _, l := range s.store.leases {
+		if l.released || l.Owner != owner {
+			continue
+		}
+		if l.ID == label || l.Name == label {
+			return l
+		}
+	}
+	return nil
+}
+
 // grantFromSnapshot spawns a sandbox directly from a specific snapshot
 // tag (not via the warm pool) and grants a lease on it. Used by clone:
 // the branch tag is fresh, has no pool, and must not be registered as a

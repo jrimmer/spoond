@@ -99,14 +99,49 @@ curl -s https://<id>-8080.sandbox.example.com/
 
 ## LLM gateway
 
-Per-lease OpenAI-compatible endpoint (no bearer token — the lease id is
-the capability):
+Per-lease OpenAI-compatible endpoint (no consumer bearer token — the
+lease id is the capability):
 
 ```bash
 curl -s https://sandbox.example.com/llm/<id>/openai/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-oss-20b-fireworks","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+### Per-user keys (epic #26 T8)
+
+When a lease owner has a per-user LLM key configured, `/llm/` requests
+on their leases must present it in the standard OpenAI-compatible
+`Authorization` header:
+
+```bash
+curl -s https://sandbox.example.com/llm/<id>/openai/chat/completions \
+  -H "Authorization: Bearer <user-llm-key>" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-oss-20b-fireworks","messages":[{"role":"user","content":"hi"}]}'
+```
+
+The user key only authorizes the caller (missing/wrong/foreign keys get
+`401`); it is replaced by the server-side upstream key before the
+request is forwarded, so it never reaches the provider. Owners **without**
+a key keep the legacy open behavior (backward compatible), including
+deployments with no identity store at all.
+
+An admin sets/rotates/revokes a key (stored hashed, never returned by
+the API):
+
+```bash
+curl -s -X POST https://sandbox.example.com/api/users/<user-id>/llm-key \
+  -H "Authorization: Bearer <admin-token>" -H 'Content-Type: application/json' \
+  -d '{"llm_key":"slk-…"}'        # set/rotate
+curl -s -X POST https://sandbox.example.com/api/users/<user-id>/llm-key \
+  -H "Authorization: Bearer <admin-token>" -H 'Content-Type: application/json' \
+  -d '{"llm_key":""}'             # revoke (owner reverts to open)
+```
+
+Optional per-user concurrency cap (in-flight `/llm/` requests per user;
+`429` when exceeded): set `LLM_MAX_CONCURRENT_PER_USER` (default 0 =
+unlimited).
 
 Config: `LLM_UPSTREAM_URL`/`LLM_UPSTREAM_KEY` (server-side upstream) or
 the sandbox's own Shelley agent on `127.0.0.1:9000`.

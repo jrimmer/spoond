@@ -39,6 +39,21 @@ Subcommands: `backend`, `gateway`, `acp`, `mcp`, `runner`, `ctl`.
 Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
 `noctl`.
 
+### Agent endpoints (`mcp` / `acp`)
+
+Both endpoints authenticate to the backend as a **per-agent user** (epic
+#26 U4): leases they create are owned by that agent's identity.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FORKD_AGENT_TOKEN` | *(empty)* | per-agent bearer token for this endpoint, provisioned from the users store; wins over `FORKD_TOKEN` |
+| `FORKD_TOKEN` | *(empty)* | legacy fallback (deprecated): used with a warning when `FORKD_AGENT_TOKEN` is unset |
+
+Create an agent user first (`ssh-key add <pubkey> <name>` or
+`POST /api/users` with `kind=agent`), then set `FORKD_AGENT_TOKEN` to
+that user's token. If neither variable is set, the endpoint fails fast
+with provisioning instructions.
+
 ## 1. forkd-backend (lease API)
 
 ### Environment

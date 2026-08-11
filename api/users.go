@@ -140,6 +140,34 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
 }
 
+// handleUsersLLMKey sets or rotates a user's LLM gateway key (admin
+// only; U8/T8). The key is stored hashed and never returned in API
+// responses. An empty llm_key clears the key, reverting that user's
+// leases to the legacy open-gateway behavior.
+func (s *Server) handleUsersLLMKey(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	var req struct {
+		LLMKey string `json:"llm_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if err := s.svc.identities.SetLLMKey(id, req.LLMKey); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	u := s.svc.identities.UserByID(id)
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
+}
+
 // handleUsersDelete removes a user (admin only).
 func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {

@@ -176,13 +176,30 @@ loopback listener only).
 
 ---
 
-## LLM gateway (per-lease, no bearer token)
+## LLM gateway (per-lease)
 
 `POST /llm/{lease-id}/openai/chat/completions` — OpenAI-compatible chat
 completion against the lease's sandbox-hosted LLM gateway. The lease id
 in the path is the capability; sandboxes hold no consumer token. When no
 `LLM_UPSTREAM_URL` is configured the gateway forwards to the sandbox's
 own `127.0.0.1:9000` Shelley agent instead.
+
+Per-user key auth (epic #26 T8): when the lease owner has an LLM key
+configured, requests must present it as `Authorization: Bearer
+<user-llm-key>`. Missing/wrong/foreign keys → `401`. Owners without a
+key (and deployments without an identity store) keep the open behavior.
+The user key is replaced by the server-side upstream key before
+forwarding, so it never reaches the provider.
+
+## Users & identity
+
+### `POST /api/users/{id}/llm-key` — set/rotate/revoke a user's LLM gateway key
+
+Admin only. Request: `{"llm_key": "<slk-…>"}`; an empty `llm_key`
+revokes (the owner's leases revert to the open gateway). The key is
+stored as a SHA-256 hash and never returned in responses. Response
+`200 OK` with the user object (no `llm_key_hash` field). `404` unknown
+user; `403` non-admin.
 
 ---
 

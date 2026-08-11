@@ -193,3 +193,54 @@ func TestUsersListShowsUsers(t *testing.T) {
 		t.Fatalf("token hash leaked in response: %s", raw)
 	}
 }
+
+func TestUsersLLMKeyEndpoint(t *testing.T) {
+	srv, ids := newTestServerWithIdentities(t)
+	h := srv.Handler()
+	// bootstrap admin jason (token t1), then alice (token t2)
+	rec, body := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"jason","fingerprints":["SHA256:fp1"],"token":"t1"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("bootstrap: %d %s", rec.Code, rec.Body.String())
+	}
+	jasonID := body["user"].(map[string]any)["id"].(string)
+	rec2, body2 := doUsersReq(t, h, "POST", "/api/users", "t1", `{"name":"alice","fingerprints":["SHA256:fp2"],"token":"t2"}`)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("alice create: %d %s", rec2.Code, rec2.Body.String())
+	}
+	aliceID := body2["user"].(map[string]any)["id"].(string)
+
+	// Admin sets jason's LLM key.
+	rec3, _ := doUsersReq(t, h, "POST", "/api/users/"+jasonID+"/llm-key", "t1", `{"llm_key":"slk-jason-secret"}`)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("set key: %d %s", rec3.Code, rec3.Body.String())
+	}
+	// The key hash must never be exposed in API responses.
+	if raw := rec3.Body.String(); strings.Contains(raw, "llm_key_hash") {
+		t.Fatalf("llm_key_hash leaked in response: %s", raw)
+	}
+	if !ids.LLMKeyOK(jasonID, "slk-jason-secret") {
+		t.Fatal("stored key must verify")
+	}
+	if ids.LLMKeyOK(jasonID, "slk-wrong") {
+		t.Fatal("wrong key must not verify")
+	}
+
+	// Non-admin cannot set keys — not even their own.
+	rec4, _ := doUsersReq(t, h, "POST", "/api/users/"+aliceID+"/llm-key", "t2", `{"llm_key":"slk-mallory"}`)
+	if rec4.Code != http.StatusForbidden {
+		t.Fatalf("non-admin set should 403, got %d", rec4.Code)
+	}
+	// Unknown user -> 404.
+	rec5, _ := doUsersReq(t, h, "POST", "/api/users/u-nope/llm-key", "t1", `{"llm_key":"slk-x"}`)
+	if rec5.Code != http.StatusNotFound {
+		t.Fatalf("unknown user should 404, got %d", rec5.Code)
+	}
+	// Empty key clears (revoke) — admin only.
+	rec6, _ := doUsersReq(t, h, "POST", "/api/users/"+jasonID+"/llm-key", "t1", `{"llm_key":""}`)
+	if rec6.Code != http.StatusOK {
+		t.Fatalf("clear key: %d %s", rec6.Code, rec6.Body.String())
+	}
+	if ids.LLMKeyOK(jasonID, "slk-jason-secret") {
+		t.Fatal("cleared key must not verify")
+	}
+}

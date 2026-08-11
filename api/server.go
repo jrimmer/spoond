@@ -45,7 +45,9 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux()}
 	if openRouterURL != "" {
-		s.llm = newLLMGateway(svc.log, svc.lookupAny, openRouterURL, openRouterKey, defaultModel, modelMap)
+		// svc.identities must be installed (SetIdentities) before
+		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
+		s.llm = newLLMGateway(svc.log, svc.lookupAny, svc.identities, openRouterURL, openRouterKey, defaultModel, modelMap)
 	}
 	s.mux.HandleFunc("POST /api/sandboxes", s.handleCreate)
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
@@ -72,6 +74,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.mux.HandleFunc("POST /api/users", s.handleUsersCreate)
 		s.mux.HandleFunc("GET /api/users/by-key", s.handleUsersByKey)
 		s.mux.HandleFunc("POST /api/users/{id}/quota", s.handleUsersQuota)
+		s.mux.HandleFunc("POST /api/users/{id}/llm-key", s.handleUsersLLMKey) // U8/T8
 		s.mux.HandleFunc("DELETE /api/users/{id}", s.handleUsersDelete)
 	}
 	if s.llm != nil {
@@ -81,6 +84,15 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.mux.Handle(llmGatewayPrefix, s.llm)
 	}
 	return s
+}
+
+// SetLLMMaxConcurrent caps in-flight LLM gateway requests per user
+// (U8/T8); 0 disables the cap. Call after NewServerWithLLM, before
+// serving. Configured via LLM_MAX_CONCURRENT_PER_USER.
+func (s *Server) SetLLMMaxConcurrent(n int) {
+	if s.llm != nil {
+		s.llm.maxConcurrent = n
+	}
 }
 
 // handleHealthz reports liveness without auth, for Gatus/load-balancer

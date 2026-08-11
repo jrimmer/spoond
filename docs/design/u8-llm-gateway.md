@@ -80,6 +80,22 @@ U1 (users store) and U5 (quota columns/accounting) are hard prerequisites — T8
 
 ---
 
+## Implementation notes (T8 landed 2026-08-11)
+
+What was actually implemented, and the deliberate deviations from the memo:
+
+- **Auth mechanism: `Authorization: Bearer <slk_…>`** (not `X-Spoond-LLM-Key`). The gateway is an OpenAI-compatible endpoint, so the standard Authorization header is the least surprising contract and Shelley/ACP clients can pass it through unchanged. The user key never reaches the upstream: `ServeHTTP` clones inbound headers but overwrites `Authorization` with the host key (`g.key`) before forwarding — same code path as before, verified by test.
+- **Ownership is folded into key verification** (memo 2a step 3's separate 403 does not exist as its own check). The gateway does `g.users.LLMKeyOK(lease.Owner, presentedKey)` — a key that verifies is by construction the lease owner's key, so a foreign user's valid key gets `401`, not `403`. Same security outcome, one less lookup; the U9 share case extends this predicate site.
+- **Backward compat (KTD-3):** gate is `owner.LLMKeyHash != ""` — no `LLM_REQUIRE_USER_KEY` toggle env was added (store-population inference is exactly the memo's recommended semantic; the toggle can be added later without touching the auth code). No identity store (`svc.identities == nil`) ⇒ gateway fully open, unchanged.
+- **Quota metering (memo 2b):** the post-response token metering (`RecordLLMUsage`, usage-object parsing) was **not** implemented — it needs U5 accounting counters on the user record that don't exist yet. Instead, the implemented quota hook is the **per-user concurrent in-flight cap** (`LLM_MAX_CONCURRENT_PER_USER`, default 0 = unlimited, `429` when exceeded), a self-contained counter in `llmGateway` keyed by lease owner. Post-stream token metering remains the documented hook point here (2b above).
+- **New admin endpoint:** `POST /api/users/{id}/llm-key` with `{"llm_key":"…"}`; empty string revokes. Stored as SHA-256 hex in `User.LLMKeyHash` (persisted in the users JSON), verified constant-time (`crypto/subtle`). Never returned by the API (`UserView` has no field for it; test asserts no `llm_key_hash` in responses).
+- **Key delivery into the sandbox (memo 2a "Key delivery"):** not implemented — `cmd/spoond-sshd-gateway` is out of scope for T8 (separate unit). `shelley.json` will gain `"api_key"` when that lands.
+- **Order of checks now:** parse lease id → `lookupAny` (404) → suspended (409) → user-key auth (401) → concurrency cap (429) → provider match (501) → forward with host key.
+
+Files changed by T8: `identity/store.go` (+`LLMKeyHash`, `SetLLMKey`, `LLMKeyOK`, `hashSecret`), `api/llmgateway.go` (auth + cap), `api/server.go` (wiring, route, `SetLLMMaxConcurrent`), `api/users.go` (`handleUsersLLMKey`), `cmd/spoond-backend/main.go` (`LLM_MAX_CONCURRENT_PER_USER`), tests in `identity/store_test.go`, `api/users_test.go`, new `api/llmgateway_test.go`, docs (`usage.md`, `api.md`, this memo).
+
+---
+
 ## Summary
 
 - **What I did:** Read `api/llmgateway.go`, `api/server.go`, `api/service.go`, `cmd/spoond-backend/main.go`, `api/proxy.go`, the sshd gateway's `runShelly`/backend auth, `TestLLMGateway`, the epic #26 plan (`docs/plans/2026-08-11-multi-user-tenancy-plan.md`), and `docs/api.md`; checked git state (main is clean, no `identity/` landed).

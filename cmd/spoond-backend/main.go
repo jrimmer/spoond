@@ -14,6 +14,10 @@
 //	                 LLM gateway (e.g. https://openrouter.ai/api/v1)
 //	LLM_UPSTREAM_KEY server-side key for that upstream (never sent to
 //	                 sandboxes; empty disables the gateway)
+//	LLM_MAX_CONCURRENT_PER_USER  per-user in-flight LLM gateway request
+//	                 cap (0 = unlimited; U8/T8). Per-user LLM keys are
+//	                 store data, set via POST /api/users/{id}/llm-key,
+//	                 not env config.
 package spoondbackend
 
 import (
@@ -126,6 +130,10 @@ func Main(args []string) int {
 	}
 
 	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), os.Getenv("LLM_UPSTREAM_KEY"), os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
+	// Per-user LLM gateway concurrency cap (U8/T8): 0 = unlimited.
+	if n := envIntOr("LLM_MAX_CONCURRENT_PER_USER", 0); n > 0 {
+		srv.SetLLMMaxConcurrent(n)
+	}
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).
 	if d := os.Getenv("ASSETS_DIR"); d != "" {
