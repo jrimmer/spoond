@@ -66,13 +66,19 @@ type Store struct {
 	pool map[string][]string
 	// shares maps lease id -> grantee id -> share (T6/#33).
 	shares map[string]map[string]*Share
+	// pending counts in-flight lease creations per owner (T4/#31 quota
+	// reservation, security review #37 H2): a slot is reserved under
+	// the same lock as the quota count and released when the lease is
+	// inserted or the grant fails, closing the check-then-create race.
+	pending map[string]int
 }
 
 func newStore() *Store {
 	return &Store{
-		leases: make(map[string]*Lease),
-		pool:   make(map[string][]string),
-		shares: make(map[string]map[string]*Share),
+		leases:  make(map[string]*Lease),
+		pool:    make(map[string][]string),
+		shares:  make(map[string]map[string]*Share),
+		pending: make(map[string]int),
 	}
 }
 
@@ -411,10 +417,14 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 // cap (T4/#31). The API layer maps it to HTTP 429.
 var errQuotaExceeded = fmt.Errorf("lease quota exceeded")
 
-// checkQuota enforces a user's concurrent-lease cap before granting.
+// reserveQuota enforces a user's concurrent-lease cap before granting
+// and RESERVES a slot atomically (security review #37 H2): the count
+// and the reservation happen under the same store lock, so concurrent
+// creates cannot both pass max_leases. The caller MUST call
+// releaseQuotaReservation when the grant finishes (success or failure).
 // Returns errQuotaExceeded when the cap is hit. Owners without an
 // identity-store user (legacy consumer tokens) are uncapped.
-func (s *Service) checkQuota(owner string) error {
+func (s *Service) reserveQuota(owner string) error {
 	if s.identities == nil {
 		return nil
 	}
@@ -430,16 +440,38 @@ func (s *Service) checkQuota(owner string) error {
 			active++
 		}
 	}
-	if active >= u.MaxLeases {
+	if active+s.store.pending[owner] >= u.MaxLeases {
 		return errQuotaExceeded
 	}
+	s.store.pending[owner]++
 	return nil
 }
 
+// releaseQuotaReservation drops a reservation made by reserveQuota.
+func (s *Service) releaseQuotaReservation(owner string) {
+	if s.identities == nil {
+		return
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if s.store.pending[owner] <= 1 {
+		delete(s.store.pending, owner)
+	} else {
+		s.store.pending[owner]--
+	}
+}
+
 func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool, netPolicy string, netAllow []string) (*Lease, error) {
-	if err := s.checkQuota(owner); err != nil {
+	if err := s.reserveQuota(owner); err != nil {
 		return nil, err
 	}
+	// The reservation becomes the real lease when it's stored below;
+	// the deferred release runs on BOTH success and failure: on failure
+	// it frees the slot, on success the lease is already counted as
+	// active so the pending reservation must be dropped (security
+	// review #37 H2). Both mutations take the same store lock, so a
+	// concurrent reserveQuota sees a consistent active+pending count.
+	defer func() { s.releaseQuotaReservation(owner) }()
 	lease := &Lease{
 		ID:         newID(),
 		Owner:      owner,

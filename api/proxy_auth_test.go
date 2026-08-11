@@ -18,7 +18,7 @@ func newProxyAuthServer(t *testing.T) (http.Handler, http.Handler, string) {
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
 	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
-	srv.SetProxyAuth("forward-auth", "s3cret")
+	srv.SetProxyAuth("forward-auth", "s3cret", "")
 	apiH := srv.Handler()
 
 	// bootstrap admin + jason

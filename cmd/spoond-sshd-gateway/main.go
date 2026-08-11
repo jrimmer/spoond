@@ -56,12 +56,13 @@ var (
 	flags = flag.NewFlagSet("spoond-gateway", flag.ExitOnError)
 
 	// gatewayHost is the public hostname advertised in MOTDs.
-	gatewayHost = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
-	listenAddr  = flags.String("listen", ":2222", "listen address")
-	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
-	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
-	backendTok  = flags.String("backend-token", "", "spoond-backend consumer token (required)")
-	clientKeys  = flags.String("client-keys", "", "comma-separated paths to authorized client public keys, or a directory scanned for *.pub files")
+	gatewayHost  = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
+	listenAddr   = flags.String("listen", ":2222", "listen address")
+	hostKeyPath  = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
+	backendURL   = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
+	backendTok   = flags.String("backend-token", "", "spoond-backend consumer token (required)")
+	bootstrapTok = flags.String("bootstrap-token", "", "spoond-backend BOOTSTRAP_TOKEN (first-user bootstrap; security review #37 M4)")
+	clientKeys   = flags.String("client-keys", "", "comma-separated paths to authorized client public keys, or a directory scanned for *.pub files")
 	// gatewayKeyPath is the identity the gateway uses to connect INTO
 	// sandboxes. Its public half is baked into dev-base authorized_keys.
 	gatewayKeyPath = flags.String("gateway-key", "/etc/spoond-gateway/gateway_ed25519", "gateway identity key for nested connections")
@@ -100,9 +101,35 @@ func Main(args []string) int {
 		log.Fatalf("client keys: %v", err)
 	}
 
+	// Identity-store authority (security review #37 H1): when the
+	// backend has an identity store, key resolution there is the ONLY
+	// gate — the local allowlist is a legacy single-user fallback and
+	// must not silently admit keys that the store doesn't know (which
+	// would also leave them unscoped after `ssh-key rm`). Probe once at
+	// startup; the store's presence doesn't change at runtime.
+	identityAuthoritative := false
+	if *backendURL != "" && *backendTok != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		b, berr := backendJSON(ctx, http.MethodGet, "/api/identity-status", nil)
+		cancel()
+		if berr == nil {
+			var st struct {
+				IdentityStore bool `json:"identity_store"`
+			}
+			if json.Unmarshal(b, &st) == nil {
+				identityAuthoritative = st.IdentityStore
+				log.Printf("identity store %v (key resolution %s)",
+					identityAuthoritative, map[bool]string{true: "authoritative", false: "local allowlist only"}[identityAuthoritative])
+			}
+		}
+		if identityAuthoritative {
+			allowed = nil // local allowlist must not bypass the store
+		}
+	}
+
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if len(allowed) == 0 {
+			if len(allowed) == 0 && !identityAuthoritative {
 				return nil, fmt.Errorf("no client keys configured")
 			}
 			// Accept any key from the allowed set (backward compatible);
@@ -124,6 +151,21 @@ func Main(args []string) int {
 					}
 					return perms, nil
 				}
+			}
+			// Identity-authoritative mode: the store must know the key.
+			if identityAuthoritative {
+				userID, userName := resolveKeyUser(key)
+				if userID == "" {
+					return nil, fmt.Errorf("unknown client key (not in identity store)")
+				}
+				perms := &ssh.Permissions{
+					Extensions: map[string]string{
+						"forkd-key-id":    fmt.Sprintf("%s %s", ssh.FingerprintSHA256(key), key.Type()),
+						"forkd-user-id":   userID,
+						"forkd-user-name": userName,
+					},
+				}
+				return perms, nil
 			}
 			return nil, fmt.Errorf("unknown client key")
 		},
@@ -737,7 +779,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		switch sub {
 		case "add":
 			if len(fields) < 4 {
-				return `{"error":"usage: share add <lease-id> <user-id> [ssh|http] [ttl]"}`
+				return `{"error":"usage: share add <lease-id> <user-id-or-name> [ssh|http] [ttl]"}`
 			}
 			mode := "http"
 			ttl := 0
@@ -749,7 +791,28 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 					ttl = n
 				}
 			}
-			p, _ := json.Marshal(map[string]any{"grantee": fields[2], "mode": mode, "ttl": ttl})
+			// The grantee may be a user id or a username; usernames
+			// resolve via the minimal by-name endpoint (security review
+			// #37 C1 — the full directory is admin-only now).
+			grantee := fields[3]
+			if !strings.HasPrefix(grantee, "u-") {
+				b, err := backendJSON(ctx, http.MethodGet, "/api/users/by-name/"+url.PathEscape(grantee), nil)
+				if err != nil {
+					return fmt.Sprintf(`{"error":"unknown user %q: %v"}`, grantee, err)
+				}
+				var ru struct {
+					User struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"user"`
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(b, &ru); err != nil || ru.Error != "" || ru.User.ID == "" {
+					return fmt.Sprintf(`{"error":"unknown user %q"}`, grantee)
+				}
+				grantee = ru.User.ID
+			}
+			p, _ := json.Marshal(map[string]any{"grantee": grantee, "mode": mode, "ttl": ttl})
 			b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[2]+"/share", p)
 			if err != nil {
 				return fmt.Sprintf(`{"error":"%v"}`, err)
@@ -1238,6 +1301,12 @@ func backendJSONOnceWith(ctx context.Context, client *http.Client, method, path 
 	req.Header.Set("Authorization", "Bearer "+*backendTok)
 	if uid, _ := ctx.Value(ctxUserIDKey{}).(string); uid != "" {
 		req.Header.Set("X-Spoond-User-Id", uid)
+	}
+	// First-user bootstrap (security review #37 M4): forward the
+	// bootstrap token on every call; the backend only honors it for the
+	// store-empty first user creation.
+	if *bootstrapTok != "" {
+		req.Header.Set("X-Bootstrap-Token", *bootstrapTok)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

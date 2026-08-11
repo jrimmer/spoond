@@ -215,11 +215,23 @@ func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job,
 	cloneURL := base + "/" + repo + ".git"
 
 	// Auth via GITHUB_TOKEN (provided by Forgejo in job secrets), sent
-	// as an extra header so the token never appears in the URL.
+	// as an extra header so the token never appears in the URL. Passed
+	// via GIT_CONFIG_COUNT env — git's native multi-config mechanism —
+	// rather than interpolated into the command string (security review
+	// #37 C3). The token charset is validated up front and the value is
+	// single-quoted, so no shell metacharacter in the token can break
+	// out of the env assignment into command injection.
 	token := ctx2.Eval("${{ secrets.GITHUB_TOKEN }}")
-	authArg := ""
+	authEnv := ""
 	if token != "" {
-		authArg = `-c http.extraheader="Authorization: token ` + token + `"`
+		if !regexp.MustCompile(`^[A-Za-z0-9_.\-]+$`).MatchString(token) {
+			e.log(ctx, job, *logIndex, "checkout: GITHUB_TOKEN contains characters unsafe for shell env (not a standard token)")
+			*logIndex++
+			stepState.Result = ResultFailure
+			stepState.LogLength = 1
+			return fmt.Errorf("checkout: GITHUB_TOKEN has unsafe characters")
+		}
+		authEnv = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0='Authorization: token " + token + "' "
 	}
 
 	// Ensure the workspace exists and is clean, then clone into it.
@@ -229,7 +241,7 @@ func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job,
 	cmds := []string{
 		"rm -rf " + ws,
 		"mkdir -p " + ws,
-		"git " + authArg + " clone --depth 1 " + cloneURL + " " + ws,
+		authEnv + "git clone --depth 1 " + cloneURL + " " + ws,
 	}
 	for _, c := range cmds {
 		res, err := e.Sandbox.Exec(ctx, sandboxID, c, "", nil, 300)

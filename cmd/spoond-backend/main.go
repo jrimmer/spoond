@@ -134,11 +134,20 @@ func Main(args []string) int {
 	if n := envIntOr("LLM_MAX_CONCURRENT_PER_USER", 0); n > 0 {
 		srv.SetLLMMaxConcurrent(n)
 	}
+	// Security review #37 C2: when an identity store is present, deny
+	// /llm/ for identity users without an LLM key unless the operator
+	// explicitly opts into the pre-U8 capability model.
+	srv.SetLLMRequireKey(os.Getenv("LLM_OPEN_LEGACY") == "")
 	// Public proxy auth (U7/T7): off (default) = capability model;
 	// forward-auth = require X-Proxy-Auth secret + Remote-User identity
 	// on every hostname-routed proxy request. The secret is shared with
 	// the Caddy forward-auth block (never exposed to guests).
-	srv.SetProxyAuth(os.Getenv("PROXY_AUTH_MODE"), os.Getenv("PROXY_AUTH_SECRET"))
+	srv.SetProxyAuth(os.Getenv("PROXY_AUTH_MODE"), os.Getenv("PROXY_AUTH_SECRET"), os.Getenv("PROXY_AUTH_TRUSTED_PEERS"))
+	// First-user bootstrap gate (security review #37 H3/M4). Unset keeps
+	// the legacy open-bootstrap for single-operator setups; set it on
+	// multi-user deployments so a leaked consumer token can't claim
+	// admin on a fresh store.
+	srv.SetBootstrapToken(os.Getenv("BOOTSTRAP_TOKEN"))
 
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).

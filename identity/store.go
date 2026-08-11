@@ -11,6 +11,7 @@
 package identity
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -60,6 +61,13 @@ type Store struct {
 	byToken map[string]string // token hash -> user id
 	byName  map[string]string // name -> user id
 	file    string
+	// salt (security review #37 M1) makes stored token/LLM-key hashes
+	// HMAC-SHA256(salt, secret) instead of unsalted SHA256, defeating
+	// offline dictionary attacks if the users file leaks. It is loaded
+	// from <file>.salt (or generated for a fresh store); a pre-existing
+	// store without a sidecar stays in legacy plain-SHA256 mode so old
+	// hashes keep verifying. The salt never changes once chosen.
+	salt []byte
 }
 
 // NewStore creates an empty store. filename may be "" for in-memory-only.
@@ -75,8 +83,55 @@ func NewStore(filename string) (*Store, error) {
 		if err := s.load(); err != nil {
 			return nil, err
 		}
+		if err := s.loadSalt(); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
+}
+
+// loadSalt reads (or creates) the per-store salt sidecar. A fresh store
+// (no users yet) gets a salt generated now; an existing legacy store
+// without a sidecar keeps nil salt so its plain SHA256 hashes still
+// verify — new writes then also stay plain for consistency until the
+// store is re-seeded (documented migration path: recreate users or
+// rotate tokens after setting the salt).
+func (s *Store) loadSalt() error {
+	sidecar := s.file + ".salt"
+	data, err := os.ReadFile(sidecar)
+	if err == nil {
+		s.salt, err = hex.DecodeString(strings.TrimSpace(string(data)))
+		return err
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read salt: %w", err)
+	}
+	if len(s.users) > 0 {
+		return nil // legacy store, keep plain SHA256
+	}
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return err
+	}
+	if err := os.WriteFile(sidecar, []byte(hex.EncodeToString(salt)), 0o600); err != nil {
+		return fmt.Errorf("write salt: %w", err)
+	}
+	s.salt = salt
+	return nil
+}
+
+// hashSecret hashes a bearer token or LLM gateway key for storage and
+// comparison. With a salt configured this is HMAC-SHA256(salt, secret)
+// (security review #37 M1); legacy stores without a salt keep plain
+// SHA256 so pre-existing hashes verify.
+func (s *Store) hashSecret(secret string) string {
+	if len(s.salt) > 0 {
+		mac := hmac.New(sha256.New, s.salt)
+		_, _ = mac.Write([]byte(secret))
+		return hex.EncodeToString(mac.Sum(nil))
+	}
+	h := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(h[:])
 }
 
 func (s *Store) load() error {
@@ -132,13 +187,6 @@ func (s *Store) save() error {
 	return os.Rename(tmp, s.file)
 }
 
-// hashSecret returns the SHA256 hex of a bearer token or LLM gateway
-// key. Only hashes are ever stored or compared (U8/T8).
-func hashSecret(secret string) string {
-	h := sha256.Sum256([]byte(secret))
-	return hex.EncodeToString(h[:])
-}
-
 // FingerprintSHA256 returns the standard ssh SHA256 fingerprint for a
 // marshaled public key.
 func FingerprintSHA256(marshaled []byte) string {
@@ -178,7 +226,7 @@ func (s *Store) AddUser(name string, kind Kind, fingerprints []string, token str
 		u.Fingerprints = append(u.Fingerprints, fp)
 	}
 	if token != "" {
-		u.TokenHash = hashSecret(token)
+		u.TokenHash = s.hashSecret(token)
 		if owner, dup := s.byToken[u.TokenHash]; dup {
 			return nil, fmt.Errorf("token already belongs to user %s", owner)
 		}
@@ -238,7 +286,7 @@ func (s *Store) UserByFingerprint(fp string) *User {
 func (s *Store) UserByToken(token string) *User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	id, ok := s.byToken[hashSecret(token)]
+	id, ok := s.byToken[s.hashSecret(token)]
 	if !ok {
 		return nil
 	}
@@ -355,7 +403,7 @@ func (s *Store) SetLLMKey(userID, llmKey string) error {
 	if llmKey == "" {
 		u.LLMKeyHash = ""
 	} else {
-		u.LLMKeyHash = hashSecret(llmKey)
+		u.LLMKeyHash = s.hashSecret(llmKey)
 	}
 	return s.save()
 }
@@ -370,7 +418,7 @@ func (s *Store) LLMKeyOK(userID, llmKey string) bool {
 	if u == nil || u.LLMKeyHash == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(u.LLMKeyHash), []byte(hashSecret(llmKey))) == 1
+	return subtle.ConstantTimeCompare([]byte(u.LLMKeyHash), []byte(s.hashSecret(llmKey))) == 1
 }
 
 // Count returns the number of users (used for the bootstrap check).

@@ -83,6 +83,14 @@ func (s *Server) proxyAuthOK(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
 	}
+	// Trusted-peer enforcement (security review #37 M3): when peers are
+	// configured, only a trusted reverse proxy may present Remote-User.
+	// A direct client to the listener can't spoof an identity even with
+	// the shared secret.
+	if len(s.proxyTrustedPeers) > 0 && !s.peerTrusted(r.RemoteAddr) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
 	owner := user // legacy single-user: Remote-User is the owner directly
 	if s.svc.identities != nil {
 		u := s.svc.identities.UserByName(user)
@@ -94,6 +102,25 @@ func (s *Server) proxyAuthOK(w http.ResponseWriter, r *http.Request) bool {
 	}
 	*r = *r.WithContext(context.WithValue(r.Context(), ctxProxyOwnerKey{}, owner))
 	return true
+}
+
+// peerTrusted reports whether a RemoteAddr host is in the trusted-peer
+// set (security review #37 M3).
+func (s *Server) peerTrusted(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range s.proxyTrustedPeers {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetAssetsDir enables static asset serving on the proxy listener.

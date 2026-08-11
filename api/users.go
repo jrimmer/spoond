@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -39,27 +40,85 @@ func toUserView(u *identity.User) UserView {
 // admin user. Legacy consumer-token callers (no identity user in
 // context) are NOT admin — they can read but not mutate users. The one
 // exception is bootstrap: when the store is empty, anyone authenticated
-// may create the first (admin) user.
+// may create the first (admin) user. When BOOTSTRAP_TOKEN is configured
+// (security review #37 H3/M4), bootstrap additionally requires
+// X-Bootstrap-Token to match it — otherwise any token holder (tokens
+// live in world-readable unit files) could claim admin on a fresh
+// deployment.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	u := userFrom(r.Context())
 	if u != nil && u.Admin {
 		return true
 	}
 	if s.svc.identities != nil && s.svc.identities.Count() == 0 && r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/users") {
+		if s.bootstrapToken != "" {
+			bt := r.Header.Get("X-Bootstrap-Token")
+			if bt == "" || subtle.ConstantTimeCompare([]byte(bt), []byte(s.bootstrapToken)) != 1 {
+				writeError(w, http.StatusForbidden, "bootstrap token required")
+				return false
+			}
+		}
 		return true // bootstrap: first user creation is open
 	}
 	writeError(w, http.StatusForbidden, "admin required")
 	return false
 }
 
-// handleUsersList returns all users.
+// handleUsersList returns all users. Admin-only: the full directory
+// (admin flags, fingerprints, quotas) must not be enumerable by any
+// token holder (security review #37 C1).
 func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	users := s.svc.identities.Users()
 	out := make([]UserView, 0, len(users))
 	for _, u := range users {
 		out = append(out, toUserView(u))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+}
+
+// handleUsersMe returns the caller's own user record. Available to any
+// authenticated identity-store user (self-scoped, no directory leak).
+func (s *Server) handleUsersMe(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r.Context())
+	if u == nil {
+		writeError(w, http.StatusNotFound, "no identity user for this token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
+}
+
+// handleUsersByName resolves a username to a minimal identity (id +
+// name only — no admin flag, no fingerprints, no quota). It exists so a
+// lease owner can grant a share to another user by name (T6/#33)
+// without exposing the full directory (security review #37 C1).
+func (s *Server) handleUsersByName(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name required")
+		return
+	}
+	u := s.svc.identities.UserByName(name)
+	if u == nil {
+		writeError(w, http.StatusNotFound, "no such user")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": map[string]any{
+		"id":   u.ID,
+		"name": u.Name,
+	}})
+}
+
+// handleIdentityStatus reports whether an identity store is configured.
+// The SSH gateway probes this at startup: when a store is present, the
+// backend by-key resolution is AUTHORITATIVE and the gateway's local
+// allowlist is ignored for new connections (security review #37 H1) —
+// the allowlist only applies in legacy single-user mode. Returns a
+// boolean only; no user data.
+func (s *Server) handleIdentityStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"identity_store": s.svc.identities != nil})
 }
 
 // handleUsersCreate registers a new user. Open during bootstrap (first

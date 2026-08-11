@@ -53,6 +53,12 @@ type llmGateway struct {
 	maxConcurrent int
 	inflightMu    sync.Mutex
 	inflight      map[string]int
+	// requireKey (security review #37 C2): when true (identity store
+	// present and the caller did NOT opt into legacy-open), a lease
+	// whose owner has no LLM key configured is DENIED instead of
+	// silently open. Set via LLM_OPEN_LEGACY=1 to keep the pre-U8
+	// capability model for keyless owners.
+	requireKey bool
 }
 
 // newLLMGateway wires the OpenAI-compatible upstream. upstreamURL is the
@@ -146,8 +152,10 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// configured, the caller must present it. A key that verifies is by
 	// construction the owner's key, so this check doubles as the
 	// lease-owner check (the U9 share case extends this predicate).
-	// Legacy deployments (no identity store, or owner without a key)
-	// keep today's open behavior.
+	// Security review #37 C2: when the identity store is present and the
+	// deployment has not opted into legacy-open, a keyless owner's lease
+	// is DENIED rather than silently open — otherwise any token holder
+	// could burn the host's LLM quota through another user's lease.
 	if g.users != nil {
 		owner := g.users.UserByID(lease.Owner)
 		if owner != nil && owner.LLMKeyHash != "" {
@@ -157,6 +165,13 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "missing or invalid LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
 				return
 			}
+		} else if owner != nil && g.requireKey {
+			// Identity-store user WITHOUT a key: deny unless the
+			// deployment opted into legacy-open. (Legacy consumer-owned
+			// leases — owner not in the store — keep the capability
+			// model: the operator controls those tokens.)
+			http.Error(w, "LLM access requires the lease owner to configure an LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
+			return
 		}
 	}
 

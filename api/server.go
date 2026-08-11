@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,14 +37,55 @@ type Server struct {
 	// user from Remote-User before owner-scoping lookups.
 	proxyAuthMode   string
 	proxyAuthSecret string
+	// proxyTrustedPeers (security review #37 M3): when non-empty, the
+	// forward-auth gate only honors Remote-User from these peer
+	// addresses/CIDRs — defense in depth so a direct client to :8891
+	// can't spoof a username even with the shared secret. Set via
+	// PROXY_AUTH_TRUSTED_PEERS (comma-separated).
+	proxyTrustedPeers []*net.IPNet
+	// bootstrapToken (security review #37 H3/M4) gates the first-user
+	// bootstrap when configured: the store-empty creation must present
+	// X-Bootstrap-Token matching it. Set via BOOTSTRAP_TOKEN env.
+	bootstrapToken string
+	// authFails (security review #37 L5) throttles repeated failed
+	// token auths per client IP.
+	authFails *authFailLimiter
+}
+
+// SetBootstrapToken configures the first-user bootstrap gate
+// (security review #37 H3/M4). Empty = bootstrap open to any
+// authenticated caller (legacy behavior).
+func (s *Server) SetBootstrapToken(tok string) {
+	s.bootstrapToken = tok
 }
 
 // SetProxyAuth configures the public proxy listener's auth gate
 // (U7/T7). mode "off" (or "") keeps the capability model; mode
 // "forward-auth" requires the shared secret + Remote-User identity.
-func (s *Server) SetProxyAuth(mode, secret string) {
+// trustedPeers is a comma-separated list of IPs/CIDRs that may present
+// Remote-User (security review #37 M3); empty = any peer with the
+// secret.
+func (s *Server) SetProxyAuth(mode, secret, trustedPeers string) {
 	s.proxyAuthMode = mode
 	s.proxyAuthSecret = secret
+	s.proxyTrustedPeers = nil
+	for _, cidr := range strings.Split(trustedPeers, ",") {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		if ip := net.ParseIP(cidr); ip != nil {
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			s.proxyTrustedPeers = append(s.proxyTrustedPeers, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			s.proxyTrustedPeers = append(s.proxyTrustedPeers, n)
+		}
+	}
 }
 
 // NewServer wires the lease API routes onto a mux. openRouterURL and
@@ -58,7 +101,7 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // (applied when a requested id isn't in modelMap); modelMap translates
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
-	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux()}
+	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter()}
 	if openRouterURL != "" {
 		// svc.identities must be installed (SetIdentities) before
 		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
@@ -90,8 +133,11 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Identity endpoints (epic #26 T1): user management + key resolution.
 	if s.svc.identities != nil {
 		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
-		s.mux.HandleFunc("POST /api/users", s.handleUsersCreate)
+		s.mux.HandleFunc("GET /api/users/me", s.handleUsersMe)
+		s.mux.HandleFunc("GET /api/users/by-name/{name}", s.handleUsersByName)
 		s.mux.HandleFunc("GET /api/users/by-key", s.handleUsersByKey)
+		s.mux.HandleFunc("GET /api/identity-status", s.handleIdentityStatus)
+		s.mux.HandleFunc("POST /api/users", s.handleUsersCreate)
 		s.mux.HandleFunc("POST /api/users/{id}/quota", s.handleUsersQuota)
 		s.mux.HandleFunc("POST /api/users/{id}/llm-key", s.handleUsersLLMKey) // U8/T8
 		s.mux.HandleFunc("DELETE /api/users/{id}", s.handleUsersDelete)
@@ -114,6 +160,15 @@ func (s *Server) SetLLMMaxConcurrent(n int) {
 	}
 }
 
+// SetLLMRequireKey controls whether identity-store users WITHOUT an
+// LLM key are denied on /llm/ (security review #37 C2). Default false
+// keeps legacy-open; set true unless LLM_OPEN_LEGACY=1.
+func (s *Server) SetLLMRequireKey(v bool) {
+	if s.llm != nil {
+		s.llm.requireKey = v
+	}
+}
+
 // handleHealthz reports liveness without auth, for Gatus/load-balancer
 // checks. It returns 200 if the service is up.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -124,8 +179,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // handleMetrics proxies forkd-controller's Prometheus metrics so the
 // controller can stay loopback-bound while VictoriaMetrics scrapes the
-// backend. Requires a consumer token (auth middleware).
+// backend. Requires a consumer token (auth middleware) AND an admin
+// identity when the store is present (security review #37 M5) — the
+// controller metrics expose sandbox inventory that shouldn't be
+// readable by any token holder.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.svc.identities != nil && !s.requireAdmin(w, r) {
+		return
+	}
 	body, err := s.svc.forkd.Metrics(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to fetch metrics")
@@ -157,11 +218,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
+		// Throttle repeated FAILED auths per IP (security review #37
+		// L5). hit() returns true when the caller is now over the
+		// limit; valid tokens always pass and reset the window.
+		ip := clientIP(r.RemoteAddr)
 		owner, ok := s.svc.ResolveOwner(token)
 		if !ok {
+			if s.authFails.hit(ip) {
+				writeError(w, http.StatusTooManyRequests, "too many failed auth attempts; try again shortly")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
+		s.authFails.clear(ip)
 		ctx := context.WithValue(r.Context(), ctxOwnerKey{}, owner)
 		// Record the resolved identity (user id) when available so handlers
 		// can distinguish an identity-store user from a legacy consumer.
@@ -175,7 +245,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// that user so the backend's owner-scoping applies to the SSH caller
 		// rather than the gateway service identity. The header user must
 		// exist in the identity store.
-		if s.svc.gatewayToken != "" && token == s.svc.gatewayToken {
+		if s.svc.gatewayToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.svc.gatewayToken)) == 1 {
 			if uid := r.Header.Get("X-Spoond-User-Id"); uid != "" {
 				if u := s.svc.identities.UserByID(uid); u != nil {
 					ctx = context.WithValue(ctx, ctxOwnerKey{}, u.ID)
@@ -192,6 +262,59 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 type ctxOwnerKey struct{}
 type ctxUserKey struct{}
+
+// authFailLimiter throttles repeated failed token auths per client IP
+// (security review #37 L5). Tokens are high-entropy so brute force is
+// not realistic, but the limiter also bounds /api/users/by-key probing
+// and general junk traffic. 5 failures per 30s window → 429.
+type authFailLimiter struct {
+	mu      sync.Mutex
+	fails   map[string][]time.Time // ip -> failure timestamps
+	window  time.Duration
+	maxHits int
+}
+
+func newAuthFailLimiter() *authFailLimiter {
+	return &authFailLimiter{
+		fails:   map[string][]time.Time{},
+		window:  30 * time.Second,
+		maxHits: 5,
+	}
+}
+
+// hit records a failed auth for ip. Returns true when the caller is
+// now over the limit and should be throttled.
+func (l *authFailLimiter) hit(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	cut := now.Add(-l.window)
+	kept := l.fails[ip][:0]
+	for _, t := range l.fails[ip] {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	kept = append(kept, now)
+	l.fails[ip] = kept
+	return len(kept) > l.maxHits
+}
+
+// clear resets the failure window for ip after a successful auth.
+func (l *authFailLimiter) clear(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.fails, ip)
+}
+
+// clientIP extracts a client IP from RemoteAddr for limiter accounting.
+func clientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
 
 // userFrom returns the identity-store user attached by authMiddleware,
 // or nil for legacy consumer-token callers.
