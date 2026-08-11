@@ -28,6 +28,21 @@ type Server struct {
 	mux       *http.ServeMux
 	llm       *llmGateway
 	assetsDir string // static assets dir served at /assets/ on the proxy listener
+
+	// Proxy authentication (U7/T7): mode "" or "off" = open capability
+	// model (today's behavior); "forward-auth" = the proxy listener
+	// requires X-Proxy-Auth == secret and resolves the authenticated
+	// user from Remote-User before owner-scoping lookups.
+	proxyAuthMode   string
+	proxyAuthSecret string
+}
+
+// SetProxyAuth configures the public proxy listener's auth gate
+// (U7/T7). mode "off" (or "") keeps the capability model; mode
+// "forward-auth" requires the shared secret + Remote-User identity.
+func (s *Server) SetProxyAuth(mode, secret string) {
+	s.proxyAuthMode = mode
+	s.proxyAuthSecret = secret
 }
 
 // NewServer wires the lease API routes onto a mux. openRouterURL and

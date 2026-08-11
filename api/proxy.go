@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"net"
 	"net/http"
@@ -28,6 +29,10 @@ const defaultProxyPort = 3000
 // Every request's Host header names a lease: <lease-id>.sandbox.lacy.casa
 // → guest:3000, <lease-id>-<port>.sandbox.lacy.casa → guest:<port>.
 // The lease id in the hostname is the capability (same model as SSH).
+//
+// Under forward-auth (U7/T7) the capability model is replaced: the
+// proxy requires X-Proxy-Auth == the shared secret and resolves the
+// authenticated user from Remote-User, then owner-scopes every lookup.
 func (s *Server) ProxyHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The LLM gateway also lives on the plain-HTTP proxy listener:
@@ -44,8 +49,51 @@ func (s *Server) ProxyHandler() http.Handler {
 			http.ServeFile(w, r, filepath.Join(s.assetsDir, strings.TrimPrefix(r.URL.Path, "/assets/")))
 			return
 		}
+		// Forward-auth gate (U7/T7): off/"") = capability model.
+		if s.proxyAuthMode == "forward-auth" {
+			if !s.proxyAuthOK(w, r) {
+				return
+			}
+		}
 		s.handleProxy(w, r)
 	})
+}
+
+// ctxProxyOwnerKey carries the authenticated proxy owner (user id or
+// legacy consumer name) resolved by the forward-auth gate. The inbound
+// Remote-User header is never read again after this.
+type ctxProxyOwnerKey struct{}
+
+func proxyOwnerFrom(ctx context.Context) string {
+	v, _ := ctx.Value(ctxProxyOwnerKey{}).(string)
+	return v
+}
+
+// proxyAuthOK implements the forward-auth gate: shared-secret check
+// (constant-time), Remote-User presence, and identity resolution. It
+// stashes the resolved owner in the request context.
+func (s *Server) proxyAuthOK(w http.ResponseWriter, r *http.Request) bool {
+	secret := r.Header.Get("X-Proxy-Auth")
+	if secret == "" || subtle.ConstantTimeCompare([]byte(secret), []byte(s.proxyAuthSecret)) != 1 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	user := strings.TrimSpace(r.Header.Get("Remote-User"))
+	if user == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	owner := user // legacy single-user: Remote-User is the owner directly
+	if s.svc.identities != nil {
+		u := s.svc.identities.UserByName(user)
+		if u == nil {
+			http.Error(w, "unknown user", http.StatusForbidden)
+			return false
+		}
+		owner = u.ID
+	}
+	*r = *r.WithContext(context.WithValue(r.Context(), ctxProxyOwnerKey{}, owner))
+	return true
 }
 
 // SetAssetsDir enables static asset serving on the proxy listener.
@@ -58,7 +106,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var lease *Lease
-	if len(label) == 32 && isHex(label) {
+	// Under forward-auth, the authenticated owner scopes every lookup
+	// (U7/T7): a user only ever reaches their own leases, by id or
+	// friendly name. In the capability model (off) the hostname is the
+	// credential and owner-blind lookups are used, as before.
+	if owner := proxyOwnerFrom(r.Context()); owner != "" {
+		lease = s.svc.lookupUserScoped(owner, label)
+	} else if len(label) == 32 && isHex(label) {
 		lease = s.svc.lookupAny(label)
 	} else {
 		lease = s.svc.lookupByName(label)

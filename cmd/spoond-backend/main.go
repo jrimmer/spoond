@@ -134,6 +134,12 @@ func Main(args []string) int {
 	if n := envIntOr("LLM_MAX_CONCURRENT_PER_USER", 0); n > 0 {
 		srv.SetLLMMaxConcurrent(n)
 	}
+	// Public proxy auth (U7/T7): off (default) = capability model;
+	// forward-auth = require X-Proxy-Auth secret + Remote-User identity
+	// on every hostname-routed proxy request. The secret is shared with
+	// the Caddy forward-auth block (never exposed to guests).
+	srv.SetProxyAuth(os.Getenv("PROXY_AUTH_MODE"), os.Getenv("PROXY_AUTH_SECRET"))
+
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).
 	if d := os.Getenv("ASSETS_DIR"); d != "" {
