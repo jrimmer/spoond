@@ -237,7 +237,6 @@ func (s *Server) handleLine(ctx context.Context, line []byte) map[string]any {
 	default:
 		return rpcError(&id, -32601, "method not found: "+method)
 	}
-	return rpcError(&id, -32601, "method not found")
 }
 
 func (s *Server) handleToolCall(ctx context.Context, id any, params any) map[string]any {
