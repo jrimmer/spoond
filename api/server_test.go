@@ -27,6 +27,7 @@ type fakeForkd struct {
 	resumed       []string
 	deadSandboxes map[string]bool
 	netns         string // reported for spawned sandboxes ("" = none)
+	execStdout    string // canned stdout for Exec ("" = default "ok\n")
 }
 
 func newFakeForkd() *fakeForkd {
@@ -76,7 +77,11 @@ func (f *fakeForkd) Kill(ctx context.Context, id string) error {
 }
 
 func (f *fakeForkd) Exec(ctx context.Context, id string, args []string, timeoutSecs int) (*forkd.ExecResult, error) {
-	return &forkd.ExecResult{Stdout: "ok\n", Stderr: "", ExitCode: 0}, nil
+	stdout := f.execStdout
+	if stdout == "" {
+		stdout = "ok\n"
+	}
+	return &forkd.ExecResult{Stdout: stdout, Stderr: "", ExitCode: 0}, nil
 }
 
 func (f *fakeForkd) Ping(ctx context.Context, id string) error {
@@ -964,5 +969,82 @@ func TestTagAndRestart(t *testing.T) {
 	}
 	if _, ok := m["reply"]; !ok {
 		t.Fatalf("prompt response missing reply: %v", m)
+	}
+}
+
+func TestStat(t *testing.T) {
+	ts, ff := newTestServer(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+
+	// fake forkd exec returns canned stat probe output.
+	ff.execStdout = `== loadavg ==
+0.25 0.10 0.05 1/12 345
+== meminfo ==
+MemTotal:       1572864 kB
+MemAvailable:    524288 kB
+== netdev ==
+eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0
+lo: 999 0 0 0 0 0 0 0 888 0 0 0 0 0 0 0
+== df ==
+Filesystem     1K-blocks    Used Available Use% Mounted on
+/dev/root        4194304   1048576   3145728  25% /
+`
+	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stat", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stat status %d: %v", resp.StatusCode, body)
+	}
+	cpu, _ := body["cpu"].(map[string]any)
+	if cpu["load1"] != 0.25 {
+		t.Fatalf("load1: %v", cpu["load1"])
+	}
+	mem, _ := body["mem"].(map[string]any)
+	if mem["total_mib"] != float64(1536) || mem["used_mib"] != float64(1024) {
+		t.Fatalf("mem: %v", mem)
+	}
+	disk, _ := body["disk"].(map[string]any)
+	if disk["total_mib"] != float64(4096) || disk["used_mib"] != float64(1024) {
+		t.Fatalf("disk: %v", disk)
+	}
+	net, _ := body["net"].(map[string]any)
+	// eth0 rx=1000 tx=2000; lo excluded.
+	if net["rx_bytes"] != float64(1000) || net["tx_bytes"] != float64(2000) {
+		t.Fatalf("net: %v", net)
+	}
+}
+
+func TestStatCrossConsumerDenied(t *testing.T) {
+	ts, _ := newTestServer(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+	resp, _ := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/stat", "token-b", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-consumer stat: status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestParseStatProbe(t *testing.T) {
+	// minimal / partial probe output must still parse
+	out := `== loadavg ==
+0.75 0.20 0.10 2/40 900
+== meminfo ==
+MemTotal:        2097152 kB
+MemAvailable:    1048576 kB
+== netdev ==
+== df ==
+`
+	st, err := parseStatProbe(out)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if st.CPU.Load1 != 0.75 {
+		t.Fatalf("load1: %v", st.CPU.Load1)
+	}
+	if st.Mem.TotalMiB != 2048 || st.Mem.UsedMiB != 1024 {
+		t.Fatalf("mem: %+v", st.Mem)
+	}
+	// garbage -> error
+	if _, err := parseStatProbe("nothing useful"); err == nil {
+		t.Fatal("expected error for empty probe")
 	}
 }

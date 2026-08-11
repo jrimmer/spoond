@@ -57,6 +57,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/comment", s.handleComment)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/prompt", s.handlePrompt)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/stat", s.handleStat)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
@@ -700,6 +701,140 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		"stderr": res.Stderr,
 		"exit":   res.ExitCode,
 	})
+}
+
+// handleStat returns lightweight guest-side metrics for a sandbox
+// (ticket #25): vCPU load, memory, disk, and network RX/TX. Data comes
+// from a one-shot exec probe (KTD5-style, stateless, 5s timeout) —
+// zero controller changes; works for any image with procfs.
+func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease := s.svc.lookup(owner, id)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	s.svc.touch(id)
+	if lease.Suspended {
+		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		return
+	}
+	const probe = `set -e
+echo "== loadavg =="; cat /proc/loadavg
+echo "== meminfo =="; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
+echo "== netdev =="; cat /proc/net/dev
+echo "== df =="; df -P /
+`
+	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, buildShellArgs(probe, "", nil), 5)
+	if err != nil {
+		s.svc.log.Printf("stat: %s: %v", lease.ForkdID, err)
+		writeError(w, http.StatusInternalServerError, "stat probe failed")
+		return
+	}
+	if res.ExitCode != 0 {
+		s.svc.log.Printf("stat: %s: probe exit=%d stderr=%q", lease.ForkdID, res.ExitCode, tailStr(res.Stderr, 300))
+		writeError(w, http.StatusInternalServerError, "stat probe exited non-zero")
+		return
+	}
+	stat, perr := parseStatProbe(res.Stdout)
+	if perr != nil {
+		s.svc.log.Printf("stat: %s: parse: %v (stdout=%q)", lease.ForkdID, perr, tailStr(res.Stdout, 300))
+		writeError(w, http.StatusInternalServerError, "stat probe parse failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, stat)
+}
+
+// statResult is the shaped /stat response.
+type statResult struct {
+	CPU  struct {
+		Load1 float64 `json:"load1"`
+	} `json:"cpu"`
+	Mem struct {
+		UsedMiB  int64 `json:"used_mib"`
+		TotalMiB int64 `json:"total_mib"`
+	} `json:"mem"`
+	Disk struct {
+		UsedMiB  int64 `json:"used_mib"`
+		TotalMiB int64 `json:"total_mib"`
+	} `json:"disk"`
+	Net struct {
+		RXBytes int64 `json:"rx_bytes"`
+		TXBytes int64 `json:"tx_bytes"`
+	} `json:"net"`
+}
+
+// parseStatProbe parses the output of the stat probe script into a
+// statResult. The script emits section markers (== name ==) followed by
+// raw /proc-style lines; we extract what we need by section + field.
+func parseStatProbe(out string) (*statResult, error) {
+	var st statResult
+	section := ""
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "== "):
+			section = strings.TrimSuffix(strings.TrimPrefix(trim, "== "), " ==")
+			continue
+		case trim == "":
+			continue
+		}
+		switch section {
+		case "loadavg":
+			f := strings.Fields(trim)
+			if len(f) >= 1 {
+				if v, err := strconv.ParseFloat(f[0], 64); err == nil {
+					st.CPU.Load1 = v
+				}
+			}
+		case "meminfo":
+			f := strings.Fields(trim)
+			if len(f) >= 2 {
+				switch strings.TrimSuffix(f[0], ":") {
+				case "MemTotal":
+					st.Mem.TotalMiB = kibToMiB(parseInt64(f[1]))
+				case "MemAvailable":
+					st.Mem.UsedMiB = st.Mem.TotalMiB - kibToMiB(parseInt64(f[1]))
+				}
+			}
+		case "netdev":
+			// Format: iface: rx_bytes ... tx_bytes ...
+			if !strings.Contains(trim, ":") {
+				continue
+			}
+			iface := strings.TrimSuffix(strings.SplitN(trim, ":", 2)[0], ":")
+			if iface == "lo" {
+				continue
+			}
+			f := strings.Fields(strings.SplitN(trim, ":", 2)[1])
+			if len(f) >= 9 {
+				st.Net.RXBytes += parseInt64(f[0])
+				st.Net.TXBytes += parseInt64(f[8])
+			}
+		case "df":
+			f := strings.Fields(trim)
+			// df -P: Filesystem 1K-blocks Used Available Use% Mounted on
+			// (6 fields); match the root mount in the LAST field.
+			if len(f) >= 6 && f[len(f)-1] == "/" {
+				st.Disk.TotalMiB = kibToMiB(parseInt64(f[1]))
+				st.Disk.UsedMiB = kibToMiB(parseInt64(f[2]))
+			}
+		}
+	}
+	// The probe is useless if nothing was captured.
+	if st.Mem.TotalMiB == 0 && st.Disk.TotalMiB == 0 && st.CPU.Load1 == 0 {
+		return nil, fmt.Errorf("no usable stat sections")
+	}
+	return &st, nil
+}
+
+func kibToMiB(kib int64) int64 { return kib / 1024 }
+
+func parseInt64(s string) int64 {
+	v, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	return v
 }
 
 // handleDelete releases a sandbox owned by the caller.

@@ -69,5 +69,6 @@ run_file test_netpolicy.sh
 run_file test_proxy.sh
 run_file test_mcp.sh
 run_file test_acp.sh
+run_file test_stat_pretty.sh
 
 summary

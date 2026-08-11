@@ -33,15 +33,19 @@ CTLID=$(echo "$OUT" | grep -oE '[0-9a-f]{32}' | head -1)
 if [ -n "$CTLID" ]; then ok "captured ctl lease id ($CTLID)"; else bad "captured ctl lease id"; fi
 
 echo
-echo "== ctl: ls =="
-OUT=$(timeout 20 $SSH "ls" 2>&1)
-assert_contains "ls lists leases" "$OUT" "$CTLID"
+echo "== ctl: ls == (pretty default; --json for machine) =="
+OUT=$(timeout 20 $SSH "ls --json" 2>&1)
+assert_contains "ls --json lists leases" "$OUT" "$CTLID"
+OUT_PRETTY=$(timeout 20 $SSH "ls" 2>&1)
+assert_contains "ls pretty has header" "$OUT_PRETTY" "IMAGE"
 
 echo
-echo "== ctl: whoami =="
-OUT=$(timeout 20 $SSH "whoami" 2>&1)
-assert_contains "whoami returns user ctl" "$OUT" '"user":"ctl"'
-assert_contains "whoami includes key fingerprint" "$OUT" "SHA256:"
+echo "== ctl: whoami == (pretty default; --json for machine) =="
+OUT=$(timeout 20 $SSH "whoami --json" 2>&1)
+assert_contains "whoami --json returns user ctl" "$OUT" '"user":"ctl"'
+assert_contains "whoami --json includes key fingerprint" "$OUT" "SHA256:"
+OUT_PRETTY=$(timeout 20 $SSH "whoami" 2>&1)
+assert_contains "whoami pretty shows user ctl" "$OUT_PRETTY" "user: ctl"
 
 echo
 echo "== ctl: comment =="

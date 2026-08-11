@@ -435,19 +435,39 @@ func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyI
 
 // runControlCommand executes one control-plane command and returns the
 // JSON-ish response text written to the client.
+//
+// Default output is human-readable (ticket #27); `--json` anywhere in
+// the command opts into raw machine format for scripts/LLM skills.
 func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, keyID string) string {
 	fields := strings.Fields(cmd)
 	if len(fields) == 0 {
 		return `{"error":"empty command — try new, ls, rm, keepalive, cp, help"}`
 	}
+	jsonMode := false
+	kept := fields[:0]
+	for _, f := range fields {
+		if f == "--json" || f == "-j" {
+			jsonMode = true
+			continue
+		}
+		kept = append(kept, f)
+	}
+	fields = kept
+
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls, rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>"
+		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
-			return `{"user":"ctl","key":"unknown"}`
+			if jsonMode {
+				return `{"user":"ctl","key":"unknown"}`
+			}
+			return "user: ctl (key: unknown)"
 		}
-		return fmt.Sprintf(`{"user":"ctl","key":%q}`, keyID)
+		if jsonMode {
+			return fmt.Sprintf(`{"user":"ctl","key":%q}`, keyID)
+		}
+		return fmt.Sprintf("user: ctl (key: %s)", keyID)
 	case "new":
 		user := "new"
 		if len(fields) > 1 {
@@ -463,7 +483,22 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
-		return strings.TrimSpace(string(b))
+		if jsonMode {
+			return strings.TrimSpace(string(b))
+		}
+		return prettySandboxTable(b)
+	case "stat":
+		if len(fields) < 2 {
+			return `{"error":"usage: stat <lease-id>"}`
+		}
+		b, err := backendJSON(ctx, http.MethodGet, "/api/sandboxes/"+fields[1]+"/stat", nil)
+		if err != nil {
+			return fmt.Sprintf(`{"error":"%v"}`, err)
+		}
+		if jsonMode {
+			return strings.TrimSpace(string(b))
+		}
+		return prettyStat(b)
 	case "rm":
 		if len(fields) < 2 {
 			return `{"error":"usage: rm <lease-id>"}`
@@ -575,6 +610,83 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 func backendJSONErr(ctx context.Context, method, path string, payload []byte) error {
 	_, err := backendJSON(ctx, method, path, payload)
 	return err
+}
+
+// prettySandboxTable renders the /api/sandboxes JSON as a columnar
+// table (ticket #27). IDs show as a 12-char prefix (full id via --json).
+func prettySandboxTable(b []byte) string {
+	var resp struct {
+		Sandboxes []map[string]any `json:"sandboxes"`
+		Error     string           `json:"error"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil || resp.Error != "" {
+		return strings.TrimSpace(string(b)) // not our shape (or an error); pass through
+	}
+	if len(resp.Sandboxes) == 0 {
+		return "no sandboxes"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%-14s %-12s %-10s %-22s %-16s %s\n", "ID", "IMAGE", "STATE", "EXPIRES", "ADDRESS", "NAME")
+	for _, s := range resp.Sandboxes {
+		id, _ := s["id"].(string)
+		img, _ := s["image"].(string)
+		addr, _ := s["address"].(string)
+		name, _ := s["name"].(string)
+		if name == "" {
+			name, _ = s["comment"].(string)
+		}
+		state := "running"
+		if suspended, _ := s["suspended"].(bool); suspended {
+			state = "suspended"
+		}
+		exp := ""
+		if expUnix, ok := s["expires"].(float64); ok && expUnix > 0 {
+			exp = time.Unix(int64(expUnix), 0).UTC().Format("2006-01-02 15:04 UTC")
+		}
+		if persistent, _ := s["persistent"].(bool); persistent {
+			state += "*" // persistent lease: not TTL-swept
+		}
+		if len(id) > 12 {
+			id = id[:12] + "…"
+		}
+		fmt.Fprintf(&sb, "%-14s %-12s %-10s %-22s %-16s %s\n", id, img, state, exp, addr, name)
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// prettyStat renders the /stat JSON as a human-readable block
+// (ticket #27).
+func prettyStat(b []byte) string {
+	var st struct {
+		CPU struct {
+			Load1 float64 `json:"load1"`
+		} `json:"cpu"`
+		Mem struct {
+			UsedMiB  int64 `json:"used_mib"`
+			TotalMiB int64 `json:"total_mib"`
+		} `json:"mem"`
+		Disk struct {
+			UsedMiB  int64 `json:"used_mib"`
+			TotalMiB int64 `json:"total_mib"`
+		} `json:"disk"`
+		Net struct {
+			RXBytes int64 `json:"rx_bytes"`
+			TXBytes int64 `json:"tx_bytes"`
+		} `json:"net"`
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return strings.TrimSpace(string(b))
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "cpu : load1 %.2f\n", st.CPU.Load1)
+	if st.Mem.TotalMiB > 0 {
+		fmt.Fprintf(&sb, "mem : %d / %d MiB used\n", st.Mem.UsedMiB, st.Mem.TotalMiB)
+	}
+	if st.Disk.TotalMiB > 0 {
+		fmt.Fprintf(&sb, "disk: %d / %d MiB used\n", st.Disk.UsedMiB, st.Disk.TotalMiB)
+	}
+	fmt.Fprintf(&sb, "net : rx %d bytes, tx %d bytes\n", st.Net.RXBytes, st.Net.TXBytes)
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
