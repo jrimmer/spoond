@@ -19,6 +19,9 @@ if [ ! -x "$ACP_BIN" ]; then
   exit 0
 fi
 
+# Go binaries verify TLS; backend cert has vm2.lacy.casa SAN only.
+GO_BE_API="${BE_API/https:\/\/127.0.0.1:8890/https:\/\/vm2.lacy.casa:8890}"
+
 rpc() {
   local id="$1" method="$2" params="${3:-}"
   [ -z "$params" ] && params="{}"
@@ -34,7 +37,7 @@ OUT=$( {
   sleep 3
   rpc 3 session/prompt '{"sessionId":"sess-0","prompt":[{"type":"text","text":"run uname -a and tell me the kernel"}]}'
   sleep 25
-} | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" 2>/dev/null )
+} | FORKD_BACKEND_URL="$GO_BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" 2>/dev/null )
 
 INIT=$(echo "$OUT" | sed -n '1p')
 NEW=$(echo "$OUT" | sed -n '2p')

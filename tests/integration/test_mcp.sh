@@ -13,6 +13,11 @@ if [ ! -x "$MCP_BIN" ]; then
   exit 0
 fi
 
+# The Go binaries verify TLS; the backend cert only has vm2.lacy.casa
+# SAN, so translate a loopback BE_API to the hostname form (vm2's
+# /etc/hosts resolves it). curl -sk callers keep using BE_API directly.
+GO_BE_API="${BE_API/https:\/\/127.0.0.1:8890/https:\/\/vm2.lacy.casa:8890}"
+
 # rpc <name> <args-json> — send one JSON-RPC request, print the result line.
 # NOTE: params must be a complete JSON object (own braces). Avoid
 # ${3:-{}} as the default — bash's brace counting in the expansion
@@ -26,21 +31,21 @@ rpc() {
 BEFORE=$(api GET /api/sandboxes | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('sandboxes',d)))" 2>/dev/null || echo "?")
 
 # initialize
-INIT=$( { rpc 1 initialize '{"protocolVersion":"2025-03-26","clientInfo":{"name":"itest"}}'; sleep 1; } | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" 2>/dev/null | head -1 )
+INIT=$( { rpc 1 initialize '{"protocolVersion":"2025-03-26","clientInfo":{"name":"itest"}}'; sleep 1; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" 2>/dev/null | head -1 )
 assert_contains "mcp initialize ok" "$INIT" "forkd-dev-mcp"
 
 # tools/list
-TOOLS=$( { rpc 2 tools/list; sleep 1; } | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" 2>/dev/null | head -1 )
+TOOLS=$( { rpc 2 tools/list; sleep 1; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" 2>/dev/null | head -1 )
 assert_contains "mcp tools/list has shell" "$TOOLS" "shell"
 assert_contains "mcp tools/list has read_file" "$TOOLS" "read_file"
 
 # tools/call shell: run uname in a real sandbox
-CALL=$( { rpc 3 tools/call '{"name":"shell","arguments":{"command":"uname -a"}}'; sleep 3; } | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" 2>/dev/null | head -1 )
+CALL=$( { rpc 3 tools/call '{"name":"shell","arguments":{"command":"uname -a"}}'; sleep 3; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" 2>/dev/null | head -1 )
 assert_contains "mcp shell runs in sandbox" "$CALL" "Linux"
 assert_contains "mcp shell returns sandbox_id" "$CALL" "sandbox_id"
 
 # tools/call write_file + read_file round-trip
-WRITE=$( { rpc 4 tools/call '{"name":"write_file","arguments":{"path":"/tmp/mcp_test.txt","content":"hello from mcp"}}'; sleep 3; } | FORKD_BACKEND_URL="$BE_API" FORKD_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" 2>/dev/null | head -1 )
+WRITE=$( { rpc 4 tools/call '{"name":"write_file","arguments":{"path":"/tmp/mcp_test.txt","content":"hello from mcp"}}'; sleep 3; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" 2>/dev/null | head -1 )
 assert_contains "mcp write_file ok" "$WRITE" "WROTE"
 
 # leases released after stateless calls (should be near the baseline)
