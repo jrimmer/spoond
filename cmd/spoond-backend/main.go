@@ -118,6 +118,12 @@ func Main(args []string) int {
 		svc.SetIdentities(ids)
 		log.Printf("identity store: %s (%d user(s))", usersFile, ids.Count())
 	}
+	// Trusted gateway impersonation (U6/T5): the SSH gateway's service
+	// token, used to act as the SSH-authenticated user on ctl calls.
+	if gt := os.Getenv("GATEWAY_TOKEN"); gt != "" {
+		svc.SetGatewayToken(gt)
+		log.Printf("gateway token: trusted impersonation enabled")
+	}
 
 	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), os.Getenv("LLM_UPSTREAM_KEY"), os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
 	// Static assets (shelley binary etc.) served to guests on the proxy

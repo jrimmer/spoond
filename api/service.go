@@ -90,6 +90,12 @@ type Service struct {
 	// bearer-token auth resolves against it first; tokens map remains as
 	// the backward-compatible fallback for single-user deployments.
 	identities *identity.Store
+	// gatewayToken is the SSH gateway's service token (U6/T5). When a
+	// request authenticates with it, the X-Spoond-User-Id header is
+	// honored so the gateway can act as the SSH-authenticated user; the
+	// backend's owner-scoping then applies to that user, not the gateway
+	// service identity. Empty disables impersonation.
+	gatewayToken string
 	// poolSize is the warm-pool size per image.
 	poolSize int
 	// defaultTTL is used when a request omits ttl.
@@ -115,6 +121,13 @@ type Service struct {
 func (s *Service) SetNetpol(a PolicyApplier, dns []string) {
 	s.netpol = a
 	s.netpolDNS = dns
+}
+
+// SetGatewayToken marks the SSH gateway's service token, enabling
+// trusted impersonation (U6/T5): requests carrying this token may set
+// X-Spoond-User-Id to act as the SSH-authenticated user.
+func (s *Service) SetGatewayToken(tok string) {
+	s.gatewayToken = tok
 }
 
 // SetIdentities installs the identity store used for token→user and

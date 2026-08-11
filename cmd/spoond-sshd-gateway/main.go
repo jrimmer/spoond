@@ -159,9 +159,16 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 	// The authenticated key identity (from PublicKeyCallback) rides in
 	// the connection permissions, for `ctl whoami`.
 	keyID := ""
+	userID := ""
+	userName := ""
 	if sconn.Permissions != nil && sconn.Permissions.Extensions != nil {
 		keyID = sconn.Permissions.Extensions["forkd-key-id"]
+		userID = sconn.Permissions.Extensions["forkd-user-id"]
+		userName = sconn.Permissions.Extensions["forkd-user-name"]
 	}
+	// All backend calls from this connection run owner-scoped as the SSH
+	// user (U6/T5); the gateway impersonates via X-Spoond-User-Id.
+	gwCtx := withGatewayUser(context.Background(), userID)
 
 	go ssh.DiscardRequests(reqs)
 
@@ -169,12 +176,6 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 	// Exec requests become API calls (new/ls/rm/keepalive/cp) and the
 	// response is JSON on stdout — no sandbox is dialed.
 	if user == "ctl" {
-		userID := ""
-		userName := ""
-		if sconn.Permissions != nil && sconn.Permissions.Extensions != nil {
-			userID = sconn.Permissions.Extensions["forkd-user-id"]
-			userName = sconn.Permissions.Extensions["forkd-user-name"]
-		}
 		handleControlPlane(chans, gatewayKey, keyID, userID, userName)
 		return
 	}
@@ -198,14 +199,14 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 		// Anything that's not a lease id and not a new-* create verb is a
 		// candidate name; createSandbox rejects unknown verbs below.
 		if !strings.HasPrefix(user, "new") {
-			if id, ok := resolveName(context.Background(), user); ok {
+			if id, ok := resolveName(gwCtx, user); ok {
 				leaseID = id
 				user = id // keep motd generic below
 			}
 		}
 	}
 	if !isLeaseID(user) {
-		created, img, err := createSandbox(context.Background(), user)
+		created, img, err := createSandbox(gwCtx, user)
 		if err != nil {
 			errMsg := "spoond: " + err.Error() + "\n"
 			log.Printf("create for %q failed: %v", user, err)
@@ -421,6 +422,8 @@ func dialSandbox(ctx context.Context, leaseID string, gatewayKey ssh.Signer) (*s
 //	ssh ctl@sandbox.lacy.casa "cp <id> [tag]"   clone a sandbox (branch)
 //	ssh ctl@sandbox.lacy.casa "help"
 func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyID, userID, userName string) {
+	// All ctl verbs run owner-scoped as the SSH user (U6/T5).
+	gwCtx := withGatewayUser(context.Background(), userID)
 	// Accept the first session channel; anything else is rejected.
 	var ch ssh.Channel
 	var reqs <-chan *ssh.Request
@@ -462,7 +465,7 @@ func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyI
 		if req.WantReply {
 			req.Reply(true, nil)
 		}
-		out := runControlCommand(context.Background(), msg.Command, gatewayKey, keyID, userID, userName)
+		out := runControlCommand(gwCtx, msg.Command, gatewayKey, keyID, userID, userName)
 		ch.Write([]byte(out + "\n"))
 		return
 	}
@@ -1133,6 +1136,22 @@ func backendJSONOnce(ctx context.Context, method, path string, body []byte) ([]b
 	return backendJSONOnceWith(ctx, backendClient(), method, path, body)
 }
 
+// ctxUserIDKey carries the SSH-authenticated user id (U6/T5). The
+// backend honors it via X-Spoond-User-Id only when the gateway's own
+// service token is used — the gateway never forwards a user-supplied
+// token, so impersonation stays trusted.
+type ctxUserIDKey struct{}
+
+// withGatewayUser returns a context that makes backendJSON attach the
+// X-Spoond-User-Id header, so ctl verbs run owner-scoped as the SSH
+// user instead of the gateway service identity.
+func withGatewayUser(ctx context.Context, userID string) context.Context {
+	if userID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxUserIDKey{}, userID)
+}
+
 func backendJSONOnceWith(ctx context.Context, client *http.Client, method, path string, body []byte) ([]byte, error) {
 	url := strings.TrimRight(*backendURL, "/") + path
 	var rd io.Reader
@@ -1144,6 +1163,9 @@ func backendJSONOnceWith(ctx context.Context, client *http.Client, method, path 
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+*backendTok)
+	if uid, _ := ctx.Value(ctxUserIDKey{}).(string); uid != "" {
+		req.Header.Set("X-Spoond-User-Id", uid)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

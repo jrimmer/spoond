@@ -139,6 +139,22 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, ctxUserKey{}, u)
 			}
 		}
+		// Trusted gateway impersonation (U6/T5): when the request carries the
+		// SSH gateway's service token AND a X-Spoond-User-Id header, act as
+		// that user so the backend's owner-scoping applies to the SSH caller
+		// rather than the gateway service identity. The header user must
+		// exist in the identity store.
+		if s.svc.gatewayToken != "" && token == s.svc.gatewayToken {
+			if uid := r.Header.Get("X-Spoond-User-Id"); uid != "" {
+				if u := s.svc.identities.UserByID(uid); u != nil {
+					ctx = context.WithValue(ctx, ctxOwnerKey{}, u.ID)
+					ctx = context.WithValue(ctx, ctxUserKey{}, u)
+				} else {
+					writeError(w, http.StatusForbidden, "unknown impersonated user")
+					return
+				}
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
