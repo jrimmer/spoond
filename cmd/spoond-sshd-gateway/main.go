@@ -34,6 +34,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
+
+	"github.com/jrimmer/spoond/identity"
 )
 
 // envOr returns the value of env key or def when unset/empty. Used for
@@ -102,16 +104,24 @@ func Main(args []string) int {
 			if len(allowed) == 0 {
 				return nil, fmt.Errorf("no client keys configured")
 			}
-			// Accept any key from the allowed set (single-user homelab;
-			// the lease id in the username is the real capability).
+			// Accept any key from the allowed set (backward compatible);
+			// the lease id in the username is the real capability.
 			for _, pk := range allowed {
 				if string(pk.Marshal()) == string(key.Marshal()) {
-					// Record the authenticated key for `ctl whoami`.
-					return &ssh.Permissions{
+					perms := &ssh.Permissions{
 						Extensions: map[string]string{
 							"forkd-key-id": fmt.Sprintf("%s %s", ssh.FingerprintSHA256(pk), pk.Type()),
 						},
-					}, nil
+					}
+					// When the backend has an identity store, resolve the
+					// key to a user id so `ctl whoami` and future
+					// owner-scoping can attribute the connection (T1).
+					userID, userName := resolveKeyUser(key)
+					if userID != "" {
+						perms.Extensions["forkd-user-id"] = userID
+						perms.Extensions["forkd-user-name"] = userName
+					}
+					return perms, nil
 				}
 			}
 			return nil, fmt.Errorf("unknown client key")
@@ -159,7 +169,13 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 	// Exec requests become API calls (new/ls/rm/keepalive/cp) and the
 	// response is JSON on stdout — no sandbox is dialed.
 	if user == "ctl" {
-		handleControlPlane(chans, gatewayKey, keyID)
+		userID := ""
+		userName := ""
+		if sconn.Permissions != nil && sconn.Permissions.Extensions != nil {
+			userID = sconn.Permissions.Extensions["forkd-user-id"]
+			userName = sconn.Permissions.Extensions["forkd-user-name"]
+		}
+		handleControlPlane(chans, gatewayKey, keyID, userID, userName)
 		return
 	}
 
@@ -404,7 +420,7 @@ func dialSandbox(ctx context.Context, leaseID string, gatewayKey ssh.Signer) (*s
 //	ssh ctl@sandbox.lacy.casa "keepalive <id>"  extend a lease
 //	ssh ctl@sandbox.lacy.casa "cp <id> [tag]"   clone a sandbox (branch)
 //	ssh ctl@sandbox.lacy.casa "help"
-func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyID string) {
+func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyID, userID, userName string) {
 	// Accept the first session channel; anything else is rejected.
 	var ch ssh.Channel
 	var reqs <-chan *ssh.Request
@@ -446,7 +462,7 @@ func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyI
 		if req.WantReply {
 			req.Reply(true, nil)
 		}
-		out := runControlCommand(context.Background(), msg.Command, gatewayKey, keyID)
+		out := runControlCommand(context.Background(), msg.Command, gatewayKey, keyID, userID, userName)
 		ch.Write([]byte(out + "\n"))
 		return
 	}
@@ -457,7 +473,7 @@ func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyI
 //
 // Default output is human-readable (ticket #27); `--json` anywhere in
 // the command opts into raw machine format for scripts/LLM skills.
-func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, keyID string) string {
+func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, keyID, userID, userName string) string {
 	fields := strings.Fields(cmd)
 	if len(fields) == 0 {
 		return `{"error":"empty command — try new, ls, rm, keepalive, cp, help"}`
@@ -475,13 +491,19 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message> — add --json for raw output"
+		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {
 				return `{"user":"ctl","key":"unknown"}`
 			}
 			return "user: ctl (key: unknown)"
+		}
+		if userName != "" {
+			if jsonMode {
+				return fmt.Sprintf(`{"user":%q,"key":%q,"user_id":%q}`, userName, keyID, userID)
+			}
+			return fmt.Sprintf("user: %s (key: %s)", userName, keyID)
 		}
 		if jsonMode {
 			return fmt.Sprintf(`{"user":"ctl","key":%q}`, keyID)
@@ -619,9 +641,117 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
 		return strings.TrimSpace(string(b))
+	case "ssh-key", "keys":
+		// Identity management (T1). ssh-key ls / ssh-key add <pubkey> <name> / ssh-key rm <user-id>
+		if len(fields) < 2 {
+			return `{"error":"usage: ssh-key ls | ssh-key add <pubkey> <name> | ssh-key rm <user-id>"}`
+		}
+		sub := fields[1]
+		switch sub {
+		case "ls":
+			b, err := backendJSON(ctx, http.MethodGet, "/api/users", nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			if jsonMode {
+				return strings.TrimSpace(string(b))
+			}
+			var resp struct {
+				Users []struct {
+					ID    string   `json:"id"`
+					Name  string   `json:"name"`
+					Kind  string   `json:"kind"`
+					Admin bool     `json:"admin"`
+					Keys  []string `json:"fingerprints"`
+				} `json:"users"`
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(b, &resp); err != nil || resp.Error != "" {
+				return strings.TrimSpace(string(b))
+			}
+			if len(resp.Users) == 0 {
+				return "no users"
+			}
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "%-16s %-10s %-6s %s\n", "NAME", "KIND", "ADMIN", "KEYS")
+			for _, u := range resp.Users {
+				admin := "no"
+				if u.Admin {
+					admin = "yes"
+				}
+				keys := ""
+				if len(u.Keys) > 0 {
+					keys = u.Keys[0]
+					if len(u.Keys) > 1 {
+						keys += fmt.Sprintf(" (+%d)", len(u.Keys)-1)
+					}
+				}
+				fmt.Fprintf(&sb, "%-16s %-10s %-6s %s\n", u.Name, u.Kind, admin, keys)
+			}
+			return strings.TrimSuffix(sb.String(), "\n")
+		case "add":
+			if len(fields) < 4 {
+				return `{"error":"usage: ssh-key add <pubkey> <name>"}`
+			}
+			// Verify + fingerprint the provided public key.
+			pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(fields[2]))
+			if err != nil {
+				return fmt.Sprintf(`{"error":"bad public key: %v"}`, err)
+			}
+			fp := identity.FingerprintSHA256(pub.Marshal())
+			p, _ := json.Marshal(map[string]any{
+				"name":         fields[3],
+				"kind":         "person",
+				"fingerprints": []string{fp},
+			})
+			b, err := backendJSON(ctx, http.MethodPost, "/api/users", p)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			if jsonMode {
+				return strings.TrimSpace(string(b))
+			}
+			return fmt.Sprintf("added user %q with key %s", fields[3], fp)
+		case "rm":
+			if len(fields) < 3 {
+				return `{"error":"usage: ssh-key rm <user-id>"}`
+			}
+			if err := backendJSONErr(ctx, http.MethodDelete, "/api/users/"+fields[2], nil); err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return fmt.Sprintf(`{"deleted":%q}`, fields[2])
+		default:
+			return `{"error":"unknown ssh-key subcommand — ls, add, rm"}`
+		}
 	default:
-		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, restart, tag, prompt, help"}`, fields[0])
+		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, restart, tag, prompt, ssh-key, help"}`, fields[0])
 	}
+}
+
+// resolveKeyUser asks the backend identity store which user owns an SSH
+// key. Returns empty strings when the backend has no identity store
+// (legacy single-user mode) or the key is unknown. The gateway must not
+// block SSH auth on this — a slow/missing backend falls back to
+// allowlist-only auth.
+func resolveKeyUser(key ssh.PublicKey) (userID, userName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	fp := identity.FingerprintSHA256(key.Marshal())
+	b, err := backendJSON(ctx, http.MethodGet, "/api/users/by-key?fingerprint="+url.QueryEscape(fp), nil)
+	if err != nil {
+		return "", ""
+	}
+	var resp struct {
+		User struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"user"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil || resp.Error != "" || resp.User.ID == "" {
+		return "", ""
+	}
+	return resp.User.ID, resp.User.Name
 }
 
 // backendJSONErr is backendJSON for calls that expect no response body;

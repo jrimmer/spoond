@@ -29,6 +29,7 @@ import (
 
 	"github.com/jrimmer/spoond/api"
 	"github.com/jrimmer/spoond/forkd"
+	"github.com/jrimmer/spoond/identity"
 )
 
 func envOr(key, def string) string {
@@ -105,6 +106,19 @@ func Main(args []string) int {
 			}
 		}
 	}
+	// Identity store (epic #26 T1): users + key/token resolution. The
+	// store file is optional; when absent the backend runs in legacy
+	// single-user mode (consumer tokens only) until a user is created.
+	// The first user created becomes the admin (KTD-2).
+	if usersFile := os.Getenv("USERS_FILE"); usersFile != "" {
+		ids, err := identity.NewStore(usersFile)
+		if err != nil {
+			log.Fatalf("identity store: %v", err)
+		}
+		svc.SetIdentities(ids)
+		log.Printf("identity store: %s (%d user(s))", usersFile, ids.Count())
+	}
+
 	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), os.Getenv("LLM_UPSTREAM_KEY"), os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).

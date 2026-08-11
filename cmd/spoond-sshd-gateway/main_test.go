@@ -56,15 +56,26 @@ func TestPrettyStat(t *testing.T) {
 
 func TestRunControlCommandJSONFlag(t *testing.T) {
 	// whoami --json and --json whoami both return raw JSON.
-	if got := runControlCommand(t.Context(), "whoami --json", nil, "jrimmer"); got != `{"user":"ctl","key":"jrimmer"}` {
+	if got := runControlCommand(t.Context(), "whoami --json", nil, "jrimmer", "", ""); got != `{"user":"ctl","key":"jrimmer"}` {
 		t.Fatalf("whoami --json: %q", got)
 	}
-	if got := runControlCommand(t.Context(), "--json whoami", nil, "jrimmer"); got != `{"user":"ctl","key":"jrimmer"}` {
+	if got := runControlCommand(t.Context(), "--json whoami", nil, "jrimmer", "", ""); got != `{"user":"ctl","key":"jrimmer"}` {
 		t.Fatalf("--json whoami: %q", got)
 	}
 	// default pretty
-	if got := runControlCommand(t.Context(), "whoami", nil, "jrimmer"); got != "user: ctl (key: jrimmer)" {
+	if got := runControlCommand(t.Context(), "whoami", nil, "jrimmer", "", ""); got != "user: ctl (key: jrimmer)" {
 		t.Fatalf("whoami default: %q", got)
+	}
+	// identity-store user takes precedence in whoami
+	if got := runControlCommand(t.Context(), "whoami", nil, "jrimmer", "u-abc123", "jason"); got != "user: jason (key: jrimmer)" {
+		t.Fatalf("whoami with user: %q", got)
+	}
+	if got := runControlCommand(t.Context(), "whoami --json", nil, "jrimmer", "u-abc123", "jason"); got != `{"user":"jason","key":"jrimmer","user_id":"u-abc123"}` {
+		t.Fatalf("whoami --json with user: %q", got)
+	}
+	// ssh-key help
+	if got := runControlCommand(t.Context(), "ssh-key", nil, "jrimmer", "", ""); !strings.Contains(got, "usage: ssh-key") {
+		t.Fatalf("ssh-key usage: %q", got)
 	}
 }
 

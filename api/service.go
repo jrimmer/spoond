@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/forkd"
+	"github.com/jrimmer/spoond/identity"
 )
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
@@ -83,8 +84,12 @@ type ForkdClient interface {
 type Service struct {
 	forkd ForkdClient
 	store *Store
-	// tokens maps a consumer token to its consumer id.
+	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
+	// identities is the user/identity store (epic #26 T1). When set,
+	// bearer-token auth resolves against it first; tokens map remains as
+	// the backward-compatible fallback for single-user deployments.
+	identities *identity.Store
 	// poolSize is the warm-pool size per image.
 	poolSize int
 	// defaultTTL is used when a request omits ttl.
@@ -110,6 +115,26 @@ type Service struct {
 func (s *Service) SetNetpol(a PolicyApplier, dns []string) {
 	s.netpol = a
 	s.netpolDNS = dns
+}
+
+// SetIdentities installs the identity store used for token→user and
+// key→user resolution. Call before serving; when set, the first user in
+// the store is the admin (KTD-2) and legacy consumer tokens still work.
+func (s *Service) SetIdentities(ids *identity.Store) {
+	s.identities = ids
+}
+
+// ResolveOwner resolves a bearer token to an owner identity. It prefers
+// the identity store (user id) and falls back to the legacy consumer
+// token map for single-user deployments.
+func (s *Service) ResolveOwner(token string) (string, bool) {
+	if s.identities != nil {
+		if u := s.identities.UserByToken(token); u != nil {
+			return u.ID, true
+		}
+	}
+	owner, ok := s.tokens[token]
+	return owner, ok
 }
 
 // applyNetpol enforces a lease's egress policy inside its child netns.

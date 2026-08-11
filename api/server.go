@@ -17,6 +17,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/sys/unix"
+
+	"github.com/jrimmer/spoond/identity"
 )
 
 // Server is the HTTP lease API.
@@ -64,6 +66,13 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	// Identity endpoints (epic #26 T1): user management + key resolution.
+	if s.svc.identities != nil {
+		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
+		s.mux.HandleFunc("POST /api/users", s.handleUsersCreate)
+		s.mux.HandleFunc("GET /api/users/by-key", s.handleUsersByKey)
+		s.mux.HandleFunc("DELETE /api/users/{id}", s.handleUsersDelete)
+	}
 	if s.llm != nil {
 		// The LLM gateway is auth-exempt (lease id in path is the
 		// capability); it MUST be mounted on the outer handler after
@@ -116,17 +125,32 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
-		owner, ok := s.svc.tokens[token]
+		owner, ok := s.svc.ResolveOwner(token)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxOwnerKey{}, owner)
+		// Record the resolved identity (user id) when available so handlers
+		// can distinguish an identity-store user from a legacy consumer.
+		if s.svc.identities != nil {
+			if u := s.svc.identities.UserByToken(token); u != nil {
+				ctx = context.WithValue(ctx, ctxUserKey{}, u)
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 type ctxOwnerKey struct{}
+type ctxUserKey struct{}
+
+// userFrom returns the identity-store user attached by authMiddleware,
+// or nil for legacy consumer-token callers.
+func userFrom(ctx context.Context) *identity.User {
+	v, _ := ctx.Value(ctxUserKey{}).(*identity.User)
+	return v
+}
 
 // maxExecTimeout caps a single exec call so it cannot run far past the
 // lease TTL or tie up the controller indefinitely.
