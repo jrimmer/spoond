@@ -1,18 +1,18 @@
 [Unit]
-Description=forkd SSH gateway (sandbox.lacy.casa interactive access)
-After=network.target forkd-backend.service
+Description=spoond SSH gateway (sandbox.lacy.casa interactive access)
+After=network.target spoond-backend.service
 # Soft dependency: start after the backend, but do NOT tear down the
 # gateway when the backend restarts (Requires= would stop us too — the
 # backend restarts on sweep/failure and the gateway must keep serving
 # long enough for its create-retry to ride through the blip).
-Wants=forkd-backend.service
+Wants=spoond-backend.service
 
 [Service]
-ExecStart=/opt/forkd-gateway/forkd-sshd-gateway \
+ExecStart=/opt/spoond/spoond gateway \
   --listen :2222 \
-  --host-key /etc/forkd-gateway/ssh_host_ed25519_key \
-  --gateway-key /etc/forkd-gateway/gateway_ed25519 \
-  --client-keys /etc/forkd-gateway/keys/jason.pub \
+  --host-key /etc/spoond-gateway/ssh_host_ed25519_key \
+  --gateway-key /etc/spoond-gateway/gateway_ed25519 \
+  --client-keys /etc/spoond-gateway/keys \
   --backend https://127.0.0.1:8890 \
   --backend-token <CONSUMER_TOKEN> \
   --gateway-host sandbox.lacy.casa

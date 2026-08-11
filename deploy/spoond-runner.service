@@ -1,12 +1,12 @@
 [Unit]
-Description=forkd Forgejo Actions runner
-After=network-online.target forkd-backend.service
+Description=spoond Forgejo Actions runner
+After=network-online.target spoond-backend.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/forkd-runner/forkd-runner
-EnvironmentFile=/etc/forkd-runner.env
+ExecStart=/opt/spoond/spoond runner
+EnvironmentFile=/etc/spoond-runner.env
 # Ephemeral runners exit 0 after one job; always restart to re-register.
 Restart=always
 RestartSec=5

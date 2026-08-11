@@ -8,7 +8,7 @@
 // (128-bit random). The gateway accepts any of the configured client
 // keys; the sandbox sshd then authenticates the nested connection with
 // the gateway's own key (baked into dev-base authorized_keys).
-package main
+package spoondgateway
 
 import (
 	"context"
@@ -47,28 +47,33 @@ func envOr(key, def string) string {
 }
 
 var (
+	// flags is the gateway's private FlagSet; it stays scoped to this
+	// package so the spoond umbrella binary can link every command
+	// without flag-name collisions.
+	flags = flag.NewFlagSet("spoond-gateway", flag.ExitOnError)
+
 	// gatewayHost is the public hostname advertised in MOTDs.
-	gatewayHost = flag.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
-	listenAddr  = flag.String("listen", ":2222", "listen address")
-	hostKeyPath = flag.String("host-key", "/etc/forkd-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
-	backendURL  = flag.String("backend", "https://127.0.0.1:8890", "forkd-backend base URL")
-	backendTok  = flag.String("backend-token", "", "forkd-backend consumer token (required)")
-	clientKeys  = flag.String("client-keys", "", "comma-separated paths to authorized client public keys, or a directory scanned for *.pub files")
+	gatewayHost = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
+	listenAddr  = flags.String("listen", ":2222", "listen address")
+	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
+	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
+	backendTok  = flags.String("backend-token", "", "spoond-backend consumer token (required)")
+	clientKeys  = flags.String("client-keys", "", "comma-separated paths to authorized client public keys, or a directory scanned for *.pub files")
 	// gatewayKeyPath is the identity the gateway uses to connect INTO
 	// sandboxes. Its public half is baked into dev-base authorized_keys.
-	gatewayKeyPath = flag.String("gateway-key", "/etc/forkd-gateway/gateway_ed25519", "gateway identity key for nested connections")
+	gatewayKeyPath = flags.String("gateway-key", "/etc/spoond-gateway/gateway_ed25519", "gateway identity key for nested connections")
 	// shellyBinaryURL is where the `shelly` ctl verb fetches the agent
 	// binary from inside the sandbox (host-side asset server on the
 	// plain-HTTP proxy listener; guests reach it via forkd-br0).
-	shellyBinaryURL = flag.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.43.0.1:8891/assets/shelley"), "URL the sandbox fetches the shelley binary from")
+	shellyBinaryURL = flags.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.43.0.1:8891/assets/shelley"), "URL the sandbox fetches the shelley binary from")
 	// llmGatewayURL is the per-lease LLM gateway base the shelley agent
 	// is pointed at (host-side proxy listener; guests reach it via
 	// forkd-br0). The lease id is appended.
-	llmGatewayURL = flag.String("llm-gateway-url", envOr("LLM_GATEWAY_URL", "http://10.43.0.1:8891/llm/"), "base URL of the per-lease LLM gateway (lease id appended)")
+	llmGatewayURL = flags.String("llm-gateway-url", envOr("LLM_GATEWAY_URL", "http://10.43.0.1:8891/llm/"), "base URL of the per-lease LLM gateway (lease id appended)")
 	// shellyModel is the default model id written into shelley.json. It
 	// must be an id the LLM gateway's LLM_MODEL_MAP understands (the
 	// exe.dev catalog id, not the upstream id).
-	shellyModel = flag.String("shelly-model", "gpt-oss-20b-fireworks", "default model id for the shelley agent")
+	shellyModel = flags.String("shelly-model", "gpt-oss-20b-fireworks", "default model id for the shelley agent")
 )
 
 type endpoint struct {
@@ -78,8 +83,8 @@ type endpoint struct {
 	Image     string `json:"image"`
 }
 
-func main() {
-	flag.Parse()
+func Main(args []string) int {
+	flags.Parse(args)
 	if *backendTok == "" {
 		log.Fatal("--backend-token is required")
 	}
@@ -118,7 +123,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s: %v", *listenAddr, err)
 	}
-	log.Printf("forkd-sshd-gateway listening on %s", *listenAddr)
+	log.Printf("spoond-sshd-gateway listening on %s", *listenAddr)
 
 	for {
 		conn, err := ln.Accept()
@@ -186,7 +191,7 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 	if !isLeaseID(user) {
 		created, img, err := createSandbox(context.Background(), user)
 		if err != nil {
-			errMsg := "forkd: " + err.Error() + "\n"
+			errMsg := "spoond: " + err.Error() + "\n"
 			log.Printf("create for %q failed: %v", user, err)
 			// Deliver the error on the first session channel.
 			for nc := range chans {
@@ -202,14 +207,14 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 			return
 		}
 		leaseID = created
-		motd = fmt.Sprintf("forkd: created sandbox %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+		motd = fmt.Sprintf("spoond: created sandbox %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
 			created, img, reconnect(created))
 		log.Printf("created sandbox %s (%s) for user %q", created, img, user)
 	} else {
 		// Attaching to an existing lease: show the id in the tmux footer
 		// and print the reconnect hint when the session ends, same as
 		// create — the id is just as easy to forget on reconnect.
-		motd = fmt.Sprintf("forkd: attached to sandbox %s — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+		motd = fmt.Sprintf("spoond: attached to sandbox %s — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
 			leaseID, reconnect(leaseID))
 	}
 
@@ -223,7 +228,7 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 				continue
 			}
 			ch, _, _ := nc.Accept()
-			fmt.Fprintf(ch, "forkd: cannot reach sandbox %s: %v\n", leaseID, err)
+			fmt.Fprintf(ch, "spoond: cannot reach sandbox %s: %v\n", leaseID, err)
 			ch.Close()
 			return
 		}

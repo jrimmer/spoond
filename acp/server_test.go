@@ -105,7 +105,7 @@ func TestInitialize(t *testing.T) {
 		t.Fatalf("wrong protocol version: %v", r["protocolVersion"])
 	}
 	info := r["agentInfo"].(map[string]any)
-	if info["name"] != "forkd-acp" {
+	if info["name"] != "spoond-acp" {
 		t.Fatalf("wrong agent name: %v", info["name"])
 	}
 }

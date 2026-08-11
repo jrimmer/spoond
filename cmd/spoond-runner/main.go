@@ -20,7 +20,7 @@
 //	RUNNER_SCALE_STEP  Runners added/removed per scale event (default 3)
 //	SCALE_UP_DELAY     All-busy duration before scaling up (default 10s)
 //	SCALE_DOWN_DELAY   Idle duration before scaling down (default 60s)
-package main
+package spoondrunner
 
 import (
 	"context"
@@ -59,7 +59,7 @@ func envDurOr(key string, def time.Duration) time.Duration {
 	return def
 }
 
-func main() {
+func Main(args []string) int {
 	forgejoURL := envOr("FORGEJO_URL", "https://code.lacy.casa")
 	token := os.Getenv("RUNNER_TOKEN")
 	if token == "" {
@@ -125,4 +125,5 @@ func main() {
 
 	// Block forever; workers run in goroutines.
 	select {}
+	return 0
 }

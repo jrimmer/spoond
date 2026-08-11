@@ -36,15 +36,15 @@ spoond (this repo)                 forkd controller (separate repo)
 - **LLM gateway** — per-lease OpenAI-compatible endpoint
   (`/llm/<lease-id>/openai/chat/completions`); upstream keys stay on
   the host, never inside sandboxes.
-- **Native agent endpoints** — `forkd-dev-mcp` (MCP stdio server:
+- **Native agent endpoints** — `spoond mcp` (MCP stdio server:
   shell/read_file/write_file/edit_file/list_files/status tools) and
-  `forkd-acp` (Agent Client Protocol: session = lease, agent loop
+  `spoond acp` (Agent Client Protocol: session = lease, agent loop
   through the LLM gateway). Point Goose/Claude/Codex-style clients at
   them to get sandboxed tool execution.
 - **Per-sandbox network policy** — `none` | `lan` | `internet` |
   `restricted` (with egress allowlist), enforced with iptables in the
   child netns.
-- **Forgejo Actions runner** — `cmd/forkd-runner` adaptively leases
+- **Forgejo Actions runner** — `spoond runner` adaptively leases
   sandboxes as CI workers.
 
 ## Docs
@@ -69,11 +69,23 @@ quotas, sharing) is the v1.1 direction; the foundation ships in v1.0.
 
 ## Build
 
+One binary, all services; exclude any module with build tags:
+
 ```bash
-go build -o forkd-backend ./cmd/forkd-backend
-go build -o forkd-sshd-gateway ./cmd/forkd-sshd-gateway
-go build -o forkd-acp ./cmd/forkd-acp
-go build -o forkd-dev-mcp ./cmd/forkd-dev-mcp
+go build -o spoond ./cmd/spoond                       # all modules
+go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
+```
+
+Supported exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`,
+`norunner`, `noctl`.
+
+```bash
+./spoond backend    # lease API
+./spoond gateway    # SSH gateway + ctl plane
+./spoond acp        # ACP endpoint
+./spoond mcp        # MCP endpoint
+./spoond runner     # Forgejo Actions runner
+./spoond ctl        # control-plane CLI
 ```
 
 ## Run
@@ -83,10 +95,10 @@ See [docs/setup.md](docs/setup.md) for the full guide; the short form:
 ```bash
 export CONSUMER_TOKENS='abc=forgejo'
 export POOL_SIZE=3
-./forkd-backend
+./spoond backend
 
-./forkd-sshd-gateway --backend https://127.0.0.1:8890 \
-  --backend-token abc --client-keys /etc/forkd-gateway/keys
+./spoond gateway --backend https://127.0.0.1:8890 \
+  --backend-token abc --client-keys /etc/spoond-gateway/keys
 ```
 
 ## Configuration knobs

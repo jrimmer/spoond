@@ -4,7 +4,7 @@ source "$(dirname "$0")/lib.sh"
 # Requires: lib.sh sourced, run ON vm2 (needs local systemd + gateway keys dir).
 # Adds a temporary test key to the allowlist, tests, then restores the unit.
 set -u
-UNIT=/etc/systemd/system/forkd-sshd-gateway.service
+UNIT=/etc/systemd/system/spoond-sshd-gateway.service
 KEYS=/etc/forkd-gateway/keys
 GWKEY=/tmp/itest_gw_key
 GWKEY_PUB=/tmp/itest_gw_key.pub
@@ -20,9 +20,9 @@ cp "$GWKEY_PUB" "$KEYS/itest.pub"
 cp "$UNIT" /tmp/gateway-unit.bak
 # append itest.pub to client-keys (idempotent-ish: strip any previous itest, re-add)
 sed -i 's|,/etc/forkd-gateway/keys/itest.pub||; s|--client-keys \([^ ]*\)|--client-keys \1,/etc/forkd-gateway/keys/itest.pub|' "$UNIT"
-systemctl daemon-reload && systemctl restart forkd-sshd-gateway
+systemctl daemon-reload && systemctl restart spoond-sshd-gateway
 sleep 2
-systemctl is-active forkd-sshd-gateway >/dev/null && ok "gateway restarted with test key" || bad "gateway restarted with test key"
+systemctl is-active spoond-sshd-gateway >/dev/null && ok "gateway restarted with test key" || bad "gateway restarted with test key"
 
 echo
 echo "== gateway: auto-create (ssh new@) =="
@@ -71,8 +71,8 @@ fi
 # restore unit without test key
 cp /tmp/gateway-unit.bak "$UNIT"
 rm -f "$KEYS/itest.pub" "$GWKEY" "$GWKEY_PUB"
-systemctl daemon-reload && systemctl restart forkd-sshd-gateway
+systemctl daemon-reload && systemctl restart spoond-sshd-gateway
 sleep 2
-systemctl is-active forkd-sshd-gateway >/dev/null && ok "gateway restored (jason key only)" || bad "gateway restored"
+systemctl is-active spoond-sshd-gateway >/dev/null && ok "gateway restored (jason key only)" || bad "gateway restored"
 echo
 echo "== gateway done =="

@@ -7,10 +7,10 @@ set -u
 # Backend API (https, self-signed — always -k).
 BE_API="${BE_API:-https://127.0.0.1:8890}"
 TOKEN="${TOKEN:-}"
-if [ -z "$TOKEN" ] && [ -f /etc/forkd-backend.env ]; then
+if [ -z "$TOKEN" ] && [ -f /etc/spoond-backend.env ]; then
   # Format: CONSUMER_TOKENS=<token>=<consumer-id> — take the part
   # before the first '=' after the key.
-  TOKEN=$(grep -oE 'CONSUMER_TOKENS=[^ ]+' /etc/forkd-backend.env | cut -d= -f2- | cut -d= -f1)
+  TOKEN=$(grep -oE 'CONSUMER_TOKENS=[^ ]+' /etc/spoond-backend.env | cut -d= -f2- | cut -d= -f1)
 fi
 
 # Optional: run everything through ssh (tests run from Hermes host).

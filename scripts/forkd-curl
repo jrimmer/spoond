@@ -14,12 +14,12 @@
 #
 # Env:
 #   FORKD_API         base URL (default https://127.0.0.1:8890)
-#   FORKD_TOKEN_FILE  env file with CONSUMER_TOKENS= (default /etc/forkd-backend.env)
+#   FORKD_TOKEN_FILE  env file with CONSUMER_TOKENS= (default /etc/spoond-backend.env)
 #   FORKD_TOKEN       explicit token, overrides FORKD_TOKEN_FILE
 set -eu
 
 FORKD_API="${FORKD_API:-https://127.0.0.1:8890}"
-FORKD_TOKEN_FILE="${FORKD_TOKEN_FILE:-/etc/forkd-backend.env}"
+FORKD_TOKEN_FILE="${FORKD_TOKEN_FILE:-/etc/spoond-backend.env}"
 
 TOKEN="${FORKD_TOKEN:-}"
 if [ -z "$TOKEN" ] && [ -f "$FORKD_TOKEN_FILE" ]; then

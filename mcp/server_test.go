@@ -133,7 +133,7 @@ func TestInitialize(t *testing.T) {
 		t.Fatalf("expected result, got %v", resp)
 	}
 	si := resp["result"].(map[string]any)["serverInfo"].(map[string]any)
-	if si["name"] != "forkd-dev-mcp" {
+	if si["name"] != "spoond-mcp" {
 		t.Fatalf("wrong server name: %v", si["name"])
 	}
 }

@@ -14,7 +14,7 @@
 //	                 LLM gateway (e.g. https://openrouter.ai/api/v1)
 //	LLM_UPSTREAM_KEY server-side key for that upstream (never sent to
 //	                 sandboxes; empty disables the gateway)
-package main
+package spoondbackend
 
 import (
 	"context"
@@ -47,7 +47,7 @@ func envIntOr(key string, def int) int {
 	return def
 }
 
-func main() {
+func Main(args []string) int {
 	forkdURL := envOr("FORKD_URL", "http://127.0.0.1:8889")
 	forkdToken := os.Getenv("FORKD_TOKEN")
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
@@ -157,7 +157,7 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("forkd-backend listening on %s (forkd at %s, %d consumer(s), pool=%d)", bindAddr, forkdURL, len(tokens), poolSize)
+	log.Printf("spoond-backend listening on %s (forkd at %s, %d consumer(s), pool=%d)", bindAddr, forkdURL, len(tokens), poolSize)
 	var err error
 	if tlsCert != "" && tlsKey != "" {
 		err = httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
@@ -167,4 +167,5 @@ func main() {
 	if err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server: %v", err)
 	}
+	return 0
 }

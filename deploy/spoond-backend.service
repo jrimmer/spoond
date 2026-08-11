@@ -1,18 +1,18 @@
 [Unit]
-Description=forkd ephemeral-backend lease API
+Description=spoond lease API backend (forkd microVM lease service)
 After=network-online.target forkd-controller.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/forkd-backend/forkd-backend
+ExecStart=/opt/spoond/spoond backend
 Restart=on-failure
 RestartSec=3
 # forkd-controller is on localhost; the lease API binds localhost by default.
 Environment=FORKD_URL=http://127.0.0.1:8889
 Environment=BIND_ADDR=127.0.0.1:8890
 # Consumer tokens: token=consumer,comma-separated. Set via EnvironmentFile.
-EnvironmentFile=-/etc/forkd-backend.env
+EnvironmentFile=-/etc/spoond-backend.env
 User=root
 Group=root
 

@@ -1,4 +1,4 @@
-// Package mcp implements forkd-dev-mcp (ticket #23): a Model Context
+// Package mcp implements the spoond MCP server (ticket #23): a Model Context
 // Protocol server that exposes forkd microVM sandboxes as agent tools.
 //
 // Transport: newline-delimited JSON-RPC 2.0 over stdio (the standard MCP
@@ -213,7 +213,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte) map[string]any {
 					"tools": map[string]any{"listChanged": false},
 				},
 				"serverInfo": map[string]any{
-					"name":    "forkd-dev-mcp",
+					"name":    "spoond-mcp",
 					"version": "0.1.0",
 				},
 			},

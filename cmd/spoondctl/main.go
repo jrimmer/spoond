@@ -1,31 +1,31 @@
-// Command forkdctl is a thin CLI wrapper over the forkd control plane.
+// Command spoondctl is a thin CLI wrapper over the spoond control plane.
 //
 // The API surface is the SSH-as-API control plane (same model as exe.dev:
 // "the exe.dev API is SSH"): every command here is literally an exec
-// request to `ssh ctl@<host> "<verb> ..."` against forkd-sshd-gateway.
+// request to `ssh ctl@<host> "<verb> ..."` against spoond-sshd-gateway.
 // The CLI adds zero business logic — it resolves args, builds the SSH
 // command line, runs it, and prints the JSON response. All state lives in
 // the backend; the CLI is a client like any other.
 //
 // Usage:
 //
-//	forkdctl new [image]            create a sandbox (dev/go/py/elixir/llm)
-//	forkdctl ls                     list sandboxes (JSON)
-//	forkdctl rm <id>                delete a sandbox
-//	forkdctl keepalive <id>         extend a persistent lease
-//	forkdctl suspend <id>           suspend (snapshot + stop)
-//	forkdctl resume <id>            resume from snapshot
-//	forkdctl restart <id>           reboot (snapshot + fresh sandbox)
-//	forkdctl cp <id> [tag]          clone a sandbox
-//	forkdctl shelly <id>            install + start the Shelley coding agent
-//	forkdctl tag <id> <name>        give the sandbox a friendly name
-//	forkdctl prompt <id> <message>  ask the agent in a sandbox something
-//	forkdctl ssh <id|name>          drop into a shell (delegates to ssh)
-//	forkdctl help
+//	spoondctl new [image]            create a sandbox (dev/go/py/elixir/llm)
+//	spoondctl ls                     list sandboxes (JSON)
+//	spoondctl rm <id>                delete a sandbox
+//	spoondctl keepalive <id>         extend a persistent lease
+//	spoondctl suspend <id>           suspend (snapshot + stop)
+//	spoondctl resume <id>            resume from snapshot
+//	spoondctl restart <id>           reboot (snapshot + fresh sandbox)
+//	spoondctl cp <id> [tag]          clone a sandbox
+//	spoondctl shelly <id>            install + start the Shelley coding agent
+//	spoondctl tag <id> <name>        give the sandbox a friendly name
+//	spoondctl prompt <id> <message>  ask the agent in a sandbox something
+//	spoondctl ssh <id|name>          drop into a shell (delegates to ssh)
+//	spoondctl help
 //
 // Environment: FORKD_CTL_HOST (default sandbox.lacy.casa), FORKD_CTL_PORT
 // (default 2222), FORKD_CTL_KEY (default ~/.ssh/id_ed25519).
-package main
+package spoondctl
 
 import (
 	"encoding/json"
@@ -36,11 +36,10 @@ import (
 	"strings"
 )
 
-func main() {
-	args := os.Args[1:]
+func Main(args []string) int {
 	if len(args) == 0 {
 		usage()
-		os.Exit(1)
+		return 1
 	}
 	verb := args[0]
 	rest := args[1:]
@@ -52,82 +51,82 @@ func main() {
 	switch verb {
 	case "help", "--help", "-h":
 		usage()
-		return
+		return 0
 	case "ssh":
 		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: forkdctl ssh <id|name>")
-			os.Exit(1)
+			fmt.Fprintln(os.Stderr, "usage: spoondctl ssh <id|name>")
+			return 1
 		}
 		runSSH(host, port, key, rest[0], rest[1:])
-		return
+		return 0
 	case "prompt":
 		if len(rest) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: forkdctl prompt <id> <message>")
-			os.Exit(1)
+			fmt.Fprintln(os.Stderr, "usage: spoondctl prompt <id> <message>")
+			return 1
 		}
 		cmd := fmt.Sprintf("prompt %s %s", rest[0], strings.Join(rest[1:], " "))
 		printJSON(runCtl(host, port, key, cmd))
-		return
+		return 0
 	case "tag":
 		if len(rest) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: forkdctl tag <id> <name>")
-			os.Exit(1)
+			fmt.Fprintln(os.Stderr, "usage: spoondctl tag <id> <name>")
+			return 1
 		}
 		printJSON(runCtl(host, port, key, fmt.Sprintf("tag %s %s", rest[0], rest[1])))
-		return
+		return 0
 	case "comment":
 		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: forkdctl comment <id> [text...] (no text clears)")
-			os.Exit(1)
+			fmt.Fprintln(os.Stderr, "usage: spoondctl comment <id> [text...] (no text clears)")
+			return 1
 		}
 		printJSON(runCtl(host, port, key, fmt.Sprintf("comment %s %s", rest[0], strings.Join(rest[1:], " "))))
-		return
+		return 0
 	case "whoami":
 		printJSON(runCtl(host, port, key, "whoami"))
-		return
+		return 0
 	case "restart", "resume", "suspend", "keepalive", "shelly", "agent":
 		if len(rest) < 1 {
-			fmt.Fprintf(os.Stderr, "usage: forkdctl %s <id>\n", verb)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "usage: spoondctl %s <id>\n", verb)
+			return 1
 		}
 		v := verb
 		if verb == "agent" {
 			v = "shelly"
 		}
 		printJSON(runCtl(host, port, key, fmt.Sprintf("%s %s", v, rest[0])))
-		return
+		return 0
 	case "rm":
 		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: forkdctl rm <id>")
-			os.Exit(1)
+			fmt.Fprintln(os.Stderr, "usage: spoondctl rm <id>")
+			return 1
 		}
 		printJSON(runCtl(host, port, key, fmt.Sprintf("rm %s", rest[0])))
-		return
+		return 0
 	case "cp", "clone":
 		if len(rest) < 1 {
-			fmt.Fprintln(os.Stderr, "usage: forkdctl cp <id> [tag]")
-			os.Exit(1)
+			fmt.Fprintln(os.Stderr, "usage: spoondctl cp <id> [tag]")
+			return 1
 		}
 		cmd := fmt.Sprintf("cp %s", rest[0])
 		if len(rest) > 1 {
 			cmd += " " + rest[1]
 		}
 		printJSON(runCtl(host, port, key, cmd))
-		return
+		return 0
 	case "new":
 		cmd := "new"
 		if len(rest) > 0 {
 			cmd = "new " + rest[0]
 		}
 		printJSON(runCtl(host, port, key, cmd))
-		return
+		return 0
 	case "ls":
 		printJSON(runCtl(host, port, key, "ls"))
-		return
+		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "forkdctl: unknown command %q\n\n", verb)
+		fmt.Fprintf(os.Stderr, "spoondctl: unknown command %q\n\n", verb)
 		usage()
-		os.Exit(1)
+		return 1
 	}
 }
 
@@ -187,24 +186,24 @@ func printJSON(s string) {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `forkdctl — forkd control plane CLI (thin wrapper over ssh ctl@)
+	fmt.Fprint(os.Stderr, `spoondctl — spoond control plane CLI (thin wrapper over ssh ctl@)
 
 usage:
-  forkdctl new [image]            create a sandbox (dev/go/py/elixir/llm)
-  forkdctl ls                     list sandboxes
-  forkdctl rm <id>                delete a sandbox
-  forkdctl keepalive <id>         extend a persistent lease
-  forkdctl suspend <id>           suspend (snapshot + stop)
-  forkdctl resume <id>            resume from snapshot
-  forkdctl restart <id>           reboot (snapshot + fresh sandbox)
-  forkdctl cp <id> [tag]          clone a sandbox
-  forkdctl shelly <id>            install + start the Shelley coding agent
-  forkdctl tag <id> <name>        give the sandbox a friendly name
-  forkdctl comment <id> [text]    set/clear a free-text annotation
-  forkdctl whoami                 show the authenticated key identity
-  forkdctl prompt <id> <message>  ask the agent in a sandbox something
-  forkdctl ssh <id|name>          drop into a shell
-  forkdctl help
+  spoondctl new [image]            create a sandbox (dev/go/py/elixir/llm)
+  spoondctl ls                     list sandboxes
+  spoondctl rm <id>                delete a sandbox
+  spoondctl keepalive <id>         extend a persistent lease
+  spoondctl suspend <id>           suspend (snapshot + stop)
+  spoondctl resume <id>            resume from snapshot
+  spoondctl restart <id>           reboot (snapshot + fresh sandbox)
+  spoondctl cp <id> [tag]          clone a sandbox
+  spoondctl shelly <id>            install + start the Shelley coding agent
+  spoondctl tag <id> <name>        give the sandbox a friendly name
+  spoondctl comment <id> [text]    set/clear a free-text annotation
+  spoondctl whoami                 show the authenticated key identity
+  spoondctl prompt <id> <message>  ask the agent in a sandbox something
+  spoondctl ssh <id|name>          drop into a shell
+  spoondctl help
 
 env: FORKD_CTL_HOST (sandbox.lacy.casa), FORKD_CTL_PORT (2222), FORKD_CTL_KEY (~/.ssh/id_ed25519)
 `)

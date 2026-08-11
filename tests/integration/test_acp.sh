@@ -1,5 +1,5 @@
 #!/bin/bash
-# test_acp.sh — ACP smoke test (ticket #24): spawn ONE forkd-acp,
+# test_acp.sh — ACP smoke test (ticket #24): spawn ONE spoond acp,
 # drive initialize → session/new → session/prompt over the same
 # process, confirm the protocol handshake works and the prompt returns
 # a result without hanging.
@@ -12,7 +12,7 @@ set -u
 # shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
 
-ACP_BIN="${ACP_BIN:-/opt/forkd-acp/forkd-acp}"
+ACP_BIN="${ACP_BIN:-/opt/spoond/spoond}"
 
 if [ ! -x "$ACP_BIN" ]; then
   echo "skip: $ACP_BIN not found"
@@ -37,13 +37,13 @@ OUT=$( {
   sleep 3
   rpc 3 session/prompt '{"sessionId":"sess-0","prompt":[{"type":"text","text":"run uname -a and tell me the kernel"}]}'
   sleep 25
-} | FORKD_BACKEND_URL="$GO_BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" 2>/dev/null )
+} | FORKD_BACKEND_URL="$GO_BE_API" FORKD_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" acp 2>/dev/null )
 
 INIT=$(echo "$OUT" | sed -n '1p')
 NEW=$(echo "$OUT" | sed -n '2p')
 PROMPT=$(echo "$OUT" | tail -1)
 
-assert_contains "acp initialize ok" "$INIT" "forkd-acp"
+assert_contains "acp initialize ok" "$INIT" "spoond-acp"
 assert_contains "acp protocol version" "$INIT" "protocolVersion"
 assert_contains "acp session/new ok" "$NEW" "sessionId"
 

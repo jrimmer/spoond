@@ -19,7 +19,7 @@
 //	    env = { FORKD_BACKEND_URL = "...", FORKD_TOKEN = "..." }
 //	  }
 //	}
-package main
+package spoondmcp
 
 import (
 	"context"
@@ -37,7 +37,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-func main() {
+func Main(args []string) int {
 	backendURL := envOr("FORKD_BACKEND_URL", "https://127.0.0.1:8890")
 	token := os.Getenv("FORKD_TOKEN")
 	if token == "" {
@@ -60,6 +60,7 @@ func main() {
 
 	if err := srv.Run(context.Background()); err != nil {
 		log.Printf("run: %v", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

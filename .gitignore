@@ -9,12 +9,7 @@
 .dev.vars
 
 # Build artifacts / binaries (source of truth is the build)
-/forkd-sshd-gateway
-/forkd-backend
-/forkd-runner
-/forkd-acp
-/forkd-dev-mcp
-/forkdctl
+/spoond
 *.exe
 *.test
 *.out

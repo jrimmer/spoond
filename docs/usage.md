@@ -127,18 +127,18 @@ Tools: `shell`, `read_file`, `write_file`, `edit_file`, `list_files`,
 
 ```bash
 FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
-  ./forkd-dev-mcp
+  ./spoond mcp
 ```
 
 ### `forkd-acp` (Agent Client Protocol server)
 
 Sessions map 1:1 to leases; the agent loop runs through the LLM gateway
-with in-sandbox tools. One `forkd-acp` process serves the whole
+with in-sandbox tools. One `spoond acp` process serves the whole
 conversation (sessions are process-scoped).
 
 ```bash
 FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
-  FORKD_LLM_MODEL=gpt-oss-20b-fireworks ./forkd-acp
+  FORKD_LLM_MODEL=gpt-oss-20b-fireworks ./spoond acp
 ```
 
 ## Network policies

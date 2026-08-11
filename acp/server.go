@@ -1,4 +1,4 @@
-// Package acp implements forkd-acp (ticket #24): a native Agent Client
+// Package acp implements the spoond ACP endpoint (ticket #24): a native Agent Client
 // Protocol (ACP) agent endpoint for spoond.
 //
 // ACP is the JSON-RPC 2.0 / NDJSON-over-stdio contract that hosts like
@@ -256,7 +256,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte) error {
 					"prompt": map[string]any{"supportsStreaming": true},
 				},
 				AgentInfo: map[string]any{
-					"name":    "forkd-acp",
+					"name":    "spoond-acp",
 					"version": "0.1.0",
 				},
 			},

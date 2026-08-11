@@ -10,7 +10,7 @@ set -u
 # shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
 
-UNIT=/etc/systemd/system/forkd-sshd-gateway.service
+UNIT=/etc/systemd/system/spoond-sshd-gateway.service
 KEYS=/etc/forkd-gateway/keys
 GWKEY=/tmp/itest_stat_key
 GWKEY_PUB=/tmp/itest_stat_key.pub
@@ -20,7 +20,7 @@ SSH="ssh $SSHOPTS ctl@127.0.0.1 -p 2222"
 restore_gw() { # restore unit + key; must always run
   cp -f /tmp/stat-unit.bak "$UNIT" 2>/dev/null || true
   rm -f "$KEYS/itest_stat.pub"
-  systemctl daemon-reload && systemctl restart forkd-sshd-gateway
+  systemctl daemon-reload && systemctl restart spoond-sshd-gateway
   sleep 2
 }
 trap restore_gw EXIT
@@ -30,9 +30,9 @@ echo "== stat/pretty: temporary test key setup =="
 cp "$GWKEY_PUB" "$KEYS/itest_stat.pub"
 cp "$UNIT" /tmp/stat-unit.bak
 sed -i 's|,/etc/forkd-gateway/keys/itest_stat.pub||; s|--client-keys \([^ ]*\)|--client-keys \1,/etc/forkd-gateway/keys/itest_stat.pub|' "$UNIT"
-systemctl daemon-reload && systemctl restart forkd-sshd-gateway
+systemctl daemon-reload && systemctl restart spoond-sshd-gateway
 sleep 2
-systemctl is-active forkd-sshd-gateway >/dev/null && ok "gateway restarted with test key" || bad "gateway restarted with test key"
+systemctl is-active spoond-sshd-gateway >/dev/null && ok "gateway restarted with test key" || bad "gateway restarted with test key"
 
 echo
 echo "== stat/pretty: lease for testing =="

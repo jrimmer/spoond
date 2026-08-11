@@ -19,7 +19,7 @@
 //
 //	agent_command: forkd-acp
 //	agent_command_env: { FORKD_BACKEND_URL: ..., FORKD_TOKEN: ... }
-package main
+package spoondacp
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-func main() {
+func Main(args []string) int {
 	backendURL := envOr("FORKD_BACKEND_URL", "https://127.0.0.1:8890")
 	token := os.Getenv("FORKD_TOKEN")
 	if token == "" {
@@ -66,6 +66,8 @@ func main() {
 	ctx := context.Background()
 	if err := srv.Run(ctx); err != nil {
 		log.Printf("run: %v", err)
+		return 1
 	}
 	srv.Close(ctx)
+	return 0
 }

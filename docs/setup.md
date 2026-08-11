@@ -28,15 +28,16 @@ sandboxes from) — see [deeplethe/forkd](https://github.com/deeplethe/forkd).
 
 ## Build
 
+One binary, all services; exclude any module with Go build tags:
+
 ```bash
-git clone https://github.com/jrimmer/spoond
-cd spoond
-go build -o forkd-backend ./cmd/forkd-backend
-go build -o forkd-sshd-gateway ./cmd/forkd-sshd-gateway
-go build -o forkd-runner ./cmd/forkd-runner        # optional
-go build -o forkd-acp ./cmd/forkd-acp              # optional agent endpoint
-go build -o forkd-dev-mcp ./cmd/forkd-dev-mcp      # optional agent endpoint
+go build -o spoond ./cmd/spoond                       # all modules
+go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
+
+Subcommands: `backend`, `gateway`, `acp`, `mcp`, `runner`, `ctl`.
+Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
+`noctl`.
 
 ## 1. forkd-backend (lease API)
 
@@ -66,12 +67,12 @@ go build -o forkd-dev-mcp ./cmd/forkd-dev-mcp      # optional agent endpoint
 export CONSUMER_TOKENS='abc=forgejo,def=pi'
 export POOL_SIZE=3
 export TLS_CERT=/etc/spoond/tls/fullchain.pem TLS_KEY=/etc/spoond/tls/privkey.pem
-./forkd-backend
+./spoond backend
 ```
 
 ### systemd unit
 
-See `deploy/forkd-backend.service`; the unit sources `/etc/forkd-backend.env`
+See `deploy/spoond-backend.service`; the unit sources `/etc/forkd-backend.env`
 (`chmod 600`) and runs with `User=forkd`.
 
 ## 2. forkd-sshd-gateway (SSH + ctl plane)
@@ -103,9 +104,9 @@ See `deploy/forkd-backend.service`; the unit sources `/etc/forkd-backend.env`
 ### Run
 
 ```bash
-./forkd-sshd-gateway --backend https://127.0.0.1:8890 \
+./spoond gateway --backend https://127.0.0.1:8890 \
   --backend-token abc \
-  --client-keys /etc/forkd-gateway/keys   # dir scan: add user = drop .pub + restart
+  --client-keys /etc/spoond-gateway/keys   # dir scan: add user = drop .pub + restart
 ```
 
 ## 3. forkd-runner (Forgejo Actions, optional)
