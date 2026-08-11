@@ -23,7 +23,7 @@ import (
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
 type Lease struct {
 	ID         string // unguessable lease id
-	Owner      string // consumer id that owns this lease
+	Owner      string `json:"owner"` // owner identity (user id or legacy consumer id)
 	Image      string // snapshot tag
 	ForkdID    string // underlying forkd sandbox id
 	Address    string // guest address, e.g. "10.42.0.2:8888"
@@ -661,6 +661,20 @@ func (s *Service) lookupByName(name string) *Lease {
 	return nil
 }
 
+// lookupByNameForOwner returns a live lease with the given name owned by
+// the given owner (names are unique per owner). Used by the API's
+// /api/names endpoint so a caller can only resolve their own names.
+func (s *Service) lookupByNameForOwner(owner, name string) *Lease {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	for _, l := range s.store.leases {
+		if !l.released && l.Owner == owner && l.Name == name {
+			return l
+		}
+	}
+	return nil
+}
+
 // grantFromSnapshot spawns a sandbox directly from a specific snapshot
 // tag (not via the warm pool) and grants a lease on it. Used by clone:
 // the branch tag is fresh, has no pool, and must not be registered as a
@@ -774,6 +788,7 @@ func (s *Service) list(owner string) []map[string]any {
 		if l.Owner == owner && !l.released {
 			out = append(out, map[string]any{
 				"id":               l.ID,
+				"owner":            l.Owner,
 				"image":            l.Image,
 				"address":          l.Address,
 				"expires":          l.ExpiresAt.Unix(),

@@ -224,6 +224,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         lease.ID,
+		"owner":      lease.Owner,
 		"address":    lease.Address,
 		"image":      lease.Image,
 		"ttl":        int(ttl.Seconds()),
@@ -932,11 +933,13 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"images": tags})
 }
 
-// handleByName resolves a friendly lease name to its lease id. Used by
-// the SSH gateway (username = name) and for script/LLM convenience.
+// handleByName resolves a friendly lease name owned by the caller to its
+// lease id. Used by the SSH gateway (username = name) and for
+// script/LLM convenience. Owner-scoped: names are unique per owner, so
+// a caller can only resolve their own.
 func (s *Server) handleByName(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	lease := s.svc.lookupByName(name)
+	lease := s.svc.lookupByNameForOwner(ownerFrom(r.Context()), name)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "no sandbox named "+name)
 		return
