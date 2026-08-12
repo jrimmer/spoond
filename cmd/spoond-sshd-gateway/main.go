@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +83,16 @@ var (
 	// must be an id the LLM gateway's LLM_MODEL_MAP understands (the
 	// exe.dev catalog id, not the upstream id).
 	shellyModel = flags.String("shelly-model", "gpt-oss-20b-fireworks", "default model id for the shelley agent")
+
+	// sshImages is the set of image tags that have sshd installed and
+	// can therefore support interactive SSH sessions. CI images (go-base,
+	// py-base, rust-base, etc.) typically don't have sshd. Defaults to
+	// dev-base only; operators can add more via GATEWAY_SSH_IMAGES.
+	sshImages = flags.String("ssh-images", envOr("GATEWAY_SSH_IMAGES", "dev-base"), "comma-separated image tags that support interactive SSH (have sshd)")
+
+	// extraImageAliases allows operators to add or override short-name
+	// → full-tag aliases without code changes. Format: short=full,short=full.
+	extraImageAliases = flags.String("image-aliases", envOr("GATEWAY_IMAGE_ALIASES", ""), "comma-separated short=full image aliases (e.g. rust=rust-base,js=js-base)")
 )
 
 type endpoint struct {
@@ -95,6 +106,37 @@ func Main(args []string) int {
 	flags.Parse(args)
 	if *backendTok == "" {
 		log.Fatal("--backend-token is required")
+	}
+
+	// Parse the set of images that support interactive SSH (have sshd
+	// installed). Default is dev-base only; operators can add more via
+	// GATEWAY_SSH_IMAGES=dev-base,rust-base,...
+	sshImageSet = make(map[string]bool)
+	for _, img := range strings.Split(*sshImages, ",") {
+		img = strings.TrimSpace(img)
+		if img != "" {
+			sshImageSet[img] = true
+		}
+	}
+
+	// Parse extra image aliases from GATEWAY_IMAGE_ALIASES (format:
+	// short=full,short=full). These are merged into the hardcoded
+	// imageAliases map so operators can add new short names without
+	// code changes.
+	if *extraImageAliases != "" {
+		for _, pair := range strings.Split(*extraImageAliases, ",") {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			short, full, ok := strings.Cut(pair, "=")
+			if !ok || short == "" || full == "" {
+				log.Printf("warning: ignoring malformed image alias %q (expected short=full)", pair)
+				continue
+			}
+			imageAliases[strings.TrimSpace(short)] = strings.TrimSpace(full)
+			log.Printf("image alias: %s -> %s", short, full)
+		}
 	}
 
 	hostKey := loadOrGenerateHostKey(*hostKeyPath)
@@ -339,6 +381,37 @@ var imageAliases = map[string]string{
 	"base":   "dev-base",
 }
 
+// sshImageSet is populated from the --ssh-images flag at startup.
+var sshImageSet map[string]bool
+
+// fetchKnownImages queries the backend's /api/images endpoint and returns
+// the list of known image tags. This is used to validate full image names
+// (e.g. "rust-base") that aren't in the imageAliases short-name map.
+func fetchKnownImages(ctx context.Context) ([]string, error) {
+	b, err := backendJSON(ctx, http.MethodGet, "/api/images", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Images []string `json:"images"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("parse /api/images: %w", err)
+	}
+	return resp.Images, nil
+}
+
+// sshImageTags returns a sorted slice of image tags that support
+// interactive SSH, for use in error messages.
+func sshImageTags() []string {
+	tags := make([]string, 0, len(sshImageSet))
+	for tag := range sshImageSet {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags
+}
+
 // createSandbox parses an SSH username of the form new[-<image>] and
 // creates a persistent sandbox in the backend. Returns the new lease id
 // and the resolved image tag.
@@ -348,23 +421,44 @@ func createSandbox(ctx context.Context, user string) (string, string, error) {
 	if user != "new" {
 		rest, ok := strings.CutPrefix(user, "new-")
 		if !ok || rest == "" {
-			return "", "", fmt.Errorf("unknown command %q — use a lease id or new[-<image>] (new, new-dev, new-go, new-py, new-elixir, new-llm)", user)
+			return "", "", fmt.Errorf("unknown command %q — use a lease id or new[-<image>] (new, new-dev, new-go, new-py, new-elixir, new-llm, or new-<full-tag>)", user)
 		}
 		alias = rest
 	}
 	if alias != "" {
 		tag, ok := imageAliases[alias]
 		if !ok {
-			return "", "", fmt.Errorf("unknown image %q — try dev, go, py, elixir, llm", alias)
+			// Not a known short alias — try matching as a full image
+			// tag against the backend's known images. This lets new
+			// images (e.g. rust-base) be used immediately without
+			// adding a code-level alias.
+			known, err := fetchKnownImages(ctx)
+			if err != nil {
+				return "", "", fmt.Errorf("cannot verify image %q (backend /api/images unavailable: %v) — try a known short name: dev, go, py, elixir, llm", alias, err)
+			}
+			found := false
+			for _, k := range known {
+				if k == alias {
+					image = alias
+					found = true
+					break
+				}
+			}
+			if !found {
+				sort.Strings(known)
+				return "", "", fmt.Errorf("unknown image %q — try a short name (dev, go, py, elixir, llm) or a known tag: %s", alias, strings.Join(known, ", "))
+			}
+		} else {
+			image = tag
 		}
-		image = tag
 	}
 
-	// Interactive SSH requires an image with sshd. Only dev-base has it
-	// today; CI images (go/py/elixir/llm) are for workflows, not shells.
-	// Reject before creating so we don't orphan a sandbox.
-	if image != "dev-base" {
-		return "", "", fmt.Errorf("image %q is a CI image with no sshd — interactive SSH requires dev-base (use new or new-dev)", image)
+	// Interactive SSH requires an image with sshd. Most CI images (go,
+	// py, elixir, rust, etc.) don't have sshd — they're for API exec
+	// workflows, not interactive shells. Reject before creating so we
+	// don't orphan a sandbox.
+	if !sshImageSet[image] {
+		return "", "", fmt.Errorf("image %q is not an interactive SSH image (no sshd) — interactive SSH requires one of: %s. Use the backend API for CI images.", image, strings.Join(sshImageTags(), ", "))
 	}
 
 	payload, err := json.Marshal(map[string]any{
