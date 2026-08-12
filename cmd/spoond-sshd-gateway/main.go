@@ -61,7 +61,11 @@ var (
 	listenAddr  = flags.String("listen", ":2222", "listen address")
 	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
 	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
-	backendTok  = flags.String("backend-token", "", "spoond-backend consumer token (required)")
+	// backendTok: the spoond-backend consumer token (required, admin-equivalent).
+	// Read from --backend-token flag or SPOOND_GATEWAY_TOKEN env so the
+	// value never needs to appear in ExecStart (security review #37 rescan
+	// F7: /proc/<pid>/cmdline must not expose the token).
+	backendTok = flags.String("backend-token", envOr("SPOOND_GATEWAY_TOKEN", ""), "spoond-backend consumer token (required; or $SPOOND_GATEWAY_TOKEN)")
 	// DEPRECATED/ignored (security review #37 rescan F7): the gateway
 	// must NOT forward the bootstrap token — bootstrap is an operator
 	// action against the backend directly. The flag is accepted so
