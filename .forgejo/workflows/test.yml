@@ -16,8 +16,17 @@ jobs:
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
       - name: go vet
+        env:
+          GOPATH: /tmp/gopath
+          GOMODCACHE: /tmp/gopath/pkg/mod
         run: go vet ./...
       - name: go build
+        env:
+          GOPATH: /tmp/gopath
+          GOMODCACHE: /tmp/gopath/pkg/mod
         run: go build ./...
       - name: go test
+        env:
+          GOPATH: /tmp/gopath
+          GOMODCACHE: /tmp/gopath/pkg/mod
         run: go test ./...

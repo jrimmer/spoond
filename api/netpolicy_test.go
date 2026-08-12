@@ -127,13 +127,17 @@ func TestApplyNetpolHooks(t *testing.T) {
 		t.Fatalf("expected 1 apply on resume, got %d: %v", len(fp.calls), fp.calls)
 	}
 
-	// default lan policy must NOT trigger an apply (netns FORWARD allows it)
+	// default (empty) policy is treated as LAN and must be applied to clear
+	// stale FORWARD rules from a previous lease that used the same netns.
 	fp.calls = nil
 	_, err = svc.grant(context.Background(), "c", "py-base", 0, time.Minute, true, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fp.calls) != 0 {
-		t.Fatalf("expected no apply for lan policy, got %v", fp.calls)
+	if len(fp.calls) != 1 {
+		t.Fatalf("expected 1 apply for lan policy (clear stale rules), got %d: %v", len(fp.calls), fp.calls)
+	}
+	if !strings.Contains(fp.calls[0], "lan") {
+		t.Fatalf("expected lan policy applied, got %q", fp.calls[0])
 	}
 }
