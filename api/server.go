@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/sys/unix"
 
+	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
 )
 
@@ -983,6 +984,14 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, args, timeout)
 	if err != nil {
 		s.svc.log.Printf("exec: %s: %v (dur=%s)", lease.ForkdID, err, time.Since(start))
+		// Map forkd 404 (sandbox killed/expired in the controller but the
+		// lease still exists in our store) to 410 Gone so the caller can
+		// distinguish a permanently dead sandbox from a transient exec
+		// failure (e.g. controller overload, network blip).
+		if fe, ok := err.(*forkd.Error); ok && fe.StatusCode == http.StatusNotFound {
+			writeError(w, http.StatusGone, "sandbox no longer exists in controller")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "exec failed")
 		return
 	}

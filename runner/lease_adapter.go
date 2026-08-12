@@ -62,28 +62,55 @@ func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (st
 	return out.ID, nil
 }
 
-// Exec runs a command in a sandbox.
+// Exec runs a command in a sandbox. It retries transient backend errors
+// (500/502/503) up to 2 times with 1s/2s backoff. Permanent errors (410
+// Gone — sandbox no longer exists in the controller) and client errors
+// (400/401/403/404) are returned immediately.
 func (c *HTTPLeaseClient) Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error) {
 	body, _ := json.Marshal(map[string]any{"cmd": cmd, "cwd": cwd, "env": env, "timeout": timeout})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/sandboxes/"+id+"/exec", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, lastErr
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+		// Fresh reader each attempt — reusing a consumed body reader
+		// produces "ContentLength=N with Body length 0" on retry.
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/sandboxes/"+id+"/exec", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			// 410 Gone = sandbox permanently dead; don't retry.
+			// 500/502/503 = transient backend error; retry.
+			// Other non-200 = client error; don't retry.
+			if resp.StatusCode == http.StatusGone ||
+				resp.StatusCode < 500 {
+				return nil, fmt.Errorf("exec: status %d", resp.StatusCode)
+			}
+			lastErr = fmt.Errorf("exec: status %d", resp.StatusCode)
+			continue
+		}
+		var out ExecResult
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		resp.Body.Close()
+		return &out, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("exec: status %d", resp.StatusCode)
-	}
-	var out ExecResult
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return nil, lastErr
 }
 
 // Delete releases a sandbox.

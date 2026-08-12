@@ -77,19 +77,13 @@ func (e *Error) Error() string {
 // do performs a JSON request and decodes the response into out (if non-nil).
 // Non-2xx responses are returned as *Error.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
-	var buf bytes.Buffer
+	var payload []byte
 	if body != nil {
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		var err error
+		payload, err = json.Marshal(body)
+		if err != nil {
 			return fmt.Errorf("forkd: encode request: %w", err)
 		}
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, &buf)
-	if err != nil {
-		return fmt.Errorf("forkd: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 
 	// Retry transient network errors (connection refused/reset) with
@@ -97,6 +91,12 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	// (15+ sandboxes, tap/cgroup contention; it also blocks its accept
 	// loop during heavy branch/snapshot writes). HTTP-level errors are
 	// not retried — those are real answers. Budget: ~4.7s total.
+	//
+	// The request is recreated inside the loop because reusing a
+	// request whose body has already been consumed (EOF after the first
+	// c.http.Do) produces "http: ContentLength=N with Body length 0" on
+	// retry — the Content-Length header is set from the original buffer
+	// size, but the body reader is at EOF.
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
 		if attempt > 0 {
@@ -106,24 +106,41 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
 			}
 		}
+		var bodyReader io.Reader
+		if payload != nil {
+			bodyReader = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+		if err != nil {
+			return fmt.Errorf("forkd: build request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+
 		resp, err := c.http.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("forkd: %s %s: %w", method, path, err)
 			continue
 		}
-		defer resp.Body.Close()
+		// Close the body explicitly — defer in a loop would leak across
+		// iterations since defer runs at function return, not loop exit.
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			var eb struct {
 				Error string `json:"error"`
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&eb)
+			resp.Body.Close()
 			return &Error{StatusCode: resp.StatusCode, Message: eb.Error}
 		}
 		if out != nil {
 			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+				resp.Body.Close()
 				return fmt.Errorf("forkd: decode response: %w", err)
 			}
 		}
+		resp.Body.Close()
 		return nil
 	}
 	return lastErr
