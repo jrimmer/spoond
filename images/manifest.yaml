@@ -58,3 +58,42 @@ images:
     baked: true
     rootfs: /var/cache/forkd/llm-review-local.ext4
     notes: "Baked 2026-08-08 from python:3.12-slim + git + curl. Runs .forgejo/scripts/llm-review.py (pure Python stdlib)."
+
+  - name: rust-base
+    capability: rust
+    labels: [rust, rust-lang]
+    description: "Rust stable toolchain + git for Rust build/test/CI jobs"
+    baked: false
+    rootfs: ""
+    notes: |
+      Not yet permanently baked. During initial testing (2026-08-11) a rust-base
+      snapshot was built from rust:1.85-bookworm but hit several issues:
+
+      1. DISK: cargo test requires full compilation + linking of the
+         dependency tree. A 4 GiB rootfs is insufficient — the Rust toolchain
+         (~1.5 GiB) + cargo registry (~200 MiB) + build artifacts (2+ GiB)
+         + project source exceeds the rootfs. Minimum recommended rootfs:
+         8 GiB (or use sparse rootfs per issue #38).
+
+      2. MEMORY: 512 MiB default OOM-kills cargo check during tokio compilation.
+         Need at least 4 GiB RAM. Use `forkd from-image --mem-size-mib 4096`
+         (issue #39) or re-snapshot with `forkd snapshot --mem-size-mib 4096`.
+
+      3. RUSTUP FRICTION: Docker rust images ship rustup without a default
+         toolchain. rust-toolchain.toml with channel="stable" causes rustup to
+         download the latest stable, which may not fit on the rootfs. Workarounds:
+         - Pre-set `rustup default stable` during image bake (before snapshot)
+         - Or bypass rustup: set PATH to the toolchain binaries directly
+         - Or set RUSTUP_TOOLCHAIN to the pre-installed version
+         - Pin incompatible deps with `cargo update --precise` if using an
+           older toolchain (e.g. time needs 1.88, icu_* needs 1.86)
+
+      4. PATH: forkd-agent.py inherits host PATH (issue #41, fixed in PR #44).
+         Ensure /etc/environment has the correct PATH including
+         /usr/local/cargo/bin before baking the snapshot.
+
+      Recommended bake command (once #38/#39 are resolved):
+        forkd from-image rust:1.85-bookworm --tag rust-base \
+          --extra python3 --size-mib 8192 --mem-size-mib 4096
+
+      python3 is required for forkd-agent.py (PID 1 guest agent).
