@@ -10,11 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jrimmer/spoond/identity"
+	"github.com/jrimmer/spoond/metrics"
 )
 
 // llmGatewayPrefix is the path prefix for the per-lease LLM gateway.
@@ -59,6 +61,8 @@ type llmGateway struct {
 	// silently open. Set via LLM_OPEN_LEGACY=1 to keep the pre-U8
 	// capability model for keyless owners.
 	requireKey bool
+	// metrics (issue #20): LLM gateway Prometheus metrics.
+	metrics *metrics.BackendMetrics
 }
 
 // newLLMGateway wires the OpenAI-compatible upstream. upstreamURL is the
@@ -139,6 +143,8 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub := rest[slash:] // e.g. "/openai/chat/completions"
 
 	lease := g.lookup(leaseID)
+	start := time.Now()
+	provider := "unknown"
 	if lease == nil {
 		http.Error(w, "sandbox not found", http.StatusNotFound)
 		return
@@ -162,6 +168,9 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
 			key := strings.TrimPrefix(auth, "Bearer ")
 			if key == "" || key == auth || !g.users.LLMKeyOK(owner.ID, key) {
+				if g.metrics != nil {
+					g.metrics.LLMKeyFail.Inc()
+				}
 				http.Error(w, "missing or invalid LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
 				return
 			}
@@ -181,6 +190,9 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.inflightMu.Lock()
 		if g.inflight[lease.Owner] >= g.maxConcurrent {
 			g.inflightMu.Unlock()
+			if g.metrics != nil {
+				g.metrics.LLMRateLimit.Inc()
+			}
 			http.Error(w, "too many concurrent LLM requests for this user", http.StatusTooManyRequests)
 			return
 		}
@@ -206,6 +218,7 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if sub == p || strings.HasPrefix(sub, p+"/") {
 			tail = strings.TrimPrefix(sub, p)
 			matched = true
+			provider = strings.TrimPrefix(p, "/")
 			break
 		}
 	}
@@ -266,10 +279,21 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		MaxIdleConns:          16,
 		IdleConnTimeout:       60 * time.Second,
 	}
+	if g.metrics != nil {
+		g.metrics.LLMReqs.WithLabelValues(provider).Inc()
+		g.metrics.LLMInflight.WithLabelValues(lease.Owner).Inc()
+		defer func() {
+			g.metrics.LLMDur.WithLabelValues(provider).Observe(time.Since(start).Seconds())
+			g.metrics.LLMInflight.WithLabelValues(lease.Owner).Dec()
+		}()
+	}
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			g.log.Printf("llm gateway: %s: %v", leaseID, err)
+		}
+		if g.metrics != nil {
+			g.metrics.LLMErrors.WithLabelValues(provider, "502").Inc()
 		}
 		http.Error(w, "llm gateway error: "+err.Error(), http.StatusBadGateway)
 		return
@@ -283,6 +307,9 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Del("Server")
+	if g.metrics != nil && resp.StatusCode >= 400 {
+		g.metrics.LLMErrors.WithLabelValues(provider, strconv.Itoa(resp.StatusCode)).Inc()
+	}
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)

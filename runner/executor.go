@@ -6,6 +6,9 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/jrimmer/spoond/metrics"
 )
 
 // Executor runs a job in a sandbox. It depends only on the ports
@@ -26,6 +29,8 @@ type Executor struct {
 	// WorkspaceDir is the directory inside the sandbox where the repo is
 	// checked out and run steps execute. Defaults to /workspace.
 	WorkspaceDir string
+	// Metrics (issue #20): runner Prometheus metrics. Nil = no metrics.
+	Metrics *metrics.RunnerMetrics
 }
 
 // checkoutRe matches a uses: actions/checkout step (any version).
@@ -34,6 +39,11 @@ var checkoutRe = regexp.MustCompile(`(?i)^actions/checkout(@.*)?$`)
 // Run executes a job's workflow in a sandbox, streaming logs and
 // reporting the final state. It always releases the sandbox.
 func (e *Executor) Run(ctx context.Context, job *Job) error {
+	jobStart := time.Now()
+	if e.Metrics != nil {
+		e.Metrics.JobsActive.Inc()
+		defer e.Metrics.JobsActive.Dec()
+	}
 	wf, err := ParseWorkflow(job.Workflow)
 	if err != nil {
 		return e.fail(ctx, job, err)
@@ -152,6 +162,9 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		}
 		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, cwd, env, 300)
 		if err != nil {
+			if e.Metrics != nil {
+				e.Metrics.ExecErrors.WithLabelValues("500").Inc()
+			}
 			stepState.Result = ResultFailure
 			state.Result = ResultFailure
 			e.log(ctx, job, logIndex, "step failed: "+err.Error())
@@ -181,6 +194,14 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		}
 	}
 	log.Printf("executor: job %d final result=%d steps=%d", job.ID, int(state.Result), len(state.Steps))
+	if e.Metrics != nil {
+		result := "success"
+		if state.Result == ResultFailure {
+			result = "failure"
+		}
+		e.Metrics.JobsTotal.WithLabelValues(result).Inc()
+		e.Metrics.JobDur.Observe(time.Since(jobStart).Seconds())
+	}
 	return e.Sink.Report(ctx, state, nil)
 }
 

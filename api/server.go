@@ -9,19 +9,17 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"golang.org/x/sys/unix"
+	"github.com/prometheus/common/expfmt"
 
 	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
+	"github.com/jrimmer/spoond/metrics"
 )
 
 // Server is the HTTP lease API.
@@ -48,6 +46,9 @@ type Server struct {
 	// bootstrap when configured: the store-empty creation must present
 	// X-Bootstrap-Token matching it. Set via BOOTSTRAP_TOKEN env.
 	bootstrapToken string
+	// metrics (issue #20): service-owned Prometheus metrics served at
+	// /metrics alongside namespaced controller passthrough.
+	metrics *metrics.BackendMetrics
 	// authFails (security review #37 L5) throttles repeated failed
 	// token auths per client IP.
 	authFails *authFailLimiter
@@ -132,12 +133,14 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
-		busyCount: map[string]int{}, busyMax: 8}
+		busyCount: map[string]int{}, busyMax: 8, metrics: metrics.NewBackendMetrics()}
 	if openRouterURL != "" {
 		// svc.identities must be installed (SetIdentities) before
 		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
 		s.llm = newLLMGateway(svc.log, svc.lookupAny, svc.identities, openRouterURL, openRouterKey, defaultModel, modelMap)
+		s.llm.metrics = s.metrics
 	}
+	s.svc.SetMetrics(s.metrics)
 	s.mux.HandleFunc("POST /api/sandboxes", s.handleCreate)
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
@@ -208,29 +211,138 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// handleMetrics proxies forkd-controller's Prometheus metrics so the
-// controller can stay loopback-bound while VictoriaMetrics scrapes the
-// backend. Requires a consumer token (auth middleware) AND an admin
-// identity when the store is present (security review #37 M5) — the
-// controller metrics expose sandbox inventory that shouldn't be
-// readable by any token holder.
+// handleMetrics emits service-owned Prometheus metrics (issue #20)
+// merged with namespaced controller passthrough. The service-owned
+// metrics are gathered from the live Service state (pool, leases,
+// identity) and rendered via the prometheus registry; the controller
+// metrics are fetched from forkd-controller's /metrics and rewritten
+// to spoond_controller_* so service vs controller semantics never
+// collide. Requires admin when the identity store is present
+// (security review #37 M5).
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.svc.identities != nil && !s.requireAdmin(w, r) {
 		return
 	}
-	body, err := s.svc.forkd.Metrics(r.Context())
+	// Update live gauges from current service state before gathering.
+	s.collectServiceMetrics()
+	// Gather service-owned metrics from the registry.
+	mfs, err := s.metrics.Registry.Gather()
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to fetch metrics")
+		writeError(w, http.StatusInternalServerError, "gather metrics: "+err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
+	enc := expfmt.NewEncoder(w, expfmt.FmtText)
+	for _, mf := range mfs {
+		if err := enc.Encode(mf); err != nil {
+			return
+		}
+	}
+	// Fetch and namespace controller passthrough metrics.
+	body, err := s.svc.forkd.Metrics(r.Context())
+	if err == nil {
+		_, _ = w.Write([]byte(metrics.NamespaceControllerMetrics(body)))
+	}
 }
 
-// Handler returns the HTTP handler with auth middleware applied.
+// collectServiceMetrics updates live gauge metrics from the current
+// service and identity state (issue #20). Called before gathering
+// metrics for /metrics so gauges reflect the moment of scrape.
+func (s *Server) collectServiceMetrics() {
+	s.svc.CollectMetrics(s.metrics)
+	// Identity user counts.
+	if s.svc.identities != nil {
+		persons, agents, admins := 0, 0, 0
+		for _, u := range s.svc.identities.Users() {
+			if u.Admin {
+				admins++
+			}
+			if u.Kind == identity.KindAgent {
+				agents++
+			} else {
+				persons++
+			}
+		}
+		s.metrics.IdentityUsers.WithLabelValues("person").Set(float64(persons))
+		s.metrics.IdentityUsers.WithLabelValues("agent").Set(float64(agents))
+		s.metrics.IdentityAdmins.Set(float64(admins))
+	}
+	// Busy slots per owner.
+	s.busyMu.Lock()
+	for owner, n := range s.busyCount {
+		s.metrics.BusySlots.WithLabelValues(owner).Set(float64(n))
+	}
+	s.busyMu.Unlock()
+}
+
+// Handler returns the HTTP handler with auth + metrics middleware applied.
 func (s *Server) Handler() http.Handler {
-	return s.authMiddleware(s.mux)
+	return s.metricsMiddleware(s.authMiddleware(s.mux))
+}
+
+// metricsMiddleware records HTTP request count and latency by path
+// and method (issue #20). Wraps the outermost handler so it sees all
+// requests including auth failures.
+func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sw, r)
+		path := normalizePath(r.URL.Path)
+		s.metrics.HTTPReqs.WithLabelValues(path, r.Method, strconv.Itoa(sw.status)).Inc()
+		s.metrics.HTTPDur.WithLabelValues(path).Observe(time.Since(start).Seconds())
+	})
+}
+
+// statusWriter wraps http.ResponseWriter to capture the status code.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+// normalizePath reduces high-cardinality paths (sandbox ids, user ids)
+// to stable labels for metrics.
+func normalizePath(p string) string {
+	// Replace hex ids with :id
+	if len(p) > 40 && isHexPath(p) {
+		return "/api/sandboxes/:id"
+	}
+	if strings.HasPrefix(p, "/api/sandboxes/") {
+		rest := strings.TrimPrefix(p, "/api/sandboxes/")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) > 0 && len(parts[0]) >= 32 {
+			if len(parts) > 1 {
+				return "/api/sandboxes/:id/" + parts[1]
+			}
+			return "/api/sandboxes/:id"
+		}
+	}
+	if strings.HasPrefix(p, "/api/users/") {
+		rest := strings.TrimPrefix(p, "/api/users/")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) > 0 && strings.HasPrefix(parts[0], "u-") {
+			if len(parts) > 1 {
+				return "/api/users/:id/" + parts[1]
+			}
+			return "/api/users/:id"
+		}
+	}
+	return p
+}
+
+func isHexPath(p string) bool {
+	for _, c := range p {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == '/' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // authMiddleware authenticates the bearer token and injects the
@@ -255,7 +367,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		ip := clientIP(r.RemoteAddr)
 		owner, ok := s.svc.ResolveOwner(token)
 		if !ok {
+			s.metrics.AuthFailures.Inc()
 			if s.authFails.hit(ip) {
+				s.metrics.AuthThrottled.Inc()
 				writeError(w, http.StatusTooManyRequests, "too many failed auth attempts; try again shortly")
 				return
 			}
@@ -654,31 +768,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 // dialInNetns enters the given network namespace on a locked thread,
 // dials addr, and returns the connection (usable from any thread once
 // established — the socket is already bound in the target netns).
-func dialInNetns(netns, addr string) (net.Conn, error) {
-	type result struct {
-		conn net.Conn
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		f, err := os.Open(filepath.Join("/var/run/netns", netns))
-		if err != nil {
-			ch <- result{nil, fmt.Errorf("open netns %s: %w", netns, err)}
-			return
-		}
-		defer f.Close()
-		if err := unix.Setns(int(f.Fd()), unix.CLONE_NEWNET); err != nil {
-			ch <- result{nil, fmt.Errorf("setns %s: %w", netns, err)}
-			return
-		}
-		d, err := net.DialTimeout("tcp", addr, 10*time.Second)
-		ch <- result{d, err}
-	}()
-	r := <-ch
-	return r.conn, r.err
-}
+// dialInNetns is defined in netns_linux.go (Linux) and netns_other.go
+// (non-Linux stub). It enters the named netns and dials addr.
 
 // handleKeepAlive extends a persistent lease's expiry. The caller must
 // own the lease. Body may carry {"ttl": seconds} (capped at maxTTL).
