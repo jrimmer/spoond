@@ -1,13 +1,18 @@
 // Package mcp implements the spoond MCP server (ticket #23): a Model Context
 // Protocol server that exposes forkd microVM sandboxes as agent tools.
 //
-// Transport: newline-delimited JSON-RPC 2.0 over stdio (the standard MCP
-// stdio transport — agents spawn the server as a subprocess and speak
-// JSON-RPC). Hand-rolled to keep the dependency footprint at zero; the
-// protocol surface we implement is small and stable:
+// Transport: stdio (newline-delimited JSON-RPC 2.0) by default, or HTTP
+// (Streamable HTTP transport per the 2025-03-26 MCP spec) when the caller
+// invokes RunHTTP. The HTTP transport also exposes a GET /sse endpoint
+// for backward compatibility with older MCP clients that use the
+// 2024-11-05 HTTP+SSE transport.
+//
+// Hand-rolled to keep the dependency footprint at zero; the protocol
+// surface we implement is small and stable:
 //
 //	initialize            (capability negotiation)
 //	notifications/initialized
+//	ping
 //	tools/list            (tool registry)
 //	tools/call            (execute a tool in a forkd sandbox)
 //
@@ -47,6 +52,10 @@ type Server struct {
 	tools   []Tool
 	mu      sync.Mutex
 	closed  bool
+	// HTTP transport state
+	httpPathPrefix string
+	sseSessions    map[string]*sseSession
+	sseSessionsMu  sync.Mutex
 }
 
 // Config wires the server.
