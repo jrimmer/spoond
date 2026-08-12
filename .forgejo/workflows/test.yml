@@ -8,6 +8,10 @@ on:
 jobs:
   test:
     runs-on: go
+    env:
+      PATH: /usr/local/go/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+      GOPATH: /tmp/gopath
+      GOMODCACHE: /tmp/gopath/pkg/mod
     steps:
       - uses: actions/checkout@v4
       - run: go version
@@ -16,17 +20,8 @@ jobs:
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
       - name: go vet
-        env:
-          GOPATH: /tmp/gopath
-          GOMODCACHE: /tmp/gopath/pkg/mod
         run: go vet ./...
       - name: go build
-        env:
-          GOPATH: /tmp/gopath
-          GOMODCACHE: /tmp/gopath/pkg/mod
         run: go build ./...
       - name: go test
-        env:
-          GOPATH: /tmp/gopath
-          GOMODCACHE: /tmp/gopath/pkg/mod
         run: go test ./...
