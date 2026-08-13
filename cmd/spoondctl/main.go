@@ -21,6 +21,10 @@
 //	spoondctl tag <id> <name>        give the sandbox a friendly name
 //	spoondctl prompt <id> <message>  ask the agent in a sandbox something
 //	spoondctl ssh <id|name>          drop into a shell (delegates to ssh)
+//	spoondctl env ls                  list per-PR ephemeral environments
+//	spoondctl env new <repo> <pr> [image]   create/ensure a PR environment
+//	spoondctl env rm <repo> <pr>      tear down a PR environment
+//	spoondctl env id <repo> <pr>      print the environment's sandbox id
 //	spoondctl help
 //
 // Environment: FORKD_CTL_HOST (default sandbox.lacy.casa), FORKD_CTL_PORT
@@ -123,6 +127,41 @@ func Main(args []string) int {
 	case "ls":
 		printJSON(runCtl(host, port, key, "ls"))
 		return 0
+	case "env":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: spoondctl env ls|new <repo> <pr> [image]|rm <repo> <pr>|id <repo> <pr>")
+			return 1
+		}
+		switch rest[0] {
+		case "ls":
+			printJSON(runCtl(host, port, key, "env ls"))
+		case "new":
+			if len(rest) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: spoondctl env new <repo> <pr> [image]")
+				return 1
+			}
+			cmd := fmt.Sprintf("env new %s %s", rest[1], rest[2])
+			if len(rest) > 3 {
+				cmd += " " + rest[3]
+			}
+			printJSON(runCtl(host, port, key, cmd))
+		case "rm":
+			if len(rest) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: spoondctl env rm <repo> <pr>")
+				return 1
+			}
+			printJSON(runCtl(host, port, key, fmt.Sprintf("env rm %s %s", rest[1], rest[2])))
+		case "id":
+			if len(rest) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: spoondctl env id <repo> <pr>")
+				return 1
+			}
+			printJSON(runCtl(host, port, key, fmt.Sprintf("env id %s %s", rest[1], rest[2])))
+		default:
+			fmt.Fprintf(os.Stderr, "spoondctl env: unknown subcommand %q\n", rest[0])
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "spoondctl: unknown command %q\n\n", verb)
 		usage()
@@ -203,6 +242,10 @@ usage:
   spoondctl whoami                 show the authenticated key identity
   spoondctl prompt <id> <message>  ask the agent in a sandbox something
   spoondctl ssh <id|name>          drop into a shell
+  spoondctl env ls                 list per-PR ephemeral environments
+  spoondctl env new <repo> <pr> [image]  create/ensure a PR environment
+  spoondctl env rm <repo> <pr>     tear down a PR environment
+  spoondctl env id <repo> <pr>     print the environment's sandbox id
   spoondctl help
 
 env: FORKD_CTL_HOST (sandbox.lacy.casa), FORKD_CTL_PORT (2222), FORKD_CTL_KEY (~/.ssh/id_ed25519)

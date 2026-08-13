@@ -35,6 +35,7 @@ ssh ctl@sandbox.example.com -p 2222 "stat <id>"
 | `cp` | `cp <id> [tag]` (alias `clone`) | branch snapshot + spawn clone |
 | `tag` | `tag <id> <name>` | friendly name (then `ssh <name>@…`) |
 | `comment` | `comment <id> [text…]` | annotate; no text clears |
+| `env` | `env ls` / `env new <repo> <pr> [image]` / `env rm <repo> <pr>` / `env id <repo> <pr>` | per-PR ephemeral environments (see `docs/environments.md`) |
 | `share` | `share add <id> <user> [ssh\|http] [ttl]` / `share ls <id>` / `share rm <id> <user>` | grant/list/revoke lease access (epic #26 U9) |
 | `ssh-key` | `ssh-key ls` / `ssh-key add <pubkey> <name>` / `ssh-key rm <user-id>` | manage users & SSH keys (v1.1; `ls`/`add` are admin after bootstrap) |
 | `shelly` | `shelly <id>` (alias `agent`) | start the in-sandbox Shelley coding agent |

@@ -18,6 +18,10 @@
 //	                 cap (0 = unlimited; U8/T8). Per-user LLM keys are
 //	                 store data, set via POST /api/users/{id}/llm-key,
 //	                 not env config.
+//	BOOTSTRAP_TOKEN  first-user bootstrap gate (optional)
+//	WEBHOOK_SECRET   Forgejo webhook HMAC secret for /hooks/forgejo (optional)
+//	ENV_OWNER        owner for webhook-created environments (default: first consumer)
+//	ENV_IMAGE        default image for environments (default: dev-base)
 package spoondbackend
 
 import (
@@ -148,6 +152,14 @@ func Main(args []string) int {
 	// multi-user deployments so a leaked consumer token can't claim
 	// admin on a fresh store.
 	srv.SetBootstrapToken(os.Getenv("BOOTSTRAP_TOKEN"))
+
+	// Per-PR ephemeral environments (Forgejo webhook receiver).
+	// WEBHOOK_SECRET is the HMAC-SHA256 shared secret (empty disables
+	// /hooks/forgejo); ENV_OWNER is the lease owner for webhook-created
+	// environments (empty falls back to the first consumer token);
+	// ENV_IMAGE is the default image (default dev-base).
+	srv.SetWebhookSecret(os.Getenv("WEBHOOK_SECRET"))
+	srv.SetEnvDefaults(os.Getenv("ENV_OWNER"), envOr("ENV_IMAGE", "dev-base"))
 
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).

@@ -46,6 +46,14 @@ type Server struct {
 	// bootstrap when configured: the store-empty creation must present
 	// X-Bootstrap-Token matching it. Set via BOOTSTRAP_TOKEN env.
 	bootstrapToken string
+	// webhookSecret (env WEBHOOK_SECRET) verifies Forgejo webhook
+	// deliveries to /hooks/forgejo via HMAC-SHA256. Empty disables the
+	// receiver.
+	webhookSecret string
+	// envOwner and envImage are the defaults applied to environments
+	// created via the webhook receiver (which presents no consumer token).
+	envOwner string
+	envImage string
 	// metrics (issue #20): service-owned Prometheus metrics served at
 	// /metrics alongside namespaced controller passthrough.
 	metrics *metrics.BackendMetrics
@@ -88,6 +96,19 @@ func (s *Server) releaseBusy(owner string) {
 // authenticated caller (legacy behavior).
 func (s *Server) SetBootstrapToken(tok string) {
 	s.bootstrapToken = tok
+}
+
+// SetWebhookSecret configures the Forgejo webhook receiver HMAC secret.
+// Empty disables /hooks/forgejo.
+func (s *Server) SetWebhookSecret(secret string) {
+	s.webhookSecret = secret
+}
+
+// SetEnvDefaults sets the owner and image applied to environments created
+// via the webhook receiver (which has no authenticated consumer).
+func (s *Server) SetEnvDefaults(owner, image string) {
+	s.envOwner = owner
+	s.envImage = image
 }
 
 // SetProxyAuth configures the public proxy listener's auth gate
@@ -162,6 +183,12 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
+	// Per-PR ephemeral environments (Forgejo webhook driven).
+	s.mux.HandleFunc("POST /api/environments", s.handleEnvCreate)
+	s.mux.HandleFunc("GET /api/environments", s.handleEnvList)
+	s.mux.HandleFunc("DELETE /api/environments", s.handleEnvDelete)
+	// Forgejo webhook receiver: auth-exempt (HMAC-verified in-handler).
+	s.mux.HandleFunc("POST /hooks/forgejo", s.handleForgejoWebhook)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -351,7 +378,7 @@ func isHexPath(p string) bool {
 // capability, and sandboxes hold no consumer token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) || strings.HasPrefix(r.URL.Path, "/hooks/") {
 			next.ServeHTTP(w, r)
 			return
 		}

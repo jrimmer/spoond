@@ -679,7 +679,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
+		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, env ls|new <repo> <pr>|rm <repo> <pr>|id <repo> <pr>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {
@@ -815,6 +815,61 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
 		return strings.TrimSpace(string(b))
+	case "env":
+		if len(fields) < 2 {
+			return `{"error":"usage: env ls | env new <repo> <pr> [image] | env rm <repo> <pr> | env id <repo> <pr>"}`
+		}
+		switch fields[1] {
+		case "ls":
+			b, err := backendJSON(ctx, http.MethodGet, "/api/environments", nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return strings.TrimSpace(string(b))
+		case "new":
+			if len(fields) < 4 {
+				return `{"error":"usage: env new <repo> <pr> [image]"}`
+			}
+			img := ""
+			if len(fields) > 4 {
+				img = fields[4]
+			}
+			p, _ := json.Marshal(map[string]string{"repo": fields[2], "ref": fields[3], "image": img})
+			b, err := backendJSON(ctx, http.MethodPost, "/api/environments", p)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return strings.TrimSpace(string(b))
+		case "rm":
+			if len(fields) < 4 {
+				return `{"error":"usage: env rm <repo> <pr>"}`
+			}
+			path := "/api/environments?repo=" + url.QueryEscape(fields[2]) + "&ref=" + url.QueryEscape(fields[3])
+			if err := backendJSONErr(ctx, http.MethodDelete, path, nil); err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return fmt.Sprintf(`{"deleted":true,"repo":%q,"ref":%q}`, fields[2], fields[3])
+		case "id":
+			if len(fields) < 4 {
+				return `{"error":"usage: env id <repo> <pr>"}`
+			}
+			path := "/api/environments?repo=" + url.QueryEscape(fields[2]) + "&ref=" + url.QueryEscape(fields[3])
+			b, err := backendJSON(ctx, http.MethodGet, path, nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			var resp struct {
+				Envs []struct {
+					SandboxID string `json:"sandbox_id"`
+				} `json:"environments"`
+			}
+			if err := json.Unmarshal(b, &resp); err != nil || len(resp.Envs) == 0 {
+				return `{"error":"environment not found"}`
+			}
+			return fmt.Sprintf(`{"sandbox_id":%q}`, resp.Envs[0].SandboxID)
+		default:
+			return `{"error":"unknown env subcommand (ls|new|rm|id)"}`
+		}
 	case "prompt":
 		if len(fields) < 3 {
 			return `{"error":"usage: prompt <lease-id> <message...>"}`

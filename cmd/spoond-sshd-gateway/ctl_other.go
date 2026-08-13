@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-func runControlCommand(ctx context.Context, cmd string, gatewayKey interface{}, keyID, userID, userName string) string {
+func runControlCommand(_ context.Context, cmd string, _ interface{}, keyID, userID, userName string) string {
 	fields := strings.Fields(cmd)
 	if len(fields) == 0 {
 		return `{"error":"empty command"}`
@@ -50,8 +50,10 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey interface{}, 
 		return fmt.Sprintf("user: ctl (key: %s)", keyID)
 	case "ssh-key", "keys":
 		return "usage: ssh-key ls|add <pubkey> <name>|rm <id>"
+	case "env":
+		return "usage: env ls|new <repo> <pr> [image]|rm <repo> <pr>|id <repo> <pr> (stub — full impl on Linux)"
 	case "help", "--help", "-h":
-		return "commands: new, ls, rm, stat, whoami, help (stub — full impl on Linux)"
+		return "commands: new, ls, rm, stat, whoami, env, help (stub — full impl on Linux)"
 	default:
 		return fmt.Sprintf(`{"error":"stub: %s not available on non-Linux"}`, fields[0])
 	}

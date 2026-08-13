@@ -74,6 +74,11 @@ type BackendMetrics struct {
 	// Builds (image bake)
 	BuildsInFlight prometheus.Gauge   // active bakes
 	BuildsFailed   prometheus.Counter // cumulative bake failures
+
+	// Environments (per-PR ephemeral environments)
+	EnvCreated  prometheus.Counter // cumulative environments created
+	EnvTeardown prometheus.Counter // cumulative environments torn down
+	EnvsActive  prometheus.Gauge   // live environment count
 }
 
 // NewBackendMetrics creates and registers all backend metrics on a
@@ -253,6 +258,20 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Cumulative image bake failures.",
 	})
 
+	// Environments
+	m.EnvCreated = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "environments_created_total",
+		Help: "Cumulative per-PR ephemeral environments created.",
+	})
+	m.EnvTeardown = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "environments_teardown_total",
+		Help: "Cumulative per-PR ephemeral environments torn down.",
+	})
+	m.EnvsActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "environments_active",
+		Help: "Live per-PR ephemeral environments.",
+	})
+
 	// Register all
 	reg.MustRegister(
 		m.PoolReady, m.PoolCap, m.PoolRefill, m.PoolRefillFail,
@@ -268,6 +287,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.AuthThrottled, m.QuotaExceeded, m.QuotaReserved,
 		m.SharesActive, m.BusySlots,
 		m.BuildsInFlight, m.BuildsFailed,
+		m.EnvCreated, m.EnvTeardown, m.EnvsActive,
 	)
 	return m
 }

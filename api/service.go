@@ -72,6 +72,10 @@ type Store struct {
 	// the same lock as the quota count and released when the lease is
 	// inserted or the grant fails, closing the check-then-create race.
 	pending map[string]int
+	// envs indexes per-PR ephemeral environments by their stable key
+	// (repo + "#" + ref). A nil-SandboxID entry is a provisioning
+	// sentinel: the environment is being created and not yet ready.
+	envs map[string]*Env
 }
 
 func newStore() *Store {
@@ -80,6 +84,7 @@ func newStore() *Store {
 		pool:    make(map[string][]string),
 		shares:  make(map[string]map[string]*Share),
 		pending: make(map[string]int),
+		envs:    make(map[string]*Env),
 	}
 }
 
