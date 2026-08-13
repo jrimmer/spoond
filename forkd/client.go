@@ -9,8 +9,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -20,16 +22,25 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	breaker *circuitBreaker
 }
 
 // NewClient returns a Client for the controller at baseURL (e.g.
 // "http://127.0.0.1:8889"). If token is non-empty it is sent as a
-// Bearer token on every request.
+// Bearer token on every request. The HTTP client timeout and circuit
+// breaker use DefaultTimeout and the default breaker thresholds.
 func NewClient(baseURL, token string) *Client {
+	return NewClientWithTimeout(baseURL, token, defaultTimeout)
+}
+
+// NewClientWithTimeout is NewClient with an explicit HTTP client
+// timeout (issue #53).
+func NewClientWithTimeout(baseURL, token string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL: baseURL,
 		token:   token,
-		http:    &http.Client{Timeout: 600 * time.Second},
+		http:    &http.Client{Timeout: timeout},
+		breaker: newCircuitBreaker(breakerThreshold, breakerCooldown, breakerMaxCooldown),
 	}
 }
 
@@ -97,6 +108,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	// c.http.Do) produces "http: ContentLength=N with Body length 0" on
 	// retry — the Content-Length header is set from the original buffer
 	// size, but the body reader is at EOF.
+
+	// Circuit breaker (issue #53): one admission per call, before any
+	// attempt. Fail fast when the controller is wedged instead of
+	// blocking for the full HTTP timeout.
+	if err := c.breaker.allow(time.Now()); err != nil {
+		return err
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
 		if attempt > 0 {
@@ -122,6 +141,18 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		resp, err := c.http.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("forkd: %s %s: %w", method, path, err)
+			// Caller cancellation is not a controller fault — don't
+			// count it toward the breaker.
+			if ctx.Err() != nil {
+				return lastErr
+			}
+			// A timeout means the controller is hung, not transiently
+			// refusing — don't re-issue (a re-run would duplicate a
+			// non-idempotent exec).
+			if isTimeout(err) {
+				c.breaker.recordFailure(time.Now())
+				return lastErr
+			}
 			continue
 		}
 		// Close the body explicitly — defer in a loop would leak across
@@ -132,18 +163,57 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&eb)
 			resp.Body.Close()
+			// Unhealthy statuses count toward the breaker; a definitive
+			// client error (4xx) or permanent server answer (e.g. 501)
+			// proves the controller is responsive.
+			if controllerUnhealthy(resp.StatusCode) {
+				c.breaker.recordFailure(time.Now())
+			} else {
+				c.breaker.recordSuccess()
+			}
 			return &Error{StatusCode: resp.StatusCode, Message: eb.Error}
 		}
 		if out != nil {
 			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 				resp.Body.Close()
+				// 2xx = the controller responded; don't leave a stale
+				// failure count behind a healthy answer.
+				c.breaker.recordSuccess()
 				return fmt.Errorf("forkd: decode response: %w", err)
 			}
 		}
 		resp.Body.Close()
+		c.breaker.recordSuccess()
 		return nil
 	}
+	// Exhausted retries on transient network errors (timeouts and
+	// cancellations returned above): one failure for the whole call.
+	c.breaker.recordFailure(time.Now())
 	return lastErr
+}
+
+// controllerUnhealthy reports whether a controller HTTP status is a
+// transient server-side failure worth counting toward the circuit
+// breaker (mirrors runner.ClassifyStatus's retryable set).
+func controllerUnhealthy(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// isTimeout reports whether err is a request timeout (a hung controller)
+// rather than a fast connection refusal/reset.
+func isTimeout(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 // ListSnapshots returns the registered snapshot tags.

@@ -57,3 +57,71 @@ func TestHTTPLeaseClientAgentToken(t *testing.T) {
 		}
 	}
 }
+
+// TestHTTPLeaseClientExecRetriesTransient verifies Exec retries a
+// retryable status (503) and succeeds on the following attempt.
+func TestHTTPLeaseClientExecRetriesTransient(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"stdout":"ok\n","stderr":"","exit":0}`))
+	}))
+	defer srv.Close()
+	c := NewHTTPLeaseClient(srv.URL, "t")
+	if _, err := c.Exec(context.Background(), "sb-1", "echo hi", "", nil, 10); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (one retry then success)", calls)
+	}
+}
+
+// TestHTTPLeaseClientExecNoRetryOnGone verifies a permanent 410 (stale
+// lease) fails immediately without retry.
+func TestHTTPLeaseClientExecNoRetryOnGone(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer srv.Close()
+	c := NewHTTPLeaseClient(srv.URL, "t")
+	if _, err := c.Exec(context.Background(), "sb-1", "echo hi", "", nil, 10); err == nil {
+		t.Fatal("expected error for 410")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (410 is permanent)", calls)
+	}
+}
+
+// TestHTTPLeaseClientExecNoRetryOnNotImplemented verifies a permanent
+// 501 (previously retried via the raw >=500 split) now fails immediately.
+func TestHTTPLeaseClientExecNoRetryOnNotImplemented(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	defer srv.Close()
+	c := NewHTTPLeaseClient(srv.URL, "t")
+	if _, err := c.Exec(context.Background(), "sb-1", "echo hi", "", nil, 10); err == nil {
+		t.Fatal("expected error for 501")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (501 is permanent)", calls)
+	}
+}
+
+// TestNewHTTPLeaseClientTimeout asserts the bounded client timeout is
+// actually installed (issue #53).
+func TestNewHTTPLeaseClientTimeout(t *testing.T) {
+	c := NewHTTPLeaseClient("http://127.0.0.1:8890", "t")
+	if c.Client.Timeout != leaseClientTimeout {
+		t.Errorf("Client.Timeout = %s, want %s", c.Client.Timeout, leaseClientTimeout)
+	}
+}

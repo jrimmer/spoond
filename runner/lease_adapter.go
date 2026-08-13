@@ -19,12 +19,17 @@ type HTTPLeaseClient struct {
 	NetAllow  []string // allowlist IPs/CIDRs for restricted policy
 }
 
+// leaseClientTimeout bounds the runner→backend HTTP client. It must stay
+// above the 300s max exec timeout but well below the old 600s so a wedged
+// backend cannot hold a step for many minutes (issue #53).
+const leaseClientTimeout = 330 * time.Second
+
 // NewHTTPLeaseClient builds a lease API adapter.
 func NewHTTPLeaseClient(baseURL, token string) *HTTPLeaseClient {
 	return &HTTPLeaseClient{
 		BaseURL:   baseURL,
 		Token:     token,
-		Client:    &http.Client{Timeout: 600 * time.Second},
+		Client:    &http.Client{Timeout: leaseClientTimeout},
 		NetPolicy: "lan", // CI sandboxes need LAN egress to reach Forgejo
 	}
 }
@@ -92,11 +97,10 @@ func (c *HTTPLeaseClient) Exec(ctx context.Context, id, cmd, cwd string, env map
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			// 410 Gone = sandbox permanently dead; don't retry.
-			// 500/502/503 = transient backend error; retry.
-			// Other non-200 = client error; don't retry.
-			if resp.StatusCode == http.StatusGone ||
-				resp.StatusCode < 500 {
+			// Shared retry taxonomy (issue #53): retryable statuses
+			// (429/500/502/503/504) back off and retry; permanent
+			// statuses (410 Gone, 4xx, 501) return immediately.
+			if ClassifyStatus(resp.StatusCode) == ClassPermanent {
 				return nil, fmt.Errorf("exec: status %d", resp.StatusCode)
 			}
 			lastErr = fmt.Errorf("exec: status %d", resp.StatusCode)
