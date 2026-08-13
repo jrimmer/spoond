@@ -29,7 +29,7 @@ type RunnerState map[string]RunnerStateEntry
 // with Forgejo, fetches jobs, and executes them. Implemented by
 // ForgejoAdapter + Executor; injectable for tests.
 type RunnerWorker interface {
-	Register(ctx context.Context, name, token string, labels []string, ephemeral bool) (int64, error)
+	Register(ctx context.Context, name, token string, labels []string) (int64, error)
 	Restore(uuid, token string, id int64)
 	RunnerID() int64
 	Deregister(adminToken string) error
@@ -44,8 +44,8 @@ type WorkerImpl struct {
 	Exec    *Executor
 }
 
-func (w *WorkerImpl) Register(ctx context.Context, name, token string, labels []string, ephemeral bool) (int64, error) {
-	return w.Adapter.Register(ctx, name, token, labels, ephemeral)
+func (w *WorkerImpl) Register(ctx context.Context, name, token string, labels []string) (int64, error) {
+	return w.Adapter.Register(ctx, name, token, labels)
 }
 func (w *WorkerImpl) Restore(uuid, token string, id int64) {
 	w.Adapter.Restore(uuid, token, id)
@@ -254,7 +254,7 @@ func (w *worker) snapshot() (workerState, time.Time) {
 
 // run is the worker's main loop. It registers once (or restores
 // saved credentials), then polls for jobs indefinitely. Unlike the
-// previous ephemeral design, the worker does NOT re-register after each
+// design, the worker does NOT re-register after each
 // job — it stays on the same registration and keeps polling.
 //
 // If savedState is non-nil, the worker first restores the saved UUID
@@ -318,7 +318,7 @@ func (w *worker) run(ctx context.Context, savedState *RunnerStateEntry, onRegist
 	}
 }
 
-// registerFresh registers with Forgejo using a non-ephemeral registration.
+// registerFresh registers with Forgejo. Registration is always persistent
 // Retries with backoff until success or context cancellation.
 func (w *worker) registerFresh(ctx context.Context) error {
 	for {
@@ -328,7 +328,7 @@ func (w *worker) registerFresh(ctx context.Context) error {
 		if st, _ := w.snapshot(); st == workerStopped {
 			return fmt.Errorf("worker stopped")
 		}
-		if _, err := w.impl.Register(ctx, w.name, w.token, w.labels, false); err != nil {
+		if _, err := w.impl.Register(ctx, w.name, w.token, w.labels); err != nil {
 			log.Printf("worker %d: register: %v", w.id, err)
 			select {
 			case <-time.After(5 * time.Second):

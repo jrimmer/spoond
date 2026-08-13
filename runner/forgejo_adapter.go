@@ -84,12 +84,12 @@ func authFrom(ctx context.Context) map[string]string {
 // Register registers this runner with Forgejo and returns the runner id.
 // The returned UUID and token are stored and sent as headers on
 // subsequent protocol calls.
-func (a *ForgejoAdapter) Register(ctx context.Context, name, token string, labels []string, ephemeral bool) (int64, error) {
+func (a *ForgejoAdapter) Register(ctx context.Context, name, token string, labels []string) (int64, error) {
 	resp, err := a.svc.Register(ctx, connect.NewRequest(&runnerv1.RegisterRequest{
 		Name:      name,
 		Token:     token,
 		Labels:    labels,
-		Ephemeral: ephemeral,
+		Ephemeral: false,
 		Version:   "forkd-runner-v0.1",
 	}))
 	if err != nil {

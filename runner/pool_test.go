@@ -22,7 +22,7 @@ func newFakeWorker() *fakeWorker {
 	return &fakeWorker{stopCh: make(chan struct{})}
 }
 
-func (f *fakeWorker) Register(ctx context.Context, name, token string, labels []string, ephemeral bool) (int64, error) {
+func (f *fakeWorker) Register(ctx context.Context, name, token string, labels []string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.regs++
