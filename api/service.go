@@ -72,6 +72,9 @@ type Store struct {
 	// the same lock as the quota count and released when the lease is
 	// inserted or the grant fails, closing the check-then-create race.
 	pending map[string]int
+	// records holds run checkpoints (issue #55): a before/after snapshot
+	// pair per sandbox run, replayable via grantFromSnapshot.
+	records map[string]*Record
 }
 
 func newStore() *Store {
@@ -80,6 +83,7 @@ func newStore() *Store {
 		pool:    make(map[string][]string),
 		shares:  make(map[string]map[string]*Share),
 		pending: make(map[string]int),
+		records: make(map[string]*Record),
 	}
 }
 

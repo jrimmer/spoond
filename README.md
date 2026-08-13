@@ -38,7 +38,7 @@ spoond (this repo)                 forkd controller (separate repo)
   table by default; `--json` for raw). Verbs: `new`, `ls`, `stat`,
   `rm`, `keepalive`, `suspend`, `resume`, `restart`, `cp` (clone),
   `tag`, `comment`, `exec`, `share`, `ssh-key` (admin), `whoami`,
-  `shelly`, `prompt`.
+  `shelly`, `prompt`, `record` (checkpoint/replay, see docs/records.md).
 - **HTTP proxy** — `<lease-id>.sandbox.example` and `<id>-<port>`
   public URLs for sandbox web servers (Caddy fronts TLS).
 - **LLM gateway** — per-lease OpenAI-compatible endpoint
@@ -52,6 +52,9 @@ spoond (this repo)                 forkd controller (separate repo)
 - **Per-sandbox network policy** — `none` | `lan` | `internet` |
   `restricted` (with egress allowlist), enforced with iptables in the
   child netns.
+- **Sandbox record/replay** — bracket a run with before/after
+  checkpoints (forkd branch snapshots) and re-attach to the after state
+  later, for debugging and audit (see docs/records.md).
 - **Forgejo Actions runner** — `spoond runner` adaptively leases
   sandboxes as CI workers.
 
@@ -74,6 +77,7 @@ git clone https://github.com/jrimmer/spoond && cd spoond
 | [Setup](docs/setup.md) | prerequisites, build, env/flag reference, systemd, TLS |
 | [API reference](docs/api.md) | every endpoint: auth, request/response, errors |
 | [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
+| [Records](docs/records.md) | sandbox record/replay: checkpoints + re-attach |
 | [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user | 
 | [Operations](docs/operations.md) | pool, watchdog, failure runbook, backups, identity ops |
 | [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |

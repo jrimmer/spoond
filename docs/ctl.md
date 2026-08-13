@@ -39,6 +39,7 @@ ssh ctl@sandbox.example.com -p 2222 "stat <id>"
 | `ssh-key` | `ssh-key ls` / `ssh-key add <pubkey> <name>` / `ssh-key rm <user-id>` | manage users & SSH keys (v1.1; `ls`/`add` are admin after bootstrap) |
 | `shelly` | `shelly <id>` (alias `agent`) | start the in-sandbox Shelley coding agent |
 | `prompt` | `prompt <id> <message…>` | message the Shelley agent (waits for reply) |
+| `record` | `record start <id> [label]` / `record stop <record-id>` / `record ls` / `record replay <record-id>` / `record rm <record-id>` | checkpoint a run and re-attach to its after-state (issue #55; see [records.md](records.md)) |
 
 ## Examples
 

@@ -679,7 +679,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
+		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user>, record start <id> [label]|stop <id>|ls|replay <id>|rm <id> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {
@@ -1004,8 +1004,92 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		default:
 			return `{"error":"unknown share subcommand — add, ls, rm"}`
 		}
+	case "record":
+		// Record/replay (issue #55). record start <id> [label] /
+		// record stop <record-id> / record ls / record replay <record-id> /
+		// record rm <record-id>. Always JSON output.
+		if len(fields) < 2 {
+			return `{"error":"usage: record start <lease-id> [label] | record stop <record-id> | record ls | record replay <record-id> | record rm <record-id>"}`
+		}
+		sub := fields[1]
+		switch sub {
+		case "start":
+			if len(fields) < 3 {
+				return `{"error":"usage: record start <lease-id> [label]"}`
+			}
+			var p []byte
+			if len(fields) > 3 {
+				p, _ = json.Marshal(map[string]any{"label": strings.Join(fields[3:], " ")})
+			}
+			b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[2]+"/record/start", p)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return strings.TrimSpace(string(b))
+		case "stop":
+			if len(fields) < 3 {
+				return `{"error":"usage: record stop <record-id>"}`
+			}
+			b, err := backendJSON(ctx, http.MethodPost, "/api/records/"+fields[2]+"/stop", nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return strings.TrimSpace(string(b))
+		case "ls":
+			b, err := backendJSON(ctx, http.MethodGet, "/api/records", nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			if jsonMode {
+				return strings.TrimSpace(string(b))
+			}
+			var resp struct {
+				Records []struct {
+					ID        string `json:"id"`
+					Label     string `json:"label"`
+					SandboxID string `json:"sandbox_id"`
+					AfterTag  string `json:"after_tag"`
+				} `json:"records"`
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(b, &resp); err != nil || resp.Error != "" {
+				return strings.TrimSpace(string(b))
+			}
+			if len(resp.Records) == 0 {
+				return "no records"
+			}
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "%-36s %-16s %-20s %s\n", "RECORD", "SANDBOX", "LABEL", "STATE")
+			for _, rec := range resp.Records {
+				state := "open"
+				if rec.AfterTag != "" {
+					state = "stopped"
+				}
+				fmt.Fprintf(&sb, "%-36s %-16s %-20s %s\n", rec.ID, rec.SandboxID, rec.Label, state)
+			}
+			return strings.TrimSuffix(sb.String(), "\n")
+		case "replay":
+			if len(fields) < 3 {
+				return `{"error":"usage: record replay <record-id>"}`
+			}
+			b, err := backendJSON(ctx, http.MethodPost, "/api/records/"+fields[2]+"/replay", nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return strings.TrimSpace(string(b))
+		case "rm":
+			if len(fields) < 3 {
+				return `{"error":"usage: record rm <record-id>"}`
+			}
+			if err := backendJSONErr(ctx, http.MethodDelete, "/api/records/"+fields[2], nil); err != nil {
+				return fmt.Sprintf(`{"error":"%v"}`, err)
+			}
+			return fmt.Sprintf(`{"deleted":%q}`, fields[2])
+		default:
+			return `{"error":"unknown record subcommand — start, stop, ls, replay, rm"}`
+		}
 	default:
-		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, restart, tag, prompt, ssh-key, share, help"}`, fields[0])
+		return fmt.Sprintf(`{"error":"unknown command %q — try new, ls, rm, keepalive, cp, shelly, restart, tag, prompt, ssh-key, share, record, help"}`, fields[0])
 	}
 }
 

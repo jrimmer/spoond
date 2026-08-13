@@ -74,6 +74,11 @@ type BackendMetrics struct {
 	// Builds (image bake)
 	BuildsInFlight prometheus.Gauge   // active bakes
 	BuildsFailed   prometheus.Counter // cumulative bake failures
+
+	// Records (issue #55)
+	RecordCreated prometheus.Counter // cumulative record checkpoints started
+	RecordReplay  prometheus.Counter // cumulative replay grants
+	RecordsActive prometheus.Gauge   // open (un-stopped) run records
 }
 
 // NewBackendMetrics creates and registers all backend metrics on a
@@ -253,6 +258,20 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Cumulative image bake failures.",
 	})
 
+	// Records
+	m.RecordCreated = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "record_created_total",
+		Help: "Cumulative run-record checkpoints started.",
+	})
+	m.RecordReplay = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "record_replay_total",
+		Help: "Cumulative replay grants from a recorded state.",
+	})
+	m.RecordsActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "records_active",
+		Help: "Open (started but not stopped) run records.",
+	})
+
 	// Register all
 	reg.MustRegister(
 		m.PoolReady, m.PoolCap, m.PoolRefill, m.PoolRefillFail,
@@ -268,6 +287,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.AuthThrottled, m.QuotaExceeded, m.QuotaReserved,
 		m.SharesActive, m.BusySlots,
 		m.BuildsInFlight, m.BuildsFailed,
+		m.RecordCreated, m.RecordReplay, m.RecordsActive,
 	)
 	return m
 }

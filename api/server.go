@@ -162,6 +162,13 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
+	// Records (issue #55): checkpoint + replay of sandbox runs.
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/record/start", s.handleRecordStart)
+	s.mux.HandleFunc("POST /api/records/{id}/stop", s.handleRecordStop)
+	s.mux.HandleFunc("GET /api/records", s.handleRecordsList)
+	s.mux.HandleFunc("GET /api/records/{id}", s.handleRecordGet)
+	s.mux.HandleFunc("POST /api/records/{id}/replay", s.handleRecordReplay)
+	s.mux.HandleFunc("DELETE /api/records/{id}", s.handleRecordDelete)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -313,27 +320,34 @@ func normalizePath(p string) string {
 	if len(p) > 40 && isHexPath(p) {
 		return "/api/sandboxes/:id"
 	}
-	if strings.HasPrefix(p, "/api/sandboxes/") {
-		rest := strings.TrimPrefix(p, "/api/sandboxes/")
-		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) > 0 && len(parts[0]) >= 32 {
-			if len(parts) > 1 {
-				return "/api/sandboxes/:id/" + parts[1]
-			}
-			return "/api/sandboxes/:id"
-		}
+	if r := normalizeIDPath(p, "/api/sandboxes/", func(s string) bool { return len(s) >= 32 }); r != "" {
+		return r
 	}
-	if strings.HasPrefix(p, "/api/users/") {
-		rest := strings.TrimPrefix(p, "/api/users/")
-		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) > 0 && strings.HasPrefix(parts[0], "u-") {
-			if len(parts) > 1 {
-				return "/api/users/:id/" + parts[1]
-			}
-			return "/api/users/:id"
-		}
+	if r := normalizeIDPath(p, "/api/users/", func(s string) bool { return strings.HasPrefix(s, "u-") }); r != "" {
+		return r
+	}
+	if r := normalizeIDPath(p, "/api/records/", func(s string) bool { return len(s) >= 32 }); r != "" {
+		return r
 	}
 	return p
+}
+
+// normalizeIDPath collapses a path under prefix whose first segment is
+// an id (per isID) to "<prefix>:id[/rest]", or returns "" when it does
+// not match.
+func normalizeIDPath(p, prefix string, isID func(string) bool) string {
+	if !strings.HasPrefix(p, prefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(p, prefix)
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) == 0 || !isID(parts[0]) {
+		return ""
+	}
+	if len(parts) > 1 {
+		return prefix + ":id/" + parts[1]
+	}
+	return prefix + ":id"
 }
 
 func isHexPath(p string) bool {

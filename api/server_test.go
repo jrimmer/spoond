@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,7 +18,10 @@ import (
 )
 
 // fakeForkd is a minimal in-memory forkd controller for tests.
+// It is safe for concurrent use (the idle sweeper runs against it in a
+// background goroutine while tests read its state via accessors).
 type fakeForkd struct {
+	mu            sync.Mutex
 	snapshots     []forkd.SnapshotInfo
 	sandboxes     map[string]forkd.SandboxInfo
 	workspaces    map[string]*forkd.WorkspaceInfo
@@ -26,8 +30,25 @@ type fakeForkd struct {
 	suspended     []string
 	resumed       []string
 	deadSandboxes map[string]bool
-	netns         string // reported for spawned sandboxes ("" = none)
-	execStdout    string // canned stdout for Exec ("" = default "ok\n")
+	netns         string       // reported for spawned sandboxes ("" = none)
+	execStdout    string       // canned stdout for Exec ("" = default "ok\n")
+	failBranch    *forkd.Error // when set, Branch returns this error
+}
+
+// suspendedCount returns the number of suspended workspaces, safe for
+// concurrent access from the idle-sweeper goroutine.
+func (f *fakeForkd) suspendedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.suspended)
+}
+
+// killedCount returns the number of killed sandboxes, safe for concurrent
+// access from the idle-sweeper goroutine.
+func (f *fakeForkd) killedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.killed)
 }
 
 func newFakeForkd() *fakeForkd {
@@ -71,6 +92,8 @@ func (f *fakeForkd) ListSandboxes(ctx context.Context) ([]forkd.SandboxInfo, err
 }
 
 func (f *fakeForkd) Kill(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.killed = append(f.killed, id)
 	delete(f.sandboxes, id)
 	return nil
@@ -92,6 +115,9 @@ func (f *fakeForkd) Ping(ctx context.Context, id string) error {
 }
 
 func (f *fakeForkd) Branch(ctx context.Context, id, tag string) (string, error) {
+	if f.failBranch != nil {
+		return "", f.failBranch
+	}
 	if f.deadSandboxes != nil && f.deadSandboxes[id] {
 		return "", fmt.Errorf("forkd: sandbox %s not found (status 404)", id)
 	}
@@ -104,6 +130,9 @@ func (f *fakeForkd) Branch(ctx context.Context, id, tag string) (string, error) 
 }
 
 func (f *fakeForkd) CreateWorkspace(ctx context.Context, name, tag string, perChildNetns bool) (*forkd.WorkspaceInfo, error) {
+	if !f.hasSnapshot(tag) {
+		return nil, &forkd.Error{StatusCode: http.StatusNotFound, Message: "snapshot tag not found"}
+	}
 	f.nextID++
 	sbID := fmt.Sprintf("sb-%d", f.nextID)
 	ws := &forkd.WorkspaceInfo{
@@ -119,6 +148,8 @@ func (f *fakeForkd) CreateWorkspace(ctx context.Context, name, tag string, perCh
 }
 
 func (f *fakeForkd) SuspendWorkspace(ctx context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	ws, ok := f.workspaces[name]
 	if !ok {
 		return fmt.Errorf("forkd: workspace %s not found (status 404)", name)
@@ -154,6 +185,16 @@ func (f *fakeForkd) DeleteWorkspace(ctx context.Context, name string) error {
 
 func (f *fakeForkd) Metrics(ctx context.Context) ([]byte, error) {
 	return []byte("# HELP forkd_sandboxes_active\n# TYPE forkd_sandboxes_active gauge\nforkd_sandboxes_active 0\n"), nil
+}
+
+// hasSnapshot reports whether a snapshot tag is registered.
+func (f *fakeForkd) hasSnapshot(tag string) bool {
+	for _, s := range f.snapshots {
+		if s.Tag == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // newTestServer builds a lease API server backed by a fake forkd.
@@ -393,8 +434,8 @@ func TestTTLSweeper(t *testing.T) {
 	cancel()
 
 	// The lease should be gone and the sandbox killed.
-	if len(ff.killed) != 1 {
-		t.Fatalf("expected 1 kill, got %d", len(ff.killed))
+	if ff.killedCount() != 1 {
+		t.Fatalf("expected 1 kill, got %d", ff.killedCount())
 	}
 	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
 	if resp.StatusCode != 404 {
@@ -428,8 +469,8 @@ func TestIdleSweeper(t *testing.T) {
 	cancel()
 
 	// Still alive: touches outpace the idle timeout.
-	if len(ff.suspended) != 0 {
-		t.Fatalf("expected 0 suspends while touched, got %d", len(ff.suspended))
+	if ff.suspendedCount() != 0 {
+		t.Fatalf("expected 0 suspends while touched, got %d", ff.suspendedCount())
 	}
 
 	// Now stop touching; the sweeper should suspend the workspace within
@@ -437,23 +478,23 @@ func TestIdleSweeper(t *testing.T) {
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	svc.Start(ctx2)
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(ff.suspended) == 0 {
+	for time.Now().Before(deadline) && ff.suspendedCount() == 0 {
 		time.Sleep(100 * time.Millisecond)
 	}
 	cancel2()
-	if len(ff.suspended) != 1 {
-		t.Fatalf("expected 1 idle suspend, got %d", len(ff.suspended))
+	if ff.suspendedCount() != 1 {
+		t.Fatalf("expected 1 idle suspend, got %d", ff.suspendedCount())
 	}
-	if len(ff.killed) != 0 {
-		t.Fatalf("expected 0 kills on idle, got %d (suspended lease should stay)", len(ff.killed))
+	if ff.killedCount() != 0 {
+		t.Fatalf("expected 0 kills on idle, got %d (suspended lease should stay)", ff.killedCount())
 	}
 	// The lease is still listable (suspended, not released).
 	resp, _ := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200 listing after suspend, got %d", resp.StatusCode)
 	}
-	if len(ff.suspended) != 1 {
-		t.Fatalf("expected 1 idle suspend, got %d", len(ff.suspended))
+	if ff.suspendedCount() != 1 {
+		t.Fatalf("expected 1 idle suspend, got %d", ff.suspendedCount())
 	}
 }
 
