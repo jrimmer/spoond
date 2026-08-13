@@ -26,10 +26,13 @@ type ForgejoAdapter struct {
 	// be sent as headers on subsequent calls.
 	runnerUUID  string
 	runnerToken string
+	runnerID    int64
 	// internalBaseURL, when set, overrides github.api_url and
 	// github.server_url in the job Context so workflows talk to the
 	// internal Forgejo address (never via the public/Pangolin route).
 	internalBaseURL string
+	// adminBaseURL is the Forgejo REST API base for admin cleanup calls.
+	adminBaseURL string
 }
 
 // NewForgejoAdapter builds a Forgejo runner protocol adapter.
@@ -61,7 +64,7 @@ func NewForgejoAdapterWithInternal(baseURL, internalBaseURL string, hc *http.Cli
 			}
 		})),
 	)
-	return &ForgejoAdapter{svc: svc, internalBaseURL: strings.TrimRight(internalBaseURL, "/")}
+	return &ForgejoAdapter{svc: svc, internalBaseURL: strings.TrimRight(internalBaseURL, "/"), adminBaseURL: strings.TrimRight(baseURL, "/")}
 }
 
 // authCtxKey is the context key for runner auth headers.
@@ -81,12 +84,12 @@ func authFrom(ctx context.Context) map[string]string {
 // Register registers this runner with Forgejo and returns the runner id.
 // The returned UUID and token are stored and sent as headers on
 // subsequent protocol calls.
-func (a *ForgejoAdapter) Register(ctx context.Context, name, token string, labels []string, ephemeral bool) (int64, error) {
+func (a *ForgejoAdapter) Register(ctx context.Context, name, token string, labels []string) (int64, error) {
 	resp, err := a.svc.Register(ctx, connect.NewRequest(&runnerv1.RegisterRequest{
 		Name:      name,
 		Token:     token,
 		Labels:    labels,
-		Ephemeral: ephemeral,
+		Ephemeral: false,
 		Version:   "forkd-runner-v0.1",
 	}))
 	if err != nil {
@@ -97,7 +100,43 @@ func (a *ForgejoAdapter) Register(ctx context.Context, name, token string, label
 	}
 	a.runnerUUID = resp.Msg.GetRunner().GetUuid()
 	a.runnerToken = resp.Msg.GetRunner().GetToken()
-	return resp.Msg.GetRunner().GetId(), nil
+	a.runnerID = resp.Msg.GetRunner().GetId()
+	return a.runnerID, nil
+}
+
+// Restore loads previously saved runner credentials without calling
+// Register. This lets a worker reconnect to its existing Forgejo runner
+// entry after a process restart instead of creating a new one.
+func (a *ForgejoAdapter) Restore(uuid, token string, id int64) {
+	a.runnerUUID = uuid
+	a.runnerToken = token
+	a.runnerID = id
+}
+
+// RunnerID returns the Forgejo runner ID assigned at registration.
+func (a *ForgejoAdapter) RunnerID() int64 {
+	return a.runnerID
+}
+
+// DeleteRunner removes a runner entry from Forgejo via the admin REST
+// API. adminToken must be a Forgejo admin API token. This is used for
+// cleanup of stale offline runners on startup and on scale-down.
+func (a *ForgejoAdapter) DeleteRunner(adminToken string, runnerID int64) error {
+	url := fmt.Sprintf("%s/api/v1/admin/actions/runners/%d", a.adminBaseURL, runnerID)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("delete runner %d: %w", runnerID, err)
+	}
+	req.Header.Set("Authorization", "token "+adminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete runner %d: %w", runnerID, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("delete runner %d: status %s", runnerID, resp.Status)
+	}
+	return nil
 }
 
 // authHeaders returns the headers needed to authenticate subsequent
