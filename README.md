@@ -81,6 +81,18 @@ git clone https://github.com/jrimmer/spoond && cd spoond
 
 ## Status
 
+**v1.2 — infrastructure & observability.** Comprehensive Prometheus
+metrics for all three services (backend, gateway, runner) with Grafana
+dashboard support. MCP HTTP/SSE transport for remote agent host
+integration. SSH gateway dynamic image resolution with configurable
+sshd-enabled images. LLM-based PR review via Forgejo Actions. Runner
+pool reliability — persistent registration with state persistence, no
+more Forgejo runner entry accumulation. Exec reliability fixes (body
+reuse on retry, stale-lease 404→410 mapping, runner retry). CI
+connectivity fixes (network policy always-apply, internet egress for
+dependency downloads). Container PATH fix — guest agent reads
+/etc/environment for correct tool resolution.
+
 **v1.1 — multi-user tenancy.** People and agents are first-class
 identities (epic #26): a user store with per-user SSH keys and bearer
 tokens, ownership-scoped leases, quotas, admin roles, lease sharing with
