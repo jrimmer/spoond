@@ -75,6 +75,7 @@ git clone https://github.com/jrimmer/spoond && cd spoond
 | [API reference](docs/api.md) | every endpoint: auth, request/response, errors |
 | [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
 | [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user | 
+| [Agents](docs/agents.md) | capability map and "how do I X?" for AI coding agents (MCP, SSH ctl, API, ACP) |
 | [Operations](docs/operations.md) | pool, watchdog, failure runbook, backups, identity ops |
 | [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
 | [deploy/](deploy/README.md) | systemd units for vm2-style deployments |

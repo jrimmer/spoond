@@ -27,7 +27,7 @@ ssh ctl@sandbox.example.com -p 2222 "stat <id>"
 | `ls` | `ls [--json]` | list leases (pretty table default) |
 | `stat` | `stat <id> [--json]` | guest metrics (cpu/mem/disk/net) |
 | `rm` | `rm <id>` | delete a lease |
-| `exec` | `exec <id> <command…>` | run a command via the API and print stdout |
+| *exec* | *(no ctl verb)* | run commands via the lease API `POST /api/sandboxes/{id}/exec` or by attaching `ssh <id>@…` |
 | `keepalive` | `keepalive <id>` (alias `ka`) | extend persistent lease |
 | `suspend` | `suspend <id>` | snapshot + stop (workspace-backed only) |
 | `resume` | `resume <id>` | start from snapshot |

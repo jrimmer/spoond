@@ -103,6 +103,47 @@ listener + `/healthz` (TLS-aware, uses the cert's own SAN), SSH gateway port,
 LLM gateway upstream (key present + `/models` probe), warm pool size, TLS
 material, disk fill.
 
+## Using spoond from an AI coding agent
+
+spoond is designed to be driven by agents as much as people. The
+agent-facing docs are [AGENTS.md](../AGENTS.md) (auto-loaded by Claude
+Code, Codex, Cursor, pi, and others working in this repo) and
+[docs/agents.md](agents.md) (the full surface map and "how do I X?"
+reference).
+
+To give an agent access, create an agent identity with a token and (for
+SSH access) its public key in a single call — the server stores the token
+you choose; it does not mint one:
+
+```bash
+FP=$(ssh-keygen -lf <agent>.pub | awk '{print $2}')
+curl -s -X POST https://127.0.0.1:8890/api/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"name\":\"my-agent\",\"kind\":\"agent\",\"token\":\"<choose-a-strong-token>\",\"fingerprints\":[\"$FP\"]}"
+```
+
+Then wire the agent to a surface:
+
+```bash
+# MCP (recommended for agent hosts) — 6 tools (shell, read_file, write_file,
+# edit_file, list_files, status); a sandbox is created per call. stdio:
+FORKD_BACKEND_URL=https://127.0.0.1:8890 \
+FORKD_AGENT_TOKEN=<agent-token> \
+FORKD_IMAGE=dev-base \
+  spoond-dev-mcp
+
+# …or HTTP/SSE for a remote agent host:
+MCP_TRANSPORT=http MCP_LISTEN=:9090 MCP_AUTH_TOKEN=<secret> \
+FORKD_AGENT_TOKEN=<agent-token> \
+  spoond-dev-mcp        # POST /mcp (streamable), GET /sse, GET /healthz
+
+# SSH control plane: with the key fingerprint added above, the agent can run
+# `ssh ctl@<host> -p 2222 "…"` and attach `ssh <id|name>@<host>`.
+```
+
+See [docs/agents.md](agents.md) for the full capability map (lease API,
+SSH gateway, HTTP/LLM proxy, MCP, ACP, runner, forkd CLI, guest agent).
+
 See also: [docs/setup.md](setup.md) for the full env/flag reference,
 [docs/api.md](api.md) for the HTTP API, [docs/ctl.md](ctl.md) for the control
 plane.
