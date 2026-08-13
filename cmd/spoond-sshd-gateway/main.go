@@ -1,3 +1,5 @@
+//go:build linux
+
 // Command forkd-sshd-gateway is the interactive access point for forkd
 // sandboxes: `ssh <lease-id>@sandbox.lacy.casa`. It authenticates the
 // caller with a public key, resolves the lease id to a running sandbox,
@@ -12,11 +14,8 @@ package spoondgateway
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +23,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+
+	"github.com/jrimmer/spoond/metrics"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -92,7 +94,8 @@ var (
 	// can therefore support interactive SSH sessions. CI images (go-base,
 	// py-base, rust-base, etc.) typically don't have sshd. Defaults to
 	// dev-base only; operators can add more via GATEWAY_SSH_IMAGES.
-	sshImages = flags.String("ssh-images", envOr("GATEWAY_SSH_IMAGES", "dev-base"), "comma-separated image tags that support interactive SSH (have sshd)")
+	sshImages     = flags.String("ssh-images", envOr("GATEWAY_SSH_IMAGES", "dev-base"), "comma-separated image tags that support interactive SSH (have sshd)")
+	metricsListen = flags.String("metrics-listen", envOr("GATEWAY_METRICS_LISTEN", ""), "address for /metrics endpoint (empty = disabled)")
 
 	// extraImageAliases allows operators to add or override short-name
 	// → full-tag aliases without code changes. Format: short=full,short=full.
@@ -108,6 +111,18 @@ type endpoint struct {
 
 func Main(args []string) int {
 	flags.Parse(args)
+
+	// Start metrics endpoint (issue #20).
+	var gwMetrics *metrics.GatewayMetrics
+	if *metricsListen != "" {
+		gwMetrics = metrics.NewGatewayMetrics()
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.HandlerFor(gwMetrics.Registry, promhttp.HandlerOpts{}))
+			log.Printf("gateway metrics on %s", *metricsListen)
+			log.Fatal(http.ListenAndServe(*metricsListen, mux))
+		}()
+	}
 	if *backendTok == "" {
 		log.Fatal("--backend-token is required")
 	}
@@ -180,6 +195,9 @@ func Main(args []string) int {
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if len(allowed) == 0 && !identityAuthoritative {
+				if gwMetrics != nil {
+					gwMetrics.AuthFailures.WithLabelValues("no_keys").Inc()
+				}
 				return nil, fmt.Errorf("no client keys configured")
 			}
 			// Accept any key from the allowed set (backward compatible);
@@ -206,6 +224,9 @@ func Main(args []string) int {
 			if identityAuthoritative {
 				userID, userName := resolveKeyUser(key)
 				if userID == "" {
+					if gwMetrics != nil {
+						gwMetrics.AuthFailures.WithLabelValues("identity_not_found").Inc()
+					}
 					return nil, fmt.Errorf("unknown client key (not in identity store)")
 				}
 				perms := &ssh.Permissions{
@@ -216,6 +237,9 @@ func Main(args []string) int {
 					},
 				}
 				return perms, nil
+			}
+			if gwMetrics != nil {
+				gwMetrics.AuthFailures.WithLabelValues("unknown_key").Inc()
 			}
 			return nil, fmt.Errorf("unknown client key")
 		},
@@ -228,8 +252,14 @@ func Main(args []string) int {
 	}
 	log.Printf("spoond-sshd-gateway listening on %s", *listenAddr)
 
+	// Connection counter goroutine: wrap the accept loop to count connections.
+	// The actual accept loop is below; we instrument it inline.
+
 	for {
 		conn, err := ln.Accept()
+		if err == nil && gwMetrics != nil {
+			gwMetrics.ConnectionsTotal.Inc()
+		}
 		if err != nil {
 			log.Printf("accept: %v", err)
 			continue
@@ -573,6 +603,10 @@ func dialSandbox(ctx context.Context, leaseID string, gatewayKey ssh.Signer) (*s
 //	ssh ctl@sandbox.lacy.casa "cp <id> [tag]"   clone a sandbox (branch)
 //	ssh ctl@sandbox.lacy.casa "help"
 func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyID, userID, userName string) {
+	// Note: ctl command metrics would need gwMetrics passed through the
+	// call chain. For now, connection-level metrics are captured here;
+	// per-verb metrics require threading gwMetrics through handleControlPlane.
+	// This is a follow-up enhancement.
 	// All ctl verbs run owner-scoped as the SSH user (U6/T5).
 	gwCtx := withGatewayUser(context.Background(), userID)
 	// Accept the first session channel; anything else is rejected.
@@ -1006,83 +1040,6 @@ func resolveKeyUser(key ssh.PublicKey) (userID, userName string) {
 func backendJSONErr(ctx context.Context, method, path string, payload []byte) error {
 	_, err := backendJSON(ctx, method, path, payload)
 	return err
-}
-
-// prettySandboxTable renders the /api/sandboxes JSON as a columnar
-// table (ticket #27). IDs show as a 12-char prefix (full id via --json).
-func prettySandboxTable(b []byte) string {
-	var resp struct {
-		Sandboxes []map[string]any `json:"sandboxes"`
-		Error     string           `json:"error"`
-	}
-	if err := json.Unmarshal(b, &resp); err != nil || resp.Error != "" {
-		return strings.TrimSpace(string(b)) // not our shape (or an error); pass through
-	}
-	if len(resp.Sandboxes) == 0 {
-		return "no sandboxes"
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%-14s %-12s %-10s %-22s %-16s %s\n", "ID", "IMAGE", "STATE", "EXPIRES", "ADDRESS", "NAME")
-	for _, s := range resp.Sandboxes {
-		id, _ := s["id"].(string)
-		img, _ := s["image"].(string)
-		addr, _ := s["address"].(string)
-		name, _ := s["name"].(string)
-		if name == "" {
-			name, _ = s["comment"].(string)
-		}
-		state := "running"
-		if suspended, _ := s["suspended"].(bool); suspended {
-			state = "suspended"
-		}
-		exp := ""
-		if expUnix, ok := s["expires"].(float64); ok && expUnix > 0 {
-			exp = time.Unix(int64(expUnix), 0).UTC().Format("2006-01-02 15:04 UTC")
-		}
-		if persistent, _ := s["persistent"].(bool); persistent {
-			state += "*" // persistent lease: not TTL-swept
-		}
-		if len(id) > 12 {
-			id = id[:12] + "…"
-		}
-		fmt.Fprintf(&sb, "%-14s %-12s %-10s %-22s %-16s %s\n", id, img, state, exp, addr, name)
-	}
-	return strings.TrimRight(sb.String(), "\n")
-}
-
-// prettyStat renders the /stat JSON as a human-readable block
-// (ticket #27).
-func prettyStat(b []byte) string {
-	var st struct {
-		CPU struct {
-			Load1 float64 `json:"load1"`
-		} `json:"cpu"`
-		Mem struct {
-			UsedMiB  int64 `json:"used_mib"`
-			TotalMiB int64 `json:"total_mib"`
-		} `json:"mem"`
-		Disk struct {
-			UsedMiB  int64 `json:"used_mib"`
-			TotalMiB int64 `json:"total_mib"`
-		} `json:"disk"`
-		Net struct {
-			RXBytes int64 `json:"rx_bytes"`
-			TXBytes int64 `json:"tx_bytes"`
-		} `json:"net"`
-	}
-	if err := json.Unmarshal(b, &st); err != nil {
-		return strings.TrimSpace(string(b))
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "cpu : load1 %.2f\n", st.CPU.Load1)
-	if st.Mem.TotalMiB > 0 {
-		fmt.Fprintf(&sb, "mem : %d / %d MiB used\n", st.Mem.UsedMiB, st.Mem.TotalMiB)
-	}
-	if st.Disk.TotalMiB > 0 {
-		fmt.Fprintf(&sb, "disk: %d / %d MiB used\n", st.Disk.UsedMiB, st.Disk.TotalMiB)
-	}
-	fmt.Fprintf(&sb, "net : rx %d bytes, tx %d bytes\n", st.Net.RXBytes, st.Net.TXBytes)
-	return strings.TrimRight(sb.String(), "\n")
 }
 
 func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
@@ -1570,59 +1527,4 @@ func loadKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 	return ssh.ParsePrivateKey(data)
-}
-
-func ed25519Generate(path string) (ssh.PublicKey, ssh.Signer, error) {
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		return nil, nil, err
-	}
-	block, _ := ssh.MarshalPrivateKey(priv, "")
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
-		return nil, nil, err
-	}
-	os.WriteFile(path+".pub", ssh.MarshalAuthorizedKey(signer.PublicKey()), 0o644)
-	return signer.PublicKey(), signer, nil
-}
-
-func loadAuthorizedKeys(spec string) ([]ssh.PublicKey, error) {
-	var out []ssh.PublicKey
-	if spec == "" {
-		return out, nil
-	}
-	// #26 seed: a directory scans all *.pub files at startup, so adding
-	// a user = dropping a key + restart. A comma-separated list of file
-	// paths (the original contract) still works unchanged.
-	paths := []string{spec}
-	if st, err := os.Stat(spec); err == nil && st.IsDir() {
-		paths, err = filepath.Glob(filepath.Join(spec, "*.pub"))
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		paths = strings.Split(spec, ",")
-	}
-	for _, p := range paths {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return nil, err
-		}
-		for len(data) > 0 {
-			pk, _, _, rest, err := ssh.ParseAuthorizedKey(data)
-			if err != nil {
-				break
-			}
-			out = append(out, pk)
-			data = rest
-		}
-	}
-	return out, nil
 }

@@ -271,8 +271,11 @@ func TestMetricsWithAuth(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	raw, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(raw), "forkd_sandboxes_active") {
-		t.Fatalf("expected forkd metrics in body, got: %s", raw)
+	if !strings.Contains(string(raw), "spoond_controller_sandboxes_active") {
+		t.Fatalf("expected namespaced controller metrics in body, got: %s", raw)
+	}
+	if !strings.Contains(string(raw), "spoond_leases_active") {
+		t.Fatalf("expected service-owned metrics in body, got: %s", raw)
 	}
 }
 

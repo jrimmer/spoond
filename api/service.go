@@ -19,6 +19,7 @@ import (
 
 	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
+	"github.com/jrimmer/spoond/metrics"
 )
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
@@ -141,10 +142,19 @@ type Service struct {
 	netpol PolicyApplier
 	// netpolDNS is the resolver set allowed under PolicyRestricted.
 	netpolDNS []string
+	// metrics (issue #20): service-level Prometheus metrics.
+	metrics *metrics.BackendMetrics
 }
 
 // SetNetpol installs the egress-policy applier and the DNS resolvers
 // allowed under the restricted policy. Call before serving.
+// SetMetrics installs the Prometheus metrics collector (issue #20).
+// Called by the Server after NewServerWithLLM so the service can
+// record pool, lease, and netpol events.
+func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
+	s.metrics = m
+}
+
 func (s *Service) SetNetpol(a PolicyApplier, dns []string) {
 	s.netpol = a
 	s.netpolDNS = dns
@@ -444,6 +454,9 @@ func (s *Service) reserveQuota(owner string) error {
 		}
 	}
 	if active+s.store.pending[owner] >= u.MaxLeases {
+		if s.metrics != nil {
+			s.metrics.QuotaExceeded.Inc()
+		}
 		return errQuotaExceeded
 	}
 	s.store.pending[owner]++
@@ -475,6 +488,11 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 	// review #37 H2). Both mutations take the same store lock, so a
 	// concurrent reserveQuota sees a consistent active+pending count.
 	defer func() { s.releaseQuotaReservation(owner) }()
+	grantStart := time.Now()
+	if s.metrics != nil {
+		s.metrics.LeasesTotal.Inc()
+		s.metrics.LeaseGrantDur.Observe(time.Since(grantStart).Seconds())
+	}
 	lease := &Lease{
 		ID:         newID(),
 		Owner:      owner,
@@ -1102,6 +1120,46 @@ func (s *Service) Shutdown(ctx context.Context) {
 // live sandbox belongs to a previous backend incarnation (or a foreign
 // client); killing them frees netns slots that would otherwise be held
 // forever.
+// CollectMetrics updates live gauge metrics from the current service
+// state (issue #20). Called by the Server before gathering metrics
+// for /metrics. All store access is under the store lock.
+func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+
+	// Pool: ready count per image.
+	for img, ids := range s.store.pool {
+		m.PoolReady.WithLabelValues(img).Set(float64(len(ids)))
+	}
+	// Pool cap = poolSize × number of known images.
+	if s.poolSize > 0 {
+		m.PoolCap.Set(float64(s.poolSize * len(s.store.pool)))
+	}
+
+	// Leases: count non-released.
+	active := 0
+	for _, l := range s.store.leases {
+		if !l.released {
+			active++
+		}
+	}
+	m.LeasesActive.Set(float64(active))
+
+	// Quota reservations.
+	pending := 0
+	for _, n := range s.store.pending {
+		pending += n
+	}
+	m.QuotaReserved.Set(float64(pending))
+
+	// Shares.
+	shares := 0
+	for _, grantees := range s.store.shares {
+		shares += len(grantees)
+	}
+	m.SharesActive.Set(float64(shares))
+}
+
 func (s *Service) ReconcileOrphans(ctx context.Context) {
 	sbs, err := s.forkd.ListSandboxes(ctx)
 	if err != nil {
@@ -1130,6 +1188,9 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 			continue
 		}
 		killed++
+		if s.metrics != nil {
+			s.metrics.LeaseOrphaned.Inc()
+		}
 	}
 	if killed > 0 {
 		s.log.Printf("reconcile: killed %d orphaned sandbox(es) from a previous incarnation", killed)

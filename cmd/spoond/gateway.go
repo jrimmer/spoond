@@ -1,4 +1,4 @@
-//go:build !nogateway
+//go:build !nogateway && linux
 
 package main
 

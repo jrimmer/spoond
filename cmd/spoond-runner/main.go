@@ -34,6 +34,11 @@ import (
 	"strings"
 	"time"
 
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/jrimmer/spoond/metrics"
 	"github.com/jrimmer/spoond/runner"
 )
 
@@ -109,6 +114,19 @@ func Main(args []string) int {
 		ForgejoURL:     forgejoURL,
 	}
 
+	// Start metrics endpoint (issue #20).
+	metricsListen := envOr("METRICS_LISTEN", "")
+	var runnerMetrics *metrics.RunnerMetrics
+	if metricsListen != "" {
+		runnerMetrics = metrics.NewRunnerMetrics()
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.HandlerFor(runnerMetrics.Registry, promhttp.HandlerOpts{}))
+			log.Printf("runner metrics on %s", metricsListen)
+			log.Fatal(http.ListenAndServe(metricsListen, mux))
+		}()
+	}
+
 	// newWorker builds a fresh ForgejoAdapter + Executor per worker so
 	// each registered runner has its own auth headers and job loop.
 	newWorker := func() runner.RunnerWorker {
@@ -123,6 +141,7 @@ func Main(args []string) int {
 		}
 		exec := &runner.Executor{
 			Sandbox:      lease,
+			Metrics:      runnerMetrics,
 			Sink:         proto,
 			Labels:       imageMap,
 			DefaultImage: defaultImage,
