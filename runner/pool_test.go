@@ -32,6 +32,11 @@ func (f *fakeWorker) Register(ctx context.Context, name, token string, labels []
 	return int64(f.regs), nil
 }
 
+func (f *fakeWorker) Restore(uuid, token string, id int64) {}
+func (f *fakeWorker) RunnerID() int64                      { return 0 }
+func (f *fakeWorker) Deregister(adminToken string) error   { return nil }
+func (f *fakeWorker) Credentials() RunnerStateEntry        { return RunnerStateEntry{} }
+
 func (f *fakeWorker) Fetch(ctx context.Context, version int64) (*Job, int64, error) {
 	f.mu.Lock()
 	f.fetches++

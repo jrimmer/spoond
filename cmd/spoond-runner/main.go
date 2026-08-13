@@ -20,6 +20,10 @@
 //	RUNNER_SCALE_STEP  Runners added/removed per scale event (default 3)
 //	SCALE_UP_DELAY     All-busy duration before scaling up (default 10s)
 //	SCALE_DOWN_DELAY   Idle duration before scaling down (default 60s)
+//	RUNNER_STATE_FILE  Path to persist runner UUIDs between restarts
+//	                   (default /var/lib/spoond/runner-state.json)
+//	FORGEJO_ADMIN_TOKEN  Forgejo admin API token for stale runner cleanup.
+//	                   If unset, cleanup is skipped.
 package spoondrunner
 
 import (
@@ -100,6 +104,9 @@ func Main(args []string) int {
 		ScaleUpDelay:   envDurOr("SCALE_UP_DELAY", 10*time.Second),
 		ScaleDownDelay: envDurOr("SCALE_DOWN_DELAY", 60*time.Second),
 		PollInterval:   5 * time.Second,
+		StateFile:      envOr("RUNNER_STATE_FILE", "/var/lib/spoond/runner-state.json"),
+		AdminToken:     os.Getenv("FORGEJO_ADMIN_TOKEN"),
+		ForgejoURL:     forgejoURL,
 	}
 
 	// newWorker builds a fresh ForgejoAdapter + Executor per worker so
