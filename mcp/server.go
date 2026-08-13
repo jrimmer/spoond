@@ -83,6 +83,23 @@ type Tool struct {
 	Handler     func(ctx context.Context, args map[string]any) (any, error) `json:"-"`
 }
 
+// Exposed tool names. Kept as constants so the self-description document
+// (capabilities.Build) can reference ToolNames() rather than hand-copying
+// the list and drifting (issue #52).
+const (
+	ToolShell     = "shell"
+	ToolReadFile  = "read_file"
+	ToolWriteFile = "write_file"
+	ToolEditFile  = "edit_file"
+	ToolListFiles = "list_files"
+	ToolStatus    = "status"
+)
+
+var toolNames = []string{ToolShell, ToolReadFile, ToolWriteFile, ToolEditFile, ToolListFiles, ToolStatus}
+
+// ToolNames returns the canonical, ordered list of exposed tool names.
+func ToolNames() []string { return append([]string(nil), toolNames...) }
+
 // New builds the MCP server.
 func New(cfg Config) *Server {
 	if cfg.TTL == 0 {
@@ -108,7 +125,7 @@ func New(cfg Config) *Server {
 	}
 	s.tools = []Tool{
 		{
-			Name:        "shell",
+			Name:        ToolShell,
 			Description: "Run a shell command in an isolated forkd microVM sandbox. Returns stdout, stderr and exit code. Use for any command execution.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -122,7 +139,7 @@ func New(cfg Config) *Server {
 			Handler: s.toolShell,
 		},
 		{
-			Name:        "read_file",
+			Name:        ToolReadFile,
 			Description: "Read a file from the sandbox filesystem. Returns the file contents as text.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -134,7 +151,7 @@ func New(cfg Config) *Server {
 			Handler: s.toolReadFile,
 		},
 		{
-			Name:        "write_file",
+			Name:        ToolWriteFile,
 			Description: "Write a file in the sandbox filesystem. Creates parent directories. Overwrites existing content.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -147,7 +164,7 @@ func New(cfg Config) *Server {
 			Handler: s.toolWriteFile,
 		},
 		{
-			Name:        "edit_file",
+			Name:        ToolEditFile,
 			Description: "Replace a unique substring in a sandbox file with new text. Use for targeted edits; write_file for full rewrites.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -161,7 +178,7 @@ func New(cfg Config) *Server {
 			Handler: s.toolEditFile,
 		},
 		{
-			Name:        "list_files",
+			Name:        ToolListFiles,
 			Description: "List files in a sandbox directory (ls -la style).",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -172,7 +189,7 @@ func New(cfg Config) *Server {
 			Handler: s.toolListFiles,
 		},
 		{
-			Name:        "status",
+			Name:        ToolStatus,
 			Description: "Report sandbox status: OS, kernel, architecture, lease info. No arguments.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 			Handler:     s.toolStatus,

@@ -37,6 +37,21 @@ import (
 // Protocol version we speak.
 const protocolVersion = 1
 
+// Exposed JSON-RPC method names (client -> server). Kept as constants so
+// the self-description document (capabilities.Build) can reference
+// MethodNames() rather than hand-copying the list (issue #52).
+const (
+	MethodInitialize    = "initialize"
+	MethodSessionNew    = "session/new"
+	MethodSessionPrompt = "session/prompt"
+	MethodSessionCancel = "session/cancel"
+)
+
+var methodNames = []string{MethodInitialize, MethodSessionNew, MethodSessionPrompt, MethodSessionCancel}
+
+// MethodNames returns the canonical, ordered list of client->server methods.
+func MethodNames() []string { return append([]string(nil), methodNames...) }
+
 // ---------- message types (client -> agent) ----------
 
 // Request is a JSON-RPC 2.0 request.
@@ -244,7 +259,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte) error {
 		return s.send(Response{JSONRPC: "2.0", Error: &RPCError{Code: -32700, Message: "parse error"}})
 	}
 	switch req.Method {
-	case "initialize":
+	case MethodInitialize:
 		var p InitializeParams
 		_ = json.Unmarshal(req.Params, &p)
 		return s.send(Response{
@@ -261,15 +276,15 @@ func (s *Server) handleLine(ctx context.Context, line []byte) error {
 				},
 			},
 		})
-	case "session/new":
+	case MethodSessionNew:
 		var p SessionNewParams
 		_ = json.Unmarshal(req.Params, &p)
 		return s.handleSessionNew(ctx, req.ID, p)
-	case "session/prompt":
+	case MethodSessionPrompt:
 		var p PromptParams
 		_ = json.Unmarshal(req.Params, &p)
 		return s.handlePrompt(ctx, req.ID, p)
-	case "session/cancel":
+	case MethodSessionCancel:
 		var p CancelParams
 		_ = json.Unmarshal(req.Params, &p)
 		s.handleCancel(p.SessionID)

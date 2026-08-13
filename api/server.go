@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/common/expfmt"
 
+	"github.com/jrimmer/spoond/capabilities"
 	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
 	"github.com/jrimmer/spoond/metrics"
@@ -164,6 +165,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	s.mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
 	if s.svc.identities != nil {
 		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
@@ -201,6 +203,13 @@ func (s *Server) SetLLMRequireKey(v bool) {
 	if s.llm != nil {
 		s.llm.requireKey = v
 	}
+}
+
+// handleCapabilities serves the self-description document (issue #52).
+// Auth-exempt: it enumerates only the public surface (no leases, tokens,
+// or user data), so an agent host can discover spoond cold.
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, capabilities.Build())
 }
 
 // handleHealthz reports liveness without auth, for Gatus/load-balancer
@@ -351,7 +360,7 @@ func isHexPath(p string) bool {
 // capability, and sandboxes hold no consumer token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/v1/capabilities" || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}

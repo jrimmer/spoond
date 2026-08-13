@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jrimmer/spoond/capabilities"
 	"github.com/jrimmer/spoond/forkd"
 )
 
@@ -37,6 +38,14 @@ type checkResult struct {
 }
 
 func Main(args []string) int {
+	// The capabilities subcommand may precede or follow flags (e.g.
+	// `spoond doctor --json capabilities`), so detect it by scanning
+	// rather than only checking args[0].
+	for _, a := range args {
+		if a == "capabilities" {
+			return printCapabilities(args)
+		}
+	}
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	jsonOut := fs.Bool("json", false, "machine-readable JSON output")
 	_ = fs.Parse(args)
@@ -85,6 +94,75 @@ func Main(args []string) int {
 		if r.status == "FAIL" {
 			return 1
 		}
+	}
+	return 0
+}
+
+// printCapabilities prints the self-description document (issue #52).
+// `--json` emits the raw Document (the machine contract); text mode is a
+// compact human-readable summary. Note this differs from `spoond doctor
+// --json`, which emits the health-check envelope {checks, ...}.
+func printCapabilities(args []string) int {
+	// Strip the "capabilities" token — it may precede or follow flags.
+	var rest []string
+	for _, a := range args {
+		if a != "capabilities" {
+			rest = append(rest, a)
+		}
+	}
+	fs := flag.NewFlagSet("doctor capabilities", flag.ExitOnError)
+	jsonOut := fs.Bool("json", false, "machine-readable JSON output")
+	_ = fs.Parse(rest)
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "doctor capabilities: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	doc := capabilities.Build()
+	if *jsonOut {
+		b, _ := json.MarshalIndent(doc, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	fmt.Printf("%s capability surface (auth: %s)\n", doc.Name, doc.Auth)
+	fmt.Printf("  token: %s\n", doc.TokenProvisioning)
+	for _, surf := range doc.Surfaces {
+		reach := surf.Reach
+		if reach == "" {
+			reach = strings.Join(surf.Transports, ", ")
+		}
+		fmt.Printf("\n%-14s %s\n", surf.Name, reach)
+		if surf.Note != "" {
+			fmt.Printf("  note: %s\n", surf.Note)
+		}
+		for _, list := range []struct {
+			label string
+			items []string
+		}{
+			{"endpoints", surf.Endpoints},
+			{"ctl verbs", surf.CtlVerbs},
+			{"tools", surf.Tools},
+			{"methods", surf.Methods},
+			{"env", surf.Env},
+		} {
+			if len(list.items) > 0 {
+				fmt.Printf("  %s: %s\n", list.label, strings.Join(list.items, ", "))
+			}
+		}
+	}
+	fmt.Printf("\nimages:\n")
+	for _, img := range doc.Images {
+		var sizes []string
+		if img.MemoryMiB > 0 {
+			sizes = append(sizes, fmt.Sprintf("mem=%dMiB", img.MemoryMiB))
+		}
+		if img.DiskMiB > 0 {
+			sizes = append(sizes, fmt.Sprintf("disk=%dMiB", img.DiskMiB))
+		}
+		status := "baked"
+		if !img.Baked {
+			status = "not-baked"
+		}
+		fmt.Printf("  %-14s %-10s %s\n", img.Tag, status, strings.Join(sizes, " "))
 	}
 	return 0
 }
