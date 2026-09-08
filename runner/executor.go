@@ -169,7 +169,31 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		if stepTimeout <= 0 {
 			stepTimeout = 300
 		}
+		// Heartbeat while the step runs: Forgejo reaps tasks that stop
+		// reporting, and a long silent step (a full mix release, a cargo
+		// build) emits no log rows until it completes — the task gets
+		// declared failed server-side after ~13 minutes of silence.
+		// Keepalive rows use the step's starting index; the goroutine
+		// must not touch logIndex (owned by this loop).
+		kaDone := make(chan struct{})
+		kaIdx := logIndex
+		stepStart := time.Now()
+		go func() {
+			t := time.NewTicker(60 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-kaDone:
+					return
+				case <-t.C:
+				}
+				e.Sink.Log(ctx, job.ID, kaIdx, []*LogRow{{Content: fmt.Sprintf("⏱ step still running (%ds)", int(time.Since(stepStart).Seconds()))}}, false)
+			}
+		}()
 		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, cwd, env, stepTimeout)
+		close(kaDone)
 		if err != nil {
 			if e.Metrics != nil {
 				e.Metrics.ExecErrors.WithLabelValues("500").Inc()
