@@ -25,13 +25,18 @@ RUN apt-get update -qq \
       curl git python3 jq xz-utils \
  && rm -rf /var/lib/apt/lists/*
 
-# Rust — pinned homes so cache mounts elsewhere can never mask the
-# toolchain binaries (same reasoning as cytale's root Dockerfile).
+# Rust — copied wholesale from the stock toolchain image instead of
+# rustup-installed: curl/getaddrinfo is unreliable inside this host's LXC
+# docker builds (pthread create denied), and `curl | sh` once "passed"
+# with no Rust installed when the download failed silently. Pinned homes
+# so cache mounts elsewhere can never mask the toolchain binaries.
+# The trailing rustc invocation fails the layer if the copy is broken.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
-      --default-toolchain stable --no-modify-path
+COPY --from=rust:1-bookworm /usr/local/rustup /usr/local/rustup
+COPY --from=rust:1-bookworm /usr/local/cargo /usr/local/cargo
+RUN /usr/local/cargo/bin/rustc --version
 
 # Node 22 + corepack pnpm for SPA builds. Selective copy — a wholesale
 # `COPY --from=node /usr/local` would clobber erl/elixir, which live in
@@ -52,6 +57,27 @@ COPY --from=gcr.io/kaniko-project/executor:v1.23.2 /kaniko/executor /usr/local/b
 # LXC build containers (AF_UNIX denied at spawn_init, EACCES) but runs fine
 # in the forkd microVM; CI jobs bootstrap hex/rebar themselves in ~5s.
 
-# Guest agent (forkd-agent.py) reads /etc/environment for PATH — the
-# go-base bake proved the default PATH misses /usr/local (issue #41).
-RUN echo 'PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' >> /etc/environment
+# Guest agent (forkd-agent.py) reads /etc/environment for PATH — but only
+# the FIRST PATH= line (appending a second one is silently ignored, which
+# once cost us rustc). Rewrite /etc/environment wholesale: cargo first,
+# one canonical PATH line; RUSTUP_HOME/CARGO_HOME for good measure.
+RUN printf 'PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nRUSTUP_HOME=/usr/local/rustup\nCARGO_HOME=/usr/local/cargo\n' > /etc/environment
+
+# The rust:1 image's cargo/bin entries are symlinks to the `rustup` proxy,
+# which needs RUSTUP_HOME resolved at runtime — the guest agent may not
+# pass it through. Point rustc/cargo straight at the toolchain binary.
+RUN ln -sf /usr/local/rustup/toolchains/*/bin/rustc /usr/local/cargo/bin/rustc \
+ && ln -sf /usr/local/rustup/toolchains/*/bin/cargo /usr/local/cargo/bin/cargo
+
+# The agent's exec PATH is a hardcoded default that does NOT include
+# /usr/local/cargo/bin and (evidence of several failed bakes) does not
+# reliably come from /etc/environment either — the go-base bake hit the
+# same wall and solved it by symlinking into /usr/local/bin. Do that.
+RUN ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc \
+ && ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo
+
+# NOTE: DNS/registry reachability is fixed at the INIT level, not here:
+# forkd-init.sh (injected post-conversion, lives on the forkd host) now
+# lists the LAN resolvers first, so code.lacy.casa resolves to the LAN
+# edge whose /v2/ path is not SSO-gated. Image-level /etc/hosts pinning
+# does not survive guest boot.

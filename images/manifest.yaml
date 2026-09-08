@@ -63,10 +63,22 @@ images:
       NIF builds + hex deps + node_modules + _build peak well past 8 GiB. Rust homes
       pinned to /usr/local/{rustup,cargo} so cache mounts can never mask toolchain
       binaries. kaniko baked in for daemonless image push (sandboxes have no docker).
-      First bake: 2026-09-08. BAKE GOTCHA: custom `docker build` RUN steps on vm2
-      need `--network=host --security-opt seccomp=unconfined` (Proxmox LXC denies
-      thread creation + AF_UNIX in the default build sandbox; Erlang/OTP cannot
-      boot there at all, so no mix RUNs in the dockerfile).
+      First bake: 2026-09-08. BAKE GOTCHAS (each cost a bake cycle):
+      - vm2 docker builds need --network=host --security-opt seccomp=unconfined
+        (Proxmox LXC denies thread creation + AF_UNIX; Erlang can't boot there at
+        all — no mix RUNs in the dockerfile).
+      - curl | sh silently succeeds with nothing installed when the download
+        fails; Rust is COPY'd from rust:1-bookworm with a rustc --version guard.
+      - from-image's ext4 cache keys on the image TAG and re-registering over a
+        live tag keeps the daemon's old rootfs fd — bake script rm's the cached
+        ext4 and forkd rmi's the tag before converting.
+      - The guest agent's exec PATH is a hardcoded default; /etc/environment is
+        not applied. Toolchains must expose binaries in /usr/local/bin (go-base
+        pattern). rustc/cargo are direct symlinks to the toolchain, bypassing
+        the rustup proxy (which needs RUSTUP_HOME env the agent won't pass).
+      - forkd-init.sh (host-level) now lists LAN resolvers first — sandbox DNS
+        is otherwise public, and code.lacy.casa then resolves to the public edge
+        whose /v2/ registry path is SSO-gated (302 to login).
 
   - name: llm-review
     capability: llm-review
