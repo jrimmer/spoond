@@ -176,8 +176,6 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		// Keepalive rows use the step's starting index; the goroutine
 		// must not touch logIndex (owned by this loop).
 		kaDone := make(chan struct{})
-		kaIdx := logIndex
-		stepStart := time.Now()
 		go func() {
 			t := time.NewTicker(60 * time.Second)
 			defer t.Stop()
@@ -189,7 +187,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 					return
 				case <-t.C:
 				}
-				e.Sink.Log(ctx, job.ID, kaIdx, []*LogRow{{Content: fmt.Sprintf("⏱ step still running (%ds)", int(time.Since(stepStart).Seconds()))}}, false)
+				_ = e.Sink.Keepalive(ctx, job.ID)
 			}
 		}()
 		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, cwd, env, stepTimeout)

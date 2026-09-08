@@ -59,6 +59,10 @@ func (f *fakeSink) Report(ctx context.Context, state *JobState, outputs map[stri
 	return nil
 }
 
+func (f *fakeSink) Keepalive(ctx context.Context, jobID int64) error {
+	return nil
+}
+
 func (f *fakeSink) Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error {
 	for _, r := range rows {
 		f.logs = append(f.logs, r.Content)

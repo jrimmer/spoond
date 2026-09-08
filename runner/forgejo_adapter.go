@@ -230,6 +230,22 @@ func (a *ForgejoAdapter) Report(ctx context.Context, state *JobState, outputs ma
 	return nil
 }
 
+// Keepalive implements JobSink. It reports RUNNING without new log
+// output so Forgejo's stale-task reaper does not kill long silent steps.
+func (a *ForgejoAdapter) Keepalive(ctx context.Context, jobID int64) error {
+	ctx = withAuth(ctx, a.authHeaders())
+	ts := &runnerv1.TaskState{
+		Id:     jobID,
+		Result: runnerv1.Result_RESULT_UNSPECIFIED, // zero value = still running; refreshes the stale-task clock
+	}
+	if _, err := a.svc.UpdateTask(ctx, connect.NewRequest(&runnerv1.UpdateTaskRequest{
+		State: ts,
+	})); err != nil {
+		return fmt.Errorf("update task (keepalive): %w", err)
+	}
+	return nil
+}
+
 // Log implements JobSink. It streams log rows to Forgejo.
 func (a *ForgejoAdapter) Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error {
 	ctx = withAuth(ctx, a.authHeaders())

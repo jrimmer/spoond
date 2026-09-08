@@ -82,4 +82,8 @@ type JobSource interface {
 type JobSink interface {
 	Report(ctx context.Context, state *JobState, outputs map[string]string) error
 	Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error
+	// Keepalive reports that the job is still running without appending
+	// log output. Forgejo reaps tasks that stop hearing from the runner,
+	// so long silent steps must send this periodically.
+	Keepalive(ctx context.Context, jobID int64) error
 }
