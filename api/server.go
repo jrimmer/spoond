@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -476,8 +477,17 @@ func userFrom(ctx context.Context) *identity.User {
 }
 
 // maxExecTimeout caps a single exec call so it cannot run far past the
-// lease TTL or tie up the controller indefinitely.
-const maxExecTimeout = 300 // seconds
+// lease TTL or tie up the controller indefinitely. Overridable via
+// MAX_EXEC_TIMEOUT_SECS: compile-heavy CI steps (a Phoenix mix release,
+// large cargo builds) legitimately run tens of minutes.
+var maxExecTimeout = func() int {
+	if v := os.Getenv("MAX_EXEC_TIMEOUT_SECS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 300 // seconds
+}()
 
 func ownerFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxOwnerKey{}).(string)
