@@ -51,6 +51,23 @@ images:
     rootfs: /var/cache/forkd/elixir-1-17-3072-*.ext4
     notes: "Baked 2026-08-08 from elixir:1.17 with --size-mib 3072 (needs >1536 MiB). elixir/mix/erl already in /usr/local/bin."
 
+  - name: elixir-release
+    capability: elixir-release
+    labels: [elixir-release, release]
+    description: "Elixir 1.18 / OTP 27 + Rust stable (pinned CARGO_HOME) + Node 22/pnpm + kaniko — full Phoenix+NIF release builds (origin: cytale deploy pipeline)"
+    baked: true
+    rootfs: /var/cache/forkd/elixir-release-tools-local.ext4
+    notes: |
+      Bake with deploy/bake-elixir-release.sh (dockerfile: images/elixir-release.dockerfile).
+      Sizing per rust-base notes: rootfs 12 GiB, memory 4 GiB — Tantivy-class Rust
+      NIF builds + hex deps + node_modules + _build peak well past 8 GiB. Rust homes
+      pinned to /usr/local/{rustup,cargo} so cache mounts can never mask toolchain
+      binaries. kaniko baked in for daemonless image push (sandboxes have no docker).
+      First bake: 2026-09-08. BAKE GOTCHA: custom `docker build` RUN steps on vm2
+      need `--network=host --security-opt seccomp=unconfined` (Proxmox LXC denies
+      thread creation + AF_UNIX in the default build sandbox; Erlang/OTP cannot
+      boot there at all, so no mix RUNs in the dockerfile).
+
   - name: llm-review
     capability: llm-review
     labels: [llm-review]
