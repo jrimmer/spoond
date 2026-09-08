@@ -33,6 +33,14 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
+// SetHTTPTimeout overrides the client's overall per-request timeout. The
+// default 600s silently caps exec calls of the same name — a long-running
+// CI step (mix release, cargo build) dies at exactly 10 minutes even when
+// the requested exec timeout is larger. Set to maxExecTimeout + slack.
+func (c *Client) SetHTTPTimeout(d time.Duration) {
+	c.http.Timeout = d
+}
+
 // SnapshotInfo mirrors the controller's SnapshotInfo JSON shape.
 type SnapshotInfo struct {
 	Tag           string `json:"tag"`

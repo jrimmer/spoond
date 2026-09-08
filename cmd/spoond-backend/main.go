@@ -82,6 +82,14 @@ func Main(args []string) int {
 	}
 
 	fc := forkd.NewClient(forkdURL, forkdToken)
+	// The client's overall HTTP timeout must exceed the largest exec the
+	// backend is willing to forward, or long CI steps die at exactly the
+	// client timeout (600s default) regardless of MAX_EXEC_TIMEOUT_SECS.
+	if v := os.Getenv("FORKD_HTTP_TIMEOUT_SECS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			fc.SetHTTPTimeout(time.Duration(n) * time.Second)
+		}
+	}
 	// knownTags surfaces baked images even when the controller's list
 	// endpoint is empty; add tags here as you bake them. Also seeds the
 	// warm pool so every image pre-forks at startup.
