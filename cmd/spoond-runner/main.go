@@ -15,6 +15,7 @@
 //	REPO_BASE_URL      Git host base URL for actions/checkout clones
 //	                   (default https://code.lacy.casa)
 //	LEASE_TTL          Sandbox lease TTL seconds (default 600)
+//	EXEC_TIMEOUT_SECS  Per-step exec timeout seconds (default 300)
 //	RUNNER_FLOOR       Minimum registered runners (default 3)
 //	RUNNER_MAX         Maximum registered runners (default 12)
 //	RUNNER_SCALE_STEP  Runners added/removed per scale event (default 3)
@@ -31,6 +32,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -101,6 +103,15 @@ func Main(args []string) int {
 		}
 	}
 
+	// Per-step exec timeout for CI steps (mix release / cargo builds run
+	// tens of minutes). 0 -> executor default (300s).
+	stepTimeout := 0
+	if v := os.Getenv("EXEC_TIMEOUT_SECS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			stepTimeout = n
+		}
+	}
+
 	// Adaptive pool config.
 	poolCfg := runner.PoolConfig{
 		Floor:          envIntOr("RUNNER_FLOOR", 3),
@@ -147,6 +158,7 @@ func Main(args []string) int {
 			DefaultImage: defaultImage,
 			TTL:          ttl,
 			RepoBaseURL:  envOr("REPO_BASE_URL", "https://code.lacy.casa"),
+			StepTimeout:  stepTimeout,
 		}
 		return &runner.WorkerImpl{Adapter: proto, Exec: exec}
 	}

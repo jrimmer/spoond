@@ -29,6 +29,11 @@ type Executor struct {
 	// WorkspaceDir is the directory inside the sandbox where the repo is
 	// checked out and run steps execute. Defaults to /workspace.
 	WorkspaceDir string
+	// StepTimeout is the per-step exec timeout in seconds. Defaults to
+	// 300 when zero. Compile-heavy CI steps (a full mix release, cargo
+	// builds) routinely exceed the old hardcoded 300s — set via
+	// EXEC_TIMEOUT_SECS on the runner.
+	StepTimeout int
 	// Metrics (issue #20): runner Prometheus metrics. Nil = no metrics.
 	Metrics *metrics.RunnerMetrics
 }
@@ -160,7 +165,11 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		if checkedOut {
 			cwd = ws
 		}
-		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, cwd, env, 300)
+		stepTimeout := e.StepTimeout
+		if stepTimeout <= 0 {
+			stepTimeout = 300
+		}
+		res, err := e.Sandbox.Exec(ctx, sandboxID, cmd, cwd, env, stepTimeout)
 		if err != nil {
 			if e.Metrics != nil {
 				e.Metrics.ExecErrors.WithLabelValues("500").Inc()
