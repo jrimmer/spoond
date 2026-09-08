@@ -29,6 +29,13 @@ func NewHTTPLeaseClient(baseURL, token string) *HTTPLeaseClient {
 	}
 }
 
+// SetHTTPTimeout raises the lease client's overall timeout so long exec
+// calls (EXEC_TIMEOUT_SECS) are not cut at the default 600s by the
+// runner's own HTTP client. Must exceed the backend's exec timeout.
+func (c *HTTPLeaseClient) SetHTTPTimeout(d time.Duration) {
+	c.Client.Timeout = d
+}
+
 // Create grants a new sandbox lease.
 func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (string, error) {
 	payload := map[string]any{"image": image, "ttl": ttl}
