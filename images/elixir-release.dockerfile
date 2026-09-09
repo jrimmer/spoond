@@ -26,8 +26,8 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/*
 
 # Rust — copied wholesale from the stock toolchain image instead of
-# rustup-installed: curl/getaddrinfo is unreliable inside this host's LXC
-# docker builds (pthread create denied), and `curl | sh` once "passed"
+# rustup-installed: curl/getaddrinfo is unreliable in this host's docker
+# build containers (default seccomp denies pthread creation), and `curl | sh` once "passed"
 # with no Rust installed when the download failed silently. Pinned homes
 # so cache mounts elsewhere can never mask the toolchain binaries.
 # The trailing rustc invocation fails the layer if the copy is broken.
@@ -54,8 +54,8 @@ RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 COPY --from=gcr.io/kaniko-project/executor:v1.23.2 /kaniko/executor /usr/local/bin/executor
 
 # NOTE: no `mix local.hex` here — Erlang cannot boot inside this host's
-# LXC build containers (AF_UNIX denied at spawn_init, EACCES) but runs fine
-# in the forkd microVM; CI jobs bootstrap hex/rebar themselves in ~5s.
+# docker build containers (AF_UNIX denied at spawn_init, EACCES) but runs
+# fine in the forkd microVM; CI jobs bootstrap hex/rebar themselves in ~5s.
 
 # Guest agent (forkd-agent.py) reads /etc/environment for PATH — but only
 # the FIRST PATH= line (appending a second one is silently ignored, which

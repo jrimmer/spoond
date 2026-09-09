@@ -10,9 +10,9 @@ cd /var/cache/forkd
 export FORKD_SCRIPTS_DIR=/usr/local/share/forkd-scripts
 
 echo "=== 1. build toolchain image (docker) ==="
-# --security-opt seccomp=unconfined: vm2 is a Proxmox LXC; the default build
-# sandbox denies thread creation (getaddrinfo) and AF_UNIX (Erlang spawn_init).
-# --network=host: DNS resolution is flaky in the nested build sandbox.
+# --security-opt seccomp=unconfined: the host's docker default seccomp
+# profile denies thread creation (getaddrinfo) and AF_UNIX in build
+# containers. --network=host: build-sandbox DNS is flaky otherwise.
 DOCKER_BUILDKIT=1 docker build --network=host --security-opt seccomp=unconfined \
   -f elixir-release.dockerfile -t elixir-release-tools:local /var/cache/forkd
 
@@ -59,6 +59,7 @@ ln -sf /usr/local/bin/node /tmp/node-link && /tmp/node-link --version && echo SY
 cp /usr/local/bin/node /tmp/node-copy && /tmp/node-copy --version && echo COPY_EXEC_OK
 corepack --version && echo COREPACK_SHIM_OK
 which pkg-config && echo WHICH_OK
+id && getent passwd root >/dev/null && echo PASSWD_OK
 pkg-config --libs openssl && echo PKGCONFIG_OPENSSL_OK
 pkg-config --version && PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig pkg-config --exists openssl && echo PKGCONFIG_OK
 echo "--- space ---"

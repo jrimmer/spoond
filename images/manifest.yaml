@@ -65,8 +65,8 @@ images:
       binaries. kaniko baked in for daemonless image push (sandboxes have no docker).
       First bake: 2026-09-08. BAKE GOTCHAS (each cost a bake cycle):
       - vm2 docker builds need --network=host --security-opt seccomp=unconfined
-        (Proxmox LXC denies thread creation + AF_UNIX; Erlang can't boot there at
-        all — no mix RUNs in the dockerfile).
+        (the host's default docker seccomp profile denies thread creation and
+        AF_UNIX; Erlang can't boot there at all — no mix RUNs in the dockerfile).
       - curl | sh silently succeeds with nothing installed when the download
         fails; Rust is COPY'd from rust:1-bookworm with a rustc --version guard.
       - from-image's ext4 cache keys on the image TAG and re-registering over a
