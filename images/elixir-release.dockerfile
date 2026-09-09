@@ -76,6 +76,13 @@ RUN ln -sf /usr/local/rustup/toolchains/*/bin/rustc /usr/local/cargo/bin/rustc \
 RUN ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc \
  && ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo
 
+# Final guard: fail the BUILD (loudly, before the costly conversion) if
+# any tool the CI pipeline needs is missing. The docker→ext4 conversion in
+# build-rootfs.sh can silently drop files when the host disk runs tight.
+RUN for b in pkg-config rustc cargo node corepack git python3 elixir mix executor curl; do \
+      command -v "$b" >/dev/null || { echo "MISSING TOOL: $b" >&2; exit 1; }; \
+    done && echo ALL_TOOLS_PRESENT
+
 # NOTE: DNS/registry reachability is fixed at the INIT level, not here:
 # forkd-init.sh (injected post-conversion, lives on the forkd host) now
 # lists the LAN resolvers first, so code.lacy.casa resolves to the LAN

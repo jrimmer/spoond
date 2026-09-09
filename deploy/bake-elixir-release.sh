@@ -58,6 +58,9 @@ echo "--- symlink + copy exec (ext4-conversion corruption sentinels) ---"
 ln -sf /usr/local/bin/node /tmp/node-link && /tmp/node-link --version && echo SYMLINK_EXEC_OK
 cp /usr/local/bin/node /tmp/node-copy && /tmp/node-copy --version && echo COPY_EXEC_OK
 corepack --version && echo COREPACK_SHIM_OK
+which pkg-config && echo WHICH_OK
+pkg-config --libs openssl && echo PKGCONFIG_OPENSSL_OK
+pkg-config --version && PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig pkg-config --exists openssl && echo PKGCONFIG_OK
 echo "--- space ---"
 df -h / | tail -1
 echo ELIXIR_RELEASE_OK
