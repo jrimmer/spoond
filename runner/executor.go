@@ -139,6 +139,12 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		if env["CI_COMMIT"] == "" {
 			env["CI_COMMIT"] = ctx2.Eval("${{ github.sha }}")
 		}
+		// CI=true signals "non-interactive" to every tool (pnpm and friends
+		// otherwise prompt on /dev/console — which never EOFs — and hang
+		// forever; cost us a full debugging cycle on the cytale pipeline).
+		if env["CI"] == "" {
+			env["CI"] = "true"
+		}
 		if env["CI_PULL_REQUEST"] == "" {
 			env["CI_PULL_REQUEST"] = ctx2.Eval("${{ github.event.pull_request.number }}")
 		}
