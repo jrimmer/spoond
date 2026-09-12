@@ -96,7 +96,33 @@ work.
 | `pooled sb-… is stale (controller forgot it)` | controller restart pruned pool | backend restart (above) |
 | `sandbox is suspended; resume it first` | lease suspended, op needs live VM | `resume <id>` first |
 | `failed to grant sandbox` 500 | pool refill window | retry after ~30s |
+| `spawned sandbox failed the integrity probe` | toolchain corrupt in that image generation | re-bake the image; the bad sandbox is already killed |
+| `pooled sb-… failed the integrity probe` | a pooled sandbox predates a fix | expected once per bad sandbox; the pool refills clean |
 | exec `proxy.golang.org` blocked | `lan` policy has no internet | use `network_policy: internet` or allowlist |
+
+## The integrity probe
+
+`SANDBOX_PROBE` (default on) runs a behaviour check inside each sandbox before
+it is pooled or leased — `uname -s` must report Linux, `tr` must translate —
+and kills the sandbox on failure. It catches a corrupted toolchain that is
+otherwise invisible: the sandbox pings fine and `uname --version` exits 0
+while returning another program's output. `docs/ci-jobs.md` has the observed
+signatures.
+
+Two operational consequences. A bad image generation now surfaces as probe
+failures in the backend journal instead of 48-second build failures, so a run
+of them means the image needs re-baking rather than the sandbox layer needing
+attention. And `SANDBOX_PROBE=0` is the escape hatch if the probe itself
+misbehaves — grants then hand out unverified sandboxes, which is what every
+deployment did before it existed.
+
+The probe is a detection net, not a fix: it stops a corrupt sandbox from
+costing a debugging cycle, and says nothing about why the image was corrupt.
+
+Failed jobs are recorded as JSON under `/var/lib/spoond/jobs/`
+(`JOB_RECORD_DIR`), naming the failing step, its exit code and its output
+tail. That is the first place to look for a red build — the runner's Forgejo
+logs are not readable back out.
 
 ## Diagnostics first
 

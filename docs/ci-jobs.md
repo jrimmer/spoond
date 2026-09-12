@@ -81,9 +81,56 @@ Already handled by the runner, so jobs need not:
 Concurrency is bounded by host configuration, not by workflow content:
 
 - `RUNNER_MAX` is the number of **registered runners** (not sandboxes).
-  `sandbox` runs `RUNNER_MAX=1`, so jobs are serialized today; `RUNNER_FLOOR=3`
-  above a max of 1 is contradictory and should be reconciled before tuning.
+  `sandbox` runs `RUNNER_MAX=1`, so jobs are serialized today. `RUNNER_FLOOR`
+  above `RUNNER_MAX` is contradictory and is clamped up to the floor now
+  (`runner/pool.go`); it used to register only one runner and silently cap
+  every job behind it.
 - Sandboxes restored from *different* tags were always safe to run
   concurrently — different images, different files. Same-tag concurrency is
   safe now too, since each sandbox has its own rootfs copy; raising
   `RUNNER_MAX` and provisioning netns accordingly is what unlocks it.
+
+## When a build fails, look for the job record
+
+A failed job writes `/var/lib/spoond/jobs/job-<id>.json` naming the step that
+died, its exit code, and the tail of its output. Forgejo exposes no readable
+log API, so without this a red run reaches the consumer as a bare `failure` —
+no step name, no exit code, nothing to act on. The runner's own journal line
+carries the same fields:
+
+```
+executor: job 1729 final result=1 steps=5 failed_step=4(build) exit=1
+```
+
+Records are written on failure only and capped at 500 files. `JOB_RECORD_DIR`
+moves them (`/var/lib/spoond/jobs` by default); empty disables writing.
+
+Workflow authors should not need to add their own failure logging for this:
+the runner already has the step name, exit code and output at the point it
+fails. If a red build still leaves you guessing, that is a gap in the runner,
+not something to route around in the workflow.
+
+## The sandbox integrity probe
+
+Every sandbox is checked from the inside before it is pooled or leased
+(`SANDBOX_PROBE`, on by default; `SANDBOX_PROBE=0` disables). This exists
+because a sandbox can carry a corrupted toolchain that is invisible from
+outside: it answers a ping, `uname --version` exits 0, and the job then fails
+48 seconds into a dependency build with an error that names neither the
+sandbox nor the corruption.
+
+The probe checks **behaviour, not exit status**, because a swapped binary is a
+valid ELF of plausible size that exits 0. Observed carriers, and what the
+probe does with each:
+
+| sandbox state | `uname --version` | probe |
+|---|---|---|
+| healthy | `uname (GNU coreutils) 9.1` | `PROBE_OK` |
+| `uniq` swapped into `/usr/bin/uname` | `uniq (GNU coreutils) 9.1`, exit 0 | `PROBE_FAIL uname -s -> option requires an argument -- 's'` |
+| garbage bytes | exec format error | `PROBE_FAIL` |
+
+A failing sandbox is killed on the spot and the grant either retries from the
+pool or fails with a message naming the probe — a bad sandbox is never handed
+to a job. It is not a fix for whatever corrupts an image, only a way to stop
+one from silently costing a debugging cycle; `docs/operations.md` covers the
+image side.
