@@ -93,12 +93,38 @@ work.
 | `connection refused` on :2222 | gateway down/restarting | `systemctl restart forkd-sshd-gateway` |
 | `Text file busy` on deploy | overwrote a running binary | deploy to `.new` then `mv` (see deploy scripts) |
 | `child-1.sock never appeared within 10s` | controller busy / cold spawn | wait for pool refill; check watchdog tarballs |
-| `pooled sb-… is stale (controller forgot it)` | controller restart pruned pool | backend restart (above) |
+| `pooled sb-… is stale (controller forgot it)` | controller restart pruned pool | backend restart (above) — see below, the pool does **not** recover on its own |
 | `sandbox is suspended; resume it first` | lease suspended, op needs live VM | `resume <id>` first |
 | `failed to grant sandbox` 500 | pool refill window | retry after ~30s |
 | `spawned sandbox failed the integrity probe` | toolchain corrupt in that image generation | re-bake the image; the bad sandbox is already killed |
 | `pooled sb-… failed the integrity probe` | a pooled sandbox predates a fix | expected once per bad sandbox; the pool refills clean |
+| `warmPool: spawn <tag>:` repeating forever | tag's snapshot can't restore (e.g. vmstate from an older Firecracker) | re-bake that tag; the backend retries it every 5s until then |
 | exec `proxy.golang.org` blocked | `lan` policy has no internet | use `network_policy: internet` or allowlist |
+
+### A controller restart leaves the pool cold until it is drained
+
+`warmPool` sizes the pool with `len(s.store.pool[image])` and returns early at
+`poolSize`, but the pool is in memory only and the controller has no
+client-liveness concept. After a controller restart the backend still holds
+the old ids, so the count reads "full" while every entry is dead: no refill
+happens, and the pool stays cold indefinitely. Each grant pops one phantom
+(`is stale … dropping`) and then cold-spawns, so grants keep working and the
+symptom is invisible except in the journal.
+
+Observed 2026-09-12: three phantom `elixir-release` ids, zero live sandboxes,
+and a grant that dropped all three before spawning. `systemctl restart
+spoond-backend` clears it, which is why the row above says to restart the
+backend rather than the controller.
+
+Do not "fix" this by making the refill more aggressive without checking the
+disk budget first: `POOL_SIZE × images` sandboxes at ~12 GiB per child is
+larger than the pool's free space on this host, so a refill that spawns
+without accounting for phantoms can fill the pool.
+
+A tag that cannot restore is retried on every refill tick — observed at
+**1440 failed spawn attempts in 20 minutes** (6 un-restorable tags × a 5s
+tick), each one a doomed restore. A per-image backoff after a failed spawn
+would cut that to a handful without changing behaviour for healthy tags.
 
 ## The integrity probe
 
