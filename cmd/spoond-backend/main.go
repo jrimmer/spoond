@@ -52,6 +52,21 @@ func envIntOr(key string, def int) int {
 	return def
 }
 
+// envBoolOr accepts the usual off-words ("0", "false", "no") as false and
+// anything else as true, so a typo fails open to the default rather than
+// silently disabling a check.
+func envBoolOr(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "":
+		return def
+	case "0", "false", "no":
+		return false
+	default:
+		return true
+	}
+}
+
 func Main(args []string) int {
 	forkdURL := envOr("FORKD_URL", "http://127.0.0.1:8889")
 	forkdToken := os.Getenv("FORKD_TOKEN")
@@ -98,6 +113,10 @@ func Main(args []string) int {
 		knownTags = strings.Split(v, ",")
 	}
 	svc := api.NewServiceWithIdle(fc, tokens, poolSize, defaultTTL, maxTTL, idleTimeout, knownTags...)
+	// Per-spawn integrity probe: a sandbox with a corrupt toolchain answers a
+	// ping and then fails the job deep inside a build, so verify it from
+	// inside the guest before pooling or leasing it. SANDBOX_PROBE=0 disables.
+	svc.SetSandboxProbe(envBoolOr("SANDBOX_PROBE", true), time.Duration(envIntOr("SANDBOX_PROBE_TIMEOUT_SECS", 20))*time.Second)
 	// Egress policy enforcement (ticket #13): install iptables FORWARD
 	// rules in each lease's child netns. NETPOL_DNS lists resolvers the
 	// restricted policy always permits so guests can resolve allowlisted

@@ -126,6 +126,10 @@ type Service struct {
 	gatewayToken string
 	// poolSize is the warm-pool size per image.
 	poolSize int
+	// probeEnabled runs integrityProbe inside each sandbox before it is
+	// pooled or handed to a lease. probeTimeout bounds that exec.
+	probeEnabled bool
+	probeTimeout time.Duration
 	// defaultTTL is used when a request omits ttl.
 	defaultTTL time.Duration
 	// maxTTL caps a requested ttl.
@@ -165,6 +169,16 @@ func (s *Service) SetNetpol(a PolicyApplier, dns []string) {
 // X-Spoond-User-Id to act as the SSH-authenticated user.
 func (s *Service) SetGatewayToken(tok string) {
 	s.gatewayToken = tok
+}
+
+// SetSandboxProbe configures the per-spawn integrity probe. enabled=false
+// turns it off (every sandbox is then handed out unverified); timeout<=0
+// leaves the default in place.
+func (s *Service) SetSandboxProbe(enabled bool, timeout time.Duration) {
+	s.probeEnabled = enabled
+	if timeout > 0 {
+		s.probeTimeout = timeout
+	}
 }
 
 // SetIdentities installs the identity store used for token→user and
@@ -234,6 +248,8 @@ func NewServiceWithIdle(fc ForkdClient, tokens map[string]string, poolSize int, 
 		idleTimeout:   idleTimeout,
 		sweepInterval: 5 * time.Second,
 		log:           log.Default(),
+		probeEnabled:  true,
+		probeTimeout:  20 * time.Second,
 	}
 	for _, img := range knownImages {
 		if img == "" {
@@ -518,6 +534,10 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		if err := s.fillEndpoint(ctx, lease); err != nil {
 			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
 		}
+		if err := s.probeSandbox(ctx, lease.ForkdID); err != nil {
+			_ = s.forkd.DeleteWorkspace(ctx, ws.Name)
+			return nil, fmt.Errorf("workspace sandbox failed the integrity probe: %w", err)
+		}
 		if err := s.applyNetpol(ctx, lease); err != nil {
 			return nil, fmt.Errorf("apply network policy: %w", err)
 		}
@@ -551,13 +571,23 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		}
 		// Verify the pooled sandbox is still alive; if not, drop it and
 		// try the next one (or cold-spawn below).
-		if err := s.forkd.Ping(ctx, forkdID); err == nil {
-			addr = ""
-			break
+		if err := s.forkd.Ping(ctx, forkdID); err != nil {
+			s.log.Printf("grant: pooled %s (%s) is stale (controller forgot it), dropping", forkdID, image)
+			_ = s.forkd.Kill(ctx, forkdID)
+			forkdID = ""
+			continue
 		}
-		s.log.Printf("grant: pooled %s (%s) is stale (controller forgot it), dropping", forkdID, image)
-		_ = s.forkd.Kill(ctx, forkdID)
-		forkdID = ""
+		// Alive is not the same as sane. A pooled sandbox from a bad image
+		// generation answers a ping and then fails the job 48s in, so
+		// recycle it here and let the pool refill.
+		if err := s.probeSandbox(ctx, forkdID); err != nil {
+			s.log.Printf("grant: pooled %s (%s) failed the integrity probe, recycling: %v", forkdID, image, err)
+			_ = s.forkd.Kill(ctx, forkdID)
+			forkdID = ""
+			continue
+		}
+		addr = ""
+		break
 	}
 	if forkdID == "" {
 		sbs, err := s.forkd.Spawn(ctx, image, 1, true, memoryMiB)
@@ -569,6 +599,10 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		}
 		forkdID = sbs[0].ID
 		addr = sbs[0].GuestAddr
+		if err := s.probeSandbox(ctx, forkdID); err != nil {
+			_ = s.forkd.Kill(ctx, forkdID)
+			return nil, fmt.Errorf("spawned sandbox failed the integrity probe: %w", err)
+		}
 	}
 
 	lease.ForkdID = forkdID
@@ -939,6 +973,10 @@ func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl 
 		if err := s.fillEndpoint(ctx, lease); err != nil {
 			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
 		}
+		if err := s.probeSandbox(ctx, lease.ForkdID); err != nil {
+			_ = s.forkd.DeleteWorkspace(ctx, ws.Name)
+			return nil, fmt.Errorf("workspace sandbox failed the integrity probe: %w", err)
+		}
 		if err := s.applyNetpol(ctx, lease); err != nil {
 			return nil, fmt.Errorf("apply network policy: %w", err)
 		}
@@ -1044,6 +1082,52 @@ func (s *Service) list(owner string) []map[string]any {
 	return out
 }
 
+// integrityProbe is run inside a sandbox before it is pooled or leased. It
+// checks what the toolchain files DO, not whether they execute: a corrupted
+// /usr/bin/uname can be a valid ELF of plausible size that exits 0 while
+// printing some other program's name, so an exit-status check passes it. A
+// name-based check is no better — it has to guess at non-GNU tools (busybox
+// uname announces itself as BusyBox). Behaviour is the thing that stays true
+// across images.
+//
+// The carriers here are the ones observed in practice: a swapped or
+// unexecutable uname (which breaks every `OS=$(uname -s)` build hook) and a
+// swapped tr. Extend the script if a new carrier shows up; a probe that does
+// not answer at all counts as a failure, since the guest is the only vantage
+// point from which this corruption is visible.
+const integrityProbe = `p=""
+if command -v uname >/dev/null 2>&1; then
+  v=$(uname -s 2>&1)
+  case "$v" in Linux|linux) ;; *) p="uname -s -> $v" ;; esac
+fi
+if [ -z "$p" ] && command -v tr >/dev/null 2>&1; then
+  v=$(echo a-b | tr - _ 2>&1)
+  case "$v" in a_b) ;; *) p="tr a-b - _ -> $v" ;; esac
+fi
+if [ -z "$p" ]; then echo PROBE_OK; else echo "PROBE_FAIL $p"; exit 1; fi
+`
+
+// probeSandbox runs integrityProbe inside a sandbox. nil means usable. An
+// unreachable guest agent is a failure rather than a pass: a probe that
+// cannot run has told us nothing about the sandbox.
+func (s *Service) probeSandbox(ctx context.Context, id string) error {
+	if !s.probeEnabled {
+		return nil
+	}
+	res, err := s.forkd.Exec(ctx, id, []string{"sh", "-c", integrityProbe}, int(s.probeTimeout.Seconds()))
+	if err != nil {
+		return fmt.Errorf("probe: %w", err)
+	}
+	out := strings.TrimSpace(res.Stdout)
+	if res.ExitCode != 0 || out != "PROBE_OK" {
+		if out == "" {
+			out = strings.TrimSpace(res.Stderr)
+		}
+		return fmt.Errorf("integrity probe failed (exit %d): %s", res.ExitCode, out)
+	}
+	return nil
+}
+
 // warmPool pre-forks poolSize sandboxes per image tag.
 func (s *Service) warmPool(ctx context.Context, image string) {
 	if s.poolSize <= 0 {
@@ -1065,6 +1149,17 @@ func (s *Service) warmPool(ctx context.Context, image string) {
 		if err != nil {
 			s.log.Printf("warmPool: spawn %s: %v", image, err)
 			return
+		}
+		// Verify before pooling, so a bad generation is recycled here
+		// rather than served to a job. Stop rather than loop: a tag that
+		// fails the probe will keep failing it, and retrying spawns a
+		// sandbox per attempt.
+		for _, sb := range sbs {
+			if err := s.probeSandbox(ctx, sb.ID); err != nil {
+				s.log.Printf("warmPool: %s sandbox %s failed the integrity probe, recycling: %v", image, sb.ID, err)
+				_ = s.forkd.Kill(ctx, sb.ID)
+				return
+			}
 		}
 		s.store.mu.Lock()
 		for _, sb := range sbs {

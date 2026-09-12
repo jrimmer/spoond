@@ -67,6 +67,8 @@ with provisioning instructions.
 | `BOOTSTRAP_TOKEN` | *(empty)* | gates the first-user bootstrap when the store is empty (security review #37 H3/M4); unset = legacy open first-create |
 | `GATEWAY_TOKEN` | *(empty)* | SSH gateway's service token; lets the gateway call the backend as the authenticated SSH user (trusted impersonation, epic #26 U6) |
 | `POOL_SIZE` | `0` | warm-pool size **per image**; pre-forked sandboxes served in milliseconds. `0` disables |
+| `SANDBOX_PROBE` | `1` | check each sandbox runs a healthy toolchain before pooling or leasing it; `0` disables (see `docs/ci-jobs.md`) |
+| `SANDBOX_PROBE_TIMEOUT_SECS` | `20` | exec timeout for each integrity probe |
 | `KNOWN_IMAGES` | *(all)* | comma-separated allowlist of image tags that may be granted (e.g. `dev-base,go-base`) |
 | `PROXY_ADDR` | *(empty)* | `0.0.0.0:8891` to serve the HTTP proxy/LLM gateway listener (Caddy wildcard fronts it) |
 | `PROXY_AUTH_MODE` | `off` | `off` = capability model (lease id is the credential); `forward-auth` = require `X-Proxy-Auth` secret + `Remote-User` identity (epic #26 U7) |

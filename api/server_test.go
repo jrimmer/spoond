@@ -28,6 +28,10 @@ type fakeForkd struct {
 	deadSandboxes map[string]bool
 	netns         string // reported for spawned sandboxes ("" = none)
 	execStdout    string // canned stdout for Exec ("" = default "ok\n")
+	// probeFail marks sandboxes whose integrity probe fails, by sandbox id;
+	// probeFailAll fails the probe for every sandbox (fresh spawns too).
+	probeFail    map[string]string
+	probeFailAll bool
 }
 
 func newFakeForkd() *fakeForkd {
@@ -77,6 +81,16 @@ func (f *fakeForkd) Kill(ctx context.Context, id string) error {
 }
 
 func (f *fakeForkd) Exec(ctx context.Context, id string, args []string, timeoutSecs int) (*forkd.ExecResult, error) {
+	// The integrity probe reaches the substrate through this same call. A
+	// sandbox is healthy unless the test marks it otherwise, so answer the
+	// probe here instead of falling through to the canned stdout, which
+	// would fail every grant.
+	if len(args) == 3 && args[0] == "sh" && args[2] == integrityProbe {
+		if reason, bad := f.probeFail[id]; bad || f.probeFailAll {
+			return &forkd.ExecResult{Stdout: "PROBE_FAIL " + reason + "\n", ExitCode: 1}, nil
+		}
+		return &forkd.ExecResult{Stdout: "PROBE_OK\n"}, nil
+	}
 	stdout := f.execStdout
 	if stdout == "" {
 		stdout = "ok\n"
