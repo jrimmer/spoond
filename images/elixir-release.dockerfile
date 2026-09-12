@@ -19,10 +19,17 @@
 FROM elixir:1.18.4-otp-27
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Tauri 2 Linux target needs WebKitGTK/GTK/libsoup dev headers + the bundler
+# helpers. They are BAKED IN (not apt-installed per job): running apt inside
+# the sandbox is unreliable because the ext4 conversion randomly corrupts
+# /var/lib/apt and /var/lib/dpkg entries (EBADMSG), and the corruption is
+# invisible until something touches those paths.
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev libsrtp2-dev ca-certificates \
       curl git python3 jq xz-utils \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev \
+      libxdo-dev libayatana-appindicator3-dev patchelf file \
  && rm -rf /var/lib/apt/lists/*
 
 # Rust — copied wholesale from the stock toolchain image instead of
@@ -82,6 +89,14 @@ RUN ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc \
 RUN for b in pkg-config rustc cargo node corepack git python3 elixir mix executor curl; do \
       command -v "$b" >/dev/null || { echo "MISSING TOOL: $b" >&2; exit 1; }; \
     done && echo ALL_TOOLS_PRESENT
+
+# Tauri's Linux target links against these at compile time; assert the
+# pkg-config entries survive the build (the conversion corruption class has
+# bitten this image before).
+RUN pkg-config --exists webkit2gtk-4.1 \
+ && pkg-config --exists gtk+-3.0 \
+ && pkg-config --exists libsoup-3.0 \
+ && echo TAURI_SYS_DEPS_OK
 
 # NOTE: DNS/registry reachability is fixed at the INIT level, not here:
 # forkd-init.sh (injected post-conversion, lives on the forkd host) now
