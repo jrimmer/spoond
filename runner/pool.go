@@ -201,6 +201,13 @@ func (c PoolConfig) withDefaults() PoolConfig {
 	if c.Max <= 0 {
 		c.Max = 12
 	}
+	// spawn enforces Max as a hard cap, so a Max below Floor registers
+	// fewer runners than the floor promises (Floor=3 with Max=1 starts
+	// one worker and serializes every job).
+	if c.Max < c.Floor {
+		log.Printf("pool: max=%d is below floor=%d; raising max to floor", c.Max, c.Floor)
+		c.Max = c.Floor
+	}
 	if c.ScaleStep <= 0 {
 		c.ScaleStep = 3
 	}

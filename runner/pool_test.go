@@ -184,3 +184,19 @@ func TestPoolScalesDownToFloor(t *testing.T) {
 		t.Fatalf("expected scale-down to floor 3, got %d", got)
 	}
 }
+
+func TestWithDefaultsRaisesMaxToFloor(t *testing.T) {
+	c := PoolConfig{Floor: 3, Max: 1}.withDefaults()
+	if c.Max != 3 {
+		t.Fatalf("Max = %d, want 3 (raised to Floor)", c.Max)
+	}
+	if got := (PoolConfig{Floor: 4, Max: 4}).withDefaults().Max; got != 4 {
+		t.Fatalf("Max = %d, want 4 (Max == Floor left alone)", got)
+	}
+	if got := (PoolConfig{Floor: 3, Max: 12}).withDefaults().Max; got != 12 {
+		t.Fatalf("Max = %d, want 12 (Max above Floor left alone)", got)
+	}
+	if got := (PoolConfig{Max: 1}).withDefaults().Max; got != 3 {
+		t.Fatalf("Max = %d, want 3 (raised to default Floor)", got)
+	}
+}
