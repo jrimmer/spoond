@@ -27,7 +27,7 @@ Build a general-purpose ephemeral sandbox backend on top of forkd, exposed as a 
 
 ### Summary
 
-forkd is installed and proven on vm2 (10.1.0.11): 10 microVMs fork from a warm parent in 53ms, and `forkd exec` runs real commands inside live children. This plan builds the general-purpose layer on top of it — a small HTTP API that treats sandboxes as leases, with images as pre-baked snapshot tags — and validates the contract with a direct client smoke test. The result is a reusable ephemeral-compute backend that any future consumer can call without knowing forkd exists.
+forkd is installed and proven on sandbox (10.1.0.11): 10 microVMs fork from a warm parent in 53ms, and `forkd exec` runs real commands inside live children. This plan builds the general-purpose layer on top of it — a small HTTP API that treats sandboxes as leases, with images as pre-baked snapshot tags — and validates the contract with a direct client smoke test. The result is a reusable ephemeral-compute backend that any future consumer can call without knowing forkd exists.
 
 ### Problem Frame
 
@@ -100,7 +100,7 @@ flowchart LR
         AUTH[Token Auth]
         FC[forkd HTTP client]
     end
-    subgraph Host [vm2 10.1.0.11]
+    subgraph Host [sandbox 10.1.0.11]
         CTRL[forkd-controller :8889]
         SNAP[(snapshot tags)]
     end
@@ -140,8 +140,8 @@ GET    /api/images                     list snapshot tags
 
 ### Assumptions
 
-- forkd-controller runs as a systemd service on vm2 at `127.0.0.1:8889` (already installed and proven).
-- The backend runs on vm2 alongside forkd-controller, or on a host with network access to it.
+- forkd-controller runs as a systemd service on sandbox at `127.0.0.1:8889` (already installed and proven).
+- The backend runs on sandbox alongside forkd-controller, or on a host with network access to it.
 - Image baking starts with the forkd CLI (`forkd from-image`, `forkd snapshot-diff`); the admin API is deferred.
 - The Forgejo runner (U4) is deferred; its protocol stubs (`code.gitea.io/actions-proto-go` v0.6.0) are noted for when it is built.
 
@@ -168,7 +168,7 @@ GET    /api/images                     list snapshot tags
 - Error path: exec against a dead sandbox returns a connection error surfaced as a typed error.
 - Integration: against a live forkd-controller, spawn 1 sandbox and exec `echo hi`.
 
-**Verification:** Unit tests pass with a mocked HTTP server; integration test passes against the live forkd-controller on vm2.
+**Verification:** Unit tests pass with a mocked HTTP server; integration test passes against the live forkd-controller on sandbox.
 
 ### U2. Lease API service
 
@@ -247,7 +247,7 @@ GET    /api/images                     list snapshot tags
 
 ### U5. First image bake + backend deployment
 
-**Goal:** Bake the first image tag (`py-base`) and deploy the backend as a systemd service on vm2.
+**Goal:** Bake the first image tag (`py-base`) and deploy the backend as a systemd service on sandbox.
 
 **Requirements:** R7
 
@@ -257,7 +257,7 @@ GET    /api/images                     list snapshot tags
 - `deploy/forkd-backend.service` (new)
 - `deploy/README.md` (new)
 
-**Approach:** Bake `py-base` via the forkd CLI (`forkd from-image python:3.12-slim --tag py-base`). This bake is a prerequisite for U2's and U3's integration tests, so it runs before those verifications. Deploy the backend binary to vm2 and install the systemd unit. Document the bake + deploy steps. (The runner service unit is deferred with U4.)
+**Approach:** Bake `py-base` via the forkd CLI (`forkd from-image python:3.12-slim --tag py-base`). This bake is a prerequisite for U2's and U3's integration tests, so it runs before those verifications. Deploy the backend binary to sandbox and install the systemd unit. Document the bake + deploy steps. (The runner service unit is deferred with U4.)
 
 **Test scenarios:**
 - Happy path: `py-base` tag is baked and visible in `GET /api/images`.
@@ -269,16 +269,16 @@ GET    /api/images                     list snapshot tags
 ## Verification Contract
 
 - `go test ./...` passes in the repo.
-- Integration tests against the live forkd-controller on vm2 pass (spawn, exec, TTL-expire).
+- Integration tests against the live forkd-controller on sandbox pass (spawn, exec, TTL-expire).
 - A direct client smoke test (create → exec → TTL-expire → release) passes against the deployed backend.
 - The sandbox is released after the smoke test (no orphaned microVMs).
-- `forkd doctor` on vm2 reports `fail=0`.
+- `forkd doctor` on sandbox reports `fail=0`.
 
 ## Definition of Done
 
 **Global:**
 - The lease API is implemented and tested (U1–U3).
-- `py-base` is baked and the backend is deployed as a systemd service on vm2 (U5).
+- `py-base` is baked and the backend is deployed as a systemd service on sandbox (U5).
 - No orphaned microVMs remain after a smoke test (TTL + release verified).
 - The Forgejo runner integration (U4) is scoped but deferred to follow-up work.
 
@@ -290,5 +290,5 @@ GET    /api/images                     list snapshot tags
 - **Lease API transport:** a cleartext network-reachable API lets an on-path attacker steal tokens and exec payloads (KTD7). Mitigation: TLS termination + explicit bind (default `127.0.0.1`); non-localhost consumers use HTTPS.
 - **Cross-consumer sandbox access:** guessable sandbox IDs let one consumer exec into or kill another's sandbox (KTD8). Mitigation: unguessable IDs + owner check on every sandbox-scoped handler.
 - **forkd upstream churn:** forkd is a young project (v0.5.3). Its HTTP API may change. Mitigation: isolate all forkd calls in the `forkd/` client layer (U1) so API changes are contained.
-- **Warm-pool memory:** a warm parent lives in RAM. On 64GB vm2 this is ample, but the pool size must be bounded. Mitigation: configurable pool size, default conservative.
+- **Warm-pool memory:** a warm parent lives in RAM. On 64GB sandbox this is ample, but the pool size must be bounded. Mitigation: configurable pool size, default conservative.
 - **Runner build effort (U4):** the Forgejo runner does not exist yet; building it is a substantial separate effort. Mitigation: deferred to follow-up work; the API contract (U2) is designed to support it.

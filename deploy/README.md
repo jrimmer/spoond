@@ -1,6 +1,6 @@
 # spoond deployment
 
-Three systemd units run on vm2 (10.1.0.11):
+Three systemd units run on sandbox (10.1.0.11):
 
 1. **forkd-backend** — the lease API (`:8890`) with the warm pool
 2. **forkd-sshd-gateway** — the SSH gateway (`:2222`) + ctl plane
@@ -28,7 +28,7 @@ scp forkd-backend root@10.1.0.11:/opt/forkd-backend/
 scp deploy/forkd-backend.service root@10.1.0.11:/etc/systemd/system/
 ```
 
-On vm2, create `/etc/forkd-backend.env`:
+On sandbox, create `/etc/forkd-backend.env`:
 
 ```bash
 cat > /etc/forkd-backend.env <<'EOF'
@@ -44,8 +44,8 @@ chmod 600 /etc/forkd-backend.env
   authenticate with these bearer tokens
 - `POOL_SIZE` — pre-fork that many sandboxes per image so grants are served
   from the warm pool (milliseconds) instead of cold-spawning. 0 disables
-- `TLS_CERT`/`TLS_KEY` — serve HTTPS. On vm2 this uses the Let's Encrypt
-  cert for `vm2.lacy.casa` (see TLS below)
+- `TLS_CERT`/`TLS_KEY` — serve HTTPS. On sandbox this uses the Let's Encrypt
+  cert for `sandbox.lacy.casa` (see TLS below)
 
 Then:
 
@@ -58,7 +58,7 @@ systemctl status forkd-backend
 ### Verify
 
 ```bash
-curl -s -H "Authorization: Bearer <token>" https://vm2.lacy.casa:8890/api/images
+curl -s -H "Authorization: Bearer <token>" https://sandbox.lacy.casa:8890/api/images
 ```
 
 ## 2. forkd-sshd-gateway (SSH gateway + ctl plane)
@@ -108,7 +108,7 @@ scp forkd-runner root@10.1.0.11:/opt/forkd-runner/
 scp deploy/forkd-runner.service root@10.1.0.11:/etc/systemd/system/
 ```
 
-On vm2, create `/etc/forkd-runner.env`:
+On sandbox, create `/etc/forkd-runner.env`:
 
 ```bash
 cat > /etc/forkd-runner.env <<'EOF'
@@ -116,7 +116,7 @@ FORGEJO_URL=https://code.lacy.casa
 RUNNER_TOKEN=<registration token>
 RUNNER_NAME=forkd-runner
 RUNNER_LABELS=forkd
-LEASE_URL=https://vm2.lacy.casa:8890
+LEASE_URL=https://sandbox.lacy.casa:8890
 LEASE_TOKEN=<consumer token>
 DEFAULT_IMAGE=py-base
 RUNNER_FLOOR=3
@@ -169,7 +169,7 @@ scp deploy/forkd-spawn-watchdog.sh root@10.1.0.11:/usr/local/bin/
 scp deploy/forkd-watchdog.service deploy/forkd-watchdog.timer root@10.1.0.11:/etc/systemd/system/
 ```
 
-On vm2:
+On sandbox:
 
 ```bash
 chmod +x /usr/local/bin/forkd-spawn-watchdog.sh
@@ -201,6 +201,6 @@ ls -l /var/log/forkd/watchdog/
 
 ## TLS
 
-The backend serves TLS on `:8890` using vm2's Let's Encrypt cert for
-`vm2.lacy.casa`. vm2's `/etc/hosts` pins that hostname to 10.1.0.11 so the
+The backend serves TLS on `:8890` using sandbox's Let's Encrypt cert for
+`sandbox.lacy.casa`. sandbox's `/etc/hosts` pins that hostname to 10.1.0.11 so the
 runner reaches the backend directly (not via Caddy).

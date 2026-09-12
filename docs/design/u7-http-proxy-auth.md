@@ -128,7 +128,7 @@ guest VM ── http://10.43.0.1:8891/llm/<id>/... , /assets/...  (exempt, uncha
 
 - **DNS reality check:** `*.sandbox.lacy.casa` already covers form 1 (one label). Form 2 is two labels — the existing wildcard does **not** cover it. Per-user wildcard records (`*.<user>.sandbox.lacy.casa`) are required; create them at user-creation time. Caddy's host wildcard may also need a `host *.*.sandbox.lacy.casa` matcher (verify with `caddy adapt` on .203).
 - **Disambiguation rule for form 1:** lease lookup first (id, then owner-scoped name); if no lease and `identities.UserByName(label)` exists → user root (`handleUserRoot`). Edge: a lease named identically to its owner resolves as a lease — acceptable, document it.
-- External (Cloudflare) exposure of per-user domains is **out of scope for T7** (internal split-horizon only; external stays via `vm2.lacy.casa:8890` API + Pangolin).
+- External (Cloudflare) exposure of per-user domains is **out of scope for T7** (internal split-horizon only; external stays via `sandbox.lacy.casa:8890` API + Pangolin).
 
 ## 7. Owner-scoping semantics
 
@@ -143,7 +143,7 @@ Authenticated owner = user **ID** (`u-<hex>`, matching `Lease.Owner` once T2 lan
 
 - `parseProxyHost2` table: user-scoped id/name, `-port` variants, two-label, bad port, apex, >63-char, dot-in-user rejected.
 - httptest handler tests (fake `Service`/`ForkdClient`, mirroring `proxy_test.go` + `server_test.go` style): no `Remote-User` → 401; wrong/missing secret → 403; owner → 200 + proxied; non-owner legacy id → 403; non-owner name → 403; user-scoped host of another user → 403; unknown Authelia user → 403; `/llm/` + `/assets/` without auth still work; `off` mode → legacy behavior.
-- Integration (vm2, per plan U7): browser-level through Caddy; curl with `Remote-User` + secret headers; two-identity fixture from the plan's verification contract.
+- Integration (sandbox, per plan U7): browser-level through Caddy; curl with `Remote-User` + secret headers; two-identity fixture from the plan's verification contract.
 
 ## 9. Risks / open questions
 

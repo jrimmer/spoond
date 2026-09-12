@@ -34,7 +34,7 @@ Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.lacy.casa` on CT144
 
 ### Summary
 
-CFOS is a self-hosted platform for "vibe coded" personal applications and AI agents that run inside a strong sandbox. It runs on CT144 (10.1.0.144) as a pnpm service (`cfos.service`), with the upstream repo at `github.com/cloudflare/cloudflare-os`. Gadgets and agent `executeCode` calls currently execute on a sandboxed variant of Cloudflare Workers. The forkd lease API (built in the prior plan) provides fast, isolated, ephemeral microVMs on vm2. This plan wires CFOS's code execution to forkd, keeping the CFOS frontend, chat, and gadget model intact while swapping the execution substrate.
+CFOS is a self-hosted platform for "vibe coded" personal applications and AI agents that run inside a strong sandbox. It runs on CT144 (10.1.0.144) as a pnpm service (`cfos.service`), with the upstream repo at `github.com/cloudflare/cloudflare-os`. Gadgets and agent `executeCode` calls currently execute on a sandboxed variant of Cloudflare Workers. The forkd lease API (built in the prior plan) provides fast, isolated, ephemeral microVMs on sandbox. This plan wires CFOS's code execution to forkd, keeping the CFOS frontend, chat, and gadget model intact while swapping the execution substrate.
 
 ### Problem Frame
 
@@ -98,11 +98,11 @@ flowchart LR
         CA[Command Adapter /v1/run]
         BR[gatekeeper bridge → CFOS]
     end
-    subgraph Backend [vm2 - forkd-backend]
+    subgraph Backend [sandbox - forkd-backend]
         API[Lease API :8890]
         POOL[Warm Pool]
     end
-    subgraph Host [vm2]
+    subgraph Host [sandbox]
         CTRL[forkd-controller]
         SNAP[(snapshot tags)]
     end
@@ -124,7 +124,7 @@ flowchart LR
 
 ### Assumptions
 
-- forkd-backend lease API is live on vm2 at `https://vm2.lacy.casa:8890` (built in prior plan).
+- forkd-backend lease API is live on sandbox at `https://sandbox.lacy.casa:8890` (built in prior plan).
 - CFOS runs on CT144 and can reach the adapter over the homelab network (internal traffic, not via Pangolin).
 - Gadget code is JS/TS; a `js-base` image is baked for it.
 - The adapter runs as a systemd service (plain Go binary, per homelab preference).

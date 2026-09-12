@@ -93,7 +93,7 @@ flowchart LR
         PERSIST[Persistent Sandbox Mode]
         SUSPEND[Suspend/Resume]
     end
-    subgraph Host [vm2]
+    subgraph Host [sandbox]
         CTRL[forkd-controller]
         SNAP[(dev-base snapshot)]
     end
@@ -127,7 +127,7 @@ forkd-dev status <id>                                          → running/suspe
 
 ### Assumptions
 
-- forkd-backend lease API is live on vm2 at `https://vm2.lacy.casa:8890`.
+- forkd-backend lease API is live on sandbox at `https://sandbox.lacy.casa:8890`.
 - A reachable ssh gateway/proxy exists (or is added) on the homelab edge for external access.
 - The dev image (`dev-base`) is baked with tmux, ssh server, git, and an LLM coding agent.
 - The user accesses from anywhere, so the gateway must be reachable externally (but internal traffic never via Pangolin).

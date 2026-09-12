@@ -107,8 +107,8 @@ Identity lives in the backend (a `users` table: id, name, kind=person|agent, adm
 ### Assumptions
 
 - Forgejo/Authelia remain the identity source for the HTTP side (already in stack per exe.dev triage).
-- vm2's gateway keys directory keeps working as the bootstrap path (first key → admin).
-- The integration suite runs on vm2 and is the acceptance gate for every unit.
+- sandbox's gateway keys directory keeps working as the bootstrap path (first key → admin).
+- The integration suite runs on sandbox and is the acceptance gate for every unit.
 
 ## Implementation Units
 
@@ -206,7 +206,7 @@ Identity lives in the backend (a `users` table: id, name, kind=person|agent, adm
 | Gateway/ctl suite | `tests/integration/test_gateway.sh test_ctl.sh test_ctl_new.sh` | U1, U3, U6, U9 |
 | MCP/ACP suite | `tests/integration/test_mcp.sh test_acp.sh` | U4 |
 | Stat/pretty suite | `tests/integration/test_stat_pretty.sh` | U2, U6 |
-| Full suite (vm2) | `tests/integration/run.sh` — 219+ PASS, only known netpolicy flake allowed | all |
+| Full suite (sandbox) | `tests/integration/run.sh` — 219+ PASS, only known netpolicy flake allowed | all |
 | Multi-identity fixture | two SSH keys + two tokens; each surface exercised as owner and non-owner | U1, U3, U6, U7, U9 |
 
 ## Definition of Done

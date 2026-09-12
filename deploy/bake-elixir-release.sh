@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bake the elixir-release snapshot: Elixir 1.18/OTP 27 + Rust stable +
-# Node 22/pnpm + kaniko. Runs ON THE FORKD HOST (vm2); the dockerfile is
+# Node 22/pnpm + kaniko. Runs ON THE FORKD HOST (sandbox); the dockerfile is
 # images/elixir-release.dockerfile from the spoond repo.
 #
 # Retry with fixed args, js-base style: from-image registers the tag and

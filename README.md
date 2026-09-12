@@ -77,7 +77,7 @@ git clone https://github.com/jrimmer/spoond && cd spoond
 | [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user | 
 | [Operations](docs/operations.md) | pool, watchdog, failure runbook, backups, identity ops |
 | [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
-| [deploy/](deploy/README.md) | systemd units for vm2-style deployments |
+| [deploy/](deploy/README.md) | systemd units for sandbox-style deployments |
 
 ## Status
 
