@@ -23,6 +23,30 @@ milliseconds. After a backend restart the pool refills over ~90s
 slower and can transiently fail with `failed to grant sandbox` 500s —
 those are artifacts, not product bugs.
 
+### Where a pool's disk goes
+
+Each sandbox writes to its own copy of its tag's rootfs, so a pooled sandbox's
+accumulated writes — cargo target, pnpm store, `mix _build` — are charged to
+that sandbox and released when it dies. This is the opposite of the behaviour
+that used to fill the host: writes went into the shared rootfs, so draining the
+pool freed nothing and the growth was unbounded.
+
+Two numbers follow from it:
+
+- **Draining the pool now reclaims disk.** `forkd-disk-guard.sh` restarting
+  `spoond-runner` releases the pool's copies, which is what makes that guard
+  effective rather than cosmetic.
+- **A spawn costs one rootfs copy.** Free where the filesystem clones
+  (`reflink`) — ZFS 2.2+, XFS, btrfs — and a full copy elsewhere, so on such a
+  host `POOL_SIZE` is a storage decision, not just a latency one. Check with
+  `zfs list` / `df` before raising it.
+
+Stranded copies are not expected: a killed sandbox removes its own, a restart's
+sweep removes those belonging to sandboxes that died with the controller, and
+the watchdog removes directories with no live Firecracker. If disk does not come
+back after a drain, compare `ls /tmp/forkd-daemon-*/*.ext4` against
+`pgrep -c firecracker` before assuming a leak.
+
 ## Spawn-outage watchdog
 
 `forkd-spawn-watchdog` (timer, every 5 min) auto-recovers from the

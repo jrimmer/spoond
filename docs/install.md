@@ -29,6 +29,13 @@ git clone https://github.com/jrimmer/spoond && cd spoond
 # 1. forkd-controller — separate upstream project.
 #    Follow its own install docs (github.com/jrimmer/forkd) and leave it
 #    running with its API on http://127.0.0.1:8889.
+#    Needs Firecracker >= 1.15. A restore re-points each sandbox's rootfs
+#    drive at its own copy so concurrent sandboxes cannot corrupt one
+#    another; older builds accept that call without moving the device's
+#    storage, so the minimum is enforced rather than advisory and a restore
+#    on an older build fails instead of running the sandbox unsafely.
+#    Upgrading Firecracker invalidates existing snapshots — a vmstate is
+#    version-pinned — so re-bake tags as part of that upgrade.
 # 2. spoond on top:
 ./deploy/install-spoond.sh --with-forkd
 ```
