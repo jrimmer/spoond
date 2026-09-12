@@ -143,6 +143,11 @@ func Main(args []string) int {
 	newWorker := func() runner.RunnerWorker {
 		proto := runner.NewForgejoAdapterWithInternal(forgejoURL, envOr("REPO_BASE_URL", ""), nil)
 		lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+		// Keep the lease client's HTTP timeout above the per-step exec
+		// timeout, or long CI steps die at the client's own 600s cap.
+		if stepTimeout > 0 {
+			lease.SetHTTPTimeout(time.Duration(stepTimeout+120) * time.Second)
+		}
 		lease.NetPolicy = envOr("LEASE_NETPOL", "internet")
 		if v := os.Getenv("LEASE_NET_ALLOW"); v != "" {
 			lease.NetAllow = strings.Split(v, ",")
