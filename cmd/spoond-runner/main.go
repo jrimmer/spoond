@@ -164,6 +164,7 @@ func Main(args []string) int {
 			TTL:          ttl,
 			RepoBaseURL:  envOr("REPO_BASE_URL", "https://code.lacy.casa"),
 			StepTimeout:  stepTimeout,
+			RecordDir:    envOr("JOB_RECORD_DIR", "/var/lib/spoond/jobs"),
 		}
 		return &runner.WorkerImpl{Adapter: proto, Exec: exec}
 	}

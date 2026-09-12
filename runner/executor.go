@@ -36,6 +36,9 @@ type Executor struct {
 	StepTimeout int
 	// Metrics (issue #20): runner Prometheus metrics. Nil = no metrics.
 	Metrics *metrics.RunnerMetrics
+	// RecordDir is where failed jobs are recorded as JSON (one file per
+	// job). Empty disables recording. Set via JOB_RECORD_DIR.
+	RecordDir string
 }
 
 // checkoutRe matches a uses: actions/checkout step (any version).
@@ -92,9 +95,14 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	checkedOut := false
 
 	var logIndex int64
+	// The step that failed, with its output tail, held for the failure
+	// record — the sink streams logs to Forgejo and keeps nothing readable.
+	var failed *StepState
+	var failedStdout, failedStderr string
 	for i, step := range wfJob.Steps {
 		stepState := &StepState{
 			ID:       int64(i),
+			Name:     stepName(&step),
 			Result:   ResultSuccess,
 			LogIndex: logIndex,
 		}
@@ -102,7 +110,11 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		if step.Uses != "" && checkoutRe.MatchString(step.Uses) {
 			if err := e.checkout(ctx, sandboxID, ws, job, ctx2, stepState, &logIndex); err != nil {
 				state.Result = ResultFailure
+				stepState.Result = ResultFailure
+				stepState.Exit = -1
 				state.Steps = append(state.Steps, *stepState)
+				failed = stepState
+				failedStderr = err.Error()
 				break
 			}
 			checkedOut = true
@@ -203,11 +215,14 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 				e.Metrics.ExecErrors.WithLabelValues("500").Inc()
 			}
 			stepState.Result = ResultFailure
+			stepState.Exit = -1
 			state.Result = ResultFailure
 			e.log(ctx, job, logIndex, "step failed: "+err.Error())
 			logIndex++
 			stepState.LogLength = 1
 			state.Steps = append(state.Steps, *stepState)
+			failed = stepState
+			failedStderr = err.Error()
 			break
 		}
 		// Stream stdout/stderr as log rows.
@@ -215,12 +230,15 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		e.log(ctx, job, logIndex, strings.Join(rows, "\n"))
 		logIndex += int64(len(rows))
 		stepState.LogLength = int64(len(rows))
+		stepState.Exit = res.Exit
 		if res.Exit != 0 {
 			stepState.Result = ResultFailure
 			state.Result = ResultFailure
 			e.log(ctx, job, logIndex, fmt.Sprintf("step exited %d (stderr tail: %s)", res.Exit, tailStr(res.Stderr, 300)))
 			logIndex++
 			stepState.LogLength++
+			failed = stepState
+			failedStdout, failedStderr = res.Stdout, res.Stderr
 		}
 		state.Steps = append(state.Steps, *stepState)
 		e.log(ctx, job, logIndex, fmt.Sprintf("step %d (%s) exit=%d", i, stepName(&step), res.Exit))
@@ -230,7 +248,18 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			break
 		}
 	}
-	log.Printf("executor: job %d final result=%d steps=%d", job.ID, int(state.Result), len(state.Steps))
+	// Name the failing step in the runner's own journal: this line is what an
+	// operator sees on the host, and "result=1 steps=5" alone does not say
+	// which step died or why.
+	if state.Result == ResultFailure && failed != nil {
+		log.Printf("executor: job %d final result=%d steps=%d failed_step=%d(%s) exit=%d",
+			job.ID, int(state.Result), len(state.Steps), failed.ID, failed.Name, failed.Exit)
+	} else {
+		log.Printf("executor: job %d final result=%d steps=%d", job.ID, int(state.Result), len(state.Steps))
+	}
+	if state.Result == ResultFailure {
+		writeJobRecord(e.RecordDir, jobRecord(job, state, failed, failedStdout, failedStderr, time.Since(jobStart)))
+	}
 	if e.Metrics != nil {
 		result := "success"
 		if state.Result == ResultFailure {
@@ -251,6 +280,49 @@ func stepName(step *Step) string {
 		return step.Name
 	}
 	return "run"
+}
+
+// jobRecord builds the failure record for a finished job. Every executed step
+// is listed so the record shows how far the job got; the failing step — always
+// the last one appended, since the step loop breaks on failure — carries the
+// tail of its output.
+func jobRecord(job *Job, state *JobState, failed *StepState, stdout, stderr string, dur time.Duration) *JobRecord {
+	rec := &JobRecord{
+		JobID:    job.ID,
+		Result:   "failure",
+		Duration: dur.Round(time.Millisecond).String(),
+	}
+	for _, s := range state.Steps {
+		rec.Steps = append(rec.Steps, StepRecord{
+			Index:  int(s.ID),
+			Name:   s.Name,
+			Exit:   s.Exit,
+			Result: resultLabel(s.Result),
+			Logs:   s.LogLength,
+		})
+	}
+	if failed != nil && len(rec.Steps) > 0 {
+		last := &rec.Steps[len(rec.Steps)-1]
+		last.Stdout = tailText(stdout, recordTail)
+		last.Stderr = tailText(stderr, recordTail)
+	}
+	return rec
+}
+
+// resultLabel names a Result for a record. Result has no String method, and
+// the JSON should be readable without one.
+func resultLabel(r Result) string {
+	switch r {
+	case ResultSuccess:
+		return "success"
+	case ResultFailure:
+		return "failure"
+	case ResultCancelled:
+		return "cancelled"
+	case ResultSkipped:
+		return "skipped"
+	}
+	return "unknown"
 }
 
 // checkout clones the job's repository into the workspace inside the
@@ -342,9 +414,13 @@ func (e *Executor) log(ctx context.Context, job *Job, index int64, content strin
 	_ = e.Sink.Log(ctx, job.ID, index, []*LogRow{{Content: content}}, false)
 }
 
-// fail reports a job failure and returns the error.
+// fail reports a job failure and returns the error. Failures that happen
+// before the step loop (no workflow, no sandbox) are recorded too: "cannot
+// create sandbox" is exactly the class of failure a consumer cannot see from
+// Forgejo.
 func (e *Executor) fail(ctx context.Context, job *Job, err error) error {
 	_ = e.Sink.Report(ctx, &JobState{ID: job.ID, Result: ResultFailure}, nil)
+	writeJobRecord(e.RecordDir, &JobRecord{JobID: job.ID, Result: "failure", Error: err.Error()})
 	return err
 }
 

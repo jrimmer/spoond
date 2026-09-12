@@ -124,16 +124,21 @@ RUNNER_MAX=12
 RUNNER_SCALE_STEP=3
 SCALE_UP_DELAY=10s
 SCALE_DOWN_DELAY=60s
+JOB_RECORD_DIR=/var/lib/spoond/jobs
 EOF
 chmod 600 /etc/forkd-runner.env
 ```
 
 Pool tuning:
 - `RUNNER_FLOOR` — minimum registered runners always kept (default 3)
-- `RUNNER_MAX` — maximum registered runners (default 12)
+- `RUNNER_MAX` — maximum registered runners (default 12). Kept at or above
+  `RUNNER_FLOOR`; a lower max registers only `max` runners and serializes
+  every job behind them
 - `RUNNER_SCALE_STEP` — runners added/removed per scale event (default 3)
 - `SCALE_UP_DELAY` — how long all workers must be busy before scaling up
 - `SCALE_DOWN_DELAY` — how long a worker must be idle before scaling down
+- `JOB_RECORD_DIR` — where failed jobs are recorded as JSON (default
+  `/var/lib/spoond/jobs`); empty disables recording
 
 Then:
 

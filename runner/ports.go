@@ -37,6 +37,10 @@ type StepState struct {
 	Result    Result
 	LogIndex  int64
 	LogLength int64
+	// Name is the step's short label and Exit its process exit code, kept
+	// so a failure can be named locally without re-parsing log rows.
+	Name string
+	Exit int
 }
 
 // JobState is the outcome of a whole job.
