@@ -30,7 +30,14 @@ RUN apt-get update -qq \
       curl git python3 jq xz-utils \
       libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev \
       libxdo-dev libayatana-appindicator3-dev patchelf file \
+      openssh-server \
+ && mkdir -p /run/sshd \
  && rm -rf /var/lib/apt/lists/*
+# openssh-server: the suite's OpenSSH interop gate authenticates issued
+# certificates against a REAL sshd and FAILS (not skips) when the binary is
+# missing — masked for weeks behind the env-gate failures, exposed once the
+# runner started providing USER/LOGNAME (lacy-infra#26 triage). /run/sshd is
+# the privilege-separation dir sshd refuses to start without.
 
 # Rust — copied wholesale from the stock toolchain image instead of
 # rustup-installed: curl/getaddrinfo is unreliable in this host's docker
@@ -86,7 +93,7 @@ RUN ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc \
 # Final guard: fail the BUILD (loudly, before the costly conversion) if
 # any tool the CI pipeline needs is missing. The docker→ext4 conversion in
 # build-rootfs.sh can silently drop files when the host disk runs tight.
-RUN for b in pkg-config rustc cargo node corepack git python3 elixir mix executor curl; do \
+RUN for b in pkg-config rustc cargo node corepack git python3 elixir mix executor curl sshd; do \
       command -v "$b" >/dev/null || { echo "MISSING TOOL: $b" >&2; exit 1; }; \
     done && echo ALL_TOOLS_PRESENT
 
