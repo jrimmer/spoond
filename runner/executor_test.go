@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -417,5 +418,77 @@ jobs:
 	}
 	if env["CI_COMMIT"] != "abc123" {
 		t.Fatalf("CI_COMMIT = %q, want abc123 (env=%+v)", env["CI_COMMIT"], env)
+	}
+}
+
+// recordingSink records Log calls with their row counts and starting indexes
+// so batching behaviour is observable.
+type recordingSink struct {
+	fakeSink
+	calls []struct {
+		index int64
+		rows  int
+	}
+	failEvery int // when >0, every Nth Log call returns an error
+	n          int
+}
+
+func (r *recordingSink) Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error {
+	r.n++
+	r.calls = append(r.calls, struct {
+		index int64
+		rows  int
+	}{index, len(rows)})
+	if r.failEvery > 0 && r.n%r.failEvery == 0 {
+		return fmt.Errorf("simulated upload failure")
+	}
+	return r.fakeSink.Log(ctx, jobID, index, rows, noMore)
+}
+
+func TestLogLinesBatches(t *testing.T) {
+	e := &Executor{Sink: &recordingSink{}}
+	rows := make([]string, 450)
+	for i := range rows {
+		rows[i] = fmt.Sprintf("row %d", i)
+	}
+	consumed := e.logLines(t.Context(), &Job{ID: 7}, 10, rows)
+	if consumed != 450 {
+		t.Fatalf("consumed = %d, want 450", consumed)
+	}
+	rs := e.Sink.(*recordingSink)
+	if len(rs.calls) != 3 {
+		t.Fatalf("calls = %d, want 3 (200+200+50)", len(rs.calls))
+	}
+	if rs.calls[0].index != 10 || rs.calls[1].index != 210 || rs.calls[2].index != 410 {
+		t.Fatalf("batch indexes = %v, want 10/210/410", rs.calls)
+	}
+}
+
+func TestLogLinesSplitsLongRows(t *testing.T) {
+	e := &Executor{Sink: &recordingSink{}}
+	consumed := e.logLines(t.Context(), &Job{ID: 8}, 0, []string{strings.Repeat("x", logRowMax*2 + 5)})
+	rs := e.Sink.(*recordingSink)
+	total := 0
+	for _, c := range rs.calls {
+		total += c.rows
+	}
+	if consumed != 3 || total != 3 {
+		t.Fatalf("consumed=%d rows=%d, want 3 (8192+8192+5)", consumed, total)
+	}
+}
+
+func TestLogLinesContinuesPastFailures(t *testing.T) {
+	e := &Executor{Sink: &recordingSink{failEvery: 2}}
+	rows := make([]string, logBatchRows*2) // two batches; the second upload fails
+	for i := range rows {
+		rows[i] = "x"
+	}
+	consumed := e.logLines(t.Context(), &Job{ID: 9}, 0, rows)
+	if consumed != int64(len(rows)) {
+		t.Fatalf("consumed = %d, want %d (failures must not stop batching)", consumed, int64(len(rows)))
+	}
+	rs := e.Sink.(*recordingSink)
+	if len(rs.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(rs.calls))
 	}
 }

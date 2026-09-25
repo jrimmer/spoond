@@ -227,8 +227,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		}
 		// Stream stdout/stderr as log rows.
 		rows := splitLog(res.Stdout, res.Stderr)
-		e.log(ctx, job, logIndex, strings.Join(rows, "\n"))
-		logIndex += int64(len(rows))
+		logIndex += e.logLines(ctx, job, logIndex, rows)
 		stepState.LogLength = int64(len(rows))
 		stepState.Exit = res.Exit
 		if res.Exit != 0 {
@@ -384,8 +383,7 @@ func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job,
 		}
 		rows := splitLog(res.Stdout, res.Stderr)
 		if len(rows) > 0 {
-			e.log(ctx, job, *logIndex, strings.Join(rows, "\n"))
-			*logIndex += int64(len(rows))
+			*logIndex += e.logLines(ctx, job, *logIndex, rows)
 			stepState.LogLength += int64(len(rows))
 		}
 		if res.Exit != 0 {
@@ -406,12 +404,65 @@ func (e *Executor) imageFor(job *WorkflowJob) string {
 	return e.DefaultImage
 }
 
-// log streams a log row to the job sink.
+// log streams a log row to the job sink. Upload failures are journaled, not
+// swallowed: a dropped row otherwise presents as a job that "died" wherever
+// the log stops (we have seen a 1.8 KB stored log for a job whose step
+// produced 1.4 MB — the mix output never reached Forgejo and the lane looked
+// like it never got past pnpm bootstrap).
 func (e *Executor) log(ctx context.Context, job *Job, index int64, content string) {
 	if content == "" {
 		return
 	}
-	_ = e.Sink.Log(ctx, job.ID, index, []*LogRow{{Content: content}}, false)
+	if err := e.Sink.Log(ctx, job.ID, index, []*LogRow{{Content: content}}, false); err != nil {
+		log.Printf("executor: job %d log upload failed at row %d: %v", job.ID, index, err)
+	}
+}
+
+const (
+	// logBatchRows bounds the rows sent per UpdateLog call. One giant row
+	// (a whole step's output joined with newlines) or one giant batch is
+	// what got silently dropped by the sink path before this existed.
+	logBatchRows = 200
+	// logRowMax caps an individual row's content; longer lines (minified
+	// bundles, embedded artifacts) are split so no content is lost.
+	logRowMax = 8192
+)
+
+// logLines streams rows in bounded batches and returns the number of row
+// slots consumed (including splits). Each batch is a separate UpdateLog call
+// so one rejected batch cannot take the whole step's log with it; failures
+// are journaled and the remaining batches are still attempted.
+func (e *Executor) logLines(ctx context.Context, job *Job, index int64, rows []string) int64 {
+	sent := int64(0)
+	emit := func(batch []string) {
+		protoRows := make([]*LogRow, 0, len(batch))
+		for _, line := range batch {
+			for len(line) > logRowMax {
+				protoRows = append(protoRows, &LogRow{Content: line[:logRowMax]})
+				line = line[logRowMax:]
+				sent++
+			}
+			if line != "" {
+				protoRows = append(protoRows, &LogRow{Content: line})
+				sent++
+			}
+		}
+		if len(protoRows) == 0 {
+			return
+		}
+		if err := e.Sink.Log(ctx, job.ID, index+sent-int64(len(protoRows)), protoRows, false); err != nil {
+			log.Printf("executor: job %d log upload failed near row %d (%d rows dropped from Forgejo): %v",
+				job.ID, index+sent, len(protoRows), err)
+		}
+	}
+	for start := 0; start < len(rows); start += logBatchRows {
+		end := start + logBatchRows
+		if end > len(rows) {
+			end = len(rows)
+		}
+		emit(rows[start:end])
+	}
+	return sent
 }
 
 // fail reports a job failure and returns the error. Failures that happen
