@@ -541,3 +541,43 @@ jobs:
 		t.Fatalf("explicit COREPACK_ENABLE_DOWNLOAD_PROMPT must win, got %q", ovr["COREPACK_ENABLE_DOWNLOAD_PROMPT"])
 	}
 }
+
+func TestExecutorGitHubRunIDInjection(t *testing.T) {
+	cases := []struct {
+		name    string
+		context map[string]string
+		want    string
+	}{
+		{"run_id present", map[string]string{"run_id": "4242"}, "4242"},
+		{"run_number fallback", map[string]string{"run_number": "1174"}, "1174"},
+		{"task id last resort", map[string]string{}, "1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: probe
+`
+			lease := newFakeLease()
+			sink := &fakeSink{}
+			exec := &Executor{
+				Sandbox:      lease,
+				Sink:         sink,
+				Labels:       map[string]string{"ubuntu-latest": "py-base"},
+				DefaultImage: "py-base",
+				TTL:          600,
+			}
+			job := testJob(payload)
+			job.Context = tc.context
+			if err := exec.Run(context.Background(), job); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := lease.envs[0]["GITHUB_RUN_ID"]; got != tc.want {
+				t.Fatalf("GITHUB_RUN_ID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

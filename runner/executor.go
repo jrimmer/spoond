@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -179,6 +180,31 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		}
 		if env["LOGNAME"] == "" {
 			env["LOGNAME"] = "root"
+		}
+		// GitHub Actions exposes GITHUB_RUN_ID and friends implicitly;
+		// without them, workflows that key per-run state (e.g. a test
+		// keyspace named cytale_ci_${GITHUB_RUN_ID:-local}) silently fall
+		// back to their default — and EVERY run then shares one state
+		// bucket: cancelled runs leave rows that poison the next suite
+		// (lacy-infra#26: ReactionController/bot clusters, same-sha drift).
+		// Preference: context run_id, then run_number, then the task id
+		// (unique per attempt, so even a re-run isolates its state).
+		if env["GITHUB_RUN_ID"] == "" {
+			env["GITHUB_RUN_ID"] = firstNonEmpty(
+				ctx2.Eval("${{ github.run_id }}"),
+				ctx2.Eval("${{ github.run_number }}"),
+				strconv.FormatInt(job.ID, 10))
+		}
+		if env["GITHUB_RUN_NUMBER"] == "" {
+			env["GITHUB_RUN_NUMBER"] = firstNonEmpty(
+				ctx2.Eval("${{ github.run_number }}"),
+				strconv.FormatInt(job.ID, 10))
+		}
+		if env["GITHUB_SHA"] == "" {
+			env["GITHUB_SHA"] = ctx2.Eval("${{ github.sha }}")
+		}
+		if env["GITHUB_REF"] == "" {
+			env["GITHUB_REF"] = ctx2.Eval("${{ github.ref }}")
 		}
 		if env["CI_PULL_REQUEST"] == "" {
 			env["CI_PULL_REQUEST"] = ctx2.Eval("${{ github.event.pull_request.number }}")
@@ -519,4 +545,14 @@ func tailStr(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
+}
+
+// firstNonEmpty returns the first argument that is not "", or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
