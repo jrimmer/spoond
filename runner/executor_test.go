@@ -492,3 +492,49 @@ func TestLogLinesContinuesPastFailures(t *testing.T) {
 		t.Fatalf("calls = %d, want 2", len(rs.calls))
 	}
 }
+
+func TestExecutorEnvDefaults(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: probe-defaults
+      - env:
+          PATH: /custom/bin
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "1"
+        run: probe-override
+`
+	lease := newFakeLease()
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	if err := exec.Run(context.Background(), testJob(payload)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(lease.envs) != 2 {
+		t.Fatalf("expected 2 step execs, got %d", len(lease.envs))
+	}
+	def := lease.envs[0]
+	if def["PATH"] != "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" {
+		t.Fatalf("default PATH = %q", def["PATH"])
+	}
+	if def["COREPACK_ENABLE_DOWNLOAD_PROMPT"] != "0" {
+		t.Fatalf("default COREPACK_ENABLE_DOWNLOAD_PROMPT = %q", def["COREPACK_ENABLE_DOWNLOAD_PROMPT"])
+	}
+	if def["CI"] != "true" {
+		t.Fatalf("default CI = %q", def["CI"])
+	}
+	ovr := lease.envs[1]
+	if ovr["PATH"] != "/custom/bin" {
+		t.Fatalf("explicit PATH must win, got %q", ovr["PATH"])
+	}
+	if ovr["COREPACK_ENABLE_DOWNLOAD_PROMPT"] != "1" {
+		t.Fatalf("explicit COREPACK_ENABLE_DOWNLOAD_PROMPT must win, got %q", ovr["COREPACK_ENABLE_DOWNLOAD_PROMPT"])
+	}
+}

@@ -157,6 +157,20 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		if env["CI"] == "" {
 			env["CI"] = "true"
 		}
+		// GitHub Actions always provides PATH; the guest agent REPLACES the
+		// environment with the step's env map when one is supplied, and its
+		// own default PATH is not applied to that case — so a step env
+		// without PATH loses /usr/bin entirely ("date: command not found"
+		// in otherwise-green jobs, lacy-infra#26).
+		if env["PATH"] == "" {
+			env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		}
+		// Corepack aborts (exit 1) when it must fetch the packageManager-
+		// pinned tool and no TTY is available for its download prompt. The
+		// sandbox has registry egress, so let it download silently.
+		if env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] == "" {
+			env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
+		}
 		if env["CI_PULL_REQUEST"] == "" {
 			env["CI_PULL_REQUEST"] = ctx2.Eval("${{ github.event.pull_request.number }}")
 		}
