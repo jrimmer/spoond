@@ -19,9 +19,10 @@ DOCKER_BUILDKIT=1 docker build --network=host --security-opt seccomp=unconfined 
 echo "=== 2. from-image -> ext4 -> boot -> warm -> snapshot ==="
 # Cache-bust: from-image keys its ext4 artifact cache on the image TAG, so
 # a rebuilt image under the same tag silently reuses a STALE conversion
-# (this cost us a whole round of "where did rust go"). rm the artifact
-# unless KEEP_CACHE=1.
-if [ "${KEEP_CACHE:-0}" != "1" ]; then rm -f /var/cache/forkd/elixir-release-tools-local.ext4; fi
+# (this cost us a whole round of "where did rust go", and again on
+# 2026-09-25 when an sshd re-bake served a Sep 12 rootfs). The artifact
+# name carries a hash suffix, so glob it; rm unless KEEP_CACHE=1.
+if [ "${KEEP_CACHE:-0}" != "1" ]; then rm -f /var/cache/forkd/elixir-release-tools-local-*.ext4*; fi
 # Remove the existing snapshot FIRST: re-registering over a live tag keeps
 # the daemon's open rootfs fd (old inode — rm+recreate of the ext4 at the
 # same path is invisible to already-registered snapshots), so new bakes
