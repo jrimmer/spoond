@@ -171,6 +171,15 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		if env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] == "" {
 			env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
 		}
+		// Identity vars vanish with the same env replacement. Tests that
+		// derive the local login name (OpenSSH interop gate) abort with
+		// "neither USER nor LOGNAME is set". CI sandboxes exec as root.
+		if env["USER"] == "" {
+			env["USER"] = "root"
+		}
+		if env["LOGNAME"] == "" {
+			env["LOGNAME"] = "root"
+		}
 		if env["CI_PULL_REQUEST"] == "" {
 			env["CI_PULL_REQUEST"] = ctx2.Eval("${{ github.event.pull_request.number }}")
 		}

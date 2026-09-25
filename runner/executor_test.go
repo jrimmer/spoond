@@ -530,6 +530,9 @@ jobs:
 	if def["CI"] != "true" {
 		t.Fatalf("default CI = %q", def["CI"])
 	}
+	if def["USER"] != "root" || def["LOGNAME"] != "root" {
+		t.Fatalf("default USER/LOGNAME = %q/%q, want root/root", def["USER"], def["LOGNAME"])
+	}
 	ovr := lease.envs[1]
 	if ovr["PATH"] != "/custom/bin" {
 		t.Fatalf("explicit PATH must win, got %q", ovr["PATH"])
