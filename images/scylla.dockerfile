@@ -12,5 +12,6 @@
 # The RHEL-based upstream image already has python3 (the guest agent's
 # interpreter), so the bake passes no --extra (apt would fail here anyway).
 FROM scylladb/scylla:2026.2.6
-COPY scylla-init-hook.sh /etc/forkd/init.d/50-scylla
-RUN chmod 755 /etc/forkd/init.d/50-scylla
+# --chmod, not a RUN chmod: the upstream image's USER is `scylla`, which may
+# not chmod a root-owned file.
+COPY --chmod=755 scylla-init-hook.sh /etc/forkd/init.d/50-scylla
