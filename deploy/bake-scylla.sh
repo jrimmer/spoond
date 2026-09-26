@@ -26,7 +26,7 @@ DOCKER_BUILDKIT=1 docker build --network=host --security-opt seccomp=unconfined 
 echo "=== 2. from-image -> ext4 -> boot (hook starts scylla) -> snapshot ==="
 if [ "${KEEP_CACHE:-0}" != "1" ]; then rm -f /var/cache/forkd/scylla-service-local-*.ext4*; fi
 forkd rmi scylla 2>&1 | tail -2 || true
-# 3 GiB guest: seastar --memory=1536M plus page cache and the agent.
+# 3 GiB guest: seastar --memory=1200M plus its OS reserve and the agent.
 # boot-wait covers the hook's cold start (schema tables, ~10-20s) with margin.
 forkd from-image scylla-service:local --tag scylla \
   --size-mib 8192 --mem-size-mib 3072 --boot-wait-secs 90

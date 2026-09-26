@@ -10,6 +10,9 @@
 # "sstring out of range", the same message a missing cgroup2 mount produces.
 #
 #   developer-mode    no io/XFS tuning checks (a microVM ext4 rootfs)
+#   memory=1200M      seastar reserves RAM for the OS: in the 3 GiB guest only
+#                     ~1.37 GiB is left, so 1536M fails "insufficient physical
+#                     memory" (measured). 1200M is also the dev-recipe value.
 #   overprovisioned   no busy-polling: idle pool children stay cheap
 #   tablets disabled  schemas using SimpleStrategy are rejected under tablets
 #   rpc 0.0.0.0       reachable through the lease's expose_ports DNAT
@@ -19,7 +22,7 @@ mkdir -p /var/lib/scylla/data /var/lib/scylla/commitlog /var/lib/scylla/hints /v
 
 nohup setsid /usr/bin/scylla \
   --options-file /etc/scylla/scylla.yaml \
-  --developer-mode=1 --smp=1 --memory=1536M --overprovisioned \
+  --developer-mode=1 --smp=1 --memory=1200M --overprovisioned \
   --tablets-mode-for-new-keyspaces=disabled \
   --listen-address=127.0.0.1 --rpc-address=0.0.0.0 --broadcast-rpc-address=10.42.0.2 \
   --seed-provider-parameters=seeds=127.0.0.1 --api-address=127.0.0.1 \

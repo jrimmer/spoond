@@ -138,7 +138,7 @@ images:
       Needs deploy/rootfs-init/forkd-init.sh installed first: its cgroup2 mount
       (seastar fails "sstring out of range" without one) and its
       /etc/forkd/init.d hook runner, which starts ScyllaDB BEFORE the snapshot
-      so every fork restores serving. Guest 3 GiB, seastar --memory=1536M,
+      so every fork restores serving. Guest 3 GiB, seastar --memory=1200M (1536M does not fit beside seastar's OS reserve),
       --overprovisioned (no busy-polling — idle pool children stay cheap).
       No labels: a job leases it via the lease API, it never runs a job.
       Warm pool: the first lease registers the tag, after which POOL_SIZE
