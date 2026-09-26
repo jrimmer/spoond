@@ -34,6 +34,7 @@ Request:
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
 | `egress_allowlist` | []string | *(host bridge only)* | additional IPs/CIDRs/domains for `network_policy=restricted` |
 | `init_cmd` | string | *(none)* | command run at sandbox start |
+| `expose_ports` | []int | *(none)* | guest TCP ports to publish on the lease's bridge address for peer sandboxes (#70). Max 8; 8888/9000 refused; `501` without netns access |
 
 Response `201 Created`:
 
@@ -44,9 +45,16 @@ Response `201 Created`:
   "image": "dev-base",
   "ttl": 300,
   "persistent": false,
-  "expires_at": "2026-08-11T03:00:00Z"
+  "expires_at": "2026-08-11T03:00:00Z",
+  "exposed": {"9042": "10.43.0.10:9042"}
 }
 ```
+
+`exposed` maps each published port to `<bridge-ip>:<port>` — reachable from
+the host and from sandboxes whose policy reaches `10.43.0.0/16` (`lan`,
+`internet`, or an allowlisted `restricted`); never from the LAN. Only replies
+flow back out, so a `network_policy: none` lease stays unable to originate
+connections. The same map appears in `GET /api/sandboxes`.
 
 ### `GET /api/sandboxes` — list leases
 

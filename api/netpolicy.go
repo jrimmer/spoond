@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -129,4 +130,128 @@ func resolveEntry(entry string) []string {
 		}
 	}
 	return out
+}
+
+// Inbound port exposure — a lease can publish guest TCP ports on its
+// bridge-facing address so OTHER sandboxes (and the host) can reach a
+// service it runs: a CI job's database, for one. Everything else about the
+// netns stays egress-only.
+//
+// The shape inside the lease's netns:
+//
+//	nat    PREROUTING -i veth0 --dport P  → DNAT guest:P
+//	filter FORWARD    -i veth0 → tap  -d guest --dport P  ACCEPT   (inserted
+//	filter FORWARD    -i tap → veth0  -s guest --sport P  ESTABLISHED ACCEPT
+//	                                                        above the policy)
+//
+// so a published port answers its own connections and nothing more: under
+// PolicyNone the guest still cannot open a connection of its own.
+//
+// Reachability is bounded by the bridge, not by this code: veth0 sits on
+// forkd-br0 (10.43.0.0/16), which the LAN cannot route into, so a published
+// port is visible to the host and to sandboxes whose own policy lets them
+// reach 10.43.0.0/16 (lan, internet, or an allowlisted restricted lease).
+
+const (
+	netnsUplink = "veth0"      // bridge-facing interface in every child netns
+	netnsTap    = "forkd-tap0" // guest-facing interface in every child netns
+	// MaxExposedPorts bounds one lease's published ports.
+	MaxExposedPorts = 8
+)
+
+// reservedGuestPorts can never be published: the guest agent (:8888) is an
+// unauthenticated root exec endpoint and Shelley (:9000) an agent loop.
+// Publishing either would hand every bridge peer a root shell.
+var reservedGuestPorts = map[int]string{8888: "the guest exec agent", 9000: "the Shelley agent"}
+
+// ValidateExposePorts checks a requested port list: 1..65535, no reserved
+// port, no duplicates, at most MaxExposedPorts. It returns the list sorted.
+func ValidateExposePorts(ports []int) ([]int, error) {
+	if len(ports) > MaxExposedPorts {
+		return nil, fmt.Errorf("at most %d exposed ports", MaxExposedPorts)
+	}
+	seen := map[int]bool{}
+	out := make([]int, 0, len(ports))
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return nil, fmt.Errorf("exposed port %d is out of range", p)
+		}
+		if what, reserved := reservedGuestPorts[p]; reserved {
+			return nil, fmt.Errorf("port %d is %s and cannot be exposed", p, what)
+		}
+		if seen[p] {
+			return nil, fmt.Errorf("exposed port %d is listed twice", p)
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+// PortExposer is the optional capability of a PolicyApplier that publishes
+// guest ports. Expose MUST be called on every (re)application, with an empty
+// list too: the netns pool is reused, and a previous lease's DNAT rules would
+// otherwise survive into the next tenant. It returns the netns's
+// bridge-facing IP — the host part of every published address.
+type PortExposer interface {
+	Expose(ctx context.Context, netns, guestHost string, ports []int) (bridgeIP string, err error)
+}
+
+// Expose implements PortExposer with iptables inside the netns. It runs
+// AFTER Apply, which flushed FORWARD; the accepts are inserted at the top so
+// they precede the policy's final DROP.
+func (a *NetnsPolicyApplier) Expose(ctx context.Context, netns, guestHost string, ports []int) (string, error) {
+	if netns == "" {
+		return "", fmt.Errorf("no netns to expose ports in")
+	}
+	for _, args := range exposeCommands(guestHost, ports) {
+		full := append([]string{"netns", "exec", netns, "iptables"}, args...)
+		out, err := exec.CommandContext(ctx, "ip", full...).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("iptables in netns %s: %v: %s", netns, err, strings.TrimSpace(string(out)))
+		}
+	}
+	out, err := exec.CommandContext(ctx, "ip", "-n", netns, "-4", "-o", "addr", "show", "dev", netnsUplink).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("read %s address in netns %s: %v: %s", netnsUplink, netns, err, strings.TrimSpace(string(out)))
+	}
+	ip := parseIPv4Addr(string(out))
+	if ip == "" {
+		return "", fmt.Errorf("no IPv4 address on %s in netns %s", netnsUplink, netns)
+	}
+	return ip, nil
+}
+
+// exposeCommands returns the iptables args that publish ports. The first
+// command always flushes nat PREROUTING — the only user of that chain in a
+// child netns — so a reused netns starts clean even when ports is empty.
+func exposeCommands(guestHost string, ports []int) [][]string {
+	cmds := [][]string{{"-t", "nat", "-F", "PREROUTING"}}
+	for _, p := range ports {
+		port := fmt.Sprint(p)
+		cmds = append(cmds,
+			[]string{"-t", "nat", "-A", "PREROUTING", "-i", netnsUplink, "-p", "tcp", "--dport", port,
+				"-m", "comment", "--comment", "forkd-expose", "-j", "DNAT", "--to-destination", guestHost + ":" + port},
+			[]string{"-I", "FORWARD", "1", "-i", netnsUplink, "-o", netnsTap, "-p", "tcp", "-d", guestHost, "--dport", port,
+				"-m", "comment", "--comment", "forkd-expose", "-j", "ACCEPT"},
+			[]string{"-I", "FORWARD", "1", "-i", netnsTap, "-o", netnsUplink, "-p", "tcp", "-s", guestHost, "--sport", port,
+				"-m", "state", "--state", "ESTABLISHED", "-m", "comment", "--comment", "forkd-expose", "-j", "ACCEPT"},
+		)
+	}
+	return cmds
+}
+
+// parseIPv4Addr pulls the address out of `ip -4 -o addr show` output
+// ("3: veth0    inet 10.43.0.10/16 brd … scope global veth0").
+func parseIPv4Addr(out string) string {
+	f := strings.Fields(out)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == "inet" {
+			if ip, _, err := net.ParseCIDR(f[i+1]); err == nil && ip.To4() != nil {
+				return ip.String()
+			}
+		}
+	}
+	return ""
 }

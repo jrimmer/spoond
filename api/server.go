@@ -518,6 +518,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Persistent bool     `json:"persistent"`
 		NetPolicy  string   `json:"network_policy"`
 		NetAllow   []string `json:"egress_allowlist"`
+		// ExposePorts publishes guest TCP ports on the lease's bridge-facing
+		// address for other sandboxes to reach (netpolicy.go).
+		ExposePorts []int `json:"expose_ports"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -547,6 +550,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// would lose guest-side LLM/proxy access. Appending it here
 		// keeps the default functional while still blocking peers.
 		req.NetAllow = append(req.NetAllow, hostBridgeAllow...)
+	}
+	expose, err := ValidateExposePorts(req.ExposePorts)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(expose) > 0 && !s.svc.CanExposePorts() {
+		writeError(w, http.StatusNotImplemented, "port exposure needs network policy enforcement (NETPOL_DNS) on this backend")
+		return
 	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
 	if err != nil {
@@ -588,7 +600,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.MemoryMiB > maxLeaseMemoryMiB {
 		req.MemoryMiB = maxLeaseMemoryMiB
 	}
-	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent, req.NetPolicy, req.NetAllow)
+	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent, req.NetPolicy, req.NetAllow, expose...)
 	if err != nil {
 		if err == errQuotaExceeded {
 			writeError(w, http.StatusTooManyRequests, err.Error())
@@ -606,6 +618,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"ttl":        int(ttl.Seconds()),
 		"persistent": lease.Persistent,
 		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
+		"exposed":    exposedMap(lease),
 	})
 }
 

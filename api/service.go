@@ -38,8 +38,13 @@ type Lease struct {
 	Name       string    // optional friendly name/tag (unique per owner; resolved by ssh/proxy)
 	NetPolicy  string    // egress policy: none|lan|internet|restricted ("" = lan)
 	NetAllow   []string  // allowlist for restricted policy
-	Comment    string    // optional free-text annotation (set/cleared via ctl comment)
-	released   bool
+	// ExposePorts are guest TCP ports published on the lease's bridge-facing
+	// address (netpolicy.go). ExposedIP is that address, refreshed on every
+	// (re)application because a resume or restart lands in a different netns.
+	ExposePorts []int
+	ExposedIP   string
+	Comment     string // optional free-text annotation (set/cleared via ctl comment)
+	released    bool
 }
 
 // ShareMode selects which surfaces a share covers.
@@ -222,7 +227,47 @@ func (s *Service) applyNetpol(ctx context.Context, l *Lease) error {
 	if allow == nil {
 		allow = []string{}
 	}
-	return s.netpol.Apply(ctx, ep.Netns, NetworkPolicy(l.NetPolicy), allow)
+	if err := s.netpol.Apply(ctx, ep.Netns, NetworkPolicy(l.NetPolicy), allow); err != nil {
+		return err
+	}
+	// Exposure runs on EVERY application, empty or not: it flushes the
+	// netns's DNAT rules, which a reused pool netns may still carry from its
+	// previous tenant.
+	exposer, ok := s.netpol.(PortExposer)
+	if !ok {
+		if len(l.ExposePorts) > 0 {
+			return fmt.Errorf("port exposure is not supported by this policy applier")
+		}
+		return nil
+	}
+	ip, err := exposer.Expose(ctx, ep.Netns, ep.GuestHost, l.ExposePorts)
+	if err != nil {
+		return err
+	}
+	l.ExposedIP = ""
+	if len(l.ExposePorts) > 0 {
+		l.ExposedIP = ip
+	}
+	return nil
+}
+
+// CanExposePorts reports whether this service can publish guest ports —
+// only when network policy enforcement (and so netns access) is installed.
+func (s *Service) CanExposePorts() bool {
+	_, ok := s.netpol.(PortExposer)
+	return ok
+}
+
+// exposedMap renders a lease's published ports as {"<port>": "<ip>:<port>"}.
+func exposedMap(l *Lease) map[string]string {
+	out := map[string]string{}
+	if l.ExposedIP == "" {
+		return out
+	}
+	for _, p := range l.ExposePorts {
+		out[fmt.Sprint(p)] = net.JoinHostPort(l.ExposedIP, fmt.Sprint(p))
+	}
+	return out
 }
 
 // NewService builds a lease service. tokens maps consumer tokens to
@@ -493,7 +538,7 @@ func (s *Service) releaseQuotaReservation(owner string) {
 	}
 }
 
-func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool, netPolicy string, netAllow []string) (*Lease, error) {
+func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, exposePorts ...int) (*Lease, error) {
 	if err := s.reserveQuota(owner); err != nil {
 		return nil, err
 	}
@@ -510,15 +555,16 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		s.metrics.LeaseGrantDur.Observe(time.Since(grantStart).Seconds())
 	}
 	lease := &Lease{
-		ID:         newID(),
-		Owner:      owner,
-		Image:      image,
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(ttl),
-		Persistent: persistent,
-		LastActive: time.Now(),
-		NetPolicy:  netPolicy,
-		NetAllow:   netAllow,
+		ID:          newID(),
+		Owner:       owner,
+		Image:       image,
+		CreatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(ttl),
+		Persistent:  persistent,
+		LastActive:  time.Now(),
+		NetPolicy:   netPolicy,
+		NetAllow:    netAllow,
+		ExposePorts: exposePorts,
 	}
 
 	// Persistent leases are workspace-backed so they can suspend/resume
@@ -1076,6 +1122,7 @@ func (s *Service) list(owner string) []map[string]any {
 				"comment":          l.Comment,
 				"net_policy":       l.NetPolicy,
 				"egress_allowlist": l.NetAllow,
+				"exposed":          exposedMap(l),
 			})
 		}
 	}
