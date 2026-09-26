@@ -126,3 +126,21 @@ images:
           --extra python3 --size-mib 8192 --mem-size-mib 4096
 
       python3 is required for forkd-agent.py (PID 1 guest agent).
+
+  - name: scylla
+    capability: cql-database
+    labels: []
+    description: "ScyllaDB 2026.2.6, single node, developer mode — a SERVICE image: leased per job with expose_ports [9042] and reached from the job's sandbox (#70). Not a runs-on image."
+    baked: false
+    rootfs: /var/cache/forkd/scylla-service-local-*.ext4
+    notes: |
+      Bake with deploy/bake-scylla.sh (images/scylla.dockerfile + images/scylla-init-hook.sh).
+      Needs deploy/rootfs-init/forkd-init.sh installed first: its cgroup2 mount
+      (seastar fails "sstring out of range" without one) and its
+      /etc/forkd/init.d hook runner, which starts ScyllaDB BEFORE the snapshot
+      so every fork restores serving. Guest 3 GiB, seastar --memory=1536M,
+      --overprovisioned (no busy-polling — idle pool children stay cheap).
+      No labels: a job leases it via the lease API, it never runs a job.
+      Warm pool: the first lease registers the tag, after which POOL_SIZE
+      children stay warm (~2 GiB each) — instant starts, bounded cost.
+      Upstream image is RHEL 9: no apt, so no --extra; python3 is already there.
