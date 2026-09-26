@@ -55,6 +55,33 @@ rm -f /etc/resolv.conf
     echo "nameserver 8.8.8.8"
 } > /etc/resolv.conf
 
+# cgroup2. Services that size themselves from cgroups need the hierarchy
+# mounted: seastar (ScyllaDB) refuses to start without it, failing with
+# "Could not initialize seastar: std::out_of_range (sstring out of range)".
+# Harmless for everything else.
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
+
+# Image boot hooks (spoond #70). An image that must RUN something — a
+# database a CI job connects to, an sshd — ships executables in
+# /etc/forkd/init.d/. They run in lexical order BEFORE the agent starts, so a
+# bake snapshots the service already up and every fork restores warm. A hook
+# starts its daemon detached and returns once it is ready; each is bounded, and
+# a failing hook is logged, never fatal — the agent must always come up.
+if [ -d /etc/forkd/init.d ]; then
+    for hook in /etc/forkd/init.d/*; do
+        [ -f "$hook" ] && [ -x "$hook" ] || continue
+        echo "forkd-init: hook $hook"
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "${FORKD_HOOK_TIMEOUT:-180}" "$hook" >>/tmp/forkd-init-hooks.log 2>&1
+        else
+            "$hook" >>/tmp/forkd-init-hooks.log 2>&1
+        fi
+        rc=$?
+        [ "$rc" -eq 0 ] || echo "forkd-init: WARN hook $hook exited $rc (see /tmp/forkd-init-hooks.log)" >&2
+    done
+fi
+
 echo "forkd-init: launching agent..."
 # Find python: Ubuntu has /usr/bin/python3; official python:* images have /usr/local/bin/python3.
 for PY in /usr/local/bin/python3 /usr/bin/python3 /usr/local/bin/python /usr/bin/python; do
