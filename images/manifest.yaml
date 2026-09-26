@@ -131,9 +131,10 @@ images:
     capability: cql-database
     labels: []
     description: "ScyllaDB 2026.2.6, single node, developer mode — a SERVICE image: leased per job with expose_ports [9042] and reached from the job's sandbox (#70). Not a runs-on image."
-    baked: false
+    baked: true
     rootfs: /var/cache/forkd/scylla-service-local-*.ext4
     notes: |
+      First baked 2026-09-26; a fresh fork answered CQL 769 ms after restore.
       Bake with deploy/bake-scylla.sh (images/scylla.dockerfile + images/scylla-init-hook.sh).
       Needs deploy/rootfs-init/forkd-init.sh installed first: its cgroup2 mount
       (seastar fails "sstring out of range" without one) and its
