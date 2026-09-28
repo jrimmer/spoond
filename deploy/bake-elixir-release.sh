@@ -60,6 +60,7 @@ ln -sf /usr/local/bin/node /tmp/node-link && /tmp/node-link --version && echo SY
 cp /usr/local/bin/node /tmp/node-copy && /tmp/node-copy --version && echo COPY_EXEC_OK
 corepack --version && echo COREPACK_SHIM_OK
 which pkg-config && echo WHICH_OK
+which xdg-mime && echo XDG_MIME_OK
 id && getent passwd root >/dev/null && echo PASSWD_OK
 pkg-config --libs openssl && echo PKGCONFIG_OPENSSL_OK
 pkg-config --version && PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig pkg-config --exists openssl && echo PKGCONFIG_OK

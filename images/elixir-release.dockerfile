@@ -30,7 +30,7 @@ RUN apt-get update -qq \
       curl git python3 jq xz-utils \
       libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev librsvg2-dev \
       libxdo-dev libayatana-appindicator3-dev patchelf file \
-      openssh-server \
+      openssh-server xdg-utils \
  && mkdir -p /run/sshd \
  && rm -rf /var/lib/apt/lists/*
 # openssh-server: the suite's OpenSSH interop gate authenticates issued
@@ -38,6 +38,10 @@ RUN apt-get update -qq \
 # missing — masked for weeks behind the env-gate failures, exposed once the
 # runner started providing USER/LOGNAME (lacy-infra#26 triage). /run/sshd is
 # the privilege-separation dir sshd refuses to start without.
+# xdg-utils: Tauri's AppImage bundler shells out to `xdg-mime`, so without it
+# the desktop build fails after the .deb and .rpm succeed ("xdg-mime binary
+# not found /usr/bin/xdg-mime") and no updater feed is published (cytale
+# desktop.yml, every run since the workflow landed).
 
 # Rust — copied wholesale from the stock toolchain image instead of
 # rustup-installed: curl/getaddrinfo is unreliable in this host's docker
