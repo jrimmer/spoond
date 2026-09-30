@@ -261,6 +261,7 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 			DiskMB:     img.DiskMB,
 			StartCmd:   startCmd,
 			ReadyCmd:   readyCmd,
+			Env:        img.Env,
 			UpdatedAt:  time.Now(),
 		}
 		if err := db.UpsertImage(ctx, row); err != nil {
@@ -324,6 +325,7 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		DiskMB:         img.DiskMB,
 		StartCmd:       startCmd,
 		ReadyCmd:       readyCmd,
+		Env:            img.Env,
 		UpdatedAt:      time.Now(),
 	}); err != nil {
 		return err

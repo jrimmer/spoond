@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -14,6 +15,7 @@ type ImageRow struct {
 	Name, TemplateID, CurrentBuildID, Digest string
 	VCPU, MemoryMB, DiskMB                   int
 	StartCmd, ReadyCmd                       string
+	Env                                      map[string]string // JSON in env
 	UpdatedAt                                time.Time
 }
 
@@ -21,7 +23,7 @@ type ImageRow struct {
 func (db *DB) GetImage(ctx context.Context, name string) (ImageRow, error) {
 	row := db.r.QueryRowContext(ctx, `SELECT
 		name, template_id, current_build_id, digest,
-		vcpu, memory_mb, disk_mb, start_cmd, ready_cmd, updated_at
+		vcpu, memory_mb, disk_mb, start_cmd, ready_cmd, env, updated_at
 		FROM images WHERE name = ?`, name)
 	return scanImage(row.Scan)
 }
@@ -30,7 +32,7 @@ func (db *DB) GetImage(ctx context.Context, name string) (ImageRow, error) {
 func (db *DB) ListImages(ctx context.Context) ([]ImageRow, error) {
 	rows, err := db.r.QueryContext(ctx, `SELECT
 		name, template_id, current_build_id, digest,
-		vcpu, memory_mb, disk_mb, start_cmd, ready_cmd, updated_at
+		vcpu, memory_mb, disk_mb, start_cmd, ready_cmd, env, updated_at
 		FROM images ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list images: %w", err)
@@ -54,10 +56,14 @@ func (db *DB) ListImages(ctx context.Context) ([]ImageRow, error) {
 // existing row on name conflict. The caller owns the row's identity:
 // the template id of an existing image is passed back unchanged.
 func (db *DB) UpsertImage(ctx context.Context, r ImageRow) error {
-	_, err := db.w.ExecContext(ctx, `INSERT INTO images
+	env, err := json.Marshal(r.Env)
+	if err != nil {
+		return fmt.Errorf("store: image %s: env: %w", r.Name, err)
+	}
+	_, err = db.w.ExecContext(ctx, `INSERT INTO images
 		(name, template_id, current_build_id, digest,
-		 vcpu, memory_mb, disk_mb, start_cmd, ready_cmd, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 vcpu, memory_mb, disk_mb, start_cmd, ready_cmd, env, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 		  template_id = excluded.template_id,
 		  current_build_id = excluded.current_build_id,
@@ -67,9 +73,10 @@ func (db *DB) UpsertImage(ctx context.Context, r ImageRow) error {
 		  disk_mb = excluded.disk_mb,
 		  start_cmd = excluded.start_cmd,
 		  ready_cmd = excluded.ready_cmd,
+		  env = excluded.env,
 		  updated_at = excluded.updated_at`,
 		r.Name, r.TemplateID, r.CurrentBuildID, r.Digest,
-		r.VCPU, r.MemoryMB, r.DiskMB, r.StartCmd, r.ReadyCmd, formatTime(r.UpdatedAt))
+		r.VCPU, r.MemoryMB, r.DiskMB, r.StartCmd, r.ReadyCmd, string(env), formatTime(r.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("store: upsert image %s: %w", r.Name, err)
 	}
@@ -78,9 +85,9 @@ func (db *DB) UpsertImage(ctx context.Context, r ImageRow) error {
 
 func scanImage(scan func(dest ...any) error) (ImageRow, error) {
 	var r ImageRow
-	var updatedAt string
+	var updatedAt, env string
 	err := scan(&r.Name, &r.TemplateID, &r.CurrentBuildID, &r.Digest,
-		&r.VCPU, &r.MemoryMB, &r.DiskMB, &r.StartCmd, &r.ReadyCmd, &updatedAt)
+		&r.VCPU, &r.MemoryMB, &r.DiskMB, &r.StartCmd, &r.ReadyCmd, &env, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ImageRow{}, ErrNotFound
 	}
@@ -88,6 +95,9 @@ func scanImage(scan func(dest ...any) error) (ImageRow, error) {
 		return ImageRow{}, err
 	}
 	r.UpdatedAt = parseTime(updatedAt)
+	if err := json.Unmarshal([]byte(env), &r.Env); err != nil {
+		return ImageRow{}, fmt.Errorf("store: image %s: env: %w", r.Name, err)
+	}
 	return r, nil
 }
 
