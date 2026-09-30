@@ -14,7 +14,7 @@ Orchestrator session started 2026-09-30.
 | U05 sqlite-store | done | deployed 2026-09-30 18:57Z; R3 PASS 1.20s; spoond.db created; all services active |
 | U06 substrate-interface | done | live test PASS on vm2 (303s: build/create/exec/PTY/checkpoint+forks/pause-resume); verifier PASS 0 deviations; merged |
 | U07 image-pipeline | done | all 7 images built into staging DB (scylla 9ce3a8f4 after 9 build rounds; deviations recorded below); live checks PASS for all 7 (resolv.conf first line 10.1.0.1) |
-| U08 lease-lifecycle | pending | depends on U07 |
+| U08 lease-lifecycle | verifying-on-host | code merged (verifier PASS, 0 deviations); Ops dispatched: migration rebuild, staging deploy, conformance L/S/D/I, S4 budgets |
 | U09 networking-and-access | pending | depends on U08 |
 | U10 restart-and-crash | pending | depends on U08, U09 |
 | U11 catalog-gc-and-observability | pending | depends on U08, U10 |
