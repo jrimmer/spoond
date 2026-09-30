@@ -16,7 +16,7 @@ and verify with `spoond doctor`.
 ## Prerequisites (both paths)
 
 ```bash
-# Go toolchain (1.22+)
+# Go toolchain (1.27.1+)
 apt-get install -y golang-go   # or install from https://go.dev/dl/
 
 # clone the repo
