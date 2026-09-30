@@ -278,7 +278,8 @@ For every N test, a helper `canTCP(id, host, port) bool` runs:
   `10.1.0.203:443` is `code.lacy.casa` on the LAN: a known-open private
   TCP service that is not vm2 itself.
   1. `none`: `canTCP(1.1.1.1,443)=no` and `canTCP(10.1.0.203,443)=no`.
-  2. `internet`: `canTCP(1.1.1.1,443)=yes` and `canTCP(10.1.0.203,443)=no`.
+  2. `internet`: `canTCP(1.1.1.1,443)=yes` and `canTCP(10.1.0.203,443)=yes`
+     (E2B `internet` allows public plus the LAN ranges, as forkd does).
   3. `lan`: `canTCP(10.1.0.203,443)=yes` and `canTCP(1.1.1.1,443)=no`.
      Also `canTCP(10.1.0.11,22)=no`: the host's own addresses are refused
      except the granted service port (`e2b` only; skip on forkd).

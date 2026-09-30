@@ -135,7 +135,7 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
    | Policy | Egress |
    |---|---|
    | `none` | `DeniedCIDRs=["0.0.0.0/0"]`, nothing else |
-   | `internet` | `Private=[hostSvc, dns] + s.peerAllowances(l)` |
+   | `internet` | `Private=[lanRanges..., hostSvc, dns] + s.peerAllowances(l)`, with `lanRanges` as in the `lan` row. Public destinations stay allowed (no `DeniedCIDRs`); listing the LAN ranges as private allowances matches forkd, where `internet` flushes all rules and private/LAN addresses are reachable |
    | `lan` | `DeniedCIDRs=["0.0.0.0/0"]`, `Private=[lanRanges..., hostSvc, dns] + s.peerAllowances(l)`, where lanRanges are the CIDRs below with empty `TCPPorts` |
    | `restricted` | `DeniedCIDRs=["0.0.0.0/0"]`, `AllowedDomains` = the domain entries of `NetAllow`, `AllowedCIDRs` = the IP/CIDR entries of `NetAllow` (public ones), `Private` = `[hostSvc, dns]` + the private IP/CIDR entries of `NetAllow` (empty ports) + `s.peerAllowances(l)` |
 
