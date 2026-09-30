@@ -10,12 +10,12 @@ RUN apt-get update -qq \
  && install -m 0644 /tmp/scylla-signing-key.gpg /etc/apt/keyrings/scylladb.gpg \
  && install -m 0644 /tmp/scylla-2026.2.list /etc/apt/sources.list.d/scylla.list \
  && apt-get update -qq \
- && dpkg-divert --local --rename --add /usr/sbin/sysctl \
- && printf '#!/bin/sh\nexit 0\n' > /usr/sbin/sysctl \
- && chmod 0755 /usr/sbin/sysctl \
+ && if [ -e /usr/bin/sysctl ]; then dpkg-divert --local --rename --add /usr/bin/sysctl; else dpkg-divert --local --add /usr/bin/sysctl; fi \
+ && printf '#!/bin/sh\nexit 0\n' > /usr/bin/sysctl \
+ && chmod 0755 /usr/bin/sysctl \
  && apt-get install -y --no-install-recommends scylla=2026.2.7-0.20260902.94dae629230b-1 \
- && rm -f /usr/sbin/sysctl \
- && dpkg-divert --local --rename --remove /usr/sbin/sysctl \
+ && rm -f /usr/bin/sysctl \
+ && dpkg-divert --local --rename --remove /usr/bin/sysctl \
  && rm -rf /var/lib/apt/lists/*
 COPY --chmod=755 scylla-init-hook.sh /etc/spoond/init.d/50-scylla
 COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
