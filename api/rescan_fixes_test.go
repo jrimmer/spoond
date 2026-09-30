@@ -50,10 +50,10 @@ func TestF1CloneQuota(t *testing.T) {
 }
 
 // TestF2ProxyStripsGateHeaders: gate headers must not reach the guest
-// app (rescan finding 2). We can't run a full netns in unit tests, so
-// assert the Rewrite strips them via a direct call through the handler
-// with a fake app... Instead, verify at the unit level that the proxy
-// handler refuses without auth when forward-auth is on and strips
+// app (rescan finding 2). We can't run a full orchestrator proxy in unit
+// tests, so assert the Rewrite strips them via a direct call through the
+// handler with a fake app... Instead, verify at the unit level that the
+// proxy handler refuses without auth when forward-auth is on and strips
 // headers is code-level; here we assert capability-mode still serves
 // hex-id hostnames and the header-strip loop exists via behavior:
 // request to /assets (pre-gate) unaffected.

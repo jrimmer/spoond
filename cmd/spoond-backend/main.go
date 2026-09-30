@@ -134,6 +134,7 @@ func Main(args []string) int {
 		IdleTimeout:     idleTimeout,
 		HostGuestAddr:   hostGuestAddr,
 		HostGuestPort:   hostGuestPort,
+		ProxyURL:        cfg.ProxyURL,
 		CheckpointEvery: checkpointEvery,
 	})
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,26 @@ type testSub struct {
 	probeFail    map[string]string
 	probeFailAll bool
 	execStdout   string // canned stdout for non-probe execs ("" = "ok\n")
+
+	// lastStart records the most recent Start request (the stream tests
+	// pin the initial PTY size it carries).
+	startMu   sync.Mutex
+	lastStart substrate.StartRequest
+}
+
+// LastStart returns the most recent Start request.
+func (ts *testSub) LastStart() substrate.StartRequest {
+	ts.startMu.Lock()
+	defer ts.startMu.Unlock()
+	return ts.lastStart
+}
+
+// Start delegates to the fake and records the request.
+func (ts *testSub) Start(ctx context.Context, sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
+	ts.startMu.Lock()
+	ts.lastStart = req
+	ts.startMu.Unlock()
+	return ts.Fake.Start(ctx, sandboxID, req)
 }
 
 func newTestSub() *testSub {
@@ -111,13 +132,16 @@ func seedImage(t *testing.T, db *store.DB, name string, memoryMB int) store.Imag
 }
 
 // newTestService builds a Service over a fake substrate and a temp DB.
+// ProxyURL points at an unroutable loopback port: the fake substrate has
+// no network, so proxy tests that reach the dial get a 502.
 func newTestService(t *testing.T) (*Service, *store.DB, *testSub) {
 	t.Helper()
 	sub := newTestSub()
 	db := newTestDB(t)
 	svc := NewService(sub, db, map[string]string{
 		"token-a": "consumer-a", "token-b": "consumer-b", "legacy-tok": "legacy-consumer",
-	}, ServiceConfig{DefaultTTL: 60 * time.Second, MaxTTL: 10 * time.Minute})
+	}, ServiceConfig{DefaultTTL: 60 * time.Second, MaxTTL: 10 * time.Minute,
+		ProxyURL: "http://127.0.0.1:1"})
 	svc.log = log.New(io.Discard, "", 0)
 	return svc, db, sub
 }
