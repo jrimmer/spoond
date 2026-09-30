@@ -7,11 +7,11 @@ Orchestrator session started 2026-09-30.
 
 | Unit | State | Notes |
 |---|---|---|
-| U01 go-upgrade | blocked | local commit bb21513 on impl/U01-go-upgrade; vm2 steps 9a+10 blocked on host-key change (see Waiting on human) |
-| U02 conformance-suite | pending | blocked behind U01 |
-| U03 e2b-fork-and-patches | pending | starts after U01 step 10 |
+| U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
+| U02 conformance-suite | running | worker started, worktree `impl/U02-conformance-suite` |
+| U03 e2b-fork-and-patches | running | Ops dispatched for steps 1–2 on vm2; worker authoring patches next |
 | U04 host-bringup | pending | depends on U03 |
-| U05 sqlite-store | pending | depends on U01 |
+| U05 sqlite-store | running | worker started, worktree `impl/U05-sqlite-store` |
 | U06 substrate-interface | pending | depends on U04 + U05 |
 | U07 image-pipeline | pending | depends on U04 + U06 |
 | U08 lease-lifecycle | pending | depends on U07 |
@@ -27,11 +27,14 @@ Orchestrator session started 2026-09-30.
 - 2026-09-30 `/etc/spoond/conformance.env` present on vm2 (read-only check) ✓
 - 2026-09-30 vm2 access via spec-ops, exact output:
   `sandbox`, `x86_64`, `debian 13`, `active` ×4 ✓
-- 2026-09-30 U01 worker finished local steps (commit bb21513 on `impl/U01-go-upgrade`), parked on vm2 steps 9a/10 per protocol.
+- 2026-09-30 U01 verifier PASS (`VERIFY-U01.md`); merged --no-ff into feat/e2b-substrate (735038c); branch pushed; draft-PR-equivalent opened via agit: PR #74 (base main).
+- 2026-09-30 workstation DNS fell back to 8.8.8.8 (LAN resolvers 10.1.0.2/.3 unreachable for a period); public zone for lacy.casa points git/code/vm2 at 5.78.185.36 (foreign). Workaround: `~/.ssh/config` pins vm2.lacy.casa→10.1.0.11 and git.lacy.casa→10.1.0.47 (keys verified against original known_hosts entries); HTTPS API reached with `curl --resolve code.lacy.casa:443:10.1.0.203`.
 
 ## Verifier results
 
-(none yet)
+(none yet for units other than U01)
+
+- U01: PASS (2026-09-30), zero deviations (VERIFY-U01.md in the U01 worktree).
 
 ## Autonomous window runs
 
@@ -44,4 +47,4 @@ Orchestrator session started 2026-09-30.
 
 ## Notifications
 
-- 2026-09-30 Resumed: vm2 blocker was DNS misdirection to a foreign host; address pinned to 10.1.0.11 in ssh config. U01 steps 9a/10 re-dispatched.
+- 2026-09-30 U01 merged into feat/e2b-substrate; U02/U05 started, U03 started. **Action needed:** provide a read-only Forgejo API token (code.lacy.casa) so the orchestrator can read CI status of PR #74 ('Run go version' step must print go1.27.1) — or check PR #74 yourself and confirm. Also (non-blocking): fix public DNS for lacy.casa names (currently pointing at 5.78.185.36) and/or the workstation's resolver fallback.
