@@ -40,9 +40,8 @@ Orchestrator session started 2026-09-30.
 ## Waiting on human
 
 
-- **vm2 SSH host key changed mid-session (2026-09-30).** The setup access check and the conformance.env check both passed against the stored key earlier in this session. Minutes later, every ssh to `root@vm2.lacy.casa` fails host-key verification. Offered ED25519 fingerprint now: `SHA256:8OdOGujdZElO17X+/NO5QXOsEOOwTVB2iN/am4oMgis`; live ECDSA also differs: `SHA256:uZYbEiQrkD4orM2FSbxzhR/Pdh9v7PzGR1DYhTjh13w` (consistent with a full host re-key, not a single-algorithm rotation). Stored fingerprints (known_hosts lines 8–10): ed25519 `SHA256:3fd5df51…`, rsa `SHA256:942925d6…`, ecdsa `SHA256:a480c83a…`. Either vm2 was rebuilt/re-keyed, or this is a MITM. No unit commands ran on vm2 after the change; no vm2 state was touched.
-  **Needed from human:** confirm the host key change is legitimate (and if so update known_hosts, or tell the orchestrator to accept `SHA256:8OdOGujdZElO17X+/NO5QXOsEOOwTVB2iN/am4oMgis`), or investigate. All vm2 steps (U01 9a+10, then U03/U04 and every later ops step) are paused until then.
+- **RESOLVED (2026-09-30):** vm2 SSH "host key changed" was **DNS misdirection**, not a re-key. Public DNS for `vm2.lacy.casa` began resolving to `5.78.185.36`, a foreign host presenting rotating keys (`8OdOGujd…` then `f0e74e1a…`, both confirmed *not* vm2 by the human). The real vm2 is `10.1.0.11` (per the human; matches `01-architecture.md` `HOST_PRIMARY_IP`) and serves the **original** host keys (ed25519 `SHA256:3fd5df51…`, ecdsa `SHA256:a480c83a…`). Fixed on the workstation: `~/.ssh/config` now pins `Host vm2.lacy.casa → HostName 10.1.0.11`, and `10.1.0.11`'s keys were added to `known_hosts`. Verified: `ssh root@vm2.lacy.casa` → `sandbox`, `x86_64`, `active` ×4. No unit command ever ran against the foreign host; vm2 state untouched throughout. Suggested (human, non-blocking): fix the public DNS record for `vm2.lacy.casa`.
 
 ## Notifications
 
-- 2026-09-30 BLOCKED (all vm2 work): vm2 SSH host key changed mid-session. Action needed: confirm the new key `SHA256:8OdOGujd…` is legitimate (vm2 rebuild/re-key) or investigate as a security event; then tell the orchestrator to resume.
+- 2026-09-30 Resumed: vm2 blocker was DNS misdirection to a foreign host; address pinned to 10.1.0.11 in ssh config. U01 steps 9a/10 re-dispatched.
