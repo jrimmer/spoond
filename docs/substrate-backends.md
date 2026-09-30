@@ -5,6 +5,12 @@ Hyper (`harmont-dev/hyper`, Elixir) can be a second backend. Written after
 the forkd shared-rootfs work (upstream #317, spoond #66) prompted the
 question.
 
+**Updated 2026-09-29 — read this first.** A third sweep, not limited to
+Firecracker or to "agent sandbox" projects, changed the recommendation from
+"stay on forkd" to **buy the engine, own the seam**: write a 1.0 substrate
+spec and conformance suite, then run it against three engines. See the last
+section, *Re-survey, 2026-09-29*. Tracked as #73.
+
 **Updated 2026-09-28:** microsandbox re-checked and upgraded from "not a
 peer" to the strongest candidate (see its section below); the Firecracker
 ≥1.15 requirement stated in the Hyper verdict was wrong and is corrected
@@ -293,7 +299,7 @@ suggests, and it is the thing a spike should settle.
 ### Peers of forkd — the same primitive, other projects
 | Project | Verdict |
 |---|---|
-| **Mitos** | **Corrected 2026-09-12 — not a layer over forkd, a naming collision.** Verified: `go.mod` carries no forkd dependency, the DaemonSet ships `ghcr.io/mitos-run/mitos-forkd` built from its own `cmd/forkd/`, and it vendors its *own* patched Firecracker (UFFD-WP, memfd CoW). So it is an independent full stack and a competitor at the primitive layer, not a consumer of ours. Kept out of the decision tables on health: 89 stars, 5 contributors (two active humans), no commits since 2026-07-18, and its own ADR 0005 is titled "raw-forkd not multitenant". |
+| **Mitos** | **Withdrawn (2026-09-29):** the `mitos-run` org now shows no public repos and `mitos-run/mitos` returns 404. **Corrected 2026-09-12 — not a layer over forkd, a naming collision.** Verified: `go.mod` carries no forkd dependency, the DaemonSet ships `ghcr.io/mitos-run/mitos-forkd` built from its own `cmd/forkd/`, and it vendors its *own* patched Firecracker (UFFD-WP, memfd CoW). So it is an independent full stack and a competitor at the primitive layer, not a consumer of ours. Kept out of the decision tables on health: 89 stars, 5 contributors (two active humans), no commits since 2026-07-18, and its own ADR 0005 is titled "raw-forkd not multitenant". |
 | **Tarit** | Broadest single-project coverage on paper — its own rust-vmm VMM, multi-node orchestrator, SSH/PTY gateway, live snapshots. Disqualified by **AGPL-3.0**, **one contributor**, and v0.1.x. |
 | **microsandbox** | **Corrected 2026-09-28 — now a peer, and the strongest candidate found.** The 2026-09-12 verdict ("its snapshot model is not the RAM-state resume the interactive product needs") was true of the pre-0.7 docs and is wrong now: v0.7 ships full snapshots (memory and running processes), live branching and pause/resume, all verified by running them. See [microsandbox, re-checked](#microsandbox-re-checked-2026-09-28) below. |
 | **firecracker-containerd / Flintlock** | Neither exposes a VM snapshot API (flintlock is create/delete/start/stop/pause; CNI still "coming soon"), and both want containerd beside them. They would cost more than they replace. Weave Ignite is archived (2023). |
@@ -385,8 +391,9 @@ per-sandbox writable root, OCI images and a small operational footprint,
 without adopting someone else's control plane — which is exactly the
 combination the other candidates here each missed. Not adopted on paper:
 the security posture, the bundled kernel and beta churn have to be judged
-on vm2 with real workloads. **Next step: a time-boxed spike** behind the
-existing seam — tracked as #73.
+on vm2 with real workloads. **Next step:** #73, widened on 2026-09-29 into a
+conformance-suite evaluation of microsandbox, smolvm and E2B's orchestrator
+(see *Re-survey, 2026-09-29*).
 
 ### The layer category: control planes over a fork primitive
 
@@ -409,7 +416,7 @@ one in view, and it turned out not even to be one. Swept properly:
 | **opensandbox-group/OpenSandbox** | Ex-Alibaba, Apache-2.0, 15k stars. A genuine control plane — pools, TTL, lifecycle hooks, ingress, egress policy, multi-tenancy, six SDKs — over Docker/K8s and gVisor/Kata/Kata+Firecracker via `RuntimeClass`. | Fails the one thing that matters: default pause/resume is **rootfs-only, no RAM**, so there is no resumable interactive session. |
 | **fast-sandbox**, **agent-sandbox/agent-sandbox** | Small k8s runtime planes: warm "Fastlet" pods with pool reuse; REST+MCP over `agent-infra/sandbox`. Note the **name collision** with `kubernetes-sigs/agent-sandbox`, which is a different project. | No RAM snapshot; unproven. |
 | **kubeswift-io/kubeswift** | A Kubernetes control plane for **Cloud Hypervisor** with the richest snapshot surface in this group: `SwiftSnapshot` (memory+disk, local or S3), `SwiftRestore`, guest pools, `cloneFromSnapshot`, live migration. | Dropped for the same two reasons as Tarit: **AGPL-3.0** and effectively single-author. |
-| **smol-machines/smolvm** | *Substrate-class, and a new find.* 6,033 stars, Apache-2.0, 42 contributors, active: libkrun-based with its **own** live-fork primitive (`smolvm machine branch --from source --count 8 --parallel 8`) and a containerd shim. | The healthiest new primitive found — but libkrun is a local/portable model where "the guest and the VMM pertain to the same security context", so it is not a multi-tenant boundary for untrusted code. |
+| **smol-machines/smolvm** | **Superseded 2026-09-29:** now has RAM pause/resume, checkpoints and live branch, default-on seccomp + Landlock + per-VM uid, and systemd-scope survival across restarts — see *Re-survey, 2026-09-29*. *Original 09-12 entry:* *Substrate-class, and a new find.* 6,033 stars, Apache-2.0, 42 contributors, active: libkrun-based with its **own** live-fork primitive (`smolvm machine branch --from source --count 8 --parallel 8`) and a containerd shim. | The healthiest new primitive found — but libkrun is a local/portable model where "the guest and the VMM pertain to the same security context", so it is not a multi-tenant boundary for untrusted code. |
 
 **The category's honest conclusion:** nothing here clears the bar to replace
 spoond's control plane, because nothing pairs a RAM-state fork with the rest
@@ -471,6 +478,9 @@ account. That is the sovereignty and ops-footprint trade this platform
 exists to avoid — which is a reason to keep the option, not to take it today.
 
 ## Recommendation
+
+> **Superseded 2026-09-29** by *Re-survey, 2026-09-29* at the end of this
+> file. Kept as the record of the 09-12 reasoning.
 
 **Stay on forkd. Change the justification, and buy the cheap insurance.**
 
@@ -555,3 +565,239 @@ AgentENV's README claims. **Not independently verified:** all cold-start and
 pause/resume latency figures (vendor or project numbers, including forkd's
 ~100 ms/100 children); E2B's "up to a hundred" fork count; CubeSandbox's
 `<60 ms` claim. Treat those as claims to measure, not facts to plan on.
+
+---
+
+# Re-survey, 2026-09-29: buy the engine, own the seam
+
+## The question, and what changed in it
+
+After the #321 retrofit landed, the question became: is there a substrate
+that is **better architected for our use**, whether or not it is
+Firecracker? Two answers from the owner framed this sweep:
+
+- **Forking a running sandbox with its memory is essential.** It backs
+  `clone`/`cp` and resuming a dev sandbox with its session intact, and it is
+  what makes the platform general-purpose for use cases we don't know yet.
+- **Buy over build.** If building, not from scratch, and not as weeks of
+  back-and-forth towards "close to right".
+
+"Better architected" is judged on four structural properties, the ones
+whose absence caused forkd's pain:
+
+1. **Per-instance writable storage by construction.** No shared file that
+   has to be re-pointed.
+2. **VMs supervised independently of the control plane.** One process or
+   systemd unit per VM, so no restart can take everything down.
+3. **Container images as the input.** No per-image bake pipeline.
+4. **Memory-state fork and suspend.**
+
+A fifth, **confinement of the VMM process**, is where the candidates differ
+most.
+
+## How this was done
+
+Three parallel sweeps, each told to verify claims in source, docs or release
+tags and to mark anything else unverified:
+
+- general-purpose VM platforms (Incus, Cloud Hypervisor projects, Kata);
+- the agent-sandbox landscape, re-checking the 09-12 list and finding new
+  entries, with smolvm in depth;
+- the cost of a purpose-built substrate.
+
+Two results were then checked first-hand:
+
+- **Relative drive paths** isolate restored Firecracker children, run on
+  v1.17.0.
+- **E2B's node orchestrator** runs standalone, read in its source.
+
+What was *run* versus *read* is marked below.
+
+## Finding 1: no healthy general-purpose platform forks memory
+
+- **Incus** (Apache-2.0, v7.5.1, monthly releases, hundreds of
+  contributors) gets almost everything right: one daemon with an embedded
+  database, instances that keep running across daemon restarts, a ZFS clone
+  per instance, stateful stop/start that survives a host reboot, network
+  ACLs, projects/quotas, a PTY agent, a Go client. But it **cannot fork a
+  running VM's memory**. `incus copy` of a running VM is disk-only, and a
+  stateful copy refuses a new name (`instances_post.go`: "Instance name
+  cannot be changed during stateful copy"). It **cannot boot OCI images as
+  VMs** either (lxc/incus#1360, milestone "later"). VM cold boot is seconds.
+  Read, not run.
+- **Kata** 4.2.0 still has no checkpoint: the shim's `Checkpoint` returns
+  `ErrNotImplemented`, and VM templating is not a running fork.
+- **Proxmox**: `qm clone` has no vmstate option.
+
+So with memory fork as a hard requirement, the choice is among young
+purpose-built engines, E2B's engine, or building.
+
+## Finding 2: E2B's node orchestrator is a "buy" option after all
+
+E2B was ruled out on 09-12 for its footprint (Postgres, Redis, ClickHouse,
+Nomad, object storage). That footprint is its **control plane**. The per-node
+orchestrator (`e2b-dev/infra`, `packages/orchestrator`, Apache-2.0) was read
+first-hand on 2026-09-29:
+
+- **Redis is optional.** `factories/run.go` tolerates `ErrRedisDisabled`,
+  and peer registry and resolver fall back to no-ops.
+- **ClickHouse is optional.** It connects only `if
+  config.ClickhouseConnectionString != ""`.
+- **LaunchDarkly** falls back to offline defaults when
+  `LAUNCH_DARKLY_API_KEY` is unset.
+- **Storage can be local disk.** `STORAGE_PROVIDER=Local` and
+  `ARTIFACTS_REGISTRY_PROVIDER=Local` are in its `.env.local`.
+- **A gRPC surface spoond could drive directly:** `Create`, `Update`,
+  `List`, `Delete`, `Pause`, `Checkpoint`. `Checkpoint` snapshots a running
+  sandbox into a build that `Create` can start from, which is fork. The
+  template manager, which builds from container images, runs in the same
+  process (`ORCHESTRATOR_SERVICES=orchestrator,template-manager`).
+- **Built in:** a per-sandbox egress firewall (`tcpfirewall`), port mapping,
+  an ingress proxy, a chroot per sandbox, metrics and health checks.
+
+It is the most production-proven open-source Firecracker sandbox engine.
+Caveats, all read in source:
+
+- **Its startup SIGKILLs every Firecracker process group it finds**
+  (`startupreclaim/firecracker.go`). That is the same "restart kills
+  everything" behaviour we want to leave behind. E2B drains and pauses nodes
+  first, so spoond would have to pause to disk before any restart.
+- Its gRPC is an **internal API**. Pin a release tag and upgrade
+  deliberately.
+- It runs as root and needs NBD, E2B's Firecracker and kernel builds, and
+  its own guest agent (`envd`, Connect-RPC) in place of ours.
+
+Not yet run. The fork semantics are read from `orchestrator.proto`.
+
+## Finding 3: the young engines moved
+
+- **smolvm** (Apache-2.0, 46 contributors) now has:
+  - RAM pause/resume;
+  - durable, incremental checkpoints;
+  - live branch of a running machine (~0.9 s end-to-end in its own
+    benchmark);
+  - per-machine copy-on-write disks by design;
+  - OCI images without a bake step. The image runs as a container under
+    crun *inside* the VM;
+  - a server API with exec, SSE streaming and a PTY WebSocket;
+  - systemd-scope survival across `serve` restarts.
+
+  In `serve` mode it turns on a **seccomp allowlist, Landlock and a per-VM
+  uid by default**, which closes most of the confinement gap that libkrun
+  (and microsandbox) leave open.
+
+  Against that: one author dominates (257 of 297 commits in 30 days), it
+  carries a large libkrun fork, it churns hard (eight releases in five
+  days), there is no routable guest IP (ports only), the API is
+  unauthenticated, and there is no Go SDK (the client would be generated
+  from its OpenAPI spec). Read, not run.
+- **microsandbox**: unchanged since 2026-09-28 (section above). Measured
+  fastest (299 ms live branch), weakest VMM confinement.
+- **Cocoon** (`cocoonstack/cocoon`, MIT, Go, v0.7.0) is technically closest
+  to "forkd done right":
+  - one hypervisor process per VM, with a daemon that adopts running VMs;
+  - per-VM copy-on-write disks over read-only layers;
+  - RAM clone with copy-on-write memory, and hibernate (~300 ms, their
+    figure);
+  - Cloud Hypervisor or Firecracker.
+
+  But one author wrote 644 of 653 commits, the daemon's API is read-only,
+  OCI images must carry a kernel, and its sandbox and operator repos are
+  AGPL. It is not an adoption candidate. **It is the best base to fork if we
+  build.**
+- **Ruled out this sweep:**
+  - Daytona: open source abandoned June 2026, last tag AGPL, containers.
+  - Arrakis: AGPL, dormant.
+  - SporeVM: no saved state on x86.
+  - Slicer: closed-source core.
+  - ArcBox: macOS-only.
+  - Unikraft: unikernels, no general userland.
+  - Mitos: withdrawn.
+  - Also: KumaBox, pve-microvm, Celesto and about eight other
+    single-author or Kubernetes-only projects.
+
+  E2B's full stack, CubeSandbox, AgentENV, Hyper, Tarit, OpenSandbox,
+  kubeswift and agent-sandbox: no material change against the reasons given
+  above.
+
+## Finding 4: per-child disks can be structural in Firecracker
+
+Measured on Firecracker v1.17.0, 2026-09-29: a VM booted with **relative**
+drive paths (`root.ext4`, `data.img`) was snapshotted. Two children were
+then restored with **no `PATCH /drives`**, each started in its own working
+directory holding its own copy of the disks.
+
+- Each child reported `data.img` and wrote its own file (ticks 49 and 48).
+- The original stayed frozen at tick 28.
+
+The vmstate stores the path as given. A relative path therefore resolves
+against each child's working directory, or its jailer chroot.
+
+This matters two ways:
+
+- **For forkd today:** baking with relative paths, and starting each child
+  in its own work dir, gives new snapshots per-child disks without the #321
+  re-pointing. Snapshots with absolute paths still need it.
+- **For a purpose-built substrate:** the core isolation property comes free
+  from the jailer's chroot.
+
+## Build, if it comes to that
+
+Sketched design, Firecracker-based:
+
+- a **jailer chroot per VM** (Finding 4);
+- **one systemd unit per VM**, not bound to the control plane, so restarting
+  the control plane never touches a VM. Its `ExecStartPre` and
+  `ExecStopPost` own the per-VM netns, TAP and nftables policy;
+- **reflinked raw images on ZFS**. A fork clones *every* disk into the
+  snapshot while the VM is paused and commits with an atomic `rename()`;
+- **`skopeo`/`umoci` → ext4** in place of the bake pipeline;
+- snapshots pinned to the Firecracker binary that wrote them, with old
+  binaries kept.
+
+Estimates from the sweep, not measured:
+
+- ~14–18 person-weeks from scratch, half of it fork, crash-consistency and
+  fault-injection work;
+- perhaps 8–10 from a Cocoon fork;
+- 10–20% of an engineer ongoing.
+
+Cloud Hypervisor is the credible alternative VMM (editable restore config,
+virtio-fs, landlock), and stronger once its `copyonwrite` memory mode ships
+in a release. As of 2026-09-29 it is on main only.
+
+## Recommendation
+
+**Buy the engine, own the seam, and decide with a test suite, not a
+debate.**
+
+1. **Write a 1.0 substrate spec and a conformance suite first.**
+   - The suite is spoond-side Go tests against the substrate seam, and it
+     codifies the eleven requirements plus every check this project has
+     learned the hard way:
+     - two sandboxes from one image stay isolated, and the base is never
+       written;
+     - a clone survives its source being killed;
+     - resources are reclaimed after a kill *and* after the control plane
+       is SIGKILLed;
+     - suspend/resume survives a host reboot;
+     - a control-plane restart keeps sandboxes;
+     - extra volumes are private per child;
+     - performance budgets.
+   - The spec adds operability (metrics, health, logs, reconcile, capacity)
+     and **explicit non-goals**: multi-host, live migration, GPU, Windows,
+     rootless, cross-host restore.
+   - Run it against forkd first as the baseline.
+2. **Run it on vm2 against three engines:**
+   - **microsandbox**: fastest, weakest confinement;
+   - **smolvm**: best-confined libkrun, single dominant author;
+   - **E2B's orchestrator**: most proven, restart kills all.
+
+   Expect each to fail something. The suite shows which gap is cheapest to
+   live with.
+3. **Build only if none is acceptable.** Fork Cocoon (or E2B's
+   orchestrator) and build to the same spec. It is done when the suite
+   passes, which is the guard against open-ended iteration.
+
+Meanwhile, the relative-path bake (Finding 4) is a cheap improvement to
+forkd, independent of this decision.
