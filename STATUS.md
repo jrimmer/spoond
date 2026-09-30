@@ -13,7 +13,7 @@ Orchestrator session started 2026-09-30.
 | U04 host-bringup | done | vm2 §1–§10 verified on host; §11 merged (deploy/e2b/, verifier PASS) |
 | U05 sqlite-store | done | deployed 2026-09-30 18:57Z; R3 PASS 1.20s; spoond.db created; all services active |
 | U06 substrate-interface | done | live test PASS on vm2 (303s: build/create/exec/PTY/checkpoint+forks/pause-resume); verifier PASS 0 deviations; merged |
-| U07 image-pipeline | verifying-on-host | code merged 7e3bd18, verifier PASS; Ops running step 0 + build --all + live checks on vm2 |
+| U07 image-pipeline | done | all 7 images built into staging DB (scylla 9ce3a8f4 after 9 build rounds; deviations recorded below); live checks PASS for all 7 (resolv.conf first line 10.1.0.1) |
 | U08 lease-lifecycle | pending | depends on U07 |
 | U09 networking-and-access | pending | depends on U08 |
 | U10 restart-and-crash | pending | depends on U08, U09 |
