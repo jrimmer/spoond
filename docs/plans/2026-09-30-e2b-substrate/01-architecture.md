@@ -200,7 +200,8 @@ proxy, collecting stdout/stderr until `EndEvent`.
 
 There is **no forkd adapter**:
 - Production keeps running the spoond binary built from `main` (U01 + U05,
-  merged to `main` and deployed by the OPERATOR at the end of U05; on
+  merged to `main` by the orchestrator and deployed by the Ops runner in an
+  Autonomous window at the end of U05; on
   forkd) until the U12 cutover.
 - All E2B development runs on a **staging** instance on vm2, sharing the one
   orchestrator:

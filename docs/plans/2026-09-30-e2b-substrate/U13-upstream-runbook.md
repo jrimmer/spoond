@@ -72,8 +72,19 @@ U12 is done.
      prints them; see the addition below).
    - Set `DEFAULT_FIRECRACKER_VERSION` and `DEFAULT_KERNEL_VERSION` in
      `/etc/e2b/orchestrator.env` to the new versions **only** in step 10.
-9. **Swap and validate** (in an OPERATOR window):
-   1. Stop the production runner: `systemctl stop spoond-runner`.
+9. **Swap and validate** (Autonomous window, `00-README.md`; steps 9–10):
+   - **Rollback artifacts**, checked by protocol step 1:
+     - `/usr/local/lib/e2b/orchestrator` (current) and `/fc-envd/envd`
+       (current), both copied to `.prev` in 9.3 before the swap;
+     - `/etc/e2b/drain.env`, copied to `/root/drain.env.pre-upgrade` first.
+   - **Rollback commands:** the "If it fails" block in step 10, then restore
+     `/root/drain.env.pre-upgrade` to `/etc/e2b/drain.env`.
+   - **On any failure** in 9–10: rollback, `window_smoke`, then `BLOCKED`
+     (protocol step 4).
+
+   1. After `window_idle` returns 0, stop the production runner:
+      `systemctl stop spoond-runner` (protocol step 3). Then
+      `cp /etc/e2b/drain.env /root/drain.env.pre-upgrade`.
    2. Re-create staging (its unit files and `/etc/spoond-staging/` were kept
       by U12 step 20; `staging.db` and the binary were not):
       ```bash
@@ -121,7 +132,8 @@ U12 is done.
       values);
     - disable staging and drop its catalog:
       `systemctl disable --now spoond-backend-staging spoond-sshd-gateway-staging && rm -f /var/lib/spoond/staging.db*`;
-    - `systemctl start spoond-runner`.
+    - `systemctl start spoond-runner` (protocol step 5);
+    - run `window_smoke` against production; it must return 0.
 
     **If it fails:** restore the previous binaries and restart, then do the
     same drain, staging and runner steps as on success:
@@ -132,7 +144,10 @@ U12 is done.
     mv /fc-envd/envd.prev /fc-envd/envd
     systemctl restart e2b-orchestrator
     ```
-    Record the failure in `PATCHES.md` under "Upgrade attempts".
+    Then restore `/root/drain.env.pre-upgrade` to `/etc/e2b/drain.env`,
+    disable staging as on success, `systemctl start spoond-runner`, and run
+    `window_smoke`. Record the failure in `PATCHES.md` under "Upgrade
+    attempts", and write `BLOCKED-U13.md`.
 11. **Record:** update `PATCHES.md` ("Current build": the commit and
     SHA-256s) and `substrate/e2b/proto/SOURCE`. Commit both repositories.
 12. **Upstream the patches:** for each patch still carried, open or refresh

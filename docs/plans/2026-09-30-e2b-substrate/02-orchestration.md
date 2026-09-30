@@ -12,38 +12,45 @@ STOP condition, and then park that lane.
 
 | Role | Model | Writes code? | Touches vm2? |
 |---|---|---|---|
-| Orchestrator | the strongest available | no (plans, merges, tracks status) | no |
+| Orchestrator | the strongest available | no (plans, merges to `feat/e2b-substrate` and `main`, dispatches the Ops runner, tracks status) | no |
 | Worker (one per unit) | GLM-5.3-Flash or similar | yes, its unit only | no |
 | Verifier (one per unit) | a different agent from the worker; preferably a stronger model | no | no |
-| Ops runner (optional) | any | no | yes: only commands copied verbatim from a unit |
+| Ops runner | any | no | yes: only commands copied verbatim from a unit, and the Autonomous window protocol (`00-README.md`) for production steps |
 
-The human may act as the ops runner instead. The vm2 steps are short.
+Workers and verifiers never touch vm2 (README rule 9); every vm2 command
+goes through the Ops runner.
 
 ## Schedule (from the Unit Index dependencies)
 
 ```
 Lane A (spoond repo):  U01 ─┬─ U02 (conformance suite)
-                            └─ U05 (SQLite store) ── HUMAN: merge to main + production deploy
+                            └─ U05 (SQLite store) ── orchestrator merges to main; Ops runner deploys (Autonomous window)
 Lane B (fork + vm2):   U01 step 10 ── U03 ── U04
 Join:                  U06 (needs U04 + U05 merged to main) → U07 → U08
 Fan-out, then merge:   U09 ┐
                        U10 ├─ parallel worktrees; merge strictly U09 → U10 → U11,
                        U11 ┘  each later branch rebased and re-tested before merge
-Human-led:             U12 → U13
+Autonomous windows:    U12 (steps 1–17; 18–19 are a worker; 20 after 30 days) → U13
 ```
 
 - Start U01. U03 starts as soon as U01 step 10 (Go 1.27.1 on vm2) is done.
   Then U02, U05 and U04 run in parallel.
-- After U05 passes verification, the human merges `feat/e2b-substrate` into
-  `main` and runs U05's production deploy in a window (U05 §Merge and
-  production deploy). The orchestrator then rebases `feat/e2b-substrate` on
-  `origin/main` before starting U06.
+- After U05 passes verification, the orchestrator merges
+  `feat/e2b-substrate` into `main` (README rule 10) and has the Ops runner
+  run U05's production deploy under the Autonomous window protocol (U05
+  §Merge and production deploy). The orchestrator then rebases
+  `feat/e2b-substrate` on `origin/main` before starting U06.
 - U09, U10 and U11 all edit `api/service.go` and `api/server.go`. Run them
   in parallel only if the orchestrator enforces the merge order and a
   rebase plus full re-test before each merge. If a rebase needs non-trivial
   conflict resolution, the worker must write `BLOCKED-Uxx.md` rather than
   resolve behaviour conflicts on its own.
-- U12 and U13 are driven by the human, and agents assist step by step.
+- U12 and U13 run like every other unit: code and doc steps by a worker,
+  vm2 steps by the Ops runner, production steps under the Autonomous window
+  protocol. U12 step 20 runs 30 days after cutover if no rollback happened;
+  the orchestrator records its due date in `STATUS.md`, and whoever is
+  running then (the orchestrator via the Ops runner, or a human) executes
+  it.
 
 ## Branches and worktrees
 
@@ -54,14 +61,15 @@ Human-led:             U12 → U13
   `--no-ff`) **only after its verifier returns PASS**.
 - U03's work lives in the separate `lacy.casa/e2b-runtime` repo (branches
   `upstream` and `spoond`), not in spoond.
-- Nobody merges to `main` except the human: once after U05, and once in
-  U12.
+- Only the orchestrator merges to `main` (README rule 10): once after U05,
+  and once in U12 step 1, each only after the unit's worker tests, verifier
+  PASS and required conformance result all pass.
 
 ## Status files (in the spoond repo root on `feat/e2b-substrate`; never merged to `main`)
 
 | File | Written by | Content |
 |---|---|---|
-| `STATUS.md` | orchestrator | the table of units (state: pending, running, verifying, blocked, done), open blockers, OPERATOR steps waiting, and the last verifier result per unit |
+| `STATUS.md` | orchestrator | the table of units (state: pending, running, verifying, verifying-on-host, soaking, blocked, done), open blockers, OPERATOR steps waiting, the last verifier result per unit, every Autonomous window run (step, start, end, result, rollback if any), and the due date of U12 step 20 |
 | `BLOCKED-<Uxx>.md` | worker | what blocked it, the file and line, expected vs found, and exactly what is needed to unblock |
 | `DONE-<Uxx>.md` | worker | each "Done when" item, how it was verified, and test output |
 | `VERIFY-<Uxx>.md` | verifier | PASS, or FAIL with numbered deviations |
@@ -73,8 +81,8 @@ and in U12). After the U05 merge, the orchestrator recreates `STATUS.md` on
 ## Guardrails
 
 1. **Split host access.** Workers and verifiers get the repositories only.
-   Commands on vm2 are executed by the ops runner or the human, copied
-   verbatim from the unit.
+   Commands on vm2 are executed by the Ops runner, copied verbatim from the
+   unit.
 2. **STOP means park.** On a false "Fact", a missing precondition, an
    OPERATOR step or a vm2 command, the worker writes `BLOCKED-<Uxx>.md` and
    exits. The orchestrator pauses the unit's dependents and continues
@@ -107,7 +115,8 @@ differs.
   `/home/jrimmer/Work/spoond`.
 - **vm2:** the orchestrating agent has SSH access as `root@vm2.lacy.casa`.
   vm2 steps, including the E2B fork's x86_64 cgo build, run through the
-  **Ops runner**. Production-affecting steps stay gated on the human.
+  **Ops runner**. Production-affecting steps run under the Autonomous
+  window protocol (`00-README.md`), authorized in advance by the human.
 - **Branches:** the spec is committed on branch `docs/e2b-substrate-spec`.
 
 > You are the **orchestrator** for implementing the spec in
@@ -133,6 +142,10 @@ differs.
 >   - **Workers and verifiers never use SSH.**
 >   - vm2 is the **live production host** for spoond CI. The README's rule 6
 >     applies to every command.
+>   - `/etc/spoond/conformance.env` exists on vm2 (provisioned by the human
+>     before kickoff). Check it read-only with
+>     `ssh root@vm2.lacy.casa 'test -s /etc/spoond/conformance.env && echo present'`;
+>     if absent, stop and ask the human.
 >
 > **Models**
 > - **Workers:** GLM-5.3-Flash, one per unit, each in its own git worktree.
@@ -195,25 +208,24 @@ differs.
 >     (U02 baseline) and against staging (U08–U11). It always runs on vm2
 >     from `/root/src/spoond` with `CONFORMANCE_SSH=local` and the
 >     `CONFORMANCE_BACKEND_UNIT` of the backend under test.
->   - The suite needs the OPERATOR-provided tokens and keys. Until they
->     exist, the unit is `BLOCKED`.
+>   - Production runs load `/etc/spoond/conformance.env` (OPERATOR, before
+>     kickoff); staging runs load `/etc/spoond-staging/conformance.env`
+>     (created by the Ops runner in U08). If the production file is
+>     missing, the unit is `BLOCKED`.
 >   - Merge on the verifier's PASS. The unit is then `verifying-on-host`
 >     until the Ops runner's suite result meets the unit's "Done when", and
 >     only then `done`.
-> - **Always gated on the human, never run on your own:**
->   - any merge to `main` (after U05 and in U12);
->   - any restart or redeploy of **production** `spoond-backend`,
->     `spoond-sshd-gateway`, `spoond-runner` or `forkd-controller` (e.g. the
->     U05 production deploy);
->   - conformance **group R** (`CONFORMANCE_DESTRUCTIVE=1`). Against forkd,
->     only `-run '^TestR3_BackendRestart$'` (U05) is ever run;
->   - `systemctl stop spoond-runner`;
->   - anything in U12 or U13.
->
->   Request these in `BLOCKED-<Uxx>.md`, and wait for the human's explicit
->   go-ahead with a time window.
-> - **Never** start U12 or U13. Prepare their checklists in `STATUS.md` for
->   the human.
+>   - Group R (`CONFORMANCE_DESTRUCTIVE=1`) and every production restart or
+>     redeploy run under the Autonomous window protocol. Against forkd,
+>     only `-run '^TestR3_BackendRestart$'` (U05) is ever run.
+> - **Production-affecting steps** (every step a unit marks "(Autonomous
+>   window)": the U05 deploy, group R runs, U12 steps 1–17, U13 steps 9–10,
+>   U12 step 20) are authorized in advance by the human. Dispatch them to
+>   the Ops runner, which follows the Autonomous window protocol in
+>   `00-README.md` exactly (rollback-ready check, idle wait, act, verify,
+>   rollback on failure, always restart the runner). Record each run in
+>   `STATUS.md`. A protocol `BLOCKED` pauses that unit.
+> - Merges to `main` follow README rule 10; you perform them.
 >
 > **Appendices.** Do not read `appendix/*.md` into your own context; they
 > total about 1 MB. For each unit, extract only the sections that unit cites
@@ -227,7 +239,8 @@ differs.
 > - Each notification names the unit and the single action needed from me.
 >
 > **Stop condition.** Stop when every remaining unit is `blocked`,
-> `verifying-on-host` or `done`. End with the contents of `STATUS.md`.
+> `soaking` (U12's 7-day soak or the wait for step 20's due date) or
+> `done`. End with the contents of `STATUS.md`.
 
 If vm2 access is ever **not** available, replace the "Target host" bullet
 with:
@@ -243,7 +256,7 @@ Also drop setup step 4.
 > You orchestrate the implementation of the spec in
 > `docs/plans/2026-09-30-e2b-substrate/`. Read `00-README.md`,
 > `01-architecture.md` and `02-orchestration.md` fully. You do not write code
-> and you never run commands on vm2.
+> and you never run commands on vm2 yourself; the Ops runner does.
 >
 > Schedule units according to `02-orchestration.md` §Schedule, running
 > independent units in parallel. For each unit:
@@ -267,8 +280,12 @@ Also drop setup step 4.
 > depends on it, continue independent units, and record the blocker in
 > `STATUS.md` under "Waiting on human".
 >
+> Dispatch every vm2 step to the Ops runner, and every step marked
+> "(Autonomous window)" under the protocol in `00-README.md`. Merge to
+> `main` only as README rule 10 allows.
+>
 > Update `STATUS.md` after every event. Never perform OPERATOR steps, never
-> merge to `main`, never edit the spec. Stop when every remaining unit is
+> edit the spec. Stop when every remaining unit is
 > blocked or done, and summarize `STATUS.md` as your final message.
 
 ### Worker (one per unit)
@@ -291,7 +308,8 @@ Also drop setup step 4.
 >   passes.
 > - If you reach an OPERATOR step or any command meant for vm2, write it into
 >   `BLOCKED-<Uxx>.md` as a request (the exact command or action needed, and
->   why) and stop. Do not attempt it.
+>   why) and stop. Do not attempt it. The orchestrator dispatches vm2
+>   commands to the Ops runner.
 > - When finished, write `DONE-<Uxx>.md`: each "Done when" item, how you
 >   verified it, and the test output.
 
@@ -309,7 +327,7 @@ Also drop setup step 4.
 > - Write `VERIFY-<Uxx>.md` with PASS, or FAIL with a numbered list of exact
 >   deviations (file, line, expected, found). Do not fix anything.
 
-### Ops runner (optional; for vm2 steps)
+### Ops runner (all vm2 steps)
 
 > Run the vm2 commands from `docs/plans/2026-09-30-e2b-substrate/<Uxx file>`
 > §<step> on `root@vm2.lacy.casa`, verbatim and in order.
@@ -319,22 +337,27 @@ Also drop setup step 4.
 >   output, and the expected result.
 > - Never run a command that is not in the unit text. Never restart a
 >   service the unit does not name.
+> - For a step marked "(Autonomous window)", follow the Autonomous window
+>   protocol in `00-README.md` exactly: rollback-ready check, `window_idle`
+>   wait (poll 60 s, give up after 24 h), `systemctl stop spoond-runner`,
+>   the step, `/healthz` plus `window_smoke`, the step's rollback on any
+>   failure, and `systemctl start spoond-runner` at the end in every case.
 
 ## Human touchpoints (in order)
 
 | When | Unit | Action |
 |---|---|---|
+| Before kickoff | all | run the provisioning script that creates the production identity user `conformance` (kind `agent`, not admin, `max_leases=20`, key `/etc/spoond/conformance_ed25519` by fingerprint) and writes `/etc/spoond/conformance.env` (README §Production conformance credentials) |
 | Before U03 | U03 | create the empty repo `lacy.casa/e2b-runtime` and grant push access |
-| During U01 | U01 | provide a production token for step 9a (go-base Go version check) |
-| Before U02's baseline run | U02 | create the conformance user and token in production as an **admin** with quota ≥ 20; register its SSH key; confirm `PROXY_AUTH_TRUSTED_PEERS` allows 127.0.0.1 |
-| After U05 verifies | U05 | merge `feat/e2b-substrate` into `main`; schedule a window; run U05's production deploy and the R3-only conformance run (the one restart that loses leases) |
-| U08 staging deploy | U08 | bootstrap the staging conformance user as the first (admin) user with quota ≥ 20; register its SSH key |
-| After U10 | U10 | schedule a window for the destructive group R against staging |
-| ≥ 7 days before U12 | U12 | send the user notice |
-| U12 | U12 | merge to `main`; run the cutover window; daily soak checks; enable `GC_DELETE=1` after reviewing logs |
 | Any time | all | answer `BLOCKED-*.md` files, then tell the orchestrator to resume |
+
+Everything else (merges to `main`, the U05 deploy, group R, the U12
+cutover, soak, `GC_DELETE=1`, step 20, U13) runs autonomously under the
+Autonomous window protocol. No user notice is needed: the human is vm2's
+only user.
 
 ## What "done" looks like
 
 The Definition of Done in `00-README.md`. The orchestrator's final
-`STATUS.md` shows U01–U11 done, and U12–U13 waiting on the human.
+`STATUS.md` shows U01–U13 done, or U12 `soaking` with step 20's due
+date recorded.

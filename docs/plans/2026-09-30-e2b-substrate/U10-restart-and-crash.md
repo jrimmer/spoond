@@ -220,8 +220,13 @@ vm2 files:
   go build -o /opt/spoond-staging/spoond ./cmd/spoond
   systemctl restart spoond-backend-staging spoond-sshd-gateway-staging
   ```
-- **Conformance** against staging, in a window, with the U08/U09 staging
-  settings (including `CONFORMANCE_BACKEND_UNIT=spoond-backend-staging`):
+- **Conformance** against staging, as an **(Autonomous window)** step
+  (`00-README.md`; group R protocol in U02), after
+  `set -a; . /etc/spoond-staging/conformance.env; set +a` with
+  `CONFORMANCE_SUBSTRATE=e2b`, `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`:
+  - **Rollback artifacts:** none (no files change).
+  - **Rollback commands:** `systemctl restart e2b-orchestrator`, then
+    `systemctl restart spoond-backend-staging spoond-sshd-gateway-staging`.
   - `CONFORMANCE_DESTRUCTIVE=1`: R1 (planned restart), R2 (crash) and R3
     (backend restart) pass;
   - `restart_total_ms` ≤ 120000.

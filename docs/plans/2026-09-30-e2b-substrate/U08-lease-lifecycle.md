@@ -314,6 +314,10 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
    - Map errors: `ErrCapacity` → 503.
    - The response is unchanged. `address` = `HostIP`.
 2. **`handleExec`, `handlePrompt`, `handleStat`:**
+   - Keep the existing log lines `exec: <id>: ...` and `create: grant ...`
+     (with `lease.SandboxID` in place of `lease.ForkdID`); the Autonomous
+     window protocol's `window_idle` reads them. `handleStream` logs
+     `stream: <lease id>: start` when a process starts.
    - Call
      `s.svc.sub.Exec(ctx, lease.SandboxID, substrate.ExecRequest{Args: buildShellArgs(...), Timeout: time.Duration(timeout)*time.Second})`.
    - `substrate.ErrNotFound` → **410**
@@ -458,10 +462,40 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
    ```
    Before step 2, run `install -d -m 700 /etc/spoond-staging`.
 4. `systemctl daemon-reload && systemctl enable --now spoond-backend-staging`.
-5. OPERATOR creates the conformance user in the staging identity store,
-   through the bootstrap flow (bearer `<hex1>`, header
-   `X-Bootstrap-Token: <hex3>`), as the first user (so it is admin), with
-   quota ≥ 20, and registers the key `CONFORMANCE_SSH_KEY` for it.
+5. **Staging conformance user (Ops runner).** Bootstrap the first staging
+   identity user, which becomes admin, and write the staging conformance
+   env file:
+   ```bash
+   set -a; . /etc/spoond-staging/backend.env; set +a
+   BEARER=${CONSUMER_TOKENS%%=*}            # <hex1>
+   API=https://vm2.lacy.casa:18890
+   ssh-keygen -t ed25519 -N '' -C conformance-staging -f /etc/spoond-staging/conformance_ed25519
+   FP=$(ssh-keygen -lf /etc/spoond-staging/conformance_ed25519.pub | awk '{print $2}')   # SHA256:...
+   TOK=$(openssl rand -hex 32)
+   USER_ID=$(curl -fsS -H "Authorization: Bearer $BEARER" -H "X-Bootstrap-Token: $BOOTSTRAP_TOKEN" \
+     -d "{\"name\":\"conformance\",\"kind\":\"agent\",\"fingerprints\":[\"$FP\"],\"token\":\"$TOK\"}" \
+     "$API/api/users" | python3 -c 'import json,sys; u=json.load(sys.stdin)["user"]; assert u["admin"]; print(u["id"])')
+   curl -fsS -H "Authorization: Bearer $TOK" -d '{"max_leases":20,"max_ttl":0}' "$API/api/users/$USER_ID/quota"
+   umask 077
+   cat > /etc/spoond-staging/conformance.env <<EOF
+   CONFORMANCE_API=$API
+   CONFORMANCE_TOKEN=$TOK
+   CONFORMANCE_USER=conformance
+   CONFORMANCE_USER_ID=$USER_ID
+   CONFORMANCE_SSH=local
+   CONFORMANCE_SSH_KEY=/etc/spoond-staging/conformance_ed25519
+   CONFORMANCE_SSH_GATEWAY=127.0.0.1:12222
+   CONFORMANCE_PROXY_URL=http://127.0.0.1:18891
+   CONFORMANCE_PROXY_SECRET=$PROXY_AUTH_SECRET
+   CONFORMANCE_PROXY_SUFFIX=.sandbox.lacy.casa
+   CONFORMANCE_BACKEND_UNIT=spoond-backend-staging
+   EOF
+   chmod 600 /etc/spoond-staging/conformance.env
+   ```
+   The `python3` assertion fails (and the step STOPs) if the user is not
+   admin, i.e. if the staging identity store was not empty. Every staging
+   conformance run loads this file with
+   `set -a; . /etc/spoond-staging/conformance.env; set +a`.
 
 Production `spoond-backend` is **not** touched.
 
@@ -480,11 +514,9 @@ Each commit builds and passes `go build ./... && go vet ./... && go test ./...`.
 
 - `go test ./...` passes.
 - These conformance tests pass against the **staging** backend, run on
-  vm2 from `/root/src/spoond` with `CONFORMANCE_API=https://vm2.lacy.casa:18890`,
-  `CONFORMANCE_SUBSTRATE=e2b`, `CONFORMANCE_SSH=local`,
-  `CONFORMANCE_BACKEND_UNIT=spoond-backend-staging`,
-  `CONFORMANCE_PROXY_URL=http://127.0.0.1:18891`,
-  `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`, and the staging user's token
+  vm2 from `/root/src/spoond` after
+  `set -a; . /etc/spoond-staging/conformance.env; set +a` with
+  `CONFORMANCE_SUBSTRATE=e2b` and `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`
   (select them with `-run '^Test(L[1-6]|S[1-4]|D[12]|I[12])_'`):
   - L1–L6 (group N comes in U09);
   - S1–S4;

@@ -51,13 +51,14 @@ None. This is the first unit.
 8. Update `docs/install.md`: replace the line `# Go toolchain (1.22+)` with
    `# Go toolchain (1.27.1+)`.
 9. **Commit:** `chore(go): Go 1.27.1 and current dependency versions`.
-9a. **go-base check (Ops runner or OPERATOR, against the production lease
-    API, run on vm2; `TOKEN` is a production consumer or user token the
-    OPERATOR provides).** Create a `go-base` lease and exec `go version`:
+9a. **go-base check (Ops runner, on vm2, against the production lease
+    API).** Create a `go-base` lease and exec `go version`:
     ```bash
-    ID=$(curl -fsS -H "Authorization: Bearer $TOKEN" -d '{"image":"go-base","ttl":120}' https://vm2.lacy.casa:8890/api/sandboxes | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-    curl -fsS -H "Authorization: Bearer $TOKEN" -d '{"cmd":"go version"}' https://vm2.lacy.casa:8890/api/sandboxes/$ID/exec
-    curl -fsS -X DELETE -H "Authorization: Bearer $TOKEN" https://vm2.lacy.casa:8890/api/sandboxes/$ID
+    set -a; . /etc/spoond/conformance.env; set +a
+    H="Authorization: Bearer $CONFORMANCE_TOKEN"
+    ID=$(curl -fsS -H "$H" -d '{"image":"go-base","ttl":120}' "$CONFORMANCE_API/api/sandboxes" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+    curl -fsS -H "$H" -d '{"cmd":"go version"}' "$CONFORMANCE_API/api/sandboxes/$ID/exec"
+    curl -fsS -X DELETE -H "$H" "$CONFORMANCE_API/api/sandboxes/$ID"
     ```
     `stdout` must contain `go1.27.1`. If it does not, STOP: CI cannot build a
     `go 1.27.1` module until go-base is rebaked, which is an OPERATOR task.

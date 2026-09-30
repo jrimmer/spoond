@@ -123,8 +123,8 @@ generate our own code from the protos.
    runner then, on vm2:
    1. `cd /root/src/spoond && git fetch origin && git checkout impl/U06-<slug> && git pull --ff-only`;
    2. runs `substrate/e2b/gen.sh`;
-   3. commits `substrate/e2b/gen/` with the U06 commit message 1
-      (`feat(substrate): E2B protos and generated clients`), as author
+   3. commits `substrate/e2b/gen/` with commit message 2
+      (`feat(substrate): generated E2B clients`), as author
       `jrimmer <jason@rimmer.net>`;
    4. pushes the branch.
 
@@ -507,8 +507,9 @@ func (p *FakeProcess) Push(ev substrate.ProcessEvent) // deliver an event to Eve
 
 ## Commits
 
-1. `feat(substrate): E2B protos and generated clients`
-2. `feat(substrate): Substrate interface, E2B client and fake`
+1. `feat(substrate): E2B proto copies and gen.sh` (worker: `substrate/e2b/proto/`, `gen.sh`)
+2. `feat(substrate): generated E2B clients` (Ops runner on vm2: `substrate/e2b/gen/` only)
+3. `feat(substrate): Substrate interface, E2B client and fake` (worker, after pulling commit 2)
 
 ## Done when
 

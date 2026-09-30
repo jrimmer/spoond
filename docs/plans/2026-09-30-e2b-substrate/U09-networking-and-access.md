@@ -322,10 +322,12 @@ systemctl restart spoond-sshd-gateway-staging
   - the gateway command selection for shell, exec, sftp and an unknown
     subsystem;
   - the gateway env composition, including `SSH_CONNECTION`.
-- **Conformance** against staging, after §9, with the U08 staging
-  settings plus `CONFORMANCE_SSH_GATEWAY=127.0.0.1:12222`,
-  `CONFORMANCE_PROXY_URL=http://127.0.0.1:18891`, and the staging
-  `PROXY_AUTH_SECRET`:
+- **Conformance** against staging, after §9: 
+  `set -a; . /etc/spoond-staging/conformance.env; set +a` (it already holds
+  the staging gateway `127.0.0.1:12222`, proxy `http://127.0.0.1:18891`,
+  the staging `PROXY_AUTH_SECRET` and the key registered at user creation),
+  plus `CONFORMANCE_SUBSTRATE=e2b` and
+  `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`:
   - N1–N6;
   - L3–L4 still pass.
 

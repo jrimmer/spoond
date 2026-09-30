@@ -7,8 +7,11 @@ and build the orchestrator and envd binaries that U04 installs.
 
 ## Preconditions
 
-- OPERATOR has created an empty repository `lacy.casa/e2b-runtime` on
-  `code.lacy.casa`, and given push access to the implementer's credentials.
+- The empty private repository `lacy.casa/e2b-runtime` exists on
+  `code.lacy.casa` (created 2026-09-30). vm2 can push to it: its deploy key
+  has write access, and its git config rewrites `https://code.lacy.casa/` to
+  `ssh://git@git.lacy.casa/`. The first push (`upstream`) becomes the
+  repository's default branch. Leave it; do not try to change it.
 - vm2 has Go 1.27.1 at `/usr/local/go` (U01 step 10). That step is this
   unit's only dependency on U01. All builds in this unit
   run **on vm2** (x86_64). The orchestrator needs cgo, so it cannot be

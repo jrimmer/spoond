@@ -12,13 +12,14 @@ delete forkd and its tooling. Includes an exact rollback path.
   including R, with every budget met. The one allowed failure is
   `TestI3_DockerInDocker` (a recorded known limitation). Results are recorded in
   `docs/plans/2026-09-30-e2b-substrate/RESULTS.md`.
-- **OPERATOR sent the user notice at least 7 days before the window:**
-  > "On <date> spoond moves to a new sandbox engine. Persistent sandboxes
-  > created before then will be deleted; copy out anything you need.
-  > Images, commands, SSH and URLs keep working."
-
-  forkd snapshots are not migrated (non-goal).
-- OPERATOR schedules a maintenance window of 2 hours.
+- **No user notice.** The human is the only user of vm2. Existing forkd
+  leases, including persistent sandboxes, are deleted at cutover, which is
+  accepted. forkd snapshots are not migrated (non-goal).
+- **The cutover runs as an Autonomous window** (`00-README.md` §Autonomous
+  window protocol), under the human's standing authorization. No human
+  schedules it.
+- `/etc/spoond/conformance.env` exists (README §Production conformance
+  credentials).
 
 ## Facts relied on
 
@@ -38,11 +39,14 @@ delete forkd and its tooling. Includes an exact rollback path.
 
 ### Before the window (does not disturb production)
 
-1. OPERATOR merges `feat/e2b-substrate` into `main`.
-2. On vm2:
+1. The orchestrator merges `feat/e2b-substrate` into `main` with `--no-ff`,
+   and pushes (README rule 10). This requires the preconditions above to hold.
+2. On vm2 (Ops runner):
    ```bash
-   cd /root/src/spoond && git fetch && git checkout main && git pull
+   export PATH=/usr/local/go/bin:$PATH
+   cd /root/src/spoond && git fetch && git checkout main && git pull --ff-only
    go build -o /opt/spoond/spoond.next ./cmd/spoond
+   /opt/spoond/spoond.next help >/dev/null 2>&1; test $? -le 2
    ```
 3. Build the production image catalog into a **new** DB file:
    ```bash
@@ -76,14 +80,34 @@ delete forkd and its tooling. Includes an exact rollback path.
      ADMIN_TOKEN=<value of /etc/spoond/admin-token>
      ```
 
-### In the window (exact order)
+### Cutover (Autonomous window, `00-README.md`; steps 5–15 in order)
 
-5. `systemctl stop spoond-runner`.
-6. Record the rollback state:
+- **Rollback artifacts** (created in step 6, then checked by protocol step 1
+  before step 7 runs):
+  - `/opt/spoond/spoond.forkd-final` (runs `help`);
+  - `/root/spoond-backend.service.forkd-final`;
+  - `/root/forkd-backend.env.forkd-final`;
+  - `/root/spoond-gateway.env.forkd-final`;
+  - `/root/drain.env.pre-cutover`;
+  - `/root/e2b-orchestrator.service.pre-cutover`.
+
+  After step 8, `/var/lib/spoond/spoond-forkd-final.db` must also pass the
+  protocol's integrity check.
+- **Rollback commands:** §Rollback below.
+- **On any failure** in steps 7–14: run §Rollback, run `window_smoke`, then
+  `BLOCKED` (protocol step 4).
+
+5. `systemctl stop spoond-runner` (protocol step 3), after `window_idle`
+   returns 0 (protocol step 2).
+6. Record the rollback state, then run the protocol's rollback-ready check
+   on the listed artifacts:
    ```bash
    cp /opt/spoond/spoond /opt/spoond/spoond.forkd-final
    cp /etc/systemd/system/spoond-backend.service /root/spoond-backend.service.forkd-final
    cp /etc/forkd-backend.env /root/forkd-backend.env.forkd-final
+   cp /etc/spoond-gateway.env /root/spoond-gateway.env.forkd-final
+   cp /etc/e2b/drain.env /root/drain.env.pre-cutover
+   cp /etc/systemd/system/e2b-orchestrator.service /root/e2b-orchestrator.service.pre-cutover
    ```
 7. `systemctl stop spoond-backend spoond-sshd-gateway`.
 8. Switch the DB and binary:
@@ -129,18 +153,28 @@ delete forkd and its tooling. Includes an exact rollback path.
     If it is short, use the U04 step 2 compaction procedure. Report the
     number if it is still short.
 14. Run the conformance suite against **production** from
-    `/root/src/spoond` (on `main`) with `CONFORMANCE_API=https://vm2.lacy.casa:8890`,
-    `CONFORMANCE_SUBSTRATE=e2b`, `CONFORMANCE_SSH=local`,
-    `CONFORMANCE_BACKEND_UNIT=spoond-backend`,
-    `CONFORMANCE_PROXY_URL=http://127.0.0.1:8891`,
-    `CONFORMANCE_SSH_GATEWAY=127.0.0.1:2222`,
-    `CONFORMANCE_GUEST_SERVICE=10.1.0.11:8891`, the production
-    `PROXY_AUTH_SECRET`, and `CONFORMANCE_DESTRUCTIVE=1` (the runner is
-    stopped). The conformance user (OPERATOR, before the window) is an
-    **admin** in the production identity store with quota ≥ 20 and the
-    `CONFORMANCE_SSH_KEY` key registered. All groups must pass, except the
-    allowed I3 failure. Append the results to `RESULTS.md`.
-15. `systemctl start spoond-runner`. Watch the first 3 CI jobs complete.
+    `/root/src/spoond` (on `main`):
+    ```bash
+    export PATH=/usr/local/go/bin:$PATH
+    set -a; . /etc/spoond/conformance.env; set +a
+    export CONFORMANCE_SUBSTRATE=e2b CONFORMANCE_GUEST_SERVICE=10.1.0.11:8891 CONFORMANCE_DESTRUCTIVE=1
+    cd /root/src/spoond && go test -tags conformance -count=1 -timeout 90m -v ./conformance/ \
+      -args -results "$PWD/conformance/results/$(date +%Y%m%dT%H%M%S)-prod-e2b.json"
+    ```
+    - The runner is stopped, so group R is safe.
+    - The production conformance user is **not** an admin, so L6 may record
+      `403` for `/metrics` (U02).
+    - All groups must pass, except the allowed I3 failure.
+    - The Ops runner copies the results file back (`scp`), and the
+      orchestrator appends a summary to `RESULTS.md`.
+    - Any failure → §Rollback.
+15. `systemctl start spoond-runner` (protocol step 5).
+
+    Then watch the first 3 CI jobs, for up to 4 hours: their runner journal
+    lines `executor: job <id> final result=<n>`. **Do not roll back on CI
+    job failures** (a job can fail on its own merits). If 2 or more of the
+    first 3 end with `result` ≠ 0, write `BLOCKED-U12.md` with the job ids
+    and their logs for the human, and keep production on E2B.
 
 ### Rollback (any time before step 20; exact)
 
@@ -151,6 +185,9 @@ sed -i 's/^vm.nr_hugepages = .*/vm.nr_hugepages = 0/' /etc/sysctl.d/90-e2b.conf
 sysctl -w vm.nr_hugepages=0
 cp /opt/spoond/spoond.forkd-final /opt/spoond/spoond
 cp /root/spoond-backend.service.forkd-final /etc/systemd/system/spoond-backend.service
+cp /root/spoond-gateway.env.forkd-final /etc/spoond-gateway.env
+cp /root/drain.env.pre-cutover /etc/e2b/drain.env
+cp /root/e2b-orchestrator.service.pre-cutover /etc/systemd/system/e2b-orchestrator.service
 mv /var/lib/spoond/spoond.db /var/lib/spoond/spoond-e2b-rolledback.db
 cp /var/lib/spoond/spoond-forkd-final.db /var/lib/spoond/spoond.db
 systemctl daemon-reload
@@ -160,8 +197,9 @@ systemctl start spoond-backend spoond-sshd-gateway spoond-runner
 ```
 
 Leases created on E2B are lost on rollback. The orchestrator is stopped so
-its hugepages (48 GiB after step 13) return to forkd; it stays stopped until
-the OPERATOR decides otherwise.
+its hugepages (48 GiB after step 13) return to forkd. It stays stopped, and
+the unit is `BLOCKED` for the human with the failure details. Rollback is
+run by the Ops runner under the protocol; it never needs a human to start.
 
 ### Soak (7 days after step 15)
 
@@ -171,11 +209,22 @@ the OPERATOR decides otherwise.
       orchestrator crash happened (record the crash);
     - the CI success rate from Forgejo for the day, compared with the
       7 days before cutover.
-17. On day 7, review the GC dry-run log lines (`gc: would delete`). If every
-    candidate is an unreferenced pause or checkpoint build or an old template
-    build, set `GC_DELETE=1` in `/etc/spoond/backend.env` and
-    `systemctl restart spoond-backend`, in a window (restarting the backend
-    no longer affects leases).
+17. **On day 7, enable GC (Autonomous window).**
+    1. Collect every `gc: would delete <build_id> kind=<k> image=<i>` line
+       from the last 7 days (`journalctl -u spoond-backend --since -7d`).
+    2. Check each against `/var/lib/spoond/spoond.db`:
+       - the build exists;
+       - `kind` is `pause` or `checkpoint`, or it is a `template` build that
+         is **not** any image's `current_build_id`;
+       - it is not the `parent_build_id` of any non-deleted build;
+       - it is not a `ref_build_id` in `build_refs`.
+    3. If every candidate passes: append `GC_DELETE=1` to
+       `/etc/spoond/backend.env`, then `systemctl restart spoond-backend`
+       inside an Autonomous window. The rollback artifact is a copy of
+       `/etc/spoond/backend.env` taken first; rollback is restoring it and
+       restarting.
+    4. If any candidate fails: do not enable GC, and write `BLOCKED-U12.md`
+       with the failing candidates.
 
 ### Removal (after a successful soak)
 
@@ -234,7 +283,9 @@ the OPERATOR decides otherwise.
       runbook (U13).
 
     **Commit:** `chore: remove forkd; document the E2B substrate`.
-20. **On vm2**, after 30 days with no rollback:
+20. **On vm2, 30 days after step 15, with no rollback** (authorized by the
+    human; record the due date in `STATUS.md` at step 15, and run it then,
+    through the Ops runner or a human):
     1. Delete staging-only builds. They are not in the production catalog,
        so production GC never reclaims them. Keep every build the
        production catalog knows or references (its `builds`, their parents,
@@ -274,7 +325,8 @@ the OPERATOR decides otherwise.
 
 ## Done when
 
-- Production passes the full conformance suite on E2B.
+- Production passes the full conformance suite on E2B (I3 may fail as a
+  recorded known limitation).
 - The 7-day soak meets the Definition of Done in `00-README.md`.
 - forkd code, tooling and data are removed.
 - The docs are updated.

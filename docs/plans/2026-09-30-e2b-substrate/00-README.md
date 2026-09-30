@@ -36,15 +36,115 @@ further research. Every decision is already made. When this spec says
    - In spoond: `go build ./... && go vet ./... && go test ./...` must pass
      before each commit.
    - In the E2B fork, the unit gives the exact commands.
-6. **The host is shared and live.** vm2 runs production CI on forkd until U12.
-   On vm2, run only the commands a unit lists. Never restart
-   `forkd-controller`, `spoond-backend`, `spoond-runner` or
-   `spoond-sshd-gateway` unless the unit says so.
+6. **The host is live.** vm2 runs production CI (forkd until U12, then
+   E2B). The human is its only user. On vm2, run only the commands a unit
+   lists. Never restart `forkd-controller`, `spoond-backend`,
+   `spoond-runner`, `spoond-sshd-gateway` or `e2b-orchestrator` unless the
+   unit says so. **Every production-affecting step runs under the
+   Autonomous window protocol below**; there is no other gate.
 7. **Secrets.** Never commit tokens, seeds or keys. Secrets live in root-owned
    `0600` files under `/etc/spoond/` or `/etc/e2b/` on vm2, created by the
    operator or by the unit's commands.
 8. **Where something is marked OPERATOR**, a human must do it (it needs
    credentials the implementing model does not have). Stop and ask for it.
+   Both remaining OPERATOR items are **already done** (2026-09-30): the fork
+   repository `lacy.casa/e2b-runtime` exists (empty, private), and
+   `/etc/spoond/conformance.env` is provisioned on vm2 (below). vm2 also
+   has a deploy key with write access to both repositories, and its git
+   config rewrites `https://code.lacy.casa/` to SSH, so vm2 can clone and push
+   with the URLs this spec uses.
+9. **Workers and verifiers never touch vm2.** The Ops runner (see
+   `02-orchestration.md`) executes every vm2 command, verbatim from a unit.
+10. **Merges to `main`.** The orchestrator merges `feat/e2b-substrate` into
+    `main` (U05 and U12 step 1) once the unit's worker tests pass, its
+    verifier returns PASS, and its required conformance result (if any)
+    passes. No human merge is needed.
+
+## Production conformance credentials (OPERATOR; done 2026-09-30)
+
+The human runs a provisioning script (outside this spec) that creates, in
+the **production** identity store, the user `conformance` (kind `agent`,
+**not** admin: only the first identity user is admin and there is no promote
+API) with quota `max_leases=20`, an SSH key `/etc/spoond/conformance_ed25519`
+registered by fingerprint, and writes `/etc/spoond/conformance.env` (root,
+0600):
+
+```ini
+CONFORMANCE_API=https://vm2.lacy.casa:8890
+CONFORMANCE_TOKEN=<token>
+CONFORMANCE_USER=conformance
+CONFORMANCE_USER_ID=<user id>
+CONFORMANCE_SSH=local
+CONFORMANCE_SSH_KEY=/etc/spoond/conformance_ed25519
+CONFORMANCE_SSH_GATEWAY=127.0.0.1:2222
+CONFORMANCE_PROXY_URL=http://127.0.0.1:8891
+CONFORMANCE_PROXY_SECRET=<production PROXY_AUTH_SECRET, may be empty>
+CONFORMANCE_PROXY_SUFFIX=.sandbox.lacy.casa
+CONFORMANCE_BACKEND_UNIT=spoond-backend
+```
+
+Every production conformance run and every production smoke test loads it
+with `set -a; . /etc/spoond/conformance.env; set +a`. Per-run variables
+(`CONFORMANCE_SUBSTRATE`, `CONFORMANCE_GUEST_SERVICE`,
+`CONFORMANCE_DESTRUCTIVE`) are set by the run. The staging equivalent,
+`/etc/spoond-staging/conformance.env`, is created by the Ops runner in U08.
+
+## Autonomous window protocol
+
+The human has given standing authorization for production-affecting steps,
+provided forkd and spoond can be restored if anything fails. Every step a
+unit marks **"(Autonomous window)"** is executed by the Ops runner exactly
+like this; nothing else is needed from a human.
+
+1. **Rollback-ready check.** Every rollback artifact the step lists
+   (previous binary, unit file, env file, DB copy, as applicable) exists and
+   is verified (`test -s <file>`; for a binary also `<binary> help`
+   exits 0 or 2; for a DB copy `python3 -c "import sqlite3;sqlite3.connect('<copy>').execute('PRAGMA integrity_check').fetchone()[0]=='ok' or exit(1)"`). If
+   any is missing or fails: do not act; `BLOCKED`.
+2. **Idle wait.** Poll every 60 s until `window_idle` returns 0; give up
+   after 24 h → `BLOCKED`. `window_idle` (exact):
+   ```bash
+   window_idle() {
+     # No backend exec/stream/create log lines in the last 10 minutes.
+     n=$(journalctl -u spoond-backend --since -10min -o cat | grep -cE '(exec|stream|create): ')
+     [ "$n" -eq 0 ] || return 1
+     # Every job the runner started in the last 24 h has a final result.
+     log=$(journalctl -u spoond-runner --since -24h -o cat)
+     for j in $(printf '%s\n' "$log" | grep -oE 'executing job [0-9]+' | awk '{print $3}' | sort -u); do
+       printf '%s\n' "$log" | grep -qE "job $j final result=" || return 1
+     done
+     return 0
+   }
+   ```
+   (The runner logs `worker N: executing job <id>` and
+   `executor: job <id> final result=...`; the backend logs `exec: <id>: ...`.
+   U08 keeps those backend log lines.)
+3. **Act.** `systemctl stop spoond-runner`, perform the step exactly as the
+   unit writes it, then verify:
+   - `curl -fsS <backend>/healthz` returns `200`;
+   - `window_smoke` returns 0 (exact):
+     ```bash
+     window_smoke() {
+       set -a; . /etc/spoond/conformance.env; set +a
+       H="Authorization: Bearer $CONFORMANCE_TOKEN"
+       id=$(curl -fsS -H "$H" -d '{"image":"py-base","ttl":120}' "$CONFORMANCE_API/api/sandboxes" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])') || return 1
+       out=$(curl -fsS -H "$H" -d '{"cmd":"echo ok"}' "$CONFORMANCE_API/api/sandboxes/$id/exec" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["stdout"].strip())')
+       curl -fsS -X DELETE -H "$H" "$CONFORMANCE_API/api/sandboxes/$id" >/dev/null
+       [ "$out" = ok ]
+     }
+     ```
+     plus any extra verification the step lists.
+4. **On any failure** (a command exits non-zero, a verification fails):
+   run the step's rollback commands immediately, run `window_smoke` against
+   the restored system, then `BLOCKED` with the failing command, its output,
+   and the post-rollback smoke result.
+5. **Always** finish with `systemctl start spoond-runner`, on success and on
+   failure.
+
+Every step marked "(Autonomous window)" names its rollback artifacts and
+its rollback commands. A step without them must not be run.
 
 ## What we are building (one paragraph)
 
@@ -86,8 +186,8 @@ are native.
 | Thing | Value |
 |---|---|
 | spoond repo | `https://code.lacy.casa/lacy.casa/spoond` (Go module `github.com/jrimmer/spoond`) |
-| spoond work branch | `feat/e2b-substrate`, created from `main` at the start of U01. After U05, the OPERATOR merges it into `main` (U05 §Merge and production deploy); from U06 on, work continues on `feat/e2b-substrate` rebased on `main` |
-| E2B fork repo | `https://code.lacy.casa/lacy.casa/e2b-runtime` (created by OPERATOR in U03) |
+| spoond work branch | `feat/e2b-substrate`, created from `main` at the start of U01. After U05, the orchestrator merges it into `main` (U05 §Merge and production deploy; rule 10); from U06 on, work continues on `feat/e2b-substrate` rebased on `main` |
+| E2B fork repo | `https://code.lacy.casa/lacy.casa/e2b-runtime` (created 2026-09-30, empty; U03 pushes `upstream` and `spoond`) |
 | Fork branches | `upstream` (= E2B `e473dd13`, never edited), `spoond` (= `upstream` + patches P1–P5, in order) |
 | Upstream | `https://github.com/e2b-dev/runtime.git` (module paths still `github.com/e2b-dev/infra/...`) |
 | Target host | `vm2.lacy.casa`, reached as `root@vm2.lacy.casa`. x86_64, Debian 13, kernel `6.17.13-2-pve`, cgroup v2, 4 KiB pages, glibc 2.41, 16 vCPU, 62 GiB RAM, ZFS pool `forkdcache` (block cloning active) |

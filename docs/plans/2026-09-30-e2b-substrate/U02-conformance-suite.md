@@ -57,20 +57,27 @@ U01 is done.
 
 ## Configuration (environment variables read by the suite)
 
+Every variable except the per-run ones (`CONFORMANCE_SUBSTRATE`,
+`CONFORMANCE_GUEST_SERVICE`, `CONFORMANCE_DESTRUCTIVE`) comes from an env
+file loaded with `set -a; . <file>; set +a`: `/etc/spoond/conformance.env`
+for production (provisioned before kickoff, README §Production conformance
+credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
+
 | Variable | Required | Meaning |
 |---|---|---|
 | `CONFORMANCE_API` | yes | e.g. `https://vm2.lacy.casa:8890` |
-| `CONFORMANCE_TOKEN` | yes | the token of an **admin** spoond user with quota ≥ 20 concurrent leases (OPERATOR creates the user; `GET /metrics` requires admin when an identity store is present) |
+| `CONFORMANCE_TOKEN` | yes | the token of the identity user `conformance` (kind `agent`, `max_leases=20`). In production it is **not** admin (only the first identity user is admin, and there is no promote API), so `GET /metrics` answers `403` there; on staging it is the first user and therefore admin (L6) |
 | `CONFORMANCE_SSH` | yes | `local` or `user@host`. `local` runs host-level checks with `sh -c` on the machine running the suite; any other value runs them with `ssh <value>`. On vm2 the value is `local` |
 | `CONFORMANCE_SUBSTRATE` | yes | `forkd` or `e2b`. Selects the host-level check implementations |
 | `CONFORMANCE_BACKEND_UNIT` | yes | the systemd unit of the backend under test: `spoond-backend` (production) or `spoond-backend-staging` (staging). R3 restarts exactly this unit |
 | `CONFORMANCE_DESTRUCTIVE` | no | `1` enables group R (restarts and crashes). Default off |
 | `CONFORMANCE_IMAGES` | no | comma list. Default `py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla` |
 | `CONFORMANCE_SSH_GATEWAY` | yes | `127.0.0.1:2222` (gateway `--listen :2222`, A1 §7.1) |
-| `CONFORMANCE_SSH_KEY` | yes | path to a private key registered (`ctl ssh-key add`) for the conformance user |
-| `CONFORMANCE_USER` | yes | the conformance user's **name** (used as `Remote-User` for the proxy) |
-| `CONFORMANCE_PROXY_URL` | yes | `http://127.0.0.1:8891` (production) or `http://127.0.0.1:18891` (staging). If the backend env sets `PROXY_AUTH_TRUSTED_PEERS`, it must contain `127.0.0.1/32`, otherwise N3 gets 403; the OPERATOR checks this before the first run |
-| `CONFORMANCE_PROXY_SECRET` | yes | the value of `PROXY_AUTH_SECRET` from `/etc/forkd-backend.env` |
+| `CONFORMANCE_SSH_KEY` | yes | path to the conformance user's private key; its fingerprint was registered when the user was created |
+| `CONFORMANCE_USER` | yes | the conformance user's **name**, `conformance` (used as `Remote-User` for the proxy) |
+| `CONFORMANCE_USER_ID` | yes | the conformance user's id (informational; recorded in the results file) |
+| `CONFORMANCE_PROXY_URL` | yes | `http://127.0.0.1:8891` (production) or `http://127.0.0.1:18891` (staging). If the backend env sets `PROXY_AUTH_TRUSTED_PEERS`, it must contain `127.0.0.1/32`, otherwise N3 gets 403 (checked in step 0) |
+| `CONFORMANCE_PROXY_SECRET` | yes (may be empty) | the backend's `PROXY_AUTH_SECRET`; empty when the backend runs without forward-auth |
 | `CONFORMANCE_PROXY_SUFFIX` | yes | `.sandbox.lacy.casa` |
 | `CONFORMANCE_GUEST_SERVICE` | yes | host service address guests use (see N6) |
 
@@ -102,13 +109,17 @@ To run a single test, add `-run '^<TestName>$'` before `-args`.
 `py-base`, `ttl` = 600, `persistent` = false, no `network_policy` (the
 backend default, `restricted`).
 
-**Group R (destructive) protocol**, followed exactly, and only in a window
-the OPERATOR has scheduled:
-1. Announce a maintenance window.
-2. On vm2: `systemctl stop spoond-runner`.
-3. Run the suite with `CONFORMANCE_DESTRUCTIVE=1` and the correct
-   `CONFORMANCE_BACKEND_UNIT`.
-4. On vm2: `systemctl start spoond-runner`.
+**Group R (destructive) protocol.** A run with `CONFORMANCE_DESTRUCTIVE=1`
+is an **(Autonomous window)** step (`00-README.md`): the Ops runner does the
+rollback-ready check, waits for `window_idle`, stops `spoond-runner`, runs
+the suite with `CONFORMANCE_DESTRUCTIVE=1` and the correct
+`CONFORMANCE_BACKEND_UNIT`, verifies `/healthz` and `window_smoke`, and
+always starts `spoond-runner` again.
+- **Rollback artifacts:** none (group R changes no files).
+- **Rollback commands (on any failure):**
+  `systemctl restart e2b-orchestrator` (e2b runs only), then
+  `systemctl restart <CONFORMANCE_BACKEND_UNIT>`; on forkd,
+  `systemctl restart spoond-backend`.
 
 On forkd, R1 always skips (it would restart `forkd-controller` and kill every
 production VM) and R2 always skips (`e2b` only). The only group R test ever
@@ -172,8 +183,11 @@ run against forkd is R3, and only as
 - **`TestL6_StatAndHealth`**:
   1. `stat` returns `mem.total_mib > 0` and `disk.total_mib > 0`.
   2. `GET /healthz` returns `200`.
-  3. `GET /metrics` returns `200`, and the body contains
-     `spoond_leases_active`.
+  3. `GET /metrics` returns `200` or `403`. Record the status as metric
+     `metrics_status`. If it is `200`, the body contains
+     `spoond_leases_active`. On staging (the conformance user is admin) it
+     must be `200`: the test fails on `403` when
+     `CONFORMANCE_BACKEND_UNIT=spoond-backend-staging`.
 
 ### Group S — state (memory)
 
@@ -398,16 +412,23 @@ If E2B misses a budget in U12, record the measured value in the results, and
    `ssh root@vm2.lacy.casa 'systemctl cat spoond-backend | grep EnvironmentFile'`.
    Write the path into `STATUS.md` as `BACKEND_ENV_FILE`. Every later mention
    of `/etc/forkd-backend.env` in this spec means this path. If the unit has
-   more than one `EnvironmentFile=` line, STOP.
+   more than one `EnvironmentFile=` line, STOP. Also run
+   `ssh root@vm2.lacy.casa "grep '^PROXY_AUTH_TRUSTED_PEERS=' <path>"`; if
+   the line exists and does not contain `127.0.0.1`, STOP (N3 would get
+   403).
 1. Implement the harness and all tests above in `conformance/`.
 2. Add `conformance/results/*` to `.gitignore`, except `.gitkeep`.
 3. **Commit:** `test(conformance): substrate conformance suite`.
-4. OPERATOR provides `CONFORMANCE_TOKEN`, `CONFORMANCE_SSH_GATEWAY` and
-   `CONFORMANCE_SSH_KEY`.
-5. Run the suite against production forkd on vm2 **without** group R
-   (`CONFORMANCE_DESTRUCTIVE` unset, `CONFORMANCE_SUBSTRATE=forkd`,
-   `CONFORMANCE_BACKEND_UNIT=spoond-backend`, `CONFORMANCE_SSH=local`). Copy
-   the results file to `conformance/baseline-forkd.json`.
+4. Check that `/etc/spoond/conformance.env` exists on vm2 (Ops runner:
+   `test -s /etc/spoond/conformance.env`). If not, `BLOCKED` on the
+   OPERATOR.
+5. Run the suite against production forkd on vm2 **without** group R (Ops
+   runner): `set -a; . /etc/spoond/conformance.env; set +a`, then
+   `CONFORMANCE_SUBSTRATE=forkd CONFORMANCE_GUEST_SERVICE=10.43.0.1:8891`,
+   `CONFORMANCE_DESTRUCTIVE` unset. The Ops runner copies the results file
+   into the worker's worktree as `conformance/baseline-forkd.json`
+   (`scp root@vm2.lacy.casa:<results file> <worktree>/conformance/baseline-forkd.json`);
+   the worker commits it.
 6. **Commit:** `test(conformance): forkd baseline results`.
 
 ## Done when
@@ -420,4 +441,4 @@ If E2B misses a budget in U12, record the measured value in the results, and
 ## Do not
 
 - Do not modify application code in this unit.
-- Do not run group R outside an announced window.
+- Do not run group R outside the Autonomous window protocol.

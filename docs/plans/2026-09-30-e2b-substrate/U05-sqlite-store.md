@@ -344,32 +344,43 @@ zero time. Parse `""` back as `time.Time{}`.
     on the fake: assert `len(ff.killed) == 0` (`fakeForkd.killed` records
     both).
 
-## Merge and production deploy (OPERATOR-gated; after both commits pass)
+## Merge and production deploy (orchestrator merge; Autonomous window deploy)
 
-1. **OPERATOR** merges `feat/e2b-substrate` (at this point U01, U02 and U05)
-   into `main`.
-2. **OPERATOR** schedules a maintenance window. This deploy is the **only**
-   time leases are lost, because the old binary's `Shutdown` still releases
-   them.
-3. In the window, on vm2 (Ops runner, commands verbatim):
+1. **Merge (orchestrator, README rule 10).** Once both commits pass the
+   worker's tests and the verifier returns PASS, the orchestrator merges
+   `feat/e2b-substrate` (at this point U01, U02 and U05) into `main`, with
+   the status files removed first (`02-orchestration.md`).
+2. **Prepare (Ops runner; no production impact):**
    ```bash
    export PATH=/usr/local/go/bin:$PATH
    test -d /root/src/spoond || git clone https://code.lacy.casa/lacy.casa/spoond.git /root/src/spoond
    cd /root/src/spoond && git fetch && git checkout main && git pull --ff-only
    install -d -m 700 /var/lib/spoond
    go build -o /opt/spoond/spoond.new ./cmd/spoond
-   systemctl stop spoond-runner
    cp /opt/spoond/spoond /opt/spoond/spoond.pre-u05
-   mv /opt/spoond/spoond.new /opt/spoond/spoond
-   systemctl restart spoond-backend spoond-sshd-gateway
-   sleep 5
-   curl -fsS https://vm2.lacy.casa:8890/healthz
-   ls -l /var/lib/spoond/spoond.db
-   systemctl start spoond-runner
    ```
-   `healthz` must print `{"status":"ok"}` and `spoond.db` must exist. If
-   either fails: `cp /opt/spoond/spoond.pre-u05 /opt/spoond/spoond &&
-   systemctl restart spoond-backend spoond-sshd-gateway`, then STOP.
+3. **Deploy (Autonomous window, `00-README.md`).** This restart is the only
+   time leases are lost, because the old binary's `Shutdown` still releases
+   them; the human has accepted that.
+   - **Rollback artifacts:** `/opt/spoond/spoond.pre-u05` (verify:
+     `test -s` and `/opt/spoond/spoond.pre-u05 help` exits 0 or 2). The unit
+     files and env files are not changed. There is no previous DB.
+   - **Act:**
+     ```bash
+     mv /opt/spoond/spoond.new /opt/spoond/spoond
+     systemctl restart spoond-backend spoond-sshd-gateway
+     sleep 5
+     ```
+   - **Verify:** `curl -fsS https://vm2.lacy.casa:8890/healthz` prints
+     `{"status":"ok"}`; `window_smoke`; `test -s /var/lib/spoond/spoond.db`;
+     then, in the same window, the R3-only conformance run from "Done when"
+     passes.
+   - **Rollback commands:**
+     ```bash
+     cp /opt/spoond/spoond.pre-u05 /opt/spoond/spoond
+     systemctl restart spoond-backend spoond-sshd-gateway
+     ```
+     then `window_smoke`, then `BLOCKED`.
 4. From U06 on, work continues on `feat/e2b-substrate`, rebased on `main`
    (`git rebase origin/main`).
 
@@ -383,9 +394,10 @@ zero time. Parse `""` back as `time.Time{}`.
 ## Done when
 
 - `go test ./...` passes.
-- After the production deploy, in a window with `spoond-runner` stopped,
-  only R3 passes against forkd:
-  `CONFORMANCE_DESTRUCTIVE=1 CONFORMANCE_SUBSTRATE=forkd CONFORMANCE_BACKEND_UNIT=spoond-backend CONFORMANCE_SSH=local go test -tags conformance -count=1 -run '^TestR3_BackendRestart$' -v ./conformance/ -args -results "$PWD/conformance/results/$(date +%Y%m%dT%H%M%S)-forkd-r3.json"`.
+- In the deploy's Autonomous window (after the restart, with
+  `spoond-runner` still stopped), only R3 passes against forkd, run from
+  `/root/src/spoond` on `main`:
+  `set -a; . /etc/spoond/conformance.env; set +a; CONFORMANCE_DESTRUCTIVE=1 CONFORMANCE_SUBSTRATE=forkd CONFORMANCE_GUEST_SERVICE=10.43.0.1:8891 go test -tags conformance -count=1 -run '^TestR3_BackendRestart$' -v ./conformance/ -args -results "$PWD/conformance/results/$(date +%Y%m%dT%H%M%S)-forkd-r3.json"`.
   Never run all of group R against forkd.
 
 ## Do not
