@@ -255,13 +255,47 @@ func randMarker() string {
 	return hex.EncodeToString(b)
 }
 
-// canTCP runs the unit's TCP probe in the lease and reports whether the
-// connection succeeded:
+// canTCP runs the suite's TCP reachability probe in the lease and reports
+// whether the destination is reachable. The probe is substrate-aware:
 //
-//	timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no
+//   - forkd denies at SYN (netns firewall), so a plain connect probe
+//     decides: timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no
+//   - e2b enforces egress with a transparent TCP proxy: the guest's
+//     connect() always succeeds (the local proxy accepts) and a denied
+//     destination closes at the data phase. Reachability there means the
+//     connection supports the data phase, probed with
+//     timeout 3 bash -c 'exec 3<>/dev/tcp/HOST/PORT && head -c 1 <&3'
+//     where exit 0 (a byte arrived) or 124 (timeout — connection still
+//     open, silent server) is reachable, and any other exit (1/2 — EOF or
+//     reset, i.e. the proxy closed us) is blocked.
+//
+// Allowed-but-silent services (e.g. scylla 9042 waiting for CQL) hit the
+// timeout path and count as reachable, which is correct.
 func canTCP(t *testing.T, id, host string, port int) bool {
+	if cfg.Substrate == "e2b" {
+		code := probeExit(t, id, fmt.Sprintf("timeout 3 bash -c 'exec 3<>/dev/tcp/%s/%d && head -c 1 <&3'", host, port))
+		return code == 0 || code == 124
+	}
 	out := execOK(t, id, fmt.Sprintf("timeout 5 bash -c '</dev/tcp/%s/%d' && echo yes || echo no", host, port))
 	return out == "yes"
+}
+
+// probeExit runs cmd in the lease and returns its exit code, tolerating
+// non-zero exits (probes whose meaning is the exit code). Transport and
+// HTTP-level failures still fail the test.
+func probeExit(t *testing.T, id, cmd string) int {
+	st, body, err := cl.exec(id, execReq{Cmd: cmd, Timeout: 10})
+	if err != nil {
+		failf(t, "exec %s %q: %v", id, cmd, err)
+	}
+	if st != 200 {
+		failf(t, "exec %s %q: status %d: %s", id, cmd, st, truncate(body))
+	}
+	var out execResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		failf(t, "exec %s %q: bad body: %v", id, cmd, err)
+	}
+	return out.Exit
 }
 
 // canTCPAddr is canTCP for a host:port address (CONFORMANCE_GUEST_SERVICE).
