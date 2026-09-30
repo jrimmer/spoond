@@ -4,15 +4,17 @@
 //
 //	go test -tags e2blive -count=1 -timeout 60m ./cmd/spoond-images/
 //
-// from /root/src/spoond, with SPOOND_DB_PATH=/var/lib/spoond/staging.db
-// and the E2B_* environment set (FromEnv defaults). For every baked
-// manifest image it creates a sandbox from the image's current_build_id
-// with the manifest env, runs `cat /etc/resolv.conf`, requires the first
-// line to be `nameserver 10.1.0.1`, and deletes the sandbox.
+// from /root/src/spoond, with the E2B_* environment set (FromEnv
+// defaults). For every baked manifest image it creates a sandbox from
+// the image's current_build_id with the manifest env, runs `cat
+// /etc/resolv.conf`, requires the first line to be `nameserver
+// 10.1.0.1`, and deletes the sandbox.
 package spoondimages
 
 import (
 	"context"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,14 +24,24 @@ import (
 	"github.com/jrimmer/spoond/substrate/e2b"
 )
 
+// repoRoot is the spoond checkout root, resolved from this file's
+// location: go test runs with the package directory as the working
+// directory, so a cwd-relative path like images/manifest.yaml does not
+// resolve.
+var repoRoot = func() string {
+	_, file, _, _ := runtime.Caller(0)     // .../cmd/spoond-images/live_test.go
+	dir := filepath.Dir(file)              // .../cmd/spoond-images
+	return filepath.Dir(filepath.Dir(dir)) // checkout root
+}()
+
 func TestLiveImages(t *testing.T) {
 	ctx := context.Background()
 
-	m, err := loadManifest("images/manifest.yaml")
+	m, err := loadManifest(filepath.Join(repoRoot, "images", "manifest.yaml"))
 	if err != nil {
 		t.Fatalf("loadManifest: %v", err)
 	}
-	db, err := store.Open(envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"))
+	db, err := store.Open(envOr("SPOOND_DB_PATH", "/var/lib/spoond/staging.db"))
 	if err != nil {
 		t.Fatalf("store open: %v", err)
 	}

@@ -6,8 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
  && install -d -m 0755 /etc/apt/keyrings \
- && gpg --homedir /tmp --no-default-keyring --keyring /etc/apt/keyrings/scylladb.gpg \
-        --keyserver hkps://keyserver.ubuntu.com --recv-keys 6C6ECC84F42AF147BD2A65AEC503C686B007F39E \
+ && curl -fsSL 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x6C6ECC84F42AF147BD2A65AEC503C686B007F39E' \
+      | gpg --homedir /tmp --no-default-keyring --keyring /etc/apt/keyrings/scylladb.gpg --dearmor --import \
  && gpg --no-default-keyring --keyring /etc/apt/keyrings/scylladb.gpg --list-keys --with-colons \
       | grep -q '^fpr:::::::::6C6ECC84F42AF147BD2A65AEC503C686B007F39E:' \
  && curl -fsSL -o /etc/apt/sources.list.d/scylla.list https://downloads.scylladb.com/deb/debian/scylla-2026.2.list \
