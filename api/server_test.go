@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,26 @@ type testSub struct {
 	probeFail    map[string]string
 	probeFailAll bool
 	execStdout   string // canned stdout for non-probe execs ("" = "ok\n")
+
+	// lastStart records the most recent Start request (the stream tests
+	// pin the initial PTY size it carries).
+	startMu   sync.Mutex
+	lastStart substrate.StartRequest
+}
+
+// LastStart returns the most recent Start request.
+func (ts *testSub) LastStart() substrate.StartRequest {
+	ts.startMu.Lock()
+	defer ts.startMu.Unlock()
+	return ts.lastStart
+}
+
+// Start delegates to the fake and records the request.
+func (ts *testSub) Start(ctx context.Context, sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
+	ts.startMu.Lock()
+	ts.lastStart = req
+	ts.startMu.Unlock()
+	return ts.Fake.Start(ctx, sandboxID, req)
 }
 
 func newTestSub() *testSub {

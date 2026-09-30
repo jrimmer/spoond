@@ -633,9 +633,14 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStream opens a WebSocket to a sandbox and relays an interactive
-// PTY session: the client sends {"args":[...],"cwd":...} as the first
-// message; server events stream back as one text frame each (no trailing
-// newline); client text frames drive the process stdin.
+// PTY session: the client sends {"args":[...],"cwd":...,"binary":bool}
+// as the first message. In text mode (the default), server events come
+// back as one text JSON frame each (no trailing newline) and client text
+// frames drive the process stdin. In binary mode, process output goes as
+// WebSocket binary frames whose first byte selects the channel (1 stdout,
+// 2 stderr, 3 pty), client binary frames are raw stdin, and text frames
+// carry control JSON. started, exit_code and error stay text JSON frames
+// in both modes.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
@@ -646,6 +651,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.releaseBusy(owner)
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
+	if lease == nil && s.requestHasGatewayToken(r) {
+		// The SSH gateway relays session channels through /stream, so a
+		// request carrying its service token may attach over an ssh
+		// share too (U09).
+		lease = s.svc.lookupWithShare(owner, id, ShareSSH)
+	}
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
@@ -676,10 +687,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Args []string          `json:"args"`
-		Cwd  string            `json:"cwd"`
-		Env  map[string]string `json:"env"`
-		Pty  *bool             `json:"pty"`
+		Args   []string          `json:"args"`
+		Cwd    string            `json:"cwd"`
+		Env    map[string]string `json:"env"`
+		Pty    *bool             `json:"pty"`
+		Binary bool              `json:"binary"`
+		Cols   uint32            `json:"cols"`
+		Rows   uint32            `json:"rows"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"bad request JSON"}`))
@@ -692,6 +706,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	pty := true
 	if req.Pty != nil {
 		pty = *req.Pty
+	}
+	cols, rows := req.Cols, req.Rows
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
 	}
 	// A pooled sandbox was created for the "pool" placeholder lease, so
 	// its envd default SPOOND_LEASE_ID is "pool"; the real lease id rides
@@ -708,8 +729,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		Env:   req.Env,
 		Cwd:   req.Cwd,
 		PTY:   pty,
-		Cols:  80,
-		Rows:  24,
+		Cols:  cols,
+		Rows:  rows,
 		Stdin: true,
 	})
 	if err != nil {
@@ -718,52 +739,79 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	s.svc.log.Printf("stream: %s: start", lease.ID)
 
-	// Substrate -> WS relay: one text frame per event, no trailing
-	// newline. The relay runs until EventExit or EventError (Events is
-	// closed after either).
+	// Substrate -> WS relay: one frame per event, no trailing newline.
+	// The relay runs until EventExit or EventError (Events is closed
+	// after either). Process output rides binary frames in binary mode
+	// (byte 0 = channel: 1 stdout, 2 stderr, 3 pty); started, exit_code
+	// and error are always text JSON.
 	relayDone := make(chan struct{})
 	go func() {
 		defer close(relayDone)
 		for ev := range proc.Events() {
-			var frame any
 			switch ev.Kind {
 			case substrate.EventStarted:
-				frame = struct {
+				line, err := json.Marshal(struct {
 					Stream string `json:"stream"`
 					PID    uint32 `json:"pid"`
 					Pty    bool   `json:"pty"`
-				}{"started", ev.PID, pty}
+				}{"started", ev.PID, pty})
+				if err != nil {
+					continue
+				}
+				if err := ws.WriteMessage(websocket.TextMessage, line); err != nil {
+					return
+				}
 			case substrate.EventStdout, substrate.EventStderr, substrate.EventPTY:
-				frame = struct {
+				if req.Binary {
+					ch := byte(1)
+					if ev.Kind == substrate.EventStderr {
+						ch = 2
+					} else if ev.Kind == substrate.EventPTY {
+						ch = 3
+					}
+					frame := make([]byte, 0, len(ev.Data)+1)
+					frame = append(frame, ch)
+					frame = append(frame, ev.Data...)
+					if err := ws.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+						return
+					}
+					continue
+				}
+				line, err := json.Marshal(struct {
 					Out string `json:"out"`
-				}{string(ev.Data)}
+				}{string(ev.Data)})
+				if err != nil {
+					continue
+				}
+				if err := ws.WriteMessage(websocket.TextMessage, line); err != nil {
+					return
+				}
 			case substrate.EventExit:
-				frame = struct {
+				line, err := json.Marshal(struct {
 					ExitCode int `json:"exit_code"`
-				}{ev.ExitCode}
-			case substrate.EventError:
-				frame = struct {
-					Error string `json:"error"`
-				}{ev.Err}
-			default:
-				continue
-			}
-			line, err := json.Marshal(frame)
-			if err != nil {
-				continue
-			}
-			if err := ws.WriteMessage(websocket.TextMessage, line); err != nil {
+				}{ev.ExitCode})
+				if err != nil {
+					return
+				}
+				_ = ws.WriteMessage(websocket.TextMessage, line)
 				return
-			}
-			if ev.Kind == substrate.EventExit || ev.Kind == substrate.EventError {
+			case substrate.EventError:
+				line, err := json.Marshal(struct {
+					Error string `json:"error"`
+				}{ev.Err})
+				if err != nil {
+					return
+				}
+				_ = ws.WriteMessage(websocket.TextMessage, line)
 				return
 			}
 		}
 	}()
 
-	// WS -> substrate relay: {"in":"..."}, {"action":"stop"},
-	// {"resize":{"cols":C,"rows":R}}, {"action":"eof"}; anything else is
-	// ignored.
+	// WS -> substrate relay: binary frames are raw stdin; text frames
+	// are control JSON — {"in":"..."} (text mode only), {"action":"stop"}
+	// (SIGTERM), {"action":"kill"} (SIGKILL), {"action":"eof"},
+	// {"resize":{"cols":C,"rows":R}}; anything else is ignored.
 	for {
 		mt, payload, err := ws.ReadMessage()
 		if err != nil {
@@ -772,7 +820,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			_ = proc.Close()
 			break
 		}
-		if mt != websocket.TextMessage {
+		if mt == websocket.BinaryMessage {
+			_ = proc.Write(payload)
 			continue
 		}
 		var msg struct {
@@ -788,10 +837,17 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		switch {
 		case msg.In != "":
-			_ = proc.Write([]byte(msg.In))
+			if !req.Binary {
+				_ = proc.Write([]byte(msg.In))
+			}
 		case msg.Action == "stop":
 			// SIGTERM, then keep relaying until the process exits.
 			_ = proc.Signal(false)
+			<-relayDone
+			return
+		case msg.Action == "kill":
+			// SIGKILL, then keep relaying until the process exits.
+			_ = proc.Signal(true)
 			<-relayDone
 			return
 		case msg.Action == "eof":
@@ -801,6 +857,18 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	<-relayDone
+}
+
+// requestHasGatewayToken reports whether the request's bearer token is
+// the SSH gateway's service token (constant-time compare). Such requests
+// may reach leases through an ssh share (U09).
+func (s *Server) requestHasGatewayToken(r *http.Request) bool {
+	if s.svc.gatewayToken == "" {
+		return false
+	}
+	auth := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(auth, "Bearer ")
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.svc.gatewayToken)) == 1
 }
 
 // handleNetwork changes a lease's egress policy live (U09): the lease is
