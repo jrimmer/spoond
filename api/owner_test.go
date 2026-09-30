@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jrimmer/spoond/identity"
 )
@@ -15,11 +14,11 @@ import (
 // create and list responses, and reflects the identity-store user id
 // when the caller is an identity user (falling back to consumer name).
 func TestOwnerSerialization(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	// Bootstrap an identity user with its own token.
@@ -63,9 +62,9 @@ func TestOwnerSerialization(t *testing.T) {
 // TestOwnerSerializationLegacy verifies legacy consumer-token owners are
 // serialized as the consumer name (backward compat).
 func TestOwnerSerializationLegacy(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	create := httptest.NewRecorder()
@@ -86,11 +85,11 @@ func TestOwnerSerializationLegacy(t *testing.T) {
 // TestOwnerScopedByName verifies the /api/names endpoint is owner-scoped:
 // user A cannot resolve user B's named lease.
 func TestOwnerScopedByName(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	// Bootstrap admin + create a named lease as user-a.

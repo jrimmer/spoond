@@ -191,16 +191,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(lease.ID) // proxied web traffic is activity for the idle sweeper
-	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
-	if err != nil {
+	// Interim until U09: the target is the sandbox's host address (the
+	// orchestrator routes host:port into the sandbox). A lease without a
+	// host address has no running sandbox.
+	if lease.HostIP == "" {
 		http.Error(w, "sandbox not running", http.StatusBadGateway)
 		return
 	}
-	target := net.JoinHostPort(ep.GuestHost, strconv.Itoa(port))
+	target := net.JoinHostPort(lease.HostIP, strconv.Itoa(port))
 
-	// Reverse proxy with a Transport that dials inside the sandbox netns
-	// (the guest IP is only reachable from the host via setns). Both HTTP
-	// and WebSocket upgrades work through this.
+	// Reverse proxy over the host-routed sandbox address. Both HTTP and
+	// WebSocket upgrades work through this.
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(&url.URL{Scheme: "http", Host: target})
@@ -218,15 +219,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				pr.Out.Header.Del(h)
 			}
 		},
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// ReverseProxy gives us the target addr; we dial it inside
-				// the lease's netns. dialInNetns ignores addr and dials
-				// target directly (bound in the guest netns).
-				return dialInNetns(ep.Netns, target)
-			},
-			IdleConnTimeout: 30 * time.Second,
-		},
+		Transport: &http.Transport{IdleConnTimeout: 30 * time.Second},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				return

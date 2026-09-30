@@ -1,13 +1,11 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestValidateExposePorts(t *testing.T) {
@@ -86,88 +84,18 @@ func TestParseIPv4Addr(t *testing.T) {
 	}
 }
 
-// fakeExposer is a fakeNetpol that can also publish ports.
-type fakeExposer struct {
-	fakeNetpol
-	exposed []string
-	ip      string
-}
-
-func (f *fakeExposer) Expose(_ context.Context, netns, guestHost string, ports []int) (string, error) {
-	f.exposed = append(f.exposed, fmt.Sprintf("%s|%s|%v", netns, guestHost, ports))
-	return f.ip, nil
-}
-
-// TestApplyNetpolExposesPorts: exposure rides every policy application —
-// grant and resume — and runs (as a flush) even when nothing is exposed.
-func TestApplyNetpolExposesPorts(t *testing.T) {
-	ff := newFakeForkd()
-	ff.netns = "forkd-child-9"
-	svc := NewService(ff, map[string]string{"t": "c"}, 0, time.Minute, 10*time.Minute, "py-base")
-	fe := &fakeExposer{ip: "10.43.0.10"}
-	svc.SetNetpol(fe, []string{"10.1.0.2"})
-
-	l, err := svc.grant(context.Background(), "c", "py-base", 0, time.Minute, true, string(PolicyNone), nil, 9042)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fe.exposed) != 1 || !strings.HasSuffix(fe.exposed[0], "|10.42.0.2|[9042]") {
-		t.Fatalf("grant must expose 9042 to the guest, got %v", fe.exposed)
-	}
-	if got := exposedMap(l); got["9042"] != "10.43.0.10:9042" {
-		t.Fatalf("exposed map: %v", got)
-	}
-
-	fe.exposed = nil
-	if _, err := svc.resume(context.Background(), "c", l.ID); err != nil {
-		t.Fatal(err)
-	}
-	if len(fe.exposed) != 1 {
-		t.Fatalf("resume must re-expose (new netns), got %v", fe.exposed)
-	}
-
-	fe.exposed = nil
-	plain, err := svc.grant(context.Background(), "c", "py-base", 0, time.Minute, true, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fe.exposed) != 1 || !strings.HasSuffix(fe.exposed[0], "|[]") {
-		t.Fatalf("a lease with no ports must still flush stale DNAT, got %v", fe.exposed)
-	}
-	if len(exposedMap(plain)) != 0 {
-		t.Fatalf("no ports means no exposed addresses, got %v", exposedMap(plain))
-	}
-}
-
-// TestApplyNetpolRefusesExposureWithoutCapability: an applier that cannot
-// publish must fail a lease that asked for ports rather than hand it out
-// silently unreachable.
-func TestApplyNetpolRefusesExposureWithoutCapability(t *testing.T) {
-	ff := newFakeForkd()
-	ff.netns = "forkd-child-9"
-	svc := NewService(ff, map[string]string{"t": "c"}, 0, time.Minute, 10*time.Minute, "py-base")
-	svc.SetNetpol(&fakeNetpol{}, nil)
-	if _, err := svc.grant(context.Background(), "c", "py-base", 0, time.Minute, false, "", nil, 9042); err == nil {
-		t.Fatal("expected grant to fail when the applier cannot expose ports")
-	}
-}
-
-func TestCreateExposePortsAPI(t *testing.T) {
-	build := func(t *testing.T, withExposer bool) *httptest.Server {
+// Until U09 (envd-based exposure) no backend can publish guest ports, so
+// create answers 501 for expose_ports; reserved ports still fail
+// validation with 400.
+func TestCreateExposePortsInterim(t *testing.T) {
+	build := func(t *testing.T) *httptest.Server {
 		t.Helper()
-		ff := newFakeForkd()
-		ff.netns = "forkd-child-3"
-		svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
-		if withExposer {
-			svc.SetNetpol(&fakeExposer{ip: "10.43.0.4"}, []string{"10.1.0.2"})
-		}
-		ts := httptest.NewServer(NewServer(svc, NewImageRegistry(ff, "py-base")).Handler())
-		t.Cleanup(ts.Close)
+		ts, _ := newTestServer(t)
 		return ts
 	}
 
 	t.Run("reserved port is refused", func(t *testing.T) {
-		ts := build(t, true)
+		ts := build(t)
 		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 			map[string]any{"image": "py-base", "expose_ports": []int{8888}})
 		if resp.StatusCode != http.StatusBadRequest {
@@ -176,24 +104,11 @@ func TestCreateExposePortsAPI(t *testing.T) {
 	})
 
 	t.Run("no enforcement means no exposure", func(t *testing.T) {
-		ts := build(t, false)
+		ts := build(t)
 		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 			map[string]any{"image": "py-base", "expose_ports": []int{9042}})
 		if resp.StatusCode != http.StatusNotImplemented {
 			t.Fatalf("status %d, body %v", resp.StatusCode, body)
-		}
-	})
-
-	t.Run("published address is returned", func(t *testing.T) {
-		ts := build(t, true)
-		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
-			map[string]any{"image": "py-base", "network_policy": "none", "expose_ports": []int{9042}})
-		if resp.StatusCode != http.StatusCreated {
-			t.Fatalf("status %d, body %v", resp.StatusCode, body)
-		}
-		exposed, _ := body["exposed"].(map[string]any)
-		if exposed["9042"] != "10.43.0.4:9042" {
-			t.Fatalf("exposed: %v", body["exposed"])
 		}
 	})
 }

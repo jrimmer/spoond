@@ -1,47 +1,49 @@
-// Package api implements the forkd ephemeral-backend lease API.
-//
-// A sandbox is a lease: create with an image tag + TTL, use via exec,
-// release via delete or TTL expiry. Consumers never manage forkd
-// snapshots, netns, or warm pools directly.
+// Package api implements the lease API backend on the Substrate
+// interface (U08): every lease operation is an E2B sandbox operation
+// recorded in SQLite. Consumers never manage templates, builds, pools
+// or egress directly.
 package api
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
 	"github.com/jrimmer/spoond/metrics"
 	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/substrate/e2b"
 )
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
 type Lease struct {
 	ID         string // unguessable lease id
 	Owner      string `json:"owner"` // owner identity (user id or legacy consumer id)
-	Image      string // snapshot tag
-	ForkdID    string // underlying forkd sandbox id
-	Address    string // guest address, e.g. "10.42.0.2:8888"
+	Image      string // image name in the catalog
+	SandboxID  string // underlying E2B sandbox id
+	HostIP     string // host-side address of the running sandbox, no port
+	BuildID    string // build the running sandbox was created from ("" when suspended)
+	TemplateID string // template of the lease's image (looked up, not persisted)
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
-	Persistent bool      // interactive/persistent lease: not TTL-swept, keep-alive extends
+	Persistent bool      // interactive lease: not TTL-swept, keep-alive extends
 	LastActive time.Time // last activity (exec/stream/proxy/keepalive), for idle sweep
-	Workspace  string    // workspace name when workspace-backed (suspend/resume support)
-	Suspended  bool      // workspace-backed lease is currently suspended
+	Suspended  bool      // derived from State == "suspended"
 	Name       string    // optional friendly name/tag (unique per owner; resolved by ssh/proxy)
-	NetPolicy  string    // egress policy: none|lan|internet|restricted ("" = lan)
+	NetPolicy  string    // egress policy: none|lan|internet|restricted ("" = restricted)
 	NetAllow   []string  // allowlist for restricted policy
-	// ExposePorts are guest TCP ports published on the lease's bridge-facing
-	// address (netpolicy.go). ExposedIP is that address, refreshed on every
-	// (re)application because a resume or restart lands in a different netns.
+	// ExposePorts are guest TCP ports to publish for other sandboxes
+	// (unsupported until U09; the create handler answers 501).
 	ExposePorts []int
 	ExposedIP   string
 	Comment     string // optional free-text annotation (set/cleared via ctl comment)
@@ -53,8 +55,17 @@ type Lease struct {
 	LastCheckpointBuildID string    // newest checkpoint build of this lease
 	LastCheckpointAt      time.Time // zero = never checkpointed
 	RecoveredFrom         time.Time // zero = never recovered
-	released              bool
+	// pooled marks a lease served from the warm pool: the sandbox's envd
+	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
+	// create), so exec/stream/stat/prompt add the lease id per request.
+	// Not persisted.
+	released bool
+	pooled   bool
 }
+
+// live reports whether the lease has a running sandbox. "recovered" is
+// introduced in U10 and behaves exactly like "running".
+func (l *Lease) live() bool { return l.State == "running" || l.State == "recovered" }
 
 // ShareMode selects which surfaces a share covers.
 type ShareMode string
@@ -77,14 +88,14 @@ type Share struct {
 type Store struct {
 	mu     sync.Mutex
 	leases map[string]*Lease
-	// pool holds pre-forked forkd sandbox ids per image tag.
+	// pool holds pre-created E2B sandbox ids per image name, oldest first.
 	pool map[string][]string
 	// shares maps lease id -> grantee id -> share (T6/#33).
 	shares map[string]map[string]*Share
 	// pending counts in-flight lease creations per owner (T4/#31 quota
 	// reservation, security review #37 H2): a slot is reserved under
-	// the same lock as the quota count and released when the lease is
-	// inserted or the grant fails, closing the check-then-create race.
+	// the same store lock as the quota count and released when the lease
+	// is inserted or the grant fails, closing the check-then-create race.
 	pending map[string]int
 	// lastActiveDirty batches touch() updates; the sweeper flushes them
 	// to the store once per tick instead of writing on every activity.
@@ -108,27 +119,21 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// ForkdClient is the subset of the forkd controller API the lease
-// service needs. *forkd.Client satisfies it; tests use a fake.
-type ForkdClient interface {
-	ListSnapshots(ctx context.Context) ([]forkd.SnapshotInfo, error)
-	SnapshotExists(ctx context.Context, tag string) (bool, error)
-	Spawn(ctx context.Context, tag string, n int, perChildNetns bool, memoryLimitMiB int) ([]forkd.SandboxInfo, error)
-	ListSandboxes(ctx context.Context) ([]forkd.SandboxInfo, error)
-	Kill(ctx context.Context, id string) error
-	Exec(ctx context.Context, id string, args []string, timeoutSecs int) (*forkd.ExecResult, error)
-	Ping(ctx context.Context, id string) error
-	Branch(ctx context.Context, id, tag string) (string, error)
-	CreateWorkspace(ctx context.Context, name, tag string, perChildNetns bool) (*forkd.WorkspaceInfo, error)
-	SuspendWorkspace(ctx context.Context, name string) error
-	ResumeWorkspace(ctx context.Context, name string) (*forkd.WorkspaceInfo, error)
-	DeleteWorkspace(ctx context.Context, name string) error
-	Metrics(ctx context.Context) ([]byte, error)
+// ServiceConfig carries the constructor tunables.
+type ServiceConfig struct {
+	PoolSize                        int
+	DefaultTTL, MaxTTL, IdleTimeout time.Duration
+	HostGuestAddr                   string        // HOST_GUEST_SERVICE_ADDR
+	HostGuestPort                   int           // HOST_GUEST_SERVICE_PORT
+	CheckpointEvery                 time.Duration // U10
 }
 
 // Service is the lease API backend.
 type Service struct {
-	forkd ForkdClient
+	sub substrate.Substrate
+	// db persists leases, shares, the pool and the sandbox catalog
+	// (U05/U08). Required.
+	db    *store.DB
 	store *Store
 	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
@@ -142,55 +147,44 @@ type Service struct {
 	// backend's owner-scoping then applies to that user, not the gateway
 	// service identity. Empty disables impersonation.
 	gatewayToken string
-	// poolSize is the warm-pool size per image.
-	poolSize int
+	// cfg carries the pool size, TTL bounds, idle timeout and the
+	// host-service address guests use (LLM gateway, proxy, assets).
+	cfg ServiceConfig
 	// probeEnabled runs integrityProbe inside each sandbox before it is
 	// pooled or handed to a lease. probeTimeout bounds that exec.
 	probeEnabled bool
 	probeTimeout time.Duration
-	// defaultTTL is used when a request omits ttl.
-	defaultTTL time.Duration
-	// maxTTL caps a requested ttl.
-	maxTTL time.Duration
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
-	// idleTimeout is how long a persistent lease may sit idle before the
-	// sweeper reclaims it (auto-suspend). 0 disables idle sweeping.
-	idleTimeout time.Duration
-	log         *log.Logger
-	// netpol applies egress policy to a lease's child netns. Nil means
-	// policy enforcement is disabled (tests, or deployments without
-	// root ip netns access).
-	netpol PolicyApplier
-	// netpolDNS is the resolver set allowed under PolicyRestricted.
-	netpolDNS []string
+	log           *log.Logger
 	// metrics (issue #20): service-level Prometheus metrics.
 	metrics *metrics.BackendMetrics
-	// db persists leases, shares and the pool (U05). Nil (tests) keeps
-	// the service memory-only: every store helper becomes a no-op.
-	db *store.DB
 	// stopLoops cancels the background sweeper/refiller started by Start.
 	stopLoops context.CancelFunc
 }
 
-// SetNetpol installs the egress-policy applier and the DNS resolvers
-// allowed under the restricted policy. Call before serving.
+// NewService builds the lease service on sub. db is required: every
+// mutation is persisted (U05). tokens maps legacy consumer tokens to
+// consumer ids.
+func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
+	return &Service{
+		sub:           sub,
+		db:            db,
+		store:         newStore(),
+		tokens:        tokens,
+		cfg:           cfg,
+		sweepInterval: 5 * time.Second,
+		log:           log.Default(),
+		probeEnabled:  true,
+		probeTimeout:  20 * time.Second,
+	}
+}
+
 // SetMetrics installs the Prometheus metrics collector (issue #20).
 // Called by the Server after NewServerWithLLM so the service can
-// record pool, lease, and netpol events.
+// record pool, lease and quota events.
 func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 	s.metrics = m
-}
-
-// SetDB installs the SQLite store (U05). Call before LoadState; nil
-// (the default in tests) keeps the service memory-only.
-func (s *Service) SetDB(db *store.DB) {
-	s.db = db
-}
-
-func (s *Service) SetNetpol(a PolicyApplier, dns []string) {
-	s.netpol = a
-	s.netpolDNS = dns
 }
 
 // SetGatewayToken marks the SSH gateway's service token, enabling
@@ -200,7 +194,7 @@ func (s *Service) SetGatewayToken(tok string) {
 	s.gatewayToken = tok
 }
 
-// SetSandboxProbe configures the per-spawn integrity probe. enabled=false
+// SetSandboxProbe configures the per-create integrity probe. enabled=false
 // turns it off (every sandbox is then handed out unverified); timeout<=0
 // leaves the default in place.
 func (s *Service) SetSandboxProbe(enabled bool, timeout time.Duration) {
@@ -230,60 +224,10 @@ func (s *Service) ResolveOwner(token string) (string, bool) {
 	return owner, ok
 }
 
-// applyNetpol enforces a lease's egress policy inside its child netns.
-// It is called after grant (fresh sandbox), after resume (new sandbox),
-// and after restart. A nil applier disables enforcement.
-func (s *Service) applyNetpol(ctx context.Context, l *Lease) error {
-	if s.netpol == nil {
-		return nil
-	}
-	if l.NetPolicy == "" {
-		l.NetPolicy = string(PolicyLAN)
-	}
-	// Always apply rules — the netns pool reuses network namespaces, so a
-	// previous lease may have left stale FORWARD rules (e.g. restricted).
-	// policyCommands flushes FORWARD first, making this idempotent.
-	ep, err := s.resolveEndpoint(ctx, l)
-	if err != nil {
-		return fmt.Errorf("resolve endpoint for policy: %w", err)
-	}
-	allow := l.NetAllow
-	if allow == nil {
-		allow = []string{}
-	}
-	if err := s.netpol.Apply(ctx, ep.Netns, NetworkPolicy(l.NetPolicy), allow); err != nil {
-		return err
-	}
-	// Exposure runs on EVERY application, empty or not: it flushes the
-	// netns's DNAT rules, which a reused pool netns may still carry from its
-	// previous tenant.
-	exposer, ok := s.netpol.(PortExposer)
-	if !ok {
-		if len(l.ExposePorts) > 0 {
-			return fmt.Errorf("port exposure is not supported by this policy applier")
-		}
-		return nil
-	}
-	ip, err := exposer.Expose(ctx, ep.Netns, ep.GuestHost, l.ExposePorts)
-	if err != nil {
-		return err
-	}
-	l.ExposedIP = ""
-	if len(l.ExposePorts) > 0 {
-		l.ExposedIP = ip
-	}
-	s.store.mu.Lock()
-	s.saveLeaseLocked(l)
-	s.store.mu.Unlock()
-	return nil
-}
-
-// CanExposePorts reports whether this service can publish guest ports —
-// only when network policy enforcement (and so netns access) is installed.
-func (s *Service) CanExposePorts() bool {
-	_, ok := s.netpol.(PortExposer)
-	return ok
-}
+// CanExposePorts reports whether this backend can publish guest ports.
+// Until U09 (envd-based exposure) it cannot, so create answers 501 for
+// expose_ports.
+func (s *Service) CanExposePorts() bool { return false }
 
 // exposedMap renders a lease's published ports as {"<port>": "<ip>:<port>"}.
 func exposedMap(l *Lease) map[string]string {
@@ -297,43 +241,175 @@ func exposedMap(l *Lease) map[string]string {
 	return out
 }
 
-// NewService builds a lease service. tokens maps consumer tokens to
-// consumer ids. poolSize is the warm-pool size per image (0 disables
-// pre-forking). defaultTTL and maxTTL bound lease lifetimes. knownImages
-// seeds the warm-pool map so refillPool pre-forks every image at
-// startup — without this, an image only becomes warm after its first
-// grant, leaving the pool cold after a backend restart.
-func NewService(fc ForkdClient, tokens map[string]string, poolSize int, defaultTTL, maxTTL time.Duration, knownImages ...string) *Service {
-	return NewServiceWithIdle(fc, tokens, poolSize, defaultTTL, maxTTL, 0, knownImages...)
+// lanRanges is RFC 1918 minus the sandbox networks 10.11.0.0/16 and
+// 10.12.0.0/16: the private CIDRs the lan and internet policies permit.
+var lanRanges = []string{
+	"10.0.0.0/13",
+	"10.8.0.0/15",
+	"10.10.0.0/16",
+	"10.13.0.0/16",
+	"10.14.0.0/15",
+	"10.16.0.0/12",
+	"10.32.0.0/11",
+	"10.64.0.0/10",
+	"10.128.0.0/9",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
 }
 
-// NewServiceWithIdle is NewService plus an idle auto-suspend timeout for
-// persistent leases. idleTimeout 0 disables idle sweeping.
-func NewServiceWithIdle(fc ForkdClient, tokens map[string]string, poolSize int, defaultTTL, maxTTL, idleTimeout time.Duration, knownImages ...string) *Service {
-	s := &Service{
-		forkd:         fc,
-		store:         newStore(),
-		tokens:        tokens,
-		poolSize:      poolSize,
-		defaultTTL:    defaultTTL,
-		maxTTL:        maxTTL,
-		idleTimeout:   idleTimeout,
-		sweepInterval: 5 * time.Second,
-		log:           log.Default(),
-		probeEnabled:  true,
-		probeTimeout:  20 * time.Second,
+// egressForLocked builds the lease's E2B egress policy. hostSvc is the
+// host-service allowance every guest needs (LLM gateway, proxy, assets);
+// dns is the guest resolver. The caller holds s.store.mu: in U09
+// peerAllowances reads other leases.
+func (s *Service) egressForLocked(l *Lease) substrate.Egress {
+	hostSvc := substrate.PrivateAllowance{
+		CIDR:     s.cfg.HostGuestAddr + "/32",
+		TCPPorts: []uint32{uint32(s.cfg.HostGuestPort)},
 	}
-	for _, img := range knownImages {
-		if img == "" {
-			continue
-		}
-		s.store.mu.Lock()
-		if _, ok := s.store.pool[img]; !ok {
-			s.store.pool[img] = nil
-		}
-		s.store.mu.Unlock()
+	dns := substrate.PrivateAllowance{CIDR: "10.1.0.1/32", TCPPorts: []uint32{53}}
+	policy := l.NetPolicy
+	if policy == "" {
+		policy = string(PolicyRestricted)
 	}
-	return s
+	switch NetworkPolicy(policy) {
+	case PolicyNone:
+		return substrate.Egress{DeniedCIDRs: []string{"0.0.0.0/0"}}
+	case PolicyInternet:
+		// Public destinations stay allowed; listing the LAN ranges as
+		// private allowances matches forkd, where internet flushed all
+		// rules and private/LAN addresses stayed reachable.
+		return substrate.Egress{Private: lanPrivate(l, hostSvc, dns)}
+	case PolicyLAN:
+		return substrate.Egress{
+			DeniedCIDRs: []string{"0.0.0.0/0"},
+			Private:     lanPrivate(l, hostSvc, dns),
+		}
+	default: // restricted: the default when empty
+		eg := substrate.Egress{
+			DeniedCIDRs: []string{"0.0.0.0/0"},
+			Private:     []substrate.PrivateAllowance{hostSvc, dns},
+		}
+		for _, entry := range l.NetAllow {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			cidr := entry
+			if ip := net.ParseIP(entry); ip != nil {
+				cidr = ip.String() + "/32"
+			} else if _, n, err := net.ParseCIDR(entry); err == nil {
+				cidr = n.String()
+			} else {
+				eg.AllowedDomains = append(eg.AllowedDomains, entry)
+				continue
+			}
+			if isPrivateCIDR(cidr) {
+				eg.Private = append(eg.Private, substrate.PrivateAllowance{CIDR: cidr})
+			} else {
+				eg.AllowedCIDRs = append(eg.AllowedCIDRs, cidr)
+			}
+		}
+		eg.Private = append(eg.Private, s.peerAllowances(l)...)
+		return eg
+	}
+}
+
+// lanPrivate is the allowance list of the lan and internet policies:
+// the LAN ranges (empty port scope), then the host service and DNS.
+func lanPrivate(l *Lease, hostSvc, dns substrate.PrivateAllowance) []substrate.PrivateAllowance {
+	out := make([]substrate.PrivateAllowance, 0, len(lanRanges)+2)
+	for _, cidr := range lanRanges {
+		out = append(out, substrate.PrivateAllowance{CIDR: cidr})
+	}
+	out = append(out, hostSvc, dns)
+	return out
+}
+
+// isPrivateCIDR reports whether cidr lies within 10/8, 172.16/12,
+// 192.168/16, 127/8 or 169.254/16.
+func isPrivateCIDR(cidr string) bool {
+	_, n, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	for _, base := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16"} {
+		_, b, _ := net.ParseCIDR(base)
+		if b.Contains(n.IP) {
+			return true
+		}
+	}
+	return false
+}
+
+// egressFor is egressForLocked with the store lock taken. Call it where
+// the lock is not held; call egressForLocked where it is (item 18 paths).
+func (s *Service) egressFor(l *Lease) substrate.Egress {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	return s.egressForLocked(l)
+}
+
+// peerAllowances permits egress into ranges other leases own (U09).
+// It is always called with s.store.mu held (from egressForLocked) and
+// returns nil until U09.
+func (s *Service) peerAllowances(l *Lease) []substrate.PrivateAllowance { return nil }
+
+// refreshPeers re-applies peer allowances to leases that may reach l
+// after l's sandbox changed (U09). A no-op in U08.
+func (s *Service) refreshPeers(*Lease) {}
+
+// createSandbox admits and creates one sandbox for lease l from build b.
+// sandboxID "" allocates a new E2B sandbox id; resume reuses the paused
+// sandbox's id. On success the sandboxes row is upserted (upsert because
+// resume reuses the sandbox id).
+func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store.BuildRow, resume bool, sandboxID string, l *Lease) (substrate.Sandbox, error) {
+	if err := s.admit(ctx, b.MemoryMB); err != nil {
+		return substrate.Sandbox{}, err
+	}
+	if sandboxID == "" {
+		sandboxID = e2b.NewSandboxID()
+	}
+	env := make(map[string]string, len(img.Env)+2)
+	for k, v := range img.Env {
+		env[k] = v
+	}
+	env["SPOOND_LEASE_ID"] = l.ID
+	env["SPOOND_GATEWAY_URL"] = "http://" + s.cfg.HostGuestAddr + ":" + strconv.Itoa(s.cfg.HostGuestPort)
+	sb, err := s.sub.Create(ctx, substrate.CreateRequest{
+		TemplateID:         b.TemplateID,
+		BuildID:            b.BuildID,
+		SandboxID:          sandboxID,
+		KernelVersion:      b.KernelVersion,
+		FirecrackerVersion: b.FirecrackerVersion,
+		EnvdVersion:        b.EnvdVersion,
+		VCPU:               uint32(b.VCPU),
+		MemoryMB:           uint32(b.MemoryMB),
+		DiskSizeMB:         uint32(b.DiskMB),
+		Resume:             resume,
+		EnvVars:            env,
+		Metadata:           map[string]string{"lease_id": l.ID, "owner": l.Owner},
+		EndAt:              l.ExpiresAt,
+		Egress:             s.egressFor(l),
+	})
+	if err != nil {
+		return substrate.Sandbox{}, err
+	}
+	leaseID := l.ID
+	if leaseID == "pool" {
+		leaseID = "" // pool placeholder: pool sandboxes have no lease
+	}
+	s.upsertSandboxRow(store.SandboxRow{
+		SandboxID:   sb.ID,
+		LeaseID:     leaseID,
+		BuildID:     sb.BuildID,
+		ExecutionID: sb.ExecutionID,
+		HostIP:      sb.HostIP,
+		VCPU:        int(sb.VCPU),
+		MemoryMB:    int(sb.MemoryMB),
+		StartedAt:   sb.StartedAt,
+		EndAt:       sb.EndAt,
+	})
+	return sb, nil
 }
 
 // Start begins the TTL sweeper and warm-pool refill. It runs until ctx
@@ -355,30 +431,32 @@ func (s *Service) Start(ctx context.Context) {
 	}()
 }
 
-// refillPool pre-forks poolSize sandboxes for each known image so
-// grants can be served from the warm pool instead of cold-spawning.
+// refillPool pre-creates cfg.PoolSize sandboxes for every image with a
+// current build so grants can be served from the warm pool instead of
+// cold-creating.
 func (s *Service) refillPool(ctx context.Context) {
-	if s.poolSize <= 0 {
+	if s.cfg.PoolSize <= 0 {
 		return
 	}
-	s.store.mu.Lock()
-	images := make([]string, 0, len(s.store.pool))
-	for img := range s.store.pool {
-		images = append(images, img)
+	imgs, err := s.db.ListImages(ctx)
+	if err != nil {
+		s.log.Printf("refillPool: list images: %v", err)
+		return
 	}
-	s.store.mu.Unlock()
-	for _, img := range images {
+	for _, img := range imgs {
+		if img.CurrentBuildID == "" {
+			continue
+		}
 		s.warmPool(ctx, img)
 	}
 }
 
-// sweepExpired kills and removes leases whose TTL has passed. Persistent
-// leases are not TTL-swept (the consumer keeps them alive via keep-alive,
-// and disposes via delete), but when idleTimeout is set they are
-// auto-suspended after that long without activity (exec/stream/proxy/
-// keep-alive all bump LastActive). Workspace-backed leases are suspended
-// (state snapshot kept, cheap to resume); plain persistent leases are
-// released as before.
+// sweepExpired releases leases whose TTL has passed. Persistent leases
+// are not TTL-swept (the consumer keeps them alive via keep-alive and
+// disposes via delete), but when IdleTimeout is set every persistent
+// lease is auto-suspended after that long without activity
+// (exec/stream/proxy/keep-alive all bump LastActive). A suspended
+// sandbox keeps its state snapshot and is cheap to resume.
 func (s *Service) sweepExpired(ctx context.Context) {
 	s.store.mu.Lock()
 	s.flushLastActiveLocked(ctx)
@@ -393,37 +471,27 @@ func (s *Service) sweepExpired(ctx context.Context) {
 			expired = append(expired, l)
 			continue
 		}
-		if l.Persistent && s.idleTimeout > 0 && now.After(l.LastActive.Add(s.idleTimeout)) {
-			if l.Workspace != "" && !l.Suspended {
-				s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
-				idleSuspend = append(idleSuspend, l)
-			} else if l.Workspace == "" {
-				s.log.Printf("idle sweep: reclaiming persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
-				expired = append(expired, l)
-			}
+		if l.Persistent && s.cfg.IdleTimeout > 0 && !l.Suspended && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
+			s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
+			idleSuspend = append(idleSuspend, l)
 		}
 	}
 	s.store.mu.Unlock()
-	// Suspend idle workspace leases in small, staggered batches. Each
-	// suspend is a controller snapshot write that briefly blocks the
-	// controller's accept loop; a large backlog (e.g. after a long test
-	// session) must not produce one big pause that drops incoming
-	// connections. Cap per tick and space them out — with the 5s sweep
-	// tick, 13 idle leases clear in ~25s instead of a single burst.
+	// Suspend idle leases in small, staggered batches. Each suspend is a
+	// snapshot write on the node; a large backlog (e.g. after a long test
+	// session) must not produce one big burst. Cap per tick and space
+	// them out — with the 5s sweep tick, 13 idle leases clear in ~25s
+	// instead of a single burst.
 	const maxSuspendPerTick = 3
 	suspended := 0
 	for _, l := range idleSuspend {
 		if suspended >= maxSuspendPerTick {
 			break
 		}
-		if err := s.forkd.SuspendWorkspace(ctx, l.Workspace); err != nil {
+		if _, err := s.suspend(ctx, l.Owner, l.ID); err != nil {
 			s.log.Printf("idle sweep: suspend %s: %v", l.ID, err)
 			continue
 		}
-		s.store.mu.Lock()
-		l.Suspended = true
-		s.saveLeaseLocked(l)
-		s.store.mu.Unlock()
 		suspended++
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -440,9 +508,7 @@ func (s *Service) touch(id string) {
 	if l := s.store.leases[id]; l != nil && !l.released {
 		now := time.Now()
 		l.LastActive = now
-		if s.db != nil {
-			s.store.lastActiveDirty[id] = now
-		}
+		s.store.lastActiveDirty[id] = now
 	}
 }
 
@@ -459,10 +525,10 @@ func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error)
 		return nil, errNotPersistent
 	}
 	if ttl <= 0 {
-		ttl = s.maxTTL
+		ttl = s.cfg.MaxTTL
 	}
-	if ttl > s.maxTTL {
-		ttl = s.maxTTL
+	if ttl > s.cfg.MaxTTL {
+		ttl = s.cfg.MaxTTL
 	}
 	l.ExpiresAt = time.Now().Add(ttl)
 	l.LastActive = time.Now() // keep-alive is activity
@@ -470,10 +536,9 @@ func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error)
 	return l, nil
 }
 
-// release kills the underlying forkd sandbox and removes the lease.
-// The lease is only removed from the store after a successful kill, so
-// a transient Kill failure leaves it in place for the sweeper to retry
-// rather than leaking the sandbox.
+// release deletes the lease's sandbox (nil when already gone), drops the
+// sandboxes row, then the lease row; shares cascade. Builds are left for
+// U11's GC.
 func (s *Service) release(ctx context.Context, l *Lease) {
 	s.store.mu.Lock()
 	if l.released {
@@ -483,59 +548,29 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	l.released = true
 	s.store.mu.Unlock()
 
-	// Workspace-backed leases: delete the workspace (kills the live
-	// sandbox if any AND removes the state snapshot). Plain leases: kill
-	// the sandbox.
-	var err error
-	if l.Workspace != "" {
-		err = s.forkd.DeleteWorkspace(ctx, l.Workspace)
-		if err != nil && strings.Contains(err.Error(), "not found") {
-			err = nil // workspace already gone
-		}
-	} else {
-		err = s.forkd.Kill(ctx, l.ForkdID)
+	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
+		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
 	}
-	if err != nil {
-		// A 404 means the sandbox is already gone (e.g. the controller
-		// restarted and forgot it) — that's the goal state, not a
-		// failure. Treat it as released so we don't retry forever.
-		if strings.Contains(err.Error(), "not found") {
-			s.log.Printf("release: kill %s: already gone (removing lease)", l.ForkdID)
-			s.store.mu.Lock()
-			delete(s.store.leases, l.ID)
-			s.deleteLeaseLocked(l.ID)
-			s.store.mu.Unlock()
-			return
-		}
-		s.log.Printf("release: kill %s failed: %v (will retry)", l.ForkdID, err)
-		// Re-open the lease so the sweeper retries the kill.
-		s.store.mu.Lock()
-		l.released = false
-		s.store.mu.Unlock()
-		return
-	}
+	s.deleteSandboxRow(l.SandboxID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
+	delete(s.store.shares, l.ID)
 	s.deleteLeaseLocked(l.ID)
 	s.store.mu.Unlock()
 }
 
-// grant creates a new lease for owner from the warm pool (or spawns a
-// fresh sandbox when the pool is empty). Persistent leases are intended
-// for interactive use: they are not TTL-swept (see keepAlive) and the
-// consumer drives their lifecycle.
 // errQuotaExceeded is returned when a user hits their concurrent-lease
 // cap (T4/#31). The API layer maps it to HTTP 429.
 var errQuotaExceeded = fmt.Errorf("lease quota exceeded")
 
 // reserveQuota enforces a user's concurrent-lease cap before granting
-// and RESERVES a slot atomically (security review #37 H2): the count
+// and RESERVES n slots atomically (security review #37 H2): the count
 // and the reservation happen under the same store lock, so concurrent
 // creates cannot both pass max_leases. The caller MUST call
-// releaseQuotaReservation when the grant finishes (success or failure).
+// releaseQuotaReservation when it finishes (success or failure).
 // Returns errQuotaExceeded when the cap is hit. Owners without an
 // identity-store user (legacy consumer tokens) are uncapped.
-func (s *Service) reserveQuota(owner string) error {
+func (s *Service) reserveQuota(owner string, n int) error {
 	if s.identities == nil {
 		return nil
 	}
@@ -551,32 +586,61 @@ func (s *Service) reserveQuota(owner string) error {
 			active++
 		}
 	}
-	if active+s.store.pending[owner] >= u.MaxLeases {
+	if active+s.store.pending[owner]+n > u.MaxLeases {
 		if s.metrics != nil {
 			s.metrics.QuotaExceeded.Inc()
 		}
 		return errQuotaExceeded
 	}
-	s.store.pending[owner]++
+	s.store.pending[owner] += n
 	return nil
 }
 
-// releaseQuotaReservation drops a reservation made by reserveQuota.
-func (s *Service) releaseQuotaReservation(owner string) {
+// releaseQuotaReservation drops n reservations made by reserveQuota.
+func (s *Service) releaseQuotaReservation(owner string, n int) {
 	if s.identities == nil {
 		return
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	if s.store.pending[owner] <= 1 {
+	if s.store.pending[owner] <= n {
 		delete(s.store.pending, owner)
 	} else {
-		s.store.pending[owner]--
+		s.store.pending[owner] -= n
 	}
 }
 
-func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, exposePorts ...int) (*Lease, error) {
-	if err := s.reserveQuota(owner); err != nil {
+// imageBuild loads an image row and its current build. An image without
+// a row, or whose current build is unset, is unknown (→ 404).
+func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow, store.BuildRow, error) {
+	img, err := s.db.GetImage(ctx, image)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.ImageRow{}, store.BuildRow{}, errUnknownImage
+	}
+	if err != nil {
+		return store.ImageRow{}, store.BuildRow{}, fmt.Errorf("load image %s: %w", image, err)
+	}
+	if img.CurrentBuildID == "" {
+		return store.ImageRow{}, store.BuildRow{}, errUnknownImage
+	}
+	b, err := s.db.GetBuild(ctx, img.CurrentBuildID)
+	if err != nil {
+		return store.ImageRow{}, store.BuildRow{}, fmt.Errorf("load build %s: %w", img.CurrentBuildID, err)
+	}
+	return img, b, nil
+}
+
+// grant creates a new lease for owner: served from the warm pool when
+// one is configured and stocked, else a cold create from the image's
+// current build. Persistent leases are intended for interactive use:
+// they are not TTL-swept (see keepAlive) and the consumer drives their
+// lifecycle.
+func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, exposePorts ...int) (*Lease, error) {
+	img, b, err := s.imageBuild(ctx, image)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.reserveQuota(owner, 1); err != nil {
 		return nil, err
 	}
 	// The reservation becomes the real lease when it's stored below;
@@ -585,117 +649,103 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 	// active so the pending reservation must be dropped (security
 	// review #37 H2). Both mutations take the same store lock, so a
 	// concurrent reserveQuota sees a consistent active+pending count.
-	defer func() { s.releaseQuotaReservation(owner) }()
-	grantStart := time.Now()
+	defer func() { s.releaseQuotaReservation(owner, 1) }()
 	if s.metrics != nil {
 		s.metrics.LeasesTotal.Inc()
-		s.metrics.LeaseGrantDur.Observe(time.Since(grantStart).Seconds())
 	}
+	now := time.Now()
 	lease := &Lease{
 		ID:          newID(),
 		Owner:       owner,
 		Image:       image,
-		CreatedAt:   time.Now(),
-		ExpiresAt:   time.Now().Add(ttl),
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(ttl),
 		Persistent:  persistent,
-		LastActive:  time.Now(),
+		LastActive:  now,
 		NetPolicy:   netPolicy,
 		NetAllow:    netAllow,
 		ExposePorts: exposePorts,
 		State:       "running",
+		TemplateID:  img.TemplateID,
 	}
 
-	// Persistent leases are workspace-backed so they can suspend/resume
-	// (the workspace keeps a state snapshot while stopped). TTL leases
-	// use the warm pool for fast grants.
-	if persistent {
-		ws, err := s.forkd.CreateWorkspace(ctx, "ws-"+lease.ID, image, true)
-		if err != nil {
-			return nil, fmt.Errorf("create workspace: %w", err)
-		}
-		lease.Workspace = ws.Name
-		lease.ForkdID = ws.LiveSandboxID
-		if err := s.fillEndpoint(ctx, lease); err != nil {
-			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
-		}
-		if err := s.probeSandbox(ctx, lease.ForkdID); err != nil {
-			_ = s.forkd.DeleteWorkspace(ctx, ws.Name)
-			return nil, fmt.Errorf("workspace sandbox failed the integrity probe: %w", err)
-		}
-		if err := s.applyNetpol(ctx, lease); err != nil {
-			return nil, fmt.Errorf("apply network policy: %w", err)
-		}
-		s.store.mu.Lock()
-		s.store.leases[lease.ID] = lease
-		s.saveLeaseLocked(lease)
-		s.store.mu.Unlock()
-		return lease, nil
-	}
-
-	// Try the warm pool first, validating that the pooled sandbox still
-	// exists in the controller. After a controller restart the backend's
-	// in-memory pool holds stale IDs (the controller forgot them); a
-	// stale ID would 404 on exec and leave the consumer hanging.
-	var forkdID, addr string
-	for {
-		s.store.mu.Lock()
-		pool := s.store.pool[image]
-		if len(pool) > 0 {
-			forkdID = pool[len(pool)-1]
-			s.store.pool[image] = pool[:len(pool)-1]
-			s.removePoolLocked(forkdID)
-		}
-		// Ensure the image is registered so the warm-pool refill knows to
-		// pre-fork it.
-		if _, known := s.store.pool[image]; !known {
-			s.store.pool[image] = nil
-		}
-		s.store.mu.Unlock()
-
-		if forkdID == "" {
+	// Pool: pop the oldest entry for the image. The pool serves
+	// persistent and non-persistent grants alike. A pooled sandbox was
+	// created for the "pool" placeholder lease, so its egress policy and
+	// EndAt are updated for the new lease, and its sandboxes row moves to
+	// it. Entries from another build, with no row, or unhealthy are
+	// discarded and the next one is tried.
+	if s.cfg.PoolSize > 0 {
+		for {
+			s.store.mu.Lock()
+			pool := s.store.pool[image]
+			var id string
+			if len(pool) > 0 {
+				id = pool[0]
+				s.store.pool[image] = pool[1:]
+				s.removePoolLocked(id)
+			}
+			s.store.mu.Unlock()
+			if id == "" {
+				break
+			}
+			row, err := s.db.GetSandbox(ctx, id)
+			if errors.Is(err, store.ErrNotFound) {
+				s.log.Printf("grant: pooled %s (%s) has no sandboxes row, discarding", id, image)
+				s.discardPoolSandbox(ctx, id)
+				continue
+			}
+			if err != nil {
+				s.discardPoolSandbox(ctx, id)
+				return nil, fmt.Errorf("load pooled sandbox %s: %w", id, err)
+			}
+			if row.BuildID != img.CurrentBuildID {
+				s.log.Printf("grant: pooled %s (%s) was built from %s, want %s, discarding", id, image, row.BuildID, img.CurrentBuildID)
+				s.discardPoolSandbox(ctx, id)
+				continue
+			}
+			if err := s.sub.Health(ctx, id); err != nil {
+				s.log.Printf("grant: pooled %s (%s) is unhealthy, discarding: %v", id, image, err)
+				s.discardPoolSandbox(ctx, id)
+				continue
+			}
+			if err := s.sub.UpdateEgress(ctx, id, s.egressFor(lease)); err != nil {
+				s.discardPoolSandbox(ctx, id)
+				return nil, fmt.Errorf("update egress on pooled sandbox: %w", err)
+			}
+			if err := s.sub.UpdateEndAt(ctx, id, lease.ExpiresAt); err != nil {
+				s.discardPoolSandbox(ctx, id)
+				return nil, fmt.Errorf("update end at on pooled sandbox: %w", err)
+			}
+			row.LeaseID = lease.ID
+			s.upsertSandboxRow(row)
+			lease.SandboxID = id
+			lease.HostIP = row.HostIP
+			lease.BuildID = row.BuildID
+			lease.pooled = true
 			break
 		}
-		// Verify the pooled sandbox is still alive; if not, drop it and
-		// try the next one (or cold-spawn below).
-		if err := s.forkd.Ping(ctx, forkdID); err != nil {
-			s.log.Printf("grant: pooled %s (%s) is stale (controller forgot it), dropping", forkdID, image)
-			_ = s.forkd.Kill(ctx, forkdID)
-			forkdID = ""
-			continue
-		}
-		// Alive is not the same as sane. A pooled sandbox from a bad image
-		// generation answers a ping and then fails the job 48s in, so
-		// recycle it here and let the pool refill.
-		if err := s.probeSandbox(ctx, forkdID); err != nil {
-			s.log.Printf("grant: pooled %s (%s) failed the integrity probe, recycling: %v", forkdID, image, err)
-			_ = s.forkd.Kill(ctx, forkdID)
-			forkdID = ""
-			continue
-		}
-		addr = ""
-		break
 	}
-	if forkdID == "" {
-		sbs, err := s.forkd.Spawn(ctx, image, 1, true, memoryMiB)
+
+	if lease.SandboxID == "" {
+		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
 			return nil, err
 		}
-		if len(sbs) == 0 {
-			return nil, errNoSandbox
-		}
-		forkdID = sbs[0].ID
-		addr = sbs[0].GuestAddr
-		if err := s.probeSandbox(ctx, forkdID); err != nil {
-			_ = s.forkd.Kill(ctx, forkdID)
-			return nil, fmt.Errorf("spawned sandbox failed the integrity probe: %w", err)
-		}
+		lease.SandboxID = sb.ID
+		lease.HostIP = sb.HostIP
+		lease.BuildID = b.BuildID
 	}
 
-	lease.ForkdID = forkdID
-	lease.Address = addr
-	if err := s.applyNetpol(ctx, lease); err != nil {
-		return nil, fmt.Errorf("apply network policy: %w", err)
+	// The integrity probe runs through exec before the sandbox is handed
+	// out. On probe failure the sandbox is deleted (A1 §17 item 7's leak,
+	// fixed).
+	if err := s.probeSandbox(ctx, lease.SandboxID); err != nil {
+		_ = s.sub.Delete(ctx, lease.SandboxID)
+		s.deleteSandboxRow(lease.SandboxID)
+		return nil, err
 	}
+
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
@@ -703,37 +753,15 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 	return lease, nil
 }
 
-// fillEndpoint looks up a lease's sandbox in the controller and fills in
-// the Address (guest addr). Used after workspace create/resume where the
-// controller response does not carry the endpoint.
-func (s *Service) fillEndpoint(ctx context.Context, lease *Lease) error {
-	if lease.ForkdID == "" {
-		return fmt.Errorf("no sandbox id")
-	}
-	sbs, err := s.forkd.ListSandboxes(ctx)
-	if err != nil {
-		return err
-	}
-	for _, sb := range sbs {
-		if sb.ID == lease.ForkdID {
-			lease.Address = sb.GuestAddr
-			// Persist the address change, but only for a lease the store
-			// already tracks: during grant the lease is not in the map
-			// until every fallible step (probe, netpol) has passed, and
-			// grant's insert saves the complete row.
-			s.store.mu.Lock()
-			if s.store.leases[lease.ID] != nil {
-				s.saveLeaseLocked(lease)
-			}
-			s.store.mu.Unlock()
-			return nil
-		}
-	}
-	return fmt.Errorf("sandbox %s not in controller list", lease.ForkdID)
+// discardPoolSandbox deletes a pooled sandbox that failed validation:
+// the substrate sandbox and its rows go, and grant tries the next entry.
+func (s *Service) discardPoolSandbox(ctx context.Context, id string) {
+	_ = s.sub.Delete(ctx, id)
+	s.deleteSandboxRow(id)
 }
 
-// suspend suspends a workspace-backed persistent lease: the controller
-// snapshots the sandbox and stops it. The lease stays; resume restores.
+// suspend pauses a persistent lease's sandbox into a new build and stops
+// it. The lease stays; resume restores it with the same sandbox id.
 func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
@@ -745,25 +773,50 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 		s.store.mu.Unlock()
 		return nil, errNotPersistent
 	}
-	if l.Workspace == "" {
-		s.store.mu.Unlock()
-		return nil, errNotPersistent // not workspace-backed (older lease)
-	}
 	s.store.mu.Unlock()
 
-	if err := s.forkd.SuspendWorkspace(ctx, l.Workspace); err != nil {
+	buildID, _, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
+	if err != nil {
 		return nil, err
 	}
+	// The pause build records what was snapshotted: versions and sizes
+	// copied from the parent build row (refs are stored from U11 on).
+	parent, err := s.db.GetBuild(ctx, l.BuildID)
+	if err != nil {
+		return nil, fmt.Errorf("load parent build %s: %w", l.BuildID, err)
+	}
+	now := time.Now()
+	if err := s.db.InsertBuild(ctx, store.BuildRow{
+		BuildID:            buildID,
+		Kind:               "pause",
+		TemplateID:         l.TemplateID,
+		Image:              l.Image,
+		ParentBuildID:      l.BuildID,
+		SourceSandboxID:    l.SandboxID,
+		State:              "ready",
+		KernelVersion:      parent.KernelVersion,
+		FirecrackerVersion: parent.FirecrackerVersion,
+		EnvdVersion:        parent.EnvdVersion,
+		VCPU:               parent.VCPU,
+		MemoryMB:           parent.MemoryMB,
+		DiskMB:             parent.DiskMB,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}); err != nil {
+		return nil, fmt.Errorf("insert pause build: %w", err)
+	}
+	s.deleteSandboxRow(l.SandboxID)
 	s.store.mu.Lock()
-	l.Suspended = true
 	l.State = "suspended"
+	l.Suspended = true
+	l.ResumeBuildID = buildID
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	return l, nil
 }
 
-// resume restores a suspended workspace-backed lease and refreshes the
-// lease's sandbox id (resume spawns a fresh sandbox).
+// resume restores a suspended persistent lease: create with snapshot
+// from the pause build, same sandbox id.
 func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
@@ -775,36 +828,37 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		s.store.mu.Unlock()
 		return nil, errNotPersistent
 	}
-	if l.Workspace == "" {
-		s.store.mu.Unlock()
-		return nil, errNotPersistent
-	}
+	resumeBuild := l.ResumeBuildID
+	image := l.Image
 	s.store.mu.Unlock()
 
-	ws, err := s.forkd.ResumeWorkspace(ctx, l.Workspace)
+	img, err := s.db.GetImage(ctx, image)
+	if err != nil {
+		return nil, fmt.Errorf("load image %s: %w", image, err)
+	}
+	b, err := s.db.GetBuild(ctx, resumeBuild)
+	if err != nil {
+		return nil, fmt.Errorf("load build %s: %w", resumeBuild, err)
+	}
+	sb, err := s.createSandbox(ctx, img, b, true, l.SandboxID, l)
 	if err != nil {
 		return nil, err
 	}
 	s.store.mu.Lock()
-	l.ForkdID = ws.LiveSandboxID
-	l.LastActive = time.Now()
-	l.Suspended = false
+	l.HostIP = sb.HostIP
+	l.BuildID = resumeBuild
 	l.State = "running"
+	l.Suspended = false
+	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
-	if err := s.fillEndpoint(ctx, l); err != nil {
-		return nil, err
-	}
-	if err := s.applyNetpol(ctx, l); err != nil {
-		return nil, err
-	}
 	return l, nil
 }
 
-// restart reboots a workspace-backed persistent lease: suspend (snapshot
-// + stop) then resume (fresh sandbox from the state snapshot). Idempotent
-// for suspended leases (resume alone). Plain leases get a kill + cold
-// spawn; non-workspace persistent leases return notPersistent.
+// restart reboots a lease. Persistent and running: suspend, then resume
+// (lossless through the pause build). Persistent and suspended: resume.
+// Non-persistent: delete the sandbox and create a fresh one from the
+// image's current build, keeping the lease id (A1 §17 item 4).
 func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
@@ -812,48 +866,267 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
-	if !l.Persistent {
-		s.store.mu.Unlock()
-		return nil, errNotPersistent
-	}
-	workspace := l.Workspace
+	persistent := l.Persistent
 	suspended := l.Suspended
 	s.store.mu.Unlock()
 
-	if workspace != "" {
+	if persistent {
 		if !suspended {
-			if err := s.forkd.SuspendWorkspace(ctx, workspace); err != nil {
+			if _, err := s.suspend(ctx, owner, id); err != nil {
 				return nil, err
 			}
 		}
 		return s.resume(ctx, owner, id)
 	}
-	// Plain persistent lease: kill the sandbox, then cold-spawn the image
-	// and re-grant the lease on the fresh sandbox.
-	if err := s.forkd.Kill(ctx, l.ForkdID); err != nil {
-		return nil, err
-	}
-	sbs, err := s.forkd.Spawn(ctx, l.Image, 1, false, 0)
+
+	_ = s.sub.Delete(ctx, l.SandboxID)
+	s.deleteSandboxRow(l.SandboxID)
+	img, b, err := s.imageBuild(ctx, l.Image)
 	if err != nil {
 		return nil, err
 	}
-	if len(sbs) == 0 {
-		return nil, fmt.Errorf("spawn returned no sandboxes")
+	sb, err := s.createSandbox(ctx, img, b, false, "", l)
+	if err != nil {
+		return nil, err
 	}
 	s.store.mu.Lock()
-	l.ForkdID = sbs[0].ID
+	l.SandboxID = sb.ID
+	l.HostIP = sb.HostIP
+	l.BuildID = b.BuildID
+	l.State = "running"
 	l.Suspended = false
 	l.LastActive = time.Now()
-	l.State = "running"
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
-	if err := s.fillEndpoint(ctx, l); err != nil {
-		return nil, err
-	}
-	if err := s.applyNetpol(ctx, l); err != nil {
-		return nil, err
-	}
 	return l, nil
+}
+
+// checkpointLease checkpoints a running sandbox into a new build,
+// inserts the checkpoint build row (versions and sizes copied from the
+// parent build row; refs are stored from U11 on), and applies the
+// checkpoint bookkeeping to the source lease (item 18). It returns the
+// new build row.
+func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildRow, error) {
+	buildID, _, err := s.sub.Checkpoint(ctx, src.SandboxID)
+	if err != nil {
+		return store.BuildRow{}, err
+	}
+	parent, err := s.db.GetBuild(ctx, src.BuildID)
+	if err != nil {
+		return store.BuildRow{}, fmt.Errorf("load parent build %s: %w", src.BuildID, err)
+	}
+	now := time.Now()
+	b := store.BuildRow{
+		BuildID:            buildID,
+		Kind:               "checkpoint",
+		TemplateID:         src.TemplateID,
+		Image:              src.Image,
+		ParentBuildID:      src.BuildID,
+		SourceSandboxID:    src.SandboxID,
+		State:              "ready",
+		KernelVersion:      parent.KernelVersion,
+		FirecrackerVersion: parent.FirecrackerVersion,
+		EnvdVersion:        parent.EnvdVersion,
+		VCPU:               parent.VCPU,
+		MemoryMB:           parent.MemoryMB,
+		DiskMB:             parent.DiskMB,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	if err := s.db.InsertBuild(ctx, b); err != nil {
+		return store.BuildRow{}, fmt.Errorf("insert checkpoint build: %w", err)
+	}
+	// The source keeps running from the new build (A2 §3.5, §3.6, the
+	// "resume-fresh" path), so its build id and — possibly changed — host
+	// IP are re-recorded (item 18).
+	s.afterCheckpoint(ctx, src, buildID)
+	return b, nil
+}
+
+// afterCheckpoint records a checkpoint on the source lease: it now runs
+// from the checkpoint build; its host IP is re-read from the substrate
+// because the resume-fresh path may move it. Call without s.store.mu.
+func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID string) {
+	sbs, err := s.sub.List(ctx)
+	if err != nil {
+		s.log.Printf("checkpoint: list sandboxes: %v", err)
+	}
+	s.store.mu.Lock()
+	src.BuildID = buildID
+	src.LastCheckpointBuildID = buildID
+	src.LastCheckpointAt = time.Now()
+	for _, sb := range sbs {
+		if sb.ID == src.SandboxID {
+			src.HostIP = sb.HostIP
+			s.upsertSandboxRow(store.SandboxRow{
+				SandboxID:   sb.ID,
+				LeaseID:     src.ID,
+				BuildID:     sb.BuildID,
+				ExecutionID: sb.ExecutionID,
+				HostIP:      sb.HostIP,
+				VCPU:        int(sb.VCPU),
+				MemoryMB:    int(sb.MemoryMB),
+				StartedAt:   sb.StartedAt,
+				EndAt:       sb.EndAt,
+			})
+		}
+	}
+	s.saveLeaseLocked(src)
+	s.store.mu.Unlock()
+	s.refreshPeers(src)
+}
+
+// clone checkpoints a running sandbox into a new build and grants a new
+// persistent lease on it. NetPolicy, NetAllow and ExposePorts are copied
+// from the source; the image is the source's image name (the TemplateID
+// is looked up by image name); the clone expires after maxTTL. The
+// request's optional tag is accepted and ignored (A1 §17 item 5).
+func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, string, error) {
+	s.store.mu.Lock()
+	src := s.store.leases[srcID]
+	if src == nil || src.Owner != owner || src.released {
+		s.store.mu.Unlock()
+		return nil, "", errNotFound
+	}
+	s.store.mu.Unlock()
+
+	if err := s.reserveQuota(owner, 1); err != nil {
+		return nil, "", err
+	}
+	defer func() { s.releaseQuotaReservation(owner, 1) }()
+
+	img, _, err := s.imageBuild(ctx, src.Image)
+	if err != nil {
+		return nil, "", err
+	}
+	b, err := s.checkpointLease(ctx, src)
+	if err != nil {
+		return nil, "", err
+	}
+	now := time.Now()
+	lease := &Lease{
+		ID:          newID(),
+		Owner:       owner,
+		Image:       src.Image,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(s.cfg.MaxTTL),
+		Persistent:  true,
+		LastActive:  now,
+		NetPolicy:   src.NetPolicy,
+		NetAllow:    append([]string(nil), src.NetAllow...),
+		ExposePorts: append([]int(nil), src.ExposePorts...),
+		State:       "running",
+		TemplateID:  img.TemplateID,
+	}
+	sb, err := s.createSandbox(ctx, img, b, false, "", lease)
+	if err != nil {
+		return nil, "", err
+	}
+	lease.SandboxID = sb.ID
+	lease.HostIP = sb.HostIP
+	lease.BuildID = b.BuildID
+	s.store.mu.Lock()
+	s.store.leases[lease.ID] = lease
+	s.saveLeaseLocked(lease)
+	s.store.mu.Unlock()
+	return lease, b.BuildID, nil
+}
+
+// fork checkpoints a running sandbox once and creates count sandboxes
+// from the checkpoint build (1..20). Quota for all count leases is
+// reserved up front, all or nothing; if any create fails, every sandbox
+// created in this call is deleted, the reservations are released, and
+// the error is returned. The source keeps running (item 18 bookkeeping).
+func (s *Service) fork(ctx context.Context, owner, srcID string, count int, persistent bool, ttl time.Duration) ([]*Lease, string, error) {
+	s.store.mu.Lock()
+	src := s.store.leases[srcID]
+	if src == nil || src.Owner != owner || src.released {
+		s.store.mu.Unlock()
+		return nil, "", errNotFound
+	}
+	if src.Suspended {
+		s.store.mu.Unlock()
+		return nil, "", errSuspended
+	}
+	s.store.mu.Unlock()
+
+	if count < 1 || count > 20 {
+		return nil, "", errBadForkCount
+	}
+	if ttl <= 0 {
+		ttl = s.cfg.DefaultTTL
+	}
+	if ttl > s.cfg.MaxTTL {
+		ttl = s.cfg.MaxTTL
+	}
+	if s.identities != nil {
+		if u := s.identities.UserByID(owner); u != nil && u.MaxTTL > 0 {
+			if userMax := time.Duration(u.MaxTTL) * time.Second; ttl > userMax {
+				ttl = userMax
+			}
+		}
+	}
+
+	if err := s.reserveQuota(owner, count); err != nil {
+		return nil, "", err
+	}
+
+	img, _, err := s.imageBuild(ctx, src.Image)
+	if err != nil {
+		s.releaseQuotaReservation(owner, count)
+		return nil, "", err
+	}
+	b, err := s.checkpointLease(ctx, src)
+	if err != nil {
+		s.releaseQuotaReservation(owner, count)
+		return nil, "", err
+	}
+
+	var created []*Lease
+	rollback := func(err error) ([]*Lease, string, error) {
+		for _, l := range created {
+			_ = s.sub.Delete(ctx, l.SandboxID)
+			s.deleteSandboxRow(l.SandboxID)
+			s.store.mu.Lock()
+			delete(s.store.leases, l.ID)
+			s.deleteLeaseLocked(l.ID)
+			s.store.mu.Unlock()
+		}
+		s.releaseQuotaReservation(owner, count)
+		return nil, "", err
+	}
+
+	now := time.Now()
+	for range count {
+		lease := &Lease{
+			ID:          newID(),
+			Owner:       owner, // quota is charged to the caller
+			Image:       src.Image,
+			CreatedAt:   now,
+			ExpiresAt:   now.Add(ttl),
+			Persistent:  persistent,
+			LastActive:  now,
+			NetPolicy:   src.NetPolicy,
+			NetAllow:    append([]string(nil), src.NetAllow...),
+			ExposePorts: append([]int(nil), src.ExposePorts...),
+			State:       "running",
+			TemplateID:  img.TemplateID,
+		}
+		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
+		if err != nil {
+			return rollback(err)
+		}
+		lease.SandboxID = sb.ID
+		lease.HostIP = sb.HostIP
+		lease.BuildID = b.BuildID
+		s.store.mu.Lock()
+		s.store.leases[lease.ID] = lease
+		s.saveLeaseLocked(lease)
+		s.store.mu.Unlock()
+		created = append(created, lease)
+	}
+	s.releaseQuotaReservation(owner, count)
+	return created, b.BuildID, nil
 }
 
 // setName assigns a friendly name to a lease. Names must be non-empty,
@@ -1048,67 +1321,6 @@ func (s *Service) lookupWithShare(caller, leaseID string, mode ShareMode) *Lease
 	return l
 }
 
-// grantFromSnapshot spawns a sandbox directly from a specific snapshot
-// tag (not via the warm pool) and grants a lease on it. Used by clone:
-// the branch tag is fresh, has no pool, and must not be registered as a
-// refillable image (refillPool would start pre-forking clone tags).
-func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl time.Duration, persistent bool) (*Lease, error) {
-	// Quota enforcement (security review #37 rescan F1): clone must not
-	// bypass the per-user lease cap. Reserve atomically and release on
-	// completion (the reservation becomes the real lease on success).
-	if err := s.reserveQuota(owner); err != nil {
-		return nil, err
-	}
-	defer func() { s.releaseQuotaReservation(owner) }()
-	lease := &Lease{
-		ID:         newID(),
-		Owner:      owner,
-		Image:      tag,
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(ttl),
-		Persistent: persistent,
-		LastActive: time.Now(),
-		State:      "running",
-	}
-	if persistent {
-		ws, err := s.forkd.CreateWorkspace(ctx, "ws-"+lease.ID, tag, true)
-		if err != nil {
-			return nil, fmt.Errorf("create workspace: %w", err)
-		}
-		lease.Workspace = ws.Name
-		lease.ForkdID = ws.LiveSandboxID
-		if err := s.fillEndpoint(ctx, lease); err != nil {
-			return nil, fmt.Errorf("resolve workspace sandbox: %w", err)
-		}
-		if err := s.probeSandbox(ctx, lease.ForkdID); err != nil {
-			_ = s.forkd.DeleteWorkspace(ctx, ws.Name)
-			return nil, fmt.Errorf("workspace sandbox failed the integrity probe: %w", err)
-		}
-		if err := s.applyNetpol(ctx, lease); err != nil {
-			return nil, fmt.Errorf("apply network policy: %w", err)
-		}
-		s.store.mu.Lock()
-		s.store.leases[lease.ID] = lease
-		s.saveLeaseLocked(lease)
-		s.store.mu.Unlock()
-		return lease, nil
-	}
-	sbs, err := s.forkd.Spawn(ctx, tag, 1, true, 0)
-	if err != nil {
-		return nil, err
-	}
-	if len(sbs) == 0 {
-		return nil, errNoSandbox
-	}
-	lease.ForkdID = sbs[0].ID
-	lease.Address = sbs[0].GuestAddr
-	s.store.mu.Lock()
-	s.store.leases[lease.ID] = lease
-	s.saveLeaseLocked(lease)
-	s.store.mu.Unlock()
-	return lease, nil
-}
-
 // lookup returns the lease with the given id if it belongs to owner.
 func (s *Service) lookup(owner, id string) *Lease {
 	s.store.mu.Lock()
@@ -1133,37 +1345,40 @@ func (s *Service) lookupAny(id string) *Lease {
 	return l
 }
 
-// Endpoint describes how to reach a leased sandbox's guest agent.
-type Endpoint struct {
-	ForkdID   string
-	Netns     string
-	GuestAddr string
-	GuestHost string
+// leaseMap renders a lease as one GET /api/sandboxes row.
+func leaseMap(l *Lease) map[string]any {
+	return map[string]any{
+		"id":               l.ID,
+		"owner":            l.Owner,
+		"image":            l.Image,
+		"address":          l.HostIP,
+		"expires":          l.ExpiresAt.Unix(),
+		"persistent":       l.Persistent,
+		"suspended":        l.Suspended,
+		"name":             l.Name,
+		"comment":          l.Comment,
+		"net_policy":       l.NetPolicy,
+		"egress_allowlist": l.NetAllow,
+		"exposed":          exposedMap(l),
+	}
 }
 
-// resolveEndpoint finds the live sandbox info (netns + guest addr) for a
-// lease by asking the controller. GuestHost is the host part of the
-// guest address (the agent port is always 8888).
-func (s *Service) resolveEndpoint(ctx context.Context, l *Lease) (*Endpoint, error) {
-	sbs, err := s.forkd.ListSandboxes(ctx)
-	if err != nil {
-		return nil, err
+// leaseDetailMap is a list row plus the lifecycle fields served by
+// GET /api/sandboxes/{id}.
+func leaseDetailMap(l *Lease) map[string]any {
+	m := leaseMap(l)
+	m["state"] = l.State
+	m["recovered_from"] = formatRFC3339(l.RecoveredFrom)
+	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
+	return m
+}
+
+// formatRFC3339 renders t in UTC, "" for the zero time.
+func formatRFC3339(t time.Time) string {
+	if t.IsZero() {
+		return ""
 	}
-	for _, sb := range sbs {
-		if sb.ID == l.ForkdID {
-			host, _, err := net.SplitHostPort(sb.GuestAddr)
-			if err != nil {
-				host = sb.GuestAddr
-			}
-			return &Endpoint{
-				ForkdID:   sb.ID,
-				Netns:     sb.Netns,
-				GuestAddr: sb.GuestAddr,
-				GuestHost: host,
-			}, nil
-		}
-	}
-	return nil, fmt.Errorf("sandbox %s not running", l.ForkdID)
+	return t.UTC().Format(time.RFC3339)
 }
 
 // list returns the caller's live leases as plain maps.
@@ -1173,20 +1388,7 @@ func (s *Service) list(owner string) []map[string]any {
 	var out []map[string]any
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
-			out = append(out, map[string]any{
-				"id":               l.ID,
-				"owner":            l.Owner,
-				"image":            l.Image,
-				"address":          l.Address,
-				"expires":          l.ExpiresAt.Unix(),
-				"persistent":       l.Persistent,
-				"suspended":        l.Suspended,
-				"name":             l.Name,
-				"comment":          l.Comment,
-				"net_policy":       l.NetPolicy,
-				"egress_allowlist": l.NetAllow,
-				"exposed":          exposedMap(l),
-			})
+			out = append(out, leaseMap(l))
 		}
 	}
 	return out
@@ -1224,7 +1426,7 @@ func (s *Service) probeSandbox(ctx context.Context, id string) error {
 	if !s.probeEnabled {
 		return nil
 	}
-	res, err := s.forkd.Exec(ctx, id, []string{"sh", "-c", integrityProbe}, int(s.probeTimeout.Seconds()))
+	res, err := s.sub.Exec(ctx, id, substrate.ExecRequest{Args: []string{"sh", "-c", integrityProbe}, Timeout: s.probeTimeout})
 	if err != nil {
 		return fmt.Errorf("probe: %w", err)
 	}
@@ -1238,50 +1440,59 @@ func (s *Service) probeSandbox(ctx context.Context, id string) error {
 	return nil
 }
 
-// warmPool pre-forks poolSize sandboxes per image tag.
-func (s *Service) warmPool(ctx context.Context, image string) {
-	if s.poolSize <= 0 {
+// warmPool pre-creates cfg.PoolSize sandboxes of img under the placeholder
+// lease {ID:"pool", Owner:"pool", ExpiresAt: now+24h, NetPolicy:"none"}.
+// Their sandboxes rows carry lease_id "".
+func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
+	if s.cfg.PoolSize <= 0 {
 		return
 	}
 	s.store.mu.Lock()
-	cur := len(s.store.pool[image])
+	cur := len(s.store.pool[img.Name])
 	s.store.mu.Unlock()
-	if cur >= s.poolSize {
+	if cur >= s.cfg.PoolSize {
 		return
 	}
-	// Spawn one child at a time. forkd's restore_many restores all N
-	// children concurrently, and a large snapshot (e.g. elixir-base at
-	// 2 GiB) can take longer than forkd's 5s socket timeout when several
-	// restores run at once, failing the whole batch. Serializing keeps
-	// each restore under the timeout.
-	for i := cur; i < s.poolSize; i++ {
-		sbs, err := s.forkd.Spawn(ctx, image, 1, true, 0)
+	b, err := s.db.GetBuild(ctx, img.CurrentBuildID)
+	if err != nil {
+		s.log.Printf("warmPool: %s: load build %s: %v", img.Name, img.CurrentBuildID, err)
+		return
+	}
+	placeholder := &Lease{
+		ID:         "pool",
+		Owner:      "pool",
+		ExpiresAt:  time.Now().Add(24 * time.Hour),
+		NetPolicy:  string(PolicyNone),
+		State:      "running",
+		TemplateID: img.TemplateID,
+	}
+	// Create one at a time and verify before stocking, so a bad build is
+	// recycled here rather than served to a job. Stop rather than loop: a
+	// build that fails the probe will keep failing it, and retrying
+	// creates a sandbox per attempt.
+	for i := cur; i < s.cfg.PoolSize; i++ {
+		sb, err := s.createSandbox(ctx, img, b, false, "", placeholder)
 		if err != nil {
-			s.log.Printf("warmPool: spawn %s: %v", image, err)
+			s.log.Printf("warmPool: create %s: %v", img.Name, err)
 			return
 		}
-		// Verify before pooling, so a bad generation is recycled here
-		// rather than served to a job. Stop rather than loop: a tag that
-		// fails the probe will keep failing it, and retrying spawns a
-		// sandbox per attempt.
-		for _, sb := range sbs {
-			if err := s.probeSandbox(ctx, sb.ID); err != nil {
-				s.log.Printf("warmPool: %s sandbox %s failed the integrity probe, recycling: %v", image, sb.ID, err)
-				_ = s.forkd.Kill(ctx, sb.ID)
-				return
-			}
+		if err := s.probeSandbox(ctx, sb.ID); err != nil {
+			s.log.Printf("warmPool: %s sandbox %s failed the integrity probe, recycling: %v", img.Name, sb.ID, err)
+			_ = s.sub.Delete(ctx, sb.ID)
+			s.deleteSandboxRow(sb.ID)
+			return
 		}
 		s.store.mu.Lock()
-		for _, sb := range sbs {
-			s.store.pool[image] = append(s.store.pool[image], sb.ID)
-			s.addPoolLocked(sb.ID, image)
-		}
+		s.store.pool[img.Name] = append(s.store.pool[img.Name], sb.ID)
+		s.addPoolLocked(sb.ID, img.Name)
 		s.store.mu.Unlock()
 	}
 }
 
 // leaseToRow maps an in-memory lease to its store row. An empty State
 // is derived from Suspended so the row always carries a valid state.
+// HostIP lives in the address column; TemplateID is looked up from
+// images and BuildID from sandboxes (neither is a lease column).
 func leaseToRow(l *Lease) store.LeaseRow {
 	state := l.State
 	if state == "" {
@@ -1295,14 +1506,13 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		ID:                    l.ID,
 		Owner:                 l.Owner,
 		Image:                 l.Image,
-		SandboxID:             l.ForkdID,
-		Address:               l.Address,
+		SandboxID:             l.SandboxID,
+		Address:               l.HostIP,
 		CreatedAt:             l.CreatedAt,
 		ExpiresAt:             l.ExpiresAt,
 		Persistent:            l.Persistent,
 		LastActive:            l.LastActive,
 		Suspended:             l.Suspended,
-		Workspace:             l.Workspace,
 		Name:                  l.Name,
 		NetPolicy:             l.NetPolicy,
 		NetAllow:              l.NetAllow,
@@ -1324,14 +1534,13 @@ func rowToLease(r store.LeaseRow) *Lease {
 		ID:                    r.ID,
 		Owner:                 r.Owner,
 		Image:                 r.Image,
-		ForkdID:               r.SandboxID,
-		Address:               r.Address,
+		SandboxID:             r.SandboxID,
+		HostIP:                r.Address,
 		CreatedAt:             r.CreatedAt,
 		ExpiresAt:             r.ExpiresAt,
 		Persistent:            r.Persistent,
 		LastActive:            r.LastActive,
 		Suspended:             r.State == "suspended",
-		Workspace:             r.Workspace,
 		Name:                  r.Name,
 		NetPolicy:             r.NetPolicy,
 		NetAllow:              r.NetAllow,
@@ -1359,14 +1568,11 @@ func (s *Service) storeError(op, id string, err error) {
 	}
 }
 
-// The store helpers below are called with s.store.mu held and are
-// no-ops when no database is installed, so memory-only callers (tests)
-// need no changes.
+// The store helpers below are called with s.store.mu held (the sandbox
+// row helpers excepted: they run outside lease mutations) and write
+// through with a bounded timeout.
 
 func (s *Service) saveLeaseLocked(l *Lease) {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.UpsertLease(ctx, leaseToRow(l)); err != nil {
@@ -1375,9 +1581,6 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 }
 
 func (s *Service) deleteLeaseLocked(id string) {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.DeleteLease(ctx, id); err != nil {
@@ -1386,9 +1589,6 @@ func (s *Service) deleteLeaseLocked(id string) {
 }
 
 func (s *Service) saveShareLocked(sh *Share) {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.UpsertShare(ctx, store.ShareRow{
@@ -1403,9 +1603,6 @@ func (s *Service) saveShareLocked(sh *Share) {
 }
 
 func (s *Service) deleteShareLocked(leaseID, grantee string) {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.DeleteShare(ctx, leaseID, grantee); err != nil {
@@ -1414,9 +1611,6 @@ func (s *Service) deleteShareLocked(leaseID, grantee string) {
 }
 
 func (s *Service) addPoolLocked(id, image string) {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.AddPool(ctx, id, image); err != nil {
@@ -1425,9 +1619,6 @@ func (s *Service) addPoolLocked(id, image string) {
 }
 
 func (s *Service) removePoolLocked(id string) {
-	if s.db == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.RemovePool(ctx, id); err != nil {
@@ -1435,11 +1626,29 @@ func (s *Service) removePoolLocked(id string) {
 	}
 }
 
+// upsertSandboxRow records a created/resumed/checkpointed sandbox.
+func (s *Service) upsertSandboxRow(row store.SandboxRow) {
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.UpsertSandbox(ctx, row); err != nil {
+		s.storeError("upsert_sandbox", row.SandboxID, err)
+	}
+}
+
+// deleteSandboxRow drops a sandboxes entry.
+func (s *Service) deleteSandboxRow(sandboxID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.DeleteSandbox(ctx, sandboxID); err != nil {
+		s.storeError("delete_sandbox", sandboxID, err)
+	}
+}
+
 // flushLastActiveLocked writes the batched touch() updates in one
 // transaction, then clears the dirty set. A failed flush keeps the set
 // so the next tick retries. Called with s.store.mu held.
 func (s *Service) flushLastActiveLocked(ctx context.Context) {
-	if s.db == nil || len(s.store.lastActiveDirty) == 0 {
+	if len(s.store.lastActiveDirty) == 0 {
 		return
 	}
 	dirty := s.store.lastActiveDirty
@@ -1458,13 +1667,11 @@ func (s *Service) flushLastActiveLocked(ctx context.Context) {
 }
 
 // LoadState reads every lease, share and pool entry from the store into
-// memory. Known images stay registered in the pool map (seeded by the
-// constructor) so the warm-pool refill keeps pre-forking them. It must
-// run before Start and before ReconcileOrphans.
+// memory. Each lease's TemplateID comes from its image row; its BuildID
+// comes from the sandboxes row carrying its id (a suspended lease has
+// none, and its BuildID stays ""). It must run before Start and before
+// ReconcileOrphans.
 func (s *Service) LoadState(ctx context.Context) error {
-	if s.db == nil {
-		return nil
-	}
 	leases, err := s.db.ListLeases(ctx)
 	if err != nil {
 		return fmt.Errorf("load leases: %w", err)
@@ -1477,11 +1684,20 @@ func (s *Service) LoadState(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load pool: %w", err)
 	}
+	loaded := make(map[string]*Lease, len(leases))
+	for _, r := range leases {
+		l := rowToLease(r)
+		if img, err := s.db.GetImage(ctx, l.Image); err == nil {
+			l.TemplateID = img.TemplateID
+		}
+		if row, err := s.db.GetSandboxByLease(ctx, l.ID); err == nil {
+			l.BuildID = row.BuildID
+		}
+		loaded[l.ID] = l
+	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	for _, r := range leases {
-		s.store.leases[r.ID] = rowToLease(r)
-	}
+	s.store.leases = loaded
 	for _, r := range shareRows {
 		if s.store.shares[r.LeaseID] == nil {
 			s.store.shares[r.LeaseID] = make(map[string]*Share)
@@ -1500,7 +1716,7 @@ func (s *Service) LoadState(ctx context.Context) error {
 	return nil
 }
 
-// LiveLeases returns the count of active (unreleased) leases. Used by
+// LiveLeases returns the ids of active (unreleased) leases. Used by
 // the shutdown log line.
 func (s *Service) LiveLeases() []string {
 	s.store.mu.Lock()
@@ -1515,9 +1731,9 @@ func (s *Service) LiveLeases() []string {
 }
 
 // Shutdown stops the background loops and flushes the batched
-// LastActive updates to the store. It does NOT release leases, delete
-// workspaces or kill pooled sandboxes: state persists in the SQLite
-// store and the next incarnation loads it via LoadState (U05).
+// LastActive updates to the store. It does NOT release leases or delete
+// pooled sandboxes: state persists in the SQLite store and the next
+// incarnation loads it via LoadState (U05).
 func (s *Service) Shutdown(ctx context.Context) {
 	if s.stopLoops != nil {
 		s.stopLoops()
@@ -1527,12 +1743,6 @@ func (s *Service) Shutdown(ctx context.Context) {
 	s.flushLastActiveLocked(ctx)
 }
 
-// ReconcileOrphans aligns the controller with the state loaded from the
-// store (U05). Controller sandboxes that no lease (by sandbox id) or
-// pool entry claims are killed. Non-suspended leases whose sandbox is
-// missing from the controller were lost to a crash or a controller
-// restart: they are marked lost and kept, never deleted. Pool entries
-// whose sandbox is missing are removed.
 // CollectMetrics updates live gauge metrics from the current service
 // state (issue #20). Called by the Server before gathering metrics
 // for /metrics. All store access is under the store lock.
@@ -1544,9 +1754,9 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	for img, ids := range s.store.pool {
 		m.PoolReady.WithLabelValues(img).Set(float64(len(ids)))
 	}
-	// Pool cap = poolSize × number of known images.
-	if s.poolSize > 0 {
-		m.PoolCap.Set(float64(s.poolSize * len(s.store.pool)))
+	// Pool cap = poolSize × number of stocked images.
+	if s.cfg.PoolSize > 0 {
+		m.PoolCap.Set(float64(s.cfg.PoolSize * len(s.store.pool)))
 	}
 
 	// Leases: count non-released.
@@ -1573,8 +1783,15 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	m.SharesActive.Set(float64(shares))
 }
 
+// ReconcileOrphans aligns the substrate with the state loaded from the
+// store. If the sandbox list fails, nothing changes (leases are never
+// marked lost on a list failure). Substrate sandboxes that no lease
+// (by sandbox id) or pool entry claims are deleted. Live leases whose
+// sandbox is missing are marked lost (U10 upgrades this to recovery);
+// suspended leases have no live sandbox by design. Pool entries whose
+// sandbox is missing are removed.
 func (s *Service) ReconcileOrphans(ctx context.Context) {
-	sbs, err := s.forkd.ListSandboxes(ctx)
+	sbs, err := s.sub.List(ctx)
 	if err != nil {
 		s.log.Printf("reconcile: list sandboxes failed: %v", err)
 		return
@@ -1586,23 +1803,28 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 	s.store.mu.Lock()
 	mine := make(map[string]bool)
 	for _, l := range s.store.leases {
-		mine[l.ForkdID] = true
+		if l.SandboxID != "" {
+			mine[l.SandboxID] = true
+		}
 	}
 	for _, ids := range s.store.pool {
 		for _, id := range ids {
 			mine[id] = true
 		}
 	}
-	// Non-suspended leases whose sandbox is gone are marked lost (the
-	// DB row is kept); suspended leases have no live sandbox by design.
+	var orphans []string
+	for _, sb := range sbs {
+		if !mine[sb.ID] {
+			orphans = append(orphans, sb.ID)
+		}
+	}
 	for _, l := range s.store.leases {
-		if l.Suspended || present[l.ForkdID] {
+		if !l.live() || present[l.SandboxID] {
 			continue
 		}
 		l.State = "lost"
 		s.saveLeaseLocked(l)
 	}
-	// Pool entries whose sandbox is missing are stale.
 	for img, ids := range s.store.pool {
 		kept := ids[:0]
 		for _, id := range ids {
@@ -1616,28 +1838,29 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 	}
 	s.store.mu.Unlock()
 
-	killed := 0
-	for _, sb := range sbs {
-		if mine[sb.ID] {
+	deleted := 0
+	for _, id := range orphans {
+		if err := s.sub.Delete(ctx, id); err != nil {
+			s.log.Printf("reconcile: delete orphan %s failed: %v", id, err)
 			continue
 		}
-		if err := s.forkd.Kill(ctx, sb.ID); err != nil {
-			s.log.Printf("reconcile: kill orphan %s failed: %v", sb.ID, err)
-			continue
-		}
-		killed++
+		deleted++
 		if s.metrics != nil {
 			s.metrics.LeaseOrphaned.Inc()
 		}
 	}
-	if killed > 0 {
-		s.log.Printf("reconcile: killed %d orphaned sandbox(es) from a previous incarnation", killed)
+	if deleted > 0 {
+		s.log.Printf("reconcile: deleted %d orphaned sandbox(es) from a previous incarnation", deleted)
 	}
 }
 
-var errNoSandbox = &leaseError{"no sandbox granted"}
-var errNotFound = &leaseError{"sandbox not found"}
-var errNotPersistent = &leaseError{"sandbox is not a persistent lease"}
+var (
+	errNotFound      = &leaseError{"sandbox not found"}
+	errNotPersistent = &leaseError{"sandbox is not a persistent lease"}
+	errUnknownImage  = &leaseError{"unknown image"}
+	errSuspended     = &leaseError{"sandbox is suspended"}
+	errBadForkCount  = &leaseError{"count must be 1..20"}
+)
 
 // leaseError is a simple sentinel error.
 type leaseError struct{ msg string }

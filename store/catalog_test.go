@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -18,6 +19,7 @@ func TestImageUpsertGetList(t *testing.T) {
 		VCPU: 2, MemoryMB: 1024, DiskMB: 4096,
 		StartCmd:  "/usr/local/bin/spoond-guest-init",
 		ReadyCmd:  "test -f /run/spoond-guest-ready",
+		Env:       map[string]string{"SPOOND_TOOL": "uv"},
 		UpdatedAt: time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
 	}
 	if err := db.UpsertImage(ctx, first); err != nil {
@@ -27,7 +29,7 @@ func TestImageUpsertGetList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got != first {
+	if !reflect.DeepEqual(got, first) {
 		t.Fatalf("got %+v, want %+v", got, first)
 	}
 
@@ -44,7 +46,7 @@ func TestImageUpsertGetList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get 2: %v", err)
 	}
-	if got != second {
+	if !reflect.DeepEqual(got, second) {
 		t.Fatalf("got %+v, want %+v", got, second)
 	}
 
@@ -52,12 +54,47 @@ func TestImageUpsertGetList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) != 1 || list[0] != second {
+	if len(list) != 1 || !reflect.DeepEqual(list[0], second) {
 		t.Fatalf("list = %+v, want [py-base]", list)
 	}
 
 	if _, err := db.GetImage(ctx, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get missing = %v, want ErrNotFound", err)
+	}
+}
+
+// TestImageEnvRoundTrip stores an image without an env map and reads it
+// back empty, then with one.
+func TestImageEnvRoundTrip(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+
+	noEnv := ImageRow{
+		Name: "go-base", TemplateID: "tpl0123456789abcdefgh", CurrentBuildID: "b-1",
+		VCPU: 2, MemoryMB: 2048, DiskMB: 4096,
+		UpdatedAt: time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
+	}
+	if err := db.UpsertImage(ctx, noEnv); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := db.GetImage(ctx, "go-base")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.Env) != 0 {
+		t.Fatalf("nil env must read back empty, got %v", got.Env)
+	}
+
+	noEnv.Env = map[string]string{"GOPATH": "/go", "SPOOND_X": "1"}
+	if err := db.UpsertImage(ctx, noEnv); err != nil {
+		t.Fatalf("upsert 2: %v", err)
+	}
+	got, err = db.GetImage(ctx, "go-base")
+	if err != nil {
+		t.Fatalf("get 2: %v", err)
+	}
+	if !reflect.DeepEqual(got.Env, noEnv.Env) {
+		t.Fatalf("env = %v, want %v", got.Env, noEnv.Env)
 	}
 }
 
