@@ -158,6 +158,8 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stat", s.handleStat)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
+	// Live egress policy change (U09).
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/network", s.handleNetwork)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/fork", s.handleFork)
 	// Sharing (T6/#33).
@@ -511,7 +513,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Persistent bool     `json:"persistent"`
 		NetPolicy  string   `json:"network_policy"`
 		NetAllow   []string `json:"egress_allowlist"`
-		// ExposePorts publishes guest TCP ports (unsupported until U09).
+		// ExposePorts publishes guest TCP ports for other sandboxes to
+		// reach (each peer's egress policy decides reachability).
 		ExposePorts []int `json:"expose_ports"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -537,10 +540,6 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	expose, err := ValidateExposePorts(req.ExposePorts)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if len(expose) > 0 && !s.svc.CanExposePorts() {
-		writeError(w, http.StatusNotImplemented, "port exposure needs network policy enforcement (NETPOL_DNS) on this backend")
 		return
 	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
@@ -802,6 +801,44 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	<-relayDone
+}
+
+// handleNetwork changes a lease's egress policy live (U09): the lease is
+// updated and saved, the egress config is re-applied to its sandbox, and
+// every peer's allowances are refreshed. Owner only.
+func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		NetPolicy string   `json:"network_policy"`
+		NetAllow  []string `json:"egress_allowlist"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if !ValidNetworkPolicy(req.NetPolicy) {
+		writeError(w, http.StatusBadRequest, "network_policy must be none|lan|internet|restricted")
+		return
+	}
+	lease, err := s.svc.setNetwork(r.Context(), owner, id, req.NetPolicy, req.NetAllow)
+	if err != nil {
+		switch err {
+		case errNotFound:
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errSuspended:
+			writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		default:
+			s.svc.log.Printf("network %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "network update failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":               lease.ID,
+		"network_policy":   lease.NetPolicy,
+		"egress_allowlist": lease.NetAllow,
+	})
 }
 
 // handleKeepAlive extends a persistent lease's expiry. The caller must

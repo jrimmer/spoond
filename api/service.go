@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -42,11 +43,13 @@ type Lease struct {
 	Name       string    // optional friendly name/tag (unique per owner; resolved by ssh/proxy)
 	NetPolicy  string    // egress policy: none|lan|internet|restricted ("" = restricted)
 	NetAllow   []string  // allowlist for restricted policy
-	// ExposePorts are guest TCP ports to publish for other sandboxes
-	// (unsupported until U09; the create handler answers 501).
+	// ExposePorts are guest TCP ports published to other sandboxes:
+	// peers reach them as their own egress policy permits
+	// (peerAllowances).
 	ExposePorts []int
-	ExposedIP   string
-	Comment     string // optional free-text annotation (set/cleared via ctl comment)
+	// ExposedIP mirrors HostIP (kept for the store column).
+	ExposedIP string
+	Comment   string // optional free-text annotation (set/cleared via ctl comment)
 	// Lifecycle state kept in the store (U05); later units set the
 	// checkpoint/recovery fields. State is running|suspended|recovered|lost
 	// ("" = derived from Suspended).
@@ -156,6 +159,14 @@ type Service struct {
 	probeTimeout time.Duration
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
+	// refreshMu serializes refreshPeers runs, which are scheduled
+	// asynchronously after lifecycle events (U09).
+	refreshMu sync.Mutex
+	// appliedEgress remembers the canonical JSON of the egress config
+	// last applied to each lease's sandbox, keyed by lease id, so
+	// refreshPeers only calls UpdateEgress on change.
+	appliedMu     sync.Mutex
+	appliedEgress map[string]string
 	log           *log.Logger
 	// metrics (issue #20): service-level Prometheus metrics.
 	metrics *metrics.BackendMetrics
@@ -174,6 +185,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		tokens:        tokens,
 		cfg:           cfg,
 		sweepInterval: 5 * time.Second,
+		appliedEgress: map[string]string{},
 		log:           log.Default(),
 		probeEnabled:  true,
 		probeTimeout:  20 * time.Second,
@@ -224,19 +236,16 @@ func (s *Service) ResolveOwner(token string) (string, bool) {
 	return owner, ok
 }
 
-// CanExposePorts reports whether this backend can publish guest ports.
-// Until U09 (envd-based exposure) it cannot, so create answers 501 for
-// expose_ports.
-func (s *Service) CanExposePorts() bool { return false }
-
 // exposedMap renders a lease's published ports as {"<port>": "<ip>:<port>"}.
+// The published address is the sandbox's host address; only a live lease
+// with a host address has anything to reach.
 func exposedMap(l *Lease) map[string]string {
 	out := map[string]string{}
-	if l.ExposedIP == "" {
+	if !l.live() || l.HostIP == "" {
 		return out
 	}
 	for _, p := range l.ExposePorts {
-		out[fmt.Sprint(p)] = net.JoinHostPort(l.ExposedIP, fmt.Sprint(p))
+		out[fmt.Sprint(p)] = net.JoinHostPort(l.HostIP, fmt.Sprint(p))
 	}
 	return out
 }
@@ -278,11 +287,11 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		// Public destinations stay allowed; listing the LAN ranges as
 		// private allowances matches forkd, where internet flushed all
 		// rules and private/LAN addresses stayed reachable.
-		return substrate.Egress{Private: lanPrivate(l, hostSvc, dns)}
+		return substrate.Egress{Private: append(lanPrivate(l, hostSvc, dns), s.peerAllowances(l)...)}
 	case PolicyLAN:
 		return substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
-			Private:     lanPrivate(l, hostSvc, dns),
+			Private:     append(lanPrivate(l, hostSvc, dns), s.peerAllowances(l)...),
 		}
 	default: // restricted: the default when empty
 		eg := substrate.Egress{
@@ -300,6 +309,13 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 			} else if _, n, err := net.ParseCIDR(entry); err == nil {
 				cidr = n.String()
 			} else {
+				// A NetAllow entry that names a lease (id, name, or the
+				// "lease:"-prefixed forms) is a peer reference, not a
+				// domain: peers are permitted through peerAllowances,
+				// never resolved as domains (U09).
+				if s.isPeerReference(entry) {
+					continue
+				}
 				eg.AllowedDomains = append(eg.AllowedDomains, entry)
 				continue
 			}
@@ -349,14 +365,158 @@ func (s *Service) egressFor(l *Lease) substrate.Egress {
 	return s.egressForLocked(l)
 }
 
-// peerAllowances permits egress into ranges other leases own (U09).
-// It is always called with s.store.mu held (from egressForLocked) and
-// returns nil until U09.
-func (s *Service) peerAllowances(l *Lease) []substrate.PrivateAllowance { return nil }
+// peerAllowances permits egress into ranges other leases own (U09): the
+// exposed ports of every other live lease that publishes them, on any
+// owner — parity with the old shared bridge, where every published port
+// was reachable from every sandbox whose own policy let it route there.
+// Under restricted, a peer counts only when the allowlist names it. It
+// is always called with s.store.mu held (from egressForLocked).
+func (s *Service) peerAllowances(l *Lease) []substrate.PrivateAllowance {
+	policy := l.NetPolicy
+	if policy == "" {
+		policy = string(PolicyRestricted)
+	}
+	if NetworkPolicy(policy) == PolicyNone {
+		return nil
+	}
+	restricted := NetworkPolicy(policy) == PolicyRestricted
+	var out []substrate.PrivateAllowance
+	for _, p := range s.store.leases {
+		if p.ID == l.ID || len(p.ExposePorts) == 0 || !p.live() || p.HostIP == "" {
+			continue
+		}
+		if restricted && !netAllowNamesPeer(l.NetAllow, p) {
+			continue
+		}
+		ports := make([]uint32, 0, len(p.ExposePorts))
+		for _, port := range p.ExposePorts {
+			ports = append(ports, uint32(port))
+		}
+		out = append(out, substrate.PrivateAllowance{CIDR: p.HostIP + "/32", TCPPorts: ports})
+	}
+	return out
+}
 
-// refreshPeers re-applies peer allowances to leases that may reach l
-// after l's sandbox changed (U09). A no-op in U08.
-func (s *Service) refreshPeers(*Lease) {}
+// netAllowNamesPeer reports whether an egress allowlist names peer p:
+// by id, by friendly name, or in the "lease:"+id / "lease:"+name forms.
+func netAllowNamesPeer(allow []string, p *Lease) bool {
+	for _, a := range allow {
+		a = strings.TrimSpace(a)
+		a = strings.TrimPrefix(a, "lease:")
+		if a == p.ID || (p.Name != "" && a == p.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPeerReference reports whether a restricted allowlist entry names a
+// lease — by id, by friendly name, or "lease:"-prefixed — and is
+// therefore a peer reference rather than a domain. Called with
+// s.store.mu held (from egressForLocked).
+func (s *Service) isPeerReference(entry string) bool {
+	name := strings.TrimPrefix(strings.TrimSpace(entry), "lease:")
+	if name == "" {
+		return false
+	}
+	for _, p := range s.store.leases {
+		if p.ID == name || (p.Name != "" && p.Name == name) {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalEgress renders eg as the canonical JSON refreshPeers compares
+// against the last applied value: sorted CIDR and domain lists, Private
+// sorted by CIDR, and every allowance's TCPPorts sorted.
+func canonicalEgress(eg substrate.Egress) string {
+	eg.AllowedCIDRs = append([]string(nil), eg.AllowedCIDRs...)
+	eg.DeniedCIDRs = append([]string(nil), eg.DeniedCIDRs...)
+	eg.AllowedDomains = append([]string(nil), eg.AllowedDomains...)
+	sort.Strings(eg.AllowedCIDRs)
+	sort.Strings(eg.DeniedCIDRs)
+	sort.Strings(eg.AllowedDomains)
+	eg.Private = append([]substrate.PrivateAllowance(nil), eg.Private...)
+	sort.Slice(eg.Private, func(i, j int) bool { return eg.Private[i].CIDR < eg.Private[j].CIDR })
+	for i, a := range eg.Private {
+		ports := append([]uint32(nil), a.TCPPorts...)
+		sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+		eg.Private[i].TCPPorts = ports
+	}
+	b, err := json.Marshal(eg)
+	if err != nil {
+		return "" // Egress carries only strings and ints: cannot fail
+	}
+	return string(b)
+}
+
+// recordAppliedEgress remembers the canonical form of the egress config
+// just applied to a lease's sandbox (create, pooled grant, or a live
+// update), so the next refreshPeers does not re-apply it.
+func (s *Service) recordAppliedEgress(leaseID string, eg substrate.Egress) {
+	s.appliedMu.Lock()
+	defer s.appliedMu.Unlock()
+	s.appliedEgress[leaseID] = canonicalEgress(eg)
+}
+
+// refreshPeers re-applies every live lease's egress config whose value
+// changed (U09): peer allowances move when leases expose ports, go live,
+// or are released, and each affected sandbox needs an UpdateEgress. The
+// store lock is held only to read state; substrate calls run without it.
+// Callers must hold refreshMu (see runRefreshPeers).
+func (s *Service) refreshPeers(ctx context.Context) {
+	type update struct {
+		leaseID, sandboxID, canon string
+		eg                        substrate.Egress
+	}
+	s.store.mu.Lock()
+	var upds []update
+	for _, l := range s.store.leases {
+		policy := l.NetPolicy
+		if policy == "" {
+			policy = string(PolicyRestricted)
+		}
+		if !l.live() || NetworkPolicy(policy) == PolicyNone || l.SandboxID == "" {
+			continue
+		}
+		eg := s.egressForLocked(l)
+		upds = append(upds, update{leaseID: l.ID, sandboxID: l.SandboxID, canon: canonicalEgress(eg), eg: eg})
+	}
+	s.store.mu.Unlock()
+
+	for _, u := range upds {
+		s.appliedMu.Lock()
+		unchanged := s.appliedEgress[u.leaseID] == u.canon
+		s.appliedMu.Unlock()
+		if unchanged {
+			continue
+		}
+		if err := s.sub.UpdateEgress(ctx, u.sandboxID, u.eg); err != nil {
+			s.log.Printf("refreshPeers: update egress for %s: %v", u.leaseID, err)
+			continue
+		}
+		s.appliedMu.Lock()
+		s.appliedEgress[u.leaseID] = u.canon
+		s.appliedMu.Unlock()
+	}
+}
+
+// refreshPeersAsync schedules one refreshPeers run on a goroutine. Runs
+// are serialized by refreshMu; ctx cancellation does not stop the run —
+// the refresh must outlive the request that triggered it. Called after
+// grant/resume/restart/clone/fork/release of a lease with ExposePorts
+// and after any network policy change (U09).
+func (s *Service) refreshPeersAsync(ctx context.Context) {
+	go s.runRefreshPeers(ctx)
+}
+
+// runRefreshPeers runs refreshPeers serialized by refreshMu.
+func (s *Service) runRefreshPeers(ctx context.Context) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	s.refreshPeers(context.WithoutCancel(ctx))
+}
 
 // createSandbox admits and creates one sandbox for lease l from build b.
 // sandboxID "" allocates a new E2B sandbox id; resume reuses the paused
@@ -375,6 +535,7 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 	}
 	env["SPOOND_LEASE_ID"] = l.ID
 	env["SPOOND_GATEWAY_URL"] = "http://" + s.cfg.HostGuestAddr + ":" + strconv.Itoa(s.cfg.HostGuestPort)
+	eg := s.egressFor(l)
 	sb, err := s.sub.Create(ctx, substrate.CreateRequest{
 		TemplateID:         b.TemplateID,
 		BuildID:            b.BuildID,
@@ -389,11 +550,12 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		EnvVars:            env,
 		Metadata:           map[string]string{"lease_id": l.ID, "owner": l.Owner},
 		EndAt:              l.ExpiresAt,
-		Egress:             s.egressFor(l),
+		Egress:             eg,
 	})
 	if err != nil {
 		return substrate.Sandbox{}, err
 	}
+	s.recordAppliedEgress(l.ID, eg)
 	leaseID := l.ID
 	if leaseID == "pool" {
 		leaseID = "" // pool placeholder: pool sandboxes have no lease
@@ -557,6 +719,9 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	delete(s.store.shares, l.ID)
 	s.deleteLeaseLocked(l.ID)
 	s.store.mu.Unlock()
+	if len(l.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
 }
 
 // errQuotaExceeded is returned when a user hits their concurrent-lease
@@ -709,10 +874,12 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 				s.discardPoolSandbox(ctx, id)
 				continue
 			}
-			if err := s.sub.UpdateEgress(ctx, id, s.egressFor(lease)); err != nil {
+			eg := s.egressFor(lease)
+			if err := s.sub.UpdateEgress(ctx, id, eg); err != nil {
 				s.discardPoolSandbox(ctx, id)
 				return nil, fmt.Errorf("update egress on pooled sandbox: %w", err)
 			}
+			s.recordAppliedEgress(lease.ID, eg)
 			if err := s.sub.UpdateEndAt(ctx, id, lease.ExpiresAt); err != nil {
 				s.discardPoolSandbox(ctx, id)
 				return nil, fmt.Errorf("update end at on pooled sandbox: %w", err)
@@ -721,6 +888,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 			s.upsertSandboxRow(row)
 			lease.SandboxID = id
 			lease.HostIP = row.HostIP
+			lease.ExposedIP = row.HostIP
 			lease.BuildID = row.BuildID
 			lease.pooled = true
 			break
@@ -734,6 +902,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		}
 		lease.SandboxID = sb.ID
 		lease.HostIP = sb.HostIP
+		lease.ExposedIP = sb.HostIP
 		lease.BuildID = b.BuildID
 	}
 
@@ -750,6 +919,9 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
+	if len(lease.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
 	return lease, nil
 }
 
@@ -846,12 +1018,16 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 	}
 	s.store.mu.Lock()
 	l.HostIP = sb.HostIP
+	l.ExposedIP = sb.HostIP
 	l.BuildID = resumeBuild
 	l.State = "running"
 	l.Suspended = false
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	if len(l.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
 	return l, nil
 }
 
@@ -892,12 +1068,16 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	s.store.mu.Lock()
 	l.SandboxID = sb.ID
 	l.HostIP = sb.HostIP
+	l.ExposedIP = sb.HostIP
 	l.BuildID = b.BuildID
 	l.State = "running"
 	l.Suspended = false
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	if len(l.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
 	return l, nil
 }
 
@@ -958,6 +1138,7 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 	for _, sb := range sbs {
 		if sb.ID == src.SandboxID {
 			src.HostIP = sb.HostIP
+			src.ExposedIP = sb.HostIP
 			s.upsertSandboxRow(store.SandboxRow{
 				SandboxID:   sb.ID,
 				LeaseID:     src.ID,
@@ -973,7 +1154,9 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 	}
 	s.saveLeaseLocked(src)
 	s.store.mu.Unlock()
-	s.refreshPeers(src)
+	if len(src.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
 }
 
 // clone checkpoints a running sandbox into a new build and grants a new
@@ -1024,11 +1207,15 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	}
 	lease.SandboxID = sb.ID
 	lease.HostIP = sb.HostIP
+	lease.ExposedIP = sb.HostIP
 	lease.BuildID = b.BuildID
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
+	if len(lease.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
 	return lease, b.BuildID, nil
 }
 
@@ -1118,6 +1305,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		}
 		lease.SandboxID = sb.ID
 		lease.HostIP = sb.HostIP
+		lease.ExposedIP = sb.HostIP
 		lease.BuildID = b.BuildID
 		s.store.mu.Lock()
 		s.store.leases[lease.ID] = lease
@@ -1126,6 +1314,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		created = append(created, lease)
 	}
 	s.releaseQuotaReservation(owner, count)
+	if len(src.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
 	return created, b.BuildID, nil
 }
 
@@ -1173,6 +1364,34 @@ func (s *Service) setComment(owner, id, comment string) (*Lease, error) {
 	}
 	l.Comment = comment
 	s.saveLeaseLocked(l)
+	return l, nil
+}
+
+// setNetwork updates a lease's egress policy and allowlist (U09): the
+// lease is saved, the egress config is re-applied to its sandbox, and
+// every lease's peer allowances are refreshed asynchronously.
+func (s *Service) setNetwork(ctx context.Context, owner, id, policy string, allow []string) (*Lease, error) {
+	s.store.mu.Lock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		s.store.mu.Unlock()
+		return nil, errNotFound
+	}
+	if l.Suspended {
+		s.store.mu.Unlock()
+		return nil, errSuspended
+	}
+	l.NetPolicy = policy
+	l.NetAllow = allow
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
+
+	eg := s.egressFor(l)
+	if err := s.sub.UpdateEgress(ctx, l.SandboxID, eg); err != nil {
+		return nil, fmt.Errorf("update egress: %w", err)
+	}
+	s.recordAppliedEgress(l.ID, eg)
+	s.refreshPeersAsync(ctx)
 	return l, nil
 }
 
