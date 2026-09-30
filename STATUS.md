@@ -41,6 +41,7 @@ Orchestrator session started 2026-09-30.
 - U04: PASS (2026-09-30), zero deviations. VERIFY-U04.md in the U04 worktree.
 - SPEC1 (internet→public+LAN): PASS (2026-09-30).
 - U06: PASS (2026-09-30), zero deviations. VERIFY-U06.md in the U06 worktree.
+- U07: PASS (2026-09-30) on the full 11-commit branch after the scylla fix trail; zero deviations; keys fingerprint-checked by the verifier.
 
 ## Autonomous window runs
 
