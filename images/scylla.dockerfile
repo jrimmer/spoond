@@ -10,7 +10,7 @@ RUN apt-get update -qq \
  && install -m 0644 /tmp/scylla-signing-key.gpg /etc/apt/keyrings/scylladb.gpg \
  && install -m 0644 /tmp/scylla-2026.2.list /etc/apt/sources.list.d/scylla.list \
  && apt-get update -qq \
- && apt-get install -y --no-install-recommends scylla=2026.2.6-0.20260824.c06236b53803-1 \
+ && apt-get install -y --no-install-recommends scylla=2026.2.7-0.20260902.94dae629230b-1 \
  && rm -rf /var/lib/apt/lists/*
 COPY --chmod=755 scylla-init-hook.sh /etc/spoond/init.d/50-scylla
 COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
