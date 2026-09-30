@@ -105,11 +105,20 @@ and in U12). After the U05 merge, the orchestrator recreates `STATUS.md` on
 
 **Assumed setup.** Adjust the "Environment" block of the prompt if yours
 differs.
-- **Harness:** Claude Code, with subagents and git worktrees.
-  - **Orchestrator:** Claude Opus 5.5 (`claude-opus-5-5`).
-  - **Workers:** GLM-5.3-Flash.
-  - **Verifiers:** Claude Sonnet 5 (`claude-sonnet-5`). A different model
+- **Harness:** OMP (oh-my-pi, `omp`), with its `task` sub-agents. The
+  project agents live in `.omp/agents/` in the spoond repo:
+  - **Orchestrator:** the main OMP session, `zai/glm-5.3` (thinking `high`).
+  - **Workers:** agent `spec-worker`, `zai/glm-5.3-flash` (thinking `high`).
+  - **Verifiers:** agent `spec-verifier`, `zai/glm-5.3`. A different model
     from the workers, so verification is independent.
+  - **Ops runner:** agent `spec-ops`, `zai/glm-5.3-flash` (thinking `low`).
+    The only agent that uses SSH.
+
+  None of the three agents may spawn further agents (`spawns: []`). The
+  orchestrator creates the git worktrees itself with `git worktree add`, and
+  gives each worker its worktree's absolute path.
+- **SSH:** always the local key `~/.ssh/id_ed25519`, never an SSH agent.
+  This is enforced in `~/.ssh/config`.
 - **Where it runs:** the orchestrator and workers run on the operator's
   workstation, an **arm64** Linux machine with the spoond checkout at
   `/home/jrimmer/Work/spoond`.
@@ -147,18 +156,24 @@ differs.
 >     `ssh root@vm2.lacy.casa 'test -s /etc/spoond/conformance.env && echo present'`;
 >     if absent, stop and ask the human.
 >
-> **Models**
-> - **Workers:** GLM-5.3-Flash, one per unit, each in its own git worktree.
-> - **Verifiers:** Claude Sonnet 5 (`claude-sonnet-5`). A verifier is never
+> **Agents (OMP `task` tool; defined in `.omp/agents/`)**
+> - **Workers:** agent `spec-worker` (`zai/glm-5.3-flash`), one per unit,
+>   each in its own git worktree. Give it the unit id, the absolute worktree
+>   path, and the `.spec-context/` path.
+> - **Ops runner:** agent `spec-ops` (`zai/glm-5.3-flash`). Give it the unit
+>   file and step number. It is the only agent that runs commands on vm2.
+> - **Verifiers:** agent `spec-verifier` (`zai/glm-5.3`). A verifier is never
 >   the agent that wrote the unit.
-> - **You:** Claude Opus 5.5. You do not write implementation code.
+> - **You:** `zai/glm-5.3`, the main OMP session. You do not write
+>   implementation code, and you do not run commands on vm2.
 >
 > **Setup, in order, before any unit starts**
 > 1. `git -C /home/jrimmer/Work/spoond fetch origin`.
 > 2. If `feat/e2b-substrate` does not exist, create it from `origin/main`.
 > 3. Merge `docs/e2b-substrate-spec` into `feat/e2b-substrate` with `--no-ff`,
 >    so every worktree contains the spec.
-> 4. **Confirm vm2 access** (read-only) by running exactly:
+> 4. **Confirm vm2 access** (read-only). Dispatch `spec-ops` to run exactly
+>    this (it is the only agent that uses SSH):
 >    ```bash
 >    ssh -o BatchMode=yes -o ConnectTimeout=10 root@vm2.lacy.casa \
 >      'hostname; uname -m; . /etc/os-release; echo "$ID $VERSION_ID"; systemctl is-active forkd-controller spoond-backend spoond-runner spoond-sshd-gateway'
@@ -233,14 +248,36 @@ differs.
 > `.spec-context/`.
 >
 > **Notify me**
-> - Send a push notification, or post a message if you can't, whenever a
->   `BLOCKED-*.md` appears, when a unit becomes `verifying-on-host`, and when
->   you stop.
+> - Post a short message in this session, and add a dated line under
+>   "Notifications" in `STATUS.md`, whenever a `BLOCKED-*.md` appears, when a
+>   unit becomes `verifying-on-host` or `soaking`, and when you stop.
 > - Each notification names the unit and the single action needed from me.
 >
 > **Stop condition.** Stop when every remaining unit is `blocked`,
 > `soaking` (U12's 7-day soak or the wait for step 20's due date) or
 > `done`. End with the contents of `STATUS.md`.
+
+**How to launch (unattended).** The prompt above is also saved, without
+the quote markers, as `03-kickoff.md`. From the spoond checkout:
+
+```bash
+cd /home/jrimmer/Work/spoond
+git switch docs/e2b-substrate-spec   # so .omp/agents/ and the spec are present
+omp --model zai/glm-5.3:high --approval-mode yolo \
+  @docs/plans/2026-09-30-e2b-substrate/03-kickoff.md
+```
+
+- `--approval-mode yolo` lets it run without tool-approval prompts. The
+  spec's rules (only `spec-ops` touches vm2, and only verbatim unit
+  commands; production changes only under the Autonomous window protocol)
+  are what bound it.
+- **Before starting,** check that `omp models` lists both
+  `zai/glm-5.3` and `zai/glm-5.3-flash`, and that the three agents in
+  `.omp/agents/` are discovered: they appear as agent types to the `task`
+  tool.
+- The orchestrator creates `feat/e2b-substrate`, and every worktree
+  branches from it. It merges `docs/e2b-substrate-spec` in during setup, so
+  `.omp/agents/` is present in every worktree.
 
 If vm2 access is ever **not** available, replace the "Target host" bullet
 with:
