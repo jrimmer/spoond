@@ -8,10 +8,7 @@
 # Any Phoenix+NIF repo can reuse it; if a future job needs a different
 # single toolchain, prefer a language base instead of growing this one.
 #
-# Bake (on the forkd host, see deploy/bake-elixir-release.sh):
-#   docker build -f images/elixir-release.dockerfile -t elixir-release-tools:local .
-#   forkd from-image elixir-release-tools:local --tag elixir-release \
-#     --extra python3 --size-mib 12288 --mem-size-mib 4096
+# Build: spoond images build elixir-release   (U07; E2B template)
 #
 # Sizing follows the rust-base notes: Rust toolchain + cargo artifacts +
 # hex deps + node_modules + _build peak well past 8 GiB; memory 4 GiB
@@ -114,3 +111,5 @@ RUN pkg-config --exists webkit2gtk-4.1 \
 # lists the LAN resolvers first, so code.lacy.casa resolves to the LAN
 # edge whose /v2/ path is not SSO-gated. Image-level /etc/hosts pinning
 # does not survive guest boot.
+COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
+RUN mkdir -p /etc/spoond/init.d

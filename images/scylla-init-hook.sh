@@ -1,7 +1,7 @@
 #!/bin/bash
-# /etc/forkd/init.d/50-scylla — start ScyllaDB at guest boot (spoond #70).
+# /etc/spoond/init.d/50-scylla — start ScyllaDB at guest boot (spoond #70).
 #
-# Runs as a forkd-init.sh hook, before the agent: starts the server detached
+# Runs as a spoond-guest-init hook, before the agent: starts the server detached
 # and returns once CQL answers, so a bake snapshots it serving.
 #
 # Flag syntax matters: the scylla wrapper takes `--flag value` or
@@ -24,7 +24,7 @@ nohup setsid /usr/bin/scylla \
   --options-file /etc/scylla/scylla.yaml \
   --developer-mode=1 --smp=1 --memory=1200M --overprovisioned \
   --tablets-mode-for-new-keyspaces=disabled \
-  --listen-address=127.0.0.1 --rpc-address=0.0.0.0 --broadcast-rpc-address=10.42.0.2 \
+  --listen-address=127.0.0.1 --rpc-address=0.0.0.0 --broadcast-rpc-address=169.254.0.21 \
   --seed-provider-parameters=seeds=127.0.0.1 --api-address=127.0.0.1 \
   >/tmp/scylla.log 2>&1 </dev/null &
 echo $! >/tmp/scylla.pid

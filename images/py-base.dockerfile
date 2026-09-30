@@ -23,3 +23,5 @@ RUN for b in git python3 pip3 curl; do \
       command -v "$b" >/dev/null || { echo "MISSING TOOL: $b" >&2; exit 1; }; \
     done \
  && git --version && python3 --version
+COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
+RUN mkdir -p /etc/spoond/init.d
