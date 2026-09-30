@@ -1,0 +1,19 @@
+#!/bin/bash
+# spoond-guest-init — E2B template start command. Runs once while the
+# template is built; the template is snapshotted after the ready command
+# (test -f /run/spoond-guest-ready) succeeds, so everything done here is in
+# every sandbox's restored memory and disk.
+set -u
+rm -f /etc/resolv.conf
+printf 'nameserver 10.1.0.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n' > /etc/resolv.conf
+for h in /etc/spoond/init.d/*; do
+  [ -x "$h" ] || continue
+  echo "spoond-guest-init: running $h"
+  if ! "$h"; then
+    echo "spoond-guest-init: hook $h failed" >&2
+    touch /run/spoond-guest-failed
+    exec sleep infinity
+  fi
+done
+touch /run/spoond-guest-ready
+exec sleep infinity

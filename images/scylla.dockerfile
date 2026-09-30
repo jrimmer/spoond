@@ -1,17 +1,19 @@
-# scylla — ScyllaDB as a forkd SERVICE image (spoond #70).
-#
-# Capability, not project: a single-node, developer-mode CQL database that a
-# CI job (or any sandbox) leases per run and reaches through `expose_ports`.
-# The pinned build matches the one cytale's dev and CI run against.
-#
-# The image carries a boot hook (/etc/forkd/init.d/, run by forkd-init.sh
-# before the agent) that starts ScyllaDB and returns once CQL answers — so the
-# bake snapshots it SERVING and every fork restores warm, in milliseconds,
-# instead of paying a ~10s cold boot per job.
-#
-# The RHEL-based upstream image already has python3 (the guest agent's
-# interpreter), so the bake passes no --extra (apt would fail here anyway).
-FROM scylladb/scylla:2026.2.6
-# --chmod, not a RUN chmod: the upstream image's USER is `scylla`, which may
-# not chmod a root-owned file.
-COPY --chmod=755 scylla-init-hook.sh /etc/forkd/init.d/50-scylla
+# scylla — ScyllaDB as a SERVICE image (spoond #70). A job leases it with
+# expose_ports [9042]. Debian 12 + ScyllaDB's apt repository (the upstream
+# scylladb/scylla image is RHEL UBI, which E2B's template builder rejects).
+FROM debian:12
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
+ && install -d -m 0755 /etc/apt/keyrings \
+ && gpg --homedir /tmp --no-default-keyring --keyring /etc/apt/keyrings/scylladb.gpg \
+        --keyserver hkps://keyserver.ubuntu.com --recv-keys 6C6ECC84F42AF147BD2A65AEC503C686B007F39E \
+ && gpg --no-default-keyring --keyring /etc/apt/keyrings/scylladb.gpg --list-keys --with-colons \
+      | grep -q '^fpr:::::::::6C6ECC84F42AF147BD2A65AEC503C686B007F39E:' \
+ && curl -fsSL -o /etc/apt/sources.list.d/scylla.list https://downloads.scylladb.com/deb/debian/scylla-2026.2.list \
+ && apt-get update -qq \
+ && apt-get install -y --no-install-recommends scylla=2026.2.6-0.20260824.c06236b53803-1 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --chmod=755 scylla-init-hook.sh /etc/spoond/init.d/50-scylla
+COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
+RUN mkdir -p /etc/spoond/init.d
