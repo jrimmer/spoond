@@ -20,6 +20,7 @@ import (
 	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
 	"github.com/jrimmer/spoond/metrics"
+	"github.com/jrimmer/spoond/store"
 )
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
@@ -44,7 +45,15 @@ type Lease struct {
 	ExposePorts []int
 	ExposedIP   string
 	Comment     string // optional free-text annotation (set/cleared via ctl comment)
-	released    bool
+	// Lifecycle state kept in the store (U05); later units set the
+	// checkpoint/recovery fields. State is running|suspended|recovered|lost
+	// ("" = derived from Suspended).
+	State                 string
+	ResumeBuildID         string    // build a suspended lease resumes from
+	LastCheckpointBuildID string    // newest checkpoint build of this lease
+	LastCheckpointAt      time.Time // zero = never checkpointed
+	RecoveredFrom         time.Time // zero = never recovered
+	released              bool
 }
 
 // ShareMode selects which surfaces a share covers.
@@ -77,14 +86,18 @@ type Store struct {
 	// the same lock as the quota count and released when the lease is
 	// inserted or the grant fails, closing the check-then-create race.
 	pending map[string]int
+	// lastActiveDirty batches touch() updates; the sweeper flushes them
+	// to the store once per tick instead of writing on every activity.
+	lastActiveDirty map[string]time.Time
 }
 
 func newStore() *Store {
 	return &Store{
-		leases:  make(map[string]*Lease),
-		pool:    make(map[string][]string),
-		shares:  make(map[string]map[string]*Share),
-		pending: make(map[string]int),
+		leases:          make(map[string]*Lease),
+		pool:            make(map[string][]string),
+		shares:          make(map[string]map[string]*Share),
+		pending:         make(map[string]int),
+		lastActiveDirty: make(map[string]time.Time),
 	}
 }
 
@@ -153,6 +166,11 @@ type Service struct {
 	netpolDNS []string
 	// metrics (issue #20): service-level Prometheus metrics.
 	metrics *metrics.BackendMetrics
+	// db persists leases, shares and the pool (U05). Nil (tests) keeps
+	// the service memory-only: every store helper becomes a no-op.
+	db *store.DB
+	// stopLoops cancels the background sweeper/refiller started by Start.
+	stopLoops context.CancelFunc
 }
 
 // SetNetpol installs the egress-policy applier and the DNS resolvers
@@ -162,6 +180,12 @@ type Service struct {
 // record pool, lease, and netpol events.
 func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 	s.metrics = m
+}
+
+// SetDB installs the SQLite store (U05). Call before LoadState; nil
+// (the default in tests) keeps the service memory-only.
+func (s *Service) SetDB(db *store.DB) {
+	s.db = db
 }
 
 func (s *Service) SetNetpol(a PolicyApplier, dns []string) {
@@ -248,6 +272,9 @@ func (s *Service) applyNetpol(ctx context.Context, l *Lease) error {
 	if len(l.ExposePorts) > 0 {
 		l.ExposedIP = ip
 	}
+	s.store.mu.Lock()
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
 	return nil
 }
 
@@ -310,8 +337,9 @@ func NewServiceWithIdle(fc ForkdClient, tokens map[string]string, poolSize int, 
 }
 
 // Start begins the TTL sweeper and warm-pool refill. It runs until ctx
-// is cancelled.
+// is cancelled or Shutdown stops it.
 func (s *Service) Start(ctx context.Context) {
+	ctx, s.stopLoops = context.WithCancel(ctx)
 	go func() {
 		t := time.NewTicker(s.sweepInterval)
 		defer t.Stop()
@@ -353,6 +381,7 @@ func (s *Service) refillPool(ctx context.Context) {
 // released as before.
 func (s *Service) sweepExpired(ctx context.Context) {
 	s.store.mu.Lock()
+	s.flushLastActiveLocked(ctx)
 	var expired []*Lease
 	var idleSuspend []*Lease
 	now := time.Now()
@@ -393,6 +422,7 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		}
 		s.store.mu.Lock()
 		l.Suspended = true
+		s.saveLeaseLocked(l)
 		s.store.mu.Unlock()
 		suspended++
 		time.Sleep(500 * time.Millisecond)
@@ -408,7 +438,11 @@ func (s *Service) touch(id string) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	if l := s.store.leases[id]; l != nil && !l.released {
-		l.LastActive = time.Now()
+		now := time.Now()
+		l.LastActive = now
+		if s.db != nil {
+			s.store.lastActiveDirty[id] = now
+		}
 	}
 }
 
@@ -432,6 +466,7 @@ func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error)
 	}
 	l.ExpiresAt = time.Now().Add(ttl)
 	l.LastActive = time.Now() // keep-alive is activity
+	s.saveLeaseLocked(l)
 	return l, nil
 }
 
@@ -468,6 +503,7 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 			s.log.Printf("release: kill %s: already gone (removing lease)", l.ForkdID)
 			s.store.mu.Lock()
 			delete(s.store.leases, l.ID)
+			s.deleteLeaseLocked(l.ID)
 			s.store.mu.Unlock()
 			return
 		}
@@ -480,6 +516,7 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	}
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
+	s.deleteLeaseLocked(l.ID)
 	s.store.mu.Unlock()
 }
 
@@ -565,6 +602,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		NetPolicy:   netPolicy,
 		NetAllow:    netAllow,
 		ExposePorts: exposePorts,
+		State:       "running",
 	}
 
 	// Persistent leases are workspace-backed so they can suspend/resume
@@ -589,6 +627,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		}
 		s.store.mu.Lock()
 		s.store.leases[lease.ID] = lease
+		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
 		return lease, nil
 	}
@@ -604,6 +643,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 		if len(pool) > 0 {
 			forkdID = pool[len(pool)-1]
 			s.store.pool[image] = pool[:len(pool)-1]
+			s.removePoolLocked(forkdID)
 		}
 		// Ensure the image is registered so the warm-pool refill knows to
 		// pre-fork it.
@@ -658,6 +698,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, memoryMiB int,
 	}
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
+	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
 	return lease, nil
 }
@@ -676,6 +717,15 @@ func (s *Service) fillEndpoint(ctx context.Context, lease *Lease) error {
 	for _, sb := range sbs {
 		if sb.ID == lease.ForkdID {
 			lease.Address = sb.GuestAddr
+			// Persist the address change, but only for a lease the store
+			// already tracks: during grant the lease is not in the map
+			// until every fallible step (probe, netpol) has passed, and
+			// grant's insert saves the complete row.
+			s.store.mu.Lock()
+			if s.store.leases[lease.ID] != nil {
+				s.saveLeaseLocked(lease)
+			}
+			s.store.mu.Unlock()
 			return nil
 		}
 	}
@@ -706,6 +756,8 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 	}
 	s.store.mu.Lock()
 	l.Suspended = true
+	l.State = "suspended"
+	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	return l, nil
 }
@@ -737,6 +789,8 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 	l.ForkdID = ws.LiveSandboxID
 	l.LastActive = time.Now()
 	l.Suspended = false
+	l.State = "running"
+	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	if err := s.fillEndpoint(ctx, l); err != nil {
 		return nil, err
@@ -790,6 +844,8 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	l.ForkdID = sbs[0].ID
 	l.Suspended = false
 	l.LastActive = time.Now()
+	l.State = "running"
+	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	if err := s.fillEndpoint(ctx, l); err != nil {
 		return nil, err
@@ -825,6 +881,7 @@ func (s *Service) setName(owner, id, name string) (*Lease, error) {
 		}
 	}
 	l.Name = name
+	s.saveLeaseLocked(l)
 	return l, nil
 }
 
@@ -842,6 +899,7 @@ func (s *Service) setComment(owner, id, comment string) (*Lease, error) {
 		return nil, errNotFound
 	}
 	l.Comment = comment
+	s.saveLeaseLocked(l)
 	return l, nil
 }
 
@@ -924,6 +982,7 @@ func (s *Service) GrantShare(owner, leaseID, grantee string, mode ShareMode, ttl
 		s.store.shares[leaseID] = make(map[string]*Share)
 	}
 	s.store.shares[leaseID][grantee] = sh
+	s.saveShareLocked(sh)
 	return nil
 }
 
@@ -942,6 +1001,7 @@ func (s *Service) RevokeShare(owner, leaseID, grantee string) error {
 			delete(s.store.shares, leaseID)
 		}
 	}
+	s.deleteShareLocked(leaseID, grantee)
 	return nil
 }
 
@@ -1008,6 +1068,7 @@ func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl 
 		ExpiresAt:  time.Now().Add(ttl),
 		Persistent: persistent,
 		LastActive: time.Now(),
+		State:      "running",
 	}
 	if persistent {
 		ws, err := s.forkd.CreateWorkspace(ctx, "ws-"+lease.ID, tag, true)
@@ -1028,6 +1089,7 @@ func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl 
 		}
 		s.store.mu.Lock()
 		s.store.leases[lease.ID] = lease
+		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
 		return lease, nil
 	}
@@ -1042,6 +1104,7 @@ func (s *Service) grantFromSnapshot(ctx context.Context, owner, tag string, ttl 
 	lease.Address = sbs[0].GuestAddr
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
+	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
 	return lease, nil
 }
@@ -1211,9 +1274,230 @@ func (s *Service) warmPool(ctx context.Context, image string) {
 		s.store.mu.Lock()
 		for _, sb := range sbs {
 			s.store.pool[image] = append(s.store.pool[image], sb.ID)
+			s.addPoolLocked(sb.ID, image)
 		}
 		s.store.mu.Unlock()
 	}
+}
+
+// leaseToRow maps an in-memory lease to its store row. An empty State
+// is derived from Suspended so the row always carries a valid state.
+func leaseToRow(l *Lease) store.LeaseRow {
+	state := l.State
+	if state == "" {
+		if l.Suspended {
+			state = "suspended"
+		} else {
+			state = "running"
+		}
+	}
+	return store.LeaseRow{
+		ID:                    l.ID,
+		Owner:                 l.Owner,
+		Image:                 l.Image,
+		SandboxID:             l.ForkdID,
+		Address:               l.Address,
+		CreatedAt:             l.CreatedAt,
+		ExpiresAt:             l.ExpiresAt,
+		Persistent:            l.Persistent,
+		LastActive:            l.LastActive,
+		Suspended:             l.Suspended,
+		Workspace:             l.Workspace,
+		Name:                  l.Name,
+		NetPolicy:             l.NetPolicy,
+		NetAllow:              l.NetAllow,
+		ExposePorts:           l.ExposePorts,
+		ExposedIP:             l.ExposedIP,
+		Comment:               l.Comment,
+		State:                 state,
+		ResumeBuildID:         l.ResumeBuildID,
+		LastCheckpointBuildID: l.LastCheckpointBuildID,
+		LastCheckpointAt:      l.LastCheckpointAt,
+		RecoveredFrom:         l.RecoveredFrom,
+	}
+}
+
+// rowToLease maps a store row back to an in-memory lease. The Suspended
+// flag follows the persisted state.
+func rowToLease(r store.LeaseRow) *Lease {
+	return &Lease{
+		ID:                    r.ID,
+		Owner:                 r.Owner,
+		Image:                 r.Image,
+		ForkdID:               r.SandboxID,
+		Address:               r.Address,
+		CreatedAt:             r.CreatedAt,
+		ExpiresAt:             r.ExpiresAt,
+		Persistent:            r.Persistent,
+		LastActive:            r.LastActive,
+		Suspended:             r.State == "suspended",
+		Workspace:             r.Workspace,
+		Name:                  r.Name,
+		NetPolicy:             r.NetPolicy,
+		NetAllow:              r.NetAllow,
+		ExposePorts:           r.ExposePorts,
+		ExposedIP:             r.ExposedIP,
+		Comment:               r.Comment,
+		State:                 r.State,
+		ResumeBuildID:         r.ResumeBuildID,
+		LastCheckpointBuildID: r.LastCheckpointBuildID,
+		LastCheckpointAt:      r.LastCheckpointAt,
+		RecoveredFrom:         r.RecoveredFrom,
+	}
+}
+
+// storeWriteTimeout bounds a single store write.
+const storeWriteTimeout = 5 * time.Second
+
+// storeError records a failed store write: a log line plus the
+// spoond_store_errors_total counter. Store errors never fail the
+// request — availability wins over durability for a single write.
+func (s *Service) storeError(op, id string, err error) {
+	s.log.Printf("store: %s %s: %v", op, id, err)
+	if s.metrics != nil {
+		s.metrics.StoreErrors.WithLabelValues(op).Inc()
+	}
+}
+
+// The store helpers below are called with s.store.mu held and are
+// no-ops when no database is installed, so memory-only callers (tests)
+// need no changes.
+
+func (s *Service) saveLeaseLocked(l *Lease) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.UpsertLease(ctx, leaseToRow(l)); err != nil {
+		s.storeError("upsert_lease", l.ID, err)
+	}
+}
+
+func (s *Service) deleteLeaseLocked(id string) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.DeleteLease(ctx, id); err != nil {
+		s.storeError("delete_lease", id, err)
+	}
+}
+
+func (s *Service) saveShareLocked(sh *Share) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.UpsertShare(ctx, store.ShareRow{
+		LeaseID:   sh.LeaseID,
+		Grantee:   sh.Grantee,
+		Mode:      string(sh.Mode),
+		ExpiresAt: sh.ExpiresAt,
+		CreatedAt: sh.CreatedAt,
+	}); err != nil {
+		s.storeError("upsert_share", sh.LeaseID+"/"+sh.Grantee, err)
+	}
+}
+
+func (s *Service) deleteShareLocked(leaseID, grantee string) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.DeleteShare(ctx, leaseID, grantee); err != nil {
+		s.storeError("delete_share", leaseID+"/"+grantee, err)
+	}
+}
+
+func (s *Service) addPoolLocked(id, image string) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.AddPool(ctx, id, image); err != nil {
+		s.storeError("add_pool", id, err)
+	}
+}
+
+func (s *Service) removePoolLocked(id string) {
+	if s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.RemovePool(ctx, id); err != nil {
+		s.storeError("remove_pool", id, err)
+	}
+}
+
+// flushLastActiveLocked writes the batched touch() updates in one
+// transaction, then clears the dirty set. A failed flush keeps the set
+// so the next tick retries. Called with s.store.mu held.
+func (s *Service) flushLastActiveLocked(ctx context.Context) {
+	if s.db == nil || len(s.store.lastActiveDirty) == 0 {
+		return
+	}
+	dirty := s.store.lastActiveDirty
+	ctx, cancel := context.WithTimeout(ctx, storeWriteTimeout)
+	defer cancel()
+	if err := s.db.UpdateLastActive(ctx, dirty); err != nil {
+		ids := make([]string, 0, len(dirty))
+		for id := range dirty {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		s.storeError("update_last_active", strings.Join(ids, ","), err)
+		return
+	}
+	s.store.lastActiveDirty = make(map[string]time.Time)
+}
+
+// LoadState reads every lease, share and pool entry from the store into
+// memory. Known images stay registered in the pool map (seeded by the
+// constructor) so the warm-pool refill keeps pre-forking them. It must
+// run before Start and before ReconcileOrphans.
+func (s *Service) LoadState(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	leases, err := s.db.ListLeases(ctx)
+	if err != nil {
+		return fmt.Errorf("load leases: %w", err)
+	}
+	shareRows, err := s.db.ListShares(ctx)
+	if err != nil {
+		return fmt.Errorf("load shares: %w", err)
+	}
+	pool, err := s.db.ListPool(ctx)
+	if err != nil {
+		return fmt.Errorf("load pool: %w", err)
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	for _, r := range leases {
+		s.store.leases[r.ID] = rowToLease(r)
+	}
+	for _, r := range shareRows {
+		if s.store.shares[r.LeaseID] == nil {
+			s.store.shares[r.LeaseID] = make(map[string]*Share)
+		}
+		s.store.shares[r.LeaseID][r.Grantee] = &Share{
+			LeaseID:   r.LeaseID,
+			Grantee:   r.Grantee,
+			Mode:      ShareMode(r.Mode),
+			ExpiresAt: r.ExpiresAt,
+			CreatedAt: r.CreatedAt,
+		}
+	}
+	for img, ids := range pool {
+		s.store.pool[img] = ids
+	}
+	return nil
 }
 
 // LiveLeases returns the count of active (unreleased) leases. Used by
@@ -1230,38 +1514,25 @@ func (s *Service) LiveLeases() []string {
 	return ids
 }
 
-// Shutdown kills every lease and pooled sandbox. Called on SIGTERM/
-// SIGINT so a backend restart never orphans warm VMs in the controller
-// (the controller has no client-liveness concept, so orphaned VMs
-// would otherwise hold netns slots forever).
+// Shutdown stops the background loops and flushes the batched
+// LastActive updates to the store. It does NOT release leases, delete
+// workspaces or kill pooled sandboxes: state persists in the SQLite
+// store and the next incarnation loads it via LoadState (U05).
 func (s *Service) Shutdown(ctx context.Context) {
+	if s.stopLoops != nil {
+		s.stopLoops()
+	}
 	s.store.mu.Lock()
-	all := make([]*Lease, 0, len(s.store.leases))
-	for _, l := range s.store.leases {
-		all = append(all, l)
-	}
-	// Pool ids are not full leases; kill them directly.
-	poolIDs := make([]string, 0)
-	for _, ids := range s.store.pool {
-		poolIDs = append(poolIDs, ids...)
-	}
-	s.store.mu.Unlock()
-
-	for _, l := range all {
-		s.release(ctx, l)
-	}
-	for _, id := range poolIDs {
-		if err := s.forkd.Kill(ctx, id); err != nil {
-			s.log.Printf("shutdown: kill pooled %s failed: %v", id, err)
-		}
-	}
+	defer s.store.mu.Unlock()
+	s.flushLastActiveLocked(ctx)
 }
 
-// ReconcileOrphans kills controller sandboxes that this backend did not
-// create. On startup the in-memory lease/pool maps are empty, so any
-// live sandbox belongs to a previous backend incarnation (or a foreign
-// client); killing them frees netns slots that would otherwise be held
-// forever.
+// ReconcileOrphans aligns the controller with the state loaded from the
+// store (U05). Controller sandboxes that no lease (by sandbox id) or
+// pool entry claims are killed. Non-suspended leases whose sandbox is
+// missing from the controller were lost to a crash or a controller
+// restart: they are marked lost and kept, never deleted. Pool entries
+// whose sandbox is missing are removed.
 // CollectMetrics updates live gauge metrics from the current service
 // state (issue #20). Called by the Server before gathering metrics
 // for /metrics. All store access is under the store lock.
@@ -1308,6 +1579,10 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 		s.log.Printf("reconcile: list sandboxes failed: %v", err)
 		return
 	}
+	present := make(map[string]bool, len(sbs))
+	for _, sb := range sbs {
+		present[sb.ID] = true
+	}
 	s.store.mu.Lock()
 	mine := make(map[string]bool)
 	for _, l := range s.store.leases {
@@ -1317,6 +1592,27 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 		for _, id := range ids {
 			mine[id] = true
 		}
+	}
+	// Non-suspended leases whose sandbox is gone are marked lost (the
+	// DB row is kept); suspended leases have no live sandbox by design.
+	for _, l := range s.store.leases {
+		if l.Suspended || present[l.ForkdID] {
+			continue
+		}
+		l.State = "lost"
+		s.saveLeaseLocked(l)
+	}
+	// Pool entries whose sandbox is missing are stale.
+	for img, ids := range s.store.pool {
+		kept := ids[:0]
+		for _, id := range ids {
+			if present[id] {
+				kept = append(kept, id)
+			} else {
+				s.removePoolLocked(id)
+			}
+		}
+		s.store.pool[img] = kept
 	}
 	s.store.mu.Unlock()
 
