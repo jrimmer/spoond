@@ -9,7 +9,7 @@ Orchestrator session started 2026-09-30.
 |---|---|---|
 | U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
 | U02 conformance-suite | verifying-on-host | suite+baseline merged (dcc03cf); verifier PASS×2; baseline deviation pending human decision (see Waiting on human) |
-| U03 e2b-fork-and-patches | running | steps 1–2 done on vm2; worker authoring P1–P5 on workstation clone |
+| U03 e2b-fork-and-patches | blocked | 2nd verifier FAIL (residual race): top-level t.Parallel() in TestEgressDecision must also go — see Waiting on human |
 | U04 host-bringup | pending | depends on U03 |
 | U05 sqlite-store | verifying-on-host | feat merge c165550 (orchestrator initially merged main without U05 — caught by ops contradiction check, no production impact); corrected main c926de7 pushed; deploy re-dispatched |
 | U06 substrate-interface | pending | depends on U04 + U05 |
@@ -49,6 +49,11 @@ Orchestrator session started 2026-09-30.
 - **RESOLVED (2026-09-30):** vm2 SSH "host key changed" was **DNS misdirection**, not a re-key. Public DNS for `vm2.lacy.casa` began resolving to `5.78.185.36`, a foreign host presenting rotating keys (`8OdOGujd…` then `f0e74e1a…`, both confirmed *not* vm2 by the human). The real vm2 is `10.1.0.11` (per the human; matches `01-architecture.md` `HOST_PRIMARY_IP`) and serves the **original** host keys (ed25519 `SHA256:3fd5df51…`, ecdsa `SHA256:a480c83a…`). Fixed on the workstation: `~/.ssh/config` now pins `Host vm2.lacy.casa → HostName 10.1.0.11`, and `10.1.0.11`'s keys were added to `known_hosts`. Verified: `ssh root@vm2.lacy.casa` → `sandbox`, `x86_64`, `active` ×4. No unit command ever ran against the foreign host; vm2 state untouched throughout. Suggested (human, non-blocking): fix the public DNS record for `vm2.lacy.casa`.
 
 - **U02 forkd baseline deviates from the spec's expectation (2026-09-30) — DECISION NEEDED.** The unit expects only S3/D3/N2 to fail on forkd; observed 13 failures. Unexpected (all server-side on production forkd): I1 prod `/api/images` lacks `elixir-base`, `llm-review`, `rust-base` present in the repo manifest; I2 `pnpm --version` exit 1 in elixir-release; L1/S1/S2 `dev-base` create → 500 "failed to grant sandbox" (py-base/go-base fine, ~12 ms); L3/L4 stream WS dial → HTTP 500; N1 **security-relevant**: `internet` policy does NOT block 10.1.0.203:443; N3 proxy → 502 dial refused to sandbox 10.42.0.2:8080; N5 SSH gateway PTY → EOF. Results JSON: vm2 `/root/src/spoond/conformance/results/20260930T031307-forkd.json`, committed as `conformance/baseline-forkd.json`. **Choose: (a) investigate/repair production forkd (CI substrate may be degraded; N1 is a policy leak), (b) accept this baseline as forkd reality (U12 compares E2B against it), or (c) declare the suite wrong and have U02 reworked.** U12 depends on this; U03–U11 continue.
+
+## Waiting-on-human addendum (2026-09-30, U03 second FAIL)
+
+- **U03 blocked on the second verifier FAIL** (02-orchestration.md: one worker retry, then human). Round 1: subtest t.Parallel() raced the hostAddrs swap — fixed. Round 2 residual: the top-level `t.Parallel()` (handlers_allowance_test.go L34) still pairs unsynchronized with upstream's parallel TestIsEgressAllowed subtests reading hostAddrs (7 DATA RACE reports / 15 subtest FAILs under `-run 'TestEgressDecision|TestIsEgressAllowed' -count=5`; scheduling-dependent, which is why vm2's single -race run passed). Verifier's prescribed fix: drop L34's `t.Parallel()` too. Everything else on the branch is verified good (7 commits exact, byte-diff confined to the test file + PATCHES.md build record, vm2 tests+builds green at 86942eaf1, race2.log at /home/jrimmer/gotmp-u03/race2.log).
+  **Needed from human:** one word — "apply" (worker drops L34 t.Parallel(), amend P4 again, vm2 re-run, verifier round 3) — or your own disposition. U04+ stall until then.
 
 ## Notifications
 
