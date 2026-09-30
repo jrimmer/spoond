@@ -30,13 +30,14 @@ func TestN1_Policies(t *testing.T) {
 		failf(t, "none: 10.1.0.203:443 reachable, want blocked")
 	}
 
-	// internet: public yes, private no.
+	// internet: public and LAN reachable (internet maps to public plus the
+	// LAN ranges, as in forkd).
 	l = createLease(t, map[string]any{"image": "py-base", "ttl": 600, "network_policy": "internet"})
 	if !canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "internet: 1.1.1.1:443 blocked, want reachable")
 	}
-	if canTCP(t, l.ID, "10.1.0.203", 443) {
-		failf(t, "internet: 10.1.0.203:443 reachable, want blocked")
+	if !canTCP(t, l.ID, "10.1.0.203", 443) {
+		failf(t, "internet: 10.1.0.203:443 blocked, want reachable")
 	}
 
 	// lan: private yes, public no; the host's own addresses are refused
