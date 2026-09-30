@@ -10,7 +10,7 @@ Orchestrator session started 2026-09-30.
 | U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
 | U02 conformance-suite | done | disposition applied 2026-09-30: (b) stream/proxy/image-dependent failures accepted as baseline with causes in conformance/RESULTS.md; (c) spec fixed (internet=public+LAN, N1 corrected) via impl/spec-internet-lan (verifier PASS, merged b719b3e); missing forkd images NOT rebuilt (U07 rebuilds all seven) |
 | U03 e2b-fork-and-patches | done | verifier round 3 PASS (0 deviations) after human-approved race fix; origin/upstream=e473dd13, origin/spoond=b0424c4dc (upstream+7); binaries on vm2 (orch 7f0036e5…, envd 8c2f0dc3…) |
-| U04 host-bringup | pending | depends on U03 |
+| U04 host-bringup | running | vm2 §1–§10 DONE (orchestrator active+healthy v e9b2f7c28 since 12:06:27 PDT; hugepages 12288 after unit fallback; reclaim={} — P1 effective, no forkd FC touched; registry {} on :5000); §11 worker in flight |
 | U05 sqlite-store | done | deployed 2026-09-30 18:57Z; R3 PASS 1.20s; spoond.db created; all services active |
 | U06 substrate-interface | pending | depends on U04 + U05 |
 | U07 image-pipeline | pending | depends on U04 + U06 |
