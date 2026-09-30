@@ -581,6 +581,12 @@ Firecracker? Two answers from the owner framed this sweep:
   what makes the platform general-purpose for use cases we don't know yet.
 - **Buy over build.** If building, not from scratch, and not as weeks of
   back-and-forth towards "close to right".
+- **No requirement relaxing (decided 2026-09-29).** Warm start,
+  suspend/resume with memory, and fork of a running sandbox with memory are
+  all hard requirements. Dropping memory fork would have qualified Incus;
+  dropping fork and suspend would have qualified Kata, Hyper, OpenSandbox and
+  warm-pooled container runtimes. Both trades were considered and declined,
+  so do not re-open them on capability grounds.
 
 "Better architected" is judged on four structural properties, the ones
 whose absence caused forkd's pain:
