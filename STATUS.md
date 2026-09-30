@@ -7,8 +7,8 @@ Orchestrator session started 2026-09-30.
 
 | Unit | State | Notes |
 |---|---|---|
-| U01 go-upgrade | running | worker started 2026-09-30, worktree `impl/U01-go-upgrade` |
-| U02 conformance-suite | pending | depends on U01 |
+| U01 go-upgrade | blocked | local commit bb21513 on impl/U01-go-upgrade; vm2 steps 9a+10 blocked on host-key change (see Waiting on human) |
+| U02 conformance-suite | pending | blocked behind U01 |
 | U03 e2b-fork-and-patches | pending | starts after U01 step 10 |
 | U04 host-bringup | pending | depends on U03 |
 | U05 sqlite-store | pending | depends on U01 |
@@ -27,7 +27,7 @@ Orchestrator session started 2026-09-30.
 - 2026-09-30 `/etc/spoond/conformance.env` present on vm2 (read-only check) ✓
 - 2026-09-30 vm2 access via spec-ops, exact output:
   `sandbox`, `x86_64`, `debian 13`, `active` ×4 ✓
-- 2026-09-30 `feat/e2b-substrate` created from `origin/main`, spec merged `--no-ff` (7b4f481)
+- 2026-09-30 U01 worker finished local steps (commit bb21513 on `impl/U01-go-upgrade`), parked on vm2 steps 9a/10 per protocol.
 
 ## Verifier results
 
@@ -39,8 +39,10 @@ Orchestrator session started 2026-09-30.
 
 ## Waiting on human
 
-(none)
+
+- **vm2 SSH host key changed mid-session (2026-09-30).** The setup access check and the conformance.env check both passed against the stored key earlier in this session. Minutes later, every ssh to `root@vm2.lacy.casa` fails host-key verification. Offered ED25519 fingerprint now: `SHA256:8OdOGujdZElO17X+/NO5QXOsEOOwTVB2iN/am4oMgis`. Stored fingerprints (known_hosts lines 8–10): ed25519 `SHA256:3fd5df51…`, rsa `SHA256:942925d6…`, ecdsa `SHA256:a480c83a…`. Either vm2 was rebuilt/re-keyed, or this is a MITM. No unit commands ran on vm2 after the change; no vm2 state was touched.
+  **Needed from human:** confirm the host key change is legitimate (and if so update known_hosts, or tell the orchestrator to accept `SHA256:8OdOGujdZElO17X+/NO5QXOsEOOwTVB2iN/am4oMgis`), or investigate. All vm2 steps (U01 9a+10, then U03/U04 and every later ops step) are paused until then.
 
 ## Notifications
 
-- 2026-09-30 Setup complete; U01 started. No action needed.
+- 2026-09-30 BLOCKED (all vm2 work): vm2 SSH host key changed mid-session. Action needed: confirm the new key `SHA256:8OdOGujd…` is legitimate (vm2 rebuild/re-key) or investigate as a security event; then tell the orchestrator to resume.
