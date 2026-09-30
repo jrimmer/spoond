@@ -76,6 +76,10 @@ Orchestrator session started 2026-09-30.
 - **U03 blocked on the second verifier FAIL** (02-orchestration.md: one worker retry, then human). Round 1: subtest t.Parallel() raced the hostAddrs swap — fixed. Round 2 residual: the top-level `t.Parallel()` (handlers_allowance_test.go L34) still pairs unsynchronized with upstream's parallel TestIsEgressAllowed subtests reading hostAddrs (7 DATA RACE reports / 15 subtest FAILs under `-run 'TestEgressDecision|TestIsEgressAllowed' -count=5`; scheduling-dependent, which is why vm2's single -race run passed). Verifier's prescribed fix: drop L34's `t.Parallel()` too. Everything else on the branch is verified good (7 commits exact, byte-diff confined to the test file + PATCHES.md build record, vm2 tests+builds green at 86942eaf1, race2.log at /home/jrimmer/gotmp-u03/race2.log).
   **Needed from human:** one word — "apply" (worker drops L34 t.Parallel(), amend P4 again, vm2 re-run, verifier round 3) — or your own disposition. U04+ stall until then.
 
+## Risk register
+
+- **U12 budget risk (observed 2026-09-30, U08 staging run):** S2 clone 120.8 s and S3 fork8 121.3 s against U02 budgets of 5000/10000 ms. Pattern matches the orchestrator snapshot-persist path (U06 live test logged outstanding_work 1–2 for ~120 s during pause). U08's gate only covers S4 create (61/69 ms — 30× under). If U12 must meet clone/fork budgets, the pause/checkpoint persist path needs investigation (hugepage writeout to ZFS?) before cutover. Recorded for the U12 OPERATOR gate.
+
 ## Notifications
 
 - 2026-09-30 U01 merged into feat/e2b-substrate; U02/U05 started, U03 started. **Action needed:** provide a read-only Forgejo API token (code.lacy.casa) so the orchestrator can read CI status of PR #74 ('Run go version' step must print go1.27.1) — or check PR #74 yourself and confirm. Also (non-blocking): fix public DNS for lacy.casa names (currently pointing at 5.78.185.36) and/or the workstation's resolver fallback.
