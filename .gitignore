@@ -29,3 +29,8 @@
 *.log
 *.pid
 __pycache__/
+
+# Conformance suite results (the committed forkd baseline is
+# conformance/baseline-forkd.json, outside this directory)
+conformance/results/*
+!conformance/results/.gitkeep
