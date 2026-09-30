@@ -8,7 +8,7 @@ Orchestrator session started 2026-09-30.
 | Unit | State | Notes |
 |---|---|---|
 | U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
-| U02 conformance-suite | verifying-on-host | suite+baseline merged (dcc03cf); verifier PASS×2; baseline deviation pending human decision (see Waiting on human) |
+| U02 conformance-suite | done | disposition applied 2026-09-30: (b) stream/proxy/image-dependent failures accepted as baseline with causes in conformance/RESULTS.md; (c) spec fixed (internet=public+LAN, N1 corrected) via impl/spec-internet-lan (verifier PASS, merged b719b3e); missing forkd images NOT rebuilt (U07 rebuilds all seven) |
 | U03 e2b-fork-and-patches | done | verifier round 3 PASS (0 deviations) after human-approved race fix; origin/upstream=e473dd13, origin/spoond=b0424c4dc (upstream+7); binaries on vm2 (orch 7f0036e5…, envd 8c2f0dc3…) |
 | U04 host-bringup | pending | depends on U03 |
 | U05 sqlite-store | done | deployed 2026-09-30 18:57Z; R3 PASS 1.20s; spoond.db created; all services active |
