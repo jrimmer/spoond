@@ -1,15 +1,16 @@
 //go:build linux
 
-// Command forkd-sshd-gateway is the interactive access point for forkd
+// Command spoond-sshd-gateway is the interactive access point for spoond
 // sandboxes: `ssh <lease-id>@sandbox.lacy.casa`. It authenticates the
-// caller with a public key, resolves the lease id to a running sandbox,
-// enters the sandbox's network namespace, and transparently relays an
-// SSH session to the sshd inside the VM (dev-base runs sshd + tmux).
+// caller with a public key, resolves the lease id to a sandbox, and
+// relays the SSH session onto a process in the sandbox through the
+// backend's /api/sandboxes/{id}/stream WebSocket (dev-base attaches to
+// tmux on login).
 //
 // The lease id in the username is the capability: it is unguessable
 // (128-bit random). The gateway accepts any of the configured client
-// keys; the sandbox sshd then authenticates the nested connection with
-// the gateway's own key (baked into dev-base authorized_keys).
+// keys (or, when the backend has an identity store, any key the store
+// knows) and impersonates that user on every backend call.
 package spoondgateway
 
 import (
@@ -29,15 +30,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/sys/unix"
 
 	"github.com/jrimmer/spoond/identity"
 )
@@ -74,17 +74,19 @@ var (
 	// existing units keep working after upgrade.
 	bootstrapTok = flags.String("bootstrap-token", "", "DEPRECATED: ignored; bootstrap via direct backend API call")
 	clientKeys   = flags.String("client-keys", "", "comma-separated paths to authorized client public keys, or a directory scanned for *.pub files")
-	// gatewayKeyPath is the identity the gateway uses to connect INTO
-	// sandboxes. Its public half is baked into dev-base authorized_keys.
-	gatewayKeyPath = flags.String("gateway-key", "/etc/spoond-gateway/gateway_ed25519", "gateway identity key for nested connections")
+	// gatewayKeyPath is the gateway's service identity key. Kept as a
+	// flag (the staging unit file passes it); the gateway no longer
+	// connects into sandboxes with it.
+	gatewayKeyPath = flags.String("gateway-key", "/etc/spoond-gateway/gateway_ed25519", "gateway identity key")
 	// shellyBinaryURL is where the `shelly` ctl verb fetches the agent
 	// binary from inside the sandbox (host-side asset server on the
-	// plain-HTTP proxy listener; guests reach it via forkd-br0).
-	shellyBinaryURL = flags.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.43.0.1:8891/assets/shelley"), "URL the sandbox fetches the shelley binary from")
+	// plain-HTTP proxy listener; guests reach it at the host service
+	// address).
+	shellyBinaryURL = flags.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.1.0.11:8891/assets/shelley"), "URL the sandbox fetches the shelley binary from")
 	// llmGatewayURL is the per-lease LLM gateway base the shelley agent
-	// is pointed at (host-side proxy listener; guests reach it via
-	// forkd-br0). The lease id is appended.
-	llmGatewayURL = flags.String("llm-gateway-url", envOr("LLM_GATEWAY_URL", "http://10.43.0.1:8891/llm/"), "base URL of the per-lease LLM gateway (lease id appended)")
+	// is pointed at (host-side proxy listener; guests reach it at the
+	// host service address). The lease id is appended.
+	llmGatewayURL = flags.String("llm-gateway-url", envOr("LLM_GATEWAY_URL", "http://10.1.0.11:8891/llm/"), "base URL of the per-lease LLM gateway (lease id appended)")
 	// shellyModel is the default model id written into shelley.json. It
 	// must be an id the LLM gateway's LLM_MODEL_MAP understands (the
 	// exe.dev catalog id, not the upstream id).
@@ -101,13 +103,6 @@ var (
 	// → full-tag aliases without code changes. Format: short=full,short=full.
 	extraImageAliases = flags.String("image-aliases", envOr("GATEWAY_IMAGE_ALIASES", ""), "comma-separated short=full image aliases (e.g. rust=rust-base,js=js-base)")
 )
-
-type endpoint struct {
-	ForkdID   string `json:"forkd_id"`
-	Netns     string `json:"netns"`
-	GuestAddr string `json:"guest_addr"`
-	Image     string `json:"image"`
-}
 
 func Main(args []string) int {
 	flags.Parse(args)
@@ -358,36 +353,17 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 			leaseID, reconnect(leaseID))
 	}
 
-	// Security review #37 rescan F8: dial with the USER-scoped context,
-	// not Background — resolveEndpoint/restartSSHD must run as the SSH
-	// user (X-Spoond-User-Id) or attach would resolve as the gateway
-	// service identity: user-owned leases would 404 (broken attach in
-	// store mode) and gateway-owned leases would be attachable by any
-	// user without an ownership check.
-	client, err := dialSandbox(gwCtx, leaseID, gatewayKey)
-	if err != nil {
-		log.Printf("dial sandbox for %s: %v", leaseID, err)
-		// Tell the client what happened with a session-level error.
-		for nc := range chans {
-			if nc.ChannelType() != "session" {
-				nc.Reject(ssh.UnknownChannelType, "only session channels supported")
-				continue
-			}
-			ch, _, _ := nc.Accept()
-			fmt.Fprintf(ch, "spoond: cannot reach sandbox %s: %v\n", leaseID, err)
-			ch.Close()
-			return
-		}
-		return
-	}
-	defer client.Close()
-
+	// Each accepted session channel becomes one process in the sandbox,
+	// started through the backend's /stream WebSocket (U09). The
+	// connection's client address feeds SSH_CONNECTION, which is what
+	// triggers dev-base's tmux attach.
+	clientIP, clientPort, _ := net.SplitHostPort(sconn.RemoteAddr().String())
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
 			newChan.Reject(ssh.UnknownChannelType, "only session channels supported")
 			continue
 		}
-		go handleSession(newChan, client, motd)
+		go handleSession(newChan, gwCtx, leaseID, userID, motd, clientIP, clientPort)
 	}
 }
 
@@ -517,78 +493,6 @@ func createSandbox(ctx context.Context, user string) (string, string, error) {
 		return "", "", fmt.Errorf("create response missing id: %s", strings.TrimSpace(string(b)))
 	}
 	return created.ID, image, nil
-}
-
-// dialSandbox resolves the lease to its netns+address and opens a nested
-// SSH client connection to the sandbox's sshd using the gateway key.
-func dialSandbox(ctx context.Context, leaseID string, gatewayKey ssh.Signer) (*ssh.Client, error) {
-	ep, err := resolveEndpoint(ctx, leaseID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Restart sshd inside the sandbox. Firecracker restore carries the
-	// process table over, but the pre-snapshot sshd's listening socket is
-	// dead in the restored netns (the guest kernel re-initializes its
-	// network stack on restore). A fresh sshd binds cleanly. We reach the
-	// agent via the backend exec API — the agent socket survives restore.
-	if err := restartSSHD(ctx, leaseID); err != nil {
-		log.Printf("sshd restart for %s: %v", leaseID, err)
-	}
-
-	host, port, err := net.SplitHostPort(ep.GuestAddr)
-	if err != nil {
-		// GuestAddr may be host:port for the agent; sshd is on port 22.
-		host = ep.GuestAddr
-		port = "22"
-	}
-	if port == "8888" {
-		port = "22"
-	}
-	target := net.JoinHostPort(host, port)
-
-	// Enter the sandbox's netns on this thread, dial, then return to the
-	// default netns for the relay. setns requires a locked thread.
-	var dialed net.Conn
-	errCh := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		nsPath := filepath.Join("/var/run/netns", ep.Netns)
-		f, err := os.Open(nsPath)
-		if err != nil {
-			errCh <- fmt.Errorf("open netns %s: %w", nsPath, err)
-			return
-		}
-		defer f.Close()
-		if err := unix.Setns(int(f.Fd()), unix.CLONE_NEWNET); err != nil {
-			errCh <- fmt.Errorf("setns %s: %w", ep.Netns, err)
-			return
-		}
-		d, err := net.DialTimeout("tcp", target, 10*time.Second)
-		if err != nil {
-			errCh <- fmt.Errorf("dial %s in netns %s: %w", target, ep.Netns, err)
-			return
-		}
-		dialed = d
-		errCh <- nil
-	}()
-	if err := <-errCh; err != nil {
-		return nil, err
-	}
-
-	cfg := &ssh.ClientConfig{
-		User:            "root",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(gatewayKey)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // homelab; dev-base host key regenerates per bake
-		Timeout:         10 * time.Second,
-	}
-	clientConn, chans, reqs, err := ssh.NewClientConn(dialed, target, cfg)
-	if err != nil {
-		dialed.Close()
-		return nil, fmt.Errorf("nested ssh to %s: %w", target, err)
-	}
-	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
 // handleControlPlane implements the SSH-as-API control plane for the
@@ -1042,139 +946,302 @@ func backendJSONErr(ctx context.Context, method, path string, payload []byte) er
 	return err
 }
 
-func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
+// sessionCommand is the command the gateway starts in the sandbox for an
+// SSH session request (U09): the gateway no longer dials a guest sshd —
+// every session is one process started through the backend's /stream.
+type sessionCommand struct {
+	Kind string // "shell" | "exec" | "sftp"
+	Args []string
+	Pty  bool
+}
+
+// commandForRequest picks the sandbox command for the request that ended
+// the collection phase. A PTY is used iff the client sent pty-req; sftp
+// never gets one. ok=false means the request is refused (unknown
+// subsystem).
+func commandForRequest(reqType, payload string, ptyReq bool) (sessionCommand, bool) {
+	switch reqType {
+	case "shell":
+		return sessionCommand{Kind: "shell", Args: []string{"/bin/bash", "-l"}, Pty: ptyReq}, true
+	case "exec":
+		return sessionCommand{Kind: "exec", Args: []string{"/bin/bash", "-c", payload}, Pty: ptyReq}, true
+	case "subsystem":
+		if payload == "sftp" {
+			return sessionCommand{Kind: "sftp", Args: []string{"/bin/sh", "-c",
+				"if [ -x /usr/lib/openssh/sftp-server ]; then exec /usr/lib/openssh/sftp-server; else exec /usr/lib/ssh/sftp-server; fi"}}, true
+		}
+		return sessionCommand{}, false
+	}
+	return sessionCommand{}, false
+}
+
+// sessionEnv composes the env of the stream's first frame: the env the
+// client collected, TERM (default xterm-256color), the
+// SSH_CONNECTION/SSH_CLIENT pair whose presence triggers dev-base's tmux
+// attach, and the root account fields.
+func sessionEnv(collected map[string]string, term, clientIP, clientPort string) map[string]string {
+	env := make(map[string]string, len(collected)+6)
+	for k, v := range collected {
+		env[k] = v
+	}
+	if term == "" {
+		term = "xterm-256color"
+	}
+	env["TERM"] = term
+	env["SSH_CONNECTION"] = clientIP + " " + clientPort + " 10.1.0.11 22"
+	env["SSH_CLIENT"] = clientIP + " " + clientPort + " 22"
+	env["USER"] = "root"
+	env["HOME"] = "/root"
+	env["LOGNAME"] = "root"
+	return env
+}
+
+// handleSession relays one SSH session channel onto a process in the
+// sandbox, started through the backend's
+// /api/sandboxes/{id}/stream WebSocket (U09). Client requests are
+// collected until shell, exec or subsystem; the chosen command runs with
+// a PTY iff the client sent pty-req; channel stdin and output stream
+// over the WebSocket in binary mode.
+func handleSession(newChan ssh.NewChannel, gwCtx context.Context, leaseID, userID, motd, clientIP, clientPort string) {
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		return
 	}
 	defer ch.Close()
 
-	// Open a session channel on the nested client. dev-base's login hook
-	// attaches to (or creates) the tmux session, so a plain shell gets
-	// Jason into his tmux automatically.
-	sess, err := client.NewSession()
-	if err != nil {
-		log.Printf("nested session: %v", err)
-		ch.Write([]byte("gateway: nested session failed\n"))
-		return
-	}
-	defer sess.Close()
-
-	// Pipes must exist BEFORE Shell()/Start() so the session's internal
-	// start() can wire them to the channel.
-	stdin, err := sess.StdinPipe()
-	if err != nil {
-		log.Printf("stdin pipe: %v", err)
-		return
-	}
-	stdout, err := sess.StdoutPipe()
-	if err != nil {
-		log.Printf("stdout pipe: %v", err)
-		return
-	}
-	stderr, err := sess.StderrPipe()
-	if err != nil {
-		log.Printf("stderr pipe: %v", err)
-		return
-	}
-
-	started := make(chan struct{}, 1)
-	startErr := make(chan error, 1)
-	// motdReady is signaled by the request loop when the nested session
-	// actually starts (shell OR exec). It is SEPARATE from `started`
-	// because the main flow below also consumes `started` — a single
-	// value can only have one receiver, so the MOTD goroutine must not
-	// compete for it.
-	motdReady := make(chan struct{}, 1)
-
-	// Deliver the MOTD ("created sandbox …") on new auto-created
-	// sandboxes. The MOTD itself is written to the channel BEFORE the
-	// nested shell starts (above) so it survives in the terminal's
-	// scrollback. This goroutine only adds tmux presentation: a
-	// transient `display-message` popup plus a persistent `status-right`
-	// so the lease id stays visible in-session. Images without tmux are
-	// unaffected (the pre-shell write already delivered the MOTD).
-	if motd != "" {
-		go func() {
-			<-motdReady
-			// Give the guest's login hook a beat to attach tmux.
-			time.Sleep(1500 * time.Millisecond)
-			for attempt := 0; attempt < 4; attempt++ {
-				s2, err := client.NewSession()
-				if err == nil {
-					msg := strings.ReplaceAll(motd, "\n", " ")
-					// Extract the lease id (first 32-hex token) for the
-					// persistent status-right display.
-					id := ""
-					if m := regexp.MustCompile(`[0-9a-f]{32}`).FindString(msg); m != "" {
-						id = m
-					}
-					// `tmux display-message -t dev` from a second
-					// session renders on the attached client's status
-					// bar; `set-option status-right` keeps the id
-					// visible.
-					out, err := s2.Output("tmux display-message -t dev '" + msg + "' 2>/dev/null; tmux set-option -t dev status-right 'id: " + id + "' 2>/dev/null; echo __TMUX_DONE__")
-					s2.Close()
-					if err == nil && strings.Contains(string(out), "__TMUX_DONE__") {
-						return
-					}
-				}
-				time.Sleep(750 * time.Millisecond)
+	// Collection phase: pty-req and env requests accumulate; the first
+	// shell/exec/subsystem request picks the command.
+	var term string
+	var cols, rows uint32
+	hasPTY := false
+	envReq := map[string]string{}
+	var cmd sessionCommand
+	chosen := false
+collect:
+	for req := range reqs {
+		switch req.Type {
+		case "pty-req":
+			var m struct {
+				Term   string
+				Cols   uint32
+				Rows   uint32
+				Width  uint32
+				Height uint32
+				Modes  string
 			}
-		}()
+			if err := ssh.Unmarshal(req.Payload, &m); err == nil {
+				hasPTY = true
+				term = strings.TrimRight(m.Term, "\x00")
+				cols, rows = m.Cols, m.Rows
+			}
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+		case "env":
+			var m struct {
+				Name  string
+				Value string
+			}
+			if err := ssh.Unmarshal(req.Payload, &m); err == nil {
+				envReq[m.Name] = m.Value
+			}
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+		case "x11-req", "auth-agent-req@openssh.com":
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		case "shell", "exec", "subsystem":
+			payload := ""
+			switch req.Type {
+			case "exec":
+				var m struct {
+					Command string
+				}
+				if err := ssh.Unmarshal(req.Payload, &m); err != nil {
+					log.Printf("session %s: bad exec payload: %v", leaseID, err)
+					return
+				}
+				payload = m.Command
+			case "subsystem":
+				var m struct {
+					Subsystem string
+				}
+				if err := ssh.Unmarshal(req.Payload, &m); err != nil {
+					log.Printf("session %s: bad subsystem payload: %v", leaseID, err)
+					return
+				}
+				payload = m.Subsystem
+			}
+			c, ok := commandForRequest(req.Type, payload, hasPTY)
+			if !ok {
+				log.Printf("session %s: unsupported subsystem %q", leaseID, payload)
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				return
+			}
+			cmd = c
+			chosen = true
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+			break collect
+		default:
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		}
+	}
+	if !chosen {
+		return // the channel closed without shell/exec/subsystem
+	}
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
 	}
 
-	// Forward client requests. pty/env/window-change go through as-is;
-	// shell/exec START the nested session (SendRequest alone never
-	// activates the pipes — the session needs Shell()/Start()).
+	// A suspended lease is resumed automatically before the session
+	// starts (U09): SSH attach used to fail after a restore.
+	if b, err := backendJSON(gwCtx, http.MethodGet, "/api/sandboxes/"+leaseID, nil); err == nil {
+		var st struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal(b, &st) == nil && st.State == "suspended" {
+			log.Printf("session %s: suspended, resuming", leaseID)
+			if err := backendJSONErr(gwCtx, http.MethodPost, "/api/sandboxes/"+leaseID+"/resume", nil); err != nil {
+				fmt.Fprintf(ch.Stderr(), "spoond: cannot resume sandbox %s: %v\n", leaseID, err)
+				_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct {
+					Status uint32
+				}{1}))
+				return
+			}
+		}
+	}
+
+	// The MOTD (created/attached notice) is written for shell requests
+	// only, before the session starts, so it lands in the scrollback.
+	if motd != "" && cmd.Kind == "shell" {
+		if _, err := ch.Write([]byte(motd)); err != nil {
+			return
+		}
+	}
+
+	// Open the stream: wss for an https backend, same TLS trust as
+	// backendClient(), gateway token + user impersonation headers.
+	u, err := url.Parse(*backendURL)
+	if err != nil {
+		log.Printf("session %s: parse backend URL: %v", leaseID, err)
+		return
+	}
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	case "http":
+		u.Scheme = "ws"
+	default:
+		log.Printf("session %s: unsupported backend scheme %q", leaseID, u.Scheme)
+		return
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/api/sandboxes/" + leaseID + "/stream"
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+*backendTok)
+	if userID != "" {
+		hdr.Set("X-Spoond-User-Id", userID)
+	}
+	ws, _, err := backendWSDialer().Dial(u.String(), hdr)
+	if err != nil {
+		fmt.Fprintf(ch.Stderr(), "spoond: cannot reach sandbox %s: %v\n", leaseID, err)
+		return
+	}
+	defer ws.Close()
+
+	first, err := json.Marshal(struct {
+		Args   []string          `json:"args"`
+		Env    map[string]string `json:"env"`
+		Pty    bool              `json:"pty"`
+		Binary bool              `json:"binary"`
+		Cols   uint32            `json:"cols"`
+		Rows   uint32            `json:"rows"`
+	}{cmd.Args, sessionEnv(envReq, term, clientIP, clientPort), cmd.Pty, true, cols, rows})
+	if err != nil {
+		log.Printf("session %s: first frame: %v", leaseID, err)
+		return
+	}
+	if err := ws.WriteMessage(websocket.TextMessage, first); err != nil {
+		log.Printf("session %s: start stream: %v", leaseID, err)
+		return
+	}
+
+	// Writes to the WebSocket come from the stdin relay and the
+	// request loop; gorilla requires one writer at a time.
+	var wsMu sync.Mutex
+	writeWS := func(mt int, data []byte) error {
+		wsMu.Lock()
+		defer wsMu.Unlock()
+		return ws.WriteMessage(mt, data)
+	}
+
+	// Channel stdin -> raw binary frames; client EOF (CloseWrite) tells
+	// the process its input is complete.
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := ch.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				if werr := writeWS(websocket.BinaryMessage, data); werr != nil {
+					return
+				}
+			}
+			if rerr != nil {
+				_ = writeWS(websocket.TextMessage, []byte(`{"action":"eof"}`))
+				return
+			}
+		}
+	}()
+
+	// window-change and signal requests after start; everything else is
+	// refused. Signal translation (U09): INT becomes the PTY's ^C byte
+	// (only with a PTY), TERM asks for SIGTERM, KILL for SIGKILL.
 	go func() {
 		for req := range reqs {
 			switch req.Type {
-			case "pty-req", "env", "window-change", "signal", "subsystem":
-				ok, err := sess.SendRequest(req.Type, req.WantReply, req.Payload)
-				if err != nil {
-					startErr <- err
-					return
+			case "window-change":
+				var m struct {
+					Cols   uint32
+					Rows   uint32
+					Width  uint32
+					Height uint32
 				}
-				if req.WantReply {
-					if err := req.Reply(ok, nil); err != nil {
-						return
+				if err := ssh.Unmarshal(req.Payload, &m); err != nil {
+					continue
+				}
+				payload, _ := json.Marshal(map[string]any{
+					"resize": map[string]uint32{"cols": m.Cols, "rows": m.Rows},
+				})
+				_ = writeWS(websocket.TextMessage, payload)
+			case "signal":
+				var m struct {
+					Signal string
+				}
+				if err := ssh.Unmarshal(req.Payload, &m); err != nil {
+					continue
+				}
+				switch m.Signal {
+				case "INT":
+					if cmd.Pty {
+						_ = writeWS(websocket.BinaryMessage, []byte{0x03})
 					}
+				case "TERM":
+					_ = writeWS(websocket.TextMessage, []byte(`{"action":"stop"}`))
+				case "KILL":
+					_ = writeWS(websocket.TextMessage, []byte(`{"action":"kill"}`))
 				}
-			case "shell":
-				err := sess.Shell()
-				started <- struct{}{}
-				startErr <- err
-				motdReady <- struct{}{}
-				// Reply to the CLIENT's shell request (OpenSSH blocks
-				// until it gets channel success/failure).
-				if req.WantReply {
-					_ = req.Reply(err == nil, nil)
-				}
-				return
-			case "exec":
-				// The exec request payload is a marshaled string
-				// (length prefix + padding) — NOT a plain command.
-				var msg struct {
-					Command string
-				}
-				if err := ssh.Unmarshal(req.Payload, &msg); err != nil {
-					startErr <- fmt.Errorf("bad exec payload: %w", err)
-					if req.WantReply {
-						_ = req.Reply(false, nil)
-					}
-					return
-				}
-				log.Printf("session exec: %q", msg.Command)
-				err := sess.Start(msg.Command)
-				started <- struct{}{}
-				startErr <- err
-				motdReady <- struct{}{}
-				// Reply to the CLIENT's exec request.
-				if req.WantReply {
-					_ = req.Reply(err == nil, nil)
-				}
-				return
 			default:
 				if req.WantReply {
 					_ = req.Reply(false, nil)
@@ -1183,58 +1250,68 @@ func handleSession(newChan ssh.NewChannel, client *ssh.Client, motd string) {
 		}
 	}()
 
-	// Wait for the nested session to start before relaying stdio.
-	select {
-	case <-started:
-		if err := <-startErr; err != nil {
-			log.Printf("nested start: %v", err)
-			return
-		}
-	case <-time.After(30 * time.Second):
-		log.Printf("nested session never started")
-		return
+	// Stream -> channel: binary frames carry output (byte 0: 1 stdout,
+	// 3 pty -> stdout, 2 -> stderr); exit_code and error arrive as text
+	// JSON and end the session.
+	closeWithStatus := func(status uint32) {
+		_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct {
+			Status uint32
+		}{status}))
+		ch.Close()
 	}
-	// Relay: client channel -> nested stdin, nested stdout/stderr ->
-	// client channel. Wait for BOTH output relays: firing on either one
-	// alone tears down the channel while the other still has buffered
-	// output (banner arrives, exec output gets truncated).
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(stdin, ch)
-		stdin.Close()
-	}()
-	go func() {
-		_, _ = io.Copy(ch, stdout)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(ch, stderr)
-		done <- struct{}{}
-	}()
-
-	// Wait for both relays to finish (EOF on each stream).
-	<-done
-	<-done
-
-	// The nested session has ended (user exited tmux/shell). Now show
-	// the MOTD so the lease id is visible after the session — the user
-	// asked for the id "on the command line in case they don't take
-	// note of it before exiting"; writing it now lands it right where
-	// they're looking when the connection closes.
-	if motd != "" {
-		_, _ = ch.Write([]byte(motd))
-	}
-
-	// Forward the nested exit status to the client channel so the ssh
-	// client knows the command finished (otherwise it hangs).
-	// sess.Wait() returns after the nested session's exit-status arrives.
-	if err := sess.Wait(); err != nil {
-		var exitErr *ssh.ExitError
-		if errors.As(err, &exitErr) {
-			_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct {
-				Status uint32
-			}{uint32(exitErr.ExitStatus())}))
+	for {
+		mt, payload, err := ws.ReadMessage()
+		if err != nil {
+			return // the stream ended without an exit frame
 		}
+		switch mt {
+		case websocket.BinaryMessage:
+			if len(payload) == 0 {
+				continue
+			}
+			switch payload[0] {
+			case 1, 3:
+				if _, werr := ch.Write(payload[1:]); werr != nil {
+					return
+				}
+			case 2:
+				if _, werr := ch.Stderr().Write(payload[1:]); werr != nil {
+					return
+				}
+			}
+		case websocket.TextMessage:
+			var msg struct {
+				ExitCode *int   `json:"exit_code"`
+				Error    string `json:"error"`
+			}
+			if json.Unmarshal(payload, &msg) != nil {
+				continue
+			}
+			if msg.Error != "" {
+				_, _ = ch.Stderr().Write([]byte(msg.Error + "\n"))
+				closeWithStatus(255)
+				return
+			}
+			if msg.ExitCode != nil {
+				closeWithStatus(uint32(*msg.ExitCode))
+				return
+			}
+		}
+	}
+}
+
+// backendTLSConfig is the TLS trust for backend connections (loopback;
+// skips TLS verify since the LAN cert doesn't cover 127.0.0.1). The
+// WebSocket dialer uses the same.
+func backendTLSConfig() *tls.Config {
+	return &tls.Config{InsecureSkipVerify: true}
+}
+
+// backendWSDialer returns the WebSocket dialer for backend streams.
+func backendWSDialer() *websocket.Dialer {
+	return &websocket.Dialer{
+		TLSClientConfig:  backendTLSConfig(),
+		HandshakeTimeout: 10 * time.Second,
 	}
 }
 
@@ -1244,7 +1321,7 @@ func backendClient() *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: backendTLSConfig(),
 		},
 	}
 }
@@ -1257,7 +1334,7 @@ func backendClientLong() *http.Client {
 	return &http.Client{
 		Timeout: 280 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: backendTLSConfig(),
 		},
 	}
 }
@@ -1390,45 +1467,6 @@ func backendJSONOnceWith(ctx context.Context, client *http.Client, method, path 
 	return b, nil
 }
 
-// restartSSHD pkill's and restarts sshd inside the sandbox via the
-// backend exec API. The agent socket survives Firecracker restore; the
-// pre-snapshot sshd listener does not. Returns a clear error when the
-// image has no sshd (CI images are not interactive).
-func restartSSHD(ctx context.Context, leaseID string) error {
-	cmd := "command -v /usr/sbin/sshd >/dev/null 2>&1 || echo NO_SSHD_BINARY; pkill -x sshd 2>/dev/null; sleep 1; mkdir -p /run/sshd; /usr/sbin/sshd 2>/dev/null; sleep 1; pgrep -x sshd >/dev/null || echo SSHD_NOT_RUNNING"
-	payload, err := json.Marshal(map[string]any{"cmd": cmd})
-	if err != nil {
-		return err
-	}
-	b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+leaseID+"/exec", payload)
-	if err != nil {
-		return err
-	}
-	var out struct {
-		Stdout string `json:"stdout"`
-	}
-	_ = json.Unmarshal(b, &out)
-	if strings.Contains(out.Stdout, "NO_SSHD_BINARY") {
-		return fmt.Errorf("image has no sshd — interactive SSH requires dev-base (use new or new-dev)")
-	}
-	if strings.Contains(out.Stdout, "SSHD_NOT_RUNNING") {
-		return fmt.Errorf("sshd did not start")
-	}
-	return nil
-}
-
-func resolveEndpoint(ctx context.Context, leaseID string) (*endpoint, error) {
-	b, err := backendJSON(ctx, http.MethodGet, "/api/sandboxes/"+leaseID+"/endpoint", nil)
-	if err != nil {
-		return nil, err
-	}
-	var ep endpoint
-	if err := json.Unmarshal(b, &ep); err != nil {
-		return nil, err
-	}
-	return &ep, nil
-}
-
 // resolveName looks up a friendly lease name and returns its lease id.
 func resolveName(ctx context.Context, name string) (string, bool) {
 	b, err := backendJSON(ctx, http.MethodGet, "/api/names/"+name, nil)
@@ -1452,7 +1490,9 @@ func resolveName(ctx context.Context, name string) (string, bool) {
 // (detached via setsid so the one-shot exec does not kill it). Returns
 // JSON with the public web URL.
 func runShelly(ctx context.Context, leaseID string) string {
-	if _, err := resolveEndpoint(ctx, leaseID); err != nil {
+	// The lease must exist (and be the caller's): the endpoint route is
+	// gone from the gateway's vocabulary (U09).
+	if _, err := backendJSON(ctx, http.MethodGet, "/api/sandboxes/"+leaseID, nil); err != nil {
 		return fmt.Sprintf(`{"error":"%v"}`, err)
 	}
 	gw := *llmGatewayURL + leaseID
