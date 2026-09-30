@@ -2,9 +2,6 @@ package api
 
 import (
 	"context"
-	"io"
-	"log"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,23 +10,24 @@ import (
 
 // TestPersistRoundTrip grants a lease, names it and shares it on a
 // service backed by a SQLite store, then verifies a NEW service on the
-// same database loads the lease, its name and the share. Shutdown must
-// not kill anything: state survives the backend (U05).
+// same database loads the lease, its name, its share, and the sandbox
+// fields (TemplateID from the image row, BuildID from the sandboxes
+// row). Shutdown must not kill anything: state survives the backend
+// (U05, U08).
 func TestPersistRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "spoond.db")
+	path := t.TempDir() + "/spoond.db"
 
 	db, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 0, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
-	svc.SetDB(db)
+	sub := newTestSub()
+	img := seedImage(t, db, "py-base", 2048)
+	svc := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
 
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -41,10 +39,9 @@ func TestPersistRoundTrip(t *testing.T) {
 	}
 
 	svc.Shutdown(ctx)
-	// fakeForkd.killed records Kill AND DeleteWorkspace calls; neither
-	// may happen on shutdown.
-	if len(ff.killed) != 0 {
-		t.Fatalf("shutdown killed sandboxes/workspaces: %v", ff.killed)
+	// fake.Fake.Calls records every Delete; none may happen on shutdown.
+	if got := calls(sub.Fake, "Delete"); got != 0 {
+		t.Fatalf("shutdown deleted sandboxes: %d", got)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close first db: %v", err)
@@ -56,22 +53,66 @@ func TestPersistRoundTrip(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	t.Cleanup(func() { db2.Close() })
-	svc2 := NewService(ff, map[string]string{"t": "c"}, 0, time.Minute, 10*time.Minute)
-	svc2.log = log.New(io.Discard, "", 0)
-	svc2.SetDB(db2)
+	svc2 := NewService(sub, db2, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
 	if err := svc2.LoadState(ctx); err != nil {
 		t.Fatalf("load state: %v", err)
 	}
 
-	if got := svc2.lookup("c", l.ID); got == nil {
+	got := svc2.lookup("c", l.ID)
+	if got == nil {
 		t.Fatalf("lease %s not loaded", l.ID)
-	} else if got.Name != "my-lease" {
+	}
+	if got.Name != "my-lease" {
 		t.Fatalf("loaded lease name = %q, want %q", got.Name, "my-lease")
+	}
+	if got.TemplateID != img.TemplateID {
+		t.Fatalf("loaded lease template = %q, want %q", got.TemplateID, img.TemplateID)
+	}
+	if got.BuildID != img.CurrentBuildID {
+		t.Fatalf("loaded lease build = %q, want %q", got.BuildID, img.CurrentBuildID)
 	}
 	if svc2.lookupByName("my-lease") == nil {
 		t.Fatalf("name %q not resolvable after load", "my-lease")
 	}
 	if svc2.lookupWithShare("friend", l.ID, ShareHTTP) == nil {
 		t.Fatalf("share for %q not loaded", "friend")
+	}
+}
+
+// TestPersistSuspendedLeaseLoads: a suspended lease has no sandboxes row,
+// so it loads with BuildID "" and ResumeBuildID set.
+func TestPersistSuspendedLeaseLoads(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	sub := newTestSub()
+	seedImage(t, db, "py-base", 2048)
+	svc := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.suspend(ctx, "c", l.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	wantResume := l.ResumeBuildID
+
+	// A new service loads the suspended lease with no BuildID.
+	svc2 := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
+	if err := svc2.LoadState(ctx); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	got := svc2.lookup("c", l.ID)
+	if got == nil {
+		t.Fatal("suspended lease not loaded")
+	}
+	if got.BuildID != "" {
+		t.Fatalf("suspended lease BuildID = %q, want \"\"", got.BuildID)
+	}
+	if got.ResumeBuildID != wantResume {
+		t.Fatalf("ResumeBuildID = %q, want %q", got.ResumeBuildID, wantResume)
+	}
+	if !got.Suspended {
+		t.Fatal("suspended flag not restored")
 	}
 }

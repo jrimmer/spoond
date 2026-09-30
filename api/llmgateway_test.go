@@ -28,8 +28,8 @@ func newLLMTestServer(t *testing.T, upstreamURL string, users func(*identity.Sto
 	}))
 	t.Cleanup(upstream.Close)
 
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, err := identity.NewStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ func newLLMTestServer(t *testing.T, upstreamURL string, users func(*identity.Sto
 	if users != nil {
 		users(ids)
 	}
-	reg := NewImageRegistry(ff, "py-base")
+	reg := NewImageRegistry(db)
 	url := upstreamURL
 	if url == "" {
 		url = upstream.URL
@@ -151,8 +151,8 @@ func TestLLMGatewayPerUserConcurrencyCap(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, err := identity.NewStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestLLMGatewayPerUserConcurrencyCap(t *testing.T) {
 	if err := ids.SetLLMKey(owner.ID, "slk-secret"); err != nil {
 		t.Fatal(err)
 	}
-	reg := NewImageRegistry(ff, "py-base")
+	reg := NewImageRegistry(db)
 	srv := NewServerWithLLM(svc, reg, upstream.URL, "host-key", "", nil)
 	srv.SetLLMMaxConcurrent(1)
 	ts := httptest.NewServer(srv.Handler())

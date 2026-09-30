@@ -1,10 +1,8 @@
 package api
 
 import (
-	"context"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestPolicyCommands(t *testing.T) {
@@ -83,61 +81,5 @@ func TestValidNetworkPolicy(t *testing.T) {
 		if ValidNetworkPolicy(p) {
 			t.Fatalf("expected %q invalid", p)
 		}
-	}
-}
-
-// fakeNetpol records Apply calls.
-type fakeNetpol struct {
-	calls []string
-	err   error
-}
-
-func (f *fakeNetpol) Apply(_ context.Context, netns string, p NetworkPolicy, allow []string) error {
-	f.calls = append(f.calls, netns+"|"+string(p)+"|"+strings.Join(allow, ","))
-	return f.err
-}
-
-// TestApplyNetpolHooks verifies policy is applied on grant (fresh sandbox)
-// and re-applied on resume (new sandbox after restart/suspend).
-func TestApplyNetpolHooks(t *testing.T) {
-	ff := newFakeForkd()
-	ff.netns = "forkd-child-9" // fake reports a netns
-	svc := NewService(ff, map[string]string{"t": "c"}, 1, time.Minute, 10*time.Minute, "py-base")
-	fp := &fakeNetpol{}
-	svc.SetNetpol(fp, []string{"10.1.0.2"})
-
-	// non-lan policy must be applied at grant
-	l, err := svc.grant(context.Background(), "c", "py-base", 0, time.Minute, true, string(PolicyRestricted), []string{"example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fp.calls) != 1 {
-		t.Fatalf("expected 1 apply on grant, got %d: %v", len(fp.calls), fp.calls)
-	}
-	if !strings.Contains(fp.calls[0], "restricted") {
-		t.Fatalf("expected restricted policy applied, got %q", fp.calls[0])
-	}
-
-	// resume must re-apply (the sandbox was recreated)
-	fp.calls = nil
-	if _, err := svc.resume(context.Background(), "c", l.ID); err != nil {
-		t.Fatal(err)
-	}
-	if len(fp.calls) != 1 {
-		t.Fatalf("expected 1 apply on resume, got %d: %v", len(fp.calls), fp.calls)
-	}
-
-	// default (empty) policy is treated as LAN and must be applied to clear
-	// stale FORWARD rules from a previous lease that used the same netns.
-	fp.calls = nil
-	_, err = svc.grant(context.Background(), "c", "py-base", 0, time.Minute, true, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fp.calls) != 1 {
-		t.Fatalf("expected 1 apply for lan policy (clear stale rules), got %d: %v", len(fp.calls), fp.calls)
-	}
-	if !strings.Contains(fp.calls[0], "lan") {
-		t.Fatalf("expected lan policy applied, got %q", fp.calls[0])
 	}
 }

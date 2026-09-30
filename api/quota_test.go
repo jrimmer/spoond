@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jrimmer/spoond/identity"
 )
@@ -14,11 +13,11 @@ import (
 // newQuotaTestServer bootstraps admin (legacy token) + a limited user.
 func newQuotaTestServer(t *testing.T) (http.Handler, string) {
 	t.Helper()
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 3600*time.Second)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	// bootstrap admin
@@ -132,9 +131,9 @@ func TestQuotaAdminOnly(t *testing.T) {
 
 func TestQuotaUncappedLegacyConsumer(t *testing.T) {
 	// legacy consumer-token callers are never capped
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 3600*time.Second)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 	for i := 0; i < 5; i++ {
 		if c := createAs(h, "legacy-tok"); c != http.StatusCreated {
