@@ -12,7 +12,7 @@ Orchestrator session started 2026-09-30.
 | U03 e2b-fork-and-patches | done | verifier round 3 PASS (0 deviations) after human-approved race fix; origin/upstream=e473dd13, origin/spoond=b0424c4dc (upstream+7); binaries on vm2 (orch 7f0036e5…, envd 8c2f0dc3…) |
 | U04 host-bringup | done | vm2 §1–§10 verified on host; §11 merged (deploy/e2b/, verifier PASS) |
 | U05 sqlite-store | done | deployed 2026-09-30 18:57Z; R3 PASS 1.20s; spoond.db created; all services active |
-| U06 substrate-interface | pending | depends on U04 + U05 |
+| U06 substrate-interface | done | live test PASS on vm2 (303s: build/create/exec/PTY/checkpoint+forks/pause-resume); verifier PASS 0 deviations; merged |
 | U07 image-pipeline | pending | depends on U04 + U06 |
 | U08 lease-lifecycle | pending | depends on U07 |
 | U09 networking-and-access | pending | depends on U08 |
@@ -38,6 +38,9 @@ Orchestrator session started 2026-09-30.
 - U03: PASS round 3 (2026-09-30) after two FAIL rounds (test data race, human-gated per protocol, fix approved by human+architect).
 - U02: PASS (2026-09-30) on the suite commit; baseline data commit verified by the Ops run itself. VERIFY-U02.md in the U02 worktree.
 - U05: PASS (2026-09-30), zero deviations. VERIFY-U05.md in the U05 worktree.
+- U04: PASS (2026-09-30), zero deviations. VERIFY-U04.md in the U04 worktree.
+- SPEC1 (internet→public+LAN): PASS (2026-09-30).
+- U06: PASS (2026-09-30), zero deviations. VERIFY-U06.md in the U06 worktree.
 
 ## Autonomous window runs
 
