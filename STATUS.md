@@ -8,10 +8,10 @@ Orchestrator session started 2026-09-30.
 | Unit | State | Notes |
 |---|---|---|
 | U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
-| U02 conformance-suite | running | worker started, worktree `impl/U02-conformance-suite`; §0 resolved: BACKEND_ENV_FILE=/etc/forkd-backend.env (see Waiting on human note) |
-| U03 e2b-fork-and-patches | running | Ops dispatched for steps 1–2 on vm2; worker authoring patches next |
+| U02 conformance-suite | verifying-on-host | suite merged 53fb910; verifier PASS; baseline run done — 13 fails (3 expected + 10 unexpected, see Waiting on human); worker committing baseline |
+| U03 e2b-fork-and-patches | running | steps 1–2 done on vm2 (upstream pushed = e473dd13, protoc sanity clean); worker authoring P1–P5 on workstation clone |
 | U04 host-bringup | pending | depends on U03 |
-| U05 sqlite-store | running | worker started, worktree `impl/U05-sqlite-store` |
+| U05 sqlite-store | verifying | worker done (2b721d1, 60f007c); verifier running |
 | U06 substrate-interface | pending | depends on U04 + U05 |
 | U07 image-pipeline | pending | depends on U04 + U06 |
 | U08 lease-lifecycle | pending | depends on U07 |
@@ -49,3 +49,5 @@ Orchestrator session started 2026-09-30.
 ## Notifications
 
 - 2026-09-30 U01 merged into feat/e2b-substrate; U02/U05 started, U03 started. **Action needed:** provide a read-only Forgejo API token (code.lacy.casa) so the orchestrator can read CI status of PR #74 ('Run go version' step must print go1.27.1) — or check PR #74 yourself and confirm. Also (non-blocking): fix public DNS for lacy.casa names (currently pointing at 5.78.185.36) and/or the workstation's resolver fallback.
+
+- 2026-09-30 **U02 baseline deviation — ACTION NEEDED:** production forkd fails 10 unexpected conformance tests (details under Waiting on human): dev-base grants 500, stream 500, proxy 502, gateway EOF, internet-policy private-range leak (N1), image catalog drift (elixir-base/llm-review/rust-base missing). Decide: repair forkd / accept baseline / rework suite. U12 depends on this; U03–U11 continue.
