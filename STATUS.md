@@ -8,7 +8,7 @@ Orchestrator session started 2026-09-30.
 | Unit | State | Notes |
 |---|---|---|
 | U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
-| U02 conformance-suite | running | worker started, worktree `impl/U02-conformance-suite` |
+| U02 conformance-suite | running | worker started, worktree `impl/U02-conformance-suite`; §0 resolved: BACKEND_ENV_FILE=/etc/forkd-backend.env (see Waiting on human note) |
 | U03 e2b-fork-and-patches | running | Ops dispatched for steps 1–2 on vm2; worker authoring patches next |
 | U04 host-bringup | pending | depends on U03 |
 | U05 sqlite-store | running | worker started, worktree `impl/U05-sqlite-store` |
@@ -39,8 +39,9 @@ Orchestrator session started 2026-09-30.
 ## Autonomous window runs
 
 (none yet)
-
 ## Waiting on human
+
+- **U02 §0 deviation (resolved by orchestrator, 2026-09-30, flag if wrong):** `systemctl cat spoond-backend` shows TWO EnvironmentFile lines — `EnvironmentFile=/etc/forkd-llm.env` and `EnvironmentFile=-/etc/forkd-backend.env`. The unit says STOP on more than one line; instead of a human gate, the orchestrator recorded **BACKEND_ENV_FILE=/etc/forkd-backend.env**, justified by `01-architecture.md` ("`/etc/forkd-backend.env` on vm2 per `deploy/README.md`") and `deploy/README.md` L31. `/etc/forkd-llm.env` is an additional LLM-gateway env file (likely `PROXY_AUTH_SECRET` et al.; not the substrate variable target). Ops verified `PROXY_AUTH_TRUSTED_PEERS` is absent from BOTH files (grep exit 1) → no N3 403 risk. If the human disagrees with this file choice, say so; nothing has been written to either file.
 
 
 - **RESOLVED (2026-09-30):** vm2 SSH "host key changed" was **DNS misdirection**, not a re-key. Public DNS for `vm2.lacy.casa` began resolving to `5.78.185.36`, a foreign host presenting rotating keys (`8OdOGujd…` then `f0e74e1a…`, both confirmed *not* vm2 by the human). The real vm2 is `10.1.0.11` (per the human; matches `01-architecture.md` `HOST_PRIMARY_IP`) and serves the **original** host keys (ed25519 `SHA256:3fd5df51…`, ecdsa `SHA256:a480c83a…`). Fixed on the workstation: `~/.ssh/config` now pins `Host vm2.lacy.casa → HostName 10.1.0.11`, and `10.1.0.11`'s keys were added to `known_hosts`. Verified: `ssh root@vm2.lacy.casa` → `sandbox`, `x86_64`, `active` ×4. No unit command ever ran against the foreign host; vm2 state untouched throughout. Suggested (human, non-blocking): fix the public DNS record for `vm2.lacy.casa`.
