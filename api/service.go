@@ -126,9 +126,10 @@ func newID() string {
 type ServiceConfig struct {
 	PoolSize                        int
 	DefaultTTL, MaxTTL, IdleTimeout time.Duration
-	HostGuestAddr                   string        // HOST_GUEST_SERVICE_ADDR
-	HostGuestPort                   int           // HOST_GUEST_SERVICE_PORT
-	CheckpointEvery                 time.Duration // U10
+	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
+	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
+	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
+	CheckpointEvery                 time.Duration
 }
 
 // Service is the lease API backend.

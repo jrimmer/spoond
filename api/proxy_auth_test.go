@@ -89,8 +89,8 @@ func TestProxyAuthUnknownUser(t *testing.T) {
 func TestProxyAuthOwnerScopesLookup(t *testing.T) {
 	ph, apiH, _ := newProxyAuthServer(t)
 	// jason's own lease id, valid auth: lookup succeeds (owner-scoped),
-	// so the proxy proceeds to dial and fails with 502 (no netns in
-	// unit test). 404 would mean the owner-scope lookup missed.
+	// so the proxy proceeds to dial and fails with 502 (the fake
+	// substrate has no network). 404 would mean the owner-scope lookup missed.
 	lid := createLeaseAs(apiH, "jason-tok")
 	if lid == "" {
 		t.Fatal("no lease id available")

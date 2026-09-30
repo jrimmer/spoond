@@ -132,13 +132,16 @@ func seedImage(t *testing.T, db *store.DB, name string, memoryMB int) store.Imag
 }
 
 // newTestService builds a Service over a fake substrate and a temp DB.
+// ProxyURL points at an unroutable loopback port: the fake substrate has
+// no network, so proxy tests that reach the dial get a 502.
 func newTestService(t *testing.T) (*Service, *store.DB, *testSub) {
 	t.Helper()
 	sub := newTestSub()
 	db := newTestDB(t)
 	svc := NewService(sub, db, map[string]string{
 		"token-a": "consumer-a", "token-b": "consumer-b", "legacy-tok": "legacy-consumer",
-	}, ServiceConfig{DefaultTTL: 60 * time.Second, MaxTTL: 10 * time.Minute})
+	}, ServiceConfig{DefaultTTL: 60 * time.Second, MaxTTL: 10 * time.Minute,
+		ProxyURL: "http://127.0.0.1:1"})
 	svc.log = log.New(io.Discard, "", 0)
 	return svc, db, sub
 }

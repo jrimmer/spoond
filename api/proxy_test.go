@@ -1,6 +1,13 @@
 package api
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
 
 func TestParseProxyHost(t *testing.T) {
 	cases := []struct {
@@ -29,5 +36,142 @@ func TestParseProxyHost(t *testing.T) {
 			t.Errorf("parseProxyHost(%q) = (%q,%d,%v), want (%q,%d,%v)",
 				c.host, id, port, ok, c.wantID, c.wantPort, c.wantOK)
 		}
+	}
+}
+
+// TestProxyDirectorHeaders pins the ReverseProxy Rewrite: exactly the
+// three E2B routing headers reach the orchestrator proxy, the inbound
+// gate/auth headers are stripped first, X-Forwarded-Host/-Proto come
+// from the inbound request, and the path and query are kept.
+func TestProxyDirectorHeaders(t *testing.T) {
+	var mu sync.Mutex
+	var gotHost, gotURI string
+	var gotHeader http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotHost = r.Host
+		gotHeader = r.Header.Clone()
+		gotURI = r.URL.RequestURI()
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	svc, db, _ := newTestService(t)
+	svc.cfg.ProxyURL = upstream.URL
+	seedImage(t, db, "py-base", 2048)
+	l, err := svc.grant(t.Context(), "u-1", "py-base", time.Minute, false, "restricted", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.HostIP = "10.11.0.5"
+	svc.store.mu.Unlock()
+	sandboxID := l.SandboxID
+
+	ph := NewServer(svc, NewImageRegistry(db)).ProxyHandler()
+	req := httptest.NewRequest("GET", "http://"+l.ID+"-8080.sandbox.lacy.casa/app?q=1", nil)
+	req.Header.Set("X-Proxy-Auth", "gate-secret")
+	req.Header.Set("Remote-User", "jason")
+	req.Header.Set("X-Spoond-User-Id", "u-9")
+	req.Header.Set("X-Bootstrap-Token", "bootstrap-secret")
+	req.Header.Set("E2b-Client-Version", "forged")
+	req.Header.Set("E2b-Sandbox-Id", "forged-sandbox")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	ph.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proxy status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	host, uri, h := gotHost, gotURI, gotHeader
+	mu.Unlock()
+	if host != upstream.URL[len("http://"):] {
+		t.Fatalf("upstream Host = %q, want the proxy URL host", host)
+	}
+	if uri != "/app?q=1" {
+		t.Fatalf("upstream URI = %q, want path and query kept", uri)
+	}
+	if v := h.Get("E2b-Sandbox-Id"); v != sandboxID {
+		t.Fatalf("E2b-Sandbox-Id = %q, want %q", v, sandboxID)
+	}
+	if v := h.Get("E2b-Sandbox-Port"); v != "8080" {
+		t.Fatalf("E2b-Sandbox-Port = %q, want 8080", v)
+	}
+	if want := "fake-traffic-" + sandboxID; h.Get("e2b-traffic-access-token") != want {
+		t.Fatalf("e2b-traffic-access-token = %q, want %q", h.Get("e2b-traffic-access-token"), want)
+	}
+	// Exactly the three E2B headers: inbound E2b-* headers were stripped.
+	for name := range h {
+		ln := strings.ToLower(name)
+		if strings.HasPrefix(ln, "e2b-") && ln != "e2b-sandbox-id" && ln != "e2b-sandbox-port" && ln != "e2b-traffic-access-token" {
+			t.Fatalf("unexpected E2B header %q survived: %v", name, h)
+		}
+	}
+	for _, stripped := range []string{"X-Proxy-Auth", "Remote-User", "X-Spoond-User-Id", "X-Bootstrap-Token"} {
+		if v := h.Get(stripped); v != "" {
+			t.Fatalf("%s reached the upstream: %q", stripped, v)
+		}
+	}
+	if v := h.Get("X-Forwarded-Host"); v != l.ID+"-8080.sandbox.lacy.casa" {
+		t.Fatalf("X-Forwarded-Host = %q, want the inbound Host", v)
+	}
+	if v := h.Get("X-Forwarded-Proto"); v != "https" {
+		t.Fatalf("X-Forwarded-Proto = %q, want https from the inbound header", v)
+	}
+	if h.Get("X-Forwarded-For") == "" {
+		t.Fatal("X-Forwarded-For missing (the client address is appended)")
+	}
+
+	// No TLS and no inbound proto header → http.
+	req2 := httptest.NewRequest("GET", "http://"+l.ID+".sandbox.lacy.casa/", nil)
+	rec2 := httptest.NewRecorder()
+	ph.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("proxy status %d", rec2.Code)
+	}
+	mu.Lock()
+	h = gotHeader
+	mu.Unlock()
+	if v := h.Get("X-Forwarded-Proto"); v != "http" {
+		t.Fatalf("X-Forwarded-Proto = %q, want http", v)
+	}
+	if v := h.Get("X-Forwarded-Host"); v != l.ID+".sandbox.lacy.casa" {
+		t.Fatalf("X-Forwarded-Host = %q", v)
+	}
+	if v := h.Get("E2b-Sandbox-Port"); v != "3000" {
+		t.Fatalf("E2b-Sandbox-Port = %q, want the default 3000", v)
+	}
+}
+
+// TestProxyRefusesEnvdPortAndSuspended: guest port 49983 is refused with
+// 403, and a suspended lease answers 409.
+func TestProxyRefusesEnvdPortAndSuspended(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	id := create["id"].(string)
+
+	proxy := NewServer(svc, NewImageRegistry(db)).ProxyHandler()
+
+	// 49983 → 403.
+	req := httptest.NewRequest("GET", "http://"+id+"-49983.sandbox.lacy.casa/", nil)
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("envd port status %d, want 403", rec.Code)
+	}
+
+	// Suspended → 409.
+	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("suspend status %d", resp.StatusCode)
+	}
+	req = httptest.NewRequest("GET", "http://"+id+"-3000.sandbox.lacy.casa/", nil)
+	rec = httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("suspended proxy status %d, want 409", rec.Code)
 	}
 }
