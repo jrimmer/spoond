@@ -9,7 +9,7 @@ Orchestrator session started 2026-09-30.
 |---|---|---|
 | U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
 | U02 conformance-suite | verifying-on-host | suite+baseline merged (dcc03cf); verifier PASS×2; baseline deviation pending human decision (see Waiting on human) |
-| U03 e2b-fork-and-patches | blocked | 2nd verifier FAIL (residual race): top-level t.Parallel() in TestEgressDecision must also go — see Waiting on human |
+| U03 e2b-fork-and-patches | done | verifier round 3 PASS (0 deviations) after human-approved race fix; origin/upstream=e473dd13, origin/spoond=b0424c4dc (upstream+7); binaries on vm2 (orch 7f0036e5…, envd 8c2f0dc3…) |
 | U04 host-bringup | pending | depends on U03 |
 | U05 sqlite-store | done | deployed 2026-09-30 18:57Z; R3 PASS 1.20s; spoond.db created; all services active |
 | U06 substrate-interface | pending | depends on U04 + U05 |
@@ -35,6 +35,7 @@ Orchestrator session started 2026-09-30.
 
 (none yet for units other than U01)
 
+- U03: PASS round 3 (2026-09-30) after two FAIL rounds (test data race, human-gated per protocol, fix approved by human+architect).
 - U02: PASS (2026-09-30) on the suite commit; baseline data commit verified by the Ops run itself. VERIFY-U02.md in the U02 worktree.
 - U05: PASS (2026-09-30), zero deviations. VERIFY-U05.md in the U05 worktree.
 
@@ -50,7 +51,11 @@ Orchestrator session started 2026-09-30.
 
 - **U02 forkd baseline deviates from the spec's expectation (2026-09-30) — DECISION NEEDED.** The unit expects only S3/D3/N2 to fail on forkd; observed 13 failures. Unexpected (all server-side on production forkd): I1 prod `/api/images` lacks `elixir-base`, `llm-review`, `rust-base` present in the repo manifest; I2 `pnpm --version` exit 1 in elixir-release; L1/S1/S2 `dev-base` create → 500 "failed to grant sandbox" (py-base/go-base fine, ~12 ms); L3/L4 stream WS dial → HTTP 500; N1 **security-relevant**: `internet` policy does NOT block 10.1.0.203:443; N3 proxy → 502 dial refused to sandbox 10.42.0.2:8080; N5 SSH gateway PTY → EOF. Results JSON: vm2 `/root/src/spoond/conformance/results/20260930T031307-forkd.json`, committed as `conformance/baseline-forkd.json`. **Choose: (a) investigate/repair production forkd (CI substrate may be degraded; N1 is a policy leak), (b) accept this baseline as forkd reality (U12 compares E2B against it), or (c) declare the suite wrong and have U02 reworked.** U12 depends on this; U03–U11 continue.
 
-## Waiting-on-human addendum (2026-09-30, U03 second FAIL)
+## Resolved human gates (2026-09-30)
+
+- U03 second-FAIL gate: human answered "apply"; architect confirmed the fix pattern (non-parallel tests run before parallel ones release) and set the round-3 condition (t.Cleanup restore), which the verifier confirmed at handlers_allowance_test.go L26-29. CLOSED.
+
+## Superseded notes (2026-09-30, U03 second FAIL)
 
 - **U03 blocked on the second verifier FAIL** (02-orchestration.md: one worker retry, then human). Round 1: subtest t.Parallel() raced the hostAddrs swap — fixed. Round 2 residual: the top-level `t.Parallel()` (handlers_allowance_test.go L34) still pairs unsynchronized with upstream's parallel TestIsEgressAllowed subtests reading hostAddrs (7 DATA RACE reports / 15 subtest FAILs under `-run 'TestEgressDecision|TestIsEgressAllowed' -count=5`; scheduling-dependent, which is why vm2's single -race run passed). Verifier's prescribed fix: drop L34's `t.Parallel()` too. Everything else on the branch is verified good (7 commits exact, byte-diff confined to the test file + PATCHES.md build record, vm2 tests+builds green at 86942eaf1, race2.log at /home/jrimmer/gotmp-u03/race2.log).
   **Needed from human:** one word — "apply" (worker drops L34 t.Parallel(), amend P4 again, vm2 re-run, verifier round 3) — or your own disposition. U04+ stall until then.
