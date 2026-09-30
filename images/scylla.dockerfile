@@ -3,13 +3,11 @@
 # scylladb/scylla image is RHEL UBI, which E2B's template builder rejects).
 FROM debian:12
 ENV DEBIAN_FRONTEND=noninteractive
-COPY scylla-signing-key.asc scylla-2026.2.list /tmp/
+COPY scylla-signing-key.gpg scylla-2026.2.list /tmp/
 RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends ca-certificates gnupg python3 \
+ && apt-get install -y --no-install-recommends ca-certificates python3 \
  && install -d -m 0755 /etc/apt/keyrings \
- && gpg --homedir /tmp --no-default-keyring --keyring /etc/apt/keyrings/scylladb.gpg --import /tmp/scylla-signing-key.asc \
- && gpg --no-default-keyring --keyring /etc/apt/keyrings/scylladb.gpg --list-keys --with-colons \
-      | grep -q '^fpr:::::::::6C6ECC84F42AF147BD2A65AEC503C686B007F39E:' \
+ && install -m 0644 /tmp/scylla-signing-key.gpg /etc/apt/keyrings/scylladb.gpg \
  && install -m 0644 /tmp/scylla-2026.2.list /etc/apt/sources.list.d/scylla.list \
  && apt-get update -qq \
  && apt-get install -y --no-install-recommends scylla=2026.2.6-0.20260824.c06236b53803-1 \
