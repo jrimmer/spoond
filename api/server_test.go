@@ -572,9 +572,11 @@ func TestBuildShellArgsQuoting(t *testing.T) {
 	}
 }
 
-// TestShutdownKillsLeasesAndPool verifies graceful shutdown releases
-// every lease and pooled sandbox so a backend restart never orphans VMs.
-func TestShutdownKillsLeasesAndPool(t *testing.T) {
+// TestShutdownKeepsLeasesAndPool verifies graceful shutdown stops the
+// background loops WITHOUT releasing leases or killing pooled sandboxes:
+// the state persists in the store and the next incarnation reloads it
+// (U05).
+func TestShutdownKeepsLeasesAndPool(t *testing.T) {
 	ff := newFakeForkd()
 	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
 	svc.log = log.New(io.Discard, "", 0)
@@ -591,14 +593,17 @@ func TestShutdownKillsLeasesAndPool(t *testing.T) {
 	}
 
 	svc.Shutdown(ctx)
-	// Every sandbox the fake ever created should be killed:
-	// l.ForkdID + 2 pooled = 3.
-	_ = l
-	if len(ff.killed) < 3 {
-		t.Fatalf("expected >=3 kills (lease + 2 pool), got %d: %v", len(ff.killed), ff.killed)
+	if len(ff.killed) != 0 {
+		t.Fatalf("expected no kills on shutdown, got %d: %v", len(ff.killed), ff.killed)
 	}
-	if len(ff.sandboxes) != 0 {
-		t.Fatalf("expected all sandboxes killed, %d remain", len(ff.sandboxes))
+	var live bool
+	for _, id := range svc.LiveLeases() {
+		if id == l.ID {
+			live = true
+		}
+	}
+	if !live {
+		t.Fatalf("lease %s no longer live after shutdown", l.ID)
 	}
 }
 
