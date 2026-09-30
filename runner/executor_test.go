@@ -430,7 +430,7 @@ type recordingSink struct {
 		rows  int
 	}
 	failEvery int // when >0, every Nth Log call returns an error
-	n          int
+	n         int
 }
 
 func (r *recordingSink) Log(ctx context.Context, jobID, index int64, rows []*LogRow, noMore bool) error {
@@ -466,7 +466,7 @@ func TestLogLinesBatches(t *testing.T) {
 
 func TestLogLinesSplitsLongRows(t *testing.T) {
 	e := &Executor{Sink: &recordingSink{}}
-	consumed := e.logLines(t.Context(), &Job{ID: 8}, 0, []string{strings.Repeat("x", logRowMax*2 + 5)})
+	consumed := e.logLines(t.Context(), &Job{ID: 8}, 0, []string{strings.Repeat("x", logRowMax*2+5)})
 	rs := e.Sink.(*recordingSink)
 	total := 0
 	for _, c := range rs.calls {
