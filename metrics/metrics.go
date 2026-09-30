@@ -71,6 +71,9 @@ type BackendMetrics struct {
 	SharesActive   prometheus.Gauge     // active share grants
 	BusySlots      *prometheus.GaugeVec // {owner}: exec/stream concurrency
 
+	// Store
+	StoreErrors *prometheus.CounterVec // {op}: SQLite write failures (U05)
+
 	// Builds (image bake)
 	BuildsInFlight prometheus.Gauge   // active bakes
 	BuildsFailed   prometheus.Counter // cumulative bake failures
@@ -243,6 +246,12 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Per-owner exec/stream concurrency (cap 8).",
 	}, []string{"owner"})
 
+	// Store
+	m.StoreErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "store_errors_total",
+		Help: "Store write failures by operation.",
+	}, []string{"op"})
+
 	// Builds
 	m.BuildsInFlight = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "builds_in_flight",
@@ -267,6 +276,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.IdentityUsers, m.IdentityAdmins, m.AuthFailures,
 		m.AuthThrottled, m.QuotaExceeded, m.QuotaReserved,
 		m.SharesActive, m.BusySlots,
+		m.StoreErrors,
 		m.BuildsInFlight, m.BuildsFailed,
 	)
 	return m

@@ -5,6 +5,7 @@
 //	FORKD_URL        forkd-controller base URL (default http://127.0.0.1:8889)
 //	FORKD_TOKEN      bearer token for forkd-controller (optional)
 //	BIND_ADDR        listen address (default 127.0.0.1:8890)
+//	SPOOND_DB_PATH   SQLite database path (default /var/lib/spoond/spoond.db)
 //	TLS_CERT, TLS_KEY  serve HTTPS when both are set
 //	CONSUMER_TOKENS  comma-separated token=consumer pairs (e.g. "abc=forgejo,def=pi")
 //	POOL_SIZE        warm-pool size per image (default 0 = disabled)
@@ -34,6 +35,7 @@ import (
 	"github.com/jrimmer/spoond/api"
 	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
+	"github.com/jrimmer/spoond/store"
 )
 
 func envOr(key, def string) string {
@@ -184,11 +186,24 @@ func Main(args []string) int {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	svc.Start(ctx)
 
-	// Kill any sandboxes left by a previous backend incarnation before
-	// warming the pool, so netns slots are never double-booked.
+	// Persistence (U05): open the SQLite store and load the previous
+	// incarnation's leases, shares and pool before reconciling or
+	// starting any loop, so the reconciler sees the loaded state.
+	db, err := store.Open(envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"))
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+	svc.SetDB(db)
+	if err := svc.LoadState(ctx); err != nil {
+		log.Fatalf("store: load state: %v", err)
+	}
+
+	// Kill any controller sandboxes no loaded lease or pool entry claims
+	// before warming the pool, so netns slots are never double-booked.
 	svc.ReconcileOrphans(ctx)
+
+	svc.Start(ctx)
 
 	// Slow-loris / header hardening (security review #37 rescan F10):
 	// both listeners get read-header timeouts + header size caps so a
@@ -217,18 +232,18 @@ func Main(args []string) int {
 		}()
 	}
 
-	// Graceful shutdown: on SIGTERM/SIGINT kill every lease and pooled
-	// sandbox before exiting. Without this, a backend restart orphans
-	// its warm VMs in the controller (which has no client-liveness), and
-	// they hold netns slots until manually reaped.
+	// Graceful shutdown: stop the background loops and flush pending
+	// LastActive updates. Leases, shares and pool entries persist in the
+	// SQLite store and the next incarnation loads them (U05).
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		log.Printf("received %v, shutting down (releasing %d leases + warm pool)", sig, len(svc.LiveLeases()))
+		log.Printf("received %v, shutting down (%d leases kept in store)", sig, len(svc.LiveLeases()))
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutdownCancel()
 		svc.Shutdown(shutdownCtx)
+		db.Close()
 		_ = httpSrv.Shutdown(shutdownCtx)
 		if proxySrv != nil {
 			_ = proxySrv.Shutdown(shutdownCtx)
@@ -237,7 +252,6 @@ func Main(args []string) int {
 	}()
 
 	log.Printf("spoond-backend listening on %s (forkd at %s, %d consumer(s), pool=%d)", bindAddr, forkdURL, len(tokens), poolSize)
-	var err error
 	if tlsCert != "" && tlsKey != "" {
 		err = httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
 	} else {
