@@ -1,0 +1,24 @@
+[Unit]
+Description=E2B orchestrator (spoond substrate)
+After=network-online.target e2b-guard.service
+Wants=network-online.target
+Requires=e2b-guard.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/e2b/orchestrator.env
+ExecStartPre=/bin/sh -c 'iptables -w 5 -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -w 5 -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu'
+ExecStartPre=/bin/mkdir -p /forkdcache/e2b/tmp /fc-vm
+ExecStart=/usr/local/lib/e2b/orchestrator
+Restart=always
+RestartSec=5
+TimeoutStartSec=420
+TimeoutStopSec=330
+KillMode=mixed
+Delegate=yes
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
