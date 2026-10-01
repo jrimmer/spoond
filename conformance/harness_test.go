@@ -279,6 +279,45 @@ try:
 except Exception:
     print("blocked")
     raise SystemExit
+s.settimeout(2)
+try:
+    d = s.recv(1)
+except socket.timeout:
+    print("ok")
+    raise SystemExit
+except Exception:
+    print("blocked")
+    raise SystemExit
+print("ok" if d else "blocked")
+'`
+
+// e2bTLSProbeCmd is the port-443 variant: 443 listeners use tcpproxy SNI
+// routing, which needs a parseable ClientHello before any allow/deny
+// decision — a 1-byte write can never complete one, so a denied 443
+// destination sits silent-open and the write+read probe would misread it
+// as reachable. This probe performs a real TLS client handshake (certificate
+// verification off; the verdict is reachability, not trust):
+//   - "ok": handshake established, and the connection alive afterwards
+//     (any data byte, or silent-open read timeout)
+//   - "blocked": any socket/ssl failure during connect or handshake
+//     (a denied 443 is closed once the hello routes), or clean EOF before
+//     any data
+const e2bTLSProbeCmd = `python3 -c '
+import socket, ssl
+try:
+    s = socket.create_connection(("%s", %d), timeout=3)
+except Exception:
+    print("blocked")
+    raise SystemExit
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+try:
+    s = ctx.wrap_socket(s, server_hostname="%s")
+except Exception:
+    print("blocked")
+    raise SystemExit
+s.settimeout(2)
 try:
     d = s.recv(1)
 except socket.timeout:
@@ -295,12 +334,18 @@ print("ok" if d else "blocked")
 //
 //   - forkd denies at SYN (netns firewall), so a plain connect probe
 //     decides: timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no
-//   - e2b: reachable means connect OK AND (data received OR the
-//     connection still open after a write); blocked means connect timeout
-//     or EOF/reset before any data (e2bProbeCmd above).
+//   - e2b, port 443: a real TLS client handshake must establish
+//     (e2bTLSProbeCmd above — SNI routing decides on the ClientHello)
+//   - e2b, other ports: reachable means connect OK AND (data received OR
+//     the connection still open after a write); blocked means connect
+//     timeout or EOF/reset before any data (e2bProbeCmd above).
 func canTCP(t *testing.T, id, host string, port int) bool {
 	if cfg.Substrate == "e2b" {
-		return probeToken(t, id, fmt.Sprintf(e2bProbeCmd, host, port)) == "ok"
+		cmd := e2bProbeCmd
+		if port == 443 {
+			cmd = e2bTLSProbeCmd
+		}
+		return probeToken(t, id, fmt.Sprintf(cmd, host, port, host)) == "ok"
 	}
 	out := execOK(t, id, fmt.Sprintf("timeout 5 bash -c '</dev/tcp/%s/%d' && echo yes || echo no", host, port))
 	return out == "yes"
