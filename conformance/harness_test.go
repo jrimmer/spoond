@@ -255,47 +255,80 @@ func randMarker() string {
 	return hex.EncodeToString(b)
 }
 
+// e2bProbeCmd classifies reachability by the data-phase outcome, because
+// E2B denies egress in two observable ways: layer-1 denies blackhole the
+// SYN (connect hangs to its timeout) and layer-2 port-scoped denies
+// connect and then close before any data (immediate EOF; notably,
+// `head -c1` exits 0 on that EOF, so a shell probe cannot decide this).
+// The probe connects with a 3s timeout, writes one byte (provoking the
+// policy decision and any server response) and reads with a 2s timeout:
+//   - "blocked": connect timeout/refused or reset, or EOF before any data
+//   - "ok": any data byte, or read timeout (silent-open = alive, e.g.
+//     scylla 9042 waiting for CQL)
+const e2bProbeCmd = `python3 -c '
+import socket
+s = socket.socket()
+s.settimeout(3)
+try:
+    s.connect(("%s", %d))
+except Exception:
+    print("blocked")
+    raise SystemExit
+try:
+    s.sendall(b"P")
+except Exception:
+    print("blocked")
+    raise SystemExit
+try:
+    d = s.recv(1)
+except socket.timeout:
+    print("ok")
+    raise SystemExit
+except Exception:
+    print("blocked")
+    raise SystemExit
+print("ok" if d else "blocked")
+'`
+
 // canTCP runs the suite's TCP reachability probe in the lease and reports
 // whether the destination is reachable. The probe is substrate-aware:
 //
 //   - forkd denies at SYN (netns firewall), so a plain connect probe
 //     decides: timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no
-//   - e2b enforces egress with a transparent TCP proxy: the guest's
-//     connect() always succeeds (the local proxy accepts) and a denied
-//     destination closes at the data phase. Reachability there means the
-//     connection supports the data phase, probed with
-//     timeout 3 bash -c 'exec 3<>/dev/tcp/HOST/PORT && head -c 1 <&3'
-//     where exit 0 (a byte arrived) or 124 (timeout — connection still
-//     open, silent server) is reachable, and any other exit (1/2 — EOF or
-//     reset, i.e. the proxy closed us) is blocked.
-//
-// Allowed-but-silent services (e.g. scylla 9042 waiting for CQL) hit the
-// timeout path and count as reachable, which is correct.
+//   - e2b: reachable means connect OK AND (data received OR the
+//     connection still open after a write); blocked means connect timeout
+//     or EOF/reset before any data (e2bProbeCmd above).
 func canTCP(t *testing.T, id, host string, port int) bool {
 	if cfg.Substrate == "e2b" {
-		code := probeExit(t, id, fmt.Sprintf("timeout 3 bash -c 'exec 3<>/dev/tcp/%s/%d && head -c 1 <&3'", host, port))
-		return code == 0 || code == 124
+		return probeToken(t, id, fmt.Sprintf(e2bProbeCmd, host, port)) == "ok"
 	}
 	out := execOK(t, id, fmt.Sprintf("timeout 5 bash -c '</dev/tcp/%s/%d' && echo yes || echo no", host, port))
 	return out == "yes"
 }
 
-// probeExit runs cmd in the lease and returns its exit code, tolerating
-// non-zero exits (probes whose meaning is the exit code). Transport and
-// HTTP-level failures still fail the test.
-func probeExit(t *testing.T, id, cmd string) int {
-	st, body, err := cl.exec(id, execReq{Cmd: cmd, Timeout: 10})
+// probeToken runs a probe cmd in the lease whose stdout is exactly "ok" or
+// "blocked". Anything else — other output, a non-zero exit, a transport or
+// HTTP-level failure — is a harness error, not a reachability verdict.
+func probeToken(t *testing.T, id, cmd string) string {
+	st, body, err := cl.exec(id, execReq{Cmd: cmd, Timeout: 15})
 	if err != nil {
-		failf(t, "exec %s %q: %v", id, cmd, err)
+		failf(t, "exec %s: %v", id, err)
 	}
 	if st != 200 {
-		failf(t, "exec %s %q: status %d: %s", id, cmd, st, truncate(body))
+		failf(t, "exec %s: status %d: %s", id, st, truncate(body))
 	}
 	var out execResult
 	if err := json.Unmarshal(body, &out); err != nil {
-		failf(t, "exec %s %q: bad body: %v", id, cmd, err)
+		failf(t, "exec %s: bad body: %v", id, err)
 	}
-	return out.Exit
+	if out.Exit != 0 {
+		failf(t, "probe harness error in %s: exit %d: stderr: %s", id, out.Exit, strings.TrimSpace(out.Stderr))
+	}
+	token := strings.TrimSpace(out.Stdout)
+	if token != "ok" && token != "blocked" {
+		failf(t, "probe harness error in %s: stdout %q, want ok|blocked", id, token)
+	}
+	return token
 }
 
 // canTCPAddr is canTCP for a host:port address (CONFORMANCE_GUEST_SERVICE).
