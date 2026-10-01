@@ -18,8 +18,8 @@ Orchestrator session started 2026-09-30.
 | U09 networking-and-access | done | conformance 20/20 PASS (all L/S/D/I/N incl. gateway, proxy, policies); one real fork bug fixed (P4 nft set-overlap EEXIST, orchestrator 40bed69a9); probe semantics reworked for E2B's proxy datapath (5 suite commits); S2 122.9s/S3 129.4s remain over U02 budgets (risk register) |
 | U10 restart-and-crash | done | R1/R2/R3 PASS (restart_total_ms 5632 vs 120000 budget); drain wired into e2b-orchestrator unit; window journey + debris sweep recorded |
 | U11 catalog-gc-and-observability | done | otelcol live (14317→19464); /metrics composed (spoond gauges + otel passthrough); D3+L6 PASS; doctor all-PASS; dry-run GC logging 10 sensible candidates; clone 0.596 s post-fix |
-| U12 cutover | running | precondition met (27/27 staging, all budgets); main merged efb1b56; HUMAN: GO + no-wait force deployment (2026-10-01); prepare + cutover window dispatched |
-| U13 upstream-runbook | pending | depends on U12 |
+| U12 cutover | soaking | steps 1-15 DONE 2026-10-01: production on E2B, 27/27 prod conformance PASS (280s, all budgets, I3 passed), window_smoke PASS, forkd+staging+watchdog disabled, rollback staged; SOAK started 2026-10-01 (7 days, day-7 GC gate); **step 20 due 2026-10-31** |
+| U13 upstream-runbook | pending | blocked on U12 soak completion (by design) |
 
 ## Setup log
 
@@ -44,6 +44,8 @@ Orchestrator session started 2026-09-30.
 - U07: PASS (2026-09-30) on the full 11-commit branch after the scylla fix trail; zero deviations; keys fingerprint-checked by the verifier.
 
 ## Autonomous window runs
+
+- **U12 CUTOVER, 2026-10-01 (no-wait human authorization):** steps 2-15 verbatim, 4h25m total incl. conformance + CI watch. Catalog 7/7 into spoond-next.db; env/unit/drain rewires per unit; forkd-controller+netns, staging backend/gateway, watchdog disabled; DB swapped (forkd-final copy integrity-ok); hugepages 18207/24576 at switch (fragmented; top-up dispatched); PRODUCTION CONFORMANCE 27/27 PASS in 280.1s (create p50 60/p95 77ms, per-image 64-88ms, clone 540ms, fork8 997ms, suspend 32ms, resume 64ms, R1 47782ms; L6 /metrics 403 expected); window_smoke PASS; runner restarted; CI watch 4h: 1 job (3433 Renovate exit 127, own merits; below 2-of-3 threshold; pre-cutover job 3432 also failed on forkd). Results: vm2 conformance/results/20261001T012919-prod-e2b.json + local U12-prep/conformance-prod-e2b.json. NO ROLLBACK.
 
 - **U10 R1–R3, 2026-10-01 (attempt 1):** window opened 01:12:51 UTC after ~40 s; R1 PASS 173.1s (restart_total_ms 167643 — OVER the 120000 budget; cause: the then-unfixed 120 s outstanding-work wait × drain pauses), R2 FAIL (netns 35 vs 39 — count-diff evidence pending), R3 PASS. Rollback executed per protocol (restart e2b-orchestrator + staging services), production healthz ok, window_smoke 0, runner restarted. Subsequent root cause: the 120 s was spoond's client wait (fixed in 9d51b89).
 - **U10 R1–R3, 2026-10-01 (attempt 2, aborted):** window_idle blocked 5+h by the failed-jobs artifact (jobs 3413/3420, aging out 01:37/02:43 PDT); the ops agent held a blocking poll — killed, nothing executed, runner never stopped.
