@@ -79,6 +79,7 @@ Orchestrator session started 2026-09-30.
 
 ## Risk register
 
+- **U06 outstanding-work wait = fixed 120 s penalty (root-caused 2026-10-01):** ops-timed checkpoint with journals: orchestrator Checkpoint gRPC = 542 ms (snapshot durable); spoond's spec'd post-call wait for OutstandingWork==0 never terminates (counter idles >=1) and burns the full 120 s on EVERY Pause/Checkpoint — the single cause of S2 120.8s/S3 129.4s (budgets 5/10 s), R1 167.6s (budget 120s) and slow drains. Fix (deviation, recorded): bounded wait — poll until OutstandingWork <= pre-call value or 10 s, then log-and-continue (U06 worker). Storage exonerated: pool writes 2.1 GB/s; disk idle during the 120 s.
 - **U12 budget risk (observed 2026-09-30, U08 staging run):** S2 clone 120.8 s and S3 fork8 121.3 s against U02 budgets of 5000/10000 ms. Pattern matches the orchestrator snapshot-persist path (U06 live test logged outstanding_work 1–2 for ~120 s during pause). U08's gate only covers S4 create (61/69 ms — 30× under). If U12 must meet clone/fork budgets, the pause/checkpoint persist path needs investigation (hugepage writeout to ZFS?) before cutover. Recorded for the U12 OPERATOR gate.
 
 ## Notifications
