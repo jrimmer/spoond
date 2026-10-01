@@ -98,10 +98,10 @@ func TestR2_OrchestratorCrash(t *testing.T) {
 		execOK(t, l.ID, "echo after > /root/m")
 	}
 
-	n0, err := strconv.Atoi(hostRun(t, "ip netns list | grep -c '^ns-' || true"))
-	if err != nil {
-		failf(t, "netns count: %v", err)
-	}
+	// Netns baseline (sorted ns-* names): R2 compares sets, not counts —
+	// see conformance/RESULTS.md §R2 netns semantics.
+	baselineFile := "/tmp/.conformance-r2-" + randMarker() + "-baseline"
+	hostRun(t, "ip netns list | grep '^ns-' | awk '{print $1}' | sort > "+baselineFile)
 	hostRun(t, "systemctl kill -s SIGKILL e2b-orchestrator")
 
 	deadline := time.Now().Add(180 * time.Second)
@@ -153,12 +153,29 @@ func TestR2_OrchestratorCrash(t *testing.T) {
 	if nbd != fc {
 		failf(t, "nbd devices = %d, firecracker processes = %d, want equal", nbd, fc)
 	}
-	ns, err := strconv.Atoi(hostRun(t, "ip netns list | grep -c '^ns-' || true"))
-	if err != nil {
-		failf(t, "netns count: %v", err)
+
+	// Netns leak check, set semantics: delete this test's leases (the
+	// cleanup would do it later), let the host settle, then require that
+	// no netns NEW since the baseline persists — see
+	// conformance/RESULTS.md §R2 netns semantics.
+	for _, id := range ids {
+		st, body, err := cl.delete(id)
+		if err != nil {
+			failf(t, "delete %s: %v", id, err)
+		}
+		if st != 204 && st != 404 {
+			failf(t, "delete %s: status %d: %s", id, st, truncate(body))
+		}
 	}
-	if ns != n0 {
-		failf(t, "netns count = %d, want %d (as before the crash)", ns, n0)
+	time.Sleep(5 * time.Second)
+	laterFile := "/tmp/.conformance-r2-" + randMarker() + "-later"
+	hostRun(t, "ip netns list | grep '^ns-' | awk '{print $1}' | sort > "+laterFile)
+	diff := hostRun(t, "comm -13 "+baselineFile+" "+laterFile)
+	baseCount := hostRun(t, "wc -l < "+baselineFile)
+	laterCount := hostRun(t, "wc -l < "+laterFile)
+	hostRun(t, "rm -f "+baselineFile+" "+laterFile)
+	if diff != "" {
+		failf(t, "netns leak: %s netns before the crash, %s after cleanup; new since baseline:\n%s", baseCount, laterCount, diff)
 	}
 }
 

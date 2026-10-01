@@ -104,3 +104,29 @@ Non-443 ports keep the write+read probe.
 On forkd the plain connect probe
 `timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no` is kept:
 forkd blocks at SYN, so a failed connect is a denial.
+
+## R2 netns semantics
+
+`TestR2_OrchestratorCrash` compares **netns sets**, not counts. This is a
+recorded deviation from the unit text ("the count equals `N0`"):
+count-equality cannot hold on a real host.
+
+- **Throwaway prefetch-harvest sandboxes** carry netns that die with a
+  crash by design, so before/after counts drift while the actual netns
+  set is untouched.
+- **Historical debris** makes absolute counts meaningless.
+
+Ops evidence during an R1–R3 window: the host netns *set* was identical
+across the whole window (37/37 names, empty `comm` diff) while raw counts
+read 43 vs 35.
+
+The check therefore:
+
+1. captures the sorted `ns-*` name list at test start (baseline `B`);
+2. after the crash-recovery assertions, deletes the test's own leases and
+   lets the host settle 5 s;
+3. captures the sorted list `L` and fails only when `comm -13 B L` is
+   non-empty — i.e. when a netns created during the crash window **leaks**
+   after the test's own sandboxes are gone.
+
+The failure message logs both counts and the leaked names.
