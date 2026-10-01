@@ -368,8 +368,8 @@ func (c *Client) Exec(ctx context.Context, sandboxID string, req substrate.ExecR
 				}
 			}
 			return substrate.ExecResult{
-				Stdout: stdout.String(),
-				Stderr: stderr.String() + fmt.Sprintf("\n[spoond] exec timed out after %ds\n", int(math.Ceil(timeout.Seconds()))),
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String() + fmt.Sprintf("\n[spoond] exec timed out after %ds\n", int(math.Ceil(timeout.Seconds()))),
 				ExitCode: 124,
 			}, nil
 		case <-ctx.Done():

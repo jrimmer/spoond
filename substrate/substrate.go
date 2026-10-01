@@ -44,19 +44,19 @@ type BuildResult struct {
 	KernelVersion      string
 	FirecrackerVersion string
 	EnvdVersion        string
-	DiskSizeMB         uint32 // from metadata rootfsSizeKey
+	DiskSizeMB         uint32    // from metadata rootfsSizeKey
 	Refs               BuildRefs // from metadata.schedulingMetadata
 	Log                []string
 }
 
 type CreateRequest struct {
-	TemplateID, BuildID, SandboxID                string
+	TemplateID, BuildID, SandboxID                 string
 	KernelVersion, FirecrackerVersion, EnvdVersion string
-	VCPU, MemoryMB, DiskSizeMB                    uint32
-	Resume                                        bool // true: SandboxID must be the paused sandbox's id
-	EnvVars, Metadata                             map[string]string
-	EndAt                                         time.Time
-	Egress                                        Egress
+	VCPU, MemoryMB, DiskSizeMB                     uint32
+	Resume                                         bool // true: SandboxID must be the paused sandbox's id
+	EnvVars, Metadata                              map[string]string
+	EndAt                                          time.Time
+	Egress                                         Egress
 }
 
 type Sandbox struct {
@@ -76,9 +76,9 @@ type NodeInfo struct {
 }
 
 type ExecRequest struct {
-	Args    []string // argv; spoond passes buildShellArgs(...)
+	Args    []string      // argv; spoond passes buildShellArgs(...)
 	Timeout time.Duration // 0 = 30 s
-	User    string // "" = "root"
+	User    string        // "" = "root"
 }
 
 type ExecResult struct {
@@ -118,11 +118,11 @@ type ProcessEvent struct {
 // Process is an interactive guest process. Events is closed after EventExit or EventError.
 type Process interface {
 	Events() <-chan ProcessEvent
-	Write(data []byte) error      // PTY input when started with PTY, else stdin
+	Write(data []byte) error // PTY input when started with PTY, else stdin
 	Resize(cols, rows uint32) error
-	Signal(kill bool) error        // false = SIGTERM, true = SIGKILL
-	CloseStdin() error             // non-PTY only
-	Close() error                  // stop streaming; does not kill the process
+	Signal(kill bool) error // false = SIGTERM, true = SIGKILL
+	CloseStdin() error      // non-PTY only
+	Close() error           // stop streaming; does not kill the process
 }
 
 type Substrate interface {
