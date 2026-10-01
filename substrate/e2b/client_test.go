@@ -1,8 +1,11 @@
 package e2b
 
 import (
+	"context"
+	"errors"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/jrimmer/spoond/substrate"
 )
@@ -100,5 +103,55 @@ func TestEgressConfig(t *testing.T) {
 	}
 	if len(plain.GetAllowedPrivate()) != 0 {
 		t.Fatalf("allowed_private = %v", plain.GetAllowedPrivate())
+	}
+}
+
+type stubNodeInfo struct {
+	level int // outstanding work returned by every poll
+	err   error
+	calls int
+}
+
+func (s *stubNodeInfo) nodeInfo(ctx context.Context) (substrate.NodeInfo, error) {
+	s.calls++
+	return substrate.NodeInfo{OutstandingWork: s.level}, s.err
+}
+
+func TestWaitOutstandingReturnsWhenWorkBackAtBaseline(t *testing.T) {
+	// Node was at 2 before the call; the persist pushed it to 3; it comes
+	// back down to 2. The wait must return as soon as work <= before,
+	// without reaching the bound.
+	stub := &stubNodeInfo{level: 2}
+	start := time.Now()
+	waitOutstanding(t.Context(), "i0123456789abcdefghij", "pause", 2, stub.nodeInfo, time.Millisecond, time.Second)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("wait returned after %s, wanted a quick return at the baseline", elapsed)
+	}
+	if stub.calls == 0 {
+		t.Fatal("NodeInfo was never polled")
+	}
+}
+
+func TestWaitOutstandingGivesUpAtBound(t *testing.T) {
+	// Work stays above the baseline (never reaches 0 in practice): the wait
+	// must give up after the bound and never error.
+	stub := &stubNodeInfo{level: 1}
+	start := time.Now()
+	waitOutstanding(t.Context(), "i0123456789abcdefghij", "checkpoint", 0, stub.nodeInfo, time.Millisecond, 50*time.Millisecond)
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("wait returned after %s, wanted the full bound", elapsed)
+	}
+	if stub.calls < 2 {
+		t.Fatalf("polled %d times, wanted at least a baseline and one poll", stub.calls)
+	}
+}
+
+func TestWaitOutstandingTreatsPollErrorsAsAboveBaseline(t *testing.T) {
+	// Poll errors keep the wait going until the bound; still no error out.
+	stub := &stubNodeInfo{err: errors.New("node info unavailable")}
+	start := time.Now()
+	waitOutstanding(t.Context(), "i0123456789abcdefghij", "pause", 0, stub.nodeInfo, time.Millisecond, 30*time.Millisecond)
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Fatalf("wait returned after %s, wanted the full bound", elapsed)
 	}
 }

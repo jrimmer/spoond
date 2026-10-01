@@ -190,6 +190,7 @@ func (c *Client) Delete(ctx context.Context, sandboxID string) error {
 
 // Pause snapshots a sandbox to a new build and stops it.
 func (c *Client) Pause(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
+	before := c.outstandingLevel(ctx)
 	buildID := NewUUID()
 	resp, err := c.sandbox.Pause(ctx, &orchestrator.SandboxPauseRequest{
 		SandboxId:  sandboxID,
@@ -199,12 +200,13 @@ func (c *Client) Pause(ctx context.Context, sandboxID, templateID string) (strin
 	if err != nil {
 		return "", substrate.BuildRefs{}, mapError(err)
 	}
-	c.waitOutstanding(ctx, sandboxID)
+	c.waitOutstanding(ctx, sandboxID, "pause", before)
 	return buildID, refsFrom(resp.GetSchedulingMetadata()), nil
 }
 
 // Checkpoint snapshots a running sandbox to a new build; it keeps running.
 func (c *Client) Checkpoint(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+	before := c.outstandingLevel(ctx)
 	buildID := NewUUID()
 	resp, err := c.sandbox.Checkpoint(ctx, &orchestrator.SandboxCheckpointRequest{
 		SandboxId: sandboxID,
@@ -213,33 +215,54 @@ func (c *Client) Checkpoint(ctx context.Context, sandboxID string) (string, subs
 	if err != nil {
 		return "", substrate.BuildRefs{}, mapError(err)
 	}
-	c.waitOutstanding(ctx, sandboxID)
+	c.waitOutstanding(ctx, sandboxID, "checkpoint", before)
 	return buildID, refsFrom(resp.GetSchedulingMetadata()), nil
 }
 
-// waitOutstanding polls NodeInfo until the node has no outstanding work.
-// outstanding_work counts every in-flight tracked operation on the node
-// (template builds, other pauses; A3 A6), so it may never reach 0: after 120 s
-// we log and continue — the timeout is not an error.
-func (c *Client) waitOutstanding(ctx context.Context, sandboxID string) {
-	deadline := time.Now().Add(120 * time.Second)
-	last := 0
+const (
+	outstandingPollInterval = 500 * time.Millisecond
+	outstandingWaitBound    = 10 * time.Second
+)
+
+// outstandingLevel captures the node's outstanding work just before a pause
+// or checkpoint call, so the wait afterwards can detect when the node is back
+// at (or under) its pre-call level.
+func (c *Client) outstandingLevel(ctx context.Context) int {
+	if info, err := c.NodeInfo(ctx); err == nil {
+		return info.OutstandingWork
+	}
+	return 0
+}
+
+func (c *Client) waitOutstanding(ctx context.Context, sandboxID, method string, before int) {
+	waitOutstanding(ctx, sandboxID, method, before, c.NodeInfo, outstandingPollInterval, outstandingWaitBound)
+}
+
+// waitOutstanding polls NodeInfo until the node's outstanding work drops back
+// to before (the level captured at the gRPC call) or the bound elapses. The
+// Pause/Checkpoint gRPC response already confirms the snapshot is durable;
+// this wait only yields to persist work still in flight on the node
+// (outstanding_work counts every tracked operation, A3 A6, and does not
+// always return to 0), so it is bounded and never an error: on timeout we log
+// and continue.
+func waitOutstanding(ctx context.Context, sandboxID, method string, before int, nodeInfo func(context.Context) (substrate.NodeInfo, error), poll, bound time.Duration) {
+	last := before
+	deadline := time.Now().Add(bound)
 	for {
-		info, err := c.NodeInfo(ctx)
-		if err == nil {
+		if info, err := nodeInfo(ctx); err == nil {
 			last = info.OutstandingWork
-			if last == 0 {
+			if last <= before {
 				return
 			}
 		}
 		if time.Now().After(deadline) {
-			slog.Warn(fmt.Sprintf("e2b: pause %s: outstanding_work still %d after 120s", sandboxID, last))
+			slog.Warn(fmt.Sprintf("e2b: %s %s: outstanding_work still %d after %s", method, sandboxID, last, bound))
 			return
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(poll):
 		}
 	}
 }
