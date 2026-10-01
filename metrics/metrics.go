@@ -80,6 +80,11 @@ type BackendMetrics struct {
 
 	// Checkpoints (U10)
 	CheckpointDur prometheus.Histogram // sub.Checkpoint snapshot duration
+
+	// Snapshot catalog (U11)
+	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
+	StorageFree   prometheus.Gauge       // free bytes at the template storage path
+	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
 }
 
 // NewBackendMetrics creates and registers all backend metrics on a
@@ -271,6 +276,20 @@ func NewBackendMetrics() *BackendMetrics {
 		Buckets: prometheus.ExponentialBuckets(0.5, 2, 10), // 0.5s → 256s
 	})
 
+	// Snapshot catalog (U11)
+	m.SnapshotBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "snapshot_bytes",
+		Help: "Disk bytes per build kind (allocated blocks × 512).",
+	}, []string{"kind"})
+	m.StorageFree = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "storage_free_bytes",
+		Help: "Free bytes at the template storage path.",
+	})
+	m.GCDeleted = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "gc_deleted_total",
+		Help: "Builds deleted by the catalog GC, by kind.",
+	}, []string{"kind"})
+
 	// Register all
 	reg.MustRegister(
 		m.PoolReady, m.PoolCap, m.PoolRefill, m.PoolRefillFail,
@@ -288,6 +307,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.StoreErrors,
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur,
+		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 	)
 	return m
 }

@@ -138,6 +138,7 @@ type ServiceConfig struct {
 	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
 	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
 	CheckpointEvery                 time.Duration
+	TemplateStoragePath             string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
 }
 
 // Service is the lease API backend.
@@ -641,6 +642,9 @@ func (s *Service) Start(ctx context.Context) {
 	// Periodic checkpoints (U10): persistent leases that saw activity
 	// since their last snapshot, one at a time, spaced 2 s apart.
 	go s.runCheckpointLoop(ctx)
+	// Snapshot catalog GC + disk accounting (U11): once 10 minutes
+	// after the backend starts, then once an hour.
+	go s.runGCCatalogLoop(ctx)
 }
 
 // refillPool pre-creates cfg.PoolSize sandboxes for every image with a
@@ -1029,12 +1033,12 @@ func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (strin
 // pauseLeaseBody is the sub work of a pause. Callers own the busy
 // window; it must not be called with s.store.mu held.
 func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (string, error) {
-	buildID, _, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
+	buildID, refs, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
 		return "", err
 	}
 	// The pause build records what was snapshotted: versions and sizes
-	// copied from the parent build row (refs are stored from U11 on).
+	// copied from the parent build row.
 	parent, err := s.db.GetBuild(ctx, l.BuildID)
 	if err != nil {
 		return "", fmt.Errorf("load parent build %s: %w", l.BuildID, err)
@@ -1059,6 +1063,11 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 		UpdatedAt:          now,
 	}); err != nil {
 		return "", fmt.Errorf("insert pause build: %w", err)
+	}
+	// The new build's headers reference the blocks of other builds
+	// (A3 C3); GC keeps them (U11).
+	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
+		return "", fmt.Errorf("store pause build refs: %w", err)
 	}
 	s.deleteSandboxRow(l.SandboxID)
 	s.store.mu.Lock()
@@ -1198,12 +1207,12 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 
 // checkpointLease checkpoints a running sandbox into a new build,
 // inserts the checkpoint build row (versions and sizes copied from the
-// parent build row; refs are stored from U11 on), and applies the
-// checkpoint bookkeeping to the source lease (item 18). It returns the
-// new build row.
+// parent build row; refs stored from the Checkpoint response), and
+// applies the checkpoint bookkeeping to the source lease (item 18). It
+// returns the new build row.
 func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildRow, error) {
 	start := time.Now()
-	buildID, _, err := s.sub.Checkpoint(ctx, src.SandboxID)
+	buildID, refs, err := s.sub.Checkpoint(ctx, src.SandboxID)
 	if s.metrics != nil {
 		s.metrics.CheckpointDur.Observe(time.Since(start).Seconds())
 	}
@@ -1235,6 +1244,11 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	}
 	if err := s.db.InsertBuild(ctx, b); err != nil {
 		return store.BuildRow{}, fmt.Errorf("insert checkpoint build: %w", err)
+	}
+	// The new build's headers reference the blocks of other builds
+	// (A3 C3); GC keeps them (U11).
+	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
+		return store.BuildRow{}, fmt.Errorf("store checkpoint build refs: %w", err)
 	}
 	// The source keeps running from the new build (A2 §3.5, §3.6, the
 	// "resume-fresh" path), so its build id and — possibly changed — host
@@ -1707,6 +1721,8 @@ func leaseMap(l *Lease) map[string]any {
 		"persistent":       l.Persistent,
 		"suspended":        l.Suspended,
 		"state":            l.State,
+		"build_id":         l.BuildID,
+		"resume_build_id":  l.ResumeBuildID,
 		"name":             l.Name,
 		"comment":          l.Comment,
 		"net_policy":       l.NetPolicy,

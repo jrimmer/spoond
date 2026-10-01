@@ -180,6 +180,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
+	// Snapshot catalog (U11): list and delete the caller's builds.
+	s.mux.HandleFunc("GET /api/snapshots", s.handleSnapshots)
+	s.mux.HandleFunc("DELETE /api/snapshots/{build_id}", s.handleSnapshotDelete)
 	// Admin endpoints (U10): drain, undrain and crash reconcile. Auth is
 	// done in api/admin.go (ADMIN_TOKEN is not a consumer token, so
 	// authMiddleware lets /api/admin/ through).

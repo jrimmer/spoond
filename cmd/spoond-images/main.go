@@ -315,6 +315,11 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	}); err != nil {
 		return err
 	}
+	// The build's headers reference the blocks of other builds (A3 C3);
+	// GC keeps them (U11).
+	if err := db.AddBuildRefs(ctx, buildID, append(res.Refs.RootfsBuildIDs, res.Refs.MemfileBuildIDs...)); err != nil {
+		return err
+	}
 	if err := db.UpsertImage(ctx, store.ImageRow{
 		Name:           img.Name,
 		TemplateID:     row.TemplateID,

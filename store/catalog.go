@@ -273,6 +273,17 @@ func (db *DB) ListBuildRefs(ctx context.Context) (map[string][]string, error) {
 	return out, nil
 }
 
+// UpdateBuildSize records a build's measured disk size (U11 disk
+// accounting). It leaves updated_at alone: the GC's one-hour age rule
+// keys on it.
+func (db *DB) UpdateBuildSize(ctx context.Context, id string, sizeBytes int64) error {
+	_, err := db.w.ExecContext(ctx, `UPDATE builds SET size_bytes = ? WHERE build_id = ?`, sizeBytes, id)
+	if err != nil {
+		return fmt.Errorf("store: update build size %s: %w", id, err)
+	}
+	return nil
+}
+
 // SandboxRow is one row of the sandboxes table: a running (or recently
 // running) E2B microVM. LeaseID "" marks a pool sandbox.
 type SandboxRow struct {

@@ -19,6 +19,8 @@
 //	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
 //	CHECKPOINT_INTERVAL_MINS  periodic checkpoint interval (U10; default 60)
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
+//	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
+//	                  (default /forkdcache/e2b/storage/templates)
 //	SPOOND_BACKUP_DIR directory for daily SQLite backups (U11; default
 //	                  /var/lib/spoond/backups; VACUUM INTO daily at 03:00
 //	                  local, plus at start when the newest is older than 24 h)
@@ -110,6 +112,7 @@ func Main(args []string) int {
 	}
 	hostGuestPort := envIntOr("HOST_GUEST_SERVICE_PORT", 8891)
 	checkpointEvery := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 60)) * time.Minute
+	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
@@ -147,14 +150,15 @@ func Main(args []string) int {
 	}
 
 	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
-		PoolSize:        poolSize,
-		DefaultTTL:      defaultTTL,
-		MaxTTL:          maxTTL,
-		IdleTimeout:     idleTimeout,
-		HostGuestAddr:   hostGuestAddr,
-		HostGuestPort:   hostGuestPort,
-		ProxyURL:        cfg.ProxyURL,
-		CheckpointEvery: checkpointEvery,
+		PoolSize:            poolSize,
+		DefaultTTL:          defaultTTL,
+		MaxTTL:              maxTTL,
+		IdleTimeout:         idleTimeout,
+		HostGuestAddr:       hostGuestAddr,
+		HostGuestPort:       hostGuestPort,
+		ProxyURL:            cfg.ProxyURL,
+		CheckpointEvery:     checkpointEvery,
+		TemplateStoragePath: storagePath,
 	})
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
 	// a ping and then fails the job deep inside a build, so verify it from
