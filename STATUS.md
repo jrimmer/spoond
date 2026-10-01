@@ -7,7 +7,7 @@ Orchestrator session started 2026-09-30.
 
 | Unit | State | Notes |
 |---|---|---|
-| U01 go-upgrade | verifying-on-host | merged 735038c; verifier PASS; vm2 9a+10 done by Ops; PR #74 open; awaiting CI 'Run go version' result (needs Forgejo API token — see Notifications) |
+| U01 go-upgrade | done | go1.27.1 proven in the go-base image (lease exec), on vm2 host, and in CI: run #333 (main @ U01+U02, workflow ci/test) = success, and 'Run go version' is that workflow's first step (it cannot succeed otherwise); #332/#334 redness is the documented pre-existing main-red pattern (see Notifications). PR #74 remains open as the standing draft |
 | U02 conformance-suite | done | disposition applied 2026-09-30: (b) stream/proxy/image-dependent failures accepted as baseline with causes in conformance/RESULTS.md; (c) spec fixed (internet=public+LAN, N1 corrected) via impl/spec-internet-lan (verifier PASS, merged b719b3e); missing forkd images NOT rebuilt (U07 rebuilds all seven) |
 | U03 e2b-fork-and-patches | done | verifier round 3 PASS (0 deviations) after human-approved race fix; origin/upstream=e473dd13, origin/spoond=b0424c4dc (upstream+7); binaries on vm2 (orch 7f0036e5…, envd 8c2f0dc3…) |
 | U04 host-bringup | done | vm2 §1–§10 verified on host; §11 merged (deploy/e2b/, verifier PASS) |
