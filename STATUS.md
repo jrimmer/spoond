@@ -15,7 +15,7 @@ Orchestrator session started 2026-09-30.
 | U06 substrate-interface | done | live test PASS on vm2 (303s: build/create/exec/PTY/checkpoint+forks/pause-resume); verifier PASS 0 deviations; merged |
 | U07 image-pipeline | done | all 7 images built into staging DB (scylla 9ce3a8f4 after 9 build rounds; deviations recorded below); live checks PASS for all 7 (resolv.conf first line 10.1.0.1) |
 | U08 lease-lifecycle | done | staging deployed (spoond-backend-staging :18890/:18891); conformance 14/14 PASS (L1-6,S1-4,D1-2,I1-2); S4 p50 61ms p95 69ms (budget 2000); TLS deviation recorded below |
-| U09 networking-and-access | running | staging deployed (gateway :12222 via /etc/spoond-gateway symlink to /etc/forkd-gateway); conformance 15/18: N1+N2 fail (none policy leaks — layer-1 hasUserRules false → proxy bypass) and N4 fails (internet policy create → nft atomic flush EEXIST, duplicate set element); both root-caused to P4 layer-1, fork fix in flight |
+| U09 networking-and-access | running | P4 egress fixes deployed (orchestrator 40bed69a9, N4 create EEXIST fixed); probe semantics corrected twice (deny = SYN blackhole at L1 or connect+EOF at L2; worker rewriting canTCP as python3 data-phase probe); REMAINING: host-originated dials to sandbox HostIPs hang (peer exposed-port allowed-case + DialGuest risk) — architect consult sent (options: P4 OUTPUT-DNAT / NETWORK_VERSION=2 / routing); U10/U11 queue behind it |
 | U10 restart-and-crash | pending | depends on U08, U09 |
 | U11 catalog-gc-and-observability | pending | depends on U08, U10 |
 | U12 cutover | pending | depends on U02, U09, U10, U11 |
