@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily E2B cutover soak check
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+RandomizedDelaySec=10min
+Unit=spoond-soak.service
+
+[Install]
+WantedBy=timers.target
