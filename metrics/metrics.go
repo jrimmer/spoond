@@ -77,6 +77,9 @@ type BackendMetrics struct {
 	// Builds (image bake)
 	BuildsInFlight prometheus.Gauge   // active bakes
 	BuildsFailed   prometheus.Counter // cumulative bake failures
+
+	// Checkpoints (U10)
+	CheckpointDur prometheus.Histogram // sub.Checkpoint snapshot duration
 }
 
 // NewBackendMetrics creates and registers all backend metrics on a
@@ -261,6 +264,12 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "builds_failed_total",
 		Help: "Cumulative image bake failures.",
 	})
+	// Checkpoints
+	m.CheckpointDur = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "checkpoint_duration_seconds",
+		Help:    "Duration of one substrate Checkpoint call.",
+		Buckets: prometheus.ExponentialBuckets(0.5, 2, 10), // 0.5s → 256s
+	})
 
 	// Register all
 	reg.MustRegister(
@@ -278,6 +287,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.SharesActive, m.BusySlots,
 		m.StoreErrors,
 		m.BuildsInFlight, m.BuildsFailed,
+		m.CheckpointDur,
 	)
 	return m
 }

@@ -163,6 +163,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/suspend", s.handleSuspend)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/resume", s.handleResume)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restart", s.handleRestart)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/checkpoint", s.handleCheckpoint)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/tag", s.handleTag)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/comment", s.handleComment)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/prompt", s.handlePrompt)

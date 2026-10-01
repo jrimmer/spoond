@@ -638,6 +638,9 @@ func (s *Service) Start(ctx context.Context) {
 			}
 		}
 	}()
+	// Periodic checkpoints (U10): persistent leases that saw activity
+	// since their last snapshot, one at a time, spaced 2 s apart.
+	go s.runCheckpointLoop(ctx)
 }
 
 // refillPool pre-creates cfg.PoolSize sandboxes for every image with a
@@ -1198,7 +1201,11 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 // checkpoint bookkeeping to the source lease (item 18). It returns the
 // new build row.
 func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildRow, error) {
+	start := time.Now()
 	buildID, _, err := s.sub.Checkpoint(ctx, src.SandboxID)
+	if s.metrics != nil {
+		s.metrics.CheckpointDur.Observe(time.Since(start).Seconds())
+	}
 	if err != nil {
 		return store.BuildRow{}, err
 	}
