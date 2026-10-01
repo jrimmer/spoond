@@ -92,6 +92,8 @@ Orchestrator session started 2026-09-30.
 
 ## Notifications
 
+- 2026-10-01 **Soak automation live:** deploy/e2b/soak-check.{sh,service,timer} (worker 002cbca, verifier PASS, main 6318ed1, feat updated); installed on vm2, timer enabled (daily 09:00 +10min jitter, Persistent). First clean line 2026-10-01T19:39:05Z: doctor 15 PASS/1 WARN/0 FAIL, no lost leases, CI 24h excl-Renovate 2 ok/1 fail (gofmt job 3432 pre-fix; Renovate excluded per spec), orchestrator_restarts 1 (the cutover-era restart), hugepages 21973/21973 free. Doctor env mismatch fixed by aligning backend.env with the unit Environment lines (BIND_ADDR/TLS_CERT/TLS_KEY appended; backend not restarted). Day-7 gate 2026-10-08: summarize soak.log into RESULTS.md, evaluate step 17, disable the timer.
+
 - 2026-10-01 **STOP (soak):** production on E2B, 27/27 prod conformance, soak running to 2026-10-08 (day-7 GC gate), step 20 due 2026-10-31, U13 queued behind soak. Hugepages 21,973/24,576 (safe; re-apply after next orchestrator restart). Action needed from human: none until the day-7 GC report or a soak incident.
 - 2026-10-01 **CUTOVER GO** (human): "No waits whatsoever, force deployment" — standing override for all remaining windows; rollback-ready and smoke gates remain enforced.
 
