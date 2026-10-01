@@ -90,6 +90,7 @@ Orchestrator session started 2026-09-30.
 
 ## Notifications
 
+- 2026-10-01 **STOP (soak):** production on E2B, 27/27 prod conformance, soak running to 2026-10-08 (day-7 GC gate), step 20 due 2026-10-31, U13 queued behind soak. Hugepages 21,973/24,576 (safe; re-apply after next orchestrator restart). Action needed from human: none until the day-7 GC report or a soak incident.
 - 2026-10-01 **CUTOVER GO** (human): "No waits whatsoever, force deployment" — standing override for all remaining windows; rollback-ready and smoke gates remain enforced.
 
 - 2026-09-30 U01 merged into feat/e2b-substrate; U02/U05 started, U03 started. **Action needed:** provide a read-only Forgejo API token (code.lacy.casa) so the orchestrator can read CI status of PR #74 ('Run go version' step must print go1.27.1) — or check PR #74 yourself and confirm. Also (non-blocking): fix public DNS for lacy.casa names (currently pointing at 5.78.185.36) and/or the workstation's resolver fallback.
