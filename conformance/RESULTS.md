@@ -89,12 +89,17 @@ allow/deny decision — a 1-byte write can never complete one, and a denied
 would misread as reachable. For port 443 the probe performs a **real TLS
 client handshake** (`socket.create_connection` 3s timeout;
 `ssl.create_default_context()` with `check_hostname=False`,
-`verify_mode=ssl.CERT_NONE`; wrap; then `recv(1)` 2s timeout): `ok` when
-the handshake established (regardless of certificate) and the connection
-is alive afterwards (data or silent-open); `blocked` on any socket/ssl
-failure during connect or handshake (a denied 443 is closed once the hello
-routes), or clean EOF before any data. Non-443 ports keep the write+read
-probe.
+`verify_mode=ssl.CERT_NONE`; wrap; then `recv(1)` 2s timeout):
+
+- **reachable** ("ok"): the handshake established, **or the peer answered
+  with a TLS alert** — an alert is a peer response, so bytes flowed
+  bidirectionally through the egress path. SNI-strict servers alert on
+  IP-literal hellos that carry no SNI (e.g. the LAN edge answering
+  `tlsv1 alert internal error`); that rejection is not a policy block.
+- **blocked** ("blocked"): connect failure/timeout, or a clean close
+  before any peer bytes (EOF/reset — the egress path closed us).
+
+Non-443 ports keep the write+read probe.
 
 On forkd the plain connect probe
 `timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no` is kept:
