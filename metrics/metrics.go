@@ -87,12 +87,12 @@ type BackendMetrics struct {
 	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
 
 	// Substrate (U11)
-	LeasesByState     *prometheus.GaugeVec   // {state}: leases per state
-	NodeRunning       prometheus.Gauge       // orchestrator running sandboxes
-	NodeHugepagesFree prometheus.Gauge       // (total − used − reserved) × page size
-	NodeWork          prometheus.Gauge       // orchestrator outstanding work
+	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
+	NodeRunning       prometheus.Gauge         // orchestrator running sandboxes
+	NodeHugepagesFree prometheus.Gauge         // (total − used − reserved) × page size
+	NodeWork          prometheus.Gauge         // orchestrator outstanding work
 	CreateDur         *prometheus.HistogramVec // {resume}: sub.Create duration
-	CapacityRej       prometheus.Counter     // admission refusals
+	CapacityRej       prometheus.Counter       // admission refusals
 }
 
 // NewBackendMetrics creates and registers all backend metrics on a
