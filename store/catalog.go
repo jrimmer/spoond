@@ -104,18 +104,18 @@ func scanImage(scan func(dest ...any) error) (ImageRow, error) {
 // BuildRow is one row of the builds table: one immutable E2B artifact
 // set (kind template, pause or checkpoint) and its lifecycle state.
 type BuildRow struct {
-	BuildID, Kind, TemplateID, Image, ParentBuildID, SourceSandboxID, State string
-	KernelVersion, FirecrackerVersion, EnvdVersion                          string
-	VCPU, MemoryMB, DiskMB                                                  int
-	SizeBytes                                                               int64
-	Error                                                                   string
-	CreatedAt, UpdatedAt                                                    time.Time
+	BuildID, Kind, TemplateID, Image, ParentBuildID, SourceSandboxID, Owner, State string
+	KernelVersion, FirecrackerVersion, EnvdVersion                                 string
+	VCPU, MemoryMB, DiskMB                                                         int
+	SizeBytes                                                                      int64
+	Error                                                                          string
+	CreatedAt, UpdatedAt                                                           time.Time
 }
 
 // GetBuild returns the build row for id, or ErrNotFound.
 func (db *DB) GetBuild(ctx context.Context, id string) (BuildRow, error) {
 	row := db.r.QueryRowContext(ctx, `SELECT
-		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, state,
+		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, owner, state,
 		kernel_version, firecracker_version, envd_version,
 		vcpu, memory_mb, disk_mb, size_bytes, error, created_at, updated_at
 		FROM builds WHERE build_id = ?`, id)
@@ -126,11 +126,11 @@ func (db *DB) GetBuild(ctx context.Context, id string) (BuildRow, error) {
 // the caller set). The build id must not exist yet.
 func (db *DB) InsertBuild(ctx context.Context, r BuildRow) error {
 	_, err := db.w.ExecContext(ctx, `INSERT INTO builds
-		(build_id, kind, template_id, image, parent_build_id, source_sandbox_id, state,
+		(build_id, kind, template_id, image, parent_build_id, source_sandbox_id, owner, state,
 		 kernel_version, firecracker_version, envd_version,
 		 vcpu, memory_mb, disk_mb, size_bytes, error, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.BuildID, r.Kind, r.TemplateID, r.Image, r.ParentBuildID, r.SourceSandboxID, r.State,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.BuildID, r.Kind, r.TemplateID, r.Image, r.ParentBuildID, r.SourceSandboxID, r.Owner, r.State,
 		r.KernelVersion, r.FirecrackerVersion, r.EnvdVersion,
 		r.VCPU, r.MemoryMB, r.DiskMB, r.SizeBytes, r.Error,
 		formatTime(r.CreatedAt), formatTime(r.UpdatedAt))
@@ -168,7 +168,7 @@ func (db *DB) UpdateBuildState(ctx context.Context, id, state, errMsg string, r 
 // ListBuilds returns every build row, ordered by created_at.
 func (db *DB) ListBuilds(ctx context.Context) ([]BuildRow, error) {
 	rows, err := db.r.QueryContext(ctx, `SELECT
-		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, state,
+		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, owner, state,
 		kernel_version, firecracker_version, envd_version,
 		vcpu, memory_mb, disk_mb, size_bytes, error, created_at, updated_at
 		FROM builds ORDER BY created_at`)
@@ -195,7 +195,7 @@ func (db *DB) ListBuilds(ctx context.Context) ([]BuildRow, error) {
 // created_at.
 func (db *DB) ChildBuilds(ctx context.Context, parentID string) ([]BuildRow, error) {
 	rows, err := db.r.QueryContext(ctx, `SELECT
-		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, state,
+		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, owner, state,
 		kernel_version, firecracker_version, envd_version,
 		vcpu, memory_mb, disk_mb, size_bytes, error, created_at, updated_at
 		FROM builds WHERE parent_build_id = ? ORDER BY created_at`, parentID)
@@ -221,7 +221,7 @@ func scanBuild(scan func(dest ...any) error) (BuildRow, error) {
 	var r BuildRow
 	var createdAt, updatedAt string
 	err := scan(&r.BuildID, &r.Kind, &r.TemplateID, &r.Image, &r.ParentBuildID,
-		&r.SourceSandboxID, &r.State,
+		&r.SourceSandboxID, &r.Owner, &r.State,
 		&r.KernelVersion, &r.FirecrackerVersion, &r.EnvdVersion,
 		&r.VCPU, &r.MemoryMB, &r.DiskMB, &r.SizeBytes, &r.Error,
 		&createdAt, &updatedAt)
@@ -234,6 +234,54 @@ func scanBuild(scan func(dest ...any) error) (BuildRow, error) {
 	r.CreatedAt = parseTime(createdAt)
 	r.UpdatedAt = parseTime(updatedAt)
 	return r, nil
+}
+
+// AddBuildRefs inserts (buildID, ref) for every ref in refs, ignoring duplicates
+// (INSERT OR IGNORE) and ignoring ref == buildID.
+func (db *DB) AddBuildRefs(ctx context.Context, buildID string, refs []string) error {
+	for _, ref := range refs {
+		if ref == buildID {
+			continue
+		}
+		if _, err := db.w.ExecContext(ctx,
+			`INSERT OR IGNORE INTO build_refs (build_id, ref_build_id) VALUES (?, ?)`,
+			buildID, ref); err != nil {
+			return fmt.Errorf("store: add build refs %s: %w", buildID, err)
+		}
+	}
+	return nil
+}
+
+// ListBuildRefs returns every build_refs row as build_id -> ref_build_ids.
+func (db *DB) ListBuildRefs(ctx context.Context) (map[string][]string, error) {
+	rows, err := db.r.QueryContext(ctx, `SELECT build_id, ref_build_id FROM build_refs`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list build refs: %w", err)
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var buildID, ref string
+		if err := rows.Scan(&buildID, &ref); err != nil {
+			return nil, fmt.Errorf("store: list build refs: %w", err)
+		}
+		out[buildID] = append(out[buildID], ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list build refs: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateBuildSize records a build's measured disk size (U11 disk
+// accounting). It leaves updated_at alone: the GC's one-hour age rule
+// keys on it.
+func (db *DB) UpdateBuildSize(ctx context.Context, id string, sizeBytes int64) error {
+	_, err := db.w.ExecContext(ctx, `UPDATE builds SET size_bytes = ? WHERE build_id = ?`, sizeBytes, id)
+	if err != nil {
+		return fmt.Errorf("store: update build size %s: %w", id, err)
+	}
+	return nil
 }
 
 // SandboxRow is one row of the sandboxes table: a running (or recently

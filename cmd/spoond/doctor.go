@@ -9,7 +9,7 @@ import (
 func init() {
 	register(command{
 		name: "doctor",
-		desc: "dependency/connectivity checks (forkd, LLM, listeners, pool)",
+		desc: "dependency/connectivity checks (orchestrator, registry, LLM, listeners, catalog)",
 		run:  spoonddoctor.Main,
 	})
 }
