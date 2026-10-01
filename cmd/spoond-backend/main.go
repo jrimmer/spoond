@@ -19,6 +19,9 @@
 //	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
 //	CHECKPOINT_INTERVAL_MINS  periodic checkpoint interval (U10; default 60)
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
+//	SPOOND_BACKUP_DIR directory for daily SQLite backups (U11; default
+//	                  /var/lib/spoond/backups; VACUUM INTO daily at 03:00
+//	                  local, plus at start when the newest is older than 24 h)
 //	LLM_UPSTREAM_URL  OpenAI-compatible LLM API base for the per-lease
 //	                  LLM gateway (e.g. https://openrouter.ai/api/v1)
 //	LLM_UPSTREAM_KEY  server-side key for that upstream (never sent to
@@ -35,6 +38,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,6 +56,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// backupStale reports whether dir holds no <prefix>-*.db backup newer
+// than 24 h (a missing or unreadable newest backup counts as stale).
+func backupStale(dir, prefix string) bool {
+	matches, _ := filepath.Glob(filepath.Join(dir, prefix+"-*.db"))
+	if len(matches) == 0 {
+		return true
+	}
+	sort.Strings(matches)
+	info, err := os.Stat(matches[len(matches)-1])
+	return err != nil || time.Since(info.ModTime()) > 24*time.Hour
 }
 
 func envIntOr(key string, def int) int {
@@ -123,7 +140,8 @@ func Main(args []string) int {
 	// Persistence (U05): open the SQLite store and load the previous
 	// incarnation's leases, shares and pool before reconciling or
 	// starting any loop, so the reconciler sees the loaded state.
-	db, err := store.Open(envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"))
+	dbPath := envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db")
+	db, err := store.Open(dbPath)
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
@@ -218,6 +236,34 @@ func Main(args []string) int {
 	svc.ReconcileOrphans(ctx)
 
 	svc.Start(ctx)
+
+	// Database backups (U11): daily at 03:00 local time, and once at
+	// start when no backup is newer than 24 h. The file prefix is the
+	// database file's basename without extension.
+	backupDir := envOr("SPOOND_BACKUP_DIR", "/var/lib/spoond/backups")
+	backupPrefix := strings.TrimSuffix(filepath.Base(dbPath), filepath.Ext(dbPath))
+	go func() {
+		if backupStale(backupDir, backupPrefix) {
+			if err := db.Backup(context.Background(), backupDir, 7); err != nil {
+				log.Printf("backup: %v", err)
+			}
+		}
+		for {
+			now := time.Now()
+			next := time.Date(now.Year(), now.Month(), now.Day(), 3, 0, 0, 0, now.Location())
+			if !next.After(now) {
+				next = next.Add(24 * time.Hour)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(next.Sub(now)):
+			}
+			if err := db.Backup(context.Background(), backupDir, 7); err != nil {
+				log.Printf("backup: %v", err)
+			}
+		}
+	}()
 
 	// Slow-loris / header hardening (security review #37 rescan F10):
 	// both listeners get read-header timeouts + header size caps so a

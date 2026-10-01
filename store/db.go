@@ -23,8 +23,9 @@ import (
 // DB is spoond's embedded SQLite database. One writer connection, a small
 // reader pool.
 type DB struct {
-	w *sql.DB // SetMaxOpenConns(1): all writes serialize here
-	r *sql.DB // SetMaxOpenConns(8): reads
+	w    *sql.DB // SetMaxOpenConns(1): all writes serialize here
+	r    *sql.DB // SetMaxOpenConns(8): reads
+	path string  // database file path (backup file prefix, U11)
 }
 
 // ErrNotFound is returned by single-row getters.
@@ -52,7 +53,7 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("store: open reader: %w", err)
 	}
 	r.SetMaxOpenConns(8)
-	db := &DB{w: w, r: r}
+	db := &DB{w: w, r: r, path: path}
 	if err := db.migrate(); err != nil {
 		db.Close()
 		return nil, err
