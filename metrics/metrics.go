@@ -85,6 +85,14 @@ type BackendMetrics struct {
 	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
 	StorageFree   prometheus.Gauge       // free bytes at the template storage path
 	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
+
+	// Substrate (U11)
+	LeasesByState     *prometheus.GaugeVec   // {state}: leases per state
+	NodeRunning       prometheus.Gauge       // orchestrator running sandboxes
+	NodeHugepagesFree prometheus.Gauge       // (total − used − reserved) × page size
+	NodeWork          prometheus.Gauge       // orchestrator outstanding work
+	CreateDur         *prometheus.HistogramVec // {resume}: sub.Create duration
+	CapacityRej       prometheus.Counter     // admission refusals
 }
 
 // NewBackendMetrics creates and registers all backend metrics on a
@@ -290,6 +298,33 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Builds deleted by the catalog GC, by kind.",
 	}, []string{"kind"})
 
+	// Substrate (U11)
+	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "leases",
+		Help: "Leases per state: running, suspended, recovered, lost.",
+	}, []string{"state"})
+	m.NodeRunning = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "node_running_sandboxes",
+		Help: "Sandboxes running on the orchestrator node.",
+	})
+	m.NodeHugepagesFree = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "node_hugepages_free_bytes",
+		Help: "Free hugepage bytes: (total − used − reserved) × page size.",
+	})
+	m.NodeWork = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "node_outstanding_work",
+		Help: "Outstanding tracked operations on the node.",
+	})
+	m.CreateDur = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "create_duration_seconds",
+		Help:    "Duration of one substrate Create call, by resume.",
+		Buckets: prometheus.ExponentialBuckets(0.1, 2, 12), // 0.1s → ~3.4min
+	}, []string{"resume"})
+	m.CapacityRej = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "capacity_rejections_total",
+		Help: "Admission refusals (hugepages or node status).",
+	})
+
 	// Register all
 	reg.MustRegister(
 		m.PoolReady, m.PoolCap, m.PoolRefill, m.PoolRefillFail,
@@ -308,6 +343,8 @@ func NewBackendMetrics() *BackendMetrics {
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
+		m.LeasesByState, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
+		m.CreateDur, m.CapacityRej,
 	)
 	return m
 }

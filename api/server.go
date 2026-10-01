@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -230,12 +231,21 @@ func (s *Server) SetLLMRequireKey(v bool) {
 	}
 }
 
-// handleHealthz reports liveness without auth, for Gatus/load-balancer
-// checks. It returns 200 if the service is up.
+// handleHealthz reports liveness and orchestrator reachability without
+// auth, for Gatus/load-balancer checks (U11): 200
+// {"status":"ok","orchestrator":"<NodeInfo.Status>"} when NodeInfo
+// succeeds, 503 {"status":"degraded","orchestrator":"unreachable"} when
+// it fails.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	body := `{"status":"degraded","orchestrator":"unreachable"}`
+	code := http.StatusServiceUnavailable
+	if info, err := s.svc.sub.NodeInfo(r.Context()); err == nil {
+		code = http.StatusOK
+		body = fmt.Sprintf(`{"status":"ok","orchestrator":%q}`, info.Status)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte(body))
 }
 
 // handleMetrics emits spoond's own Prometheus metrics (issue #20),
@@ -262,7 +272,29 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Orchestrator passthrough (U11): when OTEL_PROM_URL is set, fetch
+	// the collector's Prometheus output and append it verbatim after a
+	// marker line.
+	if url := os.Getenv("OTEL_PROM_URL"); url != "" {
+		resp, err := otelClient.Get(url)
+		if err != nil {
+			fmt.Fprintf(w, "# orchestrator metrics unavailable: %v\n", err)
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			fmt.Fprintf(w, "# orchestrator metrics unavailable: %v\n", err)
+			return
+		}
+		fmt.Fprintln(w, "# --- orchestrator (otel) ---")
+		_, _ = w.Write(body)
+	}
 }
+
+// otelClient fetches the collector's Prometheus output for /metrics
+// (U11); the 2 s timeout keeps a slow collector from stalling scrapes.
+var otelClient = &http.Client{Timeout: 2 * time.Second}
 
 // collectServiceMetrics updates live gauge metrics from the current
 // service and identity state (issue #20). Called before gathering
