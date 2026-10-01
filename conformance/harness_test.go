@@ -329,6 +329,16 @@ except Exception:
 print("ok" if d else "blocked")
 '`
 
+// probeCmd renders the e2b probe command for host:port. Each template
+// receives exactly its own arguments — a surplus argument would be
+// appended as `%!(EXTRA ...)` and its parentheses break the guest shell.
+func probeCmd(host string, port int) string {
+	if port == 443 {
+		return fmt.Sprintf(e2bTLSProbeCmd, host, port, host)
+	}
+	return fmt.Sprintf(e2bProbeCmd, host, port)
+}
+
 // canTCP runs the suite's TCP reachability probe in the lease and reports
 // whether the destination is reachable. The probe is substrate-aware:
 //
@@ -341,11 +351,7 @@ print("ok" if d else "blocked")
 //     timeout or EOF/reset before any data (e2bProbeCmd above).
 func canTCP(t *testing.T, id, host string, port int) bool {
 	if cfg.Substrate == "e2b" {
-		cmd := e2bProbeCmd
-		if port == 443 {
-			cmd = e2bTLSProbeCmd
-		}
-		return probeToken(t, id, fmt.Sprintf(cmd, host, port, host)) == "ok"
+		return probeToken(t, id, probeCmd(host, port)) == "ok"
 	}
 	out := execOK(t, id, fmt.Sprintf("timeout 5 bash -c '</dev/tcp/%s/%d' && echo yes || echo no", host, port))
 	return out == "yes"
