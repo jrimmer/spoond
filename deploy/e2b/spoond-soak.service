@@ -1,0 +1,6 @@
+[Unit]
+Description=E2B cutover soak check (daily spoond doctor, lease and CI snapshot)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/spoond/soak-check.sh
