@@ -179,11 +179,12 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
-	// Admin endpoints (U10): drain and undrain. Auth is done in
-	// api/admin.go (ADMIN_TOKEN is not a consumer token, so
+	// Admin endpoints (U10): drain, undrain and crash reconcile. Auth is
+	// done in api/admin.go (ADMIN_TOKEN is not a consumer token, so
 	// authMiddleware lets /api/admin/ through).
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
+	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -683,6 +684,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// A suspended lease has no running sandbox; resume it first.
 	if lease.Suspended {
 		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		return
+	}
+	// A lease lost in a substrate crash has no sandbox to attach to; the
+	// SSH gateway relays sessions through this route, so it covers SSH
+	// too (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
 		return
 	}
 
@@ -1212,6 +1220,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	// first.
 	if lease.Suspended {
 		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		return
+	}
+	// A lease lost in a substrate crash has nothing to exec into (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
 		return
 	}
 	var req struct {

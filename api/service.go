@@ -603,6 +603,41 @@ func (s *Service) Start(ctx context.Context) {
 			}
 		}
 	}()
+	// Crash reconcile (U10): every 30 s while not draining, plus
+	// immediately when NodeInfo goes from failing to succeeding (the
+	// orchestrator came back).
+	go func() {
+		reconcile := time.NewTicker(30 * time.Second)
+		defer reconcile.Stop()
+		probe := time.NewTicker(s.sweepInterval)
+		defer probe.Stop()
+		nodeDown := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reconcile.C:
+				if s.draining.Load() {
+					continue
+				}
+				s.reconcileCrash(ctx)
+			case <-probe.C:
+				if _, err := s.sub.NodeInfo(ctx); err != nil {
+					nodeDown = true
+					continue
+				}
+				if nodeDown {
+					nodeDown = false
+					if s.draining.Load() {
+						continue
+					}
+					s.log.Printf("reconcile: node info recovered, reconciling crashes")
+					s.reconcileCrash(ctx)
+					continue
+				}
+			}
+		}
+	}()
 }
 
 // refillPool pre-creates cfg.PoolSize sandboxes for every image with a
@@ -1662,6 +1697,7 @@ func leaseMap(l *Lease) map[string]any {
 		"expires":          l.ExpiresAt.Unix(),
 		"persistent":       l.Persistent,
 		"suspended":        l.Suspended,
+		"state":            l.State,
 		"name":             l.Name,
 		"comment":          l.Comment,
 		"net_policy":       l.NetPolicy,
@@ -2104,10 +2140,9 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 // ReconcileOrphans aligns the substrate with the state loaded from the
 // store. If the sandbox list fails, nothing changes (leases are never
 // marked lost on a list failure). Substrate sandboxes that no lease
-// (by sandbox id) or pool entry claims are deleted. Live leases whose
-// sandbox is missing are marked lost (U10 upgrades this to recovery);
-// suspended leases have no live sandbox by design. Pool entries whose
-// sandbox is missing are removed.
+// (by sandbox id) or pool entry claims are deleted. The per-lease
+// crash handling (lost/recovered marking, U10) runs afterwards via
+// reconcileCrash.
 func (s *Service) ReconcileOrphans(ctx context.Context) {
 	sbs, err := s.sub.List(ctx)
 	if err != nil {
@@ -2136,13 +2171,6 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 			orphans = append(orphans, sb.ID)
 		}
 	}
-	for _, l := range s.store.leases {
-		if !l.live() || present[l.SandboxID] {
-			continue
-		}
-		l.State = "lost"
-		s.saveLeaseLocked(l)
-	}
 	for img, ids := range s.store.pool {
 		kept := ids[:0]
 		for _, id := range ids {
@@ -2170,6 +2198,7 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 	if deleted > 0 {
 		s.log.Printf("reconcile: deleted %d orphaned sandbox(es) from a previous incarnation", deleted)
 	}
+	s.reconcileCrash(ctx)
 }
 
 var (

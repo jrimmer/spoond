@@ -77,6 +77,15 @@ func (s *Server) handleAdminUndrain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.undrain(r.Context()))
 }
 
+// handleAdminReconcile runs the crash reconciliation now and returns
+// its summary (U10).
+func (s *Server) handleAdminReconcile(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.svc.reconcileCrash(r.Context()))
+}
+
 // drainConcurrency bounds the concurrent pauses and resumes of the
 // drain and undrain.
 const drainConcurrency = 4

@@ -212,7 +212,9 @@ func Main(args []string) int {
 	}
 
 	// Delete any substrate sandboxes no loaded lease or pool entry
-	// claims before warming the pool, so capacity is never double-booked.
+	// claims, then recover every lease that has a checkpoint from the
+	// crash (U10 reconcileCrash) before warming the pool, so capacity is
+	// never double-booked.
 	svc.ReconcileOrphans(ctx)
 
 	svc.Start(ctx)
