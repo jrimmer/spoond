@@ -48,6 +48,10 @@ type Server struct {
 	// bootstrap when configured: the store-empty creation must present
 	// X-Bootstrap-Token matching it. Set via BOOTSTRAP_TOKEN env.
 	bootstrapToken string
+	// adminToken (U10) gates POST /api/admin/{drain,undrain,reconcile}
+	// with Authorization: Bearer <ADMIN_TOKEN>. It is not a user or
+	// consumer token; empty (the default) disables the admin routes.
+	adminToken string
 	// metrics (issue #20): service-owned Prometheus metrics served at
 	// /metrics alongside namespaced controller passthrough.
 	metrics *metrics.BackendMetrics
@@ -90,6 +94,13 @@ func (s *Server) releaseBusy(owner string) {
 // authenticated caller (legacy behavior).
 func (s *Server) SetBootstrapToken(tok string) {
 	s.bootstrapToken = tok
+}
+
+// SetAdminToken configures the /api/admin/* bearer token (U10). Empty
+// (the default) disables the admin routes; a configured token is
+// required on every admin request and compared in constant time.
+func (s *Server) SetAdminToken(tok string) {
+	s.adminToken = tok
 }
 
 // SetProxyAuth configures the public proxy listener's auth gate
@@ -152,6 +163,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/suspend", s.handleSuspend)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/resume", s.handleResume)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restart", s.handleRestart)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/checkpoint", s.handleCheckpoint)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/tag", s.handleTag)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/comment", s.handleComment)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/prompt", s.handlePrompt)
@@ -168,6 +180,12 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
+	// Admin endpoints (U10): drain, undrain and crash reconcile. Auth is
+	// done in api/admin.go (ADMIN_TOKEN is not a consumer token, so
+	// authMiddleware lets /api/admin/ through).
+	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
+	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
+	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -357,10 +375,12 @@ func isHexPath(p string) bool {
 // authMiddleware authenticates the bearer token and injects the
 // consumer id into the request context. /healthz is exempt (liveness);
 // the /llm/ prefix is exempt too — the lease id in the path is the
-// capability, and sandboxes hold no consumer token.
+// capability, and sandboxes hold no consumer token. /api/admin/ is
+// exempt because ADMIN_TOKEN is not a user/consumer token; api/admin.go
+// authenticates those routes itself.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -667,6 +687,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
 		return
 	}
+	// A lease lost in a substrate crash has no sandbox to attach to; the
+	// SSH gateway relays sessions through this route, so it covers SSH
+	// too (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
+		return
+	}
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(*http.Request) bool { return true }, // consumer-token auth above
@@ -951,6 +978,8 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "sandbox not found")
 		case errNotPersistent:
 			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+		case errLeaseBusy:
+			writeError(w, http.StatusConflict, err.Error())
 		default:
 			s.svc.log.Printf("suspend %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "suspend failed")
@@ -976,6 +1005,8 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "sandbox not found")
 		case errNotPersistent:
 			writeError(w, http.StatusBadRequest, "sandbox is not a persistent lease")
+		case errLeaseBusy:
+			writeError(w, http.StatusConflict, err.Error())
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")
@@ -1147,6 +1178,8 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "sandbox not found")
 		case errNotPersistent:
 			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+		case errLeaseBusy:
+			writeError(w, http.StatusConflict, err.Error())
 		default:
 			s.svc.log.Printf("resume %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "resume failed")
@@ -1188,6 +1221,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	// first.
 	if lease.Suspended {
 		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		return
+	}
+	// A lease lost in a substrate crash has nothing to exec into (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
 		return
 	}
 	var req struct {
@@ -1412,6 +1450,8 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errors.Is(err, errLeaseBusy):
+			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errQuotaExceeded):
 			// Quota enforcement (security review #37 rescan F1): clone
 			// surfaces the same 429 as create, not a generic 500.
@@ -1458,6 +1498,8 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "sandbox not found")
 		case errors.Is(err, errSuspended):
 			writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		case errors.Is(err, errLeaseBusy):
+			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):

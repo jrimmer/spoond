@@ -10,6 +10,12 @@ EnvironmentFile=/etc/e2b/orchestrator.env
 ExecStartPre=/bin/sh -c 'iptables -w 5 -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -w 5 -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu'
 ExecStartPre=/bin/mkdir -p /forkdcache/e2b/tmp /fc-vm
 ExecStart=/usr/local/lib/e2b/orchestrator
+# Drain hooks (U10): ExecStop pauses every sandbox before the SIGTERM
+# lands; ExecStartPost resumes the drained leases once the orchestrator
+# is up (undrain waits for NodeInfo). Both read /etc/e2b/drain.env.
+EnvironmentFile=/etc/e2b/drain.env
+ExecStop=/opt/spoond-staging/spoond drain --stop
+ExecStartPost=/opt/spoond-staging/spoond drain --start
 Restart=always
 RestartSec=5
 TimeoutStartSec=420

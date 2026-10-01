@@ -207,6 +207,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sandbox is suspended; resume it first", http.StatusConflict)
 		return
 	}
+	// A lease lost in a substrate crash has no sandbox to proxy to (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
+		return
+	}
 	// The target is the sandbox's host address; the orchestrator's
 	// sandbox proxy routes it into the sandbox. A lease without a host
 	// address has no running sandbox.
