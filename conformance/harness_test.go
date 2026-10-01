@@ -297,11 +297,14 @@ print("ok" if d else "blocked")
 // destination sits silent-open and the write+read probe would misread it
 // as reachable. This probe performs a real TLS client handshake (certificate
 // verification off; the verdict is reachability, not trust):
-//   - "ok": handshake established, and the connection alive afterwards
-//     (any data byte, or silent-open read timeout)
-//   - "blocked": any socket/ssl failure during connect or handshake
-//     (a denied 443 is closed once the hello routes), or clean EOF before
-//     any data
+//   - "ok": the handshake established, OR the peer answered with a TLS
+//     alert (an alert is a peer response — bytes flowed bidirectionally
+//     through the egress path; SNI-strict servers alert on IP-literal
+//     hellos that carry no SNI, e.g. `tlsv1 alert internal error`), and
+//     the connection is alive afterwards (any data byte, or silent-open
+//     read timeout)
+//   - "blocked": connect failure/timeout, or a clean close before any
+//     peer bytes (EOF/reset — the egress path closed us)
 const e2bTLSProbeCmd = `python3 -c '
 import socket, ssl
 try:
@@ -314,6 +317,12 @@ ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 try:
     s = ctx.wrap_socket(s, server_hostname="%s")
+except ssl.SSLError as e:
+    if e.reason and "ALERT" in e.reason.upper():
+        print("ok")
+        raise SystemExit
+    print("blocked")
+    raise SystemExit
 except Exception:
     print("blocked")
     raise SystemExit
