@@ -33,8 +33,7 @@ further research. Every decision is already made. When this spec says
    - **Never** add AI attribution, `Co-Authored-By` trailers, or "Generated
      with" text to commits, code comments, docs or PRs.
 5. **Tests gate every commit.**
-   - In spoond: `go build ./... && go vet ./... && go test ./...` must pass
-     before each commit.
+   - In spoond: `test -z "$(gofmt -l .)" && go build ./... && go vet ./... && go test ./...` must pass before each commit.
    - In the E2B fork, the unit gives the exact commands.
 6. **The host is live.** vm2 runs production CI (forkd until U12, then
    E2B). The human is its only user. On vm2, run only the commands a unit

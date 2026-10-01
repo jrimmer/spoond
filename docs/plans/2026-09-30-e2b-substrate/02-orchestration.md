@@ -341,8 +341,7 @@ Also drop setup step 4.
 >   fact, the file and line, expected, found) and stop.
 > - Make exactly the commits the unit lists, with those messages, and never
 >   add AI attribution or `Co-Authored-By` trailers. Before each commit, run
->   `go build ./... && go vet ./... && go test ./...`, and commit only if it
->   passes.
+>   `test -z "$(gofmt -l .)" && go build ./... && go vet ./... && go test ./...`, and commit only if it passes.
 > - If you reach an OPERATOR step or any command meant for vm2, write it into
 >   `BLOCKED-<Uxx>.md` as a request (the exact command or action needed, and
 >   why) and stop. Do not attempt it. The orchestrator dispatches vm2
@@ -357,7 +356,8 @@ Also drop setup step 4.
 > - Check every "Done when" and every "Do not" item against
 >   `git diff feat/e2b-substrate...impl/<Uxx>-<slug>`.
 > - Run the unit's tests and `go build ./... && go vet ./... && go test ./...`
->   yourself. Do not trust `DONE-<Uxx>.md`.
+>   yourself. Also check that `gofmt -l .` is empty. Do not trust
+>   `DONE-<Uxx>.md`.
 > - Check that the commit messages match the unit's list exactly, and that
 >   no commit contains AI attribution.
 > - Flag every changed file the unit does not list.
