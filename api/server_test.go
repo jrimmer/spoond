@@ -9,177 +9,165 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/forkd"
+	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/substrate/e2b"
+	"github.com/jrimmer/spoond/substrate/fake"
 )
 
-// fakeForkd is a minimal in-memory forkd controller for tests.
-type fakeForkd struct {
-	snapshots     []forkd.SnapshotInfo
-	sandboxes     map[string]forkd.SandboxInfo
-	workspaces    map[string]*forkd.WorkspaceInfo
-	nextID        int
-	killed        []string
-	suspended     []string
-	resumed       []string
-	deadSandboxes map[string]bool
-	netns         string // reported for spawned sandboxes ("" = none)
-	execStdout    string // canned stdout for Exec ("" = default "ok\n")
-	// probeFail marks sandboxes whose integrity probe fails, by sandbox id;
-	// probeFailAll fails the probe for every sandbox (fresh spawns too).
+// testSub is the fake substrate with an exec handler that answers the
+// integrity probe: a sandbox is healthy unless the test marks it
+// otherwise (probeFail by id, or probeFailAll for fresh creates too).
+type testSub struct {
+	*fake.Fake
 	probeFail    map[string]string
 	probeFailAll bool
+	execStdout   string // canned stdout for non-probe execs ("" = "ok\n")
+
+	// lastStart records the most recent Start request (the stream tests
+	// pin the initial PTY size it carries).
+	startMu   sync.Mutex
+	lastStart substrate.StartRequest
 }
 
-func newFakeForkd() *fakeForkd {
-	return &fakeForkd{
-		snapshots:  []forkd.SnapshotInfo{{Tag: "py-base", Bootable: true}},
-		sandboxes:  make(map[string]forkd.SandboxInfo),
-		workspaces: make(map[string]*forkd.WorkspaceInfo),
-	}
+// LastStart returns the most recent Start request.
+func (ts *testSub) LastStart() substrate.StartRequest {
+	ts.startMu.Lock()
+	defer ts.startMu.Unlock()
+	return ts.lastStart
 }
 
-func (f *fakeForkd) ListSnapshots(ctx context.Context) ([]forkd.SnapshotInfo, error) {
-	return f.snapshots, nil
+// Start delegates to the fake and records the request.
+func (ts *testSub) Start(ctx context.Context, sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
+	ts.startMu.Lock()
+	ts.lastStart = req
+	ts.startMu.Unlock()
+	return ts.Fake.Start(ctx, sandboxID, req)
 }
 
-func (f *fakeForkd) SnapshotExists(ctx context.Context, tag string) (bool, error) {
-	for _, s := range f.snapshots {
-		if s.Tag == tag {
-			return true, nil
-		}
-	}
-	return false, nil
+func newTestSub() *testSub {
+	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}}
+	ts.Fake.SetExecHandler(ts.exec)
+	return ts
 }
 
-func (f *fakeForkd) Spawn(ctx context.Context, tag string, n int, perChildNetns bool, memoryLimitMiB int) ([]forkd.SandboxInfo, error) {
-	var out []forkd.SandboxInfo
-	for i := 0; i < n; i++ {
-		id := "sb-" + string(rune('a'+f.nextID))
-		f.nextID++
-		f.sandboxes[id] = forkd.SandboxInfo{ID: id, SnapshotTag: tag, GuestAddr: "10.42.0.2:8888", Netns: f.netns}
-		out = append(out, f.sandboxes[id])
-	}
-	return out, nil
-}
-
-func (f *fakeForkd) ListSandboxes(ctx context.Context) ([]forkd.SandboxInfo, error) {
-	var out []forkd.SandboxInfo
-	for _, s := range f.sandboxes {
-		out = append(out, s)
-	}
-	return out, nil
-}
-
-func (f *fakeForkd) Kill(ctx context.Context, id string) error {
-	f.killed = append(f.killed, id)
-	delete(f.sandboxes, id)
-	return nil
-}
-
-func (f *fakeForkd) Exec(ctx context.Context, id string, args []string, timeoutSecs int) (*forkd.ExecResult, error) {
-	// The integrity probe reaches the substrate through this same call. A
-	// sandbox is healthy unless the test marks it otherwise, so answer the
-	// probe here instead of falling through to the canned stdout, which
-	// would fail every grant.
+func (ts *testSub) exec(sandboxID string, args []string) substrate.ExecResult {
 	if len(args) == 3 && args[0] == "sh" && args[2] == integrityProbe {
-		if reason, bad := f.probeFail[id]; bad || f.probeFailAll {
-			return &forkd.ExecResult{Stdout: "PROBE_FAIL " + reason + "\n", ExitCode: 1}, nil
+		if reason, bad := ts.probeFail[sandboxID]; bad || ts.probeFailAll {
+			return substrate.ExecResult{Stdout: "PROBE_FAIL " + reason + "\n", ExitCode: 1}
 		}
-		return &forkd.ExecResult{Stdout: "PROBE_OK\n"}, nil
+		return substrate.ExecResult{Stdout: "PROBE_OK\n"}
 	}
-	stdout := f.execStdout
+	stdout := ts.execStdout
 	if stdout == "" {
 		stdout = "ok\n"
 	}
-	return &forkd.ExecResult{Stdout: stdout, Stderr: "", ExitCode: 0}, nil
+	return substrate.ExecResult{Stdout: stdout, ExitCode: 0}
 }
 
-func (f *fakeForkd) Ping(ctx context.Context, id string) error {
-	if f.deadSandboxes != nil && f.deadSandboxes[id] {
-		return fmt.Errorf("forkd: sandbox %s not found (status 404)", id)
-	}
-	return nil
-}
-
-func (f *fakeForkd) Branch(ctx context.Context, id, tag string) (string, error) {
-	if f.deadSandboxes != nil && f.deadSandboxes[id] {
-		return "", fmt.Errorf("forkd: sandbox %s not found (status 404)", id)
-	}
-	branchTag := tag
-	if branchTag == "" {
-		branchTag = "branch-" + id
-	}
-	f.snapshots = append(f.snapshots, forkd.SnapshotInfo{Tag: branchTag})
-	return branchTag, nil
-}
-
-func (f *fakeForkd) CreateWorkspace(ctx context.Context, name, tag string, perChildNetns bool) (*forkd.WorkspaceInfo, error) {
-	f.nextID++
-	sbID := fmt.Sprintf("sb-%d", f.nextID)
-	ws := &forkd.WorkspaceInfo{
-		ID:                "ws-" + sbID,
-		Name:              name,
-		SourceSnapshotTag: tag,
-		Status:            "running",
-		LiveSandboxID:     sbID,
-	}
-	f.workspaces[name] = ws
-	f.sandboxes[sbID] = forkd.SandboxInfo{ID: sbID, GuestAddr: "10.42.0." + fmt.Sprint(f.nextID+1) + ":8888"}
-	return ws, nil
-}
-
-func (f *fakeForkd) SuspendWorkspace(ctx context.Context, name string) error {
-	ws, ok := f.workspaces[name]
-	if !ok {
-		return fmt.Errorf("forkd: workspace %s not found (status 404)", name)
-	}
-	ws.Status = "suspended"
-	f.suspended = append(f.suspended, name)
-	return nil
-}
-
-func (f *fakeForkd) ResumeWorkspace(ctx context.Context, name string) (*forkd.WorkspaceInfo, error) {
-	ws, ok := f.workspaces[name]
-	if !ok {
-		return nil, fmt.Errorf("forkd: workspace %s not found (status 404)", name)
-	}
-	f.nextID++
-	newID := fmt.Sprintf("sb-%d", f.nextID)
-	ws.Status = "running"
-	ws.LiveSandboxID = newID
-	f.sandboxes[newID] = forkd.SandboxInfo{ID: newID, GuestAddr: "10.42.0." + fmt.Sprint(f.nextID+1) + ":8888"}
-	f.resumed = append(f.resumed, name)
-	return ws, nil
-}
-
-func (f *fakeForkd) DeleteWorkspace(ctx context.Context, name string) error {
-	ws, ok := f.workspaces[name]
-	if !ok {
-		return fmt.Errorf("forkd: workspace %s not found (status 404)", name)
-	}
-	delete(f.workspaces, name)
-	f.killed = append(f.killed, ws.LiveSandboxID)
-	return nil
-}
-
-func (f *fakeForkd) Metrics(ctx context.Context) ([]byte, error) {
-	return []byte("# HELP forkd_sandboxes_active\n# TYPE forkd_sandboxes_active gauge\nforkd_sandboxes_active 0\n"), nil
-}
-
-// newTestServer builds a lease API server backed by a fake forkd.
-func newTestServer(t *testing.T) (*httptest.Server, *fakeForkd) {
+// sandboxesLive lists the sandbox ids the fake currently tracks.
+func (ts *testSub) sandboxesLive(t *testing.T) []string {
 	t.Helper()
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"token-a": "consumer-a", "token-b": "consumer-b"}, 0, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, "py-base")
-	srv := NewServer(svc, reg)
+	sbs, err := ts.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	ids := make([]string, 0, len(sbs))
+	for _, sb := range sbs {
+		ids = append(ids, sb.ID)
+	}
+	return ids
+}
+
+// calls counts the fake's recorded calls by method name.
+func calls(f *fake.Fake, method string) int {
+	n := 0
+	for _, c := range f.Calls {
+		if c == method || strings.HasPrefix(c, method+" ") {
+			n++
+		}
+	}
+	return n
+}
+
+// newTestDB opens a SQLite store in a temp directory.
+func newTestDB(t *testing.T) *store.DB {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "spoond.db"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// seedImage records an image and its current (ready) build in the catalog.
+func seedImage(t *testing.T, db *store.DB, name string, memoryMB int) store.ImageRow {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	img := store.ImageRow{
+		Name: name, TemplateID: e2b.NewTemplateID(), CurrentBuildID: e2b.NewUUID(),
+		Digest: "localhost:5000/" + name + "@sha256:0123456789abcdef",
+		VCPU:   2, MemoryMB: memoryMB, DiskMB: 10240, UpdatedAt: now,
+	}
+	if err := db.UpsertImage(ctx, img); err != nil {
+		t.Fatalf("seed image: %v", err)
+	}
+	b := store.BuildRow{
+		BuildID: img.CurrentBuildID, Kind: "template", TemplateID: img.TemplateID,
+		Image: name, State: "ready", VCPU: 2, MemoryMB: memoryMB, DiskMB: 10240,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.InsertBuild(ctx, b); err != nil {
+		t.Fatalf("seed build: %v", err)
+	}
+	return img
+}
+
+// newTestService builds a Service over a fake substrate and a temp DB.
+// ProxyURL points at an unroutable loopback port: the fake substrate has
+// no network, so proxy tests that reach the dial get a 502.
+func newTestService(t *testing.T) (*Service, *store.DB, *testSub) {
+	t.Helper()
+	sub := newTestSub()
+	db := newTestDB(t)
+	svc := NewService(sub, db, map[string]string{
+		"token-a": "consumer-a", "token-b": "consumer-b", "legacy-tok": "legacy-consumer",
+	}, ServiceConfig{DefaultTTL: 60 * time.Second, MaxTTL: 10 * time.Minute,
+		ProxyURL: "http://127.0.0.1:1"})
+	svc.log = log.New(io.Discard, "", 0)
+	return svc, db, sub
+}
+
+// newTestServer builds a lease API server backed by a fake substrate and
+// a temp DB with py-base seeded.
+func newTestServer(t *testing.T) (*httptest.Server, *testSub) {
+	t.Helper()
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts, ff
+	return ts, sub
+}
+
+// newTestServerWithService exposes the service as well (for sweeper and
+// pool tests).
+func newTestServerWithService(t *testing.T) (*httptest.Server, *Service, *store.DB, *testSub) {
+	t.Helper()
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts, svc, db, sub
 }
 
 func doReq(t *testing.T, method, url, token string, body any) (*http.Response, map[string]any) {
@@ -285,9 +273,6 @@ func TestMetricsWithAuth(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	raw, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(raw), "spoond_controller_sandboxes_active") {
-		t.Fatalf("expected namespaced controller metrics in body, got: %s", raw)
-	}
 	if !strings.Contains(string(raw), "spoond_leases_active") {
 		t.Fatalf("expected service-owned metrics in body, got: %s", raw)
 	}
@@ -306,6 +291,28 @@ func TestExec(t *testing.T) {
 	}
 }
 
+// TestExecSandboxGone maps a substrate not-found to 410 Gone so callers
+// can distinguish a permanently dead sandbox from a transient failure.
+func TestExecSandboxGone(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+	// The sandbox disappears beneath the lease (e.g. the node forgot it):
+	// the substrate answers execs with not-found.
+	svc.store.mu.Lock()
+	sandboxID := svc.store.leases[id].SandboxID
+	svc.store.mu.Unlock()
+	sub.Kill(sandboxID)
+	sub.FailCall("Exec", 0, substrate.ErrNotFound)
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	if resp.StatusCode != 410 {
+		t.Fatalf("expected 410, got %d: %v", resp.StatusCode, body)
+	}
+	if body["error"] != "sandbox no longer exists" {
+		t.Fatalf("error body: %v", body["error"])
+	}
+}
+
 func TestExecCrossConsumerDenied(t *testing.T) {
 	ts, _ := newTestServer(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
@@ -318,15 +325,19 @@ func TestExecCrossConsumerDenied(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	ts, ff := newTestServer(t)
+	ts, sub := newTestServer(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 	resp, _ := doReq(t, "DELETE", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
 	if resp.StatusCode != 204 {
 		t.Fatalf("delete status %d", resp.StatusCode)
 	}
-	if len(ff.killed) != 1 {
-		t.Fatalf("expected 1 kill, got %d", len(ff.killed))
+	if got := calls(sub.Fake, "Delete"); got != 1 {
+		t.Fatalf("expected 1 sandbox delete, got %d", got)
+	}
+	sbs, err := sub.List(context.Background())
+	if err != nil || len(sbs) != 0 {
+		t.Fatalf("expected no sandboxes left, got %v (%v)", sbs, err)
 	}
 	// exec after delete -> 404
 	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
@@ -373,8 +384,20 @@ func TestComment(t *testing.T) {
 	}
 }
 
+// TestImages lists catalog images with a current build; an image whose
+// build is unset is not offered.
 func TestImages(t *testing.T) {
-	ts, _ := newTestServer(t)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	if err := db.UpsertImage(context.Background(), store.ImageRow{
+		Name: "ghost", TemplateID: e2b.NewTemplateID(),
+		VCPU: 2, MemoryMB: 2048, DiskMB: 10240, UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed unbuilt image: %v", err)
+	}
+	ts := httptest.NewServer(NewServer(svc, NewImageRegistry(db)).Handler())
+	t.Cleanup(ts.Close)
+
 	resp, body := doReq(t, "GET", ts.URL+"/api/images", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("images status %d", resp.StatusCode)
@@ -383,17 +406,31 @@ func TestImages(t *testing.T) {
 	if len(imgs) != 1 || imgs[0] != "py-base" {
 		t.Fatalf("expected [py-base], got %v", imgs)
 	}
+
+	// detail=1 returns the catalog rows.
+	resp, body = doReq(t, "GET", ts.URL+"/api/images?detail=1", "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("images detail status %d", resp.StatusCode)
+	}
+	details, _ := body["images"].([]any)
+	if len(details) != 1 {
+		t.Fatalf("expected 1 detail row, got %v", details)
+	}
+	row := details[0].(map[string]any)
+	for _, k := range []string{"name", "build_id", "template_id", "digest", "vcpu", "memory_mb", "disk_mb", "updated_at"} {
+		if _, ok := row[k]; !ok {
+			t.Fatalf("detail row missing %q: %v", k, row)
+		}
+	}
+	if row["name"] != "py-base" || row["memory_mb"] != float64(2048) {
+		t.Fatalf("detail row: %v", row)
+	}
 }
 
 // TestTTLSweeper verifies the background sweeper reclaims expired
-// leases and kills the underlying sandbox.
+// leases and deletes the underlying sandbox.
 func TestTTLSweeper(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, "py-base")
-	srv := NewServer(svc, reg)
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	ts, svc, _, sub := newTestServerWithService(t)
 
 	// Create a lease with a 1-second TTL.
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 1})
@@ -406,9 +443,9 @@ func TestTTLSweeper(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 	cancel()
 
-	// The lease should be gone and the sandbox killed.
-	if len(ff.killed) != 1 {
-		t.Fatalf("expected 1 kill, got %d", len(ff.killed))
+	// The lease should be gone and the sandbox deleted.
+	if got := calls(sub.Fake, "Delete"); got != 1 {
+		t.Fatalf("expected 1 delete, got %d", got)
 	}
 	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo"})
 	if resp.StatusCode != 404 {
@@ -417,13 +454,13 @@ func TestTTLSweeper(t *testing.T) {
 }
 
 // TestIdleSweeper verifies persistent leases are auto-suspended (not
-// deleted) after idleTimeout without activity, and that touch() keeps
+// deleted) after IdleTimeout without activity, and that touch() keeps
 // them alive.
 func TestIdleSweeper(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewServiceWithIdle(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute, 400*time.Millisecond)
-	reg := NewImageRegistry(ff, "py-base")
-	srv := NewServer(svc, reg)
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.IdleTimeout = 400 * time.Millisecond
+	srv := NewServer(svc, NewImageRegistry(db))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
@@ -442,56 +479,57 @@ func TestIdleSweeper(t *testing.T) {
 	cancel()
 
 	// Still alive: touches outpace the idle timeout.
-	if len(ff.suspended) != 0 {
-		t.Fatalf("expected 0 suspends while touched, got %d", len(ff.suspended))
+	if got := calls(sub.Fake, "Pause"); got != 0 {
+		t.Fatalf("expected 0 pauses while touched, got %d", got)
 	}
 
-	// Now stop touching; the sweeper should suspend the workspace within
-	// ~1s. The lease is workspace-backed, so it is suspended, not killed.
+	// Now stop touching; the sweeper should suspend the lease within
+	// ~1s. The lease is suspended, not deleted.
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	svc.Start(ctx2)
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(ff.suspended) == 0 {
+	for time.Now().Before(deadline) && calls(sub.Fake, "Pause") == 0 {
 		time.Sleep(100 * time.Millisecond)
 	}
 	cancel2()
-	if len(ff.suspended) != 1 {
-		t.Fatalf("expected 1 idle suspend, got %d", len(ff.suspended))
+	if got := calls(sub.Fake, "Pause"); got != 1 {
+		t.Fatalf("expected 1 idle pause, got %d", got)
 	}
-	if len(ff.killed) != 0 {
-		t.Fatalf("expected 0 kills on idle, got %d (suspended lease should stay)", len(ff.killed))
+	if got := calls(sub.Fake, "Delete"); got != 0 {
+		t.Fatalf("expected 0 deletes on idle, got %d (suspended lease should stay)", got)
 	}
 	// The lease is still listable (suspended, not released).
 	resp, _ := doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200 listing after suspend, got %d", resp.StatusCode)
 	}
-	if len(ff.suspended) != 1 {
-		t.Fatalf("expected 1 idle suspend, got %d", len(ff.suspended))
-	}
 }
 
 // TestSuspendResume verifies explicit suspend/resume verbs on a
-// workspace-backed persistent lease, and that resume refreshes the
-// sandbox id.
+// persistent lease: suspend pauses the sandbox into a build, resume
+// creates again with the same sandbox id, and delete removes it.
 func TestSuspendResume(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, "py-base")
-	srv := NewServer(svc, reg)
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	ts, svc, _, sub := newTestServerWithService(t)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
+	createsBefore := calls(sub.Fake, "Create")
 
 	// Suspend.
 	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200 suspend, got %d", resp.StatusCode)
 	}
-	if len(ff.suspended) != 1 {
-		t.Fatalf("expected 1 suspend, got %d", len(ff.suspended))
+	if got := calls(sub.Fake, "Pause"); got != 1 {
+		t.Fatalf("expected 1 pause, got %d", got)
+	}
+	svc.store.mu.Lock()
+	l := svc.store.leases[id]
+	suspended := l.Suspended
+	resumeBuild := l.ResumeBuildID
+	svc.store.mu.Unlock()
+	if !suspended || resumeBuild == "" {
+		t.Fatalf("expected suspended lease with a resume build, got suspended=%v build=%q", suspended, resumeBuild)
 	}
 
 	// Resume.
@@ -499,48 +537,75 @@ func TestSuspendResume(t *testing.T) {
 	if resp2.StatusCode != 200 {
 		t.Fatalf("expected 200 resume, got %d", resp2.StatusCode)
 	}
-	if len(ff.resumed) != 1 {
-		t.Fatalf("expected 1 resume, got %d", len(ff.resumed))
+	if got := calls(sub.Fake, "Create"); got != createsBefore+1 {
+		t.Fatalf("expected 1 more create after resume, got %d (before %d)", calls(sub.Fake, "Create"), createsBefore)
+	}
+	svc.store.mu.Lock()
+	l = svc.store.leases[id]
+	sandboxID := l.SandboxID
+	buildID := l.BuildID
+	svc.store.mu.Unlock()
+	if !l.live() || buildID != resumeBuild {
+		t.Fatalf("expected running lease on the resume build, got state=%q build=%q", l.State, buildID)
 	}
 
-	// Delete releases the workspace.
+	// Delete releases the sandbox.
 	doReq(t, "DELETE", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
-	if len(ff.killed) != 1 {
-		t.Fatalf("expected 1 workspace delete/kill, got %d", len(ff.killed))
+	if got := calls(sub.Fake, "Delete"); got != 1 {
+		t.Fatalf("expected 1 delete, got %d", got)
+	}
+	if got := calls(sub.Fake, "Delete"); got == 1 && !strings.Contains(sub.Fake.Calls[len(sub.Fake.Calls)-1], sandboxID) {
+		t.Fatalf("expected the lease's sandbox %s deleted, calls: %v", sandboxID, sub.Fake.Calls)
 	}
 }
 
 // TestWarmPoolGrant verifies a grant is served from the warm pool when
-// sandboxes are pre-forked.
+// sandboxes are pre-created, and the served lease is marked pooled.
 func TestWarmPoolGrant(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 2, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, "py-base")
-	srv := NewServer(svc, reg)
+	svc, db, sub := newTestService(t)
+	img := seedImage(t, db, "py-base", 2048)
+	svc.cfg.PoolSize = 2
+	srv := NewServer(svc, NewImageRegistry(db))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	// Pre-fork 2 sandboxes into the pool.
+	// Pre-create 2 sandboxes into the pool.
 	ctx := context.Background()
-	svc.warmPool(ctx, "py-base")
+	svc.warmPool(ctx, img)
 	svc.store.mu.Lock()
 	poolLen := len(svc.store.pool["py-base"])
 	svc.store.mu.Unlock()
 	if poolLen != 2 {
 		t.Fatalf("expected 2 warm sandboxes in pool, got %d", poolLen)
 	}
+	if got := calls(sub.Fake, "Create"); got != 2 {
+		t.Fatalf("expected 2 creates for the pool, got %d", got)
+	}
 
-	// Grant should consume from the pool without spawning.
+	// Grant should consume from the pool without creating.
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
-	if create["id"] == "" {
+	id, _ := create["id"].(string)
+	if id == "" {
 		t.Fatal("expected a lease id")
 	}
-	// One pool sandbox consumed, one remains.
+	if got := calls(sub.Fake, "Create"); got != 2 {
+		t.Fatalf("expected pool grant to not create, creates=%d", got)
+	}
+	// One pool sandbox consumed, one remains; the served lease is marked
+	// pooled and carries the build it runs from.
 	svc.store.mu.Lock()
 	poolLen = len(svc.store.pool["py-base"])
+	l := svc.store.leases[id]
+	pooled, buildID := l.pooled, l.BuildID
 	svc.store.mu.Unlock()
 	if poolLen != 1 {
 		t.Fatalf("expected 1 sandbox remaining in pool after grant, got %d", poolLen)
+	}
+	if !pooled {
+		t.Fatal("expected the pool-served lease to be marked pooled")
+	}
+	if buildID != img.CurrentBuildID {
+		t.Fatalf("pooled lease build = %q, want %q", buildID, img.CurrentBuildID)
 	}
 }
 
@@ -573,28 +638,28 @@ func TestBuildShellArgsQuoting(t *testing.T) {
 }
 
 // TestShutdownKeepsLeasesAndPool verifies graceful shutdown stops the
-// background loops WITHOUT releasing leases or killing pooled sandboxes:
-// the state persists in the store and the next incarnation reloads it
-// (U05).
+// background loops WITHOUT releasing leases or deleting pooled
+// sandboxes: the state persists in the store and the next incarnation
+// reloads it (U05).
 func TestShutdownKeepsLeasesAndPool(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
+	svc, db, sub := newTestService(t)
+	img := seedImage(t, db, "py-base", 2048)
+	svc.cfg.PoolSize = 2
 
 	// Grant a lease and warm the pool.
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	svc.warmPool(ctx, "py-base") // fills pool to 2
-	if got := len(ff.sandboxes); got < 2 {
+	svc.warmPool(ctx, img) // fills pool to 2
+	if got := len(sub.sandboxesLive(t)); got < 2 {
 		t.Fatalf("expected >=2 sandboxes after warm, got %d", got)
 	}
 
 	svc.Shutdown(ctx)
-	if len(ff.killed) != 0 {
-		t.Fatalf("expected no kills on shutdown, got %d: %v", len(ff.killed), ff.killed)
+	if got := calls(sub.Fake, "Delete"); got != 0 {
+		t.Fatalf("expected no deletes on shutdown, got %d", got)
 	}
 	var live bool
 	for _, id := range svc.LiveLeases() {
@@ -607,100 +672,124 @@ func TestShutdownKeepsLeasesAndPool(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphansKillsForeignSandboxes verifies startup
-// reconciliation kills controller sandboxes that this backend did not
+// TestReconcileOrphansDeletesForeignSandboxes verifies startup
+// reconciliation deletes substrate sandboxes that this backend did not
 // create (e.g. leftovers from a previous incarnation).
-func TestReconcileOrphansKillsForeignSandboxes(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
+func TestReconcileOrphansDeletesForeignSandboxes(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	// A foreign sandbox already exists in the controller (previous incarnation).
-	foreign, err := ff.Spawn(ctx, "py-base", 1, true, 0)
+	// A foreign sandbox already exists on the substrate (previous incarnation).
+	foreign, err := sub.Create(ctx, substrate.CreateRequest{SandboxID: e2b.NewSandboxID()})
 	if err != nil {
-		t.Fatalf("foreign spawn: %v", err)
+		t.Fatalf("foreign create: %v", err)
 	}
 	// Grant our own lease (would be empty at true startup, but proves the
 	// mine/not-mine split).
-	ours, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
+	ours, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 
 	svc.ReconcileOrphans(ctx)
 
-	// Foreign killed, ours kept.
-	killedForeign := false
-	for _, id := range ff.killed {
-		if id == foreign[0].ID {
-			killedForeign = true
+	// Foreign deleted, ours kept.
+	deleted := false
+	for _, c := range sub.Fake.Calls {
+		if c == "Delete "+foreign.ID {
+			deleted = true
 		}
 	}
-	if !killedForeign {
-		t.Fatalf("expected foreign sandbox %s killed, killed: %v", foreign[0].ID, ff.killed)
+	if !deleted {
+		t.Fatalf("expected foreign sandbox %s deleted, calls: %v", foreign.ID, sub.Fake.Calls)
 	}
-	if _, stillAlive := ff.sandboxes[ours.ForkdID]; !stillAlive {
-		t.Fatalf("our own sandbox %s should not be killed", ours.ForkdID)
+	alive, err := sub.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, sb := range alive {
+		if sb.ID == ours.SandboxID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("our own sandbox %s should not be deleted", ours.SandboxID)
 	}
 }
 
-// TestGrantDropsStalePooledSandbox verifies grant validates pooled
-// sandboxes against the controller and cold-spawns when the pooled one
-// is gone (e.g. after a controller restart).
-func TestGrantDropsStalePooledSandbox(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
+// TestGrantDiscardsUnhealthyPooledSandbox verifies grant validates pooled
+// sandboxes (envd health) and cold-creates when the pooled one is bad
+// (e.g. its guest agent never came up).
+func TestGrantDiscardsUnhealthyPooledSandbox(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	img := seedImage(t, db, "py-base", 2048)
+	svc.cfg.PoolSize = 1
 
 	ctx := context.Background()
-	// Warm the pool, then mark its member stale (as if the controller
-	// restarted and forgot it).
-	svc.warmPool(ctx, "py-base")
-	ff.deadSandboxes = map[string]bool{}
-	for id := range ff.sandboxes {
-		ff.deadSandboxes[id] = true
+	// Warm the pool, then mark its member unhealthy.
+	svc.warmPool(ctx, img)
+	svc.store.mu.Lock()
+	pooled := append([]string(nil), svc.store.pool["py-base"]...)
+	svc.store.mu.Unlock()
+	if len(pooled) != 1 {
+		t.Fatalf("expected 1 pooled sandbox, got %d", len(pooled))
 	}
+	sub.SetHealthErr(pooled[0], fmt.Errorf("envd unreachable"))
 
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	// The granted sandbox must be a FRESH spawn (not the stale pooled id).
-	if ff.deadSandboxes[l.ForkdID] {
-		t.Fatalf("granted stale pooled sandbox %s", l.ForkdID)
+	// The granted sandbox must be a FRESH create (not the stale pooled id).
+	if l.SandboxID == pooled[0] {
+		t.Fatalf("granted unhealthy pooled sandbox %s", pooled[0])
 	}
-	if len(ff.killed) == 0 {
-		t.Fatalf("expected stale pooled sandbox to be killed")
+	if got := calls(sub.Fake, "Delete "+pooled[0]); got != 1 {
+		t.Fatalf("expected the unhealthy pooled sandbox to be deleted, calls: %v", sub.Fake.Calls)
 	}
 }
 
-// TestNewServiceSeedsPoolFromKnownImages verifies NewService registers
-// known images so refillPool warms all of them at startup (not just the
-// ones that happen to get granted).
-func TestNewServiceSeedsPoolFromKnownImages(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute, "py-base", "go-base", "elixir-base", "llm-review")
-	if len(svc.store.pool) != 4 {
-		t.Fatalf("expected 4 seeded images, got %d: %v", len(svc.store.pool), svc.store.pool)
+// TestRefillPoolWarmsBuiltImages verifies refillPool warms every image
+// with a current build (and only those) at startup.
+func TestRefillPoolWarmsBuiltImages(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	// An image without a current build must not be warmed.
+	if err := db.UpsertImage(context.Background(), store.ImageRow{
+		Name: "ghost", TemplateID: e2b.NewTemplateID(),
+		VCPU: 2, MemoryMB: 2048, DiskMB: 10240, UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
 	}
-	// Empty pool entries must exist so refillPool sees cur=0 < poolSize.
-	for _, img := range []string{"py-base", "go-base", "elixir-base", "llm-review"} {
-		if _, ok := svc.store.pool[img]; !ok {
-			t.Fatalf("image %s not seeded", img)
-		}
+	svc.cfg.PoolSize = 1
+
+	svc.refillPool(context.Background())
+
+	svc.store.mu.Lock()
+	pyLen := len(svc.store.pool["py-base"])
+	ghostLen := len(svc.store.pool["ghost"])
+	svc.store.mu.Unlock()
+	if pyLen != 1 {
+		t.Fatalf("expected py-base warmed, got %d pool entries", pyLen)
+	}
+	if ghostLen != 0 {
+		t.Fatalf("expected no pool entries for the unbuilt image, got %d", ghostLen)
+	}
+	if got := calls(sub.Fake, "Create"); got != 1 {
+		t.Fatalf("expected 1 create, got %d", got)
 	}
 }
 
 // TestPersistentLeaseSurvivesSweep verifies a persistent lease is not
 // reclaimed by the TTL sweeper, even after its initial expiry.
 func TestPersistentLeaseSurvivesSweep(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, true, "", nil) // persistent, short TTL
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, true, "", nil) // persistent, short TTL
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -715,12 +804,11 @@ func TestPersistentLeaseSurvivesSweep(t *testing.T) {
 // TestNonPersistentLeaseIsSwept verifies the sweeper still reclaims
 // ordinary leases on expiry (regression guard).
 func TestNonPersistentLeaseIsSwept(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, 50*time.Millisecond, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -735,12 +823,11 @@ func TestNonPersistentLeaseIsSwept(t *testing.T) {
 // TestKeepAliveExtendsPersistentLease verifies keepalive pushes the
 // expiry forward for persistent leases.
 func TestKeepAliveExtendsPersistentLease(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, true, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -763,12 +850,11 @@ func TestKeepAliveExtendsPersistentLease(t *testing.T) {
 // TestKeepAliveRejectsNonPersistent verifies keepalive refuses ordinary
 // leases (their TTL is fixed by contract).
 func TestKeepAliveRejectsNonPersistent(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 2, time.Minute, 10*time.Minute)
-	svc.log = log.New(io.Discard, "", 0)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 0, time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -799,10 +885,9 @@ func TestLLMGateway(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, "py-base")
-	srv := NewServerWithLLM(svc, reg, upstream.URL, "sk-server-secret", "fallback-model", map[string]string{"gpt-oss-20b-fireworks": "gpt-oss:20b"})
+	svc, db, _ := newTestService(t)
+	srv := NewServerWithLLM(svc, NewImageRegistry(db), upstream.URL, "sk-server-secret", "fallback-model", map[string]string{"gpt-oss-20b-fireworks": "gpt-oss:20b"})
+	seedImage(t, db, "py-base", 2048)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
@@ -929,14 +1014,10 @@ func TestLLMGateway(t *testing.T) {
 	}
 }
 
-// TestTagAndRestart covers the new ctl surface: friendly names (tag) and
-// reboot (restart) on workspace-backed persistent leases.
+// TestTagAndRestart covers the ctl surface: friendly names (tag) and
+// reboot (restart) on persistent leases.
 func TestTagAndRestart(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"token-a": "consumer-a"}, 0, 60*time.Second, 10*time.Minute)
-	reg := NewImageRegistry(ff, "py-base")
-	srv := NewServer(svc, reg)
-	ts := httptest.NewServer(srv.Handler())
+	ts, svc, _, sub := newTestServerWithService(t)
 	defer ts.Close()
 
 	create := func() string {
@@ -971,10 +1052,20 @@ func TestTagAndRestart(t *testing.T) {
 		t.Fatalf("invalid name: status %d, want 400", resp.StatusCode)
 	}
 
-	// restart: workspace-backed lease -> suspend+resume, still listable.
+	// restart: a running persistent lease suspends then resumes.
+	createsBefore := calls(sub.Fake, "Create")
 	_, m = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/restart", "token-a", map[string]any{})
 	if m["status"] != "running" {
 		t.Fatalf("restart response: %v", m)
+	}
+	if calls(sub.Fake, "Create") != createsBefore+1 {
+		t.Fatalf("expected the restart to resume the sandbox (1 new create)")
+	}
+	svc.store.mu.Lock()
+	l := svc.store.leases[id]
+	svc.store.mu.Unlock()
+	if !l.live() {
+		t.Fatalf("restarted lease not running: %+v", l)
 	}
 	// list still contains both, with names.
 	_, m = doReq(t, "GET", ts.URL+"/api/sandboxes", "token-a", nil)
@@ -982,12 +1073,12 @@ func TestTagAndRestart(t *testing.T) {
 	if len(sbs) != 2 {
 		t.Fatalf("want 2 sandboxes, got %d", len(sbs))
 	}
-	// prompt endpoint exists and answers (fake exec returns empty output;
+	// prompt endpoint exists and answers (fake exec returns "ok";
 	// the SHELLEY_NOT_RUNNING 409 path needs a live agent, covered by the
 	// integration suite).
 	resp, m = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/prompt", "token-a", map[string]any{"message": "hi"})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("prompt: status %d, want 200 (fake exec empty)", resp.StatusCode)
+		t.Fatalf("prompt: status %d, want 200 (fake exec canned)", resp.StatusCode)
 	}
 	if _, ok := m["reply"]; !ok {
 		t.Fatalf("prompt response missing reply: %v", m)
@@ -995,12 +1086,12 @@ func TestTagAndRestart(t *testing.T) {
 }
 
 func TestStat(t *testing.T) {
-	ts, ff := newTestServer(t)
+	ts, _, _, sub := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
 
-	// fake forkd exec returns canned stat probe output.
-	ff.execStdout = `== loadavg ==
+	// fake exec returns canned stat probe output.
+	sub.execStdout = `== loadavg ==
 0.25 0.10 0.05 1/12 345
 == meminfo ==
 MemTotal:       1572864 kB

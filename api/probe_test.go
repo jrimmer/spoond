@@ -6,75 +6,87 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/forkd"
+	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/substrate"
 )
 
-// newProbeService builds a Service over a fake substrate with one image in
-// the pool map, so the warm-pool paths are reachable.
-func newProbeService(ff *fakeForkd) *Service {
-	return NewService(ff, map[string]string{"t": "c"}, 0, time.Minute, time.Minute, "py-base")
+// newProbeService builds a Service over a fake substrate and temp DB with
+// one seeded image, so the warm-pool paths are reachable.
+func newProbeService(t *testing.T) (*Service, store.ImageRow, *store.DB, *testSub) {
+	t.Helper()
+	svc, db, sub := newTestService(t)
+	img := seedImage(t, db, "py-base", 2048)
+	return svc, img, db, sub
 }
 
-// poolSeeded puts a sandbox id in the warm pool for image.
-func poolSeeded(svc *Service, image string, ids ...string) {
-	svc.store.mu.Lock()
-	svc.store.pool[image] = append(svc.store.pool[image], ids...)
-	svc.store.mu.Unlock()
-}
-
-// A pooled sandbox from a bad image generation answers a ping and then fails
-// the job deep inside a build. It must be recycled rather than leased.
-func TestGrantRecyclesPooledSandboxThatFailsProbe(t *testing.T) {
-	ff := newFakeForkd()
-	ff.sandboxes["pooled-bad"] = forkd.SandboxInfo{ID: "pooled-bad", SnapshotTag: "py-base", GuestAddr: "10.42.0.2:8888"}
-	ff.probeFail = map[string]string{"pooled-bad": "uname -s -> uniq (GNU coreutils) 9.1"}
-
-	svc := newProbeService(ff)
-	poolSeeded(svc, "py-base", "pooled-bad")
-
-	lease, err := svc.grant(context.Background(), "c", "py-base", 0, time.Minute, false, "internet", nil)
-	if err != nil {
-		t.Fatalf("grant: %v", err)
-	}
-	if lease.ForkdID == "pooled-bad" {
-		t.Fatal("granted the sandbox that failed its integrity probe")
-	}
-	killed := false
-	for _, id := range ff.killed {
-		if id == "pooled-bad" {
-			killed = true
+// poolSeeded stocks a sandbox in the warm pool for image, with the
+// sandboxes row and pool row grant's validation reads.
+func poolSeeded(t *testing.T, svc *Service, db *store.DB, sub *testSub, image, buildID string, ids ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, id := range ids {
+		sb, err := sub.Create(ctx, substrate.CreateRequest{SandboxID: id, BuildID: buildID})
+		if err != nil {
+			t.Fatalf("seed pooled sandbox: %v", err)
 		}
-	}
-	if !killed {
-		t.Errorf("corrupt pooled sandbox was not recycled; killed=%v", ff.killed)
+		if err := db.UpsertSandbox(ctx, store.SandboxRow{
+			SandboxID: sb.ID, LeaseID: "", BuildID: sb.BuildID,
+			ExecutionID: sb.ExecutionID, HostIP: sb.HostIP,
+			VCPU: int(sb.VCPU), MemoryMB: int(sb.MemoryMB),
+			StartedAt: sb.StartedAt, EndAt: sb.EndAt,
+		}); err != nil {
+			t.Fatalf("seed sandboxes row: %v", err)
+		}
+		if err := db.AddPool(ctx, id, image); err != nil {
+			t.Fatalf("seed pool row: %v", err)
+		}
+		svc.store.mu.Lock()
+		svc.store.pool[image] = append(svc.store.pool[image], id)
+		svc.store.mu.Unlock()
 	}
 }
 
-// A cold spawn is probed too: the failure has to be caught before the sandbox
-// is handed to a job, and a bad sandbox must not be left running.
-func TestGrantRejectsColdSpawnThatFailsProbe(t *testing.T) {
-	ff := newFakeForkd()
-	ff.probeFailAll = true
+// A pooled sandbox from a bad image generation answers a health check and
+// then fails the job deep inside a build. The probe must catch it: the
+// grant fails and the sandbox is deleted, never leased.
+func TestGrantRejectsPooledSandboxThatFailsProbe(t *testing.T) {
+	svc, img, db, sub := newProbeService(t)
+	svc.cfg.PoolSize = 1
+	sub.probeFail["pooled-bad"] = "uname -s -> uniq (GNU coreutils) 9.1"
+	poolSeeded(t, svc, db, sub, "py-base", img.CurrentBuildID, "pooled-bad")
 
-	svc := newProbeService(ff)
-	_, err := svc.grant(context.Background(), "c", "py-base", 0, time.Minute, false, "internet", nil)
+	_, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil)
 	if err == nil {
 		t.Fatal("grant succeeded with a sandbox that failed its integrity probe")
 	}
-	if len(ff.killed) != 1 {
-		t.Errorf("expected the bad sandbox to be killed, killed=%v", ff.killed)
+	if got := calls(sub.Fake, "Delete pooled-bad"); got != 1 {
+		t.Errorf("corrupt pooled sandbox was not deleted; calls=%v", sub.Fake.Calls)
+	}
+}
+
+// A cold create is probed too: the failure has to be caught before the
+// sandbox is handed to a job, and a bad sandbox must not be left running.
+func TestGrantRejectsColdCreateThatFailsProbe(t *testing.T) {
+	svc, _, _, sub := newProbeService(t)
+	sub.probeFailAll = true
+
+	_, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil)
+	if err == nil {
+		t.Fatal("grant succeeded with a sandbox that failed its integrity probe")
+	}
+	if got := calls(sub.Fake, "Delete"); got != 1 {
+		t.Errorf("expected the bad sandbox to be deleted, deletes=%d", got)
 	}
 }
 
 // The warm pool must not stock a sandbox that fails the probe, or every grant
 // after it inherits the failure.
 func TestWarmPoolDoesNotStockSandboxThatFailsProbe(t *testing.T) {
-	ff := newFakeForkd()
-	ff.probeFailAll = true
+	svc, img, _, sub := newProbeService(t)
+	sub.probeFailAll = true
 
-	svc := newProbeService(ff)
-	svc.poolSize = 1
-	svc.warmPool(context.Background(), "py-base")
+	svc.cfg.PoolSize = 1
+	svc.warmPool(context.Background(), img)
 
 	svc.store.mu.Lock()
 	pooled := len(svc.store.pool["py-base"])
@@ -82,43 +94,40 @@ func TestWarmPoolDoesNotStockSandboxThatFailsProbe(t *testing.T) {
 	if pooled != 0 {
 		t.Fatalf("pooled %d sandboxes, want 0", pooled)
 	}
-	if len(ff.killed) != 1 {
-		t.Errorf("expected the bad sandbox to be recycled, killed=%v", ff.killed)
+	if got := calls(sub.Fake, "Delete"); got != 1 {
+		t.Errorf("expected the bad sandbox to be recycled, deletes=%d", got)
 	}
 }
 
-// A healthy spawn is pooled as before — the probe must not reject good work.
+// A healthy create is pooled as before — the probe must not reject good work.
 func TestWarmPoolStocksHealthySandbox(t *testing.T) {
-	ff := newFakeForkd()
-	svc := newProbeService(ff)
-	svc.poolSize = 2
-	svc.warmPool(context.Background(), "py-base")
+	svc, img, _, sub := newProbeService(t)
+	svc.cfg.PoolSize = 2
+	svc.warmPool(context.Background(), img)
 
 	svc.store.mu.Lock()
 	pooled := len(svc.store.pool["py-base"])
 	svc.store.mu.Unlock()
 	if pooled != 2 {
-		t.Fatalf("pooled %d sandboxes, want 2; killed=%v", pooled, ff.killed)
+		t.Fatalf("pooled %d sandboxes, want 2; calls=%v", pooled, sub.Fake.Calls)
 	}
 }
 
 // SANDBOX_PROBE=0 turns the check off: every sandbox is handed out
 // unverified, which is the escape hatch if the probe itself misbehaves.
 func TestProbeDisabledGrantsUnverifiedSandbox(t *testing.T) {
-	ff := newFakeForkd()
-	ff.sandboxes["pooled-bad"] = forkd.SandboxInfo{ID: "pooled-bad", SnapshotTag: "py-base", GuestAddr: "10.42.0.2:8888"}
-	ff.probeFail = map[string]string{"pooled-bad": "uname -s -> uniq (GNU coreutils) 9.1"}
+	svc, img, db, sub := newProbeService(t)
+	svc.cfg.PoolSize = 1
+	sub.probeFail["pooled-bad"] = "uname -s -> uniq (GNU coreutils) 9.1"
+	poolSeeded(t, svc, db, sub, "py-base", img.CurrentBuildID, "pooled-bad")
 
-	svc := newProbeService(ff)
 	svc.SetSandboxProbe(false, 0)
-	poolSeeded(svc, "py-base", "pooled-bad")
-
-	lease, err := svc.grant(context.Background(), "c", "py-base", 0, time.Minute, false, "internet", nil)
+	lease, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	if lease.ForkdID != "pooled-bad" {
-		t.Fatalf("with the probe disabled the pooled sandbox should be granted, got %s", lease.ForkdID)
+	if lease.SandboxID != "pooled-bad" {
+		t.Fatalf("with the probe disabled the pooled sandbox should be granted, got %s", lease.SandboxID)
 	}
 }
 

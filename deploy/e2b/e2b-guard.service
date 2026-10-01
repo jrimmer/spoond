@@ -1,0 +1,13 @@
+[Unit]
+Description=E2B host firewall (nftables table inet e2b_guard)
+After=network-pre.target
+Before=e2b-orchestrator.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/e2b-guard.nft
+ExecStop=/usr/sbin/nft delete table inet e2b_guard
+
+[Install]
+WantedBy=multi-user.target

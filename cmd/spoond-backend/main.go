@@ -1,24 +1,37 @@
-// Command forkd-backend runs the forkd ephemeral-backend lease API.
+// Command spoond-backend runs the lease API backend on the E2B
+// substrate (U08).
 //
 // Configuration is read from the environment:
 //
-//	FORKD_URL        forkd-controller base URL (default http://127.0.0.1:8889)
-//	FORKD_TOKEN      bearer token for forkd-controller (optional)
-//	BIND_ADDR        listen address (default 127.0.0.1:8890)
-//	SPOOND_DB_PATH   SQLite database path (default /var/lib/spoond/spoond.db)
+//	E2B_GRPC_ADDR     orchestrator gRPC (default 127.0.0.1:5008)
+//	E2B_PROXY_URL     orchestrator sandbox proxy (default http://127.0.0.1:5007)
+//	E2B_TOKEN_SEED_FILE  envd/traffic HMAC seed file (default /etc/spoond/e2b-token-seed)
+//	E2B_TEAM_ID       fixed team UUID sent on every request
+//	BIND_ADDR         listen address (default 127.0.0.1:8890)
+//	PROXY_ADDR        public proxy listener (e.g. 0.0.0.0:8891)
+//	SPOOND_DB_PATH    SQLite database path (default /var/lib/spoond/spoond.db)
 //	TLS_CERT, TLS_KEY  serve HTTPS when both are set
-//	CONSUMER_TOKENS  comma-separated token=consumer pairs (e.g. "abc=forgejo,def=pi")
-//	POOL_SIZE        warm-pool size per image (default 0 = disabled)
-//	DEFAULT_TTL_SECS default lease TTL (default 300)
-//	MAX_TTL_SECS     max lease TTL (default 3600)
-//	LLM_UPSTREAM_URL OpenAI-compatible LLM API base for the per-lease
-//	                 LLM gateway (e.g. https://openrouter.ai/api/v1)
-//	LLM_UPSTREAM_KEY server-side key for that upstream (never sent to
-//	                 sandboxes; empty disables the gateway)
+//	CONSUMER_TOKENS   comma-separated token=consumer pairs (e.g. "abc=forgejo,def=pi")
+//	POOL_SIZE         warm-pool size per image (default 0 = disabled)
+//	DEFAULT_TTL_SECS  default lease TTL (default 300)
+//	MAX_TTL_SECS      max lease TTL (default 3600)
+//	HOST_GUEST_SERVICE_ADDR  address guests use to reach host services (required)
+//	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
+//	CHECKPOINT_INTERVAL_MINS  periodic checkpoint interval (U10; default 60)
+//	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
+//	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
+//	                  (default /forkdcache/e2b/storage/templates)
+//	SPOOND_BACKUP_DIR directory for daily SQLite backups (U11; default
+//	                  /var/lib/spoond/backups; VACUUM INTO daily at 03:00
+//	                  local, plus at start when the newest is older than 24 h)
+//	LLM_UPSTREAM_URL  OpenAI-compatible LLM API base for the per-lease
+//	                  LLM gateway (e.g. https://openrouter.ai/api/v1)
+//	LLM_UPSTREAM_KEY  server-side key for that upstream (never sent to
+//	                  sandboxes; empty disables the gateway)
 //	LLM_MAX_CONCURRENT_PER_USER  per-user in-flight LLM gateway request
-//	                 cap (0 = unlimited; U8/T8). Per-user LLM keys are
-//	                 store data, set via POST /api/users/{id}/llm-key,
-//	                 not env config.
+//	                  cap (0 = unlimited; U8/T8). Per-user LLM keys are
+//	                  store data, set via POST /api/users/{id}/llm-key,
+//	                  not env config.
 package spoondbackend
 
 import (
@@ -27,15 +40,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jrimmer/spoond/api"
-	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
 	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/substrate/e2b"
 )
 
 func envOr(key, def string) string {
@@ -43,6 +58,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// backupStale reports whether dir holds no <prefix>-*.db backup newer
+// than 24 h (a missing or unreadable newest backup counts as stale).
+func backupStale(dir, prefix string) bool {
+	matches, _ := filepath.Glob(filepath.Join(dir, prefix+"-*.db"))
+	if len(matches) == 0 {
+		return true
+	}
+	sort.Strings(matches)
+	info, err := os.Stat(matches[len(matches)-1])
+	return err != nil || time.Since(info.ModTime()) > 24*time.Hour
 }
 
 func envIntOr(key string, def int) int {
@@ -70,8 +97,6 @@ func envBoolOr(key string, def bool) bool {
 }
 
 func Main(args []string) int {
-	forkdURL := envOr("FORKD_URL", "http://127.0.0.1:8889")
-	forkdToken := os.Getenv("FORKD_TOKEN")
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
 	proxyAddr := envOr("PROXY_ADDR", "") // e.g. 0.0.0.0:8891 (Caddy wildcard front)
 	tlsCert := os.Getenv("TLS_CERT")
@@ -81,6 +106,13 @@ func Main(args []string) int {
 	idleTimeout := time.Duration(idleTimeoutSecs) * time.Second
 	defaultTTL := time.Duration(envIntOr("DEFAULT_TTL_SECS", 300)) * time.Second
 	maxTTL := time.Duration(envIntOr("MAX_TTL_SECS", 3600)) * time.Second
+	hostGuestAddr := os.Getenv("HOST_GUEST_SERVICE_ADDR")
+	if hostGuestAddr == "" {
+		log.Fatal("HOST_GUEST_SERVICE_ADDR is required (the address guests use to reach host services)")
+	}
+	hostGuestPort := envIntOr("HOST_GUEST_SERVICE_PORT", 8891)
+	checkpointEvery := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 60)) * time.Minute
+	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
@@ -98,35 +130,41 @@ func Main(args []string) int {
 		log.Fatal("CONSUMER_TOKENS is required (token=consumer,comma-separated)")
 	}
 
-	fc := forkd.NewClient(forkdURL, forkdToken)
-	// The client's overall HTTP timeout must exceed the largest exec the
-	// backend is willing to forward, or long CI steps die at exactly the
-	// client timeout (600s default) regardless of MAX_EXEC_TIMEOUT_SECS.
-	if v := os.Getenv("FORKD_HTTP_TIMEOUT_SECS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			fc.SetHTTPTimeout(time.Duration(n) * time.Second)
-		}
+	// The E2B substrate: orchestrator over gRPC, envd through the proxy.
+	cfg, err := e2b.FromEnv()
+	if err != nil {
+		log.Fatalf("substrate: %v", err)
 	}
-	// knownTags surfaces baked images even when the controller's list
-	// endpoint is empty; add tags here as you bake them. Also seeds the
-	// warm pool so every image pre-forks at startup.
-	knownTags := []string{}
-	if v := os.Getenv("KNOWN_IMAGES"); v != "" {
-		knownTags = strings.Split(v, ",")
+	sub, err := e2b.New(cfg)
+	if err != nil {
+		log.Fatalf("substrate: %v", err)
 	}
-	svc := api.NewServiceWithIdle(fc, tokens, poolSize, defaultTTL, maxTTL, idleTimeout, knownTags...)
-	// Per-spawn integrity probe: a sandbox with a corrupt toolchain answers a
-	// ping and then fails the job deep inside a build, so verify it from
+
+	// Persistence (U05): open the SQLite store and load the previous
+	// incarnation's leases, shares and pool before reconciling or
+	// starting any loop, so the reconciler sees the loaded state.
+	dbPath := envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db")
+	db, err := store.Open(dbPath)
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+
+	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
+		PoolSize:            poolSize,
+		DefaultTTL:          defaultTTL,
+		MaxTTL:              maxTTL,
+		IdleTimeout:         idleTimeout,
+		HostGuestAddr:       hostGuestAddr,
+		HostGuestPort:       hostGuestPort,
+		ProxyURL:            cfg.ProxyURL,
+		CheckpointEvery:     checkpointEvery,
+		TemplateStoragePath: storagePath,
+	})
+	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
+	// a ping and then fails the job deep inside a build, so verify it from
 	// inside the guest before pooling or leasing it. SANDBOX_PROBE=0 disables.
 	svc.SetSandboxProbe(envBoolOr("SANDBOX_PROBE", true), time.Duration(envIntOr("SANDBOX_PROBE_TIMEOUT_SECS", 20))*time.Second)
-	// Egress policy enforcement (ticket #13): install iptables FORWARD
-	// rules in each lease's child netns. NETPOL_DNS lists resolvers the
-	// restricted policy always permits so guests can resolve allowlisted
-	// names; empty NETPOL_DNS disables enforcement (no root/netns access).
-	if dns := os.Getenv("NETPOL_DNS"); dns != "" {
-		svc.SetNetpol(&api.NetnsPolicyApplier{}, strings.Split(dns, ","))
-	}
-	reg := api.NewImageRegistry(fc, knownTags...)
+
 	// LLM gateway model map: "exe.dev-id=upstream-id,exe.dev-id2=upstream2".
 	// Shelley sends exe.dev catalog ids; the gateway rewrites them to the
 	// configured upstream's models. Unmapped ids fall back to defaultModel.
@@ -158,13 +196,14 @@ func Main(args []string) int {
 		log.Printf("gateway token: trusted impersonation enabled")
 	}
 
+	reg := api.NewImageRegistry(db)
 	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), os.Getenv("LLM_UPSTREAM_KEY"), os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
 	// Per-user LLM gateway concurrency cap (U8/T8): 0 = unlimited.
 	if n := envIntOr("LLM_MAX_CONCURRENT_PER_USER", 0); n > 0 {
 		srv.SetLLMMaxConcurrent(n)
 	}
 	// Security review #37 C2: when an identity store is present, deny
-	// /llm/ for identity users without an LLM key unless the operator
+	// /llm/ for identity users WITHOUT an LLM key unless the operator
 	// explicitly opts into the pre-U8 capability model.
 	srv.SetLLMRequireKey(os.Getenv("LLM_OPEN_LEGACY") == "")
 	// Public proxy auth (U7/T7): off (default) = capability model;
@@ -177,6 +216,9 @@ func Main(args []string) int {
 	// multi-user deployments so a leaked consumer token can't claim
 	// admin on a fresh store.
 	srv.SetBootstrapToken(os.Getenv("BOOTSTRAP_TOKEN"))
+	// Admin API (U10): /api/admin/drain, /undrain, /reconcile. The token
+	// is not a consumer token; empty disables the admin routes.
+	srv.SetAdminToken(os.Getenv("ADMIN_TOKEN"))
 
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).
@@ -187,23 +229,45 @@ func Main(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Persistence (U05): open the SQLite store and load the previous
-	// incarnation's leases, shares and pool before reconciling or
-	// starting any loop, so the reconciler sees the loaded state.
-	db, err := store.Open(envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"))
-	if err != nil {
-		log.Fatalf("store: %v", err)
-	}
-	svc.SetDB(db)
 	if err := svc.LoadState(ctx); err != nil {
 		log.Fatalf("store: load state: %v", err)
 	}
 
-	// Kill any controller sandboxes no loaded lease or pool entry claims
-	// before warming the pool, so netns slots are never double-booked.
+	// Delete any substrate sandboxes no loaded lease or pool entry
+	// claims, then recover every lease that has a checkpoint from the
+	// crash (U10 reconcileCrash) before warming the pool, so capacity is
+	// never double-booked.
 	svc.ReconcileOrphans(ctx)
 
 	svc.Start(ctx)
+
+	// Database backups (U11): daily at 03:00 local time, and once at
+	// start when no backup is newer than 24 h. The file prefix is the
+	// database file's basename without extension.
+	backupDir := envOr("SPOOND_BACKUP_DIR", "/var/lib/spoond/backups")
+	backupPrefix := strings.TrimSuffix(filepath.Base(dbPath), filepath.Ext(dbPath))
+	go func() {
+		if backupStale(backupDir, backupPrefix) {
+			if err := db.Backup(context.Background(), backupDir, 7); err != nil {
+				log.Printf("backup: %v", err)
+			}
+		}
+		for {
+			now := time.Now()
+			next := time.Date(now.Year(), now.Month(), now.Day(), 3, 0, 0, 0, now.Location())
+			if !next.After(now) {
+				next = next.Add(24 * time.Hour)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(next.Sub(now)):
+			}
+			if err := db.Backup(context.Background(), backupDir, 7); err != nil {
+				log.Printf("backup: %v", err)
+			}
+		}
+	}()
 
 	// Slow-loris / header hardening (security review #37 rescan F10):
 	// both listeners get read-header timeouts + header size caps so a
@@ -225,7 +289,7 @@ func Main(args []string) int {
 	if proxyAddr != "" {
 		proxySrv = newHTTPServer(proxyAddr, srv.ProxyHandler())
 		go func() {
-			log.Printf("forkd proxy listening on %s (wildcard sandbox hostnames)", proxyAddr)
+			log.Printf("proxy listening on %s (wildcard sandbox hostnames)", proxyAddr)
 			if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("proxy: %v", err)
 			}
@@ -251,7 +315,7 @@ func Main(args []string) int {
 		cancel()
 	}()
 
-	log.Printf("spoond-backend listening on %s (forkd at %s, %d consumer(s), pool=%d)", bindAddr, forkdURL, len(tokens), poolSize)
+	log.Printf("spoond-backend listening on %s (substrate %s, %d consumer(s), pool=%d)", bindAddr, cfg.GRPCAddr, len(tokens), poolSize)
 	if tlsCert != "" && tlsKey != "" {
 		err = httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
 	} else {

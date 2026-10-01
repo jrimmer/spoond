@@ -8,11 +8,11 @@ import (
 // TestLookupUserScoped verifies the forward-auth proxy lookup helper
 // (U7/T7): it resolves only the owner's leases by id or friendly name.
 func TestLookupUserScoped(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"t": "c"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 
 	// two users each create a named lease
-	lA, err := svc.grant(t.Context(), "u-a", "py-base", 0, time.Minute, true, "", nil)
+	lA, err := svc.grant(t.Context(), "u-a", "py-base", time.Minute, true, "", nil)
 	if err != nil {
 		t.Fatalf("grant a: %v", err)
 	}
@@ -20,7 +20,7 @@ func TestLookupUserScoped(t *testing.T) {
 	lA.Name = "web"
 	svc.store.mu.Unlock()
 
-	lB, err := svc.grant(t.Context(), "u-b", "py-base", 0, time.Minute, true, "", nil)
+	lB, err := svc.grant(t.Context(), "u-b", "py-base", time.Minute, true, "", nil)
 	if err != nil {
 		t.Fatalf("grant b: %v", err)
 	}

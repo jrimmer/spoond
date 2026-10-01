@@ -255,13 +255,140 @@ func randMarker() string {
 	return hex.EncodeToString(b)
 }
 
-// canTCP runs the unit's TCP probe in the lease and reports whether the
-// connection succeeded:
+// e2bProbeCmd classifies reachability by the data-phase outcome, because
+// E2B denies egress in two observable ways: layer-1 denies blackhole the
+// SYN (connect hangs to its timeout) and layer-2 port-scoped denies
+// connect and then close before any data (immediate EOF; notably,
+// `head -c1` exits 0 on that EOF, so a shell probe cannot decide this).
+// The probe connects with a 3s timeout, writes one byte (provoking the
+// policy decision and any server response) and reads with a 2s timeout:
+//   - "blocked": connect timeout/refused or reset, or EOF before any data
+//   - "ok": any data byte, or read timeout (silent-open = alive, e.g.
+//     scylla 9042 waiting for CQL)
+const e2bProbeCmd = `python3 -c '
+import socket
+s = socket.socket()
+s.settimeout(3)
+try:
+    s.connect(("%s", %d))
+except Exception:
+    print("blocked")
+    raise SystemExit
+try:
+    s.sendall(b"P")
+except Exception:
+    print("blocked")
+    raise SystemExit
+s.settimeout(2)
+try:
+    d = s.recv(1)
+except socket.timeout:
+    print("ok")
+    raise SystemExit
+except Exception:
+    print("blocked")
+    raise SystemExit
+print("ok" if d else "blocked")
+'`
+
+// e2bTLSProbeCmd is the port-443 variant: 443 listeners use tcpproxy SNI
+// routing, which needs a parseable ClientHello before any allow/deny
+// decision — a 1-byte write can never complete one, so a denied 443
+// destination sits silent-open and the write+read probe would misread it
+// as reachable. This probe performs a real TLS client handshake (certificate
+// verification off; the verdict is reachability, not trust):
+//   - "ok": the handshake established, OR the peer answered with a TLS
+//     alert (an alert is a peer response — bytes flowed bidirectionally
+//     through the egress path; SNI-strict servers alert on IP-literal
+//     hellos that carry no SNI, e.g. `tlsv1 alert internal error`), and
+//     the connection is alive afterwards (any data byte, or silent-open
+//     read timeout)
+//   - "blocked": connect failure/timeout, or a clean close before any
+//     peer bytes (EOF/reset — the egress path closed us)
+const e2bTLSProbeCmd = `python3 -c '
+import socket, ssl
+try:
+    s = socket.create_connection(("%s", %d), timeout=3)
+except Exception:
+    print("blocked")
+    raise SystemExit
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+try:
+    s = ctx.wrap_socket(s, server_hostname="%s")
+except ssl.SSLError as e:
+    if e.reason and "ALERT" in e.reason.upper():
+        print("ok")
+        raise SystemExit
+    print("blocked")
+    raise SystemExit
+except Exception:
+    print("blocked")
+    raise SystemExit
+s.settimeout(2)
+try:
+    d = s.recv(1)
+except socket.timeout:
+    print("ok")
+    raise SystemExit
+except Exception:
+    print("blocked")
+    raise SystemExit
+print("ok" if d else "blocked")
+'`
+
+// probeCmd renders the e2b probe command for host:port. Each template
+// receives exactly its own arguments — a surplus argument would be
+// appended as `%!(EXTRA ...)` and its parentheses break the guest shell.
+func probeCmd(host string, port int) string {
+	if port == 443 {
+		return fmt.Sprintf(e2bTLSProbeCmd, host, port, host)
+	}
+	return fmt.Sprintf(e2bProbeCmd, host, port)
+}
+
+// canTCP runs the suite's TCP reachability probe in the lease and reports
+// whether the destination is reachable. The probe is substrate-aware:
 //
-//	timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no
+//   - forkd denies at SYN (netns firewall), so a plain connect probe
+//     decides: timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no
+//   - e2b, port 443: a real TLS client handshake must establish
+//     (e2bTLSProbeCmd above — SNI routing decides on the ClientHello)
+//   - e2b, other ports: reachable means connect OK AND (data received OR
+//     the connection still open after a write); blocked means connect
+//     timeout or EOF/reset before any data (e2bProbeCmd above).
 func canTCP(t *testing.T, id, host string, port int) bool {
+	if cfg.Substrate == "e2b" {
+		return probeToken(t, id, probeCmd(host, port)) == "ok"
+	}
 	out := execOK(t, id, fmt.Sprintf("timeout 5 bash -c '</dev/tcp/%s/%d' && echo yes || echo no", host, port))
 	return out == "yes"
+}
+
+// probeToken runs a probe cmd in the lease whose stdout is exactly "ok" or
+// "blocked". Anything else — other output, a non-zero exit, a transport or
+// HTTP-level failure — is a harness error, not a reachability verdict.
+func probeToken(t *testing.T, id, cmd string) string {
+	st, body, err := cl.exec(id, execReq{Cmd: cmd, Timeout: 15})
+	if err != nil {
+		failf(t, "exec %s: %v", id, err)
+	}
+	if st != 200 {
+		failf(t, "exec %s: status %d: %s", id, st, truncate(body))
+	}
+	var out execResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		failf(t, "exec %s: bad body: %v", id, err)
+	}
+	if out.Exit != 0 {
+		failf(t, "probe harness error in %s: exit %d: stderr: %s", id, out.Exit, strings.TrimSpace(out.Stderr))
+	}
+	token := strings.TrimSpace(out.Stdout)
+	if token != "ok" && token != "blocked" {
+		failf(t, "probe harness error in %s: stdout %q, want ok|blocked", id, token)
+	}
+	return token
 }
 
 // canTCPAddr is canTCP for a host:port address (CONFORMANCE_GUEST_SERVICE).

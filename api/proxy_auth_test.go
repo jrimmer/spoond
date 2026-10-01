@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/jrimmer/spoond/identity"
 )
@@ -13,11 +12,11 @@ import (
 // users; returns the proxy handler, the API handler, and jason's id.
 func newProxyAuthServer(t *testing.T) (http.Handler, http.Handler, string) {
 	t.Helper()
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	srv.SetProxyAuth("forward-auth", "s3cret", "")
 	apiH := srv.Handler()
 
@@ -90,8 +89,8 @@ func TestProxyAuthUnknownUser(t *testing.T) {
 func TestProxyAuthOwnerScopesLookup(t *testing.T) {
 	ph, apiH, _ := newProxyAuthServer(t)
 	// jason's own lease id, valid auth: lookup succeeds (owner-scoped),
-	// so the proxy proceeds to dial and fails with 502 (no netns in
-	// unit test). 404 would mean the owner-scope lookup missed.
+	// so the proxy proceeds to dial and fails with 502 (the fake
+	// substrate has no network). 404 would mean the owner-scope lookup missed.
 	lid := createLeaseAs(apiH, "jason-tok")
 	if lid == "" {
 		t.Fatal("no lease id available")

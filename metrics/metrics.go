@@ -77,6 +77,22 @@ type BackendMetrics struct {
 	// Builds (image bake)
 	BuildsInFlight prometheus.Gauge   // active bakes
 	BuildsFailed   prometheus.Counter // cumulative bake failures
+
+	// Checkpoints (U10)
+	CheckpointDur prometheus.Histogram // sub.Checkpoint snapshot duration
+
+	// Snapshot catalog (U11)
+	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
+	StorageFree   prometheus.Gauge       // free bytes at the template storage path
+	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
+
+	// Substrate (U11)
+	LeasesByState     *prometheus.GaugeVec   // {state}: leases per state
+	NodeRunning       prometheus.Gauge       // orchestrator running sandboxes
+	NodeHugepagesFree prometheus.Gauge       // (total − used − reserved) × page size
+	NodeWork          prometheus.Gauge       // orchestrator outstanding work
+	CreateDur         *prometheus.HistogramVec // {resume}: sub.Create duration
+	CapacityRej       prometheus.Counter     // admission refusals
 }
 
 // NewBackendMetrics creates and registers all backend metrics on a
@@ -261,6 +277,53 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "builds_failed_total",
 		Help: "Cumulative image bake failures.",
 	})
+	// Checkpoints
+	m.CheckpointDur = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "checkpoint_duration_seconds",
+		Help:    "Duration of one substrate Checkpoint call.",
+		Buckets: prometheus.ExponentialBuckets(0.5, 2, 10), // 0.5s → 256s
+	})
+
+	// Snapshot catalog (U11)
+	m.SnapshotBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "snapshot_bytes",
+		Help: "Disk bytes per build kind (allocated blocks × 512).",
+	}, []string{"kind"})
+	m.StorageFree = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "storage_free_bytes",
+		Help: "Free bytes at the template storage path.",
+	})
+	m.GCDeleted = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "gc_deleted_total",
+		Help: "Builds deleted by the catalog GC, by kind.",
+	}, []string{"kind"})
+
+	// Substrate (U11)
+	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "leases",
+		Help: "Leases per state: running, suspended, recovered, lost.",
+	}, []string{"state"})
+	m.NodeRunning = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "node_running_sandboxes",
+		Help: "Sandboxes running on the orchestrator node.",
+	})
+	m.NodeHugepagesFree = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "node_hugepages_free_bytes",
+		Help: "Free hugepage bytes: (total − used − reserved) × page size.",
+	})
+	m.NodeWork = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "node_outstanding_work",
+		Help: "Outstanding tracked operations on the node.",
+	})
+	m.CreateDur = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "create_duration_seconds",
+		Help:    "Duration of one substrate Create call, by resume.",
+		Buckets: prometheus.ExponentialBuckets(0.1, 2, 12), // 0.1s → ~3.4min
+	}, []string{"resume"})
+	m.CapacityRej = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "capacity_rejections_total",
+		Help: "Admission refusals (hugepages or node status).",
+	})
 
 	// Register all
 	reg.MustRegister(
@@ -278,6 +341,10 @@ func NewBackendMetrics() *BackendMetrics {
 		m.SharesActive, m.BusySlots,
 		m.StoreErrors,
 		m.BuildsInFlight, m.BuildsFailed,
+		m.CheckpointDur,
+		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
+		m.LeasesByState, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
+		m.CreateDur, m.CapacityRej,
 	)
 	return m
 }

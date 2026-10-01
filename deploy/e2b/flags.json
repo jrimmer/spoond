@@ -1,0 +1,6 @@
+{
+  "max-sandboxes-per-node": 100,
+  "max-starting-instances-per-node": 6,
+  "in-place-checkpoint": false,
+  "use-sync-wp": false
+}

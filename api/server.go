@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -18,9 +20,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/common/expfmt"
 
-	"github.com/jrimmer/spoond/forkd"
 	"github.com/jrimmer/spoond/identity"
 	"github.com/jrimmer/spoond/metrics"
+	"github.com/jrimmer/spoond/substrate"
 )
 
 // Server is the HTTP lease API.
@@ -47,6 +49,10 @@ type Server struct {
 	// bootstrap when configured: the store-empty creation must present
 	// X-Bootstrap-Token matching it. Set via BOOTSTRAP_TOKEN env.
 	bootstrapToken string
+	// adminToken (U10) gates POST /api/admin/{drain,undrain,reconcile}
+	// with Authorization: Bearer <ADMIN_TOKEN>. It is not a user or
+	// consumer token; empty (the default) disables the admin routes.
+	adminToken string
 	// metrics (issue #20): service-owned Prometheus metrics served at
 	// /metrics alongside namespaced controller passthrough.
 	metrics *metrics.BackendMetrics
@@ -89,6 +95,13 @@ func (s *Server) releaseBusy(owner string) {
 // authenticated caller (legacy behavior).
 func (s *Server) SetBootstrapToken(tok string) {
 	s.bootstrapToken = tok
+}
+
+// SetAdminToken configures the /api/admin/* bearer token (U10). Empty
+// (the default) disables the admin routes; a configured token is
+// required on every admin request and compared in constant time.
+func (s *Server) SetAdminToken(tok string) {
+	s.adminToken = tok
 }
 
 // SetProxyAuth configures the public proxy listener's auth gate
@@ -144,25 +157,39 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.svc.SetMetrics(s.metrics)
 	s.mux.HandleFunc("POST /api/sandboxes", s.handleCreate)
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}", s.handleGetSandbox)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/suspend", s.handleSuspend)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/resume", s.handleResume)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restart", s.handleRestart)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/checkpoint", s.handleCheckpoint)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/tag", s.handleTag)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/comment", s.handleComment)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/prompt", s.handlePrompt)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/endpoint", s.handleEndpoint)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stat", s.handleStat)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/stream", s.handleStream)
+	// Live egress policy change (U09).
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/network", s.handleNetwork)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/fork", s.handleFork)
 	// Sharing (T6/#33).
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/share", s.handleShareGrant)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/share/{grantee}", s.handleShareRevoke)
 	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
+	// Snapshot catalog (U11): list and delete the caller's builds.
+	s.mux.HandleFunc("GET /api/snapshots", s.handleSnapshots)
+	s.mux.HandleFunc("DELETE /api/snapshots/{build_id}", s.handleSnapshotDelete)
+	// Admin endpoints (U10): drain, undrain and crash reconcile. Auth is
+	// done in api/admin.go (ADMIN_TOKEN is not a consumer token, so
+	// authMiddleware lets /api/admin/ through).
+	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
+	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
+	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -204,22 +231,27 @@ func (s *Server) SetLLMRequireKey(v bool) {
 	}
 }
 
-// handleHealthz reports liveness without auth, for Gatus/load-balancer
-// checks. It returns 200 if the service is up.
+// handleHealthz reports liveness and orchestrator reachability without
+// auth, for Gatus/load-balancer checks (U11): 200
+// {"status":"ok","orchestrator":"<NodeInfo.Status>"} when NodeInfo
+// succeeds, 503 {"status":"degraded","orchestrator":"unreachable"} when
+// it fails.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	body := `{"status":"degraded","orchestrator":"unreachable"}`
+	code := http.StatusServiceUnavailable
+	if info, err := s.svc.sub.NodeInfo(r.Context()); err == nil {
+		code = http.StatusOK
+		body = fmt.Sprintf(`{"status":"ok","orchestrator":%q}`, info.Status)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte(body))
 }
 
-// handleMetrics emits service-owned Prometheus metrics (issue #20)
-// merged with namespaced controller passthrough. The service-owned
-// metrics are gathered from the live Service state (pool, leases,
-// identity) and rendered via the prometheus registry; the controller
-// metrics are fetched from forkd-controller's /metrics and rewritten
-// to spoond_controller_* so service vs controller semantics never
-// collide. Requires admin when the identity store is present
-// (security review #37 M5).
+// handleMetrics emits spoond's own Prometheus metrics (issue #20),
+// gathered from the live Service state (pool, leases, identity) and
+// rendered via the prometheus registry. Requires admin when the
+// identity store is present (security review #37 M5).
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.svc.identities != nil && !s.requireAdmin(w, r) {
 		return
@@ -240,12 +272,29 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Fetch and namespace controller passthrough metrics.
-	body, err := s.svc.forkd.Metrics(r.Context())
-	if err == nil {
-		_, _ = w.Write([]byte(metrics.NamespaceControllerMetrics(body)))
+	// Orchestrator passthrough (U11): when OTEL_PROM_URL is set, fetch
+	// the collector's Prometheus output and append it verbatim after a
+	// marker line.
+	if url := os.Getenv("OTEL_PROM_URL"); url != "" {
+		resp, err := otelClient.Get(url)
+		if err != nil {
+			fmt.Fprintf(w, "# orchestrator metrics unavailable: %v\n", err)
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			fmt.Fprintf(w, "# orchestrator metrics unavailable: %v\n", err)
+			return
+		}
+		fmt.Fprintln(w, "# --- orchestrator (otel) ---")
+		_, _ = w.Write(body)
 	}
 }
+
+// otelClient fetches the collector's Prometheus output for /metrics
+// (U11); the 2 s timeout keeps a slow collector from stalling scrapes.
+var otelClient = &http.Client{Timeout: 2 * time.Second}
 
 // collectServiceMetrics updates live gauge metrics from the current
 // service and identity state (issue #20). Called before gathering
@@ -297,6 +346,8 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 }
 
 // statusWriter wraps http.ResponseWriter to capture the status code.
+// It forwards Hijack so WebSocket upgrades (stream) work through the
+// metrics middleware.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
@@ -305,6 +356,16 @@ type statusWriter struct {
 func (sw *statusWriter) WriteHeader(code int) {
 	sw.status = code
 	sw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack forwards the connection hijack to the underlying writer.
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := sw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("websocket upgrade: response writer does not implement Hijacker")
+	}
+	sw.status = http.StatusSwitchingProtocols
+	return h.Hijack()
 }
 
 // normalizePath reduces high-cardinality paths (sandbox ids, user ids)
@@ -349,10 +410,12 @@ func isHexPath(p string) bool {
 // authMiddleware authenticates the bearer token and injects the
 // consumer id into the request context. /healthz is exempt (liveness);
 // the /llm/ prefix is exempt too — the lease id in the path is the
-// capability, and sandboxes hold no consumer token.
+// capability, and sandboxes hold no consumer token. /api/admin/ is
+// exempt because ADMIN_TOKEN is not a user/consumer token; api/admin.go
+// authenticates those routes itself.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -494,32 +557,19 @@ func ownerFrom(ctx context.Context) string {
 	return v
 }
 
-// maxLeaseMemoryMiB caps the per-lease memory a caller may request
-// (security review #37 rescan F6). 16 GiB — generous for compute
-// workloads, bounded against host OOM.
-const maxLeaseMemoryMiB = 16 * 1024
-
-// hostBridgeAllow is the host-side bridge IP that every guest needs
-// even under the default restricted policy: the LLM gateway, shelly
-// binary assets, and the public proxy all live on the host and guests
-// reach them via the bridge (security review #37 rescan F3). This must
-// match the bridge IP used by forkd-controller (10.43.0.1) — the same
-// constant the gateway uses for SHELLY_BINARY_URL / LLM_GATEWAY_URL.
-var hostBridgeAllow = []string{"10.43.0.1"}
-
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Image      string   `json:"image"`
 		TTL        int      `json:"ttl"` // seconds
 		MemoryMiB  int      `json:"memory_mib"`
-		Network    string   `json:"network"`
-		InitCmd    string   `json:"init_cmd"`
+		Network    string   `json:"network"`  // ignored
+		InitCmd    string   `json:"init_cmd"` // ignored
 		Persistent bool     `json:"persistent"`
 		NetPolicy  string   `json:"network_policy"`
 		NetAllow   []string `json:"egress_allowlist"`
-		// ExposePorts publishes guest TCP ports on the lease's bridge-facing
-		// address for other sandboxes to reach (netpolicy.go).
+		// ExposePorts publishes guest TCP ports for other sandboxes to
+		// reach (each peer's egress policy decides reachability).
 		ExposePorts []int `json:"expose_ports"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -532,11 +582,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Egress policy (security review #37 rescan F3): default restricted —
 	// NOT lan. The default must not let a guest reach other tenants'
-	// sandboxes on the shared bridge (each sandbox carries an
-	// unauthenticated root exec agent on :8888 and a shelley agent on
-	// :9000). Restricted allows the host bridge (LLM gateway, shelly
-	// assets, proxy) + configured allowlist, and blocks guest→guest.
-	// Operators who need full LAN egress opt in explicitly.
+	// sandboxes. Restricted allows the host service (LLM gateway, assets,
+	// proxy) + configured allowlist, and blocks guest→guest. Operators who
+	// need full LAN egress opt in explicitly.
 	if req.NetPolicy == "" {
 		req.NetPolicy = string(PolicyRestricted)
 	}
@@ -544,39 +592,42 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "network_policy must be none|lan|internet|restricted")
 		return
 	}
-	if req.NetPolicy == string(PolicyRestricted) {
-		// Guests always need the host bridge IP (LLM gateway, assets,
-		// proxy) even under restricted; without it every default lease
-		// would lose guest-side LLM/proxy access. Appending it here
-		// keeps the default functional while still blocking peers.
-		req.NetAllow = append(req.NetAllow, hostBridgeAllow...)
-	}
 	expose, err := ValidateExposePorts(req.ExposePorts)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(expose) > 0 && !s.svc.CanExposePorts() {
-		writeError(w, http.StatusNotImplemented, "port exposure needs network policy enforcement (NETPOL_DNS) on this backend")
-		return
-	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "image registry unavailable")
+		writeError(w, http.StatusInternalServerError, "image catalog unavailable")
 		return
 	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
 		return
 	}
+	// Memory is fixed per image (D16): a snapshot restores with its
+	// build's RAM, so a per-lease memory override is impossible.
+	if req.MemoryMiB != 0 {
+		img, err := s.svc.db.GetImage(r.Context(), req.Image)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
+			return
+		}
+		if req.MemoryMiB != img.MemoryMB {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"memory is fixed per image on this backend: %s has %d MiB", req.Image, img.MemoryMB))
+			return
+		}
+	}
 	// Cap the requested TTL in seconds BEFORE converting to a duration,
 	// so a huge ttl value cannot overflow time.Duration and bypass the
 	// maxTTL cap (yielding a near-zero lease).
 	ttlSecs := req.TTL
 	if ttlSecs <= 0 {
-		ttlSecs = int(s.svc.defaultTTL / time.Second)
+		ttlSecs = int(s.svc.cfg.DefaultTTL / time.Second)
 	}
-	if maxSecs := int(s.svc.maxTTL / time.Second); ttlSecs > maxSecs {
+	if maxSecs := int(s.svc.cfg.MaxTTL / time.Second); ttlSecs > maxSecs {
 		ttlSecs = maxSecs
 	}
 	// The TTL cap above already bounds persistent leases; keep-alive
@@ -589,31 +640,25 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			ttl = userMax
 		}
 	}
-	// Cap the memory request (security review #37 rescan F6): an
-	// uncapped memory_mib lets a tenant drive a cold spawn with an
-	// absurd limit and exhaust host RAM (the warm pool is off by
-	// default, so most spawns are cold). The controller clamps per-VM
-	// but must never receive an attacker-chosen unbounded value.
-	if req.MemoryMiB < 0 {
-		req.MemoryMiB = 0
-	}
-	if req.MemoryMiB > maxLeaseMemoryMiB {
-		req.MemoryMiB = maxLeaseMemoryMiB
-	}
-	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, req.MemoryMiB, ttl, req.Persistent, req.NetPolicy, req.NetAllow, expose...)
+	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, ttl, req.Persistent, req.NetPolicy, req.NetAllow, expose...)
 	if err != nil {
-		if err == errQuotaExceeded {
+		switch {
+		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
-			return
+		case errors.Is(err, errUnknownImage):
+			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
+		case errors.Is(err, substrate.ErrCapacity):
+			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		default:
+			s.svc.log.Printf("create: grant %s: %v", req.Image, err)
+			writeError(w, http.StatusInternalServerError, "failed to grant sandbox")
 		}
-		s.svc.log.Printf("create: grant %s: %v", req.Image, err)
-		writeError(w, http.StatusInternalServerError, "failed to grant sandbox")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         lease.ID,
 		"owner":      lease.Owner,
-		"address":    lease.Address,
+		"address":    lease.HostIP,
 		"image":      lease.Image,
 		"ttl":        int(ttl.Seconds()),
 		"persistent": lease.Persistent,
@@ -622,10 +667,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleEndpoint resolves a lease to the sandbox's live network endpoint
-// (netns + guest addr). Used by the SSH gateway to reach sshd inside the
-// VM. The lease owner must match (a lease id is a capability: anyone who
-// holds it can resolve + connect).
+// handleEndpoint reports a lease's sandbox endpoint (interim until U09,
+// which rewrites it): the sandbox id and the host address guests use.
 func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
@@ -635,25 +678,24 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
-	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "sandbox not running")
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":         lease.ID,
-		"forkd_id":   ep.ForkdID,
+		"forkd_id":   lease.SandboxID,
 		"image":      lease.Image,
-		"netns":      ep.Netns,
-		"guest_addr": ep.GuestAddr,
+		"netns":      "",
+		"guest_addr": lease.HostIP,
 	})
 }
 
 // handleStream opens a WebSocket to a sandbox and relays an interactive
-// PTY session: the client sends {"args":[...],"cwd":...} as the first
-// message; output streams back as text frames; client text frames are
-// written to the process stdin. Protocol matches the agent's "stream"
-// action (line-delimited JSON on the agent side).
+// PTY session: the client sends {"args":[...],"cwd":...,"binary":bool}
+// as the first message. In text mode (the default), server events come
+// back as one text JSON frame each (no trailing newline) and client text
+// frames drive the process stdin. In binary mode, process output goes as
+// WebSocket binary frames whose first byte selects the channel (1 stdout,
+// 2 stderr, 3 pty), client binary frames are raw stdin, and text frames
+// carry control JSON. started, exit_code and error stay text JSON frames
+// in both modes.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
@@ -664,20 +706,27 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.releaseBusy(owner)
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
+	if lease == nil && s.requestHasGatewayToken(r) {
+		// The SSH gateway relays session channels through /stream, so a
+		// request carrying its service token may attach over an ssh
+		// share too (U09).
+		lease = s.svc.lookupWithShare(owner, id, ShareSSH)
+	}
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
 	s.svc.touch(id) // stream attach is activity for the idle sweeper
-	// A suspended workspace-backed lease has no running sandbox; resume
-	// first.
+	// A suspended lease has no running sandbox; resume it first.
 	if lease.Suspended {
 		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
 		return
 	}
-	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "sandbox not running")
+	// A lease lost in a substrate crash has no sandbox to attach to; the
+	// SSH gateway relays sessions through this route, so it covers SSH
+	// too (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
 		return
 	}
 
@@ -700,10 +749,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Args []string          `json:"args"`
-		Cwd  string            `json:"cwd"`
-		Env  map[string]string `json:"env"`
-		Pty  *bool             `json:"pty"`
+		Args   []string          `json:"args"`
+		Cwd    string            `json:"cwd"`
+		Env    map[string]string `json:"env"`
+		Pty    *bool             `json:"pty"`
+		Binary bool              `json:"binary"`
+		Cols   uint32            `json:"cols"`
+		Rows   uint32            `json:"rows"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"bad request JSON"}`))
@@ -717,82 +769,207 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if req.Pty != nil {
 		pty = *req.Pty
 	}
+	cols, rows := req.Cols, req.Rows
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
+	}
+	// A pooled sandbox was created for the "pool" placeholder lease, so
+	// its envd default SPOOND_LEASE_ID is "pool"; the real lease id rides
+	// every request's env instead.
+	if lease.pooled {
+		if req.Env == nil {
+			req.Env = map[string]string{}
+		}
+		req.Env["SPOOND_LEASE_ID"] = lease.ID
+	}
 
-	// Dial the agent inside the sandbox's netns. The agent binds
-	// 127.0.0.1:8888 (security review #37 rescan F3) — it must NOT be
-	// reachable from peer sandboxes on the bridge. dialInNetns enters
-	// the guest netns, so loopback resolves to the guest's own agent.
-	agentAddr := net.JoinHostPort("127.0.0.1", "8888")
-	agent, err := dialInNetns(ep.Netns, agentAddr)
+	proc, err := s.svc.sub.Start(r.Context(), lease.SandboxID, substrate.StartRequest{
+		Args:  req.Args,
+		Env:   req.Env,
+		Cwd:   req.Cwd,
+		PTY:   pty,
+		Cols:  cols,
+		Rows:  rows,
+		Stdin: true,
+	})
 	if err != nil {
 		ws.WriteMessage(websocket.TextMessage, []byte(`{"error":"agent unreachable: `+err.Error()+`"}`))
 		return
 	}
-	defer agent.Close()
+	s.svc.log.Printf("stream: %s: start", lease.ID)
 
-	startReq := map[string]any{
-		"action": "stream",
-		"args":   req.Args,
-		"cwd":    req.Cwd,
-		"env":    req.Env,
-		"pty":    pty,
-	}
-	line, _ := json.Marshal(startReq)
-	if _, err := agent.Write(append(line, '\n')); err != nil {
-		return
-	}
-
-	// Agent -> WS relay (line-delimited JSON).
-	agentDone := make(chan struct{})
+	// Substrate -> WS relay: one frame per event, no trailing newline.
+	// The relay runs until EventExit or EventError (Events is closed
+	// after either). Process output rides binary frames in binary mode
+	// (byte 0 = channel: 1 stdout, 2 stderr, 3 pty); started, exit_code
+	// and error are always text JSON.
+	relayDone := make(chan struct{})
 	go func() {
-		defer close(agentDone)
-		br := bufio.NewReader(agent)
-		for {
-			ln, err := br.ReadBytes('\n')
-			if len(ln) > 0 {
-				_ = ws.WriteMessage(websocket.TextMessage, ln)
-			}
-			if err != nil {
+		defer close(relayDone)
+		for ev := range proc.Events() {
+			switch ev.Kind {
+			case substrate.EventStarted:
+				line, err := json.Marshal(struct {
+					Stream string `json:"stream"`
+					PID    uint32 `json:"pid"`
+					Pty    bool   `json:"pty"`
+				}{"started", ev.PID, pty})
+				if err != nil {
+					continue
+				}
+				if err := ws.WriteMessage(websocket.TextMessage, line); err != nil {
+					return
+				}
+			case substrate.EventStdout, substrate.EventStderr, substrate.EventPTY:
+				if req.Binary {
+					ch := byte(1)
+					if ev.Kind == substrate.EventStderr {
+						ch = 2
+					} else if ev.Kind == substrate.EventPTY {
+						ch = 3
+					}
+					frame := make([]byte, 0, len(ev.Data)+1)
+					frame = append(frame, ch)
+					frame = append(frame, ev.Data...)
+					if err := ws.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+						return
+					}
+					continue
+				}
+				line, err := json.Marshal(struct {
+					Out string `json:"out"`
+				}{string(ev.Data)})
+				if err != nil {
+					continue
+				}
+				if err := ws.WriteMessage(websocket.TextMessage, line); err != nil {
+					return
+				}
+			case substrate.EventExit:
+				line, err := json.Marshal(struct {
+					ExitCode int `json:"exit_code"`
+				}{ev.ExitCode})
+				if err != nil {
+					return
+				}
+				_ = ws.WriteMessage(websocket.TextMessage, line)
+				return
+			case substrate.EventError:
+				line, err := json.Marshal(struct {
+					Error string `json:"error"`
+				}{ev.Err})
+				if err != nil {
+					return
+				}
+				_ = ws.WriteMessage(websocket.TextMessage, line)
 				return
 			}
 		}
 	}()
 
-	// WS -> agent relay: {"in":"...","action":"stop"} messages.
+	// WS -> substrate relay: binary frames are raw stdin; text frames
+	// are control JSON — {"in":"..."} (text mode only), {"action":"stop"}
+	// (SIGTERM), {"action":"kill"} (SIGKILL), {"action":"eof"},
+	// {"resize":{"cols":C,"rows":R}}; anything else is ignored.
 	for {
 		mt, payload, err := ws.ReadMessage()
 		if err != nil {
+			// The WebSocket closed first: stop streaming but do NOT kill
+			// the process (forkd matched this: the agent saw EOF).
+			_ = proc.Close()
 			break
 		}
-		if mt != websocket.TextMessage {
+		if mt == websocket.BinaryMessage {
+			_ = proc.Write(payload)
 			continue
 		}
 		var msg struct {
 			In     string `json:"in"`
 			Action string `json:"action"`
+			Resize *struct {
+				Cols uint32 `json:"cols"`
+				Rows uint32 `json:"rows"`
+			} `json:"resize"`
 		}
 		if err := json.Unmarshal(payload, &msg); err != nil {
 			continue
 		}
-		if msg.Action == "stop" {
-			break
-		}
-		if msg.In != "" {
-			out, _ := json.Marshal(map[string]string{"in": msg.In})
-			if _, err := agent.Write(append(out, '\n')); err != nil {
-				break
+		switch {
+		case msg.In != "":
+			if !req.Binary {
+				_ = proc.Write([]byte(msg.In))
 			}
+		case msg.Action == "stop":
+			// SIGTERM, then keep relaying until the process exits.
+			_ = proc.Signal(false)
+			<-relayDone
+			return
+		case msg.Action == "kill":
+			// SIGKILL, then keep relaying until the process exits.
+			_ = proc.Signal(true)
+			<-relayDone
+			return
+		case msg.Action == "eof":
+			_ = proc.CloseStdin()
+		case msg.Resize != nil:
+			_ = proc.Resize(msg.Resize.Cols, msg.Resize.Rows)
 		}
 	}
-
-	<-agentDone
+	<-relayDone
 }
 
-// dialInNetns enters the given network namespace on a locked thread,
-// dials addr, and returns the connection (usable from any thread once
-// established — the socket is already bound in the target netns).
-// dialInNetns is defined in netns_linux.go (Linux) and netns_other.go
-// (non-Linux stub). It enters the named netns and dials addr.
+// requestHasGatewayToken reports whether the request's bearer token is
+// the SSH gateway's service token (constant-time compare). Such requests
+// may reach leases through an ssh share (U09).
+func (s *Server) requestHasGatewayToken(r *http.Request) bool {
+	if s.svc.gatewayToken == "" {
+		return false
+	}
+	auth := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(auth, "Bearer ")
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.svc.gatewayToken)) == 1
+}
+
+// handleNetwork changes a lease's egress policy live (U09): the lease is
+// updated and saved, the egress config is re-applied to its sandbox, and
+// every peer's allowances are refreshed. Owner only.
+func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		NetPolicy string   `json:"network_policy"`
+		NetAllow  []string `json:"egress_allowlist"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if !ValidNetworkPolicy(req.NetPolicy) {
+		writeError(w, http.StatusBadRequest, "network_policy must be none|lan|internet|restricted")
+		return
+	}
+	lease, err := s.svc.setNetwork(r.Context(), owner, id, req.NetPolicy, req.NetAllow)
+	if err != nil {
+		switch err {
+		case errNotFound:
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errSuspended:
+			writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		default:
+			s.svc.log.Printf("network %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "network update failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":               lease.ID,
+		"network_policy":   lease.NetPolicy,
+		"egress_allowlist": lease.NetAllow,
+	})
+}
 
 // handleKeepAlive extends a persistent lease's expiry. The caller must
 // own the lease. Body may carry {"ttl": seconds} (capped at maxTTL).
@@ -836,6 +1013,8 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "sandbox not found")
 		case errNotPersistent:
 			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+		case errLeaseBusy:
+			writeError(w, http.StatusConflict, err.Error())
 		default:
 			s.svc.log.Printf("suspend %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "suspend failed")
@@ -861,6 +1040,8 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "sandbox not found")
 		case errNotPersistent:
 			writeError(w, http.StatusBadRequest, "sandbox is not a persistent lease")
+		case errLeaseBusy:
+			writeError(w, http.StatusConflict, err.Error())
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")
@@ -991,7 +1172,10 @@ echo "AGENT_TIMEOUT"`, msg64, mod64)
 
 	s.svc.log.Printf("prompt %s: %s", id, req.Message)
 	start := time.Now()
-	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, buildShellArgs(script, "", nil), 240)
+	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
+		Args:    buildShellArgs(script, "", requestEnv(lease, nil)),
+		Timeout: 240 * time.Second,
+	})
 	if err != nil {
 		s.svc.log.Printf("prompt %s: %v (dur=%s)", id, err, time.Since(start))
 		writeError(w, http.StatusBadGateway, "agent exec failed: "+err.Error())
@@ -1029,6 +1213,8 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "sandbox not found")
 		case errNotPersistent:
 			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+		case errLeaseBusy:
+			writeError(w, http.StatusConflict, err.Error())
 		default:
 			s.svc.log.Printf("resume %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "resume failed")
@@ -1038,7 +1224,7 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      lease.ID,
 		"status":  "running",
-		"address": lease.Address,
+		"address": lease.HostIP,
 	})
 }
 
@@ -1072,6 +1258,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
 		return
 	}
+	// A lease lost in a substrate crash has nothing to exec into (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
+		return
+	}
 	var req struct {
 		Cmd     string            `json:"cmd"`
 		Cwd     string            `json:"cwd"`
@@ -1093,25 +1284,28 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if timeout > maxExecTimeout {
 		timeout = maxExecTimeout
 	}
-	args := buildShellArgs(req.Cmd, req.Cwd, req.Env)
+	args := buildShellArgs(req.Cmd, req.Cwd, requestEnv(lease, req.Env))
 	start := time.Now()
-	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, args, timeout)
+	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
+		Args:    args,
+		Timeout: time.Duration(timeout) * time.Second,
+	})
 	if err != nil {
-		s.svc.log.Printf("exec: %s: %v (dur=%s)", lease.ForkdID, err, time.Since(start))
-		// Map forkd 404 (sandbox killed/expired in the controller but the
-		// lease still exists in our store) to 410 Gone so the caller can
-		// distinguish a permanently dead sandbox from a transient exec
-		// failure (e.g. controller overload, network blip).
-		if fe, ok := err.(*forkd.Error); ok && fe.StatusCode == http.StatusNotFound {
-			writeError(w, http.StatusGone, "sandbox no longer exists in controller")
+		s.svc.log.Printf("exec: %s: %v (dur=%s)", lease.SandboxID, err, time.Since(start))
+		// Map substrate ErrNotFound (sandbox gone from the orchestrator
+		// but the lease still exists in our store) to 410 Gone so the
+		// caller can distinguish a permanently dead sandbox from a
+		// transient exec failure (e.g. node overload, network blip).
+		if errors.Is(err, substrate.ErrNotFound) {
+			writeError(w, http.StatusGone, "sandbox no longer exists")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "exec failed")
 		return
 	}
-	s.svc.log.Printf("exec: %s: exit=%d stdout=%d stderr=%d dur=%s", lease.ForkdID, res.ExitCode, len(res.Stdout), len(res.Stderr), time.Since(start))
+	s.svc.log.Printf("exec: %s: exit=%d stdout=%d stderr=%d dur=%s", lease.SandboxID, res.ExitCode, len(res.Stdout), len(res.Stderr), time.Since(start))
 	if res.ExitCode != 0 {
-		s.svc.log.Printf("exec: %s: stderr=%q", lease.ForkdID, tailStr(res.Stderr, 500))
+		s.svc.log.Printf("exec: %s: stderr=%q", lease.SandboxID, tailStr(res.Stderr, 500))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stdout": res.Stdout,
@@ -1143,20 +1337,27 @@ echo "== meminfo =="; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
 echo "== netdev =="; cat /proc/net/dev
 echo "== df =="; df -P /
 `
-	res, err := s.svc.forkd.Exec(r.Context(), lease.ForkdID, buildShellArgs(probe, "", nil), 5)
+	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
+		Args:    buildShellArgs(probe, "", requestEnv(lease, nil)),
+		Timeout: 5 * time.Second,
+	})
 	if err != nil {
-		s.svc.log.Printf("stat: %s: %v", lease.ForkdID, err)
+		if errors.Is(err, substrate.ErrNotFound) {
+			writeError(w, http.StatusGone, "sandbox no longer exists")
+			return
+		}
+		s.svc.log.Printf("stat: %s: %v", lease.SandboxID, err)
 		writeError(w, http.StatusInternalServerError, "stat probe failed")
 		return
 	}
 	if res.ExitCode != 0 {
-		s.svc.log.Printf("stat: %s: probe exit=%d stderr=%q", lease.ForkdID, res.ExitCode, tailStr(res.Stderr, 300))
+		s.svc.log.Printf("stat: %s: probe exit=%d stderr=%q", lease.SandboxID, res.ExitCode, tailStr(res.Stderr, 300))
 		writeError(w, http.StatusInternalServerError, "stat probe exited non-zero")
 		return
 	}
 	stat, perr := parseStatProbe(res.Stdout)
 	if perr != nil {
-		s.svc.log.Printf("stat: %s: parse: %v (stdout=%q)", lease.ForkdID, perr, tailStr(res.Stdout, 300))
+		s.svc.log.Printf("stat: %s: parse: %v (stdout=%q)", lease.SandboxID, perr, tailStr(res.Stdout, 300))
 		writeError(w, http.StatusInternalServerError, "stat probe parse failed")
 		return
 	}
@@ -1267,68 +1468,144 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleClone branches a running sandbox into a new snapshot tag and
-// grants a fresh lease on the branch. Optional {"tag": "..."} names the
-// branch; otherwise the controller auto-generates one. The clone is a
-// persistent lease (the source's tmux state, filesystem, and installed
-// packages carry over).
+// handleClone checkpoints a running sandbox and grants a fresh
+// persistent lease on the checkpoint build. The optional {"tag": "..."}
+// body is accepted and ignored. The clone copies the source's network
+// policy and exposes nothing.
 func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
-	lease := s.svc.lookup(owner, id)
-	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
-		return
-	}
 	var req struct {
 		Tag string `json:"tag"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req) // optional body
+	_ = json.NewDecoder(r.Body).Decode(&req) // optional body; tag ignored
 
-	// Branch the running sandbox to a new snapshot tag.
-	tag := req.Tag
-	if tag == "" {
-		tag = "clone-" + lease.ID[:8] + "-" + strconv.FormatInt(time.Now().Unix(), 10)
-	}
-	newTag, err := s.svc.forkd.Branch(r.Context(), lease.ForkdID, tag)
+	cloned, buildID, err := s.svc.clone(r.Context(), owner, id)
 	if err != nil {
-		s.svc.log.Printf("clone %s: branch: %v", id, err)
-		writeError(w, http.StatusInternalServerError, "failed to branch sandbox")
-		return
-	}
-
-	// Spawn a sandbox from the branch and grant a lease on it.
-	ttl := s.svc.maxTTL
-	cloned, err := s.svc.grantFromSnapshot(r.Context(), owner, newTag, ttl, true)
-	if err != nil {
-		s.svc.log.Printf("clone %s: grant from %s: %v", id, newTag, err)
-		// Quota enforcement (security review #37 rescan F1): clone must
-		// surface the same 429 as create, not a generic 500.
-		if err == errQuotaExceeded {
+		switch {
+		case errors.Is(err, errNotFound):
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errors.Is(err, errLeaseBusy):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errQuotaExceeded):
+			// Quota enforcement (security review #37 rescan F1): clone
+			// surfaces the same 429 as create, not a generic 500.
 			writeError(w, http.StatusTooManyRequests, err.Error())
-			return
+		case errors.Is(err, substrate.ErrCapacity):
+			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		default:
+			s.svc.log.Printf("clone %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "failed to clone sandbox")
 		}
-		writeError(w, http.StatusInternalServerError, "failed to spawn clone")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         cloned.ID,
 		"image":      cloned.Image,
 		"source":     id,
-		"branch_tag": newTag,
-		"persistent": cloned.Persistent,
+		"branch_tag": buildID,
+		"persistent": true,
 		"expires_at": cloned.ExpiresAt.UTC().Format(time.RFC3339),
 	})
 }
 
-// handleImages lists available image tags.
-func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
-	tags, err := s.reg.Tags(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "image registry unavailable")
+// handleFork checkpoints a running sandbox once and creates count
+// sandboxes from the checkpoint build. Owner only, as for clone (no
+// shares).
+func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		Count      int  `json:"count"`
+		Persistent bool `json:"persistent"`
+		TTL        int  `json:"ttl"` // seconds
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"images": tags})
+	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second)
+	if err != nil {
+		switch {
+		case errors.Is(err, errBadForkCount):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, errNotFound):
+			writeError(w, http.StatusNotFound, "sandbox not found")
+		case errors.Is(err, errSuspended):
+			writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		case errors.Is(err, errLeaseBusy):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errQuotaExceeded):
+			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, substrate.ErrCapacity):
+			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		default:
+			s.svc.log.Printf("fork %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "failed to fork sandbox")
+		}
+		return
+	}
+	ids := make([]string, len(leases))
+	for i, l := range leases {
+		ids[i] = l.ID
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"source":   id,
+		"build_id": buildID,
+		"ids":      ids,
+	})
+}
+
+// handleGetSandbox returns one lease: the same object as an element of
+// GET /api/sandboxes plus the lifecycle fields. The owner or an http
+// share is required.
+func (s *Server) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, leaseDetailMap(lease))
+}
+
+// handleImages lists the images with a current build. Without a detail
+// query it returns their names; with ?detail=1 it returns the full
+// catalog rows.
+func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
+	imgs, err := s.svc.db.ListImages(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "image catalog unavailable")
+		return
+	}
+	if r.URL.Query().Get("detail") == "1" {
+		out := []map[string]any{}
+		for _, img := range imgs {
+			if img.CurrentBuildID == "" {
+				continue
+			}
+			out = append(out, map[string]any{
+				"name":        img.Name,
+				"build_id":    img.CurrentBuildID,
+				"template_id": img.TemplateID,
+				"digest":      img.Digest,
+				"vcpu":        img.VCPU,
+				"memory_mb":   img.MemoryMB,
+				"disk_mb":     img.DiskMB,
+				"updated_at":  img.UpdatedAt.UTC().Format(time.RFC3339),
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"images": out})
+		return
+	}
+	names := []string{}
+	for _, img := range imgs {
+		if img.CurrentBuildID != "" {
+			names = append(names, img.Name)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"images": names})
 }
 
 // handleByName resolves a friendly lease name owned by the caller to its
@@ -1347,6 +1624,22 @@ func (s *Server) handleByName(w http.ResponseWriter, r *http.Request) {
 		"name":  lease.Name,
 		"image": lease.Image,
 	})
+}
+
+// requestEnv merges a request's env with the lease id when the lease
+// was served from the warm pool: the sandbox's envd default
+// SPOOND_LEASE_ID is "pool" and env vars cannot be updated after
+// create, so pooled leases carry the real id on every request.
+func requestEnv(lease *Lease, env map[string]string) map[string]string {
+	if !lease.pooled {
+		return env
+	}
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	out["SPOOND_LEASE_ID"] = lease.ID
+	return out
 }
 
 // buildShellArgs wraps a command with cwd/env into a single shell

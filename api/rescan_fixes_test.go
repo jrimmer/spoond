@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jrimmer/spoond/identity"
 )
@@ -14,12 +13,11 @@ import (
 // returns the handler and jason's token.
 func secServer2(t *testing.T) (http.Handler, string) {
 	t.Helper()
-	ff := newFakeForkd()
-	ff.netns = "/var/run/netns/test"
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
@@ -52,17 +50,17 @@ func TestF1CloneQuota(t *testing.T) {
 }
 
 // TestF2ProxyStripsGateHeaders: gate headers must not reach the guest
-// app (rescan finding 2). We can't run a full netns in unit tests, so
-// assert the Rewrite strips them via a direct call through the handler
-// with a fake app... Instead, verify at the unit level that the proxy
-// handler refuses without auth when forward-auth is on and strips
+// app (rescan finding 2). We can't run a full orchestrator proxy in unit
+// tests, so assert the Rewrite strips them via a direct call through the
+// handler with a fake app... Instead, verify at the unit level that the
+// proxy handler refuses without auth when forward-auth is on and strips
 // headers is code-level; here we assert capability-mode still serves
 // hex-id hostnames and the header-strip loop exists via behavior:
 // request to /assets (pre-gate) unaffected.
 func TestF2ProxyStripsGateHeaders(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
 	srv.SetProxyAuth("forward-auth", "s3cret", "10.1.0.203/32")
 	ph := srv.ProxyHandler()
 
@@ -94,11 +92,11 @@ func TestF2ProxyStripsGateHeaders(t *testing.T) {
 // store present, friendly-name hostnames must 404 (only hex lease ids
 // are capabilities) (rescan finding 4).
 func TestF4CapabilityNoFriendlyNames(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	ph := srv.ProxyHandler()
 
 	// Friendly name with identity store present (capability mode):
@@ -111,14 +109,27 @@ func TestF4CapabilityNoFriendlyNames(t *testing.T) {
 	}
 }
 
-// TestF6MemoryClamp: memory_mib beyond the cap is clamped server-side.
-func TestF6MemoryClamp(t *testing.T) {
+// TestF6MemoryFixedPerImage: memory_mib must be 0 or the image's memory
+// (D16); anything else is a 400.
+func TestF6MemoryFixedPerImage(t *testing.T) {
 	h, jasonTok := secServer2(t)
 	rec, body := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":999999}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create with huge memory: %d %v", rec.Code, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create with wrong memory: %d %v", rec.Code, body)
 	}
-	// The fake doesn't record memory, but the request must not 500.
+	if !strings.Contains(body["error"].(string), "memory is fixed per image") {
+		t.Fatalf("error body: %v", body["error"])
+	}
+	// The image's own memory is accepted.
+	rec2, body2 := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":2048}`)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("create with the image's memory: %d %v", rec2.Code, body2)
+	}
+	// And 0 (unset) is fine.
+	rec3, body3 := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":0}`)
+	if rec3.Code != http.StatusCreated {
+		t.Fatalf("create without memory: %d %v", rec3.Code, body3)
+	}
 }
 
 // TestF9BusyCap: >busyMax concurrent execs per owner → 429.
@@ -134,12 +145,11 @@ func TestF9BusyCap(t *testing.T) {
 	// limiter (requests complete too fast to saturate naturally).
 	// Reach into the handler's internals: we own the Server type in the
 	// test package, so construct a fresh server and grab its limiter.
-	ff := newFakeForkd()
-	ff.netns = "/var/run/netns/test"
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h2 := srv.Handler()
 	doUsersReq(t, h2, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
 	_, jbody := doUsersReq(t, h2, "POST", "/api/users", "admin-tok", `{"name":"jason","fingerprints":["SHA256:fp-j"],"token":"jason-tok"}`)
@@ -166,11 +176,11 @@ func TestF9BusyCap(t *testing.T) {
 // of the header-set code path (reviewed manually). This test pins the
 // backend bootstrap gate still working with a direct header.
 func TestF7BootstrapDirectStillWorks(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	srv.SetBootstrapToken("boot-secret")
 	h := srv.Handler()
 

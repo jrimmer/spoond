@@ -7,23 +7,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jrimmer/spoond/identity"
 )
 
 // newTestServerWithIdentities builds a Server with an identity store and a
-// fake forkd client (no real controller).
+// fake substrate (no real orchestrator).
 func newTestServerWithIdentities(t *testing.T) (*Server, *identity.Store) {
 	t.Helper()
-	fc := &fakeForkd{}
-	svc := NewService(fc, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 300*time.Second, 3600*time.Second)
+	svc, db, _ := newTestService(t)
 	ids, err := identity.NewStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(fc))
+	srv := NewServer(svc, NewImageRegistry(db))
 	return srv, ids
 }
 

@@ -14,11 +14,11 @@ import (
 // newShareTestServer: admin + users a (owner) + b (grantee).
 func newShareTestServer(t *testing.T) (http.Handler, string, string) {
 	t.Helper()
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	if rec, _ := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`); rec.Code != http.StatusCreated {

@@ -10,12 +10,17 @@
 # capability is missing.
 #
 # Fields:
-#   name        baked snapshot tag (must exist on the forkd host)
+#   name        unique image name (lease API `image`)
 #   capability  the job capability this image provides (one per image)
 #   labels      runs-on labels that map to this image (IMAGE_MAP keys)
 #   description what's in it / what it's for
-#   baked       true once the snapshot exists on the host
-#   rootfs      the ext4 rootfs backing the snapshot (if known)
+#   baked       true for every image built by U07 (keeps validate-image.py working)
+#   dockerfile  file name in images/
+#   vcpu        1 or an even number
+#   memory_mb   even, >= 128
+#   disk_mb     free disk space (MB) guaranteed in the guest rootfs; sent as
+#               diskSizeMB. The final rootfs size is rootfsSizeKey
+#   env         env vars passed on every sandbox create (process defaults)
 #   notes       freeform
 
 images:
@@ -24,7 +29,12 @@ images:
     labels: [python, py, py-base, ubuntu-latest]
     description: "Python 3.12 slim base for Python build/test/CI jobs"
     baked: true
-    rootfs: /var/cache/forkd/python-3-12-slim.ext4
+    dockerfile: py-base.dockerfile
+    vcpu: 2
+    memory_mb: 1024
+    disk_mb: 4096
+    env:
+      PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     notes: "First image baked 2026-08-07. DEFAULT_IMAGE fallback for the runner."
 
   - name: go-base
@@ -32,7 +42,14 @@ images:
     labels: [go, golang]
     description: "Go 1.25.12 toolchain (go/gofmt symlinked into /usr/local/bin) + git for Go build/test/CI jobs"
     baked: true
-    rootfs: /var/cache/forkd/golang-1-25.ext4
+    dockerfile: go-base.dockerfile
+    vcpu: 2
+    memory_mb: 2048
+    disk_mb: 6144
+    env:
+      PATH: /usr/local/go/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+      GOCACHE: /root/.cache/go-build
+      GOPATH: /root/go
     notes: "Re-baked 2026-08-09 from golang:1.25 (was 1.24 — go.mod needed >=1.25.0). Memory 2 GiB (512 MiB OOM'd the Go compiler). PATH fix: symlink go/gofmt into /usr/local/bin (guest agent uses default PATH, not Docker ENV). GOCACHE/GOPATH default to /root (rootfs, 935M free) — do NOT point them at /tmp (256M tmpfs). Built via CLI snapshot --mem-size-mib 2048 + branch (M2.1)."
 
   - name: dev-base
@@ -40,7 +57,13 @@ images:
     labels: [dev]
     description: "Interactive dev environment: tmux 3.4 + sshd + git + python3 + build tools. SSH in, attach to tmux session 'dev'."
     baked: true
-    rootfs: /var/cache/forkd/dev-base-rootfs.ext4
+    dockerfile: dev-base.dockerfile
+    vcpu: 2
+    memory_mb: 2048
+    disk_mb: 8192
+    env:
+      PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+      LANG: C.UTF-8
     notes: "Baked 2026-08-09 from ubuntu:24.04 + tmux/openssh-server/git/python3/build-essential. 2 GiB memory. /forkd-init.sh patched to: mount devpts, generate ssh host keys, start sshd, and attach-to-or-create tmux session 'dev' on SSH login (via /etc/profile.d/forkd-tmux.sh, skip with FORKD_NO_TMUX). For exe.dev interactive sessions (ticket #18, U4). Branch-built so the memory state has sshd running."
 
   - name: elixir-base
@@ -48,7 +71,13 @@ images:
     labels: [elixir]
     description: "Elixir 1.17 / Erlang OTP 27 toolchain + git for Elixir build/test/CI jobs"
     baked: true
-    rootfs: /var/cache/forkd/elixir-1-17-3072-*.ext4
+    dockerfile: elixir-base.dockerfile
+    vcpu: 2
+    memory_mb: 2048
+    disk_mb: 6144
+    env:
+      PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+      LANG: C.UTF-8
     notes: "Baked 2026-08-08 from elixir:1.17 with --size-mib 3072 (needs >1536 MiB). elixir/mix/erl already in /usr/local/bin."
 
   - name: elixir-release
@@ -56,7 +85,15 @@ images:
     labels: [elixir-release, release]
     description: "Elixir 1.18 / OTP 27 + Rust stable (pinned CARGO_HOME) + Node 22/pnpm + kaniko — full Phoenix+NIF release builds (origin: cytale deploy pipeline)"
     baked: true
-    rootfs: /var/cache/forkd/elixir-release-tools-local.ext4
+    dockerfile: elixir-release.dockerfile
+    vcpu: 4
+    memory_mb: 4096
+    disk_mb: 12288
+    env:
+      PATH: /usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+      RUSTUP_HOME: /usr/local/rustup
+      CARGO_HOME: /usr/local/cargo
+      LANG: C.UTF-8
     notes: |
       Bake with deploy/bake-elixir-release.sh (dockerfile: images/elixir-release.dockerfile).
       Sizing per rust-base notes: rootfs 12 GiB, memory 4 GiB — Tantivy-class Rust
@@ -85,7 +122,12 @@ images:
     labels: [llm-review]
     description: "Python 3.12 + git + curl for LLM code-review jobs (language-agnostic)"
     baked: true
-    rootfs: /var/cache/forkd/llm-review-local.ext4
+    dockerfile: llm-review.dockerfile
+    vcpu: 2
+    memory_mb: 1024
+    disk_mb: 4096
+    env:
+      PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     notes: "Baked 2026-08-08 from python:3.12-slim + git + curl. Runs .forgejo/scripts/llm-review.py (pure Python stdlib)."
 
   - name: rust-base
@@ -93,7 +135,6 @@ images:
     labels: [rust, rust-lang]
     description: "Rust stable toolchain + git for Rust build/test/CI jobs"
     baked: false
-    rootfs: ""
     notes: |
       Not yet permanently baked. During initial testing (2026-08-11) a rust-base
       snapshot was built from rust:1.85-bookworm but hit several issues:
@@ -132,7 +173,12 @@ images:
     labels: []
     description: "ScyllaDB 2026.2.6, single node, developer mode — a SERVICE image: leased per job with expose_ports [9042] and reached from the job's sandbox (#70). Not a runs-on image."
     baked: true
-    rootfs: /var/cache/forkd/scylla-service-local-*.ext4
+    dockerfile: scylla.dockerfile
+    vcpu: 2
+    memory_mb: 3072
+    disk_mb: 6144
+    env:
+      PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     notes: |
       First baked 2026-09-26; a fresh fork answered CQL 769 ms after restore.
       Bake with deploy/bake-scylla.sh (images/scylla.dockerfile + images/scylla-init-hook.sh).

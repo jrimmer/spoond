@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/jrimmer/spoond/identity"
 )
@@ -16,11 +15,11 @@ import (
 // non-admin third user (mallory). Returns handler + mallory's token.
 func newSecServer(t *testing.T) (http.Handler, string) {
 	t.Helper()
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	if rec, _ := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`); rec.Code != http.StatusCreated {
@@ -103,11 +102,11 @@ func TestC1UsersByNameUnknown(t *testing.T) {
 // TestH3BootstrapToken: with a bootstrap token configured, store-empty
 // user creation requires the header; without it, forbidden.
 func TestH3BootstrapToken(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	srv.SetBootstrapToken("boot-secret")
 	h := srv.Handler()
 
@@ -144,11 +143,11 @@ func TestH3BootstrapToken(t *testing.T) {
 // TestH2QuotaConcurrent: max_leases=1 with 20 concurrent creates must
 // yield exactly 1 success (no TOCTOU blow-past).
 func TestH2QuotaConcurrent(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
@@ -184,12 +183,13 @@ func TestH2QuotaConcurrent(t *testing.T) {
 // TestM2GatewayTokenConstantTime: impersonation still works via the
 // gateway token (behavioral regression).
 func TestM2GatewayTokenConstantTime(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer", "gw-tok": "gateway-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.tokens["gw-tok"] = "gateway-consumer"
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
 	svc.SetGatewayToken("gw-tok")
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
@@ -218,11 +218,11 @@ func TestM2GatewayTokenConstantTime(t *testing.T) {
 
 // TestL5AuthRateLimit: 6+ consecutive failed auths from one IP → 429.
 func TestL5AuthRateLimit(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	got429 := false
@@ -276,11 +276,11 @@ func TestM5MetricsAdminOnly(t *testing.T) {
 // denied on /llm/ even with a valid token; with an LLM key set, the
 // key is required.
 func TestC2LLMRequireKey(t *testing.T) {
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
-	srv := NewServerWithLLM(svc, NewImageRegistry(ff, "py-base"), "https://upstream.example/v1", "host-key", "gpt-x", nil)
+	srv := NewServerWithLLM(svc, NewImageRegistry(db), "https://upstream.example/v1", "host-key", "gpt-x", nil)
 	srv.SetLLMRequireKey(true)
 	h := srv.Handler()
 

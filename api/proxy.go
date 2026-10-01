@@ -24,6 +24,10 @@ const proxyHostSuffix = ".sandbox.lacy.casa"
 // <lease-id>-<port>.sandbox.lacy.casa.
 const defaultProxyPort = 3000
 
+// envdPort is the guest's management port (envd's HTTP + Connect-RPC
+// listener). It is never exposed through spoond's proxy.
+const envdPort = 49983
+
 // ProxyHandler returns the HTTP handler for the public proxy listener
 // (plain HTTP on an internal port; Caddy fronts it with wildcard TLS).
 // Every request's Host header names a lease: <lease-id>.sandbox.lacy.casa
@@ -190,43 +194,88 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sandbox not found", http.StatusNotFound)
 		return
 	}
+	// envd is never exposed through spoond's proxy: guest port 49983 is
+	// the sandbox's management surface, reachable only with its traffic
+	// token through the orchestrator.
+	if port == envdPort {
+		http.Error(w, "port 49983 is envd and cannot be proxied", http.StatusForbidden)
+		return
+	}
 	s.svc.touch(lease.ID) // proxied web traffic is activity for the idle sweeper
-	ep, err := s.svc.resolveEndpoint(r.Context(), lease)
-	if err != nil {
+	// A suspended lease has no running sandbox; resume it first.
+	if lease.Suspended {
+		http.Error(w, "sandbox is suspended; resume it first", http.StatusConflict)
+		return
+	}
+	// A lease lost in a substrate crash has no sandbox to proxy to (U10).
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
+		return
+	}
+	// The target is the sandbox's host address; the orchestrator's
+	// sandbox proxy routes it into the sandbox. A lease without a host
+	// address has no running sandbox.
+	if lease.HostIP == "" {
 		http.Error(w, "sandbox not running", http.StatusBadGateway)
 		return
 	}
-	target := net.JoinHostPort(ep.GuestHost, strconv.Itoa(port))
+	proxyURL, err := url.Parse(s.svc.cfg.ProxyURL)
+	if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
+		http.Error(w, "proxy misconfigured", http.StatusInternalServerError)
+		return
+	}
 
-	// Reverse proxy with a Transport that dials inside the sandbox netns
-	// (the guest IP is only reachable from the host via setns). Both HTTP
-	// and WebSocket upgrades work through this.
+	// Reverse proxy through the orchestrator's sandbox proxy (HTTP only,
+	// routed by the E2b-Sandbox-Id/-Port headers below — it routes by
+	// headers only when the Host is an IP, hence Out.Host). Both HTTP and
+	// WebSocket upgrades work through this.
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(&url.URL{Scheme: "http", Host: target})
-			// Preserve the original Host so sandbox apps see the public
-			// hostname (virtual hosting works as expected).
-			pr.Out.Host = pr.In.Host
 			// Security review #37 rescan F2: NEVER forward the forward-auth
 			// gate headers to the guest app. Guests are tenant-controlled;
 			// if X-Proxy-Auth (the shared secret with Caddy) or Remote-User
 			// reached them, any tenant could harvest the secret and
 			// impersonate anyone through the proxy. Strip all gate/auth
-			// headers here (Caddy also strips on ingress — defense in
-			// depth, spoond must too since :8891 is directly reachable).
-			for _, h := range []string{"X-Proxy-Auth", "Remote-User", "X-Spoond-User-Id", "X-Bootstrap-Token"} {
+			// headers and every E2b-* routing header FIRST (defense in
+			// depth: Caddy strips on ingress too, and :8891 is directly
+			// reachable), THEN set this proxy's own.
+			for _, h := range []string{"X-Proxy-Auth", "Remote-User", "X-Spoond-User-Id", "X-Bootstrap-Token", "e2b-traffic-access-token"} {
 				pr.Out.Header.Del(h)
 			}
+			for name := range pr.Out.Header {
+				if strings.HasPrefix(strings.ToLower(name), "e2b-") {
+					pr.Out.Header.Del(name)
+				}
+			}
+			// Scheme and host from the orchestrator proxy; path and query
+			// stay as the client sent them.
+			pr.SetURL(proxyURL)
+			pr.Out.Host = proxyURL.Host
+			// Preserve the public hostname for guest apps: they see
+			// Host: <proxy host>, so frameworks that validate the Host
+			// (e.g. dev servers with host allowlists) must consult
+			// X-Forwarded-Host. U12 step 19 records this behaviour
+			// change in docs/api.md.
+			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
+			proto := "http"
+			if pr.In.TLS != nil || strings.EqualFold(pr.In.Header.Get("X-Forwarded-Proto"), "https") {
+				proto = "https"
+			}
+			pr.Out.Header.Set("X-Forwarded-Proto", proto)
+			// X-Forwarded-For: append the client address to any inbound
+			// chain. ReverseProxy only does this on the Director path;
+			// the Rewrite path strips it, so re-add it here.
+			if clientIP, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil {
+				if chain := pr.In.Header.Get("X-Forwarded-For"); chain != "" {
+					clientIP = chain + ", " + clientIP
+				}
+				pr.Out.Header.Set("X-Forwarded-For", clientIP)
+			}
+			pr.Out.Header.Set("E2b-Sandbox-Id", lease.SandboxID)
+			pr.Out.Header.Set("E2b-Sandbox-Port", strconv.Itoa(port))
+			pr.Out.Header.Set("e2b-traffic-access-token", s.svc.sub.TrafficToken(lease.SandboxID))
 		},
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// ReverseProxy gives us the target addr; we dial it inside
-				// the lease's netns. dialInNetns ignores addr and dials
-				// target directly (bound in the guest netns).
-				return dialInNetns(ep.Netns, target)
-			},
-			IdleConnTimeout: 30 * time.Second,
-		},
+		Transport: &http.Transport{IdleConnTimeout: 30 * time.Second},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				return

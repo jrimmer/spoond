@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jrimmer/spoond/identity"
 )
@@ -14,12 +13,13 @@ import (
 // newGatewayScopedServer: admin + two users (a, b), gateway token trusted.
 func newGatewayScopedServer(t *testing.T) (http.Handler, string) {
 	t.Helper()
-	ff := newFakeForkd()
-	svc := NewService(ff, map[string]string{"legacy-tok": "legacy-consumer", "gw-tok": "gateway"}, 0, 60*time.Second, 10*time.Minute)
+	svc, db, _ := newTestService(t)
+	svc.tokens["gw-tok"] = "gateway"
+	seedImage(t, db, "py-base", 2048)
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
 	svc.SetGatewayToken("gw-tok")
-	srv := NewServer(svc, NewImageRegistry(ff, "py-base"))
+	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
 
 	// bootstrap admin, then users a + b
