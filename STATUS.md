@@ -45,6 +45,10 @@ Orchestrator session started 2026-09-30.
 
 ## Autonomous window runs
 
+- **U10 R1–R3, 2026-10-01 (attempt 1):** window opened 01:12:51 UTC after ~40 s; R1 PASS 173.1s (restart_total_ms 167643 — OVER the 120000 budget; cause: the then-unfixed 120 s outstanding-work wait × drain pauses), R2 FAIL (netns 35 vs 39 — count-diff evidence pending), R3 PASS. Rollback executed per protocol (restart e2b-orchestrator + staging services), production healthz ok, window_smoke 0, runner restarted. Subsequent root cause: the 120 s was spoond's client wait (fixed in 9d51b89).
+- **U10 R1–R3, 2026-10-01 (attempt 2, aborted):** window_idle blocked 5+h by the failed-jobs artifact (jobs 3413/3420, aging out 01:37/02:43 PDT); the ops agent held a blocking poll — killed, nothing executed, runner never stopped.
+- **U10 R1–R3, 2026-10-01 (attempt 3):** HUMAN OVERRIDE selected ("Override now") — backend idle confirmed, blockers are the known artifact. Executing with netns before/after diff capture.
+
 - **U05 deploy, 2026-09-30:** window 18:57:16Z–18:57:47Z (31 s). Prepare on main c926de7 (spoond.pre-u05 verified 21,315,265 B). Idle wait polled exactly per protocol 10:25:25Z–18:52Z (~8.5 h), never idle — failed runner jobs 3413 (01:36:59Z, create sandbox 500) / 3420 (02:42:47Z, 404) emit `job N failed:` with no `final result=` line, so window_idle cannot return 0. **HUMAN OVERRIDE ~18:55Z: "Don't wait... push to outcome."** Act: stop runner → mv spoond.new → restart backend+gateway. Verify: /healthz {"status":"ok"}, window_smoke 0, /var/lib/spoond/spoond.db created. **TestR3_BackendRestart PASS (1.20s)** from main c926de7, results /root/src/spoond/conformance/results/20260930T115736-forkd-r3.json. No rollback. Runner restarted, all active. NOTE for U12: window_idle's "every job has final result=" clause deadlocks on any failed CI job in the 24 h window — spec amendment candidate (treat `job N failed:` as terminal) or future human overrides.
 ## Deviations resolved by orchestrator (flag if wrong)
 
