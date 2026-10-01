@@ -18,6 +18,7 @@
 //	HOST_GUEST_SERVICE_ADDR  address guests use to reach host services (required)
 //	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
 //	CHECKPOINT_INTERVAL_MINS  periodic checkpoint interval (U10; default 60)
+//	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
 //	LLM_UPSTREAM_URL  OpenAI-compatible LLM API base for the per-lease
 //	                  LLM gateway (e.g. https://openrouter.ai/api/v1)
 //	LLM_UPSTREAM_KEY  server-side key for that upstream (never sent to
@@ -193,6 +194,9 @@ func Main(args []string) int {
 	// multi-user deployments so a leaked consumer token can't claim
 	// admin on a fresh store.
 	srv.SetBootstrapToken(os.Getenv("BOOTSTRAP_TOKEN"))
+	// Admin API (U10): /api/admin/drain, /undrain, /reconcile. The token
+	// is not a consumer token; empty disables the admin routes.
+	srv.SetAdminToken(os.Getenv("ADMIN_TOKEN"))
 
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).

@@ -50,6 +50,7 @@ func TestLeaseRoundTrip(t *testing.T) {
 		ExposedIP:   "10.42.0.9", Comment: "hello", State: "suspended",
 		ResumeBuildID: "b-2", LastCheckpointBuildID: "b-1",
 		LastCheckpointAt: base.Add(2 * time.Minute), RecoveredFrom: base,
+		Drained: true,
 	}
 	// Zero times, nil slices and empty strings everywhere they can be.
 	minimal := LeaseRow{
@@ -77,6 +78,7 @@ func TestLeaseRoundTrip(t *testing.T) {
 	updated.LastCheckpointBuildID = ""
 	updated.LastCheckpointAt = time.Time{}
 	updated.RecoveredFrom = time.Time{}
+	updated.Drained = false
 	if err := db.UpsertLease(ctx, updated); err != nil {
 		t.Fatalf("upsert update: %v", err)
 	}

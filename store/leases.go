@@ -20,12 +20,13 @@ type LeaseRow struct {
 	ExposedIP, Comment, State            string   // State: running|suspended|recovered|lost
 	ResumeBuildID, LastCheckpointBuildID string
 	LastCheckpointAt, RecoveredFrom      time.Time // zero = unset ('')
+	Drained                              bool      // paused by the admin drain, resumed by undrain (U10)
 }
 
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
 	persistent, last_active, workspace, suspended, name, net_policy, net_allow,
 	expose_ports, exposed_ip, comment, state, resume_build_id,
-	last_checkpoint_build_id, last_checkpoint_at, recovered_from`
+	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained`
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -40,7 +41,7 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	}
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -63,13 +64,14 @@ ON CONFLICT(id) DO UPDATE SET
   resume_build_id=excluded.resume_build_id,
   last_checkpoint_build_id=excluded.last_checkpoint_build_id,
   last_checkpoint_at=excluded.last_checkpoint_at,
-  recovered_from=excluded.recovered_from`,
+  recovered_from=excluded.recovered_from,
+  drained=excluded.drained`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
 		l.NetPolicy, string(netAllow), string(exposePorts), l.ExposedIP,
 		l.Comment, l.State, l.ResumeBuildID, l.LastCheckpointBuildID,
-		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom))
+		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom), l.Drained)
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -136,7 +138,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&createdAt, &expiresAt, &r.Persistent, &lastActive, &r.Workspace,
 		&r.Suspended, &r.Name, &r.NetPolicy, &netAllow, &exposePorts,
 		&r.ExposedIP, &r.Comment, &r.State, &r.ResumeBuildID,
-		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom)
+		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}

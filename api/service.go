@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jrimmer/spoond/identity"
@@ -58,12 +59,19 @@ type Lease struct {
 	LastCheckpointBuildID string    // newest checkpoint build of this lease
 	LastCheckpointAt      time.Time // zero = never checkpointed
 	RecoveredFrom         time.Time // zero = never recovered
+	// Drained marks a lease the admin drain paused (U10): undrain
+	// resumes exactly the drained leases.
+	Drained bool
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
 	// Not persisted.
 	released bool
 	pooled   bool
+	// busy marks a lease with an in-flight suspend/resume/restart/
+	// checkpoint/pause operation (U10): a second operation on it returns
+	// 409. Not persisted.
+	busy bool
 }
 
 // live reports whether the lease has a running sandbox. "recovered" is
@@ -171,6 +179,9 @@ type Service struct {
 	log           *log.Logger
 	// metrics (issue #20): service-level Prometheus metrics.
 	metrics *metrics.BackendMetrics
+	// draining is true while the admin drain is running (U10): pool
+	// refill, idle sweep, GC and the crash reconcile skip until undrain.
+	draining atomic.Bool
 	// stopLoops cancels the background sweeper/refiller started by Start.
 	stopLoops context.CancelFunc
 }
@@ -598,7 +609,8 @@ func (s *Service) Start(ctx context.Context) {
 // current build so grants can be served from the warm pool instead of
 // cold-creating.
 func (s *Service) refillPool(ctx context.Context) {
-	if s.cfg.PoolSize <= 0 {
+	// The drain pauses everything; refill stays off until undrain (U10).
+	if s.cfg.PoolSize <= 0 || s.draining.Load() {
 		return
 	}
 	imgs, err := s.db.ListImages(ctx)
@@ -621,6 +633,11 @@ func (s *Service) refillPool(ctx context.Context) {
 // (exec/stream/proxy/keep-alive all bump LastActive). A suspended
 // sandbox keeps its state snapshot and is cheap to resume.
 func (s *Service) sweepExpired(ctx context.Context) {
+	// Draining pauses every lease and undrain resumes it; the idle sweep
+	// must not fight the drain (U10).
+	if s.draining.Load() {
+		return
+	}
 	s.store.mu.Lock()
 	s.flushLastActiveLocked(ctx)
 	var expired []*Lease
@@ -948,15 +965,41 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 	}
 	s.store.mu.Unlock()
 
+	if _, err := s.pauseLease(ctx, l, false); err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// pauseLease is suspend without the owner/persistence checks: the admin
+// drain pauses non-persistent leases too (U10). It marks the lease busy
+// (a second operation on a busy lease returns errLeaseBusy), pauses into
+// a new build, inserts the pause build row and marks the lease
+// suspended — plus Drained when drained.
+func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (string, error) {
+	s.store.mu.Lock()
+	if l.busy {
+		s.store.mu.Unlock()
+		return "", errLeaseBusy
+	}
+	l.busy = true
+	s.store.mu.Unlock()
+	defer s.endBusy(l)
+	return s.pauseLeaseBody(ctx, l, drained)
+}
+
+// pauseLeaseBody is the sub work of a pause. Callers own the busy
+// window; it must not be called with s.store.mu held.
+func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (string, error) {
 	buildID, _, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	// The pause build records what was snapshotted: versions and sizes
 	// copied from the parent build row (refs are stored from U11 on).
 	parent, err := s.db.GetBuild(ctx, l.BuildID)
 	if err != nil {
-		return nil, fmt.Errorf("load parent build %s: %w", l.BuildID, err)
+		return "", fmt.Errorf("load parent build %s: %w", l.BuildID, err)
 	}
 	now := time.Now()
 	if err := s.db.InsertBuild(ctx, store.BuildRow{
@@ -976,16 +1019,19 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}); err != nil {
-		return nil, fmt.Errorf("insert pause build: %w", err)
+		return "", fmt.Errorf("insert pause build: %w", err)
 	}
 	s.deleteSandboxRow(l.SandboxID)
 	s.store.mu.Lock()
 	l.State = "suspended"
 	l.Suspended = true
 	l.ResumeBuildID = buildID
+	if drained {
+		l.Drained = true
+	}
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
-	return l, nil
+	return buildID, nil
 }
 
 // resume restores a suspended persistent lease: create with snapshot
@@ -1001,9 +1047,32 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		s.store.mu.Unlock()
 		return nil, errNotPersistent
 	}
+	s.store.mu.Unlock()
+	return s.resumeLease(ctx, l)
+}
+
+// resumeLease is resume without the owner/persistence checks: the
+// undrain resumes drained non-persistent leases through it (U10). It
+// marks the lease busy (a second operation on a busy lease returns
+// errLeaseBusy) and runs the resume.
+func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
+	s.store.mu.Lock()
+	if l.busy {
+		s.store.mu.Unlock()
+		return nil, errLeaseBusy
+	}
+	l.busy = true
+	s.store.mu.Unlock()
+	defer s.endBusy(l)
+	return s.resumeLeaseBody(ctx, l)
+}
+
+// resumeLeaseBody is the sub work of a resume (U08's resume steps 1–4).
+// Callers own the busy window; it must not be called with s.store.mu
+// held.
+func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error) {
 	resumeBuild := l.ResumeBuildID
 	image := l.Image
-	s.store.mu.Unlock()
 
 	img, err := s.db.GetImage(ctx, image)
 	if err != nil {
@@ -1043,17 +1112,23 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
+	if l.busy {
+		s.store.mu.Unlock()
+		return nil, errLeaseBusy
+	}
+	l.busy = true
 	persistent := l.Persistent
 	suspended := l.Suspended
 	s.store.mu.Unlock()
+	defer s.endBusy(l)
 
 	if persistent {
 		if !suspended {
-			if _, err := s.suspend(ctx, owner, id); err != nil {
+			if _, err := s.pauseLeaseBody(ctx, l, false); err != nil {
 				return nil, err
 			}
 		}
-		return s.resume(ctx, owner, id)
+		return s.resumeLeaseBody(ctx, l)
 	}
 
 	_ = s.sub.Delete(ctx, l.SandboxID)
@@ -1172,7 +1247,13 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		s.store.mu.Unlock()
 		return nil, "", errNotFound
 	}
+	if src.busy {
+		s.store.mu.Unlock()
+		return nil, "", errLeaseBusy
+	}
+	src.busy = true
 	s.store.mu.Unlock()
+	defer s.endBusy(src)
 
 	if err := s.reserveQuota(owner, 1); err != nil {
 		return nil, "", err
@@ -1236,7 +1317,13 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.store.mu.Unlock()
 		return nil, "", errSuspended
 	}
+	if src.busy {
+		s.store.mu.Unlock()
+		return nil, "", errLeaseBusy
+	}
+	src.busy = true
 	s.store.mu.Unlock()
+	defer s.endBusy(src)
 
 	if count < 1 || count > 20 {
 		return nil, "", errBadForkCount
@@ -1744,6 +1831,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LastCheckpointBuildID: l.LastCheckpointBuildID,
 		LastCheckpointAt:      l.LastCheckpointAt,
 		RecoveredFrom:         l.RecoveredFrom,
+		Drained:               l.Drained,
 	}
 }
 
@@ -1772,6 +1860,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LastCheckpointBuildID: r.LastCheckpointBuildID,
 		LastCheckpointAt:      r.LastCheckpointAt,
 		RecoveredFrom:         r.RecoveredFrom,
+		Drained:               r.Drained,
 	}
 }
 
@@ -1791,6 +1880,15 @@ func (s *Service) storeError(op, id string, err error) {
 // The store helpers below are called with s.store.mu held (the sandbox
 // row helpers excepted: they run outside lease mutations) and write
 // through with a bounded timeout.
+
+// endBusy clears a lease's busy flag. It is the deferred counterpart of
+// the busy set every lifecycle operation performs under s.store.mu
+// before its first sub call (U10).
+func (s *Service) endBusy(l *Lease) {
+	s.store.mu.Lock()
+	l.busy = false
+	s.store.mu.Unlock()
+}
 
 func (s *Service) saveLeaseLocked(l *Lease) {
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
@@ -2080,6 +2178,7 @@ var (
 	errUnknownImage  = &leaseError{"unknown image"}
 	errSuspended     = &leaseError{"sandbox is suspended"}
 	errBadForkCount  = &leaseError{"count must be 1..20"}
+	errLeaseBusy     = &leaseError{"sandbox is busy; retry"}
 )
 
 // leaseError is a simple sentinel error.
