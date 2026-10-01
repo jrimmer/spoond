@@ -16,7 +16,7 @@ Orchestrator session started 2026-09-30.
 | U07 image-pipeline | done | all 7 images built into staging DB (scylla 9ce3a8f4 after 9 build rounds; deviations recorded below); live checks PASS for all 7 (resolv.conf first line 10.1.0.1) |
 | U08 lease-lifecycle | done | staging deployed (spoond-backend-staging :18890/:18891); conformance 14/14 PASS (L1-6,S1-4,D1-2,I1-2); S4 p50 61ms p95 69ms (budget 2000); TLS deviation recorded below |
 | U09 networking-and-access | done | conformance 20/20 PASS (all L/S/D/I/N incl. gateway, proxy, policies); one real fork bug fixed (P4 nft set-overlap EEXIST, orchestrator 40bed69a9); probe semantics reworked for E2B's proxy datapath (5 suite commits); S2 122.9s/S3 129.4s remain over U02 budgets (risk register) |
-| U10 restart-and-crash | pending | depends on U08, U09 |
+| U10 restart-and-crash | verifying-on-host | verifier PASS (0 deviations); Ops dispatched: staging redeploy + drain wiring + R1–R3 Autonomous window |
 | U11 catalog-gc-and-observability | pending | depends on U08, U10 |
 | U12 cutover | pending | depends on U02, U09, U10, U11 |
 | U13 upstream-runbook | pending | depends on U12 |
