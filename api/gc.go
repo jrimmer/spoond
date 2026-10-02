@@ -22,6 +22,9 @@ import (
 // resume/checkpoint builds, every live sandbox's build, every in-flight
 // build — keeps the closure of that set, and deletes (dry-run by
 // default) ready/failed builds older than an hour that fall outside it.
+// A lease lost in a substrate crash keeps its resume/checkpoint builds
+// for a grace period after the loss (7 d persistent, 1 d otherwise)
+// before they may be reclaimed (owner decision 2026-10-02).
 //
 // The selection rule: a build is never a candidate while it is the
 // parent of any non-deleted build, or a ref_build_id in build_refs of a
@@ -34,6 +37,50 @@ import (
 // gcAge is how long a build must be unreferenced and idle before the GC
 // considers it.
 const gcAge = time.Hour
+
+// The lost-lease snapshot grace periods (owner decision 2026-10-02): a
+// lost lease's resume_build_id and last_checkpoint_build_id stay kept
+// roots for 7 days after lost_at when the lease is persistent, 1 day
+// otherwise. Overridable per service via ServiceConfig.
+const (
+	defaultLostGracePersistent = 7 * 24 * time.Hour
+	defaultLostGrace           = 24 * time.Hour
+)
+
+// lostGraces resolves the configured grace periods, substituting the
+// defaults for zero values.
+func (s *Service) lostGraces() (persistent, other time.Duration) {
+	p, o := s.cfg.LostGracePersistent, s.cfg.LostGrace
+	if p <= 0 {
+		p = defaultLostGracePersistent
+	}
+	if o <= 0 {
+		o = defaultLostGrace
+	}
+	return p, o
+}
+
+// lostGrace returns one lease's grace period: 7 days for a persistent
+// lease, 1 day for any other, from the configured (or default) values.
+func (s *Service) lostGrace(l store.LeaseRow) time.Duration {
+	p, o := s.lostGraces()
+	if l.Persistent {
+		return p
+	}
+	return o
+}
+
+// lostKeepUntil is the instant from which a lost lease's snapshots may
+// be reclaimed: lost_at (or now, for a lease lost before lost_at was
+// recorded — it counts as lost at the time of the pass, so it is
+// protected for the full period starting then) plus its grace period.
+func (s *Service) lostKeepUntil(l store.LeaseRow, now time.Time) time.Time {
+	lostAt := l.LostAt
+	if lostAt.IsZero() {
+		lostAt = now
+	}
+	return lostAt.Add(s.lostGrace(l))
+}
 
 // runGCCatalogLoop runs the GC once 10 minutes after the backend starts
 // and then once an hour. Disk accounting runs with it. Never while the
@@ -78,6 +125,9 @@ func (s *Service) gcOnce(ctx context.Context) error {
 // keptBuilds computes the GC keep set. Roots are every image's current
 // build, every live lease's resume and checkpoint builds, every live
 // sandbox's build (pool sandboxes included), and every in-flight build.
+// A lost lease's resume and checkpoint builds stay roots for a grace
+// period after the loss — 7 days for a persistent lease, 1 day
+// otherwise — so its snapshots outlive the crash that lost it.
 // Every root's ancestor chain is kept in full, and every kept build's
 // header-referenced builds (build_refs) are kept in full — including
 // their own ancestors and refs, transitively.
@@ -152,9 +202,15 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gc: list leases: %w", err)
 	}
+	now := s.now()
 	for _, l := range leases {
 		if l.State == "lost" {
-			continue
+			// A lost lease keeps its snapshots for a grace period after
+			// the loss, so the owner can still reclaim them; past it the
+			// builds are candidates like any other unreferenced build.
+			if !now.Before(s.lostKeepUntil(l, now)) {
+				continue
+			}
 		}
 		keep(l.ResumeBuildID)
 		keep(l.LastCheckpointBuildID)

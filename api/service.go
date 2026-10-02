@@ -59,6 +59,10 @@ type Lease struct {
 	LastCheckpointBuildID string    // newest checkpoint build of this lease
 	LastCheckpointAt      time.Time // zero = never checkpointed
 	RecoveredFrom         time.Time // zero = never recovered
+	// LostAt is when the lease became lost (zero = unset). "lost_at" is
+	// omitted while unset; the GC's lost-lease grace period counts from
+	// it.
+	LostAt time.Time `json:"lost_at,omitempty"`
 	// Drained marks a lease the admin drain paused (U10): undrain
 	// resumes exactly the drained leases.
 	Drained bool
@@ -77,6 +81,22 @@ type Lease struct {
 // live reports whether the lease has a running sandbox. "recovered" is
 // introduced in U10 and behaves exactly like "running".
 func (l *Lease) live() bool { return l.State == "running" || l.State == "recovered" }
+
+// setState records a lifecycle state change. Entering "lost" stamps
+// LostAt once — an existing timestamp is never overwritten, so a lease
+// that dips in and out of the lost state keeps the original loss time
+// (and the grace period counted from it) — and leaving "lost" clears
+// it.
+func (l *Lease) setState(state string) {
+	l.State = state
+	if state == "lost" {
+		if l.LostAt.IsZero() {
+			l.LostAt = time.Now()
+		}
+		return
+	}
+	l.LostAt = time.Time{}
+}
 
 // ShareMode selects which surfaces a share covers.
 type ShareMode string
@@ -141,6 +161,13 @@ type ServiceConfig struct {
 	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
 	CheckpointEvery                 time.Duration
 	TemplateStoragePath             string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
+	// LostGracePersistent / LostGrace are how long a lost lease's
+	// resume_build_id and last_checkpoint_build_id stay kept roots after
+	// lost_at — 7 days for persistent leases, 1 day for the rest, so a
+	// lease lost in a substrate crash leaves its snapshots around long
+	// enough to be reclaimed by hand. Zero falls back to the defaults.
+	LostGracePersistent time.Duration
+	LostGrace           time.Duration
 }
 
 // Service is the lease API backend.
@@ -171,6 +198,9 @@ type Service struct {
 	probeTimeout time.Duration
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
+	// now is the service clock. Tests replace it to age a lease's
+	// lost_at without sleeping; the GC's grace periods read it.
+	now func() time.Time
 	// refreshMu serializes refreshPeers runs, which are scheduled
 	// asynchronously after lifecycle events (U09).
 	refreshMu sync.Mutex
@@ -200,6 +230,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		tokens:        tokens,
 		cfg:           cfg,
 		sweepInterval: 5 * time.Second,
+		now:           time.Now,
 		appliedEgress: map[string]string{},
 		log:           log.Default(),
 		probeEnabled:  true,
@@ -1131,7 +1162,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	}
 	s.deleteSandboxRow(l.SandboxID)
 	s.store.mu.Lock()
-	l.State = "suspended"
+	l.setState("suspended")
 	l.Suspended = true
 	l.ResumeBuildID = buildID
 	if drained {
@@ -1198,7 +1229,7 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = resumeBuild
-	l.State = "running"
+	l.setState("running")
 	l.Suspended = false
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
@@ -1254,7 +1285,7 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = b.BuildID
-	l.State = "running"
+	l.setState("running")
 	l.Suspended = false
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
@@ -1798,6 +1829,9 @@ func leaseDetailMap(l *Lease) map[string]any {
 	m["state"] = l.State
 	m["recovered_from"] = formatRFC3339(l.RecoveredFrom)
 	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
+	if !l.LostAt.IsZero() {
+		m["lost_at"] = formatRFC3339(l.LostAt)
+	}
 	return m
 }
 
@@ -1952,6 +1986,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LastCheckpointBuildID: l.LastCheckpointBuildID,
 		LastCheckpointAt:      l.LastCheckpointAt,
 		RecoveredFrom:         l.RecoveredFrom,
+		LostAt:                l.LostAt,
 		Drained:               l.Drained,
 	}
 }
@@ -1981,6 +2016,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LastCheckpointBuildID: r.LastCheckpointBuildID,
 		LastCheckpointAt:      r.LastCheckpointAt,
 		RecoveredFrom:         r.RecoveredFrom,
+		LostAt:                r.LostAt,
 		Drained:               r.Drained,
 	}
 }

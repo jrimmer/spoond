@@ -54,7 +54,7 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 		if l.LastCheckpointBuildID == "" {
 			// No checkpoint to recover from: the running state is gone.
 			s.store.mu.Lock()
-			l.State = "lost"
+			l.setState("lost")
 			s.saveLeaseLocked(l)
 			s.store.mu.Unlock()
 			s.deleteSandboxRow(l.SandboxID)
@@ -64,7 +64,7 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 		}
 		if err := s.recoverFromCheckpoint(ctx, l); err != nil {
 			s.store.mu.Lock()
-			l.State = "lost"
+			l.setState("lost")
 			s.saveLeaseLocked(l)
 			s.store.mu.Unlock()
 			summary.Lost++
@@ -112,7 +112,7 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		return err
 	}
 	s.store.mu.Lock()
-	l.State = "recovered"
+	l.setState("recovered")
 	l.RecoveredFrom = l.LastCheckpointAt
 	l.BuildID = l.LastCheckpointBuildID
 	l.HostIP = sb.HostIP

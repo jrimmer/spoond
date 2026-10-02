@@ -36,6 +36,12 @@
 //	                  cap (0 = unlimited; U8/T8). Per-user LLM keys are
 //	                  store data, set via POST /api/users/{id}/llm-key,
 //	                  not env config.
+//	GC_LOST_GRACE_PERSISTENT     how long a persistent lease's snapshots
+//	                  stay kept after the lease is lost (Go duration;
+//	                  default 168h = 7 d)
+//	GC_LOST_GRACE   how long a non-persistent lease's snapshots stay
+//	                  kept after the lease is lost (Go duration;
+//	                  default 24h = 1 d)
 package spoondbackend
 
 import (
@@ -61,6 +67,15 @@ import (
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envDurationOr(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
 	}
 	return def
 }
@@ -123,6 +138,11 @@ func Main(args []string) int {
 	hostAPIPort := envIntOr("HOST_API_PORT", defaultAPIPort)
 	checkpointEvery := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 60)) * time.Minute
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
+	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
+	// a lost lease's resume/checkpoint builds for this long before they
+	// become candidates.
+	lostGracePersistent := envDurationOr("GC_LOST_GRACE_PERSISTENT", 7*24*time.Hour)
+	lostGrace := envDurationOr("GC_LOST_GRACE", 24*time.Hour)
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
@@ -171,6 +191,8 @@ func Main(args []string) int {
 		ProxyURL:            cfg.ProxyURL,
 		CheckpointEvery:     checkpointEvery,
 		TemplateStoragePath: storagePath,
+		LostGracePersistent: lostGracePersistent,
+		LostGrace:           lostGrace,
 	})
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
 	// a ping and then fails the job deep inside a build, so verify it from
