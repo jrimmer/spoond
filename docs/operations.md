@@ -134,6 +134,29 @@ it lossless. Do not stop the backend first.
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.
 
+## Rebooting the host (planned)
+
+A host shutdown stops every unit, and the orchestrator's own drain hook
+cannot work then: `spoond-backend` is ordered after the orchestrator, so
+systemd stops the backend first and the hook's drain call is refused
+(this lost every lease in a reboot on 2026-10-02). `spoond-drain.service`
+(`deploy/e2b/spoond-drain.service`) covers it. It is ordered after both
+units, so at shutdown it stops first and its `ExecStop=spoond drain
+--stop` drains while both are up; at boot it starts last, waits for
+`/healthz` to report the orchestrator healthy, and its `ExecStart=spoond
+drain --start` resumes the drained leases. Drain and undrain are
+idempotent, so the orchestrator's own hooks, which also run, do nothing
+the second time. Install it with the orchestrator unit and enable it:
+
+```bash
+install -m 644 deploy/e2b/spoond-drain.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now spoond-drain
+```
+
+Do not stop `spoond-backend` and `e2b-orchestrator` by hand together
+without stopping `spoond-drain` first (`systemctl stop spoond-drain`
+drains; `systemctl start spoond-drain` resumes).
+
 `spoond drain` always exits 0, even when a call fails: a failed drain
 must never block the stop. Watch a restart with:
 
