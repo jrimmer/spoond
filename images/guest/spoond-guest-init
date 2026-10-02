@@ -9,12 +9,13 @@ set -u
 # calls must never go, and the router (10.1.0.1) gives stale LAN answers.
 rm -f /etc/resolv.conf
 printf 'nameserver 10.1.0.2\noptions timeout:2 attempts:3\n' > /etc/resolv.conf
-# E2B's template provisioning installs chrony, which adds dpkg statoverride
-# entries for the _chrony group. Tools that unpack a base image over the
-# live root (kaniko) keep this file while replacing /etc/group, and apt then
-# fails on the unknown group. The image's own entries stay.
+# Empty dpkg's statoverride. Tools that unpack a base image over the live
+# root (kaniko) keep this file while replacing /etc/group, so any override
+# whose group the base lacks (E2B's chrony adds _chrony; images with dbus
+# carry messagebus) makes apt abort. Overrides only reapply when those
+# packages are reconfigured, which ephemeral sandboxes do not need.
 if [ -f /var/lib/dpkg/statoverride ]; then
-  sed -i '/ _chrony /d' /var/lib/dpkg/statoverride
+  : > /var/lib/dpkg/statoverride
 fi
 # A container marker, as forkd's docker-export rootfs had: container-aware
 # tools (kaniko) otherwise warn that they run outside a container.
