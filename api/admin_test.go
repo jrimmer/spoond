@@ -104,7 +104,7 @@ func TestDrainUndrainRoundTrip(t *testing.T) {
 			t.Fatalf("drained lease %s = %+v, want suspended with a resume build", l.ID, l)
 		}
 		if got := calls(sub.Fake, "Pause "+l.SandboxID); got != 1 {
-			t.Fatalf("lease %s paused %d times, want 1 (calls %v)", l.ID, got, sub.Fake.Calls)
+			t.Fatalf("lease %s paused %d times, want 1 (calls %v)", l.ID, got, sub.Fake.CallLog())
 		}
 	}
 	if suspended.Drained {
@@ -138,7 +138,7 @@ func TestDrainUndrainRoundTrip(t *testing.T) {
 		// The resume is a snapshot create with the same sandbox id: the
 		// fake saw the id twice, on the grant and on the resume.
 		if got := calls(sub.Fake, "Create "+l.SandboxID); got != 2 {
-			t.Fatalf("lease %s: %d creates of its sandbox id, want 2 (grant + resume) (calls %v)", l.ID, got, sub.Fake.Calls)
+			t.Fatalf("lease %s: %d creates of its sandbox id, want 2 (grant + resume) (calls %v)", l.ID, got, sub.Fake.CallLog())
 		}
 	}
 	if suspended.Drained || !suspended.Suspended {

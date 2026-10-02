@@ -39,7 +39,7 @@ func TestPersistRoundTrip(t *testing.T) {
 	}
 
 	svc.Shutdown(ctx)
-	// fake.Fake.Calls records every Delete; none may happen on shutdown.
+	// fake.Fake.CallLog() records every Delete; none may happen on shutdown.
 	if got := calls(sub.Fake, "Delete"); got != 0 {
 		t.Fatalf("shutdown deleted sandboxes: %d", got)
 	}

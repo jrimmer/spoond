@@ -184,12 +184,12 @@ func TestRefreshPeersOnlyOnChange(t *testing.T) {
 	svc.runRefreshPeers(ctx)
 	first := calls(sub.Fake, "UpdateEgress")
 	if first != 2 {
-		t.Fatalf("first refresh: %d UpdateEgress calls, want 2 (both leases): %v", first, sub.Fake.Calls)
+		t.Fatalf("first refresh: %d UpdateEgress calls, want 2 (both leases): %v", first, sub.Fake.CallLog())
 	}
 
 	svc.runRefreshPeers(ctx)
 	if got := calls(sub.Fake, "UpdateEgress"); got != first {
-		t.Fatalf("unchanged refresh re-applied egress: %d calls: %v", got, sub.Fake.Calls)
+		t.Fatalf("unchanged refresh re-applied egress: %d calls: %v", got, sub.Fake.CallLog())
 	}
 
 	// b is released: a loses its peer allowance, b is not updated at all.
@@ -198,7 +198,7 @@ func TestRefreshPeersOnlyOnChange(t *testing.T) {
 	svc.store.mu.Unlock()
 	svc.runRefreshPeers(ctx)
 	if got := calls(sub.Fake, "UpdateEgress"); got != first+1 {
-		t.Fatalf("release refresh: %d total calls, want %d (a only): %v", got, first+1, sub.Fake.Calls)
+		t.Fatalf("release refresh: %d total calls, want %d (a only): %v", got, first+1, sub.Fake.CallLog())
 	}
 	if got := calls(sub.Fake, "UpdateEgress sb-b"); got != 1 {
 		t.Fatalf("suspended lease updated %d times, want 1 (before suspension)", got)
@@ -275,7 +275,7 @@ func TestNetworkRoute(t *testing.T) {
 		}
 		// The lease's own egress is applied synchronously.
 		if got := calls(sub.Fake, "UpdateEgress"); got != before+1 {
-			t.Fatalf("UpdateEgress calls %d, want %d: %v", got, before+1, sub.Fake.Calls)
+			t.Fatalf("UpdateEgress calls %d, want %d: %v", got, before+1, sub.Fake.CallLog())
 		}
 		// The saved policy survives a store round-trip.
 		rows, err := db.ListLeases(context.Background())
@@ -321,7 +321,7 @@ func TestReleaseTriggersPeerRefresh(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := calls(sub.Fake, "UpdateEgress"); got <= before {
-		t.Fatalf("release did not schedule a refresh: %d calls: %v", got, sub.Fake.Calls)
+		t.Fatalf("release did not schedule a refresh: %d calls: %v", got, sub.Fake.CallLog())
 	}
 	if containsAllowance(svc.egressFor(svc.lookup("u-b", "bbbb")).Private, peerAllowance("10.11.0.5", 8080)) {
 		t.Fatal("released peer's allowance still present")

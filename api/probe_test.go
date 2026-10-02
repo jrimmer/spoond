@@ -60,7 +60,7 @@ func TestGrantRejectsPooledSandboxThatFailsProbe(t *testing.T) {
 		t.Fatal("grant succeeded with a sandbox that failed its integrity probe")
 	}
 	if got := calls(sub.Fake, "Delete pooled-bad"); got != 1 {
-		t.Errorf("corrupt pooled sandbox was not deleted; calls=%v", sub.Fake.Calls)
+		t.Errorf("corrupt pooled sandbox was not deleted; calls=%v", sub.Fake.CallLog())
 	}
 }
 
@@ -109,7 +109,7 @@ func TestWarmPoolStocksHealthySandbox(t *testing.T) {
 	pooled := len(svc.store.pool["py-base"])
 	svc.store.mu.Unlock()
 	if pooled != 2 {
-		t.Fatalf("pooled %d sandboxes, want 2; calls=%v", pooled, sub.Fake.Calls)
+		t.Fatalf("pooled %d sandboxes, want 2; calls=%v", pooled, sub.Fake.CallLog())
 	}
 }
 
