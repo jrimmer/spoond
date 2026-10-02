@@ -60,7 +60,8 @@ type Snapshot struct {
 	Load1       float64 `json:"load1"`
 	Cores       int     `json:"cores"`
 	MemUsedPct  float64 `json:"memUsedPct"`
-	MemTotalGiB float64 `json:"memTotalGiB"`
+	MemTotalGiB float64 `json:"memTotalGiB"` // host memory outside the hugepage pool
+	MemUsedGiB  float64 `json:"memUsedGiB"`
 	HugeUsedPct float64 `json:"hugeUsedPct"`
 	HugeFreeGiB float64 `json:"hugeFreeGiB"`
 	DiskUsedPct float64 `json:"diskUsedPct"`
@@ -338,15 +339,7 @@ func (c *collector) fromHost(s *Snapshot) error {
 	if err != nil {
 		return err
 	}
-	if t := mem["MemTotal"]; t > 0 {
-		s.MemTotalGiB = round1(float64(t) / (1 << 20))
-		s.MemUsedPct = round1(float64(t-mem["MemAvailable"]) / float64(t) * 100)
-	}
-	if t := mem["HugePages_Total"]; t > 0 {
-		page := float64(mem["Hugepagesize"]) * 1024
-		s.HugeUsedPct = round1(float64(t-mem["HugePages_Free"]) / float64(t) * 100)
-		s.HugeFreeGiB = round1(float64(mem["HugePages_Free"]) * page / (1 << 30))
-	}
+	memGauges(s, mem)
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(c.cfg.StoragePath, &st); err == nil && st.Blocks > 0 {
 		s.DiskFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))
@@ -378,6 +371,30 @@ func cpuJiffies() (busy, total uint64, cores int, err error) {
 		}
 	}
 	return busy, total, cores, sc.Err()
+}
+
+// memGauges fills the Memory and Hugepages gauges from /proc/meminfo
+// values (kB, except the HugePages_* page counts).
+func memGauges(s *Snapshot, mem map[string]uint64) {
+	// Guest memory comes from the hugepage pool, which the kernel counts
+	// as used whether or not a lease holds it. So Memory is the host's
+	// own memory outside the pool, and Hugepages is lease capacity:
+	// a microVM reserves its full size from the pool when it starts and
+	// faults pages in as the guest touches them, so reserved-but-untouched
+	// pages (HugePages_Rsvd, still inside HugePages_Free) are taken too.
+	pageKB := mem["Hugepagesize"]
+	poolKB := mem["HugePages_Total"] * pageKB
+	if t := mem["MemTotal"] - poolKB; mem["MemTotal"] > poolKB {
+		used := t - min(mem["MemAvailable"], t)
+		s.MemTotalGiB = round1(float64(t) / (1 << 20))
+		s.MemUsedGiB = round1(float64(used) / (1 << 20))
+		s.MemUsedPct = round1(float64(used) / float64(t) * 100)
+	}
+	if t := mem["HugePages_Total"]; t > 0 {
+		free := mem["HugePages_Free"] - min(mem["HugePages_Rsvd"], mem["HugePages_Free"])
+		s.HugeUsedPct = round1(float64(t-free) / float64(t) * 100)
+		s.HugeFreeGiB = round1(float64(free*pageKB) / (1 << 20))
+	}
 }
 
 func meminfo() (map[string]uint64, error) {

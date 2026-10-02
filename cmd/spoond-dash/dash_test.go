@@ -223,3 +223,19 @@ func TestFromDBReadsLeasesAndImages(t *testing.T) {
 		t.Fatalf("image rows (unbuilt must be skipped): %+v", s.Images)
 	}
 }
+
+// The host as measured on 2026-10-02: a 43 GiB pool of 2 MiB pages, five
+// leases holding 19 GiB of it (9.9 GiB touched, 9.1 GiB reserved).
+func TestMemGaugesExcludePoolAndCountReserved(t *testing.T) {
+	var s Snapshot
+	memGauges(&s, map[string]uint64{
+		"MemTotal": 65649676, "MemAvailable": 10470980, "Hugepagesize": 2048,
+		"HugePages_Total": 21973, "HugePages_Free": 16907, "HugePages_Rsvd": 4662,
+	})
+	if s.MemTotalGiB != 19.7 || s.MemUsedGiB != 9.7 || s.MemUsedPct != 49.3 {
+		t.Errorf("memory = %v of %v GiB (%v%%), want 9.7 of 19.7 GiB (49.3%%)", s.MemUsedGiB, s.MemTotalGiB, s.MemUsedPct)
+	}
+	if s.HugeFreeGiB != 23.9 || s.HugeUsedPct != 44.3 {
+		t.Errorf("hugepages = %v GiB free (%v%%), want 23.9 GiB (44.3%%)", s.HugeFreeGiB, s.HugeUsedPct)
+	}
+}

@@ -132,9 +132,9 @@
       <div class="gauge-cell"><sb-gauge label="CPU" unit="%" min="0" max="100" warn="75" danger="90" data-attr:value="$_s.cpuPct"></sb-gauge>
         <div class="sub" data-text="'load ' + $_s.load1 + ' · ' + $_s.cores + ' cores · ' + $_s.vcpuAlloc + ' vCPU leased'"></div></div>
       <div class="gauge-cell"><sb-gauge label="Memory" unit="%" min="0" max="100" warn="80" danger="92" data-attr:value="$_s.memUsedPct"></sb-gauge>
-        <div class="sub" data-text="$_s.memTotalGiB + ' GiB · ' + $_s.memAllocGiB + ' GiB to sandboxes'"></div></div>
+        <div class="sub" data-text="$_s.memUsedGiB + ' of ' + $_s.memTotalGiB + ' GiB outside the pool'"></div></div>
       <div class="gauge-cell"><sb-gauge label="Hugepages" unit="%" min="0" max="100" warn="80" danger="92" data-attr:value="$_s.hugeUsedPct"></sb-gauge>
-        <div class="sub" data-text="$_s.hugeFreeGiB + ' GiB free'"></div></div>
+        <div class="sub" data-text="$_s.memAllocGiB + ' GiB to leases · ' + $_s.hugeFreeGiB + ' GiB free'"></div></div>
       <div class="gauge-cell"><sb-gauge label="Snapshot disk" unit="%" min="0" max="100" warn="80" danger="90" data-attr:value="$_s.diskUsedPct"></sb-gauge>
         <div class="sub" data-text="$_s.diskFreeGiB + ' GiB free'"></div></div>
     </div>
