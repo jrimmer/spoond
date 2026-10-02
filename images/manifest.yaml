@@ -183,7 +183,9 @@ images:
       Build with `spoond images build scylla` (images/scylla.dockerfile + images/scylla-init-hook.sh).
       Needs images/guest/spoond-guest-init in the image: its
       /etc/spoond/init.d hook runner starts ScyllaDB BEFORE the snapshot
-      so every fork restores serving. Guest 3 GiB, seastar --memory=1200M (1536M does not fit beside seastar's OS reserve),
+      so every fork restores serving. seastar also needs cgroup2 mounted
+      ("sstring out of range" without it); E2B guests boot with systemd,
+      which mounts it. Guest 3 GiB, seastar --memory=1200M (1536M does not fit beside seastar's OS reserve),
       --overprovisioned (no busy-polling — idle pool children stay cheap).
       No labels: a job leases it via the lease API, it never runs a job.
       Warm pool: the first lease registers the tag, after which POOL_SIZE
