@@ -46,22 +46,6 @@ func TestLeaseHeartbeatNotOnAPIListener(t *testing.T) {
 	}
 }
 
-// leaseRow reads one lease row back from the store.
-func leaseRow(t *testing.T, db *store.DB, id string) store.LeaseRow {
-	t.Helper()
-	rows, err := db.ListLeases(context.Background())
-	if err != nil {
-		t.Fatalf("list leases: %v", err)
-	}
-	for _, r := range rows {
-		if r.ID == id {
-			return r
-		}
-	}
-	t.Fatalf("lease %s not in store", id)
-	return store.LeaseRow{}
-}
-
 // heartbeat posts one heartbeat and returns the response.
 func heartbeat(t *testing.T, url string) *http.Response {
 	t.Helper()
