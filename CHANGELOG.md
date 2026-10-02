@@ -1,20 +1,23 @@
 # Changelog
 
 Notable changes to spoond, newest first. Format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Every entry names
-where it comes from: a commit (`<short-hash>`), a unit of the E2B substrate
-spec (`U01`–`U13`, under `docs/plans/2026-09-30-e2b-substrate/`), or a fixed
-decision (`D1`–`D17`, in that spec's `00-README.md`).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). In the 2.0
+section, every entry names where it comes from: a commit (`<short-hash>`),
+a unit of the E2B substrate spec (`U01`–`U13`, under
+`docs/plans/2026-09-30-e2b-substrate/`), or a fixed decision (`D1`–`D17`,
+in that spec's `00-README.md`). The earlier-releases section is
+summarised from README "Status".
 
 ## [2.0.0] - unreleased
 
 2.0 replaces forkd with a patch-queue fork of E2B's node runtime as the
-sandbox substrate (deployed 2026-10-01), moves spoond's state to SQLite, and
-adds a template-based image pipeline, native fork/checkpoint and
-pause/resume, a drain protocol for orchestrator restarts, and a read-only
-dashboard. The lease API is the compatibility contract and changes only
-additively (D5); everything beneath it changed. The design, decisions and
-per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
+sandbox substrate (production cut over 2026-10-01), moves spoond's state
+to SQLite, and adds a template-based image pipeline, native
+fork/checkpoint and pause/resume, a drain protocol for orchestrator
+restarts, and a read-only dashboard. The lease API is the compatibility
+contract and changes only additively (D5); everything beneath it changed.
+The design, decisions and per-unit specs are in
+`docs/plans/2026-09-30-e2b-substrate/`.
 
 ### Changed
 
@@ -44,14 +47,15 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
   environment to `/etc/spoond/backend.env` and change the unit's `After=`
   from `forkd-controller.service` to `e2b-orchestrator.service`
   (U12 steps 4 and 18). The forkd-era installer and the rollback artifacts
-  stay on the host only until U12 step 20 (2026-10-31; README "Install").
+  stay on the host only until U12 step 20 — 30 days after the cutover
+  (README "Install").
 - **Breaking: lease state lives in SQLite.** Leases, shares, the warm pool,
   the image catalog and the build/snapshot catalog are persisted in an
   embedded SQLite database at `SPOOND_DB_PATH` (D10, U05; `2b721d1`,
   `60f007c`), so a backend restart no longer loses leases — conformance
-  R3 (backend restart) passed as a U05 deploy check. An operator must
-  provision `SPOOND_DB_PATH` and a backup directory (`SPOOND_BACKUP_DIR`);
-  in-memory state is no longer authoritative.
+  R3 (backend restart) passed as a U05 deploy check (U05 "Done when"). An
+  operator must provision `SPOOND_DB_PATH` and a backup directory
+  (`SPOOND_BACKUP_DIR`); in-memory state is no longer authoritative.
 - **Breaking: Go 1.27.1 is required to build and deploy.** `go.mod` and
   every dependency were moved forward with no downgrades (D11, U01;
   `bb21513`); `modernc.org/sqlite` v1.60.1 needs Go ≥ 1.26. An operator
@@ -65,7 +69,8 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
   template with hugepages, spoond sets `huge_pages=true` on every create
   and refuses with 503 `capacity: …` when free hugepages are short (D12;
   `156d273` admission, `c68b14c` capacity metrics, U08). An operator must
-  reserve hugepages at host bring-up (`deploy/e2b/host-setup.sh`, U04).
+  reserve hugepages at host bring-up (`deploy/e2b/host-setup.sh`, U04) and
+  size them to the working set — 48 GiB at the cutover (U12 step 13).
 - **Breaking: the SSH gateway relays sessions instead of dialing a guest
   sshd.** Session channels are relayed onto envd processes through the
   backend's `/api/sandboxes/{id}/stream` (D14, U09; `63d1f12`); spoond now
@@ -75,16 +80,17 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
   (`63d1f12`); an operator must remove overrides of both so the new
   defaults apply (U12 step 9).
 - **Breaking: admin routes need `ADMIN_TOKEN`.** Drain, undrain and
-  reconcile are authenticated by a new constant-time bearer token, and the
-  routes 404 while it is unset (U10; `cbf12fa`). An operator must generate
-  and set `ADMIN_TOKEN` for the drain hooks to work (U12 step 4).
+  reconcile are authenticated by a new constant-time bearer token; the
+  routes 404 while it is unset and 401 on a wrong token (U10; `cbf12fa`).
+  An operator must generate and set `ADMIN_TOKEN` for the drain hooks to
+  work (U12 step 4).
 - The HTTP proxy dials sandboxes through the orchestrator's sandbox proxy
   instead of a netns dial (U09; `55cd9e8`), and exposed ports are published
   as per-sandbox peer allowances on E2B's egress firewall, with live policy
   changes on `POST /api/sandboxes/{id}/network` (U09; `55cbfe8`).
-- The SSH gateway, LLM gateway and shelley defaults follow
-  `HOST_GUEST_SERVICE_ADDR` (`10.1.0.11`), replacing forkd's `10.43.0.1`
-  host address (U09; `63d1f12`).
+- The shelley-binary and LLM-gateway URLs default to the host-service
+  address `10.1.0.11:8891` — the value of `HOST_GUEST_SERVICE_ADDR` in
+  `01-architecture.md` — replacing forkd's `10.43.0.1` (U09; `63d1f12`).
 
 ### Added
 
@@ -97,8 +103,8 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
 - **Suspend/resume with memory**: pause writes a build and stops the
   sandbox; resume restores it with its memory from that build (D3; U08;
   `156d273`). Lease objects now carry `state` (`running|suspended|
-  recovered|lost`), `build_id`, `resume_build_id` and `recovered_from`
-  (U05/U10; `60f007c`, `14284a7`).
+  recovered|lost`), `recovered_from` and `last_checkpoint_at` (`60f007c`,
+  `156d273`), plus `build_id` and `resume_build_id` (`220d7a2`).
 - **Drain protocol**: `POST /api/admin/drain` pauses every running lease
   (persistent or not) and quiesces the node, `POST /api/admin/undrain`
   resumes them, and the new `spoond drain` subcommand is wired into the
@@ -106,20 +112,27 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
   orchestrator restarts are lossless (D4; U10; `cbf12fa`, `f348719`).
 - **Crash recovery**: on backend start, every 30 s, and whenever the node
   comes back, leases with a checkpoint are resumed from it and the rest are
-  marked `lost` (410 `sandbox lost in a substrate crash`); `POST
-  /api/admin/reconcile` reports the summary (D4; U10; `14284a7`).
+  marked `lost` (410 `sandbox lost in a substrate crash; delete this
+  lease`); `POST /api/admin/reconcile` reports the summary (D4; U10;
+  `14284a7`).
 - **Image pipeline**: one Dockerfile per capability in `images/`, built by
   docker, pushed to the local registry and turned into E2B templates by
   `spoond images build <name>|--all`, with the catalog (images, builds,
   owners, per-image env) in SQLite (D6, U07; `f9f8e44`, `b6e6093`,
-  `50180f2`). Bake scripts and `rootfs-init` are gone (U12 step 18).
+  `50180f2`, `f884782`). The forkd bake scripts and `rootfs-init` are
+  removed with forkd (see Removed).
 - **Snapshot catalog and GC**: `GET /api/snapshots` and `DELETE
   /api/snapshots/{build_id}` list and delete the caller's builds, and a
-  reference-counted GC (parents via `parent_build_id`, block references via
-  `build_refs`) reclaims unreferenced builds — dry-run by default,
-  `GC_DELETE=1` enables deletion (U11; `220d7a2`).
-- **Database backups**: daily `VACUUM INTO` copies into `SPOOND_BACKUP_DIR`
-  with retention (U11; `f884782`).
+  GC keeps the closure of the root set — every image's current build,
+  every live lease's resume and checkpoint builds, every sandbox's build,
+  every in-flight build, then parents (`parent_build_id`) and header
+  references (`build_refs`) — and reclaims unreferenced builds older than
+  an hour. It runs 10 minutes after start and then hourly, never during a
+  drain; dry-run by default, `GC_DELETE=1` enables deletion (U11;
+  `220d7a2`).
+- **Database backups**: `VACUUM INTO` copies into `SPOOND_BACKUP_DIR` daily
+  at 03:00 (and once at start when the newest is over 24 h old), keeping
+  the last 7 (U11; `f884782`).
 - **Observability**: orchestrator metrics are collected by an OpenTelemetry
   collector and appended to spoond's `/metrics` when `OTEL_PROM_URL` is set
   (U11; `c68b14c`, `d04faf7`); `GET /healthz` reports the node's status and
@@ -133,7 +146,7 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
   (`c68b14c`, `5fa2dcb`).
 - **`METRICS_TOKEN`**: a scrape-only bearer token that reads `/metrics` and
   nothing else, so Prometheus and the dashboard no longer need admin
-  rights; adds `spoond_leases_by_image` (U11 follow-up; `5fa2dcb`).
+  rights; adds `spoond_leases_by_image` (`5fa2dcb`).
 - **`spoond dash`**: a read-only, live dashboard of leases, sandboxes, host
   vitals, request rate, lease grant latency, egress connections, units and
   the image catalog, over one shared SSE stream, with 5-minute sparklines
@@ -146,17 +159,21 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
   SQLite database and catalog, the pinned E2B artifacts by SHA-256, build
   storage headroom, the backend, the gateway port, the LLM gateway and TLS
   (U11; `fe6981d`), plus the Firecracker and kernel versions still in use
-  by live builds (U13; `d66ff13`).
+  by non-deleted builds (U13; `d66ff13`).
 - **Lease API additions**: `GET /api/sandboxes/{id}`, the fork, checkpoint
   and network routes above, and a binary stream mode for `/stream` with
   `resize`, `kill` and `eof` controls (D5 — additive only; `156d273`,
   `96676dc`, `55cbfe8`, `4c74444`).
-- **Conformance suite**: a substrate conformance suite run against
-  production from the repo, with E2B-aware reachability probes; the full
-  suite (27 tests, all groups) passes against E2B with every budget met
+- **Conformance suite**: a substrate conformance suite in `conformance/`
+  (build tag `conformance`), run from a host checkout through the lease
+  API, with E2B-aware reachability probes (under E2B a deny closes at the
+  data phase, and port 443 needs a real TLS handshake, because SNI routing
+  decides on the ClientHello); the full suite — 27 tests, all groups —
+  passed on staging with every budget met as the U12 precondition
+  (`RESULTS.md`; U12 step 14 runs the same suite against production)
   (U02; `63e3939`, `3a27ed3`, `107e060`, `4ebea12`, `d2e2d5c`).
 - **Operations**: the E2B upgrade runbook (`docs/runbooks/e2b-upgrade.md`,
-  monthly rebase of the fork gated by the conformance suite; U13;
+  rebase of the fork at most monthly, gated by the conformance suite; U13;
   `e1bc392`), daily soak checks for the cutover (`deploy/e2b/soak-check.sh`
   and timer; `002cbca`), and `deploy/e2b/` host bring-up artifacts
   (`dafe71c`).
@@ -177,53 +194,62 @@ per-unit specs are in `docs/plans/2026-09-30-e2b-substrate/`.
 
 ### Fixed
 
-Fixes deployed to production on 2026-10-01, after the cutover:
+Found in production after the 2026-10-01 cutover and deployed the same day:
 
 - **`lan`/`internet` guests can reach the lease API again.** The fork's
   host-address guard only admits a host destination when an allowance names
   both IP and port, so the any-port LAN ranges did not count and CI jobs
   that lease databases from inside their sandbox broke. The API port is now
   named explicitly (`HOST_API_PORT`, defaulting to `BIND_ADDR`'s port);
-  `restricted` and `none` are unchanged (`9643e53`).
+  `restricted` and `none` are unchanged (`9643e53`; deployed in `4f63ddf`).
 - **Internet egress allowances survive peer refreshes.** The fork's Update
   path collapsed an egress with no CIDRs, domains, rules or proxy to nil
   and dropped `allowed_private`, so the first lease that published ports
   silently removed the lease-API allowance for `internet` leases. A deny of
-  TEST-NET-1 (never routed) keeps the policy non-empty (`dfb6f65`).
+  TEST-NET-1 (never routed) keeps the policy non-empty (`dfb6f65`;
+  deployed in `3121626`).
 - **Guests resolve through the LAN resolver only.** The old
   `10.1.0.1` + `8.8.8.8` pair fell back to public DNS, which answers
   `*.lacy.casa` with the public edge, and the router gave stale LAN answers;
   `resolv.conf` now names Technitium (`10.1.0.2`) alone, and the egress DNS
-  allowance follows it (`f2b0289`).
+  allowance follows it (`f2b0289`; deployed in `26d9cab`).
 - **The guest rootfs is kaniko-safe again.** `/var/lib/dpkg/statoverride`
   is emptied (E2B's chrony `_chrony` lines and the images' own `messagebus`
   override made apt abort when kaniko unpacked a base image over the live
   root and replaced `/etc/group`), and `/.dockerenv` is created so
-  container-aware tools detect a container (`f2b0289`, `e76d66a`).
+  container-aware tools detect a container (`f2b0289`, `e76d66a`; deployed
+  in `26d9cab`).
+
+Earlier in the 2.0 effort:
+
 - **Clone, fork and drains are no longer stuck for 120 s.** The substrate
   client waited for `OutstandingWork == 0` after every pause/checkpoint,
-  which never terminated; the wait is now bounded (pre-call value or 10 s),
-  taking clone from 120.8 s to 0.596 s (`bc2a78c`, merged in `9d51b89`).
+  which never terminates; the wait is now bounded (back to the pre-call
+  value, or 10 s), taking clone from 120.8 s to 0.596 s (`bc2a78c`, merged
+  in `9d51b89`; measured in `cc49dff`, `RESULTS.md`).
 - **Image build correctness**: scylla builds without gpg in the build
-  context (vendored, fingerprint-verified keyring) and without running
-  host-level sysctls (procps preinstalled, `dpkg-divert` stub during the
-  scylla install), and the pin tracks the offered 2026.2.7
+  context (the signing key and apt list are vendored in `images/`, the key
+  fingerprint verified at commit time, since gpg cannot run there) and
+  without running host-level sysctls (procps preinstalled, a `dpkg-divert`
+  stub around the scylla install), and the pin tracks the offered 2026.2.7
   (`26b8947`, `32bd651`, `b99bb69`, `bda1249`, `81b77f6`, `362d0aa`).
 - **Leases survive a backend restart** (conformance R3), previously lost
-  with the in-memory store (`60f007c`).
+  with the in-memory store (U05; `60f007c`).
 
 ### Security
 
 - **Guest DNS can no longer leak to public resolvers**: sandboxes resolve
   only through the LAN resolver, so credentialed names never fall back to
-  the public edge (report of 2026-10-01; `f2b0289`).
+  the public edge (`f2b0289`).
 - **The orchestrator is not reachable off-host**: `deploy/e2b/e2b-guard.nft`
-  restricts the orchestrator's gRPC, proxy, hyperloop and egress-proxy
-  ports to loopback and sandbox source ranges, and sandboxes to the egress
-  proxy and hyperloop (U04; `dafe71c`).
-- **Per-sandbox private allowances with TCP port scoping** come from the
-  fork's patch P4 host-address guard, extending E2B's own two egress layers
-  (per-netns nftables + userspace TCP proxy) (D13; U03, U09).
+  accepts loopback, lets sandbox source ranges reach only the egress proxy
+  and hyperloop, drops everything else from them, and drops all off-host
+  traffic to the orchestrator's ports — so the gRPC and sandbox-proxy
+  ports are loopback-only (U04; `dafe71c`).
+- **Per-sandbox private allowances with TCP port scoping**, plus the
+  host-address guard, come from the fork's patch P4, extending E2B's own
+  two egress layers (per-netns nftables + userspace TCP proxy) (D13; U03,
+  U09).
 - **`ADMIN_TOKEN`** gates the drain/undrain/reconcile routes with a
   constant-time compare and 404s while unset (U10; `cbf12fa`);
   **`METRICS_TOKEN`** is scrape-only — the lease API refuses it, and an
@@ -249,6 +275,6 @@ Earlier releases predate this changelog; summarised from README "Status".
 - **v1.1 — multi-user tenancy.** People and agents became first-class
   identities (per-user SSH keys, tokens, quotas, admin roles, lease
   sharing, per-user LLM gateway keys and proxy hostnames), with security
-  hardening from two adversarial review passes; see `docs/security.md`.
+  hardening across the board; see `docs/security.md`.
 - **v1.0 — single-operator.** The original lease API, warm pool, gateway,
   proxy and Forgejo Actions runner on a forkd homelab.
