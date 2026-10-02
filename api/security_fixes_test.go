@@ -347,3 +347,46 @@ func TestC2LLMRequireKey(t *testing.T) {
 func jsonUnmarshal(b []byte, v any) error {
 	return json.Unmarshal(b, v)
 }
+
+// TestMetricsTokenScrapeOnly: the METRICS_TOKEN bearer reads /metrics
+// (including spoond_leases_by_image) and nothing else; a wrong token and
+// an unset METRICS_TOKEN grant nothing.
+func TestMetricsTokenScrapeOnly(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ids, _ := identity.NewStore("")
+	svc.SetIdentities(ids)
+	svc.cfg.MetricsToken = "scrape-tok"
+	h := NewServer(svc, NewImageRegistry(db)).Handler()
+	if rec, _ := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("bootstrap: %d", rec.Code)
+	}
+	insertLease(t, svc, &Lease{ID: "l1", Owner: "u-a", Image: "py-base", State: "running"})
+
+	get := func(path, tok string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := get("/metrics", "scrape-tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics with scrape token: %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `spoond_leases_by_image{image="py-base"} 1`) {
+		t.Fatalf("leases_by_image missing:\n%s", rec.Body.String())
+	}
+	for _, path := range []string{"/api/sandboxes", "/api/users", "/api/images"} {
+		if rec := get(path, "scrape-tok"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("scrape token on %s: %d, want 401", path, rec.Code)
+		}
+	}
+	if rec := get("/metrics", "scrape-tok-wrong"); rec.Code == http.StatusOK {
+		t.Fatal("wrong token read metrics")
+	}
+	svc.cfg.MetricsToken = ""
+	if rec := get("/metrics", ""); rec.Code == http.StatusOK {
+		t.Fatal("empty token read metrics with METRICS_TOKEN unset")
+	}
+}

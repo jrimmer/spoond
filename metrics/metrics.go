@@ -88,6 +88,7 @@ type BackendMetrics struct {
 
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
+	LeasesByImage     *prometheus.GaugeVec     // {image}: live leases per image
 	NodeRunning       prometheus.Gauge         // orchestrator running sandboxes
 	NodeHugepagesFree prometheus.Gauge         // (total − used − reserved) × page size
 	NodeWork          prometheus.Gauge         // orchestrator outstanding work
@@ -303,6 +304,10 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "leases",
 		Help: "Leases per state: running, suspended, recovered, lost.",
 	}, []string{"state"})
+	m.LeasesByImage = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "leases_by_image",
+		Help: "Live (non-released) leases per image.",
+	}, []string{"image"})
 	m.NodeRunning = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "node_running_sandboxes",
 		Help: "Sandboxes running on the orchestrator node.",
@@ -343,7 +348,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
-		m.LeasesByState, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
+		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)
 	return m

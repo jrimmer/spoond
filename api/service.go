@@ -136,6 +136,7 @@ type ServiceConfig struct {
 	DefaultTTL, MaxTTL, IdleTimeout time.Duration
 	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
 	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
+	MetricsToken                    string // METRICS_TOKEN: bearer that may read /metrics only (scrapers, dashboards)
 	HostAPIPort                     int    // HOST_API_PORT: lease API port lan/internet guests may reach on HostGuestAddr (0 = none)
 	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
 	CheckpointEvery                 time.Duration
@@ -2204,15 +2205,22 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	// Leases: count non-released, per state (U11) and total.
 	active := 0
 	byState := map[string]int{}
+	byImage := map[string]int{}
 	for _, l := range s.store.leases {
 		if !l.released {
 			active++
 			byState[l.State]++
+			byImage[l.Image]++
 		}
 	}
 	m.LeasesActive.Set(float64(active))
 	for _, state := range []string{"running", "suspended", "recovered", "lost"} {
 		m.LeasesByState.WithLabelValues(state).Set(float64(byState[state]))
+	}
+	// Reset first so an image whose last lease ended drops out.
+	m.LeasesByImage.Reset()
+	for img, n := range byImage {
+		m.LeasesByImage.WithLabelValues(img).Set(float64(n))
 	}
 
 	// Quota reservations.
