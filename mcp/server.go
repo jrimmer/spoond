@@ -1,5 +1,5 @@
 // Package mcp implements the spoond MCP server (ticket #23): a Model Context
-// Protocol server that exposes forkd microVM sandboxes as agent tools.
+// Protocol server that exposes microVM sandboxes as agent tools.
 //
 // Transport: stdio (newline-delimited JSON-RPC 2.0) by default, or HTTP
 // (Streamable HTTP transport per the 2025-03-26 MCP spec) when the caller
@@ -14,10 +14,10 @@
 //	notifications/initialized
 //	ping
 //	tools/list            (tool registry)
-//	tools/call            (execute a tool in a forkd sandbox)
+//	tools/call            (execute a tool in a sandbox)
 //
 // Hexagonal: the server depends only on the runner.SandboxProvider port
-// (the lease HTTP API), never on forkd internals — same shape as the
+// (the lease HTTP API) — same shape as the
 // cfos adapter. v1 is stateless per call (create -> exec -> release),
 // matching the ticket's KTD5-style design; persistent session-scoped
 // leases are a v2 follow-on.
@@ -109,7 +109,7 @@ func New(cfg Config) *Server {
 	s.tools = []Tool{
 		{
 			Name:        "shell",
-			Description: "Run a shell command in an isolated forkd microVM sandbox. Returns stdout, stderr and exit code. Use for any command execution.",
+			Description: "Run a shell command in an isolated microVM sandbox. Returns stdout, stderr and exit code. Use for any command execution.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

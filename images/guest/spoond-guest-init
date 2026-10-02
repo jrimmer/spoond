@@ -17,8 +17,8 @@ printf 'nameserver 10.1.0.2\noptions timeout:2 attempts:3\n' > /etc/resolv.conf
 if [ -f /var/lib/dpkg/statoverride ]; then
   : > /var/lib/dpkg/statoverride
 fi
-# A container marker, as forkd's docker-export rootfs had: container-aware
-# tools (kaniko) otherwise warn that they run outside a container.
+# A container marker: container-aware tools (kaniko)
+# otherwise warn that they run outside a container.
 : > /.dockerenv
 for h in /etc/spoond/init.d/*; do
   [ -x "$h" ] || continue

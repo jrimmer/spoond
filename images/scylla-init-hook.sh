@@ -29,7 +29,7 @@ nohup setsid /usr/bin/scylla \
   >/tmp/scylla.log 2>&1 </dev/null &
 echo $! >/tmp/scylla.pid
 
-# Ready = the CQL port accepts. Bounded well inside forkd-init's hook timeout.
+# Ready = the CQL port accepts. Bounded well inside the guest-init hook timeout.
 for _ in $(seq 1 150); do
   if (exec 3<>/dev/tcp/127.0.0.1/9042) 2>/dev/null; then
     echo "scylla: CQL up"

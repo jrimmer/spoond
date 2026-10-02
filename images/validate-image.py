@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-forkd image inquiry — validate a repo against the image manifest.
+image inquiry — validate a repo against the image manifest.
 
 Usage:
     images/validate-image.py <repo-path-or-url>
@@ -91,14 +91,14 @@ def check_coverage(manifest, capability, image_name):
 
 def fetch_repo(url):
     """Clone a repo URL to a temp dir, return the path."""
-    tmp = tempfile.mkdtemp(prefix="forkd-inquiry-")
+    tmp = tempfile.mkdtemp(prefix="spoond-inquiry-")
     subprocess.run(["git", "clone", "--depth", "1", url, tmp],
                    check=True, capture_output=True)
     return tmp
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Validate a repo against the forkd image manifest")
+    ap = argparse.ArgumentParser(description="Validate a repo against the image manifest")
     ap.add_argument("repo", help="local path or git URL of the repo to interrogate")
     ap.add_argument("--manifest", default=os.path.join(os.path.dirname(__file__), "manifest.yaml"),
                     help="path to manifest.yaml")

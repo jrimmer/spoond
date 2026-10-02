@@ -31,7 +31,7 @@ POST /v1/run
 Authorization: Bearer <consumer-token>
 
 {
-  "image": "py-numpy",          // forkd snapshot tag (required)
+  "image": "py-numpy",          // image tag (required)
   "command": "analyze(data)",   // shell command or snippet (required)
   "cwd": "/workspace",          // optional working dir
   "env": { "DATA": "..." },     // optional env vars
@@ -83,7 +83,7 @@ Authorization: Bearer <consumer-token>
    exhausting the pool.
 
 5. **Auth at the adapter, isolation at the kernel.** Same posture as the
-   lease API: bearer tokens gate access; forkd provides microVM
+   lease API: bearer tokens gate access; the substrate provides microVM
    isolation.
 
 ## What it enables

@@ -349,21 +349,15 @@ func probeCmd(host string, port int) string {
 }
 
 // canTCP runs the suite's TCP reachability probe in the lease and reports
-// whether the destination is reachable. The probe is substrate-aware:
+// whether the destination is reachable:
 //
-//   - forkd denies at SYN (netns firewall), so a plain connect probe
-//     decides: timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no
-//   - e2b, port 443: a real TLS client handshake must establish
+//   - port 443: a real TLS client handshake must establish
 //     (e2bTLSProbeCmd above — SNI routing decides on the ClientHello)
-//   - e2b, other ports: reachable means connect OK AND (data received OR
+//   - other ports: reachable means connect OK AND (data received OR
 //     the connection still open after a write); blocked means connect
 //     timeout or EOF/reset before any data (e2bProbeCmd above).
 func canTCP(t *testing.T, id, host string, port int) bool {
-	if cfg.Substrate == "e2b" {
-		return probeToken(t, id, probeCmd(host, port)) == "ok"
-	}
-	out := execOK(t, id, fmt.Sprintf("timeout 5 bash -c '</dev/tcp/%s/%d' && echo yes || echo no", host, port))
-	return out == "yes"
+	return probeToken(t, id, probeCmd(host, port)) == "ok"
 }
 
 // probeToken runs a probe cmd in the lease whose stdout is exactly "ok" or

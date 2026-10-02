@@ -44,17 +44,14 @@ assert_contains "llm-review shell works" "$OUT" "LLM_REVIEW_OK"
 del_lease "$L"
 
 echo
-echo "== images: dev-base (interactive: sshd + tmux + stream agent) =="
+echo "== images: dev-base (interactive: tmux + guest init) =="
 L=$(new_lease dev-base 120 false)
 [ -n "$L" ] && ok "create dev-base lease ($L)" || bad "create dev-base lease"
 sleep 3
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"ps aux | grep [s]shd | head -1"}')
-assert_contains "sshd running" "$OUT" "sshd"
+OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"test -f /run/spoond-guest-ready && echo GUEST_INIT_OK"}')
+assert_contains "guest init ran" "$OUT" "GUEST_INIT_OK"
 OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"which tmux && echo TMUX_OK"}')
 assert_contains "tmux installed" "$OUT" "TMUX_OK"
-OUT=$(api POST "/api/sandboxes/$L/exec" '{"cmd":"grep -c stream /forkd-agent.py"}')
-STREAMCOUNT=$(echo "$OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stdout','0').strip())" 2>/dev/null)
-if [ "${STREAMCOUNT:-0}" -gt 0 ]; then ok "agent has stream action ($STREAMCOUNT refs)"; else bad "agent has stream action"; fi
 del_lease "$L"
 
 echo

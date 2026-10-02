@@ -343,8 +343,7 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		return substrate.Egress{DeniedCIDRs: []string{"0.0.0.0/0"}}
 	case PolicyInternet:
 		// Public destinations stay allowed; listing the LAN ranges as
-		// private allowances matches forkd, where internet flushed all
-		// rules and private/LAN addresses stayed reachable.
+		// private allowances keeps private/LAN addresses reachable.
 		return substrate.Egress{Private: append(append(lanPrivate(l, hostSvc, dns), hostAPI...), s.peerAllowances(l)...)}
 	case PolicyLAN:
 		return substrate.Egress{

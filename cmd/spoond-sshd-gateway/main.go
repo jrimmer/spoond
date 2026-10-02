@@ -497,7 +497,7 @@ func createSandbox(ctx context.Context, user string) (string, string, error) {
 
 // handleControlPlane implements the SSH-as-API control plane for the
 // reserved `ctl` username. It accepts the first session channel, runs
-// the exec command as a forkd API call, writes JSON to the channel and
+// the exec command as a lease API call, writes JSON to the channel and
 // closes it. Usage:
 //
 //	ssh ctl@sandbox.lacy.casa "new [image]"     create a persistent lease

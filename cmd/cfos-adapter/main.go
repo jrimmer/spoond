@@ -1,6 +1,6 @@
 // Command cfos-adapter is the CFOS/Sandstorm execution bridge (ticket
 // #17 U1): a thin HTTP service that runs CFOS executeCode requests in
-// forkd microVMs via the lease API.
+// microVMs via the lease API.
 //
 // Plain Go binary (homelab preference), no Docker. Env:
 //

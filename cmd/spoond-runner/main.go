@@ -1,11 +1,11 @@
-// Command forkd-runner runs a Forgejo Actions runner that executes
-// each job in a forkd sandbox obtained from the lease API.
+// Command spoond-runner runs a Forgejo Actions runner that executes
+// each job in a microVM sandbox obtained from the lease API.
 //
 // Configuration is read from the environment:
 //
 //	FORGEJO_URL       Forgejo instance base URL (e.g. https://code.lacy.casa)
 //	RUNNER_TOKEN       Runner registration token
-//	RUNNER_NAME        Runner name prefix (default "forkd-runner")
+//	RUNNER_NAME        Runner name prefix (default "spoond-runner")
 //	RUNNER_LABELS      Comma-separated labels (default "ubuntu-latest")
 //	LEASE_URL          Lease API base URL (default http://127.0.0.1:8890)
 //	LEASE_TOKEN        Lease API bearer token
@@ -76,7 +76,7 @@ func Main(args []string) int {
 	if token == "" {
 		log.Fatal("RUNNER_TOKEN is required")
 	}
-	name := envOr("RUNNER_NAME", "forkd-runner")
+	name := envOr("RUNNER_NAME", "spoond-runner")
 	labels := strings.Split(envOr("RUNNER_LABELS", "ubuntu-latest"), ",")
 	leaseURL := envOr("LEASE_URL", "http://127.0.0.1:8890")
 	leaseToken := os.Getenv("LEASE_TOKEN")

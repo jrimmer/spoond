@@ -31,7 +31,7 @@ func TestN1_Policies(t *testing.T) {
 	}
 
 	// internet: public and LAN reachable (internet maps to public plus the
-	// LAN ranges, as in forkd).
+	// LAN ranges).
 	l = createLease(t, map[string]any{"image": "py-base", "ttl": 600, "network_policy": "internet"})
 	if !canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "internet: 1.1.1.1:443 blocked, want reachable")
@@ -81,8 +81,7 @@ func TestN1_Policies(t *testing.T) {
 }
 
 // TestN2_LivePolicyChange switches a lease from none to internet while it
-// runs. Requires the U09 network route; on forkd it fails (route absent),
-// which is the recorded baseline result.
+// runs. Requires the U09 network route.
 func TestN2_LivePolicyChange(t *testing.T) {
 	begin(t)
 	l := createLease(t, map[string]any{"image": "py-base", "ttl": 600, "network_policy": "none"})

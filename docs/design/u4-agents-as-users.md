@@ -3,6 +3,14 @@
 > Epic #26 · parallel research (delegated agent, 2026-08-11) · input to U4 implementation.
 > Scope: per-agent identity for MCP/ACP endpoints (KTD-1: separate keypair per agent).
 
+> **Update 2026-10-02.** The `FORKD_TOKEN` fallback described below was removed
+> with forkd (U12 step 18): `cmd/spoond-acp` and `cmd/spoond-dev-mcp` now read
+> `FORKD_AGENT_TOKEN` only, and it is required. Every other `FORKD_*` name this
+> memo mentions (`FORKD_BACKEND_URL`, `FORKD_IMAGE`, `FORKD_LLM_MODEL`, …)
+> survives unchanged as a deployed configuration name. The analysis below is
+> the memo as written in 2026-08-11 and is kept as the historical record of
+> the U4 decision.
+
 ---
 
 ---

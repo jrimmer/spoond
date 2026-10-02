@@ -11,7 +11,7 @@ set -u
 . "$(dirname "$0")/lib.sh"
 
 UNIT=/etc/systemd/system/spoond-sshd-gateway.service
-KEYS=/etc/forkd-gateway/keys
+KEYS=/etc/spoond-gateway/keys
 GWKEY=/tmp/itest_stat_key
 GWKEY_PUB=/tmp/itest_stat_key.pub
 SSHOPTS="-i $GWKEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"

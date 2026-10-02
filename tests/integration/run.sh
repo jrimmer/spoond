@@ -1,13 +1,14 @@
 #!/bin/bash
-# run.sh — forkd integration test suite orchestrator.
+# run.sh — spoond integration test suite orchestrator.
 #
-# Runs the full integration suite against a live forkd stack (vm2).
-# By default tests run locally against 127.0.0.1:8890; pass SSHHOST to
-# stage and run on a remote host (e.g. SSHHOST=root@10.1.0.11).
+# Runs the full integration suite against a live spoond stack on an
+# E2B host (vm2). By default tests run locally against 127.0.0.1:8890;
+# pass SSHHOST to stage and run on a remote host (e.g.
+# SSHHOST=root@10.1.0.11).
 #
 # Usage:
 #   tests/integration/run.sh              # run locally on vm2
-#   SSHHOST=root@10.1.0.11 tests/integration/run.sh   # from Hermes host
+#   SSHHOST=root@10.1.0.11 tests/integration/run.sh   # from another host
 set -u
 cd "$(dirname "$0")"
 DIR="$(pwd)"
@@ -24,21 +25,21 @@ echo "wsclient built"
 # If SSHHOST is set, stage everything there and run remotely.
 if [ -n "$SSHHOST" ]; then
   echo "== staging to $SSHHOST =="
-  ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" "mkdir -p /tmp/forkd-itest"
-  scp -q -r "$DIR/." "$SSHHOST:/tmp/forkd-itest/"
+  ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" "mkdir -p /tmp/spoond-itest"
+  scp -q -r "$DIR/." "$SSHHOST:/tmp/spoond-itest/"
   # gateway test needs the backend token in its env file; run.sh picks it up from /etc
   # The cap runs REMOTELY (vm2 has GNU timeout; the local machine may
   # be macOS/zsh where `timeout` doesn't exist). If the remote run
   # hangs, timeout kills it and ssh returns.
   ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" \
-    "cd /tmp/forkd-itest && timeout 600 env BE_API='$BE_API' bash run.sh"
+    "cd /tmp/spoond-itest && timeout 600 env BE_API='$BE_API' bash run.sh"
   RC=$?
   exit $RC
 fi
 
 # Local run (on vm2 or wherever the backend is reachable).
 source ./lib.sh
-echo "== forkd integration suite =="
+echo "== spoond integration suite =="
 echo "backend: $BE_API  host: $(hostname)"
 echo
 

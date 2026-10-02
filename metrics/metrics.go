@@ -1,16 +1,12 @@
 // Package metrics defines the Prometheus metric contracts for all spoond
 // services (issue #20). Each service (backend, SSH gateway, CI runner)
 // owns its own registry and exposes a /metrics endpoint; the backend
-// additionally merges namespaced controller passthrough metrics.
+// additionally appends the orchestrator's collector output verbatim.
 //
-// Metric naming: spoond_* for service-owned, spoond_controller_* for
-// raw forkd-controller passthrough (renamed from forkd_* to avoid
-// collision with service semantics).
+// Metric naming: spoond_* for service-owned metrics.
 package metrics
 
 import (
-	"strings"
-
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -18,13 +14,13 @@ import (
 
 // BackendMetrics holds all backend-owned metrics. They are registered
 // on a dedicated registry so handleMetrics can emit service-owned
-// metrics alongside the namespaced controller passthrough.
+// metrics alongside the orchestrator passthrough.
 type BackendMetrics struct {
 	Registry *prometheus.Registry
 
 	// Pool
 	PoolReady      *prometheus.GaugeVec     // {image}: warm VMs available
-	PoolCap        prometheus.Gauge         // POOL_SIZE × len(KNOWN_IMAGES)
+	PoolCap        prometheus.Gauge         // POOL_SIZE × number of stocked images
 	PoolRefill     *prometheus.CounterVec   // {image}: refill events
 	PoolRefillFail *prometheus.CounterVec   // {image}: refill failures
 	PoolRefillDur  *prometheus.HistogramVec // {image}: refill duration
@@ -112,7 +108,7 @@ func NewBackendMetrics() *BackendMetrics {
 	}, []string{"image"})
 	m.PoolCap = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "pool_cap",
-		Help: "Designed warm-pool size (POOL_SIZE × len(KNOWN_IMAGES)).",
+		Help: "Designed warm-pool size (POOL_SIZE × number of stocked images).",
 	})
 	m.PoolRefill = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "pool_refill_total",
@@ -474,20 +470,4 @@ func NewRunnerMetrics() *RunnerMetrics {
 		m.ExecRetries, m.ExecErrors, m.CheckoutDur, m.SandboxCreateFail,
 	)
 	return m
-}
-
-// NamespaceControllerMetrics rewrites forkd_ controller metrics to
-// spoond_controller_ so service vs controller semantics never collide
-// on the same scrape target. The input is the raw Prometheus text
-// format from forkd-controller's /metrics endpoint.
-func NamespaceControllerMetrics(raw []byte) string {
-	// Rewrite metric names: forkd_sandboxes_active → spoond_controller_sandboxes_active, etc.
-	// Only rewrite lines that start with forkd_ (metric names or HELP/TYPE comments).
-	lines := strings.Split(string(raw), "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "forkd_") || strings.HasPrefix(line, "# HELP forkd_") || strings.HasPrefix(line, "# TYPE forkd_") {
-			lines[i] = strings.Replace(line, "forkd_", "spoond_controller_", 1)
-		}
-	}
-	return strings.Join(lines, "\n")
 }

@@ -55,7 +55,7 @@ type Server struct {
 	// consumer token; empty (the default) disables the admin routes.
 	adminToken string
 	// metrics (issue #20): service-owned Prometheus metrics served at
-	// /metrics alongside namespaced controller passthrough.
+	// /metrics alongside the orchestrator's collector output.
 	metrics *metrics.BackendMetrics
 	// authFails (security review #37 L5) throttles repeated failed
 	// token auths per client IP.
@@ -708,8 +708,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleEndpoint reports a lease's sandbox endpoint (interim until U09,
-// which rewrites it): the sandbox id and the host address guests use.
+// handleEndpoint reports a lease's sandbox endpoint: the substrate
+// sandbox id and the host address guests use.
 func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
@@ -919,7 +919,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		mt, payload, err := ws.ReadMessage()
 		if err != nil {
 			// The WebSocket closed first: stop streaming but do NOT kill
-			// the process (forkd matched this: the agent saw EOF).
+			// the process (the agent sees EOF).
 			_ = proc.Close()
 			break
 		}
@@ -1684,7 +1684,7 @@ func requestEnv(lease *Lease, env map[string]string) map[string]string {
 }
 
 // buildShellArgs wraps a command with cwd/env into a single shell
-// invocation, since forkd's exec takes argv and no cwd/env. Both env
+// invocation, since the substrate's exec takes argv and no cwd/env. Both env
 // keys and values are shell-quoted so a hostile key cannot inject
 // shell metacharacters.
 func buildShellArgs(cmd, cwd string, env map[string]string) []string {

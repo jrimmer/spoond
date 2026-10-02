@@ -5,7 +5,7 @@ source "$(dirname "$0")/lib.sh"
 # Adds a temporary test key to the allowlist, tests, then restores the unit.
 set -u
 UNIT=/etc/systemd/system/spoond-sshd-gateway.service
-KEYS=/etc/forkd-gateway/keys
+KEYS=/etc/spoond-gateway/keys
 GWKEY=/tmp/itest_gw_key
 GWKEY_PUB=/tmp/itest_gw_key.pub
 SSHOPTS="-i $GWKEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
@@ -56,7 +56,7 @@ if [ -n "$CTLID" ]; then
   # exec after restart must work (fresh sandbox, state restored)
   OUT2=$(api POST "/api/sandboxes/$CTLID/exec" '{"cmd":"echo RESTARTED_OK"}')
   assert_contains "exec works after restart" "$OUT2" "RESTARTED_OK"
-  # proxy after restart must work (netns preserved across resume)
+  # proxy after restart must work (guest address preserved across resume)
   sleep 5
   CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $CTLID-8080.sandbox.lacy.casa" "http://127.0.0.1:8891/")
   # guest has nothing on 8080; 502 is fine (proxy dialed), 400/404 is a proxy-path regression

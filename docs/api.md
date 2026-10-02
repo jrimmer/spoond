@@ -26,47 +26,62 @@ Request:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `image` | string | *(required)* | image tag, must be in the registry and `KNOWN_IMAGES` allowlist |
+| `image` | string | *(required)* | image name, must have a current build in the catalog (`GET /api/images`) |
 | `ttl` | int | `DEFAULT_TTL_SECS` | seconds; capped at `MAX_TTL_SECS` |
-| `persistent` | bool | `false` | workspace-backed: not TTL-swept, supports suspend/resume |
-| `memory_mib` | int | *(image default)* | guest memory request |
-| `network` | string | *(image default)* | legacy network mode |
+| `persistent` | bool | `false` | survives TTL sweeps, supports suspend/resume and periodic checkpoint |
+| `memory_mib` | int | *(image default)* | **fixed per image**: `0` or exactly the image's memory, else `400` |
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
-| `egress_allowlist` | []string | *(host bridge only)* | additional IPs/CIDRs/domains for `network_policy=restricted` |
-| `init_cmd` | string | *(none)* | command run at sandbox start |
-| `expose_ports` | []int | *(none)* | guest TCP ports to publish on the lease's bridge address for peer sandboxes (#70). Max 8; 8888/9000 refused; `501` without netns access |
+| `egress_allowlist` | []string | *(host services only)* | additional IPs/CIDRs/domains for `network_policy=restricted` |
+| `expose_ports` | []int | *(none)* | guest TCP ports to publish on the lease's host address for peer sandboxes (#70). Max 8 |
 
 Response `201 Created`:
 
 ```json
 {
   "id": "8f3a…32hex…",
-  "address": "10.42.0.2:8888",
+  "owner": "consumer",
+  "address": "10.11.0.5",
   "image": "dev-base",
   "ttl": 300,
   "persistent": false,
-  "expires_at": "2026-08-11T03:00:00Z",
-  "exposed": {"9042": "10.43.0.10:9042"}
+  "expires_at": "2026-10-01T03:00:00Z",
+  "exposed": {"9042": "10.11.0.5:9042"}
 }
 ```
 
-`exposed` maps each published port to `<bridge-ip>:<port>` — reachable from
-the host and from sandboxes whose policy reaches `10.43.0.0/16` (`lan`,
-`internet`, or an allowlisted `restricted`); never from the LAN. Only replies
-flow back out, so a `network_policy: none` lease stays unable to originate
-connections. The same map appears in `GET /api/sandboxes`.
+`address` is the sandbox's host-side address (`HostIP`); `exposed` maps each
+published port to `<host-ip>:<port>` — reachable from the host and from
+sandboxes whose policy reaches it (`lan`, `internet`, or an allowlisted
+`restricted`), never from the LAN. The same map appears in `GET
+/api/sandboxes`. A create is a **memory-snapshot restore** of the image's
+current build, so it is warm.
 
 ### `GET /api/sandboxes` — list leases
 
 Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each lease has
-`id`, `image`, `address`, `expires_at` (RFC3339), `persistent`,
-`suspended`, `name`, `comment`, `network_policy`, `egress_allowlist`.
+`id`, `owner`, `image`, `address`, `expires_at` (RFC3339), `persistent`,
+`suspended`, `state`, `build_id`, `resume_build_id`, `name`, `comment`,
+`net_policy`, `egress_allowlist`, `exposed`.
 
-### `GET /api/sandboxes/{id}` *(via `GET /api/names/{name}`)* — resolve by name
+### `GET /api/sandboxes/{id}` — one lease
 
-`GET /api/names/{name}` returns `{"id": "<lease-id>"}` for a friendly
-name set with `tag`. Used by the SSH gateway (`ssh <name>@…`) and by
-scripts/LLM tools.
+The list row plus the lifecycle fields:
+
+| Field | Meaning |
+|---|---|
+| `state` | `running` \| `suspended` \| `recovered` \| `lost` |
+| `build_id` | the build the sandbox currently runs (its image's template build, a pause build, a checkpoint build, or a fork source) |
+| `resume_build_id` | set while suspended: the pause build `resume` restores from |
+| `recovered_from` | set on a lease recovered after a substrate crash: the checkpoint time it resumed from |
+| `last_checkpoint_at` | the lease's last checkpoint time |
+
+A `lost` lease answers `410` on exec/stream with `sandbox lost in a
+substrate crash; delete this lease`; delete it and start again.
+
+### `GET /api/names/{name}` — resolve by name
+
+Returns `{"id": "<lease-id>"}` for a friendly name set with `tag`. Used by
+the SSH gateway (`ssh <name>@…`) and by scripts/agent tools.
 
 ### `DELETE /api/sandboxes/{id}` — delete
 
@@ -107,18 +122,47 @@ timeout). Response `200 OK`:
 
 ### `GET /api/sandboxes/{id}/endpoint` — resolve network endpoint
 
-Returns the underlying forkd sandbox endpoint (for gateway/SSH use):
+Returns the substrate sandbox id and the host-side address guests use.
+`netns` is always empty on the E2B substrate (kept for response
+compatibility; the gateway no longer reads it):
 
 ```json
-{"id":"…","forkd_id":"…","image":"…","netns":"forkd-…","guest_addr":"10.42.0.2:8888"}
+{"id":"…","forkd_id":"i…","image":"…","netns":"","guest_addr":"10.11.0.5"}
 ```
+
+`guest_addr` is the sandbox's host-side address (`HostIP`), the same value
+as `address` in `POST /api/sandboxes`. `forkd_id` is the substrate sandbox
+id; the name predates the E2B substrate and is kept for response
+compatibility (D5).
 
 ### `GET /api/sandboxes/{id}/stream` — interactive PTY (WebSocket)
 
-Upgrade to WebSocket; first client message `{"args":[…],"cwd":…,
-"env":{…},"pty":true}` starts a PTY; output streams as text frames;
-client text frames are written to process stdin; `{"action":"stop"}`
-terminates.
+Upgrade to WebSocket; the first client message is the exec request:
+`{"args":[…],"cwd":…,"env":{…},"pty":true,"binary":bool}`.
+
+In **text mode** (the default) every server event comes back as one text
+JSON frame — `started`, incremental `stdout`/`stderr`/`pty` chunks,
+`exit_code`, `error` — and client text frames carry either
+`{"in":"…"}` (written to process stdin) or a control message.
+
+In **binary mode** (`"binary":true`, for programs that emit or consume
+arbitrary bytes) process output arrives as WebSocket binary frames whose
+first byte selects the channel — `1` stdout, `2` stderr, `3` pty — and
+client binary frames are raw stdin. `started`, `exit_code` and `error`
+remain text JSON frames in both modes.
+
+Control messages (text frames):
+
+| Message | Effect |
+|---|---|
+| `{"in":"…"}` | write to process stdin (text mode only) |
+| `{"action":"stop"}` | SIGTERM, then keep relaying until the process exits |
+| `{"action":"kill"}` | SIGKILL, then keep relaying until the process exits |
+| `{"action":"eof"}` | close the process's stdin |
+| `{"resize":{"cols":C,"rows":R}}` | resize the PTY |
+
+Closing the WebSocket alone does **not** kill the process — the stream
+closes, the process keeps running.
 
 ### `POST /api/sandboxes/{id}/keepalive` — extend persistent lease
 
@@ -128,13 +172,43 @@ not persistent.
 
 ### `POST /api/sandboxes/{id}/suspend` — snapshot + stop
 
-Workspace-backed persistent leases only. The controller snapshots the
-sandbox and stops it; the lease remains and can be resumed.
+Persistent leases only. The substrate snapshots the running sandbox
+(memory included) into a new build and stops it; the lease stays, becomes
+`suspended`, and can be resumed from `resume_build_id`. `400` if not
+persistent; `409` if busy.
 
 ### `POST /api/sandboxes/{id}/resume` — start from snapshot
 
-Re-hydrates a suspended workspace-backed lease. `400` if not
-workspace-backed; `409` if already running.
+Restores a suspended lease from its pause build, with its memory intact.
+`400` if not persistent; `409` if already running.
+
+### `POST /api/sandboxes/{id}/checkpoint` — snapshot a running lease
+
+Snapshots a running sandbox into a new build **without stopping it**: the
+lease keeps running, and its `last_checkpoint_at` advances. Persistent
+leases are checkpointed automatically every `CHECKPOINT_INTERVAL_MINS`;
+this does it on demand. Owner only, live leases only (`409` otherwise,
+including busy). Response `200 OK`:
+
+```json
+{"id":"…","build_id":"<uuid>","at":"2026-10-01T12:00:00Z"}
+```
+
+A checkpoint is what a lease is recovered from after a substrate crash
+(see [operations.md](operations.md#crash-recovery-unplanned)).
+
+### `POST /api/sandboxes/{id}/fork` — copy a running sandbox N times
+
+Checkpoints the running sandbox into a new build, then creates `count`
+sandboxes from it. Request: `{"count": N, "persistent": bool, "ttl": S}`;
+`count` is 1..20 (`400` otherwise). Response `201 Created`:
+
+```json
+{"source":"<id>","build_id":"<uuid>","ids":["…","…"]}
+```
+
+Forked leases are independent from the source from the moment of the
+snapshot.
 
 ### `POST /api/sandboxes/{id}/restart` — reboot
 
@@ -150,12 +224,43 @@ Request `{"name": "<unique-per-owner-name>"}`. Response
 
 Request `{"comment": "…"}`. Response `{"id":"…","comment":"…","ok":true}`.
 
-### `POST /api/sandboxes/{id}/clone` — branch to new snapshot
+### `POST /api/sandboxes/{id}/clone` — copy a running sandbox
 
-Request (optional) `{"tag":"my-snapshot"}` — default tag
-`clone-<id8>-<unix>`. Branches the running sandbox, spawns a lease from
-the branch (persistent, `MAX_TTL_SECS`). Response `201 Created`:
-`{"id":"…","image":"…","source":"<source-id>","branch_tag":"…","persistent":true,"expires_at":"…"}`.
+Checkpoints the running sandbox and creates a new persistent lease from
+that build (`MAX_TTL_SECS`). Response `201 Created`:
+`{"id":"…","image":"…","source":"<source-id>","build_id":"<uuid>","persistent":true,"expires_at":"…"}`.
+
+### `POST /api/sandboxes/{id}/network` — change egress policy live
+
+Request: `{"network_policy":"none|lan|internet|restricted",
+"egress_allowlist":[…]}`. The lease is updated and saved, the egress
+config is re-applied to its sandbox, and every peer's allowances are
+refreshed. Owner only. Response `200 OK`:
+`{"id":"…","network_policy":"…","egress_allowlist":[…]}`.
+
+### `GET /api/snapshots` — list your snapshot builds
+
+Every non-deleted build owned by the caller — pauses, checkpoints and
+fork sources (image template builds have no owner and are not listed).
+Response `200 OK`:
+
+```json
+{"snapshots":[{
+  "build_id":"<uuid>","kind":"pause|checkpoint",
+  "image":"dev-base","parent_build_id":"<uuid>|null",
+  "size_bytes":1234567890,"created_at":"2026-10-01T12:00:00Z",
+  "in_use":false}]}
+```
+
+`in_use` is true while anything keeps the build (an image's current
+build, a resumed lease, a non-deleted child or a `build_refs` entry).
+
+### `DELETE /api/snapshots/{build_id}` — delete a snapshot build
+
+`204 No Content` on success. `404` unknown, deleted, or another owner's
+build; `403` for an image template build; `409` while `in_use`.
+Deletion frees the build's disk immediately (the catalog GC's rules are
+the same).
 
 ### `POST /api/sandboxes/{id}/prompt` — message the in-sandbox Shelley agent
 
@@ -179,10 +284,43 @@ for Gatus/load balancers.
 
 ### `GET /metrics`
 
-Proxies forkd-controller's Prometheus metrics. Admin-only (identity
-store present) — requires the caller's token to resolve to an admin
-user; `403` for non-admins and legacy consumer tokens when a store is
-present.
+Serves the backend's own Prometheus metrics, and — when `OTEL_PROM_URL`
+is set — appends the orchestrator's collector output after a marker line.
+Admin-only (identity store present) or the scrape-only `METRICS_TOKEN`;
+`403` for non-admins and legacy consumer tokens when a store is present.
+
+---
+
+## Admin (drain, undrain, reconcile)
+
+Operations endpoints for the substrate lifecycle, authenticated with a
+separate `Authorization: Bearer <ADMIN_TOKEN>` (not a user or consumer
+token). With no `ADMIN_TOKEN` configured the routes answer `404`; a wrong
+or missing token answers `401`.
+
+### `POST /api/admin/drain` — pause everything for an orchestrator restart
+
+Pauses every live lease into a pause build (4 at a time), deletes the warm
+pool, then waits until the orchestrator reports no running sandboxes and
+no outstanding work. Response `200 OK`:
+
+```json
+{"paused":N,"failed":[],"pool_deleted":M,"quiesced":true}
+```
+
+`503` when the orchestrator is unreachable — nothing changes then. See
+[operations.md](operations.md#the-drain-protocol-planned-orchestrator-restarts).
+
+### `POST /api/admin/undrain` — resume after the restart
+
+Resumes every drained lease from its pause build:
+`{"resumed":N,"failed":[]}`.
+
+### `POST /api/admin/reconcile` — run crash recovery now
+
+Runs the crash reconciliation that otherwise happens at backend start,
+every 30 s and on orchestrator recovery, and returns its summary:
+`{"recovered":N,"lost":M}`.
 
 ---
 

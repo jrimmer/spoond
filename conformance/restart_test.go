@@ -18,7 +18,7 @@ func requireDestructive(t *testing.T) {
 	}
 }
 
-// requireE2B skips substrate-specific tests on forkd.
+// requireE2B skips tests that only make sense on the E2B substrate.
 func requireE2B(t *testing.T) {
 	if cfg.Substrate != "e2b" {
 		skipf(t, "e2b only (substrate %q)", cfg.Substrate)

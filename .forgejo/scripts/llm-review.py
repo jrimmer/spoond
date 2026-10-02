@@ -160,7 +160,7 @@ print(
 
 prompt = (
     "You are a senior Go engineer reviewing a pull request for spoond — "
-    "a control plane for forkd microVM sandboxes providing lease management, "
+    "a lease API over E2B-orchestrated Firecracker microVM sandboxes providing lease management, "
     "SSH gateway, HTTP proxy, LLM gateway, MCP/ACP agent endpoints, "
     "Forgejo Actions runner, and multi-user tenancy. "
     "Respond in English. "

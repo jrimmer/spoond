@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib.sh — shared helpers for forkd integration tests.
+# lib.sh — shared helpers for the spoond integration tests.
 # Sourced by each test file. Requires: BE_API (backend base URL),
 # TOKEN (consumer token), and optional SSHHOST for remote execution.
 set -u
@@ -7,10 +7,10 @@ set -u
 # Backend API (https, self-signed — always -k).
 BE_API="${BE_API:-https://127.0.0.1:8890}"
 TOKEN="${TOKEN:-}"
-if [ -z "$TOKEN" ] && [ -f /etc/spoond-backend.env ]; then
+if [ -z "$TOKEN" ] && [ -f /etc/spoond/backend.env ]; then
   # Format: CONSUMER_TOKENS=<token>=<consumer-id> — take the part
   # before the first '=' after the key.
-  TOKEN=$(grep -oE 'CONSUMER_TOKENS=[^ ]+' /etc/spoond-backend.env | cut -d= -f2- | cut -d= -f1)
+  TOKEN=$(grep -oE 'CONSUMER_TOKENS=[^ ]+' /etc/spoond/backend.env | cut -d= -f2- | cut -d= -f1)
 fi
 
 # Optional: run everything through ssh (tests run from Hermes host).
@@ -27,7 +27,7 @@ run() { # run <cmd...> — locally or via ssh
 # Results are appended to $RESULTS_FILE (set by run.sh; truncated there)
 # so that test files running in subshells contribute to the parent's
 # summary. Without this the orchestrator only sees its own assertions.
-RESULTS_FILE="${RESULTS_FILE:-/tmp/forkd-itest-results.txt}"
+RESULTS_FILE="${RESULTS_FILE:-/tmp/spoond-itest-results.txt}"
 PASS=0; FAIL=0; FAILED_NAMES=()
 
 ok()   { PASS=$((PASS+1)); echo "OK $1" >> "$RESULTS_FILE"; echo "  ✅ $1"; }

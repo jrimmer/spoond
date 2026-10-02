@@ -1,7 +1,7 @@
 // Package commandadapter implements the command adapter: a synchronous,
 // caller-driven HTTP front-end over the lease API. A caller posts a
 // command/snippet + image and gets the result back. It depends only on
-// the SandboxProvider port, not on forkd or the lease API internals.
+// the SandboxProvider port, not on the lease API internals.
 package commandadapter
 
 import (

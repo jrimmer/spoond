@@ -1,11 +1,15 @@
 # spoond deployment
 
-Three systemd units run on sandbox (10.1.0.11):
+Four systemd units run on vm2 (10.1.0.11), counting the E2B substrate unit
+they depend on:
 
-1. **forkd-backend** — the lease API (`:8890`) with the warm pool
-2. **forkd-sshd-gateway** — the SSH gateway (`:2222`) + ctl plane
-3. **forkd-runner** — the Forgejo Actions runner (adaptive pool)
-4. **forkd-spawn-watchdog** — spawn-outage auto-recovery + diagnostics (timer)
+0. **e2b-orchestrator** — the sandbox substrate (Firecracker microVM
+   lifecycle, snapshots, sandbox proxy). Deployed from the
+   `lacy.casa/e2b-runtime` fork; see [docs/install.md](../docs/install.md)
+   and [docs/substrate.md](../docs/substrate.md).
+1. **spoond-backend** — the lease API (`:8890`), warm pool, SQLite state
+2. **spoond-sshd-gateway** — the SSH gateway (`:2222`) + ctl plane
+3. **spoond-runner** — the Forgejo Actions runner (adaptive pool)
 
 > Full user docs: [docs/setup.md](../docs/setup.md),
 > [docs/api.md](../docs/api.md), [docs/ctl.md](../docs/ctl.md),
@@ -13,111 +17,124 @@ Three systemd units run on sandbox (10.1.0.11):
 > [docs/operations.md](../docs/operations.md). This file is the
 > deploy-specific quick reference.
 
-## 1. forkd-backend (lease API)
+## 0. e2b-orchestrator (substrate)
 
-### Build
+Brought up by `deploy/e2b/host-setup.sh` plus the remaining steps of
+[U04](../docs/plans/2026-09-30-e2b-substrate/U04-host-bringup.md):
+the `e2b-orchestrator.service` unit with `deploy/e2b/orchestrator.env`,
+the token seed (`/etc/spoond/e2b-token-seed`), the `flags.json` override,
+the `e2b-guard` host firewall and the OpenTelemetry collector.
 
 ```bash
-go build -o forkd-backend ./cmd/forkd-backend
+install -m 644 deploy/e2b/e2b-orchestrator.service /etc/systemd/system/
+install -m 600 deploy/e2b/orchestrator.env /etc/e2b/orchestrator.env
+systemctl daemon-reload && systemctl enable --now e2b-orchestrator
 ```
 
-### Deploy
+The unit carries the drain hooks (U10): `ExecStop` pauses every running
+sandbox before the SIGTERM lands, `ExecStartPost` resumes them once the
+orchestrator is up. Deliberate restarts therefore lose nothing — see the
+[drain protocol](../docs/operations.md).
+
+## 1. spoond-backend (lease API)
+
+### Build and deploy
 
 ```bash
-scp forkd-backend root@10.1.0.11:/opt/forkd-backend/
-scp deploy/forkd-backend.service root@10.1.0.11:/etc/systemd/system/
+go build -o /opt/spoond/spoond ./cmd/spoond
+install -m 644 deploy/spoond-backend.service /etc/systemd/system/
 ```
 
-On sandbox, create `/etc/forkd-backend.env`:
+On vm2, create `/etc/spoond/backend.env` (mode 0600). The full variable
+reference is in [docs/setup.md](../docs/setup.md) and
+[docs/install.md](../docs/install.md); the minimum:
 
 ```bash
-cat > /etc/forkd-backend.env <<'EOF'
+cat > /etc/spoond/backend.env <<'EOF'
 CONSUMER_TOKENS=<token>=<consumer>,<token2>=<consumer2>
-POOL_SIZE=3
-TLS_CERT=/etc/forkd-backend/tls/fullchain.pem
-TLS_KEY=/etc/forkd-backend/tls/privkey.pem
+E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
+HOST_GUEST_SERVICE_ADDR=10.1.0.11
+TLS_CERT=/etc/spoond/tls/fullchain.pem
+TLS_KEY=/etc/spoond/tls/privkey.pem
 EOF
-chmod 600 /etc/forkd-backend.env
+chmod 600 /etc/spoond/backend.env
 ```
 
 - `CONSUMER_TOKENS` — comma-separated `token=consumer` pairs; consumers
   authenticate with these bearer tokens
-- `POOL_SIZE` — pre-fork that many sandboxes per image so grants are served
-  from the warm pool (milliseconds) instead of cold-spawning. 0 disables
-- `TLS_CERT`/`TLS_KEY` — serve HTTPS. On sandbox this uses the Let's Encrypt
-  cert for `sandbox.lacy.casa` (see TLS below)
+- `E2B_TOKEN_SEED_FILE` — the seed file shared with the orchestrator
+  (envd/traffic tokens derive from it)
+- `HOST_GUEST_SERVICE_ADDR` — the host address guests use to reach the
+  proxy/LLM gateway and the lease API
+- `TLS_CERT`/`TLS_KEY` — serve HTTPS on :8890. On vm2 this uses the
+  Let's Encrypt cert for `sandbox.lacy.casa` (see TLS below)
 
 Then:
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now forkd-backend
-systemctl status forkd-backend
+systemctl enable --now spoond-backend
+systemctl status spoond-backend
 ```
 
 ### Verify
 
 ```bash
+spoond doctor
 curl -s -H "Authorization: Bearer <token>" https://sandbox.lacy.casa:8890/api/images
 ```
 
-## 2. forkd-sshd-gateway (SSH gateway + ctl plane)
+## 2. spoond-sshd-gateway (SSH gateway + ctl plane)
 
-### Build
-
-```bash
-go build -o forkd-sshd-gateway ./cmd/forkd-sshd-gateway
-```
-
-### Deploy
+### Build and deploy
 
 ```bash
-scp forkd-sshd-gateway root@10.1.0.11:/opt/forkd-gateway/
-scp deploy/forkd-sshd-gateway.service root@10.1.0.11:/etc/systemd/system/
+go build -o /opt/spoond/spoond ./cmd/spoond
+install -m 644 deploy/spoond-sshd-gateway.service /etc/systemd/system/
 ```
 
-The unit runs with `--client-keys /etc/forkd-gateway/keys` — a
-**directory**; each `*.pub` file is a user. Add a user = drop their
-`.pub` into the dir + restart. Only the key's owner may connect; the
-username selects the capability (`ctl`, `new-*`, `<lease-id>`, or a
-friendly name).
+The unit runs with `--client-keys /etc/spoond-gateway/keys` — a
+**directory**; each `*.pub` file is a user (legacy allowlist mode). With
+`USERS_FILE` set on the backend, the identity store is the single source
+of truth and the directory is ignored. Add a user = drop their `.pub`
+into the dir + restart, or `ssh-key add` via the ctl plane.
+
+The backend credential lives in `/etc/spoond-gateway.env` (mode 0600) as
+`SPOOND_GATEWAY_TOKEN` — never in `ExecStart`, so `/proc/<pid>/cmdline`
+cannot expose it (it is admin-equivalent: the gateway impersonates the
+authenticated SSH user via `X-Spoond-User-Id`).
 
 ### Verify
 
 ```bash
-ssh ctl@sandbox.lacy.casa -p 2222 "ls"
-ssh new@sandbox.lacy.casa -p 2222    # auto-create + attach
+ssh ctl@sandbox.lacy.casa "ls"
+ssh new@sandbox.lacy.casa    # auto-create + attach
 ```
 
-## 3. forkd-runner (Forgejo Actions)
+## 3. spoond-runner (Forgejo Actions)
 
 Runs an **adaptive pool** of concurrent runner workers: one process
 registers N runners with Forgejo, scales up when all are busy, and scales
 back down to a floor when load subsides.
 
-### Build
+### Build and deploy
 
 ```bash
-go build -o forkd-runner ./cmd/forkd-runner
+go build -o /opt/spoond/spoond ./cmd/spoond
+install -m 644 deploy/spoond-runner.service /etc/systemd/system/
 ```
 
-### Deploy
+On vm2, create `/etc/spoond-runner.env` (mode 0600):
 
 ```bash
-scp forkd-runner root@10.1.0.11:/opt/forkd-runner/
-scp deploy/forkd-runner.service root@10.1.0.11:/etc/systemd/system/
-```
-
-On sandbox, create `/etc/forkd-runner.env`:
-
-```bash
-cat > /etc/forkd-runner.env <<'EOF'
+cat > /etc/spoond-runner.env <<'EOF'
 FORGEJO_URL=https://code.lacy.casa
 RUNNER_TOKEN=<registration token>
-RUNNER_NAME=forkd-runner
-RUNNER_LABELS=forkd
+RUNNER_NAME=spoond-runner
+RUNNER_LABELS=ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
 LEASE_URL=https://sandbox.lacy.casa:8890
 LEASE_TOKEN=<consumer token>
+IMAGE_MAP=ubuntu-latest=py-base,go=go-base,golang=go-base,elixir=elixir-base,elixir-base=elixir-base,llm-review=llm-review,dev=dev-base,elixir-release=elixir-release,release=elixir-release
 DEFAULT_IMAGE=py-base
 RUNNER_FLOOR=3
 RUNNER_MAX=12
@@ -126,86 +143,38 @@ SCALE_UP_DELAY=10s
 SCALE_DOWN_DELAY=60s
 JOB_RECORD_DIR=/var/lib/spoond/jobs
 EOF
-chmod 600 /etc/forkd-runner.env
+chmod 600 /etc/spoond-runner.env
 ```
 
-Pool tuning:
-- `RUNNER_FLOOR` — minimum registered runners always kept (default 3)
-- `RUNNER_MAX` — maximum registered runners (default 12). Kept at or above
-  `RUNNER_FLOOR`; a lower max registers only `max` runners and serializes
-  every job behind them
-- `RUNNER_SCALE_STEP` — runners added/removed per scale event (default 3)
-- `SCALE_UP_DELAY` — how long all workers must be busy before scaling up
-- `SCALE_DOWN_DELAY` — how long a worker must be idle before scaling down
-- `JOB_RECORD_DIR` — where failed jobs are recorded as JSON (default
-  `/var/lib/spoond/jobs`); empty disables recording
+Pool tuning (`RUNNER_FLOOR`, `RUNNER_MAX`, `RUNNER_SCALE_STEP`,
+`SCALE_UP_DELAY`, `SCALE_DOWN_DELAY`, `JOB_RECORD_DIR`) is documented in
+[docs/setup.md](../docs/setup.md) and
+[docs/ci-jobs.md](../docs/ci-jobs.md).
 
 Then:
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now forkd-runner
-systemctl status forkd-runner
+systemctl enable --now spoond-runner
+systemctl status spoond-runner
 ```
 
 ### Verify
 
 ```bash
 # pool starts at floor
-journalctl -u forkd-runner | grep 'pool: spawned'
+journalctl -u spoond-runner | grep 'pool: spawned'
 
-# scale-up: fire N concurrent jobs; pool grows by SCALE_STEP
-# scale-down: after jobs finish, pool returns to FLOOR
-journalctl -u forkd-runner | grep -E 'spawned worker|stopped worker'
-```
-
-## 4. forkd-spawn-watchdog (auto-recovery + diagnostics)
-
-A systemd timer that detects the forkd spawn outage ("socket ... never
-appeared within 10s" / empty warm pool while the backend is active),
-captures a diagnostics tarball, and recovers: kills leaked firecrackers,
-removes stale daemon dirs (NEVER `/var/run/netns`), restarts the
-controller. The warm pool then refills via the backend.
-
-### Install
-
-```bash
-scp deploy/forkd-spawn-watchdog.sh root@10.1.0.11:/usr/local/bin/
-scp deploy/forkd-watchdog.service deploy/forkd-watchdog.timer root@10.1.0.11:/etc/systemd/system/
-```
-
-On sandbox:
-
-```bash
-chmod +x /usr/local/bin/forkd-spawn-watchdog.sh
-systemctl daemon-reload
-systemctl enable --now forkd-watchdog.timer
-systemctl list-timers forkd-watchdog
-```
-
-### Behaviour
-
-- Runs every 5 minutes (`forkd-watchdog.timer` → `forkd-watchdog.service`)
-- **Healthy**: exits 0 quietly, no tarball, no recovery
-- **Triggered**: logs the reason, captures `/var/log/forkd/watchdog/forkd-watchdog-<ts>.tar.gz`
-  (trigger, controller/backend/runner journals, firecracker ps, daemon-dir
-  inventory, netns list, sandboxes.json, dmesg, service status — newest 5
-  kept), then kills firecrackers, removes stale daemon dirs, restarts the
-  controller, and logs the tarball path to journald for triage
-- **Test mode** (no recovery): `FORKD_WATCHDOG_TEST_CAPTURE=1 /usr/local/bin/forkd-spawn-watchdog.sh`
-
-### Verify
-
-```bash
-# healthy (exit 0, no output)
-/usr/local/bin/forkd-spawn-watchdog.sh
-# capture-only smoke test (creates one tarball, does NOT recover)
-FORKD_WATCHDOG_TEST_CAPTURE=1 /usr/local/bin/forkd-spawn-watchdog.sh
-ls -l /var/log/forkd/watchdog/
+# scale-up: fire N concurrent jobs; pool grows by RUNNER_SCALE_STEP
+# scale-down: after jobs finish, pool returns to RUNNER_FLOOR
+journalctl -u spoond-runner | grep -E 'spawned worker|stopped worker'
 ```
 
 ## TLS
 
-The backend serves TLS on `:8890` using sandbox's Let's Encrypt cert for
-`sandbox.lacy.casa`. sandbox's `/etc/hosts` pins that hostname to 10.1.0.11 so the
-runner reaches the backend directly (not via Caddy).
+The backend serves TLS on `:8890` using vm2's Let's Encrypt cert for
+`sandbox.lacy.casa`. vm2's `/etc/hosts` pins that hostname to 10.1.0.11
+so the runner reaches the backend directly (not via Caddy). The proxy /
+LLM gateway listener (`:8891`) stays plain HTTP behind Caddy, which
+fronts the `*.sandbox.lacy.casa` wildcard; see
+`deploy/caddy-sandbox-forwardauth.conf` for the forward-auth block.

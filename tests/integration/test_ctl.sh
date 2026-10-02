@@ -5,7 +5,7 @@ source "$(dirname "$0")/lib.sh"
 # Adds a temporary test key to the allowlist, tests, then restores the unit.
 set -u
 UNIT=/etc/systemd/system/spoond-sshd-gateway.service
-KEYS=/etc/forkd-gateway/keys
+KEYS=/etc/spoond-gateway/keys
 GWKEY=/tmp/itest_gw_key
 GWKEY_PUB=/tmp/itest_gw_key.pub
 SSHOPTS="-i $GWKEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
@@ -82,24 +82,16 @@ echo "== ctl: suspend/resume =="
 if [ -n "$CTLID" ]; then
   OUT=$(timeout 60 $SSH "suspend $CTLID" 2>&1)
   assert_contains "suspend returns JSON" "$OUT" '"status":"suspended"'
-  # the workspace should now be suspended in the controller
-  WS_STATE=$(curl -s --max-time 8 http://127.0.0.1:8889/v1/workspaces)
-  if echo "$WS_STATE" | grep -q "\"name\":\"ws-$CTLID\".*\"status\":\"suspended\""; then
-    ok "workspace $CTLID suspended in controller"
-  else
-    bad "workspace $CTLID suspended in controller"
-  fi
+  # the lease is now suspended in the catalog
+  WS_STATE=$(api GET "/api/sandboxes/$CTLID")
+  assert_contains "lease suspended in catalog" "$WS_STATE" '"state":"suspended"'
   # exec while suspended must fail cleanly (409 conflict, not hang)
   CODE=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/sandboxes/$CTLID/exec" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"cmd":"echo should-not-run"}')
   assert_eq "exec on suspended lease 409" "$CODE" "409"
   OUT=$(timeout 90 $SSH "resume $CTLID" 2>&1)
   assert_contains "resume returns JSON" "$OUT" '"status":"running"'
-  WS_STATE2=$(curl -s --max-time 8 http://127.0.0.1:8889/v1/workspaces)
-  if echo "$WS_STATE2" | grep -q "\"name\":\"ws-$CTLID\".*\"status\":\"running\""; then
-    ok "workspace $CTLID running after resume"
-  else
-    bad "workspace $CTLID running after resume"
-  fi
+  WS_STATE2=$(api GET "/api/sandboxes/$CTLID")
+  assert_contains "lease running after resume" "$WS_STATE2" '"state":"running"'
   # exec after resume must work (state restored, fresh sandbox id)
   OUT2=$(api POST "/api/sandboxes/$CTLID/exec" '{"cmd":"echo RESUMED_OK"}')
   assert_contains "exec works after resume" "$OUT2" "RESUMED_OK"
@@ -116,9 +108,6 @@ echo
 echo "== ctl: cleanup =="
 if [ -n "${CLONEID:-}" ]; then
   api DELETE "/api/sandboxes/$CLONEID" >/dev/null && ok "deleted clone lease" || bad "delete clone lease"
-  # remove the branch snapshot too (it's a persistent forkd snapshot)
-  curl -s --max-time 10 -X DELETE "http://127.0.0.1:8889/v1/snapshots/${BRANCHTAG:-none}" >/dev/null 2>&1
-  ok "removed branch snapshot"
 fi
 if [ -n "$CTLID" ]; then
   api DELETE "/api/sandboxes/$CTLID" >/dev/null && ok "deleted ctl lease" || bad "delete ctl lease"

@@ -3,7 +3,7 @@
 //
 // ACP is the JSON-RPC 2.0 / NDJSON-over-stdio contract that hosts like
 // Buzz's buzz-acp use to attach agent CLIs. The agent's tools execute
-// in forkd microVM leases; its LLM comes from the forkd LLM gateway;
+// in microVM leases; its LLM comes from the per-lease LLM gateway;
 // keys stay off-VM. This is the "agent plane" companion to #23's "tool
 // plane".
 //
@@ -165,8 +165,8 @@ var (
 // ---------- server ----------
 
 // Agent is the sandbox+LLM execution core. It is the port the ACP
-// server uses; production implementation runs tools in a forkd lease
-// and prompts the forkd LLM gateway. Tests can fake it.
+// server uses; production implementation runs tools in a lease and
+// prompts the LLM gateway. Tests can fake it.
 type Agent interface {
 	// NewSession creates a session-scoped sandbox lease. Returns the
 	// lease id.
