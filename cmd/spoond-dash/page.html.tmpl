@@ -62,7 +62,7 @@
   @font-face { font-family: "Press Start 2P"; src: url("/static/fonts/press-start-2p.woff2") format("woff2"); font-display: swap; }
   .big { font-family: "Press Start 2P", var(--sb-font-ui); font-size: 32px; -webkit-font-smoothing: none; font-smooth: never; line-height: 1; display: flex; align-items: center; gap: 14px; }
   /* Every pixel-styled number uses Press Start 2P, at multiples of its 8px grid. */
-  sb-gauge::part(value) { font-family: "Press Start 2P", var(--sb-font-ui); font-size: 32px; font-weight: 400; -webkit-font-smoothing: none; }
+  sb-gauge::part(value) { font-family: "Press Start 2P", var(--sb-font-ui); font-size: 24px; font-weight: 400; -webkit-font-smoothing: none; }
   .big .aside { font-family: var(--sb-font-ui); font-size: 18px; font-weight: 400; color: var(--sb-text-muted); }
   .sub { font-size: 12px; color: var(--sb-text-muted); margin-top: 8px; }
   .gauges sb-gauge { --sb-gauge-size: 100%; }
@@ -80,8 +80,12 @@
   .pill.running, .pill.active { color: var(--sb-ok); }
   .pill.suspended, .pill.activating, .pill.recovered { color: var(--sb-warn); }
   .pill.lost, .pill.failed, .pill.inactive, .pill.unknown { color: var(--sb-danger); }
-  .services { display: flex; flex-wrap: wrap; gap: 10px; }
-  .svc { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--sb-surface-inset); font-size: 13px; }
+  /* Units: an even grid of rows, name left and state right-aligned. */
+  .services { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+  .svc { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--sb-surface-inset); font-size: 13px; min-width: 0; }
+  .svc .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .svc .state { margin-left: auto; font-size: 12px; color: var(--sb-text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .svc:not(.active) .state { color: var(--sb-danger); }
   .svc i { width: 10px; height: 10px; background: var(--sb-danger); }
   .svc.active i { background: var(--sb-ok); box-shadow: 0 0 8px var(--sb-ok); }
   .counters { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 13px; color: var(--sb-text-2); }
@@ -141,8 +145,8 @@
       <sb-sparkline show-value tone="accent" length="{{hist}}" data-attr:values="JSON.stringify($_h.running || [])" data-attr:value="$_s.running"></sb-sparkline></div>
     <div class="panel"><div class="label">API requests / s</div>
       <sb-sparkline show-value decimals="1" length="{{hist}}" data-attr:values="JSON.stringify($_h.reqPerSec || [])" data-attr:value="$_s.reqPerSec"></sb-sparkline></div>
-    <div class="panel"><div class="label">Lease grant · ms</div>
-      <sb-sparkline show-value unit=" ms" length="{{hist}}" data-attr:values="JSON.stringify($_h.grantMs || [])" data-attr:value="$_s.grantMs"></sb-sparkline></div>
+    <div class="panel"><div class="label">Creates / min</div>
+      <sb-sparkline show-value length="{{hist}}" data-attr:values="JSON.stringify($_h.createsPerMin || [])" data-attr:value="$_s.createsPerMin"></sb-sparkline></div>
     <div class="panel"><div class="label">Egress connections</div>
       <sb-sparkline show-value length="{{hist}}" data-attr:values="JSON.stringify($_h.fwConns || [])" data-attr:value="$_s.fwConns"></sb-sparkline></div>
   </section>
@@ -162,7 +166,8 @@
       <span>quota rejections<b data-text="$_s.quota">{{.Quota}}</b></span>
       <span>capacity refusals<b data-text="$_s.capacity">{{.Capacity}}</b></span>
       <span>build failures<b data-text="$_s.buildFails">{{.BuildFails}}</b></span>
-      <span>mean create<b data-text="$_s.createMs">{{.CreateMs}}</b>ms</span>
+      <span>create (1 h)<b data-text="$_s.createMs < 0 ? '–' : ($_s.createMs < 1000 ? Math.round($_s.createMs) : ($_s.createMs / 1000).toFixed(1))">–</b><span data-text="$_s.createMs < 0 ? '' : ($_s.createMs < 1000 ? 'ms' : 's')"></span></span>
+      <span>resume (1 h)<b data-text="$_s.resumeMs < 0 ? '–' : ($_s.resumeMs < 1000 ? Math.round($_s.resumeMs) : ($_s.resumeMs / 1000).toFixed(1))">–</b><span data-text="$_s.resumeMs < 0 ? '' : ($_s.resumeMs < 1000 ? 'ms' : 's')"></span></span>
     </div>
     <div class="err" data-show="$_s.err !== ''" data-text="$_s.err">{{.Err}}</div>
   </footer>
@@ -171,4 +176,4 @@
 </html>
 {{define "leases"}}<table id="leases"><thead><tr><th>lease</th><th>image</th><th>owner</th><th>state</th><th>network</th><th>age</th><th>left</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.ID}}{{if .Name}} <span class="dim">{{.Name}}</span>{{end}}</td><td>{{.Image}}</td><td>{{.Owner}}</td><td><span class="pill {{.State}}">{{.State}}</span></td><td class="dim">{{.Policy}}</td><td class="dim">{{.Age}}</td><td>{{.Left}}</td></tr>{{else}}<tr><td colspan="7" class="empty">no live leases · the pad is quiet</td></tr>{{end}}</tbody></table>{{end}}
 {{define "images"}}<table id="images"><thead><tr><th>image</th><th>live</th><th>shape</th><th>baked</th></tr></thead><tbody>{{range .Images}}<tr><td>{{.Name}}</td><td>{{if .Live}}<b>{{.Live}}</b>{{else}}<span class="dim">0</span>{{end}}</td><td class="dim">{{.VCPU}} vCPU · {{.MemMB}} MiB</td><td class="dim">{{.Updated}}</td></tr>{{end}}</tbody></table>{{end}}
-{{define "services"}}<div id="services" class="services">{{range .Services}}<span class="svc {{.State}}"><i></i>{{.Name}} <span class="dim">{{.State}}</span></span>{{end}}</div>{{end}}
+{{define "services"}}<div id="services" class="services">{{range .Services}}<span class="svc {{.State}}"><i></i><span class="name">{{.Name}}</span><span class="state">{{.State}}</span></span>{{end}}</div>{{end}}

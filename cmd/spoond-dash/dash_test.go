@@ -31,10 +31,13 @@ spoond_leases_total 1234
 spoond_node_running_sandboxes 3
 # TYPE spoond_http_requests_total counter
 spoond_http_requests_total{path="/api/sandboxes",method="POST",code="201"} %d
-# TYPE spoond_lease_grant_duration_seconds histogram
-spoond_lease_grant_duration_seconds_bucket{le="+Inf"} %d
-spoond_lease_grant_duration_seconds_sum %s
-spoond_lease_grant_duration_seconds_count %d
+# TYPE spoond_create_duration_seconds histogram
+spoond_create_duration_seconds_bucket{resume="false",le="+Inf"} %d
+spoond_create_duration_seconds_sum{resume="false"} %s
+spoond_create_duration_seconds_count{resume="false"} %d
+spoond_create_duration_seconds_bucket{resume="true",le="+Inf"} 3
+spoond_create_duration_seconds_sum{resume="true"} 4.2
+spoond_create_duration_seconds_count{resume="true"} 3
 # --- orchestrator (otel) ---
 # TYPE orchestrator_sandbox_limit gauge
 orchestrator_sandbox_limit 64
@@ -84,7 +87,7 @@ func TestCollectMetricsAndRates(t *testing.T) {
 	if s.Running != 3 || s.Limit != 64 || s.Version != "0.4.2" {
 		t.Fatalf("orchestrator section not parsed: running=%d limit=%d version=%q", s.Running, s.Limit, s.Version)
 	}
-	if s.ReqPerSec != 0 || s.GrantMs != 0 {
+	if s.ReqPerSec != 0 || s.CreatesPerMin != 0 || s.CreateMs != -1 || s.ResumeMs != -1 {
 		t.Fatalf("first scrape has no rate: %+v", s)
 	}
 
@@ -93,8 +96,11 @@ func TestCollectMetricsAndRates(t *testing.T) {
 	if s.ReqPerSec < 2.9 || s.ReqPerSec > 3.1 { // 30 requests over ~10 s
 		t.Fatalf("reqPerSec = %v, want ~3", s.ReqPerSec)
 	}
-	if s.GrantMs != 250 { // (5.5-5) s over 2 grants
-		t.Fatalf("grantMs = %v, want 250", s.GrantMs)
+	if s.CreateMs != 250 || s.CreatesPerMin != 2 { // (5.5-5) s over 2 fresh creates
+		t.Fatalf("createMs = %v, createsPerMin = %v, want 250 and 2", s.CreateMs, s.CreatesPerMin)
+	}
+	if s.ResumeMs != -1 { // the resume series did not move
+		t.Fatalf("resumeMs = %v, want -1 (none in the window)", s.ResumeMs)
 	}
 	if s.Down != 1 || s.Services[0].State == "active" {
 		t.Fatalf("missing unit should count as down: %+v", s.Services)

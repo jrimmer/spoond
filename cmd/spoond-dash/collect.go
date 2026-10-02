@@ -42,10 +42,13 @@ type Snapshot struct {
 	BuildsBusy int            `json:"buildsBusy"`
 
 	// Rates and latencies over the last interval.
-	ReqPerSec  float64 `json:"reqPerSec"`
-	GrantMs    float64 `json:"grantMs"`  // mean lease grant time
-	CreateMs   float64 `json:"createMs"` // mean substrate create time
-	FwConns    int     `json:"fwConns"`  // active egress firewall connections
+	ReqPerSec     float64 `json:"reqPerSec"`
+	CreatesPerMin float64 `json:"createsPerMin"` // leases created in the last minute
+	// Mean substrate create and resume time over the last hour, in ms;
+	// -1 when there were none (shown as "–", never as a misleading 0).
+	CreateMs   float64 `json:"createMs"`
+	ResumeMs   float64 `json:"resumeMs"`
+	FwConns    int     `json:"fwConns"` // active egress firewall connections
 	AuthFails  int     `json:"authFails"`
 	Quota      int     `json:"quota"` // quota rejections, cumulative
 	Throttled  int     `json:"throttled"`
@@ -99,6 +102,7 @@ type collector struct {
 
 	prevCounters map[string]float64 // cumulative values from the last scrape
 	prevAt       time.Time
+	samples      []sample  // cumulative create counters, newest last, at most an hour
 	prevCPU      [2]uint64 // busy, total jiffies
 }
 
@@ -240,27 +244,71 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 		}
 	}
 
-	// Rates: deltas of cumulative series since the last scrape.
-	grantSum, grantN := hist(fams["spoond_lease_grant_duration_seconds"])
-	createSum, createN := hist(fams["spoond_create_duration_seconds"])
-	cur := map[string]float64{
-		"req": g("spoond_http_requests_total"), "grantSum": grantSum, "grantN": grantN,
-		"createSum": createSum, "createN": createN,
-	}
+	// Request rate: the delta since the last scrape.
+	cur := map[string]float64{"req": g("spoond_http_requests_total")}
 	if !c.prevAt.IsZero() {
-		dt := now.Sub(c.prevAt).Seconds()
-		d := func(k string) float64 { return max(cur[k]-c.prevCounters[k], 0) }
-		if dt > 0 {
-			s.ReqPerSec = round1(d("req") / dt)
-		}
-		if n := d("grantN"); n > 0 {
-			s.GrantMs = round1(d("grantSum") / n * 1000)
-		}
-		if n := d("createN"); n > 0 {
-			s.CreateMs = round1(d("createSum") / n * 1000)
+		if dt := now.Sub(c.prevAt).Seconds(); dt > 0 {
+			s.ReqPerSec = round1(max(cur["req"]-c.prevCounters["req"], 0) / dt)
 		}
 	}
 	c.prevCounters, c.prevAt = cur, now
+
+	// Creates and resumes happen a few times an hour, so their rate and
+	// means come from windows over an hour of cumulative samples, not
+	// from one scrape interval (where they would read 0 almost always).
+	fs, fn := histBy(fams["spoond_create_duration_seconds"], "resume", "false")
+	rs, rn := histBy(fams["spoond_create_duration_seconds"], "resume", "true")
+	c.samples = append(c.samples, sample{at: now, freshSum: fs, freshN: fn, resumeSum: rs, resumeN: rn})
+	for len(c.samples) > 1 && now.Sub(c.samples[0].at) > time.Hour {
+		c.samples = c.samples[1:]
+	}
+	minute, hour := c.since(now.Add(-time.Minute)), c.samples[0]
+	last := c.samples[len(c.samples)-1]
+	s.CreatesPerMin = max(last.freshN+last.resumeN-minute.freshN-minute.resumeN, 0)
+	s.CreateMs, s.ResumeMs = -1, -1
+	if n := last.freshN - hour.freshN; n > 0 {
+		s.CreateMs = round1((last.freshSum - hour.freshSum) / n * 1000)
+	}
+	if n := last.resumeN - hour.resumeN; n > 0 {
+		s.ResumeMs = round1((last.resumeSum - hour.resumeSum) / n * 1000)
+	}
+}
+
+// sample is one scrape's cumulative create/resume histogram totals.
+type sample struct {
+	at                                   time.Time
+	freshSum, freshN, resumeSum, resumeN float64
+}
+
+// since returns the oldest sample taken at or after t (the newest if
+// none is that recent). A counter reset (backend restart) can make a
+// window negative; callers clamp at 0.
+func (c *collector) since(t time.Time) sample {
+	for _, smp := range c.samples {
+		if !smp.at.Before(t) {
+			return smp
+		}
+	}
+	return c.samples[len(c.samples)-1]
+}
+
+// histBy sums a histogram's sample sum and count over the series whose
+// label name has the given value.
+func histBy(f *dto.MetricFamily, name, value string) (sum, count float64) {
+	if f == nil {
+		return 0, 0
+	}
+	for _, m := range f.GetMetric() {
+		for _, l := range m.GetLabel() {
+			if l.GetName() == name && l.GetValue() == value {
+				if h := m.GetHistogram(); h != nil {
+					sum += h.GetSampleSum()
+					count += float64(h.GetSampleCount())
+				}
+			}
+		}
+	}
+	return sum, count
 }
 
 func (c *collector) fromHost(s *Snapshot) error {
