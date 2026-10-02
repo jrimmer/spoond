@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en" data-sb-theme="deep-space" class="sb-cloak">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spoond // sandbox control</title>
+<link rel="stylesheet" href="/static/css/reset.css">
+<link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="stylesheet" href="/static/css/theme.css">
+<link rel="stylesheet" href="/static/css/themes.css">
+<link rel="stylesheet" href="/static/css/base.css">
+<script type="importmap">{"imports": {"datastar": "/static/vendor/datastar-rocket.js"}}</script>
+<script type="module" src="/static/vendor/datastar-rocket.js"></script>
+<script type="module" src="/static/components/gauge/gauge.js"></script>
+<script type="module" src="/static/components/meter/meter.js"></script>
+<script type="module" src="/static/components/sparkline/sparkline.js"></script>
+<script type="module" src="/static/components/odometer/odometer.js"></script>
+<script type="module" src="/static/components/starfield/starfield.js"></script>
+<script type="module" src="/static/components/theme-switch/theme-switch.js"></script>
+<script>setTimeout(() => document.documentElement.classList.remove("sb-cloak"), 1500)</script>
+<style>
+@layer components {
+  :root { --gap: 14px; }
+  body { background: var(--sb-bg); color: var(--sb-text-1); font-family: var(--sb-font-ui); min-height: 100vh; }
+  .sb-cloak :not(:defined) { visibility: hidden; }
+  /* A faint CRT: scanlines over everything, never in the way. */
+  body::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 10;
+    background: repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 0.12) 2px 3px); }
+
+  .wrap { max-width: 1440px; margin: 0 auto; padding: var(--gap); display: grid; gap: var(--gap); }
+
+  /* Pixel panel: a stepped frame with notched corners. */
+  .panel { --s: var(--sb-frame-step, 3px); position: relative; padding: 16px 18px;
+    background: var(--sb-surface-card); box-shadow: inset 0 0 0 var(--s) var(--sb-frame-color, var(--sb-border));
+    clip-path: polygon(var(--s) 0, calc(100% - var(--s)) 0, calc(100% - var(--s)) var(--s), 100% var(--s),
+      100% calc(100% - var(--s)), calc(100% - var(--s)) calc(100% - var(--s)), calc(100% - var(--s)) 100%,
+      var(--s) 100%, var(--s) calc(100% - var(--s)), 0 calc(100% - var(--s)), 0 var(--s), var(--s) var(--s)); }
+  .label { font-family: var(--sb-font-display); text-transform: uppercase; letter-spacing: 0.08em;
+    font-size: 13px; color: var(--sb-text-2); margin-bottom: 8px; }
+  .label::before { content: "▸ "; color: var(--sb-brand); }
+
+  header.top { position: relative; overflow: hidden; min-height: 110px; display: flex; align-items: center;
+    gap: 24px; flex-wrap: wrap; }
+  header.top sb-starfield { position: absolute; inset: 0; z-index: 0; opacity: 0.7; }
+  header.top > :not(sb-starfield) { position: relative; z-index: 1; }
+  .title { font-family: var(--sb-font-display); font-size: clamp(22px, 3vw, 34px); letter-spacing: 0.06em;
+    text-shadow: 3px 3px 0 var(--sb-brand-subtle, transparent); }
+  .title small { display: block; font-size: 13px; color: var(--sb-text-muted); letter-spacing: 0.2em; }
+  .lamp { display: inline-flex; align-items: center; gap: 10px; font-family: var(--sb-font-display);
+    padding: 6px 12px; background: var(--sb-surface-inset); }
+  .lamp i { width: 14px; height: 14px; background: var(--sb-ok); box-shadow: 0 0 10px var(--sb-ok); animation: blink 2s steps(2) infinite; }
+  .lamp.warn i { background: var(--sb-warn); box-shadow: 0 0 10px var(--sb-warn); }
+  @keyframes blink { 50% { opacity: 0.35; } }
+  .meta { margin-left: auto; text-align: right; font-size: 13px; color: var(--sb-text-2); line-height: 1.7; }
+  .meta b { color: var(--sb-text-1); font-weight: 600; }
+
+  .grid { display: grid; gap: var(--gap); }
+  .g4 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .g2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+  .big { font-family: var(--sb-font-display); font-size: 44px; line-height: 1; display: flex; align-items: baseline; gap: 8px; }
+  .big sb-odometer { --sb-odometer-size: 44px; }
+  .sub { font-size: 12px; color: var(--sb-text-muted); margin-top: 8px; }
+  .gauges sb-gauge { --sb-gauge-size: 100%; }
+  .gauge-cell { display: grid; justify-items: center; }
+  .spark sb-sparkline { display: block; inline-size: 100%; --sb-sparkline-width: 100%; --sb-sparkline-height: 54px; }
+  sb-meter { --sb-meter-width: 100%; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-family: var(--sb-font-display); font-weight: 400; color: var(--sb-text-2);
+    text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 8px; border-bottom: 3px solid var(--sb-border); }
+  td { padding: 5px 8px; border-bottom: 1px dashed var(--sb-border-subtle); white-space: nowrap; }
+  tr:hover td { background: var(--sb-surface-hover); }
+  td.dim { color: var(--sb-text-muted); }
+  .pill { display: inline-block; padding: 1px 8px; font-size: 12px; font-family: var(--sb-font-display); background: var(--sb-surface-inset); }
+  .pill.running, .pill.active { color: var(--sb-ok); }
+  .pill.suspended, .pill.activating, .pill.recovered { color: var(--sb-warn); }
+  .pill.lost, .pill.failed, .pill.inactive, .pill.unknown { color: var(--sb-danger); }
+  .services { display: flex; flex-wrap: wrap; gap: 10px; }
+  .svc { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--sb-surface-inset); font-size: 13px; }
+  .svc i { width: 10px; height: 10px; background: var(--sb-danger); }
+  .svc.active i { background: var(--sb-ok); box-shadow: 0 0 8px var(--sb-ok); }
+  .counters { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 13px; color: var(--sb-text-2); }
+  .counters b { font-family: var(--sb-font-display); color: var(--sb-text-1); font-size: 16px; margin-left: 6px; }
+  .err { color: var(--sb-danger); font-size: 12px; }
+  .empty { color: var(--sb-text-muted); padding: 12px 8px; }
+  .scroll { overflow-x: auto; }
+}
+</style>
+</head>
+<body data-signals="{{signals .}}" data-init="@get('/stream')">
+<main class="wrap">
+
+  <header class="panel top">
+    <sb-starfield tint="violet" density="260" label="" data-attr:speed="Math.round(2 + $_s.running * 1.5)" data-attr:warp="$_s.running > 12"></sb-starfield>
+    <div class="title">SPOOND <span style="color: var(--sb-brand)">//</span> SANDBOX CONTROL<small>vm2 · e2b substrate · live</small></div>
+    <span class="lamp" data-class:warn="$_s.err !== '' || $_s.down > 0"><i></i><span data-text="$_s.err !== '' ? 'SIGNAL DEGRADED' : ($_s.down > 0 ? 'UNIT DOWN' : 'ALL SYSTEMS GO')">ALL SYSTEMS GO</span></span>
+    <div class="meta">
+      <div>clock <b data-text="$_s.at">{{.At}}</b> · host up <b data-text="$_s.uptimeH + ' h'">{{.UptimeH}} h</b></div>
+      <div>orchestrator <b data-text="$_s.version || '?'">{{.Version}}</b></div>
+      <sb-theme-switch compact themes='["deep-space","terminal","nebula","daylight"]' labels='["Deep Space","Terminal","Nebula","Daylight"]' attribute="data-sb-theme" cookie="spoond-dash-theme"></sb-theme-switch>
+    </div>
+  </header>
+
+  <section class="grid g4">
+    <div class="panel"><div class="label">Live leases</div>
+      <div class="big"><sb-odometer drum data-attr:value="$_s.leases" value="{{.Leases}}"></sb-odometer></div>
+      <div class="sub"><span data-text="($_s.byState.running || 0) + ' running · ' + ($_s.byState.suspended || 0) + ' suspended · ' + ($_s.byState.lost || 0) + ' lost'"></span></div></div>
+    <div class="panel"><div class="label">Sandboxes on node</div>
+      <div class="big"><sb-odometer drum data-attr:value="$_s.running" value="{{.Running}}"></sb-odometer><span style="font-size:20px;color:var(--sb-text-muted)" data-text="'/ ' + $_s.limit">/ {{.Limit}}</span></div>
+      <sb-meter segments="24" warn="75" danger="90" unit="%" data-attr:value="$_s.limit ? Math.round($_s.running / $_s.limit * 100) : 0"></sb-meter></div>
+    <div class="panel"><div class="label">Leases granted</div>
+      <div class="big"><sb-odometer drum grouping data-attr:value="$_s.granted" value="{{.Granted}}"></sb-odometer></div>
+      <div class="sub"><span data-text="$_s.swept + ' swept at TTL · ' + $_s.shares + ' active shares · ' + $_s.users + ' users'"></span></div></div>
+    <div class="panel"><div class="label">Queue &amp; builds</div>
+      <div class="big"><sb-odometer drum data-attr:value="$_s.queued" value="{{.Queued}}"></sb-odometer><span style="font-size:16px;color:var(--sb-text-muted)">queued</span></div>
+      <div class="sub"><span data-text="$_s.buildsBusy + ' image build(s) in flight'"></span></div></div>
+  </section>
+
+  <section class="panel">
+    <div class="label">Host vitals</div>
+    <div class="grid g4 gauges">
+      <div class="gauge-cell"><sb-gauge label="CPU" unit="%" min="0" max="100" warn="75" danger="90" data-attr:value="$_s.cpuPct"></sb-gauge>
+        <div class="sub" data-text="'load ' + $_s.load1 + ' · ' + $_s.cores + ' cores · ' + $_s.vcpuAlloc + ' vCPU leased'"></div></div>
+      <div class="gauge-cell"><sb-gauge label="Memory" unit="%" min="0" max="100" warn="80" danger="92" data-attr:value="$_s.memUsedPct"></sb-gauge>
+        <div class="sub" data-text="$_s.memTotalGiB + ' GiB · ' + $_s.memAllocGiB + ' GiB to sandboxes'"></div></div>
+      <div class="gauge-cell"><sb-gauge label="Hugepages" unit="%" min="0" max="100" warn="80" danger="92" data-attr:value="$_s.hugeUsedPct"></sb-gauge>
+        <div class="sub" data-text="$_s.hugeFreeGiB + ' GiB free'"></div></div>
+      <div class="gauge-cell"><sb-gauge label="Snapshot disk" unit="%" min="0" max="100" warn="80" danger="90" data-attr:value="$_s.diskUsedPct"></sb-gauge>
+        <div class="sub" data-text="$_s.diskFreeGiB + ' GiB free'"></div></div>
+    </div>
+  </section>
+
+  <section class="grid g4 spark">
+    <div class="panel"><div class="label">Sandboxes · 5 min</div>
+      <sb-sparkline show-value tone="accent" length="{{hist}}" data-attr:values="JSON.stringify($_h.running || [])" data-attr:value="$_s.running"></sb-sparkline></div>
+    <div class="panel"><div class="label">API requests / s</div>
+      <sb-sparkline show-value decimals="1" length="{{hist}}" data-attr:values="JSON.stringify($_h.reqPerSec || [])" data-attr:value="$_s.reqPerSec"></sb-sparkline></div>
+    <div class="panel"><div class="label">Lease grant · ms</div>
+      <sb-sparkline show-value unit=" ms" length="{{hist}}" data-attr:values="JSON.stringify($_h.grantMs || [])" data-attr:value="$_s.grantMs"></sb-sparkline></div>
+    <div class="panel"><div class="label">Egress connections</div>
+      <sb-sparkline show-value length="{{hist}}" data-attr:values="JSON.stringify($_h.fwConns || [])" data-attr:value="$_s.fwConns"></sb-sparkline></div>
+  </section>
+
+  <section class="grid g2">
+    <div class="panel"><div class="label">Live leases</div><div class="scroll">{{template "leases" .}}</div></div>
+    <div class="grid" style="align-content: start">
+      <div class="panel"><div class="label">Units</div>{{template "services" .}}</div>
+      <div class="panel"><div class="label">Image catalog</div><div class="scroll">{{template "images" .}}</div></div>
+    </div>
+  </section>
+
+  <footer class="panel">
+    <div class="counters">
+      <span>auth failures<b data-text="$_s.authFails">{{.AuthFails}}</b></span>
+      <span>throttled<b data-text="$_s.throttled">{{.Throttled}}</b></span>
+      <span>quota rejections<b data-text="$_s.quota">{{.Quota}}</b></span>
+      <span>capacity refusals<b data-text="$_s.capacity">{{.Capacity}}</b></span>
+      <span>build failures<b data-text="$_s.buildFails">{{.BuildFails}}</b></span>
+      <span>mean create<b data-text="$_s.createMs + ' ms'">{{.CreateMs}} ms</b></span>
+    </div>
+    <div class="err" data-show="$_s.err !== ''" data-text="$_s.err">{{.Err}}</div>
+  </footer>
+</main>
+</body>
+</html>
+{{define "leases"}}<table id="leases"><thead><tr><th>lease</th><th>image</th><th>owner</th><th>state</th><th>network</th><th>age</th><th>left</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.ID}}{{if .Name}} <span class="dim">{{.Name}}</span>{{end}}</td><td>{{.Image}}</td><td>{{.Owner}}</td><td><span class="pill {{.State}}">{{.State}}</span></td><td class="dim">{{.Policy}}</td><td class="dim">{{.Age}}</td><td>{{.Left}}</td></tr>{{else}}<tr><td colspan="7" class="empty">no live leases · the pad is quiet</td></tr>{{end}}</tbody></table>{{end}}
+{{define "images"}}<table id="images"><thead><tr><th>image</th><th>live</th><th>shape</th><th>baked</th></tr></thead><tbody>{{range .Images}}<tr><td>{{.Name}}</td><td>{{if .Live}}<b>{{.Live}}</b>{{else}}<span class="dim">0</span>{{end}}</td><td class="dim">{{.VCPU}} vCPU · {{.MemMB}} MiB</td><td class="dim">{{.Updated}}</td></tr>{{end}}</tbody></table>{{end}}
+{{define "services"}}<div id="services" class="services">{{range .Services}}<span class="svc {{.State}}"><i></i>{{.Name}} <span class="dim">{{.State}}</span></span>{{end}}</div>{{end}}
