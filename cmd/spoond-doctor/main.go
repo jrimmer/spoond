@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"syscall"
@@ -133,6 +134,7 @@ func runChecks(manifestPath string) []checkResult {
 	out = append(out, checkLLM()...)
 	out = append(out, checkTLS()...)
 	out = append(out, checkDisk()...)
+	out = append(out, checkDrainUnit()...)
 	return out
 }
 
@@ -778,4 +780,79 @@ func x509PoolFromCert(certPath string) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("no certificates parsed from %s", certPath)
 	}
 	return pool, nil
+}
+
+// systemctlShow returns the named properties of a unit (systemctl show
+// -p ...). Replaced in tests.
+var systemctlShow = func(unit string, props ...string) (map[string]string, error) {
+	args := []string{"show", unit}
+	for _, p := range props {
+		args = append(args, "-p", p)
+	}
+	b, err := exec.Command("systemctl", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+// drainEnvPath is the drain hook's configuration (SPOOND_DRAIN_URL,
+// SPOOND_ADMIN_TOKEN_FILE). Replaced in tests.
+var drainEnvPath = "/etc/e2b/drain.env"
+
+// checkDrainUnit verifies that a host shutdown drains leases first:
+// spoond-drain.service must be enabled, ordered after both the backend
+// and the orchestrator (so it stops first and starts last), and able to
+// read its configuration and token. Without it a reboot loses every
+// running lease (2026-10-02).
+func checkDrainUnit() []checkResult {
+	const name = "drain: shutdown unit"
+	props, err := systemctlShow("spoond-drain.service", "UnitFileState", "ActiveState", "After")
+	if err != nil {
+		return []checkResult{{name, "FAIL", fmt.Sprintf("systemctl show spoond-drain.service: %v", err)}}
+	}
+	var problems []string
+	if props["UnitFileState"] != "enabled" {
+		problems = append(problems, fmt.Sprintf("not enabled (%q); a reboot would lose every running lease", props["UnitFileState"]))
+	}
+	if props["ActiveState"] != "active" {
+		problems = append(problems, fmt.Sprintf("not active (%q), so its ExecStop will not run at shutdown", props["ActiveState"]))
+	}
+	after := " " + props["After"] + " "
+	for _, u := range []string{"spoond-backend.service", "e2b-orchestrator.service"} {
+		if !strings.Contains(after, " "+u+" ") {
+			problems = append(problems, "not ordered after "+u)
+		}
+	}
+	env, err := os.ReadFile(drainEnvPath)
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("%s: %v", drainEnvPath, err))
+	} else {
+		vals := map[string]string{}
+		for _, line := range strings.Split(string(env), "\n") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+				vals[k] = v
+			}
+		}
+		if vals["SPOOND_DRAIN_URL"] == "" {
+			problems = append(problems, drainEnvPath+": SPOOND_DRAIN_URL unset")
+		}
+		for _, f := range strings.Split(vals["SPOOND_ADMIN_TOKEN_FILE"], ",") {
+			if f = strings.TrimSpace(f); f == "" {
+				problems = append(problems, drainEnvPath+": SPOOND_ADMIN_TOKEN_FILE unset")
+			} else if _, err := os.ReadFile(f); err != nil {
+				problems = append(problems, fmt.Sprintf("token file %s: %v", f, err))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return []checkResult{{name, "FAIL", strings.Join(problems, "; ") + " (deploy/e2b/spoond-drain.service; docs/operations.md, Rebooting the host)"}}
+	}
+	return []checkResult{{name, "PASS", "spoond-drain enabled, active, ordered after spoond-backend and e2b-orchestrator"}}
 }
