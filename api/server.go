@@ -248,12 +248,21 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
+// isMetricsToken reports whether the request carries the scrape-only
+// METRICS_TOKEN (constant-time compare). An unset token matches nothing.
+func (s *Server) isMetricsToken(r *http.Request) bool {
+	want := s.svc.cfg.MetricsToken
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return want != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // handleMetrics emits spoond's own Prometheus metrics (issue #20),
 // gathered from the live Service state (pool, leases, identity) and
 // rendered via the prometheus registry. Requires admin when the
-// identity store is present (security review #37 M5).
+// identity store is present (security review #37 M5), or the
+// scrape-only METRICS_TOKEN.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if s.svc.identities != nil && !s.requireAdmin(w, r) {
+	if s.svc.identities != nil && !s.isMetricsToken(r) && !s.requireAdmin(w, r) {
 		return
 	}
 	// Update live gauges from current service state before gathering.
@@ -416,6 +425,12 @@ func isHexPath(p string) bool {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The scrape-only token reaches /metrics and nothing else;
+		// handleMetrics accepts it in place of an admin.
+		if r.URL.Path == "/metrics" && s.isMetricsToken(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
