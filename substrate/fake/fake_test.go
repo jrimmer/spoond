@@ -35,12 +35,12 @@ func TestCallLog(t *testing.T) {
 		"NodeInfo",
 		"Pause " + id,
 	}
-	if len(f.Calls) != len(want) {
-		t.Fatalf("Calls = %v, want %v", f.Calls, want)
+	if len(f.CallLog()) != len(want) {
+		t.Fatalf("Calls = %v, want %v", f.CallLog(), want)
 	}
 	for i, w := range want {
-		if f.Calls[i] != w {
-			t.Fatalf("Calls[%d] = %q, want %q", i, f.Calls[i], w)
+		if f.CallLog()[i] != w {
+			t.Fatalf("Calls[%d] = %q, want %q", i, f.CallLog()[i], w)
 		}
 	}
 }

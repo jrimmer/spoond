@@ -31,7 +31,7 @@ func TestPeriodicCheckpointSkipsIdle(t *testing.T) {
 	// checkpointed); the non-persistent one never is.
 	svc.checkpointIdleLeases(ctx)
 	if got := calls(sub.Fake, "Checkpoint "+l.SandboxID); got != 1 {
-		t.Fatalf("due lease checkpointed %d times, want 1 (calls %v)", got, sub.Fake.Calls)
+		t.Fatalf("due lease checkpointed %d times, want 1 (calls %v)", got, sub.Fake.CallLog())
 	}
 	if got := calls(sub.Fake, "Checkpoint "+plain.SandboxID); got != 0 {
 		t.Fatalf("non-persistent lease checkpointed %d times, want 0", got)
