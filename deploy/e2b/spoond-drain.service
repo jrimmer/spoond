@@ -1,0 +1,25 @@
+[Unit]
+Description=spoond drain/undrain around a full stop (host shutdown and boot)
+# Ordered after both the lease API and the orchestrator, so at shutdown
+# this unit stops first (its ExecStop drains while both are still up)
+# and at boot it starts last (its ExecStart undrains once both are up).
+# The orchestrator unit's own ExecStop/ExecStartPost still cover an
+# orchestrator-only restart, when the backend stays up. Drain and
+# undrain are idempotent, so the second call in each pair is a no-op.
+After=e2b-orchestrator.service spoond-backend.service
+Wants=e2b-orchestrator.service spoond-backend.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/e2b/drain.env
+# Wait for the lease API to report the orchestrator healthy (healthz is
+# 503 while it is unreachable); give up after 3 minutes and undrain anyway.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 90); do curl -fsSk -o /dev/null https://127.0.0.1:8890/healthz && exit 0; sleep 2; done; exit 0'
+ExecStart=/opt/spoond/spoond drain --start
+ExecStop=/opt/spoond/spoond drain --stop
+TimeoutStartSec=420
+TimeoutStopSec=330
+
+[Install]
+WantedBy=multi-user.target
