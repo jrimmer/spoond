@@ -166,7 +166,7 @@ type dash struct {
 }
 
 // Sparkline series kept in history, by signal name.
-var series = []string{"running", "reqPerSec", "grantMs", "cpuPct", "memUsedPct", "fwConns"}
+var series = []string{"running", "reqPerSec", "createsPerMin", "cpuPct", "memUsedPct", "fwConns"}
 
 func newDash(cfg Config) (*dash, error) {
 	funcs := template.FuncMap{
@@ -220,8 +220,8 @@ func seriesValue(s Snapshot, k string) float64 {
 		return float64(s.Running)
 	case "reqPerSec":
 		return s.ReqPerSec
-	case "grantMs":
-		return s.GrantMs
+	case "createsPerMin":
+		return s.CreatesPerMin
 	case "cpuPct":
 		return s.CPUPct
 	case "memUsedPct":
