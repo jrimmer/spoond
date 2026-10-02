@@ -264,6 +264,10 @@ func exposedMap(l *Lease) map[string]string {
 	return out
 }
 
+// internetNoopDeny is denied for internet leases only so their egress is
+// never empty (see egressForLocked). TEST-NET-1 is documentation space.
+const internetNoopDeny = "192.0.2.0/24"
+
 // lanRanges is RFC 1918 minus the sandbox networks 10.11.0.0/16 and
 // 10.12.0.0/16: the private CIDRs the lan and internet policies permit.
 var lanRanges = []string{
@@ -312,7 +316,18 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		// Public destinations stay allowed; listing the LAN ranges as
 		// private allowances matches forkd, where internet flushed all
 		// rules and private/LAN addresses stayed reachable.
-		return substrate.Egress{Private: append(append(lanPrivate(l, hostSvc, dns), hostAPI...), s.peerAllowances(l)...)}
+		//
+		// The deny of TEST-NET-1 (RFC 5737; never routed) changes no
+		// traffic. It keeps the policy non-empty in the fork's eyes: on
+		// UpdateEgress (peer refresh) the orchestrator's
+		// applyNetworkEgress collapses an egress with no CIDRs, domains,
+		// rules or proxy to nil, ignoring private allowances, so a
+		// private-only policy lost the lease API after the first peer
+		// lease was created. Remove once the fork counts allowed_private.
+		return substrate.Egress{
+			DeniedCIDRs: []string{internetNoopDeny},
+			Private:     append(append(lanPrivate(l, hostSvc, dns), hostAPI...), s.peerAllowances(l)...),
+		}
 	case PolicyLAN:
 		return substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
