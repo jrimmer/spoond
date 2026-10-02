@@ -144,3 +144,24 @@ func TestIntegrityProbeChecksBehaviourNotExitStatus(t *testing.T) {
 		t.Error("probe relies on --version, which non-GNU tools answer differently; check behaviour instead")
 	}
 }
+
+// Only a lease actually handed out counts toward the image's lifetime
+// uses; a grant that fails its probe does not.
+func TestGrantCountsImageUse(t *testing.T) {
+	svc, _, db, sub := newProbeService(t)
+	ctx := context.Background()
+	if _, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "internet", nil); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	sub.probeFailAll = true
+	if _, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "internet", nil); err == nil {
+		t.Fatal("grant succeeded with a failing probe")
+	}
+	uses, err := db.ImageUses(ctx)
+	if err != nil {
+		t.Fatalf("uses: %v", err)
+	}
+	if uses["py-base"] != 1 {
+		t.Fatalf("py-base uses = %d, want 1", uses["py-base"])
+	}
+}

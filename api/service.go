@@ -1028,10 +1028,21 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
+	s.countImageUse(image)
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
 	return lease, nil
+}
+
+// countImageUse records one grant of image for the dashboard's catalog.
+// A failed write is logged and counted, never fails the grant.
+func (s *Service) countImageUse(image string) {
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if err := s.db.CountImageUse(ctx, image); err != nil {
+		s.storeError("count_image_use", image, err)
+	}
 }
 
 // discardPoolSandbox deletes a pooled sandbox that failed validation:

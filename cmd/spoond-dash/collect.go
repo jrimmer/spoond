@@ -94,6 +94,7 @@ type ImageRow struct {
 	Name, Updated string
 	VCPU, MemMB   int
 	Live          int
+	Uses          int // lifetime lease grants
 }
 
 type collector struct {
@@ -442,6 +443,20 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		return err
 	}
 
+	// Lifetime grants per image. The table arrives with the backend's
+	// migration 0005; until then the column reads 0.
+	uses := map[string]int{}
+	if u, err := db.Query(`SELECT image, uses FROM image_uses`); err == nil {
+		for u.Next() {
+			var image string
+			var n int
+			if u.Scan(&image, &n) == nil {
+				uses[image] = n
+			}
+		}
+		u.Close()
+	}
+
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
 	if err != nil {
 		return err
@@ -455,6 +470,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		}
 		r.Updated = since(now, updated) + " ago"
 		r.Live = s.ByImage[r.Name]
+		r.Uses = uses[r.Name]
 		s.Images = append(s.Images, r)
 	}
 	return imgs.Err()
