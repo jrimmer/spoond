@@ -814,6 +814,28 @@ func (s *Service) touch(id string) {
 	}
 }
 
+// markActive records activity on a lease and persists it immediately:
+// the guest heartbeat needs its write to land now (a crash must not
+// lose the one signal that keeps the lease alive), so unlike touch it
+// does not batch into the sweeper's dirty set — and it drops any pending
+// batched update for the lease, which would otherwise flush an older
+// timestamp over the newer one. Only LastActive moves — ExpiresAt,
+// persistence and state are untouched, and a suspended lease is never
+// resumed. Returns false for unknown/released leases.
+func (s *Service) markActive(id string) bool {
+	s.store.mu.Lock()
+	l := s.store.leases[id]
+	if l == nil || l.released {
+		s.store.mu.Unlock()
+		return false
+	}
+	l.LastActive = time.Now()
+	delete(s.store.lastActiveDirty, id)
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
+	return true
+}
+
 // keepAlive extends a persistent lease's expiry so the sweeper never
 // reclaims it. Non-persistent leases are rejected (their TTL is fixed).
 func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error) {

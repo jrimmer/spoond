@@ -2,7 +2,7 @@
 
 Base URL: `https://<backend>:8890` (HTTPS when `TLS_CERT`/`TLS_KEY` are
 set, plain HTTP otherwise). All endpoints except `/healthz` and the
-`/llm/` prefix require a bearer token:
+`/llm/` and `/lease/` prefixes require a bearer token:
 
 ```
 Authorization: Bearer <token>
@@ -203,6 +203,43 @@ present, keyless identity users are then denied outright (`401`) and
 only legacy consumer-owned leases stay open. The user key is replaced by
 the server-side upstream key before forwarding, so it never reaches the
 provider.
+
+## Guest-service endpoints (port `HOST_GUEST_SERVICE_PORT`)
+
+Besides the per-lease LLM gateway above (`/llm/{lease-id}/…`), the
+guest-service listener serves routes a sandbox itself calls. Every
+network policy — `restricted` included — permits this port.
+
+### `POST /lease/{lease-id}/active` — lease heartbeat
+
+Records activity on a lease so the idle sweep
+(`IDLE_TIMEOUT_SECS`) does not auto-suspend it while an agent is
+working inside the sandbox. An agent never calls the lease API and holds
+no owner token; this route is how it stays visible to the sweeper.
+
+**Capability model:** the lease id in the path is the authorization —
+the same model as `/llm/{lease-id}/` and the SSH gateway. No bearer
+token; a sandbox that knows its own lease id may heartbeat it, and no
+other lease is reachable or revealed through the response.
+
+The heartbeat only sets `LastActive` (the state the idle sweep reads)
+and persists it. It does **not** extend `ExpiresAt`, change
+persistence, resume a suspended lease, or do anything else.
+
+Responses: `204` on success (no body); `404` for an unknown or released
+lease; `409` for a suspended lease; `405` for any other method. Writes
+are limited to one per lease per 60 s — later calls inside that window
+still return `204`, so a fast loop cannot hammer the store.
+
+A guest uses the values its sandbox was created with
+(`SPOOND_GATEWAY_URL`, `SPOOND_LEASE_ID`):
+
+```
+curl -fsS -X POST "$SPOOND_GATEWAY_URL/lease/$SPOOND_LEASE_ID/active"
+```
+
+Metric: `spoond_lease_heartbeats_total` counts accepted heartbeats
+(every `204`, including rate-limited no-op calls).
 
 ## Users & identity (epic #26)
 
