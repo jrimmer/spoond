@@ -105,8 +105,22 @@ open) and prints an empty list. Every vm2 command in U07–U11 uses
 # (test -f /run/spoond-guest-ready) succeeds, so everything done here is in
 # every sandbox's restored memory and disk.
 set -u
+# Resolve only through the LAN resolver (Technitium). No public fallback:
+# public DNS answers *.lacy.casa with the public edge, where credentialed
+# calls must never go, and the router (10.1.0.1) gives stale LAN answers.
 rm -f /etc/resolv.conf
-printf 'nameserver 10.1.0.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n' > /etc/resolv.conf
+printf 'nameserver 10.1.0.2\noptions timeout:2 attempts:3\n' > /etc/resolv.conf
+# Empty dpkg's statoverride. Tools that unpack a base image over the live
+# root (kaniko) keep this file while replacing /etc/group, so any override
+# whose group the base lacks (E2B's chrony adds _chrony; images with dbus
+# carry messagebus) makes apt abort. Overrides only reapply when those
+# packages are reconfigured, which ephemeral sandboxes do not need.
+if [ -f /var/lib/dpkg/statoverride ]; then
+  : > /var/lib/dpkg/statoverride
+fi
+# A container marker, as forkd's docker-export rootfs had: container-aware
+# tools (kaniko) otherwise warn that they run outside a container.
+: > /.dockerenv
 for h in /etc/spoond/init.d/*; do
   [ -x "$h" ] || continue
   echo "spoond-guest-init: running $h"

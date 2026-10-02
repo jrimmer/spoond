@@ -39,7 +39,7 @@ func newLifecycleService(t *testing.T) (*Service, *testSub) {
 func TestEgressForEachPolicy(t *testing.T) {
 	svc, _ := newLifecycleService(t)
 	hostSvc := substrate.PrivateAllowance{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8891}}
-	dns := substrate.PrivateAllowance{CIDR: "10.1.0.1/32", TCPPorts: []uint32{53}}
+	dns := substrate.PrivateAllowance{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}}
 
 	lanPrivateWant := make([]substrate.PrivateAllowance, 0, len(lanRanges)+2)
 	for _, cidr := range lanRanges {

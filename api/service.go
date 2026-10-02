@@ -293,7 +293,8 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		CIDR:     s.cfg.HostGuestAddr + "/32",
 		TCPPorts: []uint32{uint32(s.cfg.HostGuestPort)},
 	}
-	dns := substrate.PrivateAllowance{CIDR: "10.1.0.1/32", TCPPorts: []uint32{53}}
+	// Guests resolve through Technitium only (images/guest/spoond-guest-init).
+	dns := substrate.PrivateAllowance{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}}
 	// The fork's host-address guard admits a destination on the host only
 	// when an allowance names both the IP and the port; the LAN ranges'
 	// any-port allowances do not count. So lan and internet name the lease
