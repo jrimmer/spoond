@@ -6,7 +6,7 @@ owner's yes before an implementation spec is written.
 ## Why
 
 Since 2026-10-01, coding work on spoond runs as a *swarm*: bees
-(`impl-N`) in agent-worker sandboxes take tasks over Agent Mail, implement
+(`bee-N`) in agent-worker leases take tasks over Agent Mail, implement
 them, have them independently verified, and push branches. Today the
 orchestrator (an interactive session on a laptop) does everything between
 those steps: it spawns bees, answers `[READY]` with a task, notices
@@ -80,7 +80,7 @@ controller after `[BYE]`.
 default worker class, `max_workers`. A worker class names the image
 (`agent-worker`), the implement and verify models (Bifrost names), the
 network allowlist, and which task labels it may take (today:
-`needs:vm2-ssh` and `serial:prod` are never taken by sandbox workers).
+`needs:vm2-ssh` and `serial:prod` are never taken by bees).
 
 **C7. Credentials stay on vm2.** The deploy keys, the Agent Mail token and
 the `swarm` lease token live in `/etc/spoond/swarm/secrets/` (0600, root),
