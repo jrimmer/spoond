@@ -203,8 +203,8 @@ Optional per-user concurrency cap (in-flight `/llm/` requests per user;
 `429` when exceeded): set `LLM_MAX_CONCURRENT_PER_USER` (default 0 =
 unlimited).
 
-Config: `LLM_UPSTREAM_URL`/`LLM_UPSTREAM_KEY` (server-side upstream) or
-the sandbox's own Shelley agent.
+Config: `LLM_UPSTREAM_URL`/`LLM_UPSTREAM_KEY` (server-side upstream).
+With no upstream configured the route is not mounted at all (`404`).
 
 ## In-sandbox coding agent (Shelley)
 
@@ -225,10 +225,11 @@ FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-token> \
   ./spoond mcp
 ```
 
-Create the agent user first (`POST /api/users` with `kind=agent`, or
-`ssh ctl@… "ssh-key add <pubkey> <name>"` during bootstrap) and use its
-token (`FORKD_AGENT_TOKEN`); the legacy `FORKD_TOKEN` fallback logs a
-deprecation warning.
+Create the agent user first with `POST /api/users` and
+`kind=agent` — the agent needs a `token` in the request body, not an
+SSH key (`ssh ctl@… "ssh-key add …"` cannot create one: it always
+posts a `person` with no token) — then set `FORKD_AGENT_TOKEN` to that
+token; the legacy `FORKD_TOKEN` fallback logs a deprecation warning.
 
 ### `spoond acp` (Agent Client Protocol server)
 

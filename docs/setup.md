@@ -123,8 +123,11 @@ export TLS_CERT=/etc/spoond/tls/fullchain.pem TLS_KEY=/etc/spoond/tls/privkey.pe
 
 ### systemd unit
 
-See `deploy/spoond-backend.service`; the unit sources
-`/etc/spoond/backend.env` (`chmod 600`).
+See `deploy/spoond-backend.service`. The shipped unit reads
+`EnvironmentFile=-/etc/spoond-backend.env`; the install procedure
+repoints it at `/etc/spoond/backend.env` (`chmod 600`) — that is the
+file the backend sources and the operator snippets in
+[install.md](install.md) and [operations.md](operations.md) read.
 
 ## 2. spoond-sshd-gateway (SSH + ctl plane)
 

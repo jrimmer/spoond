@@ -114,11 +114,15 @@ the moment the snapshot is taken.
 
 Catalog state — the current build of each image and every build ever
 recorded, with its kind (`template`, `pause`, `checkpoint`), versions and
-size — lives in the same SQLite database as leases. There are no bake
-scripts, no `rootfs-init`, and no `KNOWN_IMAGES` allowlist: `GET
-/api/images` is the catalog. See [install.md](install.md) for the build
-command and [operations.md](operations.md) for the GC that reclaims
-unreferenced builds.
+size — lives in the same SQLite database as leases. The forkd-era
+surface is gone from the platform: nothing builds a rootfs or consults
+an allowlist. `GET /api/images` is the catalog. (The forkd-era
+`deploy/bake-*.sh`, `deploy/rebuild-dev-base.sh` and `deploy/rootfs-init`
+still sit in the tree unused for history, and the `KNOWN_IMAGES` name
+survives only in a Prometheus help string for the `pool_cap` gauge.) See
+[install.md](install.md) for the build command and
+[operations.md](operations.md) for the GC that reclaims unreferenced
+builds.
 
 ## Restart and crash behaviour
 

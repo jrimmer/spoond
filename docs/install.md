@@ -83,7 +83,15 @@ chmod 600 /etc/e2b/orchestrator.env /etc/e2b/flags.json
 install -d -m 700 /etc/spoond
 test -s /etc/spoond/e2b-token-seed || openssl rand -hex 32 > /etc/spoond/e2b-token-seed
 chmod 600 /etc/spoond/e2b-token-seed
-install -D -m 644 deploy/e2b/e2b-orchestrator.service /etc/systemd/system/
+# Install the orchestrator unit with its drain hooks stripped out: the
+# shipped unit has EnvironmentFile=/etc/e2b/drain.env with no "-" prefix
+# (so systemd refuses to start it until that file exists) and its
+# ExecStop/ExecStartPost call /opt/spoond-staging/spoond, which does not
+# exist on a fresh host. Step 4 creates /etc/e2b/drain.env and restores
+# the hooks against /opt/spoond/spoond.
+sed -e '/drain\.env/d' -e '/spoond-staging/d' \
+    deploy/e2b/e2b-orchestrator.service \
+    > /etc/systemd/system/e2b-orchestrator.service
 systemctl daemon-reload && systemctl enable --now e2b-guard e2b-orchestrator
 curl -fsS http://127.0.0.1:5008/health     # {"status":"healthy",...}
 ```
@@ -112,7 +120,41 @@ install -D -m 644 deploy/spoond-backend.service deploy/spoond-sshd-gateway.servi
   deploy/spoond-runner.service /etc/systemd/system/
 ```
 
-The backend unit sources `/etc/spoond/backend.env` (0600). Generate the
+The backend unit is forkd-era in two places and needs editing before use
+— it is installed as a starting point, not run verbatim. The shipped
+`deploy/spoond-backend.service` reads its environment from
+`EnvironmentFile=-/etc/spoond-backend.env` (a different path, with a
+leading `-` so the unit still starts when the file is absent) and
+carries `After=forkd-controller.service` plus
+`Environment=FORKD_URL=http://127.0.0.1:8889`, both belonging to the
+substrate spoond no longer uses (nothing reads `FORKD_URL` any more).
+After installing the units, edit
+`/etc/systemd/system/spoond-backend.service`: drop `forkd-controller.service`
+from `After=`, delete the `Environment=FORKD_URL=…` line, and point
+`EnvironmentFile` at `/etc/spoond/backend.env` (0600, created below —
+without it the backend finds no `CONSUMER_TOKENS` and exits on start;
+`spoond doctor` and the operator snippets below source the same file).
+The edited `[Unit]`/`[Service]` heads look like:
+
+```ini
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/spoond/spoond backend
+Environment=BIND_ADDR=127.0.0.1:8890
+EnvironmentFile=-/etc/spoond/backend.env
+```
+
+`EnvironmentFile=-/etc/spoond/backend.env`: keep the leading `-` so a
+missing file cannot block unit startup; the backend itself refuses to
+serve without `CONSUMER_TOKENS`, which is the failure you want.
+`BIND_ADDR` stays `127.0.0.1:8890` unless the gateway or runner needs
+the backend on another address (the env file can override it — entries
+in `EnvironmentFile` win over `Environment=`).
+
+The backend sources `/etc/spoond/backend.env` (0600). Generate the
 secrets and the TLS pair **first** — an `EnvironmentFile` is parsed
 literally by systemd, so a `$(openssl rand …)` written into it stays an
 unexpanded string and never matches anything:
@@ -197,13 +239,23 @@ written above (the hook reads tokens from files, never the environment);
 `SPOOND_DRAIN_INSECURE=1` is needed because the call goes to `127.0.0.1`
 while the certificate is issued for the host's name.
 
-…and add to `e2b-orchestrator.service`'s `[Service]` section:
+Now that the binary and the env file both exist, restore the drain hooks
+in `/etc/systemd/system/e2b-orchestrator.service` — they were stripped
+in step 2 — by adding these lines to the `[Service]` section:
 
 ```ini
 EnvironmentFile=/etc/e2b/drain.env
 ExecStop=/opt/spoond/spoond drain --stop
 ExecStartPost=/opt/spoond/spoond drain --start
 ```
+
+then `systemctl daemon-reload`. A restart is not needed for the hooks to
+apply: systemd picks up the new `ExecStop`/`ExecStartPost` on the next
+stop/start. (If you took the unit from the repo instead of the step-2
+stripped copy, the shipped lines already contain all three — pointing at
+`/opt/spoond-staging/spoond`, the staging path the production host was
+first deployed from. Replace that path; do **not** keep both sets,
+systemd runs every matching line and the stale one fails the start.)
 
 Keep the unit's `TimeoutStartSec=420` and `TimeoutStopSec=330`: with
 systemd's default 90 s, a slow undrain would fail the start and

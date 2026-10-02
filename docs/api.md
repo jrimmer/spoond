@@ -310,8 +310,7 @@ the owner.
 `egress_allowlist` entries are IPs, CIDRs or domains. Entries that name
 another lease — its id, its friendly name, or those prefixed `lease:` —
 are peer references and permit that lease's published ports, not a
-domain. Known limit: a domain entry currently breaks HTTPS to allowlisted
-LAN IPs, so list IPs only where that matters.
+domain.
 
 `lan` and `internet` guests may additionally reach the lease API itself
 on the host service address (so a CI job can lease a database from inside
@@ -392,10 +391,11 @@ before using them by hand.
 ## LLM gateway (per-lease)
 
 `POST /llm/{lease-id}/openai/chat/completions` — OpenAI-compatible chat
-completion against the lease's sandbox-hosted LLM gateway. The lease id
-in the path is the capability; sandboxes hold no consumer token. When no
-`LLM_UPSTREAM_URL` is configured the gateway forwards to the sandbox's
-own Shelley agent instead.
+completion against the configured upstream. The lease id in the path is
+the capability; sandboxes hold no consumer token. The route only exists
+when `LLM_UPSTREAM_URL` is set: with no upstream the gateway is never
+built, so `/llm/…` answers `404` (`spoond doctor` reports the same as a
+WARN). There is no in-sandbox fallback.
 
 Per-user key auth: when the lease owner has an LLM key configured,
 requests must present it as `Authorization: Bearer <user-key>`.
@@ -562,7 +562,9 @@ operation — an `ssh`-share grantee who calls it directly gets `404`
 session channels through `/stream`, so requests carrying it may attach
 over an `ssh` share too). Response `201
 Created` `{"shared":true,"lease_id":…,"grantee":…,"mode":…}`.
-`400` unknown grantee, `403` non-owner.
+`400` unknown grantee; a non-owner gets `404 "sandbox not found"` —
+the lookup is owner-scoped, so a lease you do not own looks the same as
+a lease that does not exist.
 
 There is no per-lease share listing. `GET /api/shares` lists every share
 granted on the caller's leases — `{"shares": [{lease_id, grantee, mode,
