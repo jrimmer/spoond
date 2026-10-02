@@ -15,12 +15,15 @@ not in the map falls through to `DEFAULT_IMAGE`.
 Deployed on the production host:
 
 ```
-RUNNER_LABELS=spoond,ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
+RUNNER_LABELS=forkd,ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
 IMAGE_MAP=ubuntu-latest=py-base,go=go-base,golang=go-base,elixir=elixir-base,\
 elixir-base=elixir-base,llm-review=llm-review,dev=dev-base,\
 elixir-release=elixir-release,release=elixir-release
 DEFAULT_IMAGE=py-base
 ```
+
+The `forkd` label is the runner's historical name, kept so workflows with
+`runs-on: forkd` keep matching; it maps to `DEFAULT_IMAGE`.
 
 So `runs-on: elixir-release` gets the `elixir-release` image. This is the
 only job-side knob: no workflow needs to know about the orchestrator,
@@ -38,9 +41,8 @@ fails with `unknown image tag` rather than falling back.
 
 There are no bake scripts in the pipeline, no rootfs assembly and no
 snapshot tags to re-bake: images are built from Dockerfiles by
-`spoond images build`. (The forkd-era `deploy/bake-*.sh`,
-`deploy/rebuild-dev-base.sh` and `deploy/rootfs-init` scripts still sit
-in the tree for history but nothing invokes them.) An image is:
+`spoond images build`. (The forkd-era bake scripts were removed in 2.0.)
+An image is:
 
 1. a Dockerfile in `images/` (`images/<name>.dockerfile`);
 2. an entry in `images/manifest.yaml` with `baked: true`, the sizing
@@ -105,8 +107,8 @@ Already handled by the runner, so jobs need not:
 - `CI=true` is set in the step environment (interactive prompts otherwise
   hang on `/dev/console`, which never EOFs).
 - Step exec timeouts: `EXEC_TIMEOUT_SECS` / `MAX_EXEC_TIMEOUT_SECS` on the
-  backend (default 300, raised on the production host to cover long
-  builds). Do not reintroduce a ceiling by hardcoding a shorter timeout
+  backend (default 300; the production host sets both to 5400 to cover
+  long builds). Do not reintroduce a ceiling by hardcoding a shorter timeout
   in a step.
 - A database or peer service is a separate lease with `expose_ports`.
   Whether the job can reach it depends on the job's own policy: the

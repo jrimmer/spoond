@@ -27,7 +27,7 @@ spoond-backend  (Go 1.27.1)                        spoond-sshd-gateway
   ├─ store/        SQLite (modernc.org/sqlite)        │ to /api/sandboxes/{id}/stream
   ├─ substrate/    Substrate interface                ┘ (WebSocket)
   │   └─ e2b/      gRPC → orchestrator :5008, envd via proxy :5007
-  └─ images/       template build driver
+  └─ images/       template build driver (U07)
         │ gRPC (plaintext, 127.0.0.1:5008)      HTTP (127.0.0.1:5007)
         ▼                                          │ E2b-Sandbox-Id / -Port headers
 e2b-orchestrator.service (our fork, root)  ◄───────┘
@@ -116,9 +116,8 @@ Catalog state — the current build of each image and every build ever
 recorded, with its kind (`template`, `pause`, `checkpoint`), versions and
 size — lives in the same SQLite database as leases. The forkd-era
 surface is gone from the platform: nothing builds a rootfs or consults
-an allowlist. `GET /api/images` is the catalog. (The forkd-era
-`deploy/bake-*.sh`, `deploy/rebuild-dev-base.sh` and `deploy/rootfs-init`
-still sit in the tree unused for history, and the `KNOWN_IMAGES` name
+an allowlist. `GET /api/images` is the catalog. (The forkd-era bake
+scripts and rootfs init were removed in 2.0; the `KNOWN_IMAGES` name
 survives only in a Prometheus help string for the `pool_cap` gauge.) See
 [install.md](install.md) for the build command and
 [operations.md](operations.md) for the GC that reclaims unreferenced

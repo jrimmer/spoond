@@ -217,7 +217,7 @@ resume. Non-persistent: delete the sandbox and create a fresh one from
 the image's current build, keeping the lease id (its disk is lost —
 there is no snapshot to restore). Response
 `{"id":"…","status":"running","message":"sandbox restarted"}`.
-`404` unknown, `400` if not persistent, `409` when busy; a substrate
+`404` unknown, `409` when busy; a substrate
 failure on the non-persistent path (which does create a sandbox)
 surfaces as `500`, not `503` — unlike create, fork and clone, restart
 does not map capacity errors to `503`.
@@ -285,7 +285,9 @@ Request `{"comment": "…"}`. Response `{"id":"…","comment":"…","ok":true}`.
 Request `{"message":"…","model":"gpt-oss-20b-fireworks"}` (model
 optional). Polls the Shelley conversation API inside the sandbox and
 returns the agent's reply. Requires the agent to be running (see the
-`shelly` ctl verb). Response `200 OK` with `{"reply":"…"}`.
+`shelly` ctl verb). Response `200 OK` with
+`{"id":"…","message":"…","reply":"…"}` (the lease id, the message sent, and
+the agent's reply).
 
 ---
 
@@ -552,11 +554,14 @@ copying the lease id/capability.
 ### `POST /api/sandboxes/{id}/share` — grant (owner only)
 
 Request: `{"grantee": "<user-id>", "mode": "ssh"|"http", "ttl": 3600}`.
-`grantee` must be an existing user id (or a resolvable name); `ttl` in
+`grantee` must be an existing user id (the gateway's `share add` verb
+also accepts a user name and resolves it; this route does not); `ttl` in
 seconds (0 = no expiry); `mode` (default `http`) selects which
 operations the grantee may perform: `ssh` → `/endpoint`, `/prompt` and
 SSH attach through the gateway; `http` → `/exec`, `/stream`, `/stat`,
-`GET /api/sandboxes/{id}` and the HTTP proxy. `/stream` is an `http`
+`GET /api/sandboxes/{id}`. The HTTP proxy does not consult shares: in
+the capability model the lease id is the only credential, and under
+forward-auth lookups are owner-scoped. `/stream` is an `http`
 operation — an `ssh`-share grantee who calls it directly gets `404`
 (the gateway's service token is the exception: the SSH gateway relays
 session channels through `/stream`, so requests carrying it may attach

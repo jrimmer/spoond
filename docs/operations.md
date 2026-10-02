@@ -13,13 +13,13 @@ What the substrate is and why it behaves this way is
 | Orchestrator | `curl -fsS http://127.0.0.1:5008/health` (body has `"status":"healthy"`) |
 | Host firewall | `nft list table inet e2b_guard >/dev/null && echo ok` |
 | Backend | `systemctl is-active spoond-backend` |
-| Backend + orchestrator together | `curl -s https://127.0.0.1:8890/healthz` → `200 {"status":"ok","orchestrator":"healthy"}`, `503 {"status":"degraded","orchestrator":"unreachable"}` when the orchestrator is down |
+| Backend + orchestrator together | `curl -s --resolve "$HOST:8890:127.0.0.1" https://$HOST:8890/healthz` (`$HOST` = the name in the TLS certificate; `127.0.0.1` itself does not validate) → `200 {"status":"ok","orchestrator":"healthy"}`, `503 {"status":"degraded","orchestrator":"unreachable"}` when the orchestrator is down |
 | Gateway | `systemctl is-active spoond-sshd-gateway` |
 | Runner | `systemctl is-active spoond-runner` |
 | Registry | `curl -fsS http://127.0.0.1:5000/v2/` |
 | OTel collector | `curl -s http://127.0.0.1:19464/metrics >/dev/null && echo ok` (the Prometheus exporter spoond's `/metrics` appends) |
-| Metrics | `curl -s -H "Authorization: Bearer $METRICS_TOKEN" https://127.0.0.1:8890/metrics` |
-| Dashboard | `curl -fsS -u "$DASH_USER:$DASH_PASS" https://127.0.0.1:8893/` |
+| Metrics | `curl -s --resolve "$HOST:8890:127.0.0.1" -H "Authorization: Bearer $METRICS_TOKEN" https://$HOST:8890/metrics` |
+| Dashboard | `curl -fsS -u "$DASH_USER:$DASH_PASS" http://127.0.0.1:8893/` (plain HTTP by default; with `DASH_TLS_CERT`/`DASH_TLS_KEY` set, `https://$HOST:8893/` with `--resolve` as above) |
 | Identity store | `test -f /var/lib/spoond/users.json && stat -c '%a' /var/lib/spoond/users.json` (expect `600`) |
 
 `spoond dash` (below) is the watching surface; `spoond doctor` is the
@@ -184,7 +184,7 @@ are in SQLite and are loaded on start. Use it freely.
 
 ```bash
 systemctl restart spoond-backend
-curl -fsS https://127.0.0.1:8890/healthz
+curl -fsS --resolve "$HOST:8890:127.0.0.1" https://$HOST:8890/healthz
 ```
 
 On start the backend loads state, deletes substrate sandboxes nothing
