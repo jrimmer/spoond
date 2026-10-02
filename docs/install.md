@@ -283,6 +283,9 @@ per manifest entry with `baked: true`. Details and per-image behaviour:
 ```bash
 systemctl daemon-reload
 systemctl enable --now spoond-backend spoond-sshd-gateway
+# drain before a host shutdown, resume after boot (ordered after both units)
+install -m 644 deploy/e2b/spoond-drain.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now spoond-drain
 FQDN=$(hostname -f)      # the certificate's DNS SAN; 127.0.0.1 will not validate
 curl -fsS --cacert /etc/spoond/tls/cert.pem https://$FQDN:8890/healthz
 # {"status":"ok","orchestrator":"healthy"}

@@ -54,6 +54,7 @@ set -a; . /etc/spoond/backend.env; set +a
 | `llm gateway: upstream` / `key` / `/models` | upstream configured, key present, key accepted |
 | `tls: cert/key` | WARN when unconfigured (plain HTTP), FAIL when the pair does not load |
 | `disk: root` | WARN above 75% full, FAIL above 90% |
+| `drain: shutdown unit` | FAIL unless `spoond-drain.service` is enabled, active and ordered after `spoond-backend` and `e2b-orchestrator`, and `/etc/e2b/drain.env` names a backend and a readable token file; without it a reboot loses every running lease (see Rebooting the host) |
 
 ## Backups
 

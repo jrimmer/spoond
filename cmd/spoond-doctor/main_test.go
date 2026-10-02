@@ -2,6 +2,7 @@ package spoonddoctor
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,5 +164,45 @@ func TestCheckLeasesLost(t *testing.T) {
 	results = checkLeases()
 	if len(results) != 1 || results[0].status != "WARN" {
 		t.Fatalf("missing-db checkLeases = %+v, want WARN", results)
+	}
+}
+
+func TestCheckDrainUnit(t *testing.T) {
+	dir := t.TempDir()
+	tok := filepath.Join(dir, "admin.token")
+	if err := os.WriteFile(tok, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := filepath.Join(dir, "drain.env")
+	if err := os.WriteFile(env, []byte("SPOOND_DRAIN_URL=https://127.0.0.1:8890\nSPOOND_ADMIN_TOKEN_FILE="+tok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldShow, oldEnv := systemctlShow, drainEnvPath
+	t.Cleanup(func() { systemctlShow, drainEnvPath = oldShow, oldEnv })
+	drainEnvPath = env
+	good := map[string]string{"UnitFileState": "enabled", "ActiveState": "active",
+		"After": "systemd-journald.socket e2b-orchestrator.service spoond-backend.service basic.target"}
+	cases := []struct {
+		name   string
+		props  map[string]string
+		status string
+		want   string
+	}{
+		{"ok", good, "PASS", "ordered after"},
+		{"disabled", map[string]string{"UnitFileState": "disabled", "ActiveState": "active", "After": good["After"]}, "FAIL", "not enabled"},
+		{"inactive", map[string]string{"UnitFileState": "enabled", "ActiveState": "inactive", "After": good["After"]}, "FAIL", "not active"},
+		{"missing order", map[string]string{"UnitFileState": "enabled", "ActiveState": "active", "After": "e2b-orchestrator.service"}, "FAIL", "not ordered after spoond-backend.service"},
+	}
+	for _, c := range cases {
+		systemctlShow = func(string, ...string) (map[string]string, error) { return c.props, nil }
+		r := checkDrainUnit()
+		if len(r) != 1 || r[0].status != c.status || !strings.Contains(r[0].detail, c.want) {
+			t.Errorf("%s: got %+v, want %s containing %q", c.name, r, c.status, c.want)
+		}
+	}
+	systemctlShow = func(string, ...string) (map[string]string, error) { return good, nil }
+	drainEnvPath = filepath.Join(dir, "missing.env")
+	if r := checkDrainUnit(); r[0].status != "FAIL" || !strings.Contains(r[0].detail, "missing.env") {
+		t.Errorf("missing drain.env: got %+v", r)
 	}
 }
