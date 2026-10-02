@@ -12,7 +12,9 @@
 //
 // Environment:
 //
-//	DASH_ADDR            listen address (default 0.0.0.0:8892)
+//	DASH_ADDR            listen address (default 0.0.0.0:8893)
+//	DASH_TLS_CERT, DASH_TLS_KEY  serve HTTPS with this pair (basic auth
+//	                     sends the password, so use TLS beyond localhost)
 //	DASH_USER            basic-auth user (required)
 //	DASH_PASSWORD_HASH   bcrypt hash of the password (required)
 //	METRICS_URL          spoond /metrics (default https://127.0.0.1:8890/metrics)
@@ -54,6 +56,7 @@ var assets embed.FS
 // Config is the dashboard's configuration (see the package comment).
 type Config struct {
 	Addr, User, PasswordHash       string
+	TLSCert, TLSKey                string
 	MetricsURL, MetricsServerName  string
 	MetricsToken                   string
 	DBPath, UsersFile, StoragePath string
@@ -70,7 +73,9 @@ func configFromEnv() (Config, error) {
 		return def
 	}
 	c := Config{
-		Addr:              env("DASH_ADDR", "0.0.0.0:8892"),
+		Addr:              env("DASH_ADDR", "0.0.0.0:8893"),
+		TLSCert:           os.Getenv("DASH_TLS_CERT"),
+		TLSKey:            os.Getenv("DASH_TLS_KEY"),
 		User:              os.Getenv("DASH_USER"),
 		PasswordHash:      os.Getenv("DASH_PASSWORD_HASH"),
 		MetricsURL:        env("METRICS_URL", "https://127.0.0.1:8890/metrics"),
@@ -88,6 +93,9 @@ func configFromEnv() (Config, error) {
 	}
 	if c.History, err = strconv.Atoi(env("DASH_HISTORY", "150")); err != nil || c.History < 10 || c.History > 200 {
 		return c, fmt.Errorf("DASH_HISTORY: want an integer from 10 to 200 (the sparkline keeps at most 200 points)")
+	}
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return c, fmt.Errorf("set both DASH_TLS_CERT and DASH_TLS_KEY, or neither")
 	}
 	for k, v := range map[string]string{"DASH_USER": c.User, "DASH_PASSWORD_HASH": c.PasswordHash, "METRICS_TOKEN": c.MetricsToken} {
 		if v == "" {
@@ -133,8 +141,12 @@ func Main(args []string) int {
 		defer cancel()
 		_ = srv.Shutdown(shut)
 	}()
-	log.Printf("spoond dash listening on %s (refresh %s, history %d)", cfg.Addr, cfg.Interval, cfg.History)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	log.Printf("spoond dash listening on %s (tls %v, refresh %s, history %d)", cfg.Addr, cfg.TLSCert != "", cfg.Interval, cfg.History)
+	serve := srv.ListenAndServe
+	if cfg.TLSCert != "" {
+		serve = func() error { return srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey) }
+	}
+	if err := serve(); err != nil && err != http.ErrServerClosed {
 		log.Printf("spoond dash: %v", err)
 		return 1
 	}
