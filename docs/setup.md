@@ -47,8 +47,9 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 
 Subcommands: `backend`, `gateway`, `acp`, `mcp`, `runner`, `ctl`,
 `images`, `drain`, `doctor`, `dash`.
-Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
-`noctl`.
+Exclusion tags (one per gated file — `cmd/spoond/main.go` prints this
+list at `spoond help`): `nobackend`, `nogateway`, `noacp`, `nomcp`,
+`norunner`, `noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`.
 
 ### Agent endpoints (`mcp` / `acp`)
 
@@ -203,6 +204,8 @@ for the full reference):
 | `IMAGE_MAP` / `DEFAULT_IMAGE` | `runs-on` label → image mapping ([ci-jobs.md](ci-jobs.md)) |
 | `LEASE_TTL` | sandbox lease TTL seconds (default 600) |
 | `EXEC_TIMEOUT_SECS` | per-step exec timeout override (0 = the backend's `MAX_EXEC_TIMEOUT_SECS`, default 300) |
+| `LEASE_NETPOL` | egress policy the runner's leases get (`none` \| `lan` \| `internet` \| `restricted`; default `internet`) |
+| `LEASE_NET_ALLOW` | comma-separated allowlist entries added on top of the policy |
 | `RUNNER_FLOOR` / `RUNNER_MAX` / `RUNNER_SCALE_STEP` / `SCALE_UP_DELAY` / `SCALE_DOWN_DELAY` | registered-runner pool: floor, cap, step and scale delays |
 | `RUNNER_STATE_FILE` | persists runner UUIDs across restarts (default `/var/lib/spoond/runner-state.json`) |
 | `REPO_BASE_URL` | git host base URL for `actions/checkout` clones |

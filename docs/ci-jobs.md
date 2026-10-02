@@ -36,8 +36,11 @@ fails with `unknown image tag` rather than falling back.
 
 ## Images come from Dockerfiles
 
-There are no bake scripts, no rootfs assembly and no snapshot tags to
-re-bake. An image is:
+There are no bake scripts in the pipeline, no rootfs assembly and no
+snapshot tags to re-bake: images are built from Dockerfiles by
+`spoond images build`. (The forkd-era `deploy/bake-*.sh`,
+`deploy/rebuild-dev-base.sh` and `deploy/rootfs-init` scripts still sit
+in the tree for history but nothing invokes them.) An image is:
 
 1. a Dockerfile in `images/` (`images/<name>.dockerfile`);
 2. an entry in `images/manifest.yaml` with `baked: true`, the sizing
@@ -105,9 +108,12 @@ Already handled by the runner, so jobs need not:
   backend (default 300, raised on the production host to cover long
   builds). Do not reintroduce a ceiling by hardcoding a shorter timeout
   in a step.
-- A database or peer service is a separate lease with `expose_ports`; the
-  job's own `restricted` policy must name that lease (by id, name or
-  `lease:<id>`) in its allowlist to reach the published ports.
+- A database or peer service is a separate lease with `expose_ports`.
+  Whether the job can reach it depends on the job's own policy: the
+  runner's default (`LEASE_NETPOL`, `internet`) reaches every exposing
+  peer's published ports with no opt-in; under `restricted` the job's
+  allowlist must name that lease (by id, name or `lease:<id>`) to reach
+  them. See [api.md](api.md#network-policy).
 
 ## Host prerequisites
 

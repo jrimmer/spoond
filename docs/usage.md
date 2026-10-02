@@ -248,14 +248,16 @@ FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-token> \
 | Policy | Egress | Default |
 |---|---|---|
 | `none` | nothing | |
-| `lan` | the LAN ranges, host services, DNS, peers' published ports | |
-| `internet` | everything public plus the LAN, host services, DNS, peers' published ports | |
-| `restricted` | host services, DNS, the allowlist, peers' published ports | ✅ default |
+| `lan` | the LAN ranges, host services, DNS, every exposing peer's published ports | |
+| `internet` | everything public plus the LAN, host services, DNS, every exposing peer's published ports | |
+| `restricted` | host services, DNS, the allowlist, the published ports of the peers the allowlist names | ✅ default |
 
 The default is **`restricted`**: a guest can reach the host services
 spoond grants it (the proxy/LLM gateway port and DNS) plus its
-allowlist, and peer sandboxes only through their published ports. Opt in
-to wider egress with `network_policy=lan` or `internet`.
+allowlist, and peer sandboxes only through the published ports the
+allowlist names. Opt in to wider egress with `network_policy=lan` or
+`internet` — which also admits **every** exposing peer's published
+ports, on any owner, with no allowlist gate.
 
 ```bash
 curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \

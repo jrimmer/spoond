@@ -113,9 +113,11 @@ Response `200 OK`:
 {"stdout": "…", "stderr": "…", "exit": 0}
 ```
 
-`409` if the lease is suspended (resume it first) or busy; `410` if it is
+`409` if the lease is suspended (resume it first); `410` if it is
 `lost`, or if the sandbox no longer exists on the substrate; `429` when
-the per-owner concurrent exec/stream cap is reached.
+the per-owner concurrent exec/stream cap is reached. (There is no
+lease-busy `409` here: the concurrency guard on exec is the per-owner
+cap, which yields `429`.)
 
 ### `GET /api/sandboxes/{id}/stat` — guest metrics
 
@@ -203,7 +205,9 @@ records `resume_build_id`. Response
 Restores a suspended lease from `resume_build_id` **with the same sandbox
 id**, so its address and identity are unchanged. Response
 `{"id":"…","status":"running","address":"…"}`. `400` if not persistent,
-`409` if already running or busy.
+`409` if the lease is busy (another lifecycle operation is in flight).
+Resume is idempotent: there is no already-running check, so resuming a
+lease that is already running restores from the snapshot again.
 
 ### `POST /api/sandboxes/{id}/restart` — reboot
 
@@ -213,8 +217,10 @@ resume. Non-persistent: delete the sandbox and create a fresh one from
 the image's current build, keeping the lease id (its disk is lost —
 there is no snapshot to restore). Response
 `{"id":"…","status":"running","message":"sandbox restarted"}`.
-`404` unknown, `409` when busy, `503` capacity (the non-persistent path
-creates a sandbox).
+`404` unknown, `400` if not persistent, `409` when busy; a substrate
+failure on the non-persistent path (which does create a sandbox)
+surfaces as `500`, not `503` — unlike create, fork and clone, restart
+does not map capacity errors to `503`.
 
 ### `POST /api/sandboxes/{id}/checkpoint` — snapshot a running sandbox
 
@@ -287,17 +293,19 @@ returns the agent's reply. Requires the agent to be running (see the
 
 `network_policy` decides what may leave a sandbox; the substrate enforces
 it, from the config carried on create and updated live by `/network`.
-The default is **`restricted`** — a guest can reach the host services
+The default is **`restricted`** — a guest reaches only the host services
 spoond grants it (the proxy/LLM gateway port and DNS) plus its
-allowlist, and nothing else. Peer sandboxes are reachable only through
-their published ports.
+allowlist, and the peers that allowlist names through their published
+ports. Under `lan` and `internet` there is no such gate: every other
+live lease that publishes ports is reachable on those ports, whatever
+the owner.
 
 | Policy | Egress |
 |---|---|
 | `none` | nothing at all |
-| `lan` | the LAN ranges (RFC 1918 minus the sandbox networks), host services, DNS, peers' published ports |
-| `internet` | everything public, **plus** the LAN ranges, host services, DNS, peers' published ports |
-| `restricted` *(default)* | host services, DNS, the allowlist, peers' published ports |
+| `lan` | the LAN ranges (RFC 1918 minus the sandbox networks), host services, DNS, **every** exposing peer's published ports |
+| `internet` | everything public, **plus** the LAN ranges, host services, DNS, **every** exposing peer's published ports |
+| `restricted` *(default)* | host services, DNS, the allowlist, and the published ports of the peers the allowlist names |
 
 `egress_allowlist` entries are IPs, CIDRs or domains. Entries that name
 another lease — its id, its friendly name, or those prefixed `lease:` —
@@ -546,9 +554,13 @@ copying the lease id/capability.
 Request: `{"grantee": "<user-id>", "mode": "ssh"|"http", "ttl": 3600}`.
 `grantee` must be an existing user id (or a resolvable name); `ttl` in
 seconds (0 = no expiry); `mode` (default `http`) selects which
-operations the grantee may
-perform: `ssh` → `/endpoint`, `/prompt`, `/stream` (interactive/agent
-access); `http` → `/exec`, `/stream`, `/stat`, proxy. Response `201
+operations the grantee may perform: `ssh` → `/endpoint`, `/prompt` and
+SSH attach through the gateway; `http` → `/exec`, `/stream`, `/stat`,
+`GET /api/sandboxes/{id}` and the HTTP proxy. `/stream` is an `http`
+operation — an `ssh`-share grantee who calls it directly gets `404`
+(the gateway's service token is the exception: the SSH gateway relays
+session channels through `/stream`, so requests carrying it may attach
+over an `ssh` share too). Response `201
 Created` `{"shared":true,"lease_id":…,"grantee":…,"mode":…}`.
 `400` unknown grantee, `403` non-owner.
 

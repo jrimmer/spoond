@@ -86,8 +86,10 @@ powers exec and stream already give the lease owner.
   sandbox-routing header from inside their own sandbox.
 - **F3 guest isolation** — default egress policy is `restricted`, not
   `lan`: a guest reaches only the host services spoond grants (the proxy
-  / LLM gateway port, DNS) plus its allowlist, not peer sandboxes.
-  Operators who need full LAN egress opt in with `network_policy=lan`.
+  / LLM gateway port, DNS) plus its allowlist, and the published ports of
+  peers the allowlist names. Operators who need full LAN egress opt in
+  with `network_policy=lan` (which also admits every exposing peer's
+  published ports — see the table in [api.md](api.md#network-policy)).
 - **F4 proxy capability names** — in capability mode (no auth) only the
   unguessable 32-hex lease id hostname resolves; guessable friendly
   names are `404` unless forward-auth is on (where lookups are
@@ -156,8 +158,9 @@ Known/accepted residuals:
   `X-Proxy-Auth` shared secret (constant-time) + `Remote-User`; set
   `PROXY_AUTH_TRUSTED_PEERS` (e.g. `10.1.0.203/32`) so only Caddy can
   present an identity. Caddyfile: `deploy/caddy-sandbox-forwardauth.conf`.
-- **Shares** are scoped by mode (`ssh` = attach/prompt/stream, `http` =
-  exec/stream/stat/proxy), expire, and are revocable on the spot.
+- **Shares** are scoped by mode (`ssh` = SSH attach, `/endpoint` and
+  `/prompt`; `http` = exec/stream/stat/proxy and `GET` of the lease),
+  expire, and are revocable on the spot.
 
 ## Token/key storage
 
@@ -182,8 +185,17 @@ Known/accepted residuals:
   command string, never visible in argv/ps. Tokens with shell
   metacharacters fail the job rather than inject.
 - CI jobs run in their own microVM with the image's fixed memory and the
-  policy the runner requested (`restricted` unless the job opts out), so
-  a job cannot reach the host or other tenants by default.
+  policy the runner configured (`LEASE_NETPOL`, which defaults to
+  `internet`; `LEASE_NET_ALLOW` adds `restricted`-style allowlist
+  entries on top). This is **not** an isolation boundary: an `internet`
+  or `lan` job can reach the LAN ranges, the host service and lease API
+  ports spoond names in every such policy, and the published ports of
+  **every** other live lease that exposes ports — on any owner, with no
+  allowlist gate. Only a job whose lease is `restricted` is limited to
+  the host services, DNS, its allowlist and the peers that allowlist
+  names; `none` denies all egress. If CI workloads must not see each
+  other or the LAN, set `LEASE_NETPOL=restricted` (and see
+  [api.md](api.md#network-policy) for what each policy permits).
 
 ## Rate limiting
 

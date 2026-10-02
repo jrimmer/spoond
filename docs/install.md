@@ -112,29 +112,71 @@ install -D -m 644 deploy/spoond-backend.service deploy/spoond-sshd-gateway.servi
   deploy/spoond-runner.service /etc/systemd/system/
 ```
 
-The backend unit sources `/etc/spoond/backend.env` (0600). Minimum
-contents for a new deployment — see [setup.md](setup.md) for the full
-variable reference:
+The backend unit sources `/etc/spoond/backend.env` (0600). Generate the
+secrets and the TLS pair **first** — an `EnvironmentFile` is parsed
+literally by systemd, so a `$(openssl rand …)` written into it stays an
+unexpanded string and never matches anything:
 
-```ini
-CONSUMER_TOKENS=<random>=<consumer>          # required; the backend exits without it
+```bash
+install -d -m 700 /etc/spoond /etc/spoond/tls
+umask 077
+CONSUMER_TOKEN=$(openssl rand -hex 24)
+BOOTSTRAP_TOKEN=$(openssl rand -hex 24)
+GATEWAY_TOKEN=$(openssl rand -hex 32)
+ADMIN_TOKEN=$(openssl rand -hex 32)
+METRICS_TOKEN=$(openssl rand -hex 32)
+
+# self-signed cert with the host's name as a DNS SAN: the backend serves
+# HTTPS on :8890 only when TLS_CERT and TLS_KEY are both set
+FQDN=$(hostname -f)
+openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
+  -keyout /etc/spoond/tls/privkey.pem -out /etc/spoond/tls/cert.pem \
+  -subj "/CN=$FQDN" -addext "subjectAltName=DNS:$FQDN"
+
+# the drain hook reads its token from a file
+printf '%s' "$ADMIN_TOKEN" > /etc/spoond/admin-token
+```
+
+Minimum contents for a new deployment — the heredoc below is
+**unquoted** so the values above land in the file, not the variable
+names (see [setup.md](setup.md) for the full variable reference):
+
+```bash
+cat > /etc/spoond/backend.env <<EOF
+CONSUMER_TOKENS=$CONSUMER_TOKEN=forgejo
 SPOOND_DB_PATH=/var/lib/spoond/spoond.db
 E2B_GRPC_ADDR=127.0.0.1:5008
 E2B_PROXY_URL=http://127.0.0.1:5007
 E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
 IMAGE_REGISTRY=localhost:5000
-HOST_GUEST_SERVICE_ADDR=<host primary IP>    # required; what guests use to reach host services
+HOST_GUEST_SERVICE_ADDR=<host primary IP>
 HOST_GUEST_SERVICE_PORT=8891
 E2B_TEMPLATE_STORAGE_PATH=/forkdcache/e2b/storage/templates
 SPOOND_BACKUP_DIR=/var/lib/spoond/backups
-USERS_FILE=/var/lib/spoond/users.json        # identity store: multi-user tenancy
-BOOTSTRAP_TOKEN=$(openssl rand -hex 24)      # gates the first (admin) user
-GATEWAY_TOKEN=$(openssl rand -hex 32)        # the SSH gateway's service token
-ADMIN_TOKEN=$(openssl rand -hex 32)          # /api/admin/* (drain, undrain, reconcile)
-METRICS_TOKEN=$(openssl rand -hex 32)        # scrape-only /metrics (Prometheus, dashboard)
+USERS_FILE=/var/lib/spoond/users.json
+BOOTSTRAP_TOKEN=$BOOTSTRAP_TOKEN
+GATEWAY_TOKEN=$GATEWAY_TOKEN
+ADMIN_TOKEN=$ADMIN_TOKEN
+METRICS_TOKEN=$METRICS_TOKEN
+TLS_CERT=/etc/spoond/tls/cert.pem
+TLS_KEY=/etc/spoond/tls/privkey.pem
 BIND_ADDR=0.0.0.0:8890
 PROXY_ADDR=0.0.0.0:8891
+EOF
+chmod 600 /etc/spoond/backend.env
 ```
+
+Two lines to edit by hand: `HOST_GUEST_SERVICE_ADDR` (the host's primary
+IP — required, what guests use to reach host services; the backend exits
+without it) and the consumer name in `CONSUMER_TOKENS` (required; the
+backend exits without it too). `USERS_FILE` is the identity store that
+turns on multi-user tenancy; `BOOTSTRAP_TOKEN` gates the first (admin)
+user, `GATEWAY_TOKEN` is the SSH gateway's service token, `ADMIN_TOKEN`
+drives `/api/admin/*` (drain, undrain, reconcile) and `METRICS_TOKEN` is
+the scrape-only `/metrics` token. `TLS_CERT`/`TLS_KEY` must both be set
+or neither — without the pair the backend serves plain HTTP. No inline
+comments in the file: systemd's `EnvironmentFile` parser keeps a
+trailing `#` as part of the value.
 
 Write the gateway environment to `/etc/spoond-gateway.env` (0600) with
 `SPOOND_GATEWAY_TOKEN=<the GATEWAY_TOKEN value>`; the gateway unit reads
@@ -149,6 +191,11 @@ SPOOND_DRAIN_URL=https://127.0.0.1:8890
 SPOOND_ADMIN_TOKEN_FILE=/etc/spoond/admin-token
 SPOOND_DRAIN_INSECURE=1
 ```
+
+`SPOOND_ADMIN_TOKEN_FILE` points at the `/etc/spoond/admin-token` file
+written above (the hook reads tokens from files, never the environment);
+`SPOOND_DRAIN_INSECURE=1` is needed because the call goes to `127.0.0.1`
+while the certificate is issued for the host's name.
 
 …and add to `e2b-orchestrator.service`'s `[Service]` section:
 
@@ -184,12 +231,14 @@ per manifest entry with `baked: true`. Details and per-image behaviour:
 ```bash
 systemctl daemon-reload
 systemctl enable --now spoond-backend spoond-sshd-gateway
-curl -fsS https://127.0.0.1:8890/healthz       # {"status":"ok","orchestrator":"healthy"}
+FQDN=$(hostname -f)      # the certificate's DNS SAN; 127.0.0.1 will not validate
+curl -fsS --cacert /etc/spoond/tls/cert.pem https://$FQDN:8890/healthz
+# {"status":"ok","orchestrator":"healthy"}
 
 # bootstrap the first (admin) user with your SSH public key
 FP=$(ssh-keygen -lf ~/.ssh/id_ed25519.pub | awk '{print $2}')
 set -a; . /etc/spoond/backend.env; set +a
-curl -s -X POST https://127.0.0.1:8890/api/users \
+curl -s -X POST https://$FQDN:8890/api/users --cacert /etc/spoond/tls/cert.pem \
   -H "Authorization: Bearer ${CONSUMER_TOKENS%%=*}" \
   -H "X-Bootstrap-Token: $BOOTSTRAP_TOKEN" -H 'Content-Type: application/json' \
   -d "{\"name\":\"you\",\"kind\":\"person\",\"fingerprints\":[\"$FP\"]}"
@@ -199,7 +248,7 @@ Then the runner and the dashboard, if you want them:
 
 ```bash
 systemctl enable --now spoond-runner        # needs /etc/spoond-runner.env
-spoond dash hash '<password>'               # bcrypt hash for DASH_PASSWORD_HASH
+/opt/spoond/spoond dash hash '<password>'    # bcrypt hash for DASH_PASSWORD_HASH
 # /etc/spoond/dash.env: DASH_USER, DASH_PASSWORD_HASH, METRICS_TOKEN,
 #                      DASH_TLS_CERT, DASH_TLS_KEY — see operations.md
 systemctl enable --now spoond-dash   # your unit wrapping `spoond dash`
