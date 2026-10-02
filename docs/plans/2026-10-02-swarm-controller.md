@@ -1,7 +1,7 @@
 # Hive: the swarm controller (draft for decision)
 
-Status: **draft, 2026-10-02.** Decisions marked **Proposed** need the
-owner's yes before an implementation spec is written.
+Status: **accepted 2026-10-02** (C1-C11; the owner asked for it to be
+built, including enlistment and the guide). Build order at the end.
 
 ## Why
 
@@ -84,12 +84,13 @@ controller after `[BYE]`.
   infrastructure`) do not count as attempts; the hive pauses
   spawning for that project until `llm.lacy.casa` answers again.
 
-**C6. Projects and worker classes.** A project is configured once
-(`/etc/spoond/hive/<project>.yaml`): repository URL, deploy-key name,
-default worker class, `max_workers`. A worker class names the image
-(`agent-worker`), the implement and verify models (Bifrost names), the
-network allowlist, and which task labels it may take (today:
-`needs:vm2-ssh` and `serial:prod` are never taken by bees).
+**C6. Projects and worker classes.** A project is described by its
+`.spoond/hive.yaml` (C10) and registered by enlisting it; the hive keeps
+the enlisted copy under `/var/lib/spoond/hive/<project>/`. A worker class
+names the worker image (`<base>-worker`, C10), the implement and verify
+models (Bifrost names), the network allowlist (derived, C10), and which
+task labels it may take (today: `needs:vm2-ssh` and `serial:prod` are
+never taken by bees).
 
 **C7. Credentials stay on the host.** The deploy keys, the Agent Mail token and
 the `swarm` lease token live in `/etc/spoond/hive/secrets/` (0600, root),
@@ -103,6 +104,72 @@ prints the same. Every dispatch decision is also in Agent Mail.
 (default 24); when reached, the hive stops spawning and mails the
 owner. Model spend is watched in Bifrost by the owner.
 
+**C10. Enlistment: one project file, one command, everything else
+derived.** A project describes itself in its own repository, in
+`.spoond/hive.yaml`:
+
+```yaml
+project: hrmny
+repo: ssh://git@git.lacy.casa/lacy.casa/hrmny.git
+base_image: elixir-release      # any image in the spoond catalog
+gates:                          # what "done" means; bee and verifier run them
+  - mix format --check-formatted
+  - mix test
+needs: [leases, registry]       # extra network; repo host and model service are implied
+max_workers: 3
+models: {implement: Z.ai/glm-5.3, verify: Z.ai/glm-5.3}
+```
+
+From it the hive derives:
+- **The worker image.** A worker is a base image plus one fixed layer
+  (Pi, the bee start script, amail). Enlisting builds `<base>-worker`
+  with spoond's image builder and rebuilds it whenever the base image's
+  current build changes. No per-project Dockerfile.
+- **The network allowlist.** Repo host, model service and Agent Mail
+  always; each `needs:` entry maps to a fixed set (`leases`: the lease
+  API; `registry`: the registry host). No raw addresses in the file.
+- **Credentials.** The hive mints the project's lease token (scoped to
+  its own leases), registers its Agent Mail identities, and generates
+  its deploy key pair. The private half never leaves the host (C7).
+
+Two things stay with the owner by design: **authorizing the deploy key**
+on the repository (write access to a repo is the owner's decision) and
+**the budget** (C9). Merging stays with the orchestrator or the owner.
+
+`spoond hive init` drafts a hive.yaml from a checkout: base image from
+the toolchain files, gates from the CI workflows. An agent reviews
+rather than writes it.
+
+**C11. The guide: the running instance teaches enlistment.** There is
+no separate how-to to keep in step. The lease API serves:
+
+| Route | Auth | What it returns |
+|---|---|---|
+| `GET /hive/guide` | none (LAN) | How to enlist a project on *this* instance: its real addresses, images, models and routes, the hive.yaml schema, and the first step. No secrets. |
+| `POST /hive/check` | consumer token | Runs every enlistment check against a submitted hive.yaml, for real, on a trial lease. |
+| `POST /hive/projects` | consumer token | Enlists (the same checks must pass first). |
+| `GET /hive/projects/<p>/guide` | project owner | Where this project stands and the next step. |
+| `GET /hive/projects/<p>/doctor` | project owner | The checks again, for an enlisted project: key still authorized, image builds, gates pass on main, budget left. |
+
+Rules:
+- **Generated, never hand-written.** The guide is rendered from the
+  same configuration and route table the server runs, and a test fails
+  when a hive route or a hive.yaml field is missing from it.
+- **Every answer ends with `Next:`**, computed from the project's state.
+  An agent never needs the whole process, only the last line.
+- **One check engine, three front doors.** `POST /hive/check`,
+  `spoond hive enlist --check`, and the guide's `Next:` all run the same
+  checks. Each result is a pass or fail plus the exact remedy, as text
+  (`Accept: text/plain`, the default) or JSON.
+- The repository docs say one thing: point your agent at
+  `https://<host>:8890/hive/guide`.
+
+The checks, in order: hive.yaml parses and validates; base image exists;
+the worker image builds; the deploy key can clone and push a scratch
+branch (then deletes it); a trial lease with the derived allowlist
+reaches every `needs:` target; the gates pass on the default branch;
+a budget is set.
+
 ## Open questions
 
 1. **Agent Mail and Bifrost stay on vm1.** A vm1 stall stops every
@@ -111,7 +178,8 @@ owner. Model spend is watched in Bifrost by the owner.
 2. **Merging.** Should a `[DONE]` that the verifier PASSed and that only
    touches docs merge automatically? Proposed: no, every merge stays a
    human or orchestrator decision for now.
-3. **hrmny** joins as a second project once this works for spoond.
+3. **hrmny** is the first project to enlist through C10/C11 after spoond
+   itself (enlisted the same way, replacing agent-hub's scripts).
 
 ## Not in scope
 
@@ -126,3 +194,25 @@ agent-hub `bin/swarm-spawn`, `swarm-assign`, `swarm-stop`, `swarm`, and
 spoond `images/agent-worker-start.sh` (once committed) are the working
 prototype. Incidents that shaped C4 and C5 are in agent-hub
 `windows/` and the 2026-10-01/02 task comments.
+
+## Build order
+
+Each step is usable on its own, and each is a task in the spoond graph.
+
+1. **Worker layer.** Turn `images/agent-worker*` into a layer applied to
+   any base image (`<base>-worker`); `agent-worker` becomes
+   `go-base-worker`. Commit the image files to the spoond repo.
+2. **hive.yaml and the check engine** (`hive` package): schema,
+   validation, derivation (allowlist, worker image), and the checks, with
+   text and JSON reports. `spoond hive enlist --check FILE`.
+3. **Guide and check API** (C11): `GET /hive/guide`, `POST /hive/check`,
+   the guide-completeness test.
+4. **Hive core** (C1-C5, C7): the `spoond-hive` unit, enlisted projects,
+   per-project task graph, dispatch, scaling, health, retries; spawns
+   bees with minted credentials. Retires agent-hub `swarm-*` scripts and
+   `swarm-keepalive`.
+5. **Enlist and per-project routes**: `POST /hive/projects`, project
+   guide and doctor, `spoond hive init`.
+6. **Visibility and budget** (C8, C9): dashboard panel, `spoond hive
+   status`, bee-hour cap.
+7. **Enlist spoond, then hrmny.**
