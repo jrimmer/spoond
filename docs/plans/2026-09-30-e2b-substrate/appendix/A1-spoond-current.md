@@ -77,7 +77,7 @@ Top-level entries: `acp/ api/ cfos/ cmd/ commandadapter/ deploy/ docs/ forkd/ id
 | `workflow`, `workflow/action` | Standalone Forgejo workflow types/parser/expr and action handlers. **Not imported by any other package** (the runner has its own `runner/workflow.go`). |
 | `images/` | Image manifest, dockerfiles, scylla boot hook, `validate-image.py`. |
 | `deploy/` | systemd units, bake scripts, forkd rollout/watchdog scripts, installer, Caddy snippet, guest `rootfs-init`. |
-| `tests/integration/` | Bash integration suite against a live stack (vm2) plus a `wsclient` Go helper. |
+| `tests/integration/` | Bash integration suite against a live stack (host) plus a `wsclient` Go helper. |
 | `scripts/forkd-curl` | Authenticated curl wrapper for the lease API. |
 | `docs/` | api.md, ci-jobs.md, ctl.md, install.md, operations.md, security.md, setup.md, substrate-backends.md, usage.md, design/, plans/ (including the untracked `docs/plans/2026-09-29-001-feat-e2b-runtime-substrate-plan.md`). |
 
@@ -92,7 +92,7 @@ Top-level entries: `acp/ api/ cfos/ cmd/ commandadapter/ deploy/ docs/ forkd/ id
 | `cmd/spoond-doctor` | `spoonddoctor` | deployment checker |
 | `cmd/spoond-acp` | `spoondacp` | ACP endpoint |
 | `cmd/spoond-dev-mcp` | `spoondmcp` | MCP server |
-| `cmd/spoondctl` | `spoondctl` | thin CLI that runs `ssh ctl@host "<verb>"` (env `FORKD_CTL_HOST` default `sandbox.lacy.casa`, `FORKD_CTL_PORT` 2222, `FORKD_CTL_KEY`) |
+| `cmd/spoondctl` | `spoondctl` | thin CLI that runs `ssh ctl@host "<verb>"` (env `FORKD_CTL_HOST` default `sandbox.example.com`, `FORKD_CTL_PORT` 2222, `FORKD_CTL_KEY`) |
 | `cmd/cfos-adapter` | `main` (standalone binary) | CFOS adapter (env `LEASE_URL` default `https://127.0.0.1:8890`, `LEASE_TOKEN`, `ADAPTER_TOKEN`, `ADAPTER_ADDR` `:8893`, `DEFAULT_IMAGE` `js-base`) |
 
 `cmd/spoond/main.go` L1-68:
@@ -1204,7 +1204,7 @@ func (s *Service) setComment(owner, id, comment string) (*Lease, error) {
 
 // lookupByName returns a live lease with the given name regardless of
 // owner. Used by the SSH gateway (username = name) and the public proxy
-// (<name>.sandbox.lacy.casa); both treat the name as the capability, the
+// (<name>.sandbox.example.com); both treat the name as the capability, the
 // same model as lease ids. Names are unique per owner.
 func (s *Service) lookupByName(name string) *Lease {
 	s.store.mu.Lock()
@@ -3550,19 +3550,19 @@ import (
 )
 
 // proxyHostSuffix is the wildcard hostname suffix for the HTTP proxy.
-// Caddy terminates TLS for *.sandbox.lacy.casa and forwards here.
-const proxyHostSuffix = ".sandbox.lacy.casa"
+// Caddy terminates TLS for *.sandbox.example.com and forwards here.
+const proxyHostSuffix = ".sandbox.example.com"
 
 // defaultProxyPort is the guest port used when the hostname carries none.
 // exe.dev uses the Dockerfile EXPOSE port; we have no Dockerfiles, so the
 // convention is port 3000 unless the caller names another via
-// <lease-id>-<port>.sandbox.lacy.casa.
+// <lease-id>-<port>.sandbox.example.com.
 const defaultProxyPort = 3000
 
 // ProxyHandler returns the HTTP handler for the public proxy listener
 // (plain HTTP on an internal port; Caddy fronts it with wildcard TLS).
-// Every request's Host header names a lease: <lease-id>.sandbox.lacy.casa
-// → guest:3000, <lease-id>-<port>.sandbox.lacy.casa → guest:<port>.
+// Every request's Host header names a lease: <lease-id>.sandbox.example.com
+// → guest:3000, <lease-id>-<port>.sandbox.example.com → guest:<port>.
 // The lease id in the hostname is the capability (same model as SSH).
 //
 // Under forward-auth (U7/T7) the capability model is replaced: the
@@ -3775,8 +3775,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 // parseProxyHost extracts a lease id and guest port from a proxy Host
 // header. Accepted forms:
 //
-//	<32-hex-lease-id>.sandbox.lacy.casa        → port 3000
-//	<32-hex-lease-id>-<port>.sandbox.lacy.casa → that port
+//	<32-hex-lease-id>.sandbox.example.com        → port 3000
+//	<32-hex-lease-id>-<port>.sandbox.example.com → that port
 //
 // Returns ok=false for anything else (including the bare apex hostname).
 func parseProxyHost(host string) (leaseID string, port int, ok bool) {
@@ -3815,8 +3815,8 @@ func parseProxyHost(host string) (leaseID string, port int, ok bool) {
 // parseProxyHost2 is the U7/T7 extension of parseProxyHost. It accepts
 // the legacy single-label form plus the per-user form:
 //
-//	<label>.sandbox.lacy.casa              → user "" (any/legacy)
-//	<label>.<user>.sandbox.lacy.casa       → user <user>
+//	<label>.sandbox.example.com              → user "" (any/legacy)
+//	<label>.<user>.sandbox.example.com       → user <user>
 //
 // Returns user="" when the hostname has no user segment. The caller
 // (handleProxy) decides whether the user segment is allowed for the
@@ -3878,12 +3878,12 @@ func isHex(s string) bool {
 ```
 
 **Proxy summary:**
-- Listener: `PROXY_ADDR`, plain HTTP; Caddy terminates TLS for `*.sandbox.lacy.casa`.
+- Listener: `PROXY_ADDR`, plain HTTP; Caddy terminates TLS for `*.sandbox.example.com`.
 - On the same listener: `/llm/` goes to the LLM gateway, and `/assets/` serves files from `ASSETS_DIR`.
 - Host formats:
-  - `<32hex-lease-id>.sandbox.lacy.casa` → port 3000
-  - `<label>-<port>.sandbox.lacy.casa` → that port
-  - `<label>.<user>.sandbox.lacy.casa` → port 3000 (no port form with a user segment)
+  - `<32hex-lease-id>.sandbox.example.com` → port 3000
+  - `<label>-<port>.sandbox.example.com` → that port
+  - `<label>.<user>.sandbox.example.com` → port 3000 (no port form with a user segment)
   - `label` = a 32-hex id or a friendly name.
 - Lookups:
   - Under forward-auth: owner-scoped `lookupUserScoped`.
@@ -3918,7 +3918,7 @@ var (
 	flags = flag.NewFlagSet("spoond-gateway", flag.ExitOnError)
 
 	// gatewayHost is the public hostname advertised in MOTDs.
-	gatewayHost = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
+	gatewayHost = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.example.com"), "public hostname advertised in MOTDs")
 	listenAddr  = flags.String("listen", ":2222", "listen address")
 	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
 	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
@@ -3971,7 +3971,7 @@ type endpoint struct {
 
 | Flag | Env fallback | Default |
 |---|---|---|
-| `--gateway-host` | `FORKD_GATEWAY_HOST` | `sandbox.lacy.casa` |
+| `--gateway-host` | `FORKD_GATEWAY_HOST` | `sandbox.example.com` |
 | `--listen` | none | `:2222` |
 | `--host-key` | none | `/etc/spoond-gateway/ssh_host_ed25519_key` |
 | `--backend` | none | `https://127.0.0.1:8890` |
@@ -4521,12 +4521,12 @@ Summary:
 // the exec command as a forkd API call, writes JSON to the channel and
 // closes it. Usage:
 //
-//	ssh ctl@sandbox.lacy.casa "new [image]"     create a persistent lease
-//	ssh ctl@sandbox.lacy.casa "ls"              list leases
-//	ssh ctl@sandbox.lacy.casa "rm <lease-id>"   delete a lease
-//	ssh ctl@sandbox.lacy.casa "keepalive <id>"  extend a lease
-//	ssh ctl@sandbox.lacy.casa "cp <id> [tag]"   clone a sandbox (branch)
-//	ssh ctl@sandbox.lacy.casa "help"
+//	ssh ctl@sandbox.example.com "new [image]"     create a persistent lease
+//	ssh ctl@sandbox.example.com "ls"              list leases
+//	ssh ctl@sandbox.example.com "rm <lease-id>"   delete a lease
+//	ssh ctl@sandbox.example.com "keepalive <id>"  extend a lease
+//	ssh ctl@sandbox.example.com "cp <id> [tag]"   clone a sandbox (branch)
+//	ssh ctl@sandbox.example.com "help"
 func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyID, userID, userName string) {
 	// Note: ctl command metrics would need gwMetrics passed through the
 	// call chain. For now, connection-level metrics are captured here;
@@ -5438,7 +5438,7 @@ func Main(args []string) int {
 	httpSrv := newHTTPServer(bindAddr, srv.Handler())
 
 	// Optional second listener: the public HTTP proxy (wildcard
-	// *.sandbox.lacy.casa via Caddy). Plain HTTP — Caddy terminates TLS.
+	// *.sandbox.example.com via Caddy). Plain HTTP — Caddy terminates TLS.
 	var proxySrv *http.Server
 	if proxyAddr != "" {
 		proxySrv = newHTTPServer(proxyAddr, srv.ProxyHandler())
@@ -5626,7 +5626,7 @@ images:
       pinned to /usr/local/{rustup,cargo} so cache mounts can never mask toolchain
       binaries. kaniko baked in for daemonless image push (sandboxes have no docker).
       First bake: 2026-09-08. BAKE GOTCHAS (each cost a bake cycle):
-      - vm2 docker builds need --network=host --security-opt seccomp=unconfined
+      - host docker builds need --network=host --security-opt seccomp=unconfined
         (the host's default docker seccomp profile denies thread creation and
         AF_UNIX; Erlang can't boot there at all — no mix RUNs in the dockerfile).
       - curl | sh silently succeeds with nothing installed when the download
@@ -5639,7 +5639,7 @@ images:
         pattern). rustc/cargo are direct symlinks to the toolchain, bypassing
         the rustup proxy (which needs RUSTUP_HOME env the agent won't pass).
       - forkd-init.sh (host-level) now lists LAN resolvers first — sandbox DNS
-        is otherwise public, and code.lacy.casa then resolves to the public edge
+        is otherwise public, and git.example.com then resolves to the public edge
         whose /v2/ registry path is SSO-gated (302 to login).
 
   - name: llm-review
@@ -5754,7 +5754,7 @@ RUN apt-get update -qq \
 # openssh-server: the suite's OpenSSH interop gate authenticates issued
 # certificates against a REAL sshd and FAILS (not skips) when the binary is
 # missing — masked for weeks behind the env-gate failures, exposed once the
-# runner started providing USER/LOGNAME (lacy-infra#26 triage). /run/sshd is
+# runner started providing USER/LOGNAME (infra#26 triage). /run/sshd is
 # the privilege-separation dir sshd refuses to start without.
 # xdg-utils: Tauri's AppImage bundler shells out to `xdg-mime`, so without it
 # the desktop build fails after the .deb and .rpm succeed ("xdg-mime binary
@@ -5829,7 +5829,7 @@ RUN pkg-config --exists webkit2gtk-4.1 \
 
 # NOTE: DNS/registry reachability is fixed at the INIT level, not here:
 # forkd-init.sh (injected post-conversion, lives on the forkd host) now
-# lists the LAN resolvers first, so code.lacy.casa resolves to the LAN
+# lists the LAN resolvers first, so git.example.com resolves to the LAN
 # edge whose /v2/ path is not SSO-gated. Image-level /etc/hosts pinning
 # does not survive guest boot.
 ```
@@ -5840,9 +5840,9 @@ RUN pkg-config --exists webkit2gtk-4.1 \
 # py-base — the runner's DEFAULT_IMAGE fallback (IMAGE_MAP: ubuntu-latest ->
 # py-base; any label without an explicit mapping lands here). "Python 3.12
 # slim base for Python build/test/CI jobs" per images/manifest.yaml; first
-# baked 2026-08-07, re-created 2026-09-25 after the vm1 consolidation left
+# baked 2026-08-07, re-created 2026-09-25 after the infrastructure host consolidation left
 # only elixir-release registered (runner jobs on other labels 404'd —
-# lacy-infra#26 decision b: bake the missing images).
+# infra#26 decision b: bake the missing images).
 #
 # git is REQUIRED: the runner's built-in checkout execs `git clone` inside
 # the sandbox. ca-certificates for HTTPS clones. bash ships with slim.
@@ -6003,11 +6003,11 @@ fi
 # so the guest can do DNS over the netns + host bridge NAT path.
 rm -f /etc/resolv.conf
 {
-    # LAN resolvers first: split-horizon names (e.g. code.lacy.casa must
+    # LAN resolvers first: split-horizon names (e.g. git.example.com must
     # resolve to the LAN edge, whose /v2/ registry path is not SSO-gated;
     # the public edge 302s it to the login portal). Public fallbacks after.
-    echo "nameserver 10.1.0.2"
-    echo "nameserver 10.1.0.1"
+    echo "nameserver 10.0.0.2"
+    echo "nameserver 10.0.0.1"
     echo "nameserver 1.1.1.1"
     echo "nameserver 8.8.8.8"
 } > /etc/resolv.conf
@@ -6057,7 +6057,7 @@ Summary of what the init does, in order:
 2. Mount `/tmp` as a 256m tmpfs.
 3. Export a fixed PATH.
 4. Mount volumes from the kernel cmdline `forkd.mounts=vdb:/path,...`.
-5. **Rewrite `/etc/resolv.conf`**: nameservers `10.1.0.2`, `10.1.0.1`, `1.1.1.1`, `8.8.8.8`.
+5. **Rewrite `/etc/resolv.conf`**: nameservers `10.0.0.2`, `10.0.0.1`, `1.1.1.1`, `8.8.8.8`.
 6. **Mount cgroup2** at `/sys/fs/cgroup`.
 7. **Run hooks:** every executable file in `/etc/forkd/init.d/*` in lexical order, each under `timeout ${FORKD_HOOK_TIMEOUT:-180}`, output appended to `/tmp/forkd-init-hooks.log`. A non-zero exit is logged, never fatal.
 8. `exec` python3 `/forkd-agent.py`; fall back to `sleep infinity` if there's no python.
@@ -6210,7 +6210,7 @@ if __name__ == "__main__":
 | `install-spoond.sh` | installer for spoond (optionally `--with-forkd`), writes `FORKD_URL=http://127.0.0.1:8889` |
 | `bake-py-base.sh`, `bake-js-base.sh`, `bake-elixir-release.sh`, `bake-scylla.sh` | bake snapshots ON the forkd host: `docker build`, then `forkd from-image ... --tag`, then verify via direct controller calls (`POST http://127.0.0.1:8889/v1/sandboxes {"snapshot_tag","n":1,"per_child_netns":true}`, `/ping`, `/exec`, `DELETE`) |
 | `rebuild-dev-base.sh` | rebuild dev-base (snapshot via controller `{"tag","kernel","rootfs","rw","tap":"forkd-tap0","boot_wait_secs"}`), patch the init (UsePAM no, sshd, tmux hook), bake the gateway pubkey into authorized_keys, branch |
-| `caddy-sandbox-forwardauth.conf` | staged Caddy forward-auth block for `*.sandbox.lacy.casa` (review only) |
+| `caddy-sandbox-forwardauth.conf` | staged Caddy forward-auth block for `*.sandbox.example.com` (review only) |
 | `rootfs-init/forkd-init.sh`, `rootfs-init/forkd-agent.py` | guest PID 1 and agent (§10.5/10.6) |
 
 `deploy/spoond-backend.service` L1-20:
@@ -6263,7 +6263,7 @@ WantedBy=multi-user.target
 
 ```ini
 [Unit]
-Description=spoond SSH gateway (sandbox.lacy.casa interactive access)
+Description=spoond SSH gateway (sandbox.example.com interactive access)
 After=network.target spoond-backend.service
 # Soft dependency: start after the backend, but do NOT tear down the
 # gateway when the backend restarts (Requires= would stop us too — the
@@ -6284,7 +6284,7 @@ ExecStart=/opt/spoond/spoond gateway \
   --client-keys /etc/spoond-gateway/keys \
   --backend https://127.0.0.1:8890 \
   --backend-token ${SPOOND_GATEWAY_TOKEN} \
-  --gateway-host sandbox.lacy.casa
+  --gateway-host sandbox.example.com
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -6386,7 +6386,7 @@ The backend `/metrics` also appends the forkd controller's `/metrics` text, rena
 
 ### 13.1 Integration suite (tests/integration/)
 
-These are bash tests run against a **live** stack (vm2): backend on `BE_API` (default `https://127.0.0.1:8890`, curl `-k`), a token from `TOKEN` or parsed from `/etc/spoond-backend.env` `CONSUMER_TOKENS`. `run.sh` builds `wsclient` (`go build` in `tests/integration/wsclient`, a separate module), optionally stages everything to `SSHHOST` and runs it there under `timeout 600`, runs the preflight (grant a dev-base lease), runs each file in order, then prints a summary from `RESULTS_FILE` (`/tmp/forkd-itest-results.txt`). Several files need root on the host: they edit `/etc/forkd-gateway/keys` and `systemctl restart spoond-sshd-gateway`.
+These are bash tests run against a **live** stack (host): backend on `BE_API` (default `https://127.0.0.1:8890`, curl `-k`), a token from `TOKEN` or parsed from `/etc/spoond-backend.env` `CONSUMER_TOKENS`. `run.sh` builds `wsclient` (`go build` in `tests/integration/wsclient`, a separate module), optionally stages everything to `SSHHOST` and runs it there under `timeout 600`, runs the preflight (grant a dev-base lease), runs each file in order, then prints a summary from `RESULTS_FILE` (`/tmp/forkd-itest-results.txt`). Several files need root on the host: they edit `/etc/forkd-gateway/keys` and `systemctl restart spoond-sshd-gateway`.
 
 `tests/integration/run.sh` L1-75:
 
@@ -6394,13 +6394,13 @@ These are bash tests run against a **live** stack (vm2): backend on `BE_API` (de
 #!/bin/bash
 # run.sh — forkd integration test suite orchestrator.
 #
-# Runs the full integration suite against a live forkd stack (vm2).
+# Runs the full integration suite against a live forkd stack (host).
 # By default tests run locally against 127.0.0.1:8890; pass SSHHOST to
-# stage and run on a remote host (e.g. SSHHOST=root@10.1.0.11).
+# stage and run on a remote host (e.g. SSHHOST=root@10.0.0.11).
 #
 # Usage:
-#   tests/integration/run.sh              # run locally on vm2
-#   SSHHOST=root@10.1.0.11 tests/integration/run.sh   # from Hermes host
+#   tests/integration/run.sh              # run locally on the host
+#   SSHHOST=root@10.0.0.11 tests/integration/run.sh   # from Hermes host
 set -u
 cd "$(dirname "$0")"
 DIR="$(pwd)"
@@ -6420,7 +6420,7 @@ if [ -n "$SSHHOST" ]; then
   ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" "mkdir -p /tmp/forkd-itest"
   scp -q -r "$DIR/." "$SSHHOST:/tmp/forkd-itest/"
   # gateway test needs the backend token in its env file; run.sh picks it up from /etc
-  # The cap runs REMOTELY (vm2 has GNU timeout; the local machine may
+  # The cap runs REMOTELY (host has GNU timeout; the local machine may
   # be macOS/zsh where `timeout` doesn't exist). If the remote run
   # hangs, timeout kills it and ssh returns.
   ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" \
@@ -6429,7 +6429,7 @@ if [ -n "$SSHHOST" ]; then
   exit $RC
 fi
 
-# Local run (on vm2 or wherever the backend is reachable).
+# Local run (on the host or wherever the backend is reachable).
 source ./lib.sh
 echo "== forkd integration suite =="
 echo "backend: $BE_API  host: $(hostname)"
@@ -6591,7 +6591,7 @@ summary() {
 | `test_ctl_new.sh` | tag assigns a name; duplicate name rejected; name resolves; name-based ssh; restart returns JSON; exec after restart; **proxy after restart reaches guest network (502 = connected, nothing listening)**; prompt without agent returns a conflict |
 | `test_identity.sh` | create users (admin/bootstrap), duplicate rejected, non-admin create rejected, impersonated create owner (gateway token plus `X-Spoond-User-Id`), unknown impersonation 403, cross-owner list isolation and rm denied, quota cap 429, TTL clamp |
 | `test_netpolicy.sh` | `none` blocks LAN egress (and is **re-applied after restart**); `lan` allows LAN; `internet` allows egress; `restricted` allows an allowlisted IP and blocks others; unknown policy rejected; "restricted without allowlist rejected" (see the §5.4 ambiguity) |
-| `test_proxy.sh` | start `python3 -m http.server` in the guest; fetch `https://<id>.sandbox.lacy.casa` through Caddy; custom `-<port>` plus Host passthrough; unknown lease 404 |
+| `test_proxy.sh` | start `python3 -m http.server` in the guest; fetch `https://<id>.sandbox.example.com` through Caddy; custom `-<port>` plus Host passthrough; unknown lease 404 |
 | `test_mcp.sh` | `spoond mcp` stdio: initialize, tools/list has shell and read_file, shell runs in a sandbox (returns sandbox_id), write_file ok |
 | `test_acp.sh` | `spoond acp` stdio: initialize, protocol version, session/new, session/prompt returns a result/stop reason or a JSON-RPC error without hanging |
 | `test_stat_pretty.sh` | ctl stat returns cpu/mem/net (pretty and `--json`); ctl ls pretty header and truncated id; ls `--json` is the sandboxes array; whoami pretty and json |
@@ -6857,15 +6857,15 @@ func (c *HTTPLeaseClient) Delete(ctx context.Context, id string) error {
 			Labels:       imageMap,
 			DefaultImage: defaultImage,
 			TTL:          ttl,
-			RepoBaseURL:  envOr("REPO_BASE_URL", "https://code.lacy.casa"),
+			RepoBaseURL:  envOr("REPO_BASE_URL", "https://git.example.com"),
 			StepTimeout:  stepTimeout,
 			RecordDir:    envOr("JOB_RECORD_DIR", "/var/lib/spoond/jobs"),
 		}
 ```
 
-- **Runner env** (cmd/spoond-runner/main.go header): `FORGEJO_URL`, `RUNNER_TOKEN`, `RUNNER_NAME` (forkd-runner), `RUNNER_LABELS` (ubuntu-latest), `LEASE_URL` (`http://127.0.0.1:8890`), `LEASE_TOKEN`, `IMAGE_MAP` (label=image), `DEFAULT_IMAGE` (py-base), `REPO_BASE_URL` (`https://code.lacy.casa`), `LEASE_TTL` (600), `EXEC_TIMEOUT_SECS` (300), `RUNNER_FLOOR/MAX/SCALE_STEP` (3/12/3), `SCALE_UP_DELAY`/`SCALE_DOWN_DELAY`, `RUNNER_STATE_FILE` (`/var/lib/spoond/runner-state.json`), `FORGEJO_ADMIN_TOKEN`, `METRICS_LISTEN`, `LEASE_NETPOL`, `LEASE_NET_ALLOW`, `JOB_RECORD_DIR` (`/var/lib/spoond/jobs`).
+- **Runner env** (cmd/spoond-runner/main.go header): `FORGEJO_URL`, `RUNNER_TOKEN`, `RUNNER_NAME` (forkd-runner), `RUNNER_LABELS` (ubuntu-latest), `LEASE_URL` (`http://127.0.0.1:8890`), `LEASE_TOKEN`, `IMAGE_MAP` (label=image), `DEFAULT_IMAGE` (py-base), `REPO_BASE_URL` (`https://git.example.com`), `LEASE_TTL` (600), `EXEC_TIMEOUT_SECS` (300), `RUNNER_FLOOR/MAX/SCALE_STEP` (3/12/3), `SCALE_UP_DELAY`/`SCALE_DOWN_DELAY`, `RUNNER_STATE_FILE` (`/var/lib/spoond/runner-state.json`), `FORGEJO_ADMIN_TOKEN`, `METRICS_LISTEN`, `LEASE_NETPOL`, `LEASE_NET_ALLOW`, `JOB_RECORD_DIR` (`/var/lib/spoond/jobs`).
 - **Image selection:** the first `runs-on` label found in `IMAGE_MAP`, else `DefaultImage` (executor.go L447-454).
-- **Guest assumptions** (executor.go): one lease per job, executed as root; workspace `/workspace`; checkout = `git clone --depth 1 <REPO_BASE_URL>/<repo>.git /workspace`, run in the guest (needs `git` in the image and egress to code.lacy.casa; auth via `GIT_CONFIG_COUNT` env with `GITHUB_TOKEN`). Env injected into every step unless already set: `CI_REPO_OWNER`, `CI_REPO_NAME`, `CI_COMMIT`, **`CI=true`**, `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`, `USER=root`, `LOGNAME=root`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_SHA`, `GITHUB_REF`, `CI_PULL_REQUEST`. Commands run under `/bin/bash -c` (the backend's `buildShellArgs`), so the images need bash. **No docker inside the guest** (elixir-release bakes kaniko because "sandboxes have no docker"). The guest agent PATH/`/etc/environment` caveats are in the manifest and elixir-release.dockerfile notes (§10).
+- **Guest assumptions** (executor.go): one lease per job, executed as root; workspace `/workspace`; checkout = `git clone --depth 1 <REPO_BASE_URL>/<repo>.git /workspace`, run in the guest (needs `git` in the image and egress to git.example.com; auth via `GIT_CONFIG_COUNT` env with `GITHUB_TOKEN`). Env injected into every step unless already set: `CI_REPO_OWNER`, `CI_REPO_NAME`, `CI_COMMIT`, **`CI=true`**, `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`, `USER=root`, `LOGNAME=root`, `GITHUB_RUN_ID`, `GITHUB_RUN_NUMBER`, `GITHUB_SHA`, `GITHUB_REF`, `CI_PULL_REQUEST`. Commands run under `/bin/bash -c` (the backend's `buildShellArgs`), so the images need bash. **No docker inside the guest** (elixir-release bakes kaniko because "sandboxes have no docker"). The guest agent PATH/`/etc/environment` caveats are in the manifest and elixir-release.dockerfile notes (§10).
 
 `runner/executor.go` L150-175:
 
@@ -6885,7 +6885,7 @@ func (c *HTTPLeaseClient) Delete(ctx context.Context, id string) error {
 		// environment with the step's env map when one is supplied, and its
 		// own default PATH is not applied to that case — so a step env
 		// without PATH loses /usr/bin entirely ("date: command not found"
-		// in otherwise-green jobs, lacy-infra#26).
+		// in otherwise-green jobs, infra#26).
 		if env["PATH"] == "" {
 			env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 		}
@@ -6912,7 +6912,7 @@ func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job,
 	}
 	base := e.RepoBaseURL
 	if base == "" {
-		base = "https://code.lacy.casa"
+		base = "https://git.example.com"
 	}
 	base = strings.TrimRight(base, "/")
 	cloneURL := base + "/" + repo + ".git"

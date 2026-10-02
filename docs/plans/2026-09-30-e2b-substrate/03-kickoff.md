@@ -7,23 +7,23 @@ except for the Environment facts below.
 
 **Environment**
 - **Repository:** `/home/jrimmer/Work/spoond`, remote `origin` =
-  `https://code.lacy.casa/lacy.casa/spoond.git`, Go module
+  `https://git.example.com/example/spoond.git`, Go module
   `github.com/jrimmer/spoond`.
 - **Commit identity:** `jrimmer <jason@rimmer.net>` (already configured in
   git). Commits carry no AI attribution and no `Co-Authored-By` trailers.
 - **Workstation:** arm64 Linux. It cannot build the E2B orchestrator
-  (cgo, x86_64 only). U03 step 9 runs on vm2.
-- **Target host:** `vm2.lacy.casa` (x86_64, Debian 13), reachable as
-  `root@vm2.lacy.casa` over SSH with this machine's key.
+  (cgo, x86_64 only). U03 step 9 runs on the host.
+- **Target host:** `spoond.example.com` (x86_64, Debian 13), reachable as
+  `root@spoond.example.com` over SSH with this machine's key.
   - **Only the Ops runner** executes commands there. You give it the unit
     file and step number, and it runs only commands copied verbatim from
     that step.
   - **Workers and verifiers never use SSH.**
-  - vm2 is the **live production host** for spoond CI. The README's rule 6
+  - host is the **live production host** for spoond CI. The README's rule 6
     applies to every command.
-  - `/etc/spoond/conformance.env` exists on vm2 (provisioned by the human
+  - `/etc/spoond/conformance.env` exists on the host (provisioned by the human
     before kickoff). Check it read-only with
-    `ssh root@vm2.lacy.casa 'test -s /etc/spoond/conformance.env && echo present'`;
+    `ssh root@spoond.example.com 'test -s /etc/spoond/conformance.env && echo present'`;
     if absent, stop and ask the human.
 
 **Agents (OMP `task` tool; defined in `.omp/agents/`)**
@@ -31,21 +31,21 @@ except for the Environment facts below.
   each in its own git worktree. Give it the unit id, the absolute worktree
   path, and the `.spec-context/` path.
 - **Ops runner:** agent `spec-ops` (`zai/glm-5.3-flash`). Give it the unit
-  file and step number. It is the only agent that runs commands on vm2.
+  file and step number. It is the only agent that runs commands on the host.
 - **Verifiers:** agent `spec-verifier` (`zai/glm-5.3`). A verifier is never
   the agent that wrote the unit.
 - **You:** `zai/glm-5.3`, the main OMP session. You do not write
-  implementation code, and you do not run commands on vm2.
+  implementation code, and you do not run commands on the host.
 
 **Setup, in order, before any unit starts**
 1. `git -C /home/jrimmer/Work/spoond fetch origin`.
 2. If `feat/e2b-substrate` does not exist, create it from `origin/main`.
 3. Merge `docs/e2b-substrate-spec` into `feat/e2b-substrate` with `--no-ff`,
    so every worktree contains the spec.
-4. **Confirm vm2 access** (read-only). Dispatch `spec-ops` to run exactly
+4. **Confirm host access** (read-only). Dispatch `spec-ops` to run exactly
    this (it is the only agent that uses SSH):
    ```bash
-   ssh -o BatchMode=yes -o ConnectTimeout=10 root@vm2.lacy.casa \
+   ssh -o BatchMode=yes -o ConnectTimeout=10 root@spoond.example.com \
      'hostname; uname -m; . /etc/os-release; echo "$ID $VERSION_ID"; systemctl is-active forkd-controller spoond-backend spoond-runner spoond-sshd-gateway'
    ```
    Expected output: `sandbox`, `x86_64`, `debian 13`, then `active` four
@@ -54,7 +54,7 @@ except for the Environment facts below.
 5. Check the toolchain, and **stop and ask the human** if either fails:
    - `go version` prints `go1.27.1` (U01 sets `go 1.27.1` in `go.mod`;
      workers need that toolchain);
-   - U06's `gen.sh` runs on vm2 through the Ops runner (protoc 34.1 is
+   - U06's `gen.sh` runs on the host through the Ops runner (protoc 34.1 is
      installed there in U03), so the workstation needs no protoc. Hand-off:
      the worker pushes its branch; the Ops runner checks it out in
      `/root/src/spoond`, runs `gen.sh`, commits `substrate/e2b/gen/` and
@@ -66,11 +66,11 @@ except for the Environment facts below.
 **Scheduling**
 - Follow `02-orchestration.md` §Schedule.
 - Start **U01** (spoond). Start **U03** (fork) once U01 step 10 (Go
-  1.27.1 on vm2) is done.
-  - U03's steps 1–8 need the fork repo `lacy.casa/e2b-runtime`. If it does
+  1.27.1 on the host) is done.
+  - U03's steps 1–8 need the fork repo `example.com/e2b-runtime`. If it does
     not exist yet, U03 is `BLOCKED` on the human.
-  - U03's vm2 steps (1–9 run on vm2 per the unit) go to the Ops runner.
-    Git pushes to the fork use the credentials configured on vm2. If a
+  - U03's host steps (1–9 run on the host per the unit) go to the Ops runner.
+    Git pushes to the fork use the credentials configured on the host. If a
     push is refused, the unit is `BLOCKED` on the human.
 - **U04** is run by the Ops runner, step by step. The host firewall is the
   standalone `e2b-guard.service` (step 7); the Ops runner never touches
@@ -79,7 +79,7 @@ except for the Environment facts below.
   Firecracker process reclaimed, the Ops runner runs
   `systemctl stop e2b-orchestrator`, and the unit is `BLOCKED` on the
   human.
-- **Other unit vm2 steps** go to the Ops runner:
+- **Other unit host steps** go to the Ops runner:
   - U01 steps 9a (go-base check) and 10 (host Go);
   - U02 step 0 (record the backend env file path, read-only);
   - U06's `gen.sh` run and live test;
@@ -90,7 +90,7 @@ except for the Environment facts below.
   - U10/U11 staging config and collector install.
 - **Conformance runs:**
   - The Ops runner may run the suite **without** group R against forkd
-    (U02 baseline) and against staging (U08–U11). It always runs on vm2
+    (U02 baseline) and against staging (U08–U11). It always runs on the host
     from `/root/src/spoond` with `CONFORMANCE_SSH=local` and the
     `CONFORMANCE_BACKEND_UNIT` of the backend under test.
   - Production runs load `/etc/spoond/conformance.env` (OPERATOR, before

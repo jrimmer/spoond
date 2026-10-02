@@ -27,7 +27,7 @@ Build a general-purpose ephemeral sandbox backend on top of forkd, exposed as a 
 
 ### Summary
 
-forkd is installed and proven on sandbox (10.1.0.11): 10 microVMs fork from a warm parent in 53ms, and `forkd exec` runs real commands inside live children. This plan builds the general-purpose layer on top of it — a small HTTP API that treats sandboxes as leases, with images as pre-baked snapshot tags — and validates the contract with a direct client smoke test. The result is a reusable ephemeral-compute backend that any future consumer can call without knowing forkd exists.
+forkd is installed and proven on sandbox (10.0.0.11): 10 microVMs fork from a warm parent in 53ms, and `forkd exec` runs real commands inside live children. This plan builds the general-purpose layer on top of it — a small HTTP API that treats sandboxes as leases, with images as pre-baked snapshot tags — and validates the contract with a direct client smoke test. The result is a reusable ephemeral-compute backend that any future consumer can call without knowing forkd exists.
 
 ### Problem Frame
 
@@ -100,7 +100,7 @@ flowchart LR
         AUTH[Token Auth]
         FC[forkd HTTP client]
     end
-    subgraph Host [sandbox 10.1.0.11]
+    subgraph Host [sandbox 10.0.0.11]
         CTRL[forkd-controller :8889]
         SNAP[(snapshot tags)]
     end

@@ -82,7 +82,7 @@ controller after `[BYE]`.
   orchestrator and owner are mailed.
 - Model-service outages (the bee reports `[BLOCKED] retryable:
   infrastructure`) do not count as attempts; the hive pauses
-  spawning for that project until `llm.lacy.casa` answers again.
+  spawning for that project until `llm.example.com` answers again.
 
 **C6. Projects and worker classes.** A project is described by its
 `.spoond/hive.yaml` (C10) and registered by enlisting it; the hive keeps
@@ -110,7 +110,7 @@ derived.** A project describes itself in its own repository, in
 
 ```yaml
 project: hrmny
-repo: ssh://git@git.lacy.casa/lacy.casa/hrmny.git
+repo: ssh://git@git.example.com/example/hrmny.git
 base_image: elixir-release      # any image in the spoond catalog
 gates:                          # what "done" means; bee and verifier run them
   - mix format --check-formatted
@@ -172,7 +172,7 @@ a budget is set.
 
 ## Open questions
 
-1. **Agent Mail and Bifrost stay on vm1.** A vm1 stall stops every
+1. **Agent Mail and Bifrost stay on the infrastructure host.** A infrastructure host stall stops every
    bee (2026-10-02). Moving them is an infra decision; the
    controller only needs to survive it (C5 already does).
 2. **Merging.** Should a `[DONE]` that the verifier PASSed and that only

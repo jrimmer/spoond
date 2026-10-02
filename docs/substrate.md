@@ -160,7 +160,7 @@ incarnation loads them and reconciles.
 
 ## Staying close to upstream
 
-We do not carry a divergent fork. `code.lacy.casa/lacy.casa/e2b-runtime`
+We do not carry a divergent fork. `git.example.com/example/e2b-runtime`
 mirrors upstream (`upstream` branch, pristine) plus a short patch series
 (`spoond` branch, at most five patches: startup-reclaim scoping, drain
 hooks, private egress allowances with a host-address guard, flag

@@ -353,7 +353,7 @@ zero time. Parse `""` back as `time.Time{}`.
 2. **Prepare (Ops runner; no production impact):**
    ```bash
    export PATH=/usr/local/go/bin:$PATH
-   test -d /root/src/spoond || git clone https://code.lacy.casa/lacy.casa/spoond.git /root/src/spoond
+   test -d /root/src/spoond || git clone https://git.example.com/example/spoond.git /root/src/spoond
    cd /root/src/spoond && git fetch && git checkout main && git pull --ff-only
    install -d -m 700 /var/lib/spoond
    go build -o /opt/spoond/spoond.new ./cmd/spoond
@@ -371,7 +371,7 @@ zero time. Parse `""` back as `time.Time{}`.
      systemctl restart spoond-backend spoond-sshd-gateway
      sleep 5
      ```
-   - **Verify:** `curl -fsS https://vm2.lacy.casa:8890/healthz` prints
+   - **Verify:** `curl -fsS https://spoond.example.com:8890/healthz` prints
      `{"status":"ok"}`; `window_smoke`; `test -s /var/lib/spoond/spoond.db`;
      then, in the same window, the R3-only conformance run from "Done when"
      passes.

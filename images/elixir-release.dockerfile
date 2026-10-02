@@ -33,7 +33,7 @@ RUN apt-get update -qq \
 # openssh-server: the suite's OpenSSH interop gate authenticates issued
 # certificates against a REAL sshd and FAILS (not skips) when the binary is
 # missing — masked for weeks behind the env-gate failures, exposed once the
-# runner started providing USER/LOGNAME (lacy-infra#26 triage). /run/sshd is
+# runner started providing USER/LOGNAME (infra#26 triage). /run/sshd is
 # the privilege-separation dir sshd refuses to start without.
 # xdg-utils: Tauri's AppImage bundler shells out to `xdg-mime`, so without it
 # the desktop build fails after the .deb and .rpm succeed ("xdg-mime binary
@@ -108,7 +108,7 @@ RUN pkg-config --exists webkit2gtk-4.1 \
 
 # NOTE: DNS/registry reachability is fixed at the INIT level, not here:
 # images/guest/spoond-guest-init lists the LAN resolver only, so
-# code.lacy.casa resolves to the LAN edge whose /v2/ path is not
+# git.example.com resolves to the LAN edge whose /v2/ path is not
 # SSO-gated. Image-level /etc/hosts pinning does not survive guest boot.
 COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
 RUN mkdir -p /etc/spoond/init.d

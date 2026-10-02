@@ -12,7 +12,7 @@ delete forkd and its tooling. Includes an exact rollback path.
   including R, with every budget met. The one allowed failure is
   `TestI3_DockerInDocker` (a recorded known limitation). Results are recorded in
   `docs/plans/2026-09-30-e2b-substrate/RESULTS.md`.
-- **No user notice.** The human is the only user of vm2. Existing forkd
+- **No user notice.** The human is the only user of the host. Existing forkd
   leases, including persistent sandboxes, are deleted at cutover, which is
   accepted. forkd snapshots are not migrated (non-goal).
 - **The cutover runs as an Autonomous window** (`00-README.md` §Autonomous
@@ -41,7 +41,7 @@ delete forkd and its tooling. Includes an exact rollback path.
 
 1. The orchestrator merges `feat/e2b-substrate` into `main` with `--no-ff`,
    and pushes (README rule 10). This requires the preconditions above to hold.
-2. On vm2 (Ops runner):
+2. On host (Ops runner):
    ```bash
    export PATH=/usr/local/go/bin:$PATH
    cd /root/src/spoond && git fetch && git checkout main && git pull --ff-only
@@ -71,7 +71,7 @@ delete forkd and its tooling. Includes an exact rollback path.
      E2B_TEAM_ID=5b0f4e3a-8c1d-4f2e-9a6b-7d3c2e1f0a95
      E2B_TEMPLATE_STORAGE_PATH=/forkdcache/e2b/storage/templates
      IMAGE_REGISTRY=localhost:5000
-     HOST_GUEST_SERVICE_ADDR=10.1.0.11
+     HOST_GUEST_SERVICE_ADDR=10.0.0.11
      HOST_GUEST_SERVICE_PORT=8891
      CHECKPOINT_INTERVAL_MINS=60
      OTEL_PROM_URL=http://127.0.0.1:19464/metrics
@@ -124,7 +124,7 @@ delete forkd and its tooling. Includes an exact rollback path.
      `e2b-orchestrator.service`, and add `Wants=e2b-orchestrator.service`.
 
    Edit `/etc/spoond-gateway.env`: remove any `SHELLY_BINARY_URL` and
-   `LLM_GATEWAY_URL` overrides, so the new defaults (`10.1.0.11:8891`)
+   `LLM_GATEWAY_URL` overrides, so the new defaults (`10.0.0.11:8891`)
    apply.
 10. Point the drain at production. Edit `/etc/e2b/drain.env`:
     ```ini
@@ -144,7 +144,7 @@ delete forkd and its tooling. Includes an exact rollback path.
     `systemctl start forkd-controller` when it sees a spawn outage, so it is
     disabled before forkd.
 12. `systemctl daemon-reload && systemctl start spoond-backend spoond-sshd-gateway`.
-    `curl -fsS https://vm2.lacy.casa:8890/healthz` returns `"status":"ok"`.
+    `curl -fsS https://spoond.example.com:8890/healthz` returns `"status":"ok"`.
 13. Raise the hugepages to 48 GiB:
     ```bash
     sed -i 's/^vm.nr_hugepages = .*/vm.nr_hugepages = 24576/' /etc/sysctl.d/90-e2b.conf
@@ -157,7 +157,7 @@ delete forkd and its tooling. Includes an exact rollback path.
     ```bash
     export PATH=/usr/local/go/bin:$PATH
     set -a; . /etc/spoond/conformance.env; set +a
-    export CONFORMANCE_SUBSTRATE=e2b CONFORMANCE_GUEST_SERVICE=10.1.0.11:8891 CONFORMANCE_DESTRUCTIVE=1
+    export CONFORMANCE_SUBSTRATE=e2b CONFORMANCE_GUEST_SERVICE=10.0.0.11:8891 CONFORMANCE_DESTRUCTIVE=1
     cd /root/src/spoond && go test -tags conformance -count=1 -timeout 90m -v ./conformance/ \
       -args -results "$PWD/conformance/results/$(date +%Y%m%dT%H%M%S)-prod-e2b.json"
     ```
@@ -283,7 +283,7 @@ run by the Ops runner under the protocol; it never needs a human to start.
       runbook (U13).
 
     **Commit:** `chore: remove forkd; document the E2B substrate`.
-20. **On vm2, 30 days after step 15, with no rollback** (authorized by the
+20. **On host, 30 days after step 15, with no rollback** (authorized by the
     human; record the due date in `STATUS.md` at step 15, and run it then,
     through the Ops runner or a human):
     1. Delete staging-only builds. They are not in the production catalog,

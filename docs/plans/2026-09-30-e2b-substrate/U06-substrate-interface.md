@@ -10,7 +10,7 @@ U12, and all E2B work runs on a staging instance (U08).
 ## Preconditions
 
 - U05 is done.
-- U04 is done: the orchestrator is healthy on vm2, and the registry is up.
+- U04 is done: the orchestrator is healthy on the host, and the registry is up.
 
 ## Facts relied on
 
@@ -114,13 +114,13 @@ generate our own code from the protos.
    - `packages/envd/spec/filesystem/filesystem.proto` → `proto/envd/filesystem/filesystem.proto`
 
    Record the fork commit hash in `substrate/e2b/proto/SOURCE`.
-2. `substrate/e2b/gen.sh` (exact). It runs **on vm2** (the only machine with
+2. `substrate/e2b/gen.sh` (exact). It runs **on the host** (the only machine with
    `protoc` 34.1, installed in U03), from `/root/src/spoond`, with
    `export PATH=/usr/local/go/bin:/root/go/bin:/usr/local/bin:$PATH`.
 
    **Hand-off, fixed:** the worker first commits the proto copies and
    `gen.sh`, then pushes its unit branch (`impl/U06-…`) to `origin`. The Ops
-   runner then, on vm2:
+   runner then, on the host:
    1. `cd /root/src/spoond && git fetch origin && git checkout impl/U06-<slug> && git pull --ff-only`;
    2. runs `substrate/e2b/gen.sh`;
    3. commits `substrate/e2b/gen/` with commit message 2
@@ -176,7 +176,7 @@ import (
 
 // PrivateAllowance permits egress into an otherwise-denied private range (patch P4).
 type PrivateAllowance struct {
-	CIDR     string   // e.g. "10.1.0.11/32"
+	CIDR     string   // e.g. "10.0.0.11/32"
 	TCPPorts []uint32 // empty = all TCP ports
 }
 
@@ -487,7 +487,7 @@ func (p *FakeProcess) Push(ev substrate.ProcessEvent) // deliver an event to Eve
 - `substrate/fake/fake_test.go`: the interface is satisfied (a compile
   check), and the call log records calls.
 - **`substrate/e2b/client_live_test.go`**, with build tag `e2blive`. Run on
-  vm2 with `E2B_*` env set:
+  host with `E2B_*` env set:
   1. `BuildTemplate` from `docker.io/library/debian:12` with 2 vCPU,
      1024 MB, 4096 MB disk and `ReadyCmd` empty. It completes, and the
      versions are non-empty.
@@ -508,13 +508,13 @@ func (p *FakeProcess) Push(ev substrate.ProcessEvent) // deliver an event to Eve
 ## Commits
 
 1. `feat(substrate): E2B proto copies and gen.sh` (worker: `substrate/e2b/proto/`, `gen.sh`)
-2. `feat(substrate): generated E2B clients` (Ops runner on vm2: `substrate/e2b/gen/` only)
+2. `feat(substrate): generated E2B clients` (Ops runner on the host: `substrate/e2b/gen/` only)
 3. `feat(substrate): Substrate interface, E2B client and fake` (worker, after pulling commit 2)
 
 ## Done when
 
 - `go test ./...` passes.
-- The live test passes on vm2.
+- The live test passes on the host.
 
 ## Do not
 

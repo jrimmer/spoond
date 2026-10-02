@@ -156,7 +156,7 @@ Known/accepted residuals:
   capability model either way.
 - **Forward-auth proxy** (`PROXY_AUTH_MODE=forward-auth`): requires
   `X-Proxy-Auth` shared secret (constant-time) + `Remote-User`; set
-  `PROXY_AUTH_TRUSTED_PEERS` (e.g. `10.1.0.203/32`) so only Caddy can
+  `PROXY_AUTH_TRUSTED_PEERS` (e.g. `10.0.0.203/32`) so only Caddy can
   present an identity. Caddyfile: `deploy/caddy-sandbox-forwardauth.conf`.
 - **Shares** are scoped by mode (`ssh` = SSH attach, `/endpoint` and
   `/prompt`; `http` = exec/stream/stat/proxy and `GET` of the lease),

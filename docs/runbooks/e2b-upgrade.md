@@ -2,7 +2,7 @@
 
 1. **Pick a target.** Take the newest upstream commit on `main` that is at
    least 7 days old. A tag is preferred when one exists.
-2. **Update `upstream`** (on vm2, in `/root/src/e2b-runtime`):
+2. **Update `upstream`** (on the host, in `/root/src/e2b-runtime`):
    ```bash
    git fetch github
    git checkout upstream && git merge --ff-only <target>

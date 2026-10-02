@@ -27,12 +27,12 @@ docker: registry:2 on 127.0.0.1:5000  ◄── docker build ◄── images/*.
 otelcol-contrib: OTLP 127.0.0.1:14317 → Prometheus 127.0.0.1:19464
 ```
 
-## Addresses and ports on vm2
+## Addresses and ports on the host
 
 | Name | Value | Notes |
 |---|---|---|
-| `HOST_PRIMARY_IP` | `10.1.0.11` | vm2 on `vmbr0` (default-route interface) |
-| `HOST_GUEST_SERVICE_ADDR` | `10.1.0.11` | address guests use to reach host services (replaces forkd's `10.43.0.1`) |
+| `HOST_PRIMARY_IP` | `10.0.0.11` | host on `vmbr0` (default-route interface) |
+| `HOST_GUEST_SERVICE_ADDR` | `10.0.0.11` | address guests use to reach host services (replaces forkd's `10.43.0.1`) |
 | Sandbox host CIDR | `10.11.0.0/16` | each sandbox's `HostIP` (a /32) |
 | Sandbox veth CIDR | `10.12.0.0/16` | veth/vpeer /31 pairs |
 | Guest IP (every sandbox) | `169.254.0.21` | fixed by E2B; isolated per netns |
@@ -42,16 +42,16 @@ otelcol-contrib: OTLP 127.0.0.1:14317 → Prometheus 127.0.0.1:19464
 | TCP egress proxy | `0.0.0.0:5016`, `:5017`, `:5018` | reachable only from sandbox sources (U04) |
 | pprof | `127.0.0.1:6060` | unchanged |
 | Local registry | `127.0.0.1:5000` | docker `registry:2` |
-| OTel collector OTLP | `127.0.0.1:14317` | port 4317 is already used on vm2 |
+| OTel collector OTLP | `127.0.0.1:14317` | port 4317 is already used on the host |
 | OTel Prometheus exporter | `127.0.0.1:19464` | scraped by spoond `/metrics` (U11) |
 | spoond backend | `0.0.0.0:8890` | unchanged |
-| spoond proxy / LLM gateway | `0.0.0.0:8891` | unchanged; guests reach it at `10.1.0.11:8891` |
+| spoond proxy / LLM gateway | `0.0.0.0:8891` | unchanged; guests reach it at `10.0.0.11:8891` |
 | forkd controller | `127.0.0.1:8889` | removed in U12 |
 | Staging backend | `0.0.0.0:18890` | U08–U12 only |
 | Staging proxy / LLM gateway | `0.0.0.0:18891` | U08–U12 only |
 | Staging SSH gateway | `0.0.0.0:12222` | U09–U12 only |
 
-## Directories on vm2
+## Directories on the host
 
 | Path | Purpose | Created in |
 |---|---|---|
@@ -69,7 +69,7 @@ otelcol-contrib: OTLP 127.0.0.1:14317 → Prometheus 127.0.0.1:19464
 | `/etc/spoond/e2b-token-seed` | 64 hex chars, `0600` (envd/traffic token seed) | U04 |
 | `/etc/nftables.d/e2b-guard.nft` | host firewall table `inet e2b_guard` | U04 |
 | `/etc/systemd/system/e2b-guard.service` | oneshot unit that loads `e2b-guard.nft` | U04 |
-| `/root/src/spoond` | spoond checkout on vm2 (branch `feat/e2b-substrate` until U12, then `main`) | U07 |
+| `/root/src/spoond` | spoond checkout on the host (branch `feat/e2b-substrate` until U12, then `main`) | U07 |
 | `/opt/spoond-staging/spoond` | staging spoond binary | U07 |
 | `/etc/spoond-staging/` | staging `backend.env` and `gateway.env` (0600) | U08, U09 |
 | `/var/lib/spoond/spoond.db` | spoond SQLite database | U05 |
@@ -79,7 +79,7 @@ otelcol-contrib: OTLP 127.0.0.1:14317 → Prometheus 127.0.0.1:19464
 ## `/etc/e2b/orchestrator.env` (exact contents)
 
 ```ini
-NODE_ID=vm2
+NODE_ID=host
 NODE_IP=127.0.0.1
 ENVIRONMENT=prod
 ORCHESTRATOR_SERVICES=orchestrator,template-manager
@@ -126,7 +126,7 @@ LaunchDarkly and log shipping (A3 A2.6).
 ```
 
 Rationale, fixed:
-- **100 sandboxes** fits vm2's RAM.
+- **100 sandboxes** fits the host's RAM.
 - **6 concurrent starts** is twice the default, for 16 vCPUs.
 - **In-place checkpoint stays off.** It is E2B's newer path, and the default
   resume-fresh path is the tested one.
@@ -134,14 +134,14 @@ Rationale, fixed:
 ## spoond configuration: new environment variables
 
 Added to `spoond-backend`'s environment file (`/etc/forkd-backend.env` on
-vm2 per `deploy/README.md`; renamed in U12). The repo's
+host per `deploy/README.md`; renamed in U12). The repo's
 `deploy/spoond-backend.service` names `/etc/spoond-backend.env` instead, so
 U02 step 0 records the real path from `systemctl cat spoond-backend`; every
 later mention of `/etc/forkd-backend.env` means that recorded path. Existing
 variables keep their meaning (A1 §8), except where a unit says otherwise.
 `CONSUMER_TOKENS` is required by the backend (it exits without it).
 
-| Variable | Value on vm2 | Default in code | Meaning |
+| Variable | Value on the host | Default in code | Meaning |
 |---|---|---|---|
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | `/var/lib/spoond/spoond.db` | SQLite file (U05) |
 | `E2B_GRPC_ADDR` | `127.0.0.1:5008` | `127.0.0.1:5008` | orchestrator gRPC |
@@ -149,7 +149,7 @@ variables keep their meaning (A1 §8), except where a unit says otherwise.
 | `E2B_TOKEN_SEED_FILE` | `/etc/spoond/e2b-token-seed` | same | HMAC seed file (64 hex chars) |
 | `E2B_TEAM_ID` | `5b0f4e3a-8c1d-4f2e-9a6b-7d3c2e1f0a95` | same | fixed team UUID sent on every request |
 | `IMAGE_REGISTRY` | `localhost:5000` | `localhost:5000` | where U07 pushes images |
-| `HOST_GUEST_SERVICE_ADDR` | `10.1.0.11` | none (required) | host address guests use for spoond services |
+| `HOST_GUEST_SERVICE_ADDR` | `10.0.0.11` | none (required) | host address guests use for spoond services |
 | `HOST_GUEST_SERVICE_PORT` | `8891` (staging `18891`) | `8891` | host port guests use (the spoond proxy / LLM gateway) |
 | `ADMIN_TOKEN` | secret | empty (admin routes disabled) | bearer token for `/api/admin/*` (U10) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | same | build storage root, for disk accounting (U11) |
@@ -203,7 +203,7 @@ There is **no forkd adapter**:
   merged to `main` by the orchestrator and deployed by the Ops runner in an
   Autonomous window at the end of U05; on
   forkd) until the U12 cutover.
-- All E2B development runs on a **staging** instance on vm2, sharing the one
+- All E2B development runs on a **staging** instance on the host, sharing the one
   orchestrator:
   - `spoond-backend-staging` (`:18890`/`:18891`, DB
     `/var/lib/spoond/staging.db`, users

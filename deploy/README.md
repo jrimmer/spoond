@@ -1,11 +1,11 @@
 # spoond deployment
 
-Four systemd units run on vm2 (10.1.0.11), counting the E2B substrate unit
+Four systemd units run on the host (10.0.0.11), counting the E2B substrate unit
 they depend on:
 
 0. **e2b-orchestrator** — the sandbox substrate (Firecracker microVM
    lifecycle, snapshots, sandbox proxy). Deployed from the
-   `lacy.casa/e2b-runtime` fork; see [docs/install.md](../docs/install.md)
+   `example.com/e2b-runtime` fork; see [docs/install.md](../docs/install.md)
    and [docs/substrate.md](../docs/substrate.md).
 1. **spoond-backend** — the lease API (`:8890`), warm pool, SQLite state
 2. **spoond-sshd-gateway** — the SSH gateway (`:2222`) + ctl plane
@@ -45,7 +45,7 @@ go build -o /opt/spoond/spoond ./cmd/spoond
 install -m 644 deploy/spoond-backend.service /etc/systemd/system/
 ```
 
-On vm2, create `/etc/spoond/backend.env` (mode 0600). The full variable
+On host, create `/etc/spoond/backend.env` (mode 0600). The full variable
 reference is in [docs/setup.md](../docs/setup.md) and
 [docs/install.md](../docs/install.md); the minimum:
 
@@ -53,7 +53,7 @@ reference is in [docs/setup.md](../docs/setup.md) and
 cat > /etc/spoond/backend.env <<'EOF'
 CONSUMER_TOKENS=<token>=<consumer>,<token2>=<consumer2>
 E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
-HOST_GUEST_SERVICE_ADDR=10.1.0.11
+HOST_GUEST_SERVICE_ADDR=10.0.0.11
 TLS_CERT=/etc/spoond/tls/fullchain.pem
 TLS_KEY=/etc/spoond/tls/privkey.pem
 EOF
@@ -66,8 +66,8 @@ chmod 600 /etc/spoond/backend.env
   (envd/traffic tokens derive from it)
 - `HOST_GUEST_SERVICE_ADDR` — the host address guests use to reach the
   proxy/LLM gateway and the lease API
-- `TLS_CERT`/`TLS_KEY` — serve HTTPS on :8890. On vm2 this uses the
-  Let's Encrypt cert for `sandbox.lacy.casa` (see TLS below)
+- `TLS_CERT`/`TLS_KEY` — serve HTTPS on :8890. On host this uses the
+  Let's Encrypt cert for `sandbox.example.com` (see TLS below)
 
 Then:
 
@@ -81,7 +81,7 @@ systemctl status spoond-backend
 
 ```bash
 spoond doctor
-curl -s -H "Authorization: Bearer <token>" https://sandbox.lacy.casa:8890/api/images
+curl -s -H "Authorization: Bearer <token>" https://sandbox.example.com:8890/api/images
 ```
 
 ## 2. spoond-sshd-gateway (SSH gateway + ctl plane)
@@ -107,8 +107,8 @@ authenticated SSH user via `X-Spoond-User-Id`).
 ### Verify
 
 ```bash
-ssh ctl@sandbox.lacy.casa "ls"
-ssh new@sandbox.lacy.casa    # auto-create + attach
+ssh ctl@sandbox.example.com "ls"
+ssh new@sandbox.example.com    # auto-create + attach
 ```
 
 ## 3. spoond-runner (Forgejo Actions)
@@ -124,15 +124,15 @@ go build -o /opt/spoond/spoond ./cmd/spoond
 install -m 644 deploy/spoond-runner.service /etc/systemd/system/
 ```
 
-On vm2, create `/etc/spoond-runner.env` (mode 0600):
+On host, create `/etc/spoond-runner.env` (mode 0600):
 
 ```bash
 cat > /etc/spoond-runner.env <<'EOF'
-FORGEJO_URL=https://code.lacy.casa
+FORGEJO_URL=https://git.example.com
 RUNNER_TOKEN=<registration token>
 RUNNER_NAME=spoond-runner
 RUNNER_LABELS=ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
-LEASE_URL=https://sandbox.lacy.casa:8890
+LEASE_URL=https://sandbox.example.com:8890
 LEASE_TOKEN=<consumer token>
 IMAGE_MAP=ubuntu-latest=py-base,go=go-base,golang=go-base,elixir=elixir-base,elixir-base=elixir-base,llm-review=llm-review,dev=dev-base,elixir-release=elixir-release,release=elixir-release
 DEFAULT_IMAGE=py-base
@@ -172,9 +172,9 @@ journalctl -u spoond-runner | grep -E 'spawned worker|stopped worker'
 
 ## TLS
 
-The backend serves TLS on `:8890` using vm2's Let's Encrypt cert for
-`sandbox.lacy.casa`. vm2's `/etc/hosts` pins that hostname to 10.1.0.11
+The backend serves TLS on `:8890` using the host's Let's Encrypt cert for
+`sandbox.example.com`. the host's `/etc/hosts` pins that hostname to 10.0.0.11
 so the runner reaches the backend directly (not via Caddy). The proxy /
 LLM gateway listener (`:8891`) stays plain HTTP behind Caddy, which
-fronts the `*.sandbox.lacy.casa` wildcard; see
+fronts the `*.sandbox.example.com` wildcard; see
 `deploy/caddy-sandbox-forwardauth.conf` for the forward-auth block.

@@ -119,9 +119,9 @@ add `"drain"` to `usage()` and `nodrain` to its build-tags line):
     pair is logged and the next pair still runs. Lists of different lengths:
     log the error and exit 0 without calling anything;
   - `SPOOND_DRAIN_INSECURE=1` skips TLS verification, because the
-    certificate is for `vm2.lacy.casa` and the call goes to 127.0.0.1.
+    certificate is for `spoond.example.com` and the call goes to 127.0.0.1.
 
-vm2 files:
+host files:
 - `/etc/e2b/drain.env` (0600):
   ```ini
   SPOOND_DRAIN_URL=https://127.0.0.1:18890
@@ -223,7 +223,7 @@ vm2 files:
 - **Conformance** against staging, as an **(Autonomous window)** step
   (`00-README.md`; group R protocol in U02), after
   `set -a; . /etc/spoond-staging/conformance.env; set +a` with
-  `CONFORMANCE_SUBSTRATE=e2b`, `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`:
+  `CONFORMANCE_SUBSTRATE=e2b`, `CONFORMANCE_GUEST_SERVICE=10.0.0.11:18891`:
   - **Rollback artifacts:** none (no files change).
   - **Rollback commands:** `systemctl restart e2b-orchestrator`, then
     `systemctl restart spoond-backend-staging spoond-sshd-gateway-staging`.
