@@ -225,3 +225,52 @@ func TestBuildOneNoDockerfile(t *testing.T) {
 		t.Fatal("buildOne succeeded without a dockerfile, want error")
 	}
 }
+
+// A layer image built From a catalog image gets the base's digest as
+// BASE, inherits its shape and env (its own env keys win), and passes
+// its own build args, sorted.
+func TestBuildOneFromBase(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	ctx := context.Background()
+	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("base build: %v", err)
+	}
+	cmdLog = nil
+
+	layer := manifestImage{
+		Name: "py-base-worker", Baked: true, Dockerfile: "worker.dockerfile", From: "py-base",
+		Env:       map[string]string{"HOME": "/root"},
+		BuildArgs: map[string]string{"WARM": "true", "A": "1"},
+	}
+	if err := buildOne(ctx, db, sub, layer, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("layer build: %v", err)
+	}
+	want := "docker build --pull --build-arg A=1 --build-arg BASE=" + wantDigest +
+		" --build-arg WARM=true --build-arg WARM_ENV=export HOME='/root'; export PATH='/usr/local/bin';" +
+		" -f images/worker.dockerfile -t localhost:5000/py-base-worker:latest images"
+	if len(cmdLog) == 0 || cmdLog[0] != want {
+		t.Fatalf("docker build = %q, want %q", cmdLog, want)
+	}
+	row, err := db.GetImage(ctx, "py-base-worker")
+	if err != nil {
+		t.Fatalf("get layer: %v", err)
+	}
+	if row.VCPU != 2 || row.MemoryMB != 1024 || row.Env["PATH"] != "/usr/local/bin" || row.Env["HOME"] != "/root" {
+		t.Fatalf("layer row = %+v, want the base's shape and merged env", row)
+	}
+}
+
+// A From naming an image with no build is refused before docker runs.
+func TestBuildOneFromUnknownBase(t *testing.T) {
+	sub := &stubSubstrate{}
+	db := setup(t, sub)
+	layer := manifestImage{Name: "x-worker", Dockerfile: "worker.dockerfile", From: "nope"}
+	err := buildOne(context.Background(), db, sub, layer, "localhost:5000", "images", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "base image nope is not in the catalog") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(cmdLog) != 0 {
+		t.Fatalf("docker ran: %v", cmdLog)
+	}
+}

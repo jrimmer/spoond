@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -91,6 +92,13 @@ type manifestImage struct {
 	DiskMB      int               `yaml:"disk_mb"`
 	Env         map[string]string `yaml:"env"`
 	Notes       string            `yaml:"notes"`
+	// From names a catalog image this one is built on: its current
+	// digest is passed as the BASE build argument, and its env and
+	// shape (vcpu, memory, disk) are inherited unless set here. Used for
+	// layers such as the hive's <base>-worker.
+	From string `yaml:"from"`
+	// BuildArgs are passed to docker build as --build-arg KEY=VALUE.
+	BuildArgs map[string]string `yaml:"build_args"`
 }
 
 type manifest struct {
@@ -223,6 +231,71 @@ func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, conte
 	return 0
 }
 
+// resolveBase applies a manifest entry's From and BuildArgs: it looks up
+// the base image's current digest (passed as BASE), fills vcpu, memory,
+// disk and env from the base where the entry leaves them unset (entry
+// env keys win), passes that env as WARM_ENV, and returns the docker
+// --build-arg flags, sorted.
+func resolveBase(ctx context.Context, db *store.DB, img manifestImage) (manifestImage, []string, error) {
+	vals := map[string]string{}
+	for k, v := range img.BuildArgs {
+		vals[k] = v
+	}
+	if img.From != "" {
+		base, err := db.GetImage(ctx, img.From)
+		if errors.Is(err, store.ErrNotFound) {
+			return img, nil, fmt.Errorf("base image %s is not in the catalog", img.From)
+		}
+		if err != nil {
+			return img, nil, err
+		}
+		if base.Digest == "" || base.CurrentBuildID == "" {
+			return img, nil, fmt.Errorf("base image %s has no current build", img.From)
+		}
+		vals["BASE"] = base.Digest
+		if img.VCPU == 0 {
+			img.VCPU = base.VCPU
+		}
+		if img.MemoryMB == 0 {
+			img.MemoryMB = base.MemoryMB
+		}
+		if img.DiskMB == 0 {
+			img.DiskMB = base.DiskMB
+		}
+		env := map[string]string{}
+		for k, v := range base.Env {
+			env[k] = v
+		}
+		for k, v := range img.Env {
+			env[k] = v
+		}
+		img.Env = env
+		// WARM_ENV: the lease's runtime env as shell exports, so a build
+		// step (the worker layer's warm command) fills caches where the
+		// lease will look for them.
+		envKeys := make([]string, 0, len(env))
+		for k := range env {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		var exports strings.Builder
+		for _, k := range envKeys {
+			fmt.Fprintf(&exports, "export %s='%s'; ", k, strings.ReplaceAll(env[k], "'", `'\''`))
+		}
+		vals["WARM_ENV"] = strings.TrimSpace(exports.String())
+	}
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var flags []string
+	for _, k := range keys {
+		flags = append(flags, "--build-arg", k+"="+vals[k])
+	}
+	return img, flags, nil
+}
+
 // buildOne builds and pushes one image, then starts and waits for its
 // E2B template build, recording everything in the catalog. On failure
 // the build row is marked failed and the image row keeps describing the
@@ -233,9 +306,16 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	}
 	ref := registry + "/" + img.Name + ":latest"
 
+	img, buildArgs, err := resolveBase(ctx, db, img)
+	if err != nil {
+		return err
+	}
+
 	// Build and push with docker, streaming the output.
-	if err := runCmd(ctx, stdout, "docker", "build", "--pull",
-		"-f", filepath.Join(contextDir, img.Dockerfile), "-t", ref, contextDir); err != nil {
+	args := []string{"build", "--pull"}
+	args = append(args, buildArgs...)
+	args = append(args, "-f", filepath.Join(contextDir, img.Dockerfile), "-t", ref, contextDir)
+	if err := runCmd(ctx, stdout, "docker", args...); err != nil {
 		return fmt.Errorf("docker build: %w", err)
 	}
 	if err := runCmd(ctx, stdout, "docker", "push", ref); err != nil {
