@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate"
-	"github.com/jrimmer/spoond/substrate/fake"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
 // stubSubstrate records the BuildTemplate request and answers with a

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // TestHealthzHealthyAndDegraded: /healthz reports the orchestrator

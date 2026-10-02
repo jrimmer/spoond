@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/v2/store"
 )
 
 // ImageRegistry validates requested image names against the SQLite

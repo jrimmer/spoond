@@ -51,8 +51,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jrimmer/spoond/mcp"
-	"github.com/jrimmer/spoond/runner"
+	"github.com/jrimmer/spoond/v2/mcp"
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 func envOr(key, def string) string {

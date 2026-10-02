@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/cmd/spoond-acp"
+	"github.com/jrimmer/spoond/v2/cmd/spoond-acp"
 )
 
 func init() {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/identity"
+	"github.com/jrimmer/spoond/v2/identity"
 )
 
 // newGatewayScopedServer: admin + two users (a, b), gateway token trusted.

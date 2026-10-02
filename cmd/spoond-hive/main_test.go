@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/hive"
+	"github.com/jrimmer/spoond/v2/hive"
 )
 
 // withEnv sets environment variables for one test and restores them.

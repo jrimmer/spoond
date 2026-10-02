@@ -3,7 +3,7 @@
 package main
 
 import (
-	spoondhive "github.com/jrimmer/spoond/cmd/spoond-hive"
+	spoondhive "github.com/jrimmer/spoond/v2/cmd/spoond-hive"
 )
 
 func init() {

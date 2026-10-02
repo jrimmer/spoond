@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/cmd/spoond-dash"
+	"github.com/jrimmer/spoond/v2/cmd/spoond-dash"
 )
 
 func init() {

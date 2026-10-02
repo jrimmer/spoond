@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/cfos"
-	"github.com/jrimmer/spoond/runner"
+	"github.com/jrimmer/spoond/v2/cfos"
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 func main() {

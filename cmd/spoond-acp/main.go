@@ -34,8 +34,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/jrimmer/spoond/acp"
-	"github.com/jrimmer/spoond/runner"
+	"github.com/jrimmer/spoond/v2/acp"
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 func envOr(key, def string) string {

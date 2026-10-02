@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // admit checks that the node can host a sandbox of memoryMB MiB: enough

@@ -8,7 +8,7 @@ import (
 	connect "connectrpc.com/connect"
 	context "context"
 	errors "errors"
-	filesystem "github.com/jrimmer/spoond/substrate/e2b/gen/envd/filesystem"
+	filesystem "github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/filesystem"
 	http "net/http"
 	strings "strings"
 )

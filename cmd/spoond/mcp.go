@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/cmd/spoond-dev-mcp"
+	"github.com/jrimmer/spoond/v2/cmd/spoond-dev-mcp"
 )
 
 func init() {

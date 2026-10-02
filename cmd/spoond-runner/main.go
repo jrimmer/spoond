@@ -40,8 +40,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/jrimmer/spoond/metrics"
-	"github.com/jrimmer/spoond/runner"
+	"github.com/jrimmer/spoond/v2/metrics"
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 func envOr(key, def string) string {

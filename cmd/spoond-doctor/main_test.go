@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/v2/store"
 )
 
 // insertBuild records one build row with the given versions and state.

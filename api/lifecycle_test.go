@@ -11,9 +11,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/jrimmer/spoond/identity"
-	"github.com/jrimmer/spoond/substrate"
-	"github.com/jrimmer/spoond/substrate/fake"
+	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
 // newLifecycleService builds a Service over a fake substrate with the

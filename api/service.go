@@ -20,11 +20,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jrimmer/spoond/identity"
-	"github.com/jrimmer/spoond/metrics"
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate"
-	"github.com/jrimmer/spoond/substrate/e2b"
+	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/metrics"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
 // Lease is a sandbox granted to a consumer for a bounded lifetime.
