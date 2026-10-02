@@ -159,7 +159,7 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
 Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
-`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`.
+`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`, `nohive`.
 
 ```bash
 ./spoond backend    # lease API, HTTP proxy, LLM gateway
@@ -172,6 +172,7 @@ Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
 ./spoond drain      # pause sandboxes before an orchestrator restart, resume after
 ./spoond doctor     # health checks (below)
 ./spoond dash       # read-only dashboard
+./spoond hive       # enlistment checks for a project's hive.yaml
 ```
 
 `spoond doctor` checks the configuration, the orchestrator, the local
@@ -179,6 +180,29 @@ registry, the token seed, the SQLite database, the image catalog, the
 pinned E2B artifacts (SHA-256, plus the Firecracker and kernel versions
 builds still use), storage headroom, the backend, the SSH gateway port,
 the LLM gateway and TLS. It exits 1 if any check fails.
+
+## The hive
+
+The hive moves the mechanical half of swarm orchestration into spoond
+([docs/plans/2026-10-02-swarm-controller.md](docs/plans/2026-10-02-swarm-controller.md)).
+A project enlists by describing itself in `.spoond/hive.yaml` — the
+project name, its repo, a base image from the catalog, the gates that
+define "done", extra network needs (`leases`, `registry`), a worker cap
+and the implement/verify models — and everything else (the worker image,
+the network allowlist, the credentials) is derived from it.
+
+```bash
+spoond hive check .spoond/hive.yaml
+```
+
+runs the enlistment checks (C11) and ends with one `Next:` line: the
+first failing check's remedy, or the enlistment route when nothing
+failed. The exit code is 0 when nothing failed. It reads `SPOOND_API`
+(default `https://vm2.lacy.casa:8890`) and `SPOOND_TOKEN`, and it looks
+up the image catalog for real; the steps that need the host (building
+the worker image, cloning with the deploy key, the trial lease, the
+gates, the budget) report `skipped` there and are run for real by
+`POST /hive/check` on the instance.
 
 ## Configuration knobs
 

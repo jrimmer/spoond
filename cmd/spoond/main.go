@@ -8,6 +8,7 @@
 //	spoond runner     Forgejo Actions runner (adaptive pool)
 //	spoond ctl        control-plane CLI (thin ssh ctl@ wrapper)
 //	spoond drain      orchestrator drain/undrain hook (U10)
+//	spoond hive       swarm controller (enlistment checks)
 //
 // Modules are optional at build time via Go build tags. Each subcommand
 // is registered in a build-tag-gated file (see the files in this
@@ -20,7 +21,7 @@
 //	go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond
 //
 // Supported exclusion tags: nobackend, nogateway, noacp, nomcp,
-// norunner, noctl, noimages, nodrain.
+// norunner, noctl, noimages, nodrain, nohive.
 package main
 
 import (
@@ -60,10 +61,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (forkd microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash"} {
+	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "hive"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}
 	}
-	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, noacp, nomcp, norunner, noctl, noimages, nodoctor, nodrain, nodash\n")
+	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, noacp, nomcp, norunner, noctl, noimages, nodoctor, nodrain, nodash, nohive\n")
 }
