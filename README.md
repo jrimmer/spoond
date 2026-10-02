@@ -22,10 +22,10 @@ spoond (this repo, one Go binary)          e2b-orchestrator (our fork of
 images/*.dockerfile → docker → local registry → E2B templates (spoond images)
 ```
 
-Production moved from forkd to E2B on 2026-10-01. The design, decisions
-and per-unit specs are in
-[docs/plans/2026-09-30-e2b-substrate/](docs/plans/2026-09-30-e2b-substrate/00-README.md);
-the forkd rollback path stays until U12 step 20 (2026-10-31).
+spoond 2.0 runs on E2B's orchestrator; forkd, the 1.x substrate, is
+removed. The design, decisions and per-unit specs are in
+[docs/plans/2026-09-30-e2b-substrate/](docs/plans/2026-09-30-e2b-substrate/00-README.md),
+and every change is in [CHANGELOG.md](CHANGELOG.md).
 
 ## What it gives you
 
@@ -125,12 +125,14 @@ stack does not exist yet.
 | [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
 | [Conformance suite](conformance/README.md) | the lease-API contract tests, run against production |
 | [E2B upgrade runbook](docs/runbooks/e2b-upgrade.md) | moving the fork to a newer upstream |
-| [Install](docs/install.md), [Setup](docs/setup.md), [Operations](docs/operations.md) | **forkd-era**; being rewritten for E2B with the forkd removal |
+| [Install](docs/install.md), [Setup](docs/setup.md) | bringing up an E2B host and spoond, first users and services |
+| [Operations](docs/operations.md) | day-2: doctor, drain and reboots, the network watchdog, GC, backups, the dashboard |
+| [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
 
-**v2.0: E2B substrate (2026-10-01).** Production runs on a patch-queue
-fork of E2B's orchestrator instead of forkd: warm memory-snapshot starts,
+**v2.0: E2B substrate.** spoond runs on a patch-queue fork of E2B's
+orchestrator instead of forkd: warm memory-snapshot starts,
 native fork, pause/resume and checkpoint, SQLite state, a template-based
 image pipeline, a drain protocol for orchestrator restarts, the read-only
 dashboard and a scrape-only metrics token. The lease API contract is
