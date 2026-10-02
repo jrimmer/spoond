@@ -207,7 +207,8 @@ Each step is usable on its own, and each is a task in the spoond graph.
    text and JSON reports. `spoond hive enlist --check FILE`.
 3. **Guide and check API** (C11): `GET /hive/guide`, `POST /hive/check`,
    the guide-completeness test.
-4. **Hive core** (C1-C5, C7): the `spoond-hive` unit, enlisted projects,
+4. **Deferred: build only if v3 is delayed** (spoond #86). The v3 workflow
+   engine (#78) covers it generally. **Hive core** (C1-C5, C7): the `spoond-hive` unit, enlisted projects,
    per-project task graph, dispatch, scaling, health, retries; spawns
    bees with minted credentials. Retires agent-hub `swarm-*` scripts and
    `swarm-keepalive`.
