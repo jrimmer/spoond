@@ -135,6 +135,25 @@ it lossless. Do not stop the backend first.
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.
 
+## Network watchdog
+
+`spoond-netwatch.service` (`deploy/e2b/spoond-netwatch.sh`, installed as
+`/usr/local/sbin/spoond-netwatch`) probes the gateway and the LAN
+resolver every 15 s. When neither answers for 2 minutes it logs the
+physical port's state and bounces the port; a minute later it runs
+`ifreload -a`; after 10 minutes, if the port received nothing in that
+time and it has not rebooted the host in the last 12 hours, it reboots
+cleanly (so `spoond-drain` drains leases first). A port that still
+receives means the fault is upstream, and it does not reboot. Its log
+lines start with `netwatch:` (`journalctl -u spoond-netwatch`). It was
+added after the 10 GbE port's receive path died on 2026-10-02 with the
+link still up.
+
+By hand, from the console: record `ip -s link show enp1s0f0; ethtool -S
+enp1s0f0 | grep -v ': 0$'`, then `ip link set enp1s0f0 down; ip link set
+enp1s0f0 up`, then `ifreload -a`; reboot with `reboot` (never the reset
+button) only if those fail.
+
 ## Rebooting the host (planned)
 
 A host shutdown stops every unit, and the orchestrator's own drain hook
