@@ -40,7 +40,7 @@ their task graph, dispatch and scaling. It is a consumer of the lease API like
 `spoond runner`, using its own agent identity (`swarm`). The lease API
 contract does not change.
 
-**C2. The task graph lives on vm2, owned by the hive.** One `br`
+**C2. The task graph lives on the host, owned by the hive.** One `br`
 (beads) workspace per project under `/var/lib/spoond/hive/<project>/`.
 The hive is the only process that changes claims and states; the
 orchestrator adds and edits tasks through the hive (`spoond hive
@@ -83,7 +83,7 @@ default worker class, `max_workers`. A worker class names the image
 network allowlist, and which task labels it may take (today:
 `needs:vm2-ssh` and `serial:prod` are never taken by bees).
 
-**C7. Credentials stay on vm2.** The deploy keys, the Agent Mail token and
+**C7. Credentials stay on the host.** The deploy keys, the Agent Mail token and
 the `swarm` lease token live in `/etc/spoond/hive/secrets/` (0600, root),
 and are injected into bees at start as today. Nothing on a laptop.
 
