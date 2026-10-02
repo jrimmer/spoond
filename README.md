@@ -180,9 +180,9 @@ the LLM gateway and TLS. It exits 1 if any check fails.
 
 ## The hive
 
-The hive moves the mechanical half of swarm orchestration into spoond
-([docs/plans/2026-10-02-swarm-controller.md](docs/plans/2026-10-02-swarm-controller.md)).
-A project enlists by describing itself in `.spoond/hive.yaml` — the
+A project that wants bees (agent workers in leases) describes itself in
+`.spoond/hive.yaml` ([the hive plan](docs/plans/2026-10-02-swarm-controller.md),
+C10) — the
 project name, its repo, a base image from the catalog, the gates that
 define "done", extra network needs (`leases`, `registry`), a worker cap
 and the implement/verify models — and everything else (the worker image,
@@ -198,8 +198,8 @@ failed. The exit code is 0 when nothing failed. It reads `SPOOND_API`
 (default `https://vm2.lacy.casa:8890`) and `SPOOND_TOKEN`, and it looks
 up the image catalog for real; the steps that need the host (building
 the worker image, cloning with the deploy key, the trial lease, the
-gates, the budget) report `skipped` there and are run for real by
-`POST /hive/check` on the instance.
+gates, the budget) report `skipped` there; `POST /hive/check` on the
+instance will run them for real (build order step 3).
 
 ## Configuration knobs
 
