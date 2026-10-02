@@ -100,6 +100,13 @@ func loadMigrations() ([]migration, error) {
 		out = append(out, migration{version: v, name: e.Name(), sql: string(body)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].version < out[j].version })
+	// Two files with one version would apply only the first: a database
+	// already at that version skips the second for good.
+	for i := 1; i < len(out); i++ {
+		if out[i].version == out[i-1].version {
+			return nil, fmt.Errorf("store: migrations %q and %q share version %d", out[i-1].name, out[i].name, out[i].version)
+		}
+	}
 	return out, nil
 }
 

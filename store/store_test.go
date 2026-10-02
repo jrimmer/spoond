@@ -247,3 +247,11 @@ func TestUpdateLastActive(t *testing.T) {
 		t.Fatalf("last_active not updated: a=%v b=%v", got["a"], got["b"])
 	}
 }
+
+// Every embedded migration has its own version: a duplicate would be
+// skipped for good on a database already at that version.
+func TestMigrationVersionsUnique(t *testing.T) {
+	if _, err := loadMigrations(); err != nil {
+		t.Fatal(err)
+	}
+}
