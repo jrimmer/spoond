@@ -124,12 +124,19 @@ The design, decisions and per-unit specs are in
 - **Snapshot catalog and GC**: `GET /api/snapshots` and `DELETE
   /api/snapshots/{build_id}` list and delete the caller's builds, and a
   GC keeps the closure of the root set — every image's current build,
-  every live lease's resume and checkpoint builds, every sandbox's build,
+  every lease row's resume and checkpoint builds, every sandbox's build,
   every in-flight build, then parents (`parent_build_id`) and header
   references (`build_refs`) — and reclaims unreferenced builds older than
   an hour. It runs 10 minutes after start and then hourly, never during a
   drain; dry-run by default, `GC_DELETE=1` enables deletion (U11;
-  `220d7a2`).
+  `220d7a2`). A build is also never a candidate while any non-deleted
+  build names it as a parent or references it in `build_refs`, whatever
+  the lease and sandbox rows say (`d7d5686`). A lease lost in a crash
+  keeps its snapshots for a grace period after `lost_at` — 7 days when
+  persistent, 1 day otherwise (`GC_LOST_GRACE_PERSISTENT`,
+  `GC_LOST_GRACE`); leases lost before `lost_at` existed are stamped by
+  the first GC pass that sees them, and `spoond doctor` warns about lost
+  leases (`30fc197`, `733952a`; merged in `c83d4cb`).
 - **Database backups**: `VACUUM INTO` copies into `SPOOND_BACKUP_DIR` daily
   at 03:00 (and once at start when the newest is over 24 h old), keeping
   the last 7 (U11; `f884782`).
@@ -142,16 +149,21 @@ The design, decisions and per-unit specs are in
   `spoond_node_hugepages_free_bytes`, `spoond_node_outstanding_work`,
   `spoond_create_duration_seconds`, `spoond_capacity_rejections_total`,
   `spoond_checkpoint_duration_seconds`, `spoond_snapshot_bytes`,
-  `spoond_storage_free_bytes`, `spoond_gc_deleted_total`
-  (`c68b14c`, `5fa2dcb`).
+  `spoond_storage_free_bytes`, `spoond_gc_deleted_total`,
+  `spoond_lease_heartbeats_total` (`c68b14c`, `5fa2dcb`, `96676dc` for the
+  checkpoint histogram, `220d7a2` for the snapshot, storage and GC
+  series, `01edabf` for heartbeats).
 - **`METRICS_TOKEN`**: a scrape-only bearer token that reads `/metrics` and
   nothing else, so Prometheus and the dashboard no longer need admin
   rights; adds `spoond_leases_by_image` (`5fa2dcb`).
 - **`spoond dash`**: a read-only, live dashboard of leases, sandboxes, host
-  vitals, request rate, lease grant latency, egress connections, units and
-  the image catalog, over one shared SSE stream, with 5-minute sparklines
+  vitals (memory outside the hugepage pool, and hugepages as committed
+  lease capacity), request rate, creates per minute with the last hour's
+  mean create and resume times, egress connections, units and the image
+  catalog with each image's lifetime uses, over one shared SSE stream, with 5-minute sparklines
   and themes; basic auth, HTTPS via `DASH_TLS_CERT`/`DASH_TLS_KEY`, default
-  port 8893 (`b5d7e5e`, `8e2f08b`). Its data access is read-only
+  port 8893 (`b5d7e5e`, `8e2f08b`; numbers and gauges `87c47e4`,
+  `79ea483`, `2b23b1a`, `69eec55`, `b5f6089`, `4222706`). Its data access is read-only
   (`/metrics`, the SQLite catalog, identity names, `/proc`, systemd).
 - **`spoond doctor` E2B checks**: the forkd checks were replaced by the
   orchestrator's `/health` and node info (status, running sandboxes, free
@@ -160,6 +172,25 @@ The design, decisions and per-unit specs are in
   storage headroom, the backend, the gateway port, the LLM gateway and TLS
   (U11; `fe6981d`), plus the Firecracker and kernel versions still in use
   by non-deleted builds (U13; `d66ff13`).
+- **Lease heartbeat**: `POST /lease/{lease-id}/active` on the
+  guest-service port marks a lease active for the idle sweep, so an agent
+  working inside a persistent lease is not suspended; the lease id is the
+  capability, writes are limited to one per lease per minute, and the
+  route is not served on the API port (`01edabf`, `97cb20d`; merged in
+  `8fba7df`).
+- **Image uses**: each image's lifetime lease grants are counted
+  (migration 0005, `image_uses`) and shown in the dashboard's catalog
+  (`fd0828a`; merged in `da0544f`).
+- **Layered images**: `images/manifest.yaml` entries can name a catalog
+  image in `from:` (built on its current digest, inheriting its shape and
+  env) and pass `build_args:`; `images/worker.dockerfile` uses this to turn
+  any base image into a `<base>-worker` agent-worker image
+  (`go-base-worker`) (`5cd238f`; merged in `6a4404a`).
+- **`spoond hive check`** (preview): validates a project's
+  `.spoond/hive.yaml` and runs the enlistment checks that can run off the
+  host, ending with the next step to take
+  (`docs/plans/2026-10-02-swarm-controller.md`; `aa7755c`, merged in
+  `7d97786`).
 - **Lease API additions**: `GET /api/sandboxes/{id}`, the fork, checkpoint
   and network routes above, and a binary stream mode for `/stream` with
   `resize`, `kill` and `eof` controls (D5 — additive only; `156d273`,
@@ -186,8 +217,9 @@ The design, decisions and per-unit specs are in
   forkd-patched rollout and spawn-watchdog scripts and the watchdog units
   (D1; U12 step 18). Deployed names that merely contain `FORKD` (gateway
   and CI variables, gateway permission keys) are intentionally not renamed
-  (U12 step 18). `deploy/install-spoond.sh` is forkd-era and is kept only
-  until the removal finishes (U12 steps 18–20; README "Install").
+  (U12 step 18). The forkd-era installer `deploy/install-spoond.sh`,
+  `scripts/forkd-curl` and the forkd conformance baseline went with it
+  (`1e3f224`; merged in `63f5832`).
 - The netns, `setns` and iptables code paths in the backend (`55cd9e8`),
   and the guest `sshd` requirement — sessions are relayed onto envd
   processes instead (D14; `63d1f12`).
@@ -206,8 +238,10 @@ Found in production after the 2026-10-01 cutover and deployed the same day:
   path collapsed an egress with no CIDRs, domains, rules or proxy to nil
   and dropped `allowed_private`, so the first lease that published ports
   silently removed the lease-API allowance for `internet` leases. A deny of
-  TEST-NET-1 (never routed) keeps the policy non-empty (`dfb6f65`;
-  deployed in `3121626`).
+  TEST-NET-1 (never routed) kept the policy non-empty as a stopgap
+  (`dfb6f65`; deployed in `3121626`) until the fork counted
+  `allowed_private` itself (e2b-runtime `eb70296db`); the stopgap was then
+  removed (`0d8a603`; deployed in `dbc25ec`).
 - **Guests resolve through the LAN resolver only.** The old
   `10.1.0.1` + `8.8.8.8` pair fell back to public DNS, which answers
   `*.lacy.casa` with the public edge, and the router gave stale LAN answers;
@@ -219,6 +253,16 @@ Found in production after the 2026-10-01 cutover and deployed the same day:
   root and replaced `/etc/group`), and `/.dockerenv` is created so
   container-aware tools detect a container (`f2b0289`, `e76d66a`; deployed
   in `26d9cab`).
+
+Found on 2026-10-02:
+
+- **A migration with a duplicate version is refused at start.** Two
+  files shared version 5; a database already at 5 would have skipped the
+  second for good. It was renumbered (0006, `lost_at`) and the loader now
+  rejects duplicates (`3a0b5ab`, `d44d0e3`).
+- **The dashboard's create time is real.** It averaged a single 2-second
+  scrape and read 0; it now averages the last hour and shows "–" when
+  nothing was created (`b5f6089`).
 
 Earlier in the 2.0 effort:
 
@@ -250,6 +294,8 @@ Earlier in the 2.0 effort:
   host-address guard, come from the fork's patch P4, extending E2B's own
   two egress layers (per-netns nftables + userspace TCP proxy) (D13; U03,
   U09).
+- **The lease heartbeat is a guest-service route only**: it is not
+  mounted, auth-exempt, on the API listener (`97cb20d`).
 - **`ADMIN_TOKEN`** gates the drain/undrain/reconcile routes with a
   constant-time compare and 404s while unset (U10; `cbf12fa`);
   **`METRICS_TOKEN`** is scrape-only — the lease API refuses it, and an
