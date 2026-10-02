@@ -63,8 +63,12 @@ ssh <id>@sandbox.example.com -p 2222
 ssh <id>@sandbox.example.com -p 2222
 ```
 
-The MOTD prints the reconnect hint with the exact port; the footer shows
-the lease id. Friendly names work after `ctl tag`:
+`new` accepts the same short names as `ctl new` (`dev`, `go`, `py`,
+`python`, `elixir`, `llm`, `base`) or a full image tag, but only images
+with sshd qualify for interactive SSH — the gateway's `--ssh-images`
+list (default `dev-base`; CI images like `go-base` have no sshd and are
+rejected with a hint). The MOTD prints the reconnect hint with the exact
+port; the footer shows the lease id. Friendly names work after `ctl tag`:
 
 ```bash
 ssh ctl@sandbox.example.com "tag <id> mybox"
@@ -179,8 +183,9 @@ The user key only authorizes the caller (missing/wrong/foreign keys get
 `401`); it is replaced by the server-side upstream key before the
 request is forwarded, so it never reaches the provider. Owners **without**
 a key keep the legacy open behavior (backward compatible), including
-deployments with no identity store at all — unless the deployment sets
-`LLM_OPEN_LEGACY=0`.
+deployments with no identity store at all — unless `LLM_OPEN_LEGACY` is
+unset, which is the default: keyless identity users are then denied
+(set `LLM_OPEN_LEGACY=1` to keep them open).
 
 An admin sets/rotates/revokes a key (stored hashed, never returned by
 the API):
@@ -216,9 +221,14 @@ Tools: `shell`, `read_file`, `write_file`, `edit_file`, `list_files`,
 `status`. Point Goose/Claude Code-style MCP clients at it:
 
 ```bash
-FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
+FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-token> \
   ./spoond mcp
 ```
+
+Create the agent user first (`POST /api/users` with `kind=agent`, or
+`ssh ctl@… "ssh-key add <pubkey> <name>"` during bootstrap) and use its
+token (`FORKD_AGENT_TOKEN`); the legacy `FORKD_TOKEN` fallback logs a
+deprecation warning.
 
 ### `spoond acp` (Agent Client Protocol server)
 
@@ -227,7 +237,7 @@ with in-sandbox tools. One `spoond acp` process serves the whole
 conversation (sessions are process-scoped).
 
 ```bash
-FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
+FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-token> \
   FORKD_LLM_MODEL=gpt-oss-20b-fireworks ./spoond acp
 ```
 
@@ -268,9 +278,14 @@ ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… you@laptop you"
 # (first user is admin; with BOOTSTRAP_TOKEN set, do this via direct
 #  API call — see docs/setup.md "First-user bootstrap")
 
-# 2. Add teammates/agents (admin)
+# 2. Add teammates (admin; each becomes a `person` identity)
 ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… alice@mbp alice"
-ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… ci@runner ci"
+
+#    Agents are created over the API instead (kind=agent — what the
+#    MCP/ACP endpoints authenticate as):
+curl -s -X POST https://sandbox.example.com/api/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"ci","kind":"agent","token":"<its-token>"}'
 
 # 3. List users, set quotas (admin)
 ssh ctl@sandbox.example.com "ssh-key ls"
@@ -289,7 +304,7 @@ without copying the lease capability:
 ```bash
 ssh ctl@sandbox.example.com "share add <id> alice http 3600"   # 1h exec/stream
 ssh ctl@sandbox.example.com "share add <id> ci ssh"            # interactive, no expiry
-ssh ctl@sandbox.example.com "share ls <id>"
+ssh ctl@sandbox.example.com "share ls"                      # every share on your leases
 ssh ctl@sandbox.example.com "share rm <id> alice"              # revoke immediately
 ```
 
@@ -314,4 +329,7 @@ commands, read output, and release it — no shell needed:
 3. `GET /api/sandboxes/{id}/stat` → resource awareness
 4. `DELETE /api/sandboxes/{id}` → always release
 
-`forkd-curl` (in `scripts/`) wraps this with a friendly CLI.
+`scripts/forkd-curl` (its name is historical; it wraps this API, not the
+old controller) injects the bearer token and pins the API hostname to
+loopback so TLS validates — `FORKD_API`, `FORKD_TOKEN` or
+`FORKD_TOKEN_FILE` configure it.

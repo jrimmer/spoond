@@ -52,14 +52,20 @@ Layer 1 (per-netns nftables inside the orchestrator) enforces the
 private-range floor; layer 2 (the userspace TCP proxy) enforces domains,
 CIDRs and the port-scoped private allowances.
 
-**Tokens.** Three kinds, all HMAC-derived from one seed
-(`/etc/spoond/e2b-token-seed`, 0600, at least 32 bytes):
+**Tokens.** Two HMAC-derived-from-one-seed tokens plus one fixed id
+(`/etc/spoond/e2b-token-seed`, 0600, at least 32 bytes — the backend
+refuses to start without it):
 
-- the **envd traffic token** per sandbox, required by the orchestrator's
-  proxy for every guest port except envd's own — this is how spoond's
-  HTTP proxy reaches a guest app, and why a peer sandbox cannot;
+- the **envd token** per sandbox (`hex(HMAC-SHA256(seed, id))`),
+  required by envd's gRPC for process start, PTY, files and health;
+- the **envd traffic token** per sandbox
+  (`hex(HMAC-SHA256(seed, "sandbox-traffic-"+id))`), required by the
+  orchestrator's proxy for every guest port except envd's own — this is
+  how spoond's HTTP proxy reaches a guest app, and why a peer sandbox
+  cannot;
 - the **team id** (`E2B_TEAM_ID`), a fixed UUID sent on every gRPC
-  request;
+  request — not a secret, but pinned so the orchestrator's per-team
+  accounting stays consistent;
 - the seed itself never leaves the host. Losing it invalidates every
   derived token, so it is part of the backup set.
 
@@ -142,8 +148,10 @@ Known/accepted residuals:
   could claim admin on a fresh store.
 - **LLM gateway**: when the identity store is present, leases owned by an
   identity user are denied on `/llm/` unless that user has an LLM key
-  (`POST /api/users/{id}/llm-key`), unless `LLM_OPEN_LEGACY=1`. Legacy
-  consumer-owned leases keep the capability model.
+  (`POST /api/users/{id}/llm-key`) — that is the default. Setting
+  `LLM_OPEN_LEGACY` to any non-empty value restores the open behavior
+  for keyless identity users. Legacy consumer-owned leases keep the
+  capability model either way.
 - **Forward-auth proxy** (`PROXY_AUTH_MODE=forward-auth`): requires
   `X-Proxy-Auth` shared secret (constant-time) + `Remote-User`; set
   `PROXY_AUTH_TRUSTED_PEERS` (e.g. `10.1.0.203/32`) so only Caddy can

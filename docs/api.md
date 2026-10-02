@@ -1,8 +1,11 @@
 # API Reference
 
 Base URL: `https://<backend>:8890` (HTTPS when `TLS_CERT`/`TLS_KEY` are
-set, plain HTTP otherwise). All endpoints except `/healthz` and the
-`/llm/` and `/lease/` prefixes require a bearer token:
+set, plain HTTP otherwise). All endpoints except `/healthz`, the
+`/api/admin/*` routes (which carry their own `ADMIN_TOKEN`) and the
+`/llm/` prefix (where the lease id in the path is the capability)
+require a bearer token (`/metrics` also accepts the scrape-only
+`METRICS_TOKEN`):
 
 ```
 Authorization: Bearer <token>
@@ -166,7 +169,7 @@ Client text frames are control JSON:
 
 | Frame | Effect |
 |---|---|
-| `{"in":"…"}` | write to the process (PTY input, or stdin without a PTY) |
+| `{"in":"…"}` | write to the process (PTY input, or stdin without a PTY) — **text mode only**; in binary mode send the bytes as binary frames |
 | `{"resize":{"cols":C,"rows":R}}` | resize the PTY |
 | `{"action":"stop"}` | SIGTERM |
 | `{"action":"kill"}` | SIGKILL |
@@ -205,11 +208,13 @@ id**, so its address and identity are unchanged. Response
 ### `POST /api/sandboxes/{id}/restart` — reboot
 
 Persistent and running: suspend then resume (same lease, same build
-chain). Persistent and suspended: resume. Non-persistent: delete the
-sandbox and create a fresh one from the image's current build, keeping
-the lease id (also `400` there — non-persistent leases are never
-workspace-backed). Response `{"id":"…","status":"running","message":"sandbox restarted"}`.
-`409` when busy.
+chain, lossless through the pause build). Persistent and suspended:
+resume. Non-persistent: delete the sandbox and create a fresh one from
+the image's current build, keeping the lease id (its disk is lost —
+there is no snapshot to restore). Response
+`{"id":"…","status":"running","message":"sandbox restarted"}`.
+`404` unknown, `409` when busy, `503` capacity (the non-persistent path
+creates a sandbox).
 
 ### `POST /api/sandboxes/{id}/checkpoint` — snapshot a running sandbox
 
@@ -387,9 +392,10 @@ own Shelley agent instead.
 Per-user key auth: when the lease owner has an LLM key configured,
 requests must present it as `Authorization: Bearer <user-key>`.
 Missing/wrong/foreign keys → `401`. Owners without a key keep the open
-behavior — **unless** the deployment sets `LLM_OPEN_LEGACY=0`: with an
+behavior — **unless** `LLM_OPEN_LEGACY` is unset (the default): with an
 identity store present, keyless identity users are then denied outright
-(`401`) and only legacy consumer-owned leases stay open. The user key is
+(`401`) and only legacy consumer-owned leases stay open. Set
+`LLM_OPEN_LEGACY=1` to restore the pre-2.0 open behavior. The user key is
 replaced by the server-side upstream key before forwarding, so it never
 reaches the provider.
 
@@ -481,8 +487,9 @@ user becomes admin. After that, admin only.
 - `token`: optional per-user bearer token (like a `CONSUMER_TOKENS`
   entry, but bound to the identity).
 
-Response `201 Created`: `{"user": {id, name, kind, admin, …}}` (token
-hash, LLM key hash and fingerprints are never exposed).
+Response `201 Created`: `{"user": {id, name, kind, admin, fingerprints,
+max_leases, max_ttl, created_at}}` — the token hash and LLM key hash are
+never exposed.
 
 ### `GET /api/users` — list users (admin only)
 
@@ -525,7 +532,8 @@ user; `403` non-admin.
 
 `{"identity_store": true|false}` — tells the SSH gateway whether the
 backend has an identity store, so the gateway knows whether key
-resolution must be authoritative. Unauthenticated.
+resolution must be authoritative. Requires a bearer token (the gateway
+uses its service token).
 
 ## Shares
 
@@ -537,19 +545,20 @@ copying the lease id/capability.
 
 Request: `{"grantee": "<user-id>", "mode": "ssh"|"http", "ttl": 3600}`.
 `grantee` must be an existing user id (or a resolvable name); `ttl` in
-seconds (0 = no expiry); `mode` selects which operations the grantee may
+seconds (0 = no expiry); `mode` (default `http`) selects which
+operations the grantee may
 perform: `ssh` → `/endpoint`, `/prompt`, `/stream` (interactive/agent
 access); `http` → `/exec`, `/stream`, `/stat`, proxy. Response `201
-Created` with the share record. `400` unknown grantee, `403` non-owner.
+Created` `{"shared":true,"lease_id":…,"grantee":…,"mode":…}`.
+`400` unknown grantee, `403` non-owner.
 
-### `GET /api/sandboxes/{id}/share` — list (owner only)
-
-`{"shares": [{grantee, mode, expires_at, …}]}`. `GET /api/shares` lists
-every share the caller owns.
+There is no per-lease share listing. `GET /api/shares` lists every share
+granted on the caller's leases — `{"shares": [{lease_id, grantee, mode,
+created_at, expires_at?}]}` — which is what `share ls` prints.
 
 ### `DELETE /api/sandboxes/{id}/share/{grantee}` — revoke (owner only)
 
-`200 OK` — the grantee loses access immediately. `404` if not shared.
+`204 No Content` — the grantee loses access immediately. `404` if not shared.
 
 Grantee access is enforced owner-scoped (`lookupWithShare`): a shared
 lease behaves like the grantee's own for the granted operations until

@@ -39,11 +39,14 @@ host steps of the spec's U04: packages and the `nbd`/`tun`/`kvm` modules
 (`nbds_max=256`), the sysctl file (`vm.nr_hugepages`, `vm.max_map_count`,
 `net.ipv4.ip_forward`), the MSS-clamp rule, the ZFS dataset and
 directories, the pinned Firecracker/kernel/busybox artifacts (fetched by
-SHA-256), the `e2b_guard` nftables table and its oneshot unit, and the
-local registry container on `127.0.0.1:5000`.
+SHA-256) plus the orchestrator and envd binaries from
+`/root/src/e2b-runtime` (our fork; see below), the `e2b_guard` nftables
+table and its oneshot unit, and the local registry container on
+`127.0.0.1:5000`. The steps it leaves to the operator are the
+configuration files, the systemd unit and the coexistence checks —
+sections 2–4 below.
 
-Two things it deliberately does **not** do, because they are one-off and
-host-specific:
+Two things to review before you trust it:
 
 - **Hugepages sizing.** The script writes `vm.nr_hugepages = 12288`
   (24 GiB), the bring-up value used beside the previous substrate. Size
@@ -51,8 +54,9 @@ host-specific:
   sum of every running sandbox's `memory_mb` must fit. The production
   host runs 24576 (48 GiB). Apply changes with `sysctl -p` on that one
   file, never `sysctl --system`.
-- **The orchestrator and envd binaries.** They come from our fork of
-  E2B's runtime, not from upstream releases:
+- **The fork location.** The orchestrator and envd binaries are copied
+  from `/root/src/e2b-runtime`; clone our E2B fork there (or edit the
+  two `install` lines) before running the script:
 
   ```bash
   install -D -m 0755 /root/src/e2b-runtime/packages/envd/bin/envd /fc-envd/envd

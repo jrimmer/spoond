@@ -60,8 +60,8 @@ leases they create are owned by that agent's identity.
 | `FORKD_AGENT_TOKEN` | *(empty)* | per-agent bearer token for this endpoint, provisioned from the users store; wins over `FORKD_TOKEN` |
 | `FORKD_TOKEN` | *(empty)* | legacy fallback (deprecated): used with a warning when `FORKD_AGENT_TOKEN` is unset |
 
-Create an agent user first (`ssh-key add <pubkey> <name>` or
-`POST /api/users` with `kind=agent`), then set `FORKD_AGENT_TOKEN` to
+Create an agent user first (`POST /api/users` with `kind=agent` — it
+needs a `token`, not an SSH key), then set `FORKD_AGENT_TOKEN` to
 that user's token. If neither variable is set, the endpoint fails fast
 with provisioning instructions.
 
@@ -73,8 +73,8 @@ with provisioning instructions.
 |---|---|---|
 | `E2B_GRPC_ADDR` | `127.0.0.1:5008` | orchestrator gRPC address |
 | `E2B_PROXY_URL` | `http://127.0.0.1:5007` | orchestrator sandbox proxy base URL |
-| `E2B_TEAM_ID` | *(fixed uuid)* | team id sent with every gRPC request |
-| `E2B_TOKEN_SEED_FILE` | *(empty)* | path to the envd/traffic token seed (0600, ≥ 32 bytes) |
+| `E2B_TEAM_ID` | `5b0f4e3a-8c1d-4f2e-9a6b-7d3c2e1f0a95` | fixed team UUID sent with every gRPC request |
+| `E2B_TOKEN_SEED_FILE` | `/etc/spoond/e2b-token-seed` | envd/traffic HMAC seed file (0600, ≥ 32 bytes; the backend exits without it) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | build store — where GC and disk accounting look |
 | `IMAGE_REGISTRY` | `localhost:5000` | registry `spoond images build` pushes to |
 | `CONSUMER_TOKENS` | *(required)* | comma-separated `token=consumer` pairs, e.g. `abc=forgejo,def=pi` — consumers authenticate with bearer tokens |
@@ -89,25 +89,25 @@ with provisioning instructions.
 | `SANDBOX_PROBE_TIMEOUT_SECS` | `20` | exec timeout for each integrity probe |
 | `CHECKPOINT_INTERVAL_MINS` | `60` | background checkpoint interval for active persistent leases (`0` disables) |
 | `GC_DELETE` | `0` | `1` = the snapshot GC actually deletes; default dry-run only logs candidates (see [operations.md](operations.md)) |
-| `JOB_RECORD_DIR` | `/var/lib/spoond/jobs` | failed-CI-job JSON records; empty disables |
 | `PROXY_ADDR` | *(empty)* | `0.0.0.0:8891` to serve the HTTP proxy/LLM gateway listener (Caddy wildcard fronts it) |
 | `PROXY_AUTH_MODE` | `off` | `off` = capability model (lease id is the credential); `forward-auth` = require `X-Proxy-Auth` secret + `Remote-User` identity |
 | `PROXY_AUTH_SECRET` | *(empty)* | shared secret for `forward-auth` mode (set by Caddy/IdP; never forwarded to guests) |
 | `PROXY_AUTH_TRUSTED_PEERS` | *(empty)* | comma-separated CIDRs allowed to set `Remote-User` |
 | `HOST_GUEST_SERVICE_ADDR` | *(empty)* | host address guests use to reach host services (the proxy/LLM gateway) |
 | `HOST_GUEST_SERVICE_PORT` | `8891` | host TCP port granted to guests with the above |
-| `HOST_API_PORT` | *(empty)* | when set, `lan`/`internet` guests may also reach the lease API on this port |
+| `HOST_API_PORT` | `BIND_ADDR`'s port | lease API port `lan`/`internet` guests may reach on `HOST_GUEST_SERVICE_ADDR` (`0` = none) |
 | `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set |
 | `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |
 | `MAX_TTL_SECS` | `3600` | maximum TTL a consumer may request |
 | `IDLE_TIMEOUT_SECS` | `0` | auto-suspend persistent leases idle for this long (`0` disables) |
-| `NETPOL_DNS` | *(system)* | DNS server IPs used by network policies |
+| `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
+| `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |
 | `LLM_UPSTREAM_KEY` | *(empty)* | server-side key for that upstream (never sent into sandboxes) |
 | `LLM_DEFAULT_MODEL` | *(empty)* | default model id for LLM gateway requests |
 | `LLM_MODEL_MAP` | *(empty)* | optional `pattern=model` comma-separated map |
 | `LLM_MAX_CONCURRENT_PER_USER` | `0` | in-flight `/llm/` requests per user before `429` (`0` = unlimited) |
-| `LLM_OPEN_LEGACY` | `1` | `1` = keyless owners keep open `/llm/`; `0` = deny keyless identity users |
+| `LLM_OPEN_LEGACY` | *(empty)* | set to **any non-empty value** to keep keyless identity owners open on `/llm/` (the code tests for non-empty, so `1` is the conventional value); unset (the default) denies them |
 | `OTEL_PROM_URL` | *(empty)* | fetch the orchestrator's Prometheus output here and append it to `/metrics` |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | SQLite state: leases, shares, pool, image catalog |
 | `SPOOND_BACKUP_DIR` | `/var/lib/spoond/backups` | daily `VACUUM INTO` backups, keep 7 |
@@ -134,13 +134,16 @@ See `deploy/spoond-backend.service`; the unit sources
 | `--listen` | `:2222` | SSH listen address |
 | `--host-key` | `/etc/spoond-gateway/ssh_host_ed25519_key` | SSH host key (generated if missing) |
 | `--backend` | `https://127.0.0.1:8890` | spoond-backend base URL |
-| `--backend-token` | *(required)* | spoond-backend service token (`GATEWAY_TOKEN`) |
+| `--backend-token` | *(required)*; env `SPOOND_GATEWAY_TOKEN` | spoond-backend service token (`GATEWAY_TOKEN`) — admin-equivalent, so it is read from the env file, never `ExecStart` |
 | `--client-keys` | *(empty)* | comma-separated paths to authorized client public keys, **or a directory scanned for `*.pub` files** (legacy mode only) |
-| `--gateway-key` | `/etc/spoond-gateway/gateway_ed25519` | gateway identity for nested connections into sandboxes |
+| `--gateway-key` | `/etc/spoond-gateway/gateway_ed25519` | gateway identity key (kept for unit compatibility; the gateway no longer connects into sandboxes with it) |
 | `--gateway-host` | `sandbox.lacy.casa` (env `FORKD_GATEWAY_HOST`) | public hostname advertised in MOTDs |
-| `--shelly-binary-url` | env `SHELLY_BINARY_URL` | URL the sandbox fetches the shelley agent binary from |
-| `--llm-gateway-url` | env `LLM_GATEWAY_URL` | base URL of the per-lease lease LLM gateway |
-| `--shelly-model` | `gpt-oss-20b-fireworks` | default model id for the shelley agent |
+| `--shelly-binary-url` | env `SHELLY_BINARY_URL` (`http://10.1.0.11:8891/assets/shelley`) | URL the sandbox fetches the shelley agent binary from |
+| `--llm-gateway-url` | env `LLM_GATEWAY_URL` (`http://10.1.0.11:8891/llm/`) | base URL of the per-lease LLM gateway the shelley agent is pointed at |
+| `--shelly-model` | `gpt-oss-20b-fireworks` | default model id written into shelley.json |
+| `--ssh-images` | env `GATEWAY_SSH_IMAGES` = `dev-base` | images that may serve interactive `ssh <id>@` sessions |
+| `--metrics-listen` | env `GATEWAY_METRICS_LISTEN` *(empty = off)* | address for the gateway's own `/metrics` |
+| `--image-aliases` | env `GATEWAY_IMAGE_ALIASES` *(empty)* | extra `short=full` image aliases for `ssh new-<short>@` |
 | `--bootstrap-token` | *(ignored)* | **deprecated**: accepted for unit compatibility; bootstrap via direct backend call only |
 
 ### Key model
@@ -195,11 +198,15 @@ for the full reference):
 
 | Variable | Purpose |
 |---|---|
-| `LEASE_URL` | backend base URL |
-| `LEASE_TOKEN` | bearer token the runner authenticates with |
+| `FORGEJO_URL`, `RUNNER_TOKEN` | Forgejo instance and registration token (required) |
+| `LEASE_URL` / `LEASE_TOKEN` | backend base URL and the bearer token the runner authenticates with |
 | `IMAGE_MAP` / `DEFAULT_IMAGE` | `runs-on` label → image mapping ([ci-jobs.md](ci-jobs.md)) |
-| `RUNNER_*`, `FORGEJO_*` | registration and Forgejo connection |
-| `EXEC_TIMEOUT_SECS` | per-step exec timeout override |
+| `LEASE_TTL` | sandbox lease TTL seconds (default 600) |
+| `EXEC_TIMEOUT_SECS` | per-step exec timeout override (0 = the backend's `MAX_EXEC_TIMEOUT_SECS`, default 300) |
+| `RUNNER_FLOOR` / `RUNNER_MAX` / `RUNNER_SCALE_STEP` / `SCALE_UP_DELAY` / `SCALE_DOWN_DELAY` | registered-runner pool: floor, cap, step and scale delays |
+| `RUNNER_STATE_FILE` | persists runner UUIDs across restarts (default `/var/lib/spoond/runner-state.json`) |
+| `REPO_BASE_URL` | git host base URL for `actions/checkout` clones |
+| `JOB_RECORD_DIR` | failed-job JSON records (default `/var/lib/spoond/jobs`) |
 
 ## 4. Reverse proxy (TLS)
 
@@ -211,7 +218,10 @@ reverse proxy in front with a wildcard cert so sandbox URLs work:
 - `*.sandbox.example.com` → proxy :8891 (each lease gets
   `<lease-id>.sandbox.example.com` and `<id>-<port>.sandbox.example.com`)
 
-See `deploy/caddy/` for the reference Caddyfile.
+See `deploy/caddy-sandbox-forwardauth.conf` for the staged Caddy snippet
+that also fronts the proxy with a forward-auth (Authelia) block — the
+reference for the `PROXY_AUTH_MODE=forward-auth` setup in
+[security.md](security.md).
 
 ## Verify
 

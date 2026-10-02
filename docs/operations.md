@@ -17,6 +17,7 @@ What the substrate is and why it behaves this way is
 | Gateway | `systemctl is-active spoond-sshd-gateway` |
 | Runner | `systemctl is-active spoond-runner` |
 | Registry | `curl -fsS http://127.0.0.1:5000/v2/` |
+| OTel collector | `curl -s http://127.0.0.1:19464/metrics >/dev/null && echo ok` (the Prometheus exporter spoond's `/metrics` appends) |
 | Metrics | `curl -s -H "Authorization: Bearer $METRICS_TOKEN" https://127.0.0.1:8890/metrics` |
 | Dashboard | `curl -fsS -u "$DASH_USER:$DASH_PASS" https://127.0.0.1:8893/` |
 | Identity store | `test -f /var/lib/spoond/users.json && stat -c '%a' /var/lib/spoond/users.json` (expect `600`) |
@@ -48,7 +49,7 @@ set -a; . /etc/spoond/backend.env; set +a
 | `catalog: baked images` | every manifest image with `baked: true` has a `current_build_id` in `ready` state (WARN when the manifest has none) |
 | `artifacts: sha256` | Firecracker, the guest kernel and busybox match their pins, **and** prints the distinct Firecracker/kernel versions non-deleted builds still use — never delete a `/fc-versions/<v>` or `/fc-kernels/<v>` directory while it appears there |
 | `storage: free space` | WARN below 20 GiB free at `E2B_TEMPLATE_STORAGE_PATH` |
-| `lease API: listener` + `/healthz` | the backend listener is up and healthy (TLS probed with the cert's own SAN, never `-k`) |
+| `lease API: listener` + `/healthz` | the backend listener is up and healthy. The `/healthz` probe over TLS trusts the backend's own cert chain loaded from `TLS_CERT` and picks the hostname from the cert's DNS SAN (a wildcard bind will not validate) — a separate `lease API: TLS trust` check FAILs when the cert cannot be read, and verification is never skipped |
 | `ssh gateway: listener` | the gateway port (`GATEWAY_ADDR`, default `127.0.0.1:2222`) answers |
 | `llm gateway: upstream` / `key` / `/models` | upstream configured, key present, key accepted |
 | `tls: cert/key` | WARN when unconfigured (plain HTTP), FAIL when the pair does not load |
@@ -330,4 +331,11 @@ marker. The substrate-specific series:
 | `spoond_store_errors_total{op}` | SQLite write failures |
 
 `spoond_leases{state="lost"}` above zero means an orchestrator crash
-happened — it is the number the soak watch uses.
+happened — it is the number the soak watch uses. Deploying
+`deploy/e2b/spoond-soak.{service,timer}` (with `soak-check.sh` from
+`deploy/e2b/` in `/usr/local/lib/spoond/`) automates that watch: once a
+day it sources the backend env, runs `spoond doctor`, reads the lease
+states and the runner's job results of the last 24 h read-only from
+SQLite, and appends one JSON line to `/var/lib/spoond/soak.log`. The
+unit fails (so `systemctl --failed` shows it) when doctor reports a
+FAIL or any lease is `lost`.
