@@ -18,10 +18,18 @@ import (
 //
 // Builds form chains (parent_build_id) and their headers reference other
 // builds' blocks (build_refs, from E2B's scheduling metadata). The GC
-// computes a root set — every image's current build, every lease's
-// resume/checkpoint builds, every sandbox's build, every in-flight
+// computes a root set — every image's current build, every live lease's
+// resume/checkpoint builds, every live sandbox's build, every in-flight
 // build — keeps the closure of that set, and deletes (dry-run by
 // default) ready/failed builds older than an hour that fall outside it.
+//
+// The selection rule: a build is never a candidate while it is the
+// parent of any non-deleted build, or a ref_build_id in build_refs of a
+// kept build. Both protections are structural — they do not depend on
+// any root row still naming the build — so a lease whose lease/sandbox
+// rows lag (a crash between a checkpoint and its sandbox upsert, or a
+// drain mid-rotation) can never have the layers under its live builds
+// removed.
 
 // gcAge is how long a build must be unreferenced and idle before the GC
 // considers it.
@@ -67,28 +75,70 @@ func (s *Service) gcOnce(ctx context.Context) error {
 	return s.accountDisk(ctx)
 }
 
-// keptBuilds computes the GC root set and its closure: every image's
-// current build, every lease row's resume and checkpoint builds, every
-// sandboxes row's build (pool sandboxes included), every building
-// build, plus — transitively — parent builds and header-referenced
-// builds (build_refs). Ref ids absent from builds are still kept (they
-// are never candidates: only builds rows are).
+// keptBuilds computes the GC keep set. Roots are every image's current
+// build, every live lease's resume and checkpoint builds, every live
+// sandbox's build (pool sandboxes included), and every in-flight build.
+// Every root's ancestor chain is kept in full, and every kept build's
+// header-referenced builds (build_refs) are kept in full — including
+// their own ancestors and refs, transitively.
+//
+// The chain walk is over *non-deleted* builds only: a deleted build
+// keeps nothing, so the files a GC pass or an owner delete already
+// removed cannot hold live builds' layers hostage. Ref ids absent from
+// builds are still kept (they are never candidates: only builds rows
+// are).
 func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list builds: %w", err)
 	}
 	parent := make(map[string]string, len(builds))
+	deleted := make(map[string]bool, len(builds))
+	for _, b := range builds {
+		parent[b.BuildID] = b.ParentBuildID
+		if b.State == "deleted" {
+			deleted[b.BuildID] = true
+		}
+	}
+	refs, err := s.db.ListBuildRefs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gc: list build refs: %w", err)
+	}
 	kept := make(map[string]bool, len(builds))
-	add := func(id string) {
-		if id != "" {
+	// keep adds id and, transitively, its ancestors (up to the first
+	// deleted or unknown build) and its header-referenced builds (each
+	// with the same treatment). It is cycle-safe.
+	var keep func(id string)
+	keep = func(id string) {
+		for {
+			if id == "" || kept[id] {
+				return
+			}
 			kept[id] = true
+			for _, ref := range refs[id] {
+				keep(ref)
+			}
+			if deleted[id] {
+				return // a deleted build keeps nothing above it
+			}
+			id = parent[id]
 		}
 	}
 	for _, b := range builds {
-		parent[b.BuildID] = b.ParentBuildID
 		if b.State == "building" {
-			add(b.BuildID)
+			keep(b.BuildID)
+		}
+		if b.State == "deleted" {
+			continue // its files are gone; it protects nothing
+		}
+		// The structural roots: a build is kept while any non-deleted
+		// build names it as a parent, and while any non-deleted build's
+		// headers reference its blocks. These do not depend on an image,
+		// lease or sandbox row naming the build, so they hold even when
+		// those rows lag or were dropped.
+		keep(b.ParentBuildID)
+		for _, ref := range refs[b.BuildID] {
+			keep(ref)
 		}
 	}
 	imgs, err := s.db.ListImages(ctx)
@@ -96,45 +146,27 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 		return nil, fmt.Errorf("gc: list images: %w", err)
 	}
 	for _, img := range imgs {
-		add(img.CurrentBuildID)
+		keep(img.CurrentBuildID)
 	}
 	leases, err := s.db.ListLeases(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list leases: %w", err)
 	}
 	for _, l := range leases {
-		add(l.ResumeBuildID)
-		add(l.LastCheckpointBuildID)
+		if l.State == "lost" {
+			continue
+		}
+		keep(l.ResumeBuildID)
+		keep(l.LastCheckpointBuildID)
 	}
 	sbs, err := s.db.ListSandboxes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list sandboxes: %w", err)
 	}
 	for _, sb := range sbs {
-		add(sb.BuildID)
+		keep(sb.BuildID)
 	}
-	refs, err := s.db.ListBuildRefs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("gc: list build refs: %w", err)
-	}
-	for {
-		added := false
-		for id := range kept {
-			if p := parent[id]; p != "" && !kept[p] {
-				kept[p] = true
-				added = true
-			}
-			for _, ref := range refs[id] {
-				if !kept[ref] {
-					kept[ref] = true
-					added = true
-				}
-			}
-		}
-		if !added {
-			return kept, nil
-		}
-	}
+	return kept, nil
 }
 
 // gcCandidates deletes (GC_DELETE=1) or logs (dry-run, the default)
