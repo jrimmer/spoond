@@ -70,8 +70,9 @@ func TestVersionsInUse(t *testing.T) {
 // TestCheckLeasesLost: the "leases: lost" check lists every lost lease
 // with its owner, image, age and the time the GC stops keeping its
 // snapshots, PASSes when there are none, and never FAILs. A lease with
-// an empty lost_at (lost before the column existed) is reported as lost
-// just now and kept for the full grace period from now.
+// an empty lost_at (lost before the column existed) has no age and no
+// keep-until: the line says the grace period starts at the next GC
+// pass, which is the pass that stamps the row.
 func TestCheckLeasesLost(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "spoond.db")
 	db, err := store.Open(path)
@@ -118,7 +119,9 @@ func TestCheckLeasesLost(t *testing.T) {
 		"3 lease(s) lost",
 		"l-per owner=user-1 image=py-base lost 48h0m0s ago",
 		"l-plain owner=user-1 image=py-base lost 2h0m0s ago",
-		"l-nostamp owner=user-1 image=py-base lost 0s ago",
+		// The unstamped row carries no age and no keep-until: the grace
+		// period starts when the GC stamps it.
+		"l-nostamp owner=user-1 image=py-base lost before tracking began (grace starts at the next GC pass)",
 	} {
 		if !strings.Contains(got.detail, want) {
 			t.Errorf("detail lacks %q:\n%s", want, got.detail)
@@ -127,12 +130,13 @@ func TestCheckLeasesLost(t *testing.T) {
 	if strings.Contains(got.detail, "l-run") {
 		t.Errorf("a running lease was reported:\n%s", got.detail)
 	}
-	// The keep-until time is lost_at + the grace period: 48 h ago + 7 d,
-	// 2 h ago + 1 d, and now + 1 d for the unstamped loss.
+	// The keep-until time is lost_at + the grace period: 48 h ago + 7 d
+	// and 2 h ago + 1 d. The unstamped loss has none — it is not counted
+	// from now, because the GC's stamp, not the doctor's clock, fixes
+	// when its grace period started.
 	until := map[string]time.Time{
-		"l-per":     now.Add(-48 * time.Hour).Add(7 * 24 * time.Hour),
-		"l-plain":   now.Add(-2 * time.Hour).Add(24 * time.Hour),
-		"l-nostamp": now.Add(24 * time.Hour),
+		"l-per":   now.Add(-48 * time.Hour).Add(7 * 24 * time.Hour),
+		"l-plain": now.Add(-2 * time.Hour).Add(24 * time.Hour),
 	}
 	for id, want := range until {
 		wantStr := "snapshot kept until " + want.UTC().Format("2006-01-02 15:04 Z07:00")

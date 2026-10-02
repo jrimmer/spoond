@@ -269,9 +269,10 @@ func checkDB() []checkResult {
 // checkLeases reports every lease in the lost state (a lease whose
 // sandbox died in a substrate crash; it answers 410 until deleted).
 // Purely informational — WARN with one line per lost lease naming when
-// its snapshots stop being kept by the GC's grace period — and never
-// FAIL. It reads the database read-only, like versionsInUse, so the
-// doctor never creates or migrates the database it inspects.
+// its snapshots stop being kept by the GC's grace period (a lease lost
+// before lost_at was recorded has no such time until the GC stamps it)
+// — and never FAIL. It reads the database read-only, like versionsInUse,
+// so the doctor never creates or migrates the database it inspects.
 func checkLeases() []checkResult {
 	lost, err := lostLeases()
 	if err != nil {
@@ -293,16 +294,23 @@ type lostLease struct {
 	ID, Owner, Image string
 	Persistent       bool
 	// LostAt is the stored lost_at; zero when the lease was lost before
-	// the column was recorded. Until is when the GC's grace period for
-	// the lease ends. Both are computed by the caller's now.
+	// the column was recorded, in which case Until is zero too: the
+	// backend's GC stamps the row on its next pass and the grace period
+	// runs from that stamp. Otherwise Until is the instant the grace
+	// period ends.
 	LostAt, Until time.Time
 }
 
 // String renders the warning line for one lost lease:
 // "<id> owner=<owner> image=<image> lost <age> ago (snapshot kept until <time>)".
-// A lease lost before lost_at was recorded counts as lost just now, so
-// it reads as lost 0s ago.
+// A lease with an empty lost_at was lost before tracking began; the
+// grace period starts at the next GC pass that stamps it, so the line
+// says that instead of computing a keep-until.
 func (l lostLease) String() string {
+	if l.LostAt.IsZero() {
+		return fmt.Sprintf("%s owner=%s image=%s lost before tracking began (grace starts at the next GC pass)",
+			l.ID, l.Owner, l.Image)
+	}
 	return fmt.Sprintf("%s owner=%s image=%s lost %s ago (snapshot kept until %s)",
 		l.ID, l.Owner, l.Image,
 		duration(time.Since(l.LostAt).Round(time.Second)),
@@ -317,9 +325,9 @@ const (
 )
 
 // lostLeases lists the lost leases from the database. A lease with an
-// empty lost_at was lost before the column existed; it is reported as
-// lost now and kept for the full grace period from now, exactly as the
-// GC treats it.
+// empty lost_at was lost before the column existed; the backend's GC
+// stamps it on its next pass and the grace period runs from that stamp,
+// so it is listed without a computed age or keep-until.
 func lostLeases() ([]lostLease, error) {
 	dbPath := envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db")
 	d, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)&mode=ro")
@@ -332,7 +340,6 @@ func lostLeases() ([]lostLease, error) {
 		return nil, fmt.Errorf("list leases: %w", err)
 	}
 	defer rows.Close()
-	now := time.Now()
 	var out []lostLease
 	for rows.Next() {
 		var l lostLease
@@ -342,17 +349,16 @@ func lostLeases() ([]lostLease, error) {
 			return nil, fmt.Errorf("list leases: %w", err)
 		}
 		l.Persistent = persistent == 1
-		l.LostAt = now // lost before lost_at was recorded
 		if lostAt != "" {
 			if t, err := time.Parse(time.RFC3339Nano, lostAt); err == nil {
 				l.LostAt = t
+				grace := lostLeaseGrace
+				if l.Persistent {
+					grace = lostLeaseGracePersistent
+				}
+				l.Until = l.LostAt.Add(grace)
 			}
 		}
-		grace := lostLeaseGrace
-		if l.Persistent {
-			grace = lostLeaseGracePersistent
-		}
-		l.Until = l.LostAt.Add(grace)
 		out = append(out, l)
 	}
 	if err := rows.Err(); err != nil {

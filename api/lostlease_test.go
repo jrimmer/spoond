@@ -221,11 +221,108 @@ func TestGCKeepsLostNonPersistentLeaseGrace(t *testing.T) {
 	}
 }
 
+// TestGCStampsLostLeaseWithoutLostAt: a lost lease with an empty
+// lost_at (lost before the column existed) gets its lost_at stamped by
+// the first pass that sees it and keeps that stamp on every later pass,
+// so the grace period starts once. Its builds stay kept roots while
+// the stamped time plus the grace period is in the future and become
+// candidates once it has passed.
+func TestGCStampsLostLeaseWithoutLostAt(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+	svc, buf, db := gcTestClock(t, now)
+	pause, ckpt := lostChain(t, db)
+	seedLostLease(t, db, "l-nostamp", pause, ckpt, false, time.Time{})
+
+	// The first pass counts as the moment of loss: the builds are kept
+	// roots and the row leaves the pass stamped.
+	if !gcKeeps(t, svc, buf, pause, ckpt) {
+		t.Fatalf("an unstamped loss was not protected by the first pass:\n%s", buf.String())
+	}
+	row := leaseRow(t, db, "l-nostamp")
+	if row.LostAt.IsZero() {
+		t.Fatal("the first GC pass did not stamp lost_at")
+	}
+	if !row.LostAt.Equal(now) {
+		t.Fatalf("stamped lost_at = %v, want the pass time %v", row.LostAt, now)
+	}
+
+	// A later pass reads the stored stamp: it neither rewrites it nor
+	// restarts the grace period, and once the stamped time plus the
+	// grace period has passed the builds are candidates.
+	late := now.Add(23 * time.Hour)
+	svc.now = func() time.Time { return late }
+	buf.Reset()
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if strings.Contains(buf.String(), "would delete "+pause) || strings.Contains(buf.String(), "would delete "+ckpt) {
+		t.Errorf("23 h after the stamp the builds were already reclaimable:\n%s", buf.String())
+	}
+	row = leaseRow(t, db, "l-nostamp")
+	if !row.LostAt.Equal(now) {
+		t.Fatalf("a later pass rewrote lost_at to %v, want %v", row.LostAt, now)
+	}
+
+	expired := now.Add(25 * time.Hour)
+	svc.now = func() time.Time { return expired }
+	buf.Reset()
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	for _, id := range []string{pause, ckpt} {
+		if !strings.Contains(buf.String(), "would delete "+id) {
+			t.Errorf("25 h after the stamp %s was still held:\n%s", id, buf.String())
+		}
+	}
+	row = leaseRow(t, db, "l-nostamp")
+	if !row.LostAt.Equal(now) {
+		t.Fatalf("the expired pass rewrote lost_at to %v, want %v", row.LostAt, now)
+	}
+}
+
+// TestGCStampsLostLeaseWithoutLostAtLoaded: the stamp goes through the
+// in-memory lease when the service has one (the setState path), not
+// only through the stored row.
+func TestGCStampsLostLeaseWithoutLostAtLoaded(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	svc, _, db := gcTestClock(t, now)
+	pause, ckpt := lostChain(t, db)
+	seedLostLease(t, db, "l-mem", pause, ckpt, true, time.Time{})
+	if err := svc.LoadState(context.Background()); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+
+	if _, err := svc.keptBuilds(context.Background()); err != nil {
+		t.Fatalf("kept builds: %v", err)
+	}
+	row := leaseRow(t, db, "l-mem")
+	if !row.LostAt.Equal(now) {
+		t.Fatalf("persisted lost_at = %v, want the pass time %v", row.LostAt, now)
+	}
+	svc.store.mu.Lock()
+	mem := svc.store.leases["l-mem"]
+	svc.store.mu.Unlock()
+	if mem == nil || !mem.LostAt.Equal(now) {
+		t.Fatalf("in-memory lost_at = %v, want %v", mem.LostAt, now)
+	}
+
+	// The stamp survives a reload untouched and still bounds the grace
+	// period on later passes.
+	if _, err := svc.keptBuilds(context.Background()); err != nil {
+		t.Fatalf("second kept builds: %v", err)
+	}
+	row = leaseRow(t, db, "l-mem")
+	if !row.LostAt.Equal(now) {
+		t.Fatalf("a second pass rewrote lost_at to %v, want %v", row.LostAt, now)
+	}
+}
+
 // TestGCKeepsLostLeaseWithoutLostAt: a lost lease with an empty lost_at
-// (lost before the column existed) counts as lost at the time of each
-// pass, so its snapshots are protected for the full grace period
-// starting now — for a persistent lease and a plain one alike, and on a
-// much later pass too: the pre-change rows never age out on their own.
+// (lost before the column existed) counts as lost at the time of the
+// first pass that sees it, so its snapshots are protected for the full
+// grace period from that stamp — for a persistent lease and a plain one
+// alike, and on a much later first pass too.
 func TestGCKeepsLostLeaseWithoutLostAt(t *testing.T) {
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 
@@ -242,6 +339,11 @@ func TestGCKeepsLostLeaseWithoutLostAt(t *testing.T) {
 			if !gcKeeps(t, svc, buf, pause, ckpt) {
 				t.Errorf("persistent=%v at %v: an unstamped loss was not protected from this pass:\n%s",
 					tc.persistent, clock, buf.String())
+			}
+			row := leaseRow(t, db, "l-nostamp")
+			if !row.LostAt.Equal(clock) {
+				t.Errorf("persistent=%v at %v: lost_at = %v, want the pass time",
+					tc.persistent, clock, row.LostAt)
 			}
 		}
 	}

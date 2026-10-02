@@ -24,7 +24,11 @@ import (
 // default) ready/failed builds older than an hour that fall outside it.
 // A lease lost in a substrate crash keeps its resume/checkpoint builds
 // for a grace period after the loss (7 d persistent, 1 d otherwise)
-// before they may be reclaimed (owner decision 2026-10-02).
+// before they may be reclaimed (owner decision 2026-10-02). A lease
+// that was already lost when lost_at began to be recorded, so the
+// column is empty, has its lost_at stamped by the first GC pass that
+// sees it: the grace period then starts once instead of restarting on
+// every pass.
 //
 // The selection rule: a build is never a candidate while it is the
 // parent of any non-deleted build, or a ref_build_id in build_refs of a
@@ -71,15 +75,47 @@ func (s *Service) lostGrace(l store.LeaseRow) time.Duration {
 }
 
 // lostKeepUntil is the instant from which a lost lease's snapshots may
-// be reclaimed: lost_at (or now, for a lease lost before lost_at was
-// recorded — it counts as lost at the time of the pass, so it is
-// protected for the full period starting then) plus its grace period.
+// be reclaimed: lost_at plus its grace period. A lease still carrying
+// an empty lost_at, lost before the column was recorded, counts as
+// lost at the given now — the GC stamps such leases on sight (see
+// stampLostAt), so this fallback covers only a row the stamp has not
+// reached yet.
 func (s *Service) lostKeepUntil(l store.LeaseRow, now time.Time) time.Time {
 	lostAt := l.LostAt
 	if lostAt.IsZero() {
 		lostAt = now
 	}
 	return lostAt.Add(s.lostGrace(l))
+}
+
+// stampLostAt records the loss time of a lease that was already lost
+// when lost_at began to be recorded (its column is empty): the first GC
+// pass that sees it counts as the moment of loss, so the grace period
+// has a fixed start instead of moving forward on every pass and
+// holding the snapshots forever. It takes the same path setState uses
+// when the lease is in memory and falls back to the stored row
+// otherwise; an existing stamp is never overwritten, and a lease that
+// has since left the lost state is left alone (leaving "lost" clears
+// the stamp).
+func (s *Service) stampLostAt(ctx context.Context, l store.LeaseRow, now time.Time) {
+	s.store.mu.Lock()
+	if mem, ok := s.store.leases[l.ID]; ok {
+		if mem.State != "lost" || !mem.LostAt.IsZero() {
+			s.store.mu.Unlock()
+			return
+		}
+		// The state is already "lost", so this is only the entering-
+		// "lost" half of setState, stamped with this pass's clock.
+		mem.LostAt = now
+		s.saveLeaseLocked(mem)
+		s.store.mu.Unlock()
+		return
+	}
+	s.store.mu.Unlock()
+	l.LostAt = now
+	if err := s.db.UpsertLease(ctx, l); err != nil {
+		s.storeError("upsert_lease", l.ID, err)
+	}
 }
 
 // runGCCatalogLoop runs the GC once 10 minutes after the backend starts
@@ -205,6 +241,13 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 	now := s.now()
 	for _, l := range leases {
 		if l.State == "lost" {
+			// A lease lost before lost_at was recorded counts as lost at
+			// this pass and only this one: the stamp fixes the start of
+			// its grace period for every later pass.
+			if l.LostAt.IsZero() {
+				s.stampLostAt(ctx, l, now)
+				l.LostAt = now
+			}
 			// A lost lease keeps its snapshots for a grace period after
 			// the loss, so the owner can still reclaim them; past it the
 			// builds are candidates like any other unreferenced build.
