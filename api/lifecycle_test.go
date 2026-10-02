@@ -39,7 +39,7 @@ func newLifecycleService(t *testing.T) (*Service, *testSub) {
 func TestEgressForEachPolicy(t *testing.T) {
 	svc, _ := newLifecycleService(t)
 	hostSvc := substrate.PrivateAllowance{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8891}}
-	dns := substrate.PrivateAllowance{CIDR: "10.1.0.1/32", TCPPorts: []uint32{53}}
+	dns := substrate.PrivateAllowance{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}}
 
 	lanPrivateWant := make([]substrate.PrivateAllowance, 0, len(lanRanges)+2)
 	for _, cidr := range lanRanges {
@@ -61,7 +61,7 @@ func TestEgressForEachPolicy(t *testing.T) {
 
 	t.Run("internet", func(t *testing.T) {
 		got := svc.egressFor(&Lease{NetPolicy: "internet"})
-		want := substrate.Egress{Private: lanPrivateWant}
+		want := substrate.Egress{DeniedCIDRs: []string{"192.0.2.0/24"}, Private: lanPrivateWant}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
 		}
