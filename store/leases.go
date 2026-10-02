@@ -20,13 +20,16 @@ type LeaseRow struct {
 	ExposedIP, Comment, State            string   // State: running|suspended|recovered|lost
 	ResumeBuildID, LastCheckpointBuildID string
 	LastCheckpointAt, RecoveredFrom      time.Time // zero = unset ('')
-	Drained                              bool      // paused by the admin drain, resumed by undrain (U10)
+	// LostAt is when the lease became lost (zero = unset). The GC keeps
+	// a lost lease's snapshot builds for a grace period counted from it.
+	LostAt  time.Time
+	Drained bool // paused by the admin drain, resumed by undrain (U10)
 }
 
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
 	persistent, last_active, workspace, suspended, name, net_policy, net_allow,
 	expose_ports, exposed_ip, comment, state, resume_build_id,
-	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained`
+	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained, lost_at`
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -41,7 +44,7 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	}
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -65,13 +68,15 @@ ON CONFLICT(id) DO UPDATE SET
   last_checkpoint_build_id=excluded.last_checkpoint_build_id,
   last_checkpoint_at=excluded.last_checkpoint_at,
   recovered_from=excluded.recovered_from,
-  drained=excluded.drained`,
+  drained=excluded.drained,
+  lost_at=excluded.lost_at`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
 		l.NetPolicy, string(netAllow), string(exposePorts), l.ExposedIP,
 		l.Comment, l.State, l.ResumeBuildID, l.LastCheckpointBuildID,
-		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom), l.Drained)
+		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom), l.Drained,
+		formatTime(l.LostAt))
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -132,13 +137,14 @@ func (db *DB) UpdateLastActive(ctx context.Context, ids map[string]time.Time) er
 // LeaseRow, decoding the timestamp and JSON columns.
 func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	var r LeaseRow
-	var createdAt, expiresAt, lastActive, lastCheckpointAt, recoveredFrom string
+	var createdAt, expiresAt, lastActive, lastCheckpointAt, recoveredFrom, lostAt string
 	var netAllow, exposePorts string
 	err := scan(&r.ID, &r.Owner, &r.Image, &r.SandboxID, &r.Address,
 		&createdAt, &expiresAt, &r.Persistent, &lastActive, &r.Workspace,
 		&r.Suspended, &r.Name, &r.NetPolicy, &netAllow, &exposePorts,
 		&r.ExposedIP, &r.Comment, &r.State, &r.ResumeBuildID,
-		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained)
+		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained,
+		&lostAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}
@@ -150,6 +156,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	r.LastActive = parseTime(lastActive)
 	r.LastCheckpointAt = parseTime(lastCheckpointAt)
 	r.RecoveredFrom = parseTime(recoveredFrom)
+	r.LostAt = parseTime(lostAt)
 	if err := json.Unmarshal([]byte(netAllow), &r.NetAllow); err != nil {
 		return LeaseRow{}, fmt.Errorf("store: lease %s: net_allow: %w", r.ID, err)
 	}

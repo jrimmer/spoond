@@ -124,7 +124,10 @@ func TestGCChainWithLeaseKeepsEverything(t *testing.T) {
 }
 
 // TestGCCandidatesAfterLeaseGone: with the lease (and its sandbox row)
-// gone, c2 and c1 are candidates and the current template is not.
+// gone, the chain's tail becomes a candidate and the current template is
+// not. Its parent is kept for as long as the tail's row is non-deleted
+// (the parent protection), so the chain unwinds from the tail: one GC
+// pass per link once nothing references the link below it.
 func TestGCCandidatesAfterLeaseGone(t *testing.T) {
 	svc, buf, db, _ := gcTestService(t)
 	root, c1, c2 := seedGCChain(t, db, "py-base")
@@ -133,24 +136,35 @@ func TestGCCandidatesAfterLeaseGone(t *testing.T) {
 		t.Fatalf("gc: %v", err)
 	}
 	lines := buf.String()
-	for _, id := range []string{c1, c2} {
-		want := fmt.Sprintf("gc: would delete %s kind=checkpoint image=py-base", id)
-		if !strings.Contains(lines, want) {
-			t.Errorf("log lacks %q:\n%s", want, lines)
-		}
+	want := fmt.Sprintf("gc: would delete %s kind=checkpoint image=py-base", c2)
+	if !strings.Contains(lines, want) {
+		t.Errorf("log lacks %q:\n%s", want, lines)
 	}
-	if strings.Contains(lines, root) {
-		t.Errorf("current template logged as deletable:\n%s", lines)
+	for _, id := range []string{root, c1} {
+		if strings.Contains(lines, id) {
+			t.Errorf("build %s logged as deletable while a non-deleted build references it:\n%s", id, lines)
+		}
 	}
 	// Dry run: no state changes.
-	for _, id := range []string{c1, c2} {
-		b, err := db.GetBuild(context.Background(), id)
-		if err != nil {
-			t.Fatalf("get build %s: %v", id, err)
-		}
-		if b.State != "ready" {
-			t.Errorf("build %s: dry run changed state to %q", id, b.State)
-		}
+	b, err := db.GetBuild(context.Background(), c2)
+	if err != nil {
+		t.Fatalf("get build %s: %v", c2, err)
+	}
+	if b.State != "ready" {
+		t.Errorf("build %s: dry run changed state to %q", c2, b.State)
+	}
+
+	// The next pass, after the tail is really deleted, reclaims the
+	// parent — the deleted tail no longer protects it.
+	if err := db.UpdateBuildState(context.Background(), c2, "deleted", "", nil); err != nil {
+		t.Fatalf("mark tail deleted: %v", err)
+	}
+	buf.Reset()
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if lines := buf.String(); !strings.Contains(lines, "would delete "+c1) {
+		t.Errorf("log lacks the parent after the tail is deleted:\n%s", lines)
 	}
 }
 
@@ -180,17 +194,22 @@ func TestGCBuildingNeverDeleted(t *testing.T) {
 
 // TestGCDeleteEnabledDeletesAndCounts: GC_DELETE=1 deletes candidates
 // via the substrate, marks them deleted and bumps the counter; the
-// leased chain and current templates stay.
+// leased chain and current templates stay. A chain unwinds from the
+// tail — one link per pass — so the second image's two checkpoints take
+// two passes.
 func TestGCDeleteEnabledDeletesAndCounts(t *testing.T) {
 	svc, buf, db, sub := gcTestService(t)
 	t.Setenv("GC_DELETE", "1")
 	root, c1, c2 := seedGCChain(t, db, "py-base")
 	seedGCLease(t, db, "l1", "s1", c2)
-	// A second image's chain with no lease: its checkpoints are candidates.
+	// A second image's chain with no lease: its checkpoints are
+	// candidates, tail first.
 	root2, d1, d2 := seedGCChain(t, db, "go-base")
 
-	if err := svc.gcOnce(context.Background()); err != nil {
-		t.Fatalf("gc: %v", err)
+	for i := 0; i < 2; i++ {
+		if err := svc.gcOnce(context.Background()); err != nil {
+			t.Fatalf("gc pass %d: %v", i, err)
+		}
 	}
 	if n := calls(sub.Fake, "DeleteBuild"); n != 2 {
 		t.Fatalf("DeleteBuild calls = %d, want 2\nlog:\n%s", n, buf.String())
@@ -223,7 +242,7 @@ func TestGCDeleteEnabledDeletesAndCounts(t *testing.T) {
 func TestGCDryRunOnlyLogs(t *testing.T) {
 	svc, buf, db, sub := gcTestService(t)
 	t.Setenv("GC_DELETE", "")
-	_, c1, _ := seedGCChain(t, db, "py-base")
+	_, _, c2 := seedGCChain(t, db, "py-base")
 
 	if err := svc.gcOnce(context.Background()); err != nil {
 		t.Fatalf("gc: %v", err)
@@ -231,7 +250,7 @@ func TestGCDryRunOnlyLogs(t *testing.T) {
 	if n := calls(sub.Fake, "DeleteBuild"); n != 0 {
 		t.Errorf("dry run recorded %d DeleteBuild call(s), want 0", n)
 	}
-	if !strings.Contains(buf.String(), "would delete "+c1) {
+	if !strings.Contains(buf.String(), "would delete "+c2) {
 		t.Errorf("dry run did not log the candidate:\n%s", buf.String())
 	}
 }

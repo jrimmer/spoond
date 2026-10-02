@@ -18,14 +18,105 @@ import (
 //
 // Builds form chains (parent_build_id) and their headers reference other
 // builds' blocks (build_refs, from E2B's scheduling metadata). The GC
-// computes a root set — every image's current build, every lease's
-// resume/checkpoint builds, every sandbox's build, every in-flight
+// computes a root set — every image's current build, every live lease's
+// resume/checkpoint builds, every live sandbox's build, every in-flight
 // build — keeps the closure of that set, and deletes (dry-run by
 // default) ready/failed builds older than an hour that fall outside it.
+// A lease lost in a substrate crash keeps its resume/checkpoint builds
+// for a grace period after the loss (7 d persistent, 1 d otherwise)
+// before they may be reclaimed (owner decision 2026-10-02). A lease
+// that was already lost when lost_at began to be recorded, so the
+// column is empty, has its lost_at stamped by the first GC pass that
+// sees it: the grace period then starts once instead of restarting on
+// every pass.
+//
+// The selection rule: a build is never a candidate while it is the
+// parent of any non-deleted build, or a ref_build_id in build_refs of a
+// kept build. Both protections are structural — they do not depend on
+// any root row still naming the build — so a lease whose lease/sandbox
+// rows lag (a crash between a checkpoint and its sandbox upsert, or a
+// drain mid-rotation) can never have the layers under its live builds
+// removed.
 
 // gcAge is how long a build must be unreferenced and idle before the GC
 // considers it.
 const gcAge = time.Hour
+
+// The lost-lease snapshot grace periods (owner decision 2026-10-02): a
+// lost lease's resume_build_id and last_checkpoint_build_id stay kept
+// roots for 7 days after lost_at when the lease is persistent, 1 day
+// otherwise. Overridable per service via ServiceConfig.
+const (
+	defaultLostGracePersistent = 7 * 24 * time.Hour
+	defaultLostGrace           = 24 * time.Hour
+)
+
+// lostGraces resolves the configured grace periods, substituting the
+// defaults for zero values.
+func (s *Service) lostGraces() (persistent, other time.Duration) {
+	p, o := s.cfg.LostGracePersistent, s.cfg.LostGrace
+	if p <= 0 {
+		p = defaultLostGracePersistent
+	}
+	if o <= 0 {
+		o = defaultLostGrace
+	}
+	return p, o
+}
+
+// lostGrace returns one lease's grace period: 7 days for a persistent
+// lease, 1 day for any other, from the configured (or default) values.
+func (s *Service) lostGrace(l store.LeaseRow) time.Duration {
+	p, o := s.lostGraces()
+	if l.Persistent {
+		return p
+	}
+	return o
+}
+
+// lostKeepUntil is the instant from which a lost lease's snapshots may
+// be reclaimed: lost_at plus its grace period. A lease still carrying
+// an empty lost_at, lost before the column was recorded, counts as
+// lost at the given now — the GC stamps such leases on sight (see
+// stampLostAt), so this fallback covers only a row the stamp has not
+// reached yet.
+func (s *Service) lostKeepUntil(l store.LeaseRow, now time.Time) time.Time {
+	lostAt := l.LostAt
+	if lostAt.IsZero() {
+		lostAt = now
+	}
+	return lostAt.Add(s.lostGrace(l))
+}
+
+// stampLostAt records the loss time of a lease that was already lost
+// when lost_at began to be recorded (its column is empty): the first GC
+// pass that sees it counts as the moment of loss, so the grace period
+// has a fixed start instead of moving forward on every pass and
+// holding the snapshots forever. It takes the same path setState uses
+// when the lease is in memory and falls back to the stored row
+// otherwise; an existing stamp is never overwritten, and a lease that
+// has since left the lost state is left alone (leaving "lost" clears
+// the stamp).
+func (s *Service) stampLostAt(ctx context.Context, l store.LeaseRow, now time.Time) {
+	s.store.mu.Lock()
+	if mem, ok := s.store.leases[l.ID]; ok {
+		if mem.State != "lost" || !mem.LostAt.IsZero() {
+			s.store.mu.Unlock()
+			return
+		}
+		// The state is already "lost", so this is only the entering-
+		// "lost" half of setState, stamped with this pass's clock.
+		mem.LostAt = now
+		s.saveLeaseLocked(mem)
+		s.store.mu.Unlock()
+		return
+	}
+	s.store.mu.Unlock()
+	l.LostAt = now
+	if err := s.db.UpsertLease(ctx, l); err != nil {
+		s.storeError("upsert_lease", l.ID, err)
+	}
+}
 
 // runGCCatalogLoop runs the GC once 10 minutes after the backend starts
 // and then once an hour. Disk accounting runs with it. Never while the
@@ -67,28 +158,73 @@ func (s *Service) gcOnce(ctx context.Context) error {
 	return s.accountDisk(ctx)
 }
 
-// keptBuilds computes the GC root set and its closure: every image's
-// current build, every lease row's resume and checkpoint builds, every
-// sandboxes row's build (pool sandboxes included), every building
-// build, plus — transitively — parent builds and header-referenced
-// builds (build_refs). Ref ids absent from builds are still kept (they
-// are never candidates: only builds rows are).
+// keptBuilds computes the GC keep set. Roots are every image's current
+// build, every live lease's resume and checkpoint builds, every live
+// sandbox's build (pool sandboxes included), and every in-flight build.
+// A lost lease's resume and checkpoint builds stay roots for a grace
+// period after the loss — 7 days for a persistent lease, 1 day
+// otherwise — so its snapshots outlive the crash that lost it.
+// Every root's ancestor chain is kept in full, and every kept build's
+// header-referenced builds (build_refs) are kept in full — including
+// their own ancestors and refs, transitively.
+//
+// The chain walk is over *non-deleted* builds only: a deleted build
+// keeps nothing, so the files a GC pass or an owner delete already
+// removed cannot hold live builds' layers hostage. Ref ids absent from
+// builds are still kept (they are never candidates: only builds rows
+// are).
 func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list builds: %w", err)
 	}
 	parent := make(map[string]string, len(builds))
+	deleted := make(map[string]bool, len(builds))
+	for _, b := range builds {
+		parent[b.BuildID] = b.ParentBuildID
+		if b.State == "deleted" {
+			deleted[b.BuildID] = true
+		}
+	}
+	refs, err := s.db.ListBuildRefs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gc: list build refs: %w", err)
+	}
 	kept := make(map[string]bool, len(builds))
-	add := func(id string) {
-		if id != "" {
+	// keep adds id and, transitively, its ancestors (up to the first
+	// deleted or unknown build) and its header-referenced builds (each
+	// with the same treatment). It is cycle-safe.
+	var keep func(id string)
+	keep = func(id string) {
+		for {
+			if id == "" || kept[id] {
+				return
+			}
 			kept[id] = true
+			for _, ref := range refs[id] {
+				keep(ref)
+			}
+			if deleted[id] {
+				return // a deleted build keeps nothing above it
+			}
+			id = parent[id]
 		}
 	}
 	for _, b := range builds {
-		parent[b.BuildID] = b.ParentBuildID
 		if b.State == "building" {
-			add(b.BuildID)
+			keep(b.BuildID)
+		}
+		if b.State == "deleted" {
+			continue // its files are gone; it protects nothing
+		}
+		// The structural roots: a build is kept while any non-deleted
+		// build names it as a parent, and while any non-deleted build's
+		// headers reference its blocks. These do not depend on an image,
+		// lease or sandbox row naming the build, so they hold even when
+		// those rows lag or were dropped.
+		keep(b.ParentBuildID)
+		for _, ref := range refs[b.BuildID] {
+			keep(ref)
 		}
 	}
 	imgs, err := s.db.ListImages(ctx)
@@ -96,45 +232,40 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 		return nil, fmt.Errorf("gc: list images: %w", err)
 	}
 	for _, img := range imgs {
-		add(img.CurrentBuildID)
+		keep(img.CurrentBuildID)
 	}
 	leases, err := s.db.ListLeases(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list leases: %w", err)
 	}
+	now := s.now()
 	for _, l := range leases {
-		add(l.ResumeBuildID)
-		add(l.LastCheckpointBuildID)
+		if l.State == "lost" {
+			// A lease lost before lost_at was recorded counts as lost at
+			// this pass and only this one: the stamp fixes the start of
+			// its grace period for every later pass.
+			if l.LostAt.IsZero() {
+				s.stampLostAt(ctx, l, now)
+				l.LostAt = now
+			}
+			// A lost lease keeps its snapshots for a grace period after
+			// the loss, so the owner can still reclaim them; past it the
+			// builds are candidates like any other unreferenced build.
+			if !now.Before(s.lostKeepUntil(l, now)) {
+				continue
+			}
+		}
+		keep(l.ResumeBuildID)
+		keep(l.LastCheckpointBuildID)
 	}
 	sbs, err := s.db.ListSandboxes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list sandboxes: %w", err)
 	}
 	for _, sb := range sbs {
-		add(sb.BuildID)
+		keep(sb.BuildID)
 	}
-	refs, err := s.db.ListBuildRefs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("gc: list build refs: %w", err)
-	}
-	for {
-		added := false
-		for id := range kept {
-			if p := parent[id]; p != "" && !kept[p] {
-				kept[p] = true
-				added = true
-			}
-			for _, ref := range refs[id] {
-				if !kept[ref] {
-					kept[ref] = true
-					added = true
-				}
-			}
-		}
-		if !added {
-			return kept, nil
-		}
-	}
+	return kept, nil
 }
 
 // gcCandidates deletes (GC_DELETE=1) or logs (dry-run, the default)

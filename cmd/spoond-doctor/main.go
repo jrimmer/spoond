@@ -124,6 +124,7 @@ func runChecks(manifestPath string) []checkResult {
 	out = append(out, checkRegistry()...)
 	out = append(out, checkTokenSeed()...)
 	out = append(out, checkDB()...)
+	out = append(out, checkLeases()...)
 	out = append(out, checkCatalog(manifestPath)...)
 	out = append(out, checkArtifacts()...)
 	out = append(out, checkStorage()...)
@@ -263,6 +264,115 @@ func checkDB() []checkResult {
 		return []checkResult{{"store: database", "FAIL", fmt.Sprintf("migration version %d, want >= 4", version)}}
 	}
 	return []checkResult{{"store: database", "PASS", fmt.Sprintf("%s at migration version %d", dbPath, version)}}
+}
+
+// checkLeases reports every lease in the lost state (a lease whose
+// sandbox died in a substrate crash; it answers 410 until deleted).
+// Purely informational — WARN with one line per lost lease naming when
+// its snapshots stop being kept by the GC's grace period (a lease lost
+// before lost_at was recorded has no such time until the GC stamps it)
+// — and never FAIL. It reads the database read-only, like versionsInUse,
+// so the doctor never creates or migrates the database it inspects.
+func checkLeases() []checkResult {
+	lost, err := lostLeases()
+	if err != nil {
+		return []checkResult{{"leases: lost", "WARN", fmt.Sprintf("list lost leases: %v", err)}}
+	}
+	if len(lost) == 0 {
+		return []checkResult{{"leases: lost", "PASS", "none"}}
+	}
+	lines := make([]string, 0, len(lost))
+	for _, l := range lost {
+		lines = append(lines, l.String())
+	}
+	return []checkResult{{"leases: lost", "WARN",
+		fmt.Sprintf("%d lease(s) lost: %s", len(lost), strings.Join(lines, "; "))}}
+}
+
+// lostLease is one row of the lostLeases listing.
+type lostLease struct {
+	ID, Owner, Image string
+	Persistent       bool
+	// LostAt is the stored lost_at; zero when the lease was lost before
+	// the column was recorded, in which case Until is zero too: the
+	// backend's GC stamps the row on its next pass and the grace period
+	// runs from that stamp. Otherwise Until is the instant the grace
+	// period ends.
+	LostAt, Until time.Time
+}
+
+// String renders the warning line for one lost lease:
+// "<id> owner=<owner> image=<image> lost <age> ago (snapshot kept until <time>)".
+// A lease with an empty lost_at was lost before tracking began; the
+// grace period starts at the next GC pass that stamps it, so the line
+// says that instead of computing a keep-until.
+func (l lostLease) String() string {
+	if l.LostAt.IsZero() {
+		return fmt.Sprintf("%s owner=%s image=%s lost before tracking began (grace starts at the next GC pass)",
+			l.ID, l.Owner, l.Image)
+	}
+	return fmt.Sprintf("%s owner=%s image=%s lost %s ago (snapshot kept until %s)",
+		l.ID, l.Owner, l.Image,
+		duration(time.Since(l.LostAt).Round(time.Second)),
+		l.Until.UTC().Format("2006-01-02 15:04 Z07:00"))
+}
+
+// lostLeaseGrace mirrors the backend's defaults: 7 days for a
+// persistent lease, 1 day for any other.
+const (
+	lostLeaseGracePersistent = 7 * 24 * time.Hour
+	lostLeaseGrace           = 24 * time.Hour
+)
+
+// lostLeases lists the lost leases from the database. A lease with an
+// empty lost_at was lost before the column existed; the backend's GC
+// stamps it on its next pass and the grace period runs from that stamp,
+// so it is listed without a computed age or keep-until.
+func lostLeases() ([]lostLease, error) {
+	dbPath := envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db")
+	d, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)&mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", dbPath, err)
+	}
+	defer d.Close()
+	rows, err := d.Query(`SELECT id, owner, image, persistent, lost_at FROM leases WHERE state = 'lost' ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list leases: %w", err)
+	}
+	defer rows.Close()
+	var out []lostLease
+	for rows.Next() {
+		var l lostLease
+		var persistent int
+		var lostAt string
+		if err := rows.Scan(&l.ID, &l.Owner, &l.Image, &persistent, &lostAt); err != nil {
+			return nil, fmt.Errorf("list leases: %w", err)
+		}
+		l.Persistent = persistent == 1
+		if lostAt != "" {
+			if t, err := time.Parse(time.RFC3339Nano, lostAt); err == nil {
+				l.LostAt = t
+				grace := lostLeaseGrace
+				if l.Persistent {
+					grace = lostLeaseGracePersistent
+				}
+				l.Until = l.LostAt.Add(grace)
+			}
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list leases: %w", err)
+	}
+	return out, nil
+}
+
+// duration renders d the way Go prints durations, with 0s for zero.
+func duration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	return d.String()
 }
 
 // checkCatalog verifies every manifest image with baked: true has a

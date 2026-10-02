@@ -235,7 +235,7 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			defer func() { <-sem }()
 			if _, err := s.resumeLease(ctx, l); err != nil {
 				s.store.mu.Lock()
-				l.State = "lost"
+				l.setState("lost")
 				l.Drained = false
 				s.saveLeaseLocked(l)
 				s.store.mu.Unlock()
