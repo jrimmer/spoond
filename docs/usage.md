@@ -1,7 +1,9 @@
 # Usage guide
 
 Practical recipes for working with spoond sandboxes: SSH, exec, agents,
-proxying, and policies.
+proxying, and policies. What a sandbox *is* (a Firecracker microVM
+restored from an image snapshot, on the E2B substrate) is
+[substrate.md](substrate.md); the endpoint reference is [api.md](api.md).
 
 ## Quick start
 
@@ -10,20 +12,23 @@ proxying, and policies.
 curl -s -X POST https://sandbox.example.com/api/sandboxes \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"image":"dev-base","ttl":600}'
-# → {"id":"…","address":"10.42.0.2:8888",…}
+# → {"id":"…","address":"10.11.0.7","expires_at":"…",…}
 
 ssh <id>@sandbox.example.com "uname -a"          # run a command
 ssh <id>@sandbox.example.com                      # interactive shell
 ssh ctl@sandbox.example.com "rm <id>"             # release
 ```
 
+Or skip curl entirely: `ssh new@sandbox.example.com` creates a persistent
+dev sandbox and drops you into tmux.
+
 ## Three ways to run a command
 
-1. **SSH into the sandbox** (needs the gateway key in the image):
+1. **SSH into the sandbox**:
    ```bash
    ssh <id>@sandbox.example.com -p 2222 "ls -la"
    ```
-2. **Control plane** (no key-in-image needed, your ctl key only):
+2. **Control plane** (your ctl key, no key-in-image needed):
    ```bash
    ssh ctl@sandbox.example.com -p 2222 "ls --json"
    ```
@@ -34,6 +39,12 @@ ssh ctl@sandbox.example.com "rm <id>"             # release
      -d '{"cmd":"ls -la","timeout":30}'
    # → {"stdout":"…","stderr":"","exit":0}
    ```
+
+Interactive/agent clients can also drive a PTY over the API:
+`GET /api/sandboxes/{id}/stream` (WebSocket) starts a process with
+`{"args":["/bin/bash","-l"],"pty":true}` and relays input/output/resizes
+— that is exactly how the SSH gateway itself attaches. See
+[api.md](api.md#get-apisandboxesidstream--interactive-process-websocket).
 
 ## Interactive sessions
 
@@ -65,7 +76,9 @@ ssh mybox@sandbox.example.com -p 2222
 - **Ephemeral** (`persistent:false`, default): TTL-based; auto-deleted
   when `expires_at` passes. Cheap, disposable.
 - **Persistent** (`persistent:true`): survives TTL sweeps; `keepalive`
-  extends it; `suspend`/`resume` snapshot/restore (workspace-backed);
+  extends it; `suspend`/`resume` snapshot/restore (a suspend is an E2B
+  *pause* — snapshot to a new build, then stop; a resume restores that
+  build with the **same sandbox id**, so your tmux session comes back);
   `IDLE_TIMEOUT_SECS` can auto-suspend idle ones.
 
 ```bash
@@ -76,18 +89,35 @@ ssh ctl@sandbox.example.com "suspend <id>"   # snapshot + stop
 ssh ctl@sandbox.example.com "resume <id>"    # back to work
 ```
 
-## Clones (snapshots)
+Take a checkpoint of a *running* persistent sandbox to bound what a host
+restart can cost (`POST /api/sandboxes/{id}/checkpoint`); the platform
+also checkpoints active persistent leases hourly by default. A sandbox
+lost with no checkpoint answers `410` — delete it and start again.
+
+## Clones and forks (snapshot branching)
+
+`clone`/`cp` checkpoints the running sandbox and starts a fresh
+persistent lease from that build, copying its network policy and exposed
+ports. `fork` does the same for N copies at once:
 
 ```bash
 ssh ctl@sandbox.example.com "cp <id> my-snapshot"   # branch + spawn
-# then use the new lease id as a clean starting point
+curl -s -X POST …/api/sandboxes/<id>/fork \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"count":3}'
+# → {"source":"…","build_id":"…","ids":["…","…","…"]}
 ```
+
+The checkpoint build id is the snapshot's identity; `GET /api/snapshots`
+lists yours and `DELETE /api/snapshots/{build_id}` reclaims one. Memory
+comes with it — a fork resumes with the source's RAM, which is what makes
+it useful for "try a risky thing, keep the original".
 
 ## Web server inside a sandbox
 
 With `PROXY_ADDR` + a wildcard Caddy front:
 
-- `https://<id>.sandbox.example.com/` → port 8888 inside the sandbox
+- `https://<id>.sandbox.example.com/` → port 3000 inside the sandbox
 - `https://<id>-8080.sandbox.example.com/` → port 8080
 
 ```bash
@@ -97,10 +127,34 @@ python3 -m http.server 8080
 curl -s https://<id>-8080.sandbox.example.com/
 ```
 
+Note for guest apps: requests arrive with `Host: 127.0.0.1:5007` (the
+substrate's sandbox proxy); the public hostname is in
+`X-Forwarded-Host`. Frameworks with a host allowlist must read that
+header.
+
+## Exposing a service to peer sandboxes
+
+A sandbox can publish up to 8 TCP ports for *peer sandboxes* (not the
+LAN) — a database for a CI job, for instance:
+
+```bash
+# the database lease
+curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
+  -d '{"image":"scylla","persistent":true,"expose_ports":[9042]}'
+# → "exposed":{"9042":"10.11.0.7:9042"}
+
+# the job's lease must allow that peer by id, name or lease:<id>
+curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
+  -d '{"image":"go-base","egress_allowlist":["<db-lease-id>"]}'
+```
+
+Guest port 49983 (the in-guest agent) is reserved and can never be
+published.
+
 ## LLM gateway
 
-Per-lease OpenAI-compatible endpoint (no consumer bearer token — the
-lease id is the capability):
+Per-lease OpenAI-compatible endpoint (the lease id in the path is the
+capability):
 
 ```bash
 curl -s https://sandbox.example.com/llm/<id>/openai/chat/completions \
@@ -108,7 +162,7 @@ curl -s https://sandbox.example.com/llm/<id>/openai/chat/completions \
   -d '{"model":"gpt-oss-20b-fireworks","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### Per-user keys (epic #26 T8)
+### Per-user keys
 
 When a lease owner has a per-user LLM key configured, `/llm/` requests
 on their leases must present it in the standard OpenAI-compatible
@@ -125,7 +179,8 @@ The user key only authorizes the caller (missing/wrong/foreign keys get
 `401`); it is replaced by the server-side upstream key before the
 request is forwarded, so it never reaches the provider. Owners **without**
 a key keep the legacy open behavior (backward compatible), including
-deployments with no identity store at all.
+deployments with no identity store at all — unless the deployment sets
+`LLM_OPEN_LEGACY=0`.
 
 An admin sets/rotates/revokes a key (stored hashed, never returned by
 the API):
@@ -144,7 +199,7 @@ Optional per-user concurrency cap (in-flight `/llm/` requests per user;
 unlimited).
 
 Config: `LLM_UPSTREAM_URL`/`LLM_UPSTREAM_KEY` (server-side upstream) or
-the sandbox's own Shelley agent on `127.0.0.1:9000`.
+the sandbox's own Shelley agent.
 
 ## In-sandbox coding agent (Shelley)
 
@@ -155,7 +210,7 @@ ssh ctl@sandbox.example.com "prompt <id> write a fibonacci function"
 
 ## MCP / ACP agent endpoints
 
-### `forkd-dev-mcp` (MCP stdio server, JSON-RPC 2.0 over stdio)
+### `spoond mcp` (MCP stdio server, JSON-RPC 2.0 over stdio)
 
 Tools: `shell`, `read_file`, `write_file`, `edit_file`, `list_files`,
 `status`. Point Goose/Claude Code-style MCP clients at it:
@@ -165,7 +220,7 @@ FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
   ./spoond mcp
 ```
 
-### `forkd-acp` (Agent Client Protocol server)
+### `spoond acp` (Agent Client Protocol server)
 
 Sessions map 1:1 to leases; the agent loop runs through the LLM gateway
 with in-sandbox tools. One `spoond acp` process serves the whole
@@ -176,27 +231,33 @@ FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
   FORKD_LLM_MODEL=gpt-oss-20b-fireworks ./spoond acp
 ```
 
+(The `FORKD_*` names above are the live, supported variable names.)
+
 ## Network policies
 
 | Policy | Egress | Default |
 |---|---|---|
-| `none` | none (loopback only) | |
-| `lan` | RFC1918 + link-local (opt-in) | |
-| `internet` | full egress via host NAT | |
-| `restricted` | allowlisted IPs/CIDRs/domains only | ✅ default (v1.1) |
+| `none` | nothing | |
+| `lan` | the LAN ranges, host services, DNS, peers' published ports | |
+| `internet` | everything public plus the LAN, host services, DNS, peers' published ports | |
+| `restricted` | host services, DNS, the allowlist, peers' published ports | ✅ default |
 
-The default is **`restricted`** (security review #37 rescan F3): guests
-can reach the host bridge (LLM gateway, assets, proxy) plus anything in
-`egress_allowlist`, but NOT peer sandboxes — each sandbox carries an
-unauthenticated root exec agent and a Shelley agent, so guest→guest
-must be blocked unless you explicitly opt in with `network_policy=lan`.
+The default is **`restricted`**: a guest can reach the host services
+spoond grants it (the proxy/LLM gateway port and DNS) plus its
+allowlist, and peer sandboxes only through their published ports. Opt in
+to wider egress with `network_policy=lan` or `internet`.
 
 ```bash
 curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
   -d '{"image":"dev-base","network_policy":"restricted","egress_allowlist":["10.1.0.47","github.com"]}'
 ```
 
-## Multi-user tenancy (v1.1)
+Allowlist entries may be IPs, CIDRs or domains — or a **lease
+reference** (another lease's id, its friendly name, or `lease:<id>`),
+which permits that lease's published ports. Policy can be changed live
+with `POST /api/sandboxes/{id}/network` — no restart, no new lease.
+
+## Multi-user tenancy
 
 With `USERS_FILE` set, people and agents are first-class identities.
 Operational flow for an admin:
@@ -222,8 +283,8 @@ ssh alice@sandbox.example.com            # fresh sandbox, owned by alice
 ssh ctl@sandbox.example.com "ls --json"  # alice sees only her own
 ```
 
-**Sharing a sandbox** (epic #26 U9) — hand a collaborator or an agent
-limited access without copying the lease capability:
+**Sharing a sandbox** — hand a collaborator or an agent limited access
+without copying the lease capability:
 
 ```bash
 ssh ctl@sandbox.example.com "share add <id> alice http 3600"   # 1h exec/stream
@@ -234,7 +295,7 @@ ssh ctl@sandbox.example.com "share rm <id> alice"              # revoke immediat
 
 **Per-user LLM keys** — an admin gives a user their own gateway key
 (`POST /api/users/<id>/llm-key`); that user's `/llm/` requests must then
-present it. Guests' leases stay isolated: exec/stream/stat/endpoint are
+present it. Guests' leases stay isolated: exec/stream/stat are
 owner-scoped everywhere, and a shared lease is the only way in.
 
 **Per-user proxy hostnames** — with forward-auth enabled
