@@ -136,6 +136,7 @@ type ServiceConfig struct {
 	DefaultTTL, MaxTTL, IdleTimeout time.Duration
 	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
 	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
+	HostAPIPort                     int    // HOST_API_PORT: lease API port lan/internet guests may reach on HostGuestAddr (0 = none)
 	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
 	CheckpointEvery                 time.Duration
 	TemplateStoragePath             string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
@@ -289,6 +290,17 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		TCPPorts: []uint32{uint32(s.cfg.HostGuestPort)},
 	}
 	dns := substrate.PrivateAllowance{CIDR: "10.1.0.1/32", TCPPorts: []uint32{53}}
+	// The fork's host-address guard admits a destination on the host only
+	// when an allowance names both the IP and the port; the LAN ranges'
+	// any-port allowances do not count. So lan and internet name the lease
+	// API explicitly (restricted and none never reach it).
+	var hostAPI []substrate.PrivateAllowance
+	if s.cfg.HostAPIPort > 0 {
+		hostAPI = []substrate.PrivateAllowance{{
+			CIDR:     s.cfg.HostGuestAddr + "/32",
+			TCPPorts: []uint32{uint32(s.cfg.HostAPIPort)},
+		}}
+	}
 	policy := l.NetPolicy
 	if policy == "" {
 		policy = string(PolicyRestricted)
@@ -300,11 +312,11 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		// Public destinations stay allowed; listing the LAN ranges as
 		// private allowances matches forkd, where internet flushed all
 		// rules and private/LAN addresses stayed reachable.
-		return substrate.Egress{Private: append(lanPrivate(l, hostSvc, dns), s.peerAllowances(l)...)}
+		return substrate.Egress{Private: append(append(lanPrivate(l, hostSvc, dns), hostAPI...), s.peerAllowances(l)...)}
 	case PolicyLAN:
 		return substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
-			Private:     append(lanPrivate(l, hostSvc, dns), s.peerAllowances(l)...),
+			Private:     append(append(lanPrivate(l, hostSvc, dns), hostAPI...), s.peerAllowances(l)...),
 		}
 	default: // restricted: the default when empty
 		eg := substrate.Egress{

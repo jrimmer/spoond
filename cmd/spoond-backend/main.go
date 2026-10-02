@@ -17,6 +17,8 @@
 //	MAX_TTL_SECS      max lease TTL (default 3600)
 //	HOST_GUEST_SERVICE_ADDR  address guests use to reach host services (required)
 //	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
+//	HOST_API_PORT     lease API port lan/internet guests may reach on
+//	                  HOST_GUEST_SERVICE_ADDR (default: BIND_ADDR's port)
 //	CHECKPOINT_INTERVAL_MINS  periodic checkpoint interval (U10; default 60)
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
@@ -37,6 +39,7 @@ package spoondbackend
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -111,6 +114,11 @@ func Main(args []string) int {
 		log.Fatal("HOST_GUEST_SERVICE_ADDR is required (the address guests use to reach host services)")
 	}
 	hostGuestPort := envIntOr("HOST_GUEST_SERVICE_PORT", 8891)
+	defaultAPIPort := 0
+	if _, p, err := net.SplitHostPort(bindAddr); err == nil {
+		defaultAPIPort, _ = strconv.Atoi(p)
+	}
+	hostAPIPort := envIntOr("HOST_API_PORT", defaultAPIPort)
 	checkpointEvery := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 60)) * time.Minute
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 
@@ -156,6 +164,7 @@ func Main(args []string) int {
 		IdleTimeout:         idleTimeout,
 		HostGuestAddr:       hostGuestAddr,
 		HostGuestPort:       hostGuestPort,
+		HostAPIPort:         hostAPIPort,
 		ProxyURL:            cfg.ProxyURL,
 		CheckpointEvery:     checkpointEvery,
 		TemplateStoragePath: storagePath,
