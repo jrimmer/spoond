@@ -26,7 +26,7 @@ Follow the "Worker" prompt in `02-orchestration.md` exactly. In summary:
 - Make exactly the unit's commits, with its messages. **Never** add AI
   attribution or `Co-Authored-By` trailers. Run
   `go build ./... && go vet ./... && go test ./...` before each commit.
-- **Never use SSH or touch vm2.** For an OPERATOR step or a vm2 command,
+- **Never use SSH or touch host.** For an OPERATOR step or a host command,
   write it into `BLOCKED-<Uxx>.md` as a request and stop.
 - When finished, write `DONE-<Uxx>.md`: each "Done when" item, how you
   verified it, and the test output.

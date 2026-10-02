@@ -29,7 +29,7 @@ installer and is no longer the path.
 ```bash
 apt-get install -y --no-install-recommends \
   iptables rsync e2fsprogs iproute2 util-linux curl nftables
-git clone https://git.lacy.casa/lacy.casa/spoond.git && cd spoond
+git clone https://git.example.com/example/spoond.git && cd spoond
 ```
 
 ## 1. Host setup

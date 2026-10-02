@@ -15,7 +15,7 @@ U08 and U10 are done.
 
 - **Build storage** (A3 C2):
   - each build is the directory
-    `<TEMPLATE_STORAGE>/<build_id>/` (on vm2
+    `<TEMPLATE_STORAGE>/<build_id>/` (on the host
     `/forkdcache/e2b/storage/templates/<build_id>/`);
   - it contains `metadata.json`, `rootfs.ext4`, its `.header`, and for memory
     snapshots `memfile`, its `.header` and `snapfile`.
@@ -31,7 +31,7 @@ U08 and U10 are done.
   `memfile_build_ids` (A3 C1), which U06 returns as `substrate.BuildRefs`.
 - **Orchestrator metrics** are OTLP only, sent to
   `OTEL_COLLECTOR_GRPC_ENDPOINT=127.0.0.1:14317` (A3 §7, 01-architecture).
-  Port 4317 is taken on vm2.
+  Port 4317 is taken on the host.
 - **Existing spoond metrics:** A1 §12, `metrics/metrics.go`.
 
 ## Schema migration `store/migrations/0004_build_owner.sql` (exact)
@@ -113,7 +113,7 @@ CREATE INDEX build_refs_ref ON build_refs(ref_build_id);
 - Once an hour (with GC), for each non-deleted build, set `size_bytes` to
   the sum of regular file sizes (allocated blocks × 512, via `syscall.Stat_t.Blocks`)
   under `<E2B_TEMPLATE_STORAGE_PATH>/<build_id>/`.
-- New backend env `E2B_TEMPLATE_STORAGE_PATH`, with vm2 value and default
+- New backend env `E2B_TEMPLATE_STORAGE_PATH`, with host value and default
   `/forkdcache/e2b/storage/templates`.
 - Gauge `spoond_snapshot_bytes{kind}` = the sum per kind.
 - Gauge `spoond_storage_free_bytes` = `statfs` free bytes of that path.
@@ -151,7 +151,7 @@ set:
   succeeds.
 - `503` `{"status":"degraded","orchestrator":"unreachable"}` when it fails.
 
-## OpenTelemetry Collector on vm2 (exact)
+## OpenTelemetry Collector on the host (exact)
 
 Write the config **before** installing the package: the package starts the
 service on install, and its default config would bind the busy port 4317.
@@ -278,7 +278,7 @@ Remove the `forkd` import from `cmd/spoond-doctor`.
 2. `feat(api): snapshot catalog GC (dry-run by default) and snapshot API`
 3. `feat(metrics): substrate metrics, OTel passthrough and health`
 4. `feat(doctor): substrate checks replace forkd checks`
-5. `feat(deploy): OpenTelemetry collector config for vm2`
+5. `feat(deploy): OpenTelemetry collector config for host`
 
 ## Done when
 

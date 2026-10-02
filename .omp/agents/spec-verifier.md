@@ -22,4 +22,4 @@ Follow the "Verifier" prompt in `02-orchestration.md` exactly:
 - Write `VERIFY-<Uxx>.md`: PASS, or FAIL with numbered deviations (file,
   line, expected, found).
 
-**Do not fix anything. Never use SSH or touch vm2.**
+**Do not fix anything. Never use SSH or touch host.**

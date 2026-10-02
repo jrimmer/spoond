@@ -1,5 +1,5 @@
 [Unit]
-Description=spoond SSH gateway (sandbox.lacy.casa interactive access)
+Description=spoond SSH gateway (sandbox.example.com interactive access)
 After=network.target spoond-backend.service
 # Soft dependency: start after the backend, but do NOT tear down the
 # gateway when the backend restarts (Requires= would stop us too — the
@@ -20,7 +20,7 @@ ExecStart=/opt/spoond/spoond gateway \
   --client-keys /etc/spoond-gateway/keys \
   --backend https://127.0.0.1:8890 \
   --backend-token ${SPOOND_GATEWAY_TOKEN} \
-  --gateway-host sandbox.lacy.casa
+  --gateway-host sandbox.example.com
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

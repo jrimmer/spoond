@@ -134,7 +134,7 @@ measured working on every stock release from v1.5.1 to v1.17.0.)
    capabilities.
 2. **Land the forkd fixes**: per-child rootfs backings rebound with
    `PATCH /drives` after a paused restore, with CoW clones — item 2 of #66,
-   upstream as deeplethe/forkd#321 and deployed on vm2 2026-09-28. No
+   upstream as deeplethe/forkd#321 and deployed on the host 2026-09-28. No
    Firecracker bump is required (the earlier "FC ≥1.15" was wrong).
 3. **Keep this assessment in the repo** so the Hyper question is answered
    once rather than re-litigated.
@@ -312,7 +312,7 @@ suggests, and it is the thing a spike should settle.
 `superradcompany/microsandbox` (formerly `zerocore-ai`), Apache-2.0, Rust.
 Checked against the repo, the v0.7.x release notes and the in-repo docs,
 then run: v0.7.4 on an arm64 Linux KVM host, alpine images. **Not yet run on
-vm2 (x86) or on our real images** — that is what the spike is for.
+host (x86) or on our real images** — that is what the spike is for.
 
 **What it is.** A microVM per sandbox on its own libkrun fork (`msb_krun`
 0.1.39) with a bundled guest kernel (libkrunfw, 6.12). **No daemon:** each
@@ -391,7 +391,7 @@ per-sandbox writable root, OCI images and a small operational footprint,
 without adopting someone else's control plane — which is exactly the
 combination the other candidates here each missed. Not adopted on paper:
 the security posture, the bundled kernel and beta churn have to be judged
-on vm2 with real workloads. **Next step:** #73, widened on 2026-09-29 into a
+on the host with real workloads. **Next step:** #73, widened on 2026-09-29 into a
 conformance-suite evaluation of microsandbox, smolvm and E2B's orchestrator
 (see *Re-survey, 2026-09-29*).
 
@@ -794,7 +794,7 @@ debate.**
      and **explicit non-goals**: multi-host, live migration, GPU, Windows,
      rootless, cross-host restore.
    - Run it against forkd first as the baseline.
-2. **Run it on vm2 against three engines:**
+2. **Run it on the host against three engines:**
    - **microsandbox**: fastest, weakest confinement;
    - **smolvm**: best-confined libkrun, single dominant author;
    - **E2B's orchestrator**: most proven, restart kills all.

@@ -9,7 +9,7 @@
 
 ## 1. Problem
 
-Forgejo Actions runs on `act_runner` (10.1.0.47), which executes jobs as Docker containers on the host. We have Hyper — a Firecracker microVM orchestrator — that provides isolated, ephemeral execution environments. Running CI jobs in microVMs instead of host Docker containers gives us:
+Forgejo Actions runs on `act_runner` (10.0.0.47), which executes jobs as Docker containers on the host. We have Hyper — a Firecracker microVM orchestrator — that provides isolated, ephemeral execution environments. Running CI jobs in microVMs instead of host Docker containers gives us:
 
 - **Isolation** — each job gets a fresh VM, no shared state
 - **No Docker dependency** — Hyper manages the lifecycle
@@ -41,7 +41,7 @@ Forgejo Actions runs on `act_runner` (10.1.0.47), which executes jobs as Docker 
 ```
 ┌─────────────┐     connectrpc (HTTP/2)      ┌──────────────────┐
 │   Forgejo    │ ◄──────────────────────────►│   hyper-runner   │
-│  (10.1.0.47) │   Register/Declare/         │  (10.1.0.80)     │
+│  (10.0.0.47) │   Register/Declare/         │  (10.0.0.80)     │
 │              │   FetchTask/UpdateTask/      │                  │
 │              │   UpdateLog                 │  ┌────────────┐  │
 │              │                             │  │ YAML parse │  │
@@ -213,7 +213,7 @@ Connect client construction:
 ```go
 client := runnerv1connect.NewRunnerServiceClient(
     http.DefaultClient,
-    forgejoURL,  // http://10.1.0.47:3000
+    forgejoURL,  // http://10.0.0.47:3000
     connect.WithGRPC(),  // use gRPC binary protocol
 )
 ```
@@ -255,16 +255,16 @@ Configurable via `hyper-runner.yaml`.
 
 ### 5.1 Build Environment
 
-**Build host: ci-runner (10.1.0.190)** — Ubuntu 24.04 VM, native Linux build, Go to be installed.
+**Build host: ci-runner (10.0.0.190)** — Ubuntu 24.04 VM, native Linux build, Go to be installed.
 
-Deploy the compiled binary to 10.1.0.80 (sandbox-api host, where Hyper runs).
+Deploy the compiled binary to 10.0.0.80 (sandbox-api host, where Hyper runs).
 
 ```bash
-# On ci-runner (10.1.0.190):
+# On ci-runner (10.0.0.190):
 sudo apt install -y golang-go
-cd /tmp && git clone git@git.lacy.casa:jrimmer/hyper-forgejo-runner.git
+cd /tmp && git clone git@git.example.com:jrimmer/hyper-forgejo-runner.git
 cd hyper-forgejo-runner && go build -o hyper-runner ./cmd/hyper-runner
-scp hyper-runner root@10.1.0.80:/opt/hyper-runner/
+scp hyper-runner root@10.0.0.80:/opt/hyper-runner/
 ```
 
 ### 5.2 Dependencies
@@ -295,7 +295,7 @@ The Forgejo runner proto stubs come pre-generated in `actions-proto-go` v0.6.0 �
 ### 5.4 Deployment
 
 ```
-# On 10.1.0.80 (sandbox-api host):
+# On 10.0.0.80 (sandbox-api host):
 /opt/hyper-runner/hyper-runner          # binary
 /opt/hyper-runner/hyper-runner.yaml     # config
 /opt/hyper-runner/.runner               # registration file (auto-generated)
@@ -320,7 +320,7 @@ WantedBy=multi-user.target
 
 ```bash
 /opt/hyper-runner/hyper-runner register \
-  --instance http://10.1.0.47:3000 \
+  --instance http://10.0.0.47:3000 \
   --name hyper-runner \
   --labels "ubuntu-latest:host,go:host,node:host,python:host" \
   --token <registration-token from Forgejo admin>
@@ -330,10 +330,10 @@ This writes `.runner` file with UUID + auth token. Done once.
 
 ### 5.6 Migration from act_runner
 
-1. Stop `act-runner` on 10.1.0.47: `systemctl stop act-runner`
+1. Stop `act-runner` on 10.0.0.47: `systemctl stop act-runner`
 2. De-register `sandbox-host-runner` in Forgejo admin (or leave it idle)
 3. Register `hyper-runner` against the same Forgejo instance
-4. Start `hyper-runner` on 10.1.0.80
+4. Start `hyper-runner` on 10.0.0.80
 5. Verify a test workflow runs
 
 No workflow file changes needed — same `runs-on: ubuntu-latest` labels.
@@ -443,7 +443,7 @@ Before cutover, run all 9 existing workflows against `hyper-runner` in parallel 
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Build host | **ci-runner (10.1.0.190)** — native Linux build, Go to be installed |
+| 1 | Build host | **ci-runner (10.0.0.190)** — native Linux build, Go to be installed |
 | 2 | Repository | **Own repo: `jrimmer/hyper-forgejo-runner`** |
 | 3 | Template selection | **Label → template map** (config file). `container:` override deferred to Phase 6 |
 | 4 | Checkout strategy | **Clone inside VM** — Hyper VMs have LAN access to Forgejo |
@@ -455,6 +455,6 @@ Before cutover, run all 9 existing workflows against `hyper-runner` in parallel 
 - Agent gRPC proto: `/opt/sandbox-api/src/proto/agent.proto` (v1, package `hyper.agent.v1`)
 - Guest-agent socket: `unix:///srv/hyper/socks/grpc-{vm_id}.sock`
 - Hyper gRPC endpoint: `172.30.0.1:50051` (Docker bridge gateway)
-- act_runner config: `/var/lib/act-runner/config.yaml` (10.1.0.47)
+- act_runner config: `/var/lib/act-runner/config.yaml` (10.0.0.47)
 - act_runner registration: `/var/lib/act-runner/.runner` (runner id=12, `sandbox-host-runner`)
 - Template images: `TEMPLATE_IMAGES` in `job_manager.py` (alpine, ubuntu, node, python, playwright)

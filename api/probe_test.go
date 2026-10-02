@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // newProbeService builds a Service over a fake substrate and temp DB with

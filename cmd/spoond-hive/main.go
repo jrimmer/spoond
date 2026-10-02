@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jrimmer/spoond/hive"
+	"github.com/jrimmer/spoond/v2/hive"
 )
 
 // Main runs the hive subcommand and returns the process exit code.

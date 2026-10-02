@@ -23,7 +23,7 @@ cutover.
 The images `dev-base`, `elixir-base`, `llm-review` and `rust-base` are
 missing from production forkd; only `py-base`, `go-base`, `elixir-release`,
 `scylla` and a leftover clone exist. Per the architect's analysis, the
-Dockerfile comments point at the vm1 consolidation as the cause.
+Dockerfile comments point at the infrastructure host consolidation as the cause.
 
 This explains the baseline failures of every test that needs a missing
 image: `TestI1_ImagesListed`, `TestI2_RealWorkloads`,
@@ -36,15 +36,15 @@ images (U07).
 
 ### 3. N1 internet expectation — spec bug (fixed)
 
-N1's old `internet` expectation (`canTCP(10.1.0.203,443)=no`) was a spec
+N1's old `internet` expectation (`canTCP(10.0.0.203,443)=no`) was a spec
 bug: in forkd, `internet` means everything — `policyCommands` flushes all
 rules, so private/LAN addresses are reachable. The spec wrongly redefined
 E2B `internet` as "public only; private denied". Fixed 2026-09-30: the U08
 egress mapping and N1 now assert `internet` = public **plus** the LAN
 ranges. The host-address guard (U03 P4) still keeps sandboxes away from
-vm2's own addresses; only granted ports reach host services. The baseline
+the host's own addresses; only granted ports reach host services. The baseline
 corroborates this: it recorded `TestN1_Policies` as `fail` with error
-`"internet: 10.1.0.203:443 reachable, want blocked"` — on forkd the sandbox
+`"internet: 10.0.0.203:443 reachable, want blocked"` — on forkd the sandbox
 did reach the LAN address under `internet`, and only the wrong expectation
 made the test fail.
 

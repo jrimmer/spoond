@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/cmd/spoond-backend"
+	"github.com/jrimmer/spoond/v2/cmd/spoond-backend"
 )
 
 func init() {

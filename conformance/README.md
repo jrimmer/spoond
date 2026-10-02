@@ -10,18 +10,18 @@ Every file in this package carries `//go:build conformance`, so a plain
 
 ## Running
 
-The suite runs **on vm2 as root** from the checkout `/root/src/spoond`
+The suite runs **on the host as root** from the checkout `/root/src/spoond`
 (host checks, loopback proxy and gateway access), with
 `CONFORMANCE_SSH=local`.
 
 ```bash
 export PATH=/usr/local/go/bin:$PATH
-test -d /root/src/spoond || git clone https://code.lacy.casa/lacy.casa/spoond.git /root/src/spoond
+test -d /root/src/spoond || git clone https://git.example.com/example/spoond.git /root/src/spoond
 # BRANCH is the branch under test: main for everything since the U12
 # cutover; a feature branch while its unit is in flight.
 cd /root/src/spoond && git fetch && git checkout "$BRANCH" && git pull --ff-only
 set -a; . /etc/spoond/conformance.env; set +a
-CONFORMANCE_SUBSTRATE=e2b CONFORMANCE_GUEST_SERVICE=10.1.0.11:8891 \
+CONFORMANCE_SUBSTRATE=e2b CONFORMANCE_GUEST_SERVICE=10.0.0.11:8891 \
 go test -tags conformance -count=1 -timeout 90m -v ./conformance/ \
   -args -results "$PWD/conformance/results/$(date +%Y%m%dT%H%M%S)-$CONFORMANCE_SUBSTRATE.json"
 ```

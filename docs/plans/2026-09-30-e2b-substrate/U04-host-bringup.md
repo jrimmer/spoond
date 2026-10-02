@@ -1,15 +1,15 @@
-# U04 — vm2 host bring-up (beside forkd)
+# U04 — host host bring-up (beside forkd)
 
 ## Purpose
 
-Install and start the E2B orchestrator on vm2 next to the running forkd,
+Install and start the E2B orchestrator on the host next to the running forkd,
 without disturbing forkd or CI.
 
 ## Preconditions
 
 - U03 is done. The binaries are at
   `/root/src/e2b-runtime/packages/{orchestrator,envd}/bin/`.
-- All commands run on vm2 as root.
+- All commands run on the host as root.
 
 ## Facts relied on
 
@@ -22,13 +22,13 @@ without disturbing forkd or CI.
 - **iptables:** filter `FORWARD` policy is `DROP` (Docker). E2B appends
   per-slot `FORWARD` accepts in both directions (A3 D4), so nothing more is
   needed for sandbox traffic.
-- **Primary address:** `10.1.0.11` on `vmbr0`, which is the default-route
+- **Primary address:** `10.0.0.11` on `vmbr0`, which is the default-route
   interface (E2B requires a default route; A3 D3).
 - **Artifacts:** URLs and SHA-256s in A3 A1.7.
 - **Host prerequisites:** A3 E4.
 - **Ports:** every orchestrator listener except pprof binds `0.0.0.0`
   (A3 A5).
-- **Port 4317** is already in use on vm2 (an unrelated `otel-plugin`
+- **Port 4317** is already in use on the host (an unrelated `otel-plugin`
   process).
 
 ## Steps
@@ -302,7 +302,7 @@ Add `deploy/e2b/` to the spoond repo with copies of:
   `e2b-guard.nft`), with `set -euo pipefail`. Running it twice must change
   nothing the second time.
 
-**Commit (spoond):** `feat(deploy): E2B orchestrator host setup for vm2`
+**Commit (spoond):** `feat(deploy): E2B orchestrator host setup for host`
 
 ## Done when
 

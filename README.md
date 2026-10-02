@@ -87,7 +87,7 @@ server-sent-event stream shared by all viewers, and switches between
 pixel-art themes (Deep Space, Terminal, Nebula, Daylight; built with
 [Starbase](https://starbase.zweiundeins.gmbh) components, vendored).
 
-On vm2 it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
+On host it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
 auth). Its data access is read-only: `/metrics` through the scrape-only
 `METRICS_TOKEN` (which the lease API refuses), the SQLite catalog opened
 read-only, user names from the identity store, `/proc` and systemd.
@@ -197,7 +197,7 @@ spoond hive check .spoond/hive.yaml
 runs the enlistment checks (C11) and ends with one `Next:` line: the
 first failing check's remedy, or the enlistment route when nothing
 failed. The exit code is 0 when nothing failed. It reads `SPOOND_API`
-(default `https://vm2.lacy.casa:8890`) and `SPOOND_TOKEN`, and it looks
+(default `https://spoond.example.com:8890`) and `SPOOND_TOKEN`, and it looks
 up the image catalog for real; the steps that need the host (building
 the worker image, cloning with the deploy key, the trial lease, the
 gates, the budget) report `skipped` there; `POST /hive/check` on the
@@ -205,8 +205,8 @@ instance will run them for real (build order step 3).
 
 ## Configuration knobs
 
-The repo targets a homelab by default (addresses like `10.1.0.11`,
-hostnames like `sandbox.lacy.casa` appear as *defaults only*); every
+The repo targets a homelab by default (addresses like `10.0.0.11`,
+hostnames like `sandbox.example.com` appear as *defaults only*); every
 knob is overridable. The fixed addresses, ports and paths of the E2B
 deployment are listed in
 [01-architecture.md](docs/plans/2026-09-30-e2b-substrate/01-architecture.md).

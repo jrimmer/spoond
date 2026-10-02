@@ -338,7 +338,7 @@ history are kept so a new page starts with trends. Configuration lives in
 | `DASH_USER`, `DASH_PASSWORD_HASH` | *(required)* | basic auth (`spoond dash hash PASS` makes the hash) |
 | `DASH_TLS_CERT`, `DASH_TLS_KEY` | *(unset)* | serve HTTPS (set both or neither) |
 | `METRICS_URL` | `https://127.0.0.1:8890/metrics` | spoond's `/metrics` |
-| `METRICS_SERVER_NAME` | `vm2.lacy.casa` | TLS server name for that URL |
+| `METRICS_SERVER_NAME` | `spoond.example.com` | TLS server name for that URL |
 | `METRICS_TOKEN` | *(required)* | the backend's scrape-only token |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |

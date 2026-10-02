@@ -15,9 +15,9 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/jrimmer/spoond/substrate"
-	"github.com/jrimmer/spoond/substrate/e2b/gen/envd/process"
-	"github.com/jrimmer/spoond/substrate/e2b/gen/envd/process/processconnect"
+	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/process"
+	"github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/process/processconnect"
 )
 
 // envdPort is the guest port envd listens on; requests to it go through the

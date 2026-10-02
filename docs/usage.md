@@ -262,7 +262,7 @@ ports, on any owner, with no allowlist gate.
 
 ```bash
 curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
-  -d '{"image":"dev-base","network_policy":"restricted","egress_allowlist":["10.1.0.47","github.com"]}'
+  -d '{"image":"dev-base","network_policy":"restricted","egress_allowlist":["10.0.0.47","github.com"]}'
 ```
 
 Allowlist entries may be IPs, CIDRs or domains — or a **lease

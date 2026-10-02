@@ -21,14 +21,14 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/substrate"
 	// gen/info declares "package orchestrator" and gen/template declares
 	// "package template_manager" (the fork's go_package URLs win over the M
 	// flags' import paths, per protoc-gen-go), so import them under the
 	// directory names.
-	info "github.com/jrimmer/spoond/substrate/e2b/gen/info"
-	orchestrator "github.com/jrimmer/spoond/substrate/e2b/gen/orchestrator"
-	template "github.com/jrimmer/spoond/substrate/e2b/gen/template"
+	info "github.com/jrimmer/spoond/v2/substrate/e2b/gen/info"
+	orchestrator "github.com/jrimmer/spoond/v2/substrate/e2b/gen/orchestrator"
+	template "github.com/jrimmer/spoond/v2/substrate/e2b/gen/template"
 )
 
 // maxSandboxLength is the sandbox length limit E2B's API sends on every

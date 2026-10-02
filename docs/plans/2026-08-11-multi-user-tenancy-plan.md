@@ -176,7 +176,7 @@ Identity lives in the backend (a `users` table: id, name, kind=person|agent, adm
 
 - **Goal:** proxy auth + per-user domains/CNAMEs.
 - **Files:** `api/server.go`, `deploy/` units, Caddy config notes.
-- **Approach:** Authelia forward-auth on the proxy host; after auth, the proxy resolves the user and checks lease ownership; per-user domains map `user.sandbox.lacy.casa` → the user's leases (with #15).
+- **Approach:** Authelia forward-auth on the proxy host; after auth, the proxy resolves the user and checks lease ownership; per-user domains map `user.sandbox.example.com` → the user's leases (with #15).
 - **Test scenarios:** unauthenticated proxy request → redirect; authenticated non-owner → 403; owner → stream.
 - **Verification:** browser-level test through Caddy (or curl with forward-auth headers).
 

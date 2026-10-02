@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/runner"
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 // fakeSandbox is an in-memory SandboxProvider for tests.

@@ -102,7 +102,7 @@ images:
       pinned to /usr/local/{rustup,cargo} so cache mounts can never mask toolchain
       binaries. kaniko baked in for daemonless image push (sandboxes have no docker).
       First bake: 2026-09-08. BAKE GOTCHAS (each cost a bake cycle):
-      - vm2 docker builds need --network=host --security-opt seccomp=unconfined
+      - host docker builds need --network=host --security-opt seccomp=unconfined
         (the host's default docker seccomp profile denies thread creation and
         AF_UNIX; Erlang can't boot there at all — no mix RUNs in the dockerfile).
       - curl | sh silently succeeds with nothing installed when the download
@@ -115,7 +115,7 @@ images:
         pattern). rustc/cargo are direct symlinks to the toolchain, bypassing
         the rustup proxy (which needs RUSTUP_HOME env the agent won't pass).
       - images/guest/spoond-guest-init lists the LAN resolver only — sandbox DNS
-        is otherwise public, and code.lacy.casa then resolves to the public edge
+        is otherwise public, and git.example.com then resolves to the public edge
         whose /v2/ registry path is SSO-gated (302 to login).
 
   - name: llm-review

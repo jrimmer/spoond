@@ -65,9 +65,9 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `CONFORMANCE_API` | yes | e.g. `https://vm2.lacy.casa:8890` |
+| `CONFORMANCE_API` | yes | e.g. `https://spoond.example.com:8890` |
 | `CONFORMANCE_TOKEN` | yes | the token of the identity user `conformance` (kind `agent`, `max_leases=20`). In production it is **not** admin (only the first identity user is admin, and there is no promote API), so `GET /metrics` answers `403` there; on staging it is the first user and therefore admin (L6) |
-| `CONFORMANCE_SSH` | yes | `local` or `user@host`. `local` runs host-level checks with `sh -c` on the machine running the suite; any other value runs them with `ssh <value>`. On vm2 the value is `local` |
+| `CONFORMANCE_SSH` | yes | `local` or `user@host`. `local` runs host-level checks with `sh -c` on the machine running the suite; any other value runs them with `ssh <value>`. On host the value is `local` |
 | `CONFORMANCE_SUBSTRATE` | yes | `forkd` or `e2b`. Selects the host-level check implementations |
 | `CONFORMANCE_BACKEND_UNIT` | yes | the systemd unit of the backend under test: `spoond-backend` (production) or `spoond-backend-staging` (staging). R3 restarts exactly this unit |
 | `CONFORMANCE_DESTRUCTIVE` | no | `1` enables group R (restarts and crashes). Default off |
@@ -78,18 +78,18 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 | `CONFORMANCE_USER_ID` | yes | the conformance user's id (informational; recorded in the results file) |
 | `CONFORMANCE_PROXY_URL` | yes | `http://127.0.0.1:8891` (production) or `http://127.0.0.1:18891` (staging). If the backend env sets `PROXY_AUTH_TRUSTED_PEERS`, it must contain `127.0.0.1/32`, otherwise N3 gets 403 (checked in step 0) |
 | `CONFORMANCE_PROXY_SECRET` | yes (may be empty) | the backend's `PROXY_AUTH_SECRET`; empty when the backend runs without forward-auth |
-| `CONFORMANCE_PROXY_SUFFIX` | yes | `.sandbox.lacy.casa` |
+| `CONFORMANCE_PROXY_SUFFIX` | yes | `.sandbox.example.com` |
 | `CONFORMANCE_GUEST_SERVICE` | yes | host service address guests use (see N6) |
 
 ## Running
 
-The suite runs **on vm2 as root** from the checkout `/root/src/spoond`
+The suite runs **on the host as root** from the checkout `/root/src/spoond`
 (host checks, loopback proxy and gateway access), with
 `CONFORMANCE_SSH=local`.
 
 ```bash
 export PATH=/usr/local/go/bin:$PATH
-test -d /root/src/spoond || git clone https://code.lacy.casa/lacy.casa/spoond.git /root/src/spoond
+test -d /root/src/spoond || git clone https://git.example.com/example/spoond.git /root/src/spoond
 # BRANCH is the branch the unit under test names: feat/e2b-substrate for
 # U02 and U06–U11; main for U05's R3 run and for U12.
 cd /root/src/spoond && git fetch && git checkout "$BRANCH" && git pull --ff-only
@@ -275,13 +275,13 @@ For every N test, a helper `canTCP(id, host, port) bool` runs:
 `py-base` has bash.
 
 - **`TestN1_Policies`**:
-  `10.1.0.203:443` is `code.lacy.casa` on the LAN: a known-open private
-  TCP service that is not vm2 itself.
-  1. `none`: `canTCP(1.1.1.1,443)=no` and `canTCP(10.1.0.203,443)=no`.
-  2. `internet`: `canTCP(1.1.1.1,443)=yes` and `canTCP(10.1.0.203,443)=yes`
+  `10.0.0.203:443` is `git.example.com` on the LAN: a known-open private
+  TCP service that is not host itself.
+  1. `none`: `canTCP(1.1.1.1,443)=no` and `canTCP(10.0.0.203,443)=no`.
+  2. `internet`: `canTCP(1.1.1.1,443)=yes` and `canTCP(10.0.0.203,443)=yes`
      (E2B `internet` allows public plus the LAN ranges, as forkd does).
-  3. `lan`: `canTCP(10.1.0.203,443)=yes` and `canTCP(1.1.1.1,443)=no`.
-     Also `canTCP(10.1.0.11,22)=no`: the host's own addresses are refused
+  3. `lan`: `canTCP(10.0.0.203,443)=yes` and `canTCP(1.1.1.1,443)=no`.
+     Also `canTCP(10.0.0.11,22)=no`: the host's own addresses are refused
      except the granted service port (`e2b` only; skip on forkd).
   4. `restricted` with `egress_allowlist:["example.com"]`:
      `curl -sS -o /dev/null -w '%{http_code}' https://example.com` prints a
@@ -326,8 +326,8 @@ For every N test, a helper `canTCP(id, host, port) bool` runs:
 - **`TestN6_LLMGateway`**: create `py-base` with `restricted` and no
   allowlist. `canTCP(CONFORMANCE_GUEST_SERVICE, …) = yes`, where
   `CONFORMANCE_GUEST_SERVICE` is `host:port`:
-  - `10.1.0.11:18891` for staging;
-  - `10.1.0.11:8891` for production on E2B;
+  - `10.0.0.11:18891` for staging;
+  - `10.0.0.11:8891` for production on E2B;
   - `10.43.0.1:8891` on forkd.
 
 ### Group R — restarts and crashes (only with `CONFORMANCE_DESTRUCTIVE=1`)
@@ -410,25 +410,25 @@ If E2B misses a budget in U12, record the measured value in the results, and
 ## Steps
 
 0. **Record the production backend env file path (Ops runner, read-only):**
-   `ssh root@vm2.lacy.casa 'systemctl cat spoond-backend | grep EnvironmentFile'`.
+   `ssh root@spoond.example.com 'systemctl cat spoond-backend | grep EnvironmentFile'`.
    Write the path into `STATUS.md` as `BACKEND_ENV_FILE`. Every later mention
    of `/etc/forkd-backend.env` in this spec means this path. If the unit has
    more than one `EnvironmentFile=` line, STOP. Also run
-   `ssh root@vm2.lacy.casa "grep '^PROXY_AUTH_TRUSTED_PEERS=' <path>"`; if
+   `ssh root@spoond.example.com "grep '^PROXY_AUTH_TRUSTED_PEERS=' <path>"`; if
    the line exists and does not contain `127.0.0.1`, STOP (N3 would get
    403).
 1. Implement the harness and all tests above in `conformance/`.
 2. Add `conformance/results/*` to `.gitignore`, except `.gitkeep`.
 3. **Commit:** `test(conformance): substrate conformance suite`.
-4. Check that `/etc/spoond/conformance.env` exists on vm2 (Ops runner:
+4. Check that `/etc/spoond/conformance.env` exists on the host (Ops runner:
    `test -s /etc/spoond/conformance.env`). If not, `BLOCKED` on the
    OPERATOR.
-5. Run the suite against production forkd on vm2 **without** group R (Ops
+5. Run the suite against production forkd on the host **without** group R (Ops
    runner): `set -a; . /etc/spoond/conformance.env; set +a`, then
    `CONFORMANCE_SUBSTRATE=forkd CONFORMANCE_GUEST_SERVICE=10.43.0.1:8891`,
    `CONFORMANCE_DESTRUCTIVE` unset. The Ops runner copies the results file
    into the worker's worktree as `conformance/baseline-forkd.json`
-   (`scp root@vm2.lacy.casa:<results file> <worktree>/conformance/baseline-forkd.json`);
+   (`scp root@spoond.example.com:<results file> <worktree>/conformance/baseline-forkd.json`);
    the worker commits it.
 6. **Commit:** `test(conformance): forkd baseline results`.
 
