@@ -61,7 +61,7 @@ func TestEgressForEachPolicy(t *testing.T) {
 
 	t.Run("internet", func(t *testing.T) {
 		got := svc.egressFor(&Lease{NetPolicy: "internet"})
-		want := substrate.Egress{Private: lanPrivateWant}
+		want := substrate.Egress{DeniedCIDRs: []string{"192.0.2.0/24"}, Private: lanPrivateWant}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
 		}
