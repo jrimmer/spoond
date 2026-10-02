@@ -61,6 +61,8 @@
      Pixelify Sans, the site's pixel face, a 5 reads as an S). */
   @font-face { font-family: "Press Start 2P"; src: url("/static/fonts/press-start-2p.woff2") format("woff2"); font-display: swap; }
   .big { font-family: "Press Start 2P", var(--sb-font-ui); font-size: 32px; -webkit-font-smoothing: none; font-smooth: never; line-height: 1; display: flex; align-items: center; gap: 14px; }
+  /* Every pixel-styled number uses Press Start 2P, at multiples of its 8px grid. */
+  sb-gauge::part(value) { font-family: "Press Start 2P", var(--sb-font-ui); font-size: 32px; font-weight: 400; -webkit-font-smoothing: none; }
   .big .aside { font-family: var(--sb-font-ui); font-size: 18px; font-weight: 400; color: var(--sb-text-muted); }
   .sub { font-size: 12px; color: var(--sb-text-muted); margin-top: 8px; }
   .gauges sb-gauge { --sb-gauge-size: 100%; }
@@ -83,7 +85,8 @@
   .svc i { width: 10px; height: 10px; background: var(--sb-danger); }
   .svc.active i { background: var(--sb-ok); box-shadow: 0 0 8px var(--sb-ok); }
   .counters { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 13px; color: var(--sb-text-2); }
-  .counters b { font-family: var(--sb-font-display); color: var(--sb-text-1); font-size: 16px; margin-left: 6px; }
+  .counters > span { display: inline-flex; align-items: center; gap: 8px; }
+  .counters b { font-family: "Press Start 2P", var(--sb-font-ui); font-weight: 400; color: var(--sb-text-1); font-size: 16px; -webkit-font-smoothing: none; }
   .err { color: var(--sb-danger); font-size: 12px; }
   .empty { color: var(--sb-text-muted); padding: 12px 8px; }
   .scroll { overflow-x: auto; }
@@ -159,7 +162,7 @@
       <span>quota rejections<b data-text="$_s.quota">{{.Quota}}</b></span>
       <span>capacity refusals<b data-text="$_s.capacity">{{.Capacity}}</b></span>
       <span>build failures<b data-text="$_s.buildFails">{{.BuildFails}}</b></span>
-      <span>mean create<b data-text="$_s.createMs + ' ms'">{{.CreateMs}} ms</b></span>
+      <span>mean create<b data-text="$_s.createMs">{{.CreateMs}}</b>ms</span>
     </div>
     <div class="err" data-show="$_s.err !== ''" data-text="$_s.err">{{.Err}}</div>
   </footer>
