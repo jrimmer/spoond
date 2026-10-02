@@ -92,7 +92,7 @@
 
   <header class="panel top">
     <sb-starfield tint="violet" density="260" label="" data-attr:speed="Math.round(2 + $_s.running * 1.5)" data-attr:warp="$_s.running > 12"></sb-starfield>
-    <div class="title">SPOOND <span style="color: var(--sb-brand)">//</span> SANDBOX CONTROL<small>vm2 · e2b substrate · live</small></div>
+    <div class="title">SPOOND <span style="color: var(--sb-brand)">//</span> SANDBOX CONTROL<small>sb · e2b substrate · live</small></div>
     <span class="lamp" data-class:warn="$_s.err !== '' || $_s.down > 0"><i></i><span data-text="$_s.err !== '' ? 'SIGNAL DEGRADED' : ($_s.down > 0 ? 'UNIT DOWN' : 'ALL SYSTEMS GO')">ALL SYSTEMS GO</span></span>
     <div class="meta">
       <div>clock <b data-text="$_s.at">{{.At}}</b> · host up <b data-text="$_s.uptimeH + ' h'">{{.UptimeH}} h</b></div>
@@ -105,7 +105,7 @@
     <div class="panel"><div class="label">Live leases</div>
       <div class="big"><sb-odometer data-attr:value="$_s.leases" value="{{.Leases}}">{{.Leases}}</sb-odometer></div>
       <div class="sub"><span data-text="($_s.byState.running || 0) + ' running · ' + ($_s.byState.suspended || 0) + ' suspended · ' + ($_s.byState.lost || 0) + ' lost'"></span></div></div>
-    <div class="panel"><div class="label">Sandboxes on node</div>
+    <div class="panel"><div class="label">MicroVMs on host</div>
       <div class="big"><sb-odometer data-attr:value="$_s.running" value="{{.Running}}">{{.Running}}</sb-odometer><span style="font-size:20px;color:var(--sb-text-muted)" data-text="'/ ' + $_s.limit">/ {{.Limit}}</span></div>
       <sb-meter segments="24" warn="75" danger="90" unit="%" data-attr:value="$_s.limit ? Math.round($_s.running / $_s.limit * 100) : 0"></sb-meter></div>
     <div class="panel"><div class="label">Leases granted</div>
@@ -131,7 +131,7 @@
   </section>
 
   <section class="grid g4 spark">
-    <div class="panel"><div class="label">Sandboxes · 5 min</div>
+    <div class="panel"><div class="label">MicroVMs · 5 min</div>
       <sb-sparkline show-value tone="accent" length="{{hist}}" data-attr:values="JSON.stringify($_h.running || [])" data-attr:value="$_s.running"></sb-sparkline></div>
     <div class="panel"><div class="label">API requests / s</div>
       <sb-sparkline show-value decimals="1" length="{{hist}}" data-attr:values="JSON.stringify($_h.reqPerSec || [])" data-attr:value="$_s.reqPerSec"></sb-sparkline></div>
