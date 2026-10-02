@@ -27,6 +27,7 @@ func newLifecycleService(t *testing.T) (*Service, *testSub) {
 		MaxTTL:        10 * time.Minute,
 		HostGuestAddr: "10.1.0.11",
 		HostGuestPort: 8891,
+		HostAPIPort:   8890,
 	})
 	return svc, sub
 }
@@ -44,7 +45,11 @@ func TestEgressForEachPolicy(t *testing.T) {
 	for _, cidr := range lanRanges {
 		lanPrivateWant = append(lanPrivateWant, substrate.PrivateAllowance{CIDR: cidr})
 	}
-	lanPrivateWant = append(lanPrivateWant, hostSvc, dns)
+	// lan and internet also name the lease API (8890) explicitly: the
+	// fork's host-address guard ignores the any-port LAN ranges for the
+	// host's own address.
+	lanPrivateWant = append(lanPrivateWant, hostSvc, dns,
+		substrate.PrivateAllowance{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8890}})
 
 	t.Run("none", func(t *testing.T) {
 		got := svc.egressFor(&Lease{NetPolicy: "none"})
