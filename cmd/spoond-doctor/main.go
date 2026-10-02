@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -331,7 +332,12 @@ func loadDoctorManifest(path string) (doctorManifest, error) {
 	return m, nil
 }
 
-// checkArtifacts verifies the pinned E2B artifacts by SHA-256.
+// checkArtifacts verifies the pinned E2B artifacts by SHA-256, and prints
+// the Firecracker and kernel versions in use (the distinct
+// firecracker_version / kernel_version of non-deleted builds), so version
+// directories are never removed while builds still reference them. When
+// the versions cannot be read, the check drops to WARN unless a SHA-256
+// mismatch already failed it.
 func checkArtifacts() []checkResult {
 	var bad []string
 	ok := 0
@@ -347,10 +353,70 @@ func checkArtifacts() []checkResult {
 		}
 		ok++
 	}
+	var status, detail string
 	if len(bad) > 0 {
-		return []checkResult{{"artifacts: sha256", "FAIL", strings.Join(bad, "; ")}}
+		status, detail = "FAIL", strings.Join(bad, "; ")
+	} else {
+		status, detail = "PASS", fmt.Sprintf("%d/%d match", ok, len(doctorArtifacts))
 	}
-	return []checkResult{{"artifacts: sha256", "PASS", fmt.Sprintf("%d/%d match", ok, len(doctorArtifacts))}}
+	fc, kernel, err := versionsInUse()
+	if err != nil {
+		if status == "PASS" {
+			status = "WARN"
+		}
+		detail += fmt.Sprintf("; versions in use: unavailable (%v)", err)
+	} else {
+		detail += fmt.Sprintf("; versions in use: fc=[%s] kernel=[%s]",
+			strings.Join(fc, ","), strings.Join(kernel, ","))
+	}
+	return []checkResult{{"artifacts: sha256", status, detail}}
+}
+
+// versionsInUse returns the distinct firecracker_version and
+// kernel_version values of every non-deleted build, sorted. It opens the
+// database read-only, like checkDB, so the doctor never creates or
+// migrates the database it inspects.
+func versionsInUse() (fc, kernel []string, err error) {
+	dbPath := envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db")
+	d, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)&mode=ro")
+	if err != nil {
+		return nil, nil, fmt.Errorf("open %s: %w", dbPath, err)
+	}
+	defer d.Close()
+	rows, err := d.Query(`SELECT state, firecracker_version, kernel_version FROM builds`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list builds: %w", err)
+	}
+	defer rows.Close()
+	fcSet := map[string]bool{}
+	kernelSet := map[string]bool{}
+	for rows.Next() {
+		var state, fcv, kv string
+		if err := rows.Scan(&state, &fcv, &kv); err != nil {
+			return nil, nil, fmt.Errorf("list builds: %w", err)
+		}
+		if state == "deleted" {
+			continue
+		}
+		if fcv != "" {
+			fcSet[fcv] = true
+		}
+		if kv != "" {
+			kernelSet[kv] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("list builds: %w", err)
+	}
+	for v := range fcSet {
+		fc = append(fc, v)
+	}
+	for v := range kernelSet {
+		kernel = append(kernel, v)
+	}
+	sort.Strings(fc)
+	sort.Strings(kernel)
+	return fc, kernel, nil
 }
 
 // checkStorage warns when the build storage has under 20 GiB free.
