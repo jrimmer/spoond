@@ -27,6 +27,8 @@ type FakeEnv struct {
 	PushErr error
 	// ReachErr, when set, is returned by Reachable.
 	ReachErr error
+	// ReachDetail is what Reachable reports as its probe detail.
+	ReachDetail string
 	// GateErr, when set, is returned by RunGate.
 	GateErr error
 	// BudgetResp is what Budget returns.
@@ -136,10 +138,10 @@ func (f *FakeEnv) PushScratch(ctx context.Context, repo string) error {
 
 // Reachable records the allowlist and needs and returns the scripted
 // outcome.
-func (f *FakeEnv) Reachable(ctx context.Context, allowlist, needs []string) error {
+func (f *FakeEnv) Reachable(ctx context.Context, allowlist, needs []string) (string, error) {
 	f.record("lease")
 	if err := f.hostStep("runs on the host: POST /hive/check"); err != nil {
-		return err
+		return "", err
 	}
 	f.mu.Lock()
 	f.reach = append(f.reach, struct {
@@ -147,7 +149,7 @@ func (f *FakeEnv) Reachable(ctx context.Context, allowlist, needs []string) erro
 		needs     []string
 	}{append([]string(nil), allowlist...), append([]string(nil), needs...)})
 	f.mu.Unlock()
-	return f.ReachErr
+	return f.ReachDetail, f.ReachErr
 }
 
 // RunGate records the gate and returns the scripted outcome.

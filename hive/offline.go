@@ -158,8 +158,8 @@ func (e *OfflineEnv) PushScratch(ctx context.Context, repo string) error {
 }
 
 // Reachable runs on the host: only the host mints a trial lease.
-func (e *OfflineEnv) Reachable(ctx context.Context, allowlist, needs []string) error {
-	return Skipf("%s", hostReason)
+func (e *OfflineEnv) Reachable(ctx context.Context, allowlist, needs []string) (string, error) {
+	return "", Skipf("%s", hostReason)
 }
 
 // RunGate runs on the host: gates run in a worker, not on a laptop.
