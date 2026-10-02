@@ -5,11 +5,11 @@ owner's yes before an implementation spec is written.
 
 ## Why
 
-Since 2026-10-01, coding work on spoond runs as a *swarm*: implementors
+Since 2026-10-01, coding work on spoond runs as a *swarm*: bees
 (`impl-N`) in agent-worker sandboxes take tasks over Agent Mail, implement
 them, have them independently verified, and push branches. Today the
 orchestrator (an interactive session on a laptop) does everything between
-those steps: it spawns implementors, answers `[READY]` with a task, notices
+those steps: it spawns bees, answers `[READY]` with a task, notices
 dead ones, releases their claims, and stops idle ones. Two consequences:
 
 - **Nothing moves while the orchestrator is not running.** Overnight on
@@ -26,10 +26,10 @@ merging and production changes stay with the orchestrator and the owner.
 | The controller (spoond, on vm2) | The orchestrator / owner |
 |---|---|
 | Holds each project's task graph and its claims | Writes and polishes tasks; sets dependencies |
-| Spawns implementors to match the ready work, within quotas | Decides worker classes and quotas |
+| Spawns bees to match the ready work, within quotas | Decides worker classes and quotas |
 | Answers `[READY]` with the next eligible task | Reviews `[DONE]` branches; merges or sends back |
-| Releases the claims of implementors that die or stall; retries | Decides what to do after repeated failure |
-| Stops idle implementors (`[BYE]` or idle timeout) | Production changes (`vm2-window`), diagnosis |
+| Releases the claims of bees that die or stall; retries | Decides what to do after repeated failure |
+| Stops idle bees (`[BYE]` or idle timeout) | Production changes (`vm2-window`), diagnosis |
 | Reports state to the dashboard and Agent Mail | Talks to the owner |
 
 ## Proposed decisions
@@ -54,24 +54,24 @@ controller registers as the dispatcher identity in Agent Mail
 ready set, filtered by the worker class's allowed labels, by priority),
 and handles `[DONE]`/`[BLOCKED]`/`[BYE]` bookkeeping. `[DONE]` marks the
 task `review:pending` and copies the report to the orchestrator; the
-orchestrator closes it after review. Implementors are unchanged (they
+orchestrator closes it after review. Bees are unchanged (they
 already only talk to whoever sends their tasks).
 
 **C4. Scaling rule.** For each project:
-`wanted = min(eligible ready tasks, max_workers) - idle implementors`.
+`wanted = min(eligible ready tasks, max_workers) - idle bees`.
 Spawn while `wanted > 0`; never more than `max_workers` alive. Idle
-implementors leave on their own after their idle timeout (default 30 min).
-A task that becomes ready while none are idle gets a fresh implementor
+bees leave on their own after their idle timeout (default 30 min).
+A task that becomes ready while none are idle gets a fresh bee
 within one controller tick (30 s). Persistent leases, stopped by the
 controller after `[BYE]`.
 
 **C5. Health and retries.**
-- An implementor whose lease is gone, or whose progress signal reports
+- An bee whose lease is gone, or whose progress signal reports
   "no log activity" for 30 min, or that sends nothing for 60 min, is
   stopped; its claim is released with a comment; the task is retried.
 - A task gets 3 attempts. After that it is marked `blocked` and the
   orchestrator and owner are mailed.
-- Model-service outages (the implementor reports `[BLOCKED] retryable:
+- Model-service outages (the bee reports `[BLOCKED] retryable:
   infrastructure`) do not count as attempts; the controller pauses
   spawning for that project until `llm.lacy.casa` answers again.
 
@@ -84,20 +84,20 @@ network allowlist, and which task labels it may take (today:
 
 **C7. Credentials stay on vm2.** The deploy keys, the Agent Mail token and
 the `swarm` lease token live in `/etc/spoond/swarm/secrets/` (0600, root),
-and are injected into implementors at start as today. Nothing on a laptop.
+and are injected into bees at start as today. Nothing on a laptop.
 
-**C8. Visibility.** The dashboard gains a swarm panel (implementors, their
+**C8. Visibility.** The dashboard gains a swarm panel (bees, their
 task and latest progress line, ready/blocked counts). `spoond swarm status`
 prints the same. Every dispatch decision is also in Agent Mail.
 
-**C9. Budget guard.** A per-project cap on implementor-hours per day
+**C9. Budget guard.** A per-project cap on bee-hours per day
 (default 24); when reached, the controller stops spawning and mails the
 owner. Model spend is watched in Bifrost by the owner.
 
 ## Open questions
 
 1. **Agent Mail and Bifrost stay on vm1.** A vm1 stall stops every
-   implementor (2026-10-02). Moving them is an infra decision; the
+   bee (2026-10-02). Moving them is an infra decision; the
    controller only needs to survive it (C5 already does).
 2. **Merging.** Should a `[DONE]` that the verifier PASSed and that only
    touches docs merge automatically? Proposed: no, every merge stays a
