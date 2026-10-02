@@ -57,9 +57,11 @@
   .grid { display: grid; gap: var(--gap); }
   .g4 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
   .g2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
-  /* Numbers use the bold monospace face: in the pixel face a 5 reads as an S. */
-  .big { font-family: var(--sb-font-ui); font-weight: 700; font-size: 44px; line-height: 1; display: flex; align-items: center; gap: 10px; }
-  .big .aside { font-size: 18px; font-weight: 400; color: var(--sb-text-muted); }
+  /* Counters use Press Start 2P: pixel digits that stay unambiguous (in
+     Pixelify Sans, the site's pixel face, a 5 reads as an S). */
+  @font-face { font-family: "Press Start 2P"; src: url("/static/fonts/press-start-2p.woff2") format("woff2"); font-display: swap; }
+  .big { font-family: "Press Start 2P", var(--sb-font-ui); font-size: 32px; -webkit-font-smoothing: none; font-smooth: never; line-height: 1; display: flex; align-items: center; gap: 14px; }
+  .big .aside { font-family: var(--sb-font-ui); font-size: 18px; font-weight: 400; color: var(--sb-text-muted); }
   .sub { font-size: 12px; color: var(--sb-text-muted); margin-top: 8px; }
   .gauges sb-gauge { --sb-gauge-size: 100%; }
   .gauge-cell { display: grid; justify-items: center; }
