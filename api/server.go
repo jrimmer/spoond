@@ -31,6 +31,7 @@ type Server struct {
 	reg       *ImageRegistry
 	mux       *http.ServeMux
 	llm       *llmGateway
+	heartbeat *leaseHeartbeat
 	assetsDir string // static assets dir served at /assets/ on the proxy listener
 
 	// Proxy authentication (U7/T7): mode "" or "off" = open capability
@@ -148,6 +149,10 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
 		busyCount: map[string]int{}, busyMax: 8, metrics: metrics.NewBackendMetrics()}
+	// The guest heartbeat lives only on the guest-service listener
+	// (ProxyHandler); the lease id in the path is the capability.
+	s.heartbeat = newLeaseHeartbeat(svc)
+	s.heartbeat.metrics = s.metrics
 	if openRouterURL != "" {
 		// svc.identities must be installed (SetIdentities) before
 		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
@@ -211,6 +216,15 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.mux.Handle(llmGatewayPrefix, s.llm)
 	}
 	return s
+}
+
+// SetHeartbeatMetrics installs the Prometheus collector on the heartbeat
+// handler. NewServerWithLLM already wires it; tests that build the
+// handler standalone call this to assert the counter.
+func (s *Server) SetHeartbeatMetrics(m *metrics.BackendMetrics) {
+	if s.heartbeat != nil {
+		s.heartbeat.metrics = m
+	}
 }
 
 // SetLLMMaxConcurrent caps in-flight LLM gateway requests per user
@@ -380,6 +394,18 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // normalizePath reduces high-cardinality paths (sandbox ids, user ids)
 // to stable labels for metrics.
 func normalizePath(p string) string {
+	// Guest-service lease routes: the lease id is a capability, so it is
+	// reduced like any other id to keep metrics cardinality bounded.
+	// The documented route leaves "/active" as the only remainder.
+	if strings.HasPrefix(p, "/lease/") {
+		rest := strings.TrimPrefix(p, "/lease/")
+		if i := strings.IndexByte(rest, '/'); i > 0 {
+			return "/lease/:id" + rest[i:]
+		} else if rest != "" {
+			return "/lease/:id"
+		}
+		return "/lease/"
+	}
 	// Replace hex ids with :id
 	if len(p) > 40 && isHexPath(p) {
 		return "/api/sandboxes/:id"
@@ -419,9 +445,9 @@ func isHexPath(p string) bool {
 // authMiddleware authenticates the bearer token and injects the
 // consumer id into the request context. /healthz is exempt (liveness);
 // the /llm/ prefix is exempt too — the lease id in the path is the
-// capability, and sandboxes hold no consumer token. /api/admin/ is
-// exempt because ADMIN_TOKEN is not a user/consumer token; api/admin.go
-// authenticates those routes itself.
+// capability, and sandboxes hold no consumer token.
+// /api/admin/ is exempt because ADMIN_TOKEN is not a user/consumer
+// token; api/admin.go authenticates those routes itself.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {

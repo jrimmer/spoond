@@ -31,13 +31,14 @@ type BackendMetrics struct {
 	PoolEvicted    *prometheus.CounterVec   // {image,reason}: evictions
 
 	// Leases
-	LeasesActive  prometheus.Gauge       // leased (non-warm) sandboxes
-	LeasesQueued  prometheus.Gauge       // demand waiting for a slot
-	LeasesTotal   prometheus.Counter     // cumulative leases granted
-	LeaseGrantDur prometheus.Histogram   // time from request to ready
-	LeaseOps      *prometheus.CounterVec // {op}: suspend, resume, restart, clone, keepalive
-	LeaseSwept    prometheus.Counter     // TTL-expired leases swept
-	LeaseOrphaned prometheus.Counter     // orphans detected on startup
+	LeasesActive    prometheus.Gauge       // leased (non-warm) sandboxes
+	LeasesQueued    prometheus.Gauge       // demand waiting for a slot
+	LeasesTotal     prometheus.Counter     // cumulative leases granted
+	LeaseGrantDur   prometheus.Histogram   // time from request to ready
+	LeaseOps        *prometheus.CounterVec // {op}: suspend, resume, restart, clone, keepalive
+	LeaseSwept      prometheus.Counter     // TTL-expired leases swept
+	LeaseOrphaned   prometheus.Counter     // orphans detected on startup
+	LeaseHeartbeats prometheus.Counter     // guest-service lease heartbeats accepted
 
 	// API health
 	HTTPReqs *prometheus.CounterVec   // {path,method,code}: API usage
@@ -160,6 +161,10 @@ func NewBackendMetrics() *BackendMetrics {
 	m.LeaseOrphaned = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "lease_orphaned_total",
 		Help: "Orphaned leases detected on startup reconciliation.",
+	})
+	m.LeaseHeartbeats = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "lease_heartbeats_total",
+		Help: "Guest-service lease heartbeats accepted (POST /lease/{id}/active).",
 	})
 
 	// API health
@@ -335,7 +340,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.PoolReady, m.PoolCap, m.PoolRefill, m.PoolRefillFail,
 		m.PoolRefillDur, m.PoolEvicted,
 		m.LeasesActive, m.LeasesQueued, m.LeasesTotal, m.LeaseGrantDur,
-		m.LeaseOps, m.LeaseSwept, m.LeaseOrphaned,
+		m.LeaseOps, m.LeaseSwept, m.LeaseOrphaned, m.LeaseHeartbeats,
 		m.HTTPReqs, m.HTTPDur,
 		m.LLMReqs, m.LLMDur, m.LLMErrors, m.LLMRateLimit,
 		m.LLMKeyFail, m.LLMKeylessDen, m.LLMInflight,

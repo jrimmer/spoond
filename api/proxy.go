@@ -46,6 +46,13 @@ func (s *Server) ProxyHandler() http.Handler {
 			s.llm.ServeHTTP(w, r)
 			return
 		}
+		// The lease heartbeat rides the same guest-service listener:
+		// guests reach it at http://<host>:8891/lease/<lease-id>/active,
+		// which every egress policy — restricted included — permits.
+		if strings.HasPrefix(r.URL.Path, leaseHeartbeatPrefix) {
+			s.heartbeat.ServeHTTP(w, r)
+			return
+		}
 		// Static assets (e.g. the shelley agent binary) served to guests
 		// at http://10.43.0.1:8891/assets/<file>. This is how a lease
 		// fetches tooling that is too big for the exec API cmdline.
