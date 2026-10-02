@@ -149,9 +149,8 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
 		busyCount: map[string]int{}, busyMax: 8, metrics: metrics.NewBackendMetrics()}
-	// The guest heartbeat route is auth-exempt like /llm/ (the lease id
-	// in the path is the capability) and is mounted on the outer handler
-	// below.
+	// The guest heartbeat lives only on the guest-service listener
+	// (ProxyHandler); the lease id in the path is the capability.
 	s.heartbeat = newLeaseHeartbeat(svc)
 	s.heartbeat.metrics = s.metrics
 	if openRouterURL != "" {
@@ -216,10 +215,6 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		// authMiddleware. Handler() does that via authExempt prefix.
 		s.mux.Handle(llmGatewayPrefix, s.llm)
 	}
-	// The guest-service lease heartbeat (auth-exempt like /llm/; the
-	// lease id in the path is the capability). Mounted on the mux so it
-	// rides both the main handler and the guest-service listener.
-	s.mux.Handle(leaseHeartbeatPrefix, s.heartbeat)
 	return s
 }
 
@@ -449,14 +444,13 @@ func isHexPath(p string) bool {
 
 // authMiddleware authenticates the bearer token and injects the
 // consumer id into the request context. /healthz is exempt (liveness);
-// the /llm/ and /lease/ prefixes are exempt too — the lease id in the
-// path is the capability, and sandboxes hold no consumer token.
+// the /llm/ prefix is exempt too — the lease id in the path is the
+// capability, and sandboxes hold no consumer token.
 // /api/admin/ is exempt because ADMIN_TOKEN is not a user/consumer
 // token; api/admin.go authenticates those routes itself.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, leaseHeartbeatPrefix) ||
-			strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}

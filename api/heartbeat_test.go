@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,9 +21,29 @@ func newHeartbeatTestServer(t *testing.T) (*httptest.Server, *Server, *Service, 
 	srv := NewServer(svc, NewImageRegistry(db))
 	m := metrics.NewBackendMetrics()
 	srv.SetHeartbeatMetrics(m)
-	ts := httptest.NewServer(srv.Handler())
+	// One test server stands in for both listeners: /lease/ goes to the
+	// guest-service handler (where guests reach it), the rest to the API.
+	api, guest := srv.Handler(), srv.ProxyHandler()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, leaseHeartbeatPrefix) {
+			guest.ServeHTTP(w, r)
+			return
+		}
+		api.ServeHTTP(w, r)
+	}))
 	t.Cleanup(ts.Close)
 	return ts, srv, svc, db, sub, m
+}
+
+// The heartbeat is a guest-service route only: the authenticated API
+// listener treats /lease/ like any other path and wants a token.
+func TestLeaseHeartbeatNotOnAPIListener(t *testing.T) {
+	_, srv, _, _, _, _ := newHeartbeatTestServer(t)
+	api := httptest.NewServer(srv.Handler())
+	t.Cleanup(api.Close)
+	if resp := heartbeat(t, api.URL+"/lease/00000000000000000000000000000000/active"); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("API listener: status = %d, want 401", resp.StatusCode)
+	}
 }
 
 // leaseRow reads one lease row back from the store.
