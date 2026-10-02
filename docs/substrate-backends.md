@@ -55,7 +55,7 @@ Two caveats from reading it closely:
 Hard requirements (from the inventory; losing any of these loses product
 capability):
 
-1. Named, enumerable, existence-checkable snapshots (drives `/api/images`, `KNOWN_IMAGES`).
+1. Named, enumerable, existence-checkable snapshots (drives `/api/images`).
 2. Spawn-by-snapshot returning an id + guest address, with per-child network isolation.
 3. A per-child netns with a stable name spoond can enter and run `iptables` in — this is what network policy (`none|lan|internet|restricted`) and all host→guest reachability rest on.
 4. Exec with argv + timeout returning stdout/stderr/exit, plus a cheap reachability probe.
@@ -204,7 +204,7 @@ than assuming:
 | Snapshot chains / diff snapshots | **Upstream** (v0.5) |
 | Per-child rootfs backing — the corruption fix | **Ours**: 8 commits, open as draft #321 |
 | Bake hygiene, orphan-Firecracker, bake space | **Ours**: #314/#315/#316, all deployed |
-| Guest agent and exec/stream protocol | Upstream contract; we ship and extend the agent in `deploy/rootfs-init/` |
+| Guest agent and exec/stream protocol | Upstream contract; the agent we shipped and extended lived in `deploy/rootfs-init/` (deleted with the forkd removal) |
 
 We are also already a merge-author upstream — `#295` and `#299` merged
 2026-09-02. The maintenance exposure is therefore "a 9-contributor project

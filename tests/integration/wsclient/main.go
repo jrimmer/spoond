@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// wsclient — integration-test WebSocket client for the forkd stream
+// wsclient — integration-test WebSocket client for the stream
 // endpoint. Two modes:
 //
 //	stream:  send a command, expect incremental output frames + exit_code

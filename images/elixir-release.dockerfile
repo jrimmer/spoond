@@ -70,9 +70,9 @@ COPY --from=gcr.io/kaniko-project/executor:v1.23.2 /kaniko/executor /usr/local/b
 
 # NOTE: no `mix local.hex` here — Erlang cannot boot inside this host's
 # docker build containers (AF_UNIX denied at spawn_init, EACCES) but runs
-# fine in the forkd microVM; CI jobs bootstrap hex/rebar themselves in ~5s.
+# fine in the sandbox; CI jobs bootstrap hex/rebar themselves in ~5s.
 
-# Guest agent (forkd-agent.py) reads /etc/environment for PATH — but only
+# The guest agent reads /etc/environment for PATH — but only
 # the FIRST PATH= line (appending a second one is silently ignored, which
 # once cost us rustc). Rewrite /etc/environment wholesale: cargo first,
 # one canonical PATH line; RUSTUP_HOME/CARGO_HOME for good measure.
@@ -107,9 +107,8 @@ RUN pkg-config --exists webkit2gtk-4.1 \
  && echo TAURI_SYS_DEPS_OK
 
 # NOTE: DNS/registry reachability is fixed at the INIT level, not here:
-# forkd-init.sh (injected post-conversion, lives on the forkd host) now
-# lists the LAN resolvers first, so code.lacy.casa resolves to the LAN
-# edge whose /v2/ path is not SSO-gated. Image-level /etc/hosts pinning
-# does not survive guest boot.
+# images/guest/spoond-guest-init lists the LAN resolver only, so
+# code.lacy.casa resolves to the LAN edge whose /v2/ path is not
+# SSO-gated. Image-level /etc/hosts pinning does not survive guest boot.
 COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
 RUN mkdir -p /etc/spoond/init.d

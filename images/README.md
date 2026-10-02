@@ -1,4 +1,4 @@
-# forkd image inquiry
+# Image inquiry
 
 How the agent (and you) decide what image a repo needs — and how to keep
 the image set from proliferating.
@@ -28,7 +28,7 @@ effectively identical. So there's **one `llm-review` image**, never
    `jason-go-project`. The name makes the shared-ness visible.
 2. **One image per language, one per function.** Many Go repos → one
    `go-base`. Many review jobs → one `llm-review`.
-3. **Don't version images** (`go-base:v1`). Re-bake in place when the
+3. **Don't version images** (`go-base:v1`). Re-build in place when the
    toolchain needs updating. Versioning is a proliferation trap.
 4. **An image does one job type.** If a job must compile Go *and* run an
    LLM review, that's two jobs (build on `go-base`, review on
@@ -46,7 +46,7 @@ you point the agent at a repo, the flow is:
 3. **Image inquiry** — run the validation script to confirm a baked image
    covers the labels, or that a new one is needed.
 4. **Assign or create** — if covered, use the existing image. If not,
-   bake a new one (named by capability) and update the manifest.
+   build a new one (named by capability) and update the manifest.
 
 ## The validation script
 
@@ -67,55 +67,48 @@ Output:
 
 `images/manifest.yaml` is the source of truth for baked images. It lists
 every tag, its capability, its `runs-on` labels, and whether it's baked.
-**Keep it in sync with the forkd host** — when you bake a new image, mark
-it `baked: true` here and add the tag to `KNOWN_IMAGES` on the backend
-and `IMAGE_MAP` on the runner.
+**Keep it in sync with the image catalog** — when you build a new image,
+mark it `baked: true` here and add the tag to `IMAGE_MAP` on the runner.
+Images are part of the SQLite catalog (`spoond images list`), so the
+catalog is the runtime source of truth.
 
-## Baking a new image
+## Building a new image
 
-On the forkd host (vm2), from a Docker image:
+Images are Dockerfiles under `images/`, described by the manifest, built
+into E2B templates with `spoond images build` (see
+[U07](../docs/plans/2026-09-30-e2b-substrate/U07-image-pipeline.md) and
+[ci-jobs.md](../docs/ci-jobs.md)):
 
 ```bash
-forkd from-image <docker-image> --tag <name>
+spoond images build <name> --manifest images/manifest.yaml --context images
 ```
 
 Then:
-1. Add `<name>` to `KNOWN_IMAGES` in `/etc/forkd-backend.env`
-2. Add `<label>=<name>` to `IMAGE_MAP` in `/etc/forkd-runner.env`
-3. Mark `baked: true` in `images/manifest.yaml`
+1. Add `<label>=<name>` to `IMAGE_MAP` in `/etc/spoond-runner.env`
+2. Mark `baked: true` in `images/manifest.yaml`
 
-### Baking Rust images
+### Building Rust images
 
 Rust images need special attention due to the size of the toolchain and
 build artifacts. See the `rust-base` entry in `manifest.yaml` for
 detailed notes. Key requirements:
 
-- **Rootfs**: 8+ GiB (`--size-mib 8192`). The Rust toolchain (~1.5 GiB)
+- **Rootfs**: 8+ GiB (`disk_mb: 8192`). The Rust toolchain (~1.5 GiB)
   + cargo registry + build artifacts for `cargo test` exceed 4 GiB.
-  See issue #38 for the sparse-rootfs proposal that would make this a
-  non-issue.
-- **Memory**: 4+ GiB (`--mem-size-mib 4096`). 512 MiB OOM-kills `cargo
-  check` during tokio compilation. See issue #39 for `--mem-size-mib`
-  support in `forkd from-image`.
-- **python3**: Required for `forkd-agent.py` (PID 1 guest agent). Pass
-  `--extra python3` to `forkd from-image`.
+- **Memory**: 4+ GiB (`memory_mb: 4096`). 512 MiB OOM-kills `cargo
+  check` during tokio compilation.
+- **python3**: Required by the guest init hooks. Base the image on a
+  Docker image that ships it, or `apt-get install` it in the Dockerfile.
 - **rustup**: Docker `rust:*` images ship rustup without a default
-  toolchain. Run `rustup default stable` inside the sandbox **before
-  snapshotting** so the toolchain is pre-installed and rustup doesn't
-  try to download it at runtime. If the project has a
-  `rust-toolchain.toml` with `channel = "stable"`, rustup will try to
-  download the latest stable on first build — ensure it fits on the
-  rootfs or pre-install it during bake.
-- **PATH**: Ensure `/etc/environment` includes `/usr/local/cargo/bin`
-  so `forkd-agent.py` (issue #41, PR #44) sets the correct container
-  PATH for exec commands.
+  toolchain. Run `rustup default stable` inside the sandbox **before**
+  the template snapshot so the toolchain is pre-installed and rustup
+  doesn't try to download the latest stable at runtime. If the project
+  has a `rust-toolchain.toml` with `channel = "stable"`, rustup will try
+  to download the latest stable on first build — ensure it fits on the
+  rootfs or pre-install it during the build.
+- **PATH**: Ensure the manifest's `env.PATH` includes
+  `/usr/local/cargo/bin` so exec commands reach the toolchain (the guest
+  agent does not apply `/etc/environment`).
 
-Recommended bake command (once #38/#39 are resolved):
-
-```bash
-forkd from-image rust:1.85-bookworm --tag rust-base \
-  --extra python3 --size-mib 8192 --mem-size-mib 4096
-```
-
-After baking, run `rustup default stable` inside the sandbox before
-snapshotting so the stable toolchain is pre-installed.
+After building, run `rustup default stable` inside the sandbox before
+the snapshot so the stable toolchain is pre-installed.

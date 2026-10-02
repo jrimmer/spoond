@@ -120,8 +120,7 @@ func TestD2_CloneOutlivesSource(t *testing.T) {
 }
 
 // TestD3_SnapshotDeletion exercises the U10 checkpoint route and the U11
-// snapshot deletion rules. Requires U10/U11; on forkd it fails (routes
-// absent), which is the recorded baseline result.
+// snapshot deletion rules. Requires U10/U11.
 func TestD3_SnapshotDeletion(t *testing.T) {
 	begin(t)
 	a := createLease(t, map[string]any{"image": "py-base", "persistent": true, "ttl": 600})

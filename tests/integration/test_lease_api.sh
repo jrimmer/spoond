@@ -31,17 +31,20 @@ assert_contains "lease is non-persistent" "$LIST" '"persistent":false'
 
 echo
 echo "== lease API: exec =="
-# Agent may need a moment; poll for readiness, then exec.
+# The agent may need a moment; poll for readiness, then exec.
+# The lease id is echoed back so the check needs no image-specific
+# marker: a substring of the id only appears if envd ran the command.
+EXEC_TAG="exec-$(printf %s "$L1" | tail -c 13)"
 READY=$(wait_agent "$L1" "ready")
 if [ "$?" -eq 0 ]; then ok "agent reachable"; else bad "agent reachable"; fi
-OUT=$(api POST "/api/sandboxes/$L1/exec" '{"cmd":"echo EXEC_OK; hostname"}')
+OUT=$(api POST "/api/sandboxes/$L1/exec" "{\"cmd\":\"echo EXEC_OK; echo $EXEC_TAG\"}")
 assert_contains "exec returns command output" "$OUT" "EXEC_OK"
-assert_contains "exec returns guest hostname (10.42.x)" "$OUT" "10.42"
+assert_contains "exec reaches the guest (envd exec)" "$OUT" "$EXEC_TAG"
 
 echo
 echo "== lease API: endpoint =="
 EP=$(api GET "/api/sandboxes/$L1/endpoint")
-assert_contains "endpoint has netns" "$EP" '"netns"'
+assert_contains "endpoint has forkd_id" "$EP" '"forkd_id"'
 assert_contains "endpoint has guest_addr" "$EP" '"guest_addr"'
 assert_contains "endpoint has image" "$EP" '"dev-base"'
 

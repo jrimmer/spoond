@@ -1,4 +1,4 @@
-module forkd-itest/wsclient
+module spoond-itest/wsclient
 
 go 1.23
 

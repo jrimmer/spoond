@@ -90,7 +90,7 @@ func (a *ForgejoAdapter) Register(ctx context.Context, name, token string, label
 		Token:     token,
 		Labels:    labels,
 		Ephemeral: false,
-		Version:   "forkd-runner-v0.1",
+		Version:   "spoond-runner-v0.1",
 	}))
 	if err != nil {
 		return 0, fmt.Errorf("register: %w", err)

@@ -1,6 +1,6 @@
-# forkd image manifest
+# spoond image manifest
 #
-# Source of truth for baked forkd snapshot images. One image per
+# Source of truth for baked images. One image per
 # capability — name by capability, never by repo or project. Many Go
 # repos share one `go-base`; many review jobs share one `llm-review`.
 #
@@ -14,7 +14,8 @@
 #   capability  the job capability this image provides (one per image)
 #   labels      runs-on labels that map to this image (IMAGE_MAP keys)
 #   description what's in it / what it's for
-#   baked       true for every image built by U07 (keeps validate-image.py working)
+#   baked       true for every image built into an E2B template
+#               (keeps validate-image.py working)
 #   dockerfile  file name in images/
 #   vcpu        1 or an even number
 #   memory_mb   even, >= 128
@@ -64,7 +65,7 @@ images:
     env:
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
       LANG: C.UTF-8
-    notes: "Baked 2026-08-09 from ubuntu:24.04 + tmux/openssh-server/git/python3/build-essential. 2 GiB memory. /forkd-init.sh patched to: mount devpts, generate ssh host keys, start sshd, and attach-to-or-create tmux session 'dev' on SSH login (via /etc/profile.d/forkd-tmux.sh, skip with FORKD_NO_TMUX). For exe.dev interactive sessions (ticket #18, U4). Branch-built so the memory state has sshd running."
+    notes: "Built 2026-08-09 from ubuntu:24.04 + tmux/openssh-server/git/python3/build-essential. 2 GiB memory. images/guest/spoond-guest-init runs the /etc/spoond/init.d hooks and marks the guest ready; /etc/profile.d/spoond-tmux.sh attaches-to-or-creates tmux session 'dev' on SSH login (skip with SPOOND_NO_TMUX or FORKD_NO_TMUX). For exe.dev interactive sessions (ticket #18, U4). Built as a template so the memory state has the guest ready."
 
   - name: elixir-base
     capability: elixir
@@ -95,7 +96,7 @@ images:
       CARGO_HOME: /usr/local/cargo
       LANG: C.UTF-8
     notes: |
-      Bake with deploy/bake-elixir-release.sh (dockerfile: images/elixir-release.dockerfile).
+      Build with `spoond images build elixir-release` (dockerfile: images/elixir-release.dockerfile).
       Sizing per rust-base notes: rootfs 12 GiB, memory 4 GiB — Tantivy-class Rust
       NIF builds + hex deps + node_modules + _build peak well past 8 GiB. Rust homes
       pinned to /usr/local/{rustup,cargo} so cache mounts can never mask toolchain
@@ -106,14 +107,14 @@ images:
         AF_UNIX; Erlang can't boot there at all — no mix RUNs in the dockerfile).
       - curl | sh silently succeeds with nothing installed when the download
         fails; Rust is COPY'd from rust:1-bookworm with a rustc --version guard.
-      - from-image's ext4 cache keys on the image TAG and re-registering over a
-        live tag keeps the daemon's old rootfs fd — bake script rm's the cached
-        ext4 and forkd rmi's the tag before converting.
+      - The template build keys on the image digest; re-building over a live
+        tag leaves the registry's old rootfs in place — the builder pulls the
+        new digest and the old build is reclaimed by the catalog GC.
       - The guest agent's exec PATH is a hardcoded default; /etc/environment is
         not applied. Toolchains must expose binaries in /usr/local/bin (go-base
         pattern). rustc/cargo are direct symlinks to the toolchain, bypassing
         the rustup proxy (which needs RUSTUP_HOME env the agent won't pass).
-      - forkd-init.sh (host-level) now lists LAN resolvers first — sandbox DNS
+      - images/guest/spoond-guest-init lists the LAN resolver only — sandbox DNS
         is otherwise public, and code.lacy.casa then resolves to the public edge
         whose /v2/ registry path is SSO-gated (302 to login).
 
@@ -143,11 +144,10 @@ images:
          dependency tree. A 4 GiB rootfs is insufficient — the Rust toolchain
          (~1.5 GiB) + cargo registry (~200 MiB) + build artifacts (2+ GiB)
          + project source exceeds the rootfs. Minimum recommended rootfs:
-         8 GiB (or use sparse rootfs per issue #38).
+         8 GiB (disk_mb: 8192).
 
       2. MEMORY: 512 MiB default OOM-kills cargo check during tokio compilation.
-         Need at least 4 GiB RAM. Use `forkd from-image --mem-size-mib 4096`
-         (issue #39) or re-snapshot with `forkd snapshot --mem-size-mib 4096`.
+         Need at least 4 GiB RAM (memory_mb: 4096).
 
       3. RUSTUP FRICTION: Docker rust images ship rustup without a default
          toolchain. rust-toolchain.toml with channel="stable" causes rustup to
@@ -158,15 +158,14 @@ images:
          - Pin incompatible deps with `cargo update --precise` if using an
            older toolchain (e.g. time needs 1.88, icu_* needs 1.86)
 
-      4. PATH: forkd-agent.py inherits host PATH (issue #41, fixed in PR #44).
-         Ensure /etc/environment has the correct PATH including
-         /usr/local/cargo/bin before baking the snapshot.
+      4. PATH: envd's exec PATH is a hardcoded default; /etc/environment is
+         not applied. Ensure the manifest's env PATH includes
+         /usr/local/cargo/bin before building the template.
 
-      Recommended bake command (once #38/#39 are resolved):
-        forkd from-image rust:1.85-bookworm --tag rust-base \
-          --extra python3 --size-mib 8192 --mem-size-mib 4096
+      Build command (once the sizing above is settled):
+        spoond images build rust-base
 
-      python3 is required for forkd-agent.py (PID 1 guest agent).
+      python3 is required by the guest init hooks.
 
   - name: scylla
     capability: cql-database
@@ -181,13 +180,15 @@ images:
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     notes: |
       First baked 2026-09-26; a fresh fork answered CQL 769 ms after restore.
-      Bake with deploy/bake-scylla.sh (images/scylla.dockerfile + images/scylla-init-hook.sh).
-      Needs deploy/rootfs-init/forkd-init.sh installed first: its cgroup2 mount
-      (seastar fails "sstring out of range" without one) and its
-      /etc/forkd/init.d hook runner, which starts ScyllaDB BEFORE the snapshot
-      so every fork restores serving. Guest 3 GiB, seastar --memory=1200M (1536M does not fit beside seastar's OS reserve),
+      Build with `spoond images build scylla` (images/scylla.dockerfile + images/scylla-init-hook.sh).
+      Needs images/guest/spoond-guest-init in the image: its
+      /etc/spoond/init.d hook runner starts ScyllaDB BEFORE the snapshot
+      so every fork restores serving. seastar also needs cgroup2 mounted
+      ("sstring out of range" without it); E2B guests boot with systemd,
+      which mounts it. Guest 3 GiB, seastar --memory=1200M (1536M does not fit beside seastar's OS reserve),
       --overprovisioned (no busy-polling — idle pool children stay cheap).
       No labels: a job leases it via the lease API, it never runs a job.
       Warm pool: the first lease registers the tag, after which POOL_SIZE
       children stay warm (~2 GiB each) — instant starts, bounded cost.
-      Upstream image is RHEL 9: no apt, so no --extra; python3 is already there.
+      Base image is Debian 12 (E2B's template builder rejects the RHEL-based
+      upstream image); python3 is already there.

@@ -1,9 +1,10 @@
 # Forkd baseline: recorded deviation causes
 
-Purpose: U12 compares its E2B conformance run against the committed forkd
-baseline (`conformance/baseline-forkd.json`). This file records **why** the
-baseline deviates from a green run, so those numbers are compared against
-understood causes, not treated as regressions or as targets to reproduce.
+Purpose: U12 compared its E2B conformance run against the forkd baseline
+recorded before the cutover (the forkd substrate and its baseline file were
+removed with the cutover, U12 step 18). This file records **why** that
+baseline deviated from a green run, so the recorded causes stay readable
+after the fact.
 
 Source: the architect's analysis of 2026-09-30 (cited as such throughout).
 
@@ -41,9 +42,8 @@ rules, so private/LAN addresses are reachable. The spec wrongly redefined
 E2B `internet` as "public only; private denied". Fixed 2026-09-30: the U08
 egress mapping and N1 now assert `internet` = public **plus** the LAN
 ranges. The host-address guard (U03 P4) still keeps sandboxes away from
-vm2's own addresses; only granted ports reach host services. The committed
-baseline corroborates this: `conformance/baseline-forkd.json` records
-`TestN1_Policies` as `fail` with error
+vm2's own addresses; only granted ports reach host services. The baseline
+corroborates this: it recorded `TestN1_Policies` as `fail` with error
 `"internet: 10.1.0.203:443 reachable, want blocked"` — on forkd the sandbox
 did reach the LAN address under `internet`, and only the wrong expectation
 made the test fail.
@@ -101,9 +101,10 @@ client handshake** (`socket.create_connection` 3s timeout;
 
 Non-443 ports keep the write+read probe.
 
-On forkd the plain connect probe
-`timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no` is kept:
-forkd blocks at SYN, so a failed connect is a denial.
+forkd (the substrate the baseline ran on) blocked at SYN, so the baseline
+kept the plain connect probe
+`timeout 5 bash -c '</dev/tcp/HOST/PORT' && echo yes || echo no`: a failed
+connect was a denial.
 
 ## R2 netns semantics
 

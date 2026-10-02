@@ -1,6 +1,6 @@
 // Package acp agent implementation: the loop that prompts an LLM via
-// the forkd LLM gateway and executes tool calls in a forkd microVM
-// lease. This is the "native" part of forkd-acp — we control the loop.
+// the per-lease LLM gateway and executes tool calls in a microVM lease.
+// This is the "native" part of spoond-acp — we control the loop.
 package acp
 
 import (
@@ -20,7 +20,7 @@ import (
 
 // ---------- LLM gateway client ----------
 
-// LLMClient prompts an OpenAI-compatible chat endpoint. The forkd LLM
+// LLMClient prompts an OpenAI-compatible chat endpoint. The LLM
 // gateway exposes /llm/<lease-id>/openai/chat/completions; the lease id
 // in the path is the capability (keys stay off-VM).
 type LLMClient struct {
@@ -124,7 +124,7 @@ func pyStr(s string) string {
 var agentTools = []sandboxTool{
 	{
 		name:        "shell",
-		description: "Run a shell command in the forkd microVM. Returns stdout, stderr, exit code.",
+		description: "Run a shell command in the microVM. Returns stdout, stderr, exit code.",
 		parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -210,7 +210,7 @@ func toolsToChatTools() []ChatTool {
 
 // ---------- agent ----------
 
-// SandboxAgent implements acp.Agent: sessions map to forkd leases,
+// SandboxAgent implements acp.Agent: sessions map to leases,
 // prompts run the LLM loop with in-sandbox tools.
 type SandboxAgent struct {
 	log      *log.Logger
@@ -291,7 +291,7 @@ func (a *SandboxAgent) Prompt(ctx context.Context, leaseID, system, user string,
 			Update: AgentMessage{
 				Type:    "agent_message",
 				Role:    "assistant",
-				Content: []AgentContent{{Type: "text", Text: "Starting turn in forkd sandbox " + leaseID}},
+				Content: []AgentContent{{Type: "text", Text: "Starting turn in sandbox " + leaseID}},
 			},
 		},
 	})

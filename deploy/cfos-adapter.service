@@ -1,7 +1,7 @@
 [Unit]
-Description=forkd CFOS/Sandstorm execution adapter (ticket #17)
-After=network.target forkd-backend.service
-Requires=forkd-backend.service
+Description=spoond CFOS/Sandstorm execution adapter (ticket #17)
+After=network.target spoond-backend.service
+Requires=spoond-backend.service
 
 [Service]
 ExecStart=/opt/cfos-adapter/cfos-adapter

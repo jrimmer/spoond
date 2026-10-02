@@ -59,7 +59,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (forkd microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
+	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
 	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)

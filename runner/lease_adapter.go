@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// HTTPLeaseClient is a SandboxProvider backed by the forkd-backend
+// HTTPLeaseClient is a SandboxProvider backed by the spoond backend's
 // lease HTTP API.
 type HTTPLeaseClient struct {
 	BaseURL   string

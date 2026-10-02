@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// imageFor maps a CFOS executeCode language/capability to a forkd image
+// imageFor maps a CFOS executeCode language/capability to an image
 // tag (ticket #17 U2). Defaults to the adapter's default image for
 // unknown/empty languages; explicit unsupported declarations are
 // rejected with a clear error.

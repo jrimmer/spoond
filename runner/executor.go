@@ -374,7 +374,7 @@ func resultLabel(r Result) string {
 }
 
 // checkout clones the job's repository into the workspace inside the
-// sandbox. It is the forkd equivalent of actions/checkout: the runner
+// sandbox. It is the sandbox equivalent of actions/checkout: the runner
 // provides the environment, the workflow asks for the code.
 func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job, ctx2 *EvalContext, stepState *StepState, logIndex *int64) error {
 	repo := ctx2.Eval("${{ github.repository }}")

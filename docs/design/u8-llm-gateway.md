@@ -72,7 +72,7 @@ U1 (users store) and U5 (quota columns/accounting) are hard prerequisites — T8
 
 - **Don't break streaming for metering:** never buffer a full SSE response; tee the tail only.
 - **Constant-time key lookup:** compare SHA-256 hashes (`crypto/subtle`), never raw keys; never log `Authorization`.
-- **Plain-HTTP hop:** guests reach the gateway over `forkd-br0` (`http://10.43.0.1:8891`); bearer keys transit that internal LAN. Acceptable, but note it in ops docs; the public proxy path is Caddy-TLS-terminated.
+- **Plain-HTTP hop:** guests reach the gateway at the host service address (plain HTTP); bearer keys transit that internal LAN. Acceptable, but note it in ops docs; the public proxy path is Caddy-TLS-terminated.
 - **Mid-stream quota overshoot** and **shared-lease attribution** (U9 shares must extend the ownership predicate at the same 403 site) are the two known follow-ups.
 - **Model mapping is unaffected** — per-user keys are orthogonal to `LLM_MODEL_MAP`/`LLM_DEFAULT_MODEL`.
 

@@ -1,10 +1,10 @@
 // Package cfos implements the CFOS/Sandstorm execution adapter (ticket
 // #17): a thin HTTP bridge that accepts CFOS executeCode-shaped requests
-// and runs them in forkd microVMs via the lease API, returning
+// and runs them in microVMs via the lease API, returning
 // stdout/stderr/exit to the CFOS chat.
 //
 // Hexagonal: the adapter depends only on the SandboxProvider port (the
-// lease HTTP API), never on forkd internals. It is stateless per
+// lease HTTP API). It is stateless per
 // KTD5 — each call creates a sandbox, runs the code once, returns the
 // result, and releases the lease.
 package cfos
@@ -177,17 +177,17 @@ func buildRunCommand(code string, bindings map[string]string, language string) s
 	}
 	switch strings.ToLower(language) {
 	case "javascript", "js", "typescript", "ts":
-		b.WriteString("cat > /tmp/main.mjs <<'FORKD_EOF'\n")
+		b.WriteString("cat > /tmp/main.mjs <<'SPOOND_EOF'\n")
 		b.WriteString(code)
-		b.WriteString("\nFORKD_EOF\nnode /tmp/main.mjs\n")
+		b.WriteString("\nSPOOND_EOF\nnode /tmp/main.mjs\n")
 	case "go":
-		b.WriteString("cat > /tmp/main.go <<'FORKD_EOF'\n")
+		b.WriteString("cat > /tmp/main.go <<'SPOOND_EOF'\n")
 		b.WriteString(code)
-		b.WriteString("\nFORKD_EOF\n(cd /tmp && go run main.go)\n")
+		b.WriteString("\nSPOOND_EOF\n(cd /tmp && go run main.go)\n")
 	case "python", "py":
-		b.WriteString("cat > /tmp/main.py <<'FORKD_EOF'\n")
+		b.WriteString("cat > /tmp/main.py <<'SPOOND_EOF'\n")
 		b.WriteString(code)
-		b.WriteString("\nFORKD_EOF\npython3 /tmp/main.py\n")
+		b.WriteString("\nSPOOND_EOF\npython3 /tmp/main.py\n")
 	default:
 		b.WriteString(code)
 		if !strings.HasSuffix(strings.TrimSpace(code), "\n") {

@@ -64,8 +64,7 @@ type ExecResult struct {
 }
 
 // SandboxProvider grants and releases sandboxes. It is the port the
-// executor uses to obtain compute. Adapters: lease HTTP API, direct
-// forkd client, exe.dev backend.
+// executor uses to obtain compute. Adapters: the lease HTTP API.
 type SandboxProvider interface {
 	Create(ctx context.Context, image string, ttl int) (string, error)
 	Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error)

@@ -16,7 +16,7 @@ go build ./...
 go test ./...
 ```
 
-Requirements: Go 1.25+ (see `go.mod`).
+Requirements: Go 1.27.1+ (see `go.mod`).
 
 ## How to contribute
 
@@ -31,7 +31,7 @@ Requirements: Go 1.25+ (see `go.mod`).
    - `go vet ./...`
    - `gofmt -l .` (must list nothing)
    - `go test ./...` (unit tests; the integration suite needs a live
-     forkd homelab — see below)
+     spoond host — see below)
 4. **Sign your commits** with DCO — every commit must carry a
    `Signed-off-by` trailer:
    ```bash
@@ -45,12 +45,12 @@ Requirements: Go 1.25+ (see `go.mod`).
 ## Integration tests
 
 `tests/integration/` exercises the full stack (lease API, SSH gateway,
-control plane, MCP/ACP, network policy) against a **live forkd homelab**:
-warm pool, forkd controller, microVM images. It cannot run on CI without
-that infrastructure.
+control plane, MCP/ACP, network policy) against a **live spoond host on
+the E2B substrate**: the orchestrator, the image catalog, the warm pool.
+It cannot run on CI without that infrastructure.
 
 - CI runs only `go build ./...` + `go test ./...` (unit tests).
-- To run the full suite locally against a forkd host:
+- To run the full suite locally against a live host:
 
   ```bash
   SSHHOST=root@<vm> BE_API=https://127.0.0.1:8890 bash tests/integration/run.sh
@@ -64,13 +64,13 @@ that infrastructure.
 
 - **Plain Go binaries over Docker** in the deploy targets; the homelab
   runs them under systemd.
-- **No image proliferation** — bake new toolchains into the base
-  images (`deploy/rebuild-dev-base.sh`), don't add per-feature images.
+- **No image proliferation** — add new toolchains to an existing image's
+  Dockerfile, don't add per-feature images.
 - Internal traffic never goes through the reverse proxy (Pangolin);
   Caddy fronts only the public endpoints.
-- The service depends on the **forkd controller** (separate repo,
-  Deeplethe, Apache-2.0) for microVM lifecycle — the forkd/ client
-  package is the only interface to it.
+- The sandbox substrate is E2B's orchestrator (a patch-queue fork of
+  `github.com/e2b-dev/runtime`); spoond speaks to it only through the
+  `substrate/` interface.
 - Homelab addresses (10.1.0.*, *.lacy.casa) appear as **defaults only**
   and are overridable via env/flags (see `cmd/*/main.go`). Keep it that
   way for new knobs.

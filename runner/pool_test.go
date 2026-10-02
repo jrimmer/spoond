@@ -85,7 +85,7 @@ func (f *fakeWorker) regCount() int {
 // TestPoolStartsAtFloor verifies the pool spawns Floor workers on Start.
 func TestPoolStartsAtFloor(t *testing.T) {
 	cfg := PoolConfig{Floor: 3, Max: 9, ScaleStep: 3, PollInterval: 20 * time.Millisecond}
-	p := NewRunnerPool(cfg, func() RunnerWorker { return newFakeWorker() }, "r", "tok", []string{"forkd"})
+	p := NewRunnerPool(cfg, func() RunnerWorker { return newFakeWorker() }, "r", "tok", []string{"spoond"})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	p.Start(ctx)
@@ -107,7 +107,7 @@ func TestPoolStartsAtFloor(t *testing.T) {
 // when all current workers are busy.
 func TestPoolScalesUpWhenAllBusy(t *testing.T) {
 	cfg := PoolConfig{Floor: 3, Max: 9, ScaleStep: 3, PollInterval: 20 * time.Millisecond}
-	p := NewRunnerPool(cfg, func() RunnerWorker { return newFakeWorker() }, "r", "tok", []string{"forkd"})
+	p := NewRunnerPool(cfg, func() RunnerWorker { return newFakeWorker() }, "r", "tok", []string{"spoond"})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	p.Start(ctx)
@@ -146,7 +146,7 @@ func TestPoolScalesDownToFloor(t *testing.T) {
 		PollInterval:   20 * time.Millisecond,
 		ScaleDownDelay: 100 * time.Millisecond,
 	}
-	p := NewRunnerPool(cfg, func() RunnerWorker { return newFakeWorker() }, "r", "tok", []string{"forkd"})
+	p := NewRunnerPool(cfg, func() RunnerWorker { return newFakeWorker() }, "r", "tok", []string{"spoond"})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	p.Start(ctx)

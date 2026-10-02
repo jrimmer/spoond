@@ -130,8 +130,7 @@ func TestS2_CloneRunningSandbox(t *testing.T) {
 }
 
 // TestS3_ForkToEight forks a running sandbox into eight and checks each.
-// Requires the U08 fork route; on forkd it fails (route absent), which is
-// the recorded baseline result.
+// Requires the U08 fork route.
 func TestS3_ForkToEight(t *testing.T) {
 	rec := begin(t)
 	src := createLease(t, map[string]any{"image": "py-base", "persistent": true, "ttl": 600})

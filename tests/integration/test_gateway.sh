@@ -5,13 +5,13 @@ source "$(dirname "$0")/lib.sh"
 # Adds a temporary test key to the allowlist, tests, then restores the unit.
 set -u
 UNIT=/etc/systemd/system/spoond-sshd-gateway.service
-KEYS=/etc/forkd-gateway/keys
+KEYS=/etc/spoond-gateway/keys
 GWKEY=/tmp/itest_gw_key
 GWKEY_PUB=/tmp/itest_gw_key.pub
 SSHOPTS="-i $GWKEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
 
 echo "== gateway: temporary test key setup =="
-if [ ! -f /etc/forkd-gateway/keys ]; then
+if [ ! -d /etc/spoond-gateway/keys ]; then
   # sanity: keys dir exists
   ls -d "$KEYS" >/dev/null 2>&1 || { echo "  ❌ gateway keys dir missing"; exit 1; }
 fi
@@ -26,19 +26,19 @@ systemctl is-active spoond-sshd-gateway >/dev/null && ok "gateway restarted with
 
 echo
 echo "== gateway: auto-create (ssh new@) =="
-OUT=$(timeout 40 ssh $SSHOPTS "new@127.0.0.1" -p 2222 "echo GW_CREATE_OK; hostname; exit" 2>&1)
+OUT=$(timeout 40 ssh $SSHOPTS "new@127.0.0.1" -p 2222 "echo GW_CREATE_OK; . /etc/os-release && echo \$PRETTY_NAME; exit" 2>&1)
 assert_contains "new@ creates sandbox (MOTD)" "$OUT" "spoond: created sandbox"
 assert_contains "new@ drops into guest" "$OUT" "GW_CREATE_OK"
-assert_contains "new@ guest hostname is 10.42" "$OUT" "10.42"
+assert_contains "new@ guest is the E2B guest image" "$OUT" "Ubuntu 24.04"
 NEWID=$(echo "$OUT" | grep -oP '(?<=sandbox )[a-f0-9]{32}' | head -1)
 if [ -n "$NEWID" ]; then ok "captured new lease id ($NEWID)"; else bad "captured new lease id"; fi
 
 echo
 echo "== gateway: attach existing (ssh <id>@) =="
 if [ -n "$NEWID" ]; then
-  OUT2=$(timeout 40 ssh $SSHOPTS "$NEWID@127.0.0.1" -p 2222 "echo GW_REATTACH_OK; hostname; exit" 2>&1)
+  OUT2=$(timeout 40 ssh $SSHOPTS "$NEWID@127.0.0.1" -p 2222 "echo GW_REATTACH_OK; . /etc/os-release && echo \$PRETTY_NAME; exit" 2>&1)
   assert_contains "reattach reaches same sandbox" "$OUT2" "GW_REATTACH_OK"
-  assert_contains "reattach same hostname" "$OUT2" "10.42"
+  assert_contains "reattach reaches same sandbox image" "$OUT2" "Ubuntu 24.04"
 fi
 
 echo

@@ -114,9 +114,6 @@ collector. Images are then built with `spoond images build --all`, and
 `spoond doctor` verifies the result. A single installer for the E2B
 stack does not exist yet.
 
-`deploy/install-spoond.sh` is the **forkd-era** installer, kept only
-until forkd is removed (U12 steps 18–20).
-
 ## Docs
 
 | Doc | Contents |
