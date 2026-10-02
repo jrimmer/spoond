@@ -1,154 +1,195 @@
 # spoond
 
 Fast, isolated, ephemeral compute for people and agents: a lease API in
-front of **forkd microVMs** on a warm pool. Consumers request a sandbox,
-run work in it, and release it — each job gets its own isolated KVM
-environment in milliseconds, with an SSH gateway, HTTP proxy, LLM
-gateway, and native MCP/ACP agent endpoints on top.
+front of **Firecracker microVMs run by E2B's orchestrator**. Consumers
+request a sandbox, run work in it, and release it. Every sandbox starts
+as a memory-snapshot restore, so starts are warm, and fork, pause/resume
+and checkpoint are native. On top: an SSH gateway, an HTTP proxy, an LLM
+gateway, native MCP/ACP agent endpoints, a Forgejo Actions runner and a
+read-only dashboard.
 
 ```
-spoond (this repo)                 forkd controller (separate repo)
-┌──────────────────────────┐      ┌───────────────────────────────┐
-│ lease API  :8890         │ ───▶ │ Firecracker microVM lifecycle  │
-│ SSH gateway :2222        │      │ netns slots, snapshots,        │
-│ HTTP proxy  :8891        │      │ workspaces (suspend/resume)    │
-│ ctl plane (SSH-as-API)   │      │ (deeplethe/forkd, Apache-2.0)  │
-│ MCP / ACP agent servers  │      └───────────────────────────────┘
-│ LLM gateway  /llm/<id>   │
-└──────────────────────────┘
+spoond (this repo, one Go binary)          e2b-orchestrator (our fork of
+┌──────────────────────────────────┐       e2b-dev/runtime, patch queue)
+│ lease API            :8890       │ gRPC  ┌──────────────────────────────┐
+│ HTTP proxy, LLM gateway :8891    │ ────▶ │ Firecracker microVM lifecycle│
+│ SSH gateway + ctl    :2222       │ :5008 │ memory snapshots (UFFD), NBD │
+│ dashboard (read-only) :8893      │       │ rootfs, netns per sandbox,   │
+│ MCP / ACP agent servers          │ envd  │ egress firewall, templates   │
+│ Forgejo Actions runner           │ ────▶ │ envd in every guest (:49983) │
+│ SQLite state (leases, catalog)   │ :5007 └──────────────────────────────┘
+└──────────────────────────────────┘
+images/*.dockerfile → docker → local registry → E2B templates (spoond images)
 ```
+
+Production moved from forkd to E2B on 2026-10-01. The design, decisions
+and per-unit specs are in
+[docs/plans/2026-09-30-e2b-substrate/](docs/plans/2026-09-30-e2b-substrate/00-README.md);
+the forkd rollback path stays until U12 step 20 (2026-10-31).
 
 ## What it gives you
 
-- **Lease API** — `POST /api/sandboxes` (image, TTL, persistent,
-  network policy) → exec, stream (WebSocket PTY), keepalive, suspend/
-  resume, clone, tag, comment, delete. Auth via bearer tokens
-  (`CONSUMER_TOKENS=token=owner,...`) or per-user identity tokens.
-- **Multi-user tenancy (v1.1)** — people AND agents are first-class
-  identities: per-user SSH keys, per-user tokens, quotas
+- **Lease API**: `POST /api/sandboxes` (image, TTL, persistent,
+  network policy, exposed ports), then exec, stream (WebSocket PTY),
+  keepalive, suspend/resume, checkpoint, fork, clone, tag, comment,
+  delete. Auth via bearer tokens (`CONSUMER_TOKENS=token=owner,...`) or
+  per-user identity tokens. Leases and the image catalog persist in
+  SQLite, so a backend restart loses nothing.
+- **Multi-user tenancy**: people and agents are first-class identities,
+  with per-user SSH keys, per-user tokens, quotas
   (`max_leases`/`max_ttl`), admin roles, lease sharing with expiry,
   per-user LLM gateway keys, and per-user proxy hostnames
   (`<label>.<user>.sandbox.example`). See
   [docs/security.md](docs/security.md) and the [Users & identity API
   section](docs/api.md#users--identity).
-- **SSH gateway** — `ssh new@sandbox.example` auto-creates a persistent
+- **Images**: one Dockerfile per capability in `images/`, built into E2B
+  templates by `spoond images build <name>` (or `--all`). Every guest
+  resolves names through the LAN resolver only and carries a container
+  marker, so container tools such as kaniko work inside sandboxes.
+- **SSH gateway**: `ssh new@sandbox.example` auto-creates a persistent
   sandbox; `ssh <lease-id>@sandbox.example` re-attaches; friendly names
   after `tag`. Sessions land in a tmux session.
-- **Control plane over SSH** — `ssh ctl@sandbox.example "ls"` (pretty
+- **Control plane over SSH**: `ssh ctl@sandbox.example "ls"` (pretty
   table by default; `--json` for raw). Verbs: `new`, `ls`, `stat`,
   `rm`, `keepalive`, `suspend`, `resume`, `restart`, `cp` (clone),
   `tag`, `comment`, `exec`, `share`, `ssh-key` (admin), `whoami`,
   `shelly`, `prompt`.
-- **HTTP proxy** — `<lease-id>.sandbox.example` and `<id>-<port>`
+- **HTTP proxy**: `<lease-id>.sandbox.example` and `<id>-<port>`
   public URLs for sandbox web servers (Caddy fronts TLS).
-- **LLM gateway** — per-lease OpenAI-compatible endpoint
+- **LLM gateway**: per-lease OpenAI-compatible endpoint
   (`/llm/<lease-id>/openai/chat/completions`); upstream keys stay on
   the host, never inside sandboxes.
-- **Native agent endpoints** — `spoond mcp` (MCP stdio server:
+- **Native agent endpoints**: `spoond mcp` (MCP stdio server:
   shell/read_file/write_file/edit_file/list_files/status tools) and
   `spoond acp` (Agent Client Protocol: session = lease, agent loop
-  through the LLM gateway). Point Goose/Claude/Codex-style clients at
-  them to get sandboxed tool execution.
-- **Per-sandbox network policy** — `none` | `lan` | `internet` |
-  `restricted` (with egress allowlist), enforced with iptables in the
-  child netns.
-- **Forgejo Actions runner** — `spoond runner` adaptively leases
-  sandboxes as CI workers.
+  through the LLM gateway).
+- **Per-sandbox network policy**: `none` | `lan` | `internet` |
+  `restricted` (with an egress allowlist), enforced by the orchestrator's
+  egress firewall. `internet` and `lan` guests may call the lease API
+  (CI jobs lease databases from inside their sandbox); `restricted` and
+  `none` may not. Known limit: a domain in a `restricted` allowlist
+  currently breaks HTTPS to allow-listed LAN IPs, so list IPs only.
+- **Forgejo Actions runner**: `spoond runner` leases sandboxes as CI
+  workers.
+- **Dashboard**: `spoond dash`, below.
+- **Observability**: `/metrics` (Prometheus) covers the backend, the
+  orchestrator (via an OpenTelemetry collector) and leases per state and
+  per image. It needs an admin token or the scrape-only `METRICS_TOKEN`.
+
+## Dashboard
+
+`spoond dash` is a read-only, live view of spoond's present operation,
+for watching rather than triage: lease and sandbox counts, host CPU,
+memory, hugepages and snapshot disk, five-minute sparklines (sandboxes,
+API requests, lease grant time, egress connections), the systemd units,
+live leases and the image catalog. It refreshes every 2 seconds over one
+server-sent-event stream shared by all viewers, and switches between
+pixel-art themes (Deep Space, Terminal, Nebula, Daylight; built with
+[Starbase](https://starbase.zweiundeins.gmbh) components, vendored).
+
+On vm2 it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
+auth). Its data access is read-only: `/metrics` through the scrape-only
+`METRICS_TOKEN` (which the lease API refuses), the SQLite catalog opened
+read-only, user names from the identity store, `/proc` and systemd.
+
+Setting it up is manual today; generating the credentials as part of
+installation is planned:
+
+```bash
+spoond dash hash 'the-password'   # bcrypt hash for DASH_PASSWORD_HASH
+# /etc/spoond/backend.env: METRICS_TOKEN=<random>, then restart the backend
+# /etc/spoond/dash.env:    DASH_USER, DASH_PASSWORD_HASH, METRICS_TOKEN,
+#                          DASH_TLS_CERT, DASH_TLS_KEY; every setting is
+#                          listed in cmd/spoond-dash/dash.go
+```
 
 ## Install
 
-Two paths — see [docs/install.md](docs/install.md):
+The E2B host is brought up by `deploy/e2b/host-setup.sh` (packages,
+sysctls and hugepages, storage, pinned Firecracker/kernel/envd artifacts)
+plus the remaining steps of
+[U04](docs/plans/2026-09-30-e2b-substrate/U04-host-bringup.md): the
+orchestrator unit, the host firewall (`e2b-guard`) and the OpenTelemetry
+collector. Images are then built with `spoond images build --all`, and
+`spoond doctor` verifies the result. A single installer for the E2B
+stack does not exist yet.
 
-```bash
-git clone https://github.com/jrimmer/spoond && cd spoond
-./deploy/install-spoond.sh --with-forkd   # forkd + spoond (full stack)
-./deploy/install-spoond.sh                # spoond only (existing forkd-controller)
-/opt/spoond/spoond doctor                 # verify all dependencies
-```
+`deploy/install-spoond.sh` is the **forkd-era** installer, kept only
+until forkd is removed (U12 steps 18–20).
 
 ## Docs
 
 | Doc | Contents |
 |---|---|
-| [Install](docs/install.md) | forkd + spoond (full stack) or spoond-only; install script + verification |
-| [Setup](docs/setup.md) | prerequisites, build, env/flag reference, systemd, TLS |
+| [E2B substrate spec](docs/plans/2026-09-30-e2b-substrate/00-README.md) | the current platform: architecture, decisions, per-unit specs, ops appendices |
 | [API reference](docs/api.md) | every endpoint: auth, request/response, errors |
 | [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
-| [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user | 
-| [Operations](docs/operations.md) | pool, watchdog, failure runbook, backups, identity ops |
+| [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user |
 | [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
-| [deploy/](deploy/README.md) | systemd units for sandbox-style deployments |
+| [Conformance suite](conformance/README.md) | the lease-API contract tests, run against production |
+| [E2B upgrade runbook](docs/runbooks/e2b-upgrade.md) | moving the fork to a newer upstream |
+| [Install](docs/install.md), [Setup](docs/setup.md), [Operations](docs/operations.md) | **forkd-era**; being rewritten for E2B with the forkd removal |
 
 ## Status
 
-**v1.2 — infrastructure & observability.** Comprehensive Prometheus
-metrics for all three services (backend, gateway, runner) with Grafana
-dashboard support. MCP HTTP/SSE transport for remote agent host
-integration. SSH gateway dynamic image resolution with configurable
-sshd-enabled images. LLM-based PR review via Forgejo Actions. Runner
-pool reliability — persistent registration with state persistence, no
-more Forgejo runner entry accumulation. Exec reliability fixes (body
-reuse on retry, stale-lease 404→410 mapping, runner retry). CI
-connectivity fixes (network policy always-apply, internet egress for
-dependency downloads). Container PATH fix — guest agent reads
-/etc/environment for correct tool resolution.
+**v2.0: E2B substrate (2026-10-01).** Production runs on a patch-queue
+fork of E2B's orchestrator instead of forkd: warm memory-snapshot starts,
+native fork, pause/resume and checkpoint, SQLite state, a template-based
+image pipeline, a drain protocol for orchestrator restarts, the read-only
+dashboard and a scrape-only metrics token. The lease API contract is
+unchanged (additions only).
 
-**v1.1 — multi-user tenancy.** People and agents are first-class
-identities (epic #26): a user store with per-user SSH keys and bearer
-tokens, ownership-scoped leases, quotas, admin roles, lease sharing with
-expiry, per-user LLM gateway keys, per-user proxy hostnames, and a
-forward-auth proxy mode for integrating an IdP (Caddy/Authelia-style).
-Security hardening across the board — see
-[docs/security.md](docs/security.md) for the adversarial-review findings
-and fixes that shipped with 1.1 (admin-gated directory, closed LLM
-gateway, atomic quotas, salted hashes, constant-time compares, guest
-network isolation, rate limiting, and more).
+**v1.2: infrastructure & observability.** Prometheus metrics for the
+backend, gateway and runner; MCP HTTP/SSE transport; SSH gateway image
+resolution; LLM-based PR review; runner reliability and exec fixes.
 
-Prior: **v1.0 — single-operator** (one operator, one SSH key allowlist,
-one set of consumer tokens).
+**v1.1: multi-user tenancy.** People and agents are first-class
+identities (epic #26), with security hardening across the board; see
+[docs/security.md](docs/security.md).
+
+Prior: **v1.0: single-operator**.
 
 ## Build
 
 One binary, all services; exclude any module with build tags:
 
 ```bash
-go build -o spoond ./cmd/spoond                       # all modules
+go build -o spoond ./cmd/spoond                                   # all modules
 go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
-Supported exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`,
-`norunner`, `noctl`, `nodoctor`.
+Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
+`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`.
 
 ```bash
-./spoond backend    # lease API
+./spoond backend    # lease API, HTTP proxy, LLM gateway
 ./spoond gateway    # SSH gateway + ctl plane
 ./spoond acp        # ACP endpoint
 ./spoond mcp        # MCP endpoint
 ./spoond runner     # Forgejo Actions runner
 ./spoond ctl        # control-plane CLI
-./spoond doctor     # dependency/connectivity checks (forkd, LLM, listeners, pool)
+./spoond images     # build images into E2B templates; list the catalog
+./spoond drain      # pause sandboxes before an orchestrator restart, resume after
+./spoond doctor     # health checks (below)
+./spoond dash       # read-only dashboard
 ```
 
-## Run
-
-See [docs/setup.md](docs/setup.md) for the full guide; the short form:
-
-```bash
-export CONSUMER_TOKENS='abc=forgejo'
-export POOL_SIZE=3
-./spoond backend
-
-./spoond gateway --backend https://127.0.0.1:8890 \
-  --backend-token abc --client-keys /etc/spoond-gateway/keys
-```
+`spoond doctor` checks the configuration, the orchestrator, the local
+registry, the token seed, the SQLite database, the image catalog, the
+pinned E2B artifacts (SHA-256, plus the Firecracker and kernel versions
+builds still use), storage headroom, the backend, the SSH gateway port,
+the LLM gateway and TLS. It exits 1 if any check fails.
 
 ## Configuration knobs
 
-The repo targets a homelab by default (addresses like `10.43.0.1`,
+The repo targets a homelab by default (addresses like `10.1.0.11`,
 hostnames like `sandbox.lacy.casa` appear as *defaults only*); every
-knob is overridable so the software runs anywhere the forkd controller
-does. Notable overrides: `FORKD_GATEWAY_HOST`, `SHELLY_BINARY_URL`,
-`LLM_GATEWAY_URL`, `BE_API` (integration tests).
+knob is overridable. The fixed addresses, ports and paths of the E2B
+deployment are listed in
+[01-architecture.md](docs/plans/2026-09-30-e2b-substrate/01-architecture.md).
+Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
+services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
+may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`.
 
 ## Tests
 
@@ -156,17 +197,11 @@ does. Notable overrides: `FORKD_GATEWAY_HOST`, `SHELLY_BINARY_URL`,
 go test ./...            # unit tests (fast, no infra)
 ```
 
-Integration (`tests/integration/`) exercises the full stack — lease
-API, SSH gateway, ctl plane, MCP/ACP, HTTP proxy, network policy —
-against a **live forkd homelab** (warm pool + controller + images). It
-cannot run on CI without that infrastructure; the GitHub Actions
-workflow gates it behind a manual trigger with a note.
-
-```bash
-SSHHOST=root@<vm> BE_API=https://127.0.0.1:8890 bash tests/integration/run.sh
-```
+The conformance suite (`conformance/`, build tag `conformance`) is the
+executable definition of the lease-API contract. It runs on the host
+against a live spoond, as root; see [conformance/README.md](conformance/README.md).
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+Apache-2.0; see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 Contributions welcome: see [`CONTRIBUTING.md`](CONTRIBUTING.md).
