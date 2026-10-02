@@ -1,192 +1,195 @@
 # Operations
 
-Runbook for operating a spoond deployment on the E2B substrate: health,
-drain, crash recovery, backups, the catalog GC and restart procedures.
-
-The substrate is E2B's orchestrator (our fork of `e2b-dev/runtime`),
-running as `e2b-orchestrator.service` and driving Firecracker microVMs.
-spoond is the control plane: `spoond-backend` (lease API), the SSH
-gateway, the runner, and the SQLite store under `SPOOND_DB_PATH`.
+Runbook for operating a spoond deployment: warm pool, watchdog,
+diagnostics, and common failure modes.
 
 ## Component health
 
 | Check | Command |
 |---|---|
-| Orchestrator | `systemctl is-active e2b-orchestrator` and `curl -s http://127.0.0.1:5008/health` |
-| Backend | `systemctl is-active spoond-backend` |
-| Gateway | `systemctl is-active spoond-sshd-gateway` |
-| Runner | `systemctl is-active spoond-runner` |
+| Backend | `systemctl is-active forkd-backend` |
+| Gateway | `systemctl is-active forkd-sshd-gateway` |
+| Controller (forkd) | `systemctl is-active forkd-controller` |
+| Warm pool | `pgrep -c firecracker` (expect `POOL_SIZE × images`) |
 | Lease API | `curl -s https://127.0.0.1:8890/healthz` |
-| Everything | `spoond doctor` (exit 0 = all pass; `--json` for machines) |
-| Metrics | `curl -s -H "Authorization: Bearer $METRICS_TOKEN" https://127.0.0.1:8890/metrics` |
-| Identity store | `test -f /var/lib/spoond/users.json && stat -c '%a' /var/lib/spoond/users.json` (expect `600`) |
+| Metrics | `curl -s -H "Authorization: Bearer $ADMIN_TOKEN" https://127.0.0.1:8890/metrics` (admin-only in identity-store mode) |
+| Identity store | `test -f /etc/spoond-backend-users.json && stat -c '%a' /etc/spoond-backend-users.json` (expect `600`) |
 
-`spoond doctor` exercises every external surface the backend depends on:
-the orchestrator (`/health`, `NodeInfo`), the image registry, the lease
-API listener, the gateway port, the token seed, the SQLite catalog with
-its baked images, the pinned Firecracker/kernel/envd artifacts, the build
-storage, TLS material, the LLM upstream and disk. It reads the same
-environment the backend uses, so its output is a true reflection of the
-deployed config.
+## Warm pool
 
-## Lease states
+`POOL_SIZE` pre-forks sandboxes per image so grants are served in
+milliseconds. After a backend restart the pool refills over ~90s
+(18 firecrackers = 6 images × 3). During the window, cold spawns are
+slower and can transiently fail with `failed to grant sandbox` 500s —
+those are artifacts, not product bugs.
 
-Every lease carries a `state`: `running`, `suspended`, `recovered` or
-`lost`, reported by `GET /api/sandboxes/{id}` and the `ls` ctl verb.
+### Where a pool's disk goes
 
-- **`suspended`** — paused into a build; `resume` restores it (with its
-  memory) from `resume_build_id`.
-- **`recovered`** — the sandbox died in an orchestrator crash and was
-  resumed from its last checkpoint (`recovered_from` is the checkpoint
-  time). Running state goes back only as far as that checkpoint.
-- **`lost`** — no checkpoint existed to recover from, or recovery failed.
-  The lease answers `410` with `sandbox lost in a substrate crash; delete
-  this lease`; delete it and start again.
+Each sandbox writes to its own copy of its tag's rootfs, so a pooled sandbox's
+accumulated writes — cargo target, pnpm store, `mix _build` — are charged to
+that sandbox and released when it dies. This is the opposite of the behaviour
+that used to fill the host: writes went into the shared rootfs, so draining the
+pool freed nothing and the growth was unbounded.
 
-Watch `spoond_leases{state="lost"}`: it must be `0` unless an orchestrator
-crash happened — if it moves without one, that is a bug, not wear.
+Two numbers follow from it:
 
-## The drain protocol (planned orchestrator restarts)
+- **Draining the pool now reclaims disk.** `forkd-disk-guard.sh` restarting
+  `spoond-runner` releases the pool's copies, which is what makes that guard
+  effective rather than cosmetic.
+- **A spawn costs one rootfs copy.** Free where the filesystem clones
+  (`reflink`) — ZFS 2.2+, XFS, btrfs — and a full copy elsewhere, so on such a
+  host `POOL_SIZE` is a storage decision, not just a latency one. Check with
+  `zfs list` / `df` before raising it.
 
-A **planned** restart is lossless: drain first, so every running sandbox
-is snapshotted to a build and stopped, then nothing is lost.
+Stranded copies are not expected: a killed sandbox removes its own, a restart's
+sweep removes those belonging to sandboxes that died with the controller, and
+the watchdog removes directories with no live Firecracker. If disk does not come
+back after a drain, compare `ls /tmp/forkd-daemon-*/*.ext4` against
+`pgrep -c firecracker` before assuming a leak.
 
-```bash
-# 1. Stop the runner so no job starts mid-drain.
-systemctl stop spoond-runner
+## Spawn-outage watchdog
 
-# 2. Drain: pause every live lease (4 at a time), delete the warm pool
-#    and wait until the node is quiesced.
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://127.0.0.1:8890/api/admin/drain
-#   {"paused":N,"failed":[],"pool_deleted":M,"quiesced":true}
-#   "failed" must be empty; a 503 means the orchestrator was
-#   unreachable and nothing changed.
+`forkd-spawn-watchdog` (timer, every 5 min) auto-recovers from the
+known spawn outage: it captures diagnostics to
+`/var/log/forkd/watchdog/`, kills firecrackers, removes stale daemon
+dirs, restarts the controller, and lets the backend reconcile.
 
-# 3. Restart the orchestrator (or the whole host).
-systemctl restart e2b-orchestrator
+**Known loop (stale-pool-map wedge):** if the controller is SIGKILLed
+(by the watchdog's own recovery) while the backend's in-memory pool map
+still holds the dead sandbox ids, `refillPool` silently skips and the
+pool stays empty; the watchdog re-triggers every 5 min. Discriminator:
+`pgrep -c firecracker` == 0, backend active, controller `/v1/sandboxes`
+== 0, no warmPool error lines in the backend journal.
 
-# 4. Undrain: resume every drained lease from its pause build.
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://127.0.0.1:8890/api/admin/undrain
-#   {"resumed":N,"failed":[]}
-
-systemctl start spoond-runner
-```
-
-A lease in `failed` did not pause or resume; the drain/undrain continues
-past it and reports the lease id with the error. Resolve those
-individually (`stat`, then `resume` or delete).
-
-## Crash recovery (unplanned)
-
-An orchestrator crash or a host power loss kills every running sandbox.
-This is the accepted trade-off (D4): running state returns to each
-sandbox's last checkpoint, not to the instant of the crash.
-
-Reconciliation is automatic. It runs once at backend start, every 30 s in
-the background, and immediately when the orchestrator's `NodeInfo` goes
-from failing to succeeding:
-
-- a lease with a checkpoint is resumed from that build, with the **same**
-  sandbox id, and marked `recovered`;
-- a lease without one is marked `lost`;
-- substrate sandboxes no lease or pool entry claims are deleted;
-- pool entries whose sandbox is gone are dropped.
-
-To run it on demand (e.g. right after bringing the orchestrator back):
+**Fix:**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://127.0.0.1:8890/api/admin/reconcile
-#   {"recovered":N,"lost":M}
+systemctl stop forkd-watchdog.timer
+systemctl restart forkd-backend          # clears pool map + stale leases
+# ~90s later: expect 18 firecrackers
+pgrep -c firecracker
+# VERIFY the previously-failing spawn path BEFORE re-enabling:
+curl -s -X POST https://127.0.0.1:8890/api/sandboxes \
+  -H "Authorization: Bearer $TOKEN" -d '{"image":"dev-base","persistent":true,"ttl":300}'
+#   → expect an id; exec uname -m in it; delete it; then:
+systemctl start forkd-watchdog.timer
 ```
 
-Persistent leases are checkpointed every `CHECKPOINT_INTERVAL_MINS`
-(default 60; `0` disables the loop), so that is the worst-case window of
-lost work. Lower it if a workload's re-run cost is higher than the
-checkpoint cost.
+Do NOT run the watchdog manually mid-recovery — its 15-min error
+lookback re-triggers on errors already fixed and it will SIGKILL the
+controller you just rebuilt.
 
-## Restarting the orchestrator
+## Backend restart = lease loss
 
-See §The drain protocol above for a **planned** restart; never restart
-`e2b-orchestrator` without draining first unless it is already down.
-
-## Restarting the backend
-
-`spoond-backend` may be restarted freely: leases, shares, the pool and the
-image catalog live in SQLite and are reloaded on start, then
-reconciliation aligns the substrate with the stored state.
-
-```bash
-systemctl restart spoond-backend
-journalctl -u spoond-backend --since "-2 min"    # look for recovery: lines
-curl -s https://127.0.0.1:8890/healthz
-```
-
-The runner keeps running; its next lease request either rides through the
-restart or retries. The SSH gateway does the same (it has no `Requires=`
-on the backend for exactly this reason).
-
-## Backups
-
-`SPOOND_BACKUP_DIR` (default `/var/lib/spoond/backups`) receives a
-`VACUUM INTO` snapshot daily at 03:00. The backup is a consistent SQLite
-file: restore by copying it to a stopped backend and starting it.
-
-Back up the whole of `/var/lib/spoond/` and `/etc/spoond/` from the host.
-The identity store (`users.json` and its `.salt` sidecar) holds users, key
-fingerprints, quotas and token hashes — losing the salt makes every
-existing token unverifiable, so keep it with the store. The template
-storage under `E2B_TEMPLATE_STORAGE_PATH` holds the build artifacts; back
-it up too, or rebuild the images with `spoond images build --all`.
-
-## Catalog GC
-
-Builds accumulate: every image build, pause, resume and checkpoint creates
-one. GC runs hourly and is **dry-run by default**, logging each candidate
-as `gc: would delete <build_id> kind=<k> image=<i>`.
-
-A build is a candidate only when it is unreferenced: not any image's
-`current_build_id`, not the `parent_build_id` of a live build, not a
-`ref_build_id` in `build_refs` (E2B's scheduling metadata makes builds
-share blocks, so those must be kept), and its state is not `deleted`.
-
-Check the last 7 days of candidates before enabling deletion:
-
-```bash
-journalctl -u spoond-backend --since -7d | grep 'gc: would delete'
-```
-
-Then set `GC_DELETE=1` in `/etc/spoond/backend.env` and restart the
-backend. Keep a copy of the env file first: rollback is restoring it and
-restarting. `spoond_gc_deleted_total` counts deletions by kind, and
-`spoond_snapshot_bytes` / `spoond_storage_free_bytes` track the disk.
+The backend keeps leases in memory only. Restarting it drops all leases
+and the pool map (workspace snapshots persist in the controller as
+`Stale`). Acceptable when leases are disposable; avoid during active
+work.
 
 ## Common failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Text file busy` on deploy | overwrote a running binary | deploy to `.new` then `mv` |
-| create fails, hugepages mentioned | admission refused: no free hugepages | free sandboxes or raises `vm.nr_hugepages`; see `spoond_node_hugepages_free_bytes` |
-| create `503`, drain state stuck | orchestrator unreachable | `systemctl status e2b-orchestrator`; undrain only after it is back |
-| lease `410 lost` | orchestrator crashed before a checkpoint | delete the lease; lower `CHECKPOINT_INTERVAL_MINS` if this recurs |
-| `sandbox is suspended; resume it first` | op needs a live sandbox | `resume <id>` first |
-| exec `proxy.golang.org` blocked | `lan` policy has no internet | use `network_policy: internet` or an allowlist |
-| `spoond doctor` fails the artifact check | pinned Firecracker/kernel/envd changed | follow the [upgrade runbook](runbooks/e2b-upgrade.md) |
+| `connection refused` on :2222 | gateway down/restarting | `systemctl restart forkd-sshd-gateway` |
+| `Text file busy` on deploy | overwrote a running binary | deploy to `.new` then `mv` (see deploy scripts) |
+| `child-1.sock never appeared within 10s` | controller busy / cold spawn | wait for pool refill; check watchdog tarballs |
+| `pooled sb-… is stale (controller forgot it)` | controller restart pruned pool | backend restart (above) — see below, the pool does **not** recover on its own |
+| `sandbox is suspended; resume it first` | lease suspended, op needs live VM | `resume <id>` first |
+| `failed to grant sandbox` 500 | pool refill window | retry after ~30s |
+| `spawned sandbox failed the integrity probe` | toolchain corrupt in that image generation | re-bake the image; the bad sandbox is already killed |
+| `pooled sb-… failed the integrity probe` | a pooled sandbox predates a fix | expected once per bad sandbox; the pool refills clean |
+| `warmPool: spawn <tag>:` repeating forever | tag's snapshot can't restore (e.g. vmstate from an older Firecracker) | re-bake that tag; the backend retries it every 5s until then |
+| exec `proxy.golang.org` blocked | `lan` policy has no internet | use `network_policy: internet` or allowlist |
 
-## Users & identity
+### A controller restart leaves the pool cold until it is drained
 
-- **Revoking access** = `DELETE /api/users/{id}` (or `ssh-key rm
-  <user-id>`); with the identity store present the gateway treats it as
-  authoritative, so removal is immediate.
+`warmPool` sizes the pool with `len(s.store.pool[image])` and returns early at
+`poolSize`, but the pool is in memory only and the controller has no
+client-liveness concept. After a controller restart the backend still holds
+the old ids, so the count reads "full" while every entry is dead: no refill
+happens, and the pool stays cold indefinitely. Each grant pops one phantom
+(`is stale … dropping`) and then cold-spawns, so grants keep working and the
+symptom is invisible except in the journal.
+
+Observed 2026-09-12: three phantom `elixir-release` ids, zero live sandboxes,
+and a grant that dropped all three before spawning. `systemctl restart
+spoond-backend` clears it, which is why the row above says to restart the
+backend rather than the controller.
+
+Do not "fix" this by making the refill more aggressive without checking the
+disk budget first: `POOL_SIZE × images` sandboxes at ~12 GiB per child is
+larger than the pool's free space on this host, so a refill that spawns
+without accounting for phantoms can fill the pool.
+
+A tag that cannot restore is retried on every refill tick — observed at
+**1440 failed spawn attempts in 20 minutes** (6 un-restorable tags × a 5s
+tick), each one a doomed restore. A per-image backoff after a failed spawn
+would cut that to a handful without changing behaviour for healthy tags.
+
+## The integrity probe
+
+`SANDBOX_PROBE` (default on) runs a behaviour check inside each sandbox before
+it is pooled or leased — `uname -s` must report Linux, `tr` must translate —
+and kills the sandbox on failure. It catches a corrupted toolchain that is
+otherwise invisible: the sandbox pings fine and `uname --version` exits 0
+while returning another program's output. `docs/ci-jobs.md` has the observed
+signatures.
+
+Two operational consequences. A bad image generation now surfaces as probe
+failures in the backend journal instead of 48-second build failures, so a run
+of them means the image needs re-baking rather than the sandbox layer needing
+attention. And `SANDBOX_PROBE=0` is the escape hatch if the probe itself
+misbehaves — grants then hand out unverified sandboxes, which is what every
+deployment did before it existed.
+
+The probe is a detection net, not a fix: it stops a corrupt sandbox from
+costing a debugging cycle, and says nothing about why the image was corrupt.
+
+Failed jobs are recorded as JSON under `/var/lib/spoond/jobs/`
+(`JOB_RECORD_DIR`), naming the failing step, its exit code and its output
+tail. That is the first place to look for a red build — the runner's Forgejo
+logs are not readable back out.
+
+## Diagnostics first
+
+Before any recovery: capture state (the watchdog tarball pattern):
+
+```bash
+# controller + backend journals, firecracker table, daemon dirs, netns
+journalctl -u forkd-controller --since "30 min ago" --no-pager > /tmp/ctl.log
+journalctl -u forkd-backend    --since "30 min ago" --no-pager > /tmp/be.log
+ps -eo pid,etimes,comm,args | grep '[f]irecracker' > /tmp/fc.txt
+ls -la /var/run/netns/ > /tmp/netns.txt
+curl -s http://127.0.0.1:8889/v1/sandboxes > /tmp/controller-sandboxes.json
+```
+
+## Backups
+
+The backend has no persistent state to back up (leases are in-memory;
+workspaces live in the controller). Backup the controller's workspace
+snapshots, the gateway key dir, and — in identity-store mode — the
+**user store** (it holds users, key fingerprints, quotas; losing it
+loses all SSH identities):
+
+```bash
+# controller workspace dir + gateway keys + user store
+tar czf /backup/forkd-$(date +%F).tar.gz \
+  /var/lib/forkd /etc/forkd-gateway /etc/spoond-backend-users.json
+```
+
+## Users & identity (v1.1)
+
+- **Revoking access** = `DELETE /api/users/{id}` (or
+  `ssh-key rm <user-id>`); with the identity store present the gateway
+  treats it as authoritative, so removal is immediate — no key-dir
+  cleanup needed.
 - **Quotas** are per-user (`max_leases`/`max_ttl` via
   `POST /api/users/{id}/quota`); over-cap creates return `429`. A user
   with `max_leases: 0` is unlimited.
 - **Salt rotation / token hashes**: token and LLM-key hashes are
   HMAC-SHA256 with a per-store salt (sidecar `<users-file>.salt`); back
-  up the salt alongside the store or existing hashes become unverifiable
-  on restore.
+  up the salt alongside the store or existing hashes become
+  unverifiable on restore.
 - **Forward-auth proxy** (`PROXY_AUTH_MODE=forward-auth`): the
   `PROXY_AUTH_SECRET` is shared with the IdP/Caddy; ensure Caddy strips
   inbound `X-Proxy-Auth`/`Remote-User` headers so guests can't spoof

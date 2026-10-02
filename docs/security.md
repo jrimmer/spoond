@@ -12,15 +12,14 @@ and the independent clean-room rescan (deleg_3a249d37, two fresh reviewers).
   `X-Proxy-Auth`, `Remote-User`, `X-Spoond-User-Id`, `X-Bootstrap-Token`
   before the guest app sees them; a tenant can no longer harvest the
   forward-auth secret from inside their own sandbox.
-- **F3 guest isolation** — default egress policy is `restricted`, not
-  `lan`: a guest reaches the host service address
-  (`HOST_GUEST_SERVICE_ADDR`: LLM gateway, shelly assets, proxy) and its
-  own allowlist, NOT peer sandboxes. Every sandbox's guest agent is
-  reachable from its own network namespace, so guest→guest must be
-  blocked by default; operators who need full LAN egress opt in with
-  `network_policy=lan`. On the E2B substrate the agent is reached through
-  the orchestrator's loopback proxy and the host firewall keeps the
-  orchestrator's ports off-host (`deploy/e2b/e2b-guard.nft`).
+- **F3 guest isolation** — default egress policy is now `restricted`, not
+  `lan`: a guest can only reach the host bridge IP (10.43.0.1: LLM
+  gateway, shelly assets, proxy) + its allowlist, NOT peer sandboxes.
+  Every sandbox carries an unauthenticated root exec agent on :8888 and
+  a shelley agent on :9000, so guest→guest must be blocked by default;
+  operators who need full LAN egress opt in with `network_policy=lan`.
+  (The agent itself still binds 0.0.0.0:8888 because forkd-controller
+  dials it from the host — full agent-auth is a controller-side change.)
 - **F4 proxy capability names** — in capability mode (no auth) only the
   unguessable 32-hex lease id resolves; guessable friendly names are 404
   unless forward-auth is on (where lookups are owner-scoped). Legacy
@@ -58,9 +57,9 @@ Known/accepted residuals (documented, not code-changed):
 - `InsecureSkipVerify` on the gateway→backend loopback TLS (self-signed
   cert; local-only). Prefer a pinned CA or Unix socket in locked-down
   deployments.
-- The in-guest agent channel (`envd`) is reachable only through the
-  orchestrator's loopback proxy, which the host firewall keeps off-host;
-  the default restricted policy is the spoond-side mitigation.
+- The in-guest agent channel is unauthenticated by contract with
+  forkd-controller; default restricted policy is the spoond-side
+  mitigation.
 - `PROXY_AUTH_MODE` still defaults to off (capability model) — flipping
   it requires the staged Caddy forward-auth deploy (U7).
 

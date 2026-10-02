@@ -1,130 +1,115 @@
 # Installing spoond
 
-spoond's sandbox substrate is **E2B's node runtime** — the orchestrator,
-the template manager and the `envd` guest agent — run standalone from our
-patch-queue fork of `github.com/e2b-dev/runtime` (`lacy.casa/e2b-runtime`).
-spoond is the control plane on top: identity, quotas, leases, the SSH
-gateway, the proxy, the image catalog and SQLite state. There is no
-controller package to install from this repo.
+Two install paths:
 
-## Prerequisites
+1. **forkd + spoond (full stack)** — forkd-controller provides the microVM
+   orchestration (Firecracker, warm pool, guest agent); spoond is the lease
+   API, SSH gateway, and agent endpoints on top of it.
+2. **spoond only** — you already run forkd-controller (or want the lease API
+   against a controller on another host); only the spoond services are
+   installed here.
 
-- A Linux host (Debian/Ubuntu-style, x86_64) with KVM and ZFS.
-- **Go 1.27.1** (`apt-get install -y golang-go`, or install from
-  <https://go.dev/dl/>), used both to build spoond and the orchestrator and
-  `envd` from the fork.
-- Docker, for the local image registry and the image builds.
-- A clone of this repo and of the E2B fork:
-  ```bash
-  git clone https://code.lacy.casa/lacy.casa/spoond.git
-  git clone https://code.lacy.casa/lacy.casa/e2b-runtime.git
-  ```
+Both paths assume a Linux host (Debian/Ubuntu-style) with a Go toolchain
+(1.22+). The install script is written so an agent can run it line-by-line
+and verify with `spoond doctor`.
 
-## 1. Host setup
-
-`deploy/e2b/host-setup.sh` brings up the E2B side as root: packages and
-kernel modules, sysctls and hugepages (with a `MemAvailable` guard), the
-MSS clamp, the ZFS dataset and directories under `/forkdcache/e2b/`, the
-pinned Firecracker, kernel and busybox artifacts (SHA-256 verified), the
-`envd` and orchestrator binaries from the fork, the `e2b-guard` nftables
-host firewall, and the local Docker registry on `127.0.0.1:5000`.
+## Prerequisites (both paths)
 
 ```bash
-./deploy/e2b/host-setup.sh
+# Go toolchain (1.27.1+)
+apt-get install -y golang-go   # or install from https://go.dev/dl/
+
+# clone the repo
+git clone https://github.com/jrimmer/spoond && cd spoond
 ```
 
-Then apply the remaining steps of
-[U04](plans/2026-09-30-e2b-substrate/U04-host-bringup.md): the
-`e2b-orchestrator.service` unit with `deploy/e2b/orchestrator.env`, the
-token seed (`/etc/spoond/e2b-token-seed`, 64 hex chars, mode 0600), the
-`flags.json` override file and the OpenTelemetry collector
-(`deploy/e2b/otelcol-config.yaml`).
-
-## 2. Build and install spoond
+## Path 1: forkd + spoond (full stack)
 
 ```bash
-go build -o /opt/spoond/spoond ./cmd/spoond
-install -m 644 deploy/spoond-backend.service deploy/spoond-sshd-gateway.service \
-  deploy/spoond-runner.service /etc/systemd/system/
-systemctl daemon-reload
+# 1. forkd-controller — separate upstream project.
+#    Follow its own install docs (github.com/jrimmer/forkd) and leave it
+#    running with its API on http://127.0.0.1:8889.
+#    Needs Firecracker >= 1.15. A restore re-points each sandbox's rootfs
+#    drive at its own copy so concurrent sandboxes cannot corrupt one
+#    another; older builds accept that call without moving the device's
+#    storage, so the minimum is enforced rather than advisory and a restore
+#    on an older build fails instead of running the sandbox unsafely.
+#    Upgrading Firecracker invalidates existing snapshots — a vmstate is
+#    version-pinned — so re-bake tags as part of that upgrade.
+# 2. spoond on top:
+./deploy/install-spoond.sh --with-forkd
 ```
 
-Create `/etc/spoond/backend.env` (mode 0600). The variables the backend
-reads are:
+What the script does (idempotent, `.prev` backups):
 
-```ini
-CONSUMER_TOKENS=<token>=<owner>,<token2>=<owner2>   # required
-SPOOND_DB_PATH=/var/lib/spoond/spoond.db
-E2B_GRPC_ADDR=127.0.0.1:5008
-E2B_PROXY_URL=http://127.0.0.1:5007
-E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
-E2B_TEAM_ID=5b0f4e3a-8c1d-4f2e-9a6b-7d3c2e1f0a95
-E2B_TEMPLATE_STORAGE_PATH=/forkdcache/e2b/storage/templates
-IMAGE_REGISTRY=localhost:5000
-HOST_GUEST_SERVICE_ADDR=<host IP guests use for spoond services>
-HOST_GUEST_SERVICE_PORT=8891
-TLS_CERT=/etc/spoond/tls/fullchain.pem
-TLS_KEY=/etc/spoond/tls/privkey.pem
-```
+1. Builds `spoond` (one binary, all services).
+2. Installs to `$PREFIX/spoond/spoond` (default `/opt`).
+3. Creates `/etc/spoond-backend.env` (consumer tokens — **edit before
+   starting**), `/etc/spoond-gateway/keys/` (SSH key allowlist).
+4. Installs systemd units: `spoond-backend`, `spoond-sshd-gateway`,
+   `spoond-watchdog.{service,timer}`.
+5. Starts services, then runs `spoond doctor` to verify every dependency
+   (forkd-controller, lease API, gateway port, LLM upstream, warm pool, TLS,
+   disk).
 
-`USERS_FILE` enables the multi-user identity store,
-`BOOTSTRAP_TOKEN` gates first-user bootstrap, `GATEWAY_TOKEN` is the SSH
-gateway's backend credential (in `/etc/spoond-gateway.env`, mode 0600),
-`ADMIN_TOKEN` enables the `/api/admin/*` routes, `METRICS_TOKEN` is the
-scrape-only metrics credential, `OTEL_PROM_URL` appends the orchestrator's
-collector output to `/metrics`, `GC_DELETE` allows the catalog GC to
-delete builds, `SPOOND_BACKUP_DIR` is the daily `VACUUM INTO` target, and
-`CHECKPOINT_INTERVAL_MINS` sets the periodic checkpoint of persistent
-leases. `docs/setup.md` has the full reference.
-
-## 3. Build the images
-
-Images are Dockerfiles under `images/`, described by
-`images/manifest.yaml`. `spoond images build` pushes each one to the local
-registry and turns it into an E2B template (a booted, snapshotted
-microVM), so every later create is a warm restore:
+**First-run steps after the script (v1.1 — identity store mode):**
 
 ```bash
-spoond images build --all --manifest images/manifest.yaml --context images
-spoond images list --db /var/lib/spoond/spoond.db   # one row per image
-```
+# 1. Set real consumer tokens + optional TLS, and enable the identity store:
+sudoedit /etc/spoond-backend.env
+#   CONSUMER_TOKENS=token=consumer,...
+#   USERS_FILE=/etc/spoond-backend-users.json   ← multi-user tenancy (v1.1)
+#   BOOTSTRAP_TOKEN=$(openssl rand -hex 24)      ← gate first-user bootstrap
+#   GATEWAY_TOKEN=<same token the gateway uses>   ← SSH user impersonation
+sudo systemctl restart spoond-backend
 
-## 4. Verify
-
-```bash
-spoond doctor            # human-readable table, exit 0 = all pass
-spoond doctor --json     # machine-readable
-```
-
-The doctor exercises the orchestrator (`/health`, `NodeInfo`), the image
-registry, the lease API listener and `/healthz`, the SSH gateway port, the
-token seed, the SQLite catalog with its baked images, the pinned E2B
-artifacts, the build storage, TLS material, the LLM upstream and disk —
-reading the same environment the backend uses.
-
-## First user
-
-With `USERS_FILE` set, bootstrap the first (admin) user with an SSH public
-key:
-
-```bash
+# 2. Bootstrap the first (admin) user with your SSH public key.
+#    With BOOTSTRAP_TOKEN set this is a direct API call:
 FP=$(ssh-keygen -lf ~/.ssh/id_ed25519.pub | awk '{print $2}')
 curl -s -X POST https://127.0.0.1:8890/api/users \
   -H "Authorization: Bearer $CONSUMER_TOKEN" -H "X-Bootstrap-Token: $BOOTSTRAP_TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{\"name\":\"you\",\"kind\":\"person\",\"fingerprints\":[\"$FP\"]}"
 
-systemctl enable --now spoond-backend spoond-sshd-gateway spoond-runner
+# 3. Verify:
+sudo /opt/spoond/spoond doctor
 ssh new@<this-host> -p 2222     # creates a sandbox, drops you in
 ```
 
-> **Legacy single-user mode** (no `USERS_FILE`): instead of the bootstrap
-> call, drop a public key into the gateway allowlist and restart:
+> **Legacy single-user mode** (no `USERS_FILE`): instead of step 2, drop
+> your public key into the gateway allowlist and restart:
 > `echo "ssh-ed25519 AAAA… you@laptop" | sudo tee /etc/spoond-gateway/keys/you.pub &&
 > sudo systemctl restart spoond-sshd-gateway`
 
+## Path 2: spoond only
+
+You have forkd-controller running elsewhere (e.g. another host, or you only
+need the lease API / gateway against a remote controller).
+
+```bash
+# point FORKD_URL at your controller before starting
+export FORKD_URL=http://<controller-host>:8889
+./deploy/install-spoond.sh      # no --with-forkd
+```
+
+The script leaves `FORKD_URL` at `http://127.0.0.1:8889` in
+`/etc/spoond-backend.env` — edit it to your controller before starting
+services, or the `doctor` forkd checks will fail (as they should).
+
+## Verification
+
+`spoond doctor` is the single command that checks everything:
+
+```bash
+sudo /opt/spoond/spoond doctor            # human-readable table, exit 0 = all pass
+sudo /opt/spoond/spoond doctor --json     # machine-readable
+```
+
+Checks: config env, forkd-controller connectivity + sandbox list, lease API
+listener + `/healthz` (TLS-aware, uses the cert's own SAN), SSH gateway port,
+LLM gateway upstream (key present + `/models` probe), warm pool size, TLS
+material, disk fill.
+
 See also: [docs/setup.md](setup.md) for the full env/flag reference,
-[docs/api.md](api.md) for the HTTP API, [docs/ctl.md](ctl.md) for the
-control plane, [docs/operations.md](operations.md) for running it, and
-[docs/runbooks/e2b-upgrade.md](runbooks/e2b-upgrade.md) for moving the
-fork to a newer upstream.
+[docs/api.md](api.md) for the HTTP API, [docs/ctl.md](ctl.md) for the control
+plane.

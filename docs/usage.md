@@ -10,7 +10,7 @@ proxying, and policies.
 curl -s -X POST https://sandbox.example.com/api/sandboxes \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"image":"dev-base","ttl":600}'
-# → {"id":"…","address":"10.11.0.5",…}
+# → {"id":"…","address":"10.42.0.2:8888",…}
 
 ssh <id>@sandbox.example.com "uname -a"          # run a command
 ssh <id>@sandbox.example.com                      # interactive shell
@@ -155,24 +155,24 @@ ssh ctl@sandbox.example.com "prompt <id> write a fibonacci function"
 
 ## MCP / ACP agent endpoints
 
-### `spoond mcp` (MCP stdio server, JSON-RPC 2.0 over stdio)
+### `forkd-dev-mcp` (MCP stdio server, JSON-RPC 2.0 over stdio)
 
 Tools: `shell`, `read_file`, `write_file`, `edit_file`, `list_files`,
 `status`. Point Goose/Claude Code-style MCP clients at it:
 
 ```bash
-FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-user-token> \
+FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
   ./spoond mcp
 ```
 
-### `spoond acp` (Agent Client Protocol server)
+### `forkd-acp` (Agent Client Protocol server)
 
 Sessions map 1:1 to leases; the agent loop runs through the LLM gateway
 with in-sandbox tools. One `spoond acp` process serves the whole
 conversation (sessions are process-scoped).
 
 ```bash
-FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-user-token> \
+FORKD_BACKEND_URL=https://sandbox.example.com FORKD_TOKEN=<consumer-token> \
   FORKD_LLM_MODEL=gpt-oss-20b-fireworks ./spoond acp
 ```
 
@@ -253,5 +253,4 @@ commands, read output, and release it — no shell needed:
 3. `GET /api/sandboxes/{id}/stat` → resource awareness
 4. `DELETE /api/sandboxes/{id}` → always release
 
-`curl` with `Authorization: Bearer <token>` is all a caller needs; the
-examples in [api.md](api.md) are copy-pasteable.
+`forkd-curl` (in `scripts/`) wraps this with a friendly CLI.

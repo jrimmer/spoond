@@ -13,7 +13,7 @@ in the map falls through to `DEFAULT_IMAGE`.
 Deployed on `sandbox`:
 
 ```
-RUNNER_LABELS=ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
+RUNNER_LABELS=forkd,ubuntu-latest,go,golang,elixir,elixir-base,llm-review,elixir-release,release
 IMAGE_MAP=ubuntu-latest=py-base,go=go-base,golang=go-base,elixir=elixir-base,\
 elixir-base=elixir-base,llm-review=llm-review,dev=dev-base,\
 elixir-release=elixir-release,release=elixir-release
@@ -21,7 +21,7 @@ DEFAULT_IMAGE=py-base
 ```
 
 So `runs-on: elixir-release` gets the `elixir-release` tag. This is the only
-job-side knob: no workflow needs to know about images, templates, or leases.
+job-side knob: no workflow needs to know about forkd, snapshots, or leases.
 
 **Footgun:** an unmapped or mistyped label silently gets `py-base`, and the
 job then fails somewhere unrelated with a missing toolchain. If a job needs a
@@ -57,21 +57,24 @@ Already handled by the runner, so jobs need not:
 - `CI=true` is set in the step environment (interactive prompts otherwise hang
   on `/dev/console`, which never EOFs).
 - Step exec timeouts: `EXEC_TIMEOUT_SECS` / `MAX_EXEC_TIMEOUT_SECS` (both 5400
-  on `sandbox`), with the exec ceiling carried end to end by the backend's
-  own request timeouts. These were four stacked 10-minute ceilings; do not
-  reintroduce one by hardcoding a shorter timeout in a step.
+  on `sandbox`), with `FORKD_HTTP_TIMEOUT_SECS` on the backend raised to match.
+  These were four stacked 10-minute ceilings; do not reintroduce one by
+  hardcoding a shorter timeout in a step.
 
 ## Host prerequisites
 
-The E2B substrate provides what used to be host prerequisites here: images
-are Dockerfiles under `images/`, built into E2B templates with
-`spoond images build` (see
-[U07](plans/2026-09-30-e2b-substrate/U07-image-pipeline.md)). The host owes
-the orchestrator free hugepages for every warm start and the pinned
-Firecracker, kernel and envd artifacts; each sandbox's rootfs and memory
-snapshot are allocated by the orchestrator itself, so jobs no longer depend
-on a host-side snapshot cache, a reflink-capable rootfs cache or a
-provisioned netns pool.
+- **Firecracker ≥ 1.15.** Restores use `PATCH /drives` on a restored VM to give
+  each sandbox its own rootfs, and older builds accept the call without moving
+  the device's storage — so the minimum is enforced rather than advisory. On an
+  older build a restore fails and the sandbox is not started, rather than
+  running against a shared rootfs.
+- **A reflink-capable filesystem for the rootfs cache** (XFS/btrfs, or ZFS 2.2+
+  block cloning) if per-sandbox copies are to be free. Elsewhere each spawn
+  costs a full copy of the rootfs, which makes a large `POOL_SIZE` expensive.
+- **Provisioned netns** for multi-child restores: `scripts/netns-setup.sh N`.
+  `POOL_SIZE × len(KNOWN_IMAGES)` is the pool's desired size and must fit inside
+  the namespaces available, or spawning outside the pool fails with
+  `netns pool exhausted`.
 
 ## Using the concurrency the sandbox layer allows
 
