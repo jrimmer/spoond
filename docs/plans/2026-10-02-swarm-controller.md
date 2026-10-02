@@ -67,6 +67,12 @@ within one hive tick (30 s). Persistent leases, stopped by the
 controller after `[BYE]`.
 
 **C5. Health and retries.**
+- Bees work without calling the lease API, so the backend's idle sweep
+  (`IDLE_TIMEOUT_SECS=1800` in the `spoond-backend` unit) sees their
+  persistent leases as idle and suspends them (2026-10-02: three bees
+  frozen mid-task). The hive calls `keepalive` on every live bee's lease
+  each tick (it counts as activity), and resumes any bee lease it finds
+  suspended. Until the hive exists, agent-hub `swarm-keepalive` does this.
 - An bee whose lease is gone, or whose progress signal reports
   "no log activity" for 30 min, or that sends nothing for 60 min, is
   stopped; its claim is released with a comment; the task is retried.
