@@ -259,3 +259,24 @@ func TestSandboxPoolAndDelete(t *testing.T) {
 		t.Fatalf("get after delete = %v, want ErrNotFound", err)
 	}
 }
+
+// TestImageUses counts grants per image and survives an image upsert.
+func TestImageUses(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	for _, img := range []string{"py-base", "py-base", "go-base"} {
+		if err := db.CountImageUse(ctx, img); err != nil {
+			t.Fatalf("count %s: %v", img, err)
+		}
+	}
+	if err := db.UpsertImage(ctx, ImageRow{Name: "py-base", TemplateID: "tpl", VCPU: 2, MemoryMB: 1024, DiskMB: 4096, UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := db.ImageUses(ctx)
+	if err != nil {
+		t.Fatalf("uses: %v", err)
+	}
+	if want := map[string]int{"py-base": 2, "go-base": 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("uses = %v, want %v", got, want)
+	}
+}

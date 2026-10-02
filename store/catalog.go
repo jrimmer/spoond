@@ -284,6 +284,35 @@ func (db *DB) UpdateBuildSize(ctx context.Context, id string, sizeBytes int64) e
 	return nil
 }
 
+// CountImageUse adds one lease grant to image's lifetime count.
+func (db *DB) CountImageUse(ctx context.Context, image string) error {
+	_, err := db.w.ExecContext(ctx, `INSERT INTO image_uses (image, uses) VALUES (?, 1)
+ON CONFLICT(image) DO UPDATE SET uses = uses + 1`, image)
+	if err != nil {
+		return fmt.Errorf("store: count use of %s: %w", image, err)
+	}
+	return nil
+}
+
+// ImageUses returns every image's lifetime lease-grant count.
+func (db *DB) ImageUses(ctx context.Context) (map[string]int, error) {
+	rows, err := db.r.QueryContext(ctx, `SELECT image, uses FROM image_uses`)
+	if err != nil {
+		return nil, fmt.Errorf("store: image uses: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var image string
+		var n int
+		if err := rows.Scan(&image, &n); err != nil {
+			return nil, fmt.Errorf("store: image uses: %w", err)
+		}
+		out[image] = n
+	}
+	return out, rows.Err()
+}
+
 // SandboxRow is one row of the sandboxes table: a running (or recently
 // running) E2B microVM. LeaseID "" marks a pool sandbox.
 type SandboxRow struct {
