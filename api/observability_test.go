@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,57 @@ import (
 
 	"github.com/jrimmer/spoond/v2/substrate"
 )
+
+// TestLeaseGrantDurationObservedOnGrant: a grant against the fake
+// substrate increments spoond_lease_grant_duration_seconds. The metric
+// is observed in Service.grant only when the lease is actually returned
+// (pool hit or cold create alike), so a scrape after one successful
+// create must show count 1.
+func TestLeaseGrantDurationObservedOnGrant(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	if n := grantHistogramCount(t, ts); n != 0 {
+		t.Fatalf("fresh server: lease_grant_duration count = %d, want 0", n)
+	}
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	if resp.StatusCode != 201 {
+		t.Fatalf("create status %d: %v", resp.StatusCode, body)
+	}
+
+	if n := grantHistogramCount(t, ts); n != 1 {
+		t.Fatalf("after one grant: lease_grant_duration count = %d, want 1", n)
+	}
+}
+
+// grantHistogramCount scrapes /metrics and sums the
+// spoond_lease_grant_duration_seconds_count samples.
+func grantHistogramCount(t *testing.T, ts *httptest.Server) uint64 {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer token-a")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	body := readAll(t, resp)
+	var total uint64
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "spoond_lease_grant_duration_seconds_count") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("malformed sample line: %q", line)
+		}
+		var v float64
+		if _, err := fmt.Sscanf(fields[1], "%g", &v); err != nil {
+			t.Fatalf("sample value %q: %v", fields[1], err)
+		}
+		total += uint64(v)
+	}
+	return total
+}
 
 // TestHealthzHealthyAndDegraded: /healthz reports the orchestrator
 // status on 200, and 503 "unreachable" when NodeInfo fails (U11).

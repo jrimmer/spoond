@@ -288,6 +288,12 @@ Found on 2026-10-02:
 - **The dashboard's create time is real.** It averaged a single 2-second
   scrape and read 0; it now averages the last hour and shows "–" when
   nothing was created (`b5f6089`).
+- **`spoond_lease_grant_duration_seconds` measures the grant again.**
+  The observation was dropped in the 2.0 rewiring, so the histogram sat
+  at count 0 and the dashboard stopped plotting it. It is now observed
+  around the whole grant — request received to lease returned, covering
+  pool hits, cold creates and the integrity probe; failed grants stay
+  out of the latency.
 
 Earlier in the 2.0 effort:
 
