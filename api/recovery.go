@@ -13,7 +13,7 @@ import (
 
 // lostLeaseMessage is the 410 error body for a lease whose sandbox died
 // in a substrate crash.
-const lostLeaseMessage = "sandbox lost in a substrate crash; delete this lease"
+const lostLeaseMessage = "lease lost in a substrate crash; delete this lease"
 
 // recoverySummary is the reconcileCrash result and the
 // POST /api/admin/reconcile response.

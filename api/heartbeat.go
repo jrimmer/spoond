@@ -62,11 +62,11 @@ func (h *leaseHeartbeat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	lease := h.svc.lookupAny(leaseID)
 	if lease == nil {
 		h.forgetLastWrite(leaseID)
-		http.Error(w, "sandbox not found", http.StatusNotFound)
+		http.Error(w, "lease not found", http.StatusNotFound)
 		return
 	}
 	if lease.Suspended {
-		http.Error(w, "sandbox is suspended; resume it first", http.StatusConflict)
+		http.Error(w, "lease is suspended; resume it first", http.StatusConflict)
 		return
 	}
 	if h.claimWrite(leaseID) {

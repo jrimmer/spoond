@@ -150,7 +150,7 @@ func (s *Server) SetAssetsDir(dir string) { s.assetsDir = dir }
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	label, hostUser, port, ok := parseProxyHost2(r.Host)
 	if !ok {
-		http.Error(w, "unknown sandbox hostname", http.StatusNotFound)
+		http.Error(w, "unknown lease hostname", http.StatusNotFound)
 		return
 	}
 	var lease *Lease
@@ -194,11 +194,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// exposure. Keep the old behavior for these deployments.
 		lease = s.svc.lookupByName(label)
 	} else {
-		http.Error(w, "unknown sandbox hostname", http.StatusNotFound)
+		http.Error(w, "unknown lease hostname", http.StatusNotFound)
 		return
 	}
 	if lease == nil {
-		http.Error(w, "sandbox not found", http.StatusNotFound)
+		http.Error(w, "lease not found", http.StatusNotFound)
 		return
 	}
 	// envd is never exposed through spoond's proxy: guest port 49983 is
@@ -211,7 +211,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	s.svc.touch(lease.ID) // proxied web traffic is activity for the idle sweeper
 	// A suspended lease has no running sandbox; resume it first.
 	if lease.Suspended {
-		http.Error(w, "sandbox is suspended; resume it first", http.StatusConflict)
+		http.Error(w, "lease is suspended; resume it first", http.StatusConflict)
 		return
 	}
 	// A lease lost in a substrate crash has no sandbox to proxy to (U10).
@@ -223,7 +223,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// sandbox proxy routes it into the sandbox. A lease without a host
 	// address has no running sandbox.
 	if lease.HostIP == "" {
-		http.Error(w, "sandbox not running", http.StatusBadGateway)
+		http.Error(w, "lease not running", http.StatusBadGateway)
 		return
 	}
 	proxyURL, err := url.Parse(s.svc.cfg.ProxyURL)

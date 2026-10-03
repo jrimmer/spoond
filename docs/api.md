@@ -1,7 +1,11 @@
 # API Reference
 
 Base URL: `https://<backend>:8890` (HTTPS when `TLS_CERT`/`TLS_KEY` are
-set, plain HTTP otherwise). All endpoints except `/healthz`,
+set, plain HTTP otherwise). The resource is the **lease**; every route
+lives under `/api/leases/…`. `/api/sandboxes/…` is a permanent alias for
+the same routes — identical behavior, auth and responses — kept for
+every client written before 2.0; new code should use `/api/leases/…`.
+All endpoints except `/healthz`,
 `GET /hive/guide` (the hive's enlistment guide, below), the
 `/api/admin/*` routes (which carry their own `ADMIN_TOKEN`) and the
 `/llm/` prefix (where the lease id in the path is the capability)
@@ -19,15 +23,15 @@ capability: only the owner (or anyone holding the token that owns it, or
 a grantee via a share) can act on it.
 
 Errors are JSON: `{"error":"human-readable message"}` with an appropriate
-HTTP status. Sandboxes are E2B microVMs; what that implies for a given
-field is noted below, and the platform itself is described in
-[substrate.md](substrate.md).
+HTTP status. A lease runs on an E2B microVM (the substrate "sandbox");
+what that implies for a given field is noted below, and the platform
+itself is described in [substrate.md](substrate.md).
 
 ---
 
-## Sandboxes
+## Leases
 
-### `POST /api/sandboxes` — create a lease
+### `POST /api/leases` — create a lease
 
 Request:
 
@@ -41,7 +45,7 @@ Request:
 | `init_cmd` | string | *(ignored)* | accepted for compatibility |
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
 | `egress_allowlist` | []string | *(empty)* | IPs/CIDRs/domains for `restricted`; also lease references (see below) |
-| `expose_ports` | []int | *(none)* | guest TCP ports published for peer sandboxes. Max 8; port 49983 (envd) is refused; duplicates and out-of-range ports are refused |
+| `expose_ports` | []int | *(none)* | guest TCP ports published for peer leases. Max 8; port 49983 (envd) is refused; duplicates and out-of-range ports are refused |
 
 Response `201 Created`:
 
@@ -58,24 +62,23 @@ Response `201 Created`:
 }
 ```
 
-`address` is the sandbox's host-side address (no port). `exposed` maps
+`address` is the lease's host-side address (no port). `exposed` maps
 each published port to `<address>:<port>` — reachable from peers whose
 egress policy permits it (see [Network policy](#network-policy)), never
-from the LAN. The same map appears in `GET /api/sandboxes`.
+from the LAN. The same map appears in `GET /api/leases`.
 
 Errors: `400` bad policy/ports/memory, `404` unknown image, `429` quota,
 `503` capacity (not enough free hugepage memory for the image, or the
 node is not healthy).
 
-### `GET /api/sandboxes` — list leases
+### `GET /api/leases` — list leases
 
 Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `id`, `owner`, `image`, `address`, `expires` (unix seconds),
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
 `name`, `comment`, `net_policy`, `egress_allowlist`, `exposed`.
 
-### `GET /api/sandboxes/{id}` — lease detail
-
+### `GET /api/leases/{id}` — lease detail
 The same object as a list row plus `state`, `recovered_from` (RFC 3339 or
 `""`) and `last_checkpoint_at`. Requires the owner or an `http` share.
 
@@ -94,12 +97,12 @@ while suspended, where `resume_build_id` is the one to resume from).
 with `tag`. Owner-scoped. Used by the SSH gateway (`ssh <name>@…`) and by
 scripts.
 
-### `DELETE /api/sandboxes/{id}` — delete
+### `DELETE /api/leases/{id}` — delete
 
 Releases the lease and its sandbox. `204 No Content`. Builds are left for
 the GC (and stay listed by `GET /api/snapshots` until reclaimed).
 
-### `POST /api/sandboxes/{id}/exec` — run a command
+### `POST /api/leases/{id}/exec` — run a command
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
@@ -120,7 +123,7 @@ the per-owner concurrent exec/stream cap is reached. (There is no
 lease-busy `409` here: the concurrency guard on exec is the per-owner
 cap, which yields `429`.)
 
-### `GET /api/sandboxes/{id}/stat` — guest metrics
+### `GET /api/leases/{id}/stat` — guest metrics
 
 One-shot, stateless probe (loadavg/meminfo/netdev/df via exec, 5s
 timeout). Response `200 OK`:
@@ -134,7 +137,7 @@ timeout). Response `200 OK`:
 }
 ```
 
-### `GET /api/sandboxes/{id}/endpoint` — resolve sandbox endpoint
+### `GET /api/leases/{id}/endpoint` — resolve lease endpoint
 
 Kept for compatibility. The gateway no longer uses it (SSH sessions are
 relayed over `/stream`). The `forkd_id` key keeps its pre-2.0 name
@@ -144,7 +147,7 @@ relayed over `/stream`). The `forkd_id` key keeps its pre-2.0 name
 {"id":"…","forkd_id":"<sandbox id>","image":"…","netns":"","guest_addr":"10.11.0.7"}
 ```
 
-### `GET /api/sandboxes/{id}/stream` — interactive process (WebSocket)
+### `GET /api/leases/{id}/stream` — interactive process (WebSocket)
 
 Upgrade to WebSocket; the first client message starts a process:
 
@@ -189,20 +192,20 @@ frames carry the same control JSON as above. `started`, `exit_code` and
 Closing the WebSocket stops the relay but does **not** kill the process;
 send `stop` or `kill` for that.
 
-### `POST /api/sandboxes/{id}/keepalive` — extend a persistent lease
+### `POST /api/leases/{id}/keepalive` — extend a persistent lease
 
 Request `{"ttl": <seconds>}` (0 = `MAX_TTL_SECS`; capped). Response:
 `{"id":"…","persistent":true,"expires_at":"…"}`. `400` if the lease is
 not persistent.
 
-### `POST /api/sandboxes/{id}/suspend` — snapshot + stop
+### `POST /api/leases/{id}/suspend` — snapshot + stop
 
 Persistent leases only (`400` otherwise). The sandbox is paused into a
 new build and stops; the lease stays, becomes `state: "suspended"`, and
 records `resume_build_id`. Response
-`{"id":"…","status":"suspended","message":"sandbox suspended; state snapshot kept (resume to restore)"}`.
+`{"id":"…","status":"suspended","message":"lease suspended; state snapshot kept (resume to restore)"}`.
 
-### `POST /api/sandboxes/{id}/resume` — start from the snapshot
+### `POST /api/leases/{id}/resume` — start from the snapshot
 
 Restores a suspended lease from `resume_build_id` **with the same sandbox
 id**, so its address and identity are unchanged. Response
@@ -211,20 +214,20 @@ id**, so its address and identity are unchanged. Response
 Resume is idempotent: there is no already-running check, so resuming a
 lease that is already running restores from the snapshot again.
 
-### `POST /api/sandboxes/{id}/restart` — reboot
+### `POST /api/leases/{id}/restart` — reboot
 
 Persistent and running: suspend then resume (same lease, same build
 chain, lossless through the pause build). Persistent and suspended:
 resume. Non-persistent: delete the sandbox and create a fresh one from
 the image's current build, keeping the lease id (its disk is lost —
 there is no snapshot to restore). Response
-`{"id":"…","status":"running","message":"sandbox restarted"}`.
+`{"id":"…","status":"running","message":"lease restarted"}`.
 `404` unknown, `409` when busy; a substrate
 failure on the non-persistent path (which does create a sandbox)
 surfaces as `500`, not `503` — unlike create, fork and clone, restart
 does not map capacity errors to `503`.
 
-### `POST /api/sandboxes/{id}/checkpoint` — snapshot a running sandbox
+### `POST /api/leases/{id}/checkpoint` — snapshot a running lease
 
 Owner only, live leases only (`409` otherwise, including while another
 operation is in flight). Writes a checkpoint build the lease can be
@@ -235,7 +238,7 @@ the background checkpoint loop does for active persistent leases. Response:
 {"id":"…","build_id":"<uuid>","at":"2026-10-01T12:00:00Z"}
 ```
 
-### `POST /api/sandboxes/{id}/clone` — branch to a new sandbox
+### `POST /api/leases/{id}/clone` — branch to a new lease
 
 Checkpoints the running sandbox and grants a fresh **persistent** lease
 from the checkpoint build, copying the source's network policy and
@@ -247,13 +250,13 @@ friendly *name*). Response `201 Created`:
 {"id":"…","image":"…","source":"<source-id>","branch_tag":"<build id>","persistent":true,"expires_at":"…"}
 ```
 
-### `POST /api/sandboxes/{id}/fork` — N copies of a running sandbox
+### `POST /api/leases/{id}/fork` — N copies of a running lease
 
 Owner only, as clone (shares are not honoured). Checkpoints the source
-once and creates `count` sandboxes from that build, each its own lease
+once and creates `count` leases from that build, each its own lease
 owned by the caller, with the source's policy copied. Quota is reserved
 for all of them up front (all or nothing); if any create fails, every
-sandbox created in the call is deleted.
+lease created in the call is deleted.
 
 Request `{"count":1..20,"persistent":false,"ttl":300}` (`ttl` 0 = the
 default TTL, capped at the maximum and the user's `max_ttl`).
@@ -262,7 +265,7 @@ Response `201 Created`: `{"source":"<id>","build_id":"<uuid>","ids":["…","…"
 Errors: `400` bad count, `404` unknown, `409` suspended or busy, `429`
 quota, `503` capacity.
 
-### `POST /api/sandboxes/{id}/network` — change egress policy live
+### `POST /api/leases/{id}/network` — change egress policy live
 
 Owner only. Updates the lease's policy and allowlist, re-applies the
 egress config to the running sandbox, and refreshes every peer's
@@ -272,17 +275,17 @@ Request `{"network_policy":"none|lan|internet|restricted","egress_allowlist":[�
 Response `200` `{"id","network_policy","egress_allowlist"}`. `400` on an
 invalid policy, `404` unknown, `409` suspended.
 
-### `POST /api/sandboxes/{id}/tag` — friendly name
+### `POST /api/leases/{id}/tag` — friendly name
 
 Request `{"name": "<unique-per-owner-name>"}`. Response
 `{"id":"…","name":"…","ok":true}`. Names enable `ssh <name>@…` and
 `GET /api/names/{name}`.
 
-### `POST /api/sandboxes/{id}/comment` — annotate
+### `POST /api/leases/{id}/comment` — annotate
 
 Request `{"comment": "…"}`. Response `{"id":"…","comment":"…","ok":true}`.
 
-### `POST /api/sandboxes/{id}/prompt` — message the in-sandbox Shelley agent
+### `POST /api/leases/{id}/prompt` — message the in-sandbox Shelley agent
 
 Request `{"message":"…","model":"gpt-oss-20b-fireworks"}` (model
 optional). Polls the Shelley conversation API inside the sandbox and
@@ -295,7 +298,7 @@ the agent's reply).
 
 ## Network policy
 
-`network_policy` decides what may leave a sandbox; the substrate enforces
+`network_policy` decides what may leave a lease; the substrate enforces
 it, from the config carried on create and updated live by `/network`.
 The default is **`restricted`** — a guest reaches only the host services
 spoond grants it (the proxy/LLM gateway port and DNS) plus its
@@ -307,7 +310,7 @@ the owner.
 | Policy | Egress |
 |---|---|
 | `none` | nothing at all |
-| `lan` | the LAN ranges (RFC 1918 minus the sandbox networks), host services, DNS, **every** exposing peer's published ports |
+| `lan` | the LAN ranges (RFC 1918 minus the lease networks), host services, DNS, **every** exposing peer's published ports |
 | `internet` | everything public, **plus** the LAN ranges, host services, DNS, **every** exposing peer's published ports |
 | `restricted` *(default)* | host services, DNS, the allowlist, and the published ports of the peers the allowlist names |
 
@@ -396,7 +399,7 @@ before using them by hand.
 
 `POST /llm/{lease-id}/openai/chat/completions` — OpenAI-compatible chat
 completion against the configured upstream. The lease id in the path is
-the capability; sandboxes hold no consumer token. The route only exists
+the capability; leases hold no consumer token. The route only exists
 when `LLM_UPSTREAM_URL` is set: with no upstream the gateway is never
 built, so `/llm/…` answers `404` (`spoond doctor` reports the same as a
 WARN). There is no in-sandbox fallback.
@@ -571,7 +574,7 @@ A lease owner can grant another user access to a lease for a limited
 time — sharing a workspace with a collaborator or an agent without
 copying the lease id/capability.
 
-### `POST /api/sandboxes/{id}/share` — grant (owner only)
+### `POST /api/leases/{id}/share` — grant (owner only)
 
 Request: `{"grantee": "<user-id>", "mode": "ssh"|"http", "ttl": 3600}`.
 `grantee` must be an existing user id (the gateway's `share add` verb
@@ -579,7 +582,7 @@ also accepts a user name and resolves it; this route does not); `ttl` in
 seconds (0 = no expiry); `mode` (default `http`) selects which
 operations the grantee may perform: `ssh` → `/endpoint`, `/prompt` and
 SSH attach through the gateway; `http` → `/exec`, `/stream`, `/stat`,
-`GET /api/sandboxes/{id}`. The HTTP proxy does not consult shares: in
+`GET /api/leases/{id}`. The HTTP proxy does not consult shares: in
 the capability model the lease id is the only credential, and under
 forward-auth lookups are owner-scoped. `/stream` is an `http`
 operation — an `ssh`-share grantee who calls it directly gets `404`
@@ -587,7 +590,7 @@ operation — an `ssh`-share grantee who calls it directly gets `404`
 session channels through `/stream`, so requests carrying it may attach
 over an `ssh` share too). Response `201
 Created` `{"shared":true,"lease_id":…,"grantee":…,"mode":…}`.
-`400` unknown grantee; a non-owner gets `404 "sandbox not found"` —
+`400` unknown grantee; a non-owner gets `404 "lease not found"` —
 the lookup is owner-scoped, so a lease you do not own looks the same as
 a lease that does not exist.
 
@@ -595,7 +598,7 @@ There is no per-lease share listing. `GET /api/shares` lists every share
 granted on the caller's leases — `{"shares": [{lease_id, grantee, mode,
 created_at, expires_at?}]}` — which is what `share ls` prints.
 
-### `DELETE /api/sandboxes/{id}/share/{grantee}` — revoke (owner only)
+### `DELETE /api/leases/{id}/share/{grantee}` — revoke (owner only)
 
 `204 No Content` — the grantee loses access immediately. `404` if not shared.
 
@@ -620,4 +623,4 @@ expiry or revocation.
 - All lease state, shares, the pool and the image catalog persist in
   SQLite: a backend restart loses none of it.
 - The lease id doubles as a capability (e.g. `GET /api/…/endpoint` and
-  the proxy hostname are how a caller addresses someone's sandbox).
+  the proxy hostname are how a caller addresses someone's lease).

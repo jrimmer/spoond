@@ -9,17 +9,17 @@
 //
 // Usage:
 //
-//	spoondctl new [image]            create a sandbox (dev/go/py/elixir/llm)
-//	spoondctl ls                     list sandboxes (JSON)
-//	spoondctl rm <id>                delete a sandbox
+//	spoondctl new [image]            create a lease (dev/go/py/elixir/llm)
+//	spoondctl ls                     list leases (JSON)
+//	spoondctl rm <id>                delete a lease
 //	spoondctl keepalive <id>         extend a persistent lease
 //	spoondctl suspend <id>           suspend (snapshot + stop)
 //	spoondctl resume <id>            resume from snapshot
-//	spoondctl restart <id>           reboot (snapshot + fresh sandbox)
-//	spoondctl cp <id> [tag]          clone a sandbox
+//	spoondctl restart <id>           reboot (snapshot + fresh lease)
+//	spoondctl cp <id> [tag]          clone a lease
 //	spoondctl shelly <id>            install + start the Shelley coding agent
-//	spoondctl tag <id> <name>        give the sandbox a friendly name
-//	spoondctl prompt <id> <message>  ask the agent in a sandbox something
+//	spoondctl tag <id> <name>        give the lease a friendly name
+//	spoondctl prompt <id> <message>  ask the agent in a lease something
 //	spoondctl ssh <id|name>          drop into a shell (delegates to ssh)
 //	spoondctl help
 //
@@ -192,19 +192,19 @@ func usage() {
 	fmt.Fprint(os.Stderr, `spoondctl — spoond control plane CLI (thin wrapper over ssh ctl@)
 
 usage:
-  spoondctl new [image]            create a sandbox (dev/go/py/elixir/llm)
-  spoondctl ls                     list sandboxes
-  spoondctl rm <id>                delete a sandbox
+  spoondctl new [image]            create a lease (dev/go/py/elixir/llm)
+  spoondctl ls                     list leases
+  spoondctl rm <id>                delete a lease
   spoondctl keepalive <id>         extend a persistent lease
   spoondctl suspend <id>           suspend (snapshot + stop)
   spoondctl resume <id>            resume from snapshot
-  spoondctl restart <id>           reboot (snapshot + fresh sandbox)
-  spoondctl cp <id> [tag]          clone a sandbox
+  spoondctl restart <id>           reboot (snapshot + fresh lease)
+  spoondctl cp <id> [tag]          clone a lease
   spoondctl shelly <id>            install + start the Shelley coding agent
-  spoondctl tag <id> <name>        give the sandbox a friendly name
+  spoondctl tag <id> <name>        give the lease a friendly name
   spoondctl comment <id> [text]    set/clear a free-text annotation
   spoondctl whoami                 show the authenticated key identity
-  spoondctl prompt <id> <message>  ask the agent in a sandbox something
+  spoondctl prompt <id> <message>  ask the agent in a lease something
   spoondctl ssh <id|name>          drop into a shell
   spoondctl help
 

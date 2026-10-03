@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-// prettySandboxTable renders the /api/sandboxes JSON as a columnar
-// table (ticket #27). IDs show as a 12-char prefix (full id via --json).
+// prettySandboxTable renders the /api/leases JSON (the /api/sandboxes
+// alias serves the same shape) as a columnar table (ticket #27). IDs
+// show as a 12-char prefix (full id via --json).
 func prettySandboxTable(b []byte) string {
 	var resp struct {
 		Sandboxes []map[string]any `json:"sandboxes"`
@@ -21,7 +22,7 @@ func prettySandboxTable(b []byte) string {
 		return strings.TrimSpace(string(b)) // not our shape (or an error); pass through
 	}
 	if len(resp.Sandboxes) == 0 {
-		return "no sandboxes"
+		return "no leases"
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%-14s %-12s %-10s %-22s %-16s %s\n", "ID", "IMAGE", "STATE", "EXPIRES", "ADDRESS", "NAME")

@@ -270,7 +270,7 @@ reference for the `PROXY_AUTH_MODE=forward-auth` setup in
 curl -s https://127.0.0.1:8890/healthz
 
 # Create a lease
-curl -s -X POST https://127.0.0.1:8890/api/sandboxes \
+curl -s -X POST https://127.0.0.1:8890/api/leases \
   -H "Authorization: Bearer abc" -H 'Content-Type: application/json' \
   -d '{"image":"dev-base","ttl":300}'
 

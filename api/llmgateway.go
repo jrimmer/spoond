@@ -146,11 +146,11 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	provider := "unknown"
 	if lease == nil {
-		http.Error(w, "sandbox not found", http.StatusNotFound)
+		http.Error(w, "lease not found", http.StatusNotFound)
 		return
 	}
 	if lease.Suspended {
-		http.Error(w, "sandbox is suspended; resume it first", http.StatusConflict)
+		http.Error(w, "lease is suspended; resume it first", http.StatusConflict)
 		return
 	}
 

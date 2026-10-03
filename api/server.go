@@ -353,9 +353,43 @@ func (s *Server) collectServiceMetrics() {
 	s.busyMu.Unlock()
 }
 
-// Handler returns the HTTP handler with auth + metrics middleware applied.
+// apiLeasePathPrefix is the lease API's primary, documented path
+// prefix; apiSandboxPathPrefix is its permanent alias. Every route
+// registered under /api/sandboxes is served identically under
+// /api/leases (2.0, D5): the alias is rewritten to the primary form at
+// the top of the handler chain — before auth and the mux — so there is
+// one route table, one auth path and one set of metric labels.
+const (
+	apiLeasePathPrefix   = "/api/leases"
+	apiSandboxPathPrefix = "/api/sandboxes"
+)
+
+// rewriteLeasePath maps an /api/leases… path onto its /api/sandboxes…
+// twin. Only a whole path segment matches: /api/leasesX is not a lease
+// path and stays itself (the mux then 404s it, as before).
+func rewriteLeasePath(p string) string {
+	switch {
+	case p == apiLeasePathPrefix:
+		return apiSandboxPathPrefix
+	case strings.HasPrefix(p, apiLeasePathPrefix+"/"):
+		return apiSandboxPathPrefix + p[len(apiLeasePathPrefix):]
+	}
+	return p
+}
+
+// Handler returns the HTTP handler with auth + metrics middleware
+// applied. The /api/leases → /api/sandboxes rewrite sits at the top of
+// the chain — before auth and the mux — so both path families share one
+// auth path and one route table.
 func (s *Server) Handler() http.Handler {
-	return s.metricsMiddleware(s.authMiddleware(s.mux))
+	authed := s.authMiddleware(s.mux)
+	rewrite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := rewriteLeasePath(r.URL.Path); p != r.URL.Path {
+			r.URL.Path = p
+		}
+		authed.ServeHTTP(w, r)
+	})
+	return s.metricsMiddleware(rewrite)
 }
 
 // metricsMiddleware records HTTP request count and latency by path
@@ -398,6 +432,10 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // normalizePath reduces high-cardinality paths (sandbox ids, user ids)
 // to stable labels for metrics.
 func normalizePath(p string) string {
+	// The /api/leases alias reports the /api/sandboxes labels: the
+	// rewrite happens before the mux, so the request counters must not
+	// split each route's series in two either.
+	p = rewriteLeasePath(p)
 	// Guest-service lease routes: the lease id is a capability, so it is
 	// reduced like any other id to keep metrics cardinality bounded.
 	// The documented route leaves "/active" as the only remainder.
@@ -700,7 +738,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
 			s.svc.log.Printf("create: grant %s: %v", req.Image, err)
-			writeError(w, http.StatusInternalServerError, "failed to grant sandbox")
+			writeError(w, http.StatusInternalServerError, "failed to grant lease")
 		}
 		return
 	}
@@ -724,7 +762,7 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 	// Shared leases are attachable over SSH (T6/#33).
 	lease := s.svc.lookupWithShare(owner, id, ShareSSH)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	// forkd_id keeps its pre-2.0 name: response keys are stored/protocol
@@ -764,13 +802,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		lease = s.svc.lookupWithShare(owner, id, ShareSSH)
 	}
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	s.svc.touch(id) // stream attach is activity for the idle sweeper
 	// A suspended lease has no running sandbox; resume it first.
 	if lease.Suspended {
-		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		return
 	}
 	// A lease lost in a substrate crash has no sandbox to attach to; the
@@ -1006,9 +1044,9 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case errNotFound:
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errSuspended:
-			writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+			writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		default:
 			s.svc.log.Printf("network %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "network update failed")
@@ -1036,9 +1074,9 @@ func (s *Server) handleKeepAlive(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case errNotFound:
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errNotPersistent:
-			writeError(w, http.StatusBadRequest, "sandbox is not a persistent lease")
+			writeError(w, http.StatusBadRequest, "lease is not a persistent lease")
 		default:
 			writeError(w, http.StatusInternalServerError, "keepalive failed")
 		}
@@ -1061,9 +1099,9 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case errNotFound:
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errNotPersistent:
-			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+			writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
 		case errLeaseBusy:
 			writeError(w, http.StatusConflict, err.Error())
 		default:
@@ -1075,7 +1113,7 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      lease.ID,
 		"status":  "suspended",
-		"message": "sandbox suspended; state snapshot kept (resume to restore)",
+		"message": "lease suspended; state snapshot kept (resume to restore)",
 	})
 }
 
@@ -1088,9 +1126,9 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case errNotFound:
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errNotPersistent:
-			writeError(w, http.StatusBadRequest, "sandbox is not a persistent lease")
+			writeError(w, http.StatusBadRequest, "lease is not a persistent lease")
 		case errLeaseBusy:
 			writeError(w, http.StatusConflict, err.Error())
 		default:
@@ -1102,7 +1140,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      lease.ID,
 		"status":  "running",
-		"message": "sandbox restarted",
+		"message": "lease restarted",
 	})
 }
 
@@ -1120,7 +1158,7 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 	lease, err := s.svc.setName(owner, id, req.Name)
 	if err != nil {
 		if err == errNotFound {
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1148,7 +1186,7 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	lease, err := s.svc.setComment(owner, id, req.Comment)
 	if err != nil {
 		if err == errNotFound {
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1179,11 +1217,11 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	// Shared leases accept agent prompts too (T6/#33).
 	lease := s.svc.lookupWithShare(owner, id, ShareSSH)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	if lease.Suspended {
-		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		return
 	}
 	model := req.Model
@@ -1235,7 +1273,7 @@ echo "AGENT_TIMEOUT"`, msg64, mod64)
 	s.svc.log.Printf("prompt %s: exit=%d stdout=%d dur=%s", id, res.ExitCode, len(res.Stdout), time.Since(start))
 	out := res.Stdout
 	if strings.Contains(out, "SHELLEY_NOT_RUNNING") {
-		writeError(w, http.StatusConflict, "shelley agent is not running in this sandbox — use the shelly ctl verb first")
+		writeError(w, http.StatusConflict, "shelley agent is not running in this lease — use the shelly ctl verb first")
 		return
 	}
 	if strings.Contains(out, "AGENT_TIMEOUT") {
@@ -1261,9 +1299,9 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch err {
 		case errNotFound:
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errNotPersistent:
-			writeError(w, http.StatusBadRequest, "sandbox is not a workspace-backed persistent lease")
+			writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
 		case errLeaseBusy:
 			writeError(w, http.StatusConflict, err.Error())
 		default:
@@ -1299,14 +1337,14 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	// Shared leases are executable over the API (T6/#33).
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	s.svc.touch(id) // exec is activity for the idle sweeper
 	// A suspended workspace-backed lease has no running sandbox; resume
 	// first.
 	if lease.Suspended {
-		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		return
 	}
 	// A lease lost in a substrate crash has nothing to exec into (U10).
@@ -1348,7 +1386,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// caller can distinguish a permanently dead sandbox from a
 		// transient exec failure (e.g. node overload, network blip).
 		if errors.Is(err, substrate.ErrNotFound) {
-			writeError(w, http.StatusGone, "sandbox no longer exists")
+			writeError(w, http.StatusGone, "lease no longer exists")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "exec failed")
@@ -1374,12 +1412,12 @@ func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	s.svc.touch(id)
 	if lease.Suspended {
-		writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		return
 	}
 	const probe = `set -e
@@ -1394,7 +1432,7 @@ echo "== df =="; df -P /
 	})
 	if err != nil {
 		if errors.Is(err, substrate.ErrNotFound) {
-			writeError(w, http.StatusGone, "sandbox no longer exists")
+			writeError(w, http.StatusGone, "lease no longer exists")
 			return
 		}
 		s.svc.log.Printf("stat: %s: %v", lease.SandboxID, err)
@@ -1512,7 +1550,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	s.svc.release(r.Context(), lease)
@@ -1535,7 +1573,7 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, errNotFound):
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errQuotaExceeded):
@@ -1546,7 +1584,7 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
 			s.svc.log.Printf("clone %s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "failed to clone sandbox")
+			writeError(w, http.StatusInternalServerError, "failed to clone lease")
 		}
 		return
 	}
@@ -1581,9 +1619,9 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errBadForkCount):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, errNotFound):
-			writeError(w, http.StatusNotFound, "sandbox not found")
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errSuspended):
-			writeError(w, http.StatusConflict, "sandbox is suspended; resume it first")
+			writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errQuotaExceeded):
@@ -1592,7 +1630,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
 			s.svc.log.Printf("fork %s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "failed to fork sandbox")
+			writeError(w, http.StatusInternalServerError, "failed to fork lease")
 		}
 		return
 	}
@@ -1615,7 +1653,7 @@ func (s *Server) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	lease := s.svc.lookupWithShare(owner, id, ShareHTTP)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, leaseDetailMap(lease))
@@ -1667,7 +1705,7 @@ func (s *Server) handleByName(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	lease := s.svc.lookupByNameForOwner(ownerFrom(r.Context()), name)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "no sandbox named "+name)
+		writeError(w, http.StatusNotFound, "no lease named "+name)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
