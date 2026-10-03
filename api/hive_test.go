@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -597,6 +598,36 @@ func TestHiveProbeCarriers(t *testing.T) {
 		})
 		if _, err := probeTarget(ctx, sub2, "sbx", "llm.lacy.casa:443"); err == nil {
 			t.Error("a refused connect did not fail the probe")
+		}
+	})
+	t.Run("no bash in the image", func(t *testing.T) {
+		// A base image without bash at all: the runner rejects the
+		// binary, so the bash exec errors at transport level instead of
+		// exiting 127. The probe must still fall back to curl (the
+		// runner does have it) rather than report the carrier as the
+		// failure.
+		sub := newTestSub()
+		sub.SetExecHandler(func(sandboxID string, args []string) substrate.ExecResult {
+			return substrate.ExecResult{Stdout: "PROBE_OK\n", ExitCode: 0}
+		})
+		sub.FailCall("Exec", 1, errors.New("fork/exec /bin/bash: no such file or directory"))
+		carrier, err := probeTarget(ctx, sub, "sbx", "llm.lacy.casa:443")
+		if err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		if carrier != probeCarrierCurl {
+			t.Errorf("carrier %q, want %q", carrier, probeCarrierCurl)
+		}
+	})
+	t.Run("sandbox gone", func(t *testing.T) {
+		// A lease that died mid-check is substrate.ErrNotFound: there is
+		// nothing to fall back to, and the error must say so, not blame
+		// the target.
+		sub := newTestSub()
+		sub.FailCall("Exec", 0, substrate.ErrNotFound)
+		_, err := probeTarget(ctx, sub, "sbx", "llm.lacy.casa:443")
+		if !errors.Is(err, substrate.ErrNotFound) {
+			t.Errorf("probe error %v, want it to wrap substrate.ErrNotFound", err)
 		}
 	})
 }

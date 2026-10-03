@@ -340,7 +340,15 @@ func probeTarget(ctx context.Context, sub substrate.Substrate, sandboxID, target
 		Timeout: probeTimeout,
 	})
 	if err != nil {
-		return "", fmt.Errorf("probe %s: %w", target, err)
+		// The sandbox is gone (or unreachable): curl cannot run there
+		// either, so the exec error is the answer.
+		if errors.Is(err, substrate.ErrNotFound) {
+			return "", fmt.Errorf("probe %s: %w", target, err)
+		}
+		// Otherwise the exec may have failed because the base image has
+		// no bash at all (the runner rejects the binary); fall back to
+		// curl rather than report the carrier instead of the probe.
+		return probeWithCurl(ctx, sub, sandboxID, host, port)
 	}
 	out := strings.TrimSpace(res.Stdout)
 	switch {
