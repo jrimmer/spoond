@@ -24,9 +24,40 @@ SQLite state) and talks to the E2B node orchestrator on loopback to
 create, list, pause and checkpoint sandboxes. What the substrate is and
 how that split works: [substrate.md](substrate.md).
 
-> **Naming note.** The service environment variables still carry the
-> `FORKD_` prefix (`FORKD_BACKEND_URL`, `FORKD_TOKEN`, …). They are the
-> live, supported names for 2.0 — historical naming, current platform.
+> **Naming note.** Since 2.0 the service environment variables carry the
+> `SPOOND_` prefix (`SPOOND_BACKEND_URL`, `SPOOND_AGENT_TOKEN`, …). The
+> pre-2.0 `FORKD_` names still work everywhere but log a one-line
+> deprecation warning; see the "Renamed in 2.0" table below.
+
+## Renamed in 2.0
+
+The pre-2.0 `FORKD_`-prefixed configuration variables were renamed to
+`SPOOND_`. Each pair works as follows: the `SPOOND_` name is the
+primary name; the old `FORKD_` name is still read as a fallback and
+logs a one-line deprecation warning (once per variable per process).
+When both are set, `SPOOND_` wins.
+
+| 2.0 name | Pre-2.0 name (deprecated) | Used by |
+|---|---|---|
+| `SPOOND_BACKEND_URL` | `FORKD_BACKEND_URL` | `spoond mcp`, `spoond acp` — lease API base URL |
+| `SPOOND_AGENT_TOKEN` | `FORKD_AGENT_TOKEN` | `spoond mcp`, `spoond acp` — per-agent bearer token |
+| `SPOOND_IMAGE` | `FORKD_IMAGE` | `spoond mcp`, `spoond acp` — default image for new leases |
+| `SPOOND_LLM_MODEL` | `FORKD_LLM_MODEL` | `spoond acp` — default LLM gateway model id |
+| `SPOOND_CTL_HOST` | `FORKD_CTL_HOST` | `spoondctl` — gateway host |
+| `SPOOND_CTL_PORT` | `FORKD_CTL_PORT` | `spoondctl` — gateway SSH port |
+| `SPOOND_CTL_KEY` | `FORKD_CTL_KEY` | `spoondctl` — SSH private key |
+| `SPOOND_GATEWAY_HOST` | `FORKD_GATEWAY_HOST` | `spoond gateway` `--gateway-host` default |
+| `SPOOND_NO_TMUX` | `FORKD_NO_TMUX` | guest image: skip the tmux auto-attach on SSH login |
+
+Not renamed: the gateway's `forkd-*` SSH permission keys and the
+`forkd_id` field on `GET /api/sandboxes/{id}/endpoint` are stored/protocol
+data, not configuration — renaming them would break clients.
+
+One special case: `SPOOND_NO_TMUX` is read by the guest image's login
+shell (`/etc/profile.d/spoond-tmux.sh`), not by a long-lived spoond
+process. There the deprecation warning is emitted once per user (a
+canary file in the home directory dedupes across logins) rather than
+once per process.
 
 ## Prerequisites
 
@@ -58,13 +89,16 @@ leases they create are owned by that agent's identity.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FORKD_AGENT_TOKEN` | *(empty)* | per-agent bearer token for this endpoint, provisioned from the users store; wins over `FORKD_TOKEN` |
-| `FORKD_TOKEN` | *(empty)* | legacy fallback (deprecated): used with a warning when `FORKD_AGENT_TOKEN` is unset |
+| `SPOOND_AGENT_TOKEN` | *(empty)* | per-agent bearer token for this endpoint, provisioned from the users store; **required** |
+| `SPOOND_BACKEND_URL` | `https://127.0.0.1:8890` | lease API base URL |
+| `SPOOND_IMAGE` | `dev-base` | default image for the leases these endpoints create |
+| `SPOOND_LLM_MODEL` | `gpt-oss-20b-fireworks` | (`acp` only) default model id for the LLM gateway |
 
 Create an agent user first (`POST /api/users` with `kind=agent` — it
-needs a `token`, not an SSH key), then set `FORKD_AGENT_TOKEN` to
-that user's token. If neither variable is set, the endpoint fails fast
-with provisioning instructions.
+needs a `token`, not an SSH key), then set `SPOOND_AGENT_TOKEN` to
+that user's token. If it is not set, the endpoint fails fast
+with provisioning instructions. The pre-2.0 `FORKD_*` names still work
+(see "Renamed in 2.0" above).
 
 ## 1. spoond-backend (lease API)
 
@@ -141,7 +175,7 @@ file the backend sources and the operator snippets in
 | `--backend-token` | *(required)*; env `SPOOND_GATEWAY_TOKEN` | spoond-backend service token (`GATEWAY_TOKEN`) — admin-equivalent, so it is read from the env file, never `ExecStart` |
 | `--client-keys` | *(empty)* | comma-separated paths to authorized client public keys, **or a directory scanned for `*.pub` files** (legacy mode only) |
 | `--gateway-key` | `/etc/spoond-gateway/gateway_ed25519` | gateway identity key (kept for unit compatibility; the gateway no longer connects into sandboxes with it) |
-| `--gateway-host` | `sandbox.example.com` (env `FORKD_GATEWAY_HOST`) | public hostname advertised in MOTDs |
+| `--gateway-host` | `sandbox.example.com` (env `SPOOND_GATEWAY_HOST`) | public hostname advertised in MOTDs |
 | `--shelly-binary-url` | env `SHELLY_BINARY_URL` (`http://10.0.0.11:8891/assets/shelley`) | URL the sandbox fetches the shelley agent binary from |
 | `--llm-gateway-url` | env `LLM_GATEWAY_URL` (`http://10.0.0.11:8891/llm/`) | base URL of the per-lease LLM gateway the shelley agent is pointed at |
 | `--shelly-model` | `gpt-oss-20b-fireworks` | default model id written into shelley.json |

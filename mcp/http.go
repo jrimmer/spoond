@@ -12,7 +12,7 @@ package mcp
 // delivered as `message` events on the same SSE stream.
 //
 // Authentication: Bearer token via the Authorization header.  The token
-// is configured by the caller (typically FORKD_AGENT_TOKEN).
+// is configured by the caller (typically SPOOND_AGENT_TOKEN).
 
 import (
 	"context"

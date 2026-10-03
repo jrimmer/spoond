@@ -221,15 +221,17 @@ Tools: `shell`, `read_file`, `write_file`, `edit_file`, `list_files`,
 `status`. Point Goose/Claude Code-style MCP clients at it:
 
 ```bash
-FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-token> \
+SPOOND_BACKEND_URL=https://sandbox.example.com SPOOND_AGENT_TOKEN=<agent-token> \
   ./spoond mcp
 ```
 
 Create the agent user first with `POST /api/users` and
 `kind=agent` — the agent needs a `token` in the request body, not an
 SSH key (`ssh ctl@… "ssh-key add …"` cannot create one: it always
-posts a `person` with no token) — then set `FORKD_AGENT_TOKEN` to that
-token; the legacy `FORKD_TOKEN` fallback logs a deprecation warning.
+posts a `person` with no token) — then set `SPOOND_AGENT_TOKEN` to that
+token. The pre-2.0 `FORKD_*` names still work and log a one-line
+deprecation warning (see the "Renamed in 2.0" table in
+[setup.md](setup.md)).
 
 ### `spoond acp` (Agent Client Protocol server)
 
@@ -238,11 +240,11 @@ with in-sandbox tools. One `spoond acp` process serves the whole
 conversation (sessions are process-scoped).
 
 ```bash
-FORKD_BACKEND_URL=https://sandbox.example.com FORKD_AGENT_TOKEN=<agent-token> \
-  FORKD_LLM_MODEL=gpt-oss-20b-fireworks ./spoond acp
+SPOOND_BACKEND_URL=https://sandbox.example.com SPOOND_AGENT_TOKEN=<agent-token> \
+  SPOOND_LLM_MODEL=gpt-oss-20b-fireworks ./spoond acp
 ```
 
-(The `FORKD_*` names above are the live, supported variable names.)
+(The `SPOOND_*` names above are the live, supported variable names.)
 
 ## Network policies
 
@@ -332,7 +334,5 @@ commands, read output, and release it — no shell needed:
 3. `GET /api/sandboxes/{id}/stat` → resource awareness
 4. `DELETE /api/sandboxes/{id}` → always release
 
-`scripts/forkd-curl` (its name is historical; it wraps this API, not the
-old controller) injects the bearer token and pins the API hostname to
-loopback so TLS validates — `FORKD_API`, `FORKD_TOKEN` or
-`FORKD_TOKEN_FILE` configure it.
+The lease API needs only curl: the bearer token authenticates the
+consumer and an HTTPS base URL is all the setup there is.

@@ -14,8 +14,7 @@ means bringing up one host with both:
 
 There is no single installer yet; the steps below are the procedure the
 production host was installed with, and every script referenced lives in
-`deploy/e2b/` in this repo. `deploy/install-spoond.sh` is the forkd-era
-installer and is no longer the path.
+`deploy/e2b/` in this repo.
 
 ## Prerequisites
 
@@ -120,21 +119,17 @@ install -D -m 644 deploy/spoond-backend.service deploy/spoond-sshd-gateway.servi
   deploy/spoond-runner.service /etc/systemd/system/
 ```
 
-The backend unit is forkd-era in two places and needs editing before use
-— it is installed as a starting point, not run verbatim. The shipped
+The backend unit needs one edit before use — it is installed as a
+starting point, not run verbatim. The shipped
 `deploy/spoond-backend.service` reads its environment from
 `EnvironmentFile=-/etc/spoond-backend.env` (a different path, with a
-leading `-` so the unit still starts when the file is absent) and
-carries `After=forkd-controller.service` plus
-`Environment=FORKD_URL=http://127.0.0.1:8889`, both belonging to the
-substrate spoond no longer uses (nothing reads `FORKD_URL` any more).
-After installing the units, edit
-`/etc/systemd/system/spoond-backend.service`: drop `forkd-controller.service`
-from `After=`, delete the `Environment=FORKD_URL=…` line, and point
-`EnvironmentFile` at `/etc/spoond/backend.env` (0600, created below —
-without it the backend finds no `CONSUMER_TOKENS` and exits on start;
-`spoond doctor` and the operator snippets below source the same file).
-The edited `[Unit]`/`[Service]` heads look like:
+leading `-` so the unit still starts when the file is absent). After
+installing the units, point `EnvironmentFile` in
+`/etc/systemd/system/spoond-backend.service` at
+`/etc/spoond/backend.env` (0600, created below — without it the backend
+finds no `CONSUMER_TOKENS` and exits on start; `spoond doctor` and the
+operator snippets below source the same file). The edited
+`[Unit]`/`[Service]` heads look like:
 
 ```ini
 After=network-online.target

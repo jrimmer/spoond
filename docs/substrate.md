@@ -114,11 +114,10 @@ the moment the snapshot is taken.
 
 Catalog state — the current build of each image and every build ever
 recorded, with its kind (`template`, `pause`, `checkpoint`), versions and
-size — lives in the same SQLite database as leases. The forkd-era
-surface is gone from the platform: nothing builds a rootfs or consults
-an allowlist. `GET /api/images` is the catalog. (The forkd-era bake
-scripts and rootfs init were removed in 2.0; the `KNOWN_IMAGES` name
-survives only in a Prometheus help string for the `pool_cap` gauge.) See
+size — lives in the same SQLite database as leases. Nothing builds a
+rootfs or consults an allowlist. `GET /api/images` is the catalog. (The
+`KNOWN_IMAGES` name survives only in a Prometheus help string for the
+`pool_cap` gauge.) See
 [install.md](install.md) for the build command and
 [operations.md](operations.md) for the GC that reclaims unreferenced
 builds.
