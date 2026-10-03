@@ -61,6 +61,10 @@ The design, decisions and per-unit specs are in
   `bb21513`); `modernc.org/sqlite` v1.60.1 needs Go ≥ 1.26. An operator
   must upgrade the toolchain on the build host and on the E2B node (U01
   step 10).
+- **Breaking: the Go module path is `github.com/jrimmer/spoond/v2`.** Go
+  resolves a v2 tag only for a module path ending in `/v2`, so code that
+  imports spoond packages must change its imports; behavior is unchanged
+  (`6caea85`, merged in `c46a611`).
 - **Breaking: memory is fixed per image.** A snapshot restores with its
   build's RAM, so `memory_mib` on create must be 0 or exactly the image's
   memory; anything else returns 400 (D16; `156d273`). An operator must drop
@@ -191,6 +195,18 @@ The design, decisions and per-unit specs are in
   host, ending with the next step to take
   (`docs/plans/2026-10-02-swarm-controller.md`; `aa7755c`, merged in
   `7d97786`).
+- **Hive guide and check API** (preview): `GET /hive/guide` (no token)
+  serves this instance's enlistment guide, rendered live from the same
+  tables the server and the checks run on (addresses, image catalog,
+  `hive.yaml` schema, `needs:` keys, routes, checks); `POST /hive/check`
+  runs the enlistment checks against a submitted `hive.yaml`, including a
+  trial lease that probes each `needs:` target from inside the base image
+  (`85c07f1`, merged in `f689b62`; `docs/api.md` "Hive").
+- **`spoond-netwatch`**: recovers the host network when the port stops
+  receiving while the link stays up — it bounces the port, then reloads
+  the network, and only as a last resort (nothing received for 10 minutes,
+  at most once per 12 hours) reboots cleanly so leases are drained
+  (`2125bd2`, merged in `d22266c`).
 - **Lease API additions**: `GET /api/sandboxes/{id}`, the fork, checkpoint
   and network routes above, and a binary stream mode for `/stream` with
   `resize`, `kill` and `eof` controls (D5 — additive only; `156d273`,
@@ -228,6 +244,15 @@ The design, decisions and per-unit specs are in
 
 Found in production after the 2026-10-01 cutover and deployed the same day:
 
+- **A host reboot drains and resumes leases.** At shutdown systemd
+  stopped the backend before the orchestrator, so the orchestrator's drain
+  was refused and a reboot lost every lease; at boot the undrain ran before
+  the backend existed. The new `spoond-drain.service` is ordered after both
+  units, so it drains first at shutdown and undrains last at boot
+  (`b211048`, merged in `1e0d122`); `spoond doctor` fails when the unit is
+  missing, inactive, misordered or cannot read its token (`4131bd6`,
+  merged in `d1d04d1`). An operator must install and enable the unit with
+  the backend (`docs/install.md`).
 - **`lan`/`internet` guests can reach the lease API again.** The fork's
   host-address guard only admits a host destination when an allowance names
   both IP and port, so the any-port LAN ranges did not count and CI jobs
