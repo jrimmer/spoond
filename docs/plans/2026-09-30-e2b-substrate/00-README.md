@@ -107,17 +107,27 @@ like this; nothing else is needed from a human.
      # No backend exec/stream/create log lines in the last 10 minutes.
      n=$(journalctl -u spoond-backend --since -10min -o cat | grep -cE '(exec|stream|create): ')
      [ "$n" -eq 0 ] || return 1
-     # Every job the runner started in the last 24 h has a final result.
-     log=$(journalctl -u spoond-runner --since -24h -o cat)
+     # Every job the runner started since it last started has ended.
+     since=$(systemctl show spoond-runner -p ActiveEnterTimestamp --value)
+     log=$(journalctl -u spoond-runner --since "${since:--24h}" -o cat)
      for j in $(printf '%s\n' "$log" | grep -oE 'executing job [0-9]+' | awk '{print $3}' | sort -u); do
-       printf '%s\n' "$log" | grep -qE "job $j final result=" || return 1
+       printf '%s\n' "$log" | grep -qE "job $j (final result=|failed:)" || return 1
      done
      return 0
    }
    ```
-   (The runner logs `worker N: executing job <id>` and
-   `executor: job <id> final result=...`; the backend logs `exec: <id>: ...`.
-   U08 keeps those backend log lines.)
+   (The runner logs `worker N: executing job <id>`, then either
+   `executor: job <id> final result=...` or `worker N: job <id> failed: ...`;
+   the backend logs `exec: <id>: ...`. U08 keeps those backend log lines.)
+   The runner half looks only at jobs since the runner last started: every
+   window stops the runner, and a job killed by that stop never logs an
+   end, but it cannot still be running. (Until 2026-10-02 this scanned the
+   last 24 h, so one interrupted or failed job blocked every window for up
+   to a day.)
+   Take every step baseline that creates leases or runs commands in them
+   (lease-state snapshots, pre-checks, probe leases) **after** the idle
+   wait, immediately before acting: the window's own lease activity would
+   otherwise trip the backend half of `window_idle`.
 3. **Act.** `systemctl stop spoond-runner`, perform the step exactly as the
    unit writes it, then verify:
    - `curl -fsS <backend>/healthz` returns `200`;
