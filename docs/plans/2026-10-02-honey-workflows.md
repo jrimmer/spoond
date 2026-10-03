@@ -2,7 +2,7 @@
 
 Status: **draft for decision, 2026-10-02.** Epic #78. Covers #85 (live
 view) in full and the parts of #84, #87 and #88 that the engine needs.
-Decisions are numbered W1-W29. Build order at the end.
+Decisions are numbered W1-W40. Build order at the end.
 
 Implementation starts on a branch off `main`, after `feat/e2b-substrate`
 is fully merged. Paths below are `main`'s (module `github.com/jrimmer/spoond/v2`).
@@ -54,6 +54,17 @@ crash. Jobs, the hive, CI and agent coordination become workflows.
 | W27 | Questions go to the run's owner; escalation is configured. | [Signals](#signals-questions-memos-and-steering) |
 | W28 | Notifications in v3: webhook (with chat presets) and mail, plus subscriptions to run events. | [Providers](#providers-ticket-sources-notifiers-git-hosts) |
 | W29 | Retention: step logs and session files 30 days; forever for runs whose result was merged. | [Storage](#storage-honeydb) |
+| W30 | A `return` step ends the run early with an outcome (`succeeded`, `failed`, `blocked`) and a reason. | [Ending a run early](#ending-a-run-early-return) |
+| W31 | Branches have names; the graph labels its edges with them. | [Named branches](#named-branches) |
+| W32 | The interactive agent is a conversation: a declared mode, a chat pane, a notification. | [Interactive agent](#the-interactive-agent) |
+| W33 | `each` fans a block out over a list, with iteration-local state and a collected result. | [each](#each-fan-out-over-a-list) |
+| W34 | Notification targets include named groups (teams). | [Providers](#providers-ticket-sources-notifiers-git-hosts) |
+| W35 | Honey ships a library of building-block workflows; the loop is one of them, separate from ticket handling. | [Building blocks](#building-blocks-the-built-in-library) |
+| W36 | Agents compose, validate, publish and run workflows over MCP in v3. | [Agents as authors](#agents-as-authors) |
+| W37 | Every run records usage and cost; budgets can be in money; profiles are compared on measured results. | [Cost](#cost-budgets-and-comparing-profiles) |
+| W38 | Two-way channels: chat replies become signals; a run's progress mirrors onto its ticket. | [Channels](#two-way-channels-and-ticket-mirroring) |
+| W39 | Perpetual workflows continue as new, so their history stays bounded. | [Perpetual workflows](#perpetual-workflows) |
+| W40 | Promotion and release are policy: a person approves by default; a project can allow automatic promotion when every gate passes. | [Promotion](#promotion-and-release-policy) |
 
 ## Goals and non-goals
 
@@ -69,6 +80,11 @@ crash. Jobs, the hive, CI and agent coordination become workflows.
   the MCP front door, the CLI and the review packet (#89) read the same log.
 - A person can follow a run live, see the data move between steps, and
   answer, approve or cancel from the same page.
+- A long-running agent session hands work to Honey as a tool call
+  ("send this branch to pr-review"), waits, and acts on the typed result.
+  Agents also compose new workflows from the building blocks (W36).
+- Runs that take days are normal: several can run at once, each within
+  its own budget of time and money (W37).
 
 **Non-goals (this epic)**
 
@@ -85,6 +101,8 @@ crash. Jobs, the hive, CI and agent coordination become workflows.
    The share of runs that finish without the orchestrator or a person
    stepping in is on the dashboard, and is at least the 2026-10-02 rate (3 of 5).
 3. Agent Mail coordination and the `swarm-*` scripts are retired.
+4. An agent session composes a workflow from catalog building blocks over
+   MCP, runs it, waits on it, and uses its output (W36).
 
 ## Build or adopt
 
@@ -187,7 +205,7 @@ flowchart LR
 | **Memo** | A recorded decision (an approval, an answer). First write wins. |
 | **Lock** | A run-scoped claim on paths or named resources. |
 | **Profile** | A named harness + model + provider + settings (#87). |
-| **Outcome** | How an instance ended: `succeeded`, `failed`, `needs_info`, `interrupted`, `cancelled`, `timed_out`, `skipped`. |
+| **Outcome** | How an instance ended: `succeeded`, `failed`, `blocked`, `needs_info`, `interrupted`, `cancelled`, `timed_out`, `skipped`. A run ends `succeeded`, `failed`, `blocked` or `cancelled`, with a reason. |
 
 ## Definition language
 
@@ -302,18 +320,82 @@ Common fields:
 | `if` | CEL condition; false skips the step (outcome `skipped`). |
 | `with` | Inputs, as CEL expressions over `params`, `state`, `loop`, `run`. |
 | `set` | State writes, as CEL over the step's `result` (and the above). |
-| `then` | Post-conditions: `when` → `fail`, `question` or `goto-end` (end of the enclosing block). |
+| `then` | Post-conditions: `when` → `fail`, `question` or `end` (end of the enclosing block). To end the whole run, use a `return` step (W30). |
 | `timeout` | Per attempt. |
 | `retry` | `{max, backoff, on: [error, timed_out, interrupted]}`. Infrastructure errors (model service down, lease capacity) retry without spending the budget, like the bee loop does today. |
 | `replay` | `safe` \| `idempotent` \| `resume` \| `never`. See W9. |
 | `on_error` | `fail` (default) \| `continue` (record the outcome in `result`, carry on). |
 | `locks` | Paths or resource names this step (or block) holds. |
 
-Blocks: `do`, `parallel` (with `max`, `fail_fast`), `if`/`else`, `switch`
-(`cases: [{when, do}]`), `loop` (`max`, `until`/`while`, `budget: {time, tokens}`),
-`fork` (W14, #82), `try` (`do`, `catch: [{on, do}]`, `finally`), and the
-scope steps `lease` and `lock` which run a nested `do` inside a scope that
-is released when the block exits.
+Blocks: `do`, `parallel` (with `max`, `fail_fast`, named branches),
+`if`/`else`, `switch` (`cases: [{name, when, do}]`, `default`), `loop`
+(`max`, `until`/`while`, `budget: {time, tokens}`), `each` (W33), `fork`
+(W14, #82), `try` (`do`, `catch: [{on, do}]`, `finally`), and the scope
+steps `lease` and `lock` which run a nested `do` inside a scope that is
+released when the block exits.
+
+**Concurrent writes are a publish error.** Branches of `parallel` (and
+iterations of `each`) run at the same time, so two of them writing
+overlapping state paths is rejected on publish; the remedy is to write
+iteration-local state and collect it (W33), or to write after the block.
+
+### Ending a run early (`return`)
+
+**W30.** A `return` step ends the run:
+`return: {outcome: succeeded | failed | blocked, reason: "${ ... }"}`.
+The run's `output` is still computed from state as usual. Every enclosing
+`finally` runs first (so a lease scope still pushes and releases), then
+the run ends with that outcome and reason. `blocked` means "cannot
+continue without someone": it is not a failure of the work, it is
+counted separately on the dashboard, and the review packet (#89) leads
+with its reason. In a called workflow, `return` ends the child; the
+caller's `workflow` step gets the child's outcome in `result.outcome`,
+and a child that ends `blocked` or `failed` fails the step unless it
+says `on_error: continue`.
+
+### Named branches
+
+**W31.** Every branch can carry a `name`: `switch` cases (`name:
+blocked`), the `default` (name `default` unless given), `parallel`
+branches, and `if` blocks (`name` on the step labels the "then" edge;
+`else_name` labels the other, default `else`). Names must be unique
+within their block and match `^[a-z][a-z0-9-]{0,30}$`. The graph
+description carries them as edge labels (`proceed`, `blocked`, `stop`),
+the event log records which named branch was taken, and runs can be
+filtered by it ("runs that took `blocked` at `resolve-deps/route`").
+
+### `each`: fan out over a list
+
+**W33.** `each` runs its body once per element of a list, up to `max`
+at a time:
+
+```yaml
+- id: plans
+  each:
+    in: "${ params.teams }"        # any list-typed expression
+    as: team                        # the element, typed from the list's item schema
+    max: 3                          # concurrency; 1 = in order
+    local: {plan: {$ref: "honey:plan"}}   # iteration-local state schema
+    fail: any                       # any (default) | all | never
+    do:
+      - id: draft
+        agent: {profile: planner, prompt: honey:prompts/plan, with: {team: "${ team }"}}
+        set: {local.plan: "${ result }"}
+    collect: "${ local.plan }"      # one list element per iteration
+  set: {plans: "${ result.items }"}
+```
+
+- Inside the body, `set` writes only `local.*`; the block's own `set`
+  writes run state once, from `result.items` (the collected values, in
+  input order) and `result.failed` (indices of iterations that failed).
+- `fail: any` fails the block if any iteration fails (after the others
+  finish or are cancelled); `all` only if every one fails; `never`
+  records failures in `result.failed` and carries on.
+- Each iteration is its own instance (`plans[2]/draft`), drawn side by
+  side in the live view like fork branches, and resumable on its own
+  after a crash: finished iterations are not repeated.
+- `in` is evaluated once, when the block starts, and recorded in the
+  event log, so a resumed run iterates the same list.
 
 ## Expressions (CEL)
 
@@ -483,8 +565,36 @@ response. The same key with a different body is a 409.
   restarts and are part of the run's record.
 - **Steering.** A `steer` signal to a running agent step is forwarded to
   the harness (`steer` in Pi RPC: delivered after the current tool calls,
-  before the next model call). The interactive agent step is an agent
-  step with `steering: open` and a person attached through the live view.
+  before the next model call).
+
+### The interactive agent
+
+**W32.** An interactive agent step is a conversation between an agent and
+a person, not an agent that happens to accept steering:
+
+```yaml
+- id: resolve
+  agent:
+    profile: planner
+    interactive: {with: "${ run.owner }", until: done}   # a person, a group (W34) or an agent
+    with: {open: "${ state.deps.open }"}
+```
+
+- When the step starts it notifies the named person or group (W28)
+  with a deep link, and waits for someone to join before the agent's
+  first turn if `join: required` (default `optional`: the agent starts
+  and the person can join at any time).
+- The agent's messages are events (`agent.message`, from Pi's
+  `message_end`); the person's are `say` signals, delivered as a Pi
+  `prompt` when the agent is idle and as `steer` when it is running.
+  Both appear in the step drawer as a chat pane, and the transcript is
+  part of the run's record.
+- The step ends when the agent writes its structured result, or when the
+  person sends `done` (with an optional note that is added to the
+  result), or at its timeout. A person leaving does not end it.
+- Several people can join; who said what is recorded. An agent can be
+  the other party too (over MCP, #88), which is how an orchestrator
+  agent takes part.
 
 ## Ownership, cancellation and locks
 
@@ -588,6 +698,114 @@ Pi Durable, when it is usable from Pi itself, replaces the session-file
 copy with its own checkpoints and adds per-tool replay policies. The
 contract does not change.
 
+**Tools and inputs.** An agent step can be given extra tools as MCP
+servers (`tools: [{mcp: code-search}, {mcp: tickets}]`, from a catalog of
+tool servers the project registers), so project knowledge such as code
+search or a knowledge graph reaches the agent without sitting in its
+prompt. `llm` and `agent` steps accept artifacts as inputs (`attach:
+["${ state.images }"]`); images go to profiles marked
+`vision: true`, which publish checks.
+
+**Harnesses beyond Pi.** A profile's harness can be any implementation
+of the contract: an agent CLI driven through its own RPC or JSON mode, or
+a direct API call loop. Profiles say whether a harness bills per token
+(an API) or against a flat subscription, which W37 uses.
+
+## Worked example: a planning pipeline
+
+A multi-team planning pipeline: align designs, produce one plan per
+team, loop until the dependencies between the plans are resolved (an LLM
+assesses them; a person and an agent resolve each open one together;
+stop and notify the teams if blocked), push the plans, stop if this is a
+spec-only run, otherwise capture a test baseline and go on to
+implementation. Nothing is implemented until the plan is understood end
+to end. In Honey:
+
+```yaml
+do:
+  - id: align-designs
+    agent: {profile: architect, prompt: honey:prompts/align-designs}
+
+  - id: plans                                  # one plan per team (W33)
+    each:
+      in: "${ params.teams }"
+      as: team
+      max: 3
+      local: {plan: {$ref: "honey:plan"}}
+      do:
+        - id: draft
+          agent: {profile: planner, prompt: honey:prompts/plan, with: {team: "${ team }"}}
+          set: {local.plan: "${ result }"}
+      collect: "${ local.plan }"
+    set: {plans: "${ result.items }"}
+
+  - id: resolve-deps
+    loop:
+      max: "${ params.max_rounds }"            # the engine enforces the budget; no counter step
+      until: "state.deps.resolved"
+      do:
+        - id: align-plans
+          agent: {profile: planner, with: {plans: "${ state.plans }"}}
+          set: {plans: "${ result.plans }"}
+        - id: assess
+          llm: {profile: reviewer, schema: {$ref: "honey:dep-check"}, with: {plans: "${ state.plans }"}}
+          set: {deps: "${ result }"}
+        - id: route
+          if: "!state.deps.resolved"
+          switch:
+            cases:
+              - name: blocked
+                when: "state.deps.blocked"
+                do:
+                  - id: notify-blocked
+                    notify: {to: "${ params.teams_group }", subject: planning blocked, body: "${ state.deps.reason }"}
+                  - id: stop
+                    return: {outcome: blocked, reason: "${ state.deps.reason }"}
+            default:
+              name: resolve
+              do:
+                - id: resolve
+                  agent:
+                    profile: planner
+                    interactive: {with: "${ params.teams_group }"}    # W32
+                    with: {open: "${ state.deps.open }"}
+
+  - id: unresolved                              # the loop ran out of rounds
+    if: "!state.deps.resolved"
+    do:
+      - id: stop
+        return: {outcome: blocked, reason: "dependencies still open after ${ params.max_rounds } rounds"}
+
+  - id: push-plans
+    git: {push: {branch: "${ state.branch }"}}
+
+  - id: spec-only
+    name: stop
+    else_name: continue
+    if: "params.spec_only"
+    do:
+      - id: notify-spec
+        notify: {to: "${ params.teams_group }", subject: spec ready}
+      - id: stop
+        return: {outcome: succeeded, reason: spec-only}
+
+  - id: test-baseline
+    agent: {profile: implementer, prompt: honey:prompts/test-baseline}
+```
+
+Points this example depends on:
+
+- No iteration counter step: `loop.max` is a budget the engine enforces,
+  and `loop.index` is available to expressions.
+- Pushing plans and notifying teams are `git` and `notify` steps, which
+  are idempotent, so a crash cannot push twice or skip a notification.
+- It uses ending a run early with an outcome (W30), branch names on
+  edges (W31), the interactive agent (W32), fan-out over a list (W33)
+  and teams as recipients (W34).
+- Its graph has a loop region with a back-edge, three labelled exits and
+  several terminal nodes; drawing that without overlaps or edges crossing
+  the loop region is what ELK's compound layered layout is for (W16).
+
 ## Step types
 
 | Type | Does | Result | Default replay |
@@ -598,8 +816,10 @@ contract does not change.
 | `llm` | One model call, no tools, structured output against a schema. | the schema | safe |
 | `agent` | An agent pass through a harness, with a profile. `until:` makes it a loop. | the schema, or `{text}` | resume |
 | `question` | Ends the instance `needs_info`; waits for an answer memo. | `{answer}` | — |
-| `approval` | Waits for `approve`/`reject` from named people or roles. | `{approved, by, note}` | — |
+| `approval` | Waits for `approve`/`reject` from named people, groups or agents; `auto:` approves by policy when the project allows it (W40). | `{approved, by, note}` | — |
 | `transform` | State update only, via `set`. | — | safe |
+| `return` | Ends the run with an outcome and a reason, after enclosing `finally` blocks (W30). | — | — |
+| `continue_as_new` | Ends this run and starts its successor with new params, carrying its subscriptions, locks and owned leases (W39). | — | — |
 | `workflow` | Calls a catalog workflow, waits, returns its `output`. | callee output schema | (callee's) |
 | `fork` | Forks the current lease N ways (#82), runs `do` in each, picks by gate or score, releases the rest. | `{winner, branches}` | never (by default) |
 | `snapshot` | Saves the lease as a named snapshot (#83). | `{name, version, build_id}` | idempotent |
@@ -701,15 +921,19 @@ much smaller ecosystem), dagre (unmaintained, weak compound layout).
   evaluated), outputs (`set` applied, as a diff), the lease (link to its
   dashboard row), profile and resolved model, attempts and their
   outcomes, retries, questions and memos, the harness's tool-call feed
-  for agent steps.
+  for agent steps, and for interactive agents a chat pane (W32).
+- **Edge labels** come from branch names (W31); the branch a run took is
+  drawn solid with its label highlighted.
+- **`each` iterations** draw side by side like fork branches, collapsed to
+  a counter (`3 of 5 done`) when there are more than a few.
 - **Controls:** cancel, approve, reject, answer, steer. Shown only to
   the run's owner or an admin, and sent with an `Idempotency-Key`.
 
 ### Graph model
 
 The server derives a **graph description** from each workflow version
-at publish (nodes = step paths, groups = blocks, edges = control flow,
-`edge.data = [state paths]`) and stores it. The client never parses YAML
+at publish (nodes = step paths, groups = blocks, edges = control flow
+with their branch `label` (W31), `edge.data = [state paths]`) and stores it. The client never parses YAML
 or CEL. A run's view is that graph plus instances from the event log:
 loops and forks expand into instance nodes on the client. ELK runs once
 per graph shape in a worker and is cached by shape hash, so a live run
@@ -745,6 +969,9 @@ stdio, progress notifications and cancellation come with it. Tools:
 | `run_wait` | Waits up to a bound (default 5 min) for completion, a question, or a given event type; returns the current view and a `cursor` to call again with. Resumable across disconnects. |
 | `run_read` | State, output, outcome, instance tree; `step_log` with offsets. |
 | `run_signal` | answer, approve, reject, steer, cancel; takes `request_id`. |
+| `workflow_validate` | Runs every publish check on a definition and returns the problems with remedies, without publishing (W36). |
+| `workflow_publish` | Publishes into the caller's namespace (W36). |
+| `run_start` with `definition` | Runs an unpublished definition once; it is validated like a publish and stored with the run (W36). |
 
 Results are the run's typed output, so an agent never parses logs.
 
@@ -785,6 +1012,12 @@ with credentials referenced by secret name (#80).
   which all accept incoming webhooks, so one provider covers most chat
   systems.
 - **`mail`**: SMTP, plain text plus a minimal HTML part.
+- **W34. Groups.** A project defines named recipient groups (a team):
+  `groups: {platform: {people: [alice, bob], notify: [{mail: ...}, {webhook: platform-chat}]}}`.
+  `to:` on a `notify` step, `interactive.with` (W32), `approval` and
+  escalation (W27) accept a person, a group or an agent. A group's
+  members can each answer, approve or join; the first answer wins (a
+  memo, W10).
 - **Deep links**: every notification links to the run's current step in
   the live view, where the person answers, approves or rejects. No action
   is taken by replying, in v3.
@@ -794,6 +1027,138 @@ with credentials referenced by secret name (#80).
   a notifier. That is how owners hear about questions (W27) without every
   workflow adding a notify step. The followers' feed (`GET /api/events`)
   gets every subscribed event regardless.
+
+## Building blocks: the built-in library
+
+**W35. Methodology lives in catalog workflows, and Honey ships a library
+of them.** Each is small, does one thing in a known-good way, declares
+typed inputs and outputs, and is meant to be called by larger workflows
+and by agents:
+
+| Workflow | Does | Typical caller |
+|---|---|---|
+| `pr-review` | Gates first, then a review that converges across rounds; findings marked blocking or not (W20). | Any change, by any route. |
+| `ralph-loop` | Implement, gate, review, repeat until gates pass and no blocking findings remain, or the budget runs out; escalates the profile on the last round. Given a repo, a branch and a task text; no ticket. | Medium and large changes; `ralph-ticket`; `feature-pipeline`. |
+| `ralph-ticket` | Claim a ticket, lease, `ralph-loop`, push, report. | Triggers (W19). |
+| `plan-deps` | Resolve every open dependency in a set of plans before implementation (the worked example). | `feature-pipeline`. |
+| `test-baseline` | Capture the test results and timings before any code changes, so later gates compare against them. | `feature-pipeline`, `ralph-loop`. |
+| `qa-checklist` | An agent with a checklist and access to the product's CLI or API works through every item and returns a verdict per item. | Before promotion. |
+| `deploy-env` | Deploy a branch to a named environment, optionally refreshing its data from a sanitized copy; verify; roll back on failure. | `feature-pipeline`, `release`. |
+| `release` | Promote a branch through the promotion policy (W40), merge, deploy, verify. | `feature-pipeline`. |
+| `feature-pipeline` | Ideation, product refinement, design, `plan-deps`, `test-baseline`, implementation (`ralph-loop` per part, via `each`), `pr-review`, `deploy-env` to a dev environment, end-to-end tests, `qa-checklist`, `release`. A handful of calls, not dozens of steps. | A person or an agent with a feature-sized goal. |
+
+**Choosing by size.** Catalog entries carry `summary`, `when_to_use` and
+a size hint, and the guide turns them into one table an agent or a
+person can follow: a small change goes straight in with an optional
+`pr-review`; a medium one gets `pr-review`; a large one gets
+`ralph-loop` then `pr-review`; a feature gets `feature-pipeline`.
+
+**Roles map to profiles.** The library's steps name roles
+(`product`, `architect`, `planner`, `implementer`, `implementer-strong`,
+`reviewer`, `qa`), never models. A project points each role at the
+profile that suits it, so cost and expertise can be spread across
+providers without touching a workflow.
+
+## Agents as authors
+
+**W36. Agents compose workflows over MCP in v3** (moved forward from
+"later" in #88). A planning agent with a goal can build a workflow suited
+to it from the building blocks, check it, and run it, without that
+methodology sitting in its own context.
+
+- `workflow_validate` runs every publish check and returns problems with
+  remedies, so an agent fixes its definition the way it fixes a failing
+  test.
+- **Namespaces.** Names may be `<owner>/<name>`. Anyone may publish into
+  their own namespace; un-namespaced names are the shared catalog, where
+  only the first publisher of a name or an admin publishes new versions.
+- **Inline runs.** `run_start` accepts a `definition` instead of a name:
+  it is validated like a publish and stored with the run as an immutable,
+  unlisted version, so a one-off composition does not clutter the catalog
+  but stays reproducible.
+- **Informed choices.** Catalog listings include each workflow's
+  `summary`, `when_to_use`, inputs, outputs, and observed results:
+  runs, success rate, median duration and median cost per run (W37).
+- Agents are callers like any other: their runs are owned by them, their
+  questions reach them through `run_wait` (W27), and their budgets apply.
+
+## Cost, budgets and comparing profiles
+
+**W37.** Workflows that run for days across several providers need cost
+to be visible and bounded.
+
+- **Usage per step.** The harness reports tokens in and out (and cached),
+  model calls and wall time per step instance; the events carry them.
+- **Price per profile.** A profile declares how it bills: per token
+  (input, output and cached prices) or flat (a subscription; cost counted
+  as zero, usage still recorded). A run's cost is the sum over its steps
+  and its child runs.
+- **Budgets in money.** `budget: {usd: 25}` on a run, a loop or a
+  project per day, beside the time and token budgets. A loop that would
+  exceed its budget stops at a round boundary with outcome `blocked` and
+  the reason "budget".
+- **Comparing profiles.** Per workflow and per role, the catalog keeps
+  rounds to converge, duration, cost and success rate by profile. A
+  cheaper model that is faster per round but needs more rounds shows up
+  as exactly that. An `experiment` trigger runs the same input under two
+  profiles (with `fork`, from the same warm state) and reports both.
+
+## Two-way channels and ticket mirroring
+
+**W38.** People answer where they already talk, and long-running work is
+visible where it is tracked.
+
+- **Channels** are a provider kind (W26) for two-way chat: `post`
+  (to a channel or a thread), and an inbound side that turns replies into
+  signals. A reply in a run's thread is an answer to its open question, an
+  approval or rejection, or a message in an interactive agent step (W32),
+  attributed to the person's linked Honey identity. Honey appears as a
+  bot identity in the channel. The first channel provider ships with
+  step 18; the interface ships with step 10 so notifiers and channels
+  share one shape.
+- **Ticket mirroring.** A run started from a ticket (or linked to one)
+  mirrors its progress there through subscriptions: a comment when it
+  starts, at each named milestone and when it ends, and status or label
+  changes the project maps to run states. The ticket system becomes a
+  durable, human-facing view of long-running work; Honey stays the
+  source of truth for run state.
+- Ticket providers after `br` and `forgejo`: GitHub issues and Jira are
+  the next ones; chat providers: the first is chosen in step 18.
+
+## Perpetual workflows
+
+**W39.** Some workflows never finish by design: a role agent that
+watches a project, a queue worker, a nightly maintainer. Their event log
+would grow without bound.
+
+- `continue_as_new: {with: {...}}` ends the current run and starts its
+  successor with new params in one transaction. The successor inherits
+  the predecessor's subscriptions, locks and owned leases, and links back
+  to it; the live view shows the chain.
+- Every loop has a `max`, so a workflow cannot run forever by looping:
+  a perpetual workflow repeats by `continue_as_new` at the end of each
+  cycle. A run whose event count passes 50,000 gets a warning event that
+  names `continue_as_new` as the remedy.
+- Perpetual workflows take their work from signals, webhooks, schedules
+  and ticket triggers (W19), and their budgets (W37) are per day.
+
+## Promotion and release policy
+
+**W40.** Merging, promotion and release are steps with a policy, not
+hard-coded human gates.
+
+- `approval: {from: <person|group|agent>, auto: "${ cond }"}`: when the
+  project's policy allows automatic approval for this workflow and `cond`
+  holds (for example every gate passed, `pr-review` has no blocking
+  findings and `qa-checklist` passed every item), the approval is
+  recorded as a memo by `policy`, with the evidence it relied on.
+  Otherwise a person approves.
+- The default policy is "a person approves"; automatic promotion is
+  opted into per project and per workflow, and every automatic approval
+  appears in the review packet (#89) and on the dashboard.
+- Environments are a project setting (`dev`, `staging`, `prod`), each
+  with its own deploy and data-refresh commands and its own policy, used
+  by `deploy-env` and `release`.
 
 ## Triggers and the hive
 
@@ -814,8 +1179,10 @@ plan, step 4, deferred to this epic):
 
 ## The bee loop as a workflow
 
-**W20. `ralph-ticket` (above) is the bee loop.** Its built-in workflows:
-`ralph-ticket`, `pr-review`, `task-precheck`, `warm-snapshot`, `deploy-window`,
+**W20. `ralph-ticket` (above) is the bee loop.** In the shipped catalog its
+`rounds` loop is a call to `ralph-loop` (W35), so the loop is usable
+without a ticket. Its built-in workflows: `ralph-ticket`, `ralph-loop`,
+`pr-review`, `task-precheck`, `warm-snapshot`, `deploy-window`,
 `publish-workflows`, `job`. The 2026-10-02 lessons become rules in them:
 
 | Lesson (2026-10-02) | Rule |
@@ -1032,22 +1399,24 @@ Each step is its own ticket under #78 and ends with something running.
 
 | # | Step | Size | Ends with |
 |---|---|---|---|
-| 1 | This design, accepted. | — | Decisions W1-W29 settled. |
+| 1 | This design, accepted. | — | Decisions W1-W40 settled. |
 | 2 | **Substrate files + stepd.** W12 file operations; `spoond-stepd` with journal, attach, write, signal; baked into the worker layer. | M | A 1 h process survives a backend restart and is reattached. |
 | 3 | **Definition, CEL, schemas, catalog.** `honey/def`, `honey/expr`, `honey/catalog`; publish with validation through the check engine; graph description. | L | `spoond workflows publish` rejects bad workflows with remedies. |
-| 4 | **Engine core.** honey.db, transitions, outbox, timers, recovery, signals, memos, idempotency, ownership and cancel; step types `lease`, `run`, `gate`, `transform`, `sleep`, `notify`, `question`, `approval`; blocks `do`, `parallel`, `if`, `switch`, `loop`, `try`. The crash suite. | XL | Crash suite green; `spoond runs start/follow/signal`. |
+| 4 | **Engine core.** honey.db, transitions, outbox, timers, recovery, signals, memos, idempotency, ownership and cancel; step types `lease`, `run`, `gate`, `transform`, `return`, `continue_as_new`, `sleep`, `notify`, `question`, `approval`; blocks `do`, `parallel`, `if`, `switch`, `loop`, `each`, `try`. The crash suite. | XL | Crash suite green; `spoond runs start/follow/signal`. |
 | 5 | **Event stream + run API.** Attach (W15), step logs, the followers' feed. | M | `spoond runs follow` live. |
 | 6 | **Live view v1.** Catalog, runs list, run graph with live state, loops, step drawer, controls. | L | A real run followed in the browser. |
-| 7 | **Profiles + agent step + Pi adapter** (#87). `llm` and `agent` steps; resumable via session files. | L | An agent step resumes in a new lease after its lease is killed. |
-| 8 | **Bee loop port** (W20): `ralph-ticket`, `pr-review`, `task-precheck`; provider registry (W26) with `br` and `forgejo` ticket sources and the `forgejo` git host; `ticket` and `git` steps; locks; secrets (#80). | L | spoond tasks run as workflows beside the swarm. |
+| 7 | **Profiles + agent step + Pi adapter** (#87). `llm` and `agent` steps; resumable via session files; the interactive agent (W32) and its chat pane in the step drawer; usage, prices and cost per step (W37); MCP tool servers and image inputs. | L | An agent step resumes in a new lease after its lease is killed. |
+| 8 | **Bee loop port** (W20): `ralph-loop`, `ralph-ticket`, `pr-review`, `task-precheck`; provider registry (W26) with `br` and `forgejo` ticket sources and the `forgejo` git host; `ticket` and `git` steps; locks; secrets (#80). | L | spoond tasks run as workflows beside the swarm. |
 | 9 | **Composition + data flow UI:** `workflow` step, collapsible child graphs, packets and edge hover, time scrubber. | M | A feature pipeline of called workflows, followed live. |
-| 10 | **Triggers + concurrency + budgets** (W19); hive.yaml shrinks. Notifiers `webhook` and `mail`, subscriptions and escalation (W27, W28). | M | No orchestrator needed to dispatch. |
-| 11 | **MCP front door** (#88) on the official SDK. | M | A laptop session starts `pr-review` and acts on its output. |
+| 10 | **Triggers + concurrency + budgets** (W19); hive.yaml shrinks. Notifiers `webhook` and `mail`, subscriptions and escalation (W27, W28); recipient groups (W34); the channel provider interface (W38); ticket mirroring; money budgets (W37). | M | No orchestrator needed to dispatch. |
+| 11 | **MCP front door** (#88) on the official SDK, including composition: validate, publish into a namespace, inline runs (W36). | M | A laptop session starts `pr-review` and acts on its output, and runs a workflow it composed. |
 | 12 | **Jobs** (#84), `artifact` step. | S | `spoond job run`. |
 | 13 | **Fork + snapshot steps** (#82, #83). | L | `fork` picks a winner from 3 branches. |
 | 14 | **Review packet** (#89). | M | Every `ralph-ticket` run ends with a packet. |
 | 15 | Retire Agent Mail and the `swarm-*` scripts. | S | The release criteria hold for a week. |
 | 16 | **MicroVM features:** step checkpoints (W22), sharded gates and speculative `try` (W23), failure snapshots + "open shell here" (W24), step images (W25). W22's measurement belongs in step 2. | L | A flaky gate is retried from the pre-step checkpoint; a failure is opened as a shell from the live view. |
+| 17 | **The building-block library** (W35): `plan-deps`, `test-baseline`, `qa-checklist`, `deploy-env`, `release`, `feature-pipeline`; the promotion policy (W40); catalog metadata, observed results and the size guide; profile comparison (W37). | L | A feature goes from ticket to a dev environment through `feature-pipeline`, and is promoted by policy. |
+| 18 | **First two-way channel provider** (W38). | M | A question is answered by replying in a chat thread. |
 
 ### Doing this work with v2
 
@@ -1076,3 +1445,9 @@ as soon as 5's format is fixed.
 3. **Who answers questions**: the run's owner, with configured escalation (W27).
 4. **Notifications**: webhook and mail in v3, through providers, plus subscriptions (W28).
 5. **Retention**: 30 days, forever for merged results (W29).
+
+## Open questions
+
+1. **First chat provider for two-way channels** (step 18): Matrix, Slack,
+   Teams or Discord?
+2. **Automatic promotion** (W40): which projects, if any, opt in first?
