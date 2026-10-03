@@ -79,6 +79,10 @@ func TestCollectMetricsAndRates(t *testing.T) {
 	srv := metricsServer(t, "scrape", []string{frame(100, 10, "5"), frame(130, 12, "5.5")})
 	c := newCollector(testConfig(t, srv.URL))
 	ctx := context.Background()
+	// A fixed clock: the rates must not depend on how long a scrape takes
+	// (systemd and host lookups take seconds on a loaded CI lease).
+	t0 := time.Unix(1_800_000_000, 0)
+	c.now = func() time.Time { return t0 }
 
 	s := c.collect(ctx)
 	if s.Leases != 3 || s.ByState["running"] != 2 || s.ByImage["go-base"] != 2 || s.Granted != 1234 {
@@ -91,9 +95,9 @@ func TestCollectMetricsAndRates(t *testing.T) {
 		t.Fatalf("first scrape has no rate: %+v", s)
 	}
 
-	c.prevAt = c.prevAt.Add(-10 * time.Second) // pretend the last scrape was 10 s ago
+	c.now = func() time.Time { return t0.Add(10 * time.Second) } // the next scrape, 10 s later
 	s = c.collect(ctx)
-	if s.ReqPerSec < 2.9 || s.ReqPerSec > 3.1 { // 30 requests over ~10 s
+	if s.ReqPerSec < 2.9 || s.ReqPerSec > 3.1 { // 30 requests over 10 s
 		t.Fatalf("reqPerSec = %v, want ~3", s.ReqPerSec)
 	}
 	if s.CreateMs != 250 || s.CreatesPerMin != 2 { // (5.5-5) s over 2 fresh creates
