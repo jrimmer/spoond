@@ -50,8 +50,11 @@ type Env interface {
 	// branch and deletes it again.
 	PushScratch(ctx context.Context, repo string) error
 	// Reachable runs a trial lease with the derived allowlist and
-	// reports whether it reaches every needs: target.
-	Reachable(ctx context.Context, allowlist []string, needs []string) error
+	// reports whether it reaches every needs: target. The returned
+	// detail says how the targets were probed (the env picks the carrier
+	// the base image has); an empty detail falls back to the engine's
+	// own description.
+	Reachable(ctx context.Context, allowlist []string, needs []string) (string, error)
 	// RunGate runs one gate on the repo's default branch.
 	RunGate(ctx context.Context, repo, gate string) error
 	// Budget looks up the project's bee-hour budget.
@@ -70,15 +73,16 @@ func failf(detail, remedy string) Result {
 }
 
 // resultOf turns an Env outcome into a Result: nil is a Pass with the
-// given detail, a *SkipError is a Skip carrying the reason, and
-// anything else is a Fail with the given remedy.
+// given detail, a *SkipError is a Skip carrying the reason and the same
+// remedy a failure would (what to do by hand where the step is not
+// automated), and anything else is a Fail with the given remedy.
 func resultOf(err error, detail, remedy string) Result {
 	if err == nil {
 		return Result{Status: Pass, Detail: detail}
 	}
 	var skip *SkipError
 	if errors.As(err, &skip) {
-		return Result{Status: Skip, Detail: skip.Reason}
+		return Result{Status: Skip, Detail: skip.Reason, Remedy: remedy}
 	}
 	return failf(err.Error(), remedy)
 }
@@ -98,6 +102,38 @@ const (
 // CheckNames lists the checks in C11 order.
 var CheckNames = []string{
 	CheckSchema, CheckImage, CheckBuild, CheckKey, CheckLease, CheckGates, CheckBudget,
+}
+
+// CheckDesc is one check as the guide describes it: what it verifies,
+// in one line.
+type CheckDesc struct {
+	// Name is the check's name in a report.
+	Name string `json:"name"`
+	// Verifies is what it checks, in one line.
+	Verifies string `json:"verifies"`
+}
+
+// checkDescs describes every check by name. The guide renders this
+// table alongside CheckNames, so a check cannot exist without a line
+// saying what it verifies.
+var checkDescs = map[string]string{
+	CheckSchema: "the hive.yaml parses and satisfies every field's rule",
+	CheckImage:  "the base image is in this instance's catalog, with a current build",
+	CheckBuild:  "the derived worker image (<base>-worker) builds from the base image",
+	CheckKey:    "the project's deploy key clones the repo and pushes a scratch branch, then deletes it",
+	CheckLease:  "a trial lease with the derived allowlist reaches every needs: target",
+	CheckGates:  "every gate passes on the repo's default branch",
+	CheckBudget: "a bee-hour budget is set for the project",
+}
+
+// CheckDescriptions lists every check in C11 order with what it
+// verifies.
+func CheckDescriptions() []CheckDesc {
+	out := make([]CheckDesc, 0, len(CheckNames))
+	for _, n := range CheckNames {
+		out = append(out, CheckDesc{Name: n, Verifies: checkDescs[n]})
+	}
+	return out
 }
 
 // Checks is the check list in C11 order: hive.yaml parses and
@@ -173,8 +209,11 @@ func Checks() []Check {
 						"ask the owner to fix the instance's guide, then run the check again.")
 				}
 				allowlist := p.Allowlist(inst)
-				return resultOf(env.Reachable(ctx, allowlist, p.Needs),
-					leaseDetail(p.Needs, allowlist),
+				detail, err := env.Reachable(ctx, allowlist, p.Needs)
+				if detail == "" {
+					detail = leaseDetail(p.Needs, allowlist)
+				}
+				return resultOf(err, detail,
 					fmt.Sprintf("drop the needs: entry that a trial lease cannot reach, or ask the owner to fix the target (needs: %s).", strings.Join(p.Needs, ", ")))
 			},
 		},
@@ -186,7 +225,10 @@ func Checks() []Check {
 					if err := env.RunGate(ctx, p.Repo, g); err != nil {
 						var skip *SkipError
 						if errors.As(err, &skip) {
-							return Result{Status: Skip, Detail: skip.Reason}
+							return Result{
+								Status: Skip, Detail: skip.Reason,
+								Remedy: fmt.Sprintf("make %s pass on the default branch, or drop it from gates.", g),
+							}
 						}
 						return failf(fmt.Sprintf("%s: %v", g, err),
 							fmt.Sprintf("make %s pass on the default branch, or drop it from gates.", g))
@@ -202,7 +244,10 @@ func Checks() []Check {
 				if err != nil {
 					var skip *SkipError
 					if errors.As(err, &skip) {
-						return Result{Status: Skip, Detail: skip.Reason}
+						return Result{
+							Status: Skip, Detail: skip.Reason,
+							Remedy: "set a bee-hour budget for the project with the owner, then run the check again.",
+						}
 					}
 					return failf(fmt.Sprintf("look up budget: %v", err),
 						"set a bee-hour budget for the project with the owner, then run the check again.")

@@ -86,9 +86,12 @@ func TestOfflineEnvHostStepsSkip(t *testing.T) {
 	env := NewOfflineEnv(srv.URL, "token-a", testInstance())
 	ctx := context.Background()
 	steps := map[string]error{
-		"build":  env.BuildImage(ctx, "go-base-worker"),
-		"key":    env.PushScratch(ctx, "ssh://git@git.lacy.casa/lacy.casa/hrmny.git"),
-		"lease":  env.Reachable(ctx, []string{"git.lacy.casa"}, []string{NeedLeases}),
+		"build": env.BuildImage(ctx, "go-base-worker"),
+		"key":   env.PushScratch(ctx, "ssh://git@git.lacy.casa/lacy.casa/hrmny.git"),
+		"lease": func() error {
+			_, err := env.Reachable(ctx, []string{"git.lacy.casa"}, []string{NeedLeases})
+			return err
+		}(),
 		"gate":   env.RunGate(ctx, "ssh://git@git.lacy.casa/lacy.casa/hrmny.git", "mix test"),
 		"budget": func() error { _, err := env.Budget(ctx, "hrmny"); return err }(),
 	}

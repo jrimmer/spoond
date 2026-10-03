@@ -23,7 +23,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -49,11 +48,13 @@ const (
 	NeedRegistry = "registry"
 )
 
-// KnownNeeds lists every accepted needs: key.
+// KnownNeeds lists every accepted needs: key, from the needs: table in
+// schema.go.
 var KnownNeeds = []string{NeedLeases, NeedRegistry}
 
-// workerImageSuffix turns a base image name into its worker image name.
-const workerImageSuffix = "-worker"
+// WorkerImageSuffix is appended to a base image's name to derive the
+// worker image's name (C10): go-base becomes go-base-worker.
+const WorkerImageSuffix = "-worker"
 
 // Models names the models a project's workers use (Bifrost names).
 type Models struct {
@@ -72,6 +73,8 @@ type Project struct {
 	Needs      []string `yaml:"needs" json:"needs"`
 	MaxWorkers int      `yaml:"max_workers" json:"max_workers"`
 	Models     Models   `yaml:"models" json:"models"`
+
+	parseErr error
 }
 
 // Problem is one validation failure: the field it belongs to and the
@@ -117,7 +120,10 @@ func Parse(data []byte) (Project, error) {
 		if errors.Is(err, io.EOF) {
 			return Project{}, errors.New("hive.yaml is empty")
 		}
-		return Project{}, fmt.Errorf("parse hive.yaml: %w", err)
+		// The carried Project reports the parse error as its schema
+		// problem, so POST /hive/check can answer a syntactically broken
+		// file with the usual report shape.
+		return Project{parseErr: err}, fmt.Errorf("parse hive.yaml: %w", err)
 	}
 	p := Project{
 		Project:    deref(doc.Project, ""),
@@ -159,47 +165,21 @@ func ParseFile(path string) (Project, error) {
 var projectNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
 
 // Validate checks the schema's rules and returns one Problem per
-// violation, in field order. An empty result means the file is valid.
+// violation, in field order. An empty result means the file is valid. The
+// rules themselves live in the field table (schema.go), which the guide
+// renders, so a rule cannot exist without being taught.
 func (p Project) Validate() []Problem {
+	if p.parseErr != nil {
+		return []Problem{{
+			Field:  "hive.yaml",
+			Remedy: fmt.Sprintf("fix the YAML syntax: %v.", p.parseErr),
+		}}
+	}
 	var problems []Problem
-	if !projectNameRE.MatchString(p.Project) {
-		problems = append(problems, Problem{
-			Field: "project",
-			Remedy: fmt.Sprintf("rename the project to a lowercase name of 2-31 characters from [a-z0-9-] starting with a letter, matching %s.",
-				projectNameRE.String()),
-		})
-	}
-	if host, err := repoHost(p.Repo); err != nil || host == "" {
-		problems = append(problems, Problem{
-			Field:  "repo",
-			Remedy: "set repo to an ssh:// or https:// git URL with a host, e.g. ssh://git@git.lacy.casa/lacy.casa/hrmny.git.",
-		})
-	}
-	if p.BaseImage == "" {
-		problems = append(problems, Problem{
-			Field:  "base_image",
-			Remedy: "set base_image to an image this instance has a current build of (GET /api/images lists them).",
-		})
-	}
-	if len(p.Gates) == 0 {
-		problems = append(problems, Problem{
-			Field:  "gates",
-			Remedy: "list at least one gate command under gates that says what done means for this project, e.g. mix test.",
-		})
-	}
-	for _, n := range p.Needs {
-		if !isKnownNeed(n) {
-			problems = append(problems, Problem{
-				Field:  "needs",
-				Remedy: fmt.Sprintf("replace the unknown entry %q with one of the known keys (%s), or drop it.", n, strings.Join(KnownNeeds, ", ")),
-			})
+	for _, f := range Fields() {
+		if f.check != nil {
+			problems = append(problems, f.check(&p)...)
 		}
-	}
-	if p.MaxWorkers < MinMaxWorkers || p.MaxWorkers > MaxMaxWorkers {
-		problems = append(problems, Problem{
-			Field:  "max_workers",
-			Remedy: fmt.Sprintf("set max_workers to an integer between %d and %d.", MinMaxWorkers, MaxMaxWorkers),
-		})
 	}
 	return problems
 }
@@ -225,7 +205,7 @@ type Instance struct {
 // project's base image (C10): the base image plus the one fixed worker
 // layer. No per-project Dockerfile.
 func (p Project) WorkerImage() string {
-	return p.BaseImage + workerImageSuffix
+	return p.BaseImage + WorkerImageSuffix
 }
 
 // Allowlist returns the network allowlist derived from the project and
@@ -239,11 +219,8 @@ func (p Project) Allowlist(inst Instance) []string {
 	}
 	hosts = append(hosts, inst.ModelService, inst.AgentMail)
 	for _, n := range p.Needs {
-		switch n {
-		case NeedLeases:
-			hosts = append(hosts, inst.LeaseAPI)
-		case NeedRegistry:
-			hosts = append(hosts, inst.Registry)
+		if t := NeedTarget(n, inst); t != "" {
+			hosts = append(hosts, t)
 		}
 	}
 	return dedupeSorted(hosts)
