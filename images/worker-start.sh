@@ -29,7 +29,11 @@
 # A task is a mail whose subject starts "[TASK <id>]". Its body may begin with
 #   Repo: <git url>
 #   Branch: <branch>
+#   Base: <branch>
 # lines; the rest is the task text. Without Branch:, the branch is swarm/<id>.
+# Base: names the branch the task builds on (default main): a new task
+# branch starts from origin/<base>, and the verifier's diff, the commit
+# count and the push decision are all measured against it.
 set -uo pipefail
 
 : "${SWARM_NAME:?}" "${AMAIL_URL:?}" "${AMAIL_PROJECT:?}" "${SWARM_IMPL_MODEL:?}" \
@@ -169,7 +173,7 @@ watch_pass() {
       [ "$idle" -gt 0 ] && printf ', NO log activity for %d min' $(( idle / 60 ))
       echo
       recent_tools "$W/logs-$name.jsonl" 4
-      echo "branch: $(git -C "$dir" log --oneline origin/main..HEAD 2>/dev/null | wc -l) commit(s); diff vs origin/main: $(git -C "$dir" diff --shortstat origin/main 2>/dev/null | sed 's/^ //')"
+      echo "branch: $(git -C "$dir" log --oneline "$BASE_REF"..HEAD 2>/dev/null | wc -l) commit(s); diff vs $BASE_REF: $(git -C "$dir" diff --shortstat "$BASE_REF" 2>/dev/null | sed 's/^ //')"
     } | say "$TASK_ID" "[PROGRESS $TASK_ID] $name: $(( (now - start) / 60 )) min"
   done
 }
@@ -211,6 +215,61 @@ pass() {  # pass DIR LOGNAME MODEL PROMPT [TIMEOUT]
   return 1
 }
 
+# push_and_report WT BRANCH ID SUBJECT: the one way out of a finished task, called on
+# every exit path. origin keeps only what we last pushed, so whatever the
+# exit, the current HEAD must land there: the whole point of the round loop
+# is a branch the orchestrator (or a retry) can pick up. HEAD is pushed to
+# the task branch under --force-with-lease, so a push can never overwrite a
+# commit this worker has not seen (another worker's retry, or a fix pushed
+# by hand since our clone). The lease expectation is what the worker last
+# fetched (empty when the task branch is not on origin yet, which refuses to
+# create it if someone else raced us there). When HEAD would have to force
+# (history rewritten by a later round, or the branch moved on origin), the
+# task branch is left untouched and the commits go to a "-wip-<sha>" branch
+# instead, named after the HEAD that needs saving, so a retry that rewrites
+# history again lands on a fresh name. It is created under a create-only
+# lease and never force-pushed, so the last round is always recoverable and
+# nothing can clobber an earlier -wip. The report names exactly what landed
+# and where, so a pushed sha is never only in the lease.
+push_and_report() {  # push_and_report WT BRANCH ID SUBJECT  (report body on stdin)
+  local wt=$1 branch=$2 id=$3 subject=$4 sha tip expect pushes ok out
+  sha=$(git -C "$wt" rev-parse --short=7 HEAD)
+  tip="refs/heads/$branch"
+  expect=$(git -C "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" || true)
+  # git needs the lease as "<ref>:<expect>"; empty <expect> is its own form
+  # (create-only, not an empty string), so build the arguments as an array.
+  # Fast-forward of origin's branch plus a matching lease is the only safe
+  # push to the task branch; anything else would have to force, so it goes
+  # to a "-wip-<sha>" branch instead, named for the HEAD being saved so a
+  # retry with a new rewrite gets a fresh name. Create-only and never
+  # force-pushed, it cannot clobber anything, not even another -wip of the
+  # same task. The one way its lease can refuse is when origin already has
+  # that branch — which for a HEAD-named branch means those same commits are
+  # already there, so the push has nothing left to do.
+  if [ -n "$expect" ] && ! git -C "$wt" merge-base --is-ancestor "$expect" HEAD 2>/dev/null; then
+    branch="$branch-wip-$sha"
+    pushes=("--force-with-lease=refs/heads/$branch:")
+  else
+    pushes=("--force-with-lease=$tip:$expect")
+  fi
+  echo "pushing $sha to $branch $(date -Is)"
+  if out=$(git -C "$wt" push -u origin "${pushes[@]}" HEAD:"refs/heads/$branch" 2>&1); then
+    ok=succeeded
+  elif [ "$(git -C "$wt" ls-remote origin "refs/heads/$branch" | cut -f1)" = "$(git -C "$wt" rev-parse HEAD)" ]; then
+    ok=succeeded; out="origin already has $branch at $sha"
+  else
+    ok=FAILED
+  fi
+  echo "push to $branch $ok: $out"
+  # A task whose work did not land is not done, whatever the verifier said.
+  [ "$ok" = FAILED ] && case $subject in "[DONE "*) subject="[BLOCKED $id] retryable: push failed";; esac
+  { echo "pushed: $sha -> $branch ($ok under --force-with-lease)"
+    [ "$branch" != "$2" ] && echo "note: history was rewritten, so the task branch was left at its old tip; HEAD went to $branch instead"
+    echo
+    cat
+  } | say "$id" "$subject"
+}
+
 # run_task MSGID: one complete task, reported in its own thread.
 run_task() {
   local msg=$1 raw subject id body repo branch slug wt base rules round verdict findings commits
@@ -223,6 +282,10 @@ run_task() {
   repo=$(sed -nE 's/^Repo: *([^ ]+).*/\1/p' <<<"$body" | head -1)
   branch=$(sed -nE 's/^Branch: *([^ ]+).*/\1/p' <<<"$body" | head -1)
   : "${branch:=swarm/$id}"
+  base_branch=$(sed -nE 's/^Base: *([^ ]+).*/\1/p' <<<"$body" | head -1)
+  base_branch=${base_branch#origin/}
+  : "${base_branch:=main}"
+  BASE_REF=origin/$base_branch
   amail ack "$msg" >/dev/null 2>&1 || true
   status "task $id"
   printf '%s\n' "$body" > $W/tasks/$id.md
@@ -238,10 +301,15 @@ run_task() {
       | say "$id" "[BLOCKED $id] permanent: cannot access repo"
     return
   }
+  if ! git -C "$wt" rev-parse -q --verify "refs/remotes/$BASE_REF" >/dev/null; then
+    printf 'The task names Base: %s, but %s has no such branch.\n' "$base_branch" "$repo" \
+      | say "$id" "[BLOCKED $id] permanent: no base branch $base_branch"
+    return
+  fi
   # Clean start for every task, nothing left over. A retried task resumes
   # from its pushed branch (earlier attempts push their wip); otherwise the
-  # branch starts at origin/main.
-  local start=origin/main
+  # branch starts at the task's base (Base:, default origin/main).
+  local start=$BASE_REF
   git -C "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null && start=origin/$branch
   if ! { git -C "$wt" switch -q -C "$branch" "$start" && git -C "$wt" reset -q --hard \
          && git -C "$wt" clean -q -fdx; }; then
@@ -268,8 +336,9 @@ $(printf '%s\n' "$SWARM_GATES" | sed 's/^/    /')"
   for round in $(seq 1 "$MAX_ROUNDS"); do
     if cancelled "$id"; then
       git -C "$wt" add -A && git -C "$wt" commit -q -m "wip: $id" || true
-      git -C "$wt" push -q -u origin "$branch" || true
-      printf 'Cancelled; work in progress pushed to %s.\n' "$branch" | say "$id" "[CANCELLED $id]"
+      push_and_report "$wt" "$branch" "$id" "[CANCELLED $id]" <<EOF
+Cancelled; work in progress pushed.
+EOF
       return
     fi
     status "task $id: implementing (round $round)"
@@ -313,7 +382,7 @@ You have $(( VERIFY_TIMEOUT / 60 )) minutes. Keep your notes in $W/verdict.md as
 
 Steps:
 1. Create $W/verdict.md now with the single line PENDING.
-2. Read the whole diff: git diff origin/main...HEAD
+2. Read the whole diff: git diff $BASE_REF...HEAD
 3. Check every requirement in the task is met exactly, and look hard for bugs. Add each finding to $W/verdict.md as soon as you have it, one per line (file:line and what is wrong).
 4. Run every gate the task names (once each) and add the results to $W/verdict.md.
 5. Do not fix anything yourself.
@@ -337,27 +406,56 @@ $(recent_tools "$W/logs-$vlog.jsonl" 8)"
     [ "$verdict" = PASS ] || [ "$verdict" = TIMEOUT ] && break
   done
 
-  commits=$(git -C "$wt" log --format='%h %s' origin/main..HEAD)
-  if [ "$verdict" = PASS ] && [ -n "$commits" ] && git -C "$wt" push -q -u origin "$branch"; then
-    { echo "branch:   $branch (pushed)"; echo "commits:"; echo "$commits" | sed 's/^/  /'
-      echo "verifier: PASS in round $round ($SWARM_VERIFY_MODEL)"; echo; cat $W/verdict.md; } \
-      | say "$id" "[DONE $id]"
+  commits=$(git -C "$wt" log --format='%h %s' "$BASE_REF"..HEAD)
+  if [ "$verdict" = PASS ] && [ -n "$commits" ]; then
+    push_and_report "$wt" "$branch" "$id" "[DONE $id]" <<EOF
+commits:
+$(echo "$commits" | sed 's/^/  /')
+verifier: PASS in round $round ($SWARM_VERIFY_MODEL)
+$(cat $W/verdict.md)
+EOF
     return
   fi
   git -C "$wt" add -A && git -C "$wt" commit -q -m "wip: $id" || true
-  [ -n "$(git -C "$wt" log --format=%h origin/main..HEAD)" ] && git -C "$wt" push -q -u origin "$branch"
-  if [ -n "$LLM_DOWN" ]; then
-    printf 'The model service kept failing (%s). Work so far is on %s; retry when llm.lacy.casa is healthy.\n' "$LLM_DOWN" "$branch" \
-      | say "$id" "[BLOCKED $id] retryable: infrastructure (model service)"
-    return
+  sha=$(git -C "$wt" rev-parse --short=7 HEAD)
+  if [ -n "$(git -C "$wt" log --format=%h "$BASE_REF"..HEAD)" ]; then
+    if [ -n "$LLM_DOWN" ]; then
+      push_and_report "$wt" "$branch" "$id" "[BLOCKED $id] retryable: infrastructure (model service)" <<EOF
+The model service kept failing ($LLM_DOWN).
+HEAD: $sha, pushed to $branch. Retry when the model service is healthy.
+EOF
+      return
+    fi
+    if [ "$verdict" = TIMEOUT ]; then
+      push_and_report "$wt" "$branch" "$id" "[BLOCKED $id] retryable: verifier gave no verdict" <<EOF
+The verifier gave no verdict twice in round $round, so no implement round was spent on it.
+HEAD: $sha, pushed to $branch; review it by hand.
+
+$findings
+EOF
+      return
+    fi
+    push_and_report "$wt" "$branch" "$id" "[BLOCKED $id] retryable: verifier did not pass" <<EOF
+No PASS after $MAX_ROUNDS rounds (last verdict: ${verdict:-none}).
+HEAD: $sha, pushed to $branch.
+
+Last findings:
+${findings:-none recorded}
+EOF
+  else
+    if [ -n "$LLM_DOWN" ]; then
+      printf 'The model service kept failing (%s); nothing was committed, so there is nothing to push.\n' "$LLM_DOWN" \
+        | say "$id" "[BLOCKED $id] retryable: infrastructure (model service)"
+      return
+    fi
+    if [ "$verdict" = TIMEOUT ]; then
+      { echo "The verifier gave no verdict twice in round $round, so no implement round was spent on it. Nothing was committed, so there is nothing to push."; echo
+        echo "$findings"; } | say "$id" "[BLOCKED $id] retryable: verifier gave no verdict"
+      return
+    fi
+    { echo "No PASS after $MAX_ROUNDS rounds (last verdict: ${verdict:-none}). Nothing was committed, so there is nothing to push."; echo
+      echo "Last findings:"; echo "${findings:-none recorded}"; } | say "$id" "[BLOCKED $id] retryable: verifier did not pass"
   fi
-  if [ "$verdict" = TIMEOUT ]; then
-    { echo "The verifier gave no verdict twice in round $round, so no implement round was spent on it. Work so far is on $branch; review it by hand."; echo
-      echo "$findings"; } | say "$id" "[BLOCKED $id] retryable: verifier gave no verdict"
-    return
-  fi
-  { echo "No PASS after $MAX_ROUNDS rounds (last verdict: ${verdict:-none}). Work so far is on $branch."; echo
-    echo "Last findings:"; echo "${findings:-none recorded}"; } | say "$id" "[BLOCKED $id] retryable: verifier did not pass"
 }
 
 # --- main loop: ready -> task -> ready ... until idle ---------------------------
