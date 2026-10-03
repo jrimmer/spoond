@@ -21,6 +21,7 @@
 # optional:
 #   SWARM_ORCH (orch-1), SWARM_CC (jason-0), SWARM_THINKING (high),
 #   SWARM_MAX_ROUNDS (3), SWARM_PASS_TIMEOUT seconds per Pi pass (3600),
+#   SWARM_VERIFY_TIMEOUT seconds per verify pass (SWARM_PASS_TIMEOUT),
 #   SWARM_IDLE_TIMEOUT seconds without a task before leaving (900),
 #   SWARM_GATES           the project's gates, one command per line (from
 #                         hive.yaml); every task must pass them
@@ -38,6 +39,7 @@ CC=${SWARM_CC:-jason-0}
 THINKING=${SWARM_THINKING:-high}
 MAX_ROUNDS=${SWARM_MAX_ROUNDS:-3}
 PASS_TIMEOUT=${SWARM_PASS_TIMEOUT:-3600}
+VERIFY_TIMEOUT=${SWARM_VERIFY_TIMEOUT:-$PASS_TIMEOUT}
 IDLE_TIMEOUT=${SWARM_IDLE_TIMEOUT:-900}
 
 W=/work
@@ -127,6 +129,28 @@ heartbeat() {
   curl -s -m 10 -o /dev/null -X POST "$SPOOND_GATEWAY_URL/lease/$SPOOND_LEASE_ID/active" || true
 }
 
+# recent_tools LOG N: how many tool calls a pass made, and its latest N.
+recent_tools() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+n, recent = 0, []
+try:
+    f = open(sys.argv[1], errors="replace")
+except OSError:
+    f = []
+for line in f:
+    if '"tool_execution_start"' not in line: continue
+    n += 1
+    try:
+        e = json.loads(line); a = e.get("args") or {}
+        what = a.get("command") or a.get("path") or a.get("file_path") or ""
+        recent.append(f'{e.get("toolName")} {" ".join(str(what).split())[:70]}')
+    except ValueError: pass
+print(f"tool calls: {n}; latest:")
+for r in recent[-int(sys.argv[2]):]: print("  " + r)
+PY
+}
+
 # watch_pass PID DIR LOGNAME: while the pass runs, every PROGRESS_EVERY
 # seconds report facts from its own log: elapsed time, tool calls so far and
 # the latest ones, the branch's diff size, and whether the log is still
@@ -144,21 +168,7 @@ watch_pass() {
     { printf '%s: %d min elapsed' "$name" $(( (now - start) / 60 ))
       [ "$idle" -gt 0 ] && printf ', NO log activity for %d min' $(( idle / 60 ))
       echo
-      python3 - "$W/logs-$name.jsonl" <<'PY'
-import json, sys
-n, recent = 0, []
-with open(sys.argv[1], errors="replace") as f:
-    for line in f:
-        if '"tool_execution_start"' not in line: continue
-        n += 1
-        try:
-            e = json.loads(line); a = e.get("args") or {}
-            what = a.get("command") or a.get("path") or a.get("file_path") or ""
-            recent.append(f'{e.get("toolName")} {" ".join(str(what).split())[:70]}')
-        except ValueError: pass
-print(f"tool calls: {n}; latest:")
-for r in recent[-4:]: print("  " + r)
-PY
+      recent_tools "$W/logs-$name.jsonl" 4
       echo "branch: $(git -C "$dir" log --oneline origin/main..HEAD 2>/dev/null | wc -l) commit(s); diff vs origin/main: $(git -C "$dir" diff --shortstat origin/main 2>/dev/null | sed 's/^ //')"
     } | say "$TASK_ID" "[PROGRESS $TASK_ID] $name: $(( (now - start) / 60 )) min"
   done
@@ -171,14 +181,17 @@ llm_error() {
   tail -c 4000 "$1" | grep -o '"errorMessage":"[^"]*"' | tail -1 | cut -d'"' -f4
 }
 
-pass() {  # pass DIR LOGNAME MODEL PROMPT
+pass() {  # pass DIR LOGNAME MODEL PROMPT [TIMEOUT]
+  # PASS_TIMED_OUT is 1 when the pass ran out of time (timeout exit 124):
+  # it ended normally as far as Pi knows, but did not finish.
   # A model-service failure (e.g. llm.lacy.casa 502 while its host is
   # stalled) is retried here with backoff and does not use up a round; only
   # after 6 failed attempts does the task fail, as an infrastructure block.
-  local attempt err
+  local attempt err limit=${5:-$PASS_TIMEOUT}
+  PASS_TIMED_OUT=0
   for attempt in 1 2 3 4 5 6; do
     echo "pass $2 ($3) attempt $attempt $(date -Is)"
-    ( cd "$1" && timeout "$PASS_TIMEOUT" pi -p "$4" --provider llm --model "$3" \
+    ( cd "$1" && timeout "$limit" pi -p "$4" --provider llm --model "$3" \
         --thinking "$THINKING" --no-session --mode json </dev/null > "$W/logs-$2.jsonl" 2>&1 ) &
     local pid=$!
     watch_pass "$pid" "$1" "$2" &
@@ -186,6 +199,7 @@ pass() {  # pass DIR LOGNAME MODEL PROMPT
     wait "$pid"; local rc=$?
     kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
     echo "pass $2 exit=$rc $(date -Is)"
+    [ "$rc" -eq 124 ] && PASS_TIMED_OUT=1 && echo "pass $2: timed out after ${limit}s"
     err=$(llm_error "$W/logs-$2.jsonl") || return 0
     echo "pass $2: model service error: $err"
     [ "$attempt" -eq 1 ] && printf 'Model service error in %s: %s. Retrying with backoff.\n' "$2" "$err" \
@@ -280,25 +294,47 @@ $rules" || break
     echo "Round $round implement pass finished; verifying with $SWARM_VERIFY_MODEL." \
       | say "$id" "[PROGRESS $id] round $round: verifying"
 
-    status "task $id: verifying (round $round)"
-    rm -f $W/verdict.md
-    pass "$wt" "$id-verify-$round" "$SWARM_VERIFY_MODEL" "You are an independent reviewer with fresh eyes. Review the change on branch $branch against its task.
+    # A verify pass that ends without a verdict (it ran out of time, or
+    # never wrote the file) is not a FAIL: there are no findings to fix, so
+    # another implement round would be blind. Verify once more; if that
+    # also gives no verdict, stop and hand the branch to the orchestrator
+    # with what the verifier had found so far.
+    local vtry vlog
+    for vtry in 1 2; do
+      status "task $id: verifying (round $round, try $vtry)"
+      vlog=$id-verify-$round; [ "$vtry" -gt 1 ] && vlog=$vlog-$vtry
+      rm -f $W/verdict.md
+      pass "$wt" "$vlog" "$SWARM_VERIFY_MODEL" "You are an independent reviewer with fresh eyes. Review the change on branch $branch against its task.
 
 TASK:
 $(cat $W/tasks/$id.md)
 
-Steps:
-1. Read the whole diff: git diff origin/main...HEAD
-2. Check every requirement in the task is met exactly, and look hard for bugs.
-3. Run every gate the task names and record the results.
-4. Do not fix anything yourself.
-5. Write your verdict to $W/verdict.md. First line exactly PASS or FAIL. Then one finding per line (file:line and what is wrong), then the gate results.
+You have $(( VERIFY_TIMEOUT / 60 )) minutes. Keep your notes in $W/verdict.md as you go, so nothing is lost if you run out of time.
 
-$rules" || break
-    verdict=$(head -1 $W/verdict.md 2>/dev/null | tr -d '[:space:]')
-    findings=$(tail -n +2 $W/verdict.md 2>/dev/null)
-    echo "task $id round $round verdict: ${verdict:-none}"
-    [ "$verdict" = PASS ] && break
+Steps:
+1. Create $W/verdict.md now with the single line PENDING.
+2. Read the whole diff: git diff origin/main...HEAD
+3. Check every requirement in the task is met exactly, and look hard for bugs. Add each finding to $W/verdict.md as soon as you have it, one per line (file:line and what is wrong).
+4. Run every gate the task names (once each) and add the results to $W/verdict.md.
+5. Do not fix anything yourself.
+6. Replace the first line of $W/verdict.md with exactly PASS or FAIL.
+
+$rules" "$VERIFY_TIMEOUT" || break 2
+      verdict=$(head -1 $W/verdict.md 2>/dev/null | tr -d '[:space:]')
+      findings=$(tail -n +2 $W/verdict.md 2>/dev/null)
+      case $verdict in PASS|FAIL) break ;; esac
+      local why="ended without a verdict"
+      [ "$PASS_TIMED_OUT" = 1 ] && why="timed out after $(( VERIFY_TIMEOUT / 60 )) min"
+      verdict=TIMEOUT
+      findings="Verifier $why (round $round, try $vtry).
+Partial notes:
+${findings:-none}
+$(recent_tools "$W/logs-$vlog.jsonl" 8)"
+      echo "task $id round $round verify try $vtry: $why"
+      [ "$vtry" -eq 1 ] && printf '%s\n' "$findings" | say "$id" "[PROGRESS $id] round $round: verifier $why; verifying again"
+    done
+    echo "task $id round $round verdict: $verdict"
+    [ "$verdict" = PASS ] || [ "$verdict" = TIMEOUT ] && break
   done
 
   commits=$(git -C "$wt" log --format='%h %s' origin/main..HEAD)
@@ -313,6 +349,11 @@ $rules" || break
   if [ -n "$LLM_DOWN" ]; then
     printf 'The model service kept failing (%s). Work so far is on %s; retry when llm.lacy.casa is healthy.\n' "$LLM_DOWN" "$branch" \
       | say "$id" "[BLOCKED $id] retryable: infrastructure (model service)"
+    return
+  fi
+  if [ "$verdict" = TIMEOUT ]; then
+    { echo "The verifier gave no verdict twice in round $round, so no implement round was spent on it. Work so far is on $branch; review it by hand."; echo
+      echo "$findings"; } | say "$id" "[BLOCKED $id] retryable: verifier gave no verdict"
     return
   fi
   { echo "No PASS after $MAX_ROUNDS rounds (last verdict: ${verdict:-none}). Work so far is on $branch."; echo
