@@ -2,7 +2,7 @@
 
 Status: **draft for decision, 2026-10-02.** Epic #78. Covers #85 (live
 view) in full and the parts of #84, #87 and #88 that the engine needs.
-Decisions are numbered W1-W40. Build order at the end.
+Decisions are numbered W1-W46. Build order at the end.
 
 Implementation starts on a branch off `main`, after `feat/e2b-substrate`
 is fully merged. Paths below are `main`'s (module `github.com/jrimmer/spoond/v2`).
@@ -65,6 +65,12 @@ crash. Jobs, the hive, CI and agent coordination become workflows.
 | W38 | Two-way channels: chat replies and buttons become signals; a run's progress mirrors onto its ticket. The first channel provider speaks the Discord bot API, aimed at Hrmny. | [Channels](#two-way-channels-and-ticket-mirroring) |
 | W39 | Perpetual workflows continue as new, so their history stays bounded. | [Perpetual workflows](#perpetual-workflows) |
 | W40 | Promotion and release are policy: a person approves by default; a project can allow automatic promotion when every gate passes. | [Promotion](#promotion-and-release-policy) |
+| W41 | The flight log is tamper-evident: each event carries the hash of the one before it. | [Durability](#durability-model) |
+| W42 | ACP is a harness, next to Pi: any agent that speaks ACP can back a profile. | [Harness](#the-harness-contract-and-pi) |
+| W43 | Chat starts and steers flights: mentions, reactions and slash commands are triggers. | [Channels](#two-way-channels-and-ticket-mirroring) |
+| W44 | Liveness is visible: lease health, heartbeat age and progress age per step, and a "stalled" state. | [Live view](#the-live-view-85) |
+| W45 | Flights have participants with roles (watch, answer, approve, control), like lease shares. | [Ownership](#ownership-cancellation-and-locks) |
+| W46 | Names: a definition is a **flightplan**, one execution of it is a **flight**. | [Names](#names) |
 
 ## Goals and non-goals
 
@@ -188,6 +194,22 @@ flowchart LR
   STEPD --> PI[pi --mode rpc]
   STEPD --> CMD[gate / run commands]
 ```
+
+## Names
+
+**W46.** The bee vocabulary (host, lease, bee, swarm, hive) gains two
+words. A **flightplan** is a versioned definition in the catalog. A
+**flight** is one execution of a flightplan. A flight is made of
+**steps**. A bee flies flights; the hive dispatches them.
+
+These names are used everywhere a person or an agent sees them: the CLI
+(`spoond flightplans`, `spoond flights`), the API (`/api/flightplans`,
+`/api/flights`), the MCP tools (`flightplan_*`, `flight_*`), the live
+view, the guide and these docs. The YAML says `kind: Flightplan`, and the
+step that calls another flightplan is `flightplan:`. Inside the Go code
+and the database the plain terms stay (`workflow`, `run`), because they
+are what a reader of the code expects; the API layer maps between them.
+The command step keeps its name, `run:`: it runs a command.
 
 ## Concepts
 
@@ -497,6 +519,14 @@ later transaction. A crash between the two repeats the outbox row,
 never the transition. The run's current state is a materialized row;
 the event log alone can rebuild it (tested, W18).
 
+**W41. The log is tamper-evident.** Each event stores
+`prev_hash` and `hash = sha256(prev_hash || canonical JSON of the
+event)`; the flight row keeps the head hash. `spoond flights verify <id>`
+recomputes the chain. An automatic approval (W40) and a review packet
+(#89) record the head hash they were based on, so anyone can later show
+that the evidence they cite is the evidence that was there. It costs one
+hash per event, inside the transaction that writes it.
+
 **W9. Intent before action, and a replay policy decides what a crash
 means.**
 
@@ -597,6 +627,17 @@ a person, not an agent that happens to accept steering:
   agent takes part.
 
 ## Ownership, cancellation and locks
+
+**W45. Participants.** A flight has an owner and a list of
+participants (people, groups, agents), each with roles: `watch` (read
+it and its logs), `answer` (answer questions, talk to interactive
+steps), `approve`, and `control` (steer, cancel). The owner has every
+role. Participants come from the flightplan (`participants:` with
+expressions over params, for example the team group), from the
+starter, and from shares added later (`spoond flights share`, like lease
+shares). Questions go to the owner first and then to participants with
+`answer` (W27); approvals to those with `approve`. The live view, MCP
+and channels check these roles; there are no separate permission flags.
 
 **W14. Every run is the root of an ownership tree.** It owns its child
 runs, fork branches, leases, locks and stepd processes. The tree is in
@@ -708,7 +749,21 @@ prompt. `llm` and `agent` steps accept artifacts as inputs (`attach:
 
 **Harnesses beyond Pi.** A profile's harness can be any implementation
 of the contract: an agent CLI driven through its own RPC or JSON mode, or
-a direct API call loop. Profiles say whether a harness bills per token
+a direct API call loop.
+
+**W42. ACP is the second harness, after Pi.** Many agent CLIs speak the
+Agent Client Protocol (JSON-RPC over stdio: `initialize`, `session/new`,
+`session/prompt`, `session/cancel`, session updates for messages, tool
+calls and plans), and spoond already has an ACP package (`acp/`). One
+adapter, run under stepd like Pi, makes all of them usable as profiles:
+- start, steer and abort map to `session/new`, `session/prompt` and
+  `session/cancel`; session updates become progress events and the
+  tool-call feed;
+- ACP permission requests become a policy decision (allowed by the
+  profile's tool policy) or a question to the flight's participants (W45);
+- `session/load`, where the agent supports it, gives the resumable
+  capability; otherwise an ACP step resumes only through a memory
+  checkpoint (W22). Profiles say whether a harness bills per token
 (an API) or against a flat subscription, which W37 uses.
 
 ## Worked example: a planning pipeline
@@ -922,6 +977,15 @@ much smaller ecosystem), dagre (unmaintained, weak compound layout).
   dashboard row), profile and resolved model, attempts and their
   outcomes, retries, questions and memos, the harness's tool-call feed
   for agent steps, and for interactive agents a chat pane (W32).
+- **W44. Liveness, at a glance and in detail.** Every active step shows
+  two ages: since its last heartbeat (is the process alive?) and since
+  its last progress event (is it doing anything?). Alive with no
+  progress for the step's `stall_after` (default 15 min for agent steps)
+  is the **stalled** state, drawn distinctly and alertable (#81); no
+  heartbeat is **lost**, which the engine resolves (W9). The step drawer
+  adds the lease's live CPU, memory, disk and any out-of-memory kills,
+  the current tool call and how long it has run, and the token rate.
+  "Working on it" is never the only thing a person can see.
 - **Edge labels** come from branch names (W31); the branch a run took is
   drawn solid with its label highlighted.
 - **`each` iterations** draw side by side like fork branches, collapsed to
@@ -1159,6 +1223,18 @@ visible where it is tracked.
   - people link their chat account to their Honey identity once
     (`/honey link`, confirmed in the live view); messages from unlinked
     accounts are ignored for signals.
+- **W43. Chat starts and steers flights.** The channel provider adds
+  trigger types next to schedules, webhooks and tickets (W19):
+  - `mention`: "@honey pr-review branch=feat/x" in a channel starts that
+    flightplan with those parameters (validated like any start; a reply
+    says what was started, with its link);
+  - `reaction`: a reaction on a flight's card or a message maps to a
+    signal (for example ✅ approve, ❌ reject, 🛑 cancel), configured per
+    project;
+  - `slash`: the `/honey` commands above.
+  A mention inside a flight's thread is a message to the flight: an
+  answer, or input to its interactive step. Every chat-started flight is
+  owned by the linked identity that started it.
 - **Ticket mirroring.** A run started from a ticket (or linked to one)
   mirrors its progress there through subscriptions: a comment when it
   starts, at each named milestone and when it ends, and status or label
@@ -1442,13 +1518,13 @@ Each step is its own ticket under #78 and ends with something running.
 
 | # | Step | Size | Ends with |
 |---|---|---|---|
-| 1 | This design, accepted. | — | Decisions W1-W40 settled. |
+| 1 | This design, accepted. | — | Decisions W1-W46 settled. |
 | 2 | **Substrate files + stepd.** W12 file operations; `spoond-stepd` with journal, attach, write, signal; baked into the worker layer. | M | A 1 h process survives a backend restart and is reattached. |
 | 3 | **Definition, CEL, schemas, catalog.** `honey/def`, `honey/expr`, `honey/catalog`; publish with validation through the check engine; graph description. | L | `spoond workflows publish` rejects bad workflows with remedies. |
-| 4 | **Engine core.** honey.db, transitions, outbox, timers, recovery, signals, memos, idempotency, ownership and cancel; step types `lease`, `run`, `gate`, `transform`, `return`, `continue_as_new`, `sleep`, `notify`, `question`, `approval`; blocks `do`, `parallel`, `if`, `switch`, `loop`, `each`, `try`. The crash suite. | XL | Crash suite green; `spoond runs start/follow/signal`. |
+| 4 | **Engine core.** honey.db, transitions, outbox, timers, recovery, signals, memos, idempotency, ownership and cancel; tamper-evident log (W41), participants and roles (W45); step types `lease`, `run`, `gate`, `transform`, `return`, `continue_as_new`, `sleep`, `notify`, `question`, `approval`; blocks `do`, `parallel`, `if`, `switch`, `loop`, `each`, `try`. The crash suite. | XL | Crash suite green; `spoond runs start/follow/signal`. |
 | 5 | **Event stream + run API.** Attach (W15), step logs, the followers' feed. | M | `spoond runs follow` live. |
-| 6 | **Live view v1.** Catalog, runs list, run graph with live state, loops, step drawer, controls. | L | A real run followed in the browser. |
-| 7 | **Profiles + agent step + Pi adapter** (#87). `llm` and `agent` steps; resumable via session files; the interactive agent (W32) and its chat pane in the step drawer; usage, prices and cost per step (W37); MCP tool servers and image inputs. | L | An agent step resumes in a new lease after its lease is killed. |
+| 6 | **Live view v1.** Catalog, runs list, run graph with live state, loops, step drawer, controls; liveness and the stalled state (W44). | L | A real run followed in the browser. |
+| 7 | **Profiles + agent step + Pi adapter** (#87). `llm` and `agent` steps; resumable via session files; the interactive agent (W32) and its chat pane in the step drawer; usage, prices and cost per step (W37); MCP tool servers and image inputs; the ACP harness (W42). | L | An agent step resumes in a new lease after its lease is killed. |
 | 8 | **Bee loop port** (W20): `ralph-loop`, `ralph-ticket`, `pr-review`, `task-precheck`; provider registry (W26) with `br` and `forgejo` ticket sources and the `forgejo` git host; `ticket` and `git` steps; locks; secrets (#80). | L | spoond tasks run as workflows beside the swarm. |
 | 9 | **Composition + data flow UI:** `workflow` step, collapsible child graphs, packets and edge hover, time scrubber. | M | A feature pipeline of called workflows, followed live. |
 | 10 | **Triggers + concurrency + budgets** (W19); hive.yaml shrinks. Notifiers `webhook` and `mail`, subscriptions and escalation (W27, W28); recipient groups (W34); the channel provider interface (W38); ticket mirroring; money budgets (W37). | M | No orchestrator needed to dispatch. |
@@ -1459,7 +1535,7 @@ Each step is its own ticket under #78 and ends with something running.
 | 15 | Retire Agent Mail and the `swarm-*` scripts. | S | The release criteria hold for a week. |
 | 16 | **MicroVM features:** step checkpoints (W22), sharded gates and speculative `try` (W23), failure snapshots + "open shell here" (W24), step images (W25). W22's measurement belongs in step 2. | L | A flaky gate is retried from the pre-step checkpoint; a failure is opened as a shell from the live view. |
 | 17 | **The building-block library** (W35): `plan-deps`, `test-baseline`, `qa-checklist`, `deploy-env`, `release`, `feature-pipeline`; the promotion policy (W40); catalog metadata, observed results and the size guide; profile comparison (W37). | L | A feature goes from ticket to a dev environment through `feature-pipeline`, and is promoted by policy. |
-| 18 | **First two-way channel provider** (W38): the Discord bot API, aimed at Hrmny. | M | In a Hrmny channel, a run's thread shows its live status card; a question is answered by a reply and an approval given with a button. |
+| 18 | **First two-way channel provider** (W38): the Discord bot API, aimed at Hrmny; mention, reaction and slash triggers (W43). | M | In a Hrmny channel, a run's thread shows its live status card; a question is answered by a reply and an approval given with a button. |
 
 ### Doing this work with v2
 
