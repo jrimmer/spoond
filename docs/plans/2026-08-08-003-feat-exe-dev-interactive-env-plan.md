@@ -11,7 +11,7 @@ origin: docs/plans/2026-08-08-001-feat-forkd-ephemeral-backend-plan.md
 
 # exe.dev-style Interactive Dev Environment on forkd - Plan
 
-**Target repo:** `lacy.casa/spoond` (at `forgejo-work/hyper-forgejo-runner/`)
+**Target repo:** `example.com/spoond` (at `forgejo-work/hyper-forgejo-runner/`)
 
 ## Goal Capsule
 
@@ -127,7 +127,7 @@ forkd-dev status <id>                                          → running/suspe
 
 ### Assumptions
 
-- forkd-backend lease API is live on sandbox at `https://sandbox.lacy.casa:8890`.
+- forkd-backend lease API is live on sandbox at `https://sandbox.example.com:8890`.
 - A reachable ssh gateway/proxy exists (or is added) on the homelab edge for external access.
 - The dev image (`dev-base`) is baked with tmux, ssh server, git, and an LLM coding agent.
 - The user accesses from anywhere, so the gateway must be reachable externally (but internal traffic never via Pangolin).

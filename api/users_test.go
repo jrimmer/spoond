@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/identity"
+	"github.com/jrimmer/spoond/v2/identity"
 )
 
 // newTestServerWithIdentities builds a Server with an identity store and a

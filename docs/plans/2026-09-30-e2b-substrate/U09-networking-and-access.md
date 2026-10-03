@@ -25,8 +25,8 @@ U08 is done, and the staging backend is running.
     `9000` (shelley).
   - `handleCreate` returns 501 when the policy applier cannot expose.
 - **HTTP proxy** (A1 §6.3):
-  - Host forms `<lease-or-name>[-<port>].sandbox.lacy.casa` and
-    `<label>.<user>.sandbox.lacy.casa`;
+  - Host forms `<lease-or-name>[-<port>].sandbox.example.com` and
+    `<label>.<user>.sandbox.example.com`;
   - default port 3000;
   - forward-auth via `X-Proxy-Auth` and `Remote-User`;
   - dials `GuestHost:port` inside the netns (`dialInNetns`).
@@ -148,7 +148,7 @@ Extend the U08 relay. Existing clients see no change.
   director:
   - sets the URL scheme and host from `ServiceConfig.ProxyURL`, keeping the
     path and query;
-  - sets `req.Host` to the host part of `ServiceConfig.ProxyURL` (on vm2
+  - sets `req.Host` to the host part of `ServiceConfig.ProxyURL` (on the host
     `127.0.0.1:5007`). The orchestrator proxy routes by headers only when
     the Host is an IP (A2 §5);
   - to preserve the public hostname for guest apps, sets:
@@ -203,8 +203,8 @@ Keep the route for compatibility, with U08's interim response unchanged:
   `resolveEndpoint` function, and every comment that mentions `netns` or
   `setns`.
 - **Change the flag defaults:**
-  - `--shelly-binary-url` → `http://10.1.0.11:8891/assets/shelley`;
-  - `--llm-gateway-url` → `http://10.1.0.11:8891/llm/`.
+  - `--shelly-binary-url` → `http://10.0.0.11:8891/assets/shelley`;
+  - `--llm-gateway-url` → `http://10.0.0.11:8891/llm/`.
 
   (Staging passes `:18891` through `SHELLY_BINARY_URL` and
   `LLM_GATEWAY_URL`.)
@@ -224,7 +224,7 @@ Keep the route for compatibility, with U08's interim response unchanged:
   3. Set Env:
      - the collected env;
      - `TERM` (from `pty-req`, default `xterm-256color`);
-     - `SSH_CONNECTION="<clientIP> <clientPort> 10.1.0.11 22"`;
+     - `SSH_CONNECTION="<clientIP> <clientPort> 10.0.0.11 22"`;
      - `SSH_CLIENT="<clientIP> <clientPort> 22"`;
      - `USER=root`, `HOME=/root`, `LOGNAME=root`.
 
@@ -261,13 +261,13 @@ Keep the route for compatibility, with U08's interim response unchanged:
 - Everything else is unchanged: authentication, `new`/`ctl` routing, `ctl`
   verbs, the MOTD, `--ssh-images` gating and metrics.
 
-### 8. Staging gateway on vm2 (Ops runner)
+### 8. Staging gateway on the host (Ops runner)
 
 1. `/etc/spoond-staging/gateway.env` (mode 0600, exact):
    ```ini
    SPOOND_GATEWAY_TOKEN=<GATEWAY_TOKEN from /etc/spoond-staging/backend.env>
-   SHELLY_BINARY_URL=http://10.1.0.11:18891/assets/shelley
-   LLM_GATEWAY_URL=http://10.1.0.11:18891/llm/
+   SHELLY_BINARY_URL=http://10.0.0.11:18891/assets/shelley
+   LLM_GATEWAY_URL=http://10.0.0.11:18891/llm/
    ```
    Do **not** copy `/etc/spoond-gateway.env`: its `GATEWAY_METRICS_LISTEN`
    would clash with production's port and kill the staging gateway. The
@@ -288,7 +288,7 @@ Keep the route for compatibility, with U08's interim response unchanged:
      --client-keys /etc/spoond-gateway/keys \
      --backend https://127.0.0.1:18890 \
      --backend-token ${SPOOND_GATEWAY_TOKEN} \
-     --gateway-host sandbox.lacy.casa
+     --gateway-host sandbox.example.com
    Restart=on-failure
    RestartSec=5
 
@@ -327,7 +327,7 @@ systemctl restart spoond-sshd-gateway-staging
   the staging gateway `127.0.0.1:12222`, proxy `http://127.0.0.1:18891`,
   the staging `PROXY_AUTH_SECRET` and the key registered at user creation),
   plus `CONFORMANCE_SUBSTRATE=e2b` and
-  `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`:
+  `CONFORMANCE_GUEST_SERVICE=10.0.0.11:18891`:
   - N1–N6;
   - L3–L4 still pass.
 

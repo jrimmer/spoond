@@ -13,4 +13,4 @@ it under the same terms.
 
 The sandbox substrate spoond runs on is E2B's node runtime
 (https://github.com/e2b-dev/runtime), used from a patch-queue fork
-(`lacy.casa/e2b-runtime`), Apache License 2.0.
+(`example.com/e2b-runtime`), Apache License 2.0.

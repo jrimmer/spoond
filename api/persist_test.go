@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/v2/store"
 )
 
 // TestPersistRoundTrip grants a lease, names it and shares it on a
@@ -39,7 +39,7 @@ func TestPersistRoundTrip(t *testing.T) {
 	}
 
 	svc.Shutdown(ctx)
-	// fake.Fake.Calls records every Delete; none may happen on shutdown.
+	// fake.Fake.CallLog() records every Delete; none may happen on shutdown.
 	if got := calls(sub.Fake, "Delete"); got != 0 {
 		t.Fatalf("shutdown deleted sandboxes: %d", got)
 	}

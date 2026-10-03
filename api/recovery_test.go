@@ -35,7 +35,7 @@ func TestReconcileCrashRecoversFromCheckpoint(t *testing.T) {
 	sub.Fake.Kill(ck.SandboxID)
 	sub.Fake.Kill(bare.SandboxID)
 
-	createsBefore := len(sub.Fake.Calls)
+	createsBefore := len(sub.Fake.CallLog())
 	summary := svc.reconcileCrash(ctx)
 	if summary.Recovered != 1 || summary.Lost != 1 {
 		t.Fatalf("summary = %+v, want {Recovered:1, Lost:1}", summary)
@@ -43,16 +43,16 @@ func TestReconcileCrashRecoversFromCheckpoint(t *testing.T) {
 
 	// The recovery create carried the SAME sandbox id.
 	var sawResume bool
-	for _, c := range sub.Fake.Calls[createsBefore:] {
+	for _, c := range sub.Fake.CallLog()[createsBefore:] {
 		if c == "Create "+ck.SandboxID {
 			sawResume = true
 		}
 		if c == "Create "+bare.SandboxID {
-			t.Fatalf("the checkpoint-less lease was recreated: %v", sub.Fake.Calls[createsBefore:])
+			t.Fatalf("the checkpoint-less lease was recreated: %v", sub.Fake.CallLog()[createsBefore:])
 		}
 	}
 	if !sawResume {
-		t.Fatalf("no create of the checkpointed lease's sandbox id: %v", sub.Fake.Calls[createsBefore:])
+		t.Fatalf("no create of the checkpointed lease's sandbox id: %v", sub.Fake.CallLog()[createsBefore:])
 	}
 
 	if ck.State != "recovered" {

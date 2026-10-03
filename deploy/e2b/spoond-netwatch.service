@@ -1,0 +1,14 @@
+[Unit]
+Description=spoond netwatch: recover the host network when its receive path dies
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/spoond-netwatch
+ExecStart=/usr/local/sbin/spoond-netwatch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

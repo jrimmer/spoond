@@ -54,6 +54,7 @@ set -a; . /etc/spoond/backend.env; set +a
 | `llm gateway: upstream` / `key` / `/models` | upstream configured, key present, key accepted |
 | `tls: cert/key` | WARN when unconfigured (plain HTTP), FAIL when the pair does not load |
 | `disk: root` | WARN above 75% full, FAIL above 90% |
+| `drain: shutdown unit` | FAIL unless `spoond-drain.service` is enabled, active and ordered after `spoond-backend` and `e2b-orchestrator`, and `/etc/e2b/drain.env` names a backend and a readable token file; without it a reboot loses every running lease (see Rebooting the host) |
 
 ## Backups
 
@@ -133,6 +134,48 @@ it lossless. Do not stop the backend first.
 4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.
+
+## Network watchdog
+
+`spoond-netwatch.service` (`deploy/e2b/spoond-netwatch.sh`, installed as
+`/usr/local/sbin/spoond-netwatch`) probes the gateway and the LAN
+resolver every 15 s. When neither answers for 2 minutes it logs the
+physical port's state and bounces the port; a minute later it runs
+`ifreload -a`; after 10 minutes, if the port received nothing in that
+time and it has not rebooted the host in the last 12 hours, it reboots
+cleanly (so `spoond-drain` drains leases first). A port that still
+receives means the fault is upstream, and it does not reboot. Its log
+lines start with `netwatch:` (`journalctl -u spoond-netwatch`). It was
+added after the 10 GbE port's receive path died on 2026-10-02 with the
+link still up.
+
+By hand, from the console: record `ip -s link show enp1s0f0; ethtool -S
+enp1s0f0 | grep -v ': 0$'`, then `ip link set enp1s0f0 down; ip link set
+enp1s0f0 up`, then `ifreload -a`; reboot with `reboot` (never the reset
+button) only if those fail.
+
+## Rebooting the host (planned)
+
+A host shutdown stops every unit, and the orchestrator's own drain hook
+cannot work then: `spoond-backend` is ordered after the orchestrator, so
+systemd stops the backend first and the hook's drain call is refused
+(this lost every lease in a reboot on 2026-10-02). `spoond-drain.service`
+(`deploy/e2b/spoond-drain.service`) covers it. It is ordered after both
+units, so at shutdown it stops first and its `ExecStop=spoond drain
+--stop` drains while both are up; at boot it starts last, waits for
+`/healthz` to report the orchestrator healthy, and its `ExecStart=spoond
+drain --start` resumes the drained leases. Drain and undrain are
+idempotent, so the orchestrator's own hooks, which also run, do nothing
+the second time. Install it with the orchestrator unit and enable it:
+
+```bash
+install -m 644 deploy/e2b/spoond-drain.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now spoond-drain
+```
+
+Do not stop `spoond-backend` and `e2b-orchestrator` by hand together
+without stopping `spoond-drain` first (`systemctl stop spoond-drain`
+drains; `systemctl start spoond-drain` resumes).
 
 `spoond drain` always exits 0, even when a call fails: a failed drain
 must never block the stop. Watch a restart with:
@@ -295,7 +338,7 @@ history are kept so a new page starts with trends. Configuration lives in
 | `DASH_USER`, `DASH_PASSWORD_HASH` | *(required)* | basic auth (`spoond dash hash PASS` makes the hash) |
 | `DASH_TLS_CERT`, `DASH_TLS_KEY` | *(unset)* | serve HTTPS (set both or neither) |
 | `METRICS_URL` | `https://127.0.0.1:8890/metrics` | spoond's `/metrics` |
-| `METRICS_SERVER_NAME` | `vm2.lacy.casa` | TLS server name for that URL |
+| `METRICS_SERVER_NAME` | `spoond.example.com` | TLS server name for that URL |
 | `METRICS_TOKEN` | *(required)* | the backend's scrape-only token |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |

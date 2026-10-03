@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/runner"
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 // Config wires the adapter.

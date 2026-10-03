@@ -8,7 +8,7 @@ import (
 	connect "connectrpc.com/connect"
 	context "context"
 	errors "errors"
-	process "github.com/jrimmer/spoond/substrate/e2b/gen/envd/process"
+	process "github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/process"
 	http "net/http"
 	strings "strings"
 )

@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate"
-	"github.com/jrimmer/spoond/substrate/e2b"
-	"github.com/jrimmer/spoond/substrate/fake"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/e2b"
+	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
 // testSub is the fake substrate with an exec handler that answers the
@@ -113,7 +113,7 @@ func (ts *testSub) sandboxesLive(t *testing.T) []string {
 // calls counts the fake's recorded calls by method name.
 func calls(f *fake.Fake, method string) int {
 	n := 0
-	for _, c := range f.Calls {
+	for _, c := range f.CallLog() {
 		if c == method || strings.HasPrefix(c, method+" ") {
 			n++
 		}
@@ -579,8 +579,8 @@ func TestSuspendResume(t *testing.T) {
 	if got := calls(sub.Fake, "Delete"); got != 1 {
 		t.Fatalf("expected 1 delete, got %d", got)
 	}
-	if got := calls(sub.Fake, "Delete"); got == 1 && !strings.Contains(sub.Fake.Calls[len(sub.Fake.Calls)-1], sandboxID) {
-		t.Fatalf("expected the lease's sandbox %s deleted, calls: %v", sandboxID, sub.Fake.Calls)
+	if got := calls(sub.Fake, "Delete"); got == 1 && !strings.Contains(sub.Fake.CallLog()[len(sub.Fake.CallLog())-1], sandboxID) {
+		t.Fatalf("expected the lease's sandbox %s deleted, calls: %v", sandboxID, sub.Fake.CallLog())
 	}
 }
 
@@ -721,13 +721,13 @@ func TestReconcileOrphansDeletesForeignSandboxes(t *testing.T) {
 
 	// Foreign deleted, ours kept.
 	deleted := false
-	for _, c := range sub.Fake.Calls {
+	for _, c := range sub.Fake.CallLog() {
 		if c == "Delete "+foreign.ID {
 			deleted = true
 		}
 	}
 	if !deleted {
-		t.Fatalf("expected foreign sandbox %s deleted, calls: %v", foreign.ID, sub.Fake.Calls)
+		t.Fatalf("expected foreign sandbox %s deleted, calls: %v", foreign.ID, sub.Fake.CallLog())
 	}
 	alive, err := sub.List(ctx)
 	if err != nil {
@@ -772,7 +772,7 @@ func TestGrantDiscardsUnhealthyPooledSandbox(t *testing.T) {
 		t.Fatalf("granted unhealthy pooled sandbox %s", pooled[0])
 	}
 	if got := calls(sub.Fake, "Delete "+pooled[0]); got != 1 {
-		t.Fatalf("expected the unhealthy pooled sandbox to be deleted, calls: %v", sub.Fake.Calls)
+		t.Fatalf("expected the unhealthy pooled sandbox to be deleted, calls: %v", sub.Fake.CallLog())
 	}
 }
 

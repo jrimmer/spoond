@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/identity"
+	"github.com/jrimmer/spoond/v2/identity"
 )
 
 // TestOwnerSerialization verifies U2: lease owner is serialized in

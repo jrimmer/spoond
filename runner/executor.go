@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/metrics"
+	"github.com/jrimmer/spoond/v2/metrics"
 )
 
 // Executor runs a job in a sandbox. It depends only on the ports

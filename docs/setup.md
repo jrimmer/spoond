@@ -141,9 +141,9 @@ file the backend sources and the operator snippets in
 | `--backend-token` | *(required)*; env `SPOOND_GATEWAY_TOKEN` | spoond-backend service token (`GATEWAY_TOKEN`) — admin-equivalent, so it is read from the env file, never `ExecStart` |
 | `--client-keys` | *(empty)* | comma-separated paths to authorized client public keys, **or a directory scanned for `*.pub` files** (legacy mode only) |
 | `--gateway-key` | `/etc/spoond-gateway/gateway_ed25519` | gateway identity key (kept for unit compatibility; the gateway no longer connects into sandboxes with it) |
-| `--gateway-host` | `sandbox.lacy.casa` (env `FORKD_GATEWAY_HOST`) | public hostname advertised in MOTDs |
-| `--shelly-binary-url` | env `SHELLY_BINARY_URL` (`http://10.1.0.11:8891/assets/shelley`) | URL the sandbox fetches the shelley agent binary from |
-| `--llm-gateway-url` | env `LLM_GATEWAY_URL` (`http://10.1.0.11:8891/llm/`) | base URL of the per-lease LLM gateway the shelley agent is pointed at |
+| `--gateway-host` | `sandbox.example.com` (env `FORKD_GATEWAY_HOST`) | public hostname advertised in MOTDs |
+| `--shelly-binary-url` | env `SHELLY_BINARY_URL` (`http://10.0.0.11:8891/assets/shelley`) | URL the sandbox fetches the shelley agent binary from |
+| `--llm-gateway-url` | env `LLM_GATEWAY_URL` (`http://10.0.0.11:8891/llm/`) | base URL of the per-lease LLM gateway the shelley agent is pointed at |
 | `--shelly-model` | `gpt-oss-20b-fireworks` | default model id written into shelley.json |
 | `--ssh-images` | env `GATEWAY_SSH_IMAGES` = `dev-base` | images that may serve interactive `ssh <id>@` sessions |
 | `--metrics-listen` | env `GATEWAY_METRICS_LISTEN` *(empty = off)* | address for the gateway's own `/metrics` |

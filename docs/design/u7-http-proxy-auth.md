@@ -13,16 +13,16 @@
 
 **Topology.** `cmd/spoond-backend/main.go` runs two listeners off one process:
 - `BIND_ADDR` (default `127.0.0.1:8890`) → `srv.Handler()` (API mux + bearer-token `authMiddleware`, `api/server.go:99-127`).
-- `PROXY_ADDR` (e.g. `0.0.0.0:8891`) → `srv.ProxyHandler()` (`main.go:131-139`). Plain HTTP; Caddy on CT131 (10.1.0.203) terminates TLS for `*.sandbox.lacy.casa` and forwards here (`api/proxy.go:17`).
+- `PROXY_ADDR` (e.g. `0.0.0.0:8891`) → `srv.ProxyHandler()` (`main.go:131-139`). Plain HTTP; Caddy on CT131 (10.0.0.203) terminates TLS for `*.sandbox.example.com` and forwards here (`api/proxy.go:17`).
 
 **Routing.** `ProxyHandler()` (`api/proxy.go:31-49`) is a bare `http.HandlerFunc` — **no auth of any kind**. Dispatch order:
 1. `/llm/…` prefix → `s.llm.ServeHTTP` (LLM gateway, below).
 2. `/assets/…` → static file serve (`SetAssetsDir`, `proxy.go:52`).
-3. Everything else → `handleProxy` (`proxy.go:54-105`): `parseProxyHost(r.Host)` extracts `<label>-<port>.sandbox.lacy.casa` → lease lookup → `svc.resolveEndpoint` → reverse proxy that `dialInNetns` into the guest netns (`proxy.go:88-96`), preserving the original Host so guest apps see the public hostname.
+3. Everything else → `handleProxy` (`proxy.go:54-105`): `parseProxyHost(r.Host)` extracts `<label>-<port>.sandbox.example.com` → lease lookup → `svc.resolveEndpoint` → reverse proxy that `dialInNetns` into the guest netns (`proxy.go:88-96`), preserving the original Host so guest apps see the public hostname.
 
-**Hostname grammar (`parseProxyHost`, `proxy.go:114-145`).** Single label under `.sandbox.lacy.casa`:
-- `<32-hex-lease-id>.sandbox.lacy.casa` → `svc.lookupAny(label)` (`service.go:700`) — **owner-blind by design**;
-- `<friendly-name>.sandbox.lacy.casa` → `svc.lookupByName(label)` (`service.go:628`) — **also owner-blind** (first match wins; names unique per owner);
+**Hostname grammar (`parseProxyHost`, `proxy.go:114-145`).** Single label under `.sandbox.example.com`:
+- `<32-hex-lease-id>.sandbox.example.com` → `svc.lookupAny(label)` (`service.go:700`) — **owner-blind by design**;
+- `<friendly-name>.sandbox.example.com` → `svc.lookupByName(label)` (`service.go:628`) — **also owner-blind** (first match wins; names unique per owner);
 - `-<port>` suffix selects the guest port; `defaultProxyPort = 3000` (`proxy.go:24`).
 
 **Auth today: none.** "The lease id in the hostname is the capability (same model as SSH)" (`proxy.go:30`). Anyone who knows a lease id/name can reach the guest's web server. This is the gap R8 closes.
@@ -38,12 +38,12 @@
 
 ## 3. Authelia forward-auth contract (what T7 must consume)
 
-Homelab facts (from `homelab-auth-architecture` skill): Authelia v4.39.20 on the Pangolin VPS, `https://auth.lacy.casa`, behind Traefik; session cookies 24h/1h/30d; `two_factor` policy on all domains; usernames are bare (`jason`, `trina`). Caddy on CT131 (10.1.0.203) is the internal front door; forward-auth was explicitly **skipped in Phase 12** (2026-07-27), so this is the first Caddy forward-auth deployment.
+Homelab facts (from `homelab-auth-architecture` skill): Authelia v4.39.20 on the Pangolin VPS, `https://auth.example.com`, behind Traefik; session cookies 24h/1h/30d; `two_factor` policy on all domains; usernames are bare (`jason`, `trina`). Caddy on CT131 (10.0.0.203) is the internal front door; forward-auth was explicitly **skipped in Phase 12** (2026-07-27), so this is the first Caddy forward-auth deployment.
 
-**Verify endpoint (v4.38+, use on 4.39.20):** `GET https://auth.lacy.casa/api/authz/forward-auth` (the old `/api/verify` is deprecated/removed).
+**Verify endpoint (v4.38+, use on 4.39.20):** `GET https://auth.example.com/api/authz/forward-auth` (the old `/api/verify` is deprecated/removed).
 
 **Request (header_auth strategy):** the proxy must forward the client's session `Cookie` plus:
-- `X-Forwarded-Host` (original host, e.g. `mybox-8080.sandbox.lacy.casa`)
+- `X-Forwarded-Host` (original host, e.g. `mybox-8080.sandbox.example.com`)
 - `X-Forwarded-Uri` (original path+query)
 - `X-Forwarded-Method`
 - `X-Forwarded-Proto` (optional, default http)
@@ -52,24 +52,24 @@ Homelab facts (from `homelab-auth-architecture` skill): Authelia v4.39.20 on the
 - `200` + headers `Remote-User` (bare username), `Remote-Name`, `Remote-Email`, `Remote-Groups` (comma-separated) — the proxy copies these onto the upstream request. (Some builds also refresh the session cookie.)
 - `401` unauthenticated (redirect cookie/body to the portal; proxy passes it to the browser).
 - `403` authenticated but denied by access_control rules.
-- For browser flows the proxy does **not** strip the client's cookies; Authelia session cookie domain must cover `*.sandbox.lacy.casa` (already the case if `session.cookies[].domain: lacy.casa` — verify on the VPS).
+- For browser flows the proxy does **not** strip the client's cookies; Authelia session cookie domain must cover `*.sandbox.example.com` (already the case if `session.cookies[].domain: example.com` — verify on the VPS).
 
 **Caddy native integration (no caddy-security plugin build needed)** — Caddy ≥ 2.7 `handle_response` + `copy_headers`:
 
 ```
-*.sandbox.lacy.casa {
+*.sandbox.example.com {
     @noverify path /llm/* /assets/*
-    handle @noverify { reverse_proxy 10.1.0.11:8891 }          # guest capability paths stay open
+    handle @noverify { reverse_proxy 10.0.0.11:8891 }          # guest capability paths stay open
     handle {
-        reverse_proxy https://auth.lacy.casa {                  # Authelia verify subrequest
-            header_up Host auth.lacy.casa
+        reverse_proxy https://auth.example.com {                  # Authelia verify subrequest
+            header_up Host auth.example.com
             header_up X-Forwarded-Host {host}
             header_up X-Forwarded-Uri {uri}
             header_up X-Forwarded-Method {method}
             header_up X-Forwarded-Proto {scheme}
             handle_response {                                   # fires on 200
                 copy_headers Remote-User Remote-Name Remote-Email Remote-Groups
-                reverse_proxy 10.1.0.11:8891 {
+                reverse_proxy 10.0.0.11:8891 {
                     header_up X-Proxy-Auth {$SPOOND_PROXY_SECRET}
                 }
             }
@@ -84,8 +84,8 @@ Homelab facts (from `homelab-auth-architecture` skill): Authelia v4.39.20 on the
 ## 4. Target topology
 
 ```
-browser ── https://<label>.<user>.sandbox.lacy.casa ──► Caddy .203
-        ── TLS + Authelia verify subrequest (auth.lacy.casa) ──► 200 + Remote-User
+browser ── https://<label>.<user>.sandbox.example.com ──► Caddy .203
+        ── TLS + Authelia verify subrequest (auth.example.com) ──► 200 + Remote-User
         ──► spoond :8891 (X-Proxy-Auth secret + Remote-User)
         ──► handleProxy: resolve user → owner-scope lookup → dialInNetns → guest app
 
@@ -116,19 +116,19 @@ guest VM ── http://10.43.0.1:8891/llm/<id>/... , /assets/...  (exempt, uncha
 
 **E. `deploy/` + docs**
 - Caddyfile (CT131 `/etc/caddy/Caddyfile`): forward-auth block above + header stripping.
-- Authelia (`/root/config/authelia/configuration.yml` on VPS): access_control rule for `*.sandbox.lacy.casa` (`two_factor`); confirm session cookie domain covers subdomains; follow the skill's backup→restart→verify SOP.
-- Technitium: per-user wildcard CNAME `*.<user>.sandbox.lacy.casa → sandbox.lacy.casa` (one record per user; script at user creation; see skill `references/technitium-dns-api.md`).
+- Authelia (`/root/config/authelia/configuration.yml` on VPS): access_control rule for `*.sandbox.example.com` (`two_factor`); confirm session cookie domain covers subdomains; follow the skill's backup→restart→verify SOP.
+- Technitium: per-user wildcard CNAME `*.<user>.sandbox.example.com → sandbox.example.com` (one record per user; script at user creation; see skill `references/technitium-dns-api.md`).
 - `docs/usage.md` proxy section (L86-98): new grammar + auth note.
 
 ## 6. Per-user domain grammar + DNS
 
 `parseProxyHost2` accepts (case-insensitive, optional `:port`, optional `-<port>` suffix on the label, as today):
-1. `<label>.sandbox.lacy.casa` — legacy single-label: hex id | friendly name | **user root**.
-2. `<label>.<user>.sandbox.lacy.casa` — user-scoped: `<user>` must be a known user (else 404); label = hex id or friendly name of a lease **owned by that user**.
+1. `<label>.sandbox.example.com` — legacy single-label: hex id | friendly name | **user root**.
+2. `<label>.<user>.sandbox.example.com` — user-scoped: `<user>` must be a known user (else 404); label = hex id or friendly name of a lease **owned by that user**.
 
-- **DNS reality check:** `*.sandbox.lacy.casa` already covers form 1 (one label). Form 2 is two labels — the existing wildcard does **not** cover it. Per-user wildcard records (`*.<user>.sandbox.lacy.casa`) are required; create them at user-creation time. Caddy's host wildcard may also need a `host *.*.sandbox.lacy.casa` matcher (verify with `caddy adapt` on .203).
+- **DNS reality check:** `*.sandbox.example.com` already covers form 1 (one label). Form 2 is two labels — the existing wildcard does **not** cover it. Per-user wildcard records (`*.<user>.sandbox.example.com`) are required; create them at user-creation time. Caddy's host wildcard may also need a `host *.*.sandbox.example.com` matcher (verify with `caddy adapt` on .203).
 - **Disambiguation rule for form 1:** lease lookup first (id, then owner-scoped name); if no lease and `identities.UserByName(label)` exists → user root (`handleUserRoot`). Edge: a lease named identically to its owner resolves as a lease — acceptable, document it.
-- External (Cloudflare) exposure of per-user domains is **out of scope for T7** (internal split-horizon only; external stays via `sandbox.lacy.casa:8890` API + Pangolin).
+- External (Cloudflare) exposure of per-user domains is **out of scope for T7** (internal split-horizon only; external stays via `sandbox.example.com:8890` API + Pangolin).
 
 ## 7. Owner-scoping semantics
 
@@ -153,7 +153,7 @@ Authenticated owner = user **ID** (`u-<hex>`, matching `Lease.Owner` once T2 lan
 4. **Ordering:** T7 depends on T1/T2 (identity store + `Lease.Owner` serialization — in progress, uncommitted in the working tree). The `off` default lets T7 land independently and flip when Caddy/Authelia are ready.
 5. **Shared-secret hygiene:** `X-Proxy-Auth` is only as good as the secret; Caddy must strip inbound `Remote-*`/`X-Proxy-Auth` so clients can't smuggle headers past the verify.
 
-**Recommended approach (TL;DR):** keep the single `:8891` listener; gate hostname-routed requests on `X-Proxy-Auth` secret + `Remote-User` (Caddy does the Authelia verify natively via `handle_response`/`copy_headers`, no plugin build); resolve username→user through the T1 `identity.Store` (`UserByName`), falling back to legacy consumer names; owner-scope every lease lookup in `handleProxy`; add per-user wildcard CNAMEs `*.<user>.sandbox.lacy.casa` in Technitium and a `parseProxyHost2` that understands two-label hosts; land behind `PROXY_AUTH_MODE=off` for backward compatibility.
+**Recommended approach (TL;DR):** keep the single `:8891` listener; gate hostname-routed requests on `X-Proxy-Auth` secret + `Remote-User` (Caddy does the Authelia verify natively via `handle_response`/`copy_headers`, no plugin build); resolve username→user through the T1 `identity.Store` (`UserByName`), falling back to legacy consumer names; owner-scope every lease lookup in `handleProxy`; add per-user wildcard CNAMEs `*.<user>.sandbox.example.com` in Technitium and a `parseProxyHost2` that understands two-label hosts; land behind `PROXY_AUTH_MODE=off` for backward compatibility.
 
 ---
 

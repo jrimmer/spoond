@@ -11,9 +11,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/jrimmer/spoond/identity"
-	"github.com/jrimmer/spoond/substrate"
-	"github.com/jrimmer/spoond/substrate/fake"
+	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
 // newLifecycleService builds a Service over a fake substrate with the
@@ -179,7 +179,7 @@ func TestForkRollback(t *testing.T) {
 	}
 	// One fork create succeeded before the failure; it must be deleted.
 	if got := calls(sub.Fake, "Delete"); got != 1 {
-		t.Fatalf("expected 1 rollback delete, got %d (calls %v)", got, sub.Fake.Calls)
+		t.Fatalf("expected 1 rollback delete, got %d (calls %v)", got, sub.Fake.CallLog())
 	}
 	// The source survives.
 	if svc.lookup(u.ID, src.ID) == nil {
@@ -268,7 +268,7 @@ func TestCloneCopiesSourcePolicy(t *testing.T) {
 		t.Fatal("clone returned no checkpoint build id")
 	}
 	if got := calls(sub.Fake, "Checkpoint "+src.SandboxID); got != 1 {
-		t.Fatalf("expected 1 checkpoint of the source, calls: %v", sub.Fake.Calls)
+		t.Fatalf("expected 1 checkpoint of the source, calls: %v", sub.Fake.CallLog())
 	}
 	// Item 18: the source keeps running, re-pointed at the checkpoint
 	// build, with its checkpoint fields stamped.
@@ -314,7 +314,7 @@ func TestRestartNonPersistent(t *testing.T) {
 		t.Fatal("restart must create a new sandbox id")
 	}
 	if got := calls(sub.Fake, "Delete "+oldSandbox); got != 1 {
-		t.Fatalf("expected the old sandbox deleted, calls: %v", sub.Fake.Calls)
+		t.Fatalf("expected the old sandbox deleted, calls: %v", sub.Fake.CallLog())
 	}
 	if !l.live() || l.BuildID == "" {
 		t.Fatalf("restarted lease not live: %+v", l)
@@ -403,20 +403,20 @@ func TestStreamRelayFrames(t *testing.T) {
 		ws.WriteMessage(websocket.TextMessage, []byte(`{"action":"eof"}`))
 		deadline := time.Now().Add(2 * time.Second)
 		for {
-			if len(proc.Inputs) >= 1 && len(proc.Resizes) >= 1 && proc.StdinClosed {
+			if len(proc.State().Inputs) >= 1 && len(proc.State().Resizes) >= 1 && proc.State().StdinClosed {
 				break
 			}
 			if time.Now().After(deadline) {
 				t.Fatalf("client actions not relayed: inputs=%v resizes=%v stdinClosed=%v",
-					proc.Inputs, proc.Resizes, proc.StdinClosed)
+					proc.State().Inputs, proc.State().Resizes, proc.State().StdinClosed)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		if string(proc.Inputs[0]) != "ls\n" {
-			t.Fatalf("input = %q", proc.Inputs[0])
+		if string(proc.State().Inputs[0]) != "ls\n" {
+			t.Fatalf("input = %q", proc.State().Inputs[0])
 		}
-		if !reflect.DeepEqual(proc.Resizes, [][2]uint32{{120, 40}}) {
-			t.Fatalf("resizes = %v", proc.Resizes)
+		if !reflect.DeepEqual(proc.State().Resizes, [][2]uint32{{120, 40}}) {
+			t.Fatalf("resizes = %v", proc.State().Resizes)
 		}
 	})
 
@@ -431,8 +431,8 @@ func TestStreamRelayFrames(t *testing.T) {
 		if got := readFrame(t, ws); got != `{"exit_code":0}` {
 			t.Fatalf("frame after stop = %q, want the exit frame", got)
 		}
-		if !reflect.DeepEqual(proc.Signals, []bool{false}) {
-			t.Fatalf("signals = %v, want one SIGTERM (false)", proc.Signals)
+		if !reflect.DeepEqual(proc.State().Signals, []bool{false}) {
+			t.Fatalf("signals = %v, want one SIGTERM (false)", proc.State().Signals)
 		}
 	})
 
@@ -441,15 +441,15 @@ func TestStreamRelayFrames(t *testing.T) {
 		proc := startProc(t, ws)
 		ws.Close()
 		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) && !proc.Closed {
+		for time.Now().Before(deadline) && !proc.State().Closed {
 			time.Sleep(10 * time.Millisecond)
 		}
-		if !proc.Closed {
+		if !proc.State().Closed {
 			t.Fatal("process stream not closed after the websocket closed")
 		}
 		// The sandbox itself must stay (no delete, no signal).
-		if len(proc.Signals) != 0 {
-			t.Fatalf("signals = %v, want none", proc.Signals)
+		if len(proc.State().Signals) != 0 {
+			t.Fatalf("signals = %v, want none", proc.State().Signals)
 		}
 	})
 }

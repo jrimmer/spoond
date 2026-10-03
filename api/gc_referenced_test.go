@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate/e2b"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
 // The GC selection rule under test: a build is never a candidate while

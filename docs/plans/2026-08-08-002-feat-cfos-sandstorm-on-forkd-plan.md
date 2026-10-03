@@ -11,11 +11,11 @@ origin: docs/plans/2026-08-08-001-feat-forkd-ephemeral-backend-plan.md
 
 # CFOS/Sandstorm on forkd - Plan
 
-**Target repo:** `lacy.casa/spoond` (at `forgejo-work/hyper-forgejo-runner/`)
+**Target repo:** `example.com/spoond` (at `forgejo-work/hyper-forgejo-runner/`)
 
 ## Goal Capsule
 
-Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.lacy.casa` on CT144) off Cloudflare Workers execution and onto forkd microVMs. Today CFOS runs gadget/agent code (`executeCode`) on a "restricted and heavily-sandboxed variant of Cloudflare Workers." This plan replaces that execution backend with forkd microVMs obtained from the forkd lease API, so gadget code runs in fast, isolated, ephemeral microVMs on our own hardware instead of Cloudflare's.
+Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.example.com` on CT144) off Cloudflare Workers execution and onto forkd microVMs. Today CFOS runs gadget/agent code (`executeCode`) on a "restricted and heavily-sandboxed variant of Cloudflare Workers." This plan replaces that execution backend with forkd microVMs obtained from the forkd lease API, so gadget code runs in fast, isolated, ephemeral microVMs on our own hardware instead of Cloudflare's.
 
 **Authority hierarchy:** the plan is the authority for scope and sequencing. The user (Jason) owns product decisions; the implementer owns execution details the plan leaves open.
 
@@ -23,7 +23,7 @@ Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.lacy.casa` on CT144
 
 **Tail ownership:** the implementer owns the code, tests, and deployment of the forkd-side CFOS driver. The user owns the decision to decommission the Cloudflare Workers execution path and any CFOS-side changes.
 
-> **2026-08-10 RESEARCH UPDATE (drives this revision):** after code-level research into the CFOS codebase (workshop-backend `overseer.ts`, `agent.ts`, `ai-models.ts`, `server.ts`, wrangler config at `os.lacy.casa` = 10.1.0.55:8787):
+> **2026-08-10 RESEARCH UPDATE (drives this revision):** after code-level research into the CFOS codebase (workshop-backend `overseer.ts`, `agent.ts`, `ai-models.ts`, `server.ts`, wrangler config at `os.example.com` = 10.0.0.55:8787):
 > - CFOS is NOT a plain consumer of public Cloudflare Workers APIs. It runs on workerd with its own runtime extensions (`worker_loaders` is a non-standard wrangler key; capnweb RPC; `cloudflare:workers` module).
 > - Its "interface to CF Workers" is really three seams: (1) the chat agent loop (`runAgent` in `agent.ts`), abstracted behind `AgentHooks` + `ModelHandle`; (2) code execution (`executeCode` tool → `executeCodeMode` → `LOADER.load(workerDef)`), a private dynamic-worker loader, synchronous, stateless per call; (3) persistent/async work: Gadgets (Durable Objects with SQLite, `ctx.restore()`, tails, alarms) and Gatekeepers (separate Workers holding credentials, reached via RPC stubs).
 > - **The model routing is the driver socket.** `getModel()` in `ai-models.ts` has three modes including *direct provider access with the config's own `apiUrl`/`apiToken`* — CFOS already supports pointing a chat model at an arbitrary OpenAI-compatible endpoint with zero code change. The frontend's backend URL is also plain config (`VITE_BACKEND_HOST`).
@@ -34,7 +34,7 @@ Move Cloudflare OS (CFOS, "Gadgets Workshop", running at `os.lacy.casa` on CT144
 
 ### Summary
 
-CFOS is a self-hosted platform for "vibe coded" personal applications and AI agents that run inside a strong sandbox. It runs on CT144 (10.1.0.144) as a pnpm service (`cfos.service`), with the upstream repo at `github.com/cloudflare/cloudflare-os`. Gadgets and agent `executeCode` calls currently execute on a sandboxed variant of Cloudflare Workers. The forkd lease API (built in the prior plan) provides fast, isolated, ephemeral microVMs on sandbox. This plan wires CFOS's code execution to forkd, keeping the CFOS frontend, chat, and gadget model intact while swapping the execution substrate.
+CFOS is a self-hosted platform for "vibe coded" personal applications and AI agents that run inside a strong sandbox. It runs on CT144 (10.0.0.144) as a pnpm service (`cfos.service`), with the upstream repo at `github.com/cloudflare/cloudflare-os`. Gadgets and agent `executeCode` calls currently execute on a sandboxed variant of Cloudflare Workers. The forkd lease API (built in the prior plan) provides fast, isolated, ephemeral microVMs on sandbox. This plan wires CFOS's code execution to forkd, keeping the CFOS frontend, chat, and gadget model intact while swapping the execution substrate.
 
 ### Problem Frame
 
@@ -124,7 +124,7 @@ flowchart LR
 
 ### Assumptions
 
-- forkd-backend lease API is live on sandbox at `https://sandbox.lacy.casa:8890` (built in prior plan).
+- forkd-backend lease API is live on sandbox at `https://sandbox.example.com:8890` (built in prior plan).
 - CFOS runs on CT144 and can reach the adapter over the homelab network (internal traffic, not via Pangolin).
 - Gadget code is JS/TS; a `js-base` image is baked for it.
 - The adapter runs as a systemd service (plain Go binary, per homelab preference).

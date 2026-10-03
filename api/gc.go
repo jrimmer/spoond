@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jrimmer/spoond/store"
+	"github.com/jrimmer/spoond/v2/store"
 )
 
 // Snapshot catalog GC, disk accounting and the snapshot API (U11).

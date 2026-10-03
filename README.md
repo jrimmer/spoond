@@ -22,10 +22,10 @@ spoond (this repo, one Go binary)          e2b-orchestrator (our fork of
 images/*.dockerfile → docker → local registry → E2B templates (spoond images)
 ```
 
-Production moved from forkd to E2B on 2026-10-01. The design, decisions
-and per-unit specs are in
-[docs/plans/2026-09-30-e2b-substrate/](docs/plans/2026-09-30-e2b-substrate/00-README.md);
-the forkd rollback path stays until U12 step 20 (2026-10-31).
+spoond 2.0 runs on E2B's orchestrator; forkd, the 1.x substrate, is
+removed. The design, decisions and per-unit specs are in
+[docs/plans/2026-09-30-e2b-substrate/](docs/plans/2026-09-30-e2b-substrate/00-README.md),
+and every change is in [CHANGELOG.md](CHANGELOG.md).
 
 ## What it gives you
 
@@ -87,7 +87,7 @@ server-sent-event stream shared by all viewers, and switches between
 pixel-art themes (Deep Space, Terminal, Nebula, Daylight; built with
 [Starbase](https://starbase.zweiundeins.gmbh) components, vendored).
 
-On vm2 it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
+On host it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
 auth). Its data access is read-only: `/metrics` through the scrape-only
 `METRICS_TOKEN` (which the lease API refuses), the SQLite catalog opened
 read-only, user names from the identity store, `/proc` and systemd.
@@ -125,12 +125,14 @@ stack does not exist yet.
 | [Security](docs/security.md) | threat model, hardening notes, adversarial-review fixes |
 | [Conformance suite](conformance/README.md) | the lease-API contract tests, run against production |
 | [E2B upgrade runbook](docs/runbooks/e2b-upgrade.md) | moving the fork to a newer upstream |
-| [Install](docs/install.md), [Setup](docs/setup.md), [Operations](docs/operations.md) | **forkd-era**; being rewritten for E2B with the forkd removal |
+| [Install](docs/install.md), [Setup](docs/setup.md) | bringing up an E2B host and spoond, first users and services |
+| [Operations](docs/operations.md) | day-2: doctor, drain and reboots, the network watchdog, GC, backups, the dashboard |
+| [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
 
-**v2.0: E2B substrate (2026-10-01).** Production runs on a patch-queue
-fork of E2B's orchestrator instead of forkd: warm memory-snapshot starts,
+**v2.0: E2B substrate.** spoond runs on a patch-queue fork of E2B's
+orchestrator instead of forkd: warm memory-snapshot starts,
 native fork, pause/resume and checkpoint, SQLite state, a template-based
 image pipeline, a drain protocol for orchestrator restarts, the read-only
 dashboard and a scrape-only metrics token. The lease API contract is
@@ -195,7 +197,7 @@ spoond hive check .spoond/hive.yaml
 runs the enlistment checks (C11) and ends with one `Next:` line: the
 first failing check's remedy, or the enlistment route when nothing
 failed. The exit code is 0 when nothing failed. It reads `SPOOND_API`
-(default `https://vm2.lacy.casa:8890`) and `SPOOND_TOKEN`, and it looks
+(default `https://spoond.example.com:8890`) and `SPOOND_TOKEN`, and it looks
 up the image catalog for real; the steps that need the host (building
 the worker image, cloning with the deploy key, the trial lease, the
 gates, the budget) report `skipped` there; `POST /hive/check` on the
@@ -203,8 +205,8 @@ instance will run them for real (build order step 3).
 
 ## Configuration knobs
 
-The repo targets a homelab by default (addresses like `10.1.0.11`,
-hostnames like `sandbox.lacy.casa` appear as *defaults only*); every
+The repo targets a homelab by default (addresses like `10.0.0.11`,
+hostnames like `sandbox.example.com` appear as *defaults only*); every
 knob is overridable. The fixed addresses, ports and paths of the E2B
 deployment are listed in
 [01-architecture.md](docs/plans/2026-09-30-e2b-substrate/01-architecture.md).

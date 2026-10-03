@@ -88,7 +88,7 @@ standalone `spoondctl`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FORKD_CTL_HOST` | `sandbox.lacy.casa` | gateway host |
+| `FORKD_CTL_HOST` | `sandbox.example.com` | gateway host |
 | `FORKD_CTL_PORT` | `2222` | gateway port |
 | `FORKD_CTL_KEY` | `~/.ssh/id_ed25519` | your key |
 

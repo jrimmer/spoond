@@ -9,6 +9,7 @@
 //	spoond ctl        control-plane CLI (thin ssh ctl@ wrapper)
 //	spoond drain      orchestrator drain/undrain hook (U10)
 //	spoond hive       swarm controller (enlistment checks)
+//	spoond version    version, commit and Go version
 //
 // Modules are optional at build time via Go build tags. Each subcommand
 // is registered in a build-tag-gated file (see the files in this
@@ -43,6 +44,9 @@ func register(cmd command) {
 
 func main() {
 	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "--version" {
+		args[0] = "version"
+	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		usage()
 		if len(args) == 0 {
@@ -61,7 +65,7 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "hive"} {
+	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "hive", "version"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}

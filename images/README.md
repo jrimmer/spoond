@@ -55,7 +55,7 @@ you point the agent at a repo, the flow is:
 python3 images/validate-image.py /path/to/repo
 
 # remote repo (clones it)
-python3 images/validate-image.py https://code.lacy.casa/org/repo.git
+python3 images/validate-image.py https://git.example.com/org/repo.git
 ```
 
 Output:

@@ -11,14 +11,14 @@ build. The build is recorded in SQLite. This replaces forkd's bake scripts.
 - U04 is done: registry `127.0.0.1:5000` is up and the orchestrator is healthy.
 - U06 is done: `substrate/e2b` passes its live test.
 
-## Step 0: spoond checkout and staging binary on vm2 (Ops runner)
+## Step 0: spoond checkout and staging binary on the host (Ops runner)
 
 Run after the unit's commits are merged into `feat/e2b-substrate`, and
-before the vm2 tests below:
+before the host tests below:
 
 ```bash
 export PATH=/usr/local/go/bin:$PATH
-test -d /root/src/spoond || git clone https://code.lacy.casa/lacy.casa/spoond.git /root/src/spoond
+test -d /root/src/spoond || git clone https://git.example.com/example/spoond.git /root/src/spoond
 cd /root/src/spoond && git fetch && git checkout feat/e2b-substrate && git pull --ff-only
 install -d -m 755 /opt/spoond-staging
 go build -o /opt/spoond-staging/spoond ./cmd/spoond
@@ -26,7 +26,7 @@ go build -o /opt/spoond-staging/spoond ./cmd/spoond
 ```
 
 The last command creates `/var/lib/spoond/staging.db` (migrations run on
-open) and prints an empty list. Every vm2 command in U07–U11 uses
+open) and prints an empty list. Every host command in U07–U11 uses
 `/opt/spoond-staging/spoond` and the checkout `/root/src/spoond`.
 
 ## Facts relied on
@@ -64,8 +64,8 @@ open) and prints an empty list. Every vm2 command in U07–U11 uses
   - they run as `/bin/bash -l -c <cmd>` as root;
   - the ready command retries every 2 s for up to 10 minutes;
   - the snapshot is taken after ready succeeds (A2 §6).
-- **DNS:** guests must resolve `code.lacy.casa` to the LAN edge (the
-  registry path there is not SSO-gated). vm2's LAN resolver is `10.1.0.1`.
+- **DNS:** guests must resolve `git.example.com` to the LAN edge (the
+  registry path there is not SSO-gated). the host's LAN resolver is `10.0.0.1`.
   The forkd guest init listed LAN resolvers first (A1 §10.5,
   `elixir-release.dockerfile` final note).
 - **dev-base behaviour to keep:**
@@ -106,10 +106,10 @@ open) and prints an empty list. Every vm2 command in U07–U11 uses
 # every sandbox's restored memory and disk.
 set -u
 # Resolve only through the LAN resolver (Technitium). No public fallback:
-# public DNS answers *.lacy.casa with the public edge, where credentialed
-# calls must never go, and the router (10.1.0.1) gives stale LAN answers.
+# public DNS answers *.example.com with the public edge, where credentialed
+# calls must never go, and the router (10.0.0.1) gives stale LAN answers.
 rm -f /etc/resolv.conf
-printf 'nameserver 10.1.0.2\noptions timeout:2 attempts:3\n' > /etc/resolv.conf
+printf 'nameserver 10.0.0.2\noptions timeout:2 attempts:3\n' > /etc/resolv.conf
 # Empty dpkg's statoverride. Tools that unpack a base image over the live
 # root (kaniko) keep this file while replacing /etc/group, so any override
 # whose group the base lacks (E2B's chrony adds _chrony; images with dbus
@@ -359,7 +359,7 @@ Flags:
 - `--db` (default `$SPOOND_DB_PATH`);
 - `--registry` (default `$IMAGE_REGISTRY`, which is `localhost:5000`).
 
-Runs on vm2 as root. Uses `substrate/e2b.FromEnv()`.
+Runs on the host as root. Uses `substrate/e2b.FromEnv()`.
 
 For `build <name>`:
 1. Load the manifest entry. Error if it is missing or has no `dockerfile`.
@@ -414,7 +414,7 @@ For `list`: print `name, current_build_id, digest (short), vcpu, memory_mb, disk
   - a successful build updates the image and build rows;
   - a failed build keeps the old `current_build_id`;
   - the template id is reused across builds.
-- **On vm2, against the staging DB `/var/lib/spoond/staging.db`:**
+- **On host, against the staging DB `/var/lib/spoond/staging.db`:**
   - `cd /root/src/spoond && SPOOND_DB_PATH=/var/lib/spoond/staging.db /opt/spoond-staging/spoond images build --all --manifest images/manifest.yaml --context images`
     completes for all 7 images (the `E2B_*` variables use their `FromEnv`
     defaults).
@@ -422,7 +422,7 @@ For `list`: print `name, current_build_id, digest (short), vcpu, memory_mb, disk
     shows 7 rows with build ids.
   - The substrate live check: create a sandbox from each image's
     `current_build_id` with the manifest `env`, and run
-    `cat /etc/resolv.conf`. The first line is `nameserver 10.1.0.1`.
+    `cat /etc/resolv.conf`. The first line is `nameserver 10.0.0.1`.
     Delete it.
   - Add this as a `-tags e2blive` test in `cmd/spoond-images`.
 
@@ -435,7 +435,7 @@ For `list`: print `name, current_build_id, digest (short), vcpu, memory_mb, disk
 
 ## Done when
 
-- All 7 images build on vm2 into the staging DB.
+- All 7 images build on the host into the staging DB.
 - Each image's live check passes.
 
 ## Do not

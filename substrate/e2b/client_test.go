@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 func TestNewSandboxID(t *testing.T) {

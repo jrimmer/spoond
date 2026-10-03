@@ -7,14 +7,14 @@ and build the orchestrator and envd binaries that U04 installs.
 
 ## Preconditions
 
-- The empty private repository `lacy.casa/e2b-runtime` exists on
-  `code.lacy.casa` (created 2026-09-30). vm2 can push to it: its deploy key
-  has write access, and its git config rewrites `https://code.lacy.casa/` to
-  `ssh://git@git.lacy.casa/`. The first push (`upstream`) becomes the
+- The empty private repository `example.com/e2b-runtime` exists on
+  `git.example.com` (created 2026-09-30). host can push to it: its deploy key
+  has write access, and its git config rewrites `https://git.example.com/` to
+  `ssh://git@git.example.com/`. The first push (`upstream`) becomes the
   repository's default branch. Leave it; do not try to change it.
-- vm2 has Go 1.27.1 at `/usr/local/go` (U01 step 10). That step is this
+- host has Go 1.27.1 at `/usr/local/go` (U01 step 10). That step is this
   unit's only dependency on U01. All builds in this unit
-  run **on vm2** (x86_64). The orchestrator needs cgo, so it cannot be
+  run **on the host** (x86_64). The orchestrator needs cgo, so it cannot be
   cross-compiled from arm64.
 
 ## Facts relied on
@@ -47,7 +47,7 @@ as A3 shows it, STOP (README rule 3).
 
 ## Steps
 
-### 1. Mirror and branches (on vm2)
+### 1. Mirror and branches (on the host)
 
 Every shell in this unit starts with
 `export PATH=/usr/local/go/bin:/usr/local/bin:$PATH`, because `make` and
@@ -61,12 +61,12 @@ git clone https://github.com/e2b-dev/runtime.git e2b-runtime
 cd e2b-runtime
 git checkout -b upstream e473dd130015ca1ff8cf9300341e25034c38e178
 git remote rename origin github
-git remote add origin https://code.lacy.casa/lacy.casa/e2b-runtime.git
+git remote add origin https://git.example.com/example/e2b-runtime.git
 git push origin upstream
 git checkout -b spoond upstream
 ```
 
-### 2. Proto toolchain (on vm2)
+### 2. Proto toolchain (on the host)
 
 ```bash
 cd /tmp
@@ -94,7 +94,7 @@ shows changes, the toolchain differs from upstream's, so STOP.
 ### 3. Patch P1: scope startup reclaim to our Firecracker processes
 
 Why: startup reclaim SIGKILLs **every** process named `firecracker` on the
-host (A3 P1), which would kill forkd's VMs on vm2.
+host (A3 P1), which would kill forkd's VMs on the host.
 
 Changes, all in `packages/orchestrator/pkg/startupreclaim/`:
 1. `reclaim.go`: add the field `FirecrackerVersionsDir string` to `Config`.
@@ -119,7 +119,7 @@ Changes, all in `packages/orchestrator/pkg/startupreclaim/`:
    - `firecracker` (relative) → false;
    - any path with `versionsDir=""` → false.
 
-Do **not** change NBD, netns, cgroup or file reclaim. On vm2 nothing else
+Do **not** change NBD, netns, cgroup or file reclaim. On host nothing else
 uses NBD, `ns-<int>` names, `/sys/fs/cgroup/e2b` or the orchestrator's
 `TMPDIR`.
 
@@ -198,7 +198,7 @@ Run `cd packages/orchestrator && go build ./...`.
    - add the message
      ```proto
      message SandboxPrivateAllowance {
-       // IPv4 CIDR inside the always-denied private ranges, e.g. "10.1.0.11/32" or "10.0.0.0/13".
+       // IPv4 CIDR inside the always-denied private ranges, e.g. "10.0.0.11/32" or "10.0.0.0/13".
        string cidr = 1;
        // TCP destination ports allowed to this CIDR. Empty = every TCP port.
        repeated uint32 tcp_ports = 2;
@@ -280,16 +280,16 @@ Run `cd packages/orchestrator && go build ./...`.
    with table tests of `egressDecision` (hostname `noHostnameValue`).
    Unless a row says otherwise, `hostAddrs` is replaced by
    `{127.0.0.0/8}` for the test and restored with `t.Cleanup`:
-   - allowance `10.0.0.0/13` with no ports: `10.1.0.5:22` → allowed;
+   - allowance `10.0.0.0/13` with no ports: `10.0.0.5:22` → allowed;
    - allowance `10.11.0.7/32` ports `[9042]`: `10.11.0.7:9042` → allowed,
      `10.11.0.7:22` → **denied** (matched CIDR, wrong port);
-   - no allowances (egress with no fields set): `10.1.0.5:22` → **allowed** at
+   - no allowances (egress with no fields set): `10.0.0.5:22` → **allowed** at
      layer 2 (layer 1's nftables floor enforces the private floor);
-   - with `hostAddrs` set to `{10.1.0.11/32, 127.0.0.0/8}`:
-     - allowance `10.0.0.0/13` with no ports: `10.1.0.11:8891` → **denied**;
-     - allowance `10.1.0.11/32` ports `[8891]`: `10.1.0.11:8891` → allowed,
-       `10.1.0.11:5008` → denied;
-     - nil egress: `10.1.0.11:22` → denied;
+   - with `hostAddrs` set to `{10.0.0.11/32, 127.0.0.0/8}`:
+     - allowance `10.0.0.0/13` with no ports: `10.0.0.11:8891` → **denied**;
+     - allowance `10.0.0.11/32` ports `[8891]`: `10.0.0.11:8891` → allowed,
+       `10.0.0.11:5008` → denied;
+     - nil egress: `10.0.0.11:22` → denied;
    - `denied_cidrs=["0.0.0.0/0"]` plus allowance `10.11.0.7/32` `[9042]`:
      `10.11.0.7:9042` → allowed, `10.11.0.7:22` → denied.
 
@@ -342,7 +342,7 @@ Also include the base commit hash and the proto tool versions.
 
 **Commit:** `docs: patch series for spoond`
 
-### 9. Build and publish binaries (on vm2)
+### 9. Build and publish binaries (on the host)
 
 ```bash
 export PATH=/usr/local/go/bin:/usr/local/bin:$PATH
@@ -369,7 +369,7 @@ SHA-256 values in `PATCHES.md` under "Current build". Commit
 - `origin/spoond` = upstream + 7 commits (P1–P5, PATCHES.md, record
   build).
 - The unit tests named above pass.
-- Both binaries exist on vm2 at `/root/src/e2b-runtime/packages/*/bin/`.
+- Both binaries exist on the host at `/root/src/e2b-runtime/packages/*/bin/`.
 
 ## Do not
 

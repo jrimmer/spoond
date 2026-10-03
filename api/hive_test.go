@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/hive"
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/hive"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // validHiveYAML is a hive.yaml every check can accept.

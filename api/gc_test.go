@@ -13,9 +13,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/jrimmer/spoond/metrics"
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate/e2b"
+	"github.com/jrimmer/spoond/v2/metrics"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
 // counterValue reads a single counter's current value.

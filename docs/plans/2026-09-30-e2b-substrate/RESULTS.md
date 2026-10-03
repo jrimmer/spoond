@@ -2,13 +2,13 @@
 
 Each section records one run's performance numbers against the unit's
 budgets. Full pass/fail lists live in the run's JSON under
-`conformance/results/` on vm2 (git-ignored).
+`conformance/results/` on the host (git-ignored).
 
-## 2026-09-30 — U08 staging (E2B substrate, vm2)
+## 2026-09-30 — U08 staging (E2B substrate, host)
 
-Run against `spoond-backend-staging` (https://vm2.lacy.casa:18890) from
+Run against `spoond-backend-staging` (https://spoond.example.com:18890) from
 `/root/src/spoond` on `feat/e2b-substrate` after U08, with
-`CONFORMANCE_SUBSTRATE=e2b`, `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`,
+`CONFORMANCE_SUBSTRATE=e2b`, `CONFORMANCE_GUEST_SERVICE=10.0.0.11:18891`,
 `POOL_SIZE=0`. All 14 selected tests pass (L1–L6, S1–S4, D1–D2, I1–I2)
 in 454.5 s.
 
@@ -31,7 +31,7 @@ Context (not budgeted):
 
 All 27 tests PASS (L1–L6, S1–S4, D1–D3, N1–N6, I1–I3 incl. Docker-in-Docker 21.3 s,
 R1–R3 with CONFORMANCE_DESTRUCTIVE=1) in 202.6 s against `spoond-backend-staging`
-(tip 39636b3). Results JSON: `conformance/results/20261001T005006-e2b-full.json` (vm2).
+(tip 39636b3). Results JSON: `conformance/results/20261001T005006-e2b-full.json` (host).
 
 | Metric | Value | Budget | Result |
 |---|---|---|---|

@@ -23,7 +23,7 @@ None. This is the first unit.
 - CI jobs with `runs-on: go` run in the `go-base` image. `images/manifest.yaml`
   still describes go-base as "Go 1.25.12", so step 9a verifies the image's Go
   version before the commit is pushed.
-- vm2 has Go 1.25.1 at `/usr/local/go`, used by `deploy/install-spoond.sh`
+- host has Go 1.25.1 at `/usr/local/go`, used by `deploy/install-spoond.sh`
   to build spoond.
 - Latest stable Go is 1.27.1. Latest module versions checked 2026-09-30:
   - `modernc.org/sqlite v1.60.1` (needs Go 1.26);
@@ -51,7 +51,7 @@ None. This is the first unit.
 8. Update `docs/install.md`: replace the line `# Go toolchain (1.22+)` with
    `# Go toolchain (1.27.1+)`.
 9. **Commit:** `chore(go): Go 1.27.1 and current dependency versions`.
-9a. **go-base check (Ops runner, on vm2, against the production lease
+9a. **go-base check (Ops runner, on the host, against the production lease
     API).** Create a `go-base` lease and exec `go version`:
     ```bash
     set -a; . /etc/spoond/conformance.env; set +a
@@ -62,7 +62,7 @@ None. This is the first unit.
     ```
     `stdout` must contain `go1.27.1`. If it does not, STOP: CI cannot build a
     `go 1.27.1` module until go-base is rebaked, which is an OPERATOR task.
-10. **vm2 host Go** (runs on vm2 as root; it does not touch running services):
+10. **host host Go** (runs on the host as root; it does not touch running services):
     ```bash
     cd /tmp
     curl -fsSLO https://go.dev/dl/go1.27.1.linux-amd64.tar.gz
@@ -87,7 +87,7 @@ None. This is the first unit.
 - The branch builds and passes `gofmt`, `vet`, `build` and `test` locally and
   in CI.
 - `go list -m all` shows no downgrade.
-- vm2 `/usr/local/go/bin/go version` prints `go1.27.1`.
+- host `/usr/local/go/bin/go version` prints `go1.27.1`.
 
 ## Do not
 

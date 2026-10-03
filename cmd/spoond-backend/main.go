@@ -58,10 +58,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jrimmer/spoond/api"
-	"github.com/jrimmer/spoond/identity"
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate/e2b"
+	"github.com/jrimmer/spoond/v2/api"
+	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
 func envOr(key, def string) string {

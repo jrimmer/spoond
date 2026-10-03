@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/hive"
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/hive"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Hive route paths, in guide order.

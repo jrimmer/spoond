@@ -71,7 +71,7 @@ It cannot run on CI without that infrastructure.
 - The sandbox substrate is E2B's orchestrator (a patch-queue fork of
   `github.com/e2b-dev/runtime`); spoond speaks to it only through the
   `substrate/` interface.
-- Homelab addresses (10.1.0.*, *.lacy.casa) appear as **defaults only**
+- Homelab addresses (10.0.0.*, *.example.com) appear as **defaults only**
   and are overridable via env/flags (see `cmd/*/main.go`). Keep it that
   way for new knobs.
 

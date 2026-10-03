@@ -13,9 +13,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/jrimmer/spoond/identity"
-	"github.com/jrimmer/spoond/substrate"
-	"github.com/jrimmer/spoond/substrate/fake"
+	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
 // dialStream opens a WebSocket to /stream on ts with the given headers.
@@ -152,24 +152,24 @@ func TestStreamBinaryFraming(t *testing.T) {
 	h2.ws.WriteMessage(websocket.TextMessage, []byte(`{"resize":{"cols":100,"rows":30}}`))
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if len(proc2.Inputs) >= 1 && len(proc2.Resizes) >= 1 {
+		if len(proc2.State().Inputs) >= 1 && len(proc2.State().Resizes) >= 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("binary input/resize not relayed: inputs=%v resizes=%v", proc2.Inputs, proc2.Resizes)
+			t.Fatalf("binary input/resize not relayed: inputs=%v resizes=%v", proc2.State().Inputs, proc2.State().Resizes)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if string(proc2.Inputs[0]) != "raw-stdin\n" {
-		t.Fatalf("stdin = %q, want the raw binary payload", proc2.Inputs[0])
+	if string(proc2.State().Inputs[0]) != "raw-stdin\n" {
+		t.Fatalf("stdin = %q, want the raw binary payload", proc2.State().Inputs[0])
 	}
-	for _, in := range proc2.Inputs {
+	for _, in := range proc2.State().Inputs {
 		if string(in) == "must-be-ignored" {
 			t.Fatal(`{"in"} must be ignored in binary mode`)
 		}
 	}
-	if !reflect.DeepEqual(proc2.Resizes, [][2]uint32{{100, 30}}) {
-		t.Fatalf("resizes = %v", proc2.Resizes)
+	if !reflect.DeepEqual(proc2.State().Resizes, [][2]uint32{{100, 30}}) {
+		t.Fatalf("resizes = %v", proc2.State().Resizes)
 	}
 }
 
@@ -213,8 +213,8 @@ func TestStreamKillControl(t *testing.T) {
 	if string(payload) != `{"exit_code":137}` {
 		t.Fatalf("exit frame = %q", payload)
 	}
-	if !reflect.DeepEqual(proc.Signals, []bool{true}) {
-		t.Fatalf("signals = %v, want one SIGKILL (true)", proc.Signals)
+	if !reflect.DeepEqual(proc.State().Signals, []bool{true}) {
+		t.Fatalf("signals = %v, want one SIGKILL (true)", proc.State().Signals)
 	}
 }
 

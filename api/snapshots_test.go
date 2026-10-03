@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/store"
-	"github.com/jrimmer/spoond/substrate/e2b"
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
 // seedSnapshotBuild inserts a build row owned by owner with an old

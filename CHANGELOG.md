@@ -8,7 +8,7 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
-## [2.0.0] - unreleased
+## [2.0.0] - 2026-10-02
 
 2.0 replaces forkd with a patch-queue fork of E2B's node runtime as the
 sandbox substrate (production cut over 2026-10-01), moves spoond's state
@@ -76,7 +76,7 @@ The design, decisions and per-unit specs are in
   backend's `/api/sandboxes/{id}/stream` (D14, U09; `63d1f12`); spoond now
   has no `setns`, no netns and no iptables code (U09; `55cd9e8` deletes
   the netns dialing). The gateway's `SHELLY_BINARY_URL` and
-  `LLM_GATEWAY_URL` defaults moved from `10.43.0.1` to `10.1.0.11`
+  `LLM_GATEWAY_URL` defaults moved from `10.43.0.1` to `10.0.0.11`
   (`63d1f12`); an operator must remove overrides of both so the new
   defaults apply (U12 step 9).
 - **Breaking: admin routes need `ADMIN_TOKEN`.** Drain, undrain and
@@ -89,7 +89,7 @@ The design, decisions and per-unit specs are in
   as per-sandbox peer allowances on E2B's egress firewall, with live policy
   changes on `POST /api/sandboxes/{id}/network` (U09; `55cbfe8`).
 - The shelley-binary and LLM-gateway URLs default to the host-service
-  address `10.1.0.11:8891` — the value of `HOST_GUEST_SERVICE_ADDR` in
+  address `10.0.0.11:8891` — the value of `HOST_GUEST_SERVICE_ADDR` in
   `01-architecture.md` — replacing forkd's `10.43.0.1` (U09; `63d1f12`).
 
 ### Added
@@ -243,9 +243,9 @@ Found in production after the 2026-10-01 cutover and deployed the same day:
   `allowed_private` itself (e2b-runtime `eb70296db`); the stopgap was then
   removed (`0d8a603`; deployed in `dbc25ec`).
 - **Guests resolve through the LAN resolver only.** The old
-  `10.1.0.1` + `8.8.8.8` pair fell back to public DNS, which answers
-  `*.lacy.casa` with the public edge, and the router gave stale LAN answers;
-  `resolv.conf` now names Technitium (`10.1.0.2`) alone, and the egress DNS
+  `10.0.0.1` + `8.8.8.8` pair fell back to public DNS, which answers
+  `*.example.com` with the public edge, and the router gave stale LAN answers;
+  `resolv.conf` now names Technitium (`10.0.0.2`) alone, and the egress DNS
   allowance follows it (`f2b0289`; deployed in `26d9cab`).
 - **The guest rootfs is kaniko-safe again.** `/var/lib/dpkg/statoverride`
   is emptied (E2B's chrony `_chrony` lines and the images' own `messagebus`

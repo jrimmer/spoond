@@ -5,7 +5,7 @@
 Rewire `api.Service` and `api.Server` from the forkd client onto
 `substrate.Substrate` and SQLite. Every lease API route keeps its contract
 (D5). A few routes are added. This unit also deploys the **staging**
-backend on vm2.
+backend on the host.
 
 ## Preconditions
 
@@ -130,7 +130,7 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
    and `egressForLocked` where it is (item 18).
    `hostSvc` is the allowance
    `{CIDR: HostGuestAddr+"/32", TCPPorts: [HostGuestPort]}`, and `dns` is
-   `{CIDR: "10.1.0.1/32", TCPPorts: [53]}`.
+   `{CIDR: "10.0.0.1/32", TCPPorts: [53]}`.
 
    | Policy | Egress |
    |---|---|
@@ -407,7 +407,7 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
   - the stream relay: with fake events, assert the exact frames, including
     the `resize` and `eof` client frames.
 
-## Staging deployment on vm2 (exact)
+## Staging deployment on the host (exact)
 
 1. Build: `export PATH=/usr/local/go/bin:$PATH && cd /root/src/spoond && git fetch && git checkout feat/e2b-substrate && git pull --ff-only && go build -o /opt/spoond-staging/spoond ./cmd/spoond`.
 2. Write `/etc/spoond-staging/backend.env` (mode 0600):
@@ -422,7 +422,7 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
    E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
    E2B_TEAM_ID=5b0f4e3a-8c1d-4f2e-9a6b-7d3c2e1f0a95
    IMAGE_REGISTRY=localhost:5000
-   HOST_GUEST_SERVICE_ADDR=10.1.0.11
+   HOST_GUEST_SERVICE_ADDR=10.0.0.11
    HOST_GUEST_SERVICE_PORT=18891
    CHECKPOINT_INTERVAL_MINS=60
    ```
@@ -468,7 +468,7 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
    ```bash
    set -a; . /etc/spoond-staging/backend.env; set +a
    BEARER=${CONSUMER_TOKENS%%=*}            # <hex1>
-   API=https://vm2.lacy.casa:18890
+   API=https://spoond.example.com:18890
    ssh-keygen -t ed25519 -N '' -C conformance-staging -f /etc/spoond-staging/conformance_ed25519
    FP=$(ssh-keygen -lf /etc/spoond-staging/conformance_ed25519.pub | awk '{print $2}')   # SHA256:...
    TOK=$(openssl rand -hex 32)
@@ -487,7 +487,7 @@ ALTER TABLE images ADD COLUMN env TEXT NOT NULL DEFAULT '{}';
    CONFORMANCE_SSH_GATEWAY=127.0.0.1:12222
    CONFORMANCE_PROXY_URL=http://127.0.0.1:18891
    CONFORMANCE_PROXY_SECRET=$PROXY_AUTH_SECRET
-   CONFORMANCE_PROXY_SUFFIX=.sandbox.lacy.casa
+   CONFORMANCE_PROXY_SUFFIX=.sandbox.example.com
    CONFORMANCE_BACKEND_UNIT=spoond-backend-staging
    EOF
    chmod 600 /etc/spoond-staging/conformance.env
@@ -514,9 +514,9 @@ Each commit builds and passes `go build ./... && go vet ./... && go test ./...`.
 
 - `go test ./...` passes.
 - These conformance tests pass against the **staging** backend, run on
-  vm2 from `/root/src/spoond` after
+  host from `/root/src/spoond` after
   `set -a; . /etc/spoond-staging/conformance.env; set +a` with
-  `CONFORMANCE_SUBSTRATE=e2b` and `CONFORMANCE_GUEST_SERVICE=10.1.0.11:18891`
+  `CONFORMANCE_SUBSTRATE=e2b` and `CONFORMANCE_GUEST_SERVICE=10.0.0.11:18891`
   (select them with `-run '^Test(L[1-6]|S[1-4]|D[12]|I[12])_'`):
   - L1–L6 (group N comes in U09);
   - S1–S4;

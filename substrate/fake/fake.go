@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jrimmer/spoond/substrate"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Fake implements substrate.Substrate in memory.
@@ -95,6 +95,14 @@ func (f *Fake) Proc(pid uint32) *FakeProcess {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.procs[pid]
+}
+
+// CallLog returns a copy of Calls, taken under the fake's lock, so tests
+// can read it while handlers are still calling the fake.
+func (f *Fake) CallLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.Calls...)
 }
 
 func (f *Fake) record(method, firstID string) error {
@@ -304,6 +312,29 @@ type FakeProcess struct {
 	pid    uint32
 	events chan substrate.ProcessEvent
 	mu     sync.Mutex
+}
+
+// ProcState is a copy of a FakeProcess's recorded actions.
+type ProcState struct {
+	Inputs      [][]byte
+	Resizes     [][2]uint32
+	Signals     []bool
+	StdinClosed bool
+	Closed      bool
+}
+
+// State returns a copy of the recorded actions, taken under the process's
+// lock, so tests can poll it while the relay is still writing.
+func (p *FakeProcess) State() ProcState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return ProcState{
+		Inputs:      append([][]byte(nil), p.Inputs...),
+		Resizes:     append([][2]uint32(nil), p.Resizes...),
+		Signals:     append([]bool(nil), p.Signals...),
+		StdinClosed: p.StdinClosed,
+		Closed:      p.Closed,
+	}
 }
 
 func newFakeProcess(pid uint32) *FakeProcess {
