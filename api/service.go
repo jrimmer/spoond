@@ -962,6 +962,7 @@ func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow,
 // they are not TTL-swept (see keepAlive) and the consumer drives their
 // lifecycle.
 func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, exposePorts ...int) (*Lease, error) {
+	start := time.Now()
 	img, b, err := s.imageBuild(ctx, image)
 	if err != nil {
 		return nil, err
@@ -1083,6 +1084,12 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 	s.countImageUse(image)
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
+	}
+	// Observed only when the lease is actually returned, so the
+	// histogram measures the full grant — pool hit, cold create and the
+	// integrity probe — and failed grants stay out of the latency.
+	if s.metrics != nil {
+		s.metrics.LeaseGrantDur.Observe(time.Since(start).Seconds())
 	}
 	return lease, nil
 }
