@@ -10,7 +10,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,7 +20,6 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/hive"
-	"github.com/jrimmer/spoond/store"
 	"github.com/jrimmer/spoond/substrate"
 )
 
@@ -61,16 +59,20 @@ func (s *Server) registerHiveRoutes() {
 	}
 }
 
-// hiveEnvDefaultRegistry and friends are the guide's env-configurable
-// facts: the model service and Agent Mail hosts (the server already
-// knows the rest from its own configuration).
+// The hive's env-configurable facts: the model service, Agent Mail and
+// registry hosts (the server already knows the rest from its own
+// configuration). The TLS scheme comes from the same TLS_CERT/TLS_KEY
+// env the backend itself serves HTTPS on.
 const (
 	envHiveModelService = "HIVE_MODEL_SERVICE"
 	envHiveAgentMail    = "HIVE_AGENT_MAIL"
 	envHiveRegistry     = "HIVE_REGISTRY"
+	envTLSCert          = "TLS_CERT"
+	envTLSKey           = "TLS_KEY"
 	defaultModelService = "llm.lacy.casa"
 	defaultAgentMail    = "agentmail.lacy.casa"
 	defaultRegistryPort = ":5000"
+	defaultAPIPort      = "8890"
 )
 
 // hiveFacts renders this instance's facts (C11) from the values the
@@ -80,7 +82,7 @@ const (
 func (s *Server) hiveFacts() hive.Instance {
 	host, port := s.svc.cfg.HostGuestAddr, strconv.Itoa(s.svc.cfg.HostAPIPort)
 	if s.svc.cfg.HostAPIPort <= 0 {
-		host, port = s.svc.cfg.HostGuestAddr, "8890"
+		host, port = s.svc.cfg.HostGuestAddr, defaultAPIPort
 	}
 	return hive.Instance{
 		LeaseAPI:     host + ":" + port,
@@ -91,13 +93,21 @@ func (s *Server) hiveFacts() hive.Instance {
 }
 
 // hiveBaseURL is the lease API base URL the guide teaches: the host
-// guests and LAN callers reach, with the port the API listens on.
+// guests and LAN callers reach, with the port the API listens on. HTTPS
+// when the backend is configured to serve TLS (TLS_CERT and TLS_KEY,
+// as cmd/spoond-backend serves them), HTTP otherwise.
 func (s *Server) hiveBaseURL() string {
-	f := s.hiveFacts()
-	if s.svc.cfg.TLSEnabled {
-		return "https://" + f.LeaseAPI
+	if s.hiveTLS() {
+		return "https://" + s.hiveFacts().LeaseAPI
 	}
-	return "http://" + f.LeaseAPI
+	return "http://" + s.hiveFacts().LeaseAPI
+}
+
+// hiveTLS reports whether the backend serves HTTPS: both TLS_CERT and
+// TLS_KEY set, the same pair cmd/spoond-backend's ListenAndServeTLS
+// branch requires.
+func (s *Server) hiveTLS() bool {
+	return os.Getenv(envTLSCert) != "" && os.Getenv(envTLSKey) != ""
 }
 
 // hiveGuestServiceURL is the guest-service URL a sandbox reaches.
@@ -151,7 +161,9 @@ func (s *Server) handleHiveGuide(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, hive.GuideJSON(in))
 		return
 	}
-	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	// Markdown as text: the guide is read by agents and by curl, and
+	// C11 serves it as plain text by default.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, hive.Guide(in))
 }
@@ -161,8 +173,9 @@ const hiveCheckMaxBody = 64 << 10
 
 // handleHiveCheck runs every enlistment check against the request body
 // (a hive.yaml) with the server's own environment. The report is the
-// answer whether or not checks failed: 200 either way, 400 only for a
-// body that cannot be read or parsed as YAML at all.
+// answer whether or not checks failed: 200 either way — a broken
+// hive.yaml gets the same report shape with its remedy — and 400 only
+// for a body that cannot be read at all.
 func (s *Server) handleHiveCheck(w http.ResponseWriter, r *http.Request) {
 	if ct := r.Header.Get("Content-Type"); ct != "" &&
 		ct != "application/yaml" && ct != "text/plain" &&
@@ -184,13 +197,8 @@ func (s *Server) handleHiveCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := ownerFrom(r.Context())
-	p, parseErr := hive.Parse(body)
-	if parseErr != nil {
-		// An unparseable body still gets a report, so the answer is
-		// always the same shape and ends with the same Next: line.
-		p = hive.Project{}
-	}
-	env := &hiveServerEnv{srv: s, owner: owner, parseErr: parseErr}
+	p, _ := hive.Parse(body)
+	env := &hiveServerEnv{srv: s, owner: owner, baseImage: p.BaseImage}
 	rep := hive.Run(r.Context(), &p, env)
 	if wantsJSON(r) {
 		writeJSON(w, http.StatusOK, rep)
@@ -222,11 +230,13 @@ const hiveNotAutomated = "not automated until enlistment (hive build order step 
 
 // hiveServerEnv is the Env the server runs the checks with: the facts
 // and the catalog are its own, the trial lease is a real lease owned by
-// the caller, and the steps that need an enlisted project say so.
+// the caller, and the steps that need an enlisted project say so. The
+// project's base image rides along for the trial lease; empty when the
+// submission did not parse.
 type hiveServerEnv struct {
-	srv      *Server
-	owner    string
-	parseErr error
+	srv       *Server
+	owner     string
+	baseImage string
 }
 
 // Facts returns the instance facts, with the live image catalog.
@@ -245,7 +255,8 @@ func (e *hiveServerEnv) ListImages(ctx context.Context) ([]string, error) {
 	return e.srv.hiveCatalog(ctx)
 }
 
-// BuildImage stays with a human until enlistment builds the worker layer.
+// BuildImage stays with a human until enlistment builds the worker
+// layer. The skip's remedy names the by-hand work.
 func (e *hiveServerEnv) BuildImage(ctx context.Context, image string) error {
 	return hive.Skipf("%s", hiveNotAutomated)
 }
@@ -272,61 +283,53 @@ const trialLeaseTTL = 120 * time.Second
 // non-persistent, TTL 120 s, restricted egress with the derived
 // allowlist, owned by the caller — probes every needs: target from
 // inside it with a 5 s TCP connect (bash /dev/tcp where the base image
-// has bash, curl otherwise), and always deletes the lease again.
-func (e *hiveServerEnv) Reachable(ctx context.Context, allowlist, needs []string) error {
+// has bash, curl otherwise), and always deletes the lease again. The
+// returned detail names the carrier that probed; empty when there was
+// nothing to probe.
+func (e *hiveServerEnv) Reachable(ctx context.Context, allowlist, needs []string) (string, error) {
 	inst, err := e.Facts(ctx)
 	if err != nil {
-		return fmt.Errorf("instance facts: %w", err)
+		return "", fmt.Errorf("instance facts: %w", err)
 	}
 	targets := hive.NeedTargets(needs, inst)
 	if len(targets) == 0 {
-		return nil // nothing declared: the allowlist alone is the answer
+		return "", nil // nothing declared: the allowlist alone is the answer
 	}
-	lease, err := e.srv.svc.grant(ctx, e.owner, e.baseImage(), trialLeaseTTL, false,
+	if e.baseImage == "" {
+		return "", errors.New("no base image to start the trial lease from")
+	}
+	lease, err := e.srv.svc.grant(ctx, e.owner, e.baseImage, trialLeaseTTL, false,
 		string(PolicyRestricted), append([]string(nil), allowlist...))
 	if err != nil {
-		return fmt.Errorf("grant trial lease: %w", err)
+		return "", fmt.Errorf("grant trial lease: %w", err)
 	}
 	defer e.srv.svc.release(context.WithoutCancel(ctx), lease)
 
 	var failures []string
+	carrier := ""
 	for _, target := range targets {
-		if err := probeTarget(ctx, e.srv.svc.sub, lease.SandboxID, target); err != nil {
+		via, err := probeTarget(ctx, e.srv.svc.sub, lease.SandboxID, target)
+		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", target, err))
+			continue
+		}
+		if carrier == "" {
+			carrier = via
 		}
 	}
 	if len(failures) > 0 {
-		return errors.New(strings.Join(failures, "; "))
+		return carrier, errors.New(strings.Join(failures, "; "))
 	}
-	return nil
-}
-
-// baseImage is the base image of the project being checked, recovered
-// from the request body's parse (empty when it did not parse).
-func (e *hiveServerEnv) baseImage() string {
-	if e.parseErr != nil {
-		return ""
-	}
-	images, err := e.srv.hiveCatalog(context.Background())
-	if err != nil {
-		return ""
-	}
-	for _, n := range images {
-		if strings.HasSuffix(n, hive.WorkerImageSuffix) {
-			continue
-		}
-		return n
-	}
-	return ""
+	return carrier, nil
 }
 
 // probeTarget TCP-connects to target (host or host:port) from inside the
 // trial lease with a 5 s timeout, using bash /dev/tcp when the base
 // image has bash and curl otherwise, and reports which one it used.
-func probeTarget(ctx context.Context, sub substrate.Substrate, sandboxID, target string) error {
+func probeTarget(ctx context.Context, sub substrate.Substrate, sandboxID, target string) (string, error) {
 	host, port, err := splitTarget(target)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// bash /dev/tcp first: every base image that has bash can probe
 	// without curl, and the report says which carrier was used.
@@ -337,25 +340,32 @@ func probeTarget(ctx context.Context, sub substrate.Substrate, sandboxID, target
 		Timeout: probeTimeout,
 	})
 	if err != nil {
-		return fmt.Errorf("probe %s: %w", target, err)
+		return "", fmt.Errorf("probe %s: %w", target, err)
 	}
 	out := strings.TrimSpace(res.Stdout)
 	switch {
 	case res.ExitCode == 0 && strings.Contains(out, "PROBE_OK"):
-		return nil
+		return probeCarrierBash, nil
 	case res.ExitCode == 127 || strings.Contains(res.Stderr, "command not found") ||
 		strings.Contains(res.Stderr, "No such file"):
 		return probeWithCurl(ctx, sub, sandboxID, host, port)
 	default:
 		if strings.Contains(res.Stdout, "PROBE_OK") {
-			return nil
+			return probeCarrierBash, nil
 		}
-		return fmt.Errorf("TCP connect failed (bash /dev/tcp, exit %d)", res.ExitCode)
+		return probeCarrierBash, fmt.Errorf("TCP connect failed (bash /dev/tcp, exit %d)", res.ExitCode)
 	}
 }
 
+// probeCarrierBash and probeCarrierCurl are the two probe carriers a
+// report can name: which one the base image had.
+const (
+	probeCarrierBash = "bash /dev/tcp"
+	probeCarrierCurl = "curl telnet://"
+)
+
 // probeWithCurl is the fallback carrier for base images without bash.
-func probeWithCurl(ctx context.Context, sub substrate.Substrate, sandboxID, host, port string) error {
+func probeWithCurl(ctx context.Context, sub substrate.Substrate, sandboxID, host, port string) (string, error) {
 	script := fmt.Sprintf(`curl -sf --max-time 5 --connect-timeout 5 -o /dev/null telnet://%s:%s && echo PROBE_OK || echo PROBE_FAIL`,
 		host, port)
 	res, err := sub.Exec(ctx, sandboxID, substrate.ExecRequest{
@@ -363,12 +373,12 @@ func probeWithCurl(ctx context.Context, sub substrate.Substrate, sandboxID, host
 		Timeout: probeTimeout,
 	})
 	if err != nil {
-		return fmt.Errorf("probe %s:%s: %w", host, port, err)
+		return probeCarrierCurl, fmt.Errorf("probe %s:%s: %w", host, port, err)
 	}
 	if strings.Contains(res.Stdout, "PROBE_OK") {
-		return nil
+		return probeCarrierCurl, nil
 	}
-	return fmt.Errorf("TCP connect failed (curl, exit %d)", res.ExitCode)
+	return probeCarrierCurl, fmt.Errorf("TCP connect failed (curl, exit %d)", res.ExitCode)
 }
 
 // probeTimeout bounds one needs: probe exec, including its 5 s connect
@@ -401,11 +411,3 @@ func splitHostPort(s string) (string, string, error) {
 	}
 	return s, "443", nil
 }
-
-// marshalHiveReport renders a report for tests.
-func marshalHiveReport(rep hive.Report) []byte {
-	b, _ := json.Marshal(rep)
-	return b
-}
-
-var _ = store.ErrNotFound // keep the store import while the trial lease lands

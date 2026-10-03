@@ -1,7 +1,8 @@
 # API Reference
 
 Base URL: `https://<backend>:8890` (HTTPS when `TLS_CERT`/`TLS_KEY` are
-set, plain HTTP otherwise). All endpoints except `/healthz`, the
+set, plain HTTP otherwise). All endpoints except `/healthz`,
+`GET /hive/guide` (the hive's enlistment guide, below), the
 `/api/admin/*` routes (which carry their own `ADMIN_TOKEN`) and the
 `/llm/` prefix (where the lease id in the path is the capability)
 require a bearer token (`/metrics` also accepts the scrape-only
@@ -408,6 +409,24 @@ identity store present, keyless identity users are then denied outright
 `LLM_OPEN_LEGACY=1` to restore the pre-2.0 open behavior. The user key is
 replaced by the server-side upstream key before forwarding, so it never
 reaches the provider.
+
+## Hive
+
+The hive enlists a project's agent workers on this instance
+(docs/plans/2026-10-02-swarm-controller.md, C10/C11). A project
+describes itself in `.spoond/hive.yaml`; everything else (worker image,
+network allowlist, credentials) is derived.
+
+| Route | Auth | What |
+|---|---|---|
+| `GET /hive/guide` | none (LAN) | The enlistment guide for *this* instance, rendered live: real addresses, the image catalog, the hive.yaml schema, the derived-allowlist `needs:` keys, the routes, the checks and the next step. Markdown by default; `Accept: application/json` for the same content as JSON. This guide **is** the documentation — point an agent at it rather than at this file. |
+| `POST /hive/check` | bearer token | Run every enlistment check against the body (a hive.yaml; `Content-Type: application/yaml` or `text/plain`). The report (text by default, JSON with `Accept: application/json`) is `200` whether or not checks fail — the first failure's remedy is the `Next:` line; `400` only for an unreadable body. The trial-lease check starts and deletes a real lease owned by the caller. |
+
+Not automated yet (until enlistment lands): worker image build, deploy
+key push, gates and budget report `skip` with the by-hand remedy.
+The CLI `spoond hive check <file>` runs the same checks from anywhere;
+steps that need the host report `skip` there and point at
+`POST /hive/check`.
 
 ## Guest-service endpoints (port `HOST_GUEST_SERVICE_PORT`)
 

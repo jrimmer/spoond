@@ -73,15 +73,16 @@ func failf(detail, remedy string) Result {
 }
 
 // resultOf turns an Env outcome into a Result: nil is a Pass with the
-// given detail, a *SkipError is a Skip carrying the reason, and
-// anything else is a Fail with the given remedy.
+// given detail, a *SkipError is a Skip carrying the reason and the same
+// remedy a failure would (what to do by hand where the step is not
+// automated), and anything else is a Fail with the given remedy.
 func resultOf(err error, detail, remedy string) Result {
 	if err == nil {
 		return Result{Status: Pass, Detail: detail}
 	}
 	var skip *SkipError
 	if errors.As(err, &skip) {
-		return Result{Status: Skip, Detail: skip.Reason}
+		return Result{Status: Skip, Detail: skip.Reason, Remedy: remedy}
 	}
 	return failf(err.Error(), remedy)
 }
@@ -224,7 +225,10 @@ func Checks() []Check {
 					if err := env.RunGate(ctx, p.Repo, g); err != nil {
 						var skip *SkipError
 						if errors.As(err, &skip) {
-							return Result{Status: Skip, Detail: skip.Reason}
+							return Result{
+								Status: Skip, Detail: skip.Reason,
+								Remedy: fmt.Sprintf("make %s pass on the default branch, or drop it from gates.", g),
+							}
 						}
 						return failf(fmt.Sprintf("%s: %v", g, err),
 							fmt.Sprintf("make %s pass on the default branch, or drop it from gates.", g))
@@ -240,7 +244,10 @@ func Checks() []Check {
 				if err != nil {
 					var skip *SkipError
 					if errors.As(err, &skip) {
-						return Result{Status: Skip, Detail: skip.Reason}
+						return Result{
+							Status: Skip, Detail: skip.Reason,
+							Remedy: "set a bee-hour budget for the project with the owner, then run the check again.",
+						}
 					}
 					return failf(fmt.Sprintf("look up budget: %v", err),
 						"set a bee-hour budget for the project with the owner, then run the check again.")

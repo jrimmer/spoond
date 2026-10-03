@@ -82,7 +82,12 @@ func Guide(in GuideInput) string {
 	fmt.Fprintln(&b, "## Base images")
 	fmt.Fprintln(&b)
 	images := sortedCopy(in.Inst.Images)
-	fmt.Fprintf(&b, "A project's `base_image` may be any image this instance has a current\nbuild of. Today that is: %s.\n", strings.Join(images, ", "))
+	if len(images) == 0 {
+		fmt.Fprintln(&b, "A project's `base_image` may be any image this instance has a current")
+		fmt.Fprintln(&b, "build of. The catalog is empty right now; ask the owner to build one.")
+	} else {
+		fmt.Fprintf(&b, "A project's `base_image` may be any image this instance has a current\nbuild of. Today that is: %s.\n", strings.Join(images, ", "))
+	}
 	fmt.Fprintln(&b)
 
 	fmt.Fprintln(&b, "## hive.yaml")

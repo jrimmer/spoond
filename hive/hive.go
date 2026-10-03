@@ -52,8 +52,9 @@ const (
 // schema.go.
 var KnownNeeds = []string{NeedLeases, NeedRegistry}
 
-// workerImageSuffix turns a base image name into its worker image name.
-const workerImageSuffix = "-worker"
+// WorkerImageSuffix is appended to a base image's name to derive the
+// worker image's name (C10): go-base becomes go-base-worker.
+const WorkerImageSuffix = "-worker"
 
 // Models names the models a project's workers use (Bifrost names).
 type Models struct {
@@ -72,6 +73,8 @@ type Project struct {
 	Needs      []string `yaml:"needs" json:"needs"`
 	MaxWorkers int      `yaml:"max_workers" json:"max_workers"`
 	Models     Models   `yaml:"models" json:"models"`
+
+	parseErr error
 }
 
 // Problem is one validation failure: the field it belongs to and the
@@ -117,7 +120,10 @@ func Parse(data []byte) (Project, error) {
 		if errors.Is(err, io.EOF) {
 			return Project{}, errors.New("hive.yaml is empty")
 		}
-		return Project{}, fmt.Errorf("parse hive.yaml: %w", err)
+		// The carried Project reports the parse error as its schema
+		// problem, so POST /hive/check can answer a syntactically broken
+		// file with the usual report shape.
+		return Project{parseErr: err}, fmt.Errorf("parse hive.yaml: %w", err)
 	}
 	p := Project{
 		Project:    deref(doc.Project, ""),
@@ -163,6 +169,12 @@ var projectNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
 // rules themselves live in the field table (schema.go), which the guide
 // renders, so a rule cannot exist without being taught.
 func (p Project) Validate() []Problem {
+	if p.parseErr != nil {
+		return []Problem{{
+			Field:  "hive.yaml",
+			Remedy: fmt.Sprintf("fix the YAML syntax: %v.", p.parseErr),
+		}}
+	}
 	var problems []Problem
 	for _, f := range Fields() {
 		if f.check != nil {
@@ -193,7 +205,7 @@ type Instance struct {
 // project's base image (C10): the base image plus the one fixed worker
 // layer. No per-project Dockerfile.
 func (p Project) WorkerImage() string {
-	return p.BaseImage + workerImageSuffix
+	return p.BaseImage + WorkerImageSuffix
 }
 
 // Allowlist returns the network allowlist derived from the project and
