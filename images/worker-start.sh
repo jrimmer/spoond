@@ -29,7 +29,11 @@
 # A task is a mail whose subject starts "[TASK <id>]". Its body may begin with
 #   Repo: <git url>
 #   Branch: <branch>
+#   Base: <branch>
 # lines; the rest is the task text. Without Branch:, the branch is swarm/<id>.
+# Base: names the branch the task builds on (default main): a new task
+# branch starts from origin/<base>, and the verifier's diff, the commit
+# count and the push decision are all measured against it.
 set -uo pipefail
 
 : "${SWARM_NAME:?}" "${AMAIL_URL:?}" "${AMAIL_PROJECT:?}" "${SWARM_IMPL_MODEL:?}" \
@@ -169,7 +173,7 @@ watch_pass() {
       [ "$idle" -gt 0 ] && printf ', NO log activity for %d min' $(( idle / 60 ))
       echo
       recent_tools "$W/logs-$name.jsonl" 4
-      echo "branch: $(git -C "$dir" log --oneline origin/main..HEAD 2>/dev/null | wc -l) commit(s); diff vs origin/main: $(git -C "$dir" diff --shortstat origin/main 2>/dev/null | sed 's/^ //')"
+      echo "branch: $(git -C "$dir" log --oneline "$BASE_REF"..HEAD 2>/dev/null | wc -l) commit(s); diff vs $BASE_REF: $(git -C "$dir" diff --shortstat "$BASE_REF" 2>/dev/null | sed 's/^ //')"
     } | say "$TASK_ID" "[PROGRESS $TASK_ID] $name: $(( (now - start) / 60 )) min"
   done
 }
@@ -276,6 +280,10 @@ run_task() {
   repo=$(sed -nE 's/^Repo: *([^ ]+).*/\1/p' <<<"$body" | head -1)
   branch=$(sed -nE 's/^Branch: *([^ ]+).*/\1/p' <<<"$body" | head -1)
   : "${branch:=swarm/$id}"
+  base_branch=$(sed -nE 's/^Base: *([^ ]+).*/\1/p' <<<"$body" | head -1)
+  base_branch=${base_branch#origin/}
+  : "${base_branch:=main}"
+  BASE_REF=origin/$base_branch
   amail ack "$msg" >/dev/null 2>&1 || true
   status "task $id"
   printf '%s\n' "$body" > $W/tasks/$id.md
@@ -291,10 +299,15 @@ run_task() {
       | say "$id" "[BLOCKED $id] permanent: cannot access repo"
     return
   }
+  if ! git -C "$wt" rev-parse -q --verify "refs/remotes/$BASE_REF" >/dev/null; then
+    printf 'The task names Base: %s, but %s has no such branch.\n' "$base_branch" "$repo" \
+      | say "$id" "[BLOCKED $id] permanent: no base branch $base_branch"
+    return
+  fi
   # Clean start for every task, nothing left over. A retried task resumes
   # from its pushed branch (earlier attempts push their wip); otherwise the
-  # branch starts at origin/main.
-  local start=origin/main
+  # branch starts at the task's base (Base:, default origin/main).
+  local start=$BASE_REF
   git -C "$wt" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null && start=origin/$branch
   if ! { git -C "$wt" switch -q -C "$branch" "$start" && git -C "$wt" reset -q --hard \
          && git -C "$wt" clean -q -fdx; }; then
@@ -367,7 +380,7 @@ You have $(( VERIFY_TIMEOUT / 60 )) minutes. Keep your notes in $W/verdict.md as
 
 Steps:
 1. Create $W/verdict.md now with the single line PENDING.
-2. Read the whole diff: git diff origin/main...HEAD
+2. Read the whole diff: git diff $BASE_REF...HEAD
 3. Check every requirement in the task is met exactly, and look hard for bugs. Add each finding to $W/verdict.md as soon as you have it, one per line (file:line and what is wrong).
 4. Run every gate the task names (once each) and add the results to $W/verdict.md.
 5. Do not fix anything yourself.
@@ -391,7 +404,7 @@ $(recent_tools "$W/logs-$vlog.jsonl" 8)"
     [ "$verdict" = PASS ] || [ "$verdict" = TIMEOUT ] && break
   done
 
-  commits=$(git -C "$wt" log --format='%h %s' origin/main..HEAD)
+  commits=$(git -C "$wt" log --format='%h %s' "$BASE_REF"..HEAD)
   if [ "$verdict" = PASS ] && [ -n "$commits" ]; then
     push_and_report "$wt" "$branch" "$id" "[DONE $id]" <<EOF
 commits:
@@ -403,7 +416,7 @@ EOF
   fi
   git -C "$wt" add -A && git -C "$wt" commit -q -m "wip: $id" || true
   sha=$(git -C "$wt" rev-parse --short=7 HEAD)
-  if [ -n "$(git -C "$wt" log --format=%h origin/main..HEAD)" ]; then
+  if [ -n "$(git -C "$wt" log --format=%h "$BASE_REF"..HEAD)" ]; then
     if [ -n "$LLM_DOWN" ]; then
       push_and_report "$wt" "$branch" "$id" "[BLOCKED $id] retryable: infrastructure (model service)" <<EOF
 The model service kept failing ($LLM_DOWN).

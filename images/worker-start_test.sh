@@ -73,8 +73,10 @@ case $cmd in
     mv "$D/inbox.next" "$D/inbox"
     case $line in
       *"[TASK $TEST_TASK_ID]"*)
-        printf 'Subject: [TASK %s] do the thing\n\nRepo: %s\nBranch: %s\nFix the thing.\n' \
-          "$TEST_TASK_ID" "$TEST_ORIGIN" "$TEST_BRANCH" ;;
+        printf 'Subject: [TASK %s] do the thing\n\nRepo: %s\nBranch: %s\n' \
+          "$TEST_TASK_ID" "$TEST_ORIGIN" "$TEST_BRANCH"
+        [ -n "${TEST_BASE:-}" ] && printf 'Base: %s\n' "$TEST_BASE"
+        printf 'Fix the thing.\n' ;;
       *)
         printf 'Subject: %s\n\nack\n' "${line#* }" ;;
     esac
@@ -108,7 +110,7 @@ case $key in
   "$TEST_IMPL_MODEL")
     n=$(( $(cat "$D/impl-round" 2>/dev/null || echo 0) + 1 )); printf '%s\n' "$n" > "$D/impl-round"
     if [ "$n" -ge 2 ] && [ "${TEST_AMEND:-0}" = "1" ]; then
-      git -C "$wt" reset -q --hard "$(git -C "$wt" merge-base HEAD origin/main)"
+      git -C "$wt" reset -q --hard "$(git -C "$wt" merge-base HEAD "origin/${TEST_BASE:-main}")"
     fi
     printf 'change %s\n' "$n" > "$wt/change-$n.txt"
     git -C "$wt" add -A
@@ -164,7 +166,7 @@ run_worker() {
   rm -rf "$T/mail" "$T/state"
   mkdir -p "$T/mail" "$T/state"
   printf '#1 from orch-1 [TASK %s] do the thing\n' "$tid" > "$T/mail/inbox"
-  TEST_MAIL=$T/mail TEST_STATE=$T/state TEST_ORIGIN=$origin TEST_BRANCH=$branch \
+  TEST_MAIL=$T/mail TEST_STATE=$T/state TEST_ORIGIN=$origin TEST_BRANCH=$branch TEST_BASE=${TEST_BASE:-} \
     TEST_TASK_ID=$tid TEST_VERDICT=$verdict TEST_AMEND=$amend TEST_CANCEL=$cancel \
     TEST_IMPL_MODEL=test-impl TEST_VERIFY_MODEL=test-verif \
     TEST_WORK=/work TEST_TMP=$T TEST_WORKER=$T/worker-start.sh \
@@ -264,6 +266,34 @@ check "report names the pushed sha and branch" \
 check "report is [CANCELLED" grep -q "\[CANCELLED tc4\]" "$T/mail/outbox.log"
 
 echo
+# --- BASE: the task names Base: v3; the branch starts from origin/v3, and
+# the report counts only the worker's own commits, not v3's -------------------
+o=$T/origin-base
+make_origin "$o" ""
+s2=$T/seed-v3; rm -rf "$s2"; git clone -q "$o" "$s2"
+git -C "$s2" switch -q -c v3
+printf 'v3 only\n' > "$s2/v3.txt"; git -C "$s2" add v3.txt; git -C "$s2" commit -q -m "v3 work"
+git -C "$s2" push -q origin v3
+V3_SHA=$(git -C "$o" rev-parse refs/heads/v3)
+TEST_BASE=v3
+scenario_prologue BASE "$o" swarm/tv6 tv6 1 PASS 0 0
+TEST_BASE=
+tip=$(git -C "$o" rev-parse refs/heads/swarm/tv6 2>/dev/null || true)
+check "task branch was pushed" test -n "$tip"
+check "task branch builds on origin/v3" git -C "$o" merge-base --is-ancestor "$V3_SHA" "$tip"
+check "report counts one commit (not v3's)" expect_eq "$(grep -c '^  [0-9a-f]\{7\} ' "$T/mail/outbox.log")" "1"
+check "start report names origin/v3" grep -q 'swarm/tv6 from origin/v3' "$T/mail/outbox.log"
+
+# --- BASE-MISSING: Base: names a branch origin does not have -------------------
+o=$T/origin-nobase
+make_origin "$o" ""
+TEST_BASE=no-such-base
+run_worker "$o" swarm/tn7 tn7 1 PASS 0 0
+TEST_BASE=
+check "worker exits cleanly" expect_eq "$?" "0"
+check "reported blocked: no base branch" grep -q 'BLOCKED tn7\] permanent: no base branch no-such-base' "$T/mail/outbox.log"
+check "nothing was pushed for the task" expect_eq "$(git -C "$o" for-each-ref 'refs/heads/swarm/*' | wc -l)" "0"
+
 if [ "$fails" -eq 0 ]; then
   echo "all scenarios passed"
   exit 0
