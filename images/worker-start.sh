@@ -261,6 +261,8 @@ push_and_report() {  # push_and_report WT BRANCH ID SUBJECT  (report body on std
     ok=FAILED
   fi
   echo "push to $branch $ok: $out"
+  # A task whose work did not land is not done, whatever the verifier said.
+  [ "$ok" = FAILED ] && case $subject in "[DONE "*) subject="[BLOCKED $id] retryable: push failed";; esac
   { echo "pushed: $sha -> $branch ($ok under --force-with-lease)"
     [ "$branch" != "$2" ] && echo "note: history was rewritten, so the task branch was left at its old tip; HEAD went to $branch instead"
     echo
