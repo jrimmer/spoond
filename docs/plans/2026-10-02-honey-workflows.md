@@ -406,7 +406,7 @@ A step's inputs go **inside** its type key (`agent: {with: ...}`,
 | Field | Meaning | Expression? |
 |---|---|---|
 | `if` | Condition; false skips the step (outcome `skipped`). Must be `"${ ... }"`: a plain string in a boolean field is a publish error. | yes |
-| `set` | State writes. Keys are dotted state paths (`review.blocking`), or `local.<name>` inside an `each` body. Values are expressions over the step's `result` and the variables below. Validated (schema and size) before the transition commits; a rejected write fails the step and writes nothing. | values |
+| `set` | State writes. Keys are dotted state paths (`review.blocking`), or `local.<name>` inside an `each` body. Values are expressions over the step's `result` and the variables below. Validated (schema and size) before the transition commits; a rejected write fails the step and writes nothing. Inside `finally`, a rejected write is recorded as a reported failure but does not undo the step's effect or stop the remaining `finally` steps. | values |
 | `then` | Post-conditions, evaluated after `set`, seeing `result` and the new `state`: `when` → `fail: <reason>`, `question: {text, choices \| schema}`, or `end` (end of the enclosing block). To end the whole flight, use a `return` step (W30). | yes |
 | `timeout` | Per attempt. | no |
 | `retry` | `{max, backoff, on: [failed, timed_out, interrupted]}`. An infrastructure error whose effect provably never started (connection refused, capacity denied before dispatch) retries without spending the budget, like the bee loop does today. An ambiguous error (a timeout or reset after the request was sent) is a lost attempt under the step's replay policy (W65). | no |
@@ -547,8 +547,11 @@ at a time:
 - **Where iterations run** (W49): `lease: shared` runs them in the
   enclosing lease. Each has its own working directory
   (`/work/iter/<index>`, the default `cwd`) and may read, but not write,
-  the enclosing checkout; a literal `cwd` shared by parallel iterations is
-  a publish error. `lease: per-item` gives each iteration its own lease
+  the enclosing checkout. The boundary is enforced, not only checked:
+  stepd runs each iteration's processes under their own uid with only
+  their directory writable, so a computed path cannot reach a sibling's
+  files. A literal `cwd` shared by parallel iterations is also a publish
+  error. `lease: per-item` gives each iteration its own lease
   from the same image. `lease: fork` forks the enclosing lease per
   iteration (v3.1, with #82).
 
@@ -918,7 +921,10 @@ only to the target, until host runners arrive with #79.
 - A flight's **status** is separate from its outcome: `queued` (over a
   concurrency limit or waiting for lease capacity), `running`, `waiting`
   (on a question, an approval, a lock, a timer or capacity), and `done`
-  (with its outcome).
+  (with its outcome). `waiting` always carries `waiting_on` (`question`,
+  `approval`, `lock`, `timer`, `capacity`, `provider`) and the instance
+  it concerns, so the inbox, the live view and alerts can tell them
+  apart, and each kind lists the signals that resolve it.
 - **Engine drain** (W63): for backend deploys, the engine starts no new
   steps and no new flights; running steps continue in their leases and
   are reattached after the restart. The admin drain pauses leases and is
@@ -953,7 +959,10 @@ Each wait is visible as a `step.waiting{reason}` event.
 and the CLI generate one per logical call). The key is scoped to the
 caller, the method and the path; the body's hash is stored with it, and
 keys are kept for 7 days. A retry with the same key returns the first
-response. The same key with a different body is a 409.
+response. The same key with a different body is a 409. The key's row
+and the flight (or signal) it creates are written in one transition,
+under a unique `(caller, method, path, key)` constraint, so two
+concurrent retries cannot both create.
 
 - **Signals** are rows: `answer`, `approve`, `reject`, `steer`, `say`,
   `done`, `cancel` (v3.1 adds `pause` and `resume`), and custom names a
@@ -965,10 +974,14 @@ response. The same key with a different body is a 409.
   through its harness). Only the asking instance waits; other branches
   and iterations go on. It does **not** spend a loop round. The answer
   is a memo, typed by the question's `choices` or `schema`. A `question`
-  step returns it as `result.answer`. Any other step that raised a
+  step returns it as `result.answer`. An `agent` step that asked is not
+  re-run: the answer goes into the same session as a follow-up prompt,
+  and no attempt or budget is spent. Any other step that raised a
   question runs again with the answers so far in its inputs (`answers`,
-  a typed list), at most `max_asks` times (default 3), then fails with
-  the open question as its reason. To keep an answer for later steps,
+  a typed list), as a new attempt under its replay policy (a `never`
+  step that already acted becomes `interrupted` instead), at most
+  `max_asks` times (default 3), then fails with the open question as its
+  reason. To keep an answer for later steps,
   `set` it from `answers`.
 - **Who answers (W27).**
   1. If the flightplan names a resolver step (`ask: {step: researcher}`,
@@ -1047,11 +1060,13 @@ flights, fork branches, leases, locks and stepd processes. The tree is in
 `honey.db` (`parent_run`, `parent_instance` columns).
 
 - **Cancel is bottom-up.** Cancelling a flight cancels the deepest owned
-  things first: harness abort, stepd kill, child flights, fork branches,
-  then lease release, then locks. Steps that have not started are
-  stopped; a running `never` step is let finish (W30). Each enclosing
-  `finally` still runs (so the bee loop always pushes), under the rules
-  in W50.
+  things first: harness abort and the step's own process, child
+  flights, fork branches. Steps that have not started are stopped; a
+  running `never` step is let finish (W30). Then each enclosing
+  `finally` runs, innermost first, in the same lease, with stepd still
+  up (so the bee loop always pushes), under the rules in W50. Only after
+  the last `finally` are stepd stopped, leases released and locks
+  dropped.
 - **Leases are held** (W63). A lease created for a flight carries the
   flight id as its holder. When the flight ends, its leases are released
   after their `finally` blocks, unless the block says `keep: true`.
@@ -1390,7 +1405,10 @@ Points this example depends on:
 **W56.** People and agents need to test a flightplan's routing without
 spending leases or model calls. `spoond flightplans test FILE --fixtures F`
 and the MCP tool `flightplan_test` run the interpreter against a
-fixtures file (M3).
+fixtures file (M3). A dry run is a flight with `mode: dry`: it lives
+only in memory unless the caller asks to keep it, never appears in flight
+lists, the inbox, `uses`, cost or the autonomy metric, and sends no
+notifications.
 
 - **Fixtures** give, per instance path (wildcards allowed, keys quoted:
   `"rounds[*]/gates"`) and optionally per attempt, the result a step
@@ -1797,7 +1815,10 @@ it, and run it, without that methodology sitting in its own context.
 - **Namespaces.** Names may be `<owner>/<name>`. Anyone may publish into
   their own namespace; only admins publish un-namespaced (shared) names
   (W7). An agent is its own identity, so its flightplans live in its own
-  namespace.
+  namespace. A bare name always means the shared catalog; a namespaced
+  flightplan is only reached by its full name, so a namespace cannot
+  shadow a shared one. A flight records both the name it was given and
+  the version it resolved to.
 - **Inline flights.** `flight_start` accepts a `definition` instead of a
   name: it is validated like a publish and stored with the flight as an
   immutable, unlisted version, so a one-off composition does not clutter
