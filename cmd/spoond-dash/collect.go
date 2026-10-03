@@ -101,6 +101,7 @@ type ImageRow struct {
 type collector struct {
 	cfg    Config
 	client *http.Client
+	now    func() time.Time // the clock rates are computed against; tests set it
 
 	prevCounters map[string]float64 // cumulative values from the last scrape
 	prevAt       time.Time
@@ -115,13 +116,14 @@ func newCollector(cfg Config) *collector {
 			TLSClientConfig: &tls.Config{ServerName: cfg.MetricsServerName},
 		}},
 		prevCounters: map[string]float64{},
+		now:          time.Now,
 	}
 }
 
 // collect builds a snapshot. A failing source fills Err and leaves its
 // fields at zero; the rest of the frame still renders.
 func (c *collector) collect(ctx context.Context) Snapshot {
-	now := time.Now()
+	now := c.now()
 	s := Snapshot{At: now.Format("15:04:05"), ByState: map[string]int{}, ByImage: map[string]int{}}
 	var errs []string
 
