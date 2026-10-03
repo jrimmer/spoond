@@ -60,9 +60,9 @@ crash. Jobs, the hive, CI and agent coordination become workflows.
 | W33 | `each` fans a block out over a list, with iteration-local state and a collected result. | [each](#each-fan-out-over-a-list) |
 | W34 | Notification targets include named groups (teams). | [Providers](#providers-ticket-sources-notifiers-git-hosts) |
 | W35 | Honey ships a library of building-block workflows; the loop is one of them, separate from ticket handling. | [Building blocks](#building-blocks-the-built-in-library) |
-| W36 | Agents compose, validate, publish and run workflows over MCP in v3. | [Agents as authors](#agents-as-authors) |
+| W36 | MCP is the primary way to create, edit, publish and run workflows; agents compose them in v3. The backend serves it at `/mcp`. | [Agents as authors](#agents-as-authors) |
 | W37 | Every run records usage and cost; budgets can be in money; profiles are compared on measured results. | [Cost](#cost-budgets-and-comparing-profiles) |
-| W38 | Two-way channels: chat replies become signals; a run's progress mirrors onto its ticket. | [Channels](#two-way-channels-and-ticket-mirroring) |
+| W38 | Two-way channels: chat replies and buttons become signals; a run's progress mirrors onto its ticket. The first channel provider speaks the Discord bot API, aimed at Hrmny. | [Channels](#two-way-channels-and-ticket-mirroring) |
 | W39 | Perpetual workflows continue as new, so their history stays bounded. | [Perpetual workflows](#perpetual-workflows) |
 | W40 | Promotion and release are policy: a person approves by default; a project can allow automatic promotion when every gate passes. | [Promotion](#promotion-and-release-policy) |
 
@@ -957,13 +957,37 @@ loaded in its worker only when a graph is shown.
 
 ## MCP front door (#88)
 
-Move `mcp/` from the hand-rolled JSON-RPC server to the official
-`github.com/modelcontextprotocol/go-sdk` (MIT). Streamable HTTP and
-stdio, progress notifications and cancellation come with it. Tools:
+**MCP is the primary interface for managing workflows** (W36): people
+work through an agent session, and agents compose workflows themselves.
+The CLI and the HTTP API cover the same operations, but the MCP tools are
+designed first and the others follow them.
+
+- **Served by the backend** at `/mcp` on the lease API listener
+  (streamable HTTP, `github.com/modelcontextprotocol/go-sdk`, MIT),
+  authenticated with the caller's own Honey bearer token, so every call
+  acts as that person or agent with their quotas and ownership. No
+  per-machine server to install. `spoond mcp` keeps its lease tools and
+  gains a stdio mode that proxies to `/mcp` for clients that only speak stdio.
+- **The language reference is a resource.** `honey://reference` (and the
+  `workflow_reference` tool) return the definition language generated
+  from the parser's own field and step tables, the `honey:` schema
+  library, and the catalog of building blocks with their inputs and
+  outputs, so an agent can write a valid definition from a cold start. A
+  test fails if a step type, field or schema is missing from it, as with
+  the hive guide.
+- **Editing is a loop:** `workflow_show` returns a version's source;
+  the agent edits it, `workflow_validate` returns problems with remedies,
+  `workflow_diff` compares the draft with the published version (source
+  and graph), and `workflow_publish` makes it a new version.
+- The catalog tools ship right after step 3; the run tools after step 5.
+
+Tools:
 
 | Tool | Does |
 |---|---|
-| `workflows_list` / `workflow_show` | Catalog, with params and output schemas. |
+| `workflows_list` / `workflow_show` | Catalog, with params and output schemas; `workflow_show` includes the source and the graph. |
+| `workflow_reference` | The generated language reference (also the `honey://reference` resource). |
+| `workflow_diff` | A draft against a published version: source diff, graph changes, params and output compatibility (`^` rule). |
 | `profiles_list` | Profile catalog. |
 | `run_start` | Starts a run; takes `request_id` (W10). Returns the run id. |
 | `run_wait` | Waits up to a bound (default 5 min) for completion, a question, or a given event type; returns the current view and a `cursor` to call again with. Resumable across disconnects. |
@@ -1062,7 +1086,7 @@ providers without touching a workflow.
 ## Agents as authors
 
 **W36. Agents compose workflows over MCP in v3** (moved forward from
-"later" in #88). A planning agent with a goal can build a workflow suited
+"later" in #88), and MCP is how people manage them too (see "MCP front door"). A planning agent with a goal can build a workflow suited
 to it from the building blocks, check it, and run it, without that
 methodology sitting in its own context.
 
@@ -1116,6 +1140,25 @@ visible where it is tracked.
   bot identity in the channel. The first channel provider ships with
   step 18; the interface ships with step 10 so notifiers and channels
   share one shape.
+- **The first provider speaks the Discord bot API** (REST v10 and the
+  gateway), with a configurable API base URL. It is aimed at Hrmny first,
+  whose Discord-compatible surface supports threads, embeds, message
+  edits, buttons, select menus and modals, and works unchanged against
+  Discord. Library: `github.com/disgoorg/disgo` (Apache-2.0), chosen over
+  discordgo because its REST and gateway URLs are set per client rather
+  than as package globals. In a channel:
+  - each run gets a thread, started from a status card (an embed) that
+    is edited in place as the run moves: current step, outcome, cost,
+    a link to the live view;
+  - questions and approvals post into the thread with buttons
+    (Approve, Reject, Cancel run) and an Answer button that opens a modal;
+    a plain reply in the thread is an answer to the open question, or a
+    message to an interactive agent step (W32);
+  - a slash command (`/honey start <workflow> key=value ...`,
+    `/honey runs`) starts and lists runs;
+  - people link their chat account to their Honey identity once
+    (`/honey link`, confirmed in the live view); messages from unlinked
+    accounts are ignored for signals.
 - **Ticket mirroring.** A run started from a ticket (or linked to one)
   mirrors its progress there through subscriptions: a comment when it
   starts, at each named milestone and when it ends, and status or label
@@ -1409,14 +1452,14 @@ Each step is its own ticket under #78 and ends with something running.
 | 8 | **Bee loop port** (W20): `ralph-loop`, `ralph-ticket`, `pr-review`, `task-precheck`; provider registry (W26) with `br` and `forgejo` ticket sources and the `forgejo` git host; `ticket` and `git` steps; locks; secrets (#80). | L | spoond tasks run as workflows beside the swarm. |
 | 9 | **Composition + data flow UI:** `workflow` step, collapsible child graphs, packets and edge hover, time scrubber. | M | A feature pipeline of called workflows, followed live. |
 | 10 | **Triggers + concurrency + budgets** (W19); hive.yaml shrinks. Notifiers `webhook` and `mail`, subscriptions and escalation (W27, W28); recipient groups (W34); the channel provider interface (W38); ticket mirroring; money budgets (W37). | M | No orchestrator needed to dispatch. |
-| 11 | **MCP front door** (#88) on the official SDK, including composition: validate, publish into a namespace, inline runs (W36). | M | A laptop session starts `pr-review` and acts on its output, and runs a workflow it composed. |
+| 11 | **MCP front door** (#88), backend-hosted at `/mcp` on the official SDK. Split: **11a, right after step 3:** the reference, list, show, validate, diff, publish. **11b, right after step 5:** run start (named or inline), wait, read, signal. | M | 11a: an agent session writes, validates and publishes a workflow from the reference alone. 11b: it starts `pr-review`, waits, and acts on its output. |
 | 12 | **Jobs** (#84), `artifact` step. | S | `spoond job run`. |
 | 13 | **Fork + snapshot steps** (#82, #83). | L | `fork` picks a winner from 3 branches. |
 | 14 | **Review packet** (#89). | M | Every `ralph-ticket` run ends with a packet. |
 | 15 | Retire Agent Mail and the `swarm-*` scripts. | S | The release criteria hold for a week. |
 | 16 | **MicroVM features:** step checkpoints (W22), sharded gates and speculative `try` (W23), failure snapshots + "open shell here" (W24), step images (W25). W22's measurement belongs in step 2. | L | A flaky gate is retried from the pre-step checkpoint; a failure is opened as a shell from the live view. |
 | 17 | **The building-block library** (W35): `plan-deps`, `test-baseline`, `qa-checklist`, `deploy-env`, `release`, `feature-pipeline`; the promotion policy (W40); catalog metadata, observed results and the size guide; profile comparison (W37). | L | A feature goes from ticket to a dev environment through `feature-pipeline`, and is promoted by policy. |
-| 18 | **First two-way channel provider** (W38). | M | A question is answered by replying in a chat thread. |
+| 18 | **First two-way channel provider** (W38): the Discord bot API, aimed at Hrmny. | M | In a Hrmny channel, a run's thread shows its live status card; a question is answered by a reply and an approval given with a button. |
 
 ### Doing this work with v2
 
@@ -1448,6 +1491,4 @@ as soon as 5's format is fixed.
 
 ## Open questions
 
-1. **First chat provider for two-way channels** (step 18): Matrix, Slack,
-   Teams or Discord?
-2. **Automatic promotion** (W40): which projects, if any, opt in first?
+1. **Automatic promotion** (W40): which projects, if any, opt in first?
