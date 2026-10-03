@@ -31,7 +31,7 @@ func TestPrettySandboxTable(t *testing.T) {
 }
 
 func TestPrettySandboxTableEmpty(t *testing.T) {
-	if got := prettySandboxTable([]byte(`{"sandboxes":[]}`)); got != "no sandboxes" {
+	if got := prettySandboxTable([]byte(`{"sandboxes":[]}`)); got != "no leases" {
 		t.Fatalf("empty: %q", got)
 	}
 }

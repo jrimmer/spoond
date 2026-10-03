@@ -1,5 +1,15 @@
 # The E2B substrate
 
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| host | the machine running spoond and the E2B orchestrator |
+| lease | a granted sandbox — the API resource (`POST /api/leases`; `/api/sandboxes` is its permanent alias) |
+| bee | an agent worker running in a lease |
+| swarm | a group of bees |
+| hive | the enlistment service: `/hive/guide`, `/hive/check` |
+
 spoond is a **control plane**: identity, quotas, leases, sharing, the SSH
 gateway, the HTTP proxy, the LLM gateway, policy, the image catalog and
 SQLite state. The **data plane** — actually running sandboxes — is E2B's
@@ -24,7 +34,7 @@ consumers: runner, MCP, ACP, CFOS, CLI, browsers, SSH users
         ▼
 spoond-backend  (Go 1.27.1)                        spoond-sshd-gateway
   ├─ api/          lease API, proxy, stream           │ relays SSH sessions
-  ├─ store/        SQLite (modernc.org/sqlite)        │ to /api/sandboxes/{id}/stream
+  ├─ store/        SQLite (modernc.org/sqlite)        │ to /api/leases/{id}/stream
   ├─ substrate/    Substrate interface                ┘ (WebSocket)
   │   └─ e2b/      gRPC → orchestrator :5008, envd via proxy :5007
   └─ images/       template build driver (U07)
@@ -148,7 +158,7 @@ spec's fixed decision D4); spoond makes both cases as harmless as it can.
   marked lost when the sandbox list itself cannot be read.
 - **Persistent leases are checkpointed periodically** (default every
   `CHECKPOINT_INTERVAL_MINS` = 60 minutes, only when active), which
-  bounds how much a crash can cost. `POST /api/sandboxes/{id}/checkpoint`
+  bounds how much a crash can cost. `POST /api/leases/{id}/checkpoint`
   does it on demand.
 
 The states a lease can be in are `running`, `suspended`, `recovered` and

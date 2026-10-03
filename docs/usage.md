@@ -1,6 +1,6 @@
 # Usage guide
 
-Practical recipes for working with spoond sandboxes: SSH, exec, agents,
+Practical recipes for working with spoond leases: SSH, exec, agents,
 proxying, and policies. What a sandbox *is* (a Firecracker microVM
 restored from an image snapshot, on the E2B substrate) is
 [substrate.md](substrate.md); the endpoint reference is [api.md](api.md).
@@ -9,7 +9,7 @@ restored from an image snapshot, on the E2B substrate) is
 
 ```bash
 # One-liner: create + run + delete
-curl -s -X POST https://sandbox.example.com/api/sandboxes \
+curl -s -X POST https://sandbox.example.com/api/leases \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"image":"dev-base","ttl":600}'
 # → {"id":"…","address":"10.11.0.7","expires_at":"…",…}
@@ -20,11 +20,11 @@ ssh ctl@sandbox.example.com "rm <id>"             # release
 ```
 
 Or skip curl entirely: `ssh new@sandbox.example.com` creates a persistent
-dev sandbox and drops you into tmux.
+dev lease and drops you into tmux.
 
 ## Three ways to run a command
 
-1. **SSH into the sandbox**:
+1. **SSH into the lease**:
    ```bash
    ssh <id>@sandbox.example.com -p 2222 "ls -la"
    ```
@@ -34,22 +34,22 @@ dev sandbox and drops you into tmux.
    ```
 3. **API exec** (best for LLM tools / automation):
    ```bash
-   curl -s -X POST https://sandbox.example.com/api/sandboxes/<id>/exec \
+   curl -s -X POST https://sandbox.example.com/api/leases/<id>/exec \
      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"cmd":"ls -la","timeout":30}'
    # → {"stdout":"…","stderr":"","exit":0}
    ```
 
 Interactive/agent clients can also drive a PTY over the API:
-`GET /api/sandboxes/{id}/stream` (WebSocket) starts a process with
+`GET /api/leases/{id}/stream` (WebSocket) starts a process with
 `{"args":["/bin/bash","-l"],"pty":true}` and relays input/output/resizes
 — that is exactly how the SSH gateway itself attaches. See
-[api.md](api.md#get-apisandboxesidstream--interactive-process-websocket).
+[api.md](api.md#get-apileasesidstream--interactive-process-websocket).
 
 ## Interactive sessions
 
 ```bash
-# Fresh sandbox (auto-creates persistent dev-base lease)
+# Fresh lease (auto-creates a persistent dev-base lease)
 ssh new@sandbox.example.com -p 2222
 
 # A specific image
@@ -86,27 +86,27 @@ ssh mybox@sandbox.example.com -p 2222
   `IDLE_TIMEOUT_SECS` can auto-suspend idle ones.
 
 ```bash
-curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
+curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
   -d '{"image":"dev-base","persistent":true,"ttl":3600}'
 ssh ctl@sandbox.example.com "keepalive <id>"
 ssh ctl@sandbox.example.com "suspend <id>"   # snapshot + stop
 ssh ctl@sandbox.example.com "resume <id>"    # back to work
 ```
 
-Take a checkpoint of a *running* persistent sandbox to bound what a host
-restart can cost (`POST /api/sandboxes/{id}/checkpoint`); the platform
-also checkpoints active persistent leases hourly by default. A sandbox
+Take a checkpoint of a *running* persistent lease to bound what a host
+restart can cost (`POST /api/leases/{id}/checkpoint`); the platform
+also checkpoints active persistent leases hourly by default. A lease
 lost with no checkpoint answers `410` — delete it and start again.
 
 ## Clones and forks (snapshot branching)
 
-`clone`/`cp` checkpoints the running sandbox and starts a fresh
+`clone`/`cp` checkpoints the running lease and starts a fresh
 persistent lease from that build, copying its network policy and exposed
 ports. `fork` does the same for N copies at once:
 
 ```bash
 ssh ctl@sandbox.example.com "cp <id> my-snapshot"   # branch + spawn
-curl -s -X POST …/api/sandboxes/<id>/fork \
+curl -s -X POST …/api/leases/<id>/fork \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"count":3}'
 # → {"source":"…","build_id":"…","ids":["…","…","…"]}
@@ -136,19 +136,19 @@ substrate's sandbox proxy); the public hostname is in
 `X-Forwarded-Host`. Frameworks with a host allowlist must read that
 header.
 
-## Exposing a service to peer sandboxes
+## Exposing a service to peer leases
 
-A sandbox can publish up to 8 TCP ports for *peer sandboxes* (not the
+A lease can publish up to 8 TCP ports for *peer leases* (not the
 LAN) — a database for a CI job, for instance:
 
 ```bash
 # the database lease
-curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
+curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
   -d '{"image":"scylla","persistent":true,"expose_ports":[9042]}'
 # → "exposed":{"9042":"10.11.0.7:9042"}
 
 # the job's lease must allow that peer by id, name or lease:<id>
-curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
+curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
   -d '{"image":"go-base","egress_allowlist":["<db-lease-id>"]}'
 ```
 
@@ -257,20 +257,20 @@ SPOOND_BACKEND_URL=https://sandbox.example.com SPOOND_AGENT_TOKEN=<agent-token> 
 
 The default is **`restricted`**: a guest can reach the host services
 spoond grants it (the proxy/LLM gateway port and DNS) plus its
-allowlist, and peer sandboxes only through the published ports the
+allowlist, and peer leases only through the published ports the
 allowlist names. Opt in to wider egress with `network_policy=lan` or
 `internet` — which also admits **every** exposing peer's published
 ports, on any owner, with no allowlist gate.
 
 ```bash
-curl -s -X POST …/api/sandboxes -H "Authorization: Bearer $TOKEN" \
+curl -s -X POST …/api/leases -H "Authorization: Bearer $TOKEN" \
   -d '{"image":"dev-base","network_policy":"restricted","egress_allowlist":["10.0.0.47","github.com"]}'
 ```
 
 Allowlist entries may be IPs, CIDRs or domains — or a **lease
 reference** (another lease's id, its friendly name, or `lease:<id>`),
 which permits that lease's published ports. Policy can be changed live
-with `POST /api/sandboxes/{id}/network` — no restart, no new lease.
+with `POST /api/leases/{id}/network` — no restart, no new lease.
 
 ## Multi-user tenancy
 
@@ -299,11 +299,11 @@ curl -s -X POST https://sandbox.example.com/api/users/<alice-id>/quota \
   -d '{"max_leases": 4, "max_ttl": 7200}'
 
 # 4. Everyone uses their own key; leases are ownership-scoped
-ssh alice@sandbox.example.com            # fresh sandbox, owned by alice
+ssh alice@sandbox.example.com            # fresh lease, owned by alice
 ssh ctl@sandbox.example.com "ls --json"  # alice sees only her own
 ```
 
-**Sharing a sandbox** — hand a collaborator or an agent limited access
+**Sharing a lease** — hand a collaborator or an agent limited access
 without copying the lease capability:
 
 ```bash
@@ -329,10 +329,10 @@ unguessable 32-hex lease id hostname resolves.
 The whole surface is API-first: an LLM skill can create a lease, exec
 commands, read output, and release it — no shell needed:
 
-1. `POST /api/sandboxes` → id
-2. `POST /api/sandboxes/{id}/exec` → stdout/stderr/exit (loop as needed)
-3. `GET /api/sandboxes/{id}/stat` → resource awareness
-4. `DELETE /api/sandboxes/{id}` → always release
+1. `POST /api/leases` → id
+2. `POST /api/leases/{id}/exec` → stdout/stderr/exit (loop as needed)
+3. `GET /api/leases/{id}/stat` → resource awareness
+4. `DELETE /api/leases/{id}` → always release
 
 The lease API needs only curl: the bearer token authenticates the
 consumer and an HTTPS base URL is all the setup there is.

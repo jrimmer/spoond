@@ -210,7 +210,7 @@ allowances are refreshed.
 
 To the API and the gateway, `recovered` behaves exactly like `running`
 (`state` keeps showing it until the lease is suspended or restarted),
-while `lost` answers `410 {"error":"sandbox lost in a substrate crash;
+while `lost` answers `410 {"error":"lease lost in a substrate crash;
 delete this lease"}` on exec, stream, proxy and SSH. `POST
 /api/admin/reconcile` runs the reconciliation on demand and returns
 `{"recovered":N,"lost":M}` (admin token).
@@ -218,7 +218,7 @@ delete this lease"}` on exec, stream, proxy and SSH. `POST
 Persistent leases are checkpointed in the background every
 `CHECKPOINT_INTERVAL_MINS` (default 60, `0` disables), only when they
 have been active since the last checkpoint — that is what bounds the
-loss. Users can force one with `POST /api/sandboxes/{id}/checkpoint`.
+loss. Users can force one with `POST /api/leases/{id}/checkpoint`.
 
 ## Restarting the backend
 
@@ -264,9 +264,9 @@ each request's env.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `503 capacity: … bytes of hugepage memory free` | not enough free hugepages for the image, or the node is draining/unhealthy | free sandboxes, lower `POOL_SIZE`, or raise `vm.nr_hugepages` (then re-check with doctor) |
-| `410 sandbox lost in a substrate crash` | the lease had no checkpoint when the orchestrator died | delete the lease; nothing to resume |
-| `409 sandbox is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
-| `409 sandbox is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
+| `410 lease lost in a substrate crash` | the lease had no checkpoint when the orchestrator died | delete the lease; nothing to resume |
+| `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
+| `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
 | `exec failed` / `agent unreachable` | envd in the guest is not answering (sandbox died under us, node overloaded) | `spoond doctor`; if the sandbox is really gone the next reconcile marks the lease |
 | `unknown image tag: …` on create | the image has no current build in the catalog | `spoond images build <name>` (see [ci-jobs.md](ci-jobs.md)) |
 | `spoond images build` fails at the template step | the base image is RHEL-family (E2B rejects it) or the registry is down | use a Debian/Ubuntu/Fedora/Arch/Alpine/NixOS base; `curl 127.0.0.1:5000/v2/` |

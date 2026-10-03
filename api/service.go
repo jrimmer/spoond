@@ -1713,7 +1713,7 @@ func (s *Service) lookupUserScoped(owner, label string) *Lease {
 func (s *Service) GrantShare(owner, leaseID, grantee string, mode ShareMode, ttl time.Duration) error {
 	l := s.lookup(owner, leaseID)
 	if l == nil {
-		return fmt.Errorf("sandbox not found")
+		return fmt.Errorf("lease not found")
 	}
 	if grantee == "" || grantee == owner {
 		return fmt.Errorf("grantee must be a different user")
@@ -1748,7 +1748,7 @@ func (s *Service) GrantShare(owner, leaseID, grantee string, mode ShareMode, ttl
 func (s *Service) RevokeShare(owner, leaseID, grantee string) error {
 	l := s.lookup(owner, leaseID)
 	if l == nil {
-		return fmt.Errorf("sandbox not found")
+		return fmt.Errorf("lease not found")
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
@@ -2363,12 +2363,12 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 }
 
 var (
-	errNotFound      = &leaseError{"sandbox not found"}
-	errNotPersistent = &leaseError{"sandbox is not a persistent lease"}
+	errNotFound      = &leaseError{"lease not found"}
+	errNotPersistent = &leaseError{"lease is not a persistent lease"}
 	errUnknownImage  = &leaseError{"unknown image"}
-	errSuspended     = &leaseError{"sandbox is suspended"}
+	errSuspended     = &leaseError{"lease is suspended"}
 	errBadForkCount  = &leaseError{"count must be 1..20"}
-	errLeaseBusy     = &leaseError{"sandbox is busy; retry"}
+	errLeaseBusy     = &leaseError{"lease is busy; retry"}
 )
 
 // leaseError is a simple sentinel error.

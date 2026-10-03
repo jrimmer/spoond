@@ -333,7 +333,7 @@ func TestExecSandboxGone(t *testing.T) {
 	if resp.StatusCode != 410 {
 		t.Fatalf("expected 410, got %d: %v", resp.StatusCode, body)
 	}
-	if body["error"] != "sandbox no longer exists" {
+	if body["error"] != "lease no longer exists" {
 		t.Fatalf("error body: %v", body["error"])
 	}
 }

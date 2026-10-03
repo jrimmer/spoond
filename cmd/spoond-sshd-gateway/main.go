@@ -348,14 +348,14 @@ func handleConn(conn net.Conn, config *ssh.ServerConfig, gatewayKey ssh.Signer) 
 			return
 		}
 		leaseID = created
-		motd = fmt.Sprintf("spoond: created sandbox %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+		motd = fmt.Sprintf("spoond: created lease %s (%s) — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
 			created, img, reconnect(created))
-		log.Printf("created sandbox %s (%s) for user %q", created, img, user)
+		log.Printf("created lease %s (%s) for user %q", created, img, user)
 	} else {
 		// Attaching to an existing lease: show the id in the tmux footer
 		// and print the reconnect hint when the session ends, same as
 		// create — the id is just as easy to forget on reconnect.
-		motd = fmt.Sprintf("spoond: attached to sandbox %s — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
+		motd = fmt.Sprintf("spoond: attached to lease %s — tmux 'dev' attached. Detach: Ctrl-b d. %s\n",
 			leaseID, reconnect(leaseID))
 	}
 
@@ -1119,7 +1119,7 @@ collect:
 		if json.Unmarshal(b, &st) == nil && st.State == "suspended" {
 			log.Printf("session %s: suspended, resuming", leaseID)
 			if err := backendJSONErr(gwCtx, http.MethodPost, "/api/sandboxes/"+leaseID+"/resume", nil); err != nil {
-				fmt.Fprintf(ch.Stderr(), "spoond: cannot resume sandbox %s: %v\n", leaseID, err)
+				fmt.Fprintf(ch.Stderr(), "spoond: cannot resume lease %s: %v\n", leaseID, err)
 				_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct {
 					Status uint32
 				}{1}))
@@ -1160,7 +1160,7 @@ collect:
 	}
 	ws, _, err := backendWSDialer().Dial(u.String(), hdr)
 	if err != nil {
-		fmt.Fprintf(ch.Stderr(), "spoond: cannot reach sandbox %s: %v\n", leaseID, err)
+		fmt.Fprintf(ch.Stderr(), "spoond: cannot reach lease %s: %v\n", leaseID, err)
 		return
 	}
 	defer ws.Close()

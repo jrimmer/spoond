@@ -109,6 +109,14 @@ The design, decisions and per-unit specs are in
 
 ### Added
 
+- **`/api/leases` as the primary lease API path**: every route under
+  `/api/sandboxes` is also served under `/api/leases` with identical
+  behavior, auth and responses — one path rewrite at the top of the
+  handler chain, so metrics and logs keep their `/api/sandboxes` labels
+  and nothing double counts. `/api/leases/…` is the documented path and
+  `/api/sandboxes/…` stays as a permanent alias (D5 — additive only).
+  Error messages and docs now say "lease" for the resource; JSON keys,
+  Go identifiers and metric names are unchanged.
 - **Fork**: `POST /api/sandboxes/{id}/fork` checkpoints a running sandbox
   once and creates N sandboxes from that build (D3; U08; `156d273`).
 - **Checkpoint**: `POST /api/sandboxes/{id}/checkpoint` snapshots a running

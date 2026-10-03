@@ -92,11 +92,11 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
-		writeError(w, http.StatusNotFound, "sandbox not found")
+		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
 	if !lease.live() {
-		writeError(w, http.StatusConflict, "sandbox is not running")
+		writeError(w, http.StatusConflict, "lease is not running")
 		return
 	}
 	b, err := s.svc.checkpointLeaseBusy(r.Context(), lease)
