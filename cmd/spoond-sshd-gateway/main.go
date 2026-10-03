@@ -40,11 +40,14 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/internal/env"
 )
 
 // envOr returns the value of env key or def when unset/empty. Used for
 // flag defaults so the same knobs are settable via environment
-// (FORKD_GATEWAY_HOST, SHELLY_BINARY_URL, LLM_GATEWAY_URL).
+// (SPOOND_GATEWAY_HOST, SHELLY_BINARY_URL, LLM_GATEWAY_URL). The
+// pre-2.0 FORKD_GATEWAY_HOST name still works but logs a deprecation
+// warning.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -59,7 +62,7 @@ var (
 	flags = flag.NewFlagSet("spoond-gateway", flag.ExitOnError)
 
 	// gatewayHost is the public hostname advertised in MOTDs.
-	gatewayHost = flags.String("gateway-host", envOr("FORKD_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
+	gatewayHost = flags.String("gateway-host", env.Get("SPOOND_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
 	listenAddr  = flags.String("listen", ":2222", "listen address")
 	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
 	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
@@ -187,6 +190,9 @@ func Main(args []string) int {
 		}
 	}
 
+	// The permission-extension keys ("forkd-key-id", "forkd-user-id",
+	// "forkd-user-name") keep their pre-2.0 names: they are stored data
+	// (connection state attributed by `ctl whoami`), not configuration.
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if len(allowed) == 0 && !identityAuthoritative {

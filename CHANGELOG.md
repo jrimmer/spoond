@@ -220,6 +220,16 @@ The design, decisions and per-unit specs are in
   (U12 step 18). The forkd-era installer `deploy/install-spoond.sh`,
   `scripts/forkd-curl` and the forkd conformance baseline went with it
   (`1e3f224`; merged in `63f5832`).
+- **Breaking: `FORKD_`-prefixed configuration variables are renamed to
+  `SPOOND_`.** `SPOOND_BACKEND_URL`, `SPOOND_AGENT_TOKEN`, `SPOOND_IMAGE`,
+  `SPOOND_LLM_MODEL`, `SPOOND_CTL_HOST`, `SPOOND_CTL_PORT`,
+  `SPOOND_CTL_KEY`, `SPOOND_GATEWAY_HOST` and the guest's `SPOOND_NO_TMUX`
+  are the 2.0 names; each old `FORKD_` name is still read as a fallback
+  that logs a one-line deprecation warning, once per variable per process
+  (`SPOOND_` wins when both are set). The pairs are tabulated in
+  docs/setup.md ("Renamed in 2.0"). The gateway's `forkd-*` SSH
+  permission keys and the endpoint response's `forkd_id` field keep their
+  names: they are stored/protocol data, not configuration.
 - The netns, `setns` and iptables code paths in the backend (`55cd9e8`),
   and the guest `sshd` requirement — sessions are relayed onto envd
   processes instead (D14; `63d1f12`).

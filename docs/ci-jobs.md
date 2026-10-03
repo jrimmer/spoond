@@ -41,8 +41,7 @@ fails with `unknown image tag` rather than falling back.
 
 There are no bake scripts in the pipeline, no rootfs assembly and no
 snapshot tags to re-bake: images are built from Dockerfiles by
-`spoond images build`. (The forkd-era bake scripts were removed in 2.0.)
-An image is:
+`spoond images build`. An image is:
 
 1. a Dockerfile in `images/` (`images/<name>.dockerfile`);
 2. an entry in `images/manifest.yaml` with `baked: true`, the sizing

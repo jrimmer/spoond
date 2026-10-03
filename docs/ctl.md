@@ -88,11 +88,13 @@ standalone `spoondctl`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FORKD_CTL_HOST` | `sandbox.example.com` | gateway host |
-| `FORKD_CTL_PORT` | `2222` | gateway port |
-| `FORKD_CTL_KEY` | `~/.ssh/id_ed25519` | your key |
+| `SPOOND_CTL_HOST` | `sandbox.example.com` | gateway host |
+| `SPOOND_CTL_PORT` | `2222` | gateway port |
+| `SPOOND_CTL_KEY` | `~/.ssh/id_ed25519` | your key |
 
-(`FORKD_CTL_*` are the live names; the `FORKD_` prefix is historical.)
+(The pre-2.0 `FORKD_CTL_*` names still work and log a one-line
+deprecation warning — see the "Renamed in 2.0" table in
+[setup.md](setup.md).)
 
 ```bash
 spoondctl new go          # create

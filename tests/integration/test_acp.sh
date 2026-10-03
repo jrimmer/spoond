@@ -37,7 +37,7 @@ OUT=$( {
   sleep 3
   rpc 3 session/prompt '{"sessionId":"sess-0","prompt":[{"type":"text","text":"run uname -a and tell me the kernel"}]}'
   sleep 25
-} | FORKD_BACKEND_URL="$GO_BE_API" FORKD_AGENT_TOKEN="$TOKEN" FORKD_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" acp 2>/dev/null )
+} | SPOOND_BACKEND_URL="$GO_BE_API" SPOOND_AGENT_TOKEN="$TOKEN" SPOOND_LLM_MODEL="gpt-oss-20b-fireworks" timeout 40 "$ACP_BIN" acp 2>/dev/null )
 
 INIT=$(echo "$OUT" | sed -n '1p')
 NEW=$(echo "$OUT" | sed -n '2p')

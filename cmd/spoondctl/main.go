@@ -23,8 +23,9 @@
 //	spoondctl ssh <id|name>          drop into a shell (delegates to ssh)
 //	spoondctl help
 //
-// Environment: FORKD_CTL_HOST (default sandbox.lacy.casa), FORKD_CTL_PORT
-// (default 2222), FORKD_CTL_KEY (default ~/.ssh/id_ed25519).
+// Environment: SPOOND_CTL_HOST (default sandbox.lacy.casa), SPOOND_CTL_PORT
+// (default 2222), SPOOND_CTL_KEY (default ~/.ssh/id_ed25519). The
+// pre-2.0 FORKD_CTL_* names still work but log a deprecation warning.
 package spoondctl
 
 import (
@@ -34,6 +35,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/jrimmer/spoond/v2/internal/env"
 )
 
 func Main(args []string) int {
@@ -44,9 +47,9 @@ func Main(args []string) int {
 	verb := args[0]
 	rest := args[1:]
 
-	host := envOr("FORKD_CTL_HOST", "sandbox.lacy.casa")
-	port := envOr("FORKD_CTL_PORT", "2222")
-	key := envOr("FORKD_CTL_KEY", filepath.Join(homeDir(), ".ssh", "id_ed25519"))
+	host := env.Get("SPOOND_CTL_HOST", "sandbox.lacy.casa")
+	port := env.Get("SPOOND_CTL_PORT", "2222")
+	key := env.Get("SPOOND_CTL_KEY", filepath.Join(homeDir(), ".ssh", "id_ed25519"))
 
 	switch verb {
 	case "help", "--help", "-h":
@@ -205,15 +208,8 @@ usage:
   spoondctl ssh <id|name>          drop into a shell
   spoondctl help
 
-env: FORKD_CTL_HOST (sandbox.lacy.casa), FORKD_CTL_PORT (2222), FORKD_CTL_KEY (~/.ssh/id_ed25519)
+env: SPOOND_CTL_HOST (sandbox.lacy.casa), SPOOND_CTL_PORT (2222), SPOOND_CTL_KEY (~/.ssh/id_ed25519)
 `)
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }
 
 func homeDir() string {

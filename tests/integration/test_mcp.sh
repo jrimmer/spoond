@@ -31,21 +31,21 @@ rpc() {
 BEFORE=$(api GET /api/sandboxes | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('sandboxes',d)))" 2>/dev/null || echo "?")
 
 # initialize
-INIT=$( { rpc 1 initialize '{"protocolVersion":"2025-03-26","clientInfo":{"name":"itest"}}'; sleep 1; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_AGENT_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" mcp 2>/dev/null | head -1 )
+INIT=$( { rpc 1 initialize '{"protocolVersion":"2025-03-26","clientInfo":{"name":"itest"}}'; sleep 1; } | SPOOND_BACKEND_URL="$GO_BE_API" SPOOND_AGENT_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" mcp 2>/dev/null | head -1 )
 assert_contains "mcp initialize ok" "$INIT" "spoond-mcp"
 
 # tools/list
-TOOLS=$( { rpc 2 tools/list; sleep 1; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_AGENT_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" mcp 2>/dev/null | head -1 )
+TOOLS=$( { rpc 2 tools/list; sleep 1; } | SPOOND_BACKEND_URL="$GO_BE_API" SPOOND_AGENT_TOKEN="$TOKEN" timeout 15 "$MCP_BIN" mcp 2>/dev/null | head -1 )
 assert_contains "mcp tools/list has shell" "$TOOLS" "shell"
 assert_contains "mcp tools/list has read_file" "$TOOLS" "read_file"
 
 # tools/call shell: run uname in a real sandbox
-CALL=$( { rpc 3 tools/call '{"name":"shell","arguments":{"command":"uname -a"}}'; sleep 3; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_AGENT_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" mcp 2>/dev/null | head -1 )
+CALL=$( { rpc 3 tools/call '{"name":"shell","arguments":{"command":"uname -a"}}'; sleep 3; } | SPOOND_BACKEND_URL="$GO_BE_API" SPOOND_AGENT_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" mcp 2>/dev/null | head -1 )
 assert_contains "mcp shell runs in sandbox" "$CALL" "Linux"
 assert_contains "mcp shell returns sandbox_id" "$CALL" "sandbox_id"
 
 # tools/call write_file + read_file round-trip
-WRITE=$( { rpc 4 tools/call '{"name":"write_file","arguments":{"path":"/tmp/mcp_test.txt","content":"hello from mcp"}}'; sleep 3; } | FORKD_BACKEND_URL="$GO_BE_API" FORKD_AGENT_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" mcp 2>/dev/null | head -1 )
+WRITE=$( { rpc 4 tools/call '{"name":"write_file","arguments":{"path":"/tmp/mcp_test.txt","content":"hello from mcp"}}'; sleep 3; } | SPOOND_BACKEND_URL="$GO_BE_API" SPOOND_AGENT_TOKEN="$TOKEN" timeout 30 "$MCP_BIN" mcp 2>/dev/null | head -1 )
 assert_contains "mcp write_file ok" "$WRITE" "WROTE"
 
 # leases released after stateless calls (should be near the baseline)

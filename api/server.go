@@ -727,6 +727,8 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
+	// forkd_id keeps its pre-2.0 name: response keys are stored/protocol
+	// data and renaming would break clients.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":         lease.ID,
 		"forkd_id":   lease.SandboxID,

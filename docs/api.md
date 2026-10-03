@@ -137,7 +137,8 @@ timeout). Response `200 OK`:
 ### `GET /api/sandboxes/{id}/endpoint` — resolve sandbox endpoint
 
 Kept for compatibility. The gateway no longer uses it (SSH sessions are
-relayed over `/stream`):
+relayed over `/stream`). The `forkd_id` key keeps its pre-2.0 name
+(stored/protocol data; renaming it would break clients):
 
 ```json
 {"id":"…","forkd_id":"<sandbox id>","image":"…","netns":"","guest_addr":"10.11.0.7"}
