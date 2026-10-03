@@ -356,9 +356,10 @@ func (s *Server) collectServiceMetrics() {
 // apiLeasePathPrefix is the lease API's primary, documented path
 // prefix; apiSandboxPathPrefix is its permanent alias. Every route
 // registered under /api/sandboxes is served identically under
-// /api/leases (2.0, D5): the alias is rewritten to the primary form at
-// the top of the handler chain — before auth and the mux — so there is
-// one route table, one auth path and one set of metric labels.
+// /api/leases (2.0, D5): requests to the primary /api/leases form are
+// rewritten onto the registered /api/sandboxes routes at the top of the
+// handler chain — before auth and the mux — so there is one route
+// table, one auth path and one set of metric labels.
 const (
 	apiLeasePathPrefix   = "/api/leases"
 	apiSandboxPathPrefix = "/api/sandboxes"

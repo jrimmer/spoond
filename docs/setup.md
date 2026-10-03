@@ -50,7 +50,7 @@ When both are set, `SPOOND_` wins.
 | `SPOOND_NO_TMUX` | `FORKD_NO_TMUX` | guest image: skip the tmux auto-attach on SSH login |
 
 Not renamed: the gateway's `forkd-*` SSH permission keys and the
-`forkd_id` field on `GET /api/sandboxes/{id}/endpoint` are stored/protocol
+`forkd_id` field on `GET /api/leases/{id}/endpoint` are stored/protocol
 data, not configuration — renaming them would break clients.
 
 One special case: `SPOOND_NO_TMUX` is read by the guest image's login

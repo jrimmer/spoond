@@ -9,7 +9,7 @@ import (
 func init() {
 	register(command{
 		name: "drain",
-		desc: "orchestrator drain/undrain hook (pause and resume sandboxes)",
+		desc: "orchestrator drain/undrain hook (pause and resume leases)",
 		run:  spoondrain.Main,
 	})
 }
