@@ -8,7 +8,7 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
-## [2.0.0] - 2026-10-02
+## [2.0.0] - 2026-10-03
 
 2.0 replaces forkd with a patch-queue fork of E2B's node runtime as the
 sandbox substrate (production cut over 2026-10-01), moves spoond's state
