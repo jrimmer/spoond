@@ -2,7 +2,7 @@
 
 Status: **draft for decision, 2026-10-02.** Epic #78. Covers #85 (live
 view) in full and the parts of #84, #87 and #88 that the engine needs.
-Decisions are numbered W1-W46. Build order at the end.
+Decisions are numbered W1-W61. Build order at the end.
 
 Implementation starts on a branch off `main`, after `feat/e2b-substrate`
 is fully merged. Paths below are `main`'s (module `github.com/jrimmer/spoond/v2`).
@@ -71,6 +71,21 @@ crash. Jobs, the hive, CI and agent coordination become flightplans.
 | W44 | Liveness is visible: lease health, heartbeat age and progress age per step, and a "stalled" state. | [Live view](#the-live-view-85) |
 | W45 | Flights have participants with roles (watch, answer, approve, control), like lease shares. | [Ownership](#ownership-cancellation-and-locks) |
 | W46 | Names: a definition is a **flightplan**, one execution of it is a **flight**. | [Names](#names) |
+| W47 | Leases have generations; a lease restored from an older checkpoint, or lost, re-runs the steps it no longer reflects. | [Durability](#durability-model) |
+| W48 | Flights survive Honey upgrades: the event format is versioned, migrations only move forward, and old flights are tested on the new engine. | [Durability](#durability-model) |
+| W49 | Where steps run: lease steps need an enclosing `lease` or `defaults.lease`; `each` chooses shared, per-item or fork. | [Where steps run](#where-steps-run) |
+| W50 | Flights have statuses (queued, running, waiting, paused, done), can be paused and resumed, honour backend drain, and take a deadline and a priority. | [Flight lifecycle](#flight-lifecycle) |
+| W51 | A circuit breaker per provider: when a model service or forge is down, steps wait without spending budgets, and triggers hold. | [Flight lifecycle](#flight-lifecycle) |
+| W52 | State is capped (1 MiB); large outputs are artifacts. | [Types](#types-json-schema) |
+| W53 | Untrusted input is tracked: values from tickets, chat and webhooks never reach a shell, and block automatic approval until a person has seen them. | [Security](#security) |
+| W54 | Named secrets have an allow-list of identities and flightplans. | [Security](#security) |
+| W55 | Triggers authenticate (signed webhooks, linked chat identities) and are rate-limited per identity. | [Security](#security) |
+| W56 | Dry runs: a flightplan runs against fixtures, with no leases or models, to test its routing. | [Dry runs](#dry-runs-with-fixtures) |
+| W57 | Each step in a lease records the repository revision it left. | [Dry runs](#dry-runs-with-fixtures) |
+| W58 | Reset a flight to a step (3.1). | [Dry runs](#dry-runs-with-fixtures) |
+| W59 | The live view can start a flight from a form generated from its params. | [Live view](#the-live-view-85) |
+| W60 | OpenTelemetry export, one span per step (3.1). | [Observability](#observability) |
+| W61 | The release is split: v3.0 is the core; v3.1 adds fork, the review packet, microVM features, the full library, chat channels, ACP and step images. | [Releases](#releases-v30-and-v31) |
 
 ## Goals and non-goals
 
@@ -105,7 +120,8 @@ crash. Jobs, the hive, CI and agent coordination become flightplans.
    every write, finishes with the same result and no unsafe step repeated.
 2. The bee loop runs as `ralph-ticket` for one week on spoond tasks.
    The share of flights that finish without the orchestrator or a person
-   stepping in is on the dashboard, and is at least the 2026-10-02 rate (3 of 5).
+   stepping in is on the dashboard, and is at least 80% (the 2026-10-02
+   baseline was 3 of 5).
 3. Agent Mail coordination and the `swarm-*` scripts are retired.
 4. An agent session composes a flightplan from catalog building blocks over
    MCP, runs it, waits on it, and uses its output (W36).
@@ -282,7 +298,7 @@ do:
     set:
       ticket: "${ result }"
       branch: "${ 'swarm/' + result.id }"
-    locks: {paths: "${ result.paths }"}           # held until the flight ends
+    locks: {paths: "${ result.paths }", hold: flight}   # held until the flight ends (W14)
 
   - id: precheck
     llm:
@@ -298,9 +314,11 @@ do:
     lease: {image: "${ params.image }", ttl: 6h, secrets: [deploy-key]}
     do:                                          # every step in this block runs in this lease
       - id: checkout
-        run: |
-          git clone --branch ${ params.base } ${ params.repo } /work/repo
-          git -C /work/repo switch -C ${ state.branch }
+        run:
+          script: |                              # no ${ } in a script: values come in as env (W53)
+            git clone --branch "$BASE" "$REPO" /work/repo
+            git -C /work/repo switch -C "$BRANCH"
+          env: {REPO: "${ params.repo }", BASE: "${ params.base }", BRANCH: "${ state.branch }"}
         replay: safe
 
       - id: rounds
@@ -325,7 +343,13 @@ do:
                 with: {repo_dir: /work/repo, base: "${ params.base }", previous: "${ state.review }"}
               set: {review: "${ result }"}
 
-    finally:                                     # every exit path: pass, fail, cancel, error
+      - id: verdict                              # the loop ran out of rounds without passing
+        if: "${ !(state.gates.pass && state.review.blocking == 0) }"
+        do:
+          - id: stop
+            return: {outcome: blocked, reason: "no pass after ${ params.rounds } rounds"}
+
+    finally:                                     # every exit path: pass, fail, blocked, cancel, error
       - id: push
         git: {push: {cwd: /work/repo, branch: "${ state.branch }", force_with_lease: true}}
         set: {commit: "${ result.sha }"}
@@ -347,7 +371,7 @@ Common fields:
 | `retry` | `{max, backoff, on: [error, timed_out, interrupted]}`. Infrastructure errors (model service down, lease capacity) retry without spending the budget, like the bee loop does today. |
 | `replay` | `safe` \| `idempotent` \| `resume` \| `never`. See W9. |
 | `on_error` | `fail` (default) \| `continue` (record the outcome in `result`, carry on). |
-| `locks` | Paths or resource names this step (or block) holds. |
+| `locks` | Paths or resource names, and how long they are held: `hold: step` (default on a leaf step), `block` (default on a block) or `flight`. |
 
 Blocks: `do`, `parallel` (with `max`, `fail_fast`, named branches),
 `if`/`else`, `switch` (`cases: [{name, when, do}]`, `default`), `loop`
@@ -374,6 +398,11 @@ with its reason. In a called flightplan, `return` ends the child; the
 caller's `flightplan` step gets the child's outcome in `result.outcome`,
 and a child that ends `blocked` or `failed` fails the step unless it
 says `on_error: continue`.
+
+**A failing `finally` never hides the real outcome.** Its failure is
+recorded and reported (an event, and a line in the flight's reason), but
+the flight keeps the outcome it had before `finally` ran. Only when that
+outcome was `succeeded` does a `finally` failure turn it into `failed`.
 
 ### Named branches
 
@@ -418,6 +447,12 @@ at a time:
   after a crash: finished iterations are not repeated.
 - `in` is evaluated once, when the block starts, and recorded in the
   event log, so a resumed flight iterates the same list.
+- **Where iterations run** (W49): `lease: shared` (default) runs them in
+  the enclosing lease, each with its own working directory
+  (`/work/iter/<index>`, the default `cwd`); a literal `cwd` shared by
+  parallel iterations is a publish error. `lease: per-item` gives each
+  iteration its own lease from the same image. `lease: fork` forks the
+  enclosing lease per iteration (3.1, with #82).
 
 ## Expressions (CEL)
 
@@ -449,14 +484,19 @@ This replaces `workflow/expr.go` (unused, and broken at line 58) and
 (Apache-2.0).**
 
 - Honey ships a schema library under `honey:` (`honey:ticket`,
-  `honey:gate-result`, `honey:review`, `honey:finding`, `honey:verdict`,
-  `honey:ticket-source`, ...). Built-in step types return these.
+  `honey:gate-result`, `honey:review`, `honey:finding`, `honey:plan`,
+  `honey:dep-check`, `honey:ticket-source`, ...). Built-in step types return these.
 - Custom formats tie parameters to the catalogs: `format: image`,
   `profile`, `secret`, `snapshot`, `flightplan`. Publish checks that a
   default exists in its catalog; start checks the given value.
 - State is validated after every `set`. A step that writes the wrong
   shape fails with the JSON Pointer of the bad field, before it can
   corrupt a later step.
+- **W52. State is small.** A flight's state is capped at 1 MiB (and one
+  `set` at 256 KiB). A step that would exceed it fails with a remedy:
+  store the content as an artifact (#84) and keep its reference
+  (`honey:artifact`) in state. Logs, transcripts and diffs are artifacts
+  or step logs, never state.
 
 ## Data flow is explicit
 
@@ -485,8 +525,9 @@ immutable.**
 - Publish assigns the next integer version (`ralph-ticket@4`). Content is
   stored with its sha256; publishing identical content is a no-op that
   returns the existing version.
-- References accept `name@3`, `name@^3` (latest compatible: same
-  `params` and `output` schema major) and `name` (latest). A flight resolves
+- References accept `name@3`, `name@^3` (the latest version at or above
+  3 whose params only add properties that have defaults, and whose
+  output schema is unchanged) and `name` (latest). A flight resolves
   every reference **at start** and records the resolved versions, so its
   behaviour never changes mid-flight, including the flightplans it calls.
 - **Publish-time validation** runs through the hive check engine
@@ -561,6 +602,89 @@ policy. This replaces "no log activity for 30 min" in the hive plan (C5)
 with a mechanism that knows the difference between a slow agent and a
 dead lease.
 
+**W47. Lease generations.** A lease carries a generation number. The
+lease service bumps it whenever the lease's state is replaced: restored
+from a checkpoint after a crash (the backend already does this), or
+resumed from a pause that was not the engine's own. Each step instance
+records the generation it ran against, and the engine subscribes to the
+change:
+
+- **Rolled back** (a restore from a checkpoint taken at time T): steps in
+  that lease that finished after T no longer have their effects on disk.
+  The engine re-runs them in order, each under its replay policy; a
+  `never` step among them becomes `interrupted`. With W57 the engine can
+  tell exactly which steps are affected by comparing revisions.
+- **Gone** (no checkpoint, or the restore failed): the enclosing `lease`
+  block restarts from its first step in a new lease, again under each
+  step's replay policy. A `checkpoint:` on a step (W22) shortens this by
+  restoring from the newest step checkpoint instead.
+- Recovery is visible: `lease.rolled_back` and `lease.replaced` events,
+  and the steps they re-run, appear in the flight's log and graph.
+
+**W48. Upgrades during a flight.** Flights last days, and Honey is
+deployed in between.
+
+- The event envelope carries `v` (format version). The engine reads every
+  version it has ever written; a new version is added, never changed.
+- honey.db migrations only add (tables, nullable columns, indexes) while
+  any flight that predates them is active; destructive changes wait for
+  a later release.
+- A flight runs to its end on the interpreter semantics of the engine
+  version it started under (`engine_version` on the flight). When
+  semantics change, the old behaviour stays behind that version check
+  until no flight uses it.
+- Test: the crash suite (W18) also runs "start on the previous release's
+  engine, finish on this one" for every built-in flightplan.
+- A deploy drains the engine (W50) only long enough to stop it cleanly;
+  steps keep running in their leases and are reattached after the restart (W9).
+
+## Where steps run
+
+**W49.** Steps run in one of two places:
+
+- **On the host, in the engine:** `llm`, `transform`, `question`,
+  `approval`, `return`, `continue_as_new`, `sleep`, `notify`, `ticket`,
+  `flightplan` calls, and `git` operations that only talk to the forge
+  (opening a pull request, commenting).
+- **In a lease, through stepd:** `run`, `gate`, `agent`, `artifact`,
+  `snapshot`, and `git` operations on a working copy (`push`).
+
+A lease step needs a lease: the nearest enclosing `lease` block, or the
+flightplan's `defaults.lease`, which starts one lease for the whole
+flight on first use and releases it at the end. A lease step with
+neither is a publish error, with the remedy. `each` chooses how its
+iterations share the lease (`shared`, `per-item`, `fork`; see W33).
+
+## Flight lifecycle
+
+**W50. Statuses, pause, drain, deadline and priority.**
+
+- A flight's **status** is separate from its outcome: `queued` (over a
+  concurrency limit or waiting for lease capacity), `running`, `waiting`
+  (on a question, an approval, a lock, a timer or a provider), `paused`,
+  and `done` (with its outcome).
+- **Pause and resume** are signals (role `control`). Pausing lets running
+  steps finish, starts nothing new, and keeps leases (suspended after
+  their idle time); resume continues from the next step.
+- **Drain.** When the backend is draining (the existing admin drain),
+  the engine starts no new steps and no new flights; running steps
+  continue in their leases. Undrain resumes dispatch.
+- **Deadline.** `deadline: 3d` on a flightplan or a start: when it
+  passes, the flight is cancelled with reason "deadline", and every
+  `finally` runs. Loop and money budgets (W37) still apply inside it.
+- **Priority.** `priority: 0-4` (from the ticket where there is one).
+  Queued flights and queued steps start in priority order, then by age.
+
+**W51. A circuit breaker per provider.** Each provider instance (a
+model service route, a forge, a notifier) has a breaker. Repeated
+infrastructure errors open it: steps that need it wait (status
+`waiting`, reason "provider down") without spending retries or loop
+rounds, triggers that would start flights needing it hold, and one probe
+at a time checks whether it is back. The dashboard shows open breakers,
+and an open breaker is alertable (#81). This is the hive plan's "model
+service outages do not count as attempts and pause spawning" (C5),
+generalised.
+
 ## Signals, questions, memos and steering
 
 **W10. Exactly-once submission.** `POST /api/flights` and
@@ -574,8 +698,11 @@ response. The same key with a different body is a 409.
   Each is applied by a transition, so it appears in the event log.
 - **Questions.** A step ends with outcome `needs_info` and a question
   (`then: question:`, or an agent asking through its harness). The flight
-  waits. It does **not** spend a loop round. The answer is a memo; the
-  step resumes with it in `result.answer`.
+  waits. It does **not** spend a loop round. The answer is a memo. A
+  `question` step returns it as `result.answer`. Any other step that
+  raised a question (through `then:` or its harness) runs again with the
+  answers so far in its inputs (`answers`), at most 3 times (`max_asks`),
+  then fails with the open question as its reason.
 - **W27. Who answers: a rule, with configured escalation.**
   1. If the flightplan names a resolver step (`ask: {step: researcher}`,
      a step with more access), that step tries first. It may answer, or
@@ -724,7 +851,8 @@ under stepd. Prompts and steering go in as RPC commands through stepd's
   them) and reports them as infrastructure errors, which retry without
   spending a round;
 - asks for a structured result: the step's prompt ends with an
-  instruction to write `result.json` against the step's schema, which
+  instruction to write `/run/honey/<handle>/result.json` (outside the
+  repository, so it is never committed) against the step's schema, which
   the adapter reads (W12) and validates. Free-form text is kept as
   `result.text`;
 - **resumable (first version, without Pi Durable):** after each settled
@@ -749,7 +877,8 @@ prompt. `llm` and `agent` steps accept artifacts as inputs (`attach:
 
 **Harnesses beyond Pi.** A profile's harness can be any implementation
 of the contract: an agent CLI driven through its own RPC or JSON mode, or
-a direct API call loop.
+a direct API call loop. Profiles say whether a harness bills per token
+(an API) or against a flat subscription, which W37 uses.
 
 **W42. ACP is the second harness, after Pi.** Many agent CLIs speak the
 Agent Client Protocol (JSON-RPC over stdio: `initialize`, `session/new`,
@@ -763,8 +892,7 @@ adapter, run under stepd like Pi, makes all of them usable as profiles:
   profile's tool policy) or a question to the flight's participants (W45);
 - `session/load`, where the agent supports it, gives the resumable
   capability; otherwise an ACP step resumes only through a memory
-  checkpoint (W22). Profiles say whether a harness bills per token
-(an API) or against a flat subscription, which W37 uses.
+  checkpoint (W22).
 
 ## Worked example: a planning pipeline
 
@@ -777,7 +905,14 @@ implementation. Nothing is implemented until the plan is understood end
 to end. In Honey:
 
 ```yaml
+defaults:
+  lease: {image: "${ params.image }", ttl: 2d}   # one lease for the flight's lease steps (W49)
+
 do:
+  - id: branch
+    transform: {}
+    set: {branch: "${ 'plans/' + flight.id }"}
+
   - id: align-designs
     agent: {profile: architect, prompt: honey:prompts/align-designs}
 
@@ -787,6 +922,7 @@ do:
       as: team
       max: 3
       local: {plan: {$ref: "honey:plan"}}
+      lease: shared                            # each iteration works in /work/iter/<index> (W49)
       do:
         - id: draft
           agent: {profile: planner, prompt: honey:prompts/plan, with: {team: "${ team }"}}
@@ -800,7 +936,7 @@ do:
       until: "state.deps.resolved"
       do:
         - id: align-plans
-          agent: {profile: planner, with: {plans: "${ state.plans }"}}
+          agent: {profile: planner, with: {plans: "${ state.plans }", resolutions: "${ state.resolutions }"}}
           set: {plans: "${ result.plans }"}
         - id: assess
           llm: {profile: reviewer, schema: {$ref: "honey:dep-check"}, with: {plans: "${ state.plans }"}}
@@ -824,6 +960,8 @@ do:
                     profile: planner
                     interactive: {with: "${ params.teams_group }"}    # W32
                     with: {open: "${ state.deps.open }"}
+                    schema: {$ref: "honey:resolution"}
+                  set: {resolutions: "${ state.resolutions + [result] }"}   # the next round sees it
 
   - id: unresolved                              # the loop ran out of rounds
     if: "!state.deps.resolved"
@@ -852,6 +990,9 @@ Points this example depends on:
 
 - No iteration counter step: `loop.max` is a budget the engine enforces,
   and `loop.index` is available to expressions.
+- The interactive step's outcome is data: it writes `state.resolutions`,
+  and the next `align-plans` round reads it. Nothing reaches a later step
+  except through `set` (W6).
 - Pushing plans and notifying teams are `git` and `notify` steps, which
   are idempotent, so a crash cannot push twice or skip a notification.
 - It uses ending a flight early with an outcome (W30), branch names on
@@ -861,12 +1002,45 @@ Points this example depends on:
   several terminal nodes; laying that out without overlaps or edges crossing
   the loop region is what ELK's compound layered layout is for (W16).
 
+## Dry runs with fixtures
+
+**W56.** People and agents need to test a flightplan's routing without
+spending leases or model calls. `spoond flightplans test FILE --fixtures F`
+and the MCP tool `flightplan_test` run the interpreter against a
+fixtures file: for each step path (or path and instance), the result it
+returns, or an outcome (`failed`, `blocked`, `needs_info` with an answer).
+Unlisted steps return a value generated from their result schema.
+
+- The output is the route taken (steps, branches, loop rounds,
+  iterations), every state write, the final outcome and output, and any
+  step that would have failed validation.
+- `expect:` in the fixtures file asserts on them, so a flightplan carries
+  tests; publish runs a flightplan's own tests (`tests/*.yaml` next to it)
+  and rejects a version whose tests fail.
+- The same interpreter runs dry and live; only the executors differ.
+  That is also how the engine's property tests work (W18).
+
+**W57. The repository revision per step.** After every step that runs in
+a lease with a git working copy, stepd reports `HEAD` and the tree hash
+of the working copy (including uncommitted changes, via `git stash create`
+written to a private ref, `refs/honey/<flight>/<instance>`). The step's
+event records them. That gives the review packet "what the code looked
+like after each step", lets W47 decide exactly what a rollback undid,
+and is the base for W58. Commits Honey makes carry a `Change-Id:`
+trailer so a change can be followed across amends and rebases.
+
+**W58. Reset to a step (3.1).** `spoond flights reset <id> --to <path>`
+starts a new flight linked to the old one, with the old flight's state
+as of that step's start, the working copy restored from that step's
+revision ref (W57) or memory checkpoint (W22), and the old flight's
+memos carried over. A failure on day 3 does not restart day 1.
+
 ## Step types
 
 | Type | Does | Result | Default replay |
 |---|---|---|---|
 | `lease` | Starts a lease (image or named snapshot, secrets, egress) and runs its nested `do` in it; releases it on exit unless `keep`. | `{lease_id}` | safe |
-| `run` | A command in the current lease, via stepd; output streamed. | `{exit, stdout_tail, artifacts}` | safe |
+| `run` | A command in the current lease, via stepd; output streamed. `run: {script, env}` (a shell script; values only through `env`) or `run: {argv: [...]}` (no shell; expressions allowed per element); `run: <string>` is a script with no expressions. | `{exit, stdout_tail, artifacts}` | safe |
 | `gate` | The project's validations, each its own sub-instance; pass or fail with output. | `honey:gate-result` | safe |
 | `llm` | One model call, no tools, structured output against a schema. | the schema | safe |
 | `agent` | An agent pass through a harness, with a profile. `until:` makes it a loop. | the schema, or `{text}` | resume |
@@ -883,6 +1057,7 @@ Points this example depends on:
 | `notify` | Sends through a notifier provider (W28): webhook, mail, the followers' feed. | — | idempotent |
 | `sleep` | Durable timer. | — | safe |
 | `artifact` | Collects paths from the lease into flight storage (#84). | `{artifacts}` | safe |
+| `step` | Runs a step image (W25, 3.1): `/run/honey/input.json` in, `/run/honey/output.json` out. | the image's output schema | safe |
 
 A **job** (#84) is a one-step flightplan (`lease` + `run` + `artifact`),
 created by `POST /api/jobs`. The CI runner can become a client of it.
@@ -990,8 +1165,14 @@ much smaller ecosystem), dagre (unmaintained, weak compound layout).
   drawn solid with its label highlighted.
 - **`each` iterations** draw side by side like fork branches, collapsed to
   a counter (`3 of 5 done`) when there are more than a few.
-- **Controls:** cancel, approve, reject, answer, steer. Shown only to
-  the flight's owner or an admin, and sent with an `Idempotency-Key`.
+- **W59. Start a flight from the catalog view:** a form generated from the
+  flightplan's params schema (`@rjsf/core`, Apache-2.0, with its JSON
+  Schema validator), prefilled from a previous flight on "run again".
+  Starting needs no other role than the owner's own quotas.
+- **Controls:** cancel, approve, reject, answer, steer, pause, resume.
+  Each is shown to people who hold the role it needs (W45: `answer`,
+  `approve`, `control`); admins hold every role. Sent with an
+  `Idempotency-Key`.
 
 ### Graph model
 
@@ -1007,7 +1188,7 @@ re-lays out only when a loop or fork adds instances.
 
 The UI uses the same bearer token as the API (a person's Honey user
 token, entered once and kept in `sessionStorage`; agents use MCP). Read
-access follows flight ownership and shares; admins see all. The read-only
+access follows the `watch` role (W45); admins see all. The read-only
 `watch` basic-auth account of the dashboard is not used here.
 
 ### Build and delivery
@@ -1059,6 +1240,7 @@ Tools:
 | `flight_signal` | answer, approve, reject, steer, cancel; takes `request_id`. |
 | `flightplan_validate` | Runs every publish check on a definition and returns the problems with remedies, without publishing (W36). |
 | `flightplan_publish` | Publishes into the caller's namespace (W36). |
+| `flightplan_test` | Dry-runs a definition against fixtures and returns the route, the state writes and the outcome (W56). |
 | `flight_start` with `definition` | Runs an unpublished definition once; it is validated like a publish and stored with the flight (W36). |
 
 Results are the flight's typed output, so an agent never parses logs.
@@ -1289,7 +1471,7 @@ plan, step 4, deferred to this epic):
   `ticket_ready` (a ticket-source provider has eligible tickets),
   `webhook` (Forgejo push, merge, label). A trigger starts a flight with
   fixed parameters. **In scope for v3.0.**
-- **Concurrency:** `concurrency: {key: ${ params.repo }, max: 3, queue: true}`
+- **Concurrency:** `concurrency: {key: "${ params.repo }", max: 3, queue: true}`
   replaces `max_workers`. A trigger starts flights only while the key is under its limit.
 - **Budgets:** `budget: {lease_hours_per_day: 24}` per project (C9).
 - `hive.yaml` (C10) becomes: "use `ralph-ticket` with these parameters,
@@ -1443,10 +1625,12 @@ workflows(name, version, sha256, source, def_json, graph_json, published_by, pub
 profiles(name, version, def_json, ...)
 runs(id, workflow, version, owner, parent_run, parent_instance, status, outcome,
      params_json, state_json, state_seq, output_json, intervened,
-     idem_key, created_at, started_at, ended_at)
-instances(run, path, attempt, status, outcome, lease, handle, profile_resolved,
-          started_at, ended_at, heartbeat_at, error)
-events(run, seq, ts, type, path, attempt, data_json, patch_json)   -- PK(run, seq)
+     idem_key, engine_version, priority, deadline, head_hash, untrusted_paths,
+     created_at, started_at, ended_at)
+instances(run, path, attempt, status, outcome, lease, lease_generation, handle,
+          profile_resolved, revision, tree, usage_json, cost_usd,
+          started_at, ended_at, heartbeat_at, progress_at, error)
+events(run, seq, v, ts, type, path, attempt, data_json, patch_json, prev_hash, hash)   -- PK(run, seq); W41, W48
 outbox(id, run, kind, payload_json, due_at, claimed_by, claimed_at, done_at)
 timers  -- outbox rows with kind=timer
 signals(run, id, idem_key, kind, payload_json, by, at, applied_seq)
@@ -1454,6 +1638,10 @@ memos(run, key, value_json, by, at)                                 -- PK(run, k
 locks(scope, key, run, instance, acquired_at)                       -- path and resource locks
 idempotency(key, caller, body_sha, response_json, at)
 uses(workflow, version, project, runs, last_run, last_outcome)
+participants(run, who, roles)
+subscriptions(id, who, scope, events, notifier)
+triggers(id, workflow, kind, config_json, owner, enabled)
+breakers(provider, state, opened_at, last_probe_at)
 ```
 
 Table and column names are internal; the API presents them as flightplans and flights (W46).
@@ -1477,19 +1665,48 @@ daily `VACUUM INTO` backup covers it.
 - Secrets are referenced by name (#80); values never enter the event
   log, state, step logs or the graph. stepd and the harness receive them
   as 0600 files. The log writer redacts known secret values as a second line of defence.
-- `run` commands are templated with CEL. Interpolated values are passed
-  as environment files or arguments by stepd, never re-parsed by a
-  shell, unless the step explicitly says `shell: true` (then publish
-  warns on every interpolation in it).
+- **No expressions inside scripts.** `run: {script}` and `gate` commands
+  take values only through `env` (written by stepd as a 0600 env file) or
+  as separate `argv` elements; a `${ }` inside a script is a publish
+  error whose remedy is "pass it through env". Nothing is ever
+  re-parsed by a shell.
 - stepd listens only on the lease network, behind the per-lease token.
+- **W53. Untrusted input.** Values that come from outside the people and
+  agents who own a flight (ticket bodies and titles, chat messages,
+  webhook payloads, and the output of a step that read any of these) are
+  **untrusted**. Publish computes which state paths can carry untrusted
+  data from the reads and writes (W6); the engine records it per flight.
+  - Untrusted values may go into prompts, where they are fenced and
+    labelled as data, and into `env`; never into a script or `argv[0]`.
+  - An agent step that reads untrusted data runs with its profile's
+    restricted tool policy and the lease's egress allowlist; it cannot
+    widen either.
+  - **Automatic approval (W40) is refused for a flight that consumed
+    untrusted input**, until a person with `approve` marks the inputs as
+    seen (a memo, recorded with the head hash, W41).
+- **W54. Secret allow-lists.** A named secret lists who may use it:
+  identities, groups, flightplan names (or namespaces). Publish checks
+  that every secret a flightplan names is allowed for it; start checks it
+  for the caller. Agents that compose flightplans (W36) therefore cannot
+  reach a secret just by naming it.
+- **W55. Trigger authentication.** Inbound webhooks verify the sender's
+  signature (Forgejo's HMAC) and are dropped otherwise. Chat triggers act
+  only for linked identities (W38). Every trigger source and every
+  identity has a rate limit; a burst is held and reported, not run.
 
 ## Observability
 
 Prometheus: flights started/completed by flightplan and outcome, step
 durations by type, retries, interrupted steps, recovery actions
 (reattach vs replay), outbox lag, timer lag, active leases per flight,
-interventions. Alerts (#81): a flight stuck with no event for its step's
-heartbeat timeout; outbox lag over 30 s; any `interrupted` outcome.
+interventions, open provider breakers (W51), stalled steps (W44).
+Alerts (#81): a flight stuck with no event for its step's heartbeat
+timeout; outbox lag over 30 s; any `interrupted` outcome; a breaker open
+for more than 10 minutes.
+
+**W60. OpenTelemetry (3.1).** Each flight exports as a trace (one span per
+step instance, attributes for profile, model, cost and outcome), so
+flights sit next to the rest of the system's traces in Grafana.
 
 ## Testing: reliability first
 
@@ -1520,24 +1737,39 @@ Each step is its own ticket under #78 and ends with something running.
 
 | # | Step | Size | Ends with |
 |---|---|---|---|
-| 1 | This design, accepted. | — | Decisions W1-W46 settled. |
+| 1 | This design, accepted. | — | Decisions W1-W61 settled. |
 | 2 | **Substrate files + stepd.** W12 file operations; `spoond-stepd` with journal, attach, write, signal; baked into the worker layer. | M | A 1 h process survives a backend restart and is reattached. |
 | 3 | **Definition, CEL, schemas, catalog.** `honey/def`, `honey/expr`, `honey/catalog`; publish with validation through the check engine; graph description. | L | `spoond flightplans publish` rejects bad flightplans with remedies. |
-| 4 | **Engine core.** honey.db, transitions, outbox, timers, recovery, signals, memos, idempotency, ownership and cancel; tamper-evident log (W41), participants and roles (W45); step types `lease`, `run`, `gate`, `transform`, `return`, `continue_as_new`, `sleep`, `notify`, `question`, `approval`; blocks `do`, `parallel`, `if`, `switch`, `loop`, `each`, `try`. The crash suite. | XL | Crash suite green; `spoond flights start/follow/signal`. |
+| 4 | **Engine core.** honey.db, transitions, outbox, timers, recovery, signals, memos, idempotency, ownership and cancel; tamper-evident log (W41), participants and roles (W45), lease generations (W47), upgrade compatibility (W48), where steps run (W49), statuses, pause, drain, deadline and priority (W50), the state cap (W52), untrusted-input tracking (W53), dry runs (W56), revisions per step (W57); step types `lease`, `run`, `gate`, `transform`, `return`, `continue_as_new`, `sleep`, `notify`, `question`, `approval`; blocks `do`, `parallel`, `if`, `switch`, `loop`, `each`, `try`. The crash suite. | XL | Crash suite green; `spoond flights start/follow/signal`. |
 | 5 | **Event stream + flight API.** Attach (W15), step logs, the followers' feed. | M | `spoond flights follow` live. |
-| 6 | **Live view v1.** Catalog, flights list, flight graph with live state, loops, step drawer, controls; liveness and the stalled state (W44). | L | A real flight followed in the browser. |
-| 7 | **Profiles + agent step + Pi adapter** (#87). `llm` and `agent` steps; resumable via session files; the interactive agent (W32) and its chat pane in the step drawer; usage, prices and cost per step (W37); MCP tool servers and image inputs; the ACP harness (W42). | L | An agent step resumes in a new lease after its lease is killed. |
-| 8 | **Bee loop port** (W20): `ralph-loop`, `ralph-ticket`, `pr-review`, `task-precheck`; provider registry (W26) with `br` and `forgejo` ticket sources and the `forgejo` git host; `ticket` and `git` steps; locks; secrets (#80). | L | spoond tasks run as flights beside the swarm. |
+| 6 | **Live view v1.** Catalog, flights list, flight graph with live state, loops, step drawer, controls; liveness and the stalled state (W44); the start form (W59). | L | A real flight followed in the browser. |
+| 7 | **Profiles + agent step + Pi adapter** (#87). `llm` and `agent` steps; resumable via session files; the interactive agent (W32) and its chat pane in the step drawer; usage, prices and cost per step (W37); MCP tool servers and image inputs; provider circuit breakers (W51). The ACP harness (W42) is v3.1. | L | An agent step resumes in a new lease after its lease is killed. |
+| 8 | **Bee loop port** (W20): `ralph-loop`, `ralph-ticket`, `pr-review`, `task-precheck`; provider registry (W26) with `br` and `forgejo` ticket sources and the `forgejo` git host; `ticket` and `git` steps; locks; secrets with allow-lists (#80, W54). | L | spoond tasks run as flights beside the swarm. |
 | 9 | **Composition + data flow UI:** `flightplan` step, collapsible child graphs, packets and edge hover, time scrubber. | M | A feature pipeline of called flightplans, followed live. |
-| 10 | **Triggers + concurrency + budgets** (W19); hive.yaml shrinks. Notifiers `webhook` and `mail`, subscriptions and escalation (W27, W28); recipient groups (W34); the channel provider interface (W38); ticket mirroring; money budgets (W37). | M | No orchestrator needed to dispatch. |
-| 11 | **MCP front door** (#88), backend-hosted at `/mcp` on the official SDK. Split: **11a, right after step 3:** the reference, list, show, validate, diff, publish. **11b, right after step 5:** flight start (named or inline), wait, read, signal. | M | 11a: an agent session writes, validates and publishes a flightplan from the reference alone. 11b: it starts `pr-review`, waits, and acts on its output. |
+| 10 | **Triggers + concurrency + budgets** (W19); hive.yaml shrinks. Notifiers `webhook` and `mail`, subscriptions and escalation (W27, W28); recipient groups (W34); the channel provider interface (W38); ticket mirroring; money budgets (W37); trigger authentication and rate limits (W55). | M | No orchestrator needed to dispatch. |
+| 11 | **MCP front door** (#88), backend-hosted at `/mcp` on the official SDK. Split: **11a, right after step 3:** the reference, list, show, validate, diff, publish. **11b, right after step 5:** flight start (named or inline), wait, read, signal, and `flightplan_test` (W56). | M | 11a: an agent session writes, validates and publishes a flightplan from the reference alone. 11b: it starts `pr-review`, waits, and acts on its output. |
 | 12 | **Jobs** (#84), `artifact` step. | S | `spoond job run`. |
-| 13 | **Fork + snapshot steps** (#82, #83). | L | `fork` picks a winner from 3 branches. |
-| 14 | **Review packet** (#89). | M | Every `ralph-ticket` flight ends with a packet. |
+| 13 | **Snapshot step** (#83, v3.0) and **fork step** (#82, v3.1). | L | A flight starts from a named snapshot; (3.1) `fork` picks a winner from 3 branches. |
+| 14 | **(v3.1)** **Review packet** (#89). | M | Every `ralph-ticket` flight ends with a packet. |
 | 15 | Retire Agent Mail and the `swarm-*` scripts. | S | The release criteria hold for a week. |
-| 16 | **MicroVM features:** step checkpoints (W22), sharded gates and speculative `try` (W23), failure snapshots + "open shell here" (W24), step images (W25). W22's measurement belongs in step 2. | L | A flaky gate is retried from the pre-step checkpoint; a failure is opened as a shell from the live view. |
-| 17 | **The building-block library** (W35): `plan-deps`, `test-baseline`, `qa-checklist`, `deploy-env`, `release`, `feature-pipeline`; the promotion policy (W40); catalog metadata, observed results and the size guide; profile comparison (W37). | L | A feature goes from ticket to a dev environment through `feature-pipeline`, and is promoted by policy. |
-| 18 | **First two-way channel provider** (W38): the Discord bot API, aimed at Hrmny; mention, reaction and slash triggers (W43). | M | In a Hrmny channel, a flight's thread shows its live status card; a question is answered by a reply and an approval given with a button. |
+| 16 | **(v3.1)** **MicroVM features:** step checkpoints (W22), sharded gates and speculative `try` (W23), failure snapshots + "open shell here" (W24), step images (W25). W22's measurement belongs in step 2. | L | A flaky gate is retried from the pre-step checkpoint; a failure is opened as a shell from the live view. |
+| 17 | **(v3.1)** **The building-block library** (W35): `plan-deps`, `test-baseline`, `qa-checklist`, `deploy-env`, `release`, `feature-pipeline`; the promotion policy (W40); catalog metadata, observed results and the size guide; profile comparison (W37). | L | A feature goes from ticket to a dev environment through `feature-pipeline`, and is promoted by policy. |
+| 18 | **(v3.1)** **First two-way channel provider** (W38): the Discord bot API, aimed at Hrmny; mention, reaction and slash triggers (W43). | M | In a Hrmny channel, a flight's thread shows its live status card; a question is answered by a reply and an approval given with a button. |
+
+### Releases: v3.0 and v3.1
+
+**W61.** v3.0 is the core that removes the orchestrator from routine
+work; v3.1 adds the rest.
+
+- **v3.0:** steps 2-12 and 15, named snapshots from step 13 (#83), and
+  in the library `pr-review`, `ralph-loop`, `ralph-ticket` and
+  `plan-deps`. W41, W44, W45, W47-W57 and W59, and W37's usage, cost and
+  money budgets. Release criteria 1-4 apply to v3.0.
+- **v3.1:** `fork` (#82, step 13), the review packet (step 14), microVM
+  features (step 16), the rest of the library, the promotion policy and
+  profile comparison (step 17), the first chat channel (step 18), the ACP
+  harness (W42), step images (W25), reset to a step (W58),
+  OpenTelemetry (W60), and anchored comments if they prove worth it (#101).
 
 ### Doing this work with v2
 
@@ -1566,6 +1798,7 @@ as soon as 5's format is fixed.
 3. **Who answers questions**: the flight's owner, with configured escalation (W27).
 4. **Notifications**: webhook and mail in v3, through providers, plus subscriptions (W28).
 5. **Retention**: 30 days, forever for merged results (W29).
+6. **Scope**: v3.0 is the core; v3.1 adds the rest (W61).
 
 ## Open questions
 
