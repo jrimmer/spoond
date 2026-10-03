@@ -46,3 +46,16 @@ R1–R3 with CONFORMANCE_DESTRUCTIVE=1) in 202.6 s against `spoond-backend-stagi
 
 I3 passed (not a known limitation after all). POOL_SIZE for production (per U12 step 4,
 the value recorded for S4): **0**.
+
+## 2026-10-01 — U12 PRODUCTION CUTOVER
+
+Production switched from forkd to E2B (steps 1–15, no rollback). Full suite
+against PRODUCTION on E2B: **27/27 PASS** in 280.1 s, including I3. Budgets:
+create p50 60 / p95 77 ms; per-image create 64–88 ms; clone 540 ms; fork8 997 ms;
+suspend 32 ms; resume 64 ms; R1 restart_total 47,782 ms (≤120,000). L6 /metrics
+403 (conformance user is not admin — expected). Results JSON:
+`conformance/results/20261001T012919-prod-e2b.json` (on the host).
+
+Soak started 2026-10-01 (7 days). Step 20 due: **2026-10-31**.
+Hugepages at switch: 18,207/24,576 (memory fragmentation; admission gates on
+actual free; top-up scheduled).
