@@ -38,7 +38,12 @@ func TestLeaseAliasCRUD(t *testing.T) {
 	if respAlias.StatusCode != http.StatusCreated {
 		t.Fatalf("create via /api/sandboxes: %d: %v", respAlias.StatusCode, leaseAlias)
 	}
-	leaseAlias["id"] = id // ids differ by design; everything else must not
+	// ids differ by design; expires_at is derived from each grant's own
+	// wall clock and the two requests are back to back, so either may
+	// straddle a second boundary. Normalise both before comparing — the
+	// alias must not change anything that is not inherently per-request.
+	leaseAlias["id"] = id
+	leaseAlias["expires_at"] = lease["expires_at"]
 	if rawL, rawS := jsonBody(t, lease), jsonBody(t, leaseAlias); rawL != rawS {
 		t.Fatalf("create responses diverge:\nleases: %s\nsandboxes: %s", rawL, rawS)
 	}

@@ -85,7 +85,7 @@ var (
 	// binary from inside the sandbox (host-side asset server on the
 	// plain-HTTP proxy listener; guests reach it at the host service
 	// address).
-	shellyBinaryURL = flags.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.1.0.11:8891/assets/shelley"), "URL the sandbox fetches the shelley binary from")
+	shellyBinaryURL = flags.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.1.0.11:8891/assets/shelley"), "URL the lease fetches the shelley binary from")
 	// llmGatewayURL is the per-lease LLM gateway base the shelley agent
 	// is pointed at (host-side proxy listener; guests reach it at the
 	// host service address). The lease id is appended.

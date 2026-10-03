@@ -1273,7 +1273,7 @@ echo "AGENT_TIMEOUT"`, msg64, mod64)
 	s.svc.log.Printf("prompt %s: exit=%d stdout=%d dur=%s", id, res.ExitCode, len(res.Stdout), time.Since(start))
 	out := res.Stdout
 	if strings.Contains(out, "SHELLEY_NOT_RUNNING") {
-		writeError(w, http.StatusConflict, "shelley agent is not running in this sandbox — use the shelly ctl verb first")
+		writeError(w, http.StatusConflict, "shelley agent is not running in this lease — use the shelly ctl verb first")
 		return
 	}
 	if strings.Contains(out, "AGENT_TIMEOUT") {
