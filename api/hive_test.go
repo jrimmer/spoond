@@ -109,6 +109,25 @@ func TestHiveRoutesRegistered(t *testing.T) {
 	if resp2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("GET /hive/projects unauthenticated: %d, want 401", resp2.StatusCode)
 	}
+	// Nothing beyond the table's two routes is served under /hive/: a
+	// typo in the table or a stray registration cannot grow a route the
+	// guide does not teach. Authenticated, so a registered handler would
+	// answer rather than stop at the middleware.
+	for _, path := range []string{"/hive/projects", "/hive/guide/extra", "/hive/nope"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			reqN, _ := http.NewRequest(method, url+path, strings.NewReader(""))
+			reqN.Header.Set("Authorization", "Bearer token-a")
+			respN, err := http.DefaultClient.Do(reqN)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodyN, _ := io.ReadAll(respN.Body)
+			respN.Body.Close()
+			if respN.StatusCode != http.StatusNotFound {
+				t.Errorf("%s %s = %d (%.80s), want 404: /hive/ serves the route table and nothing else", method, path, respN.StatusCode, bodyN)
+			}
+		}
+	}
 }
 
 // TestHiveGuideReachableWithoutToken pins C11's point: the guide is
@@ -141,6 +160,11 @@ func TestHiveGuideReachableWithoutToken(t *testing.T) {
 	}
 	if n := strings.Count(text, "Next: "); n != 1 {
 		t.Errorf("guide has %d Next: lines, want exactly 1", n)
+	}
+	// The default is text: no Accept header means no JSON, even as a
+	// string in the body.
+	if strings.HasPrefix(strings.TrimSpace(text), "{") {
+		t.Errorf("guide default rendered as JSON:\n%.200s", text)
 	}
 }
 
