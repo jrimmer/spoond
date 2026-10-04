@@ -558,11 +558,12 @@ by state, queued, granted, swept, running per image), host meters
 (CPU, memory, hugepages, snapshot and root disk), five-minute
 throughput sparklines, live leases with holders, images, systemd units,
 refusal and failure counters, and the backend's last activity — plus
-one attention banner above the panels, shown only when something needs
-a person: a unit not active, a lost lease, free hugepages or snapshot
-disk past the danger level, the TLS certificate inside 30 days of
-expiring, or an automatic held-lease action in the last 24 h. The
-browser page is the grid in a `<pre>` (WebTUI for the chrome, Datastar
+an attention strip above the panels (one ▲ row per trigger, only when
+something needs a person): a unit not active, a lost lease, free
+hugepages or snapshot disk past the danger level, the TLS certificate
+inside 30 days of expiring, or an automatic held-lease action in the
+last 24 h. A status line under the panels carries the headline numbers
+and the clock. The browser page is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
 styles in the terminal, at the terminal's width (COLUMNS, else 104),
 redrawn every 2 seconds until interrupted. It runs as its own service on **:8893** behind

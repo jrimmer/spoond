@@ -8,9 +8,6 @@
 <link rel="stylesheet" href="/static/css/grid.css">
 <link rel="stylesheet" href="/static/fonts/jetbrains-mono.css">
 <style>
-/* One palette, as CSS variables: the only colours on the page. Warn is
-   amber, bad red, ok green; everything else is the monochrome WebTUI
-   dark theme. */
 :root {
   --bg: #0c0c0d;
   --fg: #c9c9c9;
@@ -23,17 +20,13 @@
   --state: #7aa2f7;
   --spark: #58c470;
   --link: #7aa2f7;
-  --head: #f2f2f2;
+  --banner: #d8a657;
 }
 </style>
 <script type="module" src="/static/vendor/datastar-rocket.js"></script>
 </head>
 <body data-webtui-theme="dark" data-signals="{{signals .}}" data-init="@get('/stream')">
 <main>
-  <header>
-    <h1>SPOOND</h1>
-    <span class="meta">{{.Host}} · signed in as {{if .User}}{{.User}}{{else}}?{{end}} · {{.At}}</span>
-  </header>
 <pre id="grid" class="grid" data-webtui-theme="dark">{{.Grid}}</pre>
 </main>
 </body>

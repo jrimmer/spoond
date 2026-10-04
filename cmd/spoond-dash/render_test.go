@@ -188,6 +188,25 @@ func TestDownUnitFramePassesCheck(t *testing.T) {
 	}
 }
 
+// TestVersionLabel: the header's version is short — a tag as it is, a
+// Go pseudo-version base+7-char hash, "?" when there was none.
+func TestVersionLabel(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "?"},
+		{"v2.2.0", "v2.2.0"},
+		{"v2.1.3-0.20261004183409-7a13d2bd1131", "v2.1.3+7a13d2b"},
+		{"v2.1.3-0.20261004183409-7a13d2b", "v2.1.3+7a13d2b"},
+		{"dev", "dev"},
+		{"5ab27e59fe17", "5ab27e59fe17"},
+		{"v2.1.3-0.20261004183409-7a", "v2.1.3-0.20261004183409-7a"},
+	}
+	for _, tc := range cases {
+		if got := versionLabel(tc.in); got != tc.want {
+			t.Errorf("versionLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestBannerAbsentWhenWell: nothing wrong, no banner rows — the frame
 // starts with the panels directly.
 func TestBannerAbsentWhenWell(t *testing.T) {
@@ -244,9 +263,9 @@ func TestBannerTriggers(t *testing.T) {
 		if !found {
 			t.Errorf("%s: banner %q lacks %q", tc.name, rows, tc.want)
 		}
-		for _, r := range rows {
-			if !strings.HasPrefix(r, "■ ") {
-				t.Errorf("%s: banner row lacks the ■ marker: %q", tc.name, r)
+		for _, s := range bannerSegs(rows) {
+			if s[0].Text != "▲ " {
+				t.Errorf("%s: attention row lacks the ▲ marker: %q", tc.name, s[0].Text)
 			}
 		}
 	}

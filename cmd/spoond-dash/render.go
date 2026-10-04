@@ -12,6 +12,7 @@ package spoonddash
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/grid"
@@ -28,14 +29,14 @@ const (
 )
 
 // Extra is every non-ASCII rune the dashboard draws beyond grid.Glyphs:
-// ✓ an active unit and ✗ one that is not, · separator, ═ and ║ and the
-// double corners the panel frames use, ┄ a held-lease action in the
+// ✓ an active unit and ✗ one that is not, · separator, ═ the header's
+// rule, ▲ the attention strip's marker, ┄ a held-lease action in the
 // events panel, ■ the attention marker and the lost state, ∞ a
 // persistent lease's remaining time, ◉ a lapsed hold, and the leases
 // panel's per-state glyphs (▶ running, ‖ suspended, ◆ held). It is
 // passed to grid.Check by every renderer, and every rune is asserted to
 // be in the shipped JetBrains Mono (TestExtraGlyphsInFont).
-const Extra = "✓✗·═║╔╗╚╝┄■∞◉" + stateGlyphs
+const Extra = "✓✗·═▲┄■∞◉" + stateGlyphs
 
 // stateGlyphs are the leases panel's per-state glyphs.
 const stateGlyphs = "▶‖◆"
@@ -95,9 +96,11 @@ func legendRow() []grid.Seg {
 	return segs
 }
 
-// bannerRows returns the attention banner's rows — one per trigger, in
-// warn style — or nil when nothing needs a person (the banner is then
-// never drawn; the frame just starts with the panels). Triggers:
+// bannerRows returns the attention strip's rows — one per trigger, in
+// the banner style — or nil when nothing needs a person (the strip is
+// then never drawn; the frame just starts with the panels). The rows
+// carry the message only; the ▲ marker is prepended at draw time.
+// Triggers:
 //
 //   - a systemd unit not active,
 //   - a lost lease,
@@ -108,17 +111,17 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	var rows []string
 	for _, svc := range s.Services {
 		if svc.State != "active" {
-			rows = append(rows, fmt.Sprintf("■ unit %s is %s", svc.Name, svc.State))
+			rows = append(rows, fmt.Sprintf("unit %s is %s", svc.Name, svc.State))
 		}
 	}
 	if s.ByState["lost"] > 0 {
-		rows = append(rows, fmt.Sprintf("■ %d lost lease(s) - a substrate crash dropped them", s.ByState["lost"]))
+		rows = append(rows, fmt.Sprintf("%d lost lease(s) - a substrate crash dropped them", s.ByState["lost"]))
 	}
 	if s.HugeFreeGiB > 0 && s.HugeUsedPct >= 92 {
-		rows = append(rows, fmt.Sprintf("■ hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB))
+		rows = append(rows, fmt.Sprintf("hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB))
 	}
 	if s.DiskUsedPct >= 90 {
-		rows = append(rows, fmt.Sprintf("■ snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct))
+		rows = append(rows, fmt.Sprintf("snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct))
 	}
 	if !s.CertNotAfter.IsZero() {
 		if d := s.CertNotAfter.Sub(now); d < 30*24*time.Hour {
@@ -127,7 +130,7 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	}
 	for _, r := range s.Rows {
 		if !r.LastActionAt.IsZero() && now.Sub(r.LastActionAt) < 24*time.Hour {
-			rows = append(rows, fmt.Sprintf("■ held lease %s: %s %s ago", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))))
+			rows = append(rows, fmt.Sprintf("held lease %s: %s %s ago", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))))
 		}
 	}
 	return rows
@@ -138,12 +141,12 @@ func bannerRows(s Snapshot, now time.Time) []string {
 func certBanner(rows []string, d time.Duration, notAfter time.Time) []string {
 	when := notAfter.Format("2006-01-02")
 	if d < 0 {
-		return append(rows, "■ the TLS certificate (TLS_CERT) expired "+when)
+		return append(rows, "the TLS certificate (TLS_CERT) expired "+when)
 	}
 	if d < 7*24*time.Hour {
-		return append(rows, fmt.Sprintf("■ the TLS certificate expires in %s (%s) - renew it", dur(d), when))
+		return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s) - renew it", dur(d), when))
 	}
-	return append(rows, fmt.Sprintf("■ the TLS certificate expires in %s (%s)", dur(d), when))
+	return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s)", dur(d), when))
 }
 
 // Draw renders the whole frame at width w. now timestamps the banner and
@@ -160,15 +163,16 @@ func Draw(s Snapshot, w int, now time.Time, host string) *grid.Grid {
 }
 
 // bannerSegs converts bannerRows' strings to the styled segments the
-// frame draws: one warn-styled row per trigger. Shared by Draw, the
-// page/top renderers and the tests, so the banner is styled one way.
+// frame draws: one banner-styled row per trigger, each led by ▲.
+// Shared by Draw, the page/top renderers and the tests, so the strip is
+// styled one way.
 func bannerSegs(rows []string) [][]grid.Seg {
 	if len(rows) == 0 {
 		return nil
 	}
 	out := make([][]grid.Seg, len(rows))
 	for i, r := range rows {
-		out[i] = []grid.Seg{{Text: r, Style: "warn"}}
+		out[i] = []grid.Seg{{Text: "▲ ", Style: "banner"}, {Text: r, Style: "banner"}}
 	}
 	return out
 }
@@ -205,20 +209,23 @@ type layout struct {
 
 // assemble draws the header, the banner and every panel into one grid.
 func (l *layout) assemble() *grid.Grid {
-	h := 2 + // header + legend
+	h := headerRows() +
 		len(l.banner) + boolInt(len(l.banner) > 0) + // banner rows + a blank row under them
 		l.capacityH() + l.hostH() + l.throughputH() + l.leasesH() +
-		l.imagesH() + l.servicesH() + l.refusalsH() + l.eventsH()
+		l.imagesH() + l.servicesH() + l.refusalsH() + l.eventsH() +
+		1 // the status line
 
 	g := grid.New(l.w, h)
 	l.header(g, 0)
-	y := 2
+	y := headerRows()
 
-	// One attention banner row per trigger, then a blank row — only
-	// when something needs a person.
+	// One attention strip row per trigger, painted full width in the
+	// banner style, then a blank row — only when something needs a
+	// person.
 	for _, segs := range l.banner {
 		g.Segs(0, y, segs, l.w)
 		g.Mark(0, y, l.w, 1, "banner")
+		g.PaintRow(y, "banner")
 		y++
 	}
 	if len(l.banner) > 0 {
@@ -232,8 +239,132 @@ func (l *layout) assemble() *grid.Grid {
 	y = l.images(g, y)
 	y = l.servicesPanel(g, y)
 	y = l.refusals(g, y)
-	l.events(g, y)
+	y = l.events(g, y)
+	l.statusLine(g, y, l.s.At)
 	return g
+}
+
+// statusItem is one status-line entry: label, the value shown in
+// brackets and whether it is healthy (ok style) or not (warn/bad).
+type statusItem struct {
+	label string
+	value string
+	style string
+}
+
+// statusItems builds the status line's entries left to right: leases,
+// hugepages, snapshot disk, the certificate's remaining days and the
+// units. The styles reuse the thresholds the meters and the attention
+// strip already use. The certificate is left out when there is none.
+func statusItems(s Snapshot, now time.Time) []statusItem {
+	items := []statusItem{
+		{"leases", fmt.Sprintf("%d/%d", s.Running, s.Limit), "ok"},
+	}
+	if s.Limit > 0 {
+		if pct := float64(s.Running) / float64(s.Limit) * 100; pct >= 90 {
+			items[0].style = "bad"
+		} else if pct >= 75 {
+			items[0].style = "warn"
+		}
+	}
+	switch {
+	case s.HugeUsedPct >= 92:
+		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "bad"})
+	case s.HugeUsedPct >= 80:
+		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "warn"})
+	default:
+		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "ok"})
+	}
+	switch {
+	case s.DiskUsedPct >= 90:
+		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "bad"})
+	case s.DiskUsedPct >= 80:
+		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "warn"})
+	default:
+		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "ok"})
+	}
+	if !s.CertNotAfter.IsZero() {
+		items = append(items, statusItem{"cert", certDays(s.CertNotAfter.Sub(now)), certStyle(s.CertNotAfter.Sub(now))})
+	}
+	units, down := 0, 0
+	for _, svc := range s.Services {
+		units++
+		if svc.State != "active" {
+			down++
+		}
+	}
+	if units > 0 {
+		st := "ok"
+		if down > 0 {
+			st = "bad"
+		}
+		items = append(items, statusItem{"units", fmt.Sprintf("%d/%d", units-down, units), st})
+	}
+	return items
+}
+
+// certDays is the certificate's remaining time in days: negative when
+// it has already expired.
+func certDays(d time.Duration) string {
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// certStyle is the certificate's health: bad once expired, warn inside
+// the attention strip's 30-day window, ok before it.
+func certStyle(d time.Duration) string {
+	switch {
+	case d < 0:
+		return "bad"
+	case d < 30*24*time.Hour:
+		return "warn"
+	default:
+		return "ok"
+	}
+}
+
+// statusLine draws the frame's last row, outside any box: label
+// [value] entries left to right, the clock right-aligned on the same
+// row. At narrow widths entries are dropped from the right (cert, then
+// units) until the line fits.
+func (l *layout) statusLine(g *grid.Grid, y int, at string) {
+	items := statusItems(l.s, l.now)
+	// Drop from the right until what remains fits, the clock always
+	// kept.
+	for len(items) > 0 && statusW(items)+clockW(at, l.w) > l.w {
+		items = items[:len(items)-1]
+	}
+	segs := []grid.Seg{}
+	for _, it := range items {
+		segs = append(segs,
+			grid.Seg{Text: it.label + " ", Style: "dim"},
+			grid.Seg{Text: "[", Style: "dim"},
+			grid.Seg{Text: it.value, Style: it.style},
+			grid.Seg{Text: "]  ", Style: "dim"})
+	}
+	g.Segs(0, y, segs, l.w)
+	g.Right(l.w-1, y, []grid.Seg{{Text: at, Style: "dim"}})
+}
+
+// statusW is the width the items draw at: label, brackets and two
+// trailing spaces each (the last pair included, so the math ignores
+// where the line ends).
+func statusW(items []statusItem) int {
+	n := 0
+	for _, it := range items {
+		n += len(it.label) + len(it.value) + 5
+	}
+	return n
+}
+
+// clockW is the clock's footprint: its cells plus the gap that keeps
+// it clear of the items (at least two columns, on the narrowest frame
+// just its own width).
+func clockW(at string, w int) int {
+	gap := 2
+	if w <= minW {
+		gap = 1
+	}
+	return len(at) + gap
 }
 
 func boolInt(b bool) int {
@@ -243,58 +374,61 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// header: SPOOND, host, spoond version, orchestrator version, uptime,
-// with the frame time on the right; the legend row under it.
+// header: the title line centred — SPOOND · host · version · e2b orch
+// · uptime — an ═ rule across the full width, and the legend row, also
+// centred. The frame time is gone: the status line's clock replaced it.
 func (l *layout) header(g *grid.Grid, y int) {
 	segs := []grid.Seg{
 		{Text: "SPOOND", Style: "head"},
-		{Text: " " + l.host, Style: "text"},
-		{Text: "  spoond " + dashVersion, Style: "text"},
-		{Text: "  orch " + versionLabel(l.s.Version), Style: "text"},
-		{Text: "  up " + fmt.Sprintf("%.0fh", l.s.UptimeH), Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: l.host, Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: versionLabel(dashVersion), Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: "e2b " + versionLabel(l.s.Version), Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: "up " + fmt.Sprintf("%.0fh", l.s.UptimeH), Style: "text"},
 	}
-	g.Segs(0, y, segs, l.w)
-	g.Right(l.w-1, y, []grid.Seg{{Text: l.s.At, Style: "dim"}})
-	g.Segs(0, y+1, legendRow(), l.w)
+	g.Center(l.w/2, y, segs)
+	g.HLine(0, y+1, l.w, "frame")
+	for x := 0; x < l.w; x++ {
+		g.Put(x, y+1, '═', "frame")
+	}
+	g.Center(l.w/2, y+2, legendRow())
 }
 
-// versionLabel is an orchestrator version or "?" when the scrape had none.
+// versionLabel is a version for the header: "?" when the scrape had
+// none. A spoond build version is shortened for the line: a tag stays
+// as it is (v2.2.0), a Go pseudo-version (v2.1.3-0.20261004183409-
+// 7a13d2bd1131) becomes base+first seven of the hash (v2.1.3+7a13d2b).
 func versionLabel(v string) string {
 	if v == "" {
 		return "?"
 	}
-	return v
+	base, hash, ok := strings.Cut(v, "-0.")
+	if !ok || len(hash) < 7 {
+		return v
+	}
+	if i := strings.LastIndex(hash, "-"); i >= 0 {
+		hash = hash[i+1:]
+	}
+	if len(hash) < 7 {
+		return v
+	}
+	return base + "+" + hash[:7]
 }
 
-// panel draws a double-line framed panel of h rows with its title on
-// the frame, at row y, and returns the row past its bottom edge. id is
-// the element id Datastar patches by.
+// panel draws a single-line framed panel of h rows with its title on
+// the frame's top border at x+2 (┌─ title ───), at row y, and returns
+// the row past its bottom edge. id is the element id Datastar patches
+// by.
 func (l *layout) panel(g *grid.Grid, y, h int, title, id string) int {
-	drawPanelFrame(g, y, l.w, h)
+	g.Box(0, y, l.w, h, "frame", false)
 	if title != "" {
-		g.Title(3, y, []grid.Seg{{Text: " " + title + " ", Style: "title"}})
+		g.Title(2, y, []grid.Seg{{Text: " " + title + " ", Style: "title"}})
 	}
 	g.Mark(1, y+1, l.w-2, h-2, id)
 	return y + h
-}
-
-// drawPanelFrame draws a ═-framed rectangle w×h at (0, y) in the
-// "frame" style: double-line edges, so panels read as distinct from the
-// plain header. Drawn with Put (the package's Box draws single lines
-// only).
-func drawPanelFrame(g *grid.Grid, y, w, h int) {
-	for i := 0; i < w; i++ {
-		g.Put(i, y, '═', "frame")
-		g.Put(i, y+h-1, '═', "frame")
-	}
-	for i := 1; i < h-1; i++ {
-		g.Put(0, y+i, '║', "frame")
-		g.Put(w-1, y+i, '║', "frame")
-	}
-	g.Put(0, y, '╔', "frame")
-	g.Put(w-1, y, '╗', "frame")
-	g.Put(0, y+h-1, '╚', "frame")
-	g.Put(w-1, y+h-1, '╝', "frame")
 }
 
 // stateCount is one name/count pair of the capacity panel.
@@ -357,8 +491,9 @@ func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 	return out
 }
 
-// headerRows is the header's row count (title + legend).
-func headerRows() int { return 2 }
+// headerRows is the header's row count: the centred title line, the
+// ═ rule under it and the legend.
+func headerRows() int { return 3 }
 
 // capacity panel: running / limit meter, leases by state, queued,
 // granted, swept, running by image.
