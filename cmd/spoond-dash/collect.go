@@ -34,7 +34,6 @@ type Snapshot struct {
 	// Leases and sandboxes.
 	Leases     int            `json:"leases"`
 	ByState    map[string]int `json:"byState"`
-	ByImage    map[string]int `json:"byImage"`
 	Queued     int            `json:"queued"`
 	Granted    int            `json:"granted"` // cumulative leases granted
 	Swept      int            `json:"swept"`
@@ -157,7 +156,7 @@ func newCollector(cfg Config) *collector {
 // fields at zero; the rest of the frame still renders.
 func (c *collector) collect(ctx context.Context) Snapshot {
 	now := c.now()
-	s := Snapshot{At: now.Format("15:04:05"), ByState: map[string]int{}, ByImage: map[string]int{}}
+	s := Snapshot{At: now.Format("15:04:05"), ByState: map[string]int{}}
 	var errs []string
 
 	if fams, err := c.scrape(ctx); err != nil {
@@ -261,7 +260,6 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	g := func(name string) float64 { return value(fams[name]) }
 	s.Leases = int(g("spoond_leases_active"))
 	s.ByState = byLabel(fams["spoond_leases"], "state")
-	s.ByImage = byLabel(fams["spoond_leases_by_image"], "image")
 	s.Queued = int(g("spoond_leases_queued"))
 	s.Granted = int(g("spoond_leases_total"))
 	s.Swept = int(g("spoond_lease_swept_total"))
@@ -626,6 +624,15 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		u.Close()
 	}
 
+	// Live leases per image, from the rows just read (running and
+	// suspended leases hold an image's build).
+	live := map[string]int{}
+	for _, r := range s.Rows {
+		if r.State == "running" || r.State == "suspended" {
+			live[r.Image]++
+		}
+	}
+
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
 	if err != nil {
 		return err
@@ -638,7 +645,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			return err
 		}
 		r.Updated = since(now, updated) + " ago"
-		r.Live = s.ByImage[r.Name]
+		r.Live = live[r.Name]
 		r.Uses = uses[r.Name]
 		s.Images = append(s.Images, r)
 	}

@@ -33,7 +33,6 @@ func sampleSnapshot() Snapshot {
 		Leases: 5, Queued: 1, Granted: 1234, Swept: 17,
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
 		ByState:   map[string]int{"running": 3, "suspended": 1, "lost": 1},
-		ByImage:   map[string]int{"go-base": 2, "py-base": 1},
 		ReqPerSec: 12.3, CreatesPerMin: 4, CreateMs: 250, ResumeMs: 4100,
 		FwConns: 9, AuthFails: 2, Quota: 1, Throttled: 0, Capacity: 3, BuildFails: 1,
 		CPUPct: 37.5, Load1: 1.4, Cores: 16,
