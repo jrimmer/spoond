@@ -626,7 +626,7 @@ func (l *layout) capacityRows() []capacityRow {
 
 	// Leases: total, then running, suspended and lost counts. A zero
 	// count is dim; recovered appears only when non-zero.
-	segs := []grid.Seg{{Text: fmt.Sprintf("%d", l.s.Leases), Style: "text"}}
+	segs := []grid.Seg{{Text: fmt.Sprintf("%d leases", l.s.Leases), Style: "text"}}
 	for _, st := range []struct {
 		name string
 		n    int
@@ -818,6 +818,9 @@ func (l *layout) meterSegs(label string, pct, warnPct, dangerPct float64, barW i
 	segs := []grid.Seg{{Text: fmt.Sprintf("%-*s", meterLabelW, label), Style: "dim"}, {Text: " ", Style: "dim"}}
 	if barW > 0 {
 		filled := clamp(int(pct/100*float64(barW)), 0, barW)
+		if pct > 0 && filled == 0 {
+			filled = 1 // anything above zero shows: 3 of 64 is not an empty bar
+		}
 		style := "ok"
 		switch {
 		case pct >= dangerPct:
@@ -924,7 +927,7 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 
 	// The build GC's mode — bold ok when deletion is on, dim when it
 	// only logs candidates — and its lifetime count, left out at zero.
-	segs := []grid.Seg{gcSeg(l.s.GCMode)}
+	segs := []grid.Seg{{Text: "gc ", Style: "dim"}, gcSeg(l.s.GCMode)}
 	if l.s.GCDeleted > 0 {
 		segs = append(segs,
 			grid.Seg{Text: " · ", Style: "dim"},
@@ -989,25 +992,6 @@ func leaseLayout(w int) leaseCols {
 	c.hold = c.left + 6
 	return c
 }
-
-// meterBarW is the panels' fixed meter bar width: 16 cells in a
-// side-by-side panel (label 13 + one gap + the bar + one gap + a value
-// of at most 12 cells fills 47 of the 49 inner columns); full width
-// stacks keep it, matching the mockup.
-func (l *layout) meterBarW() int {
-	barW := l.w - 4 - meterLabelW - 14 - maxMeterValueW
-	if barW < 8 {
-		barW = 8
-	}
-	if barW > 16 {
-		barW = 16
-	}
-	return barW
-}
-
-// maxMeterValueW is the widest value a meter shows in a side-by-side
-// panel: "121.5 GiB free".
-const maxMeterValueW = 15
 
 func (l *layout) leasesH() int {
 	n := len(l.s.Rows)
@@ -1254,7 +1238,7 @@ func gcLabel(mode string) string {
 // dim when it is a dry run.
 func gcSeg(mode string) grid.Seg {
 	if mode == "delete" {
-		return grid.Seg{Text: gcLabel(mode), Style: "ok"}
+		return grid.Seg{Text: "delete on", Style: "ok"}
 	}
 	return grid.Seg{Text: gcLabel(mode), Style: "dim"}
 }

@@ -5,14 +5,14 @@
 ▲ held lease fedcba0987: expiry/expire 3h00m ago                                                        
                                                                                                         
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
-│ running       ░░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
-│ 5 · 3 running · 1 suspended · 1 lost            │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
+│ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
+│ 5 leases · 3 running · 1 suspended · 1 lost     │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
 │ queued 1 · granted 1,234 · swept 17             │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │
 │ shares 2 · users 7 · builds busy 1              │  │ snapshot disk █████████░░░╎░░░  121.5 GiB free  │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ root disk     ██████░░░░░░╎░░░   30.2 GiB free  │
 │ go-base        ███······             1 running  │  │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
 │ py-base        ███······             1 running  │  │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB         │
-│                                                 │  │ dry-run                                         │
+│                                                 │  │ gc dry-run                                      │
 └─────────────────────────────────────────────────┘  └─────────────────────────────────────────────────┘
 ┌─ throughput (5 min) ─────────────────────────────────────────────────────────────────────────────────┐
 │ running      ▃▅▇▅█▇                                                                                3 │
