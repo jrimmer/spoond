@@ -1230,8 +1230,8 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRestart reboots a persistent lease (workspace-backed: snapshot +
-// resume; plain: kill + cold spawn).
+// handleRestart restarts a lease: a persistent one is paused and resumed
+// (guest state kept, not a reboot), a plain one gets a fresh guest.
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")

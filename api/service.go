@@ -1440,7 +1440,7 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	return l, nil
 }
 
-// restart reboots a lease. Persistent and running: suspend, then resume
+// restart restarts a lease. Persistent and running: suspend, then resume
 // (lossless through the pause build). Persistent and suspended: resume.
 // Non-persistent: delete the sandbox and create a fresh one from the
 // image's current build, keeping the lease id (A1 §17 item 4).

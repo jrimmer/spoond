@@ -352,10 +352,14 @@ Resuming a lease that is already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.)
 
-### `POST /api/leases/{id}/restart` — reboot
+### `POST /api/leases/{id}/restart` — pause and resume, or a fresh guest
 
 Persistent and running: suspend then resume (same lease, same build
-chain, lossless through the pause build). Persistent and suspended:
+chain, lossless through the pause build). This is **not a reboot**: the
+guest comes back with the same memory and processes, so a hung or
+out-of-memory process is still there afterwards. To start a persistent
+lease's guest over, delete it or clone from an earlier checkpoint (a
+cold restart that keeps the lease id is planned, #120). Persistent and suspended:
 resume. Non-persistent: delete the sandbox and create a fresh one from
 the image's current build, keeping the lease id (its disk is lost —
 there is no snapshot to restore). The non-persistent path bumps the

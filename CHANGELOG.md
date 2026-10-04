@@ -23,6 +23,10 @@ summarised from README "Status".
   it, so the row's tail (padding and right border) appeared twice and the
   row wrapped. The anchor now wraps only the holder text. A holder longer
   than its column is cut with `…`.
+- **Restart is no longer called a reboot.** On a persistent lease it
+  pauses and resumes the guest with its memory and processes intact, so
+  it cannot unstick a hung guest. The API, ctl and spoondctl docs now say
+  so. A cold restart that keeps the lease id is planned (#120).
 
 ## [2.2.0] - 2026-10-04
 
