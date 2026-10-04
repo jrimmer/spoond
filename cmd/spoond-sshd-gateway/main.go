@@ -1111,14 +1111,16 @@ collect:
 	}
 
 	// A suspended lease is resumed automatically before the session
-	// starts (U09): SSH attach used to fail after a restore.
+	// starts (U09): SSH attach used to fail after a restore. A held
+	// lease suspended by the idle rule resumes for the holder's session
+	// through the same owner-blind route (2.1).
 	if b, err := backendJSON(gwCtx, http.MethodGet, "/api/sandboxes/"+leaseID, nil); err == nil {
 		var st struct {
 			State string `json:"state"`
 		}
 		if json.Unmarshal(b, &st) == nil && st.State == "suspended" {
 			log.Printf("session %s: suspended, resuming", leaseID)
-			if err := backendJSONErr(gwCtx, http.MethodPost, "/api/sandboxes/"+leaseID+"/resume", nil); err != nil {
+			if err := backendJSONErr(gwCtx, http.MethodPost, "/api/leases/"+leaseID+"/resume", nil); err != nil {
 				fmt.Fprintf(ch.Stderr(), "spoond: cannot resume lease %s: %v\n", leaseID, err)
 				_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct {
 					Status uint32

@@ -45,8 +45,9 @@ Request:
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
 | `egress_allowlist` | []string | *(empty)* | IPs/CIDRs/domains for `restricted`; also lease references (see below) |
 | `expose_ports` | []int | *(none)* | guest TCP ports published for peer leases. Max 8; port 49983 (envd) is refused; duplicates and out-of-range ports are refused |
-| `holder` | string | `""` | what holds the lease (a CI job, an orchestrator's flight, a person's scratch work). At most 128 printable characters. A non-empty holder makes the lease **held**: it is not released at its TTL, not idle-suspended, and checkpointed periodically like a persistent lease |
+| `holder` | string | `""` | what holds the lease (a CI job, an orchestrator's flight, a person's scratch work). At most 128 printable characters. A non-empty holder makes the lease **held**: it is not released at its TTL, not idle-suspended by the plain sweep, and checkpointed periodically like a persistent lease. A hold expires on its own (see `hold_ttl`) — the automatic held-lease limits in [operations.md](operations.md) act regardless |
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
+| `hold_ttl` | int | `0` | seconds the hold lasts from now instead of the default `HOLD_TTL_SECS`; capped at `HOLD_TTL_MAX_SECS`. Ignored when `holder` is empty |
 
 Response `201 Created`:
 
@@ -81,6 +82,12 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
 `name`, `comment`, `holder`, `holder_url`, `net_policy`,
 `egress_allowlist`, `exposed`.
+
+A held lease's row adds `hold_expires_at` (RFC 3339, when the hold
+expires and normal sweeping resumes) and — after the first automatic
+held-lease action — `last_action` (`"rule/action"`, e.g.
+`"idle/suspend_idle"`) with `last_action_at` (RFC 3339); see
+[operations.md](operations.md) for the rules behind them.
 
 ### `GET /api/leases/{id}` — lease detail
 The same object as a list row plus `state`, `recovered_from` (RFC 3339 or
@@ -262,13 +269,15 @@ owned by the caller, with the source's policy copied. Quota is reserved
 for all of them up front (all or nothing); if any create fails, every
 lease created in the call is deleted.
 
-Request `{"count":1..20,"persistent":false,"ttl":300}` (`ttl` 0 = the
-default TTL, capped at the maximum and the user's `max_ttl`). The
-optional `holder` and `holder_url` fields stamp every created lease
-(same validation as create; the forks are held like the holder wants
-its work kept).
+Request `{"count":1..20,"persistent":false,"ttl":300,"hold_ttl":600}`
+(`ttl` 0 = the default TTL, capped at the maximum and the user's
+`max_ttl`; `hold_ttl` bounds the forks' hold like on create). The
+optional `holder`, `holder_url` and `hold_ttl` fields stamp every
+created lease (same validation as create; the forks are held like the
+holder wants its work kept).
 
-Response `201 Created`: `{"source":"<id>","build_id":"<uuid>","ids":["…","…"]}`.
+Response `201 Created`:
+`{"source":"<id>","build_id":"<uuid>","ids":["…","…"],"hold_expires_at":"…"}`.
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
 suspended or busy, `429` quota, `503` capacity.
 
@@ -292,27 +301,53 @@ Request `{"name": "<unique-per-owner-name>"}`. Response
 
 Request `{"comment": "…"}`. Response `{"id":"…","comment":"…","ok":true}`.
 
-### `PUT /api/leases/{id}/holder` — set or clear what holds the lease
+### `PUT /api/leases/{id}/holder` — set, renew or clear what holds the lease
 
 Owner or admin; anyone else gets the same `404` as the other lease
 routes. Sets the holder later on an existing lease — the same fields as
-create:
+create plus `hold_ttl`:
 
 ```json
-{"holder": "ci-job-42", "holder_url": "https://ci.example.com/jobs/42"}
+{"holder": "ci-job-42", "holder_url": "https://ci.example.com/jobs/42", "hold_ttl": 600}
 ```
 
 Both fields empty clears the holder and restores normal sweeping. The
-same validation applies as on create (`400` naming the offending field).
-Response `200` `{"id":"…","holder":"…","holder_url":"…","ok":true}`.
+same validation applies as on create (`400` naming the offending
+field). Response `200`
+`{"id":"…","holder":"…","holder_url":"…","hold_expires_at":"…","ok":true}`.
+
+Putting the **same** holder on a lease that is already held **renews**
+the hold: it lasts another `HOLD_TTL_SECS` (or the given, capped
+`hold_ttl`) from now. A **different** holder is refused with `409` —
+take the lease over by clearing first.
 
 **Held-lease semantics:** a lease with a non-empty `holder` is not
-released by the TTL sweeper, is not idle-suspended, and is checkpointed
-periodically like a persistent lease — a CI job or an orchestrator can
-hold a plain (non-persistent) lease past its TTL without keep-alive
-calls, and its work survives a crash. The GC already keeps every
-lease's builds; a held lease changes nothing else. Clear the holder
-when the work ends, or the lease stays until it is deleted by hand.
+released by the TTL sweeper, is not idle-suspended by the plain sweep,
+and is checkpointed periodically like a persistent lease — a CI job or
+an orchestrator can hold a plain (non-persistent) lease past its TTL
+without keep-alive calls, and its work survives a crash. The hold ends
+on its own (`HOLD_TTL_SECS` from when it was set or renewed, at most
+`HOLD_TTL_MAX_SECS` for an explicit `hold_ttl`): past expiry
+`holder`/`holder_url` are cleared and the lease follows the normal TTL
+and idle rules again. Even while held, the automatic limits in
+[operations.md](operations.md) act on their own — idle suspend,
+release of stale suspended leases, the pressure and critical-disk
+rules — and every action is reported as `last_action`/`last_action_at`
+on the lease. A held lease suspended by the idle rule resumes on next
+use: the SSH gateway does this automatically on attach, and
+`POST /api/leases/{id}/resume` (no owner check — the lease id or name
+is the capability, like the gateway itself) does it over HTTP.
+Unheld leases are not served by that route (404); use the owner-checked
+`POST /api/sandboxes/{id}/resume` for them.
+
+### `POST /api/leases/{id}/resume` — resume a held lease (gateway)
+
+Owner-blind resume for **held** leases: used by the SSH gateway on
+attach, where the capability is the lease id or name and no owner id is
+known. Restores a rule-1-suspended held lease from `resume_build_id`
+with the same sandbox id (see the held-lease semantics above). An
+unheld or unknown lease answers `404`. Response `200`
+`{"id":"…","status":"running","address":"…"}`.
 
 ### `POST /api/leases/{id}/prompt` — message the in-sandbox Shelley agent
 

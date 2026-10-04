@@ -76,6 +76,19 @@ type Lease struct {
 	// persistent lease. "" = unheld, normal sweeping.
 	Holder    string `json:"holder,omitempty"`
 	HolderUrl string `json:"holder_url,omitempty"`
+	// HoldSetAt/HoldExpiresAt bound the hold (2.1): it lasts HoldTTL
+	// from when it was set or renewed, at most HoldTTLMax for an
+	// explicit hold_ttl. Past HoldExpiresAt the holder fields are
+	// cleared and the lease follows the normal TTL and idle rules.
+	// HoldTTL mirrors the requested explicit hold_ttl (0 = the default).
+	HoldSetAt     time.Time     `json:"hold_set_at,omitempty"`
+	HoldExpiresAt time.Time     `json:"hold_expires_at,omitempty"`
+	HoldTTL       time.Duration `json:"-"`
+	// LastAction/LastActionAt record the last automatic held-lease
+	// action ("rule/action", e.g. "idle/suspend_idle") and when it
+	// happened; both are returned by the lease API.
+	LastAction   string    `json:"last_action,omitempty"`
+	LastActionAt time.Time `json:"last_action_at,omitempty"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -178,6 +191,21 @@ type ServiceConfig struct {
 	// enough to be reclaimed by hand. Zero falls back to the defaults.
 	LostGracePersistent time.Duration
 	LostGrace           time.Duration
+	// Held-lease limits (2.1, owner decision 2026-10-03): how long a
+	// held lease may sit idle before it is suspended (0 disables), how
+	// long it may stay suspended before it is released (0 disables),
+	// how long a hold lasts and how long an explicit hold_ttl may be,
+	// and the disk-free percentages that shorten the idle threshold
+	// (pressure) or release suspended held leases (critical). Zero
+	// falls back to the Default* constants in api/held.go.
+	HeldIdleTimeout        time.Duration
+	HeldSuspendedRelease   time.Duration
+	HoldTTL                time.Duration
+	HoldTTLMax             time.Duration
+	PressureDiskFreePct    float64
+	PressureHeldIdle       time.Duration
+	CriticalDiskFreePct    float64
+	CriticalDiskRecoverPct float64
 }
 
 // Service is the lease API backend.
@@ -211,6 +239,10 @@ type Service struct {
 	// now is the service clock. Tests replace it to age a lease's
 	// lost_at without sleeping; the GC's grace periods read it.
 	now func() time.Time
+	// diskCapacity reads the snapshot store's total and free bytes for
+	// the held-lease pressure and critical rules (2.1). Tests replace it
+	// to exercise those thresholds without a real filesystem.
+	diskCapacity func(path string) (total, free uint64, err error)
 	// refreshMu serializes refreshPeers runs, which are scheduled
 	// asynchronously after lifecycle events (U09).
 	refreshMu sync.Mutex
@@ -241,6 +273,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		cfg:           cfg,
 		sweepInterval: 5 * time.Second,
 		now:           time.Now,
+		diskCapacity:  statfsCapacity,
 		appliedEgress: map[string]string{},
 		log:           log.Default(),
 		probeEnabled:  true,
@@ -765,7 +798,8 @@ func (s *Service) refillPool(ctx context.Context) {
 // sandbox keeps its state snapshot and is cheap to resume.
 func (s *Service) sweepExpired(ctx context.Context) {
 	// Draining pauses every lease and undrain resumes it; the idle sweep
-	// must not fight the drain (U10).
+	// must not fight the drain (U10). The held-lease limits (2.1) skip
+	// with it.
 	if s.draining.Load() {
 		return
 	}
@@ -773,13 +807,15 @@ func (s *Service) sweepExpired(ctx context.Context) {
 	s.flushLastActiveLocked(ctx)
 	var expired []*Lease
 	var idleSuspend []*Lease
-	now := time.Now()
+	now := s.now()
 	for _, l := range s.store.leases {
 		if l.released {
 			continue
 		}
 		// A held lease (non-empty holder) is left alone by both sweeps:
-		// not released at its TTL, not idle-suspended.
+		// not released at its TTL, not idle-suspended. Its own limits
+		// (hold expiry, idle suspend, stale release, pressure, critical)
+		// run in runHeldRules below.
 		if !l.Persistent && !l.held() && now.After(l.ExpiresAt) {
 			expired = append(expired, l)
 			continue
@@ -787,6 +823,27 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		if l.Persistent && !l.held() && s.cfg.IdleTimeout > 0 && !l.Suspended && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
 			s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
 			idleSuspend = append(idleSuspend, l)
+		}
+	}
+	s.store.mu.Unlock()
+	// Held-lease limits (2.1): hold expiry, stale release, idle suspend
+	// (shortened under pressure) and the critical-disk release — in that
+	// order. A hold expiring this tick clears the holder, so an
+	// already-expired TTL releases the lease in the second pass below;
+	// seenNow keeps leases already collected out of it.
+	s.runHeldRules(ctx, now)
+	seenNow := make(map[*Lease]bool, len(expired))
+	for _, l := range expired {
+		seenNow[l] = true
+	}
+	s.store.mu.Lock()
+	now = s.now()
+	for _, l := range s.store.leases {
+		if l.released || l.held() || l.Persistent || seenNow[l] {
+			continue
+		}
+		if now.After(l.ExpiresAt) {
+			expired = append(expired, l)
 		}
 	}
 	s.store.mu.Unlock()
@@ -974,7 +1031,8 @@ func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow,
 // they are not TTL-swept (see keepAlive) and the consumer drives their
 // lifecycle. holder/holderURL name what holds the lease ("" = unheld,
 // normal sweeping); validation lives in validateHolder (the API layer
-// calls it before granting).
+// calls it before granting). The hold's clock itself is stamped by
+// grantHeld; grant leaves it zero so an unheld grant carries no hold.
 func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, holder, holderURL string, exposePorts ...int) (*Lease, error) {
 	start := time.Now()
 	img, b, err := s.imageBuild(ctx, image)
@@ -1642,21 +1700,9 @@ func validateHolder(holder, holderURL string) error {
 
 // setHolder sets or clears a lease's holder fields. Both empty clears
 // the holder and restores normal sweeping. The route admits the owner
-// and admins; this function checks the owner it is given.
+// and admins; the hold clock lives in api/held.go (setHolder there).
 func (s *Service) setHolder(owner, id, holder, holderURL string) (*Lease, error) {
-	if err := validateHolder(holder, holderURL); err != nil {
-		return nil, err
-	}
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	l := s.store.leases[id]
-	if l == nil || l.Owner != owner || l.released {
-		return nil, errNotFound
-	}
-	l.Holder = holder
-	l.HolderUrl = holderURL
-	s.saveLeaseLocked(l)
-	return l, nil
+	return s.setHolderWithTTL(owner, id, holder, holderURL, 0)
 }
 
 // setName assigns a friendly name to a lease. Names must be non-empty,
@@ -1905,7 +1951,7 @@ func (s *Service) lookupAny(id string) *Lease {
 
 // leaseMap renders a lease as one GET /api/sandboxes row.
 func leaseMap(l *Lease) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"id":               l.ID,
 		"owner":            l.Owner,
 		"image":            l.Image,
@@ -1924,6 +1970,14 @@ func leaseMap(l *Lease) map[string]any {
 		"egress_allowlist": l.NetAllow,
 		"exposed":          exposedMap(l),
 	}
+	if !l.HoldExpiresAt.IsZero() {
+		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if l.LastAction != "" {
+		m["last_action"] = l.LastAction
+		m["last_action_at"] = formatRFC3339(l.LastActionAt)
+	}
+	return m
 }
 
 // leaseDetailMap is a list row plus the lifecycle fields served by
@@ -2094,6 +2148,11 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		Drained:               l.Drained,
 		Holder:                l.Holder,
 		HolderUrl:             l.HolderUrl,
+		HoldSetAt:             l.HoldSetAt,
+		HoldExpiresAt:         l.HoldExpiresAt,
+		HoldTTL:               int64(l.HoldTTL / time.Second),
+		LastAction:            l.LastAction,
+		LastActionAt:          l.LastActionAt,
 	}
 }
 
@@ -2126,6 +2185,11 @@ func rowToLease(r store.LeaseRow) *Lease {
 		Drained:               r.Drained,
 		Holder:                r.Holder,
 		HolderUrl:             r.HolderUrl,
+		HoldSetAt:             r.HoldSetAt,
+		HoldExpiresAt:         r.HoldExpiresAt,
+		HoldTTL:               time.Duration(r.HoldTTL) * time.Second,
+		LastAction:            r.LastAction,
+		LastActionAt:          r.LastActionAt,
 	}
 }
 
@@ -2320,6 +2384,7 @@ func (s *Service) LiveLeases() []string {
 func (s *Service) Shutdown(ctx context.Context) {
 	if s.stopLoops != nil {
 		s.stopLoops()
+		s.stopLoops = nil // a new Start(ctx2) gets a fresh sweeper
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
@@ -2443,12 +2508,13 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 }
 
 var (
-	errNotFound      = &leaseError{"lease not found"}
-	errNotPersistent = &leaseError{"lease is not a persistent lease"}
-	errUnknownImage  = &leaseError{"unknown image"}
-	errSuspended     = &leaseError{"lease is suspended"}
-	errBadForkCount  = &leaseError{"count must be 1..20"}
-	errLeaseBusy     = &leaseError{"lease is busy; retry"}
+	errNotFound       = &leaseError{"lease not found"}
+	errNotPersistent  = &leaseError{"lease is not a persistent lease"}
+	errUnknownImage   = &leaseError{"unknown image"}
+	errSuspended      = &leaseError{"lease is suspended"}
+	errBadForkCount   = &leaseError{"count must be 1..20"}
+	errLeaseBusy      = &leaseError{"lease is busy; retry"}
+	errHolderMismatch = &leaseError{"holder does not match the lease's current holder"}
 )
 
 // leaseError is a simple sentinel error.

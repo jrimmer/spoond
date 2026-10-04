@@ -12,6 +12,33 @@ summarised from README "Status".
 
 ### Added
 
+- **Limits on held leases that act automatically (#111 follow-up).** A
+  held lease can no longer keep memory or disk forever, and nobody has
+  to watch a dashboard for it: the limits run in the sweep loop, skip
+  while draining, and every action is logged (one line naming the
+  lease, holder, rule and numbers), counted in
+  `spoond_held_actions_total{rule,action}` and recorded on the lease
+  (`last_action`, `last_action_at`, returned by the lease API together
+  with `hold_expires_at`). Rule 1 (`HELD_IDLE_TIMEOUT_SECS`, default
+  14400 = 4 h) suspends a held lease idle that long (memory and
+  hugepages freed, nothing deleted, resumes on next use — the SSH
+  gateway resumes on attach, `POST /api/leases/{id}/resume` over
+  HTTP). Rule 2 (`HELD_SUSPENDED_RELEASE_SECS`, default 604800 = 7 d)
+  releases a lease suspended by rule 1 that stayed untouched that
+  long. Rule 3 ends a hold on its own: `HOLD_TTL_SECS` (default
+  604800 = 7 d) from set or renewal — renewal is the holder PUT with
+  the same holder, another holder is `409` — capped at
+  `HOLD_TTL_MAX_SECS` (default 2592000 = 30 d) for the new explicit
+  `hold_ttl` on create, fork and the holder PUT; past expiry the
+  holder is cleared and the lease follows the normal TTL and idle
+  rules. Rule 4 (`PRESSURE_DISK_FREE_PCT` 15, `PRESSURE_HELD_IDLE_SECS`
+  1800 = 30 min) shortens rule 1 when the snapshot disk runs low or
+  free hugepages would not admit a default-size lease. Rule 5
+  (`CRITICAL_DISK_FREE_PCT` 5, `CRITICAL_DISK_RECOVER_PCT` 10) releases
+  already-suspended held leases, oldest suspension first, until free
+  space recovers — never a running lease. `0` disables a rule. Store
+  migration 8 adds the hold-expiry and last-action columns.
+
 - **Lease holders (#111).** A lease can say what holds it — a CI job,
   an orchestrator's flight, a person's scratch work — with an optional
   link. `holder` and `holder_url` are accepted on lease create and on
