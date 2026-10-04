@@ -34,11 +34,12 @@ const (
 // Extra is every non-ASCII rune the dashboard draws beyond grid.Glyphs:
 // ✓ an active unit and ✗ one that is not, · separator, ═ the header's
 // rule, ▲ the attention strip's marker, ┄ a held-lease action in the
-// events panel, ▲ the attention strip, ■ the lost state, ∞ a
-// persistent lease's remaining time, ◉ a lapsed hold, and the leases
-// panel's per-state glyphs (▶ running, ‖ suspended, ◆ held). It is
-// passed to grid.Check by every renderer, and every rune is asserted to
-// be in the shipped JetBrains Mono (TestExtraGlyphsInFont).
+// events panel and the rules inside the capacity and host panels, ■ the
+// lost state, ∞ a persistent lease's remaining time, ◉ a lapsed hold,
+// and the leases panel's per-state glyphs (▶ running, ‖ suspended,
+// ◆ held). It is passed to grid.Check by every renderer, and every rune
+// is asserted to be in the shipped JetBrains Mono
+// (TestExtraGlyphsInFont).
 const Extra = "✓✗·═▲┄■∞◉" + stateGlyphs
 
 // stateGlyphs are the leases panel's per-state glyphs.
