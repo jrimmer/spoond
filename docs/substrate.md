@@ -101,9 +101,10 @@ an overcommitted host.
 gRPC or E2B types. `substrate/e2b` is the only implementation in
 production; `substrate/fake` exists for the unit tests. The interface
 covers template building, sandbox lifecycle (create, list, delete, pause,
-checkpoint), live egress updates, node info and drain signalling, and the
+checkpoint), live egress updates, node info and drain signalling, the
 guest surface (health, exec, interactive process start, raw TCP dial,
-traffic tokens).
+traffic tokens) and the guest filesystem (write, read with a size cap,
+stat, mkdir, remove, #114).
 
 ## Images
 
