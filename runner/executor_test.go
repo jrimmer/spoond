@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // fakeLease is an in-memory SandboxProvider for tests.
@@ -579,5 +581,240 @@ jobs:
 				t.Fatalf("GITHUB_RUN_ID = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// labelingLease is a fakeLease that also implements LeaseLabeler, the
+// way HTTPLeaseClient does: it records the label the executor set
+// before Create.
+type labelingLease struct {
+	fakeLease
+	mu    sync.Mutex
+	label string
+}
+
+func (h *labelingLease) WithLabel(label string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.label = label
+}
+
+func (h *labelingLease) labelled() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.label
+}
+
+// TestExecutorLabelsJobLease (#119): the executor labels the lease with
+// the job before creating it: "forgejo job <id> <job URL>".
+func TestExecutorLabelsJobLease(t *testing.T) {
+	lease := &labelingLease{*newFakeLease(), sync.Mutex{}, ""}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+		ForgejoURL:   "https://code.example.com/",
+	}
+	job := testJob(`
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`)
+	job.ID = 42
+	job.Context["run_id"] = "7"
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got, want := lease.labelled(), "forgejo job 42 https://code.example.com/actions/runs/7/jobs/42"; got != want {
+		t.Fatalf("label = %q, want %q", got, want)
+	}
+	// The lease itself was still created and released.
+	if len(lease.created) != 1 || len(lease.deleted) != 1 {
+		t.Fatalf("create/delete = %d/%d, want 1/1", len(lease.created), len(lease.deleted))
+	}
+}
+
+// TestExecutorRunIDFallback: without run_id in the context, the label's
+// URL falls back to the job id (unique per attempt, so the URL still
+// resolves to exactly this attempt).
+func TestExecutorRunIDFallback(t *testing.T) {
+	lease := &labelingLease{*newFakeLease(), sync.Mutex{}, ""}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         &fakeSink{},
+		DefaultImage: "py-base",
+		ForgejoURL:   "https://code.example.com",
+	}
+	job := testJob(`
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`)
+	job.ID = 99
+	delete(job.Context, "run_id")
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got, want := lease.labelled(), "forgejo job 99 https://code.example.com/actions/runs/99/jobs/99"; got != want {
+		t.Fatalf("label = %q, want the job-id fallback URL %q", got, want)
+	}
+}
+
+// TestExecutorNoForgejoURLNoLabel: with ForgejoURL unset (other
+// consumers of the executor) nothing is labelled.
+func TestExecutorNoForgejoURLNoLabel(t *testing.T) {
+	lease := &labelingLease{*newFakeLease(), sync.Mutex{}, ""}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         &fakeSink{},
+		DefaultImage: "py-base",
+	}
+	if err := exec.Run(context.Background(), testJob(`
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := lease.labelled(); got != "" {
+		t.Fatalf("label = %q, want none", got)
+	}
+}
+
+// blockingLease is a fakeLease whose Exec blocks until its ctx dies —
+// a step in progress when the runner's graceful stop cancels the job.
+type blockingLease struct {
+	fakeLease
+	started chan struct{}
+}
+
+func (b *blockingLease) Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error) {
+	close(b.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestExecutorReportsCancelledOnContextDeath (#119): a job whose
+// context is cancelled mid-run — the pool's Stop after
+// RUNNER_STOP_GRACE — reports ResultCancelled, on a context that is
+// still live, so Forgejo hears the final state instead of reaping a
+// task it believes still runs.
+func TestExecutorReportsCancelledOnContextDeath(t *testing.T) {
+	lease := &blockingLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+		ForgejoURL:   "https://code.example.com",
+	}
+	job := testJob(`
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`)
+	job.ID = 5
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Run(ctx, job) }()
+	<-lease.started // wait until the job's step is in flight
+	cancel()        // …then cancel it, the way the pool's Stop does
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run never returned after cancellation")
+	}
+	if len(sink.reports) != 1 {
+		t.Fatalf("reported %d state(s), want exactly 1 (the cancelled job)", len(sink.reports))
+	}
+	if got := sink.reports[0].Result; got != ResultCancelled {
+		t.Fatalf("reported result %v, want ResultCancelled", got)
+	}
+}
+
+// TestExecutorReportsOnLiveContextWhenCancelled: a report into a dead
+// context fails before the sink sees it; the executor must make the
+// final report on a fresh context instead (asserted inside the sink's
+// Report — the executor closes its report context when the call
+// returns, which is fine, so liveness can only be judged mid-call).
+type ctxCheckSink struct {
+	fakeSink
+	live *bool // set when Report saw a live context
+}
+
+func (s *ctxCheckSink) Report(ctx context.Context, state *JobState, outputs map[string]string) error {
+	*(s.live) = ctx.Err() == nil
+	return nil
+}
+
+func TestExecutorReportsOnLiveContextWhenCancelled(t *testing.T) {
+	lease := &blockingLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+	live := false
+	sink := &ctxCheckSink{live: &live}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+		ForgejoURL:   "https://code.example.com",
+	}
+	job := testJob(`
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Run(ctx, job) }()
+	<-lease.started
+	cancel()
+	<-done
+
+	if !live {
+		t.Fatal("final report ran on a dead context; Forgejo would never hear it")
+	}
+}
+
+// TestExecutorReportStillSuccessWithoutCancel: the cancelled-state
+// override only applies when the context actually died — a normal run
+// keeps its own result.
+func TestExecutorReportStillSuccessWithoutCancel(t *testing.T) {
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      newFakeLease(),
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	if err := exec.Run(context.Background(), testJob(`
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello
+`)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultSuccess {
+		t.Fatalf("reported %+v, want one success", sink.reports)
 	}
 }

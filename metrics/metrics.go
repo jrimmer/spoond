@@ -458,7 +458,7 @@ type RunnerMetrics struct {
 	Registry *prometheus.Registry
 
 	JobsActive        prometheus.Gauge       // jobs currently executing
-	JobsTotal         *prometheus.CounterVec // {result}: success, failure
+	JobsTotal         *prometheus.CounterVec // {result}: success, failure, cancelled
 	JobDur            prometheus.Histogram   // end-to-end job time
 	ExecRetries       prometheus.Counter     // exec retry attempts
 	ExecErrors        *prometheus.CounterVec // {code}: exec errors by HTTP status

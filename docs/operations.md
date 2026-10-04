@@ -448,6 +448,46 @@ Failed CI jobs are recorded as JSON under `/var/lib/spoond/jobs/`
 tail — the first place to look for a red build, since Forgejo exposes no
 readable log API. See [ci-jobs.md](ci-jobs.md).
 
+## The runner
+
+`spoond-runner` (the `runner` subcommand) runs Forgejo Actions jobs in
+sandboxes leased from the backend. Each job lease is labelled with its
+job (#119): right after the create, the runner sets the lease's comment
+to `forgejo job <id> <job URL>`. The lease is deliberately **not held**:
+held leases join the periodic checkpoint pass, which pauses a sandbox
+while it snapshots. A job lease lives for `LEASE_TTL` like any plain
+lease.
+
+**Orphan sweep at start.** When the runner starts it lists its token's
+leases and deletes every one whose comment starts with `forgejo job ` —
+at start the process runs nothing, so all of them are orphans of a
+crashed or restarted predecessor (without the sweep they keep their
+sandboxes until `LEASE_TTL` runs out). Each deletion is logged with the
+lease id and label. The token's other leases are never touched, and a failed
+sweep (backend unreachable) only delays it: the pool still starts, and
+the next restart sweeps again.
+
+**Graceful stop.** On SIGTERM or SIGINT (systemd's stop signal is
+SIGTERM) the runner stops fetching new jobs, waits up to
+`RUNNER_STOP_GRACE` (duration, default `10m`) for running jobs to
+finish, then cancels the rest — each job is reported to Forgejo as
+**cancelled**, its lease released by the executor's deferred delete —
+and exits 0. `systemd` kills the unit when
+its own stop timeout is reached, so the unit's `TimeoutStopSec` must be
+**above** `RUNNER_STOP_GRACE` (the shipped `deploy/spoond-runner.service`
+sets `TimeoutStopSec=660` for the 600 s default):
+
+```ini
+# /etc/systemd/system/spoond-runner.service
+[Service]
+Environment=RUNNER_STOP_GRACE=10m
+TimeoutStopSec=660   # must exceed RUNNER_STOP_GRACE
+```
+
+If `RUNNER_STOP_GRACE` is raised, raise `TimeoutStopSec` with it; a
+SIGKILLed runner leaves its job leases behind until the next runner
+start's orphan sweep (or their TTL) releases them.
+
 ## Held-lease limits
 
 A held lease (`holder` set, see [api.md](api.md)) is exempt from the

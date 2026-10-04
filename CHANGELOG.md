@@ -34,6 +34,19 @@ summarised from README "Status".
   pauses and resumes the guest with its memory and processes intact, so
   it cannot unstick a hung guest. The API, ctl and spoondctl docs now say
   so. A cold restart that keeps the lease id is planned (#120).
+- **Stopping the runner leaked its job leases (#119).** systemd's
+  SIGTERM killed `spoond-runner` mid-job, so its deferred deletes never
+  ran: the job leases kept their sandboxes until their TTL, and Forgejo
+  never heard the jobs' fate. Now, on SIGTERM/SIGINT, the runner stops
+  fetching jobs and lets running jobs finish for up to `RUNNER_STOP_GRACE`
+  (default `10m`; the unit's `TimeoutStopSec` must stay above it,
+  `deploy/spoond-runner.service` sets 660). It then cancels the rest: each
+  is reported to Forgejo as cancelled and its lease released. Then it
+  exits 0. Every job lease's comment names its job
+  (`forgejo job <id> <job URL>`). At start, the runner deletes its
+  token's leases with such a comment, since they are a dead
+  predecessor's orphans. Job leases are deliberately not held: held
+  leases are checkpointed periodically, which would pause CI sandboxes.
 
 ## [2.2.0] - 2026-10-04
 

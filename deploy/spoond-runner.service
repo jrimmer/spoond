@@ -11,6 +11,12 @@ EnvironmentFile=/etc/spoond-runner.env
 # State file (RUNNER_STATE_FILE) preserves Forgejo UUID/token between restarts.
 Restart=always
 RestartSec=5
+# Graceful stop (#119): SIGTERM drains the pool — running jobs get
+# RUNNER_STOP_GRACE (default 10m) to finish, then are cancelled and
+# their job leases released, and the runner exits 0. TimeoutStopSec must
+# stay ABOVE RUNNER_STOP_GRACE, or systemd SIGKILLs the runner mid-drain
+# and the job leases are left for the next start's orphan sweep.
+TimeoutStopSec=660
 
 [Install]
 WantedBy=multi-user.target

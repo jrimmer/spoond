@@ -40,6 +40,12 @@ type Executor struct {
 	// RecordDir is where failed jobs are recorded as JSON (one file per
 	// job). Empty disables recording. Set via JOB_RECORD_DIR.
 	RecordDir string
+	// ForgejoURL is the Forgejo instance base URL (e.g.
+	// https://code.lacy.casa). When set, the lease the job runs in is
+	// labelled with the job (#119): its comment is
+	// "forgejo job <id> <job URL>" — see the LeaseLabeler port in
+	// ports.go. Empty disables the label.
+	ForgejoURL string
 }
 
 // checkoutRe matches a uses: actions/checkout step (any version).
@@ -52,6 +58,15 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	if e.Metrics != nil {
 		e.Metrics.JobsActive.Inc()
 		defer e.Metrics.JobsActive.Dec()
+	}
+	// Label the lease with the job before creating it (#119): the
+	// comment names the job and links to it, and the orphan sweep at the
+	// next start finds a dead runner's leases by it. A comment, not a
+	// holder: a holder would make the lease held, and held leases are
+	// checkpointed periodically, pausing the job's sandbox.
+	if l, ok := e.Sandbox.(LeaseLabeler); ok && e.ForgejoURL != "" {
+		l.WithLabel(fmt.Sprintf("%s%d %s/actions/runs/%d/jobs/%d",
+			JobLabelPrefix, job.ID, strings.TrimRight(e.ForgejoURL, "/"), e.runID(job), job.ID))
 	}
 	wf, err := ParseWorkflow(job.Workflow)
 	if err != nil {
@@ -296,6 +311,13 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			break
 		}
 	}
+	// A dead job context at the end of the loop means the job was
+	// cancelled, not failed: the runner's graceful stop spent
+	// RUNNER_STOP_GRACE and pulled the plug. Record that as the job's
+	// result so Forgejo shows a cancelled task instead of a red one.
+	if ctx.Err() != nil {
+		state.Result = ResultCancelled
+	}
 	// Name the failing step in the runner's own journal: this line is what an
 	// operator sees on the host, and "result=1 steps=5" alone does not say
 	// which step died or why.
@@ -310,13 +332,36 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	}
 	if e.Metrics != nil {
 		result := "success"
-		if state.Result == ResultFailure {
+		switch state.Result {
+		case ResultFailure:
 			result = "failure"
+		case ResultCancelled, ResultSkipped:
+			result = "cancelled"
 		}
 		e.Metrics.JobsTotal.WithLabelValues(result).Inc()
 		e.Metrics.JobDur.Observe(time.Since(jobStart).Seconds())
 	}
-	return e.Sink.Report(ctx, state, nil)
+	return e.report(ctx, state, nil)
+}
+
+// reportTimeout bounds a final report made after the job's own context
+// died: the runner must not hang on a wedged sink while the shutdown
+// grace (and systemd's TimeoutStopSec) tick down.
+const reportTimeout = 15 * time.Second
+
+// report sends the job's final state to the sink. When ctx is already
+// dead — the runner's graceful stop cancelled the job after
+// RUNNER_STOP_GRACE — the report goes out on a fresh bounded context
+// instead: reporting into the dead context would fail outright and
+// Forgejo would never hear the final state, keeping the task running
+// until its stale-task reaper stops it.
+func (e *Executor) report(ctx context.Context, state *JobState, outputs map[string]string) error {
+	if ctx.Err() != nil {
+		rctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
+		defer cancel()
+		ctx = rctx
+	}
+	return e.Sink.Report(ctx, state, outputs)
 }
 
 // stepName returns a short label for a step for logging.
@@ -328,6 +373,16 @@ func stepName(step *Step) string {
 		return step.Name
 	}
 	return "run"
+}
+
+// runID is the workflow run a job belongs to, for the label's URL. The
+// context carries it as run_id (a string); the job id — unique per
+// attempt, so it never collides across runs — is the fallback.
+func (e *Executor) runID(job *Job) int64 {
+	if n, err := strconv.ParseInt(job.Context["run_id"], 10, 64); err == nil && n > 0 {
+		return n
+	}
+	return job.ID
 }
 
 // jobRecord builds the failure record for a finished job. Every executed step
@@ -519,7 +574,7 @@ func (e *Executor) logLines(ctx context.Context, job *Job, index int64, rows []s
 // create sandbox" is exactly the class of failure a consumer cannot see from
 // Forgejo.
 func (e *Executor) fail(ctx context.Context, job *Job, err error) error {
-	_ = e.Sink.Report(ctx, &JobState{ID: job.ID, Result: ResultFailure}, nil)
+	_ = e.report(ctx, &JobState{ID: job.ID, Result: ResultFailure}, nil)
 	writeJobRecord(e.RecordDir, &JobRecord{JobID: job.ID, Result: "failure", Error: err.Error()})
 	return err
 }
