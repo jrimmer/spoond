@@ -77,13 +77,15 @@ func applyLinks(row string, y int, links []linkAt) string {
 	return row[:open] + anchor + row[close:]
 }
 
-// pageGrid renders the whole grid as the page's row elements, joined by
-// newlines (the page template puts them inside its <pre>).
+// pageGrid renders the whole grid as the page's row elements (the page
+// template puts them inside its <pre>). The rows are blocks, so nothing
+// goes between them: a newline text node there drew a blank line under
+// every row and broke the box borders.
 func pageGrid(g *grid.Grid, links []linkAt) string {
 	lines := pageLines(g, links)
 	parts := make([]string, len(lines))
 	for i, l := range lines {
 		parts[i] = fmt.Sprintf(`<span class="gr" id="r%d">%s</span>`, l.N, l.HTML)
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "")
 }
