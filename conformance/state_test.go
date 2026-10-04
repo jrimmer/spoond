@@ -207,3 +207,35 @@ func TestS4_CreateLatency(t *testing.T) {
 	rec.set("create_p50_ms", pct(sorted, 50))
 	rec.set("create_p95_ms", pct(sorted, 95))
 }
+
+// TestS5_RestartBumpsGeneration: POST /restart puts a lease into a new
+// generation (2.2, #112) — the API and the guest's
+// /run/spoond/generation both say 2 — while a plain suspend/resume
+// leaves it alone.
+func TestS5_RestartBumpsGeneration(t *testing.T) {
+	begin(t)
+
+	l := createLease(t, map[string]any{"image": "py-base", "persistent": true, "ttl": 600})
+	if g := leaseGeneration(t, l.ID); g != 1 {
+		failf(t, "new lease generation %d, want 1", g)
+	}
+	for _, step := range []struct {
+		name string
+		do   func(string) (int, []byte, error)
+	}{{"suspend", cl.suspend}, {"resume", cl.resume}} {
+		st, body, err := step.do(l.ID)
+		if err != nil || st != 200 {
+			failf(t, "%s: status %d: %v %s", step.name, st, err, truncate(body))
+		}
+	}
+	if g := leaseGeneration(t, l.ID); g != 1 {
+		failf(t, "generation %d after suspend/resume, want 1", g)
+	}
+	st, body, err := cl.restart(l.ID)
+	if err != nil || st != 200 {
+		failf(t, "restart: status %d: %v %s", st, err, truncate(body))
+	}
+	if g := leaseGeneration(t, l.ID); g != 2 {
+		failf(t, "generation %d after restart, want 2", g)
+	}
+}
