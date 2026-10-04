@@ -199,6 +199,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// admin; the handler 404s for anyone else, like the other lease
 	// routes.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/holder", s.handleHolder)
+	// Owner-blind resume for held leases (2.1): the SSH gateway resumes
+	// a rule-1-suspended held lease on attach, where the capability is
+	// the lease id/name and no owner id is known.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -666,9 +669,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ExposePorts []int `json:"expose_ports"`
 		// Holder names what holds the lease (a CI job, a person's
 		// scratch work) and HolderURL links to it. A non-empty holder
-		// keeps the lease out of the TTL and idle sweeps.
+		// keeps the lease out of the TTL and idle sweeps. HoldTTL bounds
+		// the hold (2.1): it expires on its own so a forgotten hold
+		// cannot pin the lease forever.
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
+		HoldTTL   int    `json:"hold_ttl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -697,6 +703,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.HoldTTL < 0 {
+		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
 		return
 	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
@@ -757,17 +767,26 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Stamp the hold's clock on the granted lease (grant itself leaves
+	// it zero so unheld grants carry no hold).
+	if req.Holder != "" {
+		s.svc.store.mu.Lock()
+		s.svc.setHoldLocked(lease, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second, s.svc.now())
+		s.svc.saveLeaseLocked(lease)
+		s.svc.store.mu.Unlock()
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":         lease.ID,
-		"owner":      lease.Owner,
-		"address":    lease.HostIP,
-		"image":      lease.Image,
-		"ttl":        int(ttl.Seconds()),
-		"persistent": lease.Persistent,
-		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
-		"holder":     lease.Holder,
-		"holder_url": lease.HolderUrl,
-		"exposed":    exposedMap(lease),
+		"id":              lease.ID,
+		"owner":           lease.Owner,
+		"address":         lease.HostIP,
+		"image":           lease.Image,
+		"ttl":             int(ttl.Seconds()),
+		"persistent":      lease.Persistent,
+		"expires_at":      lease.ExpiresAt.UTC().Format(time.RFC3339),
+		"holder":          lease.Holder,
+		"holder_url":      lease.HolderUrl,
+		"hold_expires_at": formatRFC3339(lease.HoldExpiresAt),
+		"exposed":         exposedMap(lease),
 	})
 }
 
@@ -1216,20 +1235,29 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleHolder sets or clears what holds a lease (2.1): request
-// {"holder":"…","holder_url":"…"}, both empty clears. A held lease is
-// not released at its TTL, not idle-suspended, and checkpointed
-// periodically like a persistent lease. Owner or admin; anyone else
-// gets the same 404 as the other lease routes (no existence leak).
+// handleHolder sets or clears what holds a lease, or renews the hold
+// (2.1): request {"holder":"…","holder_url":"…","hold_ttl":secs}.
+// Both holder fields empty clears. The same holder renews the hold for
+// another HOLD_TTL_SECS (or the explicit, capped hold_ttl) from now; a
+// different holder is refused with 409. A held lease is not released
+// at its TTL, not idle-suspended, and checkpointed periodically like a
+// persistent lease; its hold expires on its own and the automatic
+// limits act regardless. Owner or admin; anyone else gets the same 404
+// as the other lease routes (no existence leak).
 func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
 	var req struct {
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
+		HoldTTL   int    `json:"hold_ttl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.HoldTTL < 0 {
+		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
 		return
 	}
 	lease := s.svc.lookup(owner, id)
@@ -1240,7 +1268,28 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	updated, err := s.svc.setHolder(lease.Owner, id, req.Holder, req.HolderURL)
+	var (
+		updated *Lease
+		err     error
+	)
+	// Validation first (400 naming the field), then the holder match:
+	// a malformed request is rejected as malformed even if the holder
+	// would not match either.
+	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Holder != "" && lease.Holder != "" && req.Holder != lease.Holder {
+		// A different holder takes the lease away from the one holding
+		// it: refused instead of silently replacing.
+		writeError(w, http.StatusConflict, errHolderMismatch.Error())
+		return
+	}
+	if lease.Holder != "" && req.Holder == lease.Holder {
+		updated, err = s.svc.renewHolder(lease.Owner, id, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second)
+	} else {
+		updated, err = s.svc.setHolderWithTTL(lease.Owner, id, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second)
+	}
 	if err != nil {
 		if err == errNotFound {
 			writeError(w, http.StatusNotFound, "lease not found")
@@ -1250,10 +1299,11 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":         updated.ID,
-		"holder":     updated.Holder,
-		"holder_url": updated.HolderUrl,
-		"ok":         true,
+		"id":              updated.ID,
+		"holder":          updated.Holder,
+		"holder_url":      updated.HolderUrl,
+		"hold_expires_at": formatRFC3339(updated.HoldExpiresAt),
+		"ok":              true,
 	})
 }
 
@@ -1354,6 +1404,12 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
 	lease, err := s.svc.resume(r.Context(), owner, id)
+	if err == errNotFound && s.requestHasGatewayToken(r) {
+		// The SSH gateway resumes a suspended lease before a session
+		// starts, for a user it has already authorised; its service token
+		// is owner-blind here as it is for stream lookups.
+		lease, err = s.svc.resumeAny(r.Context(), id)
+	}
 	if err != nil {
 		switch err {
 		case errNotFound:
@@ -1668,6 +1724,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		TTL        int    `json:"ttl"` // seconds
 		Holder     string `json:"holder"`
 		HolderURL  string `json:"holder_url"`
+		HoldTTL    int    `json:"hold_ttl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -1675,6 +1732,10 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.HoldTTL < 0 {
+		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
 		return
 	}
 	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second, req.Holder, req.HolderURL)
@@ -1701,11 +1762,18 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	ids := make([]string, len(leases))
 	for i, l := range leases {
 		ids[i] = l.ID
+		if req.Holder != "" {
+			s.svc.store.mu.Lock()
+			s.svc.setHoldLocked(l, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second, s.svc.now())
+			s.svc.saveLeaseLocked(l)
+			s.svc.store.mu.Unlock()
+		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"source":   id,
-		"build_id": buildID,
-		"ids":      ids,
+		"source":          id,
+		"build_id":        buildID,
+		"ids":             ids,
+		"hold_expires_at": formatRFC3339(leases[0].HoldExpiresAt),
 	})
 }
 

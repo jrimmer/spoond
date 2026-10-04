@@ -262,13 +262,13 @@ func TestMigrationVersionsUnique(t *testing.T) {
 
 // TestMigration7HolderOnV6Database builds a database by hand at version
 // 6 (the pre-holder schema, with one existing lease row) and opens it:
-// migration 7 must apply, stamping holder and holder_url on the leases
-// table with the empty string — the unheld default that keeps normal
-// sweeping.
+// migrations 7 and 8 must apply, stamping holder and holder_url plus
+// the hold-expiry and last-action columns on the leases table, all
+// defaulted empty — the unheld default that keeps normal sweeping.
 func TestMigration7HolderOnV6Database(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v6.db")
 	{
-		db, err := Open(path) // applies 0001..0007
+		db, err := Open(path) // applies 0001..0008
 		if err != nil {
 			t.Fatalf("open fresh: %v", err)
 		}
@@ -276,9 +276,9 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 			t.Fatalf("close: %v", err)
 		}
 	}
-	// Rewind the file to version 6: drop the two columns migration 7
-	// added and remove its schema_migrations row, so the next Open
-	// applies 0007 for real.
+	// Rewind the file to version 6: drop the columns migrations 7 and 8
+	// added and remove their schema_migrations rows, so the next Open
+	// applies 0007 and 0008 for real.
 	db6, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -287,7 +287,12 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN holder`,
 		`ALTER TABLE leases DROP COLUMN holder_url`,
-		`DELETE FROM schema_migrations WHERE version = 7`,
+		`ALTER TABLE leases DROP COLUMN hold_set_at`,
+		`ALTER TABLE leases DROP COLUMN hold_expires_at`,
+		`ALTER TABLE leases DROP COLUMN hold_ttl`,
+		`ALTER TABLE leases DROP COLUMN last_action`,
+		`ALTER TABLE leases DROP COLUMN last_action_at`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -300,7 +305,7 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 	}
 	db6.Close()
 
-	db, err := Open(path) // migration 7 applies here
+	db, err := Open(path) // migrations 7 and 8 apply here
 	if err != nil {
 		t.Fatalf("open v6 database: %v", err)
 	}

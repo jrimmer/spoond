@@ -83,6 +83,9 @@ type BackendMetrics struct {
 	StorageFree   prometheus.Gauge       // free bytes at the template storage path
 	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
 
+	// Held-lease limits (2.1): automatic actions on held leases
+	HeldActions *prometheus.CounterVec // {rule,action}: idle/stale/expiry/pressure/critical × suspend/release/expire
+
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
 	LeasesByImage     *prometheus.GaugeVec     // {image}: live leases per image
@@ -300,6 +303,12 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Builds deleted by the catalog GC, by kind.",
 	}, []string{"kind"})
 
+	// Held-lease limits (2.1): automatic actions on held leases.
+	m.HeldActions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "held_actions_total",
+		Help: "Automatic actions on held leases, by rule (idle, stale, expiry, pressure, critical) and action (suspend_idle, release, expire).",
+	}, []string{"rule", "action"})
+
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases",
@@ -349,6 +358,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
+		m.HeldActions,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)

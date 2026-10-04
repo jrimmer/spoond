@@ -42,6 +42,25 @@
 //	GC_LOST_GRACE   how long a non-persistent lease's snapshots stay
 //	                  kept after the lease is lost (Go duration;
 //	                  default 24h = 1 d)
+//	HELD_IDLE_TIMEOUT_SECS  how long a held lease may sit idle (no exec,
+//	                  stream, proxy, keepalive or heartbeat) before the
+//	                  sweep suspends it (default 14400 = 4 h; 0 disables)
+//	HELD_SUSPENDED_RELEASE_SECS  how long a held lease suspended by the
+//	                  idle or critical rule may stay untouched before it
+//	                  is released (default 604800 = 7 d; 0 disables)
+//	HOLD_TTL_SECS    how long a hold lasts from when it was set or
+//	                  renewed (default 604800 = 7 d; 0 uses the default)
+//	HOLD_TTL_MAX_SECS  the cap for an explicit hold_ttl on create or
+//	                  PUT /api/leases/{id}/holder (default 2592000 = 30 d)
+//	PRESSURE_DISK_FREE_PCT  snapshot-disk free percentage under which
+//	                  the idle threshold shortens (default 15; 0 disables)
+//	PRESSURE_HELD_IDLE_SECS  the shortened idle threshold under pressure
+//	                  (default 1800 = 30 min; 0 disables the shortening)
+//	CRITICAL_DISK_FREE_PCT  snapshot-disk free percentage under which
+//	                  suspended held leases are released (default 5; 0
+//	                  disables)
+//	CRITICAL_DISK_RECOVER_PCT  release stops above this free percentage
+//	                  (default 10)
 package spoondbackend
 
 import (
@@ -143,6 +162,14 @@ func Main(args []string) int {
 	// become candidates.
 	lostGracePersistent := envDurationOr("GC_LOST_GRACE_PERSISTENT", 7*24*time.Hour)
 	lostGrace := envDurationOr("GC_LOST_GRACE", 24*time.Hour)
+	// Held-lease limits (2.1, owner decision 2026-10-03): a held lease
+	// must never keep memory or disk forever, and nobody watches the
+	// dashboard, so the limits act on their own (0 disables a rule).
+	heldIdle := time.Duration(envIntOr("HELD_IDLE_TIMEOUT_SECS", 14400)) * time.Second
+	heldRelease := time.Duration(envIntOr("HELD_SUSPENDED_RELEASE_SECS", 604800)) * time.Second
+	holdTTL := time.Duration(envIntOr("HOLD_TTL_SECS", 604800)) * time.Second
+	holdTTLMax := time.Duration(envIntOr("HOLD_TTL_MAX_SECS", 2592000)) * time.Second
+	pressureIdle := time.Duration(envIntOr("PRESSURE_HELD_IDLE_SECS", 1800)) * time.Second
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
@@ -180,19 +207,27 @@ func Main(args []string) int {
 	}
 
 	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
-		PoolSize:            poolSize,
-		DefaultTTL:          defaultTTL,
-		MaxTTL:              maxTTL,
-		IdleTimeout:         idleTimeout,
-		HostGuestAddr:       hostGuestAddr,
-		HostGuestPort:       hostGuestPort,
-		HostAPIPort:         hostAPIPort,
-		MetricsToken:        os.Getenv("METRICS_TOKEN"),
-		ProxyURL:            cfg.ProxyURL,
-		CheckpointEvery:     checkpointEvery,
-		TemplateStoragePath: storagePath,
-		LostGracePersistent: lostGracePersistent,
-		LostGrace:           lostGrace,
+		PoolSize:               poolSize,
+		DefaultTTL:             defaultTTL,
+		MaxTTL:                 maxTTL,
+		IdleTimeout:            idleTimeout,
+		HostGuestAddr:          hostGuestAddr,
+		HostGuestPort:          hostGuestPort,
+		HostAPIPort:            hostAPIPort,
+		MetricsToken:           os.Getenv("METRICS_TOKEN"),
+		ProxyURL:               cfg.ProxyURL,
+		CheckpointEvery:        checkpointEvery,
+		TemplateStoragePath:    storagePath,
+		LostGracePersistent:    lostGracePersistent,
+		LostGrace:              lostGrace,
+		HeldIdleTimeout:        heldIdle,
+		HeldSuspendedRelease:   heldRelease,
+		HoldTTL:                holdTTL,
+		HoldTTLMax:             holdTTLMax,
+		PressureDiskFreePct:    float64(envIntOr("PRESSURE_DISK_FREE_PCT", api.DefaultPressureDiskFreePct)),
+		PressureHeldIdle:       pressureIdle,
+		CriticalDiskFreePct:    float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
+		CriticalDiskRecoverPct: float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
 	})
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
 	// a ping and then fails the job deep inside a build, so verify it from

@@ -114,6 +114,14 @@ is refreshed (allocated blocks, not apparent size) and exposed as
 `spoond_snapshot_bytes{kind}`, with `spoond_storage_free_bytes` for the
 store's free space.
 
+Interaction with the held-lease critical rule (rule 5 in [Held-lease
+limits](#held-lease-limits)): a release frees no disk by itself — the
+space returns only when the GC reclaims the released lease's builds,
+which takes the GC age (1 h) and `GC_DELETE=1`. Under the dry-run
+default the critical rule therefore releases nothing (it logs, at most
+once an hour, that the dry-run GC stops it); a full snapshot disk on a
+node with held leases is a reason to turn the GC out of dry-run.
+
 ## Restarting the orchestrator (planned)
 
 `systemctl restart e2b-orchestrator` is safe: the unit's drain hooks make
@@ -293,6 +301,49 @@ Failed CI jobs are recorded as JSON under `/var/lib/spoond/jobs/`
 tail — the first place to look for a red build, since Forgejo exposes no
 readable log API. See [ci-jobs.md](ci-jobs.md).
 
+## Held-lease limits
+
+A held lease (`holder` set, see [api.md](api.md)) is exempt from the
+plain TTL and idle sweeps — that is the point — but it must never be
+able to keep memory or disk forever, and nobody watches the dashboard.
+So the limits act on their own: they run in the existing sweep loop
+(every `sweepInterval`, 5 s) and skip while the node is draining. Every
+automatic action is logged as one line naming the lease, the holder,
+the rule and the numbers that triggered it, counted in
+`spoond_held_actions_total{rule,action}`, and recorded on the lease
+(`last_action`, `last_action_at`, returned by the lease API with
+`hold_expires_at` and `hold_state`). A hold also lapses on its own: it
+lasts `HOLD_TTL_SECS` from when it was set or renewed (renewal is `PUT
+/api/leases/{id}/holder` with the same holder), at most
+`HOLD_TTL_MAX_SECS` for an explicit `hold_ttl`. A lapsed hold
+**suspends** a running lease and never releases one: the lease stays
+held with no expiry (`hold_state` `lapsed`), so the TTL sweep never
+touches it however long ago its own TTL passed; rule 2 releases it once
+it has stayed suspended and untouched for its limit, and renewing
+restores a normal hold.
+
+**Nothing running is ever released automatically.** Rules 2 and 5
+release only leases that a rule suspended (idle, pressure or a lapse)
+and that saw no activity since; a held lease suspended by hand or by
+the drain is never released by them.
+
+| # | Rule | Variable | Default | Meaning |
+|---|---|---|---|---|
+| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach) |
+| 2 | Stale release | `HELD_SUSPENDED_RELEASE_SECS` | `604800` (7 d) | a held lease suspended by rule 1, 3 or 4 and untouched since for this long is **released** (deleted); the GC reclaims its builds |
+| 3 | Hold lapse | `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS` | `604800` (7 d), `2592000` (30 d) | an unrenewed hold lapses: a running lease is **suspended** (never released), stays held with no expiry, and rule 2 takes it from there |
+| 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a 1 GiB lease — no seeded image is smaller), rule 1 uses the shorter threshold |
+| 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage and `GC_DELETE=1`, held leases a rule suspended (1, 3 or 4), untouched since, are **released** oldest suspension first, at most one per sweep tick, until free space is above the recovery percentage; the GC runs first, at most every 5 minutes. A running lease is never released. With the dry-run GC the rule releases nothing, since nothing would be freed |
+| 6 | Scheduling | — | — | the rules run in the existing sweep loop and skip while the node is draining |
+
+Set `HELD_IDLE_TIMEOUT_SECS`, `HELD_SUSPENDED_RELEASE_SECS`,
+`PRESSURE_HELD_IDLE_SECS`, `PRESSURE_DISK_FREE_PCT` or
+`CRITICAL_DISK_FREE_PCT` to `0` to disable that rule. `HOLD_TTL_SECS`
+and `HOLD_TTL_MAX_SECS` cannot be disabled: `0` means their default, so
+every hold lapses eventually. Watch the rules with `journalctl -u spoond-backend | grep 'held
+lease'` and `spoond_held_actions_total` — a rising `critical{release}`
+means the disk needs attention the leases are paying for.
+
 ## Users & identity
 
 - **Revoking access** = `DELETE /api/users/{id}` (or `ssh-key rm
@@ -370,6 +421,7 @@ marker. The substrate-specific series:
 | `spoond_snapshot_bytes{kind}` | build disk per kind |
 | `spoond_storage_free_bytes` | free bytes at the build store |
 | `spoond_gc_deleted_total{kind}` | builds deleted by the GC |
+| `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
 | `spoond_capacity_rejections_total` | admission refusals |
 | `spoond_store_errors_total{op}` | SQLite write failures |
 

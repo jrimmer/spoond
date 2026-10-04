@@ -364,6 +364,18 @@ func storageFreeBytes(dir string) uint64 {
 	return st.Bavail * uint64(st.Bsize)
 }
 
+// statfsCapacity reports dir's total (f_blocks × f_bsize) and free
+// (f_bavail × f_bsize) bytes for the held-lease pressure and critical
+// rules; an unreadable path returns an error and the rules stay off.
+func statfsCapacity(dir string) (total, free uint64, err error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, 0, err
+	}
+	bsize := uint64(st.Bsize)
+	return st.Blocks * bsize, st.Bavail * bsize, nil
+}
+
 // handleSnapshots lists the caller's non-deleted builds (U11).
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())

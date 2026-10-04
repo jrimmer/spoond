@@ -27,14 +27,24 @@ type LeaseRow struct {
 	// Holder names what holds the lease (a CI job, a person) and
 	// HolderUrl links to it. A non-empty holder keeps the lease out of
 	// every sweeper (TTL, idle) and on the periodic checkpoint pass.
+	// HoldSetAt/HoldExpiresAt bound the hold (2.1): past HoldExpiresAt
+	// the holder is cleared and normal sweeping resumes. HoldTTL is the
+	// requested explicit hold_ttl in seconds (0 = the default). The
+	// Last* fields record the last automatic held-lease action.
 	Holder, HolderUrl string
+	HoldSetAt         time.Time
+	HoldExpiresAt     time.Time
+	HoldTTL           int64
+	LastAction        string
+	LastActionAt      time.Time
 }
 
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
 	persistent, last_active, workspace, suspended, name, net_policy, net_allow,
 	expose_ports, exposed_ip, comment, state, resume_build_id,
 	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained, lost_at,
-	holder, holder_url`
+	holder, holder_url, hold_set_at, hold_expires_at, hold_ttl,
+	last_action, last_action_at`
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -49,7 +59,8 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	}
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -76,14 +87,21 @@ ON CONFLICT(id) DO UPDATE SET
   drained=excluded.drained,
   lost_at=excluded.lost_at,
   holder=excluded.holder,
-  holder_url=excluded.holder_url`,
+  holder_url=excluded.holder_url,
+  hold_set_at=excluded.hold_set_at,
+  hold_expires_at=excluded.hold_expires_at,
+  hold_ttl=excluded.hold_ttl,
+  last_action=excluded.last_action,
+  last_action_at=excluded.last_action_at`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
 		l.NetPolicy, string(netAllow), string(exposePorts), l.ExposedIP,
 		l.Comment, l.State, l.ResumeBuildID, l.LastCheckpointBuildID,
 		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom), l.Drained,
-		formatTime(l.LostAt), l.Holder, l.HolderUrl)
+		formatTime(l.LostAt), l.Holder, l.HolderUrl,
+		formatTime(l.HoldSetAt), formatTime(l.HoldExpiresAt), l.HoldTTL,
+		l.LastAction, formatTime(l.LastActionAt))
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -145,13 +163,16 @@ func (db *DB) UpdateLastActive(ctx context.Context, ids map[string]time.Time) er
 func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	var r LeaseRow
 	var createdAt, expiresAt, lastActive, lastCheckpointAt, recoveredFrom, lostAt string
+	var holdSetAt, holdExpiresAt, lastActionAt string
 	var netAllow, exposePorts string
 	err := scan(&r.ID, &r.Owner, &r.Image, &r.SandboxID, &r.Address,
 		&createdAt, &expiresAt, &r.Persistent, &lastActive, &r.Workspace,
 		&r.Suspended, &r.Name, &r.NetPolicy, &netAllow, &exposePorts,
 		&r.ExposedIP, &r.Comment, &r.State, &r.ResumeBuildID,
 		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained,
-		&lostAt, &r.Holder, &r.HolderUrl)
+		&lostAt, &r.Holder, &r.HolderUrl,
+		&holdSetAt, &holdExpiresAt, &r.HoldTTL,
+		&r.LastAction, &lastActionAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}
@@ -164,6 +185,9 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	r.LastCheckpointAt = parseTime(lastCheckpointAt)
 	r.RecoveredFrom = parseTime(recoveredFrom)
 	r.LostAt = parseTime(lostAt)
+	r.HoldSetAt = parseTime(holdSetAt)
+	r.HoldExpiresAt = parseTime(holdExpiresAt)
+	r.LastActionAt = parseTime(lastActionAt)
 	if err := json.Unmarshal([]byte(netAllow), &r.NetAllow); err != nil {
 		return LeaseRow{}, fmt.Errorf("store: lease %s: net_allow: %w", r.ID, err)
 	}
