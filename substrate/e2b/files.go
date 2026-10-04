@@ -133,9 +133,20 @@ func (c *Client) Remove(ctx context.Context, sandboxID, path string, recursive b
 		return err
 	}
 	if r.ExitCode != 0 {
-		return fmt.Errorf("e2b: remove %s %s: exit %d: %s", sandboxID, path, r.ExitCode, strings.TrimSpace(r.Stderr))
+		return rmdirError(sandboxID, path, r.ExitCode, r.Stderr)
 	}
 	return nil
+}
+
+// rmdirError maps a failed rmdir to the substrate's errors: "Directory
+// not empty" (coreutils and busybox both say it) is ErrNotEmpty, which
+// the files API answers with 409; anything else stays a plain failure.
+func rmdirError(sandboxID, path string, exit int, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if strings.Contains(strings.ToLower(msg), "not empty") {
+		return fmt.Errorf("e2b: remove %s %s: %w", sandboxID, path, substrate.ErrNotEmpty)
+	}
+	return fmt.Errorf("e2b: remove %s %s: exit %d: %s", sandboxID, path, exit, msg)
 }
 
 // envdFilesystem returns the Connect client for one sandbox's envd filesystem

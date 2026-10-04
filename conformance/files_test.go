@@ -125,13 +125,21 @@ func TestF2_LeaseFileOperations(t *testing.T) {
 	}
 
 	// DELETE removes; a non-recursive remove of a non-empty directory
-	// is refused, the recursive one goes through.
-	st, data, err = cl.fileDelete(l.ID, dir, "")
+	// (nested, which holds deeper) is refused, of an empty one (deeper)
+	// goes through, and the recursive one takes the rest.
+	st, data, err = cl.fileDelete(l.ID, "/root/.conformance-files/nested", "")
 	if err != nil {
-		failf(t, "delete dir: %v", err)
+		failf(t, "delete non-empty dir: %v", err)
 	}
 	if st != 409 {
 		failf(t, "delete non-empty dir: status %d, want 409: %s", st, truncate(data))
+	}
+	st, data, err = cl.fileDelete(l.ID, dir, "")
+	if err != nil {
+		failf(t, "delete empty dir: %v", err)
+	}
+	if st != 204 {
+		failf(t, "delete empty dir: status %d, want 204: %s", st, truncate(data))
 	}
 	st, data, err = cl.fileDelete(l.ID, path, "")
 	if err != nil {
