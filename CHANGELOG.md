@@ -120,6 +120,14 @@ summarised from README "Status".
   through the new route (`TestN7_GuestDialEcho`), proving host-to-guest
   TCP on E2B.
 
+### Fixed
+
+- **Dashboard rows ran together.** The live stream's first frame (and
+  any frame where the row count changed) replaced the page's
+  `<pre id="grid">` with its bare rows, dropping the element and its
+  class, so the grid lost its line breaks and wrapped at the window
+  edge. The stream now patches the rows inside the `<pre>`.
+
 ## [2.1.0] - 2026-10-04
 
 2.1 makes spoond a plain microVM utility again and gives it a terminal-style
