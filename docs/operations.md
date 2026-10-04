@@ -554,10 +554,12 @@ means the disk needs attention the leases are paying for.
 `spoond dash` is a read-only, live view of spoond's present operation,
 for watching rather than triage. It draws the whole frame as one
 character grid at a fixed width — capacity (running/limit meter, leases
-by state, queued, granted, swept, running per image), host meters
-(CPU, memory, hugepages, snapshot and root disk), five-minute
-throughput sparklines, live leases with holders, images, systemd units,
-refusal and failure counters, and the backend's last activity — plus
+by state, queued, granted, swept, and one row per image with live
+leases) beside the host meters (CPU, memory, hugepages, snapshot and
+root disk) at a wide frame, stacked below it at a narrow one — then
+five-minute throughput sparklines, live leases with holders, images,
+systemd units, refusal and failure counters, and the backend's last
+activity — plus
 an attention strip above the panels (one ▲ row per trigger, only when
 something needs a person): a unit not active, a lost lease, free
 hugepages or snapshot disk past the danger level, the TLS certificate
