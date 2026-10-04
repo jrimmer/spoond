@@ -10,6 +10,22 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Lease holders (#111).** A lease can say what holds it — a CI job,
+  an orchestrator's flight, a person's scratch work — with an optional
+  link. `holder` and `holder_url` are accepted on lease create and on
+  fork, returned on every lease read and in lists, and can be set or
+  cleared later with `PUT /api/leases/{id}/holder` (owner or admin;
+  `holder` at most 128 printable characters, `holder_url` empty or an
+  absolute http(s) URL of at most 512 characters, otherwise `400`). A
+  lease with a non-empty holder is **held**: the TTL sweeper does not
+  release it, the idle sweep does not suspend it, and it is
+  checkpointed periodically like a persistent lease, so the holder's
+  work survives both expiry and a crash. Clearing the holder restores
+  normal sweeping. Store migration 7 adds the two columns (existing
+  leases default to unheld).
+
 ### Removed
 
 - **The hive, the worker layer and the bee loop moved to Honey.**

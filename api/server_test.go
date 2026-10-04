@@ -648,7 +648,7 @@ func TestShutdownKeepsLeasesAndPool(t *testing.T) {
 
 	// Grant a lease and warm the pool.
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -687,7 +687,7 @@ func TestReconcileOrphansDeletesForeignSandboxes(t *testing.T) {
 	}
 	// Grant our own lease (would be empty at true startup, but proves the
 	// mine/not-mine split).
-	ours, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	ours, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestGrantDiscardsUnhealthyPooledSandbox(t *testing.T) {
 	}
 	sub.SetHealthErr(pooled[0], fmt.Errorf("envd unreachable"))
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -789,7 +789,7 @@ func TestPersistentLeaseSurvivesSweep(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, true, "", nil) // persistent, short TTL
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, true, "", nil, "", "") // persistent, short TTL
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -808,7 +808,7 @@ func TestNonPersistentLeaseIsSwept(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -827,7 +827,7 @@ func TestKeepAliveExtendsPersistentLease(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -854,7 +854,7 @@ func TestKeepAliveRejectsNonPersistent(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

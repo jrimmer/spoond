@@ -37,15 +37,20 @@ func (s *Service) runCheckpointLoop(ctx context.Context) {
 	}
 }
 
-// checkpointIdleLeases checkpoints every persistent live lease that has
-// been active since its last checkpoint (a lease that saw no activity
-// since its last snapshot has nothing new to protect). One lease at a
-// time, 2 s apart; busy leases are skipped.
+// checkpointIdleLeases checkpoints every live lease that has been
+// active since its last checkpoint (a lease that saw no activity since
+// its last snapshot has nothing new to protect): persistent leases and
+// held leases (a non-empty holder puts a plain lease on this pass so
+// the holder's work survives a crash). One lease at a time, 2 s apart;
+// busy leases are skipped.
 func (s *Service) checkpointIdleLeases(ctx context.Context) {
 	s.store.mu.Lock()
 	var targets []*Lease
 	for _, l := range s.store.leases {
-		if l.released || !l.Persistent || !l.live() || l.busy {
+		if l.released || !l.live() || l.busy {
+			continue
+		}
+		if !l.Persistent && !l.held() {
 			continue
 		}
 		if !l.LastActive.After(l.LastCheckpointAt) {

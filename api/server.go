@@ -195,6 +195,10 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
+	// Held leases (2.1): set or clear what holds a lease later. Owner or
+	// admin; the handler 404s for anyone else, like the other lease
+	// routes.
+	s.mux.HandleFunc("PUT /api/sandboxes/{id}/holder", s.handleHolder)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -633,9 +637,17 @@ var maxExecTimeout = func() int {
 	return 300 // seconds
 }()
 
+// ownerFrom extracts the authenticated owner from the request context.
 func ownerFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxOwnerKey{}).(string)
 	return v
+}
+
+// isAdmin reports whether the caller is an identity-store admin user.
+// Legacy consumer-token callers are not admins.
+func isAdmin(r *http.Request) bool {
+	u := userFrom(r.Context())
+	return u != nil && u.Admin
 }
 
 // handleCreate grants a new sandbox lease.
@@ -652,6 +664,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// ExposePorts publishes guest TCP ports for other sandboxes to
 		// reach (each peer's egress policy decides reachability).
 		ExposePorts []int `json:"expose_ports"`
+		// Holder names what holds the lease (a CI job, a person's
+		// scratch work) and HolderURL links to it. A non-empty holder
+		// keeps the lease out of the TTL and idle sweeps.
+		Holder    string `json:"holder"`
+		HolderURL string `json:"holder_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -675,6 +692,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	expose, err := ValidateExposePorts(req.ExposePorts)
 	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -721,7 +742,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			ttl = userMax
 		}
 	}
-	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, ttl, req.Persistent, req.NetPolicy, req.NetAllow, expose...)
+	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, ttl, req.Persistent, req.NetPolicy, req.NetAllow, req.Holder, req.HolderURL, expose...)
 	if err != nil {
 		switch {
 		case errors.Is(err, errQuotaExceeded):
@@ -744,6 +765,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"ttl":        int(ttl.Seconds()),
 		"persistent": lease.Persistent,
 		"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339),
+		"holder":     lease.Holder,
+		"holder_url": lease.HolderUrl,
 		"exposed":    exposedMap(lease),
 	})
 }
@@ -1193,6 +1216,47 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleHolder sets or clears what holds a lease (2.1): request
+// {"holder":"…","holder_url":"…"}, both empty clears. A held lease is
+// not released at its TTL, not idle-suspended, and checkpointed
+// periodically like a persistent lease. Owner or admin; anyone else
+// gets the same 404 as the other lease routes (no existence leak).
+func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		Holder    string `json:"holder"`
+		HolderURL string `json:"holder_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	lease := s.svc.lookup(owner, id)
+	if lease == nil && isAdmin(r) {
+		lease = s.svc.lookupAny(id)
+	}
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	updated, err := s.svc.setHolder(lease.Owner, id, req.Holder, req.HolderURL)
+	if err != nil {
+		if err == errNotFound {
+			writeError(w, http.StatusNotFound, "lease not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":         updated.ID,
+		"holder":     updated.Holder,
+		"holder_url": updated.HolderUrl,
+		"ok":         true,
+	})
+}
+
 // handlePrompt sends a message to the Shelley coding agent running inside
 // a lease and returns the agent's reply. Requires the agent to be up
 // (see the `shelly` ctl verb / runShelly). Implements `shelley prompt`
@@ -1599,15 +1663,21 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
 	var req struct {
-		Count      int  `json:"count"`
-		Persistent bool `json:"persistent"`
-		TTL        int  `json:"ttl"` // seconds
+		Count      int    `json:"count"`
+		Persistent bool   `json:"persistent"`
+		TTL        int    `json:"ttl"` // seconds
+		Holder     string `json:"holder"`
+		HolderURL  string `json:"holder_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second)
+	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second, req.Holder, req.HolderURL)
 	if err != nil {
 		switch {
 		case errors.Is(err, errBadForkCount):
