@@ -101,7 +101,9 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 
 // recoverFromCheckpoint resumes a lease from its checkpoint build with
 // the same sandbox id (the UpsertSandbox in createSandbox replaces the
-// stale row) and marks it recovered.
+// stale row) and marks it recovered. The guest's memory did not continue
+// from where its processes left it, so the generation bumps (2.2) and
+// the new value is written into the guest.
 func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	img, err := s.db.GetImage(ctx, l.Image)
 	if err != nil {
@@ -121,7 +123,8 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	l.BuildID = l.LastCheckpointBuildID
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
-	s.saveLeaseLocked(l)
+	s.bumpGenerationLocked(l)
 	s.store.mu.Unlock()
+	s.writeGeneration(l)
 	return nil
 }

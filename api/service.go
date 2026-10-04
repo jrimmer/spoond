@@ -89,6 +89,13 @@ type Lease struct {
 	// happened; both are returned by the lease API.
 	LastAction   string    `json:"last_action,omitempty"`
 	LastActionAt time.Time `json:"last_action_at,omitempty"`
+	// Generation is the lease's continuity generation (2.2): 1 at
+	// create, bumped every time the guest's memory does not continue
+	// from where its processes left it — crash recovery and restart. A
+	// planned pause/resume and the admin drain/undrain continue the
+	// memory and do not bump it. Returned by the lease API as
+	// "generation" and written into the guest at /run/spoond/generation.
+	Generation int64 `json:"generation"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -1077,7 +1084,9 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		Holder:      holder,
 		HolderUrl:   holderURL,
 		State:       "running",
-		TemplateID:  img.TemplateID,
+		// Every lease starts on generation 1 (2.2).
+		Generation: 1,
+		TemplateID: img.TemplateID,
 	}
 
 	// Pool: pop the oldest entry for the image. The pool serves
@@ -1160,6 +1169,11 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		s.deleteSandboxRow(lease.SandboxID)
 		return nil, err
 	}
+
+	// The guest's generation file always exists (2.2): generation 1 on a
+	// fresh lease. Best effort, after the probe so a recycled sandbox
+	// never sees it.
+	s.writeGeneration(lease)
 
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
@@ -1335,9 +1349,23 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 		return nil, errLeaseBusy
 	}
 	l.busy = true
+	// Resuming a lease that is already running restores the pause build
+	// again: the guest's memory rolls back, so the generation bumps.
+	wasRunning := !l.Suspended && l.State == "running"
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
-	return s.resumeLeaseBody(ctx, l)
+	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
+		return nil, err
+	}
+	if wasRunning {
+		s.store.mu.Lock()
+		s.bumpGenerationLocked(l)
+		s.store.mu.Unlock()
+	}
+	// Written on every resume too, so a lease created before generations
+	// existed gets the file the first time it comes back.
+	s.writeGeneration(l)
+	return l, nil
 }
 
 // resumeLeaseBody is the sub work of a resume (U08's resume steps 1–4).
@@ -1402,12 +1430,20 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 				return nil, err
 			}
 		}
-		resumed, err := s.resumeLeaseBody(ctx, l)
-		if err != nil {
+		// A restart reboots the guest (2.2): its processes did not
+		// continue from where they were, so the generation bumps once the
+		// guest is back, and the new value is written into it. A failed
+		// restart leaves the lease suspended — memory still continues
+		// from the pause build on the later resume — so no bump.
+		if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 			return nil, err
 		}
+		s.store.mu.Lock()
+		s.bumpGenerationLocked(l)
+		s.store.mu.Unlock()
+		s.writeGeneration(l)
 		s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "restarted (snapshot round-trip)")
-		return resumed, nil
+		return l, nil
 	}
 
 	_ = s.sub.Delete(ctx, l.SandboxID)
@@ -1428,8 +1464,10 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	l.setState("running")
 	l.Suspended = false
 	l.LastActive = time.Now()
+	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.writeGeneration(l)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -1572,6 +1610,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		NetAllow:    append([]string(nil), src.NetAllow...),
 		ExposePorts: append([]int(nil), src.ExposePorts...),
 		State:       "running",
+		Generation:  1, // every lease starts on generation 1 (2.2)
 		TemplateID:  img.TemplateID,
 	}
 	sb, err := s.createSandbox(ctx, img, b, false, "", lease)
@@ -1582,6 +1621,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	lease.HostIP = sb.HostIP
 	lease.ExposedIP = sb.HostIP
 	lease.BuildID = b.BuildID
+	s.writeGeneration(lease)
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
@@ -1679,6 +1719,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			Holder:      holder,
 			HolderUrl:   holderURL,
 			State:       "running",
+			Generation:  1, // every lease starts on generation 1 (2.2)
 			TemplateID:  img.TemplateID,
 		}
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
@@ -1689,6 +1730,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		lease.HostIP = sb.HostIP
 		lease.ExposedIP = sb.HostIP
 		lease.BuildID = b.BuildID
+		s.writeGeneration(lease)
 		s.store.mu.Lock()
 		s.store.leases[lease.ID] = lease
 		s.saveLeaseLocked(lease)
@@ -2025,6 +2067,9 @@ func leaseMap(l *Lease) map[string]any {
 		"net_policy":       l.NetPolicy,
 		"egress_allowlist": l.NetAllow,
 		"exposed":          exposedMap(l),
+		// Continuity generation (2.2): bumped when the guest's memory
+		// does not continue from where its processes left it.
+		"generation": l.Generation,
 	}
 	if !l.HoldExpiresAt.IsZero() {
 		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
@@ -2143,6 +2188,7 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		ExpiresAt:  time.Now().Add(24 * time.Hour),
 		NetPolicy:  string(PolicyNone),
 		State:      "running",
+		Generation: 1, // the grant overwrites the file with the lease's own
 		TemplateID: img.TemplateID,
 	}
 	// Create one at a time and verify before stocking, so a bad build is
@@ -2212,6 +2258,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		HoldTTL:               int64(l.HoldTTL / time.Second),
 		LastAction:            l.LastAction,
 		LastActionAt:          l.LastActionAt,
+		Generation:            l.Generation,
 	}
 }
 
@@ -2249,6 +2296,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		HoldTTL:               time.Duration(r.HoldTTL) * time.Second,
 		LastAction:            r.LastAction,
 		LastActionAt:          r.LastActionAt,
+		Generation:            r.Generation,
 	}
 }
 
@@ -2284,6 +2332,42 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 	if err := s.db.UpsertLease(ctx, leaseToRow(l)); err != nil {
 		s.storeError("upsert_lease", l.ID, err)
 	}
+}
+
+// The guest's generation file (2.2): /run/spoond/generation, one line
+// with the lease's current generation. Processes in the guest read it to
+// notice that the memory they run in did not continue from where they
+// left it (crash recovery, restart) and re-derive whatever they keep in
+// process. The file is written 0644; WriteFile creates missing parents
+// (/run/spoond) 0755. Best effort: a failure is logged and otherwise
+// ignored — the file is an announcement, not a constraint.
+const (
+	generationPath = "/run/spoond/generation"
+	generationMode = 0o644
+)
+
+// writeGeneration writes the lease's current generation into the guest
+// at /run/spoond/generation (0644, parent /run/spoond 0755). Best
+// effort: failures are logged, never returned. Call without s.store.mu.
+func (s *Service) writeGeneration(l *Lease) {
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	data := fmt.Sprintf("%d\n", l.Generation)
+	if err := s.sub.WriteFile(ctx, l.SandboxID, generationPath, []byte(data), generationMode); err != nil {
+		s.log.Printf("generation: write %s into %s: %v", generationPath, l.ID, err)
+	}
+}
+
+// bumpGenerationLocked moves the lease to the next generation and
+// persists it. Bumped on every path that puts the lease into a state its
+// processes did not continue from: crash recovery, restart, and a
+// resume of a lease that was already running. A planned
+// pause/resume and the admin drain/undrain continue the memory and do
+// not bump. Call with s.store.mu held; the guest file is rewritten by
+// the caller after the sandbox exists again.
+func (s *Service) bumpGenerationLocked(l *Lease) {
+	l.Generation++
+	s.saveLeaseLocked(l)
 }
 
 func (s *Service) deleteLeaseLocked(id string) {

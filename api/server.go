@@ -833,6 +833,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"hold_expires_at": formatRFC3339(lease.HoldExpiresAt),
 		"hold_state":      holdState(lease),
 		"exposed":         exposedMap(lease),
+		"generation":      lease.Generation,
 	})
 }
 
