@@ -59,20 +59,21 @@ func TestWriteFileRequestShape(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", got, auth)
 	}
 
-	// The parent mkdir is a private (0700) exec; the mode lands with a chmod
-	// exec afterwards. Both are argv execs, no guest shell involved.
+	// The file is created empty with its mode (and parents) before the
+	// upload, and the mode is re-applied with a chmod afterwards. Both are
+	// argv execs, no guest shell involved.
 	if len(e.execs) != 2 {
-		t.Fatalf("execs = %v, want a parent mkdir and a chmod", e.execs)
+		t.Fatalf("execs = %v, want an install and a chmod", e.execs)
 	}
-	if want := "/bin/mkdir -p -m 0700 -- /home/u"; e.execs[0] != want {
-		t.Errorf("first exec = %q, want %q (the private parent mkdir)", e.execs[0], want)
+	if want := "/usr/bin/install -D -m 600 -- /dev/null /home/u/f.txt"; e.execs[0] != want {
+		t.Errorf("first exec = %q, want %q (the pre-create)", e.execs[0], want)
 	}
 	if e.execs[1] != "/bin/chmod 600 -- /home/u/f.txt" {
 		t.Errorf("second exec = %q, want the 600 chmod of the file", e.execs[1])
 	}
 }
 
-func TestWriteFileRootPathSkipsParentMkdir(t *testing.T) {
+func TestWriteFileRootPath(t *testing.T) {
 	e := &filesTestEnvd{}
 	c := newFilesEnvd(t, e)
 	defer e.close()
@@ -86,8 +87,8 @@ func TestWriteFileRootPathSkipsParentMkdir(t *testing.T) {
 	if got, want := e.uploads[0].path, "/f.txt"; got != want {
 		t.Errorf("upload path = %q, want %q", got, want)
 	}
-	if len(e.execs) != 1 || !strings.HasPrefix(e.execs[0], "/bin/chmod") {
-		t.Errorf("execs = %v, want only the chmod", e.execs)
+	if len(e.execs) != 2 || !strings.HasPrefix(e.execs[0], "/usr/bin/install") || !strings.HasPrefix(e.execs[1], "/bin/chmod") {
+		t.Errorf("execs = %v, want an install and a chmod", e.execs)
 	}
 }
 

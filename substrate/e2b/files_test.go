@@ -29,7 +29,7 @@ type filesTestEnvd struct {
 	srv *httptest.Server
 
 	uploads  []uploadRecord
-	execs    []string // argv lines the client exec'd (chmod, rmdir, mkdir)
+	execs    []string // argv lines the client exec'd (install, chmod, rmdir)
 	makeDirs []string // filesystem.MakeDir request paths
 	removed  []string // filesystem.Remove request paths
 	statReqs []string // filesystem.Stat request paths

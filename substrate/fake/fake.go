@@ -444,6 +444,9 @@ func (m *memFS) write(name string, data []byte, mode os.FileMode) error {
 	if name == "" {
 		return fmt.Errorf("%w: %s is a directory path", substrate.ErrInvalidOp, name)
 	}
+	if _, ok := m.dirs[name]; ok {
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, name)
+	}
 	if mode == 0 {
 		mode = 0o644
 	}

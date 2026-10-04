@@ -20,16 +20,16 @@ import (
 	"github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/filesystem/filesystemconnect"
 )
 
-// WriteFile writes data to path via envd's HTTP POST /files (multipart),
-// which creates the file and its parent directories. envd sets no mode, so
-// the requested mode is applied with a chmod exec afterwards; when the parent
-// directories do not exist yet, a private directory (0700) is created first
-// so no world-readable parent ever shows up before the chmod.
+// WriteFile writes data to path via envd's HTTP POST /files (multipart).
+// envd sets no mode, so the file is first created empty with the requested
+// mode (and any missing parents, 0755) by an exec install; the upload then
+// fills it, and a chmod afterwards re-applies the mode in case the upload
+// replaced the file rather than truncating it.
 func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, data []byte, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0o644
 	}
-	if err := c.makeParents(ctx, sandboxID, path); err != nil {
+	if err := c.precreate(ctx, sandboxID, path, mode); err != nil {
 		return err
 	}
 	if err := uploadFile(ctx, c.envdClient(sandboxID, ""), c.cfg.ProxyURL, path, data); err != nil {
@@ -161,23 +161,18 @@ func (c *Client) chmod(ctx context.Context, sandboxID, path string, mode os.File
 	return nil
 }
 
-// makeParents creates the parent directories of path before the upload.
-// envd's upload would create them world-readable, so the deepest missing
-// directory is created private (0700) in one step with an exec mkdir; the
-// upload then finds it in place. mkdir -p succeeds when it already exists.
-func (c *Client) makeParents(ctx context.Context, sandboxID, path string) error {
-	dir := parentDir(path)
-	if dir == "" {
-		return nil
-	}
+// precreate creates path empty with mode, plus any missing parent
+// directories, before the upload: secrets written 0600 are never readable
+// by others while the contents land. install refuses a directory path.
+func (c *Client) precreate(ctx context.Context, sandboxID, path string, mode os.FileMode) error {
 	r, err := c.Exec(ctx, sandboxID, substrate.ExecRequest{
-		Args: []string{"/bin/mkdir", "-p", "-m", "0700", "--", dir},
+		Args: []string{"/usr/bin/install", "-D", "-m", strconv.FormatUint(uint64(mode.Perm()), 8), "--", "/dev/null", path},
 	})
 	if err != nil {
 		return err
 	}
 	if r.ExitCode != 0 {
-		return fmt.Errorf("e2b: mkdir %s %s: exit %d: %s", sandboxID, dir, r.ExitCode, strings.TrimSpace(r.Stderr))
+		return fmt.Errorf("e2b: create %s %s: exit %d: %s", sandboxID, path, r.ExitCode, strings.TrimSpace(r.Stderr))
 	}
 	return nil
 }
@@ -239,14 +234,6 @@ func uploadFile(ctx context.Context, hc *http.Client, baseURL, path string, data
 // filesURL builds envd's /files URL with the path query parameter.
 func filesURL(baseURL, path string) string {
 	return strings.TrimSuffix(baseURL, "/") + "/files?path=" + url.QueryEscape(path)
-}
-
-func parentDir(path string) string {
-	i := strings.LastIndexByte(path, '/')
-	if i <= 0 {
-		return ""
-	}
-	return path[:i]
 }
 
 func baseName(path string) string {

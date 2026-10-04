@@ -19,8 +19,9 @@ summarised from README "Status".
   routes to follow. The E2B implementation pushes content through envd's
   HTTP `/files` on 49983 (multipart POST creates parents) and metadata
   through the envd filesystem Connect client; envd sets no mode, so the
-  requested mode lands with a chmod exec, and a write's parent directories
-  are created private (0700) first. The fake substrate implements the same
+  file is created empty with its mode by an exec `install` before the
+  upload (so a 0600 file is never readable by others) and the mode is
+  re-applied with a chmod afterwards. The fake substrate implements the same
   semantics on an in-memory per-sandbox filesystem (modes kept, parents
   created, `ErrNotFound`), cleared when the sandbox is deleted.
 

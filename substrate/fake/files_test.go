@@ -234,3 +234,13 @@ func TestModeZeroDefaults(t *testing.T) {
 		t.Fatalf("dir mode = %o, want the 755 default", info.Mode.Perm())
 	}
 }
+
+func TestWriteFileOntoDirectoryFails(t *testing.T) {
+	f, id := newFileSandbox(t)
+	if err := f.MakeDir(context.Background(), id, "/d", 0o755); err != nil {
+		t.Fatalf("MakeDir: %v", err)
+	}
+	if err := f.WriteFile(context.Background(), id, "/d", []byte("x"), 0o644); !errors.Is(err, substrate.ErrInvalidOp) {
+		t.Fatalf("WriteFile onto a directory: %v, want ErrInvalidOp", err)
+	}
+}
