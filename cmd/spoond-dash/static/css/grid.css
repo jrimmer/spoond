@@ -1,0 +1,39 @@
+/* The character grid: one class per grid style, mapped to the palette.
+   Style names come from the Go renderer (grid.HTML emits g-<name>); the
+   plain cells are WebTUI's foreground. Rows (span.gr) are the patch
+   units Datastar replaces. */
+
+html { background: var(--bg); }
+body { background: var(--bg); color: var(--fg); }
+
+main { max-width: calc(104ch + 4rem); margin: 0 auto; padding: 1rem 1rem 2rem; }
+
+header { display: flex; align-items: baseline; gap: 1ch; margin-bottom: .5lh; }
+header h1 { font-size: 1rem; letter-spacing: .2em; color: var(--head); }
+header .meta { color: var(--dim); font-size: .8rem; }
+
+pre.grid {
+  background: transparent;
+  padding: 0;
+  line-height: 1.25;
+  white-space: pre;
+  overflow-x: auto;
+  font-size: 13px;
+}
+/* One row element per grid row: the unit Datastar patches. */
+pre.grid > span.gr { display: block; white-space: pre; }
+
+/* The grid styles, one class each. */
+.g-head  { color: var(--head); font-weight: 700; }
+.g-frame { color: var(--frame); }
+.g-title { color: var(--title); font-weight: 700; }
+.g-dim   { color: var(--dim); }
+.g-text  { color: var(--fg); }
+.g-ok    { color: var(--ok); }
+.g-warn  { color: var(--warn); }
+.g-bad   { color: var(--bad); }
+.g-state { color: var(--state); }
+.g-spark { color: var(--spark); }
+.g-link  { color: var(--link); text-decoration: underline; cursor: pointer; }
+/* Links carry the holder text; keep them inside the row's flow. */
+a.g-link { display: inline; }

@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -69,13 +72,32 @@ type Snapshot struct {
 	VCPUAlloc   int     `json:"vcpuAlloc"`
 	MemAllocGiB float64 `json:"memAllocGiB"`
 	UptimeH     float64 `json:"uptimeH"`
+	RootUsedPct float64 `json:"rootUsedPct"` // the root filesystem, not the snapshot store
+	RootFreeGiB float64 `json:"rootFreeGiB"`
 
 	Down int `json:"down"` // units not active
 
+	// GCMode labels the snapshot GC: "delete" (GC_DELETE=1, or the
+	// backend has actually deleted something) or "dry-run".
+	GCMode string `json:"gcMode"`
+
+	// CertNotAfter is the served TLS pair's expiry (DASH_TLS_CERT); zero
+	// when the dashboard serves plain HTTP. Only the banner reads it.
+	CertNotAfter time.Time `json:"-"`
+
 	// Rendered as HTML element patches, not sent as signals.
-	Services []Service  `json:"-"`
-	Rows     []LeaseRow `json:"-"`
-	Images   []ImageRow `json:"-"`
+	Services []Service   `json:"-"`
+	Rows     []LeaseRow  `json:"-"`
+	Images   []ImageRow  `json:"-"`
+	Events   []EventLine `json:"-"` // the events panel, newest first
+}
+
+// EventLine is one line of the events panel: text plus the grid style
+// it is drawn with ("dim" for journal noise, "warn" for automatic
+// held-lease actions, "bad" for a scrape problem).
+type EventLine struct {
+	Text  string
+	Style string
 }
 
 // Service is a systemd unit and its state.
@@ -84,9 +106,15 @@ type Service struct {
 	State string `json:"state"`
 }
 
-// LeaseRow is one live lease for the table.
+// LeaseRow is one live lease for the table. Holder/HolderURL/HoldState
+// name what holds the lease (HoldState "" when unheld, "active" or
+// "lapsed"); LastAction/LastActionAt record the last automatic
+// held-lease action ("rule/action", e.g. "idle/suspend_idle").
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name string
+	Holder, HolderURL, HoldState          string
+	LastAction                            string
+	LastActionAt                          time.Time
 	Age, Left                             string
 }
 
@@ -144,7 +172,14 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 			s.Down++
 		}
 	}
+	c.readActivity(&s, now)
+	c.readCert(&s)
 	s.Err = strings.Join(errs, "; ")
+	if s.Err != "" {
+		// A scrape problem heads the events panel: the rest of the frame
+		// may look calm while a source is quietly missing.
+		s.Events = append([]EventLine{{Text: "scrape: " + s.Err, Style: "bad"}}, s.Events...)
+	}
 	return s
 }
 
@@ -238,6 +273,14 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	s.BuildFails = int(g("spoond_builds_failed_total"))
 	s.VCPUAlloc = int(g("orchestrator_sandbox_cpu_allocated"))
 	s.MemAllocGiB = round1(g("orchestrator_sandbox_memory_allocated") / (1 << 30))
+	// The GC's mode: a configured GC_DELETE=1 or an actually deleted
+	// build means deletion is on; otherwise the GC is in its dry-run
+	// default (it logs candidates but frees nothing).
+	if os.Getenv("GC_DELETE") == "1" || value(fams["spoond_gc_deleted_total"]) > 0 {
+		s.GCMode = "delete"
+	} else {
+		s.GCMode = "dry-run"
+	}
 	if f := fams["orchestrator_status"]; f != nil {
 		for _, m := range f.GetMetric() {
 			for _, l := range m.GetLabel() {
@@ -347,7 +390,91 @@ func (c *collector) fromHost(s *Snapshot) error {
 		s.DiskFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))
 		s.DiskUsedPct = round1(float64(st.Blocks-st.Bfree) / float64(st.Blocks) * 100)
 	}
+	if err := syscall.Statfs("/", &st); err == nil && st.Blocks > 0 {
+		s.RootFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))
+		s.RootUsedPct = round1(float64(st.Blocks-st.Bfree) / float64(st.Blocks) * 100)
+	}
 	return nil
+}
+
+// readCert stamps the served TLS pair's expiry for the banner: a
+// certificate within 30 days of expiring needs a person before basic
+// auth starts failing in browsers. A missing or unreadable file is not
+// an error here (the dashboard then serves plain HTTP or keeps the last
+// good frame); the server itself reports real certificate problems.
+func (c *collector) readCert(s *Snapshot) {
+	if c.cfg.TLSCert == "" {
+		return
+	}
+	b, err := os.ReadFile(c.cfg.TLSCert)
+	if err != nil {
+		return
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return
+	}
+	if crt, err := x509.ParseCertificate(blk.Bytes); err == nil {
+		s.CertNotAfter = crt.NotAfter
+	}
+}
+
+// readActivity fills the events panel: one line per automatic
+// held-lease action recorded on a live lease (last_action, newest
+// first), then the backend's last journal lines (journalctl, the way
+// services uses systemctl). A host without journald — CI — just
+// contributes the held-lease lines.
+func (c *collector) readActivity(s *Snapshot, now time.Time) {
+	type heldAt struct {
+		line EventLine
+		at   time.Time
+	}
+	var held []heldAt
+	for _, r := range s.Rows {
+		if r.LastAction == "" || r.LastActionAt.IsZero() {
+			continue
+		}
+		held = append(held, heldAt{
+			line: EventLine{Text: fmt.Sprintf("held lease %s: %s (%s ago)", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))), Style: "warn"},
+			at:   r.LastActionAt,
+		})
+	}
+	sort.Slice(held, func(i, j int) bool { return held[i].at.After(held[j].at) })
+	for i, h := range held {
+		if i == 4 {
+			break
+		}
+		s.Events = append(s.Events, h.line)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	unit := c.cfg.ActivityUnit
+	if unit == "" {
+		unit = "spoond-backend"
+	}
+	out, err := exec.CommandContext(ctx, "journalctl", "-u", unit, "-n", "8", "--no-pager", "--quiet", "-o", "short-iso").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		// "2026-10-04T07:19:00+00:00 spoond-backend[123]: message" — keep
+		// the time of day and the message.
+		f := strings.SplitN(line, " ", 3)
+		if len(f) < 3 {
+			continue
+		}
+		when := f[0]
+		if i := strings.IndexByte(when, 'T'); i >= 0 {
+			when = when[i+1:]
+		}
+		s.Events = append(s.Events, EventLine{Text: when + " " + f[2], Style: "dim"})
+	}
+	if n := len(s.Events); n > 8 {
+		s.Events = s.Events[:8]
+	}
 }
 
 func cpuJiffies() (busy, total uint64, cores int, err error) {
@@ -427,7 +554,8 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	defer db.Close()
 	names := c.userNames()
 
-	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, created_at, expires_at, persistent
+	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, created_at, expires_at, persistent,
+		holder, holder_url, hold_expires_at, last_action, last_action_at
 		FROM leases ORDER BY created_at DESC LIMIT 40`)
 	if err != nil {
 		return err
@@ -436,8 +564,10 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	for rows.Next() {
 		var r LeaseRow
 		var owner, created, expires string
+		var holder, holderURL, holdExpires, lastAction, lastActionAt string
 		var persistent int
-		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &created, &expires, &persistent); err != nil {
+		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &created, &expires, &persistent,
+			&holder, &holderURL, &holdExpires, &lastAction, &lastActionAt); err != nil {
 			return err
 		}
 		r.Owner = names[owner]
@@ -455,6 +585,20 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			r.Left = "∞"
 		} else {
 			r.Left = until(now, expires)
+		}
+		r.Holder, r.HolderURL = holder, holderURL
+		if holder != "" {
+			// The API's hold_state: a held lease with no hold_expires_at is
+			// a lapsed hold (it ran out unrenewed and stays held).
+			if holdExpires == "" {
+				r.HoldState = "lapsed"
+			} else {
+				r.HoldState = "active"
+			}
+		}
+		r.LastAction = lastAction
+		if t, err := time.Parse(time.RFC3339Nano, lastActionAt); err == nil {
+			r.LastActionAt = t
 		}
 		s.Rows = append(s.Rows, r)
 	}

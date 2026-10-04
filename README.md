@@ -78,13 +78,29 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
 ## Dashboard
 
 `spoond dash` is a read-only, live view of spoond's present operation,
-for watching rather than triage: lease and sandbox counts, host CPU,
-memory, hugepages and snapshot disk, five-minute sparklines (sandboxes,
-API requests, lease grant time, egress connections), the systemd units,
-live leases and the image catalog. It refreshes every 2 seconds over one
-server-sent-event stream shared by all viewers, and switches between
-pixel-art themes (Deep Space, Terminal, Nebula, Daylight; built with
-[Starbase](https://starbase.zweiundeins.gmbh) components, vendored).
+for watching rather than triage. It draws one character grid at a fixed
+width (DASH_WIDTH, default 104): framed panels for capacity (a
+running/limit meter, leases by state, queued, granted, swept, running
+leases per image), host meters (CPU, memory, hugepages, snapshot and
+root disk, with the warn/danger levels), five-minute throughput
+sparklines (sandboxes, API requests, lease creates, egress connections),
+live leases (state glyph, network policy, age, time left, holder — on
+the page the holder is a link, a lapsed hold is marked), the image
+catalog, the systemd units, refusal and failure counters, and the
+backend's last activity. Above the panels sits one attention banner,
+shown only when something needs a person: a unit not active, a lost
+lease, free hugepages or snapshot disk past the danger level, the TLS
+certificate inside 30 days of expiring, or an automatic held-lease
+action in the last 24 h. It refreshes every 2 seconds over one
+server-sent-event stream shared by all viewers; the page is the grid in
+a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for the chrome, and
+Datastar patches the rows that changed.
+
+`spoond top` draws the same grid with ANSI styles in the terminal, at
+the terminal's width (COLUMNS, else 104), redrawn every 2 seconds until
+interrupted — the same collector, the same banner, no browser. Both it
+and `spoond dash` are excluded from the binary by the `nodash` build
+tag.
 
 On host it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
 auth). Its data access is read-only: `/metrics` through the scrape-only
@@ -157,7 +173,8 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
 Exclusion tags: `nobackend`, `nogateway`, `nomcp`, `norunner`,
-`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`.
+`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash` (excludes `dash`
+and `top` together).
 
 ```bash
 ./spoond backend    # lease API, HTTP proxy, LLM gateway
@@ -168,7 +185,8 @@ Exclusion tags: `nobackend`, `nogateway`, `nomcp`, `norunner`,
 ./spoond images     # build images into E2B templates; list the catalog
 ./spoond drain      # pause sandboxes before an orchestrator restart, resume after
 ./spoond doctor     # health checks (below)
-./spoond dash       # read-only dashboard
+./spoond dash       # read-only dashboard (browser)
+./spoond top        # the dashboard grid in the terminal
 ```
 
 `spoond doctor` checks the configuration, the orchestrator, the local

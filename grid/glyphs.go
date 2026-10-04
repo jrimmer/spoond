@@ -44,10 +44,10 @@ func (g *Grid) Check(extra string) error {
 			if r == 0 {
 				continue
 			}
-			if r >= 0x20 && r <= 0x7E || set[r] {
+			if r >= 0x20 && r <= 0x7E || set[r] || Drawable(r) {
 				continue
 			}
-			return fmt.Errorf("grid: rune %q (U+%04X) at (%d, %d) is not printable ASCII, not in Glyphs and not in the extra set", r, r, x, y)
+			return fmt.Errorf("grid: rune %q (U+%04X) at (%d, %d) is not printable ASCII, not in Glyphs or the extra set, and not drawable in the shipped font", r, r, x, y)
 		}
 	}
 	return nil

@@ -362,13 +362,23 @@ means the disk needs attention the leases are paying for.
 - See [security.md](security.md) for the boundaries and [api.md](api.md)
   for the endpoints.
 
-## Dashboard (`spoond dash`)
+## Dashboard (`spoond dash`) and `spoond top`
 
 `spoond dash` is a read-only, live view of spoond's present operation,
-for watching rather than triage: lease and sandbox counts, host CPU,
-memory, hugepages and snapshot disk, five-minute sparklines (sandboxes,
-API requests, lease grant time, egress connections), the systemd units,
-live leases and the image catalog. It runs as its own service on **:8893** behind
+for watching rather than triage. It draws the whole frame as one
+character grid at a fixed width — capacity (running/limit meter, leases
+by state, queued, granted, swept, running per image), host meters
+(CPU, memory, hugepages, snapshot and root disk), five-minute
+throughput sparklines, live leases with holders, images, systemd units,
+refusal and failure counters, and the backend's last activity — plus
+one attention banner above the panels, shown only when something needs
+a person: a unit not active, a lost lease, free hugepages or snapshot
+disk past the danger level, the TLS certificate inside 30 days of
+expiring, or an automatic held-lease action in the last 24 h. The
+browser page is the grid in a `<pre>` (WebTUI for the chrome, Datastar
+patching changed rows); `spoond top` draws the same grid with ANSI
+styles in the terminal, at the terminal's width (COLUMNS, else 104),
+redrawn every 2 seconds until interrupted. It runs as its own service on **:8893** behind
 **basic auth** — set `DASH_USER` and
 `DASH_PASSWORD_HASH` (a bcrypt hash; `spoond dash hash <password>` prints
 one) — and serves HTTPS when `DASH_TLS_CERT`/`DASH_TLS_KEY` are set.
@@ -395,8 +405,11 @@ history are kept so a new page starts with trends. Configuration lives in
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
 | `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol` | systemd units to show |
+| `DASH_ACTIVITY_UNIT` | `spoond-backend` | unit whose journal feeds the events panel |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
+| `DASH_WIDTH` | `104` | frame width in cells (72–104) |
+| `DASH_HOST` | *(the hostname)* | header label |
 
 The dashboard can only read: it has no write path to the backend, the
 database or the orchestrator, and the metrics token it holds is refused

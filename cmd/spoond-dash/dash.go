@@ -5,10 +5,12 @@
 // /metrics (scrape-only METRICS_TOKEN), the SQLite catalog (opened
 // read-only), the identity store (names only), /proc and systemd. Every
 // viewer shares that loop: each page holds one SSE stream that receives
-// the snapshot as Datastar signal patches (numbers, bound to Starbase
-// gauges, meters and sparklines) and element patches (the tables). The
-// server keeps DASH_HISTORY points of history so a new page starts with
-// trends, not empty sparklines.
+// the snapshot as Datastar signal patches (the numbers) and the frame as
+// element patches (one per changed row of the character grid, the whole
+// <pre> when the row count changed). `spoond top` renders the same
+// snapshot as the same grid with ANSI styles in the terminal. The server
+// keeps DASH_HISTORY points of history so a new page starts with trends,
+// not empty sparklines.
 //
 // Environment:
 //
@@ -24,8 +26,14 @@
 //	USERS_FILE           identity store (default /var/lib/spoond/users.json)
 //	E2B_TEMPLATE_STORAGE_PATH  disk to report (default /forkdcache/e2b/storage/templates)
 //	DASH_SERVICES        systemd units to show (comma-separated)
+//	DASH_ACTIVITY_UNIT   unit whose journal feeds the events panel
+//	                     (default spoond-backend)
 //	DASH_INTERVAL        refresh interval (default 2s)
 //	DASH_HISTORY         sparkline points kept (default 150, i.e. 5 min at 2s; max 200)
+//	DASH_WIDTH           frame width in cells (default 104, 72–104; the
+//	                     page and spoond top both draw at this width —
+//	                     top clamps the terminal's COLUMNS into it)
+//	DASH_HOST            header label (default the hostname)
 package spoonddash
 
 import (
@@ -35,23 +43,44 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/jrimmer/spoond/v2/grid"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
 //go:embed static page.html.tmpl
 var assets embed.FS
+
+// dashVersion is the spoond version the header shows (spoond top shows
+// its own binary's; the page shows this build's).
+var dashVersion = readDashVersion()
+
+func readDashVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			return bi.Main.Version
+		}
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.revision" && len(s.Value) >= 12 {
+				return s.Value[:12]
+			}
+		}
+	}
+	return "dev"
+}
 
 // Config is the dashboard's configuration (see the package comment).
 type Config struct {
@@ -61,8 +90,13 @@ type Config struct {
 	MetricsToken                   string
 	DBPath, UsersFile, StoragePath string
 	Services                       []string
-	Interval                       time.Duration
-	History                        int
+	// ActivityUnit is the systemd unit whose journal feeds the events
+	// panel (DASH_ACTIVITY_UNIT).
+	ActivityUnit string
+	Interval     time.Duration
+	History      int
+	Width        int    // grid width in cells (DASH_WIDTH, 72–104)
+	Host         string // header label (DASH_HOST, else the hostname)
 }
 
 func configFromEnv() (Config, error) {
@@ -86,6 +120,7 @@ func configFromEnv() (Config, error) {
 		StoragePath:       env("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates"),
 		Services: strings.Split(env("DASH_SERVICES",
 			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol"), ","),
+		ActivityUnit: env("DASH_ACTIVITY_UNIT", "spoond-backend"),
 	}
 	var err error
 	if c.Interval, err = time.ParseDuration(env("DASH_INTERVAL", "2s")); err != nil || c.Interval < time.Second {
@@ -94,15 +129,36 @@ func configFromEnv() (Config, error) {
 	if c.History, err = strconv.Atoi(env("DASH_HISTORY", "150")); err != nil || c.History < 10 || c.History > 200 {
 		return c, fmt.Errorf("DASH_HISTORY: want an integer from 10 to 200 (the sparkline keeps at most 200 points)")
 	}
+	if c.Width, err = strconv.Atoi(env("DASH_WIDTH", strconv.Itoa(DefaultWidth))); err != nil || c.Width < minW || c.Width > maxW {
+		return c, fmt.Errorf("DASH_WIDTH: want an integer from %d to %d (the grid's width in cells)", minW, maxW)
+	}
+	c.Host = env("DASH_HOST", "")
+	if c.Host == "" {
+		if hn, err := os.Hostname(); err == nil && hn != "" {
+			c.Host = hn
+		}
+	}
+	if c.Host == "" {
+		c.Host = "host"
+	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return c, fmt.Errorf("set both DASH_TLS_CERT and DASH_TLS_KEY, or neither")
 	}
-	for k, v := range map[string]string{"DASH_USER": c.User, "DASH_PASSWORD_HASH": c.PasswordHash, "METRICS_TOKEN": c.MetricsToken} {
-		if v == "" {
-			return c, fmt.Errorf("%s is required", k)
-		}
+	if c.MetricsToken == "" {
+		return c, fmt.Errorf("METRICS_TOKEN is required")
 	}
 	return c, nil
+}
+
+// requireLogin checks the settings only the web dashboard needs: spoond
+// top draws in the operator's own terminal and has no login.
+func requireLogin(c Config) error {
+	for k, v := range map[string]string{"DASH_USER": c.User, "DASH_PASSWORD_HASH": c.PasswordHash} {
+		if v == "" {
+			return fmt.Errorf("%s is required", k)
+		}
+	}
+	return nil
 }
 
 // Main runs the dashboard; registered as `spoond dash`.
@@ -121,6 +177,9 @@ func Main(args []string) int {
 		return 0
 	}
 	cfg, err := configFromEnv()
+	if err == nil {
+		err = requireLogin(cfg)
+	}
 	if err != nil {
 		log.Printf("spoond dash: %v", err)
 		return 2
@@ -155,9 +214,10 @@ func Main(args []string) int {
 
 // dash holds the latest snapshot, the history and the connected viewers.
 type dash struct {
-	cfg  Config
-	col  *collector
-	page *template.Template
+	cfg   Config
+	col   *collector
+	page  *template.Template
+	width int // frame width in cells (DASH_WIDTH, default 104)
 
 	mu      sync.Mutex
 	last    Snapshot
@@ -182,7 +242,7 @@ func newDash(cfg Config) (*dash, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &dash{cfg: cfg, col: newCollector(cfg), page: page, hist: map[string][]float64{}, viewers: map[chan struct{}]bool{}}, nil
+	return &dash{cfg: cfg, col: newCollector(cfg), page: page, width: cfg.Width, hist: map[string][]float64{}, viewers: map[chan struct{}]bool{}}, nil
 }
 
 func (d *dash) run(ctx context.Context) {
@@ -192,13 +252,7 @@ func (d *dash) run(ctx context.Context) {
 		s := d.col.collect(ctx)
 		d.mu.Lock()
 		d.last = s
-		for _, k := range series {
-			h := append(d.hist[k], seriesValue(s, k))
-			if len(h) > d.cfg.History {
-				h = h[len(h)-d.cfg.History:]
-			}
-			d.hist[k] = h
-		}
+		appendHist(d.hist, s, d.cfg.History)
 		for ch := range d.viewers {
 			select {
 			case ch <- struct{}{}:
@@ -211,6 +265,19 @@ func (d *dash) run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// appendHist appends one snapshot's sparkline values to hist, keeping
+// the last n points per series; shared by the dash run loop and spoond
+// top's loop.
+func appendHist(hist map[string][]float64, s Snapshot, n int) {
+	for _, k := range series {
+		h := append(hist[k], seriesValue(s, k))
+		if len(h) > n {
+			h = h[len(h)-n:]
+		}
+		hist[k] = h
 	}
 }
 
@@ -268,22 +335,48 @@ func (d *dash) basicAuth(next http.Handler) http.Handler {
 	})
 }
 
-// pageData is what the page renders: the latest snapshot plus the
-// history, so sparklines draw on load instead of after the first frame.
+// pageData is what the page renders: the latest snapshot, the history,
+// the grid's row elements, the host and login names and the width.
 type pageData struct {
 	Snapshot
-	Hist map[string][]float64
+	Hist  map[string][]float64
+	User  string
+	Host  string
+	Width int
+	// Grid is the grid's rows as HTML; already escaped by grid.HTML, so
+	// the template must not escape it again.
+	Grid template.HTML
 }
 
-func (d *dash) handlePage(w http.ResponseWriter, _ *http.Request) {
+func (d *dash) handlePage(w http.ResponseWriter, r *http.Request) {
 	hist := d.history()
 	d.mu.Lock()
 	s := d.last
 	d.mu.Unlock()
+	g, links := d.gridFor(s, hist, time.Now())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := d.page.Execute(w, pageData{Snapshot: s, Hist: hist}); err != nil {
+	user, _, ok := r.BasicAuth()
+	if !ok {
+		user = ""
+	}
+	data := pageData{Snapshot: s, Hist: hist, User: user, Host: d.cfg.Host, Width: g.Cols(), Grid: template.HTML(pageGrid(g, links))}
+	if err := d.page.Execute(w, data); err != nil {
 		log.Printf("spoond dash: render: %v", err)
 	}
+}
+
+// gridFor renders a snapshot plus history into a grid and the holder
+// links found in it (row → URL), for both the page and the stream.
+func (d *dash) gridFor(s Snapshot, hist map[string][]float64, now time.Time) (*grid.Grid, []linkAt) {
+	g, err := drawFrame(s, hist, d.width, d.cfg.Host, now)
+	if err != nil {
+		// Check is a rendered invariant, not a data condition: nothing a
+		// snapshot contains should trip it. Report and fall back to an
+		// empty frame rather than streaming a broken one.
+		log.Printf("spoond dash: %v", err)
+		g = grid.New(clamp(d.width, minW, maxW), 1)
+	}
+	return g, holderLinks(s, d.width, now)
 }
 
 // history returns a copy of the sparkline series.
@@ -299,6 +392,8 @@ func (d *dash) history() map[string][]float64 {
 
 // handleStream is one viewer's SSE stream: the full state (with history)
 // at once, then a frame per collector tick until the page goes away.
+// Each stream owns a streamState, so the rows it diffs against are the
+// rows it actually sent — two open pages never cross-contaminate.
 func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -309,6 +404,7 @@ func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	st := &streamState{rows: map[int]string{}}
 	ch := make(chan struct{}, 1)
 	d.mu.Lock()
 	d.viewers[ch] = true
@@ -328,7 +424,7 @@ func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		s := d.last
 		d.mu.Unlock()
-		if err := d.writeFrame(w, s, hist); err != nil {
+		if err := d.writeFrame(w, st, s, hist); err != nil {
 			return
 		}
 		fl.Flush()
@@ -341,9 +437,20 @@ func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// streamState is one stream's diff base: the row HTML this viewer was
+// last sent, by row number. A frame patches only the rows that differ
+// from it, so a viewer is never sent row patches it cannot apply.
+type streamState struct {
+	rows map[int]string
+}
+
 // writeFrame sends the snapshot as a signal patch ($_s, plus $_h history
-// on the first frame) and the tables as element patches.
-func (d *dash) writeFrame(w http.ResponseWriter, s Snapshot, hist map[string][]float64) error {
+// on the first frame) and the grid as element patches into the page's
+// <pre id=grid>: one patch per changed row (#rN, inner mode — the span
+// itself stays), or the whole <pre> (outer mode) when the row count
+// changed. A page that loads drawn keeps its rows; the rest are dropped
+// and the next frame's <pre> patch recreates them.
+func (d *dash) writeFrame(w http.ResponseWriter, st *streamState, s Snapshot, hist map[string][]float64) error {
 	sig := map[string]any{"_s": s}
 	if hist != nil {
 		sig["_h"] = hist
@@ -355,22 +462,48 @@ func (d *dash) writeFrame(w http.ResponseWriter, s Snapshot, hist map[string][]f
 	if _, err := fmt.Fprintf(w, "event: datastar-patch-signals\ndata: signals %s\n\n", b); err != nil {
 		return err
 	}
-	for _, name := range []string{"leases", "images", "services"} {
-		var buf strings.Builder
-		if err := d.page.ExecuteTemplate(&buf, name, s); err != nil {
+	g, links := d.gridFor(s, hist, time.Now())
+	lines := pageLines(g, links)
+	d.mu.Lock()
+	sent := st.rows
+	d.mu.Unlock()
+	if len(lines) != len(sent) {
+		// Row count changed: replace the whole <pre>.
+		if err := writeElements(w, "#grid", "outer", pageGrid(g, links)); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprint(w, "event: datastar-patch-elements\n"); err != nil {
-			return err
-		}
-		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-			if _, err := fmt.Fprintf(w, "data: elements %s\n", line); err != nil {
+	} else {
+		for _, l := range lines {
+			if l.HTML == sent[l.N] {
+				continue
+			}
+			if err := writeElements(w, fmt.Sprintf("#r%d", l.N), "inner", l.HTML); err != nil {
 				return err
 			}
 		}
-		if _, err := fmt.Fprint(w, "\n"); err != nil {
+	}
+	next := make(map[int]string, len(lines))
+	for _, l := range lines {
+		next[l.N] = l.HTML
+	}
+	d.mu.Lock()
+	st.rows = next
+	d.mu.Unlock()
+	return nil
+}
+
+// writeElements sends one datastar-patch-elements event patching the
+// element(s) at selector with html in the named mode ("outer" replaces
+// the element itself, "inner" its children).
+func writeElements(w io.Writer, selector, mode, html string) error {
+	if _, err := fmt.Fprintf(w, "event: datastar-patch-elements\ndata: selector %s\ndata: mode %s\n", selector, mode); err != nil {
+		return err
+	}
+	for _, line := range strings.Split(strings.TrimRight(html, "\n"), "\n") {
+		if _, err := fmt.Fprintf(w, "data: elements %s\n", line); err != nil {
 			return err
 		}
 	}
-	return nil
+	_, err := fmt.Fprint(w, "\n")
+	return err
 }
