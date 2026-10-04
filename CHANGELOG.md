@@ -8,6 +8,20 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
+## [2.1.2] - 2026-10-04
+
+### Fixed
+
+- **Resuming a running lease rolled its memory back.** `POST
+  /api/leases/{id}/resume` had no already-running check: on a running
+  lease it restored the pause build again, so the guest lost everything
+  since that snapshot. Resuming a running lease is now a no-op that
+  answers `200` with the lease as it is.
+- **Dashboard rows were double-spaced.** The page put a newline between
+  its grid rows, which are block elements, so every row was followed by
+  a blank line and the panel borders broke into pieces. The rows are now
+  joined with nothing between them.
+
 ## [2.1.1] - 2026-10-04
 
 ### Fixed
