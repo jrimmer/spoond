@@ -177,9 +177,9 @@ Response `200 OK`:
 
 `409` if the lease is suspended (resume it first); `410` if it is
 `lost`, or if the sandbox no longer exists on the substrate; `429` when
-the per-owner concurrent exec/stream cap is reached. (There is no
-lease-busy `409` here: the concurrency guard on exec is the per-owner
-cap, which yields `429`.)
+the per-owner concurrent exec/stream cap is reached. (Exec does not wait for or take the lease's lifecycle lock; its concurrency
+guard is the per-owner cap, which yields `429`. A busy lease shows up only
+as the `409` below.)
 
 While a lifecycle operation is in flight on the lease (the periodic
 checkpoint, a suspend or a restart), the orchestrator briefly reports
