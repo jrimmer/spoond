@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -11,14 +12,16 @@ import (
 // Server-Sent Events streams of the lease event bus (2.2, #115):
 // GET /api/leases/events covers every event the caller may see, GET
 // /api/leases/{id}/events one lease. Both ride the standard bearer
-// auth; access is re-checked against the store for every event as it is
-// written, so a lease released, revoked or reassigned stops flowing to
-// a stream that can no longer see it.
+// auth; every event is checked again as it is written against the owner
+// it was stamped with, so a stream only carries the caller's own leases
+// (admins: all).
 const (
 	// sseHeartbeatEvery paces the comment ping that keeps intermediaries
-	// from closing an idle stream, and bounds how long a stale
-	// ownership change can keep feeding (or starving) a stream.
+	// from closing an idle stream.
 	sseHeartbeatEvery = 15 * time.Second
+	// sseWriteTimeout bounds one write: a client that stops reading is
+	// dropped instead of pinning the handler goroutine.
+	sseWriteTimeout = 30 * time.Second
 )
 
 // leaseEventID renders the SSE id of one event: "<epoch>-<seq>". The
@@ -104,7 +107,7 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 	}
 	// The subscription is taken before the headers go out so events
 	// emitted in between are buffered for the stream, not lost.
-	sub, replay, gapDetail2 := s.bus.subscribeWithReplay(f, hasPos, posEpoch, posSeq)
+	sub, replay, gapDetail2, at := s.bus.subscribeWithReplay(f, hasPos, posEpoch, posSeq)
 	defer s.bus.unsubscribe(sub)
 	if gapDetail == "" {
 		gapDetail = gapDetail2
@@ -114,6 +117,9 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	rc := http.NewResponseController(w)
+	deadline := func() { _ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) }
+	deadline()
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "retry: 3000\n\n")
 	// Go's server buffers until told otherwise: push the headers and
@@ -121,9 +127,17 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 	// heartbeat to see its stream open.
 	flusher.Flush()
 
-	writeOne := func(ev *LeaseEvent) bool {
-		if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n",
-			leaseEventID(ev), ev.Type, marshalLeaseEvent(ev)); err != nil {
+	// withID is false only for a slow subscriber's drop marker: it has
+	// no position, so it carries no id line and the client keeps its
+	// last real id.
+	writeOne := func(ev *LeaseEvent, withID bool) bool {
+		deadline()
+		if withID {
+			if _, err := fmt.Fprintf(w, "id: %s\n", leaseEventID(ev)); err != nil {
+				return false
+			}
+		}
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, marshalLeaseEvent(ev)); err != nil {
 			return false
 		}
 		flusher.Flush()
@@ -133,7 +147,7 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 		if !s.eventVisible(r, ev) {
 			return true
 		}
-		return writeOne(ev)
+		return writeOne(ev, true)
 	}
 
 	for i := range replay {
@@ -145,13 +159,16 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 	// restart, or one that aged out of the ring) is announced before the
 	// live flow, so the consumer knows it missed events and can resync.
 	if gapDetail != "" {
+		// The gap carries the position the live flow starts after, so a
+		// reconnect from it resumes instead of gapping again.
 		gap := LeaseEvent{
+			Seq:    at,
 			Epoch:  s.bus.Epoch(),
 			At:     time.Now().UTC(),
 			Type:   LeaseStreamGap,
 			Detail: gapDetail,
 		}
-		if !writeOne(&gap) {
+		if !writeOne(&gap, true) {
 			return
 		}
 	}
@@ -164,6 +181,7 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 		case <-clientGone:
 			return
 		case <-heartbeat.C:
+			deadline()
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 				return
 			}
@@ -179,7 +197,7 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 			if ev.Type != LeaseStreamGap && !s.eventVisible(r, &ev) {
 				continue
 			}
-			if !writeOne(&ev) {
+			if !writeOne(&ev, ev.Type != LeaseStreamGap) {
 				return
 			}
 		}
@@ -204,10 +222,17 @@ func (s *Service) eventVisible(r *http.Request, ev *LeaseEvent) bool {
 	return ev.Owner != "" && ev.Owner == ownerFrom(r.Context())
 }
 
-// marshalLeaseEvent renders one event as the SSE data line. A
-// hand-rolled render keeps the field order stable for readers; detail
-// and owner may be empty.
+// marshalLeaseEvent renders one event as the SSE data line, fields in a
+// stable order; detail and owner may be empty.
 func marshalLeaseEvent(ev *LeaseEvent) string {
-	return fmt.Sprintf(`{"seq":%d,"epoch":%q,"at":%q,"lease_id":%q,"owner":%q,"type":%q,"detail":%q}`,
-		ev.Seq, ev.Epoch, ev.At.Format(time.RFC3339Nano), ev.LeaseID, ev.Owner, ev.Type, ev.Detail)
+	b, _ := json.Marshal(struct {
+		Seq     uint64         `json:"seq"`
+		Epoch   string         `json:"epoch"`
+		At      string         `json:"at"`
+		LeaseID string         `json:"lease_id"`
+		Owner   string         `json:"owner"`
+		Type    LeaseEventType `json:"type"`
+		Detail  string         `json:"detail"`
+	}{ev.Seq, ev.Epoch, ev.At.Format(time.RFC3339Nano), ev.LeaseID, ev.Owner, ev.Type, ev.Detail})
+	return string(b)
 }

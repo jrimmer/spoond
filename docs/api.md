@@ -431,20 +431,25 @@ Send the last seen `id` as `Last-Event-ID` on reconnect:
   live events flow. Nothing is lost or duplicated across the seam.
 - Same epoch but the event has left the ring, or the id is past the
   newest sequence, or the id does not parse as `<epoch>-<seq>` at all:
-  the stream sends one `gap` event (id `<epoch>-0`) naming the
-  position it could not honour, then live events.
+  the stream sends one `gap` event naming the position it could not
+  honour, then live events. The gap's id is the current position, so
+  a reconnect from it resumes normally.
 - Different epoch (the backend restarted): same — a `gap` event first
   ("epoch … is not the current epoch"), then live events. Treat the
   epoch change as a signal to re-list your leases.
 
-Access is re-checked for every event as it is written: a stream only
-ever carries events stamped with the caller's owner id (admins: all).
+Every event is checked again as it is written: a stream only ever
+carries events stamped with the caller's owner id (admins: all).
 A `gap` marker is always delivered — it reports the caller's own
 stream, not a lease change.
 
-A `gap` event's `seq` is `0` and it is not part of the bus's sequence;
-it exists only in streams (and for in-process subscribers that fell
-behind, see below).
+A `gap` event is not part of the bus's sequence; it exists only in
+streams (and for in-process subscribers that fell behind, see below).
+A connect-time gap carries the current position as its `seq` and id;
+a gap for events dropped mid-stream has `seq` `0` and no id line, so
+the client keeps its last real id. The `suspended` and `resumed` pair
+also brackets `restarted` when a running persistent lease is restarted
+through a snapshot.
 
 ### In-process subscribers
 

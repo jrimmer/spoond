@@ -218,15 +218,19 @@ func (b *eventBus) subscribe(f EventFilter) *eventSub {
 // of the live flow. gapDetail is "" when the position is continuable
 // and otherwise the reason for the gap event the consumer must see
 // first (a foreign epoch, or a position that left the ring).
-func (b *eventBus) subscribeWithReplay(f EventFilter, hasPos bool, epoch string, seq uint64) (sub *eventSub, replay []LeaseEvent, gapDetail string) {
+//
+// at is the newest sequence assigned when the subscription was taken:
+// every later event reaches the subscriber live, so it is the position
+// a connect-time gap marker carries.
+func (b *eventBus) subscribeWithReplay(f EventFilter, hasPos bool, epoch string, seq uint64) (sub *eventSub, replay []LeaseEvent, gapDetail string, at uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	sub = b.registerSubLocked(f)
 	if !hasPos {
-		return sub, nil, ""
+		return sub, nil, "", b.seq
 	}
 	replay, gapDetail = b.replayAfterLocked(f, epoch, seq)
-	return sub, replay, gapDetail
+	return sub, replay, gapDetail, b.seq
 }
 
 // replayAfterLocked resolves a Last-Event-ID position against the ring.
@@ -263,7 +267,9 @@ func (b *eventBus) replayAfterLocked(f EventFilter, epoch string, seq uint64) ([
 	if seq == newest.Seq {
 		return nil, "" // already current; live events follow
 	}
-	if seq < oldest.Seq {
+	// Resuming from p replays every event after p, so p is honourable
+	// while the event right after it is still buffered.
+	if seq+1 < oldest.Seq {
 		return nil, fmt.Sprintf("event %d is no longer in the ring (oldest kept: %d)", seq, oldest.Seq)
 	}
 	var events []LeaseEvent

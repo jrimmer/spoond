@@ -432,6 +432,10 @@ func (sw *statusWriter) WriteHeader(code int) {
 // Flush forwards a flush to the underlying writer when it supports one
 // (http.ResponseWriter does not force it), so streamed responses are
 // not buffered by the middleware wrapper.
+// Unwrap lets http.ResponseController reach the connection (write
+// deadlines on the event streams).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 func (sw *statusWriter) Flush() {
 	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()

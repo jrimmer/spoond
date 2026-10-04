@@ -926,7 +926,7 @@ func TestEventRingWraps(t *testing.T) {
 
 // TestResumeAcrossEpochGapsAtAPILevel pins the end-to-end contract of
 // requirement #3: the SSE id embeds the epoch, and a resume carrying a
-// foreign epoch yields a gap event with the current epoch's id 0.
+// foreign epoch yields a gap event carrying the current epoch's newest position.
 func TestResumeAcrossEpochGapsAtAPILevel(t *testing.T) {
 	ts, svc := newEventsTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -938,9 +938,10 @@ func TestResumeAcrossEpochGapsAtAPILevel(t *testing.T) {
 	if gap.Type != "gap" {
 		t.Fatalf("first event = %+v, want gap (seq far past the newest)", gap)
 	}
-	// The gap's own id uses the current epoch and seq 0.
-	if !strings.HasPrefix(gap.ID, svc.bus.Epoch()+"-0") {
-		t.Fatalf("gap id = %q, want %s-0", gap.ID, svc.bus.Epoch())
+	// The gap's id is the current epoch at the newest sequence, so a
+	// reconnect from it resumes.
+	if e, _, ok := parseLeaseEventID(gap.ID); !ok || e != svc.bus.Epoch() {
+		t.Fatalf("gap id = %q, want %s-<newest>", gap.ID, svc.bus.Epoch())
 	}
 	cancel()
 }
@@ -980,3 +981,18 @@ func newEventsTestServerWithIdentity(t *testing.T) (*httptest.Server, *Service, 
 // compile-time checks that the fake substrate satisfies what the tests
 // assume.
 var _ substrate.Substrate = (*testSub)(nil)
+
+// TestResumeFromGapPosition: a connect-time gap on a fresh bus carries
+// position 0; reconnecting from it replays what happened since instead
+// of gapping again.
+func TestResumeFromGapPosition(t *testing.T) {
+	b := newEventBus()
+	sub, _, _, at := b.subscribeWithReplay(EventFilter{}, false, "", 0)
+	b.unsubscribe(sub)
+	b.emit("l1", "o1", LeaseCreated, "")
+	sub, replay, gap, _ := b.subscribeWithReplay(EventFilter{}, true, b.epoch, at)
+	defer b.unsubscribe(sub)
+	if gap != "" || len(replay) != 1 || replay[0].Seq != 1 {
+		t.Fatalf("resume from %d: replay=%v gap=%q, want event 1 and no gap", at, replay, gap)
+	}
+}
