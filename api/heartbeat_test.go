@@ -316,7 +316,7 @@ func TestLeaseHeartbeatOnGuestServiceListener(t *testing.T) {
 	srv := NewServer(svc, NewImageRegistry(db))
 	ph := srv.ProxyHandler()
 
-	l, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, true, "restricted", nil, "", "")
+	l, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, true, "restricted", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

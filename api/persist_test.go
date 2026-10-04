@@ -27,7 +27,7 @@ func TestPersistRoundTrip(t *testing.T) {
 	img := seedImage(t, db, "py-base", 2048)
 	svc := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPersistSuspendedLeaseLoads(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	svc := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

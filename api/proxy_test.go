@@ -60,7 +60,7 @@ func TestProxyDirectorHeaders(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	svc.cfg.ProxyURL = upstream.URL
 	seedImage(t, db, "py-base", 2048)
-	l, err := svc.grant(t.Context(), "u-1", "py-base", time.Minute, false, "restricted", nil, "", "")
+	l, err := svc.grant(t.Context(), "u-1", "py-base", time.Minute, false, "restricted", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
