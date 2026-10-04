@@ -441,7 +441,7 @@ func TestCheckToleratesBlank(t *testing.T) {
 
 func TestGlyphsInFont(t *testing.T) {
 	seen := map[string]bool{}
-	data, err := os.ReadFile("testdata/jetbrains-mono-codepoints.txt")
+	data, err := os.ReadFile("fontcodepoints.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestGlyphsInFont(t *testing.T) {
 			t.Fatalf("Glyphs contains ASCII %q", r)
 		}
 		if !seen[strings.ToUpper(strconv.FormatUint(uint64(r), 16))] {
-			t.Errorf("Glyphs rune %q (U+%04X) is not in jetbrains-mono-codepoints.txt", r, r)
+			t.Errorf("Glyphs rune %q (U+%04X) is not in fontcodepoints.txt", r, r)
 		}
 	}
 	// 8 box (█ shared by Bar and Sparkline's top rung): 6 corners/lines
@@ -472,5 +472,29 @@ func TestHalfCirclesNotInGlyphs(t *testing.T) {
 		if strings.ContainsRune(Glyphs, r) {
 			t.Errorf("half circle %q must not be in Glyphs: the shipped font lacks it", r)
 		}
+	}
+}
+
+// FontHas knows the shipped font: Latin with accents yes, the
+// half-filled circles and double-width scripts no. Sanitize keeps what
+// the font draws and replaces the rest and every control character.
+func TestFontHasAndSanitize(t *testing.T) {
+	for _, r := range "aé─█▖ДΩ" {
+		if !FontHas(r) || !Drawable(r) {
+			t.Errorf("FontHas/Drawable(%q) = false, want true", r)
+		}
+	}
+	for _, r := range "◐流" {
+		if FontHas(r) {
+			t.Errorf("FontHas(%q) = true, want false", r)
+		}
+	}
+	for _, r := range "​‮́�" {
+		if Drawable(r) {
+			t.Errorf("Drawable(%U) = true, want false (zero-width, bidi, combining or replacement)", r)
+		}
+	}
+	if got, want := Sanitize("café \x1b[31m流 a​b é ok\xff"), "café ?[31m? a?b e? ok?"; got != want {
+		t.Errorf("Sanitize = %q, want %q", got, want)
 	}
 }

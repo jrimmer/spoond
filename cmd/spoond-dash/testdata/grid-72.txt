@@ -25,15 +25,15 @@ SPOOND vm2.lacy.casa  spoond dev  orch 0.4.2  up 720h           12:00:00
 ║ egress conns ▅▆█▇██                                                9 ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ╔══ leases ════════════════════════════════════════════════════════════╗
-║ lease image owner state net age left  holder                         ║
+║ lease      image     owner  state       net    age   left  holder    ║
 ║ abcdef0123 go-base   jason  ▶ running   intern 5m    10m   -         ║
 ║ 1234567890 py-base   ci     ◆ running   restri 2h31m ∞     forgejo/j ║
 ║ fedcba0987 go-base   agent  ◆ suspended lan    1d    due   nightly ◉ ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ╔══ images ════════════════════════════════════════════════════════════╗
-║ image                           live uses shape        baked         ║
-║ go-base   2   51  2v/2048M  2d ago                                   ║
-║ py-base   1    7  1v/1024M  9h ago                                   ║
+║ image                            live uses  shape        baked       ║
+║ go-base                             2   51  2v/2048M     2d ago      ║
+║ py-base                             1    7  1v/1024M     9h ago      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ╔══ units ═════════════════════════════════════════════════════════════╗
 ║ ✓ spoond-backend                                                     ║

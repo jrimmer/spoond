@@ -12,9 +12,7 @@ package spoonddash
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/grid"
 )
@@ -603,17 +601,13 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, y, l.leasesH(), "leases", "leases")
 	c := leaseLayout(l.w)
-	hdr := []grid.Seg{
-		{Text: "lease", Style: "dim"},
-		{Text: strings.Repeat(" ", c.img-c.id-c.idW) + "image", Style: "dim"},
-		{Text: strings.Repeat(" ", c.own-c.img-c.imgW) + "owner", Style: "dim"},
-		{Text: strings.Repeat(" ", c.st-c.own-c.ownW) + "state", Style: "dim"},
-		{Text: strings.Repeat(" ", c.pol-c.st-c.stW) + "net", Style: "dim"},
-		{Text: strings.Repeat(" ", c.age-c.pol-c.polW) + "age", Style: "dim"},
-		{Text: strings.Repeat(" ", c.left-c.age-5) + "left", Style: "dim"},
-		{Text: "  holder", Style: "dim"},
+	// Each header at its column's start, so it lines up with the rows.
+	for _, h := range []struct {
+		x    int
+		text string
+	}{{c.id, "lease"}, {c.img, "image"}, {c.own, "owner"}, {c.st, "state"}, {c.pol, "net"}, {c.age, "age"}, {c.left, "left"}, {c.hold, "holder"}} {
+		g.Text(h.x, top+1, h.text, "dim", l.w-2-h.x)
 	}
-	g.Segs(c.id, top+1, hdr, l.w-4)
 
 	rows := l.s.Rows
 	if n := maxLeaseRows(l.w); len(rows) > n {
@@ -660,15 +654,13 @@ func (l *layout) images(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, y, l.imagesH(), "images", "images")
 	nameW := clamp(l.w-40, 12, 44)
-	hdr := []grid.Seg{
-		{Text: "image", Style: "dim"},
-		{Text: strings.Repeat(" ", nameW-5) + "live uses shape        baked", Style: "dim"},
-	}
-	g.Segs(2, top+1, hdr, l.w-4)
+	cx := 2 + nameW + 1 // the numbers' column, after the padded name
+	g.Text(2, top+1, "image", "dim", nameW)
+	g.Text(cx, top+1, "live uses  shape        baked", "dim", l.w-2-cx)
 	for i, im := range l.s.Images {
 		yy := top + 2 + i
-		cx := g.Text(2, yy, sanitize(im.Name), "text", nameW)
-		g.Text(cx, yy, fmt.Sprintf("%4d %4d  %dv/%dM  %s", im.Live, im.Uses, im.VCPU, im.MemMB, im.Updated), "dim", l.w-2-cx)
+		g.Text(2, yy, sanitize(im.Name), "text", nameW)
+		g.Text(cx, yy, fmt.Sprintf("%4d %4d  %-11s  %s", im.Live, im.Uses, fmt.Sprintf("%dv/%dM", im.VCPU, im.MemMB), im.Updated), "dim", l.w-2-cx)
 	}
 	return y
 }
@@ -792,12 +784,10 @@ func (l *layout) events(g *grid.Grid, y int) int {
 // holder text come from users, and nothing may inject terminal escapes
 // into spoond top or odd runes into the page.
 func sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == utf8.RuneError || r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return '?'
-		}
-		return r
-	}, s)
+	// Control characters and anything the shipped font cannot draw
+	// (accented Latin is fine; double-width scripts are not) become '?',
+	// so names from users always pass grid.Check and keep columns aligned.
+	return grid.Sanitize(s)
 }
 
 // gcLabel is the GC's mode for the panels: "-" when the scrape had

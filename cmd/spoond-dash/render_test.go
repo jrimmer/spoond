@@ -137,7 +137,7 @@ func TestGoldenCheck(t *testing.T) {
 // is in the shipped JetBrains Mono (the codepoint list generated from
 // the vendored woff2): the terminal and the page draw with one face.
 func TestExtraGlyphsInFont(t *testing.T) {
-	pts, err := os.ReadFile(filepath.Join("..", "..", "grid", "testdata", "jetbrains-mono-codepoints.txt"))
+	pts, err := os.ReadFile(filepath.Join("..", "..", "grid", "fontcodepoints.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestExtraGlyphsInFont(t *testing.T) {
 			continue // ASCII needs no font check
 		}
 		if !have[strings.ToLower(fmt.Sprintf("%04X", r))] {
-			t.Errorf("glyph %q (U+%04X) is not in grid/testdata/jetbrains-mono-codepoints.txt", r, r)
+			t.Errorf("glyph %q (U+%04X) is not in grid/fontcodepoints.txt", r, r)
 		}
 	}
 }
@@ -540,5 +540,25 @@ func TestEventsPanelMarksHeldActions(t *testing.T) {
 	}
 	if !journal {
 		t.Fatalf("journal line drawn with ┄:\n%s", p)
+	}
+}
+
+// Names with accented or double-width characters must never blank the
+// frame: they are sanitized to what the font draws, and grid.Check
+// passes.
+func TestNonASCIINamesDrawn(t *testing.T) {
+	s := sampleSnapshot()
+	if len(s.Rows) == 0 {
+		t.Skip("fixture has no lease rows")
+	}
+	s.Rows[0].Owner = "josé"
+	s.Rows[0].Image = "流-base"
+	g, err := drawFrame(s, nil, 104, "host", fixedNow)
+	if err != nil {
+		t.Fatalf("drawFrame with non-ASCII names: %v", err)
+	}
+	out := g.Plain()
+	if !strings.Contains(out, "josé") || !strings.Contains(out, "?-base") {
+		t.Fatalf("names not drawn as expected:\n%s", out)
 	}
 }

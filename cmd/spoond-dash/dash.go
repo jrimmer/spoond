@@ -144,12 +144,21 @@ func configFromEnv() (Config, error) {
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return c, fmt.Errorf("set both DASH_TLS_CERT and DASH_TLS_KEY, or neither")
 	}
-	for k, v := range map[string]string{"DASH_USER": c.User, "DASH_PASSWORD_HASH": c.PasswordHash, "METRICS_TOKEN": c.MetricsToken} {
-		if v == "" {
-			return c, fmt.Errorf("%s is required", k)
-		}
+	if c.MetricsToken == "" {
+		return c, fmt.Errorf("METRICS_TOKEN is required")
 	}
 	return c, nil
+}
+
+// requireLogin checks the settings only the web dashboard needs: spoond
+// top draws in the operator's own terminal and has no login.
+func requireLogin(c Config) error {
+	for k, v := range map[string]string{"DASH_USER": c.User, "DASH_PASSWORD_HASH": c.PasswordHash} {
+		if v == "" {
+			return fmt.Errorf("%s is required", k)
+		}
+	}
+	return nil
 }
 
 // Main runs the dashboard; registered as `spoond dash`.
@@ -168,6 +177,9 @@ func Main(args []string) int {
 		return 0
 	}
 	cfg, err := configFromEnv()
+	if err == nil {
+		err = requireLogin(cfg)
+	}
 	if err != nil {
 		log.Printf("spoond dash: %v", err)
 		return 2
