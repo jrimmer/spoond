@@ -228,8 +228,9 @@ too); the SSH gateway's service token may resume any lease before a
 session starts. Response
 `{"id":"…","status":"running","address":"…"}`. `400` if neither persistent nor held,
 `409` if the lease is busy (another lifecycle operation is in flight).
-Resume is idempotent: there is no already-running check, so resuming a
-lease that is already running restores from the snapshot again.
+Resuming a lease that is already running does nothing and answers `200`
+with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
+restored the pause build again, rolling the guest's memory back.)
 
 ### `POST /api/leases/{id}/restart` — reboot
 

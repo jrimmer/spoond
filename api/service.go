@@ -1327,6 +1327,13 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 		s.store.mu.Unlock()
 		return nil, errLeaseBusy
 	}
+	// A running lease has nothing to resume. Restoring its pause build
+	// again would roll the guest's memory back to that snapshot, so the
+	// resume is a no-op that returns the lease as it is.
+	if !l.Suspended && l.State == "running" {
+		s.store.mu.Unlock()
+		return l, nil
+	}
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
