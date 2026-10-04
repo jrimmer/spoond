@@ -80,6 +80,14 @@ type JobSource interface {
 	Fetch(ctx context.Context, version int64) (*Job, int64, error)
 }
 
+// JobLabelPrefix starts the comment the runner puts on every lease it
+// grants ("forgejo job <id> <url>"). The orphan sweep at start deletes
+// only leases whose comment starts with it, so the token owner's other
+// leases are never touched. The label is a comment, not a holder: a
+// holder makes a lease held, and held leases join the periodic
+// checkpoint pass, which pauses the sandbox while it snapshots.
+const JobLabelPrefix = "forgejo job "
+
 // JobSink reports job results and streams logs back to the source.
 // Adapters: Forgejo runner protocol, exe.dev harness.
 type JobSink interface {
@@ -89,4 +97,25 @@ type JobSink interface {
 	// log output. Forgejo reaps tasks that stop hearing from the runner,
 	// so long silent steps must send this periodically.
 	Keepalive(ctx context.Context, jobID int64) error
+}
+
+// LeaseLabeler is the optional capability of a SandboxProvider to label
+// the lease it grants next with the job it runs (its comment). The
+// executor calls it before Create when its Sandbox implements it (each
+// executor instance runs one job at a time, so "the next Create" is
+// that job's lease).
+type LeaseLabeler interface {
+	WithLabel(label string)
+}
+
+// LeaseSweeper lists the caller's leases and releases orphans.
+// Implemented by HTTPLeaseClient; the runner pool calls it once at
+// startup to release leases left over from a previous process.
+type LeaseSweeper interface {
+	// SweepOrphans deletes every lease of the caller whose comment marks
+	// a runner job lease (it starts with JobLabelPrefix) and for
+	// which keep returns false; keep == nil sweeps all of them (the
+	// startup case, where this process runs nothing yet). Returns how
+	// many leases were deleted.
+	SweepOrphans(ctx context.Context, keep func(id string) bool) (int, error)
 }
