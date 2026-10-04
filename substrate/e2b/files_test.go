@@ -14,6 +14,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/jrimmer/spoond/v2/substrate"
 	"github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/filesystem"
 	"github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/filesystem/filesystemconnect"
 	"github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/process"
@@ -193,4 +194,17 @@ func (h *execHandler) SendInput(ctx context.Context, r *connect.Request[process.
 
 func (h *execHandler) SendSignal(ctx context.Context, r *connect.Request[process.SendSignalRequest]) (*connect.Response[process.SendSignalResponse], error) {
 	return connect.NewResponse(&process.SendSignalResponse{}), nil
+}
+
+// TestRmdirError: rmdir's "Directory not empty" is ErrNotEmpty (409 at
+// the files API); other failures are not.
+func TestRmdirError(t *testing.T) {
+	err := rmdirError(filesSandboxID, "/d", 1, "rmdir: failed to remove '/d': Directory not empty\n")
+	if !errors.Is(err, substrate.ErrNotEmpty) {
+		t.Fatalf("not-empty rmdir = %v, want ErrNotEmpty", err)
+	}
+	err = rmdirError(filesSandboxID, "/d", 1, "rmdir: failed to remove '/d': Permission denied\n")
+	if errors.Is(err, substrate.ErrNotEmpty) || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("permission rmdir = %v", err)
+	}
 }

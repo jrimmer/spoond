@@ -133,7 +133,7 @@ func TestLiveFiles(t *testing.T) {
 
 	// 8. A non-recursive remove refuses a non-empty directory; the recursive
 	// remove clears it.
-	if err := c.Remove(ctx, id, "/root/live-dirs", false); err == nil {
+	if err := c.Remove(ctx, id, "/root/live-dirs", false); !errors.Is(err, substrate.ErrNotEmpty) {
 		t.Error("non-recursive remove of a non-empty directory succeeded")
 	}
 	if err := c.Remove(ctx, id, "/root/live-dirs", true); err != nil {
