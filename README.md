@@ -23,18 +23,43 @@ images/*.dockerfile → docker → local registry → E2B templates (spoond imag
 ```
 
 spoond 2.0 runs on E2B's orchestrator; forkd, the 1.x substrate, is
-removed. The design, decisions and per-unit specs are in
+removed. spoond is a generic microVM utility: it takes no position on
+how agents work, and agent workflow lives in the separate Honey project,
+which drives spoond through the lease API. The design, decisions and
+per-unit specs are in
 [docs/plans/2026-09-30-e2b-substrate/](docs/plans/2026-09-30-e2b-substrate/00-README.md),
 and every change is in [CHANGELOG.md](CHANGELOG.md).
 
 ## What it gives you
 
-- **Lease API**: `POST /api/sandboxes` (image, TTL, persistent,
-  network policy, exposed ports), then exec, stream (WebSocket PTY),
-  keepalive, suspend/resume, checkpoint, fork, clone, tag, comment,
-  delete. Auth via bearer tokens (`CONSUMER_TOKENS=token=owner,...`) or
-  per-user identity tokens. Leases and the image catalog persist in
-  SQLite, so a backend restart loses nothing.
+- **Lease API**: `POST /api/leases` (image, TTL, persistent, network
+  policy, exposed ports, holder, secrets; `/api/sandboxes` is kept as an
+  alias), then exec, stream (WebSocket PTY), keepalive, suspend/resume,
+  restart, checkpoint, fork, clone, tag, comment, delete. Auth via bearer
+  tokens (`CONSUMER_TOKENS=token=owner,...`) or per-user identity tokens.
+  Leases and the image catalog persist in SQLite, so a backend restart
+  loses nothing. On every lease:
+  - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
+    and removes files in the guest, up to 256 MiB per file.
+  - **Guest port dial**: `GET /api/leases/{id}/ports/{port}/dial` opens
+    raw TCP to any port in the guest over a WebSocket (a database's own
+    protocol, a debugger, a REPL), under every network policy.
+  - **Secrets as files**: a `secrets` object on create or exec becomes
+    0600 files under `/run/secrets` on a guest tmpfs, never environment
+    variables, argv, the store or logs.
+  - **Event stream**: `GET /api/leases/events` (or one lease's
+    `/events`) streams lifecycle events over SSE, with resumable
+    positions.
+  - **Generations**: a `generation` counter, also in
+    `/run/spoond/generation` in the guest, bumped when the guest's memory
+    did not continue (crash recovery, restart), so a client can tell its
+    processes were restored.
+  - **Holders**: `holder` and `holder_url` say what holds a lease (a CI
+    job, an orchestrator's run, someone's scratch work). A held lease
+    outlives its TTL until its hold lapses, and automatic limits (idle
+    suspend, release after a week suspended, pressure and critical-disk
+    rules) keep held leases bounded; nothing running is ever released
+    automatically.
 - **Multi-user tenancy**: people and agents are first-class identities,
   with per-user SSH keys, per-user tokens, quotas
   (`max_leases`/`max_ttl`), admin roles, lease sharing with expiry,
@@ -70,10 +95,20 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   currently breaks HTTPS to allow-listed LAN IPs, so list IPs only.
 - **Forgejo Actions runner**: `spoond runner` leases sandboxes as CI
   workers.
-- **Dashboard**: `spoond dash`, below.
+- **Dashboard**: `spoond dash` and `spoond top`, below.
 - **Observability**: `/metrics` (Prometheus) covers the backend, the
   orchestrator (via an OpenTelemetry collector) and leases per state and
   per image. It needs an admin token or the scrape-only `METRICS_TOKEN`.
+  `GET /readyz` answers uptime monitors such as Gatus (orchestrator,
+  database, disk and hugepage checks; an example config is in
+  [docs/operations.md](docs/operations.md#uptime-monitoring-gatus)).
+- **Notifications**: with `NOTIFY_WEBHOOKS` set, the backend pushes what
+  needs a person (a lost lease, a held-lease rule acting, a unit down,
+  disk or hugepages past their levels, the TLS certificate near expiry,
+  a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
+  receiver, with hourly dedupe, resolved messages, retries and a rate
+  limit. `spoond notify test` checks the setup; see
+  [docs/operations.md](docs/operations.md#notifications-to-webhooks).
 
 ## Dashboard
 
@@ -146,6 +181,18 @@ stack does not exist yet.
 
 ## Status
 
+**v2.2: driving work inside a lease.** Lease files, guest port dial,
+secrets as files, the lease event stream and generations on the lease
+API; `/readyz` for uptime monitors and webhook notifications for
+operators.
+
+**v2.1: a plain microVM utility.** Agent workflow (the hive, the worker
+layer, `spoond acp`, the cfos adapter) moved to the separate Honey
+project. The dashboard is drawn on a character grid, the same in the
+browser and in the terminal (`spoond top`), on the public `grid`
+package. Leases can name their holder, and held leases are bounded by
+automatic limits.
+
 **v2.0: E2B substrate.** spoond runs on a patch-queue fork of E2B's
 orchestrator instead of forkd: warm memory-snapshot starts,
 native fork, pause/resume and checkpoint, SQLite state, a template-based
@@ -187,13 +234,16 @@ and `top` together), `nonotify`.
 ./spoond doctor     # health checks (below)
 ./spoond dash       # read-only dashboard (browser)
 ./spoond top        # the dashboard grid in the terminal
+./spoond notify test  # send a test message to every NOTIFY_WEBHOOKS receiver
 ```
 
 `spoond doctor` checks the configuration, the orchestrator, the local
 registry, the token seed, the SQLite database, the image catalog, the
 pinned E2B artifacts (SHA-256, plus the Firecracker and kernel versions
 builds still use), storage headroom, the backend, the SSH gateway port,
-the LLM gateway and TLS. It exits 1 if any check fails.
+the LLM gateway, TLS, the drain unit, and the webhook receivers (their
+reachability and any deliveries dropped in the last 24 h). It exits 1 if
+any check fails.
 
 ## Configuration knobs
 
@@ -204,7 +254,9 @@ deployment are listed in
 [01-architecture.md](docs/plans/2026-09-30-e2b-substrate/01-architecture.md).
 Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
 services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
-may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`.
+may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
+`NOTIFY_WEBHOOKS`, and the held-lease limits (`HOLD_TTL_SECS` and the
+rest, in [docs/operations.md](docs/operations.md)).
 
 ## Tests
 
