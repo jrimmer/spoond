@@ -931,3 +931,22 @@ func TestCreateHoldTTLCappedAndNeedsHolder(t *testing.T) {
 		t.Fatal("create with hold_ttl but no holder made the lease held")
 	}
 }
+
+// Create, the holder PUT and fork return hold_state like a lease read.
+func TestHoldStateOnCreateAndPut(t *testing.T) {
+	ts, _, db, _ := newTestServerWithService(t)
+	seedImage(t, db, "py-base", 2048)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 60, "holder": "ci-job"})
+	if resp.StatusCode != http.StatusCreated || body["hold_state"] != "active" {
+		t.Fatalf("create = %d, hold_state %v, want 201 active", resp.StatusCode, body["hold_state"])
+	}
+	id := body["id"].(string)
+	resp, body = doReq(t, "PUT", ts.URL+"/api/leases/"+id+"/holder", "token-a", map[string]any{"holder": "ci-job"})
+	if resp.StatusCode != http.StatusOK || body["hold_state"] != "active" {
+		t.Fatalf("renew = %d, hold_state %v, want 200 active", resp.StatusCode, body["hold_state"])
+	}
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "ttl": 60})
+	if resp.StatusCode != http.StatusCreated || body["hold_state"] != "" {
+		t.Fatalf("unheld create hold_state = %v, want empty", body["hold_state"])
+	}
+}
