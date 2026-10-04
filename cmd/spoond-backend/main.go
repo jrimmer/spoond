@@ -61,6 +61,19 @@
 //	                  disables)
 //	CRITICAL_DISK_RECOVER_PCT  release stops above this free percentage
 //	                  (default 10)
+//	NOTIFY_WEBHOOKS  JSON list of webhook receivers for events that
+//	                  need a person (2.2 #117): [{"url":..., "format":
+//	                  "ntfy"|"slack"|"json", "min_severity":
+//	                  "info"|"warn"|"critical", "events": ["glob*",
+//	                  ...], "headers": {...}]. Unset disables.
+//	NOTIFY_UNITS     systemd units the notifier watches, comma-separated
+//	                  (default e2b-orchestrator.service,
+//	                  spoond-sshd-gateway.service; "none" watches none)
+//	NOTIFY_STATE_FILE  where dropped deliveries are mirrored for
+//	                  `spoond doctor` (default: notify-state.json next
+//	                  to the database)
+//	BACKUP_MAX_AGE_SECS  how old the newest database backup may get
+//	                  before the notifier warns (default 93600 = 26 h)
 package spoondbackend
 
 import (
@@ -79,6 +92,8 @@ import (
 
 	"github.com/jrimmer/spoond/v2/api"
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/metrics"
+	"github.com/jrimmer/spoond/v2/notify"
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
@@ -120,6 +135,15 @@ func envIntOr(key string, def int) int {
 	return def
 }
 
+// notifyBackupMaxAge is the backup check's age limit in seconds
+// (BACKUP_MAX_AGE_SECS): how old the newest database backup may get
+// before the notifier warns, 93600 s = 26 h by default (the daily
+// 03:00 run plus one missed day). The same knob the backup loop's own
+// staleness check uses.
+func notifyBackupMaxAge() time.Duration {
+	return notify.BackupMaxAgeSecs(envIntOr("BACKUP_MAX_AGE_SECS", 0))
+}
+
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
 // anything else as true, so a typo fails open to the default rather than
 // silently disabling a check.
@@ -133,6 +157,57 @@ func envBoolOr(key string, def bool) bool {
 	default:
 		return true
 	}
+}
+
+// notifyUnits is the systemd units the notifier watches: NOTIFY_UNITS
+// (comma-separated; "none" watches nothing, for hosts without systemd)
+// or notify.DefaultUnits.
+func notifyUnits() []string {
+	v := strings.TrimSpace(os.Getenv("NOTIFY_UNITS"))
+	switch v {
+	case "":
+		return notify.DefaultUnits
+	case "none":
+		return nil
+	}
+	return strings.Split(v, ",")
+}
+
+// newNotifier builds the webhook notifier: every outcome counted in
+// spoond_notifications_total{webhook,severity,result} (the webhook
+// label is the receiver's index — never the URL), dropped deliveries
+// mirrored to NOTIFY_STATE_FILE for `spoond doctor`, and the hugepage
+// check reading the orchestrator's NodeInfo.
+func newNotifier(hooks []notify.Webhook, dbPath string, sub *e2b.Client, m *metrics.BackendMetrics) *notify.Notifier {
+	statePath := os.Getenv("NOTIFY_STATE_FILE")
+	if statePath == "" {
+		statePath = filepath.Join(filepath.Dir(dbPath), "notify-state.json")
+	}
+	n := notify.New(notify.Config{
+		Webhooks:  hooks,
+		StatePath: statePath,
+		Log:       log.Default(),
+		Metrics:   metricsSink{m},
+	})
+	n.SetHugepages(notify.HugepagesFromNodeInfo(func(ctx context.Context) (uint64, uint64, uint64, uint64, error) {
+		info, err := sub.NodeInfo(ctx)
+		if err != nil {
+			return 0, 0, 0, 0, err
+		}
+		return info.HugepagesTotal, info.HugepagesUsed, info.HugepagesReserved, info.HugepageSizeBytes, nil
+	}))
+	return n
+}
+
+// metricsSink adapts the backend's Prometheus collector to the
+// notifier's Metrics interface: one increment of
+// spoond_notifications_total{webhook,severity,result} per outcome.
+type metricsSink struct {
+	m *metrics.BackendMetrics
+}
+
+func (s metricsSink) Notification(webhook, severity, result string) {
+	s.m.Notifications.WithLabelValues(webhook, severity, result).Inc()
 }
 
 func Main(args []string) int {
@@ -302,6 +377,32 @@ func Main(args []string) int {
 		log.Fatalf("store: load state: %v", err)
 	}
 
+	backupDir := envOr("SPOOND_BACKUP_DIR", notify.DefaultBackupDir)
+	backupPrefix := strings.TrimSuffix(filepath.Base(dbPath), filepath.Ext(dbPath))
+	// Webhook notifications (2.2, #117): events that need a person —
+	// lease lost, held-lease rule actions, and the periodic checks —
+	// delivered to the NOTIFY_WEBHOOKS receivers. Unset keeps the
+	// notifier off entirely. Webhook URLs and headers may carry
+	// secrets; only the notifier's redacted forms are ever logged.
+	if hooks, err := notify.ParseWebhooks(os.Getenv("NOTIFY_WEBHOOKS")); err != nil {
+		log.Fatalf("notify: %v", err)
+	} else if len(hooks) > 0 {
+		notifier := newNotifier(hooks, dbPath, sub, srv.Metrics())
+		svc.SetNotifier(notifier)
+		for _, c := range notify.ProductionSources(
+			notifyUnits(),
+			storagePath, backupDir, backupPrefix,
+			tlsCert, tlsKey,
+			notifyBackupMaxAge(),
+			svc.GCLastError(),
+		).Checks() {
+			notifier.AddCheck(c)
+		}
+		notifier.Start(ctx)
+		defer notifier.Stop()
+		log.Printf("notify: %d webhook(s) configured", len(hooks))
+	}
+
 	// Delete any substrate sandboxes no loaded lease or pool entry
 	// claims, then recover every lease that has a checkpoint from the
 	// crash (U10 reconcileCrash) before warming the pool, so capacity is
@@ -313,8 +414,6 @@ func Main(args []string) int {
 	// Database backups (U11): daily at 03:00 local time, and once at
 	// start when no backup is newer than 24 h. The file prefix is the
 	// database file's basename without extension.
-	backupDir := envOr("SPOOND_BACKUP_DIR", "/var/lib/spoond/backups")
-	backupPrefix := strings.TrimSuffix(filepath.Base(dbPath), filepath.Ext(dbPath))
 	go func() {
 		if backupStale(backupDir, backupPrefix) {
 			if err := db.Backup(context.Background(), backupDir, 7); err != nil {

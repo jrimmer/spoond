@@ -71,6 +71,9 @@ type BackendMetrics struct {
 	// Store
 	StoreErrors *prometheus.CounterVec // {op}: SQLite write failures (U05)
 
+	// Webhook notifications (2.2, #117)
+	Notifications *prometheus.CounterVec // {webhook,severity,result}: delivery outcomes
+
 	// Builds (image bake)
 	BuildsInFlight prometheus.Gauge   // active bakes
 	BuildsFailed   prometheus.Counter // cumulative bake failures
@@ -276,6 +279,14 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "store_errors_total",
 		Help: "Store write failures by operation.",
 	}, []string{"op"})
+	// Webhook notifications (2.2, #117): the webhook label is the
+	// webhook's index in NOTIFY_WEBHOOKS — never the URL, which may
+	// carry secrets — and "-" when no webhook was chosen (queue,
+	// dedupe and drop-before-match outcomes).
+	m.Notifications = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "notifications_total",
+		Help: "Webhook notification delivery outcomes. `webhook` is the receiver's index in NOTIFY_WEBHOOKS (never its URL); result is sent, retry, dropped, deduped or rate_limited.",
+	}, []string{"webhook", "severity", "result"})
 
 	// Builds
 	m.BuildsInFlight = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -369,6 +380,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.AuthThrottled, m.QuotaExceeded, m.QuotaReserved,
 		m.SharesActive, m.BusySlots,
 		m.StoreErrors,
+		m.Notifications,
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,

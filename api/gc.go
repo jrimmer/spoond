@@ -141,13 +141,22 @@ func (s *Service) runGCCatalogLoop(ctx context.Context) {
 }
 
 // gcOnce runs one GC pass: the kept-set closure, the candidate deletes
-// (dry-run unless GC_DELETE=1) and the hourly disk accounting.
+// (dry-run unless GC_DELETE=1) and the hourly disk accounting. The pass's
+// outcome is recorded for the notify checks (gc.failed, 2.2 #117); a
+// drain-skipped pass records nothing — it did not run, so it did not fail.
 func (s *Service) gcOnce(ctx context.Context) error {
 	// The drain pauses and resumes every lease; a GC pass racing it
 	// could delete builds mid-rotation (U10).
 	if s.draining.Load() {
 		return nil
 	}
+	err := s.gcPass(ctx)
+	s.recordGCOutcome(err)
+	return err
+}
+
+// gcPass is gcOnce's body: one full pass.
+func (s *Service) gcPass(ctx context.Context) error {
 	kept, err := s.keptBuilds(ctx)
 	if err != nil {
 		return err

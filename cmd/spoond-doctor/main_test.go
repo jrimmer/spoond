@@ -2,12 +2,18 @@ package spoonddoctor
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v2/notify"
 	"github.com/jrimmer/spoond/v2/store"
 )
 
@@ -204,5 +210,91 @@ func TestCheckDrainUnit(t *testing.T) {
 	drainEnvPath = filepath.Join(dir, "missing.env")
 	if r := checkDrainUnit(); r[0].status != "FAIL" || !strings.Contains(r[0].detail, "missing.env") {
 		t.Errorf("missing drain.env: got %+v", r)
+	}
+}
+
+// TestCheckWebhooks: unset warns (notifications are optional), a valid
+// list passes with a count plus one reachability check per webhook, a
+// malformed list fails naming the index — never the URL.
+func TestCheckWebhooks(t *testing.T) {
+	t.Setenv("NOTIFY_WEBHOOKS", "")
+	res := checkWebhooks()
+	if len(res) != 1 || res[0].status != "WARN" {
+		t.Fatalf("unset = %+v", res)
+	}
+	// A reachable receiver: config passes, the probe answers 2xx.
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(b), "spoond notify test") {
+			t.Errorf("probe body = %q, want the test message", b)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("NOTIFY_WEBHOOKS", fmt.Sprintf(
+		`[{"url":%q,"format":"json"}]`, srv.URL))
+	res = checkWebhooks()
+	if len(res) != 2 || res[0].status != "PASS" || res[0].detail != "1 webhook(s) configured" {
+		t.Fatalf("valid = %+v", res)
+	}
+	if res[1].status != "PASS" || !strings.Contains(res[1].name, "webhook 0 reachability") {
+		t.Fatalf("probe = %+v", res[1])
+	}
+
+	// A dead endpoint: config still passes, reachability FAILs.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer dead.Close()
+	deadURL := dead.URL
+	dead.Close() // nothing listens there now
+	t.Setenv("NOTIFY_WEBHOOKS", fmt.Sprintf(`[{"url":%q,"format":"slack"}]`, deadURL))
+	res = checkWebhooks()
+	if len(res) != 2 || res[0].status != "PASS" {
+		t.Fatalf("dead = %+v", res)
+	}
+	if res[1].status != "FAIL" {
+		t.Fatalf("probe should fail against a closed listener: %+v", res[1])
+	}
+
+	// A malformed list fails before anything is probed.
+	t.Setenv("NOTIFY_WEBHOOKS", `[{"url":"https://secret.example/tok?access=SECRET","format":"bogus"}]`)
+	res = checkWebhooks()
+	if len(res) != 1 || res[0].status != "FAIL" {
+		t.Fatalf("invalid = %+v", res)
+	}
+	if strings.Contains(res[0].detail, "SECRET") || strings.Contains(res[0].detail, "secret.example") {
+		t.Fatalf("check output leaked the URL: %q", res[0].detail)
+	}
+	if !strings.Contains(res[0].detail, "NOTIFY_WEBHOOKS[0]") {
+		t.Fatalf("error does not name the index: %q", res[0].detail)
+	}
+}
+
+// TestCheckNotifyFailures: no state file passes clean; recorded
+// failures within 24 h warn with per-webhook counts (by index).
+func TestCheckNotifyFailures(t *testing.T) {
+	t.Setenv("NOTIFY_STATE_FILE", filepath.Join(t.TempDir(), "state.json"))
+	res := checkNotifyFailures()
+	if len(res) != 1 || res[0].status != "PASS" {
+		t.Fatalf("no file = %+v", res)
+	}
+	path := os.Getenv("NOTIFY_STATE_FILE")
+	now := time.Now()
+	b, _ := json.Marshal([]notify.Failure{
+		{At: now.Add(-time.Hour), Webhook: 1, Error: "HTTP 503"},
+		{At: now.Add(-2 * time.Hour), Webhook: 1, Error: "HTTP 503"},
+		{At: now.Add(-30 * time.Hour), Webhook: 0, Error: "old, outside the horizon"},
+	})
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res = checkNotifyFailures()
+	if len(res) != 1 || res[0].status != "WARN" {
+		t.Fatalf("with failures = %+v", res)
+	}
+	if !strings.Contains(res[0].detail, "webhook 1: 2 dropped") || strings.Contains(res[0].detail, "outside the horizon") {
+		t.Fatalf("detail = %q", res[0].detail)
 	}
 }
