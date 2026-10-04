@@ -413,6 +413,104 @@ the agent's reply).
 
 ---
 
+## Lease events (Server-Sent Events)
+
+Every lease lifecycle change emits one event on an in-process event
+bus (#115). The bus keeps the last 10000 events; the two SSE routes
+below stream them live, with resume.
+
+### `GET /api/leases/events` — stream the caller's lease events
+
+Server-Sent Events. Admins receive every lease's events; everyone else
+receives only events for their own leases. `?lease_id=<id>` narrows the
+stream to one lease (a lease you cannot see answers the same `404` as
+the other lease routes). Requires a bearer token.
+
+### `GET /api/leases/{id}/events` — stream one lease's events
+
+Same stream, pre-filtered to the lease in the path. The owner (or an
+admin); anyone else gets `404`, like every other lease route.
+
+### Wire format
+
+Each event carries an `id` of the form `<epoch>-<seq>`, an `event` type
+and a JSON `data` payload:
+
+```
+id: 9f1c2a4b8d3e5f60-42
+event: created
+data: {"seq":42,"epoch":"9f1c2a4b8d3e5f60","at":"2026-10-04T12:00:00.123456789Z","lease_id":"8f3a…","owner":"u-…","type":"created","detail":"granted from image dev-base"}
+
+```
+
+- `seq` is monotonic per backend process (1, 2, 3, …), assigned in emit
+  order. Events on a stream never go backwards and never repeat.
+- `epoch` is a random id generated at backend start and stable for the
+  process's lifetime. A different epoch in a later event id means the
+  backend restarted (and the sequence may have restarted with it).
+- `at` is the emit time (UTC, RFC3339 with nanoseconds).
+- `detail` is a short human-readable note (empty is possible).
+
+The stream opens with a `retry: 3000` hint and a `: keepalive` comment
+every 15 s thereafter, so proxies do not close an idle stream.
+
+### Event types
+
+| `event` | emitted when | `detail` names |
+|---|---|---|
+| `created` | a lease is granted, forked or cloned | the source image (forks: the source lease and build; clones: the source lease and checkpoint build) |
+| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release) | the release |
+| `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse) | the pause build id |
+| `resumed` | the lease starts from a pause build (resume, undrain, gateway resume) | the resume build id |
+| `checkpointed` | a running lease is checkpointed | the checkpoint build id |
+| `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
+| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
+| `restarted` | `POST /api/leases/{id}/restart` completed | snapshot round-trip or the image it cold-restarted from |
+| `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
+| `holder_cleared` | the hold is cleared | the clear |
+| `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
+| `gap` | a hole in *your* stream, not a lease change | what was missed and why |
+
+### Resume and gaps
+
+Send the last seen `id` as `Last-Event-ID` on reconnect:
+
+- Same epoch and the event is still in the ring (last 10000): the
+  stream resumes — every missed event is replayed, in order, and then
+  live events flow. Nothing is lost or duplicated across the seam.
+- Same epoch but the event has left the ring, or the id is past the
+  newest sequence, or the id does not parse as `<epoch>-<seq>` at all:
+  the stream sends one `gap` event naming the position it could not
+  honour, then live events. The gap's id is the current position, so
+  a reconnect from it resumes normally.
+- Different epoch (the backend restarted): same — a `gap` event first
+  ("epoch … is not the current epoch"), then live events. Treat the
+  epoch change as a signal to re-list your leases.
+
+Every event is checked again as it is written: a stream only ever
+carries events stamped with the caller's owner id (admins: all).
+A `gap` marker is always delivered — it reports the caller's own
+stream, not a lease change.
+
+A `gap` event is not part of the bus's sequence; it exists only in
+streams (and for in-process subscribers that fell behind, see below).
+A connect-time gap carries the current position as its `seq` and id;
+a gap for events dropped mid-stream has `seq` `0` and no id line, so
+the client keeps its last real id. The `suspended` and `resumed` pair
+also brackets `restarted` when a running persistent lease is restarted
+through a snapshot.
+
+### In-process subscribers
+
+The same bus is available inside the backend process:
+`Service.Subscribe(filter)` returns a channel of events matching the
+filter (by owner, by lease id, or everything). Delivery is
+non-blocking: a subscriber that does not keep up has events dropped —
+never blocking the lease lifecycle — and receives a `gap` event
+detailing the loss once it catches up.
+
+---
+
 ## Network policy
 
 `network_policy` decides what may leave a lease; the substrate enforces

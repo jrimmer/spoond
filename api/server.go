@@ -202,6 +202,11 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
+	// Lease event streams (2.2, #115): Server-Sent Events of every lease
+	// lifecycle change, the caller's leases (admins see all) or one
+	// lease. The /api/leases alias covers both via rewriteLeasePath.
+	s.mux.HandleFunc("GET /api/sandboxes/events", s.handleLeaseEvents)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/events", s.handleLeaseEventsOne)
 	// Held leases (2.1): set or clear what holds a lease later. Owner or
 	// admin; the handler 404s for anyone else, like the other lease
 	// routes.
@@ -431,7 +436,8 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 
 // statusWriter wraps http.ResponseWriter to capture the status code.
 // It forwards Hijack so WebSocket upgrades (stream) work through the
-// metrics middleware.
+// metrics middleware, and Flush so the Server-Sent Event streams can
+// push bytes as they are produced.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
@@ -440,6 +446,19 @@ type statusWriter struct {
 func (sw *statusWriter) WriteHeader(code int) {
 	sw.status = code
 	sw.ResponseWriter.WriteHeader(code)
+}
+
+// Flush forwards a flush to the underlying writer when it supports one
+// (http.ResponseWriter does not force it), so streamed responses are
+// not buffered by the middleware wrapper.
+// Unwrap lets http.ResponseController reach the connection (write
+// deadlines on the event streams).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Hijack forwards the connection hijack to the underlying writer.
