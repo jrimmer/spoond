@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
+	"os"
 	"time"
-
-	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Limits on held leases that act automatically (2.1, #111 follow-up).
@@ -20,20 +18,25 @@ import (
 // (last_action, last_action_at, returned by the lease API).
 //
 // The rules run in the existing sweep tick (sweepExpired) and skip
-// while the node is draining. A hold also expires on its own: it lasts
+// while the node is draining. A hold also lapses on its own: it lasts
 // HoldTTL from when it was set or renewed, at most HoldTTLMax (for an
-// explicit hold_ttl). Past expiry the holder fields are cleared and the
-// lease follows the normal TTL and idle rules again. Rule 4 shortens
-// rule 1's idle threshold under pressure; rule 5 releases
-// already-suspended held leases when the snapshot disk runs critical,
-// oldest suspension first, never a running one.
+// explicit hold_ttl). A lapsed hold suspends a running lease and never
+// releases one: the lease stays held (no expiry, so the TTL sweep never
+// touches it), rules 1 and 2 still apply, and renewing restores a
+// normal hold. Rule 4 shortens rule 1's idle threshold under pressure;
+// rule 5 releases leases a rule suspended when the snapshot disk runs
+// critical, oldest suspension first.
+//
+// Nothing running is ever released automatically: rules 2 and 5 only
+// take leases that a rule suspended (idle, pressure or a lapse) and
+// that saw no activity since.
 
 // Held-lease rule names, as used in log lines, the
 // spoond_held_actions_total{rule} label and the recorded last_action.
 const (
 	heldRuleIdle     = "idle"     // rule 1: idle held lease suspended
 	heldRuleStale    = "stale"    // rule 2: suspended held lease released
-	heldRuleExpiry   = "expiry"   // rule 3: hold expired, holder cleared
+	heldRuleExpiry   = "expiry"   // rule 3: hold lapsed; a running lease is suspended
 	heldRulePressure = "pressure" // rule 4: pressure shortens rule 1
 	heldRuleCritical = "critical" // rule 5: critical disk releases suspended leases
 )
@@ -41,9 +44,10 @@ const (
 // Held-lease action names, as used in the
 // spoond_held_actions_total{action} label and the recorded last_action.
 const (
-	heldActionRelease     = "release"
-	heldActionExpire      = "expire"
-	heldActionSuspendIdle = "suspend_idle"
+	heldActionRelease      = "release"
+	heldActionExpire       = "expire"
+	heldActionSuspendIdle  = "suspend_idle"
+	heldActionSuspendLapse = "suspend_lapsed"
 )
 
 // Defaults for the held-lease limits (owner decision 2026-10-03).
@@ -51,7 +55,7 @@ const (
 // variable means the value below; a ServiceConfig field of 0 disables
 // the rule it configures.
 const (
-	DefaultHeldIdleTimeout      = 4 * 24 * time.Hour  // HELD_IDLE_TIMEOUT_SECS (14400)
+	DefaultHeldIdleTimeout      = 4 * time.Hour       // HELD_IDLE_TIMEOUT_SECS (14400)
 	DefaultHeldSuspendedRelease = 7 * 24 * time.Hour  // HELD_SUSPENDED_RELEASE_SECS (604800)
 	DefaultHoldTTL              = 7 * 24 * time.Hour  // HOLD_TTL_SECS (604800)
 	DefaultHoldTTLMax           = 30 * 24 * time.Hour // HOLD_TTL_MAX_SECS (2592000)
@@ -174,65 +178,75 @@ func (s *Service) renewHolder(owner, id, holder, holderURL string, holdTTL time.
 	return l, nil
 }
 
-// expireHolds clears the holder of every held lease whose hold has
-// passed its HoldExpiresAt, and releases the ones already suspended
-// (rule 1 or 4): after expiry no held rule looks at the lease any more
-// (rules 1, 2 and 5 all require a holder), so a suspended one would
-// keep its pause build forever — release it here, where the expiry is
-// happening. A running expired-hold lease goes back to the normal TTL
-// and idle sweeps (an already-expired TTL releases it at the same
-// sweep). Returns the ids of the leases whose hold expired.
+// expireHolds lapses every hold past its HoldExpiresAt. A lapsed hold
+// keeps the holder (for visibility, and so the held rules keep covering
+// the lease) but has no expiry, so the TTL sweep never releases it,
+// however long ago its original TTL passed. A running lease is
+// suspended (memory and hugepages freed, nothing deleted); rule 2 then
+// releases it once it has stayed suspended and untouched for
+// HeldSuspendedRelease, and renewing the hold restores it. A lease
+// already suspended is left as it is, with the lapse starting rule 2's
+// clock. Nothing is released here. Returns the ids whose hold lapsed.
 func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
+	var lapsed, running []*Lease
 	s.store.mu.Lock()
-	var expired []*Lease
 	for _, l := range s.store.leases {
 		if l.released || !l.held() || l.HoldExpiresAt.IsZero() || now.Before(l.HoldExpiresAt) {
 			continue
 		}
-		remaining := l.ExpiresAt.Sub(now)
-		suspended := l.Suspended
-		s.heldAction(ctx, l, heldRuleExpiry, heldActionExpire,
-			fmt.Sprintf("hold set at %s, expired at %s (ttl %s); %s",
-				l.HoldSetAt.Format(time.RFC3339), l.HoldExpiresAt.Format(time.RFC3339),
-				l.HoldExpiresAt.Sub(l.HoldSetAt).Round(time.Second),
-				heldSweepNote(!l.Persistent, remaining)),
-			now)
-		clearHoldLocked(l)
-		s.saveLeaseLocked(l)
-		if suspended {
-			// No rule looks at an unheld lease's suspension, so this
-			// snapshot (nothing deleted yet) would otherwise outlive every
-			// sweeper. Release it as part of the expiry; the GC reclaims
-			// the builds, as with rules 2 and 5.
-			s.heldAction(ctx, l, heldRuleExpiry, heldActionRelease,
-				"hold expired while the lease was suspended; the held rules no longer cover it",
-				now)
-			expired = append(expired, l)
-			continue
+		detail := fmt.Sprintf("hold set at %s lapsed at %s (ttl %s)",
+			l.HoldSetAt.Format(time.RFC3339), l.HoldExpiresAt.Format(time.RFC3339),
+			l.HoldExpiresAt.Sub(l.HoldSetAt).Round(time.Second))
+		l.HoldExpiresAt = time.Time{} // lapsed: still held, no expiry
+		if l.Suspended {
+			s.heldAction(ctx, l, heldRuleExpiry, heldActionSuspendLapse,
+				detail+"; already suspended, released after it stays untouched for the stale limit unless renewed", now)
+		} else {
+			s.heldAction(ctx, l, heldRuleExpiry, heldActionExpire, detail+"; suspending it", now)
+			running = append(running, l)
 		}
-		expired = append(expired, l)
+		lapsed = append(lapsed, l)
 	}
 	s.store.mu.Unlock()
-	for _, l := range expired {
-		if l.LastAction == heldRuleExpiry+"/"+heldActionRelease {
-			s.releaseHeld(ctx, l)
+	for _, l := range running {
+		if _, err := s.pauseLease(ctx, l, false); err != nil {
+			// Busy or failing: it stays held with no expiry, so rule 1
+			// suspends it once idle; nothing is released either way.
+			if !errors.Is(err, errLeaseBusy) {
+				s.log.Printf("held lease %s: suspend after lapse: %v", l.ID, err)
+			}
+			continue
 		}
+		s.heldActionLocked(ctx, l, heldRuleExpiry, heldActionSuspendLapse, "hold lapsed; suspended", now)
 	}
-	ids := make([]string, 0, len(expired))
-	for _, l := range expired {
+	ids := make([]string, 0, len(lapsed))
+	for _, l := range lapsed {
 		ids = append(ids, l.ID)
 	}
 	return ids
 }
 
-// heldSweepNote describes what now happens to an expired hold: either
-// the next sweep releases the lease (its TTL has already passed) or it
-// is protected until then.
-func heldSweepNote(expired bool, remaining time.Duration) string {
-	if expired {
-		return "ttl already passed; the next sweep releases it"
+// suspendedByRule reports whether l is suspended because a held-lease
+// rule suspended it (idle, pressure or a lapse) and has seen no activity
+// since; it returns the time of that suspension. Only such leases may
+// be released by rules 2 and 5: a lease suspended by hand or by the
+// drain, or resumed and used since, is never released automatically.
+// Call with s.store.mu held.
+func suspendedByRule(l *Lease) (time.Time, bool) {
+	if l.released || !l.held() || l.State != "suspended" || !l.Suspended || l.LastActionAt.IsZero() {
+		return time.Time{}, false
 	}
-	return fmt.Sprintf("ttl runs %s more; normal sweeping resumes", remaining.Round(time.Second))
+	switch l.LastAction {
+	case heldRuleIdle + "/" + heldActionSuspendIdle,
+		heldRulePressure + "/" + heldActionSuspendIdle,
+		heldRuleExpiry + "/" + heldActionSuspendLapse:
+	default:
+		return time.Time{}, false
+	}
+	if l.LastActive.After(l.LastActionAt) {
+		return time.Time{}, false // used since the rule suspended it
+	}
+	return l.LastActionAt, true
 }
 
 // heldActionLocked is heldAction with the store lock taken: most rule
@@ -326,11 +340,25 @@ func (s *Service) releaseSuspendedHeldUntil(ctx context.Context, now time.Time) 
 	if !ok || pct >= crit {
 		return
 	}
-	// The GC runs first, as the rule requires — its budget is a sweep
-	// tick (the loop's own context), not an hour: a slow substrate must
-	// not wedge the sweeper goroutine (the hourly catalog loop uses its
-	// own, longer-lived context).
-	s.gcOnce(ctx) // its errors do not stop the rule
+	// Releasing a lease frees disk only through the GC's deletions. With
+	// the GC in dry-run (GC_DELETE unset) nothing is ever freed, so
+	// releasing would destroy held work for no gain: refuse, and say so
+	// (at most once an hour).
+	if os.Getenv("GC_DELETE") != "1" {
+		if now.Sub(s.criticalDryRunLogged) >= time.Hour {
+			s.criticalDryRunLogged = now
+			s.log.Printf("held leases: disk %.1f%% free < %.0f%% critical, but GC_DELETE is not 1 (dry-run GC frees nothing): releasing no held lease", pct, crit)
+		}
+		return
+	}
+	// The GC runs first, as the rule requires, but at most every five
+	// minutes: it walks the whole build catalog, and the sweep ticks
+	// every few seconds. Its budget is the sweep's context, so a slow
+	// substrate cannot wedge the sweeper.
+	if now.Sub(s.criticalGCAt) >= 5*time.Minute {
+		s.criticalGCAt = now
+		s.gcOnce(ctx) // its errors do not stop the rule
+	}
 	if p, ok := s.freePercent(s.cfg.TemplateStoragePath); ok {
 		pct = p
 	}
@@ -357,29 +385,20 @@ func (s *Service) releaseSuspendedHeldUntil(ctx context.Context, now time.Time) 
 	s.releaseHeld(ctx, victim)
 }
 
-// oldestSuspendedHeld returns the held lease that has been suspended
-// longest (state "suspended", non-released, with a holder) — rule 5's
-// victim. Live leases are never candidates. Call with s.store.mu NOT
+// oldestSuspendedHeld returns the lease a rule suspended longest ago
+// (suspendedByRule) — rule 5's victim. Running leases, and leases
+// suspended by hand or by the drain, are never candidates. Call with s.store.mu NOT
 // held (the returned pointer is used outside the lock, like the
 // sweeper's other victims).
 func (s *Service) oldestSuspendedHeld(now time.Time) (*Lease, time.Time, bool) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	var best *Lease
-	bestAt := now
+	var bestAt time.Time
 	for _, l := range s.store.leases {
-		if l.released || !l.held() || l.State != "suspended" {
+		at, ok := suspendedByRule(l)
+		if !ok {
 			continue
-		}
-		at := l.LastActionAt
-		if at.IsZero() || at.After(now) {
-			// Suspended before last_action was recorded (by the drain, by
-			// hand): fall back to the lease's own activity clock so the
-			// order stays stable and old.
-			at = l.LastActive
-			if at.After(now) {
-				at = now
-			}
 		}
 		if best == nil || at.Before(bestAt) {
 			best, bestAt = l, at
@@ -391,52 +410,40 @@ func (s *Service) oldestSuspendedHeld(now time.Time) (*Lease, time.Time, bool) {
 	return best, bestAt, true
 }
 
-// releaseStaleHeld implements rule 2: a held lease suspended by rule 1
-// (or 4) and untouched for HeldSuspendedRelease is released (deleted);
-// the GC reclaims its builds. The lease's LastActionAt (recorded by
-// rule 1's suspend, or falling back to LastActive — a lease suspended
-// before last_action was recorded, or by hand/drain, has none) starts
-// the clock: it is the closest available stamp of when the lease
-// stopped being live.
+// releaseStaleHeld implements rule 2: a lease a rule suspended (idle,
+// pressure or a lapse) and untouched since for HeldSuspendedRelease is
+// released (deleted); the GC reclaims its builds. The clock starts at
+// that suspension (suspendedByRule); a lease suspended by hand or by the
+// drain, or used since, is never released here.
 func (s *Service) releaseStaleHeld(ctx context.Context, now time.Time) {
 	release := s.cfg.HeldSuspendedRelease
 	if release <= 0 {
 		return
 	}
-	var stale []*Lease
+	type victim struct {
+		l  *Lease
+		at time.Time
+	}
+	var stale []victim
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
-		if l.released || !l.held() || l.State != "suspended" {
-			continue
-		}
-		at := l.LastActionAt
-		if at.IsZero() || at.After(now) {
-			at = l.LastActive
-			if at.After(now) {
-				at = now
-			}
-		}
-		if now.Sub(at) >= release {
-			stale = append(stale, l)
+		if at, ok := suspendedByRule(l); ok && now.Sub(at) >= release {
+			stale = append(stale, victim{l, at})
 		}
 	}
 	s.store.mu.Unlock()
-	for _, l := range stale {
-		at := l.LastActionAt
-		if at.IsZero() {
-			at = l.LastActive
-		}
-		s.heldActionLocked(ctx, l, heldRuleStale, heldActionRelease,
-			fmt.Sprintf("suspended at %s, untouched for %s >= %s", at.Format(time.RFC3339),
-				now.Sub(at).Round(time.Second), release),
+	for _, v := range stale {
+		s.heldActionLocked(ctx, v.l, heldRuleStale, heldActionRelease,
+			fmt.Sprintf("suspended by %s at %s, untouched for %s >= %s", v.l.LastAction, v.at.Format(time.RFC3339),
+				now.Sub(v.at).Round(time.Second), release),
 			now)
-		s.releaseHeld(ctx, l)
+		s.releaseHeld(ctx, v.l)
 	}
 }
 
 // runHeldRules runs the held-lease rules for one sweep tick, in order:
-// hold expiry (3, releasing the leases it finds suspended — after
-// expiry no held rule covers them), stale-release (2), then
+// hold lapse (3, suspending running leases, releasing none),
+// stale-release (2), then
 // idle-suspend (1, shortened by pressure (4)) — pressure is evaluated
 // once per tick — and critical-release (5) last, so a tick that both
 // suspends and frees leaves the disk check looking at the resulting
@@ -502,61 +509,4 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 		}
 		s.heldActionLocked(ctx, l, rule, heldActionSuspendIdle, detail, now)
 	}
-}
-
-// lookupHeld returns a live held lease by id, regardless of owner. Used
-// by the SSH gateway so an attach can resume a rule-1-suspended held
-// lease it does not own.
-func (s *Service) lookupHeld(id string) *Lease {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	l := s.store.leases[id]
-	if l == nil || l.released || !l.held() {
-		return nil
-	}
-	return l
-}
-
-// resumeHeldGateway resumes a held lease on attach: the gateway's
-// capability is the lease name or id, not an owner id, so resume
-// cannot require one. Only held leases go through here; a live lease
-// is returned as-is (nothing to resume) and any other error propagates.
-func (s *Service) resumeHeldGateway(ctx context.Context, id string) (*Lease, error) {
-	l := s.lookupHeld(id)
-	if l == nil {
-		return nil, errNotFound
-	}
-	if !l.Suspended {
-		return l, nil
-	}
-	return s.resumeLease(ctx, l)
-}
-
-// handleHeldResume answers POST /api/leases/{id}/resume: the SSH
-// gateway's owner-blind resume for a held lease suspended by rule 1
-// (resuming on next use is what makes the suspension safe). Unheld
-// leases get the same 404 as the other owner-scoped routes — they have
-// the owner-checked /api/sandboxes/{id}/resume.
-func (s *Server) handleHeldResume(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	lease, err := s.svc.resumeHeldGateway(r.Context(), id)
-	if err != nil {
-		switch {
-		case errors.Is(err, errNotFound):
-			writeError(w, http.StatusNotFound, "lease not found")
-		case errors.Is(err, errLeaseBusy):
-			writeError(w, http.StatusConflict, err.Error())
-		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
-		default:
-			s.svc.log.Printf("held resume %s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "resume failed")
-		}
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":      lease.ID,
-		"status":  "running",
-		"address": lease.HostIP,
-	})
 }

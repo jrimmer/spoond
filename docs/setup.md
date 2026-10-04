@@ -133,6 +133,14 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |
 | `MAX_TTL_SECS` | `3600` | maximum TTL a consumer may request |
 | `IDLE_TIMEOUT_SECS` | `0` | auto-suspend persistent leases idle for this long (`0` disables) |
+| `HELD_IDLE_TIMEOUT_SECS` | `14400` | suspend a held lease idle this long (held-lease rule 1; `0` disables) |
+| `HELD_SUSPENDED_RELEASE_SECS` | `604800` | release a held lease a rule suspended once it stays untouched this long (rule 2; `0` disables) |
+| `HOLD_TTL_SECS` | `604800` | how long a hold lasts from when it was set or renewed (rule 3; `0` means the default) |
+| `HOLD_TTL_MAX_SECS` | `2592000` | cap for an explicit `hold_ttl` (`0` means the default) |
+| `PRESSURE_DISK_FREE_PCT` | `15` | snapshot-disk free percentage under which rule 1 uses the shorter threshold (rule 4; `0` disables the disk trigger) |
+| `PRESSURE_HELD_IDLE_SECS` | `1800` | rule 1's threshold under pressure (`0` disables rule 4) |
+| `CRITICAL_DISK_FREE_PCT` | `5` | snapshot-disk free percentage under which rule 5 releases rule-suspended held leases (needs `GC_DELETE=1`; `0` disables) |
+| `CRITICAL_DISK_RECOVER_PCT` | `10` | rule 5 stops releasing above this free percentage |
 | `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
 | `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |

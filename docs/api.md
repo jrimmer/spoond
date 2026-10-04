@@ -223,8 +223,10 @@ records `resume_build_id`. Response
 ### `POST /api/leases/{id}/resume` — start from the snapshot
 
 Restores a suspended lease from `resume_build_id` **with the same sandbox
-id**, so its address and identity are unchanged. Response
-`{"id":"…","status":"running","address":"…"}`. `400` if not persistent,
+id**, so its address and identity are unchanged. Owner only (admins
+too); the SSH gateway's service token may resume any lease before a
+session starts. Response
+`{"id":"…","status":"running","address":"…"}`. `400` if neither persistent nor held,
 `409` if the lease is busy (another lifecycle operation is in flight).
 Resume is idempotent: there is no already-running check, so resuming a
 lease that is already running restores from the snapshot again.
@@ -331,18 +333,16 @@ and is checkpointed periodically like a persistent lease — a CI job or
 an orchestrator can hold a plain (non-persistent) lease past its TTL
 without keep-alive calls, and its work survives a crash. The hold ends
 on its own (`HOLD_TTL_SECS` from when it was set or renewed, at most
-`HOLD_TTL_MAX_SECS` for an explicit `hold_ttl`): past expiry
-`holder`/`holder_url` are cleared and the lease follows the normal TTL
-and idle rules again. Even while held, the automatic limits in
+`HOLD_TTL_MAX_SECS` for an explicit `hold_ttl`): a lapsed hold suspends
+a running lease and never releases one; the lease keeps its holder,
+`hold_state` becomes `lapsed`, and it is released only after staying
+suspended and untouched for the stale limit, unless renewed. Even while held, the automatic limits in
 [operations.md](operations.md) act on their own — idle suspend,
 release of stale suspended leases, the pressure and critical-disk
 rules — and every action is reported as `last_action`/`last_action_at`
 on the lease. A held lease suspended by the idle rule resumes on next
-use: the SSH gateway does this automatically on attach, and
-`POST /api/leases/{id}/resume` (no owner check — the lease **id** is
-the capability, like the gateway and the LLM routes) does it over
-HTTP. Unheld leases are not served by that route (404); use the
-owner-checked `POST /api/sandboxes/{id}/resume` for them.
+use: the SSH gateway does this automatically on attach, and the owner
+can call `POST /api/leases/{id}/resume`.
 
 ### `POST /api/leases/{id}/resume` — resume a held lease (gateway)
 

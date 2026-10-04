@@ -259,6 +259,11 @@ type Service struct {
 	draining atomic.Bool
 	// stopLoops cancels the background sweeper/refiller started by Start.
 	stopLoops context.CancelFunc
+
+	// Rule 5's guards (held-lease limits): when its GC last ran, and
+	// when it last logged that a dry-run GC stops it. Sweep goroutine only.
+	criticalGCAt         time.Time
+	criticalDryRunLogged time.Time
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -1284,7 +1289,27 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
-	if !l.Persistent {
+	if !l.Persistent && !l.held() {
+		s.store.mu.Unlock()
+		return nil, errNotPersistent
+	}
+	s.store.mu.Unlock()
+	return s.resumeLease(ctx, l)
+}
+
+// resumeAny is resume without the owner check, for the SSH gateway's
+// service token: before a session starts, the gateway resumes a
+// suspended lease the connecting user is already authorised for (a held
+// lease suspended by an idle rule resumes on next use this way).
+// Persistent and held leases only, as for resume.
+func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
+	s.store.mu.Lock()
+	l := s.store.leases[id]
+	if l == nil || l.released {
+		s.store.mu.Unlock()
+		return nil, errNotFound
+	}
+	if !l.Persistent && !l.held() {
 		s.store.mu.Unlock()
 		return nil, errNotPersistent
 	}
@@ -1972,6 +1997,16 @@ func leaseMap(l *Lease) map[string]any {
 	}
 	if !l.HoldExpiresAt.IsZero() {
 		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if l.held() {
+		// active: the hold runs until hold_expires_at; lapsed: it ran out
+		// unrenewed, the lease was suspended and is released by the stale
+		// rule unless renewed or used.
+		if l.HoldExpiresAt.IsZero() {
+			m["hold_state"] = "lapsed"
+		} else {
+			m["hold_state"] = "active"
+		}
 	}
 	if l.LastAction != "" {
 		m["last_action"] = l.LastAction

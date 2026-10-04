@@ -2,12 +2,13 @@ package api
 
 // Limits on held leases that act automatically (2.1): every rule fires
 // at its threshold and not before, a heartbeat prevents the idle
-// suspend, renewal extends a hold and is capped at the maximum, expiry
-// clears the holder and hands the lease back to the TTL sweep, pressure
+// suspend, renewal extends a hold and is capped at the maximum, a lapse
+// suspends and never releases, pressure
 // shortens the idle threshold, the critical rule releases
 // oldest-suspended first and stops at the recovery level, a running
 // held lease is never released, and every action is counted and
-// recorded. The tests use the fake substrate, the injectable clock
+// recorded. A lapsed hold suspends a running lease and never releases
+// it; only leases a rule suspended, untouched since, are ever released. The tests use the fake substrate, the injectable clock
 // (svc.now) and an injectable free-space reader (svc.diskCapacity).
 
 import (
@@ -176,12 +177,12 @@ func TestHeldSuspendedReleasedAtThresholdNotBefore(t *testing.T) {
 	}
 }
 
-// TestHoldExpiresAndHandsBackToTTLSweep (rule 3): a hold lasts HoldTTL
-// from when it was set, at most HoldTTLMax for an explicit hold_ttl;
-// past expiry holder and holder_url are cleared and the lease follows
-// the normal TTL rules — an already-expired TTL releases it at the next
-// sweep.
-func TestHoldExpiresAndHandsBackToTTLSweep(t *testing.T) {
+// TestHoldLapseSuspendsNeverReleases (rule 3): when a hold lapses
+// unrenewed, a running lease is suspended and stays held with no
+// expiry, so the TTL sweep never releases it even though its own TTL
+// passed long ago. Rule 2 releases it only after it has stayed
+// suspended and untouched for HeldSuspendedRelease.
+func TestHoldLapseSuspendsNeverReleases(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
@@ -189,52 +190,61 @@ func TestHoldExpiresAndHandsBackToTTLSweep(t *testing.T) {
 
 	base := time.Now()
 	svc.cfg.HoldTTL = time.Hour
+	svc.cfg.HeldSuspendedRelease = 7 * 24 * time.Hour
+	svc.cfg.HeldIdleTimeout = 0 // rule 1 off: only the lapse acts here
 	cur := base
 	svc.now = func() time.Time { return cur }
 
-	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
-	}
-	// The hold's clock starts when the holder is set (setHolderWithTTL
-	// uses svc.now = base); the grant itself must not carry one.
-	if _, zero := holdOf(t, svc, l.ID); !zero.IsZero() {
-		t.Fatalf("grant stamped a hold itself: %v", zero)
 	}
 	if _, err := svc.setHolderWithTTL("c", l.ID, "ci-job", "", 0); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
-	holder, expires := holdOf(t, svc, l.ID)
-	if holder != "ci-job" || !expires.Equal(base.Add(time.Hour)) {
-		t.Fatalf("hold = %q expiring %v, want ci-job at %v", holder, expires, base.Add(time.Hour))
-	}
 
-	// Before expiry the lease is still held and survives its TTL.
+	// Before the lapse the lease is held and survives its (tiny) TTL.
 	cur = base.Add(30 * time.Minute)
 	svc.sweepExpired(ctx)
 	if svc.lookup("c", l.ID) == nil {
-		t.Fatal("held lease swept before its hold expired")
+		t.Fatal("held lease swept before its hold lapsed")
 	}
 
-	// At +2 h the hold has expired: the holder is cleared...
+	// At +2 h the hold has lapsed: the running lease is suspended, still
+	// held, with no expiry; nothing is released.
 	cur = base.Add(2 * time.Hour)
 	svc.expireHolds(ctx, cur)
-	holder, expires = holdOf(t, svc, l.ID)
-	if holder != "" || !expires.IsZero() {
-		t.Fatalf("expired hold not cleared: holder=%q expires=%v", holder, expires)
+	holder, expires := holdOf(t, svc, l.ID)
+	if holder != "ci-job" || !expires.IsZero() {
+		t.Fatalf("lapsed hold: holder=%q expires=%v, want ci-job and no expiry", holder, expires)
+	}
+	if !l.Suspended {
+		t.Fatal("running lease not suspended when its hold lapsed")
+	}
+	if l.LastAction != "expiry/suspend_lapsed" {
+		t.Fatalf("last_action = %q, want expiry/suspend_lapsed", l.LastAction)
 	}
 	if n := heldCounter(t, svc, "expiry", "expire"); n != 1 {
 		t.Fatalf("held_actions_total{expiry,expire} = %g, want 1", n)
 	}
-	if l.LastAction != "expiry/expire" {
-		t.Fatalf("last_action = %q, want expiry/expire", l.LastAction)
+
+	// Its TTL passed hours ago, yet no sweep releases it.
+	for _, h := range []time.Duration{3 * time.Hour, 24 * time.Hour, 6 * 24 * time.Hour} {
+		cur = base.Add(h)
+		svc.sweepExpired(ctx)
+		if svc.lookup("c", l.ID) == nil {
+			t.Fatalf("lapsed lease released by a sweep at +%s", h)
+		}
 	}
 
-	// ...and the lease, whose TTL passed long ago, is released by the
-	// next sweep.
+	// Seven days after the lapse-suspend, untouched: rule 2 releases it.
+	cur = base.Add(2*time.Hour + 7*24*time.Hour + time.Minute)
 	svc.sweepExpired(ctx)
 	if svc.lookup("c", l.ID) != nil {
-		t.Fatal("lease survived the sweep after its hold expired")
+		t.Fatal("lapsed, suspended, untouched lease not released after the stale limit")
+	}
+	if n := heldCounter(t, svc, "stale", "release"); n != 1 {
+		t.Fatalf("held_actions_total{stale,release} = %g, want 1", n)
 	}
 }
 
@@ -383,6 +393,7 @@ func (r *reclaimSub) Delete(ctx context.Context, sandboxID string) error {
 // own tick — the builds only become GC candidates after gcAge — so the
 // reclaimed space appears on a later tick, the way the GC delivers it.
 func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
+	t.Setenv("GC_DELETE", "1")
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
@@ -416,6 +427,9 @@ func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 	suspended[0].LastActionAt = older
 	suspended[1].LastActionAt = mid
 	suspended[2].LastActionAt = time.Now()
+	for _, l := range suspended { // no activity since each suspension
+		l.LastActive = older.Add(-time.Minute)
+	}
 	svc.store.mu.Unlock()
 
 	// A running held lease exists when the pressure hits; it must never
@@ -622,15 +636,16 @@ func TestHeldLimitsAPI(t *testing.T) {
 	if listed == nil || listed["last_action"] != "idle/suspend_idle" || listed["hold_expires_at"] == "" {
 		t.Fatalf("list row missing the held-lease fields: %v", listed)
 	}
-	// The suspended held lease resumes on next use through the
-	// owner-blind route (the SSH gateway's path).
-	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/resume", "token-b", nil)
+	// The suspended held lease resumes on next use through the ordinary
+	// resume route, for its owner.
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/resume", "token-a", nil)
 	if resp.StatusCode != http.StatusOK || body["status"] != "running" {
 		t.Fatalf("held resume = %d (%v), want 200 running", resp.StatusCode, body)
 	}
 
-	// Expiry hands the lease back to the TTL sweep: create with a tiny
-	// TTL, let the hold run out, sweep — released.
+	// A lapsed hold suspends the lease and never releases it, even with
+	// its TTL long past: create with a tiny TTL, let the hold run out,
+	// sweep — still there, suspended, hold_state lapsed.
 	resp, body = doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{
 		"image": "py-base", "ttl": 1, "holder": "short-job",
 	})
@@ -645,8 +660,8 @@ func TestHeldLimitsAPI(t *testing.T) {
 	svc.store.mu.Unlock()
 	svc.Shutdown(ctx) // stop the live sweeper; the checked sweep below is ours
 	svc.sweepExpired(ctx)
-	if l := svc.lookup("consumer-a", shortID); l != nil {
-		t.Fatal("lease whose hold expired was not handed back to the TTL sweep")
+	if l := svc.lookup("consumer-a", shortID); l == nil || !l.Suspended {
+		t.Fatalf("lapsed hold: lease released or not suspended: %+v", l)
 	}
 
 	// The actions counter is exposed under its documented name.
@@ -692,34 +707,55 @@ func TestUnheldLeaseUntouchedByHeldRules(t *testing.T) {
 	}
 }
 
-// TestHeldResumeRouteOwnerBlind: POST /api/leases/{id}/resume answers
-// 404 for an unheld lease (the owner-checked route serves those) and
-// for an unknown id.
-func TestHeldResumeRouteOwnerBlind(t *testing.T) {
+// TestResumeHeldLeaseOwnerOrGateway: a held (non-persistent) lease that
+// a rule suspended resumes through the ordinary resume route for its
+// owner and for the SSH gateway's service token; another user gets 404.
+// /api/leases/{id}/resume and /api/sandboxes/{id}/resume are the same
+// route.
+func TestResumeHeldLeaseOwnerOrGateway(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	seedImage(t, db, "py-base", 2048)
+	svc.tokens["gw-tok"] = "gateway" // the gateway's token is a consumer token too
+	svc.SetGatewayToken("gw-tok")
+	svc.cfg.HeldIdleTimeout = 30 * time.Millisecond
+	ctx := context.Background()
 
-	l, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, true, "", nil, "", "")
+	a, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "ci-job", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/resume", "token-b", nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("unheld lease resume = %d, want 404", resp.StatusCode)
+	b, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "ci-job-2", "")
+	if err != nil {
+		t.Fatalf("grant: %v", err)
 	}
-	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/no-such-lease/resume", "token-b", nil)
+	time.Sleep(60 * time.Millisecond)
+	svc.runHeldRules(ctx, time.Now())
+	if !a.Suspended || !b.Suspended {
+		t.Fatal("setup: held leases not suspended")
+	}
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+a.ID+"/resume", "token-b", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("another user's resume = %d, want 404", resp.StatusCode)
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+a.ID+"/resume", "token-a", nil)
+	if resp.StatusCode != http.StatusOK || body["status"] != "running" {
+		t.Fatalf("owner resume of a held lease = %d (%v), want 200 running", resp.StatusCode, body)
+	}
+	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes/"+b.ID+"/resume", "gw-tok", nil)
+	if resp.StatusCode != http.StatusOK || body["status"] != "running" {
+		t.Fatalf("gateway resume = %d (%v), want 200 running", resp.StatusCode, body)
+	}
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/no-such-lease/resume", "gw-tok", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown lease resume = %d, want 404", resp.StatusCode)
 	}
 }
 
-// TestExpiredHoldReleasesSuspendedLease: a held lease suspended by rule
-// 1 whose hold then expires is released by the expiry itself — after
-// expiry no held rule looks at the lease, so its pause build would
-// otherwise be kept forever. Nothing is deleted early while the hold is
-// still alive.
-func TestExpiredHoldReleasesSuspendedLease(t *testing.T) {
-	svc, db, sub := newTestService(t)
+// TestLapseOfSuspendedHoldDoesNotRelease: a held lease suspended by rule
+// 1 whose hold then lapses is not released by the lapse; the lapse
+// restarts rule 2's clock, and renewing restores a normal hold.
+func TestLapseOfSuspendedHoldDoesNotRelease(t *testing.T) {
+	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 	svc.SetMetrics(metrics.NewBackendMetrics())
@@ -727,6 +763,7 @@ func TestExpiredHoldReleasesSuspendedLease(t *testing.T) {
 	base := time.Now()
 	svc.cfg.HoldTTL = 2 * time.Hour
 	svc.cfg.HeldIdleTimeout = time.Minute
+	svc.cfg.HeldSuspendedRelease = 7 * 24 * time.Hour
 	cur := base
 	svc.now = func() time.Time { return cur }
 
@@ -737,54 +774,117 @@ func TestExpiredHoldReleasesSuspendedLease(t *testing.T) {
 	if _, err := svc.setHolderWithTTL("c", l.ID, "ci-job", "", 0); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
-	sbID := l.SandboxID
-
-	// Rule 1 suspends the idle held lease an hour in.
 	cur = base.Add(time.Hour)
 	svc.runHeldRules(ctx, cur)
 	if !l.Suspended {
 		t.Fatal("setup: held lease not suspended by rule 1")
 	}
-	pauseBuild := l.ResumeBuildID
 
-	// The hold expires a day later: the lease is gone (released), and
-	// its pause build is left for the GC to reclaim — the expiry must
-	// delete the sandbox, not the snapshot.
 	cur = base.Add(24 * time.Hour)
 	svc.expireHolds(ctx, cur)
-	if svc.lookup("c", l.ID) != nil {
-		t.Fatal("suspended held lease survived its hold's expiry")
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("suspended held lease released by its hold's lapse")
 	}
-	for _, c := range sub.CallLog() {
-		if c == "DeleteBuild "+pauseBuild {
-			t.Fatal("expiry deleted the pause build itself; the GC owns that")
-		}
+	if n := heldCounter(t, svc, "expiry", "release"); n != 0 {
+		t.Fatalf("held_actions_total{expiry,release} = %g, want 0", n)
 	}
-	if b, err := db.GetBuild(ctx, pauseBuild); err != nil || b.State != "ready" {
-		t.Fatalf("pause build after expiry: state=%v err=%v, want ready", b.State, err)
-	}
-	if n := heldCounter(t, svc, "expiry", "release"); n != 1 {
-		t.Fatalf("held_actions_total{expiry,release} = %g, want 1", n)
-	}
-	if got := calls(sub.Fake, "Delete "+sbID); got != 1 {
-		t.Fatalf("sandbox deletes = %d, want 1", got)
+	if l.LastAction != "expiry/suspend_lapsed" || !l.LastActionAt.Equal(cur) {
+		t.Fatalf("lapse not recorded: %q at %v", l.LastAction, l.LastActionAt)
 	}
 
-	// A RUNNING lease whose hold expires is not released here: it goes
-	// back to the normal sweeps (a fresh lease, not yet past its TTL).
-	l2, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "")
+	// Rule 2's clock runs from the lapse, not from the earlier suspend.
+	cur = base.Add(24*time.Hour + 7*24*time.Hour - time.Minute)
+	svc.runHeldRules(ctx, cur)
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("released before the stale limit counted from the lapse")
+	}
+
+	// Renewing restores a normal hold: an expiry again, and rule 2 no
+	// longer counts the lapse (a fresh suspend restarts it).
+	if _, err := svc.renewHolder("c", l.ID, "ci-job", "", 0); err != nil {
+		t.Fatalf("renew after lapse: %v", err)
+	}
+	if _, expires := holdOf(t, svc, l.ID); !expires.Equal(cur.Add(2 * time.Hour)) {
+		t.Fatalf("renewed hold expires %v, want %v", expires, cur.Add(2*time.Hour))
+	}
+}
+
+// TestOnlyRuleSuspendedLeasesAreReleased: a held lease suspended by hand
+// is never released by rules 2 or 5, and neither is one a rule
+// suspended that was used again since.
+func TestOnlyRuleSuspendedLeasesAreReleased(t *testing.T) {
+	t.Setenv("GC_DELETE", "1")
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	svc.cfg.HeldSuspendedRelease = time.Hour
+	svc.cfg.HeldIdleTimeout = 0
+	svc.cfg.CriticalDiskFreePct = 5
+	svc.cfg.CriticalDiskRecoverPct = 10
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 1, nil } // critical
+
+	manual, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "by-hand", "")
 	if err != nil {
-		t.Fatalf("grant 2: %v", err)
+		t.Fatalf("grant: %v", err)
 	}
-	if _, err := svc.setHolderWithTTL("c", l2.ID, "ci-job-2", "", 0); err != nil {
-		t.Fatalf("set holder 2: %v", err)
+	if _, err := svc.pauseLease(ctx, manual, false); err != nil {
+		t.Fatalf("manual suspend: %v", err)
 	}
-	svc.expireHolds(ctx, cur)
-	if svc.lookup("c", l2.ID) == nil || l2.Suspended {
-		t.Fatalf("running lease released or suspended by hold expiry: %+v", l2)
+	used, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "used-again", "")
+	if err != nil {
+		t.Fatalf("grant: %v", err)
 	}
-	if n := heldCounter(t, svc, "expiry", "release"); n != 1 {
-		t.Fatalf("held_actions_total{expiry,release} = %g after the running lease, want 1", n)
+	if _, err := svc.pauseLease(ctx, used, false); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	svc.store.mu.Lock()
+	used.LastAction, used.LastActionAt = "idle/suspend_idle", time.Now().Add(-2*time.Hour)
+	used.LastActive = time.Now().Add(-time.Hour) // touched after the rule's suspend
+	svc.store.mu.Unlock()
+
+	svc.runHeldRules(ctx, time.Now().Add(30*24*time.Hour))
+	if svc.lookup("c", manual.ID) == nil {
+		t.Fatal("a held lease suspended by hand was released")
+	}
+	if svc.lookup("c", used.ID) == nil {
+		t.Fatal("a lease used since its rule suspension was released")
+	}
+}
+
+// TestCriticalRefusesUnderDryRunGC: with GC_DELETE unset the GC frees
+// nothing, so rule 5 releases nothing however full the disk is.
+func TestCriticalRefusesUnderDryRunGC(t *testing.T) {
+	t.Setenv("GC_DELETE", "")
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	svc.cfg.HeldIdleTimeout = 50 * time.Millisecond
+	svc.cfg.CriticalDiskFreePct = 5
+	svc.cfg.CriticalDiskRecoverPct = 10
+	svc.cfg.TemplateStoragePath = t.TempDir()
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	svc.runHeldRules(ctx, time.Now())
+	if !l.Suspended {
+		t.Fatal("setup: not suspended by rule 1")
+	}
+	svc.cfg.HeldIdleTimeout = 0
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 1, nil }
+	for i := 0; i < 5; i++ {
+		svc.runHeldRules(ctx, time.Now().Add(time.Duration(i)*time.Minute))
+	}
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("rule 5 released a lease while the GC is in dry-run")
+	}
+	if n := heldCounter(t, svc, "critical", "release"); n != 0 {
+		t.Fatalf("held_actions_total{critical,release} = %g, want 0", n)
 	}
 }
 
@@ -829,46 +929,5 @@ func TestCreateHoldTTLCappedAndNeedsHolder(t *testing.T) {
 	svc.store.mu.Unlock()
 	if held {
 		t.Fatal("create with hold_ttl but no holder made the lease held")
-	}
-}
-
-// TestHeldResumeRouteMetricLabel: the owner-blind resume route's
-// request counter reduces the lease id to :id like every other lease
-// route — one series, not one per lease.
-func TestHeldResumeRouteMetricLabel(t *testing.T) {
-	ts, svc, db, _ := newTestServerWithService(t)
-	seedImage(t, db, "py-base", 2048)
-	svc.cfg.HeldIdleTimeout = 30 * time.Millisecond
-
-	l, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, true, "", nil, "ci-job", "")
-	if err != nil {
-		t.Fatalf("grant: %v", err)
-	}
-	time.Sleep(60 * time.Millisecond)
-	svc.runHeldRules(context.Background(), time.Now())
-	if !l.Suspended {
-		t.Fatal("setup: held lease not suspended")
-	}
-
-	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/resume", "token-b", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("resume = %d, want 200", resp.StatusCode)
-	}
-
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
-	req.Header.Set("Authorization", "Bearer token-a")
-	mresp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("metrics: %v", err)
-	}
-	body := readAll(t, mresp)
-	want := `path="/api/leases/:id/resume"`
-	if !strings.Contains(body, want) {
-		t.Fatalf("metrics lack %s (the resume id must be reduced):", want)
-	}
-	for _, line := range strings.Split(body, "\n") {
-		if strings.Contains(line, "/resume") && strings.Contains(line, l.ID) {
-			t.Fatalf("metric line carries the raw lease id: %s", line)
-		}
 	}
 }

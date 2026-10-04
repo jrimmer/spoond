@@ -1113,7 +1113,7 @@ collect:
 	// A suspended lease is resumed automatically before the session
 	// starts (U09): SSH attach used to fail after a restore. A held
 	// lease suspended by the idle rule resumes for the holder's session
-	// through the same owner-blind route (2.1).
+	// with the gateway token, as for any suspended lease (2.1).
 	if b, err := backendJSON(gwCtx, http.MethodGet, "/api/sandboxes/"+leaseID, nil); err == nil {
 		var st struct {
 			State string `json:"state"`

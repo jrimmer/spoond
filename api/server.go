@@ -202,7 +202,6 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Owner-blind resume for held leases (2.1): the SSH gateway resumes
 	// a rule-1-suspended held lease on attach, where the capability is
 	// the lease id/name and no owner id is known.
-	s.mux.HandleFunc("POST /api/leases/{id}/resume", s.handleHeldResume)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
@@ -365,22 +364,14 @@ func (s *Server) collectServiceMetrics() {
 // handler chain — before auth and the mux — so there is one route
 // table, one auth path and one set of metric labels.
 const (
-	apiLeasePathPrefix    = "/api/leases"
-	apiSandboxPathPrefix  = "/api/sandboxes"
-	heldResumePathPattern = "/api/leases/:id/resume"
+	apiLeasePathPrefix   = "/api/leases"
+	apiSandboxPathPrefix = "/api/sandboxes"
 )
 
 // rewriteLeasePath maps an /api/leases… path onto its /api/sandboxes…
 // twin. Only a whole path segment matches: /api/leasesX is not a lease
 // path and stays itself (the mux then 404s it, as before).
 func rewriteLeasePath(p string) string {
-	// The held-lease resume route stays /api/leases/...: it is the
-	// owner-blind path the SSH gateway calls, distinct from the
-	// owner-scoped /api/sandboxes/{id}/resume. (normalizePath reduces
-	// its id for the metrics labels separately.)
-	if strings.HasPrefix(p, apiLeasePathPrefix+"/") && strings.HasSuffix(p, "/resume") {
-		return p
-	}
 	switch {
 	case p == apiLeasePathPrefix:
 		return apiSandboxPathPrefix
@@ -445,17 +436,6 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // normalizePath reduces high-cardinality paths (sandbox ids, user ids)
 // to stable labels for metrics.
 func normalizePath(p string) string {
-	// The held-lease resume route stays /api/leases/... (it is the
-	// owner-blind path the SSH gateway calls, distinct from the
-	// owner-scoped /api/sandboxes/{id}/resume), so the lease rewrite
-	// below must not touch it — but its id is still reduced to :id, or
-	// every lease would mint its own request-counter series.
-	if strings.HasPrefix(p, apiLeasePathPrefix+"/") && strings.HasSuffix(p, "/resume") {
-		rest := strings.TrimSuffix(strings.TrimPrefix(p, apiLeasePathPrefix+"/"), "/resume")
-		if rest != "" && !strings.Contains(rest, "/") {
-			return heldResumePathPattern
-		}
-	}
 	// The /api/leases alias reports the /api/sandboxes labels: the
 	// rewrite happens before the mux, so the request counters must not
 	// split each route's series in two either.
@@ -1424,6 +1404,12 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
 	lease, err := s.svc.resume(r.Context(), owner, id)
+	if err == errNotFound && s.requestHasGatewayToken(r) {
+		// The SSH gateway resumes a suspended lease before a session
+		// starts, for a user it has already authorised; its service token
+		// is owner-blind here as it is for stream lookups.
+		lease, err = s.svc.resumeAny(r.Context(), id)
+	}
 	if err != nil {
 		switch err {
 		case errNotFound:
