@@ -66,6 +66,10 @@ type Server struct {
 	busyMu    sync.Mutex
 	busyCount map[string]int
 	busyMax   int
+
+	// fileXfer bounds concurrent file-content transfers backend-wide:
+	// each buffers up to maxFileBytes in memory.
+	fileXfer chan struct{}
 }
 
 // acquireBusy reserves an exec/stream slot for owner. Returns false when
@@ -148,7 +152,7 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
-		busyCount: map[string]int{}, busyMax: 8, metrics: metrics.NewBackendMetrics()}
+		busyCount: map[string]int{}, busyMax: 8, fileXfer: make(chan struct{}, maxFileTransfers), metrics: metrics.NewBackendMetrics()}
 	// The guest heartbeat lives only on the guest-service listener
 	// (ProxyHandler); the lease id in the path is the capability.
 	s.heartbeat = newLeaseHeartbeat(svc)

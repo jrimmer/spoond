@@ -183,7 +183,9 @@ directory is refused with `409`. `204 No Content` on success, `404`
 when the path does not exist.
 
 Other errors: `400` for a malformed `mode` (not octal, or beyond
-`7777`) or a bad `op`.
+`0777`: setuid, setgid and sticky bits are not applied, so they are
+refused) or a bad `op`; `429` when four file transfers (`GET` content
+or `PUT`) are already in flight on the backend.
 
 ### `GET /api/leases/{id}/stat` — guest metrics
 

@@ -26,6 +26,24 @@ import (
 // refuses to read a bigger file with 413. 256 MiB.
 const maxFileBytes = 256 << 20
 
+// maxFileTransfers caps file-content transfers (GET content, PUT) in
+// flight across the backend, so buffered bodies stay under 1 GiB; past
+// it the routes answer 429.
+const maxFileTransfers = 4
+
+// acquireXfer reserves a transfer slot, answering 429 when none is free.
+func (s *Server) acquireXfer(w http.ResponseWriter) bool {
+	select {
+	case s.fileXfer <- struct{}{}:
+		return true
+	default:
+		writeError(w, http.StatusTooManyRequests, "too many file transfers in flight; try again shortly")
+		return false
+	}
+}
+
+func (s *Server) releaseXfer() { <-s.fileXfer }
+
 // filesTarget resolves the caller's access to the lease behind a files
 // route: owner or admin, nil (and the caller answers 404) otherwise.
 func (s *Server) filesTarget(r *http.Request) *Lease {
@@ -54,14 +72,16 @@ func filePathValue(r *http.Request) (string, bool) {
 }
 
 // parseFileMode reads an octal ?mode= parameter ("0644", "644"), falling
-// back to def when absent; a malformed or out-of-range value is an error.
+// back to def when absent; a malformed value, or one with setuid, setgid
+// or sticky bits (the substrate applies permission bits only), is an
+// error.
 func parseFileMode(raw string, def os.FileMode) (os.FileMode, error) {
 	if raw == "" {
 		return def, nil
 	}
 	v, err := strconv.ParseUint(raw, 8, 32)
-	if err != nil || v > 0o7777 {
-		return 0, errors.New("mode must be octal, e.g. 0644")
+	if err != nil || v > 0o777 {
+		return 0, errors.New("mode must be octal permission bits, 0000-0777")
 	}
 	return os.FileMode(v), nil
 }
@@ -133,6 +153,10 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, fileInfoView(info))
 		return
 	}
+	if !s.acquireXfer(w) {
+		return
+	}
+	defer s.releaseXfer()
 	data, err := s.svc.sub.ReadFile(r.Context(), lease.SandboxID, guestPath, maxFileBytes)
 	if err != nil {
 		s.mapFileError(w, lease.SandboxID, "read", err)
@@ -174,6 +198,10 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !s.acquireXfer(w) {
+		return
+	}
+	defer s.releaseXfer()
 	data, ok := readBodyCapped(w, r, maxFileBytes)
 	if !ok {
 		return

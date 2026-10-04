@@ -177,6 +177,27 @@ func TestFilesDefaultModes(t *testing.T) {
 		t.Fatalf("PUT bad mode: %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+	// setuid/setgid/sticky would be dropped silently: refused instead.
+	resp = filesDo(t, "PUT", filesURL(ts, id, "/suid", "mode=4755"), "token-a", "x")
+	if resp.StatusCode != 400 {
+		t.Fatalf("PUT mode 4755: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestFileTransfersCapped(t *testing.T) {
+	s := &Server{fileXfer: make(chan struct{}, 1)}
+	if !s.acquireXfer(httptest.NewRecorder()) {
+		t.Fatal("first transfer refused")
+	}
+	rec := httptest.NewRecorder()
+	if s.acquireXfer(rec) || rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second transfer: code %d, want 429", rec.Code)
+	}
+	s.releaseXfer()
+	if !s.acquireXfer(httptest.NewRecorder()) {
+		t.Fatal("transfer refused after release")
+	}
 }
 
 func TestFilesMkdirAndRemove(t *testing.T) {
