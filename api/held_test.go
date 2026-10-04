@@ -950,3 +950,42 @@ func TestHoldStateOnCreateAndPut(t *testing.T) {
 		t.Fatalf("unheld create hold_state = %v, want empty", body["hold_state"])
 	}
 }
+
+// TestResumeRunningLeaseIsNoop: resuming a lease that is already running
+// must not restore its pause build again (that would roll the guest's
+// memory back); it returns the lease unchanged.
+func TestResumeRunningLeaseIsNoop(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.suspend(ctx, "c", l.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if _, err := svc.resume(ctx, "c", l.ID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	creates := func() int {
+		n := 0
+		for _, c := range sub.Fake.CallLog() {
+			if strings.HasPrefix(c, "Create ") {
+				n++
+			}
+		}
+		return n
+	}
+	before := creates()
+	got, err := svc.resume(ctx, "c", l.ID)
+	if err != nil {
+		t.Fatalf("resume of a running lease: %v", err)
+	}
+	if got.State != "running" || got.Suspended {
+		t.Fatalf("lease after no-op resume: state %q suspended %v", got.State, got.Suspended)
+	}
+	if n := creates(); n != before {
+		t.Fatalf("resume of a running lease restored the snapshot again (%d creates, want %d)", n, before)
+	}
+}

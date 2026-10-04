@@ -259,32 +259,3 @@ func TestGenerationCloneFork(t *testing.T) {
 		}
 	}
 }
-
-// TestGenerationResumeRunning: resuming a lease that is already running
-// restores its pause build again, so the memory rolls back and the
-// generation bumps.
-func TestGenerationResumeRunning(t *testing.T) {
-	svc, db, sub := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
-	ctx := t.Context()
-
-	p, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
-	if err != nil {
-		t.Fatalf("grant persistent: %v", err)
-	}
-	if _, err := svc.suspend(ctx, "c", p.ID); err != nil {
-		t.Fatalf("suspend: %v", err)
-	}
-	if _, err := svc.resume(ctx, "c", p.ID); err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	if _, err := svc.resume(ctx, "c", p.ID); err != nil {
-		t.Fatalf("resume of a running lease: %v", err)
-	}
-	if p.Generation != 2 {
-		t.Fatalf("generation after resuming a running lease = %d, want 2", p.Generation)
-	}
-	if got := readGeneration(t, sub, p.SandboxID); got != "2\n" {
-		t.Fatalf("guest file = %q, want \"2\\n\"", got)
-	}
-}

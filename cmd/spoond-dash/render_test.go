@@ -562,3 +562,16 @@ func TestNonASCIINamesDrawn(t *testing.T) {
 		t.Fatalf("names not drawn as expected:\n%s", out)
 	}
 }
+
+// TestPageGridHasNoTextBetweenRows: the rows are display:block, so any
+// text between them (a newline) renders as a blank line under each row.
+func TestPageGridHasNoTextBetweenRows(t *testing.T) {
+	g := Draw(sampleSnapshot(), DefaultWidth, fixedNow, "h")
+	html := pageGrid(g, nil)
+	if strings.Contains(html, "</span>\n<span") || strings.Contains(html, "\n") {
+		t.Fatalf("page grid has text between its rows:\n%s", html[:200])
+	}
+	if n := strings.Count(html, `<span class="gr"`); n != g.Rows() {
+		t.Fatalf("page grid has %d rows, frame has %d", n, g.Rows())
+	}
+}

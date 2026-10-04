@@ -19,9 +19,9 @@ summarised from README "Status".
   substrate file operations; the file is also written at create and on
   every resume). It starts at 1 and is bumped — and persisted — on
   exactly the paths that put the lease into a state its processes did
-  not continue from: crash recovery (`recoverFromCheckpoint`), restart
-  (both the persistent pause + resume and the non-persistent fresh
-  sandbox path), and a resume of a lease that was already running. A planned pause/resume and the
+  not continue from: crash recovery (`recoverFromCheckpoint`) and
+  restart (both the persistent pause + resume and the non-persistent
+  fresh sandbox path). A planned pause/resume and the
   admin drain/undrain continue the memory and do not bump it. The guest
   write is best effort: a failure is logged and nothing else changes.
 - **Lease secrets as files (#80).** Lease create and exec accept an
@@ -119,6 +119,22 @@ summarised from README "Status".
   The conformance suite dials a TCP echo server in a py-base lease
   through the new route (`TestN7_GuestDialEcho`), proving host-to-guest
   TCP on E2B.
+
+## [2.1.2] - 2026-10-04
+
+### Fixed
+
+- **Resuming a running lease rolled its memory back.** `POST
+  /api/leases/{id}/resume` had no already-running check: on a running
+  lease it restored the pause build again, so the guest lost everything
+  since that snapshot. Resuming a running lease is now a no-op that
+  answers `200` with the lease as it is.
+- **Dashboard rows were double-spaced.** The page put a newline between
+  its grid rows, which are block elements, so every row was followed by
+  a blank line and the panel borders broke into pieces. The rows are now
+  joined with nothing between them.
+
+## [2.1.1] - 2026-10-04
 
 ### Fixed
 
