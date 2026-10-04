@@ -595,6 +595,18 @@ func (l *layout) leasesH() int {
 // minimum width, never more than sixteen.
 func maxLeaseRows(w int) int { return min(16, max(8, (w-8)/6)) }
 
+// ellipsize cuts s to at most n runes, ending in … when it was cut.
+func ellipsize(s string, n int) string {
+	r := []rune(s)
+	if n <= 0 {
+		return ""
+	}
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
 // leases panel: id, image, owner, state with a glyph, policy, age, left
 // and the holder (the holder text; a lapsed hold shows ◉ after it).
 func (l *layout) leases(g *grid.Grid, y int) int {
@@ -627,10 +639,20 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(c.age, yy, r.Age, "dim", 5)
 		g.Text(c.left, yy, r.Left, "text", 5)
 		if r.Holder != "" {
-			hold := sanitize(r.Holder)
-			seg := []grid.Seg{{Text: hold, Style: "link"}}
+			room := l.w - c.hold - 3 // one column clear of the border
+			lapsed := ""
 			if r.HoldState == "lapsed" {
-				seg = append(seg, grid.Seg{Text: " ◉lapsed", Style: "warn"})
+				// The holder keeps at least a few columns: a narrow frame
+				// gets the bare glyph instead of the word.
+				lapsed = " ◉lapsed"
+				if room-len([]rune(lapsed)) < 6 {
+					lapsed = " ◉"
+				}
+				room -= len([]rune(lapsed))
+			}
+			seg := []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: "link"}}
+			if lapsed != "" {
+				seg = append(seg, grid.Seg{Text: lapsed, Style: "warn"})
 			}
 			g.Segs(c.hold, yy, seg, l.w-c.hold-2)
 		} else if r.Name != "" {

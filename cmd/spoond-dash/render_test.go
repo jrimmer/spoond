@@ -3,9 +3,11 @@ package spoonddash
 import (
 	"flag"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -573,5 +575,32 @@ func TestPageGridHasNoTextBetweenRows(t *testing.T) {
 	}
 	if n := strings.Count(html, `<span class="gr"`); n != g.Rows() {
 		t.Fatalf("page grid has %d rows, frame has %d", n, g.Rows())
+	}
+}
+
+// TestPageLinkRowKeepsItsWidth: swapping the holder span for an anchor
+// must not change the row's text — the row's tail (padding, the right
+// border) appears once, so the row stays one frame wide and does not
+// wrap. A long holder is cut with … inside the panel.
+func TestPageLinkRowKeepsItsWidth(t *testing.T) {
+	s := sampleSnapshot()
+	for i := range s.Rows {
+		if s.Rows[i].HolderURL != "" {
+			s.Rows[i].Holder = "pool:honey/work-47-with-a-much-longer-holder-name-than-fits-the-column"
+		}
+	}
+	g := Draw(s, DefaultWidth, fixedNow, "vm2.lacy.casa")
+	links := holderLinks(s, DefaultWidth, fixedNow)
+	if len(links) != 1 {
+		t.Fatalf("holderLinks = %+v", links)
+	}
+	plainRow := strings.Split(g.Plain(), "\n")[links[0].row]
+	if !strings.Contains(plainRow, "…") {
+		t.Fatalf("long holder not cut with …: %q", plainRow)
+	}
+	page := applyLinks(strings.Split(g.HTML(), "\n")[links[0].row], links[0].row, links)
+	text := html.UnescapeString(regexp.MustCompile(`<[^>]*>`).ReplaceAllString(page, ""))
+	if text != plainRow {
+		t.Fatalf("linked row's text changed:\n got %q\nwant %q", text, plainRow)
 	}
 }
