@@ -169,7 +169,7 @@ type execResult struct {
 }
 
 // leaseInfo is the subset of lease JSON the suite reads, including the
-// U10 "state" and U11 "resume_build_id" additions.
+// U10 "state", U11 "resume_build_id" and 2.2 "generation" additions.
 type leaseInfo struct {
 	ID            string            `json:"id"`
 	Owner         string            `json:"owner"`
@@ -181,6 +181,7 @@ type leaseInfo struct {
 	Exposed       map[string]string `json:"exposed"`
 	State         string            `json:"state"`
 	ResumeBuildID string            `json:"resume_build_id"`
+	Generation    int64             `json:"generation"`
 	Name          string            `json:"name"`
 }
 

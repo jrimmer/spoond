@@ -10,8 +10,24 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+2.2 gives every lease a generation: a counter the guest can read to
+notice that its memory did not continue from where its processes left
+it.
+
 ### Added
 
+- **Lease generations (2.2, #112).** Every lease carries a `generation`
+  (store column via migration 9, defaulted to 1), returned by the lease
+  API as `generation` and written into the guest at
+  `/run/spoond/generation` (0644, parent `/run/spoond` 0755, via the
+  substrate file operations; the file is written at create too, so it
+  always exists). It starts at 1 and is bumped — and persisted — on
+  exactly the paths that put the lease into a state its processes did
+  not continue from: crash recovery (`recoverFromCheckpoint`) and
+  restart, on both the persistent (pause + resume) and the
+  non-persistent (fresh sandbox) path. A planned pause/resume and the
+  admin drain/undrain continue the memory and do not bump it. The guest
+  write is best effort: a failure is logged and nothing else changes.
 - **Substrate file operations (#114).** `substrate.Substrate` gains
   `WriteFile`, `ReadFile`, `Stat`, `MakeDir` and `Remove` with
   `substrate.FileInfo` and a `substrate.ErrTooLarge` sentinel: file content

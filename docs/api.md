@@ -63,12 +63,17 @@ Response `201 Created`:
   "holder": "ci-job-42",
   "holder_url": "https://ci.example.com/jobs/42",
   "hold_expires_at": "2026-10-08T03:00:00Z",
+  "generation": 1,
   "exposed": {"9042": "10.11.0.7:9042"}
 }
 ```
 
 `hold_expires_at` is `""` when the lease was created without a holder
 (the zero time renders as `""`).
+
+`generation` is the lease's continuity generation: `1` on create, bumped
+whenever the guest's memory does not continue from where its processes
+left it — see [Generations](#generations).
 
 `address` is the lease's host-side address (no port). `exposed` maps
 each published port to `<address>:<port>` — reachable from peers whose
@@ -85,7 +90,7 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `id`, `owner`, `image`, `address`, `expires` (unix seconds),
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
 `name`, `comment`, `holder`, `holder_url`, `net_policy`,
-`egress_allowlist`, `exposed`.
+`egress_allowlist`, `exposed`, `generation`.
 
 A held lease's row adds `hold_expires_at` (RFC 3339, when the hold
 expires and normal sweeping resumes) and — after the first automatic
@@ -105,6 +110,39 @@ checkpoint; those leases answer `410` and should be deleted.
 
 `build_id` is the E2B build the running sandbox was created from (`""`
 while suspended, where `resume_build_id` is the one to resume from).
+
+### Generations
+
+Every lease carries a `generation` (in the create response and in every
+list and detail row): the count of times the guest's memory did **not**
+continue from where its processes left it. It starts at `1` on create
+and is bumped — and persisted — by exactly two paths:
+
+- **Crash recovery.** The crash reconcile resumed the lease from its
+  checkpoint build; the processes in the guest find themselves in a
+  memory snapshot taken earlier.
+- **Restart.** `POST /api/leases/{id}/restart` reboots the guest, on
+  both the persistent (pause + resume through the snapshot) and the
+  non-persistent (fresh sandbox) path.
+
+A planned suspend/resume and the admin drain/undrain continue the
+memory — the guest is resumed from the snapshot its own pause wrote —
+and do **not** bump the generation. Neither does anything else: exec,
+proxy, checkpoint, clone, fork and keepalive leave it alone.
+
+After every bump the new value is written into the guest at
+`/run/spoond/generation` (one line, `"2\n"`; the file is `0644`, its
+parent `/run/spoond` is created `0755`). The file is also written at
+create, so it always exists for a running lease. The write is best
+effort: a failure is logged and changes nothing else.
+
+Processes in the guest read the file to notice that their memory did
+not continue, and re-derive whatever they keep only in process (caches,
+locks, half-finished work):
+
+```bash
+cat /run/spoond/generation   # e.g. 2
+```
 
 ### `GET /api/names/{name}` — resolve by name
 
@@ -237,7 +275,9 @@ Persistent and running: suspend then resume (same lease, same build
 chain, lossless through the pause build). Persistent and suspended:
 resume. Non-persistent: delete the sandbox and create a fresh one from
 the image's current build, keeping the lease id (its disk is lost —
-there is no snapshot to restore). Response
+there is no snapshot to restore). Either way the lease's generation
+bumps and `/run/spoond/generation` is rewritten in the guest (see
+[Generations](#generations)). Response
 `{"id":"…","status":"running","message":"lease restarted"}`.
 `404` unknown, `409` when busy; a substrate
 failure on the non-persistent path (which does create a sandbox)

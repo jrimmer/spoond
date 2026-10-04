@@ -276,9 +276,9 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 			t.Fatalf("close: %v", err)
 		}
 	}
-	// Rewind the file to version 6: drop the columns migrations 7 and 8
-	// added and remove their schema_migrations rows, so the next Open
-	// applies 0007 and 0008 for real.
+	// Rewind the file to version 6: drop the columns migrations 7, 8
+	// and 9 added and remove their schema_migrations rows, so the next
+	// Open applies 0007, 0008 and 0009 for real.
 	db6, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -292,7 +292,8 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN hold_ttl`,
 		`ALTER TABLE leases DROP COLUMN last_action`,
 		`ALTER TABLE leases DROP COLUMN last_action_at`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8)`,
+		`ALTER TABLE leases DROP COLUMN generation`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -320,5 +321,61 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 	}
 	if rows[0].Holder != "" || rows[0].HolderUrl != "" {
 		t.Fatalf("holder not defaulted empty: %q / %q", rows[0].Holder, rows[0].HolderUrl)
+	}
+}
+
+// TestMigration9GenerationOnV8Database builds a database by hand at
+// version 8 (the pre-generation schema, with one existing lease row)
+// and opens it: migration 9 must apply, stamping the generation column
+// on the leases table defaulted to 1 — the value every lease is on
+// until a restart or crash recovery moves it (2.2, #112).
+func TestMigration9GenerationOnV8Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v8.db")
+	{
+		db, err := Open(path) // applies 0001..0009
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind the file to version 8: drop the column migration 9 added
+	// and remove its schema_migrations row, so the next Open applies
+	// 0009 for real.
+	db8, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN generation`,
+		`DELETE FROM schema_migrations WHERE version = 9`,
+	} {
+		if _, err := db8.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	if _, err := db8.Exec(
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		 VALUES ('lease-v8', 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'running')`); err != nil {
+		t.Fatalf("seed v8 lease: %v", err)
+	}
+	db8.Close()
+
+	db, err := Open(path) // migration 9 applies here
+	if err != nil {
+		t.Fatalf("open v8 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	rows, err := db.ListLeases(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "lease-v8" {
+		t.Fatalf("leases after migration: %v", rows)
+	}
+	if rows[0].Generation != 1 {
+		t.Fatalf("generation not defaulted to 1: %d", rows[0].Generation)
 	}
 }
