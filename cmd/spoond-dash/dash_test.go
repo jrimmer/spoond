@@ -214,13 +214,13 @@ func TestFromDBReadsLeasesAndImages(t *testing.T) {
 		}
 	}
 	raw.Close()
-	os.WriteFile(cfg.UsersFile, []byte(`{"users":[{"id":"u-1","name":"swarm"}]}`), 0o600)
+	os.WriteFile(cfg.UsersFile, []byte(`{"users":[{"id":"u-1","name":"ci"}]}`), 0o600)
 
 	s := Snapshot{ByImage: map[string]int{"go-base": 1}}
 	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Rows) != 1 || s.Rows[0].ID != "abcdef0123" || s.Rows[0].Owner != "swarm" || s.Rows[0].Age != "5m" || s.Rows[0].Left != "10m" {
+	if len(s.Rows) != 1 || s.Rows[0].ID != "abcdef0123" || s.Rows[0].Owner != "ci" || s.Rows[0].Age != "5m" || s.Rows[0].Left != "10m" {
 		t.Fatalf("lease rows: %+v", s.Rows)
 	}
 	if len(s.Images) != 1 || s.Images[0].Name != "go-base" || s.Images[0].Live != 1 || s.Images[0].Updated != "2d ago" {

@@ -5,7 +5,7 @@ front of **Firecracker microVMs run by E2B's orchestrator**. Consumers
 request a sandbox, run work in it, and release it. Every sandbox starts
 as a memory-snapshot restore, so starts are warm, and fork, pause/resume
 and checkpoint are native. On top: an SSH gateway, an HTTP proxy, an LLM
-gateway, native MCP/ACP agent endpoints, a Forgejo Actions runner and a
+gateway, an MCP server for agents, a Forgejo Actions runner and a
 read-only dashboard.
 
 ```
@@ -15,7 +15,7 @@ spoond (this repo, one Go binary)          e2b-orchestrator (our fork of
 │ HTTP proxy, LLM gateway :8891    │ ────▶ │ Firecracker microVM lifecycle│
 │ SSH gateway + ctl    :2222       │ :5008 │ memory snapshots (UFFD), NBD │
 │ dashboard (read-only) :8893      │       │ rootfs, netns per sandbox,   │
-│ MCP / ACP agent servers          │ envd  │ egress firewall, templates   │
+│ MCP server for agents            │ envd  │ egress firewall, templates   │
 │ Forgejo Actions runner           │ ────▶ │ envd in every guest (:49983) │
 │ SQLite state (leases, catalog)   │ :5007 └──────────────────────────────┘
 └──────────────────────────────────┘
@@ -59,10 +59,9 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
 - **LLM gateway**: per-lease OpenAI-compatible endpoint
   (`/llm/<lease-id>/openai/chat/completions`); upstream keys stay on
   the host, never inside sandboxes.
-- **Native agent endpoints**: `spoond mcp` (MCP stdio server:
-  shell/read_file/write_file/edit_file/list_files/status tools) and
-  `spoond acp` (Agent Client Protocol: session = lease, agent loop
-  through the LLM gateway).
+- **Agent access**: `spoond mcp`, an MCP stdio server with
+  shell/read_file/write_file/edit_file/list_files/status tools, so any
+  MCP-capable agent can work inside a lease.
 - **Per-sandbox network policy**: `none` | `lan` | `internet` |
   `restricted` (with an egress allowlist), enforced by the orchestrator's
   egress firewall. `internet` and `lan` guests may call the lease API
@@ -157,13 +156,12 @@ go build -o spoond ./cmd/spoond                                   # all modules
 go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
-Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
-`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`, `nohive`.
+Exclusion tags: `nobackend`, `nogateway`, `nomcp`, `norunner`,
+`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`.
 
 ```bash
 ./spoond backend    # lease API, HTTP proxy, LLM gateway
 ./spoond gateway    # SSH gateway + ctl plane
-./spoond acp        # ACP endpoint
 ./spoond mcp        # MCP endpoint
 ./spoond runner     # Forgejo Actions runner
 ./spoond ctl        # control-plane CLI
@@ -171,7 +169,6 @@ Exclusion tags: `nobackend`, `nogateway`, `noacp`, `nomcp`, `norunner`,
 ./spoond drain      # pause sandboxes before an orchestrator restart, resume after
 ./spoond doctor     # health checks (below)
 ./spoond dash       # read-only dashboard
-./spoond hive       # enlistment checks for a project's hive.yaml
 ```
 
 `spoond doctor` checks the configuration, the orchestrator, the local
@@ -179,29 +176,6 @@ registry, the token seed, the SQLite database, the image catalog, the
 pinned E2B artifacts (SHA-256, plus the Firecracker and kernel versions
 builds still use), storage headroom, the backend, the SSH gateway port,
 the LLM gateway and TLS. It exits 1 if any check fails.
-
-## The hive
-
-A project that wants bees (agent workers in leases) describes itself in
-`.spoond/hive.yaml` ([the hive plan](docs/plans/2026-10-02-swarm-controller.md),
-C10) — the
-project name, its repo, a base image from the catalog, the gates that
-define "done", extra network needs (`leases`, `registry`), a worker cap
-and the implement/verify models — and everything else (the worker image,
-the network allowlist, the credentials) is derived from it.
-
-```bash
-spoond hive check .spoond/hive.yaml
-```
-
-runs the enlistment checks (C11) and ends with one `Next:` line: the
-first failing check's remedy, or the enlistment route when nothing
-failed. The exit code is 0 when nothing failed. It reads `SPOOND_API`
-(default `https://spoond.example.com:8890`) and `SPOOND_TOKEN`, and it looks
-up the image catalog for real; the steps that need the host (building
-the worker image, cloning with the deploy key, the trial lease, the
-gates, the budget) report `skipped` there; `POST /hive/check` on the
-instance will run them for real (build order step 3).
 
 ## Configuration knobs
 

@@ -8,6 +8,27 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
+## [Unreleased]
+
+### Removed
+
+- **The hive, the worker layer and the bee loop moved to Honey.**
+  spoond is a microVM utility and takes no position on how agents
+  organise work; agent workflow now lives in the separate Honey project
+  (`lacy.casa/honey`), which uses spoond through the lease API. Gone from
+  spoond: the `hive` package, `spoond hive`, `cmd/spoond-hive`, the
+  `GET /hive/guide` and `POST /hive/check` routes (a 2.0 preview), the
+  `<base>-worker` image layer and `worker-start.sh`, and the bee, swarm
+  and hive terms in the docs. Images already built with the layer stay
+  in the catalog until their owner deletes them.
+- **`spoond acp`.** It was spoond's own agent loop behind an ACP
+  endpoint. Agents use spoond through `spoond mcp`; `SPOOND_LLM_MODEL`
+  (and `FORKD_LLM_MODEL`) are no longer read. The `noacp` and `nohive`
+  build tags are gone.
+- **The cfos adapter** (`cfos/`, `cmd/cfos-adapter`,
+  `deploy/cfos-adapter.service`), written for forkd and unused since
+  the E2B cutover.
+
 ## [2.0.0] - 2026-10-03
 
 2.0 replaces forkd with a patch-queue fork of E2B's node runtime as the

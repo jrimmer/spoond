@@ -34,11 +34,6 @@ type testSub struct {
 	// pin the initial PTY size it carries).
 	startMu   sync.Mutex
 	lastStart substrate.StartRequest
-
-	// lastCreate records the most recent Create request (the hive check
-	// tests pin the egress config the trial lease was created with).
-	createMu   sync.Mutex
-	lastCreate substrate.CreateRequest
 }
 
 // LastStart returns the most recent Start request.
@@ -46,21 +41,6 @@ func (ts *testSub) LastStart() substrate.StartRequest {
 	ts.startMu.Lock()
 	defer ts.startMu.Unlock()
 	return ts.lastStart
-}
-
-// Create delegates to the fake and records the request.
-func (ts *testSub) Create(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
-	ts.createMu.Lock()
-	ts.lastCreate = req
-	ts.createMu.Unlock()
-	return ts.Fake.Create(ctx, req)
-}
-
-// LastCreate returns the most recent Create request.
-func (ts *testSub) LastCreate() substrate.CreateRequest {
-	ts.createMu.Lock()
-	defer ts.createMu.Unlock()
-	return ts.lastCreate
 }
 
 // Start delegates to the fake and records the request.
@@ -83,11 +63,6 @@ func (ts *testSub) exec(sandboxID string, args []string) substrate.ExecResult {
 			return substrate.ExecResult{Stdout: "PROBE_FAIL " + reason + "\n", ExitCode: 1}
 		}
 		return substrate.ExecResult{Stdout: "PROBE_OK\n"}
-	}
-	// The hive check's needs: probe (a bash script that echoes PROBE_OK
-	// on success) is answered OK, like a sandbox with working egress.
-	if len(args) == 3 && args[0] == "/bin/bash" && strings.Contains(args[2], "PROBE_OK") {
-		return substrate.ExecResult{Stdout: "PROBE_OK\n", ExitCode: 0}
 	}
 	stdout := ts.execStdout
 	if stdout == "" {

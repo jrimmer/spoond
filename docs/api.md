@@ -5,8 +5,7 @@ set, plain HTTP otherwise). The resource is the **lease**; every route
 lives under `/api/leases/…`. `/api/sandboxes/…` is a permanent alias for
 the same routes — identical behavior, auth and responses — kept for
 every client written before 2.0; new code should use `/api/leases/…`.
-All endpoints except `/healthz`,
-`GET /hive/guide` (the hive's enlistment guide, below), the
+All endpoints except `/healthz`, the
 `/api/admin/*` routes (which carry their own `ADMIN_TOKEN`) and the
 `/llm/` prefix (where the lease id in the path is the capability)
 require a bearer token (`/metrics` also accepts the scrape-only
@@ -414,24 +413,6 @@ identity store present, keyless identity users are then denied outright
 replaced by the server-side upstream key before forwarding, so it never
 reaches the provider.
 
-## Hive
-
-The hive enlists a project's agent workers on this instance
-(docs/plans/2026-10-02-swarm-controller.md, C10/C11). A project
-describes itself in `.spoond/hive.yaml`; everything else (worker image,
-network allowlist, credentials) is derived.
-
-| Route | Auth | What |
-|---|---|---|
-| `GET /hive/guide` | none (LAN) | The enlistment guide for *this* instance, rendered live: real addresses, the image catalog, the hive.yaml schema, the derived-allowlist `needs:` keys, the routes, the checks and the next step. Markdown by default; `Accept: application/json` for the same content as JSON. This guide **is** the documentation — point an agent at it rather than at this file. |
-| `POST /hive/check` | bearer token | Run every enlistment check against the body (a hive.yaml; `Content-Type: application/yaml` or `text/plain`). The report (text by default, JSON with `Accept: application/json`) is `200` whether or not checks fail — the first failure's remedy is the `Next:` line; `400` only for an unreadable body. The trial-lease check starts and deletes a real lease owned by the caller. |
-
-Not automated yet (until enlistment lands): worker image build, deploy
-key push, gates and budget report `skip` with the by-hand remedy.
-The CLI `spoond hive check <file>` runs the same checks from anywhere;
-steps that need the host report `skip` there and point at
-`POST /hive/check`.
-
 ## Guest-service endpoints (port `HOST_GUEST_SERVICE_PORT`)
 
 Besides the per-lease LLM gateway above (`/llm/{lease-id}/…`), the
@@ -514,7 +495,7 @@ user becomes admin. After that, admin only.
 ```
 
 - `kind`: `person` | `agent` — agents are non-interactive identities
-  (the MCP/ACP endpoints authenticate as their agent user).
+  (the MCP endpoint authenticates as its agent user).
 - `fingerprints`: SSH public-key fingerprints (use `ssh-keygen -lf
   pubkey.pub`) — the gateway's `PublicKeyCallback` resolves these.
 - `token`: optional per-user bearer token (like a `CONSUMER_TOKENS`
