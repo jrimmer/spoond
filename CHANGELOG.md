@@ -10,6 +10,18 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-04
+
+2.2 gives the lease API what a client needs to drive work inside a lease
+without exec gymnastics: files in and out, raw TCP to a guest port,
+secrets as files, a live event stream, and a generation counter that
+tells a client its guest was restored. For operators it adds a readiness
+endpoint for uptime monitors and push notifications to webhooks.
+
+Upgrading: store migration 9 adds the `generation` column with a default
+of 1. It runs on start, and a 2.1 binary still runs on the migrated
+database.
+
 ### Added
 
 - **Lease generations (2.2, #112).** Every lease carries a `generation`
