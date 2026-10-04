@@ -276,11 +276,15 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	s.BuildFails = int(g("spoond_builds_failed_total"))
 	s.VCPUAlloc = int(g("orchestrator_sandbox_cpu_allocated"))
 	s.MemAllocGiB = round1(g("orchestrator_sandbox_memory_allocated") / (1 << 30))
+	// The GC's deleted-build counter, summed over its labels, feeds both
+	// the mode (an actual deletion means deletion is on) and the host
+	// panel's lifetime count.
 	s.GCDeleted = int(value(fams["spoond_gc_deleted_total"]))
+
 	// The GC's mode: a configured GC_DELETE=1 or an actually deleted
 	// build means deletion is on; otherwise the GC is in its dry-run
 	// default (it logs candidates but frees nothing).
-	if os.Getenv("GC_DELETE") == "1" || value(fams["spoond_gc_deleted_total"]) > 0 {
+	if os.Getenv("GC_DELETE") == "1" || s.GCDeleted > 0 {
 		s.GCMode = "delete"
 	} else {
 		s.GCMode = "dry-run"

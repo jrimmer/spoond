@@ -682,12 +682,15 @@ func thousands(n int) string {
 	if strings.HasPrefix(s, "-") {
 		sign, s = "-", s[1:]
 	}
-	var parts []string
-	for len(s) > 3 {
-		parts = append([]string{s[len(s)-3:]}, parts...)
-		s = s[:len(s)-3]
+	start := len(s) % 3
+	if start == 0 {
+		start = 3
 	}
-	return sign + s + strings.Join(parts, ",")
+	out := s[:start]
+	for i := start; i < len(s); i += 3 {
+		out += "," + s[i:i+3]
+	}
+	return sign + out
 }
 
 // imageCount is one image's live leases for the capacity panel: the
@@ -775,22 +778,15 @@ func (l *layout) drawCapacity(g *grid.Grid, x, y, w, h int) int {
 	barX := x + 2 + 15
 	for _, im := range names {
 		g.Text(x+2, row, ellipsize(sanitize(im.name), 15), "text", 15)
-		live := im.running * 3
-		if live > 9 {
-			live = 9
-		}
 		// Three cells per running lease, at most nine; · fills the rest.
-		fill := live
-		if fill > 9 {
-			fill = 9
-		}
+		fill := min(9, im.running*3)
 		g.Text(barX, row, strings.Repeat("█", fill)+strings.Repeat("·", 9-fill), "ok", 9)
 		right := fmt.Sprintf("%d running", im.running)
 		if im.running == 0 {
 			right = fmt.Sprintf("%d suspended", im.suspended)
 		}
-		// The mockup right-aligns the counts a column short of the
-		// meters' value column, keeping them clear of the rule above.
+		// The counts sit a column short of the meters' value column, one
+		// clear of the frame with the two the meters keep.
 		g.Right(x+w-4, row, []grid.Seg{{Text: right, Style: "dim"}})
 		row++
 	}
