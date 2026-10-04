@@ -57,6 +57,25 @@ summarised from README "Status".
   normal sweeping. Store migration 7 adds the two columns (existing
   leases default to unheld).
 
+### Changed
+
+- **The dashboard is drawn on a character grid (#110 part 2).** `spoond
+  dash` renders one fixed-width grid (104 by default, `DASH_WIDTH`
+  72–104): framed, titled panels for capacity, host meters, throughput,
+  leases, images, units, refusals and events, plus one attention banner
+  shown only when something needs a person (a unit not active, a lost
+  lease, hugepages or snapshot disk past the danger level, the TLS
+  certificate inside 30 days, an automatic held-lease action in the
+  last 24 h). The page is that grid in a `<pre>` with vendored WebTUI
+  for the chrome and Datastar patching changed rows over the SSE
+  stream; holder text links out, a lapsed hold is marked. The Starbase
+  components, the pixel-art themes, the theme switch, the starfield,
+  odometers, gauges, sparkline components and their vendored files are
+  removed; one palette as CSS variables remains. New: `spoond top`, the
+  same grid with ANSI styles in the terminal at the terminal's width
+  (COLUMNS, else 104), redrawn every 2 s — same collector, same banner,
+  no browser (excluded with `dash` by the `nodash` tag).
+
 ### Removed
 
 - **The hive, the worker layer and the bee loop moved to Honey.**

@@ -130,7 +130,7 @@ func TestBasicAuthAndStream(t *testing.T) {
 	go d.run(ctx)
 	h := d.handler()
 
-	for path, want := range map[string]int{"/": 401, "/stream": 401, "/static/css/theme.css": 401, "/healthz": 200} {
+	for path, want := range map[string]int{"/": 401, "/stream": 401, "/static/vendor/webtui/full.css": 401, "/healthz": 200} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
 		if rec.Code != want {
@@ -150,14 +150,15 @@ func TestBasicAuthAndStream(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := get("/"); rec.Code != 200 || !strings.Contains(rec.Body.String(), "SANDBOX CONTROL") || !strings.Contains(rec.Body.String(), `id="leases"`) {
-		t.Fatalf("page: %d", rec.Code)
+	if rec := get("/"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `id="grid"`) || !strings.Contains(rec.Body.String(), `id="r0"`) {
+		t.Fatalf("page: %d\n%s", rec.Code, rec.Body.String())
 	}
-	if rec := get("/static/components/gauge/gauge.js"); rec.Code != 200 {
-		t.Fatalf("vendored component: %d", rec.Code)
+	if rec := get("/static/vendor/webtui/full.css"); rec.Code != 200 {
+		t.Fatalf("vendored WebTUI: %d", rec.Code)
 	}
 
-	// The stream's first frame carries history and the three tables.
+	// The stream's first frame carries history, the signals and the grid
+	// as row patches.
 	sctx, scancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer scancel()
 	rec := httptest.NewRecorder()
@@ -166,10 +167,15 @@ func TestBasicAuthAndStream(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	body := rec.Body.String()
 	for _, want := range []string{"event: datastar-patch-signals", `"_h":`, `"_s":`, "event: datastar-patch-elements",
-		`data: elements <table id="leases">`, `data: elements <table id="images">`, `data: elements <div id="services"`} {
+		"data: selector #grid", "data: mode outer", `id="r0"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("stream lacks %q:\n%s", want, body)
 		}
+	}
+	// The selector goes straight into querySelectorAll: it must be a
+	// plain id selector, not a bracketed mode suffix nothing matches.
+	if strings.Contains(body, "selector #grid[") {
+		t.Fatalf("selector carries a bracket suffix Datastar cannot match:\n%s", body)
 	}
 	if strings.Contains(body, `"Rows"`) {
 		t.Fatal("table rows leaked into the signal payload")

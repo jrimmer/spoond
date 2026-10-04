@@ -1,0 +1,18 @@
+/* JetBrains Mono v2.304 (SIL OFL, see OFL-JetBrainsMono.txt in this
+   directory): the face the character grid is drawn for. Every codepoint
+   the grid emits is checked against this font by the Go tests. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../fonts/jetbrains-mono.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../fonts/jetbrains-mono-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+pre.grid, body {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
