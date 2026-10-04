@@ -314,10 +314,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 
 // SetMetrics installs the Prometheus metrics collector (issue #20).
 // Called by the Server after NewServerWithLLM so the service can
-// record pool, lease and quota events. The same collector implements
-// the notifier's outcome counting (spoond_notifications_total, 2.2
-// #117); the notifier installed via SetNotifier need not be present
-// yet — the adapter is looked up when the notifier is set.
+// record pool, lease and quota events.
 func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 	s.metrics = m
 }

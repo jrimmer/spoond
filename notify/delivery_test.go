@@ -3,13 +3,16 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -193,6 +196,13 @@ func TestDeliveryHappyPath(t *testing.T) {
 
 	if got := nf.payload(t, 0)["title"]; got != "lost" {
 		t.Fatalf("ntfy title = %v", got)
+	}
+	// ntfy takes JSON at the server root, the topic in the body.
+	if got := nf.reqURLs[0]; got != "/" {
+		t.Fatalf("ntfy request path = %q, want / (JSON publishes go to the root)", got)
+	}
+	if got := nf.payload(t, 0)["topic"]; got != "ntfytopic" {
+		t.Fatalf("ntfy topic = %v", got)
 	}
 	if got := js.payload(t, 0)["key"]; got != "lease.lost.abc" {
 		t.Fatalf("json key = %v", got)
@@ -429,6 +439,12 @@ func TestRedactErr(t *testing.T) {
 	if got := redactErr(err); strings.Contains(got, "SECRET") || strings.Contains(got, "127.0.0.1") {
 		t.Fatalf("redactErr left the URL in: %q", got)
 	}
+	// A real *url.Error keeps its whole cause, colons and all.
+	tlsErr := &url.Error{Op: "Post", URL: "https://h.example/x?access=SECRET",
+		Err: errors.New("tls: failed to verify certificate: x509: certificate has expired or is not yet valid: current time 2026-10-04T00:00:00Z is after 2026-01-01T00:00:00Z")}
+	if got := redactErr(tlsErr); strings.Contains(got, "SECRET") || !strings.HasPrefix(got, "tls: failed to verify certificate: x509: certificate has expired") || !strings.HasSuffix(got, "2026-01-01T00:00:00Z") {
+		t.Fatalf("redactErr(url.Error) = %q", got)
+	}
 	plain := fmt.Errorf("HTTP 500")
 	if got := redactErr(plain); got != "HTTP 500" {
 		t.Fatalf("redactErr(plain) = %q", got)
@@ -439,15 +455,15 @@ func TestRedactErr(t *testing.T) {
 // a silent success at the redirect target — following it would replay
 // the configured headers (potential secrets) somewhere else.
 func TestWebhookRefusesRedirect(t *testing.T) {
-	var target *httptest.Server
-	target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var hit, landed atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		landed.Store(true)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer target.Close()
 
-	hit := false
 	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
+		hit.Store(true)
 		http.Redirect(w, r, target.URL+"/landing", http.StatusFound)
 	}))
 	defer redirector.Close()
@@ -464,8 +480,11 @@ func TestWebhookRefusesRedirect(t *testing.T) {
 	n.Start(ctx)
 	n.Enqueue(Event{Key: "k", Severity: Info, Title: "t"})
 	waitUntil(t, "redirect treated as failure", func() bool { return sleep.len() > 0 })
-	if hit != true {
+	if !hit.Load() {
 		t.Fatal("redirector was not called at all")
+	}
+	if landed.Load() {
+		t.Fatal("the redirect was followed")
 	}
 }
 

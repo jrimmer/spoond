@@ -861,18 +861,6 @@ func checkDrainUnit() []checkResult {
 	return []checkResult{{name, "PASS", "spoond-drain enabled, active, ordered after spoond-backend and e2b-orchestrator"}}
 }
 
-// webhookProbe is the doctor's HTTP client for one reachability probe:
-// no redirects (a webhook endpoint has no business redirecting, and
-// following one would replay the probe's headers elsewhere), a bound
-// on how long the whole exchange may take. Replaced in tests.
-var webhookProbe = func(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, CheckRedirect: refuseProbeRedirect}
-}
-
-func refuseProbeRedirect(*http.Request, []*http.Request) error {
-	return fmt.Errorf("webhook redirected")
-}
-
 // checkWebhooks validates NOTIFY_WEBHOOKS (the backend's webhook
 // notification config) and probes each receiver's reachability with a
 // POST of the notifier's own one-line test message (`spoond notify

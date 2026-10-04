@@ -11,26 +11,11 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/notify"
 )
 
-// metricsSink adapts the backend's Prometheus collector to the
-// notifier's Metrics interface: one increment of
-// spoond_notifications_total{webhook,severity,result} per outcome. The
-// webhook label is the index string the notifier passes ("-" when no
-// webhook was chosen) — never a URL.
-type metricsSink struct {
-	counter *metrics.BackendMetrics
-}
-
-func (m metricsSink) Notification(webhook, severity, result string) {
-	m.counter.Notifications.WithLabelValues(webhook, severity, result).Inc()
-}
-
-// SetNotifier installs the webhook notifier, with the backend's
-// metrics collector (if installed) counting its outcomes. Call after
-// SetMetrics and before Start.
+// SetNotifier installs the webhook notifier. Call before Start: the
+// notify loop is only started when a notifier is set.
 func (s *Service) SetNotifier(n NotifySink) {
 	s.notifier = n
 }

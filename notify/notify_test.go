@@ -1,7 +1,6 @@
 package notify
 
 import (
-	"context"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -248,8 +247,8 @@ func TestEnqueueStampsAndDefaults(t *testing.T) {
 	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
 	clock := &stepClock{now: now}
 	n.now = clock.Now
-	go n.dispatchLoop(context.Background())
-	defer func() { n.stop = func() {} }()
+	// No dispatcher: the test itself reads the queue (a running
+	// dispatchLoop would race it for the event).
 
 	n.Enqueue(Event{}) // empty key: dropped silently
 	n.Enqueue(Event{Key: "k"})
@@ -260,5 +259,20 @@ func TestEnqueueStampsAndDefaults(t *testing.T) {
 		}
 	default:
 		t.Fatal("event not queued")
+	}
+}
+
+// TestNtfyPublishURL: the topic leaves the path (it travels in the
+// body); a path prefix and the query (?auth=) stay.
+func TestNtfyPublishURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://ntfy.example/alerts":           "https://ntfy.example/",
+		"https://ntfy.example/alerts/":          "https://ntfy.example/",
+		"https://lacy.casa/ntfy/alerts?auth=tk": "https://lacy.casa/ntfy/?auth=tk",
+		"https://u:p@ntfy.example/alerts":       "https://u:p@ntfy.example/",
+	} {
+		if got := ntfyPublishURL(in); got != want {
+			t.Errorf("ntfyPublishURL(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

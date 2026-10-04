@@ -25,14 +25,15 @@ func findByKey(t *testing.T, evs []Event, key string) (Event, bool) {
 
 func TestUnitCheck(t *testing.T) {
 	ctx := context.Background()
-	// All active → one resolved event, severity critical (the
+	// All active → a resolved event per unit, severity critical (the
 	// condition's own level).
-	evs := unitCheck(ctx, []string{"spoond-backend.service"},
+	evs := unitCheck(ctx, []string{"e2b-orchestrator.service"},
 		func(context.Context, string) (string, error) { return "active", nil }, checkNow)
-	if len(evs) != 1 || !evs[0].Resolved || evs[0].Severity != Critical {
+	if len(evs) != 1 || !evs[0].Resolved || evs[0].Severity != Critical || evs[0].Key != "unit.inactive.e2b-orchestrator.service" {
 		t.Fatalf("active = %+v", evs)
 	}
-	// One inactive → one critical alert naming the unit and state.
+	// One of two inactive → a critical alert keyed on that unit, and a
+	// resolved event for the other.
 	evs = unitCheck(ctx, []string{"a.service", "b.service"},
 		func(_ context.Context, u string) (string, error) {
 			if u == "b.service" {
@@ -40,16 +41,20 @@ func TestUnitCheck(t *testing.T) {
 			}
 			return "active", nil
 		}, checkNow)
-	if len(evs) != 1 || evs[0].Severity != Critical || evs[0].Resolved {
-		t.Fatalf("inactive = %+v", evs)
+	if len(evs) != 2 || !evs[0].Resolved || evs[0].Key != "unit.inactive.a.service" {
+		t.Fatalf("a = %+v", evs)
 	}
-	if want := "b.service is failed"; !contains(evs[0].Body, want) {
-		t.Fatalf("body %q, want it to name %q", evs[0].Body, want)
+	b := evs[1]
+	if b.Key != "unit.inactive.b.service" || b.Severity != Critical || b.Resolved {
+		t.Fatalf("b = %+v", b)
+	}
+	if want := "b.service is failed"; !contains(b.Body, want) {
+		t.Fatalf("body %q, want it to name %q", b.Body, want)
 	}
 	// A broken probe counts as inactive (the checker must not go quiet).
 	evs = unitCheck(ctx, []string{"a.service"},
 		func(context.Context, string) (string, error) { return "", errors.New("no systemd") }, checkNow)
-	if len(evs) != 1 || evs[0].Severity != Critical || !contains(evs[0].Body, "state unknown") {
+	if len(evs) != 1 || evs[0].Severity != Critical || evs[0].Resolved || !contains(evs[0].Body, "state unknown") {
 		t.Fatalf("broken probe = %+v", evs)
 	}
 	// No units configured → nothing.

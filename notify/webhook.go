@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -358,18 +360,26 @@ func (n *Notifier) attempt(ctx context.Context, h *webhook, p pending, retr *[]p
 }
 
 // redactErr keeps URLs (which may carry tokens in path or query) out
-// of error strings before they reach logs or the state file.
+// of error strings before they reach logs or the state file. The
+// client's *url.Error renders as `Post "<url>": <cause>`: only the cause
+// is kept, whole — it names at most the host, which the redacted URL
+// shows anyway, and cutting inside it (an x509 error has several
+// colons) would leave nothing readable.
 func redactErr(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err.Error()
+	}
 	msg := err.Error()
-	if i := strings.IndexAny(msg, " \t"); i > 0 {
-		// The client's *url.Error prefix ("Get 'http://…': ") carries
-		// the URL; keep only the trailing cause.
-		if j := strings.LastIndex(msg, ":"); j > i && j+2 < len(msg) {
-			return strings.TrimSpace(msg[j+1:])
-		}
+	if m := quotedURLPrefix.FindStringIndex(msg); m != nil {
+		return msg[m[1]:]
 	}
 	return msg
 }
+
+// quotedURLPrefix matches a url.Error-shaped prefix (`Post "…": `) in an
+// error that was flattened to a string on the way.
+var quotedURLPrefix = regexp.MustCompile(`^[A-Za-z]+ "[^"]*": `)
 
 // post renders ev in the webhook's format and posts it. A 2xx is
 // success; anything else is a retryable failure.
@@ -387,7 +397,11 @@ func postEvent(ctx context.Context, client *http.Client, w Webhook, ev Event) er
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.URL, bytes.NewReader(body))
+	target := w.URL
+	if w.Format == FormatNtfy {
+		target = ntfyPublishURL(w.URL)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -474,10 +488,13 @@ func redactErrf(err error) error {
 func render(f Format, ev Event, url string) (body []byte, contentType string, err error) {
 	switch f {
 	case FormatNtfy:
-		// Severity maps to the numeric priority header and a tag; the
-		// title carries the marker for resolved conditions. The topic is
-		// the URL path's last segment (ntfy topics live in the path); an
-		// empty topic is the server's problem, not a render error.
+		// ntfy's JSON publishing: the body names the topic and goes to the
+		// server's root URL (ntfyPublishURL); posted to the topic URL it
+		// would arrive as a message whose text is this JSON. Severity maps
+		// to the numeric priority and a tag; the title carries the marker
+		// for resolved conditions. The topic is the URL path's last
+		// segment; an empty topic is the server's problem, not a render
+		// error.
 		title := ev.Title
 		if ev.Resolved {
 			title = "Resolved: " + title
@@ -529,9 +546,26 @@ func refuseRedirect(*http.Request, []*http.Request) error {
 	return fmt.Errorf("webhook redirected: refusing to follow")
 }
 
+// ntfyPublishURL is where ntfy takes JSON publishes: the configured
+// topic URL without its last path segment (the topic, which travels in
+// the body), so a server under a path prefix (https://host/ntfy/topic)
+// keeps its prefix. The query stays: ntfy accepts ?auth=… there.
+func ntfyPublishURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	path := strings.TrimRight(u.Path, "/")
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		path = path[:i]
+	}
+	u.Path = path + "/"
+	u.RawPath = ""
+	return u.String()
+}
+
 // ntfyTopic is the URL path's last non-empty segment: ntfy addresses a
-// topic as https://host/<topic> (optionally several, comma-joined —
-// sent as-is). An unparseable URL yields "".
+// topic as https://host/<topic>. An unparseable URL yields "".
 func ntfyTopic(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {

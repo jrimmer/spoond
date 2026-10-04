@@ -114,7 +114,7 @@ The value is a JSON list; every entry is one receiver:
 | Field | Meaning |
 |---|---|
 | `url` | required, http(s). May carry secrets (tokens in path, query or userinfo) — see Secrets below |
-| `format` | `ntfy` (severity becomes the numeric priority plus a tag, topic from the URL path), `slack` (`{"text": …}` — Slack and Discord incoming webhooks both take it), or `json` (the event object itself) |
+| `format` | `ntfy` (the topic URL, `https://ntfy.example/<topic>`: the topic is its last path segment, and the message is published as JSON to the server root with severity as the numeric priority plus a tag), `slack` (`{"text": …}` — Slack and Discord incoming webhooks both take it), or `json` (the event object itself) |
 | `min_severity` | floor: `info` (default), `warn` or `critical`. A resolved message carries the condition's own severity, so a warn webhook that heard about a problem also hears that it cleared |
 | `events` | optional key filter; exact keys or `*` globs (`disk.*`); empty means everything |
 | `headers` | optional extra request headers (auth tokens); never logged |
@@ -125,7 +125,7 @@ What arrives, with its key and severity:
 |---|---|---|
 | `lease.lost.<lease-id>` | critical | a lease was lost (orchestrator crash, failed recovery) |
 | `held.<rule>.<lease-id>` | warn, critical on `release` | a held-lease rule acted on a lease |
-| `unit.inactive` | critical | a watched systemd unit (the backend, the SSH gateway) is not active |
+| `unit.inactive.<unit>` | critical | a watched systemd unit is not active. `NOTIFY_UNITS` lists them, comma-separated; the default is `e2b-orchestrator.service,spoond-sshd-gateway.service`, and `none` watches nothing (a host without systemd, where every probe would fail) |
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
 | `tls.cert.30d` / `.7d` / `.1d` | warn / warn / critical | the TLS certificate within 30, 7 or 1 day of expiry |

@@ -76,10 +76,11 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
 Subcommands: `backend`, `gateway`, `mcp`, `runner`, `ctl`,
-`images`, `drain`, `doctor`, `dash`.
+`images`, `drain`, `doctor`, `dash`, `notify`.
 Exclusion tags (one per gated file — `cmd/spoond/main.go` prints this
 list at `spoond help`): `nobackend`, `nogateway`, `nomcp`,
-`norunner`, `noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`.
+`norunner`, `noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`,
+`nonotify`.
 
 ### Agent endpoint (`mcp`)
 

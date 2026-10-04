@@ -174,7 +174,7 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 
 Exclusion tags: `nobackend`, `nogateway`, `nomcp`, `norunner`,
 `noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash` (excludes `dash`
-and `top` together).
+and `top` together), `nonotify`.
 
 ```bash
 ./spoond backend    # lease API, HTTP proxy, LLM gateway

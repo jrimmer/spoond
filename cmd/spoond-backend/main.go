@@ -66,6 +66,9 @@
 //	                  "ntfy"|"slack"|"json", "min_severity":
 //	                  "info"|"warn"|"critical", "events": ["glob*",
 //	                  ...], "headers": {...}]. Unset disables.
+//	NOTIFY_UNITS     systemd units the notifier watches, comma-separated
+//	                  (default e2b-orchestrator.service,
+//	                  spoond-sshd-gateway.service; "none" watches none)
 //	NOTIFY_STATE_FILE  where dropped deliveries are mirrored for
 //	                  `spoond doctor` (default: notify-state.json next
 //	                  to the database)
@@ -154,6 +157,20 @@ func envBoolOr(key string, def bool) bool {
 	default:
 		return true
 	}
+}
+
+// notifyUnits is the systemd units the notifier watches: NOTIFY_UNITS
+// (comma-separated; "none" watches nothing, for hosts without systemd)
+// or notify.DefaultUnits.
+func notifyUnits() []string {
+	v := strings.TrimSpace(os.Getenv("NOTIFY_UNITS"))
+	switch v {
+	case "":
+		return notify.DefaultUnits
+	case "none":
+		return nil
+	}
+	return strings.Split(v, ",")
 }
 
 // newNotifier builds the webhook notifier: every outcome counted in
@@ -373,7 +390,7 @@ func Main(args []string) int {
 		notifier := newNotifier(hooks, dbPath, sub, srv.Metrics())
 		svc.SetNotifier(notifier)
 		for _, c := range notify.ProductionSources(
-			notify.DefaultUnits,
+			notifyUnits(),
 			storagePath, backupDir, backupPrefix,
 			tlsCert, tlsKey,
 			notifyBackupMaxAge(),

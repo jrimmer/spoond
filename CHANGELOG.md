@@ -46,7 +46,9 @@ summarised from README "Status".
   someone to watch a dashboard. The sources are the lease event bus
   (a lease `lost` is critical; a held-lease rule action is warn,
   critical when it released) and a once-a-minute pass over the
-  standing conditions: a watched systemd unit not active (critical),
+  standing conditions: a watched systemd unit not active (critical,
+  keyed per unit; `NOTIFY_UNITS`, default the E2B orchestrator and the
+  SSH gateway),
   the snapshot disk past the dashboard's warn/danger levels (80 %/
   90 %), the hugepage pool past its own (80 %/92 %), the TLS
   certificate within 30 or 7 days (warn) or 1 day (critical), a
@@ -64,11 +66,12 @@ summarised from README "Status".
   webhook by its index and a redacted `scheme://host`. Every outcome
   is counted in
   `spoond_notifications_total{webhook,severity,result}`. New package
-  `notify`; `spoond notify test` posts one test message to every
+  `notify`; ntfy messages are published as JSON to the server root,
+  with the topic taken from the configured topic URL. `spoond notify test` posts one test message to every
   receiver and reports per-webhook results; `spoond doctor` probes
   each receiver's reachability and reports dropped deliveries of the
   last 24 h (mirrored to `NOTIFY_STATE_FILE`). Documented in
-  [docs/operations.md](operations.md#notifications-to-webhooks).
+  [docs/operations.md](docs/operations.md#notifications-to-webhooks).
 - **Substrate file operations (#114).** `substrate.Substrate` gains
   `WriteFile`, `ReadFile`, `Stat`, `MakeDir` and `Remove` with
   `substrate.FileInfo` and a `substrate.ErrTooLarge` sentinel: file content

@@ -47,13 +47,14 @@ const DefaultBackupMaxAge = 93600 * time.Second
 // DefaultDiskPath and DefaultBackupDir mirror the backend's defaults
 // (E2B_TEMPLATE_STORAGE_PATH, SPOOND_BACKUP_DIR): the snapshot disk
 // and the backup directory the periodic checks watch when the env is
-// unset. DefaultUnits are the systemd units whose absence means the
-// deployment is down (the backend itself, and the SSH gateway).
+// unset. DefaultUnits are the systemd units the backend depends on
+// (NOTIFY_UNITS overrides): the E2B orchestrator, and the SSH gateway.
+// The backend itself is not on the list — it is the one sending.
 var (
 	DefaultDiskPath   = "/forkdcache/e2b/storage/templates"
 	DefaultBackupDir  = "/var/lib/spoond/backups"
 	DefaultBackupPref = "spoond"
-	DefaultUnits      = []string{"spoond-backend.service", "spoond-sshd-gateway.service"}
+	DefaultUnits      = []string{"e2b-orchestrator.service", "spoond-sshd-gateway.service"}
 )
 
 // SystemdUnit reports a systemd unit's ActiveState. Replaced in tests.
@@ -219,40 +220,33 @@ func resolved(key string, severity Severity, now time.Time) Event {
 	return Event{Key: key, Severity: severity, Resolved: true, At: now}
 }
 
-// unitCheck emits critical events for configured units whose
-// ActiveState is not "active", and one resolved event when every
-// watched unit is active again. A probe that cannot run (no systemd,
-// a missing unit) counts as inactive: the checker must not go quiet
-// on a broken probe.
+// unitCheck emits one critical event per configured unit whose
+// ActiveState is not "active", keyed per unit (unit.inactive.<unit>),
+// and a resolved event for each unit that is active — so a second unit
+// failing within the hour is its own alert, and each recovery is
+// announced on its own. A probe that cannot run (no systemd) counts as
+// inactive: the checker must not go quiet on a broken probe.
 func unitCheck(ctx context.Context, units []string, state SystemdUnit, now time.Time) []Event {
-	var inactive []string
+	var out []Event
 	for _, u := range units {
 		u = strings.TrimSpace(u)
 		if u == "" {
 			continue
 		}
+		key := KeyUnitInactive + "." + u
 		st, err := state(ctx, u)
-		if err != nil {
-			inactive = append(inactive, fmt.Sprintf("%s (state unknown: %v)", u, err))
-			continue
+		switch {
+		case err != nil:
+			out = append(out, Event{Key: key, Severity: Critical, Title: u + " not active",
+				Body: fmt.Sprintf("%s: state unknown: %v", u, err), At: now})
+		case st != "active":
+			out = append(out, Event{Key: key, Severity: Critical, Title: u + " not active",
+				Body: fmt.Sprintf("%s is %s", u, st), At: now})
+		default:
+			out = append(out, resolved(key, Critical, now))
 		}
-		if st != "active" {
-			inactive = append(inactive, fmt.Sprintf("%s is %s", u, st))
-		}
 	}
-	if len(units) == 0 {
-		return nil
-	}
-	if len(inactive) > 0 {
-		return []Event{{
-			Key:      KeyUnitInactive,
-			Severity: Critical,
-			Title:    "systemd unit not active",
-			Body:     strings.Join(inactive, "; "),
-			At:       now,
-		}}
-	}
-	return []Event{resolved(KeyUnitInactive, Critical, now)}
+	return out
 }
 
 // diskCheck watches the snapshot disk past the dashboard's warn
@@ -408,14 +402,16 @@ var systemdActiveState = func(ctx context.Context, unit string) (string, error) 
 }
 
 // statfsUsage reports path's total and free bytes; the notify checks
-// read it through DiskUsage so tests can replace it.
+// read it through DiskUsage so tests can replace it. Free is Bfree, as
+// the dashboard's used percentage counts it: blocks reserved for root
+// are not used, so both cross the 80/90 % levels together.
 func statfsUsage(path string) (total, free uint64, err error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, 0, err
 	}
 	bsize := uint64(st.Bsize)
-	return st.Blocks * bsize, st.Bavail * bsize, nil
+	return st.Blocks * bsize, st.Bfree * bsize, nil
 }
 
 // newestBackup finds the newest <prefix>-*.db file's mod time in dir.
