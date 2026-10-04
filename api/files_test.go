@@ -263,10 +263,12 @@ func TestFilesMkdirAndRemove(t *testing.T) {
 }
 
 func TestFilesLimit(t *testing.T) {
+	defer func(n int64) { maxFileBytes = n }(maxFileBytes)
+	maxFileBytes = 1 << 20
 	ts, svc, _, id := filesSetup(t)
 
 	// PUT beyond the cap is a 413 and writes nothing.
-	big := strings.Repeat("a", maxFileBytes+1)
+	big := strings.Repeat("a", int(maxFileBytes)+1)
 	resp := filesDo(t, "PUT", filesURL(ts, id, "/big.bin", ""), "token-a", big)
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("PUT over cap: %d", resp.StatusCode)
@@ -278,7 +280,7 @@ func TestFilesLimit(t *testing.T) {
 	}
 
 	// Exactly at the cap works.
-	resp = filesDo(t, "PUT", filesURL(ts, id, "/max.bin", ""), "token-a", strings.Repeat("a", maxFileBytes))
+	resp = filesDo(t, "PUT", filesURL(ts, id, "/max.bin", ""), "token-a", strings.Repeat("a", int(maxFileBytes)))
 	if resp.StatusCode != 201 {
 		t.Fatalf("PUT at cap: %d %s", resp.StatusCode, filesBody(t, resp))
 	}

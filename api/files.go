@@ -21,10 +21,12 @@ import (
 // file content is a wider surface than exec, so a share grant does not
 // silently grow into a filesystem read/write.
 
-// maxFileBody is the request- and response-size cap of the file routes:
+// maxFileBytes is the request- and response-size cap of the file routes:
 // PUT refuses a bigger body with 413 before anything is written, and GET
-// refuses to read a bigger file with 413. 256 MiB.
-const maxFileBytes = 256 << 20
+// refuses to read a bigger file with 413. 256 MiB. A variable only so
+// tests can lower it: at the real size, the race detector's shadow
+// memory turns the cap test's buffers into several GiB.
+var maxFileBytes int64 = 256 << 20
 
 // maxFileTransfers caps file-content transfers (GET content, PUT) in
 // flight across the backend, so buffered bodies stay under 1 GiB; past
