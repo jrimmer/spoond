@@ -208,11 +208,12 @@ func TestS4_CreateLatency(t *testing.T) {
 	rec.set("create_p95_ms", pct(sorted, 95))
 }
 
-// TestS5_RestartBumpsGeneration: POST /restart puts a lease into a new
-// generation (2.2, #112) — the API and the guest's
-// /run/spoond/generation both say 2 — while a plain suspend/resume
-// leaves it alone.
-func TestS5_RestartBumpsGeneration(t *testing.T) {
+// TestS5_RestartGeneration: generations (2.2, #112) follow the guest's
+// memory. Suspend/resume and a persistent restart (a snapshot
+// round-trip) continue it: generation 1, and a file in /dev/shm
+// survives. A non-persistent restart is a fresh sandbox: generation 2.
+// The API and the guest's /run/spoond/generation must agree throughout.
+func TestS5_RestartGeneration(t *testing.T) {
 	begin(t)
 
 	l := createLease(t, map[string]any{"image": "py-base", "persistent": true, "ttl": 600})
@@ -231,11 +232,24 @@ func TestS5_RestartBumpsGeneration(t *testing.T) {
 	if g := leaseGeneration(t, l.ID); g != 1 {
 		failf(t, "generation %d after suspend/resume, want 1", g)
 	}
+	execOK(t, l.ID, "echo kept > /dev/shm/s5")
 	st, body, err := cl.restart(l.ID)
 	if err != nil || st != 200 {
-		failf(t, "restart: status %d: %v %s", st, err, truncate(body))
+		failf(t, "restart persistent: status %d: %v %s", st, err, truncate(body))
 	}
-	if g := leaseGeneration(t, l.ID); g != 2 {
-		failf(t, "generation %d after restart, want 2", g)
+	if out := execOK(t, l.ID, "cat /dev/shm/s5 2>/dev/null || echo gone"); out != "kept" {
+		failf(t, "persistent restart lost guest memory: /dev/shm/s5 = %q", out)
+	}
+	if g := leaseGeneration(t, l.ID); g != 1 {
+		failf(t, "generation %d after a persistent restart, want 1 (the memory continued)", g)
+	}
+
+	n := createLease(t, map[string]any{"image": "py-base", "ttl": 600})
+	st, body, err = cl.restart(n.ID)
+	if err != nil || st != 200 {
+		failf(t, "restart non-persistent: status %d: %v %s", st, err, truncate(body))
+	}
+	if g := leaseGeneration(t, n.ID); g != 2 {
+		failf(t, "generation %d after a non-persistent restart, want 2", g)
 	}
 }

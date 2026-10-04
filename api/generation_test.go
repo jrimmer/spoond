@@ -68,10 +68,11 @@ func TestGenerationCreate(t *testing.T) {
 	}
 }
 
-// TestGenerationRestart: both restart paths bump the generation and
-// rewrite the guest file. Persistent: suspend then resume. Non-
-// persistent: a fresh sandbox from the current build. A planned
-// suspend/resume in between must not bump on its own.
+// TestGenerationRestart: a persistent restart is a snapshot round-trip
+// (suspend, then resume from that pause build), so the memory continues
+// and the generation stays at 1. A non-persistent restart is a fresh
+// sandbox from the current build: the memory is gone, so it bumps and
+// rewrites the guest file. A planned suspend/resume never bumps.
 func TestGenerationRestart(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -103,11 +104,11 @@ func TestGenerationRestart(t *testing.T) {
 	if _, err := svc.restart(ctx, "c", p.ID); err != nil {
 		t.Fatalf("restart persistent: %v", err)
 	}
-	if p.Generation != 2 {
-		t.Fatalf("generation after persistent restart = %d, want 2", p.Generation)
+	if p.Generation != 1 {
+		t.Fatalf("generation after persistent restart = %d, want 1 (the memory continued)", p.Generation)
 	}
-	if got := readGeneration(t, sub, p.SandboxID); got != "2\n" {
-		t.Fatalf("guest file after persistent restart = %q, want \"2\\n\"", got)
+	if got := readGeneration(t, sub, p.SandboxID); got != "1\n" {
+		t.Fatalf("guest file after persistent restart = %q, want \"1\\n\"", got)
 	}
 
 	oldSandbox := n.SandboxID

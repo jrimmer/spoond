@@ -10,6 +10,15 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **Restarting a persistent lease bumped its generation.** `POST
+  /api/leases/{id}/restart` on a persistent lease is a snapshot
+  round-trip: the guest resumes from the pause build it just wrote, so
+  its memory continues. It still bumped the generation, telling clients
+  that work had been undone when it hadn't. Only a non-persistent restart
+  (a fresh sandbox) and crash recovery bump it now.
+
 ## [2.2.0] - 2026-10-04
 
 2.2 gives the lease API what a client needs to drive work inside a lease

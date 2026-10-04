@@ -1467,18 +1467,14 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 				return nil, err
 			}
 		}
-		// A restart reboots the guest (2.2): its processes did not
-		// continue from where they were, so the generation bumps once the
-		// guest is back, and the new value is written into it. A failed
-		// restart leaves the lease suspended — memory still continues
-		// from the pause build on the later resume — so no bump.
+		// A persistent restart is a snapshot round-trip: the guest resumes
+		// from the pause build it just wrote, so its processes continue
+		// where they were and the generation stays (the resume rewrites
+		// the guest file with the current value). Only the non-persistent
+		// path below, a fresh sandbox, loses the memory and bumps.
 		if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 			return nil, err
 		}
-		s.store.mu.Lock()
-		s.bumpGenerationLocked(l)
-		s.store.mu.Unlock()
-		s.writeGeneration(l)
 		s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "restarted (snapshot round-trip)")
 		return l, nil
 	}
