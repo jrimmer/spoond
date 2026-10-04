@@ -1,0 +1,56 @@
+                    SPOOND  ·  sandbox.lacy.casa  ·  v2.0.0  ·  e2b 0.4.2  ·  up 31h
+════════════════════════════════════════════════════════════════════════════════════════════════════════
+             ■ leases · host   ■ flights · agents   ■ healthy   ■ people   ■ needs attention
+ ▲ attention · the TLS certificate for vm2.lacy.casa expires in 24 days (2026-10-27) · spoond-x5c
+
+┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
+│ running       █░░░░░░░░░░░╎░░░           4 / 64 │  │ cpu           ██░░░░░░░░░░╎░░░   11% · load 0.8 │
+│ leases         5 · 4 running · 1 suspended · 0 lost│ memory        ██████░░░░░░░╎░░    38% of 61 GiB │
+│ queued         0 · granted 1,412 · swept 37     │  │ hugepages     █████████░░░░╎░░    21.5 GiB free │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ snapshot disk ██████████░░░╎░░      80 GiB free │
+│ go-base-worker ███······             1 running  │  │ root disk     █████████░░░░╎░░      42 GiB free │
+│ go-base        ███······             1 running  │  │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
+│ py-base        ███······             1 running  │  │ vcpu alloc 16 / 32   mem alloc 18.0 GiB         │
+│ elixir-release ███······             1 running  │  │ gc delete on · 52 builds deleted · last 02:16   │
+│ dev-base       ·········           1 suspended  │  │                                                 │
+└─────────────────────────────────────────────────┘  └─────────────────────────────────────────────────┘
+
+┌─ throughput · last 24 min ───────────────────────────────────────────────────────────────────────────┐
+│ running leases        4  requests / s        2.4  creates / min         1  egress conns         14   │
+│ ▆▅▂▂▄▄▃▆█▆▅▆▅▂▂▄▄▃▅█▆▅▆  ▅▅▇▇▄▃▄▃▁▃▆▅▅▇▇▄▃▄▃▁▃▅▅  ▃▄▃▃▇▇▅▅▆▄▂▂▄▃▃▆▇▆▆▇▅▂▂  ▅▆▆▃▁▃▄▃▄▇▇▅▆▆▄▂▃▄▂▃▆▇▅   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ leases ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│ id          image            owner     state        policy      age   left     holder                │
+│ 7c1e2d90aa  go-base-worker   honey     ◓ running    restricted  42m   held     fl-7f3a               │
+│ 9a0d77c1e3  go-base          honey     ◓ running    restricted  36m   held     fl-9c21               │
+│ b42f1c0d9e  py-base          runner    ◓ running    lan         3m    117s     ci 3611               │
+│ d08e5ab2c1  elixir-release   runner    ◓ running    lan         11m   49m      ci 3609               │
+│ 51aa0c3b7d  dev-base         jrimmer   ◌ suspended  internet    2d    persist  scratch               │
+│                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ images ──────────────────────────────────────────────────┐  ┌─ services ────────────────────────────┐
+│ image            vcpu  mem      live  uses   updated      │  │ e2b-orchestrator      ✓ active        │
+│ go-base-worker   2     2 GiB    2     412    10-03 01:56  │  │ spoond-backend        ✓ active        │
+│ go-base          2     2 GiB    1     2210   10-01 02:14  │  │ spoond-runner         ✓ active        │
+│ py-base          2     2 GiB    1     3104   10-01 02:11  │  │ spoond-sshd-gateway   ✓ active        │
+│ dev-base         4     4 GiB    1     188    10-01 02:20  │  │ spoond-dash           ✓ active        │
+│ elixir-release   4     4 GiB    1     960    10-01 02:31  │  │ spoond-drain          ✓ active        │
+│ llm-review       2     2 GiB    0     77     10-01 02:09  │  │ spoond-netwatch       ✓ active        │
+│ rust-base        4     4 GiB    0     41     10-01 02:26  │  │ soak-check.timer      ◷ waiting       │
+└───────────────────────────────────────────────────────────┘  └───────────────────────────────────────┘
+
+┌─ refusals and failures · 24h ────────────────────────────────────────────────────────────────────────┐
+│ auth 0  quota 0  throttled 0  capacity 0  build fails 0  lost leases 0  ci failures 1 (job 3604)     │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌── events ────────────────────────────────────────────────────────────────────────────────────────────┐
+│ 02:14:03  lease       granted b42f1c0d9e · py-base · 61 ms                                           │
+│ 02:14:03  runner      ci job 3611 started · lease b42f1c                                             │
+│ 02:14:40  flight      fl-7f3a · implement asks owner                                                 │
+│ 02:15:10  checkpoint  7c1e2d90aa · 540 ms · build 9e1f                                               │
+│ 02:15:22  flight      fl-9c21 · plans[infra] started (3 running)                                     │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+leases [4/64]  flights [2 running]  people [1 asked]  hugepages [21.5 GiB free]  disk [80 GiB free]  cer
