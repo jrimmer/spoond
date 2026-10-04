@@ -786,6 +786,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"holder":          lease.Holder,
 		"holder_url":      lease.HolderUrl,
 		"hold_expires_at": formatRFC3339(lease.HoldExpiresAt),
+		"hold_state":      holdState(lease),
 		"exposed":         exposedMap(lease),
 	})
 }
@@ -1303,6 +1304,7 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		"holder":          updated.Holder,
 		"holder_url":      updated.HolderUrl,
 		"hold_expires_at": formatRFC3339(updated.HoldExpiresAt),
+		"hold_state":      holdState(updated),
 		"ok":              true,
 	})
 }
@@ -1774,6 +1776,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		"build_id":        buildID,
 		"ids":             ids,
 		"hold_expires_at": formatRFC3339(leases[0].HoldExpiresAt),
+		"hold_state":      holdState(leases[0]),
 	})
 }
 

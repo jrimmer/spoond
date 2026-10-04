@@ -1974,6 +1974,20 @@ func (s *Service) lookupAny(id string) *Lease {
 	return l
 }
 
+// holdState is "active" while a hold runs until hold_expires_at,
+// "lapsed" once it ran out unrenewed (the lease was suspended and is
+// released by the stale rule unless renewed or used), and "" for an
+// unheld lease.
+func holdState(l *Lease) string {
+	if !l.held() {
+		return ""
+	}
+	if l.HoldExpiresAt.IsZero() {
+		return "lapsed"
+	}
+	return "active"
+}
+
 // leaseMap renders a lease as one GET /api/sandboxes row.
 func leaseMap(l *Lease) map[string]any {
 	m := map[string]any{
@@ -1998,15 +2012,8 @@ func leaseMap(l *Lease) map[string]any {
 	if !l.HoldExpiresAt.IsZero() {
 		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
 	}
-	if l.held() {
-		// active: the hold runs until hold_expires_at; lapsed: it ran out
-		// unrenewed, the lease was suspended and is released by the stale
-		// rule unless renewed or used.
-		if l.HoldExpiresAt.IsZero() {
-			m["hold_state"] = "lapsed"
-		} else {
-			m["hold_state"] = "active"
-		}
+	if st := holdState(l); st != "" {
+		m["hold_state"] = st
 	}
 	if l.LastAction != "" {
 		m["last_action"] = l.LastAction
