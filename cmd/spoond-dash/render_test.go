@@ -199,6 +199,7 @@ func TestVersionLabel(t *testing.T) {
 		{"dev", "dev"},
 		{"5ab27e59fe17", "5ab27e59fe17"},
 		{"v2.1.3-0.20261004183409-7a", "v2.1.3-0.20261004183409-7a"},
+		{"v0.0.0-20260101000000-abcdef123456", "v0.0.0+abcdef1"},
 	}
 	for _, tc := range cases {
 		if got := versionLabel(tc.in); got != tc.want {
@@ -621,5 +622,21 @@ func TestPageLinkRowKeepsItsWidth(t *testing.T) {
 	text := html.UnescapeString(regexp.MustCompile(`<[^>]*>`).ReplaceAllString(page, ""))
 	if text != plainRow {
 		t.Fatalf("linked row's text changed:\n got %q\nwant %q", text, plainRow)
+	}
+}
+
+// TestLegendFitsNarrowFrames: a legend wider than the frame drops whole
+// items from its right end, so the first entries (the run states) are
+// always on screen and the row fits.
+func TestLegendFitsNarrowFrames(t *testing.T) {
+	for _, w := range []int{72, 80, 104} {
+		segs := fitSegs(legendRow(), w)
+		n := 0
+		for _, s := range segs {
+			n += len([]rune(s.Text))
+		}
+		if n > w || len(segs) == 0 || segs[0].Text != "▶" {
+			t.Fatalf("width %d: legend %d wide, starts %q", w, n, segs[0].Text)
+		}
 	}
 }

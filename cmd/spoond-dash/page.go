@@ -1,6 +1,6 @@
 // The browser half of the grid dashboard: the page renders the same
 // grid as spoond top as HTML inside one <pre>, with WebTUI for the page
-// chrome (title, login state) and the grid styles as classes. Datastar
+// palette and the grid styles as classes (the grid draws its own header). Datastar
 // patches changed rows over the existing SSE stream: every grid row is
 // one element (id rN), and a frame sends one datastar-patch-elements per
 // row that changed — the whole <pre> only when the row count changed.

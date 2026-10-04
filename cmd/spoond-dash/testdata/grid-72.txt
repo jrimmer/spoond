@@ -1,6 +1,6 @@
            SPOOND · vm2.lacy.casa · dev · e2b 0.4.2 · up 720h           
 ════════════════════════════════════════════════════════════════════════
- ‖ suspended · ◆ held · ■ lost · ✓ active unit · ◉ lapsed hol           
+        ▶ running · ‖ suspended · ◆ held · ■ lost · ✓ active unit       
 ▲ 1 lost lease(s) - a substrate crash dropped them                      
 ▲ held lease fedcba0987: expiry/expire 3h00m ago                        
                                                                         

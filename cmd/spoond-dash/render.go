@@ -1,5 +1,5 @@
 // The dashboard on the character grid (#110): one fixed-width grid holds
-// the whole frame — header, legend, one attention banner when something
+// the whole frame — header, legend, the attention strip when something
 // needs a person, then a column of panels. The same grid feeds Plain
 // (golden tests), ANSI (spoond top) and HTML (the page's <pre>), so the
 // terminal and the browser draw one picture from one snapshot.
@@ -11,8 +11,9 @@ package spoonddash
 
 import (
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/grid"
@@ -31,7 +32,7 @@ const (
 // Extra is every non-ASCII rune the dashboard draws beyond grid.Glyphs:
 // ✓ an active unit and ✗ one that is not, · separator, ═ the header's
 // rule, ▲ the attention strip's marker, ┄ a held-lease action in the
-// events panel, ■ the attention marker and the lost state, ∞ a
+// events panel, ▲ the attention strip, ■ the lost state, ∞ a
 // persistent lease's remaining time, ◉ a lapsed hold, and the leases
 // panel's per-state glyphs (▶ running, ‖ suspended, ◆ held). It is
 // passed to grid.Check by every renderer, and every rune is asserted to
@@ -93,6 +94,34 @@ func legendRow() []grid.Seg {
 		grid.Seg{Text: "◉ lapsed hold", Style: "state"},
 		grid.Seg{Text: " · ", Style: "dim"},
 		grid.Seg{Text: "┄ held-lease action", Style: "dim"})
+	return segs
+}
+
+// fitSegs drops whole legend items from the right (an item ends at a
+// " · " separator) until the row fits w, so a centred legend on a narrow
+// frame loses its least important entries instead of being cut at both
+// edges.
+func fitSegs(segs []grid.Seg, w int) []grid.Seg {
+	width := func(ss []grid.Seg) int {
+		n := 0
+		for _, s := range ss {
+			n += len([]rune(s.Text))
+		}
+		return n
+	}
+	for width(segs) > w {
+		cut := -1
+		for i := len(segs) - 1; i >= 0; i-- {
+			if segs[i].Text == " · " {
+				cut = i
+				break
+			}
+		}
+		if cut < 0 {
+			break
+		}
+		segs = segs[:cut]
+	}
 	return segs
 }
 
@@ -306,7 +335,7 @@ func statusItems(s Snapshot, now time.Time) []statusItem {
 // certDays is the certificate's remaining time in days: negative when
 // it has already expired.
 func certDays(d time.Duration) string {
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
+	return fmt.Sprintf("%dd", int(math.Floor(d.Hours()/24)))
 }
 
 // certStyle is the certificate's health: bad once expired, warn inside
@@ -390,32 +419,30 @@ func (l *layout) header(g *grid.Grid, y int) {
 		{Text: "up " + fmt.Sprintf("%.0fh", l.s.UptimeH), Style: "text"},
 	}
 	g.Center(l.w/2, y, segs)
-	g.HLine(0, y+1, l.w, "frame")
 	for x := 0; x < l.w; x++ {
 		g.Put(x, y+1, '═', "frame")
 	}
-	g.Center(l.w/2, y+2, legendRow())
+	g.Center(l.w/2, y+2, fitSegs(legendRow(), l.w))
 }
 
 // versionLabel is a version for the header: "?" when the scrape had
 // none. A spoond build version is shortened for the line: a tag stays
 // as it is (v2.2.0), a Go pseudo-version (v2.1.3-0.20261004183409-
 // 7a13d2bd1131) becomes base+first seven of the hash (v2.1.3+7a13d2b).
+// pseudoVersion matches a Go pseudo-version: the base, then the commit
+// hash.
+var pseudoVersion = regexp.MustCompile(`^(v\d+\.\d+\.\d+)-(?:0\.)?\d{14}-([0-9a-f]{7,40})$`)
+
 func versionLabel(v string) string {
 	if v == "" {
 		return "?"
 	}
-	base, hash, ok := strings.Cut(v, "-0.")
-	if !ok || len(hash) < 7 {
-		return v
+	// vX.Y.Z-0.<14-digit time>-<12 hex> after a tag, vX.Y.Z-<time>-<hex>
+	// for a module with no tags (v0.0.0-…).
+	if m := pseudoVersion.FindStringSubmatch(v); m != nil {
+		return m[1] + "+" + m[2][:7]
 	}
-	if i := strings.LastIndex(hash, "-"); i >= 0 {
-		hash = hash[i+1:]
-	}
-	if len(hash) < 7 {
-		return v
-	}
-	return base + "+" + hash[:7]
+	return v
 }
 
 // panel draws a single-line framed panel of h rows with its title on
@@ -470,7 +497,7 @@ func contains(list []string, s string) bool {
 // holderLinks maps each lease row's y to its holder_url: the page
 // renderer swaps the row's link-styled span for a real anchor. Only
 // leases with a URL appear here. The row math must match assemble:
-// header (2) + banner rows (+ a blank under them) + the panels above
+// header (headerRows) + banner rows (+ a blank under them) + the panels above
 // leases, then the panel's title row, then one row per lease.
 func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 	l := &layout{w: clamp(w, minW, maxW), s: s, now: now,
