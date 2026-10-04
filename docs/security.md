@@ -184,7 +184,11 @@ Known/accepted residuals:
   written to SQLite, logs, error strings or metrics, and no endpoint
   returns them, so nothing to redact can leak from a store backup, a log
   bundle or a `GET`. The flip side: a backend restart loses them, and
-  callers must re-send on the next exec. Anyone who can exec into the
+  callers must re-send on the next exec. The tmpfs is guest memory, so
+  the snapshot files of a suspend, checkpoint, fork or clone on the
+  host's snapshot store contain the secret files present at that
+  moment, and a fork or clone starts with them; protect the snapshot
+  store like the guests themselves. Anyone who can exec into the
   lease can read the files — that is the point; the boundary is other
   guest users (0700/0600) and everything outside the lease.
 

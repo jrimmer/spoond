@@ -45,23 +45,6 @@ func (s *secretsTestServer) sandboxOf(leaseID string) string {
 	return s.svc.store.leases[leaseID].SandboxID
 }
 
-// tailCalls returns the fake's recorded calls for one sandbox after the
-// n most recent ones were dropped (for call-order assertions).
-func (s *secretsTestServer) tailCalls(sandboxID string, drop int) []string {
-	calls := s.sub.Fake.CallLog()
-	if drop > len(calls) {
-		drop = len(calls)
-	}
-	calls = calls[len(calls)-drop:]
-	var out []string
-	for _, c := range calls {
-		if strings.HasSuffix(c, " "+sandboxID) || c == sandboxID {
-			out = append(out, strings.TrimSuffix(strings.TrimPrefix(c, ""), " "+sandboxID))
-		}
-	}
-	return out
-}
-
 func TestSecretsValidation(t *testing.T) {
 	s := newSecretsTestServer(t, false)
 
@@ -388,5 +371,3 @@ func TestValidateSecretsUnit(t *testing.T) {
 		t.Fatal("over-limit total accepted")
 	}
 }
-
-var _ = substrate.ExecResult{}

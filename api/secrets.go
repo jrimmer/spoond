@@ -19,8 +19,10 @@ import (
 // /run/secrets/<name>, mode 0600, through the substrate's file API.
 //
 // Create-time secrets stay for the lease's life and are re-written
-// after a resume or restart (the tmpfs does not survive a snapshot
-// cycle or a fresh sandbox); exec-time secrets are written before the
+// after a resume, restart or crash recovery (a fresh sandbox never had
+// the tmpfs; after a snapshot resume the rewrite is a no-op refresh).
+// The tmpfs is guest memory, so a pause, checkpoint, fork or clone
+// snapshot carries the files with it. Exec-time secrets are written before the
 // command and removed after it finishes. The values live in this
 // process's memory only: never in the store, logs, error strings or
 // metrics, and never returned by any endpoint — a backend restart
@@ -181,8 +183,9 @@ func (s *Service) clearCreateSecrets(leaseID string) {
 }
 
 // restageCreateSecrets re-writes a lease's create-time secrets after
-// the sandbox came back (resume, restart, crash recovery): the tmpfs
-// does not survive a snapshot cycle and a fresh sandbox never had it.
+// the sandbox came back (resume, restart, crash recovery): a fresh
+// sandbox never had the tmpfs, and a rewrite after a snapshot resume is
+// harmless.
 // Failure is logged and otherwise ignored — the lease still runs, and
 // the caller can re-send secrets on its next exec.
 func (s *Service) restageCreateSecrets(ctx context.Context, l *Lease, what string) {

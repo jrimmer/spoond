@@ -20,8 +20,9 @@ summarised from README "Status".
   and writes every secret as `/run/secrets/<name>`, mode 0600, through
   the substrate's file API — never environment variables, never argv.
   Create-time secrets stay for the lease's life and are re-written after
-  a resume, restart or crash recovery (the tmpfs does not survive a
-  snapshot cycle); exec-time secrets are written before the command and
+  a resume, restart or crash recovery; the tmpfs is guest memory, so
+  snapshots (suspend, checkpoint, fork, clone) carry the files.
+  Exec-time secrets are written before the command and
   removed after it, restoring any create-time value a name shadowed.
   Values are kept in the backend's memory only — never in the store,
   logs, error strings or metrics, never returned by any endpoint — so a

@@ -380,8 +380,12 @@ variable and never part of the command line:
   argv, so no secret can appear in `ps` output, shell history or error
   strings.
 - **Create-time secrets** stay for the lease's life. They are re-written
-  after a resume or restart (and after crash recovery), because the
-  tmpfs does not survive a snapshot cycle or a fresh sandbox.
+  after a resume or restart (and after crash recovery), so a fresh
+  sandbox gets them too.
+- The tmpfs is guest memory: a suspend, checkpoint, fork or clone
+  snapshot contains the files that were present when it was taken, and
+  a fork or clone starts with them (the backend does not re-stage
+  secrets into a fork or clone; send them again on its create or exec).
 - **Exec-time secrets** are written before the command and removed when
   it finishes. A name that shadows a create-time secret is restored to
   the lease's value afterwards.
