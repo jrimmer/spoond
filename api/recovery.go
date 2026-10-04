@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 )
 
 // Crash recovery (U10 R16/D4): an orchestrator crash kills every
@@ -59,6 +60,7 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 			s.store.mu.Unlock()
 			s.deleteSandboxRow(l.SandboxID)
 			summary.Lost++
+			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "no checkpoint to recover from; the running state is gone")
 			s.log.Printf("recovery: lease %s lost (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
 			continue
 		}
@@ -68,10 +70,12 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 			s.saveLeaseLocked(l)
 			s.store.mu.Unlock()
 			summary.Lost++
+			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, fmt.Sprintf("recovery from checkpoint %s failed: %v", l.LastCheckpointBuildID, err))
 			s.log.Printf("recovery: lease %s lost (checkpoint %s): %v", l.ID, formatRFC3339(l.LastCheckpointAt), err)
 			continue
 		}
 		summary.Recovered++
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseRecovered, fmt.Sprintf("recovered from checkpoint %s", l.LastCheckpointBuildID))
 		s.log.Printf("recovery: lease %s recovered (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
 	}
 

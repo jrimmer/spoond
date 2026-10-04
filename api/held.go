@@ -67,10 +67,11 @@ const (
 
 // heldAction records one automatic action on a held lease: the log
 // line (lease, holder, rule, action and the numbers that triggered
-// it), the spoond_held_actions_total{rule,action} counter and the
-// lease's last_action/last_action_at record (persisted). now is the
-// instant of the action; detail is the human-readable numbers.
-// Call with s.store.mu held (like setHoldLocked).
+// it), the spoond_held_actions_total{rule,action} counter, the
+// lease's last_action/last_action_at record (persisted) and one
+// held_action event on the bus (detail = rule, action and numbers).
+// now is the instant of the action; detail is the human-readable
+// numbers. Call with s.store.mu held (like setHoldLocked).
 func (s *Service) heldAction(ctx context.Context, l *Lease, rule, action, detail string, now time.Time) {
 	if l.Holder != "" {
 		s.log.Printf("held lease %s (holder %q): %s %s: %s", l.ID, l.Holder, rule, action, detail)
@@ -83,6 +84,7 @@ func (s *Service) heldAction(ctx context.Context, l *Lease, rule, action, detail
 	l.LastAction = rule + "/" + action
 	l.LastActionAt = now
 	s.saveLeaseLocked(l)
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseHeldAction, rule+"/"+action+": "+detail)
 }
 
 // setHold timesets a hold on a lease: holder fields (already validated)
@@ -140,8 +142,10 @@ func (s *Service) setHolderWithTTL(owner, id, holder, holderURL string, holdTTL 
 	now := s.now()
 	if holder == "" {
 		clearHoldLocked(l)
+		s.emitLeaseEvent(id, owner, LeaseHolderCleared, "hold cleared")
 	} else {
 		s.setHoldLocked(l, holder, holderURL, holdTTL, now)
+		s.emitLeaseEvent(id, owner, LeaseHolderSet, fmt.Sprintf("held by %q until %s", holder, formatRFC3339(l.HoldExpiresAt)))
 	}
 	s.saveLeaseLocked(l)
 	return l, nil
@@ -164,6 +168,7 @@ func (s *Service) renewHolder(owner, id, holder, holderURL string, holdTTL time.
 	now := s.now()
 	if holder == "" {
 		clearHoldLocked(l)
+		s.emitLeaseEvent(id, owner, LeaseHolderCleared, "hold cleared")
 		s.saveLeaseLocked(l)
 		return l, nil
 	}
@@ -174,6 +179,7 @@ func (s *Service) renewHolder(owner, id, holder, holderURL string, holdTTL time.
 		l.HolderUrl = holderURL
 	}
 	s.setHoldLocked(l, l.Holder, l.HolderUrl, holdTTL, now)
+	s.emitLeaseEvent(id, owner, LeaseHolderSet, fmt.Sprintf("hold renewed by %q until %s", holder, formatRFC3339(l.HoldExpiresAt)))
 	s.saveLeaseLocked(l)
 	return l, nil
 }

@@ -264,6 +264,9 @@ type Service struct {
 	// when it last logged that a dry-run GC stops it. Sweep goroutine only.
 	criticalGCAt         time.Time
 	criticalDryRunLogged time.Time
+	// bus is the lease event bus (2.2, #115): every lifecycle change
+	// emits one event here. Set in NewService; never nil.
+	bus *eventBus
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -283,6 +286,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		log:           log.Default(),
 		probeEnabled:  true,
 		probeTimeout:  20 * time.Second,
+		bus:           newEventBus(),
 	}
 }
 
@@ -957,6 +961,7 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, "lease released")
 }
 
 // errQuotaExceeded is returned when a user hits their concurrent-lease
@@ -1170,6 +1175,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 	if s.metrics != nil {
 		s.metrics.LeaseGrantDur.Observe(time.Since(start).Seconds())
 	}
+	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("granted from image %s", image))
 	return lease, nil
 }
 
@@ -1277,6 +1283,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	}
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseSuspended, "paused into build "+buildID)
 	return buildID, nil
 }
 
@@ -1364,6 +1371,7 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "resumed from build "+resumeBuild)
 	return l, nil
 }
 
@@ -1394,7 +1402,12 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 				return nil, err
 			}
 		}
-		return s.resumeLeaseBody(ctx, l)
+		resumed, err := s.resumeLeaseBody(ctx, l)
+		if err != nil {
+			return nil, err
+		}
+		s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "restarted (snapshot round-trip)")
+		return resumed, nil
 	}
 
 	_ = s.sub.Delete(ctx, l.SandboxID)
@@ -1420,6 +1433,7 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
+	s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "cold-restarted from image "+l.Image)
 	return l, nil
 }
 
@@ -1509,6 +1523,7 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 	if len(src.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
+	s.emitLeaseEvent(src.ID, src.Owner, LeaseCheckpointed, "checkpointed into build "+buildID)
 }
 
 // clone checkpoints a running sandbox into a new build and grants a new
@@ -1574,6 +1589,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
+	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("cloned from %s (build %s)", srcID, b.BuildID))
 	return lease, b.BuildID, nil
 }
 
@@ -1677,6 +1693,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.store.leases[lease.ID] = lease
 		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
+		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
 		created = append(created, lease)
 	}
 	s.releaseQuotaReservation(owner, count)

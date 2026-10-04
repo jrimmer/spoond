@@ -8,6 +8,33 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
+## [Unreleased]
+
+### Added
+
+- **Lease event stream over SSE (#115, spoond 2.2).** Every lease
+  lifecycle change now emits one event on an in-process bus:
+  `created` (grant, fork, clone), `released`, `suspended`, `resumed`,
+  `checkpointed`, `recovered` (from a checkpoint after a crash),
+  `lost`, `restarted`, `holder_set`, `holder_cleared` and
+  `held_action` (the held-lease rule and action that fired). Each
+  event carries a per-process monotonic `seq` and a random per-start
+  `epoch`, so a client can tell a backend restart from an ordinary
+  resume. The bus keeps the last 10000 events and serves them over
+  Server-Sent Events at `GET /api/leases/events` (the caller's leases;
+  admins see all) and `GET /api/leases/{id}/events` (one lease): ids
+  are `<epoch>-<seq>`, `Last-Event-ID` resumes exactly where the
+  caller left off when the event is still buffered, an unresumable
+  position (unknown epoch, event out of the ring, malformed id) is
+  announced with a `gap` event before the live flow, and a
+  `: keepalive` comment every 15 s keeps idle streams open. Access is
+  re-checked per event, so a stream never leaks another owner's
+  leases. In-process consumers (the webhook notifier is the intended
+  first) subscribe with `Service.Subscribe(filter)`; a slow subscriber
+  has events dropped — never blocking the lifecycle — and is told so
+  with a `gap` event. Documented in
+  [docs/api.md](docs/api.md#lease-events-server-sent-events).
+
 ## [2.1.0] - 2026-10-04
 
 2.1 makes spoond a plain microVM utility again and gives it a terminal-style
