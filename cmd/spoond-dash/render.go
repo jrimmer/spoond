@@ -717,8 +717,7 @@ func (l *layout) imageCounts() []imageCount {
 		if r.State == "running" {
 			ic.running++
 		} else {
-			s := m[r.Image]
-			s.suspended++
+			ic.suspended++
 		}
 	}
 	out := make([]imageCount, 0, len(m))
