@@ -8,6 +8,16 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
+## [2.1.1] - 2026-10-04
+
+### Fixed
+
+- **Dashboard rows ran together.** The live stream's first frame (and
+  any frame where the row count changed) replaced the page's
+  `<pre id="grid">` with its bare rows, dropping the element and its
+  class, so the grid lost its line breaks and wrapped at the window
+  edge. The stream now patches the rows inside the `<pre>`.
+
 ## [2.1.0] - 2026-10-04
 
 2.1 makes spoond a plain microVM utility again and gives it a terminal-style

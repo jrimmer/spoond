@@ -167,7 +167,7 @@ func TestBasicAuthAndStream(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	body := rec.Body.String()
 	for _, want := range []string{"event: datastar-patch-signals", `"_h":`, `"_s":`, "event: datastar-patch-elements",
-		"data: selector #grid", "data: mode outer", `id="r0"`} {
+		"data: selector #grid", "data: mode inner", `id="r0"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("stream lacks %q:\n%s", want, body)
 		}

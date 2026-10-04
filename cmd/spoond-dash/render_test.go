@@ -398,8 +398,8 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	full := w.b.String()
-	if !strings.Contains(full, "data: selector #grid") || !strings.Contains(full, "data: mode outer") {
-		t.Fatalf("first frame must replace the whole <pre>:\n%s", full)
+	if !strings.Contains(full, "data: selector #grid") || !strings.Contains(full, "data: mode inner") {
+		t.Fatalf("first frame must replace every row inside the <pre>:\n%s", full)
 	}
 	for _, bad := range []string{"[outer]", "[inner]", "[replace]"} {
 		if strings.Contains(full, bad) {
