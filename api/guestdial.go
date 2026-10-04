@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -93,6 +95,18 @@ func (s *Server) handleGuestDial(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusGone, lostLeaseMessage)
 		return
 	}
+	// envd is the guest's management surface; the proxy and
+	// expose_ports refuse it too.
+	if port == envdPort {
+		writeError(w, http.StatusForbidden, "port 49983 is envd and cannot be dialed")
+		return
+	}
+	// Without a host address there is no running sandbox, and dialing
+	// ":port" would reach the backend host's own loopback.
+	if lease.HostIP == "" {
+		writeError(w, http.StatusBadGateway, "lease not running")
+		return
+	}
 
 	// Per-owner concurrent cap (429), counted like the exec/stream cap.
 	if !s.acquireDial(owner) {
@@ -134,25 +148,53 @@ func (s *Server) handleGuestDial(w http.ResponseWriter, r *http.Request) {
 }
 
 // bridgeWSGuest pumps raw bytes between an upgraded WebSocket and a TCP
-// connection until either side closes or goes quiet for the idle
-// timeout; the TCP close then closes the WebSocket and vice versa.
+// connection until either side closes or the bridge carries no bytes in
+// either direction for guestDialIdleTimeout. Closing one side closes the
+// other.
 func bridgeWSGuest(ws *websocket.Conn, conn net.Conn) {
-	// Server -> client: TCP reads become binary frames. SetReadDeadline
-	// is the idle clock: every byte pushes it forward; the loop returns
-	// when the guest closes (Read error) or the deadline lapses without
-	// bytes. Either way it takes both sockets down: the guest's conn so
-	// the socket is not half-held, and the WebSocket so the loop below
-	// stops blocking on a client that is waiting for guest bytes.
+	idle := guestDialIdleTimeout // read once: the goroutines may outlive the handler
+	var last atomic.Int64        // unix nanos of the last byte in either direction
+	last.Store(time.Now().UnixNano())
+	var once sync.Once
+	done := make(chan struct{})
+	closeBoth := func() {
+		once.Do(func() {
+			close(done)
+			conn.Close()
+			ws.Close() // Close may be called concurrently with reads/writes
+		})
+	}
+	defer closeBoth()
+
+	// Idle watchdog: one clock for both directions, so a stream that
+	// flows only one way stays open.
 	go func() {
-		defer conn.Close()
-		defer ws.Close() // Close may be called concurrently with reads/writes
+		tick := time.NewTicker(idle / 4)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-tick.C:
+				if now.Sub(time.Unix(0, last.Load())) >= idle {
+					closeBoth()
+					return
+				}
+			}
+		}
+	}()
+
+	// Guest -> client: TCP reads become binary frames. The write
+	// deadline keeps a client that stopped reading from pinning the
+	// goroutine.
+	go func() {
+		defer closeBoth()
 		buf := make([]byte, 32*1024)
 		for {
-			if err := conn.SetReadDeadline(time.Now().Add(guestDialIdleTimeout)); err != nil {
-				return
-			}
 			n, err := conn.Read(buf)
 			if n > 0 {
+				last.Store(time.Now().UnixNano())
+				ws.SetWriteDeadline(time.Now().Add(idle))
 				if werr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
 					return
 				}
@@ -163,16 +205,9 @@ func bridgeWSGuest(ws *websocket.Conn, conn net.Conn) {
 		}
 	}()
 
-	// Client -> server: binary frames are raw bytes to the guest. Any
-	// WebSocket error — a close from the client, or the read deadline
-	// expiring without a frame — tears the bridge down; the deferred TCP
-	// close unblocks the relay goroutine.
-	defer conn.Close()
-	defer ws.Close()
+	// Client -> guest: binary frames are raw bytes to the guest. Text
+	// and empty frames are ignored.
 	for {
-		if err := ws.SetReadDeadline(time.Now().Add(guestDialIdleTimeout)); err != nil {
-			return
-		}
 		mt, data, err := ws.ReadMessage()
 		if err != nil {
 			return
@@ -180,7 +215,8 @@ func bridgeWSGuest(ws *websocket.Conn, conn net.Conn) {
 		if mt != websocket.BinaryMessage || len(data) == 0 {
 			continue
 		}
-		if err := conn.SetWriteDeadline(time.Now().Add(guestDialIdleTimeout)); err != nil {
+		last.Store(time.Now().UnixNano())
+		if err := conn.SetWriteDeadline(time.Now().Add(idle)); err != nil {
 			return
 		}
 		if _, err := conn.Write(data); err != nil {

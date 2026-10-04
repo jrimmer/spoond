@@ -541,3 +541,81 @@ func TestGuestDialIdleTimeout(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestGuestDialRefusesEnvdAndNoHost(t *testing.T) {
+	ts, svc, _, _ := newTestServerWithService(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+
+	// No host address: refused, never dialed as ":port" (the backend's
+	// own loopback).
+	if _, resp, err := dialGuest(t, ts, id, 8080, "token-a"); err == nil || resp == nil || resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("empty HostIP: err=%v resp=%v, want 502", err, resp)
+	}
+
+	pointHostIP(t, svc, id, "127.0.0.1", 49983)
+	if _, resp, err := dialGuest(t, ts, id, 49983, "token-a"); err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("envd port: err=%v resp=%v, want 403", err, resp)
+	}
+}
+
+func TestGuestDialOneWayStaysOpen(t *testing.T) {
+	ts, svc, _, _ := newTestServerWithService(t)
+
+	// A talker: sends a byte every 30ms, reads nothing.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for i := 0; i < 20; i++ {
+			if _, err := c.Write([]byte{'x'}); err != nil {
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+	pointHostIP(t, svc, id, "127.0.0.1", port)
+
+	old := guestDialIdleTimeout
+	guestDialIdleTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { guestDialIdleTimeout = old })
+
+	ws, _, err := dialGuest(t, ts, id, port, "token-a")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// 20 bytes over ~600ms, four idle timeouts, with the client never
+	// sending: the bridge must stay up while bytes flow one way.
+	got := 0
+	for got < 20 {
+		ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, p, err := ws.ReadMessage()
+		if err != nil {
+			t.Fatalf("one-way stream closed after %d bytes: %v", got, err)
+		}
+		got += len(p)
+	}
+	ws.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		active, _, _ := guestDialMetrics(t, ts)
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("bridge never released its dial slot")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
