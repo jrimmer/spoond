@@ -181,6 +181,13 @@ the per-owner concurrent exec/stream cap is reached. (There is no
 lease-busy `409` here: the concurrency guard on exec is the per-owner
 cap, which yields `429`.)
 
+While a lifecycle operation is in flight on the lease (the periodic
+checkpoint, a suspend or a restart), the orchestrator briefly reports
+its sandbox missing; for a large guest a checkpoint can take a couple of
+minutes. Exec, stat, guest dial and the file routes then answer `409`
+with `Retry-After: 5`, not `410`: retry. `410` means the sandbox is gone
+with nothing in flight.
+
 ### `…/api/leases/{id}/files/{path…}` — lease files
 
 Read and write files inside the lease's filesystem. `{path…}` is the

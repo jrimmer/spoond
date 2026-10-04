@@ -90,8 +90,17 @@ func parseFileMode(raw string, def os.FileMode) (os.FileMode, error) {
 
 // mapFileError translates a substrate file error onto the HTTP status
 // the route contract names.
-func (s *Server) mapFileError(w http.ResponseWriter, sandboxID, op string, err error) {
+func (s *Server) mapFileError(w http.ResponseWriter, lease *Lease, op string, err error) {
+	sandboxID := lease.SandboxID
+	s.svc.store.mu.Lock()
+	busy := lease.busy
+	s.svc.store.mu.Unlock()
 	switch {
+	case errors.Is(err, substrate.ErrNotFound) && busy:
+		// Mid-checkpoint the whole sandbox reads as missing: busy, not a
+		// missing file (see writeSandboxGone).
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusConflict, "lease is busy (a checkpoint or another lifecycle operation is in progress); retry shortly")
 	case errors.Is(err, substrate.ErrNotFound):
 		writeError(w, http.StatusNotFound, "file not found")
 	case errors.Is(err, substrate.ErrTooLarge):
@@ -149,7 +158,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("stat") == "1" {
 		info, err := s.svc.sub.Stat(r.Context(), lease.SandboxID, guestPath)
 		if err != nil {
-			s.mapFileError(w, lease.SandboxID, "stat", err)
+			s.mapFileError(w, lease, "stat", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, fileInfoView(info))
@@ -161,7 +170,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	defer s.releaseXfer()
 	data, err := s.svc.sub.ReadFile(r.Context(), lease.SandboxID, guestPath, maxFileBytes)
 	if err != nil {
-		s.mapFileError(w, lease.SandboxID, "read", err)
+		s.mapFileError(w, lease, "read", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -209,7 +218,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.sub.WriteFile(r.Context(), lease.SandboxID, guestPath, data, mode); err != nil {
-		s.mapFileError(w, lease.SandboxID, "write", err)
+		s.mapFileError(w, lease, "write", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, fileInfoView(substrate.FileInfo{
@@ -255,7 +264,7 @@ func (s *Server) handleFileOp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.sub.MakeDir(r.Context(), lease.SandboxID, guestPath, mode); err != nil {
-		s.mapFileError(w, lease.SandboxID, "mkdir", err)
+		s.mapFileError(w, lease, "mkdir", err)
 		return
 	}
 	info, err := s.svc.sub.Stat(r.Context(), lease.SandboxID, guestPath)
@@ -280,7 +289,7 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	recursive := r.URL.Query().Get("recursive") == "1"
 	if err := s.svc.sub.Remove(r.Context(), lease.SandboxID, guestPath, recursive); err != nil {
-		s.mapFileError(w, lease.SandboxID, "remove", err)
+		s.mapFileError(w, lease, "remove", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

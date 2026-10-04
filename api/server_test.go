@@ -313,6 +313,24 @@ func TestExecSandboxGone(t *testing.T) {
 	}
 }
 
+// TestExecBusyIsNotGone: while a lifecycle operation holds the lease
+// (the periodic checkpoint pauses the sandbox for the length of the
+// snapshot), a substrate not-found is 409 with Retry-After, never 410:
+// a client must not abandon a lease that is only checkpointing.
+func TestExecBusyIsNotGone(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+	svc.store.mu.Lock()
+	svc.store.leases[id].busy = true
+	svc.store.mu.Unlock()
+	sub.FailCall("Exec", 0, substrate.ErrNotFound)
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
+	if resp.StatusCode != 409 || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("busy lease: got %d (Retry-After %q): %v, want 409 with Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+	}
+}
+
 func TestExecCrossConsumerDenied(t *testing.T) {
 	ts, _ := newTestServer(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})

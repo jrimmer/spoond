@@ -123,7 +123,7 @@ func (s *Server) handleGuestDial(w http.ResponseWriter, r *http.Request) {
 	s.metrics.GuestDialsTotal.WithLabelValues(map[bool]string{true: "ok", false: "error"}[err == nil]).Inc()
 	if err != nil {
 		if errors.Is(err, substrate.ErrNotFound) {
-			writeError(w, http.StatusGone, "lease no longer exists")
+			s.writeSandboxGone(w, lease)
 			return
 		}
 		s.svc.log.Printf("dial %s: guest %s:%d: %v", lease.ID, lease.HostIP, port, err)

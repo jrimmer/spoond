@@ -23,6 +23,13 @@ summarised from README "Status".
   it, so the row's tail (padding and right border) appeared twice and the
   row wrapped. The anchor now wraps only the holder text. A holder longer
   than its column is cut with `…`.
+- **A checkpointing lease answered 410 "lease no longer exists".** The
+  periodic checkpoint pauses the sandbox while it writes the snapshot
+  (about two minutes for a 4 GiB guest), and the orchestrator reports
+  the sandbox missing meanwhile. Exec, stat and guest dial answered `410`
+  and the file routes `404 file not found`, which tells a client its
+  lease is gone for good. While the lease is busy they now answer `409`
+  with `Retry-After: 5`.
 - **Restart is no longer called a reboot.** On a persistent lease it
   pauses and resumes the guest with its memory and processes intact, so
   it cannot unstick a hung guest. The API, ctl and spoondctl docs now say
