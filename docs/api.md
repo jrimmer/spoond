@@ -62,9 +62,13 @@ Response `201 Created`:
   "expires_at": "2026-10-01T03:00:00Z",
   "holder": "ci-job-42",
   "holder_url": "https://ci.example.com/jobs/42",
+  "hold_expires_at": "2026-10-08T03:00:00Z",
   "exposed": {"9042": "10.11.0.7:9042"}
 }
 ```
+
+`hold_expires_at` is `""` when the lease was created without a holder
+(the zero time renders as `""`).
 
 `address` is the lease's host-side address (no port). `exposed` maps
 each published port to `<address>:<port>` — reachable from peers whose
@@ -335,10 +339,10 @@ release of stale suspended leases, the pressure and critical-disk
 rules — and every action is reported as `last_action`/`last_action_at`
 on the lease. A held lease suspended by the idle rule resumes on next
 use: the SSH gateway does this automatically on attach, and
-`POST /api/leases/{id}/resume` (no owner check — the lease id or name
-is the capability, like the gateway itself) does it over HTTP.
-Unheld leases are not served by that route (404); use the owner-checked
-`POST /api/sandboxes/{id}/resume` for them.
+`POST /api/leases/{id}/resume` (no owner check — the lease **id** is
+the capability, like the gateway and the LLM routes) does it over
+HTTP. Unheld leases are not served by that route (404); use the
+owner-checked `POST /api/sandboxes/{id}/resume` for them.
 
 ### `POST /api/leases/{id}/resume` — resume a held lease (gateway)
 

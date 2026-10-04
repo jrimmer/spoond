@@ -66,6 +66,7 @@ const (
 // it), the spoond_held_actions_total{rule,action} counter and the
 // lease's last_action/last_action_at record (persisted). now is the
 // instant of the action; detail is the human-readable numbers.
+// Call with s.store.mu held (like setHoldLocked).
 func (s *Service) heldAction(ctx context.Context, l *Lease, rule, action, detail string, now time.Time) {
 	if l.Holder != "" {
 		s.log.Printf("held lease %s (holder %q): %s %s: %s", l.ID, l.Holder, rule, action, detail)
@@ -103,11 +104,12 @@ func (s *Service) setHoldLocked(l *Lease, holder, holderURL string, holdTTL time
 		ttl = holdTTL
 	}
 	l.HoldExpiresAt = now.Add(ttl)
+	l.HoldTTL = ttl // what this hold was actually granted (persisted)
 }
 
 // clearHold removes the hold: holder fields and hold timestamps are
-// reset and the lease follows the normal TTL and idle rules from then
-// on. Call with s.store.mu held.
+// reset (HoldTTL back to "the default") and the lease follows the
+// normal TTL and idle rules from then on. Call with s.store.mu held.
 func clearHoldLocked(l *Lease) {
 	l.Holder = ""
 	l.HolderUrl = ""
@@ -173,9 +175,13 @@ func (s *Service) renewHolder(owner, id, holder, holderURL string, holdTTL time.
 }
 
 // expireHolds clears the holder of every held lease whose hold has
-// passed its HoldExpiresAt. The lease then follows the normal TTL and
-// idle rules: an already-expired TTL releases it at the same sweep.
-// Returns the ids of the leases whose hold expired.
+// passed its HoldExpiresAt, and releases the ones already suspended
+// (rule 1 or 4): after expiry no held rule looks at the lease any more
+// (rules 1, 2 and 5 all require a holder), so a suspended one would
+// keep its pause build forever — release it here, where the expiry is
+// happening. A running expired-hold lease goes back to the normal TTL
+// and idle sweeps (an already-expired TTL releases it at the same
+// sweep). Returns the ids of the leases whose hold expired.
 func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
 	s.store.mu.Lock()
 	var expired []*Lease
@@ -184,6 +190,7 @@ func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
 			continue
 		}
 		remaining := l.ExpiresAt.Sub(now)
+		suspended := l.Suspended
 		s.heldAction(ctx, l, heldRuleExpiry, heldActionExpire,
 			fmt.Sprintf("hold set at %s, expired at %s (ttl %s); %s",
 				l.HoldSetAt.Format(time.RFC3339), l.HoldExpiresAt.Format(time.RFC3339),
@@ -192,9 +199,25 @@ func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
 			now)
 		clearHoldLocked(l)
 		s.saveLeaseLocked(l)
+		if suspended {
+			// No rule looks at an unheld lease's suspension, so this
+			// snapshot (nothing deleted yet) would otherwise outlive every
+			// sweeper. Release it as part of the expiry; the GC reclaims
+			// the builds, as with rules 2 and 5.
+			s.heldAction(ctx, l, heldRuleExpiry, heldActionRelease,
+				"hold expired while the lease was suspended; the held rules no longer cover it",
+				now)
+			expired = append(expired, l)
+			continue
+		}
 		expired = append(expired, l)
 	}
 	s.store.mu.Unlock()
+	for _, l := range expired {
+		if l.LastAction == heldRuleExpiry+"/"+heldActionRelease {
+			s.releaseHeld(ctx, l)
+		}
+	}
 	ids := make([]string, 0, len(expired))
 	for _, l := range expired {
 		ids = append(ids, l.ID)
@@ -256,10 +279,11 @@ func (s *Service) pressureShortensIdle(ctx context.Context) (bool, string) {
 }
 
 // defaultAdmitMemoryMB is the memory a default-size lease needs
-// (admission refuses below it): the smallest seeded image's footprint
-// in tests, 2048 MiB in production terms. The pressure rule uses it as
-// "would admission refuse a default-size lease".
-const defaultAdmitMemoryMB = 2048
+// (admission refuses below it). No seeded image is smaller than 1 GiB
+// (images/manifest.yaml), so a node that cannot host that much cannot
+// host any default lease — using the minimum (not a typical size) keeps
+// the pressure rule from under-detecting.
+const defaultAdmitMemoryMB = 1024
 
 // heldIdleTimeout is rule 1's effective threshold for this sweep: the
 // configured HeldIdleTimeout, or PressureHeldIdle while rule 4 is
@@ -277,7 +301,9 @@ func (s *Service) heldIdleTimeout(ctx context.Context, now time.Time) (time.Dura
 }
 
 // releaseHeld deletes a held lease's sandbox and row (the GC reclaims
-// its builds). Draining must be checked by the caller (the sweep does).
+// its builds; see releaseSuspendedHeldUntil for how the reclaimed
+// space becomes visible). Draining must be checked by the caller (the
+// sweep does).
 func (s *Service) releaseHeld(ctx context.Context, l *Lease) {
 	s.release(ctx, l)
 }
@@ -296,31 +322,39 @@ func (s *Service) releaseSuspendedHeldUntil(ctx context.Context, now time.Time) 
 	if recover < crit {
 		recover = crit // a recovery level below the critical level never terminates
 	}
-	gcCtx, cancel := context.WithTimeout(context.Background(), gcAge)
-	defer cancel()
-	_ = s.gcOnce(gcCtx) // the GC runs first; its errors do not stop the rule
 	pct, ok := s.freePercent(s.cfg.TemplateStoragePath)
 	if !ok || pct >= crit {
 		return
 	}
-	for {
-		victim, suspendedAt, ok := s.oldestSuspendedHeld(now)
-		if !ok {
-			return
-		}
-		s.heldActionLocked(ctx, victim, heldRuleCritical, heldActionRelease,
-			fmt.Sprintf("disk %.1f%% free < %.0f%% critical; suspended at %s (%s ago), oldest first; recovery at %.0f%%",
-				pct, crit, suspendedAt.Format(time.RFC3339), now.Sub(suspendedAt).Round(time.Second), recover),
-			now)
-		s.releaseHeld(ctx, victim)
-		// Keep releasing until the free percentage is back above the
-		// recovery level (or nothing suspended is left). Releases do not
-		// free disk directly — the GC reclaims the builds — so a pass
-		// releases every candidate when the level cannot be reached.
-		if next, ok := s.freePercent(s.cfg.TemplateStoragePath); !ok || next >= recover {
-			return
-		}
+	// The GC runs first, as the rule requires — its budget is a sweep
+	// tick (the loop's own context), not an hour: a slow substrate must
+	// not wedge the sweeper goroutine (the hourly catalog loop uses its
+	// own, longer-lived context).
+	s.gcOnce(ctx) // its errors do not stop the rule
+	if p, ok := s.freePercent(s.cfg.TemplateStoragePath); ok {
+		pct = p
 	}
+	if pct >= crit {
+		return
+	}
+	// One oldest-suspended victim per tick. A release deletes the
+	// sandbox but frees no space by itself — the pause build only
+	// becomes a GC candidate gcAge (1 h) after the suspension — so
+	// measuring again here cannot see the release's effect, and a loop
+	// would wipe every suspended lease on an unrecoverable disk (e.g.
+	// with the dry-run GC default, where no candidate is ever deleted).
+	// Releasing one per tick costs nothing against a 5 s sweep, and each
+	// next tick's leading GC pass reclaims the previous victims' builds
+	// when GC_DELETE=1, so the recovery level is still approached.
+	victim, suspendedAt, ok := s.oldestSuspendedHeld(now)
+	if !ok {
+		return
+	}
+	s.heldActionLocked(ctx, victim, heldRuleCritical, heldActionRelease,
+		fmt.Sprintf("disk %.1f%% free < %.0f%% critical; suspended at %s (%s ago), oldest first; recovery at %.0f%%",
+			pct, crit, suspendedAt.Format(time.RFC3339), now.Sub(suspendedAt).Round(time.Second), recover),
+		now)
+	s.releaseHeld(ctx, victim)
 }
 
 // oldestSuspendedHeld returns the held lease that has been suspended
@@ -360,7 +394,10 @@ func (s *Service) oldestSuspendedHeld(now time.Time) (*Lease, time.Time, bool) {
 // releaseStaleHeld implements rule 2: a held lease suspended by rule 1
 // (or 4) and untouched for HeldSuspendedRelease is released (deleted);
 // the GC reclaims its builds. The lease's LastActionAt (recorded by
-// rule 1's suspend, or falling back to LastActive) starts the clock.
+// rule 1's suspend, or falling back to LastActive — a lease suspended
+// before last_action was recorded, or by hand/drain, has none) starts
+// the clock: it is the closest available stamp of when the lease
+// stopped being live.
 func (s *Service) releaseStaleHeld(ctx context.Context, now time.Time) {
 	release := s.cfg.HeldSuspendedRelease
 	if release <= 0 {
@@ -398,11 +435,13 @@ func (s *Service) releaseStaleHeld(ctx context.Context, now time.Time) {
 }
 
 // runHeldRules runs the held-lease rules for one sweep tick, in order:
-// hold expiry (3), stale-release (2), then idle-suspend (1, shortened
-// by pressure (4)) — pressure is evaluated once per tick — and
-// critical-release (5) last, so a tick that both suspends and frees
-// leaves the disk check looking at the resulting state. Skips while
-// draining (the sweep already checked; this guards direct callers).
+// hold expiry (3, releasing the leases it finds suspended — after
+// expiry no held rule covers them), stale-release (2), then
+// idle-suspend (1, shortened by pressure (4)) — pressure is evaluated
+// once per tick — and critical-release (5) last, so a tick that both
+// suspends and frees leaves the disk check looking at the resulting
+// state. Skips while draining (the sweep already checked; this guards
+// direct callers).
 func (s *Service) runHeldRules(ctx context.Context, now time.Time) {
 	if s.draining.Load() {
 		return
@@ -435,8 +474,19 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 	}
 	s.store.mu.Unlock()
 	for _, l := range idle {
-		detail := fmt.Sprintf("idle since %s, %s >= %s", l.LastActive.Format(time.RFC3339),
-			now.Sub(l.LastActive).Round(time.Second), timeout)
+		// Re-check under the lock just before pausing: activity (an exec,
+		// a heartbeat) can land between the collection pass above and this
+		// pause, and a lease that moved in the meantime must not be
+		// suspended.
+		s.store.mu.Lock()
+		lastActive := l.LastActive
+		skip := l.released || !l.held() || l.Suspended || l.busy || !now.After(lastActive.Add(timeout))
+		s.store.mu.Unlock()
+		if skip {
+			continue
+		}
+		detail := fmt.Sprintf("idle since %s, %s >= %s", lastActive.Format(time.RFC3339),
+			now.Sub(lastActive).Round(time.Second), timeout)
 		if pressure != "" {
 			detail += "; pressure: " + pressure
 		}

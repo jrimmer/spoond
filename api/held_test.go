@@ -377,8 +377,11 @@ func (r *reclaimSub) Delete(ctx context.Context, sandboxID string) error {
 
 // TestCriticalReleasesOldestSuspendedFirstToRecovery (rule 5): under
 // critical disk pressure the suspended held leases are released oldest
-// suspension first until free space is above the recovery level; a
-// running held lease is never released.
+// suspension first, one per sweep tick, until free space is above the
+// recovery level; a running held lease is never released. The
+// free-space reader is driven by hand: a release frees no disk in its
+// own tick — the builds only become GC candidates after gcAge — so the
+// reclaimed space appears on a later tick, the way the GC delivers it.
 func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -422,21 +425,59 @@ func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 		t.Fatalf("grant running: %v", err)
 	}
 
-	// 2% free (< 5% critical); every release reclaims 5% (the GC having
-	// run), so after two releases free space is at 12% — above the 10%
-	// recovery level — and the third-suspended lease survives.
+	// 2% free (< 5% critical). Each victim's reclaim (delivered here by
+	// the injectable reader, as the GC would one gcAge later) frees 5%.
+	// Rule 1 is switched off from here on: the focus is rule 5, and the
+	// still-running lease must stay live for the never-released check.
 	var free uint64 = 2
 	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, free, nil }
-	svc.sub = &reclaimSub{testSub: sub, freed: &free}
+	svc.cfg.HeldIdleTimeout = 0
 
+	// Tick 1: exactly one release — the oldest suspension — even though
+	// the level is far from recovered. The measured percentage in the
+	// action's log line is the pre-release one.
 	svc.runHeldRules(ctx, time.Now())
-
 	if svc.lookup("c", suspended[0].ID) != nil {
 		t.Fatal("oldest-suspended lease was not released first")
 	}
+	if svc.lookup("c", suspended[1].ID) == nil || svc.lookup("c", suspended[2].ID) == nil {
+		t.Fatal("more than the oldest-suspended lease was released in one tick")
+	}
+	if got := calls(sub.Fake, "Delete "+suspended[0].SandboxID); got != 1 {
+		t.Fatalf("oldest victim deletes = %d, want 1", got)
+	}
+	if n := heldCounter(t, svc, "critical", "release"); n != 1 {
+		t.Fatalf("held_actions_total{critical,release} = %g, want 1", n)
+	}
+	if suspended[0].LastAction != "critical/release" || suspended[0].LastActionAt.IsZero() {
+		t.Fatalf("action not recorded: %q at %v", suspended[0].LastAction, suspended[0].LastActionAt)
+	}
+
+	// Tick 2: the GC has reclaimed the first victim (2+5=7%), which is
+	// above the 5% critical level — nothing more is released, even
+	// though 7% is still below the 10% recovery level.
+	free = 7
+	svc.runHeldRules(ctx, time.Now())
+	if svc.lookup("c", suspended[1].ID) == nil || svc.lookup("c", suspended[2].ID) == nil {
+		t.Fatal("lease released while the disk was above the critical level")
+	}
+
+	// Tick 3: critical again (4%). The second-oldest goes; the tick
+	// stops after its one release even though 4+5=9% is still below the
+	// recovery level.
+	free = 4
+	svc.runHeldRules(ctx, time.Now())
 	if svc.lookup("c", suspended[1].ID) != nil {
 		t.Fatal("second-oldest suspended lease was not released")
 	}
+	if svc.lookup("c", suspended[2].ID) == nil {
+		t.Fatal("more than one lease released in the tick")
+	}
+
+	// Tick 4: the reclaim lifts the level to 9%, still under the 10%
+	// recovery — but above critical, so the third survives.
+	free = 9
+	svc.runHeldRules(ctx, time.Now())
 	if svc.lookup("c", suspended[2].ID) == nil {
 		t.Fatal("release continued past the recovery level")
 	}
@@ -446,8 +487,11 @@ func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 	if got := calls(sub.Fake, "Delete "+running.SandboxID); got != 0 {
 		t.Fatalf("running held lease deleted %d times, want 0", got)
 	}
-	// Oldest first: suspended[0]'s sandbox was deleted before
-	// suspended[1]'s.
+	if n := heldCounter(t, svc, "critical", "release"); n != 2 {
+		t.Fatalf("held_actions_total{critical,release} = %g, want 2", n)
+	}
+	// Oldest first across the two release ticks: suspended[0] before
+	// suspended[1].
 	log := sub.CallLog()
 	first, second := -1, -1
 	for i, c := range log {
@@ -461,9 +505,6 @@ func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 	if first < 0 || second < 0 || first > second {
 		t.Fatalf("release order not oldest-first: %s@%d, %s@%d in %v",
 			suspended[0].SandboxID, first, suspended[1].SandboxID, second, log)
-	}
-	if n := heldCounter(t, svc, "critical", "release"); n != 2 {
-		t.Fatalf("held_actions_total{critical,release} = %g, want 2", n)
 	}
 }
 
@@ -669,5 +710,165 @@ func TestHeldResumeRouteOwnerBlind(t *testing.T) {
 	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/no-such-lease/resume", "token-b", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown lease resume = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestExpiredHoldReleasesSuspendedLease: a held lease suspended by rule
+// 1 whose hold then expires is released by the expiry itself — after
+// expiry no held rule looks at the lease, so its pause build would
+// otherwise be kept forever. Nothing is deleted early while the hold is
+// still alive.
+func TestExpiredHoldReleasesSuspendedLease(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.SetMetrics(metrics.NewBackendMetrics())
+
+	base := time.Now()
+	svc.cfg.HoldTTL = 2 * time.Hour
+	svc.cfg.HeldIdleTimeout = time.Minute
+	cur := base
+	svc.now = func() time.Time { return cur }
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "")
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setHolderWithTTL("c", l.ID, "ci-job", "", 0); err != nil {
+		t.Fatalf("set holder: %v", err)
+	}
+	sbID := l.SandboxID
+
+	// Rule 1 suspends the idle held lease an hour in.
+	cur = base.Add(time.Hour)
+	svc.runHeldRules(ctx, cur)
+	if !l.Suspended {
+		t.Fatal("setup: held lease not suspended by rule 1")
+	}
+	pauseBuild := l.ResumeBuildID
+
+	// The hold expires a day later: the lease is gone (released), and
+	// its pause build is left for the GC to reclaim — the expiry must
+	// delete the sandbox, not the snapshot.
+	cur = base.Add(24 * time.Hour)
+	svc.expireHolds(ctx, cur)
+	if svc.lookup("c", l.ID) != nil {
+		t.Fatal("suspended held lease survived its hold's expiry")
+	}
+	for _, c := range sub.CallLog() {
+		if c == "DeleteBuild "+pauseBuild {
+			t.Fatal("expiry deleted the pause build itself; the GC owns that")
+		}
+	}
+	if b, err := db.GetBuild(ctx, pauseBuild); err != nil || b.State != "ready" {
+		t.Fatalf("pause build after expiry: state=%v err=%v, want ready", b.State, err)
+	}
+	if n := heldCounter(t, svc, "expiry", "release"); n != 1 {
+		t.Fatalf("held_actions_total{expiry,release} = %g, want 1", n)
+	}
+	if got := calls(sub.Fake, "Delete "+sbID); got != 1 {
+		t.Fatalf("sandbox deletes = %d, want 1", got)
+	}
+
+	// A RUNNING lease whose hold expires is not released here: it goes
+	// back to the normal sweeps (a fresh lease, not yet past its TTL).
+	l2, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "")
+	if err != nil {
+		t.Fatalf("grant 2: %v", err)
+	}
+	if _, err := svc.setHolderWithTTL("c", l2.ID, "ci-job-2", "", 0); err != nil {
+		t.Fatalf("set holder 2: %v", err)
+	}
+	svc.expireHolds(ctx, cur)
+	if svc.lookup("c", l2.ID) == nil || l2.Suspended {
+		t.Fatalf("running lease released or suspended by hold expiry: %+v", l2)
+	}
+	if n := heldCounter(t, svc, "expiry", "release"); n != 1 {
+		t.Fatalf("held_actions_total{expiry,release} = %g after the running lease, want 1", n)
+	}
+}
+
+// TestCreateHoldTTLCappedAndNeedsHolder: hold_ttl on CREATE is capped
+// at HoldTTLMax, and it is ignored when no holder is given (the lease
+// is unheld and carries no hold at all).
+func TestCreateHoldTTLCappedAndNeedsHolder(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.HoldTTL = time.Minute
+	svc.cfg.HoldTTLMax = 5 * time.Minute
+
+	// An explicit hold_ttl of an hour is capped at the 5 min maximum,
+	// measured from the create.
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "holder": "ci-job", "hold_ttl": 3600,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d (%v), want 201", resp.StatusCode, body)
+	}
+	exp, err := time.Parse(time.RFC3339, body["hold_expires_at"].(string))
+	if err != nil {
+		t.Fatalf("hold_expires_at = %v: %v", body["hold_expires_at"], err)
+	}
+	if until := time.Until(exp); until > 6*time.Minute || until < 4*time.Minute {
+		t.Fatalf("capped hold runs %s, want ~5 min", until.Round(time.Second))
+	}
+
+	// hold_ttl without a holder: ignored — no hold, no expiry.
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "hold_ttl": 3600,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("unheld create = %d (%v), want 201", resp.StatusCode, body)
+	}
+	if exp := body["hold_expires_at"].(string); exp != "" {
+		t.Fatalf("unheld create has hold_expires_at %q, want empty", exp)
+	}
+	svc.store.mu.Lock()
+	l := svc.store.leases[body["id"].(string)]
+	held := l.held()
+	svc.store.mu.Unlock()
+	if held {
+		t.Fatal("create with hold_ttl but no holder made the lease held")
+	}
+}
+
+// TestHeldResumeRouteMetricLabel: the owner-blind resume route's
+// request counter reduces the lease id to :id like every other lease
+// route — one series, not one per lease.
+func TestHeldResumeRouteMetricLabel(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.HeldIdleTimeout = 30 * time.Millisecond
+
+	l, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	svc.runHeldRules(context.Background(), time.Now())
+	if !l.Suspended {
+		t.Fatal("setup: held lease not suspended")
+	}
+
+	resp, _ := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/resume", "token-b", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("resume = %d, want 200", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	req.Header.Set("Authorization", "Bearer token-a")
+	mresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	body := readAll(t, mresp)
+	want := `path="/api/leases/:id/resume"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("metrics lack %s (the resume id must be reduced):", want)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "/resume") && strings.Contains(line, l.ID) {
+			t.Fatalf("metric line carries the raw lease id: %s", line)
+		}
 	}
 }

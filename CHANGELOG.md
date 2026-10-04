@@ -33,10 +33,13 @@ summarised from README "Status".
   holder is cleared and the lease follows the normal TTL and idle
   rules. Rule 4 (`PRESSURE_DISK_FREE_PCT` 15, `PRESSURE_HELD_IDLE_SECS`
   1800 = 30 min) shortens rule 1 when the snapshot disk runs low or
-  free hugepages would not admit a default-size lease. Rule 5
+  free hugepages would not admit the smallest seeded image. Rule 5
   (`CRITICAL_DISK_FREE_PCT` 5, `CRITICAL_DISK_RECOVER_PCT` 10) releases
-  already-suspended held leases, oldest suspension first, until free
-  space recovers — never a running lease. `0` disables a rule. Store
+  already-suspended held leases, oldest suspension first — at most one
+  per sweep tick, since a release frees disk only via a later GC pass —
+  until free space recovers; never a running lease. A hold expiring on
+  a lease that rule 1 or 4 already suspended releases it too (nothing
+  else would reclaim its snapshot). `0` disables a rule. Store
   migration 8 adds the hold-expiry and last-action columns.
 
 - **Lease holders (#111).** A lease can say what holds it — a CI job,

@@ -306,7 +306,7 @@ func NewBackendMetrics() *BackendMetrics {
 	// Held-lease limits (2.1): automatic actions on held leases.
 	m.HeldActions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "held_actions_total",
-		Help: "Automatic actions on held leases, by rule (idle, stale, expiry, pressure, critical) and action (suspend, release, expire).",
+		Help: "Automatic actions on held leases, by rule (idle, stale, expiry, pressure, critical) and action (suspend_idle, release, expire).",
 	}, []string{"rule", "action"})
 
 	// Substrate (U11)

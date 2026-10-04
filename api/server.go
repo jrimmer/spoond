@@ -365,8 +365,9 @@ func (s *Server) collectServiceMetrics() {
 // handler chain — before auth and the mux — so there is one route
 // table, one auth path and one set of metric labels.
 const (
-	apiLeasePathPrefix   = "/api/leases"
-	apiSandboxPathPrefix = "/api/sandboxes"
+	apiLeasePathPrefix    = "/api/leases"
+	apiSandboxPathPrefix  = "/api/sandboxes"
+	heldResumePathPattern = "/api/leases/:id/resume"
 )
 
 // rewriteLeasePath maps an /api/leases… path onto its /api/sandboxes…
@@ -375,7 +376,8 @@ const (
 func rewriteLeasePath(p string) string {
 	// The held-lease resume route stays /api/leases/...: it is the
 	// owner-blind path the SSH gateway calls, distinct from the
-	// owner-scoped /api/sandboxes/{id}/resume.
+	// owner-scoped /api/sandboxes/{id}/resume. (normalizePath reduces
+	// its id for the metrics labels separately.)
 	if strings.HasPrefix(p, apiLeasePathPrefix+"/") && strings.HasSuffix(p, "/resume") {
 		return p
 	}
@@ -443,6 +445,17 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // normalizePath reduces high-cardinality paths (sandbox ids, user ids)
 // to stable labels for metrics.
 func normalizePath(p string) string {
+	// The held-lease resume route stays /api/leases/... (it is the
+	// owner-blind path the SSH gateway calls, distinct from the
+	// owner-scoped /api/sandboxes/{id}/resume), so the lease rewrite
+	// below must not touch it — but its id is still reduced to :id, or
+	// every lease would mint its own request-counter series.
+	if strings.HasPrefix(p, apiLeasePathPrefix+"/") && strings.HasSuffix(p, "/resume") {
+		rest := strings.TrimSuffix(strings.TrimPrefix(p, apiLeasePathPrefix+"/"), "/resume")
+		if rest != "" && !strings.Contains(rest, "/") {
+			return heldResumePathPattern
+		}
+	}
 	// The /api/leases alias reports the /api/sandboxes labels: the
 	// rewrite happens before the mux, so the request counters must not
 	// split each route's series in two either.

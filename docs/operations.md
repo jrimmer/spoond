@@ -114,6 +114,15 @@ is refreshed (allocated blocks, not apparent size) and exposed as
 `spoond_snapshot_bytes{kind}`, with `spoond_storage_free_bytes` for the
 store's free space.
 
+Interaction with the held-lease critical rule (rule 5 in [Held-lease
+limits](#held-lease-limits)): a release frees no disk by itself — the
+space returns only when the GC reclaims the released lease's builds,
+which takes the GC age (1 h) and `GC_DELETE=1`. Under the dry-run
+default the critical rule therefore cannot recover the level and keeps
+releasing one suspended held lease per tick while the disk stays
+critical; a full snapshot disk on a node with held leases is a reason
+to turn the GC out of dry-run.
+
 ## Restarting the orchestrator (planned)
 
 `systemctl restart e2b-orchestrator` is safe: the unit's drain hooks make
@@ -316,8 +325,8 @@ then on (an already-expired TTL releases it at the next sweep).
 | 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach) |
 | 2 | Stale release | `HELD_SUSPENDED_RELEASE_SECS` | `604800` (7 d) | a held lease suspended by rule 1 or 4 and untouched for this long is **released** (deleted); the GC reclaims its builds |
 | 3 | Hold expiry | `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS` | `604800` (7 d), `2592000` (30 d) | the hold ends on its own; holder and `holder_url` are cleared and normal sweeping resumes |
-| 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a default-size lease), rule 1 uses the shorter threshold |
-| 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage, held leases already suspended by rule 1 or 4 are **released** oldest suspension first — after the GC has run — until free space is above the recovery percentage; a running lease is never released |
+| 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a 1 GiB lease — no seeded image is smaller), rule 1 uses the shorter threshold |
+| 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage, held leases already suspended by rule 1 or 4 are **released** oldest suspension first — after the GC has run — at most one per sweep tick, until free space is above the recovery percentage; a running lease is never released. A release frees no space by itself: the freed builds only become GC candidates after the GC age (1 h), and are only actually deleted with `GC_DELETE=1` — under the dry-run default the rule keeps releasing one suspended lease per tick while the disk stays critical |
 | 6 | Scheduling | — | — | the rules run in the existing sweep loop and skip while the node is draining |
 
 Set any of the numeric variables to `0` to disable that rule (a rule
@@ -403,7 +412,7 @@ marker. The substrate-specific series:
 | `spoond_snapshot_bytes{kind}` | build disk per kind |
 | `spoond_storage_free_bytes` | free bytes at the build store |
 | `spoond_gc_deleted_total{kind}` | builds deleted by the GC |
-| `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend`, `release` or `expire` |
+| `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `release` or `expire` |
 | `spoond_capacity_rejections_total` | admission refusals |
 | `spoond_store_errors_total{op}` | SQLite write failures |
 
