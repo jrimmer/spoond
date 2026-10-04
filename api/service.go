@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/metrics"
@@ -695,7 +697,7 @@ func (s *Service) Start(ctx context.Context) {
 			}
 		}
 	}()
-	// Periodic checkpoints (U10): persistent leases that saw activity
+	// Periodic checkpoints (U10): persistent and held leases that saw activity
 	// since their last snapshot, one at a time, spaced 2 s apart.
 	go s.runCheckpointLoop(ctx)
 	// Snapshot catalog GC + disk accounting (U11): once 10 minutes
@@ -1610,11 +1612,18 @@ func (l *Lease) held() bool { return l.Holder != "" }
 // 128 printable characters; holderURL empty or an absolute http(s) URL
 // of at most 512 characters. The message names the offending field.
 func validateHolder(holder, holderURL string) error {
-	if len(holder) > 128 {
+	if !utf8.ValidString(holder) {
+		return fmt.Errorf("holder must be valid UTF-8")
+	}
+	if utf8.RuneCountInString(holder) > 128 {
 		return fmt.Errorf("holder must be at most 128 characters")
 	}
 	for _, r := range holder {
-		if r < 0x20 || r == 0x7f {
+		// Letters, marks, numbers, punctuation, symbols and the plain
+		// space only: no control or format characters (zero-width
+		// spaces, bidi overrides), which would mislead a reader of the
+		// dashboard or a terminal.
+		if r != ' ' && !unicode.IsGraphic(r) || unicode.Is(unicode.Cf, r) {
 			return fmt.Errorf("holder must be printable characters")
 		}
 	}
@@ -1632,7 +1641,8 @@ func validateHolder(holder, holderURL string) error {
 }
 
 // setHolder sets or clears a lease's holder fields. Both empty clears
-// the holder and restores normal sweeping. Owner only.
+// the holder and restores normal sweeping. The route admits the owner
+// and admins; this function checks the owner it is given.
 func (s *Service) setHolder(owner, id, holder, holderURL string) (*Lease, error) {
 	if err := validateHolder(holder, holderURL); err != nil {
 		return nil, err

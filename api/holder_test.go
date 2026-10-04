@@ -345,3 +345,26 @@ func TestLeaseHolderPutAdminAllowed(t *testing.T) {
 		t.Fatalf("owner sees holder %v, want ops", got["holder"])
 	}
 }
+
+// Holder text is measured in characters, not bytes, and format
+// characters (zero-width spaces, bidi overrides) are refused.
+func TestValidateHolderUnicode(t *testing.T) {
+	cases := []struct {
+		name, holder string
+		ok           bool
+	}{
+		{"100 CJK characters", strings.Repeat("流", 100), true},
+		{"129 CJK characters", strings.Repeat("流", 129), false},
+		{"accented and spaces", "build 3611 · café", true},
+		{"zero-width space", "ci​3611", false},
+		{"bidi override", "ci‮1163", false},
+		{"C1 control", "ci\u00853611", false},
+		{"invalid UTF-8", "ci\xff", false},
+	}
+	for _, c := range cases {
+		err := validateHolder(c.holder, "")
+		if (err == nil) != c.ok {
+			t.Errorf("%s: validateHolder err = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
