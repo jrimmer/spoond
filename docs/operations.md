@@ -30,8 +30,8 @@ triage one; Gatus (above) is the machine that watches on its own.
 For an external watcher, `/readyz` is the endpoint to poll: unlike
 `/healthz` (liveness — the process answers) it fails when a dependency
 is wrong, so a monitor pages before a human notices. Both listeners
-serve it without auth and cache their answer for 5 s; each check is
-bounded to 2 s.
+serve it without auth and bound each check to 2 s; the lease API caches
+its answer for 5 s, the dashboard answers live.
 
 - Lease API (`:8890`): `200 {"status":"ok"}` only when the
   orchestrator reports the node healthy, the catalog answers a trivial

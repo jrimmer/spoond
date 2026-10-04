@@ -77,19 +77,25 @@ func (st *readyzState) readyz() readyzResult {
 		// First poll past the window: it runs the checks — with the lock
 		// released, so nothing waits on the mutex for them — and every
 		// poll that arrives meanwhile shares its result.
-		ev := &readyzEval{done: make(chan struct{})}
+		ev := &readyzEval{done: make(chan struct{}), res: readyzResult{Status: "fail"}}
 		st.eval = ev
 		st.mu.Unlock()
 		func() {
-			defer close(ev.done) // even on a panic, waiters are released
+			// Even on a panic, waiters are released and the next poll
+			// runs the checks again instead of finding a stale eval.
+			defer func() {
+				st.mu.Lock()
+				if st.eval == ev {
+					st.eval = nil
+				}
+				st.mu.Unlock()
+				close(ev.done)
+			}()
 			ev.res = st.check()
+			st.mu.Lock()
+			st.res, st.at = ev.res, time.Now()
+			st.mu.Unlock()
 		}()
-		st.mu.Lock()
-		st.res, st.at = ev.res, time.Now()
-		if st.eval == ev {
-			st.eval = nil
-		}
-		st.mu.Unlock()
 		return ev.res
 	}
 	ev := st.eval
@@ -113,18 +119,34 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // runReadyz evaluates every check and returns the combined verdict:
-// "ok" only when all passed. The two NodeInfo checks share one fetch
-// under a single 2 s bound; database and disk get their own.
+// "ok" only when all passed. The checks run concurrently, each under its
+// own 2 s bound, so a hung orchestrator cannot make a healthy database
+// or disk look timed out. The two NodeInfo checks share one fetch.
 func (s *Service) runReadyz() readyzResult {
-	ctx, cancel := context.WithTimeout(context.Background(), readyzCheckTimeout)
-	defer cancel()
-	info, nodeErr := s.sub.NodeInfo(ctx)
-	checks := []readyCheck{
-		nodeCheck(info, nodeErr),
-		s.databaseReady(ctx),
-		s.diskReady(ctx),
-		hugepagesCheck(info, nodeErr),
+	bounded := func(f func(context.Context) readyCheck) func() readyCheck {
+		return func() readyCheck {
+			ctx, cancel := context.WithTimeout(context.Background(), readyzCheckTimeout)
+			defer cancel()
+			return f(ctx)
+		}
 	}
+	var node, hp, db, disk readyCheck
+	var wg sync.WaitGroup
+	for _, run := range []func(){
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), readyzCheckTimeout)
+			defer cancel()
+			info, err := s.sub.NodeInfo(ctx)
+			node, hp = nodeCheck(info, err), hugepagesCheck(info, err)
+		},
+		func() { db = bounded(s.databaseReady)() },
+		func() { disk = bounded(s.diskReady)() },
+	} {
+		wg.Add(1)
+		go func() { defer wg.Done(); run() }()
+	}
+	wg.Wait()
+	checks := []readyCheck{node, db, disk, hp}
 	status := "ok"
 	for _, c := range checks {
 		if !c.OK {
@@ -150,7 +172,7 @@ func nodeCheck(info substrate.NodeInfo, err error) readyCheck {
 }
 
 // databaseReady runs a trivial query against the catalog's reader pool
-// under the shared 2 s bound: a database file that opens but does not
+// under its 2 s bound: a database file that opens but does not
 // answer fails readiness.
 func (s *Service) databaseReady(ctx context.Context) readyCheck {
 	c := readyCheck{Name: "database"}
@@ -213,8 +235,9 @@ func hugepagesCheck(info substrate.NodeInfo, err error) readyCheck {
 		// rather than divide by zero.
 		return failCheck(c, "node reports no hugepage pool")
 	}
-	free := (info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes
-	usedPct := float64(info.HugepagesUsed+info.HugepagesReserved) / float64(info.HugepagesTotal) * 100
+	busy := min(info.HugepagesUsed+info.HugepagesReserved, info.HugepagesTotal)
+	free := (info.HugepagesTotal - busy) * info.HugepageSizeBytes
+	usedPct := float64(busy) / float64(info.HugepagesTotal) * 100
 	if usedPct >= readyzHugeUsedDangerPct {
 		return failCheck(c, fmt.Sprintf("%.0f%% of the pool used, danger level %.0f%%", usedPct, readyzHugeUsedDangerPct))
 	}

@@ -18,7 +18,7 @@ summarised from README "Status".
   healthy, the catalog answers a trivial query, and the snapshot disk and
   hugepage pool are below the dashboard's danger levels (90 % / 92 %);
   otherwise `503 {"status":"fail","checks":[…]}` names each failing
-  check with a reason. Every check is bounded to 2 s and the whole
+  check with a reason. Every check is bounded to 2 s on its own and the whole
   answer is cached for 5 s, so an external poller costs nothing. The
   web dashboard serves `GET /readyz` the same way: 200 only when its
   sources (the metrics scrape, the catalog, the identity store) answer.

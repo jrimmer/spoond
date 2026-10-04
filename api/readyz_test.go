@@ -351,3 +351,21 @@ func TestReadyzInPerRouteMetrics(t *testing.T) {
 		t.Errorf("metrics lack the /readyz series:\n%s", tail(body, 600))
 	}
 }
+
+func TestReadyzRecoversAfterPanic(t *testing.T) {
+	calls := 0
+	st := &readyzState{check: func() readyzResult {
+		calls++
+		if calls == 1 {
+			panic("check bug")
+		}
+		return readyzResult{Status: "ok"}
+	}}
+	func() {
+		defer func() { _ = recover() }()
+		st.readyz()
+	}()
+	if got := st.readyz(); got.Status != "ok" {
+		t.Fatalf("after a panicking check, readyz = %+v, want a fresh ok", got)
+	}
+}
