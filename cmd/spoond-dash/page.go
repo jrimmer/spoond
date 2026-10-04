@@ -68,12 +68,16 @@ func applyLinks(row string, y int, links []linkAt) string {
 	if close < 0 {
 		return row
 	}
-	close += open + len(`</span>`)
-	inner := row[open+len(`<span class="g-link`):]
-	if i := strings.Index(inner, `>`); i >= 0 {
-		inner = inner[i+1:]
+	end := open + close // where the span's </span> starts
+	close = end + len(`</span>`)
+	// The anchor takes the span's text only — from after its opening
+	// tag's > to its </span>. Taking the rest of the row duplicated the
+	// row's tail (padding and border) and wrapped the row.
+	start := open + strings.Index(row[open:], `>`) + 1
+	if start <= open || start > end {
+		return row
 	}
-	anchor := `<a class="g-link" href="` + html.EscapeString(la.url) + `" target="_blank" rel="noopener">` + inner + `</a>`
+	anchor := `<a class="g-link" href="` + html.EscapeString(la.url) + `" target="_blank" rel="noopener">` + row[start:end] + `</a>`
 	return row[:open] + anchor + row[close:]
 }
 

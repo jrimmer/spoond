@@ -18,6 +18,11 @@ summarised from README "Status".
   its memory continues. It still bumped the generation, telling clients
   that work had been undone when it hadn't. Only a non-persistent restart
   (a fresh sandbox) and crash recovery bump it now.
+- **A lease holder with a link broke its dashboard row.** The page
+  swapped the holder for an `<a>` but took the rest of the row along with
+  it, so the row's tail (padding and right border) appeared twice and the
+  row wrapped. The anchor now wraps only the holder text. A holder longer
+  than its column is cut with `…`.
 
 ## [2.2.0] - 2026-10-04
 
