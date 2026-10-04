@@ -77,6 +77,11 @@ type Snapshot struct {
 
 	Down int `json:"down"` // units not active
 
+	// GCDeleted is the builds the GC has deleted, summed over
+	// spoond_gc_deleted_total's labels. Shown next to the GC's mode;
+	// left out of the frame while it is 0.
+	GCDeleted int `json:"gcDeleted"`
+
 	// GCMode labels the snapshot GC: "delete" (GC_DELETE=1, or the
 	// backend has actually deleted something) or "dry-run".
 	GCMode string `json:"gcMode"`
@@ -273,6 +278,7 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	s.BuildFails = int(g("spoond_builds_failed_total"))
 	s.VCPUAlloc = int(g("orchestrator_sandbox_cpu_allocated"))
 	s.MemAllocGiB = round1(g("orchestrator_sandbox_memory_allocated") / (1 << 30))
+	s.GCDeleted = int(value(fams["spoond_gc_deleted_total"]))
 	// The GC's mode: a configured GC_DELETE=1 or an actually deleted
 	// build means deletion is on; otherwise the GC is in its dry-run
 	// default (it logs candidates but frees nothing).

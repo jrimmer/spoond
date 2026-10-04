@@ -439,7 +439,9 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 	}
 
 	// One lease changes: exactly one row patch, inner mode (the row span
-	// itself stays put).
+	// itself stays put). The lease's image gains a suspended lease, so
+	// the capacity panel's per-image row changes with it — both rows
+	// patch, everything else stays.
 	changed := d.last
 	changed.Rows = append([]LeaseRow(nil), d.last.Rows...)
 	changed.Rows[0].State = "suspended"
@@ -448,8 +450,8 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := w.b.String()
-	if n := strings.Count(body, "event: datastar-patch-elements"); n != 1 {
-		t.Fatalf("one changed lease must patch one row, got %d:\n%s", n, body)
+	if n := strings.Count(body, "event: datastar-patch-elements"); n != 2 {
+		t.Fatalf("one changed lease must patch its row and the image row, got %d:\n%s", n, body)
 	}
 	if !strings.Contains(body, "data: mode inner") {
 		t.Fatalf("row patch must be inner mode:\n%s", body)
@@ -480,15 +482,17 @@ func TestWriteFrameStreamStatesAreIndependent(t *testing.T) {
 	}
 
 	// A change arrives; only viewer a receives its frame. The frame with
-	// a suspended lease has the same row count, so a is patched per row.
+	// a suspended lease has the same row count, so a is patched per row:
+	// its lease row and the capacity panel's per-image row for that
+	// lease's image.
 	changed := d.last
 	changed.Rows = append([]LeaseRow(nil), d.last.Rows...)
 	changed.Rows[0].State = "suspended"
 	if err := d.writeFrame(wa, a, changed, sampleHist()); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(wa.b.String(), "data: selector #r"); n != 1 {
-		t.Fatalf("viewer a: want one row patch, got %d:\n%s", n, wa.b.String())
+	if n := strings.Count(wa.b.String(), "data: selector #r"); n != 2 {
+		t.Fatalf("viewer a: want two row patches, got %d:\n%s", n, wa.b.String())
 	}
 
 	// Viewer b, still on the first frame, must be patched against its
@@ -497,27 +501,57 @@ func TestWriteFrameStreamStatesAreIndependent(t *testing.T) {
 	if err := d.writeFrame(wb, b, changed, sampleHist()); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(wb.b.String(), "data: selector #r"); n != 1 {
-		t.Fatalf("viewer b: want one row patch against its own base, got %d:\n%s", n, wb.b.String())
+	if n := strings.Count(wb.b.String(), "data: selector #r"); n != 2 {
+		t.Fatalf("viewer b: want two row patches against its own base, got %d:\n%s", n, wb.b.String())
 	}
 }
 
-// TestRunningByImagePanel: the capacity panel shows a running count per
-// image, sorted by name.
+// TestRunningByImagePanel: the capacity panel shows one row per image
+// with live leases — a nine-cell bar of three █ per running lease, the
+// count right-aligned — ordered by live count descending, then name.
 func TestRunningByImagePanel(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
-	if !strings.Contains(p, "running by image") {
-		t.Fatalf("capacity panel lacks the running-by-image line:\n%s", p)
+	if !strings.Contains(p, "go-base        ███······") ||
+		!strings.Contains(p, "py-base        ███······") {
+		t.Fatalf("per-image bars missing:\n%s", p)
 	}
-	if !strings.Contains(p, "go-base 2") || !strings.Contains(p, "py-base 1") {
+	if !strings.Contains(p, "1 running") {
 		t.Fatalf("per-image running counts missing:\n%s", p)
 	}
-	if strings.Contains(p, "running by image  · ") {
-		t.Fatalf("running-by-image line starts with a separator:\n%s", p)
+
+	// A suspended-only image shows its bar empty and the suspended
+	// count; a running image that also has suspended leases counts only
+	// the running ones in the bar.
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{
+		{ID: "abcdef0123", Image: "go-base", State: "suspended", Age: "5m", Left: "10m"},
 	}
-	p72 := drawSample(minW).Plain()
-	if !strings.Contains(p72, "running by image") {
-		t.Fatalf("narrow frame lacks the running-by-image line:\n%s", p72)
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "go-base        ·········") ||
+		!strings.Contains(p, "1 suspended") {
+		t.Fatalf("suspended image not drawn as its own row:\n%s", p)
+	}
+
+	// No live leases at all: a dim "no live leases" instead of rows.
+	s = healthySnapshot()
+	s.Rows = nil
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "no live leases") {
+		t.Fatalf("empty capacity panel has no state line:\n%s", p)
+	}
+
+	// The per-image block folds when there are more images than room.
+	s = healthySnapshot()
+	s.Rows = nil
+	for i := 0; i < 8; i++ {
+		s.Rows = append(s.Rows, LeaseRow{
+			ID: fmt.Sprintf("img%d", i), Image: fmt.Sprintf("img-%d", i),
+			State: "running", Age: "5m", Left: "10m",
+		})
+	}
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "+3 more") {
+		t.Fatalf("overflow row missing:\n%s", p)
 	}
 }
 
