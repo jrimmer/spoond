@@ -24,12 +24,17 @@ type LeaseRow struct {
 	// a lost lease's snapshot builds for a grace period counted from it.
 	LostAt  time.Time
 	Drained bool // paused by the admin drain, resumed by undrain (U10)
+	// Holder names what holds the lease (a CI job, a person) and
+	// HolderUrl links to it. A non-empty holder keeps the lease out of
+	// every sweeper (TTL, idle) and on the periodic checkpoint pass.
+	Holder, HolderUrl string
 }
 
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
 	persistent, last_active, workspace, suspended, name, net_policy, net_allow,
 	expose_ports, exposed_ip, comment, state, resume_build_id,
-	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained, lost_at`
+	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained, lost_at,
+	holder, holder_url`
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -44,7 +49,7 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	}
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -69,14 +74,16 @@ ON CONFLICT(id) DO UPDATE SET
   last_checkpoint_at=excluded.last_checkpoint_at,
   recovered_from=excluded.recovered_from,
   drained=excluded.drained,
-  lost_at=excluded.lost_at`,
+  lost_at=excluded.lost_at,
+  holder=excluded.holder,
+  holder_url=excluded.holder_url`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
 		l.NetPolicy, string(netAllow), string(exposePorts), l.ExposedIP,
 		l.Comment, l.State, l.ResumeBuildID, l.LastCheckpointBuildID,
 		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom), l.Drained,
-		formatTime(l.LostAt))
+		formatTime(l.LostAt), l.Holder, l.HolderUrl)
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -144,7 +151,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&r.Suspended, &r.Name, &r.NetPolicy, &netAllow, &exposePorts,
 		&r.ExposedIP, &r.Comment, &r.State, &r.ResumeBuildID,
 		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained,
-		&lostAt)
+		&lostAt, &r.Holder, &r.HolderUrl)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}

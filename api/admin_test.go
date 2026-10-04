@@ -65,15 +65,15 @@ func TestDrainUndrainRoundTrip(t *testing.T) {
 	ts, svc, _, sub := newAdminServer(t, "admin-tok")
 	ctx := context.Background()
 
-	persistent, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	persistent, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant persistent: %v", err)
 	}
-	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant plain: %v", err)
 	}
-	suspended, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	suspended, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant suspended: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestDrainContinuesPastFailedPause(t *testing.T) {
 
 	var leases []*Lease
 	for i := range 3 {
-		l, err := svc.grant(ctx, "c", "py-base", time.Minute, i == 0, "", nil)
+		l, err := svc.grant(ctx, "c", "py-base", time.Minute, i == 0, "", nil, "", "")
 		if err != nil {
 			t.Fatalf("grant %d: %v", i, err)
 		}

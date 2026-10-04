@@ -55,7 +55,7 @@ func TestGrantRejectsPooledSandboxThatFailsProbe(t *testing.T) {
 	sub.probeFail["pooled-bad"] = "uname -s -> uniq (GNU coreutils) 9.1"
 	poolSeeded(t, svc, db, sub, "py-base", img.CurrentBuildID, "pooled-bad")
 
-	_, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil)
+	_, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil, "", "")
 	if err == nil {
 		t.Fatal("grant succeeded with a sandbox that failed its integrity probe")
 	}
@@ -70,7 +70,7 @@ func TestGrantRejectsColdCreateThatFailsProbe(t *testing.T) {
 	svc, _, _, sub := newProbeService(t)
 	sub.probeFailAll = true
 
-	_, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil)
+	_, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil, "", "")
 	if err == nil {
 		t.Fatal("grant succeeded with a sandbox that failed its integrity probe")
 	}
@@ -122,7 +122,7 @@ func TestProbeDisabledGrantsUnverifiedSandbox(t *testing.T) {
 	poolSeeded(t, svc, db, sub, "py-base", img.CurrentBuildID, "pooled-bad")
 
 	svc.SetSandboxProbe(false, 0)
-	lease, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil)
+	lease, err := svc.grant(context.Background(), "c", "py-base", time.Minute, false, "internet", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -150,11 +150,11 @@ func TestIntegrityProbeChecksBehaviourNotExitStatus(t *testing.T) {
 func TestGrantCountsImageUse(t *testing.T) {
 	svc, _, db, sub := newProbeService(t)
 	ctx := context.Background()
-	if _, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "internet", nil); err != nil {
+	if _, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "internet", nil, "", ""); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	sub.probeFailAll = true
-	if _, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "internet", nil); err == nil {
+	if _, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "internet", nil, "", ""); err == nil {
 		t.Fatal("grant succeeded with a failing probe")
 	}
 	uses, err := db.ImageUses(ctx)

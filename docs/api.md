@@ -45,6 +45,8 @@ Request:
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
 | `egress_allowlist` | []string | *(empty)* | IPs/CIDRs/domains for `restricted`; also lease references (see below) |
 | `expose_ports` | []int | *(none)* | guest TCP ports published for peer leases. Max 8; port 49983 (envd) is refused; duplicates and out-of-range ports are refused |
+| `holder` | string | `""` | what holds the lease (a CI job, an orchestrator's flight, a person's scratch work). At most 128 printable characters. A non-empty holder makes the lease **held**: it is not released at its TTL, not idle-suspended, and checkpointed periodically like a persistent lease |
+| `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
 
 Response `201 Created`:
 
@@ -57,6 +59,8 @@ Response `201 Created`:
   "ttl": 300,
   "persistent": false,
   "expires_at": "2026-10-01T03:00:00Z",
+  "holder": "ci-job-42",
+  "holder_url": "https://ci.example.com/jobs/42",
   "exposed": {"9042": "10.11.0.7:9042"}
 }
 ```
@@ -66,16 +70,17 @@ each published port to `<address>:<port>` — reachable from peers whose
 egress policy permits it (see [Network policy](#network-policy)), never
 from the LAN. The same map appears in `GET /api/leases`.
 
-Errors: `400` bad policy/ports/memory, `404` unknown image, `429` quota,
-`503` capacity (not enough free hugepage memory for the image, or the
-node is not healthy).
+Errors: `400` bad policy/ports/memory/holder fields, `404` unknown image,
+`429` quota, `503` capacity (not enough free hugepage memory for the
+image, or the node is not healthy).
 
 ### `GET /api/leases` — list leases
 
 Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `id`, `owner`, `image`, `address`, `expires` (unix seconds),
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
-`name`, `comment`, `net_policy`, `egress_allowlist`, `exposed`.
+`name`, `comment`, `holder`, `holder_url`, `net_policy`,
+`egress_allowlist`, `exposed`.
 
 ### `GET /api/leases/{id}` — lease detail
 The same object as a list row plus `state`, `recovered_from` (RFC 3339 or
@@ -258,11 +263,14 @@ for all of them up front (all or nothing); if any create fails, every
 lease created in the call is deleted.
 
 Request `{"count":1..20,"persistent":false,"ttl":300}` (`ttl` 0 = the
-default TTL, capped at the maximum and the user's `max_ttl`).
+default TTL, capped at the maximum and the user's `max_ttl`). The
+optional `holder` and `holder_url` fields stamp every created lease
+(same validation as create; the forks are held like the holder wants
+its work kept).
 
 Response `201 Created`: `{"source":"<id>","build_id":"<uuid>","ids":["…","…"]}`.
-Errors: `400` bad count, `404` unknown, `409` suspended or busy, `429`
-quota, `503` capacity.
+Errors: `400` bad count or bad holder fields, `404` unknown, `409`
+suspended or busy, `429` quota, `503` capacity.
 
 ### `POST /api/leases/{id}/network` — change egress policy live
 
@@ -283,6 +291,28 @@ Request `{"name": "<unique-per-owner-name>"}`. Response
 ### `POST /api/leases/{id}/comment` — annotate
 
 Request `{"comment": "…"}`. Response `{"id":"…","comment":"…","ok":true}`.
+
+### `PUT /api/leases/{id}/holder` — set or clear what holds the lease
+
+Owner or admin; anyone else gets the same `404` as the other lease
+routes. Sets the holder later on an existing lease — the same fields as
+create:
+
+```json
+{"holder": "ci-job-42", "holder_url": "https://ci.example.com/jobs/42"}
+```
+
+Both fields empty clears the holder and restores normal sweeping. The
+same validation applies as on create (`400` naming the offending field).
+Response `200` `{"id":"…","holder":"…","holder_url":"…","ok":true}`.
+
+**Held-lease semantics:** a lease with a non-empty `holder` is not
+released by the TTL sweeper, is not idle-suspended, and is checkpointed
+periodically like a persistent lease — a CI job or an orchestrator can
+hold a plain (non-persistent) lease past its TTL without keep-alive
+calls, and its work survives a crash. The GC already keeps every
+lease's builds; a held lease changes nothing else. Clear the holder
+when the work ends, or the lease stays until it is deleted by hand.
 
 ### `POST /api/leases/{id}/prompt` — message the in-sandbox Shelley agent
 

@@ -164,7 +164,7 @@ func TestForkRollback(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	src, err := svc.grant(ctx, u.ID, "py-base", time.Minute, true, "", nil)
+	src, err := svc.grant(ctx, u.ID, "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant source: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestForkRollback(t *testing.T) {
 	// 3rd overall.
 	sub.FailCall("Create", int(createsBefore+2), errors.New("node refused"))
 
-	_, _, err = svc.fork(ctx, u.ID, src.ID, 3, false, time.Minute)
+	_, _, err = svc.fork(ctx, u.ID, src.ID, 3, false, time.Minute, "", "")
 	if err == nil {
 		t.Fatal("fork succeeded despite the failed create")
 	}
@@ -188,11 +188,11 @@ func TestForkRollback(t *testing.T) {
 	// Quota released: with max_leases=5 and 1 active lease, 4 more fit
 	// and the 5th is refused.
 	for i := 0; i < 4; i++ {
-		if _, err := svc.grant(ctx, u.ID, "py-base", time.Minute, false, "", nil); err != nil {
+		if _, err := svc.grant(ctx, u.ID, "py-base", time.Minute, false, "", nil, "", ""); err != nil {
 			t.Fatalf("grant %d after rollback: %v", i, err)
 		}
 	}
-	if _, err := svc.grant(ctx, u.ID, "py-base", time.Minute, false, "", nil); !errors.Is(err, errQuotaExceeded) {
+	if _, err := svc.grant(ctx, u.ID, "py-base", time.Minute, false, "", nil, "", ""); !errors.Is(err, errQuotaExceeded) {
 		t.Fatalf("grant past cap = %v, want errQuotaExceeded", err)
 	}
 }
@@ -202,12 +202,12 @@ func TestForkRejectsBadCount(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
-	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant source: %v", err)
 	}
 	for _, n := range []int{0, -1, 21} {
-		if _, _, err := svc.fork(ctx, "c", src.ID, n, false, time.Minute); !errors.Is(err, errBadForkCount) {
+		if _, _, err := svc.fork(ctx, "c", src.ID, n, false, time.Minute, "", ""); !errors.Is(err, errBadForkCount) {
 			t.Fatalf("fork count %d = %v, want errBadForkCount", n, err)
 		}
 	}
@@ -219,14 +219,14 @@ func TestForkRejectsSuspended(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
-	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant source: %v", err)
 	}
 	if _, err := svc.suspend(ctx, "c", src.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	if _, _, err := svc.fork(ctx, "c", src.ID, 2, false, time.Minute); !errors.Is(err, errSuspended) {
+	if _, _, err := svc.fork(ctx, "c", src.ID, 2, false, time.Minute, "", ""); !errors.Is(err, errSuspended) {
 		t.Fatalf("fork of suspended lease = %v, want errSuspended", err)
 	}
 }
@@ -239,7 +239,7 @@ func TestCloneCopiesSourcePolicy(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "lan", []string{"10.0.0.0/8"}, 9042)
+	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "lan", []string{"10.0.0.0/8"}, "", "", 9042)
 	if err != nil {
 		t.Fatalf("grant source: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestRestartNonPersistent(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

@@ -13,12 +13,15 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/metrics"
@@ -66,6 +69,13 @@ type Lease struct {
 	// Drained marks a lease the admin drain paused (U10): undrain
 	// resumes exactly the drained leases.
 	Drained bool
+	// Holder names what holds the lease (a CI job, an orchestrator's
+	// flight, a person's scratch work) and HolderUrl links to it. A
+	// non-empty holder makes the lease held: not released at its TTL,
+	// not idle-suspended, and checkpointed periodically like a
+	// persistent lease. "" = unheld, normal sweeping.
+	Holder    string `json:"holder,omitempty"`
+	HolderUrl string `json:"holder_url,omitempty"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -687,7 +697,7 @@ func (s *Service) Start(ctx context.Context) {
 			}
 		}
 	}()
-	// Periodic checkpoints (U10): persistent leases that saw activity
+	// Periodic checkpoints (U10): persistent and held leases that saw activity
 	// since their last snapshot, one at a time, spaced 2 s apart.
 	go s.runCheckpointLoop(ctx)
 	// Snapshot catalog GC + disk accounting (U11): once 10 minutes
@@ -768,11 +778,13 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		if l.released {
 			continue
 		}
-		if !l.Persistent && now.After(l.ExpiresAt) {
+		// A held lease (non-empty holder) is left alone by both sweeps:
+		// not released at its TTL, not idle-suspended.
+		if !l.Persistent && !l.held() && now.After(l.ExpiresAt) {
 			expired = append(expired, l)
 			continue
 		}
-		if l.Persistent && s.cfg.IdleTimeout > 0 && !l.Suspended && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
+		if l.Persistent && !l.held() && s.cfg.IdleTimeout > 0 && !l.Suspended && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
 			s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
 			idleSuspend = append(idleSuspend, l)
 		}
@@ -960,8 +972,10 @@ func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow,
 // one is configured and stocked, else a cold create from the image's
 // current build. Persistent leases are intended for interactive use:
 // they are not TTL-swept (see keepAlive) and the consumer drives their
-// lifecycle.
-func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, exposePorts ...int) (*Lease, error) {
+// lifecycle. holder/holderURL name what holds the lease ("" = unheld,
+// normal sweeping); validation lives in validateHolder (the API layer
+// calls it before granting).
+func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, holder, holderURL string, exposePorts ...int) (*Lease, error) {
 	start := time.Now()
 	img, b, err := s.imageBuild(ctx, image)
 	if err != nil {
@@ -992,6 +1006,8 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		NetPolicy:   netPolicy,
 		NetAllow:    netAllow,
 		ExposePorts: exposePorts,
+		Holder:      holder,
+		HolderUrl:   holderURL,
 		State:       "running",
 		TemplateID:  img.TemplateID,
 	}
@@ -1483,7 +1499,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 // reserved up front, all or nothing; if any create fails, every sandbox
 // created in this call is deleted, the reservations are released, and
 // the error is returned. The source keeps running (item 18 bookkeeping).
-func (s *Service) fork(ctx context.Context, owner, srcID string, count int, persistent bool, ttl time.Duration) ([]*Lease, string, error) {
+func (s *Service) fork(ctx context.Context, owner, srcID string, count int, persistent bool, ttl time.Duration, holder, holderURL string) ([]*Lease, string, error) {
 	s.store.mu.Lock()
 	src := s.store.leases[srcID]
 	if src == nil || src.Owner != owner || src.released {
@@ -1561,6 +1577,8 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			NetPolicy:   src.NetPolicy,
 			NetAllow:    append([]string(nil), src.NetAllow...),
 			ExposePorts: append([]int(nil), src.ExposePorts...),
+			Holder:      holder,
+			HolderUrl:   holderURL,
 			State:       "running",
 			TemplateID:  img.TemplateID,
 		}
@@ -1583,6 +1601,62 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.refreshPeersAsync(ctx)
 	}
 	return created, b.BuildID, nil
+}
+
+// held reports whether the lease is held by something that must outlive
+// the sweepers: a non-empty holder keeps it past its TTL and out of the
+// idle sweep.
+func (l *Lease) held() bool { return l.Holder != "" }
+
+// validateHolder checks the create/fork/holder fields: holder at most
+// 128 printable characters; holderURL empty or an absolute http(s) URL
+// of at most 512 characters. The message names the offending field.
+func validateHolder(holder, holderURL string) error {
+	if !utf8.ValidString(holder) {
+		return fmt.Errorf("holder must be valid UTF-8")
+	}
+	if utf8.RuneCountInString(holder) > 128 {
+		return fmt.Errorf("holder must be at most 128 characters")
+	}
+	for _, r := range holder {
+		// Letters, marks, numbers, punctuation, symbols and the plain
+		// space only: no control or format characters (zero-width
+		// spaces, bidi overrides), which would mislead a reader of the
+		// dashboard or a terminal.
+		if r != ' ' && !unicode.IsGraphic(r) || unicode.Is(unicode.Cf, r) {
+			return fmt.Errorf("holder must be printable characters")
+		}
+	}
+	if holderURL == "" {
+		return nil
+	}
+	u, err := url.Parse(holderURL)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("holder_url must be an absolute http(s) URL")
+	}
+	if len(holderURL) > 512 {
+		return fmt.Errorf("holder_url must be at most 512 characters")
+	}
+	return nil
+}
+
+// setHolder sets or clears a lease's holder fields. Both empty clears
+// the holder and restores normal sweeping. The route admits the owner
+// and admins; this function checks the owner it is given.
+func (s *Service) setHolder(owner, id, holder, holderURL string) (*Lease, error) {
+	if err := validateHolder(holder, holderURL); err != nil {
+		return nil, err
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		return nil, errNotFound
+	}
+	l.Holder = holder
+	l.HolderUrl = holderURL
+	s.saveLeaseLocked(l)
+	return l, nil
 }
 
 // setName assigns a friendly name to a lease. Names must be non-empty,
@@ -1844,6 +1918,8 @@ func leaseMap(l *Lease) map[string]any {
 		"resume_build_id":  l.ResumeBuildID,
 		"name":             l.Name,
 		"comment":          l.Comment,
+		"holder":           l.Holder,
+		"holder_url":       l.HolderUrl,
 		"net_policy":       l.NetPolicy,
 		"egress_allowlist": l.NetAllow,
 		"exposed":          exposedMap(l),
@@ -2016,6 +2092,8 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		RecoveredFrom:         l.RecoveredFrom,
 		LostAt:                l.LostAt,
 		Drained:               l.Drained,
+		Holder:                l.Holder,
+		HolderUrl:             l.HolderUrl,
 	}
 }
 
@@ -2046,6 +2124,8 @@ func rowToLease(r store.LeaseRow) *Lease {
 		RecoveredFrom:         r.RecoveredFrom,
 		LostAt:                r.LostAt,
 		Drained:               r.Drained,
+		Holder:                r.Holder,
+		HolderUrl:             r.HolderUrl,
 	}
 }
 

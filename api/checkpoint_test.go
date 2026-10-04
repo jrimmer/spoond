@@ -18,11 +18,11 @@ func TestPeriodicCheckpointSkipsIdle(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant persistent: %v", err)
 	}
-	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant plain: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestManualCheckpointRoute(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil)
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

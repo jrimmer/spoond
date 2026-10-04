@@ -16,14 +16,14 @@ func TestReconcileCrashRecoversFromCheckpoint(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	ck, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	ck, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant checkpointed: %v", err)
 	}
 	if _, err := svc.checkpointLease(ctx, ck); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
-	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil)
+	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant bare: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestReconcileCrashListFailureChangesNothing(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestRecoveredLeaseStillServed(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil)
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil, "", "")
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

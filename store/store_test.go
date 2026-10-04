@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -51,6 +52,7 @@ func TestLeaseRoundTrip(t *testing.T) {
 		ResumeBuildID: "b-2", LastCheckpointBuildID: "b-1",
 		LastCheckpointAt: base.Add(2 * time.Minute), RecoveredFrom: base,
 		LostAt: base.Add(3 * time.Minute), Drained: true,
+		Holder: "ci-job-42", HolderUrl: "https://ci.example.com/jobs/42",
 	}
 	// Zero times, nil slices and empty strings everywhere they can be.
 	minimal := LeaseRow{
@@ -80,6 +82,8 @@ func TestLeaseRoundTrip(t *testing.T) {
 	updated.RecoveredFrom = time.Time{}
 	updated.Drained = false
 	updated.LostAt = time.Time{} // leaving the lost state clears it
+	updated.Holder = ""          // holder cleared: normal sweeping
+	updated.HolderUrl = ""
 	if err := db.UpsertLease(ctx, updated); err != nil {
 		t.Fatalf("upsert update: %v", err)
 	}
@@ -253,5 +257,63 @@ func TestUpdateLastActive(t *testing.T) {
 func TestMigrationVersionsUnique(t *testing.T) {
 	if _, err := loadMigrations(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestMigration7HolderOnV6Database builds a database by hand at version
+// 6 (the pre-holder schema, with one existing lease row) and opens it:
+// migration 7 must apply, stamping holder and holder_url on the leases
+// table with the empty string — the unheld default that keeps normal
+// sweeping.
+func TestMigration7HolderOnV6Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v6.db")
+	{
+		db, err := Open(path) // applies 0001..0007
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind the file to version 6: drop the two columns migration 7
+	// added and remove its schema_migrations row, so the next Open
+	// applies 0007 for real.
+	db6, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db6.Close()
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN holder`,
+		`ALTER TABLE leases DROP COLUMN holder_url`,
+		`DELETE FROM schema_migrations WHERE version = 7`,
+	} {
+		if _, err := db6.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	if _, err := db6.Exec(
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		 VALUES ('lease-v6', 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'running')`); err != nil {
+		t.Fatalf("seed v6 lease: %v", err)
+	}
+	db6.Close()
+
+	db, err := Open(path) // migration 7 applies here
+	if err != nil {
+		t.Fatalf("open v6 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	rows, err := db.ListLeases(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "lease-v6" {
+		t.Fatalf("leases after migration: %v", rows)
+	}
+	if rows[0].Holder != "" || rows[0].HolderUrl != "" {
+		t.Fatalf("holder not defaulted empty: %q / %q", rows[0].Holder, rows[0].HolderUrl)
 	}
 }
