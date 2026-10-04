@@ -1342,9 +1342,23 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 		return nil, errLeaseBusy
 	}
 	l.busy = true
+	// Resuming a lease that is already running restores the pause build
+	// again: the guest's memory rolls back, so the generation bumps.
+	wasRunning := !l.Suspended && l.State == "running"
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
-	return s.resumeLeaseBody(ctx, l)
+	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
+		return nil, err
+	}
+	if wasRunning {
+		s.store.mu.Lock()
+		s.bumpGenerationLocked(l)
+		s.store.mu.Unlock()
+	}
+	// Written on every resume too, so a lease created before generations
+	// existed gets the file the first time it comes back.
+	s.writeGeneration(l)
+	return l, nil
 }
 
 // resumeLeaseBody is the sub work of a resume (U08's resume steps 1–4).
@@ -2333,7 +2347,8 @@ func (s *Service) writeGeneration(l *Lease) {
 
 // bumpGenerationLocked moves the lease to the next generation and
 // persists it. Bumped on every path that puts the lease into a state its
-// processes did not continue from: crash recovery and restart. A planned
+// processes did not continue from: crash recovery, restart, and a
+// resume of a lease that was already running. A planned
 // pause/resume and the admin drain/undrain continue the memory and do
 // not bump. Call with s.store.mu held; the guest file is rewritten by
 // the caller after the sandbox exists again.

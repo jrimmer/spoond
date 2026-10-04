@@ -116,7 +116,7 @@ while suspended, where `resume_build_id` is the one to resume from).
 Every lease carries a `generation` (in the create response and in every
 list and detail row): the count of times the guest's memory did **not**
 continue from where its processes left it. It starts at `1` on create
-and is bumped — and persisted — by exactly two paths:
+and is bumped — and persisted — by exactly three paths:
 
 - **Crash recovery.** The crash reconcile resumed the lease from its
   checkpoint build; the processes in the guest find themselves in a
@@ -124,6 +124,9 @@ and is bumped — and persisted — by exactly two paths:
 - **Restart.** `POST /api/leases/{id}/restart` reboots the guest, on
   both the persistent (pause + resume through the snapshot) and the
   non-persistent (fresh sandbox) path.
+- **Resume of a running lease.** `POST /api/leases/{id}/resume` on a
+  lease that is already running restores its pause build again, so the
+  guest's memory rolls back to that snapshot.
 
 A planned suspend/resume and the admin drain/undrain continue the
 memory — the guest is resumed from the snapshot its own pause wrote —
@@ -133,7 +136,8 @@ proxy, checkpoint, clone, fork and keepalive leave it alone.
 After every bump the new value is written into the guest at
 `/run/spoond/generation` (one line, `"2\n"`; the file is `0644`, its
 parent `/run/spoond` is created `0755`). The file is also written at
-create, so it always exists for a running lease. The write is best
+create and on every resume, so a lease created before 2.2 gets it the
+first time it resumes. The write is best
 effort: a failure is logged and changes nothing else.
 
 Processes in the guest read the file to notice that their memory did
@@ -266,8 +270,9 @@ too); the SSH gateway's service token may resume any lease before a
 session starts. Response
 `{"id":"…","status":"running","address":"…"}`. `400` if neither persistent nor held,
 `409` if the lease is busy (another lifecycle operation is in flight).
-Resume is idempotent: there is no already-running check, so resuming a
-lease that is already running restores from the snapshot again.
+There is no already-running check: resuming a lease that is already
+running restores from the snapshot again, rolling the guest's memory
+back, and bumps its [generation](#generations).
 
 ### `POST /api/leases/{id}/restart` — reboot
 
