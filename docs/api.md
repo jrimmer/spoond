@@ -122,9 +122,11 @@ and is bumped — and persisted — by exactly two paths:
 - **Crash recovery.** The crash reconcile resumed the lease from its
   checkpoint build; the processes in the guest find themselves in a
   memory snapshot taken earlier.
-- **Restart.** `POST /api/leases/{id}/restart` reboots the guest, on
-  both the persistent (pause + resume through the snapshot) and the
-  non-persistent (fresh sandbox) path.
+- **Restart of a non-persistent lease.** `POST /api/leases/{id}/restart`
+  replaces its sandbox with a fresh one from the image, so the guest
+  starts over. Restarting a persistent lease is a snapshot round-trip
+  (pause, then resume from that pause build): the memory continues and
+  the generation stays. Before 2.2.1 it bumped there too.
 
 A planned suspend/resume and the admin drain/undrain continue the
 memory — the guest is resumed from the snapshot its own pause wrote —
@@ -356,8 +358,9 @@ Persistent and running: suspend then resume (same lease, same build
 chain, lossless through the pause build). Persistent and suspended:
 resume. Non-persistent: delete the sandbox and create a fresh one from
 the image's current build, keeping the lease id (its disk is lost —
-there is no snapshot to restore). Either way the lease's generation
-bumps and `/run/spoond/generation` is rewritten in the guest (see
+there is no snapshot to restore). The non-persistent path bumps the
+lease's generation and rewrites `/run/spoond/generation`; the
+persistent path continues the guest's memory and keeps it (see
 [Generations](#generations)). Response
 `{"id":"…","status":"running","message":"lease restarted"}`.
 `404` unknown, `409` when busy; a substrate
