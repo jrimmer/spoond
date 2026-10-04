@@ -8,10 +8,22 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
-## [Unreleased]
+## [2.1.0] - 2026-10-04
+
+2.1 makes spoond a plain microVM utility again and gives it a terminal-style
+dashboard. Agent workflow (the hive, the worker layer, the bee loop) moved
+to the separate Honey project; leases can name what holds them, and held
+leases are bounded by limits that act on their own.
 
 ### Added
 
+- **Package `grid` (#110).** A public character-grid renderer
+  (`github.com/jrimmer/spoond/v2/grid`): cells with a glyph, a style and an
+  element id; boxes with titles on the frame; text bars with a warning tick;
+  block-character sparklines; ANSI, HTML-span and plain-text writers; and a
+  glyph check against the shipped JetBrains Mono, so every drawn character
+  comes from the same font and columns never misalign. `Sanitize` makes
+  user-supplied text safe to draw.
 - **Limits on held leases that act automatically (#111 follow-up).** A
   held lease can no longer keep memory or disk forever, and nobody has
   to watch a dashboard for it: the limits run in the sweep loop, skip
