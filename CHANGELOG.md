@@ -10,6 +10,14 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-10-04
+
+Fixes found running 2.2.0 under real load.
+
+Upgrading: the runner now drains on SIGTERM for up to `RUNNER_STOP_GRACE`
+(default 10 min), so the `spoond-runner` unit needs `TimeoutStopSec`
+above it (`deploy/spoond-runner.service` sets 660). No schema change.
+
 ### Fixed
 
 - **Restarting a persistent lease bumped its generation.** `POST
