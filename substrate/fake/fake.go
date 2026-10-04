@@ -2,9 +2,12 @@
 package fake
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +26,7 @@ type Fake struct {
 
 	mu        sync.Mutex
 	sandboxes map[string]substrate.Sandbox
+	files     map[string]*memFS // per-sandbox in-memory filesystem
 	procs     map[uint32]*FakeProcess
 	nextPID   uint32
 
@@ -44,6 +48,7 @@ type failSpec struct {
 func New() *Fake {
 	return &Fake{
 		sandboxes:  map[string]substrate.Sandbox{},
+		files:      map[string]*memFS{},
 		procs:      map[uint32]*FakeProcess{},
 		healthErrs: map[string]error{},
 		nodeInfo: substrate.NodeInfo{
@@ -182,6 +187,7 @@ func (f *Fake) Delete(ctx context.Context, sandboxID string) error {
 		return err
 	}
 	delete(f.sandboxes, sandboxID) // nil when already gone
+	delete(f.files, sandboxID)     // the sandbox's files go with it
 	return nil
 }
 
@@ -294,6 +300,244 @@ func (f *Fake) TrafficToken(sandboxID string) string {
 	defer f.mu.Unlock()
 	_ = f.record("TrafficToken", sandboxID)
 	return "fake-traffic-" + sandboxID
+}
+
+// fileFS returns the sandbox's in-memory filesystem, creating an empty one
+// when the sandbox is running. nil when the sandbox is unknown.
+func (f *Fake) fileFS(sandboxID string) *memFS {
+	if _, ok := f.sandboxes[sandboxID]; !ok {
+		return nil
+	}
+	fs, ok := f.files[sandboxID]
+	if !ok {
+		fs = newMemFS()
+		f.files[sandboxID] = fs
+	}
+	return fs
+}
+
+func (f *Fake) WriteFile(ctx context.Context, sandboxID, name string, data []byte, mode os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("WriteFile", sandboxID); err != nil {
+		return err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return fmt.Errorf("fake: WriteFile %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.write(name, data, mode)
+}
+
+func (f *Fake) ReadFile(ctx context.Context, sandboxID, name string, max int64) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("ReadFile", sandboxID); err != nil {
+		return nil, err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return nil, fmt.Errorf("fake: ReadFile %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.read(name, max)
+}
+
+func (f *Fake) Stat(ctx context.Context, sandboxID, name string) (substrate.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("Stat", sandboxID); err != nil {
+		return substrate.FileInfo{}, err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return substrate.FileInfo{}, fmt.Errorf("fake: Stat %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.stat(name)
+}
+
+func (f *Fake) MakeDir(ctx context.Context, sandboxID, name string, mode os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("MakeDir", sandboxID); err != nil {
+		return err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return fmt.Errorf("fake: MakeDir %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.mkdir(name, mode)
+}
+
+func (f *Fake) Remove(ctx context.Context, sandboxID, name string, recursive bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("Remove", sandboxID); err != nil {
+		return err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return fmt.Errorf("fake: Remove %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	return fs.remove(name, recursive)
+}
+
+// memFS is an in-memory filesystem with real path semantics: absolute,
+// cleaned paths only, directories are explicit nodes, parents are created as
+// needed, and modes are kept exactly as given. The root is "" (meaning "/")
+// and always exists.
+type memFS struct {
+	dirs  map[string]os.FileMode // "" is the root, always present
+	files map[string]memFile
+}
+
+type memFile struct {
+	data    []byte
+	mode    os.FileMode
+	modTime time.Time
+}
+
+func newMemFS() *memFS {
+	return &memFS{
+		dirs:  map[string]os.FileMode{"": 0o755 | os.ModeDir},
+		files: map[string]memFile{},
+	}
+}
+
+// cleanPath normalizes a guest path to the map's key form: absolute and
+// cleaned, "/" collapses to "". An empty path stays empty (an error at the
+// callers).
+func cleanPath(name string) string {
+	if name == "" {
+		return ""
+	}
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	if path.Clean(name) == "/" {
+		return ""
+	}
+	return path.Clean(name)
+}
+
+// mkdirAll creates name and every missing parent with mode; existing nodes
+// are left alone. name must be clean. The error is ErrNotDir when a file sits
+// in the way (ErrExist would suggest overwrite semantics that do not exist
+// here).
+func (m *memFS) mkdirAll(name string, mode os.FileMode) error {
+	parts := strings.Split(strings.TrimPrefix(name, "/"), "/")
+	cur := ""
+	for _, p := range parts {
+		cur = cur + "/" + p
+		if _, ok := m.files[cur]; ok {
+			return fmt.Errorf("%w: %s", substrate.ErrNotDir, cur)
+		}
+		if _, ok := m.dirs[cur]; ok {
+			continue
+		}
+		m.dirs[cur] = mode | os.ModeDir
+	}
+	return nil
+}
+
+func (m *memFS) write(name string, data []byte, mode os.FileMode) error {
+	name = cleanPath(name)
+	if name == "" {
+		return fmt.Errorf("%w: %s is a directory path", substrate.ErrInvalidOp, name)
+	}
+	if _, ok := m.dirs[name]; ok {
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, name)
+	}
+	if mode == 0 {
+		mode = 0o644
+	}
+	if err := m.mkdirAll(path.Dir(name), 0o755); err != nil {
+		return err
+	}
+	m.files[name] = memFile{data: bytes.Clone(data), mode: mode, modTime: time.Now()}
+	return nil
+}
+
+func (m *memFS) read(name string, max int64) ([]byte, error) {
+	name = cleanPath(name)
+	if _, ok := m.dirs[name]; ok {
+		return nil, fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, name)
+	}
+	f, ok := m.files[name]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+	}
+	if int64(len(f.data)) > max {
+		return nil, fmt.Errorf("%w: %s is %d bytes, max %d", substrate.ErrTooLarge, name, len(f.data), max)
+	}
+	return bytes.Clone(f.data), nil
+}
+
+func (m *memFS) stat(name string) (substrate.FileInfo, error) {
+	name = cleanPath(name)
+	if mode, ok := m.dirs[name]; ok {
+		return substrate.FileInfo{
+			Name:    path.Base(name),
+			Mode:    mode,
+			IsDir:   true,
+			ModTime: time.Time{},
+		}, nil
+	}
+	if f, ok := m.files[name]; ok {
+		return substrate.FileInfo{
+			Name:    path.Base(name),
+			Size:    int64(len(f.data)),
+			Mode:    f.mode,
+			ModTime: f.modTime,
+		}, nil
+	}
+	return substrate.FileInfo{}, fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+}
+
+func (m *memFS) mkdir(name string, mode os.FileMode) error {
+	name = cleanPath(name)
+	if name == "" {
+		return nil // the root always exists
+	}
+	if mode == 0 {
+		mode = 0o755
+	}
+	if _, ok := m.files[name]; ok {
+		return fmt.Errorf("%w: %s", substrate.ErrExist, name)
+	}
+	return m.mkdirAll(name, mode)
+}
+
+func (m *memFS) remove(name string, recursive bool) error {
+	name = cleanPath(name)
+	if name == "" {
+		return fmt.Errorf("%w: refusing to remove the root", substrate.ErrInvalidOp)
+	}
+	if _, ok := m.files[name]; ok {
+		delete(m.files, name)
+		return nil
+	}
+	if _, ok := m.dirs[name]; !ok {
+		return fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+	}
+	prefix := name + "/"
+	for f := range m.files {
+		if strings.HasPrefix(f, prefix) {
+			if !recursive {
+				return fmt.Errorf("%w: %s", substrate.ErrNotEmpty, name)
+			}
+			delete(m.files, f)
+		}
+	}
+	for d := range m.dirs {
+		if strings.HasPrefix(d, prefix) {
+			if !recursive {
+				return fmt.Errorf("%w: %s", substrate.ErrNotEmpty, name)
+			}
+			delete(m.dirs, d)
+		}
+	}
+	delete(m.dirs, name)
+	return nil
 }
 
 // FakeProcess is the substrate.Process returned by Fake.Start.

@@ -3,6 +3,7 @@ package substrate
 import (
 	"context"
 	"net"
+	"os"
 	"time"
 )
 
@@ -115,6 +116,15 @@ type ProcessEvent struct {
 	Err      string
 }
 
+// FileInfo is a path's metadata as returned by Substrate.Stat.
+type FileInfo struct {
+	Name    string
+	Size    int64
+	Mode    os.FileMode
+	ModTime time.Time
+	IsDir   bool
+}
+
 // Process is an interactive guest process. Events is closed after EventExit or EventError.
 type Process interface {
 	Events() <-chan ProcessEvent
@@ -145,4 +155,17 @@ type Substrate interface {
 	Start(ctx context.Context, sandboxID string, req StartRequest) (Process, error)
 	DialGuest(ctx context.Context, sandboxID, hostIP string, port int) (net.Conn, error)
 	TrafficToken(sandboxID string) string
+
+	// WriteFile creates path (with parents) and writes data, replacing an
+	// existing file. ErrNotFound when the sandbox is unknown.
+	WriteFile(ctx context.Context, sandboxID, path string, data []byte, mode os.FileMode) error
+	// ReadFile reads a file, error when it is larger than max bytes.
+	ReadFile(ctx context.Context, sandboxID, path string, max int64) ([]byte, error)
+	// Stat returns a path's metadata. ErrNotFound when it does not exist.
+	Stat(ctx context.Context, sandboxID, path string) (FileInfo, error)
+	// MakeDir creates path and any missing parents. ErrNotFound when the
+	// sandbox is unknown.
+	MakeDir(ctx context.Context, sandboxID, path string, mode os.FileMode) error
+	// Remove deletes path; recursive removes non-empty directories.
+	Remove(ctx context.Context, sandboxID, path string, recursive bool) error
 }

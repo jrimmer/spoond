@@ -8,6 +8,23 @@ a unit of the E2B substrate spec (`U01`–`U13`, under
 in that spec's `00-README.md`). The earlier-releases section is
 summarised from README "Status".
 
+## [Unreleased]
+
+### Added
+
+- **Substrate file operations (#114).** `substrate.Substrate` gains
+  `WriteFile`, `ReadFile`, `Stat`, `MakeDir` and `Remove` with
+  `substrate.FileInfo` and a `substrate.ErrTooLarge` sentinel: file content
+  and metadata against a lease's filesystem, substrate-wide, with the HTTP
+  routes to follow. The E2B implementation pushes content through envd's
+  HTTP `/files` on 49983 (multipart POST creates parents) and metadata
+  through the envd filesystem Connect client; envd sets no mode, so the
+  file is created empty with its mode by an exec `install` before the
+  upload (so a 0600 file is never readable by others) and the mode is
+  re-applied with a chmod afterwards. The fake substrate implements the same
+  semantics on an in-memory per-sandbox filesystem (modes kept, parents
+  created, `ErrNotFound`), cleared when the sandbox is deleted.
+
 ## [2.1.0] - 2026-10-04
 
 2.1 makes spoond a plain microVM utility again and gives it a terminal-style
