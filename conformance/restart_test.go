@@ -25,6 +25,25 @@ func requireE2B(t *testing.T) {
 	}
 }
 
+// leaseGeneration reads a lease's generation from the API and from the
+// guest's /run/spoond/generation (2.2, #112), failing the test when they
+// disagree.
+func leaseGeneration(t *testing.T, id string) int64 {
+	st, body, err := cl.do("GET", "/api/leases/"+id, nil)
+	if err != nil || st != 200 {
+		failf(t, "lease %s: GET status %d: %v %s", id, st, err, truncate(body))
+	}
+	var l leaseInfo
+	if err := json.Unmarshal(body, &l); err != nil {
+		failf(t, "lease %s: bad body: %v", id, err)
+	}
+	guest := execOK(t, id, "cat /run/spoond/generation")
+	if guest != strconv.FormatInt(l.Generation, 10) {
+		failf(t, "lease %s: generation %d in the API, %q in the guest", id, l.Generation, guest)
+	}
+	return l.Generation
+}
+
 // TestR1_PlannedRestart drains 5 leases through an orchestrator restart
 // and requires every one of them back with state intact.
 func TestR1_PlannedRestart(t *testing.T) {
@@ -73,6 +92,10 @@ func TestR1_PlannedRestart(t *testing.T) {
 		}
 		if out := execOK(t, id, "tmux ls"); !strings.Contains(out, "conf-"+strconv.Itoa(i)) {
 			failf(t, "lease %s: tmux ls = %q, want conf-%d session", id, out, i)
+		}
+		// The memory continued through the drain: no new generation.
+		if g := leaseGeneration(t, id); g != 1 {
+			failf(t, "lease %s: generation %d after a planned restart, want 1", id, g)
 		}
 	}
 }
@@ -138,6 +161,11 @@ func TestR2_OrchestratorCrash(t *testing.T) {
 		}
 		if out := execOK(t, id, "echo alive"); out != "alive" {
 			failf(t, "lease %s: echo alive: got %q", id, out)
+		}
+		// Recovered from its checkpoint: the guest's memory went back, so
+		// the generation moved on, in the API and in the guest file.
+		if g := leaseGeneration(t, id); g != 2 {
+			failf(t, "lease %s: generation %d after crash recovery, want 2", id, g)
 		}
 	}
 
@@ -208,6 +236,10 @@ func TestR3_BackendRestart(t *testing.T) {
 	for _, id := range ids {
 		if out := execOK(t, id, "echo alive"); out != "alive" {
 			failf(t, "lease %s after backend restart: echo alive: got %q", id, out)
+		}
+		// The sandboxes ran on untouched: no new generation.
+		if g := leaseGeneration(t, id); g != 1 {
+			failf(t, "lease %s: generation %d after a backend restart, want 1", id, g)
 		}
 	}
 }
