@@ -557,8 +557,10 @@ type streamState struct {
 // writeFrame sends the snapshot as a signal patch ($_s, plus $_h history
 // on the first frame) and the grid as element patches into the page's
 // <pre id=grid>: one patch per changed row (#rN, inner mode — the span
-// itself stays), or the whole <pre> (outer mode) when the row count
-// changed. A page that loads drawn keeps its rows; the rest are dropped
+// itself stays), or all of the <pre>'s rows (inner mode on #grid, so
+// the <pre> and its class stay) when the row count changed. Replacing
+// the <pre> itself with bare rows lost its class, and the rows then
+// ran together and wrapped. A page that loads drawn keeps its rows; the rest are dropped
 // and the next frame's <pre> patch recreates them.
 func (d *dash) writeFrame(w http.ResponseWriter, st *streamState, s Snapshot, hist map[string][]float64) error {
 	sig := map[string]any{"_s": s}
@@ -578,8 +580,8 @@ func (d *dash) writeFrame(w http.ResponseWriter, st *streamState, s Snapshot, hi
 	sent := st.rows
 	d.mu.Unlock()
 	if len(lines) != len(sent) {
-		// Row count changed: replace the whole <pre>.
-		if err := writeElements(w, "#grid", "outer", pageGrid(g, links)); err != nil {
+		// Row count changed: replace every row inside the <pre>.
+		if err := writeElements(w, "#grid", "inner", pageGrid(g, links)); err != nil {
 			return err
 		}
 	} else {
