@@ -15,7 +15,7 @@
 //	spoondctl keepalive <id>         extend a persistent lease
 //	spoondctl suspend <id>           suspend (snapshot + stop)
 //	spoondctl resume <id>            resume from snapshot
-//	spoondctl restart <id>           reboot (snapshot + fresh lease)
+//	spoondctl restart <id>           persistent: pause + resume (state kept); plain: fresh guest
 //	spoondctl cp <id> [tag]          clone a lease
 //	spoondctl shelly <id>            install + start the Shelley coding agent
 //	spoondctl tag <id> <name>        give the lease a friendly name
@@ -198,7 +198,7 @@ usage:
   spoondctl keepalive <id>         extend a persistent lease
   spoondctl suspend <id>           suspend (snapshot + stop)
   spoondctl resume <id>            resume from snapshot
-  spoondctl restart <id>           reboot (snapshot + fresh lease)
+  spoondctl restart <id>           persistent: pause + resume (state kept); plain: fresh guest
   spoondctl cp <id> [tag]          clone a lease
   spoondctl shelly <id>            install + start the Shelley coding agent
   spoondctl tag <id> <name>        give the lease a friendly name

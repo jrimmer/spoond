@@ -34,7 +34,7 @@ only.
 | `keepalive` | `keepalive <id>` (alias `ka`) | extend persistent lease |
 | `suspend` | `suspend <id>` | snapshot + stop (persistent leases) |
 | `resume` | `resume <id>` | start from snapshot |
-| `restart` | `restart <id>` | reboot — persistent: pause + resume (lossless); plain: fresh lease from the image |
+| `restart` | `restart <id>` | persistent: pause + resume, guest state kept (not a reboot: a hung process stays hung); plain: fresh guest from the image |
 | `cp` | `cp <id> [tag]` (alias `clone`) | checkpoint the running lease + spawn a clone from it |
 | `tag` | `tag <id> <name>` | friendly name (then `ssh <name>@…`) |
 | `comment` | `comment <id> [text…]` | annotate; no text clears |
