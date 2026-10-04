@@ -199,6 +199,13 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// admin; the handler 404s for anyone else, like the other lease
 	// routes.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/holder", s.handleHolder)
+	// Lease file operations (#114): download/upload/stat/mkdir/remove a
+	// guest file through the substrate. Owner or admin; 404 for anyone
+	// else, 409 while suspended.
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/files/{path...}", s.handleFileDownload)
+	s.mux.HandleFunc("PUT /api/sandboxes/{id}/files/{path...}", s.handleFileUpload)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/files/{path...}", s.handleFileOp)
+	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/files/{path...}", s.handleFileDelete)
 	// Owner-blind resume for held leases (2.1): the SSH gateway resumes
 	// a rule-1-suspended held lease on attach, where the capability is
 	// the lease id/name and no owner id is known.
@@ -461,6 +468,12 @@ func normalizePath(p string) string {
 		parts := strings.SplitN(rest, "/", 2)
 		if len(parts) > 0 && len(parts[0]) >= 32 {
 			if len(parts) > 1 {
+				// The files tail is a guest path: it would give the
+				// request counters per-file cardinality, so only the
+				// route stays.
+				if strings.HasPrefix(parts[1], "files/") {
+					return "/api/sandboxes/:id/files"
+				}
 				return "/api/sandboxes/:id/" + parts[1]
 			}
 			return "/api/sandboxes/:id"

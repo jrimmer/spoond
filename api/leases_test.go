@@ -269,6 +269,10 @@ func TestLeaseAliasMetricLabels(t *testing.T) {
 	if got, want := normalizePath("/api/leases/0123456789abcdef0123456789abcdef/exec"), "/api/sandboxes/:id/exec"; got != want {
 		t.Fatalf("normalizePath(lease alias) = %q, want %q", got, want)
 	}
+	// The files tail is a guest path: it must not enter the metric label.
+	if got, want := normalizePath("/api/leases/0123456789abcdef0123456789abcdef/files/etc/secret"), "/api/sandboxes/:id/files"; got != want {
+		t.Fatalf("normalizePath(files) = %q, want %q", got, want)
+	}
 }
 
 // jsonBody marshals v deterministically for response comparison.
