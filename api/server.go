@@ -1618,7 +1618,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// caller can distinguish a permanently dead sandbox from a
 		// transient exec failure (e.g. node overload, network blip).
 		if errors.Is(err, substrate.ErrNotFound) {
-			writeError(w, http.StatusGone, "lease no longer exists")
+			s.writeSandboxGone(w, lease)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "exec failed")
@@ -1633,6 +1633,25 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		"stderr": res.Stderr,
 		"exit":   res.ExitCode,
 	})
+}
+
+// writeSandboxGone answers a substrate not-found for a lease the store
+// still holds. While a lifecycle operation is in flight on the lease (the
+// periodic checkpoint, a suspend, a restart) the orchestrator reports the
+// sandbox missing for the length of the snapshot, which can be minutes
+// for a large guest: that is 409 with Retry-After, not 410. Clients treat
+// 410 as the lease being gone for good and abandon its work. Only a
+// lease with nothing in flight gets 410.
+func (s *Server) writeSandboxGone(w http.ResponseWriter, l *Lease) {
+	s.svc.store.mu.Lock()
+	busy := l.busy
+	s.svc.store.mu.Unlock()
+	if busy {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusConflict, "lease is busy (a checkpoint or another lifecycle operation is in progress); retry shortly")
+		return
+	}
+	writeError(w, http.StatusGone, "lease no longer exists")
 }
 
 // handleStat returns lightweight guest-side metrics for a sandbox
@@ -1664,7 +1683,7 @@ echo "== df =="; df -P /
 	})
 	if err != nil {
 		if errors.Is(err, substrate.ErrNotFound) {
-			writeError(w, http.StatusGone, "lease no longer exists")
+			s.writeSandboxGone(w, lease)
 			return
 		}
 		s.svc.log.Printf("stat: %s: %v", lease.SandboxID, err)
