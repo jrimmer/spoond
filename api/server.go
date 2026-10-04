@@ -54,9 +54,12 @@ type Server struct {
 	// with Authorization: Bearer <ADMIN_TOKEN>. It is not a user or
 	// consumer token; empty (the default) disables the admin routes.
 	adminToken string
-	// metrics (issue #20): service-owned Prometheus metrics served at
+	// Metrics (issue #20): service-owned Prometheus metrics served at
 	// /metrics alongside the orchestrator's collector output.
 	metrics *metrics.BackendMetrics
+	// readyz (issue #81) caches the readiness result for 5 s so an
+	// external uptime monitor can poll /readyz cheaply.
+	readyz *readyzState
 	// authFails (security review #37 L5) throttles repeated failed
 	// token auths per client IP.
 	authFails *authFailLimiter
@@ -203,6 +206,11 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// a rule-1-suspended held lease on attach, where the capability is
 	// the lease id/name and no owner id is known.
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// Readiness (issue #81): for external uptime monitors — every check
+	// must pass, not just the orchestrator answering. Auth-exempt like
+	// /healthz.
+	s.readyz = &readyzState{check: s.svc.runReadyz}
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
 	if s.svc.identities != nil {
@@ -489,14 +497,15 @@ func isHexPath(p string) bool {
 }
 
 // authMiddleware authenticates the bearer token and injects the
-// consumer id into the request context. /healthz is exempt (liveness);
-// the /llm/ prefix is exempt — the lease id in the path is the
-// capability, and sandboxes hold no consumer token.
+// consumer id into the request context. /healthz and /readyz are
+// exempt (liveness and readiness, issue #81); the /llm/ prefix is
+// exempt — the lease id in the path is the capability, and sandboxes
+// hold no consumer token.
 // /api/admin/ is exempt because ADMIN_TOKEN is not a user/consumer
 // token; api/admin.go authenticates those routes itself.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" ||
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
 			strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
 			return

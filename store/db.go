@@ -61,6 +61,14 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
+// Ping answers a trivial query against the reader pool: the readiness
+// check's database test. A catalog file that opens is not a database
+// that answers.
+func (db *DB) Ping(ctx context.Context) error {
+	var one int
+	return db.r.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+}
+
 // Close closes both handles.
 func (db *DB) Close() error {
 	err := db.w.Close()

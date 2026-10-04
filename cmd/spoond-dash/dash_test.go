@@ -182,6 +182,91 @@ func TestBasicAuthAndStream(t *testing.T) {
 	}
 }
 
+// The dashboard's /readyz (issue #81): 200 when every source the
+// dashboard reads answers, 503 naming the failing ones. The sources are
+// probed live per request (no dashboard-side cache — the collector tick
+// is the cache), each under a 2 s bound.
+func TestDashReadyz(t *testing.T) {
+	srv := metricsServer(t, "scrape", []string{frame(1, 1, "1")})
+	cfg := testConfig(t, srv.URL)
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close() // the catalog the dashboard will open read-only
+	if err := os.WriteFile(cfg.UsersFile, []byte(`{"users":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := newDash(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := d.handler()
+
+	readyz := func() (int, string) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+		return rec.Code, rec.Body.String()
+	}
+
+	code, body := readyz()
+	if code != http.StatusOK || !strings.Contains(body, `"status":"ok"`) {
+		t.Fatalf("all sources up: %d %s", code, body)
+	}
+	for _, want := range []string{"metrics", "database", "identity store"} {
+		if !strings.Contains(body, `"name":"`+want+`","ok":true`) {
+			t.Fatalf("body lacks an ok %q check: %s", want, body)
+		}
+	}
+
+	// The metrics source dies: 503 with the failing check named and its
+	// reason carried, the still-passing checks listed beside it.
+	srv.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		code, body = readyz()
+		if code == http.StatusServiceUnavailable && strings.Contains(body, `"status":"fail"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("metrics source down, readyz never flipped: %d %s", code, body)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(body, `"name":"metrics","ok":false`) {
+		t.Fatalf("fail body lacks the failing metrics check: %s", body)
+	}
+	for _, want := range []string{"database", "identity store"} {
+		if !strings.Contains(body, `"name":"`+want+`","ok":true`) {
+			t.Fatalf("fail body lacks a passing %q check: %s", want, body)
+		}
+	}
+}
+
+// /readyz is auth-exempt like /healthz: an uptime monitor holds no
+// dashboard credentials.
+func TestDashReadyzNoAuth(t *testing.T) {
+	srv := metricsServer(t, "scrape", []string{frame(1, 1, "1")})
+	cfg := testConfig(t, srv.URL)
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := os.WriteFile(cfg.UsersFile, []byte(`{"users":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := newDash(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	d.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/readyz without auth: %d, want 200", rec.Code)
+	}
+}
+
 func TestUserNamesLayouts(t *testing.T) {
 	for name, doc := range map[string]string{
 		"list":      `{"users":[{"id":"u-1","name":"jason","token_hash":"x"}]}`,
