@@ -205,7 +205,7 @@ func TestHeldLeaseSurvivesTTLSweep(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "ci-job", "https://ci.example.com/42")
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "ci-job", "https://ci.example.com/42", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestHeldLeaseSurvivesTTLSweep(t *testing.T) {
 	}
 
 	// The unheld control is swept.
-	plain, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "")
+	plain, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant control: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestClearedHolderRestoresSweeping(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "consumer-a", "py-base", 50*time.Millisecond, false, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "consumer-a", "py-base", 50*time.Millisecond, false, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -266,11 +266,11 @@ func TestHeldLeaseNotIdleSuspended(t *testing.T) {
 	svc.cfg.IdleTimeout = 50 * time.Millisecond
 	ctx := context.Background()
 
-	held, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	held, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant held: %v", err)
 	}
-	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant control: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestHeldPlainLeaseCheckpointed(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

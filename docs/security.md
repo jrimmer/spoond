@@ -176,6 +176,21 @@ Known/accepted residuals:
   seed; see [operations.md](operations.md).
 - The envd/traffic seed (`/etc/spoond/e2b-token-seed`) is 0600 and never
   leaves the host.
+- **Lease secrets (#80) are memory-only on the backend.** The optional
+  `secrets` object on create/exec is delivered as 0600 files under a
+  0700 tmpfs at `/run/secrets` inside the guest — never env, never argv
+  — and the values are kept in the backend process's memory for the
+  lease's life (exec-time ones only for the command). They are never
+  written to SQLite, logs, error strings or metrics, and no endpoint
+  returns them, so nothing to redact can leak from a store backup, a log
+  bundle or a `GET`. The flip side: a backend restart loses them, and
+  callers must re-send on the next exec. The tmpfs is guest memory, so
+  the snapshot files of a suspend, checkpoint, fork or clone on the
+  host's snapshot store contain the secret files present at that
+  moment, and a fork or clone starts with them; protect the snapshot
+  store like the guests themselves. Anyone who can exec into the
+  lease can read the files — that is the point; the boundary is other
+  guest users (0700/0600) and everything outside the lease.
 
 ## CI runner
 

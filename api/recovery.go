@@ -126,5 +126,8 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	s.bumpGenerationLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// Crash recovery replaced the sandbox; put the lease's create-time
+	// secrets back into the fresh tmpfs (#80).
+	s.restageCreateSecrets(ctx, l, "recovery")
 	return nil
 }

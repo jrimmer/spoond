@@ -274,6 +274,12 @@ type Service struct {
 	// bus is the lease event bus (2.2, #115): every lifecycle change
 	// emits one event here. Set in NewService; never nil.
 	bus *eventBus
+
+	// createSecrets holds create-time lease secrets in memory only
+	// (#80): never persisted, never logged, lost on restart — the
+	// caller re-sends them on its next exec. Keyed by lease id.
+	secretsMu     sync.Mutex
+	createSecrets map[string]map[string]string
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -290,6 +296,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		now:           time.Now,
 		diskCapacity:  statfsCapacity,
 		appliedEgress: map[string]string{},
+		createSecrets: map[string]map[string]string{},
 		log:           log.Default(),
 		probeEnabled:  true,
 		probeTimeout:  20 * time.Second,
@@ -955,6 +962,9 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	}
 	l.released = true
 	s.store.mu.Unlock()
+	// Create-time secrets are memory-only bookkeeping; the sandbox they
+	// were staged into goes with the release (#80).
+	s.clearCreateSecrets(l.ID)
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
@@ -1050,7 +1060,7 @@ func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow,
 // normal sweeping); validation lives in validateHolder (the API layer
 // calls it before granting). The hold's clock itself is stamped by
 // grantHeld; grant leaves it zero so an unheld grant carries no hold.
-func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, holder, holderURL string, exposePorts ...int) (*Lease, error) {
+func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, holder, holderURL string, createSecrets map[string]string, exposePorts ...int) (*Lease, error) {
 	start := time.Now()
 	img, b, err := s.imageBuild(ctx, image)
 	if err != nil {
@@ -1168,6 +1178,18 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		_ = s.sub.Delete(ctx, lease.SandboxID)
 		s.deleteSandboxRow(lease.SandboxID)
 		return nil, err
+	}
+	// Create-time secrets (#80) are staged after the integrity probe so
+	// the probe never runs with them present, and before the lease is
+	// registered, so a staging failure cannot hand out (or strand) a
+	// lease without its secrets.
+	if len(createSecrets) > 0 {
+		if err := s.stageSecrets(ctx, lease.SandboxID, createSecrets); err != nil {
+			_ = s.sub.Delete(ctx, lease.SandboxID)
+			s.deleteSandboxRow(lease.SandboxID)
+			return nil, fmt.Errorf("stage lease secrets: %w", err)
+		}
+		s.setCreateSecrets(lease.ID, createSecrets)
 	}
 
 	// The guest's generation file always exists (2.2): generation 1 on a
@@ -1396,6 +1418,9 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	// The secrets tmpfs does not survive a snapshot cycle: re-write the
+	// lease's create-time secrets after the sandbox is back (#80).
+	s.restageCreateSecrets(ctx, l, "resume")
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -1468,6 +1493,9 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// A fresh sandbox never had the lease's secrets: re-write them
+	// (create-time only; exec-time secrets ride their request) (#80).
+	s.restageCreateSecrets(ctx, l, "restart")
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}

@@ -48,6 +48,7 @@ Request:
 | `holder` | string | `""` | what holds the lease (a CI job, an orchestrator's flight, a person's scratch work). At most 128 printable characters. A non-empty holder makes the lease **held**: it is not released at its TTL, not idle-suspended by the plain sweep, and checkpointed periodically like a persistent lease. A hold expires on its own (see `hold_ttl`) — the automatic held-lease limits in [operations.md](operations.md) act regardless |
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
 | `hold_ttl` | int | `0` | seconds the hold lasts from now instead of the default `HOLD_TTL_SECS`; capped at `HOLD_TTL_MAX_SECS`. Ignored when `holder` is empty |
+| `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
 
 Response `201 Created`:
 
@@ -80,7 +81,7 @@ each published port to `<address>:<port>` — reachable from peers whose
 egress policy permits it (see [Network policy](#network-policy)), never
 from the LAN. The same map appears in `GET /api/leases`.
 
-Errors: `400` bad policy/ports/memory/holder fields, `404` unknown image,
+Errors: `400` bad policy/ports/memory/holder/secret fields, `404` unknown image,
 `429` quota, `503` capacity (not enough free hugepage memory for the
 image, or the node is not healthy).
 
@@ -167,6 +168,7 @@ the GC (and stay listed by `GET /api/snapshots` until reclaimed).
 | `cwd` | string | *(none)* | working directory |
 | `env` | object | *(none)* | extra environment variables |
 | `timeout` | int | `30` | seconds; capped at `MAX_EXEC_TIMEOUT_SECS` (default 300) |
+| `secrets` | object | *(none)* | `{name: value}` written to `/run/secrets` for this command only and removed afterwards — see [Secrets](#secrets). Same limits as on create |
 
 Response `200 OK`:
 
@@ -553,6 +555,58 @@ filter (by owner, by lease id, or everything). Delivery is
 non-blocking: a subscriber that does not keep up has events dropped —
 never blocking the lease lifecycle — and receives a `gap` event
 detailing the loss once it catches up.
+
+---
+
+## Secrets
+
+Lease create and exec both accept an optional `secrets` object
+(`{name: value}`) for credentials a workload needs — API tokens, private
+registry passwords. The delivery is a **file**, never an environment
+variable and never part of the command line:
+
+- Before anything runs, the backend makes sure a `tmpfs` is mounted at
+  `/run/secrets` inside the guest (mode `0700`, owned by the user exec
+  runs as) and writes every secret as `/run/secrets/<name>`, mode
+  `0600`, through the substrate's file API. Nothing touches env or
+  argv, so no secret can appear in `ps` output, shell history or error
+  strings.
+- **Create-time secrets** stay for the lease's life. They are re-written
+  after a resume or restart (and after crash recovery), so a fresh
+  sandbox gets them too.
+- The tmpfs is guest memory: a suspend, checkpoint, fork or clone
+  snapshot contains the files that were present when it was taken, and
+  a fork or clone starts with them (the backend does not re-stage
+  secrets into a fork or clone; send them again on its create or exec).
+- **Exec-time secrets** are written before the command and removed when
+  it finishes. A name that shadows a create-time secret is restored to
+  the lease's value afterwards.
+- Limits per request: at most **32** secrets and **64 KiB** of values in
+  total; names match `[A-Za-z0-9_.-]{1,64}` (they become file names).
+  Violations are `400`.
+
+Values are held in the backend's **memory only**. They are never
+persisted to SQLite, never written to logs or metrics, and never
+returned by any endpoint — there is no read-back. A backend restart
+loses every secret it holds; the caller must re-send create-time
+secrets on its next exec (an exec request's secrets replace what the
+backend would re-stage, and the same names are removed again when the
+command finishes). See also the security notes in
+[security.md](security.md).
+
+```bash
+curl -X POST https://backend/api/leases \
+  -H "Authorization: Bearer $TOKEN" -d '{
+    "image": "dev-base",
+    "secrets": {"NPM_TOKEN": "…"}
+  }'
+
+curl -X POST https://backend/api/leases/$ID/exec \
+  -H "Authorization: Bearer $TOKEN" -d '{
+    "cmd": "npm publish",
+    "secrets": {"NPM_TOKEN": "…"}
+  }'
+```
 
 ---
 

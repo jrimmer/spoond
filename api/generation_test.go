@@ -24,7 +24,7 @@ func TestGenerationCreate(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := t.Context()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestGenerationCreate(t *testing.T) {
 	// generation too (the pool placeholder's write is overwritten).
 	svc.cfg.PoolSize = 1
 	svc.refillPool(ctx)
-	pooled, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	pooled, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant pooled: %v", err)
 	}
@@ -77,11 +77,11 @@ func TestGenerationRestart(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := t.Context()
 
-	p, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	p, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant persistent: %v", err)
 	}
-	n, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	n, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant non-persistent: %v", err)
 	}
@@ -134,14 +134,14 @@ func TestGenerationCrashRecovery(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := t.Context()
 
-	ck, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	ck, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant checkpointed: %v", err)
 	}
 	if _, err := svc.checkpointLease(ctx, ck); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
-	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant bare: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestGenerationDrainUndrain(t *testing.T) {
 	ts, svc, _, sub := newAdminServer(t, "admin-tok")
 	ctx := t.Context()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestGenerationWriteFailureIsBestEffort(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := t.Context()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestGenerationCloneFork(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := t.Context()
 
-	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestGenerationResumeRunning(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := t.Context()
 
-	p, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	p, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant persistent: %v", err)
 	}

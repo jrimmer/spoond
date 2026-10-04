@@ -431,7 +431,7 @@ func TestFilesAdminAccess(t *testing.T) {
 func TestFilesSuspendedConflict(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	ctx := context.Background()
-	id, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil, "", "")
+	id, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant persistent: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestFilesMissingPath(t *testing.T) {
 func TestFilesTouchCountsAsActivity(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	ctx := context.Background()
-	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "", "")
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

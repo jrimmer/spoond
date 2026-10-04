@@ -24,6 +24,21 @@ summarised from README "Status".
   sandbox path), and a resume of a lease that was already running. A planned pause/resume and the
   admin drain/undrain continue the memory and do not bump it. The guest
   write is best effort: a failure is logged and nothing else changes.
+- **Lease secrets as files (#80).** Lease create and exec accept an
+  optional `secrets` object (`{name: value}`; names
+  `[A-Za-z0-9_.-]{1,64}`, at most 32 secrets and 64 KiB of values per
+  request, `400` otherwise). Before anything runs the backend mounts a
+  0700 tmpfs at `/run/secrets` inside the guest (owned by the exec user)
+  and writes every secret as `/run/secrets/<name>`, mode 0600, through
+  the substrate's file API — never environment variables, never argv.
+  Create-time secrets stay for the lease's life and are re-written after
+  a resume, restart or crash recovery; the tmpfs is guest memory, so
+  snapshots (suspend, checkpoint, fork, clone) carry the files.
+  Exec-time secrets are written before the command and
+  removed after it, restoring any create-time value a name shadowed.
+  Values are kept in the backend's memory only — never in the store,
+  logs, error strings or metrics, never returned by any endpoint — so a
+  backend restart loses them and callers re-send on their next exec.
 - **Substrate file operations (#114).** `substrate.Substrate` gains
   `WriteFile`, `ReadFile`, `Stat`, `MakeDir` and `Remove` with
   `substrate.FileInfo` and a `substrate.ErrTooLarge` sentinel: file content

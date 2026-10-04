@@ -57,7 +57,7 @@ func TestEventLifecyclePerPath(t *testing.T) {
 
 	all := svc.Subscribe(EventFilter{})
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestEventForkHolderPaths(t *testing.T) {
 
 	all := svc.Subscribe(EventFilter{})
 
-	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestEventCloneEmitsCreated(t *testing.T) {
 
 	all := svc.Subscribe(EventFilter{})
 
-	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	src, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant source: %v", err)
 	}
@@ -230,14 +230,14 @@ func TestEventRecoveredLostPaths(t *testing.T) {
 
 	all := svc.Subscribe(EventFilter{})
 
-	ck, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	ck, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant checkpointed: %v", err)
 	}
 	if _, err := svc.checkpointLease(ctx, ck); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
-	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant bare: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestEventOrderingMonotonicPerProcess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 5; j++ {
-				l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+				l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 				if err != nil {
 					t.Errorf("grant: %v", err)
 					return
@@ -312,11 +312,11 @@ func TestEventFilterSelection(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	la, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "", "")
+	la, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant a: %v", err)
 	}
-	lb, err := svc.grant(ctx, "consumer-b", "py-base", time.Minute, false, "", nil, "", "")
+	lb, err := svc.grant(ctx, "consumer-b", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant b: %v", err)
 	}
@@ -708,7 +708,7 @@ func TestSubscribeSlowSubscriberDrops(t *testing.T) {
 
 	var released *Lease
 	for i := 0; i < leaseEventSubBuffer+50; i++ {
-		l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+		l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 		if err != nil {
 			t.Fatalf("grant %d: %v", i, err)
 		}
@@ -757,7 +757,7 @@ func TestSubscribeSlowSubscriberDrops(t *testing.T) {
 	}
 	// The channel is empty now; a new event flows (and a trailing gap
 	// announces nothing further since drops were already reported).
-	l2, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	l2, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant after drain: %v", err)
 	}

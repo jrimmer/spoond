@@ -42,7 +42,7 @@ func TestReconcileCrashStampsLostAtOnce(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	bare, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant bare: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestReconcileCrashStampsLostAtOnce(t *testing.T) {
 	}
 
 	// A lease lost with no stamp records the loss time.
-	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "")
+	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant plain: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestUndrainFailureStampsLostAt(t *testing.T) {
 	ts, svc, db, sub := newAdminServer(t, "admin-tok")
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}

@@ -720,6 +720,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
 		HoldTTL   int    `json:"hold_ttl"`
+		// Secrets (#80) become files under /run/secrets in the guest
+		// (mode 0600, on a 0700 tmpfs). Values are kept in memory only,
+		// never stored, logged or returned.
+		Secrets map[string]string `json:"secrets"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -752,6 +756,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.HoldTTL < 0 {
 		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
+		return
+	}
+	secrets, err := validateSecrets(req.Secrets)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
@@ -797,7 +806,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			ttl = userMax
 		}
 	}
-	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, ttl, req.Persistent, req.NetPolicy, req.NetAllow, req.Holder, req.HolderURL, expose...)
+	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, ttl, req.Persistent, req.NetPolicy, req.NetAllow, req.Holder, req.HolderURL, secrets, expose...)
 	if err != nil {
 		switch {
 		case errors.Is(err, errQuotaExceeded):
@@ -1519,6 +1528,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		Cwd     string            `json:"cwd"`
 		Env     map[string]string `json:"env"`
 		Timeout int               `json:"timeout"`
+		// Secrets (#80) are staged as /run/secrets/<name> files for this
+		// command only and removed afterwards. Values are kept in memory
+		// only, never stored, logged or returned.
+		Secrets map[string]string `json:"secrets"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -1526,6 +1539,11 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Cmd == "" {
 		writeError(w, http.StatusBadRequest, "cmd is required")
+		return
+	}
+	execSecrets, err := validateSecrets(req.Secrets)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	timeout := req.Timeout
@@ -1536,6 +1554,37 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		timeout = maxExecTimeout
 	}
 	args := buildShellArgs(req.Cmd, req.Cwd, requestEnv(lease, req.Env))
+	// Stage this request's secrets (#80) before the command runs. The
+	// cleanup below runs on every exit path — including a half-failed
+	// staging — so nothing exec-time outlives the request.
+	defer func() {
+		if len(execSecrets) > 0 {
+			// The command is done: its secrets go. A name that shadows a
+			// create-time secret gets the lease's value re-written, so the
+			// shadowed file outlives the command like every other
+			// create-time secret.
+			s.svc.removeSecrets(lease.SandboxID, sortedSecretNames(execSecrets))
+			if create := s.svc.createSecretsFor(lease.ID); len(create) > 0 {
+				var shadowed []string
+				for name := range execSecrets {
+					if _, ok := create[name]; ok {
+						shadowed = append(shadowed, name)
+					}
+				}
+				if len(shadowed) > 0 {
+					s.svc.restageSecrets(lease.SandboxID, shadowed, create)
+				}
+			}
+		}
+	}()
+	if len(execSecrets) > 0 {
+		if err := s.svc.stageSecrets(r.Context(), lease.SandboxID, execSecrets); err != nil {
+			// The error names a secret file name at most, never a value.
+			s.svc.log.Printf("exec: stage secrets %s: %v", lease.SandboxID, err)
+			writeError(w, http.StatusInternalServerError, "failed to stage secrets")
+			return
+		}
+	}
 	start := time.Now()
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
 		Args:    args,

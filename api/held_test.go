@@ -58,7 +58,7 @@ func TestHeldIdleSuspendsAtThresholdNotBefore(t *testing.T) {
 
 	base := time.Now()
 	svc.cfg.HeldIdleTimeout = time.Hour
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -106,11 +106,11 @@ func TestHeartbeatPreventsHeldIdleSuspend(t *testing.T) {
 	svc.SetMetrics(metrics.NewBackendMetrics())
 	svc.cfg.HeldIdleTimeout = 60 * time.Millisecond
 
-	active, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	active, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant active: %v", err)
 	}
-	stale, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-2", "")
+	stale, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-2", "", nil)
 	if err != nil {
 		t.Fatalf("grant stale: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestHeldSuspendedReleasedAtThresholdNotBefore(t *testing.T) {
 	base := time.Now()
 	svc.cfg.HeldIdleTimeout = time.Hour
 	svc.cfg.HeldSuspendedRelease = 24 * time.Hour
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestHoldLapseSuspendsNeverReleases(t *testing.T) {
 	cur := base
 	svc.now = func() time.Time { return cur }
 
-	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestHoldRenewalExtendsAndCapped(t *testing.T) {
 	cur := base
 	svc.now = func() time.Time { return cur }
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestPressureShortensHeldIdle(t *testing.T) {
 	svc.cfg.PressureDiskFreePct = 15
 	svc.cfg.PressureHeldIdle = 30 * time.Minute
 	svc.cfg.TemplateStoragePath = t.TempDir() // an empty dir is never under pressure
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestPressureShortensHeldIdle(t *testing.T) {
 	// admission would refuse it), so a fresh held lease is suspended at
 	// the shortened threshold too. The shortage is set after the grant —
 	// admission itself refuses when the hugepages are already short.
-	l2, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-2", "")
+	l2, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-2", "", nil)
 	if err != nil {
 		t.Fatalf("grant l2: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 	// observable: first < second < third.
 	var suspended [3]*Lease
 	for i := range suspended {
-		l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-"+string(rune('1'+i)), "")
+		l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-"+string(rune('1'+i)), "", nil)
 		if err != nil {
 			t.Fatalf("grant %d: %v", i, err)
 		}
@@ -434,7 +434,7 @@ func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 
 	// A running held lease exists when the pressure hits; it must never
 	// be a candidate.
-	running, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-running", "")
+	running, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-running", "", nil)
 	if err != nil {
 		t.Fatalf("grant running: %v", err)
 	}
@@ -532,7 +532,7 @@ func TestRulesSkipWhileDraining(t *testing.T) {
 	svc.cfg.HoldTTL = time.Hour // no expiry in this test: only the drain skip
 
 	base := time.Now()
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -693,7 +693,7 @@ func TestUnheldLeaseUntouchedByHeldRules(t *testing.T) {
 	base := time.Now()
 	cur := base
 	svc.now = func() time.Time { return cur }
-	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -720,11 +720,11 @@ func TestResumeHeldLeaseOwnerOrGateway(t *testing.T) {
 	svc.cfg.HeldIdleTimeout = 30 * time.Millisecond
 	ctx := context.Background()
 
-	a, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "ci-job", "")
+	a, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	b, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "ci-job-2", "")
+	b, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "ci-job-2", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -767,7 +767,7 @@ func TestLapseOfSuspendedHoldDoesNotRelease(t *testing.T) {
 	cur := base
 	svc.now = func() time.Time { return cur }
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -825,14 +825,14 @@ func TestOnlyRuleSuspendedLeasesAreReleased(t *testing.T) {
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 1, nil } // critical
 
-	manual, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "by-hand", "")
+	manual, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "by-hand", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	if _, err := svc.pauseLease(ctx, manual, false); err != nil {
 		t.Fatalf("manual suspend: %v", err)
 	}
-	used, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "used-again", "")
+	used, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "used-again", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
@@ -866,7 +866,7 @@ func TestCriticalRefusesUnderDryRunGC(t *testing.T) {
 	svc.cfg.CriticalDiskRecoverPct = 10
 	svc.cfg.TemplateStoragePath = t.TempDir()
 
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "")
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
