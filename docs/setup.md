@@ -39,10 +39,9 @@ When both are set, `SPOOND_` wins.
 
 | 2.0 name | Pre-2.0 name (deprecated) | Used by |
 |---|---|---|
-| `SPOOND_BACKEND_URL` | `FORKD_BACKEND_URL` | `spoond mcp`, `spoond acp` — lease API base URL |
-| `SPOOND_AGENT_TOKEN` | `FORKD_AGENT_TOKEN` | `spoond mcp`, `spoond acp` — per-agent bearer token |
-| `SPOOND_IMAGE` | `FORKD_IMAGE` | `spoond mcp`, `spoond acp` — default image for new leases |
-| `SPOOND_LLM_MODEL` | `FORKD_LLM_MODEL` | `spoond acp` — default LLM gateway model id |
+| `SPOOND_BACKEND_URL` | `FORKD_BACKEND_URL` | `spoond mcp` — lease API base URL |
+| `SPOOND_AGENT_TOKEN` | `FORKD_AGENT_TOKEN` | `spoond mcp` — per-agent bearer token |
+| `SPOOND_IMAGE` | `FORKD_IMAGE` | `spoond mcp` — default image for new leases |
 | `SPOOND_CTL_HOST` | `FORKD_CTL_HOST` | `spoondctl` — gateway host |
 | `SPOOND_CTL_PORT` | `FORKD_CTL_PORT` | `spoondctl` — gateway SSH port |
 | `SPOOND_CTL_KEY` | `FORKD_CTL_KEY` | `spoondctl` — SSH private key |
@@ -76,23 +75,22 @@ go build -o spoond ./cmd/spoond                       # all modules
 go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
-Subcommands: `backend`, `gateway`, `acp`, `mcp`, `runner`, `ctl`,
+Subcommands: `backend`, `gateway`, `mcp`, `runner`, `ctl`,
 `images`, `drain`, `doctor`, `dash`.
 Exclusion tags (one per gated file — `cmd/spoond/main.go` prints this
-list at `spoond help`): `nobackend`, `nogateway`, `noacp`, `nomcp`,
+list at `spoond help`): `nobackend`, `nogateway`, `nomcp`,
 `norunner`, `noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash`.
 
-### Agent endpoints (`mcp` / `acp`)
+### Agent endpoint (`mcp`)
 
-Both endpoints authenticate to the backend as a **per-agent user**:
-leases they create are owned by that agent's identity.
+`spoond mcp` authenticates to the backend as a **per-agent user**:
+leases it creates are owned by that agent's identity.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SPOOND_AGENT_TOKEN` | *(empty)* | per-agent bearer token for this endpoint, provisioned from the users store; **required** |
 | `SPOOND_BACKEND_URL` | `https://127.0.0.1:8890` | lease API base URL |
-| `SPOOND_IMAGE` | `dev-base` | default image for the leases these endpoints create |
-| `SPOOND_LLM_MODEL` | `gpt-oss-20b-fireworks` | (`acp` only) default model id for the LLM gateway |
+| `SPOOND_IMAGE` | `dev-base` | default image for the leases it creates |
 
 Create an agent user first (`POST /api/users` with `kind=agent` — it
 needs a `token`, not an SSH key), then set `SPOOND_AGENT_TOKEN` to

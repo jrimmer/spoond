@@ -3,12 +3,10 @@
 //
 //	spoond backend    lease API (warm pool, proxy, LLM gateway)
 //	spoond gateway    SSH gateway + ctl plane
-//	spoond acp        Agent Client Protocol endpoint
 //	spoond mcp        MCP server (stdio)
 //	spoond runner     Forgejo Actions runner (adaptive pool)
 //	spoond ctl        control-plane CLI (thin ssh ctl@ wrapper)
 //	spoond drain      orchestrator drain/undrain hook (U10)
-//	spoond hive       swarm controller (enlistment checks)
 //	spoond version    version, commit and Go version
 //
 // Modules are optional at build time via Go build tags. Each subcommand
@@ -21,8 +19,8 @@
 //
 //	go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond
 //
-// Supported exclusion tags: nobackend, nogateway, noacp, nomcp,
-// norunner, noctl, noimages, nodrain, nohive.
+// Supported exclusion tags: nobackend, nogateway, nomcp, norunner,
+// noctl, noimages, nodoctor, nodrain, nodash.
 package main
 
 import (
@@ -65,10 +63,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "acp", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "hive", "version"} {
+	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "version"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}
 	}
-	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, noacp, nomcp, norunner, noctl, noimages, nodoctor, nodrain, nodash, nohive\n")
+	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nodoctor, nodrain, nodash\n")
 }

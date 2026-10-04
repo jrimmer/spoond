@@ -6,9 +6,6 @@
 |---|---|
 | host | the machine running spoond and the E2B orchestrator |
 | lease | a granted sandbox — the API resource (`POST /api/leases`; `/api/sandboxes` is its permanent alias) |
-| bee | an agent worker running in a lease |
-| swarm | a group of bees |
-| hive | the enlistment service: `/hive/guide`, `/hive/check` |
 
 spoond is a **control plane**: identity, quotas, leases, sharing, the SSH
 gateway, the HTTP proxy, the LLM gateway, policy, the image catalog and
@@ -29,7 +26,7 @@ The fork is upgraded with the procedure in
 ## Architecture
 
 ```
-consumers: runner, MCP, ACP, CFOS, CLI, browsers, SSH users
+consumers: runner, MCP, CLI, browsers, SSH users
         │  lease API (unchanged contract, additions only)
         ▼
 spoond-backend  (Go 1.27.1)                        spoond-sshd-gateway

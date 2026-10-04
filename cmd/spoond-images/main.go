@@ -95,7 +95,7 @@ type manifestImage struct {
 	// From names a catalog image this one is built on: its current
 	// digest is passed as the BASE build argument, and its env and
 	// shape (vcpu, memory, disk) are inherited unless set here. Used for
-	// layers such as the hive's <base>-worker.
+	// layers such as a worker or tooling layer on a base image.
 	From string `yaml:"from"`
 	// BuildArgs are passed to docker build as --build-arg KEY=VALUE.
 	BuildArgs map[string]string `yaml:"build_args"`

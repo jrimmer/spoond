@@ -18,7 +18,7 @@
 //
 // Hexagonal: the server depends only on the runner.SandboxProvider port
 // (the lease HTTP API) — same shape as the
-// cfos adapter. v1 is stateless per call (create -> exec -> release),
+// command adapter. v1 is stateless per call (create -> exec -> release),
 // matching the ticket's KTD5-style design; persistent session-scoped
 // leases are a v2 follow-on.
 package mcp

@@ -161,7 +161,7 @@ print(
 prompt = (
     "You are a senior Go engineer reviewing a pull request for spoond — "
     "a lease API over E2B-orchestrated Firecracker microVM sandboxes providing lease management, "
-    "SSH gateway, HTTP proxy, LLM gateway, MCP/ACP agent endpoints, "
+    "SSH gateway, HTTP proxy, LLM gateway, MCP agent endpoint, "
     "Forgejo Actions runner, and multi-user tenancy. "
     "Respond in English. "
     "Focus on **architecture, design, correctness, security, and logic** "

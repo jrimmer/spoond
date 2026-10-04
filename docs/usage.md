@@ -213,7 +213,7 @@ ssh ctl@sandbox.example.com "shelly <id>"        # start the agent
 ssh ctl@sandbox.example.com "prompt <id> write a fibonacci function"
 ```
 
-## MCP / ACP agent endpoints
+## MCP agent endpoint
 
 ### `spoond mcp` (MCP stdio server, JSON-RPC 2.0 over stdio)
 
@@ -232,17 +232,6 @@ posts a `person` with no token) — then set `SPOOND_AGENT_TOKEN` to that
 token. The pre-2.0 `FORKD_*` names still work and log a one-line
 deprecation warning (see the "Renamed in 2.0" table in
 [setup.md](setup.md)).
-
-### `spoond acp` (Agent Client Protocol server)
-
-Sessions map 1:1 to leases; the agent loop runs through the LLM gateway
-with in-sandbox tools. One `spoond acp` process serves the whole
-conversation (sessions are process-scoped).
-
-```bash
-SPOOND_BACKEND_URL=https://sandbox.example.com SPOOND_AGENT_TOKEN=<agent-token> \
-  SPOOND_LLM_MODEL=gpt-oss-20b-fireworks ./spoond acp
-```
 
 (The `SPOOND_*` names above are the live, supported variable names.)
 
@@ -287,7 +276,7 @@ ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… you@laptop you"
 ssh ctl@sandbox.example.com "ssh-key add ssh-ed25519 AAAA… alice@mbp alice"
 
 #    Agents are created over the API instead (kind=agent — what the
-#    MCP/ACP endpoints authenticate as):
+#    MCP endpoint authenticates as):
 curl -s -X POST https://sandbox.example.com/api/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name":"ci","kind":"agent","token":"<its-token>"}'

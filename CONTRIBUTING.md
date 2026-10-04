@@ -45,7 +45,7 @@ Requirements: Go 1.27.1+ (see `go.mod`).
 ## Integration tests
 
 `tests/integration/` exercises the full stack (lease API, SSH gateway,
-control plane, MCP/ACP, network policy) against a **live spoond host on
+control plane, MCP, network policy) against a **live spoond host on
 the E2B substrate**: the orchestrator, the image catalog, the warm pool.
 It cannot run on CI without that infrastructure.
 
