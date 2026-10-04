@@ -86,6 +86,10 @@ type BackendMetrics struct {
 	// Held-lease limits (2.1): automatic actions on held leases
 	HeldActions *prometheus.CounterVec // {rule,action}: idle/stale/expiry/pressure/critical × suspend/release/expire
 
+	// Guest port dials (2.2, #113): host-to-guest TCP over a WebSocket
+	GuestDialsActive prometheus.Gauge       // open WebSocket→guest TCP bridges
+	GuestDialsTotal  *prometheus.CounterVec // {result}: ok, refused, error
+
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
 	LeasesByImage     *prometheus.GaugeVec     // {image}: live leases per image
@@ -309,6 +313,16 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Automatic actions on held leases, by rule (idle, stale, expiry, pressure, critical) and action (suspend_idle, release, expire).",
 	}, []string{"rule", "action"})
 
+	// Guest port dials (2.2, #113)
+	m.GuestDialsActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "guest_dials_active",
+		Help: "Open guest port dial bridges (WebSocket to guest TCP).",
+	})
+	m.GuestDialsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "guest_dials_total",
+		Help: "Guest port dial attempts by result: ok, refused (per-owner cap), error (the guest dial failed).",
+	}, []string{"result"})
+
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases",
@@ -359,6 +373,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.CheckpointDur,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 		m.HeldActions,
+		m.GuestDialsActive, m.GuestDialsTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)
