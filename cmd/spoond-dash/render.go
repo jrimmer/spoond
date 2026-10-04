@@ -911,6 +911,8 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 	l.rule(g, x, w, row)
 	row++
 
+	// Allocations: what the running leases hold against the node's
+	// cores and memory (Cores is the total the vcpu fraction is of).
 	alloc := dimLine(
 		fmt.Sprintf("vcpu alloc %d / %d", l.s.VCPUAlloc, l.s.Cores),
 		fmt.Sprintf("mem alloc %.1f GiB", l.s.MemAllocGiB))
@@ -919,6 +921,8 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 	g.Segs(x+2, row, alloc, inner)
 	row++
 
+	// The build GC's mode — bold ok when deletion is on, dim when it
+	// only logs candidates — and its lifetime count, left out at zero.
 	segs := []grid.Seg{gcSeg(l.s.GCMode)}
 	if l.s.GCDeleted > 0 {
 		segs = append(segs,
