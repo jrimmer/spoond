@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -304,13 +305,18 @@ func (f *Fake) Start(ctx context.Context, sandboxID string, req substrate.StartR
 	return p, nil
 }
 
+// DialGuest opens a real TCP connection to hostIP:port. The fake has no
+// orchestrator behind it, so tests point hostIP at an in-process listener
+// (an echo server on 127.0.0.1); the call is recorded like every other
+// method, so FailCall can simulate dial failures.
 func (f *Fake) DialGuest(ctx context.Context, sandboxID, hostIP string, port int) (net.Conn, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if err := f.record("DialGuest", sandboxID); err != nil {
+		f.mu.Unlock()
 		return nil, err
 	}
-	return nil, fmt.Errorf("fake: DialGuest %s: no network", sandboxID)
+	f.mu.Unlock()
+	return net.DialTimeout("tcp", net.JoinHostPort(hostIP, strconv.Itoa(port)), 5*time.Second)
 }
 
 func (f *Fake) TrafficToken(sandboxID string) string {

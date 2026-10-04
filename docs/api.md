@@ -300,6 +300,34 @@ frames carry the same control JSON as above. `started`, `exit_code` and
 Closing the WebSocket stops the relay but does **not** kill the process;
 send `stop` or `kill` for that.
 
+### `GET /api/leases/{id}/ports/{port}/dial` — raw TCP to a guest port (WebSocket)
+
+Upgrade to a WebSocket that carries raw bytes both ways to TCP port
+`{port}` (1–65535) inside the lease — a guest service the owner wants to
+reach directly: a database shell, a REPL, a debug port. The connection is
+made host-to-guest through the substrate (`DialGuest`); it is **not
+guest egress**, so it works under every `network_policy` — `restricted`
+and `none` included. Egress rules decide what may leave a sandbox; no
+packet leaves the guest here.
+
+Frames are **binary** in both directions: client binary frames are bytes
+written to the guest port, and every byte the guest sends comes back as
+a binary frame. Either side closing closes both (a guest close surfaces
+as the WebSocket closing; a client close tears down the guest TCP
+connection). A dial that carries no bytes in either direction for 10
+minutes is closed; a stream that flows only one way stays open. Text
+frames and empty frames from the client are ignored.
+
+Owner or admin; anyone else gets the same `404` as the other lease
+routes (no existence leak). Shares do not unlock dialing: it reaches
+every guest port, a step past what an `http` share grants.
+
+Errors: `400` port out of range or not a number, `403` port 49983 (envd,
+the guest's management port), `404` unknown lease or not the owner's,
+`409` suspended (resume it first), `410` lost, `429` when the owner's 16
+concurrent dials are already open, `502` when the lease has no running
+sandbox or the guest port refuses the connection.
+
 ### `POST /api/leases/{id}/keepalive` — extend a persistent lease
 
 Request `{"ttl": <seconds>}` (0 = `MAX_TTL_SECS`; capped). Response:

@@ -73,6 +73,12 @@ type Server struct {
 	// fileXfer bounds concurrent file-content transfers backend-wide:
 	// each buffers up to maxFileBytes in memory.
 	fileXfer chan struct{}
+
+	// dials (2.2, #113) caps concurrent guest port dials per owner, in
+	// its own pool: dialing a guest port is not exec/stream activity and
+	// the two caps must not eat each other's slots.
+	dialMu    sync.Mutex
+	dialCount map[string]int
 }
 
 // acquireBusy reserves an exec/stream slot for owner. Returns false when
@@ -155,7 +161,8 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
-		busyCount: map[string]int{}, busyMax: 8, fileXfer: make(chan struct{}, maxFileTransfers), metrics: metrics.NewBackendMetrics()}
+		busyCount: map[string]int{}, busyMax: 8, fileXfer: make(chan struct{}, maxFileTransfers),
+		dialCount: map[string]int{}, metrics: metrics.NewBackendMetrics()}
 	// The guest heartbeat lives only on the guest-service listener
 	// (ProxyHandler); the lease id in the path is the capability.
 	s.heartbeat = newLeaseHeartbeat(svc)
@@ -228,6 +235,10 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.readyz = &readyzState{check: s.svc.runReadyz}
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	// Guest port dial (2.2, #113): a WebSocket carrying raw bytes to a
+	// guest TCP port inside the lease, over substrate.DialGuest. Owner or
+	// admin; anyone else gets the same 404 as the other lease routes.
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/ports/{port}/dial", s.handleGuestDial)
 	// Identity endpoints (epic #26 T1): user management + key resolution.
 	if s.svc.identities != nil {
 		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
@@ -504,6 +515,11 @@ func normalizePath(p string) string {
 				// route stays.
 				if strings.HasPrefix(parts[1], "files/") {
 					return "/api/sandboxes/:id/files"
+				}
+				// The guest dial path carries the guest port; keeping it
+				// would give the request counter one series per port.
+				if strings.HasPrefix(parts[1], "ports/") && strings.HasSuffix(parts[1], "/dial") {
+					return "/api/sandboxes/:id/ports/:port/dial"
 				}
 				return "/api/sandboxes/:id/" + parts[1]
 			}

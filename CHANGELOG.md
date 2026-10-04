@@ -102,6 +102,24 @@ summarised from README "Status".
   with a `gap` event. Documented in
   [docs/api.md](docs/api.md#lease-events-server-sent-events).
 
+- **Guest port dial (#113).** `GET
+  /api/leases/{id}/ports/{port}/dial` upgrades to a WebSocket that
+  carries raw bytes both ways to TCP port `port` (1–65535) inside the
+  lease, through the substrate's host-to-guest dial (the same HostIP
+  DNAT path the SSH gateway and the HTTP proxy use). Binary frames;
+  either side closing closes both; a dial that carries no bytes in
+  either direction for 10 minutes closes.
+  The dial is host-to-guest, not guest egress, so it works under every
+  network policy (`restricted` and `none` included). Owner or admin —
+  anyone else gets the lease routes' usual `404` — with `409` for a
+  suspended lease, `403` for envd's port 49983, `429` past 16
+  concurrent dials per owner, `502` when the lease has no running
+  sandbox or the guest port is closed, and `400` for a bad port. Counted in
+  `spoond_guest_dials_active` and `spoond_guest_dials_total{result}`.
+  The conformance suite dials a TCP echo server in a py-base lease
+  through the new route (`TestN7_GuestDialEcho`), proving host-to-guest
+  TCP on E2B.
+
 ## [2.1.0] - 2026-10-04
 
 2.1 makes spoond a plain microVM utility again and gives it a terminal-style

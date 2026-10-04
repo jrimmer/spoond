@@ -497,6 +497,8 @@ marker. The substrate-specific series:
 | `spoond_storage_free_bytes` | free bytes at the build store |
 | `spoond_gc_deleted_total{kind}` | builds deleted by the GC |
 | `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
+| `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
+| `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_capacity_rejections_total` | admission refusals |
 | `spoond_store_errors_total{op}` | SQLite write failures |
 

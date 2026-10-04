@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -282,16 +283,22 @@ type wsConn struct {
 	conn *websocket.Conn
 }
 
-// stream opens GET /api/sandboxes/{id}/stream, sends the exec request as
-// the first frame and returns the connection.
-func (c *client) stream(id string, req streamReq) (*wsConn, error) {
+// wsURLOf builds the WebSocket URL for an API path, keeping the API
+// base's scheme (wss for https) and host.
+func (c *client) wsURLOf(path string) string {
 	scheme := "ws"
 	host := strings.TrimPrefix(c.base, "http://")
 	if strings.HasPrefix(c.base, "https://") {
 		scheme = "wss"
 		host = strings.TrimPrefix(c.base, "https://")
 	}
-	url := scheme + "://" + host + "/api/sandboxes/" + id + "/stream"
+	return scheme + "://" + host + path
+}
+
+// stream opens GET /api/sandboxes/{id}/stream, sends the exec request as
+// the first frame and returns the connection.
+func (c *client) stream(id string, req streamReq) (*wsConn, error) {
+	url := c.wsURLOf("/api/sandboxes/" + id + "/stream")
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
@@ -312,6 +319,30 @@ func (c *client) stream(id string, req streamReq) (*wsConn, error) {
 		return nil, err
 	}
 	return w, nil
+}
+
+// dialGuest opens GET /api/sandboxes/{id}/ports/{port}/dial — the raw
+// host-to-guest TCP bridge (2.2, #113) — and returns the WebSocket. A
+// failed upgrade returns the HTTP status (0 when the transport itself
+// failed) for status assertions.
+func (c *client) dialGuest(id string, port int) (*websocket.Conn, int, error) {
+	url := c.wsURLOf("/api/sandboxes/" + id + "/ports/" + strconv.Itoa(port) + "/dial")
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+	}
+	conn, resp, err := dialer.Dial(url, http.Header{"Authorization": {"Bearer " + c.token}})
+	if err != nil {
+		status := 0
+		body := ""
+		if resp != nil {
+			status = resp.StatusCode
+			b, _ := io.ReadAll(resp.Body)
+			body = strings.TrimSpace(string(b))
+		}
+		return nil, status, fmt.Errorf("guest dial: %v %s", err, body)
+	}
+	return conn, resp.StatusCode, nil
 }
 
 func (w *wsConn) send(v any) error {
