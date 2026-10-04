@@ -46,6 +46,44 @@ Interactive/agent clients can also drive a PTY over the API:
 — that is exactly how the SSH gateway itself attaches. See
 [api.md](api.md#get-apileasesidstream--interactive-process-websocket).
 
+## Moving files in and out
+
+Leases expose a small file API under `/api/leases/{id}/files/{path}` —
+no scp needed. The path is guest-absolute and cleaned; uploads create
+missing parents, and every route counts as activity for the idle
+sweeper:
+
+```bash
+# Upload (the body becomes the file; ?mode= is octal, default 0644)
+curl -s -X PUT --data-binary @report.pdf \
+  "https://sandbox.example.com/api/leases/<id>/files/root/report.pdf?mode=0600" \
+  -H "Authorization: Bearer $TOKEN"
+# → 201 {"name":"report.pdf","size":51200,"mode":"600", …}
+
+# Metadata without the bytes
+curl -s "https://sandbox.example.com/api/leases/<id>/files/root/report.pdf?stat=1" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Download (application/octet-stream)
+curl -s -o report.pdf \
+  "https://sandbox.example.com/api/leases/<id>/files/root/report.pdf" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Make a directory (parents included, mode default 0755)
+curl -s -X POST "https://sandbox.example.com/api/leases/<id>/files/root/d?op=mkdir" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Remove (?recursive=1 for a non-empty directory)
+curl -s -X DELETE "https://sandbox.example.com/api/leases/<id>/files/root/report.pdf" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Files are capped at 256 MiB (`413` beyond), a suspended lease answers
+`409` until resumed, and an `http` share does not carry file access —
+only the owner (or an admin) reads and writes. See
+[api.md](api.md#apileasesidfilespath--lease-files) for the full
+contract.
+
 ## Interactive sessions
 
 ```bash

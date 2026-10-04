@@ -138,6 +138,55 @@ the per-owner concurrent exec/stream cap is reached. (There is no
 lease-busy `409` here: the concurrency guard on exec is the per-owner
 cap, which yields `429`.)
 
+### `…/api/leases/{id}/files/{path…}` — lease files
+
+Read and write files inside the lease's filesystem. `{path…}` is the
+guest-absolute path (everything after `/files/`); it is cleaned before
+use, so `…/files/a/../b` is `…/files/b`, and `..` can never escape the
+guest root — a path that cleans to `/` names no file and answers `404`.
+Access follows the strictest lease model: the **owner** (or an admin,
+who may act on any lease); a grantee's `http` share does **not** carry
+file content, and anyone else gets the usual `404`. Every call counts
+as activity for the idle sweeper. A suspended lease answers `409` on
+every file route (resume it first); a `lost` lease answers `410`. File
+counts and sizes are capped at **256 MiB**: a bigger upload is refused
+with `413` before anything is written, and a bigger download with
+`413` instead of the bytes.
+
+**`GET`** downloads the file: `200` with
+`Content-Type: application/octet-stream` and the raw bytes; `404` when
+it does not exist. With `?stat=1` the route returns the metadata
+instead:
+
+```json
+{"name":"motd","size":11,"mode":"640","mod_time":"2026-10-05T09:30:00Z","is_dir":false}
+```
+
+`mode` is the octal permission string, `mod_time` is RFC 3339, `is_dir`
+distinguishes a directory (its `size` is substrate-defined, `0` on the
+fake) from a file.
+
+**`PUT`** replaces the file with the request body (parents are created;
+an existing file is replaced, an existing directory in the way is a
+`409`). The mode comes from `?mode=0644` — octal, default `0644` —
+and is applied to the created file. Response `201` with the new file's
+stat document (as above).
+
+**`POST ?op=mkdir`** creates the directory and any missing parents.
+`?mode=0755` (octal, default `0755`) applies to the leaf directory;
+existing nodes are left untouched. Response `201` with the stat
+document; anything other than `op=mkdir` is `400`.
+
+**`DELETE`** removes the file or directory. `?recursive=1` removes a
+non-empty directory with everything under it; without it, a non-empty
+directory is refused with `409`. `204 No Content` on success, `404`
+when the path does not exist.
+
+Other errors: `400` for a malformed `mode` (not octal, or beyond
+`0777`: setuid, setgid and sticky bits are not applied, so they are
+refused) or a bad `op`; `429` when four file transfers (`GET` content
+or `PUT`) are already in flight on the backend.
+
 ### `GET /api/leases/{id}/stat` — guest metrics
 
 One-shot, stateless probe (loadavg/meminfo/netdev/df via exec, 5s

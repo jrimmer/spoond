@@ -24,6 +24,19 @@ summarised from README "Status".
   re-applied with a chmod afterwards. The fake substrate implements the same
   semantics on an in-memory per-sandbox filesystem (modes kept, parents
   created, `ErrNotFound`), cleared when the sandbox is deleted.
+- **Lease file API (#114).** `/api/leases/{id}/files/{path…}` puts the
+  substrate file methods on the wire: GET downloads a file
+  (`application/octet-stream`, or the metadata document with `?stat=1`),
+  PUT writes the request body (mode from `?mode=0644` octal, default
+  0644, parents created), `POST ?op=mkdir` creates directories (mode
+  default 0755), DELETE removes (`?recursive=1` for non-empty
+  directories). Owner or admin only — a share grant does not carry file
+  access — with the usual 404 for anyone else and 409 while the lease is
+  suspended. Paths are guest-absolute and cleaned; `..` cannot leave the
+  guest root. Transfers are capped at 256 MiB (413 beyond), and every
+  call counts as activity for the idle sweeper. Conformance group F2
+  writes, stats, reads and removes a file in a py-base lease through the
+  API and confirms the bytes from inside the guest.
 
 - **Readiness endpoint for uptime monitors (#81).** `GET /readyz` on the
   lease API listener (no auth, like `/healthz`) answers

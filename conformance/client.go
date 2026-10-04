@@ -104,6 +104,43 @@ func (c *client) delete(id string) (int, []byte, error) {
 	return c.do("DELETE", "/api/sandboxes/"+id, nil)
 }
 
+// filePut uploads raw bytes to the lease file at path (guest-absolute).
+func (c *client) filePut(id, path string, data []byte, query string) (int, []byte, error) {
+	req, err := http.NewRequest(http.MethodPut, c.base+"/api/leases/"+id+"/files"+path, bytes.NewReader(data))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	if query != "" {
+		req.URL.RawQuery = query
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, err
+}
+
+// fileGet downloads the lease file at path (guest-absolute).
+func (c *client) fileGet(id, path, query string) (int, []byte, error) {
+	return c.do("GET", "/api/leases/"+id+"/files"+path+"?"+query, nil)
+}
+
+// fileMkdir creates a directory (and missing parents) at path.
+func (c *client) fileMkdir(id, path, query string) (int, []byte, error) {
+	if query == "" {
+		query = "op=mkdir"
+	}
+	return c.do("POST", "/api/leases/"+id+"/files"+path+"?"+query, nil)
+}
+
+// fileDelete removes the path; recursive for directories.
+func (c *client) fileDelete(id, path, query string) (int, []byte, error) {
+	return c.do("DELETE", "/api/leases/"+id+"/files"+path+"?"+query, nil)
+}
+
 func (c *client) keepalive(id string, body map[string]any) (int, []byte, error) {
 	return c.do("POST", "/api/sandboxes/"+id+"/keepalive", body)
 }
