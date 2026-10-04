@@ -39,6 +39,7 @@ package spoonddash
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -306,7 +307,115 @@ func (d *dash) handler() http.Handler {
 	mux.HandleFunc("GET /{$}", d.handlePage)
 	mux.HandleFunc("GET /stream", d.handleStream)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
+	// Readiness (issue #81): 200 only when every source the dashboard
+	// reads answers — metrics, catalog and identity store. Auth-exempt
+	// like /healthz: an uptime monitor holds no credentials.
+	mux.HandleFunc("GET /readyz", d.handleReadyz)
 	return d.basicAuth(mux)
+}
+
+// handleReadyz reports whether the dashboard can reach its sources
+// (issue #81): the /metrics scrape, the SQLite catalog and the identity
+// store file — the same reads the collector loop makes each tick. 200
+// {"status":"ok"} when all pass, 503 {"status":"fail","checks":[…]}
+// naming the failing ones. A monitor pointing here learns about a stale
+// dashboard before a person staring at a frozen frame does.
+func (d *dash) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	checks := []dashCheck{
+		d.metricsReady(),
+		d.dbReady(),
+		d.usersReady(),
+	}
+	r := readyzResult{Status: "ok"}
+	for _, c := range checks {
+		if !c.OK {
+			r.Status = "fail"
+		}
+	}
+	r.Checks = checks
+	code := http.StatusServiceUnavailable
+	if r.Status == "ok" {
+		code = http.StatusOK
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(r)
+}
+
+// dashCheck is one dashboard readiness check's result.
+type dashCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
+// readyzResult is the /readyz response body.
+type readyzResult struct {
+	Status string      `json:"status"`
+	Checks []dashCheck `json:"checks,omitempty"`
+}
+
+// probeSource runs one source check under a 2 s bound: readiness is
+// answered from the live sources, not from the last snapshot, so a
+// source that dies between ticks is reported at once.
+func probeSource(name string, fn func(context.Context) error) dashCheck {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := fn(ctx); err != nil {
+		return dashCheck{Name: name, OK: false, Detail: err.Error()}
+	}
+	return dashCheck{Name: name, OK: true, Detail: "ok"}
+}
+
+// metricsReady probes the /metrics scrape endpoint with the configured
+// token. An empty token sends no Authorization header at all: a
+// hand-built Config (an embedding, a test) may leave METRICS_TOKEN
+// unset, and an Authorization header reading "Bearer ", a token of
+// literally nothing, is never what a probe means.
+func (d *dash) metricsReady() dashCheck {
+	return probeSource("metrics", func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.cfg.MetricsURL, nil)
+		if err != nil {
+			return err
+		}
+		if d.cfg.MetricsToken != "" {
+			req.Header.Set("Authorization", "Bearer "+d.cfg.MetricsToken)
+		}
+		resp, err := d.col.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("%s", resp.Status)
+		}
+		return nil
+	})
+}
+
+// dbReady opens the catalog read-only and runs a trivial query.
+func (d *dash) dbReady() dashCheck {
+	return probeSource("database", func(ctx context.Context) error {
+		db, err := sql.Open("sqlite", "file:"+d.cfg.DBPath+"?mode=ro&_pragma=busy_timeout(3000)")
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		var one int
+		return db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+	})
+}
+
+// usersReady checks the identity store file is readable — the source of
+// every name the dashboard shows.
+func (d *dash) usersReady() dashCheck {
+	return probeSource("identity store", func(context.Context) error {
+		f, err := os.Open(d.cfg.UsersFile)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
 }
 
 func cacheFor(h http.Handler) http.Handler {
@@ -316,11 +425,12 @@ func cacheFor(h http.Handler) http.Handler {
 	})
 }
 
-// basicAuth guards everything except /healthz.
+// basicAuth guards everything except /healthz and /readyz (the probe
+// endpoints uptime monitors hit, which hold no credentials).
 func (d *dash) basicAuth(next http.Handler) http.Handler {
 	user := []byte(d.cfg.User)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -32,6 +32,7 @@ type Fake struct {
 
 	execHandler func(sandboxID string, args []string) substrate.ExecResult
 	nodeInfo    substrate.NodeInfo
+	nodeInfoFn  func(ctx context.Context) (substrate.NodeInfo, error)
 	nodeErr     error
 	healthErrs  map[string]error
 	fails       []failSpec
@@ -228,11 +229,28 @@ func (f *Fake) UpdateEndAt(ctx context.Context, sandboxID string, endAt time.Tim
 
 func (f *Fake) NodeInfo(ctx context.Context) (substrate.NodeInfo, error) {
 	f.mu.Lock()
+	if f.nodeInfoFn != nil {
+		fn := f.nodeInfoFn
+		f.mu.Unlock()
+		if err := f.record("NodeInfo", ""); err != nil {
+			return substrate.NodeInfo{}, err
+		}
+		return fn(ctx)
+	}
 	defer f.mu.Unlock()
 	if err := f.record("NodeInfo", ""); err != nil {
 		return substrate.NodeInfo{}, err
 	}
 	return f.nodeInfo, f.nodeErr
+}
+
+// SetNodeInfoFunc overrides NodeInfo with a function (a test that needs
+// the call to hang until its context is cancelled, say). Clear it with
+// SetNodeInfo.
+func (f *Fake) SetNodeInfoFunc(fn func(ctx context.Context) (substrate.NodeInfo, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nodeInfoFn = fn
 }
 
 func (f *Fake) SetDraining(ctx context.Context, draining bool) error {

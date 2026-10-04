@@ -25,6 +25,20 @@ summarised from README "Status".
   semantics on an in-memory per-sandbox filesystem (modes kept, parents
   created, `ErrNotFound`), cleared when the sandbox is deleted.
 
+- **Readiness endpoint for uptime monitors (#81).** `GET /readyz` on the
+  lease API listener (no auth, like `/healthz`) answers
+  `200 {"status":"ok"}` only when the orchestrator's node info reports
+  healthy, the catalog answers a trivial query, and the snapshot disk and
+  hugepage pool are below the dashboard's danger levels (90 % / 92 %);
+  otherwise `503 {"status":"fail","checks":[…]}` names each failing
+  check with a reason. Every check is bounded to 2 s on its own and the whole
+  answer is cached for 5 s, so an external poller costs nothing. The
+  web dashboard serves `GET /readyz` the same way: 200 only when its
+  sources (the metrics scrape, the catalog, the identity store) answer.
+  `docs/operations.md` gains an example Gatus configuration watching
+  both `/readyz` endpoints and the SSH gateway port, with conditions on
+  status, response time and certificate expiry.
+
 ## [2.1.0] - 2026-10-04
 
 2.1 makes spoond a plain microVM utility again and gives it a terminal-style

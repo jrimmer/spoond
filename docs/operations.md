@@ -23,7 +23,69 @@ What the substrate is and why it behaves this way is
 | Identity store | `test -f /var/lib/spoond/users.json && stat -c '%a' /var/lib/spoond/users.json` (expect `600`) |
 
 `spoond dash` (below) is the watching surface; `spoond doctor` is the
-triage one.
+triage one; Gatus (above) is the machine that watches on its own.
+
+## Uptime monitoring (Gatus)
+
+For an external watcher, `/readyz` is the endpoint to poll: unlike
+`/healthz` (liveness — the process answers) it fails when a dependency
+is wrong, so a monitor pages before a human notices. Both listeners
+serve it without auth and bound each check to 2 s; the lease API caches
+its answer for 5 s, the dashboard answers live.
+
+- Lease API (`:8890`): `200 {"status":"ok"}` only when the
+  orchestrator reports the node healthy, the catalog answers a trivial
+  query, and the snapshot disk (danger ≥ 90 % used) and hugepage pool
+  (danger ≥ 92 % used) are below the dashboard's danger levels;
+  otherwise `503 {"status":"fail","checks":[{name, ok, detail}…]}`
+  names what failed (see [api.md](api.md)).
+- Web dashboard (`:8893`): `200` only when the metrics scrape, the
+  catalog and the identity store all answer.
+
+An example [Gatus](https://github.com/TwiN/gatus) configuration —
+hostnames and alerting are deployment choices; the checks and
+conditions are the point. The two HTTPS endpoints get all three:
+status, response time (staying inside the 2 s bound the endpoint
+itself enforces per check) and TLS certificate expiry; the SSH gateway
+speaks SSH, not TLS, so its check is a TCP connect with the connected
+and response-time conditions:
+
+```yaml
+endpoints:
+  - name: lease-api-readyz
+    url: https://vm2.lacy.casa:8890/readyz
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 2000"        # milliseconds; /readyz bounds every check to 2 s
+      - "[CERTIFICATE_EXPIRATION] > 72h"
+
+  - name: dashboard-readyz
+    url: https://vm2.lacy.casa:8893/readyz
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 2000"
+      - "[CERTIFICATE_EXPIRATION] > 72h" # needs DASH_TLS_CERT set, else drop this condition
+
+  - name: ssh-gateway
+    url: tcp://vm2.lacy.casa:2222       # a TCP connect proves the listener answers
+    interval: 30s
+    conditions:
+      - "[CONNECTED] == true"
+      - "[RESPONSE_TIME] < 2000"
+```
+
+`[CERTIFICATE_EXPIRATION] > 72h` pages while there is still time to
+renew — ahead of the 30-day expiry banner the dashboard draws for its
+own cert. If the gateway fronts a TLS listener of its own, give it the
+same certificate condition on that endpoint.
+
+The dashboard listens on every interface by default (`DASH_ADDR`,
+default `0.0.0.0:8893`); the backend follows `BIND_ADDR` — loopback
+when unset, a public bind in the full deployment. Either way, point
+Gatus at the public name behind the host's TLS termination so the
+certificate condition watches what visitors actually see.
 
 ## `spoond doctor`
 

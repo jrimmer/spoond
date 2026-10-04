@@ -5,7 +5,7 @@ set, plain HTTP otherwise). The resource is the **lease**; every route
 lives under `/api/leases/…`. `/api/sandboxes/…` is a permanent alias for
 the same routes — identical behavior, auth and responses — kept for
 every client written before 2.0; new code should use `/api/leases/…`.
-All endpoints except `/healthz`, the
+All endpoints except `/healthz`, `/readyz`, the
 `/api/admin/*` routes (which carry their own `ADMIN_TOKEN`) and the
 `/llm/` prefix (where the lease id in the path is the capability)
 require a bearer token (`/metrics` also accepts the scrape-only
@@ -434,6 +434,18 @@ otherwise the build's files are removed and the row marked deleted →
 No auth. `200 {"status":"ok","orchestrator":"<status>"}` when the
 orchestrator answers, `503 {"status":"degraded","orchestrator":"unreachable"}`
 when it does not — for Gatus/load balancers.
+
+### `GET /readyz`
+
+No auth. Readiness for an external uptime monitor: `200
+{"status":"ok"}` only when every check passes — the orchestrator's
+node info reports the node healthy, the catalog answers a trivial
+query, and the snapshot disk and hugepage pool sit below the
+dashboard's danger levels (90 % / 92 % used). Otherwise `503` with
+`{"status":"fail","checks":[{"name","ok","detail"}…]}` naming each
+failing check. Every check is bounded to 2 s and the answer is cached
+for 5 s. See [operations.md](operations.md) for a Gatus example; the
+dashboard listener serves a `/readyz` over its own sources too.
 
 ### `GET /metrics`
 
