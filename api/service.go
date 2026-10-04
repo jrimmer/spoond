@@ -280,6 +280,13 @@ type Service struct {
 	// caller re-sends them on its next exec. Keyed by lease id.
 	secretsMu     sync.Mutex
 	createSecrets map[string]map[string]string
+	// notifier receives the bus's person-relevant events (2.2, #117:
+	// lease lost, held-lease rule actions). Nil until SetNotifier; the
+	// notify loop is only started when it is set.
+	notifier NotifySink
+	// gcErr remembers the last snapshot GC pass's outcome for the
+	// notify checks (gc.failed). Set in NewService.
+	gcErr *gcTracker
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -301,12 +308,16 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		probeEnabled:  true,
 		probeTimeout:  20 * time.Second,
 		bus:           newEventBus(),
+		gcErr:         newGCTracker(),
 	}
 }
 
 // SetMetrics installs the Prometheus metrics collector (issue #20).
 // Called by the Server after NewServerWithLLM so the service can
-// record pool, lease and quota events.
+// record pool, lease and quota events. The same collector implements
+// the notifier's outcome counting (spoond_notifications_total, 2.2
+// #117); the notifier installed via SetNotifier need not be present
+// yet — the adapter is looked up when the notifier is set.
 func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 	s.metrics = m
 }
@@ -761,6 +772,11 @@ func (s *Service) Start(ctx context.Context) {
 	go s.runGCCatalogLoop(ctx)
 	// Node gauges (U11): refreshed every 15 s.
 	go s.runNodeMetricsLoop(ctx)
+	// Webhook notifications (2.2, #117): forward the bus's
+	// person-relevant events. Only when a notifier is installed.
+	if s.notifier != nil {
+		go s.runNotifyLoop(ctx)
+	}
 }
 
 // runNodeMetricsLoop refreshes the NodeInfo-derived gauges every 15 s.

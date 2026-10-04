@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -37,6 +38,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/jrimmer/spoond/v2/notify"
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate/e2b"
 
@@ -134,6 +136,8 @@ func runChecks(manifestPath string) []checkResult {
 	out = append(out, checkLLM()...)
 	out = append(out, checkTLS()...)
 	out = append(out, checkDisk()...)
+	out = append(out, checkWebhooks()...)
+	out = append(out, checkNotifyFailures()...)
 	out = append(out, checkDrainUnit()...)
 	return out
 }
@@ -855,4 +859,90 @@ func checkDrainUnit() []checkResult {
 		return []checkResult{{name, "FAIL", strings.Join(problems, "; ") + " (deploy/e2b/spoond-drain.service; docs/operations.md, Rebooting the host)"}}
 	}
 	return []checkResult{{name, "PASS", "spoond-drain enabled, active, ordered after spoond-backend and e2b-orchestrator"}}
+}
+
+// webhookProbe is the doctor's HTTP client for one reachability probe:
+// no redirects (a webhook endpoint has no business redirecting, and
+// following one would replay the probe's headers elsewhere), a bound
+// on how long the whole exchange may take. Replaced in tests.
+var webhookProbe = func(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, CheckRedirect: refuseProbeRedirect}
+}
+
+func refuseProbeRedirect(*http.Request, []*http.Request) error {
+	return fmt.Errorf("webhook redirected")
+}
+
+// checkWebhooks validates NOTIFY_WEBHOOKS (the backend's webhook
+// notification config) and probes each receiver's reachability with a
+// POST of the notifier's own one-line test message (`spoond notify
+// test` delivers the same). Webhooks are optional, so an unset
+// NOTIFY_WEBHOOKS only WARNs; a configured webhook that does not
+// answer 2xx FAILs. Errors and details name webhooks by index and
+// redacted scheme://host only — URLs and headers may carry secrets.
+func checkWebhooks() []checkResult {
+	v := strings.TrimSpace(os.Getenv("NOTIFY_WEBHOOKS"))
+	if v == "" {
+		return []checkResult{{"notify: webhooks", "WARN", "NOTIFY_WEBHOOKS unset — webhook notifications disabled"}}
+	}
+	hooks, err := notify.ParseWebhooks(v)
+	if err != nil {
+		return []checkResult{{"notify: webhooks", "FAIL", err.Error()}}
+	}
+	res := []checkResult{{"notify: webhooks", "PASS",
+		fmt.Sprintf("%d webhook(s) configured", len(hooks))}}
+	res = append(res, probeWebhooks(hooks)...)
+	return res
+}
+
+// probeWebhooks POSTs a test message to every configured webhook, in
+// parallel, and reports one reachability check per webhook: PASS on a
+// 2xx, FAIL otherwise, with the redacted error. Reuses the notifier's
+// sender, so the payload, headers and redaction rules are the ones
+// delivery uses.
+func probeWebhooks(hooks []notify.Webhook) []checkResult {
+	results := notify.SendTest(context.Background(), hooks, webhookProbeTimeout, nil)
+	out := make([]checkResult, 0, len(results))
+	for _, r := range results {
+		name := fmt.Sprintf("notify: webhook %d reachability", r.Webhook)
+		if r.Err == nil {
+			out = append(out, checkResult{name, "PASS", r.Redacted + " answered"})
+			continue
+		}
+		out = append(out, checkResult{name, "FAIL", r.Redacted + ": " + r.Err.Error()})
+	}
+	return out
+}
+
+// webhookProbeTimeout bounds one webhook's reachability probe (the
+// whole exchange: connect, request, response).
+const webhookProbeTimeout = 5 * time.Second
+
+// checkNotifyFailures reports the webhook deliveries the backend gave
+// up on in the last 24 hours, from the notifier's state file
+// (NOTIFY_STATE_FILE, default next to the database). Webhooks are
+// named by index; recorded errors are already redacted by the backend.
+// A missing state file means nothing was ever dropped.
+func checkNotifyFailures() []checkResult {
+	path := envOr("NOTIFY_STATE_FILE", filepath.Join(
+		filepath.Dir(envOr("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db")), "notify-state.json"))
+	fails, err := notify.LoadFailures(path, time.Now())
+	if err != nil {
+		return []checkResult{{"notify: dropped deliveries", "WARN",
+			fmt.Sprintf("read %s: %v", filepath.Base(path), err)}}
+	}
+	if len(fails) == 0 {
+		return []checkResult{{"notify: dropped deliveries", "PASS", "none in the last 24 h"}}
+	}
+	byHook := map[int]int{}
+	for _, f := range fails {
+		byHook[f.Webhook]++
+	}
+	parts := make([]string, 0, len(byHook))
+	for hook, n := range byHook {
+		parts = append(parts, fmt.Sprintf("webhook %d: %d dropped", hook, n))
+	}
+	sort.Strings(parts)
+	return []checkResult{{"notify: dropped deliveries", "WARN",
+		fmt.Sprintf("%d in the last 24 h (%s; %s)", len(fails), strings.Join(parts, ", "), filepath.Base(path))}}
 }

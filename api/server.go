@@ -118,6 +118,11 @@ func (s *Server) SetAdminToken(tok string) {
 	s.adminToken = tok
 }
 
+// Metrics exposes the server's Prometheus collector, for wiring that
+// happened after NewServerWithLLM and needs to feed the same registry
+// (the webhook notifier's spoond_notifications_total, 2.2 #117).
+func (s *Server) Metrics() *metrics.BackendMetrics { return s.metrics }
+
 // SetProxyAuth configures the public proxy listener's auth gate
 // (U7/T7). mode "off" (or "") keeps the capability model; mode
 // "forward-auth" requires the shared secret + Remote-User identity.

@@ -9,6 +9,7 @@
 //	spoond drain      orchestrator drain/undrain hook (U10)
 //	spoond dash       read-only live dashboard (basic auth)
 //	spoond top        the dashboard grid in the terminal
+//	spoond notify     webhook notification tools (`spoond notify test`)
 //	spoond version    version, commit and Go version
 //
 // Modules are optional at build time via Go build tags. Each subcommand
@@ -65,10 +66,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "top", "version"} {
+	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "top", "notify", "version"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}
 	}
-	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nodoctor, nodrain, nodash\n")
+	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nodoctor, nodrain, nodash, nonotify\n")
 }

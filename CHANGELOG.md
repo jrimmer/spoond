@@ -39,6 +39,36 @@ summarised from README "Status".
   Values are kept in the backend's memory only — never in the store,
   logs, error strings or metrics, never returned by any endpoint — so a
   backend restart loses them and callers re-send on their next exec.
+- **Webhook notifications for events that need a person (#117, spoond
+  2.2).** With `NOTIFY_WEBHOOKS` set, the backend pushes the events a
+  person should know about to ntfy, Slack or Discord (`slack` format
+  works for both), or any JSON receiver — instead of waiting for
+  someone to watch a dashboard. The sources are the lease event bus
+  (a lease `lost` is critical; a held-lease rule action is warn,
+  critical when it released) and a once-a-minute pass over the
+  standing conditions: a watched systemd unit not active (critical),
+  the snapshot disk past the dashboard's warn/danger levels (80 %/
+  90 %), the hugepage pool past its own (80 %/92 %), the TLS
+  certificate within 30 or 7 days (warn) or 1 day (critical), a
+  failed snapshot GC pass (warn), and the newest database backup
+  older than `BACKUP_MAX_AGE_SECS` (warn; default 93600 s = 26 h —
+  the 03:00 daily run plus one missed day). Every condition has a
+  stable key: repeats dedupe to one message per hour, and when a
+  condition clears one `resolved` message goes out — only for keys an
+  alert actually opened, so a healthy system stays silent. Delivery
+  is asynchronous per webhook, retries with exponential backoff for
+  up to an hour before a message is dropped and counted, and each
+  webhook is limited to 30 deliveries per hour. Receivers are matched
+  by `min_severity` and an optional key glob list. Webhook URLs and
+  headers may carry secrets and are never logged: everything names a
+  webhook by its index and a redacted `scheme://host`. Every outcome
+  is counted in
+  `spoond_notifications_total{webhook,severity,result}`. New package
+  `notify`; `spoond notify test` posts one test message to every
+  receiver and reports per-webhook results; `spoond doctor` probes
+  each receiver's reachability and reports dropped deliveries of the
+  last 24 h (mirrored to `NOTIFY_STATE_FILE`). Documented in
+  [docs/operations.md](operations.md#notifications-to-webhooks).
 - **Substrate file operations (#114).** `substrate.Substrate` gains
   `WriteFile`, `ReadFile`, `Stat`, `MakeDir` and `Remove` with
   `substrate.FileInfo` and a `substrate.ErrTooLarge` sentinel: file content

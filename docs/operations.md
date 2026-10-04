@@ -87,6 +87,89 @@ when unset, a public bind in the full deployment. Either way, point
 Gatus at the public name behind the host's TLS termination so the
 certificate condition watches what visitors actually see.
 
+## Notifications to webhooks
+
+Gatus pulls; webhooks push. With `NOTIFY_WEBHOOKS` set, the backend
+sends the events that need a person to your own push channels — ntfy,
+Slack or Discord, or anything that takes JSON — instead of waiting for
+someone to look at a dashboard. Unset (the default) keeps the notifier
+off entirely.
+
+The value is a JSON list; every entry is one receiver:
+
+```json
+[
+  {"url": "https://ntfy.example/spoond-alerts",
+   "format": "ntfy",
+   "min_severity": "warn",
+   "headers": {"Authorization": "Bearer tk_ntfy.example_xxx"}},
+  {"url": "https://discord.com/api/webhooks/123/abc",
+   "format": "slack",
+   "events": ["lease.*", "unit.*", "disk.*"]},
+  {"url": "https://hooks.example.internal/spoond",
+   "format": "json"}
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `url` | required, http(s). May carry secrets (tokens in path, query or userinfo) — see Secrets below |
+| `format` | `ntfy` (severity becomes the numeric priority plus a tag, topic from the URL path), `slack` (`{"text": …}` — Slack and Discord incoming webhooks both take it), or `json` (the event object itself) |
+| `min_severity` | floor: `info` (default), `warn` or `critical`. A resolved message carries the condition's own severity, so a warn webhook that heard about a problem also hears that it cleared |
+| `events` | optional key filter; exact keys or `*` globs (`disk.*`); empty means everything |
+| `headers` | optional extra request headers (auth tokens); never logged |
+
+What arrives, with its key and severity:
+
+| Key | Severity | When |
+|---|---|---|
+| `lease.lost.<lease-id>` | critical | a lease was lost (orchestrator crash, failed recovery) |
+| `held.<rule>.<lease-id>` | warn, critical on `release` | a held-lease rule acted on a lease |
+| `unit.inactive` | critical | a watched systemd unit (the backend, the SSH gateway) is not active |
+| `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
+| `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
+| `tls.cert.30d` / `.7d` / `.1d` | warn / warn / critical | the TLS certificate within 30, 7 or 1 day of expiry |
+| `gc.failed` | warn | the last snapshot catalog GC pass failed |
+| `backup.stale` | warn | the newest database backup older than its age limit — `BACKUP_MAX_AGE_SECS`, default 93600 (26 h: the 03:00 daily run plus one missed day) |
+
+Delivery rules:
+
+- Asynchronous: events are queued and delivered in the background; a
+  slow or dead webhook never blocks the lease API.
+- A failing delivery retries with exponential backoff (2 s, 4 s, 8 s
+  …) for up to an hour, then the message is dropped and counted.
+- The same key is delivered at most once per hour while a condition
+  keeps firing.
+- When a warn/critical condition clears, one `resolved` message goes
+  out for its key — and only then: a healthy deployment sends nothing.
+- Each webhook is rate-limited to 30 deliveries per hour; beyond that,
+  messages wait for the window to free.
+- Every outcome is counted in
+  `spoond_notifications_total{webhook,severity,result}` (see Metrics);
+  `webhook` is the receiver's index in `NOTIFY_WEBHOOKS`, `result` is
+  `sent`, `retry`, `dropped`, `deduped` or `rate_limited`.
+
+Secrets: webhook URLs and headers may carry tokens and are never
+logged. Logs, metrics, `spoond doctor` output and the state file name
+a webhook by its index and a redacted `scheme://host` only, delivery
+errors are stripped of anything URL-bearing, and a redirecting
+endpoint is treated as a failure rather than followed (following one
+would replay the configured headers elsewhere).
+
+Two tools close the loop:
+
+- `spoond notify test` posts one info message to every configured
+  webhook (in parallel) and prints a per-webhook PASS/FAIL line —
+  redacted. Exit 0 when all answered, 1 when any failed, 2 on a
+  configuration error. Use it after changing `NOTIFY_WEBHOOKS`.
+- `spoond doctor` (below) checks each webhook's reachability with the
+  same kind of POST and reports the deliveries the backend dropped in
+  the last 24 h, read from the notifier's state file
+  (`NOTIFY_STATE_FILE`, default `notify-state.json` next to the
+  database). A few retries that ended in `sent` are business as usual;
+  a stream of `dropped` means the receiver is down and nobody is being
+  paged.
+
 ## `spoond doctor`
 
 `spoond doctor` exercises every external surface the backend depends on
@@ -116,6 +199,8 @@ set -a; . /etc/spoond/backend.env; set +a
 | `llm gateway: upstream` / `key` / `/models` | upstream configured, key present, key accepted |
 | `tls: cert/key` | WARN when unconfigured (plain HTTP), FAIL when the pair does not load |
 | `disk: root` | WARN above 75% full, FAIL above 90% |
+| `notify: webhooks` | WARN when `NOTIFY_WEBHOOKS` is unset (notifications are optional), FAIL on a malformed list — one `notify: webhook N reachability` check per webhook, POSTing a test message; FAIL when the receiver does not answer 2xx |
+| `notify: dropped deliveries` | WARN when the backend gave up on webhook deliveries in the last 24 h (read from the notifier's state file, `NOTIFY_STATE_FILE`) |
 | `drain: shutdown unit` | FAIL unless `spoond-drain.service` is enabled, active and ordered after `spoond-backend` and `e2b-orchestrator`, and `/etc/e2b/drain.env` names a backend and a readable token file; without it a reboot loses every running lease (see Rebooting the host) |
 
 ## Backups
@@ -501,6 +586,7 @@ marker. The substrate-specific series:
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_capacity_rejections_total` | admission refusals |
 | `spoond_store_errors_total{op}` | SQLite write failures |
+| `spoond_notifications_total{webhook,severity,result}` | webhook notification delivery outcomes; `webhook` is the receiver's index in `NOTIFY_WEBHOOKS` (never its URL — the URL may carry secrets), `severity` is the message's grade, `result` is `sent`, `retry`, `dropped`, `deduped` or `rate_limited` |
 
 `spoond_leases{state="lost"}` above zero means an orchestrator crash
 happened — it is the number the soak watch uses. Deploying
