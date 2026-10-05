@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -114,5 +115,59 @@ func TestPersistSuspendedLeaseLoads(t *testing.T) {
 	}
 	if !got.Suspended {
 		t.Fatal("suspended flag not restored")
+	}
+}
+
+// TestPersistClassRoundTrip: a lease's class and priority (#128 part 2)
+// survive a restart — grant one burst lease with a priority, shut the
+// service down, and verify a new service on the same database loads
+// both (an unstamped lease reads as guaranteed).
+func TestPersistClassRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "spoond.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sub := newTestSub()
+	seedImage(t, db, "py-base", 2048)
+	svc := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
+
+	l, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Minute, burst: true, priority: 7})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if l.Class != ClassBurst || l.Priority != 7 {
+		t.Fatalf("granted lease class/priority = %s/%d, want burst/7", l.Class, l.Priority)
+	}
+	// A plain lease on the same service is guaranteed.
+	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("plain grant: %v", err)
+	}
+
+	svc.Shutdown(ctx)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	db2, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { db2.Close() })
+	svc2 := NewService(sub, db2, map[string]string{"t": "c"}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
+	if err := svc2.LoadState(ctx); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	got := svc2.lookup("c", l.ID)
+	if got == nil {
+		t.Fatalf("lease %s not loaded", l.ID)
+	}
+	if got.Class != ClassBurst || got.Priority != 7 {
+		t.Fatalf("loaded lease class/priority = %s/%d, want burst/7", got.Class, got.Priority)
+	}
+	if p := svc2.lookup("c", plain.ID); p == nil || p.Class != ClassGuaranteed {
+		t.Fatalf("plain lease class = %v, want guaranteed", p)
 	}
 }

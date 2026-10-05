@@ -96,13 +96,14 @@ func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 
 // classify decides a lease's class (#128 part 2): burst when the
 // request forced it (preemptible even within the guarantee) or when the
-// owner's running charge with this lease would pass their
+// owner's running charge — the leases live now plus the reservations
+// in flight, this lease already among them — passes their
 // guaranteed_mib; guaranteed otherwise — including every lease of a
 // user without a guaranteed_mib, which keeps today's behaviour, and
-// owners without an identity-store user (legacy consumer tokens).
-// memoryMB is the lease's own charge: the first lease past the
-// guarantee is the one that bursts.
-func (s *Service) classify(owner string, memoryMB int, burst bool) string {
+// owners without an identity-store user (legacy consumer tokens). The
+// charge is read at the moment of the decision: the first lease past
+// the guarantee is the one that bursts.
+func (s *Service) classify(owner string, burst bool) string {
 	if burst {
 		return ClassBurst
 	}
@@ -113,7 +114,7 @@ func (s *Service) classify(owner string, memoryMB int, burst bool) string {
 	if u == nil || u.GuaranteedMiB <= 0 {
 		return ClassGuaranteed
 	}
-	if s.usedMiB(owner)+memoryMB > u.GuaranteedMiB {
+	if s.usedMiB(owner) > u.GuaranteedMiB {
 		return ClassBurst
 	}
 	return ClassGuaranteed
@@ -127,7 +128,7 @@ func (s *Service) classify(owner string, memoryMB int, burst bool) string {
 // not repeated here: createSandbox runs it for every cold create, and
 // a guaranteed lease's admission is exactly what the reserve protects.
 func (s *Service) admitClass(ctx context.Context, owner string, memoryMB int, burst bool) (string, error) {
-	class := s.classify(owner, memoryMB, burst)
+	class := s.classify(owner, burst)
 	if class != ClassBurst {
 		return class, nil
 	}
