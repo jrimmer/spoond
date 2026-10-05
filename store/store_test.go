@@ -295,8 +295,10 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
+		`ALTER TABLE leases DROP COLUMN class`,
+		`ALTER TABLE leases DROP COLUMN priority`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12)`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -354,8 +356,10 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
+		`ALTER TABLE leases DROP COLUMN class`,
+		`ALTER TABLE leases DROP COLUMN priority`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12)`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -414,20 +418,23 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// Rewind to version 11 so migration 12 applies for real.
+	// Rewind to version 12 so migration 13 applies for real, and to 11
+	// so migration 12 (the memory_mb backfill this test pins) applies
+	// after it.
 	db11, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if _, err := db11.Exec(
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN class`,
+		`ALTER TABLE leases DROP COLUMN priority`,
+		`DELETE FROM schema_migrations WHERE version = 13`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
-	); err != nil {
-		t.Fatalf("rewind: %v", err)
-	}
-	if _, err := db11.Exec(
 		`DELETE FROM schema_migrations WHERE version = 12`,
-	); err != nil {
-		t.Fatalf("rewind version: %v", err)
+	} {
+		if _, err := db11.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
 	}
 	db11.Close()
 
