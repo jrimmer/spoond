@@ -12,6 +12,14 @@ summarised from README "Status".
 
 ### Added
 
+- **A per-owner kept-bytes budget (#126).** `POST
+  /api/users/{id}/quota` takes `max_kept_bytes` (user-record field,
+  `0` = none) beside `max_leases`/`max_ttl`. A keep whose fresh build
+  would push the owner's kept bytes (the recorded `size_bytes` over
+  their kept builds) past the budget answers `409` naming the budget and
+  the new `build_id`: the checkpoint was written but not pinned, so it
+  ages out like any unreferenced snapshot and the caller can retry
+  without `keep`.
 - **Kept checkpoints are capped per lease (#126).** `MAX_KEPT_PER_LEASE`
   (default 4, `0` = no cap) bounds how many builds one lease may pin
   with `{"keep":true}`. A keep on a lease already at the cap answers

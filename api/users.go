@@ -21,6 +21,7 @@ type UserView struct {
 	CreatedAt    string        `json:"created_at"`
 	MaxLeases    int           `json:"max_leases"`
 	MaxTTL       int           `json:"max_ttl"`
+	MaxKeptBytes int64         `json:"max_kept_bytes"`
 }
 
 func toUserView(u *identity.User) UserView {
@@ -33,6 +34,7 @@ func toUserView(u *identity.User) UserView {
 		CreatedAt:    u.CreatedAt,
 		MaxLeases:    u.MaxLeases,
 		MaxTTL:       u.MaxTTL,
+		MaxKeptBytes: u.MaxKeptBytes,
 	}
 }
 
@@ -186,18 +188,19 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		MaxLeases int `json:"max_leases"`
-		MaxTTL    int `json:"max_ttl"`
+		MaxLeases    int   `json:"max_leases"`
+		MaxTTL       int   `json:"max_ttl"`
+		MaxKeptBytes int64 `json:"max_kept_bytes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if req.MaxLeases < 0 || req.MaxTTL < 0 {
+	if req.MaxLeases < 0 || req.MaxTTL < 0 || req.MaxKeptBytes < 0 {
 		writeError(w, http.StatusBadRequest, "quota values must be >= 0")
 		return
 	}
-	if err := s.svc.identities.SetQuota(id, req.MaxLeases, req.MaxTTL); err != nil {
+	if err := s.svc.identities.SetQuota(id, req.MaxLeases, req.MaxTTL, req.MaxKeptBytes); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
