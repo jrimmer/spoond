@@ -270,6 +270,11 @@ type Service struct {
 	// recording (#125). Tests replace it to force a measurement
 	// failure, which permission bits cannot do when tests run as root.
 	diskUsage func(dir string) (int64, error)
+	// sizeSettleEvery/sizeSettleFor pace settleBuildSize: how often a
+	// fresh build is re-measured, and for how long at most. Tests shorten
+	// them.
+	sizeSettleEvery time.Duration
+	sizeSettleFor   time.Duration
 	// refreshMu serializes refreshPeers runs, which are scheduled
 	// asynchronously after lifecycle events (U09).
 	refreshMu sync.Mutex
@@ -1359,6 +1364,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	}); err != nil {
 		return "", fmt.Errorf("insert pause build: %w", err)
 	}
+	s.settleBuildSize(buildID)
 	// The new build's headers reference the blocks of other builds
 	// (A3 C3); GC keeps them (U11).
 	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
@@ -1668,6 +1674,7 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	if err := s.db.InsertBuild(ctx, b); err != nil {
 		return store.BuildRow{}, fmt.Errorf("insert checkpoint build: %w", err)
 	}
+	s.settleBuildSize(buildID)
 	// The new build's headers reference the blocks of other builds
 	// (A3 C3); GC keeps them (U11).
 	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {

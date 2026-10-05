@@ -622,3 +622,38 @@ func TestCloneBuildSizeAtWriteTime(t *testing.T) {
 		t.Fatalf("snapshot clone size_bytes = %d, %v; want %d", got, ok, want)
 	}
 }
+
+// TestBuildSizeSettles: a fresh build whose files are still being
+// written is re-measured until two readings agree, and that size is
+// recorded (the write-time reading was partial).
+func TestBuildSizeSettles(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	var mu sync.Mutex
+	readings := []int64{64000, 900000, 1400000, 1400000}
+	svc.diskUsage = func(string) (int64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		v := readings[0]
+		if len(readings) > 1 {
+			readings = readings[1:]
+		}
+		return v, nil
+	}
+	ctx := context.Background()
+	if err := db.InsertBuild(ctx, store.BuildRow{BuildID: "b-settle", Kind: "checkpoint", Image: "py-base", State: "ready", SizeBytes: 64000, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	svc.SetBuildSizeSettle(5*time.Millisecond, time.Second)
+	svc.settleBuildSize("b-settle")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b, err := db.GetBuild(ctx, "b-settle")
+		if err == nil && b.SizeBytes == 1400000 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("size = %d, want the settled 1400000", b.SizeBytes)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

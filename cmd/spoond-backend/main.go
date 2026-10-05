@@ -337,6 +337,10 @@ func Main(args []string) int {
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 	})
+	// A fresh build's memory file lands after Checkpoint/Pause return:
+	// re-measure it until its size settles (#125).
+	svc.SetBuildSizeSettle(2*time.Second, 10*time.Minute)
+
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
 	// a ping and then fails the job deep inside a build, so verify it from
 	// inside the guest before pooling or leasing it. SANDBOX_PROBE=0 disables.

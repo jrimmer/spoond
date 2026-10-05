@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fresh build's recorded size was partial.** The orchestrator
+  finishes writing a build's memory file after Checkpoint/Pause return,
+  so the size measured at write time (2.3.1, #125) was often 0 or a
+  fraction of the build (64,000 bytes for a 140 MB py-base checkpoint).
+  The backend now re-measures a fresh build every 2 s until two readings
+  agree (for up to 10 minutes) and records that size; the hourly pass
+  still corrects anything left. Until it settles, a kept-bytes budget
+  check (#126) can count a build low.
+
 ## [2.3.1] - 2026-10-05
 
 Limits for kept checkpoints, sizes recorded when builds are written, and
