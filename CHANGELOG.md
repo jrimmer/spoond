@@ -18,11 +18,15 @@ summarised from README "Status".
   A lease costs its image's `memory_mb`, and the sum over a user's
   **running** leases may not pass `max_mib` — a suspended lease holds
   no hugepages and is not charged, so suspending frees the budget and
-  resuming re-checks it. Create, clone and fork (each child's
-  `memory_mb`, reserved up front, all or nothing) and resume answer
-  `429` naming the memory limit when over; the reservation is atomic
-  with the lease count under the store lock, so racing creates cannot
-  blow past either cap. `GET /api/users/me` reports the charge as
+  resuming re-checks it. Every path that turns a suspended lease back
+  into a running one re-passes the check — resume, warm and cold
+  restart, restore, crash recovery, undrain — and those paths check
+  memory only: a user at their `max_leases` cap can still resume their
+  own suspended (or drained) lease. Create, clone and fork (each
+  child's `memory_mb`, reserved up front, all or nothing) and resume
+  answer `429` naming the memory limit when over; the reservation is
+  atomic with the lease count under the store lock, so racing creates
+  cannot blow past either cap. `GET /api/users/me` reports the charge as
   `used_mib` beside `guaranteed_mib`/`max_mib`; `GET /api/leases/{id}`
   shows the owner's `charged_mib`/`guaranteed_mib`/`max_mib`.
   **Migration:** none — a user with `max_leases > 0` and no `max_mib`

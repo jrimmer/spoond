@@ -589,10 +589,16 @@ means the disk needs attention the leases are paying for.
   the sum over a user's **running** leases may not pass `max_mib` — a
   suspended lease holds no hugepages and is not charged, so suspending
   frees the budget and resuming re-checks it (an over-budget resume
-  answers `429` and the lease stays suspended). Create, clone and fork
-  (each child's `memory_mb`, reserved up front, all or nothing) are
-  checked under the same lock as `max_leases`, so races cannot blow
-  past either cap. `guaranteed_mib` is the user's floor of host
+  answers `429` and the lease stays suspended). The same re-check runs
+  before any operation that turns a suspended lease back into a running
+  one: warm and cold restart, restore to a kept checkpoint, the crash
+  reconcile and undrain. Resuming adds no lease, so only `max_mib`
+  applies on those paths — a user at their `max_leases` cap can still
+  resume their own suspended (or drained) lease, and an over-budget
+  undrain leaves the lease drained (reported in `failed`) instead of
+  losing it. Create, clone and fork (each child's `memory_mb`, reserved
+  up front, all or nothing) are checked under the same lock as
+  `max_leases`, so races cannot blow past either cap. `guaranteed_mib` is the user's floor of host
   memory; admission does not count it against them. Watch a user's
   charge as `used_mib` on `GET /api/users/me` (and `charged_mib` on the
   lease detail).
@@ -602,9 +608,10 @@ means the disk needs attention the leases are paying for.
     from their current charge: `GET /api/users/me` (or `GET
     /api/users`) for `used_mib`, then `POST /api/users/{id}/quota` with
     `"max_mib": <MiB>` (and `"guaranteed_mib"` at most that). Setting a
-    quota deletes nothing, but it bites on the next grant or resume —
-    size `max_mib` before a drain, since a drained lease whose resume
-    fails the check comes back lost.
+    quota deletes nothing, but it bites on the next grant, resume,
+    restart, restore, recovery or undrain — size `max_mib` before a
+    drain; an undrain whose resume fails the check leaves the lease
+    drained (reported in `failed`) instead of losing it.
 - **Token/key hashes** are HMAC-SHA256 with a per-store salt (sidecar
   `<users-file>.salt`); back the salt up alongside the store or existing
   hashes become unverifiable on restore.

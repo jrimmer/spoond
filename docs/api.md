@@ -430,7 +430,10 @@ resume chain. A persistent lease restarted cold keeps being persistent,
 and a suspended lease restarted cold comes back running.
 
 Response `{"id":"…","status":"running","message":"lease restarted"}`.
-`404` unknown, `400` for an unknown mode, `409` when busy; a substrate
+`404` unknown, `400` for an unknown mode, `409` when busy; restarting a
+suspended lease brings its guest (and its hugepages) back, so it
+re-passes the owner's memory quota (#128): `429` when the charge would
+pass `max_mib` — the lease stays suspended, untouched. A substrate
 failure on the fresh-guest path (which does create a sandbox) surfaces
 as `500`, not `503` — unlike create, fork and clone, restart does not
 map capacity errors to `503`.
@@ -486,7 +489,10 @@ and pause builds all answer `404`, like a lease the caller cannot see.
 Works on a running or a suspended lease; a lease lost in a substrate
 crash answers `410` like every other route (restore does not resurrect
 it); `409` while another operation is in flight; a substrate capacity
-failure maps to `503`.
+failure maps to `503`. Restoring a suspended lease brings a running
+sandbox (and its hugepages) back, so it re-passes the owner's memory
+quota (#128): `429` when the charge would pass `max_mib` — the lease
+stays suspended, untouched.
 
 The lease keeps its id, owner, holder, name, network policy, exposed
 ports and `checkpoint_interval`. Everything else about the guest starts
