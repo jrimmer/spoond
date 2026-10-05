@@ -600,9 +600,10 @@ Send the last seen `id` as `Last-Event-ID` on reconnect:
   epoch change as a signal to re-list your leases.
 
 Every event is checked again as it is written: a stream only ever
-carries events stamped with the caller's owner id (admins: all).
-A `gap` marker is always delivered — it reports the caller's own
-stream, not a lease change.
+carries events stamped with the caller's owner id (admins: all, and
+the events-only `EVENTS_TOKEN` on its one route). A `gap` marker is
+always delivered — it reports the caller's own stream, not a lease
+change.
 
 A `gap` event is not part of the bus's sequence; it exists only in
 streams (and for in-process subscribers that fell behind, see below).
