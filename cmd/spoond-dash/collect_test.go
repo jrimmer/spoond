@@ -257,3 +257,16 @@ func TestEventLinesSubjectPrefersHolder(t *testing.T) {
 		t.Fatalf("owner not last resort: %q", lines[0].Text)
 	}
 }
+
+// TestEventLinesDetail: the event's detail follows the subject, with
+// build ids cut to 8 characters.
+func TestEventLinesDetail(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.events.add(dashEvent{At: at, Type: "suspended", LeaseID: "12aeb66651", Subject: "conformance",
+		Detail: "paused into build 1ede0933-20dc-40ee-9350-e6f77652a856"})
+	want := "04:15:59  suspended       12aeb66651  conformance                       paused into build 1ede0933"
+	if got := c.eventLines(at)[0].Text; got != want {
+		t.Fatalf("line = %q\nwant   %q", got, want)
+	}
+}

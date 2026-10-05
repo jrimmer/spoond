@@ -930,7 +930,7 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	for _, l := range expired {
-		s.release(ctx, l)
+		s.releaseBecause(ctx, l, "TTL expired")
 	}
 }
 
@@ -996,6 +996,12 @@ func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error)
 // sandboxes row, then the lease row; shares cascade. Builds are left for
 // U11's GC.
 func (s *Service) release(ctx context.Context, l *Lease) {
+	s.releaseBecause(ctx, l, "lease released")
+}
+
+// releaseBecause is release with the reason its released event carries
+// (the dashboard's events panel and SSE clients read it).
+func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	s.store.mu.Lock()
 	if l.released {
 		s.store.mu.Unlock()
@@ -1024,7 +1030,7 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, "lease released")
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, reason)
 }
 
 // errQuotaExceeded is returned when a user hits their concurrent-lease

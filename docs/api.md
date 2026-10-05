@@ -711,7 +711,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `event` | emitted when | `detail` names |
 |---|---|---|
 | `created` | a lease is granted, forked or cloned | the source image (forks: the source lease and build; clones: the source lease and checkpoint build) |
-| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release) | the release |
+| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release) | why: `deleted through the API`, `TTL expired`, `released by a held-lease rule` (or `lease released`) |
 | `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse) | the pause build id |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume) | the resume build id |
 | `checkpointed` | a running lease is checkpointed | the checkpoint build id |

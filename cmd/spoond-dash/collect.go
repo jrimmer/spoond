@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -580,7 +581,9 @@ const eventPanelRows = 5
 // eventLines renders the buffered lease events as the panel's lines,
 // newest first, at most eventPanelRows of them:
 //
-//	HH:MM:SS  <type padded to 14>  <lease id 10>  <subject>
+//	HH:MM:SS  <type padded to 14>  <lease id 10>  <subject 32>  <detail>
+//
+// (the detail is the event's own text, build ids shortened)
 //
 // (14 fits the longest type, holder_cleared, so the columns line up.)
 //
@@ -604,7 +607,8 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 			lines = append(lines, EventLine{Text: at + "  ┄ events missed while reconnecting", Style: "warn"})
 			continue
 		}
-		text := fmt.Sprintf("%s  %-14s  %-10s  %s", at, ev.Type, ev.LeaseID, eventSubject(ev, rows, names))
+		text := strings.TrimRight(fmt.Sprintf("%s  %-14s  %-10s  %-32s  %s", at, ev.Type, ev.LeaseID,
+			ellipsize(eventSubject(ev, rows, names), 32), shortBuildIDs(ev.Detail)), " ")
 		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev.Type)})
 	}
 	return lines
@@ -979,3 +983,12 @@ func dur(d time.Duration) string {
 }
 
 func round1(v float64) float64 { return float64(int64(v*10+0.5)) / 10 }
+
+// uuidRe matches a build id (a UUID) inside an event detail.
+var uuidRe = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+
+// shortBuildIDs shortens the build ids in an event detail to their first
+// 8 characters, so "paused into build 1ede0933-20dc-…" fits the panel.
+func shortBuildIDs(detail string) string {
+	return uuidRe.ReplaceAllStringFunc(detail, func(id string) string { return id[:8] })
+}

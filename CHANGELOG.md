@@ -10,6 +10,21 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **The dashboard's sparklines vanished after the first frame.** The
+  page's stream sent the throughput history with its first frame only,
+  so every later frame redrew the graphs empty; it now sends it with
+  each frame.
+
+### Changed
+
+- **The events panel shows each event's detail** after its subject
+  (`granted from image py-base`, `paused into build 1ede0933`, …; build
+  ids cut to 8 characters), and a `released` event now says why:
+  `deleted through the API`, `TTL expired` or `released by a held-lease
+  rule`. The page hides its scrollbar (it still scrolls).
+
 ## [2.3.2] - 2026-10-05
 
 Upgrading: no schema change.

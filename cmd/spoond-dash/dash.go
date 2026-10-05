@@ -529,12 +529,11 @@ func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
 		d.mu.Unlock()
 	}()
 
-	first := true
 	for {
-		var hist map[string][]float64
-		if first {
-			hist = d.history()
-		}
+		// Every frame carries the sparkline history: without it the
+		// throughput rows redraw empty right after the page's first
+		// frame (the graphs showed for a moment, then vanished).
+		hist := d.history()
 		d.mu.Lock()
 		s := d.last
 		d.mu.Unlock()
@@ -542,7 +541,6 @@ func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fl.Flush()
-		first = false
 		select {
 		case <-r.Context().Done():
 			return

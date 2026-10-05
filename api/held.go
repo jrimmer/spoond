@@ -325,7 +325,7 @@ func (s *Service) heldIdleTimeout(ctx context.Context, now time.Time) (time.Dura
 // space becomes visible). Draining must be checked by the caller (the
 // sweep does).
 func (s *Service) releaseHeld(ctx context.Context, l *Lease) {
-	s.release(ctx, l)
+	s.releaseBecause(ctx, l, "released by a held-lease rule")
 }
 
 // releaseSuspendedHeldUntil implements rule 5: while the snapshot disk

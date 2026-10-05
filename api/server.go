@@ -1910,7 +1910,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	s.svc.release(r.Context(), lease)
+	s.svc.releaseBecause(r.Context(), lease, "deleted through the API")
 	w.WriteHeader(http.StatusNoContent)
 }
 
