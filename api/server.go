@@ -1350,6 +1350,11 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errBadRestartMode):
 			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, errQuotaExceeded):
+			// Restarting a suspended lease brings its guest (and its
+			// hugepages) back, so it re-passes the memory check (#128):
+			// over max_mib answers 429 and the lease stays suspended.
+			writeError(w, http.StatusTooManyRequests, err.Error())
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")

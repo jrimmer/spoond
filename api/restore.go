@@ -173,6 +173,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		case errors.Is(err, errQuotaExceeded):
+			// Restoring a suspended lease brings a running sandbox (and
+			// its hugepages) back, so it re-passes the memory check
+			// (#128): over max_mib answers 429 and the lease stays as it
+			// was.
+			writeError(w, http.StatusTooManyRequests, err.Error())
 		default:
 			s.svc.log.Printf("restore %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restore failed")

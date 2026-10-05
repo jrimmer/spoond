@@ -62,6 +62,18 @@ func createSandboxBody(t *testing.T, h http.Handler, token, body string) (*httpt
 	return rec, parsed
 }
 
+// postLeaseAction POSTs to a lease action route (resume, restart,
+// restore) as the token and returns the recorder.
+func postLeaseAction(t *testing.T, h http.Handler, token, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 // TestMemQuota429OverMaxMiB: a 4096 + 4096 pair over a max_mib of 6144
 // admits the first lease and answers 429 naming the memory limit for
 // the second.
@@ -93,6 +105,48 @@ func TestMemQuota429OverMaxMiB(t *testing.T) {
 	}
 	if _, ok := u["guaranteed_mib"]; !ok {
 		t.Fatal("users/me should carry guaranteed_mib")
+	}
+}
+
+// TestMemQuotaExactFitRace: two racing creates where the cap exactly
+// fits one lease (2048 image over max_mib 2048 — the admitted lease
+// fills the cap to the byte) must admit exactly one under concurrency —
+// a reservation in flight must never be counted twice (which would
+// refuse the second create even though only one landed).
+func TestMemQuotaExactFitRace(t *testing.T) {
+	_, h, tok, _ := newMemQuotaServer(t, map[string]int{"mid": 2048}, `{"max_mib":2048}`)
+
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i := range codes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec, _ := createSandboxAs(t, h, tok, "mid")
+			codes[i] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+	ok, refused := 0, 0
+	for _, c := range codes {
+		switch c {
+		case http.StatusCreated:
+			ok++
+		case http.StatusTooManyRequests:
+			refused++
+		}
+	}
+	if ok != 1 || refused != 1 {
+		t.Fatalf("exact-fit racing creates: %d created, %d refused, want one of each (codes=%v)", ok, refused, codes)
+	}
+	// The single grant's charge is the whole story: used_mib is 2048,
+	// and the reservation left no residue.
+	rec, body := doUsersReq(t, h, "GET", "/api/users/me", tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("users/me: %d", rec.Code)
+	}
+	if got := int(body["user"].(map[string]any)["used_mib"].(float64)); got != 2048 {
+		t.Fatalf("used_mib after the race = %d, want 2048", got)
 	}
 }
 
@@ -139,10 +193,7 @@ func TestMemQuotaResumeChecked(t *testing.T) {
 		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
 	}
 	// Resuming the first would push the charge to 8192 over a 4096 cap.
-	rec2 := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/sandboxes/"+id+"/resume", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	h.ServeHTTP(rec2, req)
+	rec2 := postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/resume", "")
 	if rec2.Code != http.StatusTooManyRequests {
 		t.Fatalf("resume = %d, want 429 (%s)", rec2.Code, rec2.Body.String())
 	}
@@ -156,30 +207,243 @@ func TestMemQuotaResumeChecked(t *testing.T) {
 	}
 }
 
-// TestMemQuotaConcurrent: two racing creates over a max_mib that fits
-// only one lease yield exactly one 201 (pending-MiB reservations hold).
-func TestMemQuotaConcurrent(t *testing.T) {
-	_, h, tok, _ := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":6144}`)
+// TestMemQuotaResumeNotCountCapped: resuming your own suspended lease
+// adds no lease, so a user at their max_leases cap can still resume it
+// (the count cap stays for creates; memory is what resume re-checks).
+func TestMemQuotaResumeNotCountCapped(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_leases":1}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
 
-	var wg sync.WaitGroup
-	codes := make([]int, 2)
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			rec, _ := createSandboxAs(t, h, tok, "big")
-			codes[i] = rec.Code
-		}(i)
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
-	wg.Wait()
-	ok := 0
-	for _, c := range codes {
-		if c == http.StatusCreated {
-			ok++
-		}
+	id := first["id"].(string)
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
 	}
-	if ok != 1 {
-		t.Fatalf("racing creates over max_mib: %d succeeded, want 1 (codes=%v)", ok, codes)
+	// The suspended lease still counts toward max_leases, so a create
+	// is refused by the count cap…
+	rec, _ = createSandboxAs(t, h, tok, "big")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("create at the count cap = %d, want 429", rec.Code)
+	}
+	// …but the resume of the user's own lease must not be.
+	if rec := postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/resume", ""); rec.Code != http.StatusOK {
+		t.Fatalf("resume at the count cap = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if l := svc.lookup(uid, id); l == nil || !l.live() {
+		t.Fatal("resume should have brought the lease back running")
+	}
+}
+
+// TestMemQuotaUndrainSurvivesCountCap: undrain resumes drained leases
+// through the resume path, which now checks only memory — a user at
+// their max_leases cap gets their drained leases back, not lost ones.
+func TestMemQuotaUndrainSurvivesCountCap(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "big", 4096)
+	ids, _ := identity.NewStore("")
+	svc.SetIdentities(ids)
+	srv := NewServer(svc, NewImageRegistry(db))
+	srv.SetAdminToken("admin-tok")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	u, err := ids.AddUser("worker", identity.KindPerson, []string{"SHA256:fp-b"}, "work-tok")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := ids.SetQuota(u.ID, 1, 0, 0, 0, 0); err != nil {
+		t.Fatalf("set quota: %v", err)
+	}
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, u.ID, "big", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/admin/drain", "admin-tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("drain = %d (%v), want 200", resp.StatusCode, body)
+	}
+	resp, body = doReq(t, "POST", ts.URL+"/api/admin/undrain", "admin-tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("undrain = %d (%v), want 200", resp.StatusCode, body)
+	}
+	if body["resumed"] != float64(1) {
+		t.Fatalf("undrain resumed = %v, want 1", body["resumed"])
+	}
+	if failed, ok := body["failed"].([]any); !ok || len(failed) != 0 {
+		t.Fatalf("undrain failed = %v, want an empty list", body["failed"])
+	}
+	if got := l.State; got != "running" {
+		t.Fatalf("drained lease after undrain = %s, want running (not lost)", got)
+	}
+	if ids := sub.sandboxesLive(t); len(ids) != 1 {
+		t.Fatalf("undrained lease's sandbox should be live, got %v", ids)
+	}
+}
+
+// TestMemQuotaRestartColdChecked: a cold restart of a suspended lease
+// brings a fresh running guest back, so it re-passes the memory check —
+// over max_mib it answers 429 and the lease stays suspended, unchanged.
+func TestMemQuotaRestartColdChecked(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	sandbox := svc.lookup(uid, id).SandboxID
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	// Spend the budget while the lease is suspended.
+	rec, _ = createSandboxAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/restart?mode=cold", "")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("cold restart = %d %s, want 429", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "memory") {
+		t.Fatalf("cold restart 429 should name the memory limit, got %s", rec.Body.String())
+	}
+	l := svc.lookup(uid, id)
+	if l == nil || !l.Suspended || l.SandboxID != sandbox {
+		t.Fatal("refused cold restart must leave the lease suspended, untouched")
+	}
+}
+
+// TestMemQuotaRestartWarmChecked: a warm restart of a suspended lease
+// resumes it, so it re-passes the memory check too.
+func TestMemQuotaRestartWarmChecked(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	rec, _ = createSandboxAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/restart", "")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("warm restart of a suspended lease = %d %s, want 429", rec.Code, rec.Body.String())
+	}
+	if l := svc.lookup(uid, id); l == nil || !l.Suspended {
+		t.Fatal("refused warm restart must leave the lease suspended")
+	}
+}
+
+// TestMemQuotaRestartFitsAfterSuspend: the suspend freed the charge, so
+// restarting the suspended lease within the budget works — the check
+// admits, it does not block suspended work.
+func TestMemQuotaRestartFitsAfterSuspend(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if rec := postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/restart?mode=cold", ""); rec.Code != http.StatusOK {
+		t.Fatalf("cold restart within the budget = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if l := svc.lookup(uid, id); l == nil || !l.live() {
+		t.Fatal("cold restart should have brought the lease back running")
+	}
+}
+
+// TestMemQuotaRestoreChecked: restoring a suspended lease in place
+// brings a running sandbox back, so it re-passes the memory check.
+func TestMemQuotaRestoreChecked(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	b, err := svc.checkpointLease(context.Background(), l)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if err := svc.keepBuild(context.Background(), id, b.BuildID); err != nil {
+		t.Fatalf("keep: %v", err)
+	}
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	// Spend the budget while the lease is suspended.
+	rec, _ = createSandboxAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/restore", `{"build_id":"`+b.BuildID+`"}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("restore of a suspended lease = %d %s, want 429", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "memory") {
+		t.Fatalf("restore 429 should name the memory limit, got %s", rec.Body.String())
+	}
+	if l := svc.lookup(uid, id); l == nil || !l.Suspended {
+		t.Fatal("refused restore must leave the lease suspended")
+	}
+}
+
+// TestMemQuotaRecoveryChecked: the crash reconcile turns a suspended
+// lease's sandbox back on, so it passes the memory check too.
+func TestMemQuotaRecoveryChecked(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	if _, err := svc.checkpointLease(context.Background(), l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	// Spend the budget while the lease is suspended.
+	rec, _ = createSandboxAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := svc.recoverFromCheckpoint(context.Background(), l); err == nil {
+		t.Fatal("recovery of a suspended lease past the memory cap should fail")
+	} else if !strings.Contains(err.Error(), "memory") {
+		t.Fatalf("recovery error should name the memory limit, got %v", err)
+	}
+	if l := svc.lookup(uid, id); l == nil || !l.Suspended {
+		t.Fatal("refused recovery must leave the lease suspended")
 	}
 }
 
@@ -318,6 +582,50 @@ func TestMemQuotaLegacyRowsUnchanged(t *testing.T) {
 	rec, _ = createSandboxAs(t, h, tok, "big")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("third create = %d, want 429", rec.Code)
+	}
+}
+
+// TestMemQuotaPreQuotaLeaseResume: a lease persisted before the charge
+// stamp existed (memory_mb 0 in the store) resumes without a memory
+// charge — visible to the operator in the log, never blocked on a
+// missing stamp.
+func TestMemQuotaPreQuotaLeaseResume(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	// Simulate a row written before the stamp: memory_mb back to 0.
+	l.MemoryMB = 0
+	svc.store.mu.Lock()
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+
+	// Resume is admitted (the uncharged lease logs and passes), and the
+	// row keeps its 0 until the lease is rebuilt.
+	if rec := postLeaseAction(t, h, tok, "/api/sandboxes/"+id+"/resume", ""); rec.Code != http.StatusOK {
+		t.Fatalf("resume of an unstamped lease = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	rows, err := svc.db.ListLeases(context.Background())
+	if err != nil {
+		t.Fatalf("list leases: %v", err)
+	}
+	var mb int
+	for _, r := range rows {
+		if r.ID == id {
+			mb = r.MemoryMB
+		}
+	}
+	if mb != 0 {
+		t.Fatalf("pre-quota lease should keep memory_mb 0 across a resume, got %d", mb)
 	}
 }
 
