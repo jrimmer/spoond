@@ -294,8 +294,9 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN last_action_at`,
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
+		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11)`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -352,8 +353,9 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
+		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11)`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -381,5 +383,71 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 	}
 	if rows[0].Generation != 1 {
 		t.Fatalf("generation not defaulted to 1: %d", rows[0].Generation)
+	}
+}
+
+// TestMigration12MemoryMBBackfill: the per-lease memory charge (#128)
+// backfills from the image row — and a lease whose image row is gone
+// stays 0 (uncharged), like a new lease of a vanished image.
+func TestMigration12MemoryMBBackfill(t *testing.T) {
+	db, path := openTestDB(t)
+	ctx := context.Background()
+	if err := db.UpsertImage(ctx, ImageRow{
+		Name: "py-base", TemplateID: "t-1", MemoryMB: 2048, DiskMB: 5120,
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed image: %v", err)
+	}
+	for _, id := range []string{"lease-with-image", "lease-without-image"} {
+		if err := db.UpsertLease(ctx, LeaseRow{
+			ID: id, Owner: "alice", Image: "py-base",
+			CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+			LastActive: time.Now(), State: "running",
+		}); err != nil {
+			t.Fatalf("seed lease %s: %v", id, err)
+		}
+	}
+	if _, err := db.w.ExecContext(ctx, `UPDATE leases SET image = 'gone' WHERE id = 'lease-without-image'`); err != nil {
+		t.Fatalf("detach image: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Rewind to version 11 so migration 12 applies for real.
+	db11, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, err := db11.Exec(
+		`ALTER TABLE leases DROP COLUMN memory_mb`,
+	); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+	if _, err := db11.Exec(
+		`DELETE FROM schema_migrations WHERE version = 12`,
+	); err != nil {
+		t.Fatalf("rewind version: %v", err)
+	}
+	db11.Close()
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	rows, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]int{}
+	for _, r := range rows {
+		got[r.ID] = r.MemoryMB
+	}
+	if got["lease-with-image"] != 2048 {
+		t.Fatalf("memory_mb not backfilled from the image row: %d", got["lease-with-image"])
+	}
+	if got["lease-without-image"] != 0 {
+		t.Fatalf("memory_mb of a lease with no image row should stay 0, got %d", got["lease-without-image"])
 	}
 }
