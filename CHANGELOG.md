@@ -32,6 +32,27 @@ summarised from README "Status".
   **Migration:** none — a user with `max_leases > 0` and no `max_mib`
   keeps working unchanged; set `max_mib` explicitly per user (see
   docs/operations.md, "Memory quotas").
+- **Guaranteed and burst leases (#128, part 2).** Every lease is
+  admitted as `guaranteed` or `burst`, decided at admission and
+  persisted with it (**migration 0013** adds `class` and `priority` to
+  `leases`; existing rows become `guaranteed`, which keeps their
+  behaviour). `guaranteed` is today's admission: the owner's running
+  charge with this lease stays within their `guaranteed_mib` — and a
+  user with no `guaranteed_mib` keeps every lease guaranteed. `burst`
+  covers work above the guarantee (the first lease past it bursts) or
+  forced with `"burst": true` on create — preemptible even within
+  another user's guarantee, and admissible only while the node's free
+  hugepages stay above `BURST_RESERVE_MIB` (default `8192`, `0`
+  disables; see docs/operations.md) after its own, so guaranteed work
+  and crash recovery always have room to land. A burst lease refused on
+  the reserve answers `503` `no burst capacity` with `Retry-After: 30`
+  on every admission path — create, resume, restart, restore, fork,
+  clone — and stays as it was; an undrain defers it (drained, retried
+  later) instead of losing it. Create takes `"priority"` (int, default
+  `0`): preemption order within a class, lower preempted first,
+  advisory until part 3. `class` and `priority` ride every lease row
+  and detail; the dashboard marks burst rows (`▶ running·b`) and adds
+  `burst N` to the capacity panel.
 
 ## [2.3.3] - 2026-10-05
 

@@ -444,6 +444,21 @@ size) is below the image's `memory_mb`, or when the node is not
 If creates start failing this way, check `grep HugePages_
 /proc/meminfo` and `spoond_node_hugepages_free_bytes` first.
 
+**Burst leases keep a reserve** (#128 part 2). Every lease is admitted
+`guaranteed` or `burst` (see Users & identity below): guaranteed when
+the owner's running charge with the lease stays within their
+`guaranteed_mib`, burst above it or when the request forces it. A burst
+lease is admitted only while the node's free hugepages (the same
+`spoond_node_hugepages_free_bytes` source, cached at most 15 s) stay
+above the reserve after its own — so guaranteed work and crash recovery
+always have room to land even when burst tenants fill the node. The
+reserve is `BURST_RESERVE_MIB`, default `8192` (8 GiB); `0` disables
+it. A burst lease refused on the reserve answers `503` `no burst
+capacity` with `Retry-After: 30` and the lease stays as it was; the
+reserve frees as guaranteed work suspends. Size it from your crash
+recovery headroom: everything you want a recovered lease to be able to
+resume into, minus what guaranteed tenants are entitled to.
+
 `POOL_SIZE` pre-creates that many sandboxes per image with a current
 build so grants are served without a cold restore. Production runs
 `POOL_SIZE=0` — with snapshot restores, a cold grant is tens of
@@ -602,6 +617,20 @@ means the disk needs attention the leases are paying for.
   is the user's floor of host memory; admission does not count it
   against them. Watch a user's charge as `used_mib` on
   `GET /api/users/me` (and `charged_mib` on the lease detail).
+- **Lease classes** (#128 part 2): every lease is `guaranteed` or
+  `burst`, decided at admission and stored with it (dashboard: `▶
+  running·b` and `burst N` in the capacity panel). A lease past the
+  owner's `guaranteed_mib` bursts, as does one created with
+  `"burst": true`; a user with no `guaranteed_mib` keeps every lease
+  guaranteed. A burst lease is preemptible even within another user's
+  guarantee and is held to the node's burst reserve — `BURST_RESERVE_MIB`,
+  default `8192` (see Capacity and the warm pool above): refused with
+  `503` `no burst capacity` (`Retry-After: 30`) while free hugepages
+  would dip under it. Every re-admission re-decides the class — a
+  guarantee-burst lease can fall back to guaranteed when the charge has
+  room, a request-burst one stays burst — and an undrain whose burst
+  lease cannot fit the reserve leaves it drained for a retry, like the
+  over-quota case above.
   - **Migration:** none, by design. A user with `max_leases > 0` and no
     `max_mib` keeps working unchanged — no count is converted into a
     memory number. To cap a user's memory, set it explicitly, sizing it
