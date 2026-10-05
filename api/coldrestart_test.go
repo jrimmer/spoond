@@ -1,7 +1,7 @@
 package api
 
 import (
-	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -195,4 +195,28 @@ func TestRestartBadMode(t *testing.T) {
 	}
 }
 
-type contextT = context.Context
+// TestColdRestartCreateFailureKeepsLease: when the fresh guest cannot be
+// created, the cold restart fails and the lease keeps its old sandbox
+// (the old one is only deleted after the new one exists).
+func TestColdRestartCreateFailureKeepsLease(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := t.Context()
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	old := l.SandboxID
+	sub.FailCall("Create", 0, errors.New("no capacity"))
+	if _, err := svc.restart(ctx, "c", l.ID, "cold"); err == nil {
+		t.Fatal("cold restart with a failing create succeeded")
+	}
+	if l.SandboxID != old {
+		t.Fatalf("sandbox changed to %q after a failed cold restart, want %q", l.SandboxID, old)
+	}
+	for _, c := range sub.CallLog() {
+		if c == "Delete "+old {
+			t.Fatal("the old sandbox was deleted although no new one was created")
+		}
+	}
+}

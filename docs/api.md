@@ -571,7 +571,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `checkpointed` | a running lease is checkpointed | the checkpoint build id |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
-| `restarted` | `POST /api/leases/{id}/restart` completed | snapshot round-trip or the image it cold-restarted from |
+| `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |

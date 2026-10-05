@@ -1536,8 +1536,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 // longer its resume point (the next suspend sets it as usual). A
 // suspended lease comes back running.
 func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lease, error) {
-	_ = s.sub.Delete(ctx, l.SandboxID)
-	s.deleteSandboxRow(l.SandboxID)
+	// The fresh guest is created before the old one goes: a failed
+	// create (no capacity, the image gone) leaves the lease exactly as it
+	// was, running or suspended, instead of live with no sandbox.
 	img, b, err := s.imageBuild(ctx, l.Image)
 	if err != nil {
 		return nil, err
@@ -1545,6 +1546,10 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	sb, err := s.createSandbox(ctx, img, b, false, "", l)
 	if err != nil {
 		return nil, err
+	}
+	if old := l.SandboxID; old != "" && old != sb.ID {
+		_ = s.sub.Delete(ctx, old)
+		s.deleteSandboxRow(old)
 	}
 	s.store.mu.Lock()
 	l.SandboxID = sb.ID
