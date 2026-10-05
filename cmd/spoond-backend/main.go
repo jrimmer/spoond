@@ -161,7 +161,14 @@ func notifyBackupMaxAge() time.Duration {
 // which reads the same knob) — the check is only registered when the
 // value is positive.
 func keptDiskWarnPct() float64 {
-	return float64(envIntOr("KEPT_DISK_WARN_PCT", int(notify.DefaultKeptDiskWarnPct)))
+	// Parsed as a float, as the dashboard parses the same knob, so a
+	// fractional setting (40.5) means the same in both.
+	if v := os.Getenv("KEPT_DISK_WARN_PCT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+	}
+	return notify.DefaultKeptDiskWarnPct
 }
 
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
