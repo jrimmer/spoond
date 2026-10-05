@@ -127,6 +127,7 @@ What arrives, with its key and severity:
 | `held.<rule>.<lease-id>` | warn, critical on `release` | a held-lease rule acted on a lease |
 | `unit.inactive.<unit>` | critical | a watched systemd unit is not active. `NOTIFY_UNITS` lists them, comma-separated; the default is `e2b-orchestrator.service,spoond-sshd-gateway.service`, and `none` watches nothing (a host without systemd, where every probe would fail) |
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
+| `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
 | `tls.cert.30d` / `.7d` / `.1d` | warn / warn / critical | the TLS certificate within 30, 7 or 1 day of expiry |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
@@ -263,6 +264,29 @@ store's free space. A freshly written build's `size_bytes` is measured
 at write time and then confirmed hourly, so `GET /api/snapshots` shows
 a new snapshot's size immediately.
 
+### Kept checkpoints and their caps
+
+A lease can **keep** a checkpoint (`{"keep":true}` on the checkpoint
+route): the build is pinned as a GC root and restore point while the
+lease lives. Two caps keep pins from filling the disk (#126):
+
+- `MAX_KEPT_PER_LEASE` (default `4`, `0` = no cap) bounds the keeps per
+  lease. A keep on a lease at the cap answers `409` and takes no
+  checkpoint; the owner unpins one build
+  (`DELETE /api/snapshots/{build_id}`) to free a slot.
+- A user's `max_kept_bytes` (identity-store field, set via
+  `POST /api/users/{id}/quota`) bounds the bytes their kept builds hold.
+  An over-budget keep is written and then left unpinned (409 with the
+  build id), so it ages out like any unreferenced snapshot.
+
+`GET /api/leases/{id}` lists a lease's kept builds (id, size, kept_at);
+`spoond_kept_builds` and `spoond_kept_builds_bytes` report the totals
+over live leases. When kept bytes pass `KEPT_DISK_WARN_PCT` (default
+`40`) percent of the snapshot disk, the dashboard's attention strip says
+so and the notifier raises `disk.kept` (warn) — the held-lease
+critical-disk rule never deletes a kept build, so unpinning stays with
+the owner.
+
 Interaction with the held-lease critical rule (rule 5 in [Held-lease
 limits](#held-lease-limits)): a release frees no disk by itself — the
 space returns only when the GC reclaims the released lease's builds,
@@ -386,6 +410,13 @@ did). Users can force one with `POST /api/leases/{id}/checkpoint`, and
 every checkpoint's guest pause is observed in
 `spoond_checkpoint_pause_seconds` with a log line naming the lease, the
 pause and the image's `memory_mb`.
+
+Keeps are capped (`MAX_KEPT_PER_LEASE`, default `4`, `0` = no cap): a
+keep on a lease at the cap answers `409` and takes nothing — see
+[Kept checkpoints and their caps](#kept-checkpoints-and-their-caps) in
+the GC section. `KEPT_DISK_WARN_PCT` (default `40`, `0` = off) is when
+kept bytes alone start drawing attention: the dashboard's strip and the
+notifier's `disk.kept` both read it.
 
 ## Restarting the backend
 
@@ -584,9 +615,11 @@ counts highlighted — with the mean create and resume latencies), and
 the events panel (the backend's lease event stream) — plus
 an attention strip above the panels (one ▲ row per trigger, only when
 something needs a person): a unit not active, a lost lease, free
-hugepages or snapshot disk past the danger level, the TLS certificate
+hugepages or snapshot disk past the danger level, kept checkpoints past
+`KEPT_DISK_WARN_PCT` of the snapshot disk (#126), the TLS certificate
 inside 30 days of expiring, or an automatic held-lease action in the
-last 24 h. A status line under the panels carries the headline numbers
+last 24 h. The host panel's GC row also shows the kept total —
+`kept N (X GiB)` when any build is pinned. A status line under the panels carries the headline numbers
 and the clock. The browser page is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
 styles in the terminal, at the terminal's width (COLUMNS, else 104),
@@ -680,6 +713,8 @@ marker. The substrate-specific series:
 | `spoond_snapshot_bytes{kind}` | build disk per kind |
 | `spoond_storage_free_bytes` | free bytes at the build store |
 | `spoond_gc_deleted_total{kind}` | builds deleted by the GC |
+| `spoond_kept_builds` | kept checkpoints of live leases (pins; #126) |
+| `spoond_kept_builds_bytes` | disk bytes held by kept checkpoints of live leases (recorded `size_bytes`; #126) |
 | `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
