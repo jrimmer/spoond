@@ -26,6 +26,9 @@
 //	CHECKPOINT_INTERVAL_MINS  default per-lease checkpoint interval in
 //	                  minutes for leases without their own (2.3; default 0 =
 //	                  never; a lease's checkpoint_interval overrides)
+//	MAX_KEPT_PER_LEASE  kept-checkpoint cap per lease (#126; default 4;
+//	                  0 = no cap). A keep on a lease already at the cap
+//	                  answers 409; nothing is evicted.
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
 //	                  (default /forkdcache/e2b/storage/templates)
@@ -312,6 +315,7 @@ func Main(args []string) int {
 		PressureHeldIdle:          pressureIdle,
 		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
+		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 	})
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
 	// a ping and then fails the job deep inside a build, so verify it from

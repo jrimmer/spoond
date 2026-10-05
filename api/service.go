@@ -223,6 +223,11 @@ type ServiceConfig struct {
 	PressureHeldIdle       time.Duration
 	CriticalDiskFreePct    float64
 	CriticalDiskRecoverPct float64
+	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
+	// keep on a lease already holding this many kept builds answers 409
+	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default
+	// DefaultMaxKeptPerLease.
+	MaxKeptPerLease int
 }
 
 // Service is the lease API backend.

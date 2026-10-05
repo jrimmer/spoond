@@ -76,6 +76,17 @@ func (db *DB) ListKeptBuilds(ctx context.Context) (map[string][]string, error) {
 	return out, nil
 }
 
+// CountKeptBuilds returns how many builds the lease has pinned. The
+// per-lease cap (#126) reads it before taking a kept checkpoint.
+func (db *DB) CountKeptBuilds(ctx context.Context, leaseID string) (int, error) {
+	var n int
+	if err := db.r.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM lease_kept_builds WHERE lease_id = ?`, leaseID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count kept builds of lease %s: %w", leaseID, err)
+	}
+	return n, nil
+}
+
 // LeaseKeepsBuild reports whether the lease keeps the build.
 func (db *DB) LeaseKeepsBuild(ctx context.Context, leaseID, buildID string) (bool, error) {
 	var one int

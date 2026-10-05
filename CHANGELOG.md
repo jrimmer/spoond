@@ -10,6 +10,14 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Kept checkpoints are capped per lease (#126).** `MAX_KEPT_PER_LEASE`
+  (default 4, `0` = no cap) bounds how many builds one lease may pin
+  with `{"keep":true}`. A keep on a lease already at the cap answers
+  `409` naming the limit and `DELETE /api/snapshots/{build_id}`; nothing
+  is evicted and no checkpoint is taken. Unpinning a build frees a slot.
+
 ### Fixed
 
 - **A snapshot's `size_bytes` was 0 until the next hourly accounting
