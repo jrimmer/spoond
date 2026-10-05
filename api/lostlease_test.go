@@ -221,6 +221,48 @@ func TestGCKeepsLostNonPersistentLeaseGrace(t *testing.T) {
 	}
 }
 
+// TestGCLostGraceExpiresDropsKeptRows: once a lost lease's grace
+// period lapses, the pass also deletes its lease_kept_builds rows —
+// only a release removed them before, and a lease stuck in lost is
+// never released — so the builds behind the pins become reclaimable.
+func TestGCLostGraceExpiresDropsKeptRows(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+	svc, buf, db := gcTestClock(t, now)
+	pause, ckpt := lostChain(t, db)
+	seedLostLease(t, db, "l-kept", pause, ckpt, false, now.Add(-25*time.Hour))
+	if err := db.KeepBuild(context.Background(), "l-kept", ckpt, now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("keep: %v", err)
+	}
+	// Inside the grace the keep row would hold the build; the lease's
+	// resume/checkpoint builds are already past the grace here, so the
+	// first pass is expected to propose them and delete the rows.
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	rows, err := db.ListKeptBuilds(context.Background())
+	if err != nil {
+		t.Fatalf("list kept: %v", err)
+	}
+	if len(rows["l-kept"]) != 0 {
+		t.Fatalf("kept rows of a grace-expired lost lease = %v, want gone", rows)
+	}
+	if !strings.Contains(buf.String(), "would delete "+ckpt) {
+		t.Fatalf("grace-expired lost lease's kept build still protected:\n%s", buf.String())
+	}
+
+	// Sanity: a lost lease inside its grace period keeps its rows.
+	svc, buf, db = gcTestClock(t, now)
+	pause, ckpt = lostChain(t, db)
+	seedLostLease(t, db, "l-kept2", pause, ckpt, false, now.Add(-time.Hour))
+	if err := db.KeepBuild(context.Background(), "l-kept2", ckpt, now.Add(-time.Hour)); err != nil {
+		t.Fatalf("keep: %v", err)
+	}
+	if !gcKeeps(t, svc, buf, ckpt) {
+		t.Fatalf("a lost lease inside its grace lost its kept build:\n%s", buf.String())
+	}
+}
+
 // TestGCStampsLostLeaseWithoutLostAt: a lost lease with an empty
 // lost_at (lost before the column existed) gets its lost_at stamped by
 // the first pass that sees it and keeps that stamp on every later pass,

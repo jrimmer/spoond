@@ -3,11 +3,13 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
@@ -245,11 +247,28 @@ func TestRestoreBusy409(t *testing.T) {
 	}
 }
 
-// TestRestoreRouteAdminAndBody: the route is owner or admin, others 404;
-// the response carries the new generation; a bad body is 400.
+// TestRestoreRouteAdminAndBody: the route is owner or admin, others
+// 404; the response carries the new generation; a bad body is 400.
+// The admin path runs against an identity store: the admin restores a
+// lease they are not the owner of, a plain non-owner user cannot.
 func TestRestoreRouteAdminAndBody(t *testing.T) {
-	ts, svc, db, _ := newTestServerWithService(t)
+	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatalf("identity store: %v", err)
+	}
+	// First user is admin; then a plain user.
+	if _, err := ids.AddUser("root", identity.KindAgent, []string{"SHA256:fp-root"}, "admin-tok"); err != nil {
+		t.Fatalf("admin user: %v", err)
+	}
+	if _, err := ids.AddUser("plain", identity.KindAgent, []string{"SHA256:fp-plain"}, "plain-tok"); err != nil {
+		t.Fatalf("plain user: %v", err)
+	}
+	svc.SetIdentities(ids)
+	srv := NewServer(svc, NewImageRegistry(db))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
 	ctx := context.Background()
 
 	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
@@ -277,7 +296,7 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 		t.Fatalf("restore build_id = %v, want %s", body["build_id"], b.BuildID)
 	}
 
-	// Admin can restore someone else's lease; others get 404.
+	// A second checkpoint+keep for the admin and stranger attempts.
 	b2, err := svc.checkpointLease(ctx, l)
 	if err != nil {
 		t.Fatalf("checkpoint: %v", err)
@@ -285,10 +304,21 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 	if err := svc.keepBuild(ctx, l.ID, b2.BuildID); err != nil {
 		t.Fatalf("keep: %v", err)
 	}
-	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restore", "token-b",
+	// The admin restores a lease they are not the owner of: 200.
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restore", "admin-tok",
+		map[string]any{"build_id": b2.BuildID})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin restore = %d (%v), want 200", resp.StatusCode, body)
+	}
+	if body["generation"].(float64) != 3 {
+		t.Fatalf("admin restore generation = %v, want 3", body["generation"])
+	}
+
+	// A plain non-owner user (not the owner, not an admin) gets 404.
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restore", "plain-tok",
 		map[string]any{"build_id": b2.BuildID})
 	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("restore by a stranger = %d, want 404", resp.StatusCode)
+		t.Fatalf("restore by a plain stranger = %d, want 404", resp.StatusCode)
 	}
 
 	// A missing/invalid body is 400 — but only after the lease itself
@@ -308,7 +338,7 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 	// A stranger gets the lease 404 even with a bad body.
 	req, _ = http.NewRequest("POST", ts.URL+"/api/leases/"+l.ID+"/restore",
 		strings.NewReader("{not json"))
-	req.Header.Set("Authorization", "Bearer token-b")
+	req.Header.Set("Authorization", "Bearer plain-tok")
 	hresp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -316,5 +346,116 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 	hresp.Body.Close()
 	if hresp.StatusCode != http.StatusNotFound {
 		t.Fatalf("restore bad body by a stranger = %d, want 404", hresp.StatusCode)
+	}
+}
+
+// TestRestoreLostLease410: a lost lease answers 410 like every other
+// route — restore must not resurrect a lease the whole API reports dead
+// (exec, stream, proxy, dial) with nothing but a "restored" event.
+func TestRestoreLostLease410(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	b, err := svc.checkpointLease(ctx, l)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if err := svc.keepBuild(ctx, l.ID, b.BuildID); err != nil {
+		t.Fatalf("keep: %v", err)
+	}
+
+	// The lease's sandbox dies in a (simulated) substrate crash. Its
+	// checkpoint has no build row to recover from (as if the snapshot
+	// were never recorded), so the reconcile marks it lost — while the
+	// kept build itself stays a real, restorable-set build.
+	sub.Fake.Kill(l.SandboxID)
+	svc.store.mu.Lock()
+	l.LastCheckpointBuildID = ""
+	svc.store.mu.Unlock()
+	if summary := svc.reconcileCrash(ctx); summary.Lost != 1 {
+		t.Fatalf("summary = %+v, want one loss", summary)
+	}
+	if l.State != "lost" {
+		t.Fatalf("precondition: lease state = %q, want lost", l.State)
+	}
+
+	ts := httptest.NewServer(NewServer(svc, NewImageRegistry(db)).Handler())
+	t.Cleanup(ts.Close)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restore", "token-a",
+		map[string]any{"build_id": b.BuildID})
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("restore a lost lease = %d (%v), want 410", resp.StatusCode, body)
+	}
+	if l.State != "lost" {
+		t.Fatalf("restore changed a lost lease's state to %q", l.State)
+	}
+}
+
+// TestRestoreEmitsSSEEvent: the restored event reaches an SSE stream
+// with the build id as its data field (the docs' event table row).
+func TestRestoreEmitsSSEEvent(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	b, err := svc.checkpointLease(ctx, l)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if err := svc.keepBuild(ctx, l.ID, b.BuildID); err != nil {
+		t.Fatalf("keep: %v", err)
+	}
+
+	// The restore happens while one stream is attached, then a second
+	// stream replays from the ring: both must see the restored event on
+	// the wire, with the build id in its data field.
+	sctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := startSSE(t, ts, sctx, ts.URL+"/api/leases/"+l.ID+"/events", "token-a", "")
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restore", "token-a",
+		map[string]any{"build_id": b.BuildID})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("restore = %d (%v), want 200", resp.StatusCode, body)
+	}
+
+	found := func(ev sseEvent) bool {
+		t.Helper()
+		if ev.Type != "restored" {
+			return false
+		}
+		if ev.Payload["lease_id"] != l.ID {
+			t.Fatalf("restored event data = %v, want lease_id %s", ev.Payload, l.ID)
+		}
+		// The event table's "data" column is the detail line: it names
+		// the restored-to build.
+		if !strings.Contains(ev.Payload["detail"].(string), b.BuildID) {
+			t.Fatalf("restored event detail = %v, want the build id %s", ev.Payload, b.BuildID)
+		}
+		return true
+	}
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-s.events:
+			if !ok {
+				t.Fatal("SSE stream ended unexpectedly")
+			}
+			if found(ev) {
+				cancel()
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for a restored SSE event")
+		}
 	}
 }

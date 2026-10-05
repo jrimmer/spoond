@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -147,6 +148,21 @@ func TestCheckpointKeepRoute(t *testing.T) {
 		t.Fatal("kept build not in the GC kept set")
 	}
 
+	// A malformed body is 400 — an empty body means "keep nothing" —
+	// and pins nothing.
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "token-a",
+		map[string]any{"keep": "banana"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("checkpoint with a garbage body = %d (%v), want 400", resp.StatusCode, body)
+	}
+	keeps, err = db.ListKeptBuilds(context.Background())
+	if err != nil {
+		t.Fatalf("list kept: %v", err)
+	}
+	if len(keeps[id]) != 1 {
+		t.Fatalf("kept rows after a garbage body = %v, want still one", keeps)
+	}
+
 	// A plain checkpoint records no pin.
 	resp, body2 := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
@@ -163,37 +179,60 @@ func TestCheckpointKeepRoute(t *testing.T) {
 
 // TestSnapshotDeleteUnpinsKept: DELETE /api/snapshots/{build_id} also
 // unpins a kept build (2.3, #121): the pin is not a fence, the owner's
-// delete removes the kept row and the build in one call — while the
-// same build without a delete (the lease still keeping it) stays in the
-// kept set and is never a GC candidate.
+// delete removes the kept row and the build in one call — ahead of the
+// lease's own release. The seeded lease's sandbox runs the template
+// build, so the kept build is rooted by its keep row alone: while it
+// stands, a GC pass cannot touch the build; the route's unpin is what
+// lets the delete through.
 func TestSnapshotDeleteUnpinsKept(t *testing.T) {
-	ts, svc, db, _ := newTestServerWithService(t)
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	img := seedImage(t, db, "py-base", 2048)
+	svc, buf, db, _ := gcTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	img, err := db.GetImage(ctx, "py-base")
+	if err != nil {
+		t.Fatalf("get image: %v", err)
+	}
+	srv := NewServer(svc, NewImageRegistry(db))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
 	p := e2b.NewUUID()
 	seedSnapshotBuild(t, db, p, "checkpoint", img.CurrentBuildID, "consumer-a", "ready")
-	// The pin references a real lease row (the FK cascades on it).
+	// The pin references a real lease row (the FK cascades on it); the
+	// sandbox runs the template build, so nothing else roots p.
 	seedGCLease(t, db, "lease-x", "sb-x", img.CurrentBuildID)
-	if err := svc.keepBuild(context.Background(), "lease-x", p); err != nil {
+	if err := svc.keepBuild(ctx, "lease-x", p); err != nil {
 		t.Fatalf("keep: %v", err)
 	}
-	kept, err := svc.keptBuilds(context.Background())
+	kept, err := svc.keptBuilds(ctx)
 	if err != nil {
 		t.Fatalf("keptBuilds: %v", err)
 	}
 	if !kept[p] {
 		t.Fatal("precondition: kept build not in the kept set")
 	}
+	if gcWouldDelete(t, svc, buf, p) {
+		t.Fatal("kept build proposed for delete while its keep row stands (and nothing else roots it)")
+	}
 
+	// The delete unpins and removes the build in one call, while the
+	// lease that kept it is still alive.
 	resp, body := doReq(t, "DELETE", ts.URL+"/api/snapshots/"+p, "token-a", nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete kept = %d (%v), want 204 (the delete unpins)", resp.StatusCode, body)
 	}
-	keeps, err := db.ListKeptBuilds(context.Background())
+	keeps, err := db.ListKeptBuilds(ctx)
 	if err != nil {
 		t.Fatalf("list kept: %v", err)
 	}
 	if len(keeps["lease-x"]) != 0 {
 		t.Fatalf("kept rows after the delete = %v, want unpinned", keeps)
+	}
+	deleted, err := db.GetBuild(ctx, p)
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if deleted.State != "deleted" {
+		t.Fatalf("build state after the delete = %q, want deleted", deleted.State)
 	}
 }
