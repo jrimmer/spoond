@@ -1113,8 +1113,11 @@ and is not charged). All five default to `0` =
 unlimited/unset. `guaranteed_mib` is the user's memory floor, advisory
 in this part (#128 part 1): admission never counts it against them, and
 it must be `<= max_mib` when both are set (`400` otherwise). Over-cap
-creates, forks, clones and resumes return `429`; an over-budget keep
-answers `409` on the checkpoint route with the unpinned build's id (see
+creates, forks and clones return `429`; so does any operation that
+brings a suspended lease's guest back over the cap — resume, restart,
+restore, crash recovery, undrain — leaving the lease suspended (or
+drained, for undrain) instead; an over-budget keep answers `409` on
+the checkpoint route with the unpinned build's id (see
 [Keep limits](#post-apileasesidcheckpoint--snapshot-a-running-lease)).
 
 There is no automatic conversion from `max_leases` to a memory limit: a
