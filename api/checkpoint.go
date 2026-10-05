@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -78,7 +79,7 @@ func (s *Service) checkpointIdleLeases(ctx context.Context) {
 			case <-time.After(checkpointIntervalSpacing):
 			}
 		}
-		if _, err := s.checkpointLeaseBusy(ctx, l); err != nil {
+		if _, err := s.checkpointLeaseBusy(ctx, l, false); err != nil {
 			if !errors.Is(err, errLeaseBusy) {
 				s.log.Printf("checkpoint: lease %s: %v", l.ID, err)
 			}
@@ -87,8 +88,12 @@ func (s *Service) checkpointIdleLeases(ctx context.Context) {
 }
 
 // checkpointLeaseBusy runs checkpointLease with the busy guard: a
-// second operation on a busy lease returns errLeaseBusy.
-func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease) (store.BuildRow, error) {
+// second operation on a busy lease returns errLeaseBusy. With keep set,
+// the pin is written inside the busy window, before the guard drops: a
+// release racing the checkpoint then deletes the lease's kept rows
+// after the insert, not before it (a pin written after the window would
+// fail the FK or outlive a finished release).
+func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease, keep bool) (store.BuildRow, error) {
 	s.store.mu.Lock()
 	if l.busy {
 		s.store.mu.Unlock()
@@ -97,7 +102,14 @@ func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease) (store.Buil
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
-	return s.checkpointLease(ctx, l)
+	b, err := s.checkpointLease(ctx, l)
+	if err == nil && keep {
+		if kerr := s.keepBuild(ctx, l.ID, b.BuildID); kerr != nil {
+			// The checkpoint stands; only the pin failed.
+			s.log.Printf("checkpoint: keep %s: %v", b.BuildID, kerr)
+		}
+	}
+	return b, err
 }
 
 // handleCheckpointPolicy sets the lease's own checkpoint interval
@@ -143,11 +155,34 @@ func (s *Server) handleCheckpointPolicy(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// keepBuild pins a checkpoint build of the lease (2.3, #121): the build
+// joins the GC's kept set while the lease lives and is a restore point
+// for POST /api/leases/{id}/restore. Keeping the same build twice keeps
+// the first kept_at.
+func (s *Service) keepBuild(ctx context.Context, leaseID, buildID string) error {
+	return s.db.KeepBuild(ctx, leaseID, buildID, s.now())
+}
+
 // handleCheckpoint checkpoints one lease on demand. Owner only, live
-// leases only (409 otherwise, including busy).
+// leases only (409 otherwise, including busy). The optional body
+// {"keep":true} pins the checkpoint build: it joins the GC's kept set
+// while the lease lives and can be restored in place (2.3, #121).
 func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
+	keep := false
+	if r.Body != nil {
+		var req struct {
+			Keep bool `json:"keep"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			// An empty body is "keep nothing"; a malformed one is a
+			// client error, like every other route.
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		keep = req.Keep
+	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
@@ -157,7 +192,7 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "lease is not running")
 		return
 	}
-	b, err := s.svc.checkpointLeaseBusy(r.Context(), lease)
+	b, err := s.svc.checkpointLeaseBusy(r.Context(), lease, keep)
 	if err != nil {
 		switch {
 		case errors.Is(err, errLeaseBusy):
@@ -174,5 +209,6 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		"id":       lease.ID,
 		"build_id": b.BuildID,
 		"at":       formatRFC3339(lease.LastCheckpointAt),
+		"kept":     keep,
 	})
 }

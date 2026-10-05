@@ -994,6 +994,11 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
 	}
 	s.deleteSandboxRow(l.SandboxID)
+	// The lease's kept builds stop being GC roots (2.3, #121): the next
+	// pass may reclaim them.
+	if err := s.db.DeleteKeptBuilds(ctx, l.ID); err != nil {
+		s.log.Printf("release: delete kept builds of %s: %v", l.ID, err)
+	}
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)

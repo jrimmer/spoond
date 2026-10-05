@@ -253,3 +253,74 @@ func TestS5_RestartGeneration(t *testing.T) {
 		failf(t, "generation %d after a non-persistent restart, want 2", g)
 	}
 }
+
+// TestS6_RestoreToKeptCheckpoint: a checkpoint with keep is a restore
+// point (2.3, #121). A file written after the checkpoint is gone after
+// the restore, the lease keeps its id, and the generation bumps to 2 —
+// the guest's memory did not continue from where its processes left it.
+func TestS6_RestoreToKeptCheckpoint(t *testing.T) {
+	rec := begin(t)
+	l := createLease(t, map[string]any{"image": "dev-base", "persistent": true, "ttl": 3600})
+
+	m := randMarker()
+	execOK(t, l.ID, "echo "+m+" > /root/before-restore")
+
+	t0 := time.Now()
+	st, body, err := cl.checkpointKeep(l.ID)
+	if err != nil {
+		failf(t, "checkpoint keep: %v", err)
+	}
+	if st != 200 {
+		failf(t, "checkpoint keep: status %d: %s", st, truncate(body))
+	}
+	rec.set("checkpoint_keep_ms", time.Since(t0).Milliseconds())
+	var ck struct {
+		ID      string `json:"id"`
+		BuildID string `json:"build_id"`
+		Kept    bool   `json:"kept"`
+	}
+	if err := json.Unmarshal(body, &ck); err != nil || ck.BuildID == "" {
+		failf(t, "checkpoint keep: bad body %q: %v", truncate(body), err)
+	}
+	if !ck.Kept {
+		failf(t, "checkpoint keep: kept = %v, want true", ck.Kept)
+	}
+
+	// Work done after the checkpoint.
+	execOK(t, l.ID, "echo after > /root/after-restore")
+
+	st, body, err = cl.restore(l.ID, ck.BuildID)
+	if err != nil {
+		failf(t, "restore: %v", err)
+	}
+	if st != 200 {
+		failf(t, "restore: status %d: %s", st, truncate(body))
+	}
+	var rs struct {
+		ID         string `json:"id"`
+		BuildID    string `json:"build_id"`
+		Generation int64  `json:"generation"`
+	}
+	if err := json.Unmarshal(body, &rs); err != nil {
+		failf(t, "restore: bad body %q: %v", truncate(body), err)
+	}
+	if rs.ID != l.ID {
+		failf(t, "restore changed the lease id: %q, want %q", rs.ID, l.ID)
+	}
+	if rs.BuildID != ck.BuildID {
+		failf(t, "restore build_id = %q, want the checkpoint build %q", rs.BuildID, ck.BuildID)
+	}
+	if rs.Generation != 2 {
+		failf(t, "restore generation = %d, want 2", rs.Generation)
+	}
+	if g := leaseGeneration(t, l.ID); g != 2 {
+		failf(t, "generation after restore = %d, want 2", g)
+	}
+	// The post-checkpoint file is gone; the checkpointed state is back.
+	if got := execOK(t, l.ID, "cat /root/after-restore 2>/dev/null || echo gone"); got != "gone" {
+		failf(t, "post-checkpoint file survived the restore: /root/after-restore = %q", got)
+	}
+	if got := execOK(t, l.ID, "cat /root/before-restore"); got != m {
+		failf(t, "checkpointed file lost in the restore: got %q, want %q", got, m)
+	}
+}
