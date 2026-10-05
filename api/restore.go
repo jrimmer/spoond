@@ -18,11 +18,6 @@ import (
 // a cold restart, the source build is a checkpoint the owner pinned, so
 // the lease's work since it is what gets thrown away.
 
-// errNotRestorable marks a build that is not one of the lease's own
-// checkpoints or kept builds: the route answers 404, like a lease the
-// caller cannot see (no existence leak across owners).
-var errNotRestorable = errors.New("build is not one of this lease's checkpoints or kept builds")
-
 // restoreableBuild reports whether the lease may restore to the build:
 // it must be one of the lease's own checkpoints (its newest checkpoint,
 // or any checkpoint it pinned with keep) or one of its kept builds. A
@@ -46,16 +41,11 @@ func (s *Service) restoreableBuild(ctx context.Context, l *Lease, buildID string
 	// Older checkpoints only as kept builds: unpinned snapshots can be
 	// GC'd at any pass, so restoring to one is a race the owner should
 	// not rely on — pin it first.
-	keeps, err := s.db.ListKeptBuilds(ctx)
-	if err != nil {
+	kept, err := s.db.LeaseKeepsBuild(ctx, l.ID, buildID)
+	if err != nil || !kept {
 		return store.BuildRow{}, false
 	}
-	for _, kept := range keeps[l.ID] {
-		if kept == buildID {
-			return b, true
-		}
-	}
-	return store.BuildRow{}, false
+	return b, true
 }
 
 // restore replaces the lease's sandbox with one from the given build,
@@ -72,6 +62,12 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	}
 	// The fresh sandbox exists before the old one goes (as restartCold):
 	// a failed create leaves the lease exactly as it was.
+	//
+	// resume=false with a fresh sandbox id (unlike recoverFromCheckpoint,
+	// which resumes the same sandbox id) follows the fork shape: per A2
+	// §3.6 the boot path is chosen by the build's snapshot metadata, so a
+	// checkpoint build still boots from its memory snapshot; a fresh id
+	// avoids resurrecting the same execution on the substrate.
 	sb, err := s.createSandbox(ctx, img, b, false, "", l)
 	if err != nil {
 		return err
@@ -87,6 +83,10 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
+	// A drained lease paused into its pause build; the restore replaced
+	// that sandbox with a running one, so the flag would linger and
+	// undrain would later try to resume a running lease. Clear it.
+	l.Drained = false
 	// The pause builds stop being the lease's resume point: the next
 	// suspend writes a fresh one (the restored guest is not what the old
 	// pause builds snapshotted).
@@ -122,8 +122,9 @@ func (s *Service) restoreBusy(ctx context.Context, l *Lease, b store.BuildRow) e
 
 // handleRestore restores a lease in place to one of its own kept
 // checkpoints (2.3, #121). Owner or admin, others 404; a live or
-// suspended lease; the build must be one of the lease's own checkpoints
-// or kept builds (else 404); 409 while busy.
+// suspended lease (a lost lease is 410 like every other route — restore
+// must not resurrect it); the build must be one of the lease's own
+// checkpoints or kept builds (else 404); 409 while busy.
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
@@ -133,6 +134,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	if lease.State == "lost" {
+		writeError(w, http.StatusGone, lostLeaseMessage)
 		return
 	}
 	var req struct {

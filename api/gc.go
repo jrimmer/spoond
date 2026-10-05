@@ -174,9 +174,10 @@ func (s *Service) gcPass(ctx context.Context) error {
 // sandboxes included), and every in-flight build. A lost lease's resume
 // and checkpoint builds stay roots for a grace period after the loss —
 // 7 days for a persistent lease, 1 day otherwise — so its snapshots
-// outlive the crash that lost it. Every root's ancestor chain is kept in full, and every kept build's
-// header-referenced builds (build_refs) are kept in full — including
-// their own ancestors and refs, transitively.
+// outlive the crash that lost it. Every root's ancestor chain is kept
+// in full, and every kept build's header-referenced builds
+// (build_refs) are kept in full — including their own ancestors and
+// refs, transitively.
 //
 // The chain walk is over *non-deleted* builds only: a deleted build
 // keeps nothing, so the files a GC pass or an owner delete already
@@ -265,7 +266,15 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 			// A lost lease keeps its snapshots for a grace period after
 			// the loss, so the owner can still reclaim them; past it the
 			// builds are candidates like any other unreferenced build.
+			// The lease's kept-builds rows go with the grace period too:
+			// only a release deletes them otherwise, and a lease stuck in
+			// lost is never released by its owner.
 			if !now.Before(s.lostKeepUntil(l, now)) {
+				if len(keptBy[l.ID]) > 0 {
+					if err := s.db.DeleteKeptBuilds(ctx, l.ID); err != nil {
+						s.log.Printf("gc: delete kept builds of lost lease %s: %v", l.ID, err)
+					}
+				}
 				continue
 			}
 		}

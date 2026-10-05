@@ -26,23 +26,13 @@ func (db *DB) KeepBuild(ctx context.Context, leaseID, buildID string, keptAt tim
 	return nil
 }
 
-// UnkeepBuild drops one kept-builds row. No-op when the lease does not
-// keep the build.
-func (db *DB) UnkeepBuild(ctx context.Context, leaseID, buildID string) error {
-	_, err := db.w.ExecContext(ctx,
-		`DELETE FROM lease_kept_builds WHERE lease_id = ? AND build_id = ?`,
-		leaseID, buildID)
-	if err != nil {
-		return fmt.Errorf("store: unkeep build %s for lease %s: %w", buildID, leaseID, err)
-	}
-	return nil
-}
-
-// UnkeepBuildAny drops every kept-builds row naming the build, across
+// UnkeepBuild drops every kept-builds row naming the build, across
 // all leases. The snapshot delete path uses it: the owner deleting the
-// snapshot unpins it wherever it is pinned (the build row carries the
-// owner; a lease keeping another owner's build is not possible through
-// the API, so this matches at most the caller's own pins).
+// snapshot unpins it wherever it is pinned. Today only the lease that
+// checkpointed a build can pin it (each checkpoint mints a fresh build
+// id and only handleCheckpoint pins), so this matches at most the
+// caller's own pins; a single-lease delete is reserved for a future
+// cross-lease keep.
 func (db *DB) UnkeepBuildAny(ctx context.Context, buildID string) error {
 	_, err := db.w.ExecContext(ctx,
 		`DELETE FROM lease_kept_builds WHERE build_id = ?`, buildID)

@@ -236,7 +236,7 @@ func TestRestoreBusy409(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- svc.restoreBusy(ctx, l, b) }()
 	<-started
-	if _, err := svc.checkpointLeaseBusy(ctx, l); err == nil || !strings.Contains(err.Error(), "busy") {
+	if _, err := svc.checkpointLeaseBusy(ctx, l, false); err == nil || !strings.Contains(err.Error(), "busy") {
 		t.Fatalf("checkpoint during restore = %v, want errLeaseBusy", err)
 	}
 	close(release)
