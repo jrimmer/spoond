@@ -1486,7 +1486,7 @@ func (l *layout) events(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, 0, y, l.w, l.eventsH(), "events", "events")
 	for i, e := range l.s.Events {
-		segs := splitSegs([]rune(sanitize(e.Text)), e.Style)
+		segs := splitSegs(sanitize(e.Text), e.Style)
 		l.writeRow(g, 2, top+1+i, segs)
 	}
 	return y
@@ -1507,40 +1507,34 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 	}
 }
 
-// splitSegs breaks one event line's runes into styled runs at the two
-// column separators ("  ", two spaces): the time stays dim, the type
-// and the tail take the event's own style, the gaps themselves dim.
-// One style across the whole line would paint the padding dim too.
-func splitSegs(runes []rune, style string) []grid.Seg {
-	if !strings.Contains(string(runes), "  ") {
-		return []grid.Seg{{Text: string(runes), Style: style}}
-	}
-	var segs []grid.Seg
-	run := []rune{}
-	dim := true // the line starts with the dim time
-	flush := func() {
-		if len(run) > 0 {
+// splitSegs breaks one event line into styled runs at its three column
+// separators — the two spaces between time, type, lease id and tail:
+// the time stays dim, the type and the tail take the event's own style,
+// the gaps themselves dim. One style across the whole line would paint
+// the padding dim too. Only those three separators split the line: the
+// tail is free text (a comment can hold two spaces in a row) and is
+// never cut again, so it keeps one style to the panel's edge.
+func splitSegs(line, style string) []grid.Seg {
+	segs := make([]grid.Seg, 0, 7)
+	rest := line
+	for fields := 0; fields < 3; fields++ {
+		i := strings.Index(rest, "  ")
+		if i < 0 {
+			break
+		}
+		if i > 0 {
 			st := style
-			if dim {
-				st = "dim"
+			if len(segs) == 0 {
+				st = "dim" // the HH:MM:SS before the first separator
 			}
-			segs = append(segs, grid.Seg{Text: string(run), Style: st})
-			run = nil
+			segs = append(segs, grid.Seg{Text: rest[:i], Style: st})
 		}
+		segs = append(segs, grid.Seg{Text: "  ", Style: "dim"})
+		rest = rest[i+2:]
 	}
-	for i := 0; i < len(runes); i++ {
-		// A separator is the first of two spaces: emit it as part of the
-		// dim gap, close the run before it, and step past the pair.
-		if i+1 < len(runes) && runes[i] == ' ' && runes[i+1] == ' ' {
-			flush()
-			segs = append(segs, grid.Seg{Text: "  ", Style: "dim"})
-			dim = false
-			i++
-			continue
-		}
-		run = append(run, runes[i])
+	if rest != "" {
+		segs = append(segs, grid.Seg{Text: rest, Style: style})
 	}
-	flush()
 	return segs
 }
 

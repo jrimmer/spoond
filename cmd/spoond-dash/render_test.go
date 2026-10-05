@@ -803,6 +803,28 @@ func TestEventsPanelSubjectPreference(t *testing.T) {
 	}
 }
 
+// TestEventsPanelTailKeepsItsStyle: the tail column is free text (a
+// comment can hold two spaces in a row), so the row splitter cuts only
+// at the three column separators — the tail keeps one style to the
+// panel's edge instead of losing the event's style mid-item.
+func TestEventsPanelTailKeepsItsStyle(t *testing.T) {
+	line := "07:19:02  held_action  abcdef0123  forgejo:  site #9 deploy"
+	segs := splitSegs(line, "warn")
+	var got strings.Builder
+	for _, s := range segs {
+		got.WriteString(s.Text)
+		if strings.HasPrefix(s.Text, "forgejo") && s.Style != "warn" {
+			t.Fatalf("tail run %q carried style %q, want warn", s.Text, s.Style)
+		}
+	}
+	if got.String() != line {
+		t.Fatalf("segments do not reassemble the line: %q", got.String())
+	}
+	if segs[0].Style != "dim" {
+		t.Fatalf("time run = %q with style %q, want dim", segs[0].Text, segs[0].Style)
+	}
+}
+
 // TestEventsPanelNoToken: without DASH_EVENTS_TOKEN the panel says so,
 // dim, instead of looking broken.
 func TestEventsPanelNoToken(t *testing.T) {
