@@ -75,6 +75,26 @@ spoond's HTTP proxy (`403`), and reachable only with the sandbox's
 traffic token through the orchestrator. Its powers are exactly the
 powers exec and stream already give the lease owner.
 
+## Inside the guest
+
+**A guest is one trust domain by default.** The isolation spoond gives
+is between leases, at the VM boundary. Inside a guest, spoond's own
+commands (exec, files, streams) run as root, and E2B's template build
+gives its default user `user` passwordless sudo, so anything running in
+the guest can become root. Keep that in mind before handing a lease to
+code you do not trust with the whole guest.
+
+**What spoond does guarantee for users an image adds itself** (#124):
+nothing under `/usr` is writable by others or by a non-root group, and
+`/usr/bin/envd` (the in-guest management daemon, which runs as root) is
+`0755`. E2B's template build leaves `/usr/local` and `/code` world-writable
+and envd `0777`; `spoond-guest-init` takes that back before the template
+is snapshotted, so an unprivileged user an image creates (one without
+sudo) cannot replace binaries root runs. `/code` stays a shared workspace,
+sticky (`1777`) like `/tmp`. Conformance L7 checks this on every release.
+Anything an image author installs is theirs to keep tight: a binary that
+root runs belongs in a root-owned `0755` path all the way up to `/`.
+
 ## Rescan fixes (second pass, commit after 35540b5)
 
 - **F1 clone quota** — clone reserves and releases quota like create; it
