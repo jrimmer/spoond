@@ -851,7 +851,9 @@ ones:
 
 `size_bytes` is measured when the build is written (checkpoint, pause,
 clone, fork, drain) and re-measured by the hourly disk accounting pass,
-which also corrects any build whose write-time measurement came out 0.
+which overwrites every build's `size_bytes` with what the disk then
+says — including any build whose write-time measurement failed and
+stored 0, or whose files have changed since.
 
 ### `DELETE /api/snapshots/{build_id}` — delete a snapshot build
 

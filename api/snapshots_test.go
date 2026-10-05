@@ -215,16 +215,31 @@ func capturedLogs(t *testing.T, svc *Service) string {
 // (64 KiB-page arm64 ext4, some ZFS record sizes) rounds 4096 bytes up.
 func writeBuildFiles(t *testing.T, root, buildID string, sizes ...int) int64 {
 	t.Helper()
-	dir := filepath.Join(root, buildID)
+	allocated, err := writeBuildDir(filepath.Join(root, buildID), sizes...)
+	if err != nil {
+		t.Fatalf("write build files: %v", err)
+	}
+	return allocated
+}
+
+// writeBuildDir is writeBuildFiles's core without the *testing.T: it
+// returns errors instead of calling t.Fatal, so closures that run on
+// the HTTP handler's goroutine (the fake's checkpointFn/pauseFn) can
+// use it — testing forbids Fatal off the test goroutine.
+func writeBuildDir(dir string, sizes ...int) (int64, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
+		return 0, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	for i, n := range sizes {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", i)), make([]byte, n), 0o644); err != nil {
-			t.Fatalf("write file: %v", err)
+			return 0, fmt.Errorf("write file: %w", err)
 		}
 	}
-	return allocatedSize(t, dir)
+	allocated, err := buildDiskUsage(dir)
+	if err != nil {
+		return 0, fmt.Errorf("measure %s: %w", dir, err)
+	}
+	return allocated, nil
 }
 
 // allocatedSize returns dir's allocated size via buildDiskUsage,
@@ -405,11 +420,17 @@ func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
 	// The fake's Checkpoint only mints a build id; write the build
 	// directory the way the real substrate leaves it. Compare against
 	// the OS's own allocation count, not the requested bytes: the
-	// write-time path uses the same stat as the hourly pass.
+	// write-time path uses the same stat as the hourly pass. Runs on
+	// the HTTP handler's goroutine, so the closure reports failures as
+	// the checkpoint's error instead of t.Fatal.
 	var want int64
 	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
 		id := e2b.NewUUID()
-		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 8192)
+		size, err := writeBuildDir(filepath.Join(svc.cfg.TemplateStoragePath, id), 4096, 8192)
+		if err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		want = size
 		return id, substrate.BuildRefs{}, nil
 	}
 
@@ -455,10 +476,16 @@ func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
 // pauseLease path.
 func TestPauseBuildSizeAtWriteTime(t *testing.T) {
 	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	// Handler-goroutine closure: errors come back as the pause's
+	// error, not t.Fatal.
 	var want int64
 	sub.pauseFn = func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
 		id := e2b.NewUUID()
-		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096)
+		size, err := writeBuildDir(filepath.Join(svc.cfg.TemplateStoragePath, id), 4096)
+		if err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		want = size
 		return id, substrate.BuildRefs{}, nil
 	}
 
@@ -530,7 +557,13 @@ func TestDrainPauseBuildSizeAtWriteTime(t *testing.T) {
 	var want int64
 	sub.pauseFn = func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
 		id := e2b.NewUUID()
-		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 4096)
+		// Handler-goroutine closure: errors come back as the pause's
+		// error, not t.Fatal.
+		size, err := writeBuildDir(filepath.Join(svc.cfg.TemplateStoragePath, id), 4096, 4096)
+		if err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		want = size
 		return id, substrate.BuildRefs{}, nil
 	}
 
@@ -558,10 +591,16 @@ func TestDrainPauseBuildSizeAtWriteTime(t *testing.T) {
 // clone, with no hourly accounting pass in between.
 func TestCloneBuildSizeAtWriteTime(t *testing.T) {
 	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	// The same no-t.Fatal-off-the-handler-goroutine rule as the other
+	// checkpointFn/pauseFn closures above.
 	var want int64
 	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
 		id := e2b.NewUUID()
-		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 4096, 4096)
+		size, err := writeBuildDir(filepath.Join(svc.cfg.TemplateStoragePath, id), 4096, 4096, 4096)
+		if err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		want = size
 		return id, substrate.BuildRefs{}, nil
 	}
 
