@@ -628,8 +628,13 @@ func TestCloneBuildSizeAtWriteTime(t *testing.T) {
 // recorded (the write-time reading was partial).
 func TestBuildSizeSettles(t *testing.T) {
 	svc, db, _ := newTestService(t)
+	root := t.TempDir()
+	svc.cfg.TemplateStoragePath = root
+	if err := os.MkdirAll(filepath.Join(root, "b-settle"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	var mu sync.Mutex
-	readings := []int64{64000, 900000, 1400000, 1400000}
+	readings := []int64{900000, 1400000, 1400000}
 	svc.diskUsage = func(string) (int64, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -645,6 +650,15 @@ func TestBuildSizeSettles(t *testing.T) {
 	}
 	svc.SetBuildSizeSettle(5*time.Millisecond, time.Second)
 	svc.settleBuildSize("b-settle")
+	// Headers only, stable at 64,000: not settled while there is no
+	// memfile (2.3.2's first cut recorded exactly that).
+	time.Sleep(50 * time.Millisecond)
+	if b, _ := db.GetBuild(context.Background(), "b-settle"); b.SizeBytes != 64000 {
+		t.Fatalf("size changed to %d before the memfile landed", b.SizeBytes)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b-settle", "memfile"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		b, err := db.GetBuild(ctx, "b-settle")

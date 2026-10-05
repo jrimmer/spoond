@@ -424,9 +424,11 @@ func (s *Service) SetBuildSizeSettle(every, limit time.Duration) {
 // changing, then records it. The orchestrator finishes writing a build's
 // memory file after Checkpoint/Pause return (on vm2: moments for a small
 // guest, minutes past the ZFS dirty-data threshold for a large one), so
-// the write-time number is often 0 or a fraction of the build. Two equal
-// non-zero readings in a row count as settled; it gives up after
-// sizeSettleFor and leaves the rest to the hourly pass.
+// the write-time number is often 0 or a fraction of the build. Settled
+// means the memory file exists and two readings in a row agree: before
+// the memfile lands the directory holds only headers, whose size is
+// stable too (2.3.2's first cut stopped there, at 64,000 bytes). It gives
+// up after sizeSettleFor and leaves the rest to the hourly pass.
 func (s *Service) settleBuildSize(buildID string) {
 	every, limit := s.sizeSettleEvery, s.sizeSettleFor
 	if every <= 0 || limit <= 0 {
@@ -437,6 +439,9 @@ func (s *Service) settleBuildSize(buildID string) {
 		var last int64 = -1
 		for waited := time.Duration(0); waited < limit; waited += every {
 			time.Sleep(every)
+			if fi, err := os.Stat(filepath.Join(dir, "memfile")); err != nil || fi.Size() == 0 {
+				continue // the memory snapshot has not landed yet
+			}
 			size, err := s.diskUsage(dir)
 			if err != nil {
 				continue
