@@ -413,6 +413,50 @@ func (s *Service) measureNewBuildOnDisk(buildID string) int64 {
 	return size
 }
 
+// SetBuildSizeSettle turns on settleBuildSize: re-measure a fresh build
+// every `every` for up to `limit`. Off until called (the backend calls it;
+// unit tests do not, so no goroutine outlives a test's database).
+func (s *Service) SetBuildSizeSettle(every, limit time.Duration) {
+	s.sizeSettleEvery, s.sizeSettleFor = every, limit
+}
+
+// settleBuildSize keeps measuring a fresh build until its size stops
+// changing, then records it. The orchestrator finishes writing a build's
+// memory file after Checkpoint/Pause return (on vm2: moments for a small
+// guest, minutes past the ZFS dirty-data threshold for a large one), so
+// the write-time number is often 0 or a fraction of the build. Two equal
+// non-zero readings in a row count as settled; it gives up after
+// sizeSettleFor and leaves the rest to the hourly pass.
+func (s *Service) settleBuildSize(buildID string) {
+	every, limit := s.sizeSettleEvery, s.sizeSettleFor
+	if every <= 0 || limit <= 0 {
+		return
+	}
+	go func() {
+		dir := filepath.Join(s.cfg.TemplateStoragePath, buildID)
+		var last int64 = -1
+		for waited := time.Duration(0); waited < limit; waited += every {
+			time.Sleep(every)
+			size, err := s.diskUsage(dir)
+			if err != nil {
+				continue
+			}
+			if size > 0 && size == last {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := s.db.UpdateBuildSize(ctx, buildID, size); err != nil {
+					s.log.Printf("build size: %s: %v", buildID, err)
+				}
+				cancel()
+				if s.metrics != nil {
+					s.UpdateKeptMetrics(context.Background())
+				}
+				return
+			}
+			last = size
+		}
+	}()
+}
+
 // accountDisk measures every non-deleted build's directory (allocated
 // blocks × 512 per regular file) into size_bytes, and sets the
 // snapshot/storage gauges. Runs with the GC, once an hour; it also
