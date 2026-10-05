@@ -2412,7 +2412,10 @@ func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 // leaseDetailMap is a list row plus the lifecycle fields served by
 // GET /api/sandboxes/{id}. The lease's kept checkpoints (#126) ride
 // along: build_id, size_bytes and kept_at each, oldest keep first —
-// what the caller may restore, and what unpins would free.
+// what the caller may restore, and what unpins would free. The owner's
+// memory-quota view rides along too (#128): charged_mib, guaranteed_mib
+// and max_mib, the same numbers as GET /api/users/me scoped to this
+// lease's owner.
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	m := leaseMap(l, s.effectiveCheckpointInterval(l))
 	m["state"] = l.State
@@ -2436,6 +2439,16 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		}
 	}
 	m["kept_builds"] = kept
+	// Memory quota of the lease's owner (#128): the running-lease charge
+	// plus the user's limits, 0 = unset. Best effort: an identity-store
+	// hiccup leaves the fields off rather than failing the read.
+	if s.identities != nil {
+		if u := s.identities.UserByID(l.Owner); u != nil {
+			m["charged_mib"] = s.usedMiB(u.ID)
+			m["guaranteed_mib"] = u.GuaranteedMiB
+			m["max_mib"] = u.MaxMiB
+		}
+	}
 	return m
 }
 
