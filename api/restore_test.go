@@ -112,6 +112,11 @@ func TestRestoreSuspendedLease(t *testing.T) {
 	if !l.Suspended || l.ResumeBuildID == "" {
 		t.Fatalf("precondition: not suspended with a resume point: %+v", l)
 	}
+	// A drain marks the suspended lease Drained (U10); the restore must
+	// clear it, or undrain would later try to resume a running lease.
+	svc.store.mu.Lock()
+	l.Drained = true
+	svc.store.mu.Unlock()
 	// The lease's newest checkpoint is restorable even while suspended.
 	b, err := db.GetBuild(ctx, l.LastCheckpointBuildID)
 	if err != nil {
@@ -122,6 +127,9 @@ func TestRestoreSuspendedLease(t *testing.T) {
 	}
 	if !l.live() || l.Suspended {
 		t.Fatalf("restored-from-suspended lease must be running: %+v", l)
+	}
+	if l.Drained {
+		t.Fatal("restored lease still marked Drained; undrain would chase a running lease")
 	}
 	if l.ResumeBuildID != "" {
 		t.Fatalf("resume_build_id = %q, want cleared", l.ResumeBuildID)
