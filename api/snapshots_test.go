@@ -235,25 +235,25 @@ func writeBuildDir(dir string, sizes ...int) (int64, error) {
 			return 0, fmt.Errorf("write file: %w", err)
 		}
 	}
-	allocated, err := buildDiskUsage(dir)
+	allocated, err := store.BuildDiskUsage(dir)
 	if err != nil {
 		return 0, fmt.Errorf("measure %s: %w", dir, err)
 	}
 	return allocated, nil
 }
 
-// allocatedSize returns dir's allocated size via buildDiskUsage,
+// allocatedSize returns dir's allocated size via store.BuildDiskUsage,
 // failing the test when the walk itself fails.
 func allocatedSize(t *testing.T, dir string) int64 {
 	t.Helper()
-	allocated, err := buildDiskUsage(dir)
+	allocated, err := store.BuildDiskUsage(dir)
 	if err != nil {
 		t.Fatalf("measure %s: %v", dir, err)
 	}
 	return allocated
 }
 
-// TestBuildDiskUsageDistinguishesEmptyFromFailed: buildDiskUsage
+// TestBuildDiskUsageDistinguishesEmptyFromFailed: store.BuildDiskUsage
 // reports a readable-but-empty (or missing) build directory as 0 with
 // no error, but a directory it cannot read as an error — the write-time
 // path must not treat a legitimately 0-byte build as a failed stat
@@ -262,7 +262,7 @@ func TestBuildDiskUsageDistinguishesEmptyFromFailed(t *testing.T) {
 	root := t.TempDir()
 
 	// A missing directory is an unwritten build: 0, no error.
-	size, err := buildDiskUsage(filepath.Join(root, "absent"))
+	size, err := store.BuildDiskUsage(filepath.Join(root, "absent"))
 	if size != 0 || err != nil {
 		t.Fatalf("missing dir: size=%d err=%v, want 0, nil", size, err)
 	}
@@ -272,7 +272,7 @@ func TestBuildDiskUsageDistinguishesEmptyFromFailed(t *testing.T) {
 	if err := os.Mkdir(empty, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	size, err = buildDiskUsage(empty)
+	size, err = store.BuildDiskUsage(empty)
 	if size != 0 || err != nil {
 		t.Fatalf("empty dir: size=%d err=%v, want 0, nil", size, err)
 	}
@@ -287,7 +287,7 @@ func TestBuildDiskUsageDistinguishesEmptyFromFailed(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := buildDiskUsage(filepath.Join(file, "sub")); err == nil {
+	if _, err := store.BuildDiskUsage(filepath.Join(file, "sub")); err == nil {
 		t.Fatal("failed walk: err=nil, want a measurement failure")
 	}
 }
@@ -321,7 +321,7 @@ func TestBuildSizeFailedWalkStoresZero(t *testing.T) {
 	// The walk fails after reading f0, the way an unreadable
 	// subdirectory fails it: a partial total plus the error.
 	svc.diskUsage = func(dir string) (int64, error) {
-		size, err := buildDiskUsage(dir)
+		size, err := store.BuildDiskUsage(dir)
 		if err == nil {
 			return size, fmt.Errorf("stat %s/sub: permission denied", dir)
 		}
@@ -350,7 +350,7 @@ func TestBuildSizeFailedWalkStoresZero(t *testing.T) {
 
 	// The hourly pass re-measures and corrects the row: it stores what
 	// it read, unlike the write-time path.
-	svc.diskUsage = buildDiskUsage
+	svc.diskUsage = store.BuildDiskUsage
 	want := allocatedSize(t, filepath.Join(root, buildID))
 	if want < 8192 {
 		t.Fatalf("allocated size = %d, want at least 8192", want)

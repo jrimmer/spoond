@@ -850,9 +850,10 @@ ones:
 ```
 
 `size_bytes` is measured when the build is written (checkpoint, pause,
-clone, fork, drain) and re-measured by the hourly disk accounting pass,
-which overwrites every build's `size_bytes` with what the disk then
-says — including any build whose write-time measurement failed and
+clone, fork, drain; template builds get the same treatment from
+`spoond images build`) and re-measured by the hourly disk accounting
+pass, which overwrites every build's `size_bytes` with what the disk
+then says — including any build whose write-time measurement failed and
 stored 0, or whose files have changed since.
 
 ### `DELETE /api/snapshots/{build_id}` — delete a snapshot build

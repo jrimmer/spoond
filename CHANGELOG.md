@@ -152,7 +152,8 @@ the same value as `DASH_EVENTS_TOKEN` in the dashboard's.
   `GET /api/snapshots` and the dashboard show a size immediately
   instead of up to an hour later. The measurement covers every path
   that writes a fresh build: checkpoints (manual, periodic, clone and
-  fork), suspend and the admin drain. A failed measurement logs and
+  fork), suspend and the admin drain, and template builds from
+  `spoond images build`. A failed measurement logs and
   stores 0; the hourly pass still re-measures every build and corrects
   the row.
 

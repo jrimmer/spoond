@@ -51,7 +51,9 @@ snapshot tags to re-bake: images are built from Dockerfiles by
    default `localhost:5000`) and has the orchestrator's template manager
    produce an E2B **template build** — a booted, snapshotted microVM. The
    build and its digest are recorded in the catalog
-   (`spoond images list`, or `GET /api/images?detail=1`).
+   (`spoond images list`, or `GET /api/images?detail=1`), together with
+   the build's disk size, measured when the build is written and
+   refreshed by the hourly disk accounting pass.
 
 Builds run on the host as root, take minutes each, and are idempotent
 per name: the template id is stable for the life of the image name, and

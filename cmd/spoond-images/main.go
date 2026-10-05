@@ -231,6 +231,20 @@ func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, conte
 	return 0
 }
 
+// templateBuildSize measures a template build's directory under the
+// template storage root (E2B_TEMPLATE_STORAGE_PATH), the same allocated
+// blocks × 512 the service's disk accounting sums (#125). A failed walk
+// measures 0; the hourly disk accounting pass re-measures.
+func templateBuildSize(buildID string) int64 {
+	dir := filepath.Join(envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates"), buildID)
+	size, err := store.BuildDiskUsage(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "spoond images: build size %s: %v; storing 0 until the hourly pass\n", buildID, err)
+		return 0
+	}
+	return size
+}
+
 // resolveBase applies a manifest entry's From and BuildArgs: it looks up
 // the base image's current digest (passed as BASE), fills vcpu, memory,
 // disk and env from the base where the entry leaves them unset (entry
@@ -392,6 +406,11 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		FirecrackerVersion: res.FirecrackerVersion,
 		EnvdVersion:        res.EnvdVersion,
 		DiskMB:             int(res.DiskSizeMB),
+		// The template build's size at write time (#125), like the
+		// service records for checkpoint and pause builds: measure the
+		// build directory the orchestrator just wrote. 0 on a failed
+		// stat; the hourly disk accounting pass corrects it.
+		SizeBytes: templateBuildSize(buildID),
 	}); err != nil {
 		return err
 	}
