@@ -1032,6 +1032,94 @@ func TestLLMGateway(t *testing.T) {
 	}
 }
 
+// TestRestartModesHTTP pins the restart HTTP surface (#120): no mode and
+// mode=warm keep the persistent snapshot round-trip (1 resume create, no
+// delete), ?mode=cold and the {"mode":"cold"} body run the fresh-guest
+// path (delete + create, generation 2), and an unknown mode is 400.
+func TestRestartModesHTTP(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	defer ts.Close()
+
+	create := func() string {
+		_, m := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "py-base", "persistent": true})
+		id, _ := m["id"].(string)
+		if id == "" {
+			t.Fatalf("create: no id in %v", m)
+		}
+		return id
+	}
+	leaseState := func(id string) *Lease {
+		svc.store.mu.Lock()
+		defer svc.store.mu.Unlock()
+		return svc.store.leases[id]
+	}
+
+	// warm: the default — the persistent lease pauses and resumes.
+	warmID := create()
+	creates := calls(sub.Fake, "Create")
+	deletes := calls(sub.Fake, "Delete")
+	resp, m := doReq(t, "POST", ts.URL+"/api/leases/"+warmID+"/restart", "token-a", nil)
+	if resp.StatusCode != 200 || m["status"] != "running" {
+		t.Fatalf("warm restart = %d %v, want 200 running", resp.StatusCode, m)
+	}
+	if calls(sub.Fake, "Create") != creates+1 || calls(sub.Fake, "Delete") != deletes {
+		t.Fatalf("warm restart must pause+resume (1 create, no delete), calls: %v", sub.Fake.CallLog())
+	}
+	if l := leaseState(warmID); l.Generation != 1 {
+		t.Fatalf("generation after warm restart = %d, want 1", l.Generation)
+	}
+	resp, m = doReq(t, "POST", ts.URL+"/api/leases/"+warmID+"/restart?mode=warm", "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("explicit mode=warm = %d (%v), want 200", resp.StatusCode, m)
+	}
+
+	// cold via query: the fresh-guest path on the same persistent lease.
+	coldID := create()
+	oldSandbox := leaseState(coldID).SandboxID
+	resp, m = doReq(t, "POST", ts.URL+"/api/leases/"+coldID+"/restart?mode=cold", "token-a", nil)
+	if resp.StatusCode != 200 || m["status"] != "running" {
+		t.Fatalf("cold restart = %d %v, want 200 running", resp.StatusCode, m)
+	}
+	if m["id"] != coldID {
+		t.Fatalf("cold restart answered id %v, want the lease id kept (%s)", m["id"], coldID)
+	}
+	if got := calls(sub.Fake, "Delete "+oldSandbox); got != 1 {
+		t.Fatalf("cold restart must delete the old sandbox, calls: %v", sub.Fake.CallLog())
+	}
+	l := leaseState(coldID)
+	if l.SandboxID == oldSandbox || !l.live() || l.Generation != 2 || !l.Persistent {
+		t.Fatalf("cold-restarted lease = %+v, want a fresh running sandbox, generation 2, still persistent", l)
+	}
+
+	// cold via body, on a suspended lease: comes back running.
+	bodyID := create()
+	if _, err := svc.suspend(t.Context(), "consumer-a", bodyID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	oldSandbox = leaseState(bodyID).SandboxID
+	resp, m = doReq(t, "POST", ts.URL+"/api/leases/"+bodyID+"/restart", "token-a", map[string]any{"mode": "cold"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("cold via body = %d (%v), want 200", resp.StatusCode, m)
+	}
+	if l := leaseState(bodyID); !l.live() || l.Suspended || l.SandboxID == oldSandbox || l.Generation != 2 {
+		t.Fatalf("suspended lease cold-restarted via body = %+v, want running on a fresh sandbox, generation 2", l)
+	}
+
+	// An unknown mode is 400, and the lease is untouched.
+	badID := create()
+	resp, m = doReq(t, "POST", ts.URL+"/api/leases/"+badID+"/restart?mode=hot", "token-a", nil)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(m["error"].(string), "warm or cold") {
+		t.Fatalf("mode=hot = %d (%v), want 400 mentioning warm or cold", resp.StatusCode, m)
+	}
+	resp, _ = doReq(t, "POST", ts.URL+"/api/leases/"+badID+"/restart", "token-a", map[string]any{"mode": "scorched"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("body mode=scorched = %d, want 400", resp.StatusCode)
+	}
+	if l := leaseState(badID); l.Generation != 1 || !l.live() {
+		t.Fatalf("a rejected mode must leave the lease alone: %+v", l)
+	}
+}
+
 // TestTagAndRestart covers the ctl surface: friendly names (tag) and
 // reboot (restart) on persistent leases.
 func TestTagAndRestart(t *testing.T) {
