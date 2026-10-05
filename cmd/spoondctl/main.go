@@ -16,6 +16,7 @@
 //	spoondctl suspend <id>           suspend (snapshot + stop)
 //	spoondctl resume <id>            resume from snapshot
 //	spoondctl restart <id>           persistent: pause + resume (state kept); plain: fresh guest
+//	spoondctl restart <id> --cold    fresh guest from the image's current build, lease id kept
 //	spoondctl cp <id> [tag]          clone a lease
 //	spoondctl shelly <id>            install + start the Shelley coding agent
 //	spoondctl tag <id> <name>        give the lease a friendly name
@@ -87,7 +88,28 @@ func Main(args []string) int {
 	case "whoami":
 		printJSON(runCtl(host, port, key, "whoami"))
 		return 0
-	case "restart", "resume", "suspend", "keepalive", "shelly", "agent":
+	case "restart":
+		cold := false
+		args := rest[:0]
+		for _, a := range rest {
+			if a == "--cold" {
+				cold = true
+				continue
+			}
+			args = append(args, a)
+		}
+		rest = args
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: spoondctl restart <id> [--cold]")
+			return 1
+		}
+		cmd := fmt.Sprintf("restart %s", rest[0])
+		if cold {
+			cmd += " --cold"
+		}
+		printJSON(runCtl(host, port, key, cmd))
+		return 0
+	case "resume", "suspend", "keepalive", "shelly", "agent":
 		if len(rest) < 1 {
 			fmt.Fprintf(os.Stderr, "usage: spoondctl %s <id>\n", verb)
 			return 1
@@ -199,6 +221,7 @@ usage:
   spoondctl suspend <id>           suspend (snapshot + stop)
   spoondctl resume <id>            resume from snapshot
   spoondctl restart <id>           persistent: pause + resume (state kept); plain: fresh guest
+  spoondctl restart <id> --cold    fresh guest from the image's current build, lease id kept
   spoondctl cp <id> [tag]          clone a lease
   spoondctl shelly <id>            install + start the Shelley coding agent
   spoondctl tag <id> <name>        give the lease a friendly name

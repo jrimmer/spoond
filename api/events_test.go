@@ -70,7 +70,7 @@ func TestEventLifecyclePerPath(t *testing.T) {
 	if _, err := svc.resume(ctx, "c", l.ID); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if _, err := svc.restart(ctx, "c", l.ID); err != nil {
+	if _, err := svc.restart(ctx, "c", l.ID, ""); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
 	svc.release(ctx, l)

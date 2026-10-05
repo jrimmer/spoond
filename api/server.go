@@ -1230,20 +1230,34 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRestart restarts a lease: a persistent one is paused and resumed
-// (guest state kept, not a reboot), a plain one gets a fresh guest.
+// handleRestart restarts a lease. mode=warm (the default) keeps the
+// guest: a persistent one is paused and resumed, a plain one gets a
+// fresh guest. mode=cold gives any lease a fresh guest from the image's
+// current build, keeping the lease id (#120). The mode comes from
+// ?mode= or the JSON body, body winning when both are set.
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
-	lease, err := s.svc.restart(r.Context(), owner, id)
+	mode := r.URL.Query().Get("mode")
+	if r.Body != nil {
+		var req struct {
+			Mode string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Mode != "" {
+			mode = req.Mode
+		}
+	}
+	lease, err := s.svc.restart(r.Context(), owner, id, mode)
 	if err != nil {
-		switch err {
-		case errNotFound:
+		switch {
+		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
-		case errNotPersistent:
+		case errors.Is(err, errNotPersistent):
 			writeError(w, http.StatusBadRequest, "lease is not a persistent lease")
-		case errLeaseBusy:
+		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errBadRestartMode):
+			writeError(w, http.StatusBadRequest, err.Error())
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")
