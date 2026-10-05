@@ -51,11 +51,11 @@
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ refusals and failures ──────────────────────────────────────────────┐
-│ auth 2  quota 1  throttled 0  capacity 3  build fails 1  lost leases │
+│ auth 2  quota 1  throttled 0  capacity 3  build fails 1              │
 │ create 250 ms  resume 4.1 s                                          │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ events ─────────────────────────────────────────────────────────────┐
-│ ┄ 07:19:02 held lease abc: idle/suspend_idle (2h ago)                │
-│ 07:18:44 grant: pooled go-base                                       │
+│ 07:19:02  held_action  fedcba0987  nightly                           │
+│ 07:18:44  released    abcdef0123  jason                              │
 └──────────────────────────────────────────────────────────────────────┘
 leases [3/64]  hugepages [23.9 GiB free]                        12:00:00

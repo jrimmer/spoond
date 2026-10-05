@@ -530,12 +530,16 @@ below stream them live, with resume.
 Server-Sent Events. Admins receive every lease's events; everyone else
 receives only events for their own leases. `?lease_id=<id>` narrows the
 stream to one lease (a lease you cannot see answers the same `404` as
-the other lease routes). Requires a bearer token.
+the other lease routes). Requires a bearer token: a consumer token (or
+an admin user), or the events-only `EVENTS_TOKEN` — which sees every
+owner's events and is refused on every other route (a stream is a read:
+any other method gets `405`).
 
 ### `GET /api/leases/{id}/events` — stream one lease's events
 
 Same stream, pre-filtered to the lease in the path. The owner (or an
-admin); anyone else gets `404`, like every other lease route.
+admin); the events-only `EVENTS_TOKEN` (every lease's events); anyone
+else gets `404`, like every other lease route.
 
 ### Wire format
 

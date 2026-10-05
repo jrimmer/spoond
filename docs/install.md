@@ -300,7 +300,8 @@ Then the runner and the dashboard, if you want them:
 systemctl enable --now spoond-runner        # needs /etc/spoond-runner.env
 /opt/spoond/spoond dash hash '<password>'    # bcrypt hash for DASH_PASSWORD_HASH
 # /etc/spoond/dash.env: DASH_USER, DASH_PASSWORD_HASH, METRICS_TOKEN,
-#                      DASH_TLS_CERT, DASH_TLS_KEY — see operations.md
+#                      DASH_EVENTS_TOKEN, DASH_TLS_CERT, DASH_TLS_KEY —
+#                      see operations.md
 systemctl enable --now spoond-dash   # your unit wrapping `spoond dash`
 ```
 

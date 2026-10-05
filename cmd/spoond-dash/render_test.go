@@ -66,8 +66,8 @@ func sampleSnapshot() Snapshot {
 			{Name: "py-base", Live: 1, Uses: 7, VCPU: 1, MemMB: 1024, Updated: "9h ago"},
 		},
 		Events: []EventLine{
-			{Text: "07:19:02 held lease abc: idle/suspend_idle (2h ago)", Style: "warn"},
-			{Text: "07:18:44 grant: pooled go-base", Style: "dim"},
+			{Text: "07:19:02  held_action  fedcba0987  nightly", Style: "warn"},
+			{Text: "07:18:44  released    abcdef0123  jason", Style: "dim"},
 		},
 	}
 }
@@ -249,6 +249,37 @@ func TestDownUnitFramePassesCheck(t *testing.T) {
 	}
 }
 
+// TestServicesPanelOverflowRow: when units outrun the services panel's
+// row cap, the panel's last row says "+N more" instead of silently
+// dropping them.
+func TestServicesPanelOverflowRow(t *testing.T) {
+	s := sampleSnapshot()
+	var units []Service
+	for i := 0; i < maxServiceRows; i++ {
+		units = append(units, Service{Name: fmt.Sprintf("unit-%02d", i), State: "active"})
+	}
+	s.Services = units
+
+	// At the cap every unit is drawn, no overflow row.
+	p := Draw(s, minW, fixedNow, "h").Plain()
+	if strings.Contains(p, "more") || !strings.Contains(p, fmt.Sprintf("unit-%02d", maxServiceRows-1)) {
+		t.Fatalf("units at or under the cap must all be drawn:\n%s", p)
+	}
+
+	// Over the cap: maxServiceRows unit rows and a final "+N more".
+	s.Services = append(units, Service{Name: "unit-90", State: "active"}, Service{Name: "unit-91", State: "active"})
+	p = Draw(s, minW, fixedNow, "h").Plain()
+	if !strings.Contains(p, "+2 more") {
+		t.Fatalf("overflow row missing:\n%s", p)
+	}
+	if !strings.Contains(p, fmt.Sprintf("unit-%02d", maxServiceRows-1)) || strings.Contains(p, "unit-90") {
+		t.Fatalf("kept or dropped units wrong:\n%s", p)
+	}
+	if _, err := drawFrame(s, nil, DefaultWidth, "h", fixedNow, 0); err != nil {
+		t.Fatalf("overflow frame failed Check: %v", err)
+	}
+}
+
 // TestVersionLabel: the header's version is short — a tag as it is, a
 // Go pseudo-version base+7-char hash, "?" when there was none.
 func TestVersionLabel(t *testing.T) {
@@ -404,7 +435,7 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 		switch {
 		case strings.Contains(r, "forgejo/job-42"):
 			held = r
-		case strings.Contains(r, "nightly"):
+		case strings.Contains(r, "◉"):
 			lapsed = r
 		case strings.Contains(r, "abcdef0123"):
 			plain = r
@@ -454,6 +485,35 @@ func TestLeaseNameShownWhenNoHolder(t *testing.T) {
 	p := l.assemble().Plain()
 	if !strings.Contains(p, "jasons box") {
 		t.Fatalf("lease name not shown in the holder column:\n%s", p)
+	}
+}
+
+// TestLeaseCommentShownWhenNoHolderOrName: a holder-less, name-less
+// lease (a CI job) shows its comment in the holder column, dim. With a
+// holder or a name present the comment stays hidden.
+func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Comment: "forgejo: lacy.casa/site #218",
+		Age: "5m", Left: "10m"}}
+	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
+	p := l.assemble().Plain()
+	if !strings.Contains(p, "forgejo: lacy.casa/") || !strings.Contains(p, "…") {
+		t.Fatalf("lease comment not shown in the holder column:\n%s", p)
+	}
+
+	// A holder wins; the comment is not drawn anywhere.
+	s.Rows[0].Holder = "forgejo/job-42"
+	p = l.assemble().Plain()
+	if !strings.Contains(p, "forgejo/job-42") || strings.Contains(p, "lacy.casa/site") {
+		t.Fatalf("comment drawn despite the holder:\n%s", p)
+	}
+
+	// So does a name.
+	s.Rows[0].Holder = ""
+	s.Rows[0].Name = "scratch space"
+	p = l.assemble().Plain()
+	if !strings.Contains(p, "scratch space") || strings.Contains(p, "lacy.casa/site") {
+		t.Fatalf("comment drawn despite the name:\n%s", p)
 	}
 }
 
@@ -679,27 +739,88 @@ func TestLeasesPanelEmptyState(t *testing.T) {
 	t.Fatalf("leases panel not found:\n%s", p)
 }
 
-// TestEventsPanelMarksHeldActions: automatic held-lease actions are
-// drawn with the ┄ the legend promises, journal lines without it.
-func TestEventsPanelMarksHeldActions(t *testing.T) {
-	s := sampleSnapshot() // Events: one held action (warn), one journal line (dim)
-	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	lines := strings.Split(p, "\n")
-	held, journal := false, false
+// TestEventsPanelColumns: each event line reads HH:MM:SS, the type
+// padded to 10, the lease id to 10, then the subject — with the time
+// dim and the type and tail in the event's own style, so one style
+// across the line would paint the padding dim too.
+func TestEventsPanelColumns(t *testing.T) {
+	s := sampleSnapshot() // Events: one held action (warn), one release (dim)
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	lines := strings.Split(g.HTML(), "\n")
+	var held, released []string
 	for _, r := range lines {
-		if strings.Contains(r, "held lease abc") {
-			held = strings.Contains(r, "┄")
+		if strings.Contains(r, "held_action") {
+			held = append(held, r)
 		}
-		if strings.Contains(r, "grant: pooled") {
-			journal = !strings.Contains(r, "┄")
+		if strings.Contains(r, "released") {
+			released = append(released, r)
 		}
 	}
-	if !held {
-		t.Fatalf("held-lease action not drawn with ┄:\n%s", p)
+	if len(held) != 1 || len(released) != 1 {
+		t.Fatalf("event rows missing:\n%s", g.Plain())
 	}
-	if !journal {
-		t.Fatalf("journal line drawn with ┄:\n%s", p)
+	plain := strings.Split(g.Plain(), "\n")
+
+	// The columns must line up on the plain frame: the type padded to
+	// 10, the id to 10, then the subject.
+	for _, r := range plain {
+		if strings.Contains(r, "held_action") && !strings.Contains(r, "held_action  fedcba0987  nightly") {
+			t.Fatalf("held_action row wrong:\n%s", r)
+		}
+		if strings.Contains(r, "released") && !strings.Contains(r, "released    abcdef0123  jason") {
+			t.Fatalf("released row wrong:\n%s", r)
+		}
 	}
+
+	// The type's style reaches the page: warn on the held action (its
+	// time staying dim), the release dim all through.
+	if !strings.Contains(held[0], `class="g-warn"`) || !strings.Contains(held[0], `class="g-dim"`) {
+		t.Fatalf("held_action not warn beside a dim time:\n%s", held[0])
+	}
+	if !strings.Contains(released[0], `class="g-dim"`) || strings.Contains(released[0], `class="g-warn"`) {
+		t.Fatalf("released not dim:\n%s", released[0])
+	}
+}
+
+// TestEventsPanelSubjectPreference: the tail column is the holder, else
+// the lease's name, else the owner the event carries.
+func TestEventsPanelSubjectPreference(t *testing.T) {
+	ev := dashEvent{LeaseID: "abc", Subject: "u-owner"}
+	rows := []LeaseRow{
+		{ID: "abc", Holder: "forgejo/job-9"},
+	}
+	if got := eventSubject(ev, rows); got != "forgejo/job-9" {
+		t.Fatalf("subject = %q, want the holder", got)
+	}
+	rows[0] = LeaseRow{ID: "abc", Name: "scratch space"}
+	if got := eventSubject(ev, rows); got != "scratch space" {
+		t.Fatalf("subject = %q, want the name", got)
+	}
+	rows[0] = LeaseRow{ID: "other"}
+	if got := eventSubject(ev, rows); got != "u-owner" {
+		t.Fatalf("subject = %q, want the owner", got)
+	}
+}
+
+// TestEventsPanelNoToken: without DASH_EVENTS_TOKEN the panel says so,
+// dim, instead of looking broken.
+func TestEventsPanelNoToken(t *testing.T) {
+	s := healthySnapshot()
+	s.Events = []EventLine{{Text: "events need DASH_EVENTS_TOKEN", Style: "dim"}}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "events need DASH_EVENTS_TOKEN") {
+		t.Fatalf("no-token note missing:\n%s", p)
+	}
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	for _, r := range strings.Split(g.HTML(), "\n") {
+		if strings.Contains(r, "events need DASH_EVENTS_TOKEN") {
+			if !strings.Contains(r, `class="g-dim"`) {
+				t.Fatalf("no-token note not dim:\n%s", r)
+			}
+			return
+		}
+	}
+	t.Fatalf("no-token note not drawn:\n%s", p)
 }
 
 // Names with accented or double-width characters must never blank the
@@ -767,7 +888,7 @@ func TestPageLinkRowKeepsItsWidth(t *testing.T) {
 // always on screen and the row fits.
 func TestLegendFitsNarrowFrames(t *testing.T) {
 	for _, w := range []int{72, 80, 104} {
-		segs := fitSegs(legendRow(), w)
+		segs := fitItems(legendRow(), w)
 		n := 0
 		for _, s := range segs {
 			n += len([]rune(s.Text))

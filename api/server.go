@@ -317,6 +317,14 @@ func (s *Server) isMetricsToken(r *http.Request) bool {
 	return want != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
+// isEventsToken reports whether the request carries the events-only
+// EVENTS_TOKEN (constant-time compare). An unset token matches nothing.
+func (s *Server) isEventsToken(r *http.Request) bool {
+	want := s.svc.cfg.EventsToken
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return want != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // handleMetrics emits spoond's own Prometheus metrics (issue #20),
 // gathered from the live Service state (pool, leases, identity) and
 // rendered via the prometheus registry. Requires admin when the
@@ -573,6 +581,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// The events-only token reaches the lease event streams and
+		// nothing else (the dashboard's subscription; the consumer-auth
+		// fall-through below would refuse it). The check re-runs in the
+		// handler, so one token cannot buy any other route by racing a
+		// path rewrite or a mux quirk. The request carries no consumer
+		// identity — the handlers see the marker and stream unfiltered.
+		if eventsPath(r.URL.Path) && s.isEventsToken(r) {
+			if !s.allowEventsToken(w, r) {
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxEventsToken{}, true)))
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(auth, "Bearer ")
 		if token == "" || token == auth {
@@ -632,6 +653,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 type ctxOwnerKey struct{}
 type ctxUserKey struct{}
+type ctxEventsToken struct{} // set when the caller authenticated with the events-only EVENTS_TOKEN
 
 // authFailLimiter throttles repeated failed token auths per client IP
 // (security review #37 L5). Tokens are high-entropy so brute force is
@@ -684,6 +706,60 @@ func clientIP(remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
+}
+
+// eventsPath reports whether p is one of the two lease event stream
+// routes (in either spelling — the alias rewrite happens later). The
+// events-only EVENTS_TOKEN is admitted on exactly these.
+func eventsPath(p string) bool {
+	for _, base := range []string{"/api/sandboxes/", "/api/leases/"} {
+		rest, ok := strings.CutPrefix(p, base)
+		if !ok {
+			continue
+		}
+		if rest == "events" {
+			return true
+		}
+		if id, ok := strings.CutSuffix(rest, "/events"); ok && id != "" && !strings.Contains(id, "/") {
+			return true // the {id}/events form, alias included
+		}
+	}
+	return false
+}
+
+// allowEventsToken admits a request that authenticated with the
+// events-only EVENTS_TOKEN: 401 when no token is configured (an unset
+// token matches nothing, so this is unreachable through isEventsToken,
+// but the refusal stays here for clarity), 405 for any method but GET
+// (a stream is a read), 404 for the one-lease form when the lease does
+// not exist. Everything else about the route stays the stream handler's
+// job.
+func (s *Server) allowEventsToken(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "events token is read-only")
+		return false
+	}
+	id := leaseIDFromEventsPath(r.URL.Path)
+	if id != "" && s.svc.lookupAny(id) == nil {
+		writeError(w, http.StatusNotFound, "lease not found")
+		return false
+	}
+	return true
+}
+
+// leaseIDFromEventsPath extracts the lease id of a /api/{sandboxes|
+// leases}/{id}/events path, "" on the all-events route.
+func leaseIDFromEventsPath(p string) string {
+	for _, base := range []string{"/api/sandboxes/", "/api/leases/"} {
+		rest, ok := strings.CutPrefix(p, base)
+		if !ok || rest == "events" {
+			continue
+		}
+		if id, ok := strings.CutSuffix(rest, "/events"); ok && id != "" && !strings.Contains(id, "/") {
+			return id
+		}
+	}
+	return ""
 }
 
 // userFrom returns the identity-store user attached by authMiddleware,

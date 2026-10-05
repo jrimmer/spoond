@@ -588,8 +588,14 @@ from spoond's `/metrics` using the scrape-only `METRICS_TOKEN`, the
 SQLite catalog opened read-only, user names from the identity store,
 `/proc` and systemd. Every viewer shares that loop through a single
 server-sent-event stream, and `DASH_HISTORY` (default 150) points of
-history are kept so a new page starts with trends. Configuration lives in
-`cmd/spoond-dash/dash.go`; the notable variables:
+history are kept so a new page starts with trends. With
+`DASH_EVENTS_TOKEN` set, the collector also holds one subscription to
+the backend's lease event stream (the events-only `EVENTS_TOKEN` below)
+and the events panel shows the newest events — `HH:MM:SS`, the type,
+the lease id and the holder (else the comment, else the owner), lost
+and held-lease actions highlighted, releases dim. Without the token the
+panel says `events need DASH_EVENTS_TOKEN` instead. Configuration lives
+in `cmd/spoond-dash/dash.go`; the notable variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -599,19 +605,20 @@ history are kept so a new page starts with trends. Configuration lives in
 | `METRICS_URL` | `https://127.0.0.1:8890/metrics` | spoond's `/metrics` |
 | `METRICS_SERVER_NAME` | `spoond.example.com` | TLS server name for that URL |
 | `METRICS_TOKEN` | *(required)* | the backend's scrape-only token |
+| `DASH_EVENTS_TOKEN` | *(unset)* | the backend's events-only `EVENTS_TOKEN`; the lease events panel's source (unset: the panel says so) |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
 | `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol` | systemd units to show |
-| `DASH_ACTIVITY_UNIT` | `spoond-backend` | unit whose journal feeds the events panel |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |
 | `DASH_HOST` | *(the hostname)* | header label |
 
 The dashboard can only read: it has no write path to the backend, the
-database or the orchestrator, and the metrics token it holds is refused
-everywhere except `/metrics`.
+database or the orchestrator, and the tokens it holds are refused
+everywhere except their own routes — `METRICS_TOKEN` on `/metrics`,
+`DASH_EVENTS_TOKEN` on the lease event stream.
 
 ## Metrics
 

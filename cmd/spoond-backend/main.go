@@ -19,6 +19,8 @@
 //	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
 //	METRICS_TOKEN     bearer that may read /metrics and nothing else
 //	                  (Prometheus, spoond dash); empty disables
+//	EVENTS_TOKEN      bearer that may read the lease event streams and
+//	                  nothing else (spoond dash); empty disables
 //	HOST_API_PORT     lease API port lan/internet guests may reach on
 //	                  HOST_GUEST_SERVICE_ADDR (default: BIND_ADDR's port)
 //	CHECKPOINT_INTERVAL_MINS  periodic checkpoint interval (U10; default 60)
@@ -290,6 +292,7 @@ func Main(args []string) int {
 		HostGuestPort:          hostGuestPort,
 		HostAPIPort:            hostAPIPort,
 		MetricsToken:           os.Getenv("METRICS_TOKEN"),
+		EventsToken:            os.Getenv("EVENTS_TOKEN"),
 		ProxyURL:               cfg.ProxyURL,
 		CheckpointEvery:        checkpointEvery,
 		TemplateStoragePath:    storagePath,
