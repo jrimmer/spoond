@@ -1064,7 +1064,7 @@ func errMemoryQuotaExceeded(maxMiB int) error {
 // cannot both pass max_leases or max_mib. The caller MUST call
 // releaseQuotaReservation when it finishes (success or failure).
 // memoryMB is the per-lease memory charge in MiB — the image's
-// memory_mb, stamped on the lease (leaseCharge). newLease is false for
+// memory_mb, stamped on the lease at grant time. newLease is false for
 // a resume (or any other operation that turns an existing suspended
 // lease back into a running one): those pass ONLY the memory check —
 // the lease already holds its max_leases slot — while create, clone and
@@ -1217,17 +1217,6 @@ func (s *Service) imageMiB(image string) int {
 		return 0
 	}
 	return mb
-}
-
-// leaseCharge stamps memoryMB as the lease's MiB charge (#128) and
-// persists the row. Called at grant time (create, clone, fork, and the
-// cold paths that rebuild a lease's guest) and stamped 0 nowhere else:
-// a resume keeps its original stamp.
-func (s *Service) leaseCharge(l *Lease, memoryMB int) {
-	s.store.mu.Lock()
-	l.MemoryMB = memoryMB
-	s.saveLeaseLocked(l)
-	s.store.mu.Unlock()
 }
 
 // grant creates a new lease for owner: served from the warm pool when
