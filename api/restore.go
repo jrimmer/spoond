@@ -127,19 +127,19 @@ func (s *Service) restoreBusy(ctx context.Context, l *Lease, b store.BuildRow) e
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
-	var req struct {
-		BuildID string `json:"build_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil && isAdmin(r) {
 		lease = s.svc.lookupAny(id)
 	}
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	var req struct {
+		BuildID string `json:"build_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	b, ok := s.svc.restoreableBuild(r.Context(), lease, req.BuildID)

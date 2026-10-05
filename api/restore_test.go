@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -292,7 +291,9 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 		t.Fatalf("restore by a stranger = %d, want 404", resp.StatusCode)
 	}
 
-	// A missing/invalid body is 400 before anything else.
+	// A missing/invalid body is 400 — but only after the lease itself
+	// has answered 404 for callers who cannot see it (no existence
+	// leak; 1bcbf56's ordering).
 	req, _ := http.NewRequest("POST", ts.URL+"/api/leases/"+l.ID+"/restore",
 		strings.NewReader("{not json"))
 	req.Header.Set("Authorization", "Bearer token-a")
@@ -304,5 +305,16 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 	if hresp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("restore bad body = %d, want 400", hresp.StatusCode)
 	}
-	_ = json.Marshal
+	// A stranger gets the lease 404 even with a bad body.
+	req, _ = http.NewRequest("POST", ts.URL+"/api/leases/"+l.ID+"/restore",
+		strings.NewReader("{not json"))
+	req.Header.Set("Authorization", "Bearer token-b")
+	hresp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	hresp.Body.Close()
+	if hresp.StatusCode != http.StatusNotFound {
+		t.Fatalf("restore bad body by a stranger = %d, want 404", hresp.StatusCode)
+	}
 }
