@@ -10,6 +10,13 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **The dashboard's events panel showed owner ids.** An event for a lease
+  with no holder or comment named its owner as an identity id
+  (`u-42f5…`); it now shows the user's name, as the leases table does
+  (#127).
+
 ## [2.3.0] - 2026-10-05
 
 2.3 puts checkpoints on the lease's terms and finishes the dashboard.

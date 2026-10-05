@@ -164,7 +164,7 @@ func eventStyle(t string) string {
 // job it runs), else the owner the event carries. The rows are the live
 // lease table the same tick built; a lease that has left it (released)
 // falls through to the event's owner.
-func eventSubject(ev dashEvent, rows []LeaseRow) string {
+func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string {
 	for _, r := range rows {
 		if r.ID == ev.LeaseID {
 			if r.Holder != "" {
@@ -175,6 +175,11 @@ func eventSubject(ev dashEvent, rows []LeaseRow) string {
 			}
 			break
 		}
+	}
+	// The fallback is the event's owner, an identity id (u-…) for a
+	// person or agent: show its name, as the leases table does (#127).
+	if n := names[ev.Subject]; n != "" {
+		return n
 	}
 	return ev.Subject
 }
@@ -562,6 +567,7 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 	evs := c.events.newest(eventPanelRows)
 	lines := make([]EventLine, 0, len(evs))
 	rows := c.lastRows()
+	names := c.userNames()
 	for _, ev := range evs {
 		// Local time, like the status line's clock on the same frame.
 		at := ev.At.In(now.Location()).Format("15:04:05")
@@ -571,7 +577,7 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 			lines = append(lines, EventLine{Text: at + "  ┄ events missed while reconnecting", Style: "warn"})
 			continue
 		}
-		text := fmt.Sprintf("%s  %-14s  %-10s  %s", at, ev.Type, ev.LeaseID, eventSubject(ev, rows))
+		text := fmt.Sprintf("%s  %-14s  %-10s  %s", at, ev.Type, ev.LeaseID, eventSubject(ev, rows, names))
 		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev.Type)})
 	}
 	return lines

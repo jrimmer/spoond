@@ -784,22 +784,26 @@ func TestEventsPanelColumns(t *testing.T) {
 
 // TestEventsPanelSubjectPreference: the tail column is the holder, else
 // the lease's comment (a CI job lease has neither holder nor name), else
-// the owner the event carries.
+// the owner the event carries, by name when the identity store has one.
 func TestEventsPanelSubjectPreference(t *testing.T) {
 	ev := dashEvent{LeaseID: "abc", Subject: "u-owner"}
 	rows := []LeaseRow{
 		{ID: "abc", Holder: "forgejo/job-9"},
 	}
-	if got := eventSubject(ev, rows); got != "forgejo/job-9" {
+	if got := eventSubject(ev, rows, nil); got != "forgejo/job-9" {
 		t.Fatalf("subject = %q, want the holder", got)
 	}
 	rows[0] = LeaseRow{ID: "abc", Comment: "forgejo: lacy.casa/site #9"}
-	if got := eventSubject(ev, rows); got != "forgejo: lacy.casa/site #9" {
+	if got := eventSubject(ev, rows, nil); got != "forgejo: lacy.casa/site #9" {
 		t.Fatalf("subject = %q, want the comment", got)
 	}
 	rows[0] = LeaseRow{ID: "other"}
-	if got := eventSubject(ev, rows); got != "u-owner" {
+	if got := eventSubject(ev, rows, nil); got != "u-owner" {
 		t.Fatalf("subject = %q, want the owner", got)
+	}
+	// An owner id with a name in the identity store shows the name (#127).
+	if got := eventSubject(ev, rows, map[string]string{"u-owner": "conformance"}); got != "conformance" {
+		t.Fatalf("subject = %q, want the owner's name", got)
 	}
 }
 
