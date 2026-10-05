@@ -26,7 +26,7 @@ type LeaseRow struct {
 	Drained bool // paused by the admin drain, resumed by undrain (U10)
 	// Holder names what holds the lease (a CI job, a person) and
 	// HolderUrl links to it. A non-empty holder keeps the lease out of
-	// every sweeper (TTL, idle) and on the periodic checkpoint pass.
+	// every sweeper (TTL, idle); checkpoints follow checkpoint_interval.
 	// HoldSetAt/HoldExpiresAt bound the hold (2.1): past HoldExpiresAt
 	// the holder is cleared and normal sweeping resumes. HoldTTL is the
 	// requested explicit hold_ttl in seconds (0 = the default). The

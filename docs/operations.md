@@ -641,6 +641,7 @@ marker. The substrate-specific series:
 | `spoond_node_outstanding_work` | orchestrator outstanding work (in-flight snapshot uploads) |
 | `spoond_create_duration_seconds{resume}` | `Create` latency, resume vs fresh |
 | `spoond_checkpoint_duration_seconds` | checkpoint latency |
+| `spoond_checkpoint_pause_seconds` | how long each checkpoint froze its guest (2.3, #122) |
 | `spoond_snapshot_bytes{kind}` | build disk per kind |
 | `spoond_storage_free_bytes` | free bytes at the build store |
 | `spoond_gc_deleted_total{kind}` | builds deleted by the GC |

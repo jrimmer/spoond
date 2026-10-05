@@ -119,16 +119,16 @@ func (s *Server) handleCheckpointPolicy(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "checkpoint_interval is required")
 		return
 	}
-	if err := validateCheckpointInterval(*req.CheckpointInterval); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil && isAdmin(r) {
 		lease = s.svc.lookupAny(id)
 	}
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	if err := validateCheckpointInterval(*req.CheckpointInterval); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	updated, err := s.svc.setCheckpointPolicy(lease, *req.CheckpointInterval)

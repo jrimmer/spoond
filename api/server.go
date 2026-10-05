@@ -1356,8 +1356,8 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 // Both holder fields empty clears. The same holder renews the hold for
 // another HOLD_TTL_SECS (or the explicit, capped hold_ttl) from now; a
 // different holder is refused with 409. A held lease is not released
-// at its TTL, not idle-suspended, and checkpointed periodically like a
-// persistent lease; its hold expires on its own and the automatic
+// at its TTL and not idle-suspended (periodic checkpoints follow its
+// checkpoint_interval); its hold expires on its own and the automatic
 // limits act regardless. Owner or admin; anyone else gets the same 404
 // as the other lease routes (no existence leak).
 func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {

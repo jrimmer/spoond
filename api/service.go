@@ -71,9 +71,9 @@ type Lease struct {
 	Drained bool
 	// Holder names what holds the lease (a CI job, an orchestrator's
 	// flight, a person's scratch work) and HolderUrl links to it. A
-	// non-empty holder makes the lease held: not released at its TTL,
-	// not idle-suspended, and checkpointed periodically like a
-	// persistent lease. "" = unheld, normal sweeping.
+	// non-empty holder makes the lease held: not released at its TTL and
+	// not idle-suspended. (Periodic checkpoints follow the lease's own
+	// checkpoint_interval since 2.3, not the hold.) "" = unheld.
 	Holder    string `json:"holder,omitempty"`
 	HolderUrl string `json:"holder_url,omitempty"`
 	// HoldSetAt/HoldExpiresAt bound the hold (2.1): it lasts HoldTTL
@@ -1615,9 +1615,8 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	// The pause is what guests feel (2.3, #122): one line per checkpoint
 	// with the lease, how long the guest was frozen and how much memory
 	// had to be snapshotted.
-	if memMB, merr := s.imageMemoryMB(ctx, src.Image); merr == nil {
-		s.log.Printf("checkpoint: lease %s paused %.3fs (memory_mb %d)", src.ID, pause.Seconds(), memMB)
-	}
+	memMB, _ := s.imageMemoryMB(ctx, src.Image) // 0 when the catalog cannot say
+	s.log.Printf("checkpoint: lease %s paused %.3fs (memory_mb %d, err %v)", src.ID, pause.Seconds(), memMB, err)
 	if err != nil {
 		return store.BuildRow{}, err
 	}

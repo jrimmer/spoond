@@ -47,9 +47,8 @@ summarised from README "Status".
   effective interval has elapsed and that has been active since its
   last checkpoint — previously every active persistent lease and every
   held lease was checkpointed hourly. A held lease is checkpointed
-  only if it has an interval (a held lease's `checkpoint_interval` set
-  before 2.3 upgrades to the host default, itself never — set one
-  explicitly if the holder's work must survive a crash). An
+  only if it has an interval: set one if the holder's work must survive
+  an orchestrator crash. Leases created before 2.3 get the host default. An
   orchestrator crash loses the work a lease has done since its last
   checkpoint; a lease that has never been checkpointed is lost
   entirely, while planned restarts and drains pause into a build

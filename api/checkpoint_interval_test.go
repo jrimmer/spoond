@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jrimmer/spoond/v2/store"
 )
 
 // TestCheckpointIntervalZeroNeverPicked: an interval of 0 (never) is
@@ -213,9 +211,6 @@ func TestCheckpointPolicyPutAndEvent(t *testing.T) {
 		t.Fatal("a could not create lease")
 	}
 
-	all := func() []LeaseEvent { return nil } // replaced below
-	_ = all
-
 	// Wrong owner: 404, like every owner-scoped route.
 	req := httptest.NewRequest("PUT", "/api/leases/"+lid+"/checkpoint-policy",
 		strings.NewReader(`{"checkpoint_interval":120}`))
@@ -386,16 +381,6 @@ func TestCheckpointIntervalRowFieldAndPersistence(t *testing.T) {
 	if row, err := db.GetLease(context.Background(), neverID); err != nil || row.CheckpointInterval != 0 {
 		t.Fatalf("stored interval = %d (%v), want 0", row.CheckpointInterval, err)
 	}
-}
-
-// mustRow loads one lease row or fails the test.
-func mustRow(t *testing.T, db *store.DB, id string) store.LeaseRow {
-	t.Helper()
-	row, err := db.GetLease(context.Background(), id)
-	if err != nil {
-		t.Fatalf("load row %s: %v", id, err)
-	}
-	return row
 }
 
 // TestCheckpointIntervalCloneForkCopy: clone and fork copy the source's
