@@ -3,6 +3,10 @@
 # scylladb/scylla image is RHEL UBI, which E2B's template builder rejects).
 FROM debian:12
 ENV DEBIAN_FRONTEND=noninteractive
+# The scylla metapackage pins its sub-packages to its own version exactly,
+# but apt resolves them to the newest in the repository, so every
+# sub-package is pinned to the same version too (a 2026.2.8 release broke
+# the build on 2026-10-04).
 COPY scylla-signing-key.gpg scylla-2026.2.list /tmp/
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends ca-certificates python3 \
@@ -14,7 +18,9 @@ RUN apt-get update -qq \
  && dpkg-divert --local --rename --add /sbin/sysctl \
  && printf '#!/bin/sh\nexit 0\n' > /sbin/sysctl \
  && chmod 0755 /sbin/sysctl \
- && apt-get install -y --no-install-recommends scylla=2026.2.7-0.20260902.94dae629230b-1 \
+ && V=2026.2.7-0.20260902.94dae629230b-1 \
+ && apt-get install -y --no-install-recommends scylla=$V scylla-server=$V \
+      scylla-kernel-conf=$V scylla-node-exporter=$V scylla-cqlsh=$V \
  && rm -f /sbin/sysctl \
  && dpkg-divert --local --rename --remove /sbin/sysctl \
  && rm -rf /var/lib/apt/lists/*
