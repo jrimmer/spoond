@@ -174,6 +174,18 @@ func (c *client) checkpoint(id string) (int, []byte, error) {
 	return c.do("POST", "/api/sandboxes/"+id+"/checkpoint", nil)
 }
 
+// checkpointKeep checkpoints with {"keep":true} (2.3, #121): the build
+// joins the GC's kept set and is a restore point.
+func (c *client) checkpointKeep(id string) (int, []byte, error) {
+	return c.do("POST", "/api/sandboxes/"+id+"/checkpoint", map[string]any{"keep": true})
+}
+
+// restore rolls the lease in place back to the kept checkpoint build
+// (2.3, #121).
+func (c *client) restore(id, buildID string) (int, []byte, error) {
+	return c.do("POST", "/api/leases/"+id+"/restore", map[string]any{"build_id": buildID})
+}
+
 func (c *client) stat(id string) (int, []byte, error) {
 	return c.do("GET", "/api/sandboxes/"+id+"/stat", nil)
 }
