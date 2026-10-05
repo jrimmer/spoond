@@ -630,13 +630,34 @@ func headerRows() int { return 3 }
 
 // capacity panel: the running meter, the leases line, queued, granted,
 // swept, then one row per image with live leases. H is the height the
-// panel shares with host when the two sit side by side.
+// panel shares with host when the two sit side by side. A wrapped
+// capacity row (the leases line grows with the cluster, the panel does
+// not) takes its extra lines into account.
 func (l *layout) capacityH() int {
-	h := 3 + len(l.capacityRows()) // title + rows (+ frame)
+	h := 3 + l.capacityLineCount() // title + lines (+ frame)
 	if l.imageRows() > 0 {
 		h += l.imageRows() + 1 // a ┄ rule, then the image rows
 	}
 	return h
+}
+
+// capacityLineCount is the capacityRows' drawn line count: wrapped
+// rows contribute one line per fold, the rest one each.
+func (l *layout) capacityLineCount() int {
+	n := 0
+	for _, r := range l.capacityRows() {
+		n += len(wrapCapacityRow(r, l.wrapWidth()))
+	}
+	return n
+}
+
+// wrapWidth is the cell width a capacity row wraps to: the panel's
+// inner width, side by side or full width alike.
+func (l *layout) wrapWidth() int {
+	if l.wide() {
+		return panelW - 4
+	}
+	return l.w - 4
 }
 
 // imageRows is the number of rows the capacity panel's per-image block
@@ -674,6 +695,7 @@ type capacityRow struct {
 	segs  []grid.Seg
 	dim   bool
 	right string
+	wrap  bool
 }
 
 // capacityMinRows is the least number of rows the capacity panel's
@@ -722,7 +744,7 @@ func (l *layout) capacityRows() []capacityRow {
 			grid.Seg{Text: fmt.Sprintf("%d", n), Style: "text"},
 			grid.Seg{Text: " burst", Style: "dim"})
 	}
-	rows = append(rows, capacityRow{segs: segs})
+	rows = append(rows, capacityRow{segs: segs, wrap: true})
 
 	rows = append(rows, capacityRow{segs: dimLine(
 		fmt.Sprintf("queued %s", fmt.Sprint(l.s.Queued)),
@@ -818,19 +840,21 @@ func (l *layout) drawCapacity(g *grid.Grid, x, y, w, h int) int {
 
 	row := top + 1
 	for _, r := range l.capacityRows() {
-		segs := r.segs
-		if r.dim {
-			segs = make([]grid.Seg, len(r.segs))
-			copy(segs, r.segs)
-			for i := range segs {
-				segs[i].Style = "dim"
+		for _, line := range wrapCapacityRow(r, inner) {
+			segs := line
+			if r.dim {
+				segs = make([]grid.Seg, len(line))
+				copy(segs, line)
+				for i := range segs {
+					segs[i].Style = "dim"
+				}
 			}
+			g.Segs(x+2, row, segs, inner)
+			if r.right != "" {
+				g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
+			}
+			row++
 		}
-		g.Segs(x+2, row, segs, inner)
-		if r.right != "" {
-			g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
-		}
-		row++
 	}
 	imgs := l.imageCounts()
 	if len(imgs) == 0 {
@@ -866,6 +890,68 @@ func (l *layout) drawCapacity(g *grid.Grid, x, y, w, h int) int {
 		g.Text(x+2, row, fmt.Sprintf("+%d more", len(imgs)-len(names)), "dim", inner)
 	}
 	return y
+}
+
+// wrapCapacityRow folds one capacity row's segments into lines of at
+// most max cells. Only the leases line asks (wrap): the counters grow
+// with the cluster while the panel keeps its width, so it continues at
+// a "·" separator. Each counter is a "· N label" group — separator,
+// value, space-prefixed label — kept whole: a group that does not fit
+// moves down together, and the separator it would have left behind is
+// dropped with it (a line never starts or ends with " · "). Every
+// other row is one line, clipped as before.
+func wrapCapacityRow(r capacityRow, max int) [][]grid.Seg {
+	if !r.wrap || segWidth(r.segs) <= max {
+		return [][]grid.Seg{r.segs}
+	}
+	var lines [][]grid.Seg
+	line := []grid.Seg{}
+	n := 0
+	for _, s := range r.segs {
+		w := len([]rune(s.Text))
+		if n+w <= max {
+			line = append(line, s)
+			n += w
+			continue
+		}
+		if len(line) == 0 {
+			// A lone segment wider than the panel: clip it, as Segs
+			// would have.
+			line = append(line, grid.Seg{Text: ellipsize(s.Text, max), Style: s.Style})
+			n = max
+			continue
+		}
+		// The group before this separator stays; the separator drops.
+		for line[len(line)-1].Text == " · " {
+			line = line[:len(line)-1]
+			n -= 3
+		}
+		lines = append(lines, line)
+		line, n = nil, 0
+		if s.Text == " · " {
+			continue
+		}
+		// A space-prefixed suffix belongs to the count before it: pull
+		// that count down, so the line never starts mid-pair — and drop
+		// the separator it leaves behind.
+		if strings.HasPrefix(s.Text, " ") && len(lines[len(lines)-1]) > 0 {
+			prev := lines[len(lines)-1]
+			last := prev[len(prev)-1]
+			prev = prev[:len(prev)-1]
+			for len(prev) > 0 && prev[len(prev)-1].Text == " · " {
+				prev = prev[:len(prev)-1]
+			}
+			lines[len(lines)-1] = prev
+			line = append(line, last)
+			n += len([]rune(last.Text))
+		}
+		line = append(line, s)
+		n += w
+	}
+	if len(line) > 0 {
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // runningPct is the running meter's fill fraction.
@@ -1097,9 +1183,11 @@ func (l *layout) imagesServices(g *grid.Grid, y int) int {
 
 // leaseCols picks the leases panel's column layout for width w. At the
 // wide frame it is the mockup's: id(12) image(17) owner(10) state(13)
-// policy(12) age(6) left(9) holder — the columns start at 2, 14, 31,
-// 41, 54, 66, 72, 81. Below 104 the flexible columns give (headers cut,
-// values never reach the next column) and nothing overflows.
+// policy(11) age(6) left(9) holder — the columns start at 2, 14, 31,
+// 41, 55, 67, 73, 81 (state keeps a clear cell before policy, so the
+// burst marker can fill its column). Below 104 the flexible columns
+// give (headers cut, values never reach the next column) and nothing
+// overflows.
 type leaseCols struct {
 	id, img, own, st, pol, age, left, hold int // column start cells
 	idW, imgW, ownW, stW, polW, leftW      int
@@ -1112,9 +1200,9 @@ func leaseLayout(w int) leaseCols {
 			img: 14, imgW: 17,
 			own: 31, ownW: 10,
 			st: 41, stW: 13,
-			pol: 54, polW: 12,
-			age:  66,
-			left: 72, leftW: 9,
+			pol: 55, polW: 11,
+			age:  67,
+			left: 73, leftW: 9,
 			hold: 81,
 		}
 	}

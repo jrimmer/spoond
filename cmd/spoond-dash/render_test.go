@@ -30,9 +30,9 @@ var fixedNow = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 func sampleSnapshot() Snapshot {
 	return Snapshot{
 		At: "12:00:00", Version: "0.4.2", BackendUp: 9 * time.Minute,
-		Leases: 5, Queued: 1, Granted: 1234, Swept: 17, Burst: 1,
+		Leases: 3, Queued: 1, Granted: 1234, Swept: 17, Burst: 2,
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
-		ByState:   map[string]int{"running": 3, "suspended": 1, "lost": 1},
+		ByState:   map[string]int{"running": 2, "suspended": 1},
 		ReqPerSec: 12.3, CreatesPerMin: 4, CreateMs: 250, ResumeMs: 4100,
 		FwConns: 9, AuthFails: 2, Quota: 1, Throttled: 0, Capacity: 3, BuildFails: 1,
 		CPUPct: 37.5, Load1: 1.4, Cores: 16,
@@ -59,7 +59,7 @@ func sampleSnapshot() Snapshot {
 			{ID: "fedcba0987", Image: "go-base", Owner: "agent", State: "suspended", Policy: "lan",
 				Name: "scratch space", Holder: "nightly", HoldState: "lapsed",
 				LastAction: "expiry/expire", LastActionAt: fixedNow.Add(-3 * time.Hour),
-				Age: "1d", Left: "due"},
+				Burst: true, Age: "1d", Left: "due"},
 		},
 		Images: []ImageRow{
 			{Name: "go-base", Live: 2, Uses: 51, VCPU: 2, MemMB: 2048, Updated: "2d ago"},
