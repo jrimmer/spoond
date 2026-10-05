@@ -323,7 +323,9 @@ curl -s -X POST https://sandbox.example.com/api/users \
 ssh ctl@sandbox.example.com "ssh-key ls"
 curl -s -X POST https://sandbox.example.com/api/users/<alice-id>/quota \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"max_leases": 4, "max_ttl": 7200}'
+  -d '{"max_leases": 4, "max_ttl": 7200, "max_mib": 16384}'
+# max_mib caps the memory of alice's running leases (her charge shows
+# as used_mib on GET /api/users/me); 0 = uncapped.
 
 # 4. Everyone uses their own key; leases are ownership-scoped
 ssh alice@sandbox.example.com            # fresh lease, owned by alice

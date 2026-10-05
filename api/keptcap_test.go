@@ -176,7 +176,7 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.SetQuota(u.ID, 0, 0, budget); err != nil {
+	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, budget); err != nil {
 		t.Fatal(err)
 	}
 

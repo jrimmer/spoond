@@ -48,6 +48,11 @@ type LeaseRow struct {
 	// (CHECKPOINT_INTERVAL_MINS, itself 0 = never), 0 = never,
 	// >0 = seconds.
 	CheckpointInterval int64
+	// MemoryMB is the image's memory_mb stamped when the lease was
+	// granted (#128): the lease's MiB charge while it runs. Cached on
+	// the row so quota accounting never reads the image catalog under
+	// the lease store's lock; 0 = unknown (the image row is gone).
+	MemoryMB int
 }
 
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
@@ -55,7 +60,7 @@ const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires
 	expose_ports, exposed_ip, comment, state, resume_build_id,
 	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained, lost_at,
 	holder, holder_url, hold_set_at, hold_expires_at, hold_ttl,
-	last_action, last_action_at, generation, checkpoint_interval`
+	last_action, last_action_at, generation, checkpoint_interval, memory_mb`
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -71,7 +76,7 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -105,7 +110,8 @@ ON CONFLICT(id) DO UPDATE SET
   last_action=excluded.last_action,
   last_action_at=excluded.last_action_at,
   generation=excluded.generation,
-  checkpoint_interval=excluded.checkpoint_interval`,
+  checkpoint_interval=excluded.checkpoint_interval,
+  memory_mb=excluded.memory_mb`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
@@ -115,7 +121,7 @@ ON CONFLICT(id) DO UPDATE SET
 		formatTime(l.LostAt), l.Holder, l.HolderUrl,
 		formatTime(l.HoldSetAt), formatTime(l.HoldExpiresAt), l.HoldTTL,
 		l.LastAction, formatTime(l.LastActionAt), l.Generation,
-		l.CheckpointInterval)
+		l.CheckpointInterval, l.MemoryMB)
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -200,7 +206,8 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained,
 		&lostAt, &r.Holder, &r.HolderUrl,
 		&holdSetAt, &holdExpiresAt, &r.HoldTTL,
-		&r.LastAction, &lastActionAt, &r.Generation, &r.CheckpointInterval)
+		&r.LastAction, &lastActionAt, &r.Generation, &r.CheckpointInterval,
+		&r.MemoryMB)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}

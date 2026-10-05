@@ -217,7 +217,7 @@ func TestMissingFileIsEmpty(t *testing.T) {
 func TestSetQuota(t *testing.T) {
 	s, _ := NewStore("")
 	u, _ := s.AddUser("jason", KindPerson, []string{"SHA256:fp"}, "tok")
-	if err := s.SetQuota(u.ID, 3, 120, 0); err != nil {
+	if err := s.SetQuota(u.ID, 3, 120, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	got := s.UserByID(u.ID)
@@ -225,7 +225,7 @@ func TestSetQuota(t *testing.T) {
 		t.Fatalf("quota = %d/%d, want 3/120", got.MaxLeases, got.MaxTTL)
 	}
 	// zero = unlimited
-	if err := s.SetQuota(u.ID, 0, 0, 0); err != nil {
+	if err := s.SetQuota(u.ID, 0, 0, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	got = s.UserByID(u.ID)
@@ -233,7 +233,7 @@ func TestSetQuota(t *testing.T) {
 		t.Fatalf("reset quota = %d/%d, want 0/0", got.MaxLeases, got.MaxTTL)
 	}
 	// unknown user
-	if err := s.SetQuota("u-nope", 1, 1, 0); err == nil {
+	if err := s.SetQuota("u-nope", 1, 1, 0, 0, 0); err == nil {
 		t.Fatal("expected error for unknown user")
 	}
 	// persistence round-trip
@@ -241,7 +241,7 @@ func TestSetQuota(t *testing.T) {
 	file := filepath.Join(dir, "users.json")
 	s2, _ := NewStore(file)
 	u2, _ := s2.AddUser("agent1", KindAgent, []string{"SHA256:fp2"}, "tok2")
-	_ = s2.SetQuota(u2.ID, 5, 60, 0)
+	_ = s2.SetQuota(u2.ID, 5, 60, 0, 0, 0)
 	s3, _ := NewStore(file)
 	got3 := s3.UserByID(u2.ID)
 	if got3.MaxLeases != 5 || got3.MaxTTL != 60 {

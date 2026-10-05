@@ -102,6 +102,13 @@ type Lease struct {
 	// >0 = seconds. The lease API reports the effective value (the
 	// host default already resolved) as "checkpoint_interval".
 	CheckpointInterval int64 `json:"-"`
+	// MemoryMB is the lease's MiB charge (#128): the image's memory_mb,
+	// stamped when the guest is granted or rebuilt, and summed over a
+	// user's running leases for admission (a suspended lease keeps its
+	// stamp but is not charged — it holds no hugepages). Cached on the
+	// lease so quota accounting never reads the image catalog; 0 =
+	// unknown (leases from before the stamp, or a vanished image row).
+	MemoryMB int `json:"-"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -164,6 +171,10 @@ type Store struct {
 	// the same store lock as the quota count and released when the lease
 	// is inserted or the grant fails, closing the check-then-create race.
 	pending map[string]int
+	// pendingMiB is the memory twin of pending (#128): the MiB reserved
+	// by in-flight creations per owner, under the same store lock, so
+	// two racing creates cannot both pass max_mib.
+	pendingMiB map[string]int
 	// lastActiveDirty batches touch() updates; the sweeper flushes them
 	// to the store once per tick instead of writing on every activity.
 	lastActiveDirty map[string]time.Time
@@ -175,6 +186,7 @@ func newStore() *Store {
 		pool:            make(map[string][]string),
 		shares:          make(map[string]map[string]*Share),
 		pending:         make(map[string]int),
+		pendingMiB:      make(map[string]int),
 		lastActiveDirty: make(map[string]time.Time),
 	}
 }
@@ -1034,44 +1046,110 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 }
 
 // errQuotaExceeded is returned when a user hits their concurrent-lease
-// cap (T4/#31). The API layer maps it to HTTP 429.
+// cap (T4/#31) or their running-lease memory cap (#128). The API layer
+// maps it to HTTP 429. The error's message says which cap it was.
 var errQuotaExceeded = fmt.Errorf("lease quota exceeded")
 
-// reserveQuota enforces a user's concurrent-lease cap before granting
-// and RESERVES n slots atomically (security review #37 H2): the count
-// and the reservation happen under the same store lock, so concurrent
-// creates cannot both pass max_leases. The caller MUST call
+// errMemoryQuotaExceeded is errQuotaExceeded carrying the memory cap in
+// its message (#128): reserving MiB past the user's max_mib answers 429
+// with a message that names the memory limit.
+func errMemoryQuotaExceeded(maxMiB int) error {
+	return fmt.Errorf("%w: memory limit of %d MiB exceeded", errQuotaExceeded, maxMiB)
+}
+
+// reserveQuota enforces a user's concurrent-lease cap (T4/#31) and
+// running-lease memory cap (#128) before granting, and RESERVES n slots
+// and their MiB atomically (security review #37 H2): the counts and the
+// reservations happen under the same store lock, so concurrent creates
+// cannot both pass max_leases or max_mib. The caller MUST call
 // releaseQuotaReservation when it finishes (success or failure).
-// Returns errQuotaExceeded when the cap is hit. Owners without an
-// identity-store user (legacy consumer tokens) are uncapped.
-func (s *Service) reserveQuota(owner string, n int) error {
+// memoryMB is the per-lease memory charge in MiB — the image's
+// memory_mb, stamped on the lease at grant time. newLease is false for
+// a resume (or any other operation that turns an existing suspended
+// lease back into a running one): those pass ONLY the memory check —
+// the lease already holds its max_leases slot — while create, clone and
+// fork pass both. Returns errQuotaExceeded when a cap is hit. Owners
+// without an identity-store user (legacy consumer tokens) are uncapped.
+//
+// Only RUNNING leases are charged (#128): a suspended lease holds no
+// hugepages, so suspending frees the charge and resuming re-passes this
+// check (resume calls it with the lease's own charge before the sandbox
+// comes back).
+func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool) error {
 	if s.identities == nil {
 		return nil
 	}
 	u := s.identities.UserByID(owner)
-	if u == nil || u.MaxLeases <= 0 {
+	if u == nil {
 		return nil
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	active := 0
-	for _, l := range s.store.leases {
-		if !l.released && l.Owner == owner {
-			active++
+	// The count cap stays for new leases only (T4/#31): a resume does
+	// not add a lease, so counting the (suspended) leases being resumed
+	// would cap a user out of resuming their own work (#128).
+	if newLease && u.MaxLeases > 0 {
+		active := 0
+		for _, l := range s.store.leases {
+			if !l.released && l.Owner == owner {
+				active++
+			}
+		}
+		if active+s.store.pending[owner]+n > u.MaxLeases {
+			if s.metrics != nil {
+				s.metrics.QuotaExceeded.Inc()
+			}
+			return errQuotaExceeded
 		}
 	}
-	if active+s.store.pending[owner]+n > u.MaxLeases {
-		if s.metrics != nil {
-			s.metrics.QuotaExceeded.Inc()
+	if u.MaxMiB > 0 && memoryMB > 0 {
+		// usedMiBLocked counts only live leases, so the in-flight
+		// reservation below enters the sum exactly once (through
+		// pendingMiB) until the lease lands — the exact-fit race (two
+		// creates that together fill the cap) must admit exactly one.
+		if s.usedMiBLocked(owner)+n*memoryMB > u.MaxMiB {
+			if s.metrics != nil {
+				s.metrics.QuotaExceeded.Inc()
+			}
+			return errMemoryQuotaExceeded(u.MaxMiB)
 		}
-		return errQuotaExceeded
 	}
 	s.store.pending[owner] += n
+	s.store.pendingMiB[owner] += n * memoryMB
 	return nil
 }
 
+// usedMiB reports the owner's current memory charge (#128): the sum of
+// the leases' stamped memory_mb over the owner's RUNNING leases
+// (suspended ones hold no hugepages and are not charged), plus any MiB
+// reserved by in-flight creations. A lease stamped 0 (its image row is
+// gone) charges nothing; grant stamps the charge so this sum never
+// reads the catalog.
+func (s *Service) usedMiB(owner string) int {
+	if s.identities == nil {
+		return 0
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	return s.usedMiBLocked(owner)
+}
+
+// usedMiBLocked is usedMiB without the lock. Caller holds the store
+// lock. It reads only in-memory state — no catalog I/O — so
+// reservations stay atomic without holding the lock across SQLite.
+func (s *Service) usedMiBLocked(owner string) int {
+	used := s.store.pendingMiB[owner]
+	for _, l := range s.store.leases {
+		if l.released || l.Owner != owner || !l.live() {
+			continue
+		}
+		used += l.MemoryMB
+	}
+	return used
+}
+
 // releaseQuotaReservation drops n reservations made by reserveQuota.
-func (s *Service) releaseQuotaReservation(owner string, n int) {
+func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	if s.identities == nil {
 		return
 	}
@@ -1081,6 +1159,11 @@ func (s *Service) releaseQuotaReservation(owner string, n int) {
 		delete(s.store.pending, owner)
 	} else {
 		s.store.pending[owner] -= n
+	}
+	if s.store.pendingMiB[owner] <= n*memoryMB {
+		delete(s.store.pendingMiB, owner)
+	} else {
+		s.store.pendingMiB[owner] -= n * memoryMB
 	}
 }
 
@@ -1114,6 +1197,24 @@ func (s *Service) imageMemoryMB(ctx context.Context, image string) (int, error) 
 	return img.MemoryMB, nil
 }
 
+// imageMiB is imageMemoryMB with its own bounded context: the memory
+// charge of one lease of the image (#128). The value is stamped on the
+// lease so accounting and release use the same number the admission
+// check reserved with. 0 when the catalog cannot answer: an uncharged
+// lease, and admission never blocks on a catalog hiccup — but it is
+// logged, so an operator can see the cap is not being enforced for
+// that image.
+func (s *Service) imageMiB(image string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	mb, err := s.imageMemoryMB(ctx, image)
+	if err != nil {
+		s.log.Printf("memory quota: no memory_mb for image %s, leasing it uncharged: %v", image, err)
+		return 0
+	}
+	return mb
+}
+
 // grant creates a new lease for owner: served from the warm pool when
 // one is configured and stocked, else a cold create from the image's
 // current build. Persistent leases are intended for interactive use:
@@ -1128,7 +1229,10 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 	if err != nil {
 		return nil, err
 	}
-	if err := s.reserveQuota(owner, 1); err != nil {
+	// The lease costs its image's memory_mb (#128): admission checks the
+	// user's running-lease memory before the sandbox is created, and the
+	// deferred release below drops the same number it reserved.
+	if err := s.reserveQuota(owner, 1, img.MemoryMB, true); err != nil {
 		return nil, err
 	}
 	// The reservation becomes the real lease when it's stored below;
@@ -1137,7 +1241,7 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 	// active so the pending reservation must be dropped (security
 	// review #37 H2). Both mutations take the same store lock, so a
 	// concurrent reserveQuota sees a consistent active+pending count.
-	defer func() { s.releaseQuotaReservation(owner, 1) }()
+	defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
 	if s.metrics != nil {
 		s.metrics.LeasesTotal.Inc()
 	}
@@ -1156,6 +1260,10 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		Holder:      holder,
 		HolderUrl:   holderURL,
 		State:       "running",
+		// The lease's MiB charge (#128): the image's memory_mb, the very
+		// number reserveQuota admitted with, so accounting and release
+		// always agree and quota sums never re-read the catalog.
+		MemoryMB: img.MemoryMB,
 		// Every lease starts on generation 1 (2.2) and on the host's
 		// checkpoint default (-1), unless the create request carries its
 		// own interval (the API stamps it after grant).
@@ -1432,6 +1540,12 @@ func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
 // undrain resumes drained non-persistent leases through it (U10). It
 // marks the lease busy (a second operation on a busy lease returns
 // errLeaseBusy) and runs the resume.
+//
+// A resuming lease needs its hugepages back, so it passes the memory
+// check like any create (#128): only running leases are charged, and
+// the charge returns when the sandbox comes back. A nil error has
+// already dropped the (zero-cost) reservation; errQuotaExceeded leaves
+// the lease suspended.
 func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	s.store.mu.Lock()
 	if l.busy {
@@ -1448,6 +1562,15 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
+	// The lease's own stamp is the charge to re-acquire (#128): the
+	// number admission reserved with is the number released when the
+	// lease suspends again. A resume adds no lease, so only the memory
+	// cap applies — the lease keeps its max_leases slot.
+	memPer := l.MemoryMB
+	if err := s.reserveQuota(l.Owner, 1, memPer, false); err != nil {
+		return nil, err
+	}
+	defer func() { s.releaseQuotaReservation(l.Owner, 1, memPer) }()
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
 	}
@@ -1530,6 +1653,17 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	if mode == "cold" {
 		return s.restartCold(ctx, owner, l)
 	}
+	if suspended {
+		// A suspended lease holds no hugepages, so its charge was freed
+		// at suspend; warm-restarting it brings the guest back, so it
+		// re-passes the memory check before the sandbox comes back,
+		// exactly like a resume (#128). The restart adds no lease, so
+		// only the memory cap applies.
+		if err := s.reserveQuota(owner, 1, l.MemoryMB, false); err != nil {
+			return nil, err
+		}
+		defer func() { s.releaseQuotaReservation(owner, 1, l.MemoryMB) }()
+	}
 
 	if persistent {
 		if !suspended {
@@ -1591,13 +1725,27 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 // longer its resume point (the next suspend sets it as usual). A
 // suspended lease comes back running.
 func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lease, error) {
-	// The fresh guest is created before the old one goes: a failed
-	// create (no capacity, the image gone) leaves the lease exactly as it
-	// was, running or suspended, instead of live with no sandbox.
+	// The fresh guest runs the image's current memory_mb, so that is the
+	// charge to re-admit for a suspended lease (#128) — fetched before
+	// anything else, so a catalog failure answers before any change. A
+	// cold restart adds no lease, so only the memory cap applies. A
+	// running lease is already charged; its stamp is re-set below.
 	img, b, err := s.imageBuild(ctx, l.Image)
 	if err != nil {
 		return nil, err
 	}
+	if l.Suspended {
+		// A suspended lease holds no hugepages, so its charge was freed
+		// at suspend; the fresh guest needs it back, so the cold restart
+		// re-passes the memory check before any sandbox is created.
+		if err := s.reserveQuota(owner, 1, img.MemoryMB, false); err != nil {
+			return nil, err
+		}
+		defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
+	}
+	// The fresh guest is created before the old one goes: a failed
+	// create (no capacity) leaves the lease exactly as it was, running
+	// or suspended, instead of live with no sandbox.
 	sb, err := s.createSandbox(ctx, img, b, false, "", l)
 	if err != nil {
 		return nil, err
@@ -1613,6 +1761,10 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
+	// The fresh guest comes from the image's current build, so the
+	// lease's charge is re-stamped from that image row (#128) — the
+	// number the check above (or the running charge) was admitted with.
+	l.MemoryMB = img.MemoryMB
 	// The pause builds stop being the lease's resume point: the next
 	// suspend writes a fresh one.
 	l.ResumeBuildID = ""
@@ -1751,10 +1903,12 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	s.store.mu.Unlock()
 	defer s.endBusy(src)
 
-	if err := s.reserveQuota(owner, 1); err != nil {
+	// The clone costs its image's memory_mb like any create (#128).
+	memPer := s.imageMiB(src.Image)
+	if err := s.reserveQuota(owner, 1, memPer, true); err != nil {
 		return nil, "", err
 	}
-	defer func() { s.releaseQuotaReservation(owner, 1) }()
+	defer func() { s.releaseQuotaReservation(owner, 1, memPer) }()
 
 	img, _, err := s.imageBuild(ctx, src.Image)
 	if err != nil {
@@ -1780,7 +1934,8 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		// checkpoint policy continues too.
 		CheckpointInterval: src.CheckpointInterval,
 		State:              "running",
-		Generation:         1, // every lease starts on generation 1 (2.2)
+		MemoryMB:           img.MemoryMB, // the admitted charge (#128)
+		Generation:         1,            // every lease starts on generation 1 (2.2)
 		TemplateID:         img.TemplateID,
 	}
 	sb, err := s.createSandbox(ctx, img, b, false, "", lease)
@@ -1844,18 +1999,21 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		}
 	}
 
-	if err := s.reserveQuota(owner, count); err != nil {
+	// Every fork child costs the image's memory_mb, count times (#128);
+	// the whole batch is reserved up front, all or nothing.
+	memPer := s.imageMiB(src.Image)
+	if err := s.reserveQuota(owner, count, memPer, true); err != nil {
 		return nil, "", err
 	}
 
 	img, _, err := s.imageBuild(ctx, src.Image)
 	if err != nil {
-		s.releaseQuotaReservation(owner, count)
+		s.releaseQuotaReservation(owner, count, memPer)
 		return nil, "", err
 	}
 	b, err := s.checkpointLease(ctx, src)
 	if err != nil {
-		s.releaseQuotaReservation(owner, count)
+		s.releaseQuotaReservation(owner, count, memPer)
 		return nil, "", err
 	}
 
@@ -1869,7 +2027,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			s.deleteLeaseLocked(l.ID)
 			s.store.mu.Unlock()
 		}
-		s.releaseQuotaReservation(owner, count)
+		s.releaseQuotaReservation(owner, count, memPer)
 		return nil, "", err
 	}
 
@@ -1892,7 +2050,8 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			// checkpoint policy continues too.
 			CheckpointInterval: src.CheckpointInterval,
 			State:              "running",
-			Generation:         1, // every lease starts on generation 1 (2.2)
+			MemoryMB:           img.MemoryMB, // the admitted charge (#128)
+			Generation:         1,            // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
@@ -1911,7 +2070,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
 		created = append(created, lease)
 	}
-	s.releaseQuotaReservation(owner, count)
+	s.releaseQuotaReservation(owner, count, memPer)
 	if len(src.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -2311,7 +2470,10 @@ func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 // leaseDetailMap is a list row plus the lifecycle fields served by
 // GET /api/sandboxes/{id}. The lease's kept checkpoints (#126) ride
 // along: build_id, size_bytes and kept_at each, oldest keep first —
-// what the caller may restore, and what unpins would free.
+// what the caller may restore, and what unpins would free. The owner's
+// memory-quota view rides along too (#128): charged_mib, guaranteed_mib
+// and max_mib, the same numbers as GET /api/users/me scoped to this
+// lease's owner.
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	m := leaseMap(l, s.effectiveCheckpointInterval(l))
 	m["state"] = l.State
@@ -2335,6 +2497,16 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		}
 	}
 	m["kept_builds"] = kept
+	// Memory quota of the lease's owner (#128): the running-lease charge
+	// plus the user's limits, 0 = unset. Best effort: an identity-store
+	// hiccup leaves the fields off rather than failing the read.
+	if s.identities != nil {
+		if u := s.identities.UserByID(l.Owner); u != nil {
+			m["charged_mib"] = s.usedMiB(u.ID)
+			m["guaranteed_mib"] = u.GuaranteedMiB
+			m["max_mib"] = u.MaxMiB
+		}
+	}
 	return m
 }
 
@@ -2501,6 +2673,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LastActionAt:          l.LastActionAt,
 		Generation:            l.Generation,
 		CheckpointInterval:    l.CheckpointInterval,
+		MemoryMB:              l.MemoryMB,
 	}
 }
 
@@ -2540,6 +2713,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LastActionAt:          r.LastActionAt,
 		Generation:            r.Generation,
 		CheckpointInterval:    r.CheckpointInterval,
+		MemoryMB:              r.MemoryMB,
 	}
 }
 

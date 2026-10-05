@@ -22,19 +22,30 @@ type UserView struct {
 	MaxLeases    int           `json:"max_leases"`
 	MaxTTL       int           `json:"max_ttl"`
 	MaxKeptBytes int64         `json:"max_kept_bytes"`
+	// Memory quota (#128), MiB. UsedMiB is the user's current charge:
+	// the sum of memory_mb over their RUNNING leases (suspended ones
+	// hold no hugepages and are not charged). Both limits 0 = unset.
+	GuaranteedMiB int `json:"guaranteed_mib"`
+	MaxMiB        int `json:"max_mib"`
+	UsedMiB       int `json:"used_mib"`
 }
 
-func toUserView(u *identity.User) UserView {
+// toUserView renders a user for the API. usedMiB is the user's current
+// running-lease memory charge in MiB (#128); the Service computes it.
+func toUserView(u *identity.User, usedMiB int) UserView {
 	return UserView{
-		ID:           u.ID,
-		Name:         u.Name,
-		Kind:         u.Kind,
-		Admin:        u.Admin,
-		Fingerprints: u.Fingerprints,
-		CreatedAt:    u.CreatedAt,
-		MaxLeases:    u.MaxLeases,
-		MaxTTL:       u.MaxTTL,
-		MaxKeptBytes: u.MaxKeptBytes,
+		ID:            u.ID,
+		Name:          u.Name,
+		Kind:          u.Kind,
+		Admin:         u.Admin,
+		Fingerprints:  u.Fingerprints,
+		CreatedAt:     u.CreatedAt,
+		MaxLeases:     u.MaxLeases,
+		MaxTTL:        u.MaxTTL,
+		MaxKeptBytes:  u.MaxKeptBytes,
+		GuaranteedMiB: u.GuaranteedMiB,
+		MaxMiB:        u.MaxMiB,
+		UsedMiB:       usedMiB,
 	}
 }
 
@@ -76,7 +87,7 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 	users := s.svc.identities.Users()
 	out := make([]UserView, 0, len(users))
 	for _, u := range users {
-		out = append(out, toUserView(u))
+		out = append(out, toUserView(u, s.svc.usedMiB(u.ID)))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
@@ -89,7 +100,7 @@ func (s *Server) handleUsersMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no identity user for this token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }
 
 // handleUsersByName resolves a username to a minimal identity (id +
@@ -152,7 +163,7 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserView(u)})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }
 
 // handleUsersByKey resolves an SSH key fingerprint to a user. The
@@ -188,24 +199,31 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		MaxLeases    int   `json:"max_leases"`
-		MaxTTL       int   `json:"max_ttl"`
-		MaxKeptBytes int64 `json:"max_kept_bytes"`
+		MaxLeases     int   `json:"max_leases"`
+		MaxTTL        int   `json:"max_ttl"`
+		MaxKeptBytes  int64 `json:"max_kept_bytes"`
+		GuaranteedMiB int   `json:"guaranteed_mib"`
+		MaxMiB        int   `json:"max_mib"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if req.MaxLeases < 0 || req.MaxTTL < 0 || req.MaxKeptBytes < 0 {
+	if req.MaxLeases < 0 || req.MaxTTL < 0 || req.MaxKeptBytes < 0 || req.GuaranteedMiB < 0 || req.MaxMiB < 0 {
 		writeError(w, http.StatusBadRequest, "quota values must be >= 0")
 		return
 	}
-	if err := s.svc.identities.SetQuota(id, req.MaxLeases, req.MaxTTL, req.MaxKeptBytes); err != nil {
+	// #128: the guarantee must fit inside the cap when both are set.
+	if req.GuaranteedMiB > 0 && req.MaxMiB > 0 && req.GuaranteedMiB > req.MaxMiB {
+		writeError(w, http.StatusBadRequest, "guaranteed_mib must be <= max_mib")
+		return
+	}
+	if err := s.svc.identities.SetQuota(id, req.MaxLeases, req.MaxTTL, req.GuaranteedMiB, req.MaxMiB, req.MaxKeptBytes); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	u := s.svc.identities.UserByID(id)
-	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }
 
 // handleUsersLLMKey sets or rotates a user's LLM gateway key (admin
@@ -233,7 +251,7 @@ func (s *Server) handleUsersLLMKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := s.svc.identities.UserByID(id)
-	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u)})
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }
 
 // handleUsersDelete removes a user (admin only).

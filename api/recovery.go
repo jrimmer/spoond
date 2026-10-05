@@ -113,6 +113,23 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	if err != nil {
 		return err
 	}
+	if !l.live() {
+		// A suspended lease is uncharged (no hugepages), so turning its
+		// sandbox back on here passes the memory check like any resume
+		// (#128) — before the sandbox is created. The charge is the
+		// image's CURRENT memory_mb (stamped below): the recovered
+		// sandbox runs that value, so it is both what admission reserves
+		// with and what the deferred release drops — the same rule as
+		// restartCold and restore. Reserving with the lease's stale stamp
+		// would admit an outdated charge (and leak the difference). A
+		// running lease is already charged with its own stamp and
+		// re-admits nothing. A recovery adds no lease, so only the
+		// memory cap applies.
+		if err := s.reserveQuota(l.Owner, 1, img.MemoryMB, false); err != nil {
+			return err
+		}
+		defer s.releaseQuotaReservation(l.Owner, 1, img.MemoryMB)
+	}
 	sb, err := s.createSandbox(ctx, img, b, true, l.SandboxID, l)
 	if err != nil {
 		return err
@@ -123,7 +140,12 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	l.BuildID = l.LastCheckpointBuildID
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
+	// The recovered sandbox runs the image's current memory_mb: the
+	// lease keeps the charge it was admitted with (#128) — stamped 0
+	// rows (pre-quota leases over a vanished image) stay uncharged.
+	l.MemoryMB = img.MemoryMB
 	s.bumpGenerationLocked(l)
+	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
 	// Crash recovery replaced the sandbox; put the lease's create-time

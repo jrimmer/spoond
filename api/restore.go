@@ -60,6 +60,19 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	if err != nil {
 		return err
 	}
+	if l.Suspended {
+		// A suspended lease holds no hugepages, so its charge was freed
+		// at suspend; restoring it brings a running sandbox back, and
+		// that sandbox runs the image's current memory_mb — the charge
+		// to re-admit before the sandbox is created (#128). A restore
+		// adds no lease, so only the memory cap applies. (A running
+		// restore is already charged, and with its own charge — no new
+		// admission.)
+		if err := s.reserveQuota(l.Owner, 1, img.MemoryMB, false); err != nil {
+			return err
+		}
+		defer func() { s.releaseQuotaReservation(l.Owner, 1, img.MemoryMB) }()
+	}
 	// The fresh sandbox exists before the old one goes (as restartCold):
 	// a failed create leaves the lease exactly as it was.
 	//
@@ -83,6 +96,9 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
+	// The restored sandbox runs the image's current memory_mb: the lease
+	// keeps the charge it was admitted with (#128).
+	l.MemoryMB = img.MemoryMB
 	// A drained lease paused into its pause build; the restore replaced
 	// that sandbox with a running one, so the flag would linger and
 	// undrain would later try to resume a running lease. Clear it.
@@ -158,6 +174,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		case errors.Is(err, errQuotaExceeded):
+			// Restoring a suspended lease brings a running sandbox (and
+			// its hugepages) back, so it re-passes the memory check
+			// (#128): over max_mib answers 429 and the lease stays as it
+			// was.
+			writeError(w, http.StatusTooManyRequests, err.Error())
 		default:
 			s.svc.log.Printf("restore %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restore failed")
