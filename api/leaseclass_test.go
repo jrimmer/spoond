@@ -399,3 +399,120 @@ func httptestGet(t *testing.T, h http.Handler, token, path string) *httptest.Res
 	}
 	return rec
 }
+
+// TestBurstReserveRestartRefused: restart re-admits a suspended lease
+// like a resume, so a burst lease restarting into a full reserve
+// answers 503 no burst capacity with Retry-After: 30 and stays
+// suspended — warm and cold alike.
+func TestBurstReserveRestartRefused(t *testing.T) {
+	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
+	srv.svc.cfg.BurstReserveMiB = 8192
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+	ctx := context.Background()
+
+	rec, first := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	l.Burst = true // the flag the request would have carried
+	if _, err := svc.suspend(ctx, owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	// Shrink the node so the restart's burst admission cannot fit.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    512 + 1,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.nodeInfoMu.Lock()
+	svc.nodeInfoAt = time.Time{}
+	svc.nodeInfoMu.Unlock()
+
+	for _, path := range []string{
+		"/api/leases/" + id + "/restart",           // warm
+		"/api/leases/" + id + "/restart?mode=cold", // cold
+	} {
+		resp := postLeaseAction(t, h, tok, path, "")
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s = %d %s, want 503", path, resp.Code, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), "no burst capacity") {
+			t.Fatalf("%s 503 body should name the burst capacity, got %s", path, resp.Body.String())
+		}
+		if ra := resp.Header().Get("Retry-After"); ra != "30" {
+			t.Fatalf("%s Retry-After = %q, want 30", path, ra)
+		}
+	}
+	if !l.Suspended || l.SandboxID == "" {
+		t.Fatal("refused restart must leave the suspended lease untouched")
+	}
+}
+
+// TestBurstReserveUndrainDefers: an undrain whose burst lease cannot
+// fit the reserve leaves it drained (retryable), not lost — the same
+// answer an over-quota lease gets — and a later undrain resumes it.
+func TestBurstReserveUndrainDefers(t *testing.T) {
+	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
+	srv.svc.cfg.BurstReserveMiB = 8192
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+	ctx := context.Background()
+
+	rec, first := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	l.Burst = true
+	// Drain pauses the lease and clears Drained on undrain only when
+	// the resume succeeds, so set the flag the way drain leaves it.
+	if _, err := svc.suspend(ctx, owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.Drained = true
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+
+	// The node cannot fit the burst resume.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    512 + 1,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.nodeInfoMu.Lock()
+	svc.nodeInfoAt = time.Time{}
+	svc.nodeInfoMu.Unlock()
+
+	res := svc.undrain(ctx)
+	if len(res.Failed) != 1 || res.Resumed != 0 {
+		t.Fatalf("undrain = +%v, want the burst lease in failed", res)
+	}
+	if !l.Drained || l.State != "suspended" {
+		t.Fatalf("reserve-refused undrain must keep the lease drained and suspended, got state=%s drained=%v", l.State, l.Drained)
+	}
+	if l.LostAt != (time.Time{}) {
+		t.Fatal("reserve-refused undrain must not stamp the lease lost")
+	}
+
+	// Headroom returns; the retry resumes the lease.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    8192 + 512 + 1,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.nodeInfoMu.Lock()
+	svc.nodeInfoAt = time.Time{}
+	svc.nodeInfoMu.Unlock()
+	res = svc.undrain(ctx)
+	if res.Resumed != 1 {
+		t.Fatalf("retry undrain resumed = %d, want 1 (failed: %v)", res.Resumed, res.Failed)
+	}
+	if l.State != "running" || l.Drained {
+		t.Fatalf("lease after the retry = %s drained=%v, want running and undrained", l.State, l.Drained)
+	}
+}
