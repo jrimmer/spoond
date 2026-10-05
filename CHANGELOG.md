@@ -10,6 +10,23 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-05
+
+2.3 puts checkpoints on the lease's terms and finishes the dashboard.
+Periodic checkpoints are off unless a lease asks for them; a checkpoint
+can be kept and the lease restored to it in place; a cold restart gives a
+lease a fresh guest without changing its id. Guest images stop leaving
+root-run binaries writable by other users, and the dashboard is laid out
+to its mockup, with a panel of lease events.
+
+Upgrading: store migrations 10 (a column with a default) and 11 (a new
+table) run on start; a 2.2 binary still runs on the migrated database.
+`CHECKPOINT_INTERVAL_MINS` now defaults to `0` (never) and is only the
+default for leases that do not set `checkpoint_interval`. Rebuild images
+(`spoond images build --all`) to pick up the guest permission fix. The
+dashboard's events panel needs `EVENTS_TOKEN` in the backend's env and
+the same value as `DASH_EVENTS_TOKEN` in the dashboard's.
+
 ### Added
 
 - **Restore a lease in place to a kept checkpoint (#121).**
