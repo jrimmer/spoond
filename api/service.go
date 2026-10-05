@@ -109,6 +109,28 @@ type Lease struct {
 	// lease so quota accounting never reads the image catalog; 0 =
 	// unknown (leases from before the stamp, or a vanished image row).
 	MemoryMB int `json:"-"`
+	// Class is the lease's admission class (#128 part 2):
+	// "guaranteed" or "burst", decided once at admission and kept for
+	// the lease's life. Guaranteed: the owner's running charge with
+	// this lease stays within their guaranteed_mib (a user with none
+	// keeps every lease guaranteed — today's behaviour). Burst: above
+	// the guarantee, or the request forced burst; admissible only while
+	// the node's free hugepages stay above BurstReserveMiB after this
+	// lease's own. Reported by the lease API as "class".
+	Class string `json:"-"`
+	// Priority orders preemption within a class (#128 part 2): a lower
+	// number is preempted first. 0 = the default; advisory until
+	// #128 part 3 makes the reconciler act on it. Reported as
+	// "priority".
+	Priority int `json:"-"`
+	// Burst records the request's "burst": true (#128 part 2) — the
+	// caller asked for preemptible scheduling even within the owner's
+	// guarantee. It keeps the lease bursting across rebuilds: a lease
+	// classified burst by demand stays burst on resume/restart, while
+	// one classified burst by a full guarantee may fall back to
+	// guaranteed when the charge drops below it. Not persisted; Class
+	// is.
+	Burst bool `json:"-"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -240,6 +262,11 @@ type ServiceConfig struct {
 	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default
 	// DefaultMaxKeptPerLease.
 	MaxKeptPerLease int
+	// BurstReserveMiB is the hugepage reserve (#128 part 2) a burst
+	// lease must leave free on the node after its own hugepages — the
+	// guaranteed class never runs into it. BURST_RESERVE_MIB, default
+	// DefaultBurstReserveMiB. 0 disables the reserve.
+	BurstReserveMiB int
 }
 
 // Service is the lease API backend.
@@ -325,6 +352,15 @@ type Service struct {
 	// gcErr remembers the last snapshot GC pass's outcome for the
 	// notify checks (gc.failed). Set in NewService.
 	gcErr *gcTracker
+
+	// nodeInfoCache is the substrate's last good NodeInfo with its
+	// fetch time, behind freeHugepageMiB (#128 part 2): the burst
+	// reserve is checked against a value at most nodeInfoCacheTTL old,
+	// so a burst of admissions costs the orchestrator one call. The
+	// node gauges' loop refreshes it too.
+	nodeInfoMu    sync.Mutex
+	nodeInfoCache substrate.NodeInfo
+	nodeInfoAt    time.Time
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -691,7 +727,10 @@ func (s *Service) runRefreshPeers(ctx context.Context) {
 // createSandbox admits and creates one sandbox for lease l from build b.
 // sandboxID "" allocates a new E2B sandbox id; resume reuses the paused
 // sandbox's id. On success the sandboxes row is upserted (upsert because
-// resume reuses the sandbox id).
+// resume reuses the sandbox id). The lease's hugepage admission runs
+// here for every cold create and resume — the class decision (#128
+// part 2) happened earlier on the path that owns the lease, and the
+// plain capacity check stays with the sandbox it sizes.
 func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store.BuildRow, resume bool, sandboxID string, l *Lease) (substrate.Sandbox, error) {
 	if err := s.admit(ctx, b.MemoryMB); err != nil {
 		return substrate.Sandbox{}, err
@@ -1224,6 +1263,36 @@ func (s *Service) imageMiB(image string) int {
 // calls it before granting). The hold's clock itself is stamped by
 // grantHeld; grant leaves it zero so an unheld grant carries no hold.
 func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Duration, persistent bool, netPolicy string, netAllow []string, holder, holderURL string, createSecrets map[string]string, exposePorts ...int) (*Lease, error) {
+	return s.grantLease(ctx, leaseRequest{owner: owner, image: image, ttl: ttl, persistent: persistent,
+		netPolicy: netPolicy, netAllow: netAllow, holder: holder, holderURL: holderURL,
+		createSecrets: createSecrets, exposePorts: exposePorts})
+}
+
+// leaseRequest carries one admission path's inputs to grantLease: the
+// plain grant() arguments plus the class knobs (#128 part 2) — the
+// request's burst flag and priority, and whether the admission is a new
+// lease (create, clone, fork) or the re-admission of an existing one
+// (resume, restart of a suspended lease).
+type leaseRequest struct {
+	owner, image      string
+	ttl               time.Duration
+	persistent        bool
+	netPolicy         string
+	netAllow          []string
+	holder, holderURL string
+	createSecrets     map[string]string
+	exposePorts       []int
+	burst             bool
+	priority          int
+}
+
+// grantLease is grant with the class admission (#128 part 2): the
+// lease's class is decided before the sandbox is created — guaranteed
+// within the owner's guaranteed_mib, burst above it or on an explicit
+// burst request, the burst held to the node's reserve — and stamped on
+// the lease with the requested priority.
+func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, error) {
+	owner, image, ttl, persistent := req.owner, req.image, req.ttl, req.persistent
 	start := time.Now()
 	img, b, err := s.imageBuild(ctx, image)
 	if err != nil {
@@ -1254,11 +1323,11 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		ExpiresAt:   now.Add(ttl),
 		Persistent:  persistent,
 		LastActive:  now,
-		NetPolicy:   netPolicy,
-		NetAllow:    netAllow,
-		ExposePorts: exposePorts,
-		Holder:      holder,
-		HolderUrl:   holderURL,
+		NetPolicy:   req.netPolicy,
+		NetAllow:    req.netAllow,
+		ExposePorts: req.exposePorts,
+		Holder:      req.holder,
+		HolderUrl:   req.holderURL,
 		State:       "running",
 		// The lease's MiB charge (#128): the image's memory_mb, the very
 		// number reserveQuota admitted with, so accounting and release
@@ -1270,7 +1339,20 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		Generation:         1,
 		CheckpointInterval: checkpointIntervalHost,
 		TemplateID:         img.TemplateID,
+		// The class knobs (#128 part 2): priority rides the request,
+		// and the class stamp lands after admitClass decides it below.
+		Priority: req.priority,
+		Burst:    req.burst,
 	}
+	// Class admission (#128 part 2): decides guaranteed vs burst (the
+	// charge above is the sum the guarantee is measured against) and
+	// holds a burst lease to the node's reserve. A refusal answers
+	// before any sandbox exists.
+	class, err := s.admitClass(ctx, owner, img.MemoryMB, req.burst)
+	if err != nil {
+		return nil, err
+	}
+	lease.Class = class
 
 	// Pool: pop the oldest entry for the image. The pool serves
 	// persistent and non-persistent grants alike. A pooled sandbox was
@@ -1356,13 +1438,13 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 	// the probe never runs with them present, and before the lease is
 	// registered, so a staging failure cannot hand out (or strand) a
 	// lease without its secrets.
-	if len(createSecrets) > 0 {
-		if err := s.stageSecrets(ctx, lease.SandboxID, createSecrets); err != nil {
+	if len(req.createSecrets) > 0 {
+		if err := s.stageSecrets(ctx, lease.SandboxID, req.createSecrets); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			return nil, fmt.Errorf("stage lease secrets: %w", err)
 		}
-		s.setCreateSecrets(lease.ID, createSecrets)
+		s.setCreateSecrets(lease.ID, req.createSecrets)
 	}
 
 	// The guest's generation file always exists (2.2): generation 1 on a
@@ -1571,6 +1653,15 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 		return nil, err
 	}
 	defer func() { s.releaseQuotaReservation(l.Owner, 1, memPer) }()
+	// Class re-admission (#128 part 2): a demand-burst lease stays
+	// burst (and held to the reserve); a lease that burst because the
+	// guarantee was full may come back guaranteed now that the charge
+	// has room — the class follows the owner's current standing.
+	class, err := s.admitClass(ctx, l.Owner, memPer, l.Burst)
+	if err != nil {
+		return nil, err
+	}
+	l.Class = class
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
 	}
@@ -1663,6 +1754,14 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 			return nil, err
 		}
 		defer func() { s.releaseQuotaReservation(owner, 1, l.MemoryMB) }()
+		// Class re-admission (#128 part 2), as for a resume: a
+		// demand-burst lease stays burst, a guarantee-burst one may
+		// fall back to guaranteed.
+		class, err := s.admitClass(ctx, owner, l.MemoryMB, l.Burst)
+		if err != nil {
+			return nil, err
+		}
+		l.Class = class
 	}
 
 	if persistent {
@@ -1742,6 +1841,14 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 			return nil, err
 		}
 		defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
+		// Class re-admission (#128 part 2) against the image's current
+		// charge — the number the fresh guest runs (and is stamped with
+		// below), as for the memory check above.
+		class, err := s.admitClass(ctx, owner, img.MemoryMB, l.Burst)
+		if err != nil {
+			return nil, err
+		}
+		l.Class = class
 	}
 	// The fresh guest is created before the old one goes: a failed
 	// create (no capacity) leaves the lease exactly as it was, running
@@ -1938,6 +2045,14 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		Generation:         1,            // every lease starts on generation 1 (2.2)
 		TemplateID:         img.TemplateID,
 	}
+	// Class admission (#128 part 2): a clone takes its own class from
+	// the owner's guarantee — a full one bursts the clone — and never
+	// carries a request's burst flag or priority.
+	class, err := s.admitClass(ctx, owner, img.MemoryMB, false)
+	if err != nil {
+		return nil, "", err
+	}
+	lease.Class = class
 	sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 	if err != nil {
 		return nil, "", err
@@ -2054,6 +2169,17 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			Generation:         1,            // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
+		// Class admission (#128 part 2), per child: the whole batch was
+		// reserved against max_mib above, but each child's class follows
+		// the owner's charge as the children land. Every child of one
+		// fork call gets the same class (the charge the class measures
+		// moves only when a sandbox is created, one at a time below),
+		// decided once here so the batch behaves as one.
+		class, err := s.admitClass(ctx, owner, img.MemoryMB, false)
+		if err != nil {
+			return rollback(err)
+		}
+		lease.Class = class
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
 			return rollback(err)
@@ -2453,6 +2579,12 @@ func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 		// Effective per-lease checkpoint interval in seconds (2.3,
 		// #122): the host default resolved; 0 = never.
 		"checkpoint_interval": checkpointInterval,
+		// Admission class and scheduling priority (#128 part 2):
+		// guaranteed within the owner's guaranteed_mib, burst above it
+		// (preemptible, held to the node's reserve); a lower priority
+		// is preempted first.
+		"class":    leaseClassRow(l),
+		"priority": l.Priority,
 	}
 	if !l.HoldExpiresAt.IsZero() {
 		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
@@ -2674,7 +2806,19 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		Generation:            l.Generation,
 		CheckpointInterval:    l.CheckpointInterval,
 		MemoryMB:              l.MemoryMB,
+		Class:                 leaseClassRow(l),
+		Priority:              l.Priority,
 	}
+}
+
+// leaseClassRow fills the row's class: an unstamped lease (from before
+// #128 part 2) reads as guaranteed — the class every lease had before
+// classes existed.
+func leaseClassRow(l *Lease) string {
+	if l.Class == "" {
+		return ClassGuaranteed
+	}
+	return l.Class
 }
 
 // rowToLease maps a store row back to an in-memory lease. The Suspended
@@ -2714,6 +2858,8 @@ func rowToLease(r store.LeaseRow) *Lease {
 		Generation:            r.Generation,
 		CheckpointInterval:    r.CheckpointInterval,
 		MemoryMB:              r.MemoryMB,
+		Class:                 r.Class,
+		Priority:              r.Priority,
 	}
 }
 
