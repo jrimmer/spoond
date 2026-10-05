@@ -77,6 +77,23 @@ summarised from README "Status".
   and the events panel. `spoond top` draws the same frame with ANSI
   styles, and a test draws every width from 72 to 104 and checks every
   row fits with every panel border in its column.
+- **Dashboard follow-ups (#118).** The events panel is fed by the
+  backend's lease event stream instead of the backend's journal: the
+  backend gained an events-only `EVENTS_TOKEN` (constant-time compare,
+  empty disables) that may `GET /api/leases/events` — every owner's
+  events, and that route only — and is refused on every other route,
+  and the dashboard holds one SSE subscription with
+  it (`DASH_EVENTS_TOKEN`, resuming by `Last-Event-ID`, backing off on
+  errors) and keeps the last 50 events. The panel shows the newest 5 —
+  `HH:MM:SS`, the type padded to 10, the lease id to 10, then the
+  holder, else the comment, else the owner — styled by type (`lost` and
+  `held_action` warn, `released` dim); without `DASH_EVENTS_TOKEN` it
+  says so, dim. The journalctl reader (`DASH_ACTIVITY_UNIT`) is gone.
+  A lease with no holder and no name (a CI job) shows its comment in
+  the holder column, dim, cut with `…`. The refusals row at narrow
+  widths now drops whole counters from the right instead of clipping
+  one mid-item, and the services panel folds units past its row cap
+  into a final `+N more` row.
 
 ### Security
 

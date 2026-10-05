@@ -53,8 +53,20 @@ func parseLeaseEventID(id string) (epoch string, seq uint64, ok bool) {
 // handleLeaseEvents streams the caller's lease events; admins see every
 // lease's. Filter: ?lease_id=<id> narrows the stream to one lease (a
 // caller who cannot see that lease gets the same 404 as the other
-// lease routes).
+// lease routes). This is the events-only EVENTS_TOKEN's one route: the
+// token is admitted at the top of the handler chain, on GET
+// /api/leases/events only, and reaches this handler with the marker set
+// — it sees every owner's events and no other route, spelling included.
 func (s *Server) handleLeaseEvents(w http.ResponseWriter, r *http.Request) {
+	if s.isEventsToken(r) {
+		leaseID := r.URL.Query().Get("lease_id")
+		if leaseID != "" && s.svc.lookupAny(leaseID) == nil {
+			writeError(w, http.StatusNotFound, "lease not found")
+			return
+		}
+		s.svc.streamEvents(w, r, EventFilter{LeaseID: leaseID}, true)
+		return
+	}
 	owner := ownerFrom(r.Context())
 	admin := isAdmin(r)
 	leaseID := r.URL.Query().Get("lease_id")
@@ -68,10 +80,13 @@ func (s *Server) handleLeaseEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLeaseEventsOne streams one lease's events. The owner (or an
-// admin); anyone else gets the same 404 as the other lease routes.
+// admin); anyone else gets the same 404 as the other lease routes —
+// the events-only EVENTS_TOKEN included, whose single route is the
+// all-events stream (authMiddleware refuses the token long before the
+// mux dispatches here).
 func (s *Server) handleLeaseEventsOne(w http.ResponseWriter, r *http.Request) {
-	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
+	owner := ownerFrom(r.Context())
 	admin := isAdmin(r)
 	if s.svc.lookup(owner, id) == nil && !(admin && s.svc.lookupAny(id) != nil) {
 		writeError(w, http.StatusNotFound, "lease not found")
@@ -207,16 +222,18 @@ func (s *Service) streamEvents(w http.ResponseWriter, r *http.Request, f EventFi
 // eventVisible reports whether the caller may see this event: a caller
 // is fed only events stamped with their own owner id (the bus stamps
 // the lease's true owner at emit time), and an admin is fed everything.
-// The stream's subscription filter already narrows the flow; this check
-// runs again per event at write time as a second gate — a released
-// lease is gone from the store by the time its event is written, so the
-// check deliberately reads the event's own owner field, which survives
-// the release.
+// A caller admitted with the events-only EVENTS_TOKEN has no owner
+// identity at all — it is on the route precisely to see every owner's
+// events — so it passes too. The stream's subscription filter already
+// narrows the flow; this check runs again per event at write time as a
+// second gate — a released lease is gone from the store by the time its
+// event is written, so the check deliberately reads the event's own
+// owner field, which survives the release.
 func (s *Service) eventVisible(r *http.Request, ev *LeaseEvent) bool {
 	if ev.Type == LeaseStreamGap {
 		return true
 	}
-	if isAdmin(r) {
+	if r.Context().Value(ctxEventsToken{}) == true || isAdmin(r) {
 		return true
 	}
 	return ev.Owner != "" && ev.Owner == ownerFrom(r.Context())

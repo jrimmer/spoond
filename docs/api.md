@@ -597,12 +597,18 @@ below stream them live, with resume.
 Server-Sent Events. Admins receive every lease's events; everyone else
 receives only events for their own leases. `?lease_id=<id>` narrows the
 stream to one lease (a lease you cannot see answers the same `404` as
-the other lease routes). Requires a bearer token.
+the other lease routes). Requires a bearer token: a consumer token (or
+an admin user), or the events-only `EVENTS_TOKEN` — which sees every
+owner's events and works on this route only. Everywhere else — the
+one-lease streams, the `/api/sandboxes` spellings included — refuses
+it, and any method but GET gets `405` here.
 
 ### `GET /api/leases/{id}/events` — stream one lease's events
 
 Same stream, pre-filtered to the lease in the path. The owner (or an
-admin); anyone else gets `404`, like every other lease route.
+admin); anyone else gets `404`, like every other lease route — the
+events-only `EVENTS_TOKEN` included: its one route is the all-events
+stream above.
 
 ### Wire format
 
@@ -662,9 +668,10 @@ Send the last seen `id` as `Last-Event-ID` on reconnect:
   epoch change as a signal to re-list your leases.
 
 Every event is checked again as it is written: a stream only ever
-carries events stamped with the caller's owner id (admins: all).
-A `gap` marker is always delivered — it reports the caller's own
-stream, not a lease change.
+carries events stamped with the caller's owner id (admins: all, and
+the events-only `EVENTS_TOKEN` on its one route). A `gap` marker is
+always delivered — it reports the caller's own stream, not a lease
+change.
 
 A `gap` event is not part of the bus's sequence; it exists only in
 streams (and for in-process subscribers that fell behind, see below).

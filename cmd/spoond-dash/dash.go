@@ -22,12 +22,13 @@
 //	METRICS_URL          spoond /metrics (default https://127.0.0.1:8890/metrics)
 //	METRICS_SERVER_NAME  TLS server name for METRICS_URL (default vm2.lacy.casa)
 //	METRICS_TOKEN        spoond's scrape-only token (required)
+//	DASH_EVENTS_TOKEN    the backend's events-only EVENTS_TOKEN; the
+//	                     lease events panel's source. Without it the
+//	                     panel says so instead of streaming.
 //	SPOOND_DB_PATH       catalog database (default /var/lib/spoond/spoond.db)
 //	USERS_FILE           identity store (default /var/lib/spoond/users.json)
 //	E2B_TEMPLATE_STORAGE_PATH  disk to report (default /forkdcache/e2b/storage/templates)
 //	DASH_SERVICES        systemd units to show (comma-separated)
-//	DASH_ACTIVITY_UNIT   unit whose journal feeds the events panel
-//	                     (default spoond-backend)
 //	DASH_INTERVAL        refresh interval (default 2s)
 //	DASH_HISTORY         sparkline points kept (default 150, i.e. 5 min at 2s; max 200)
 //	DASH_WIDTH           frame width in cells (default 104, 72–104; the
@@ -85,19 +86,21 @@ func readDashVersion() string {
 
 // Config is the dashboard's configuration (see the package comment).
 type Config struct {
-	Addr, User, PasswordHash       string
-	TLSCert, TLSKey                string
-	MetricsURL, MetricsServerName  string
-	MetricsToken                   string
+	Addr, User, PasswordHash      string
+	TLSCert, TLSKey               string
+	MetricsURL, MetricsServerName string
+	MetricsToken                  string
+	// EventsToken is the backend's events-only EVENTS_TOKEN
+	// (DASH_EVENTS_TOKEN); it subscribes the collector to
+	// /api/leases/events. Empty: no stream, and the events panel says
+	// so.
+	EventsToken                    string
 	DBPath, UsersFile, StoragePath string
 	Services                       []string
-	// ActivityUnit is the systemd unit whose journal feeds the events
-	// panel (DASH_ACTIVITY_UNIT).
-	ActivityUnit string
-	Interval     time.Duration
-	History      int
-	Width        int    // grid width in cells (DASH_WIDTH, 72–104)
-	Host         string // header label (DASH_HOST, else the hostname)
+	Interval                       time.Duration
+	History                        int
+	Width                          int    // grid width in cells (DASH_WIDTH, 72–104)
+	Host                           string // header label (DASH_HOST, else the hostname)
 }
 
 func configFromEnv() (Config, error) {
@@ -121,7 +124,7 @@ func configFromEnv() (Config, error) {
 		StoragePath:       env("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates"),
 		Services: strings.Split(env("DASH_SERVICES",
 			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol"), ","),
-		ActivityUnit: env("DASH_ACTIVITY_UNIT", "spoond-backend"),
+		EventsToken: os.Getenv("DASH_EVENTS_TOKEN"),
 	}
 	var err error
 	if c.Interval, err = time.ParseDuration(env("DASH_INTERVAL", "2s")); err != nil || c.Interval < time.Second {
@@ -243,10 +246,16 @@ func newDash(cfg Config) (*dash, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &dash{cfg: cfg, col: newCollector(cfg), page: page, width: cfg.Width, hist: map[string][]float64{}, viewers: map[chan struct{}]bool{}}, nil
+	return &dash{cfg: cfg, col: newCollector(cfg), page: page, width: cfg.Width,
+		hist: map[string][]float64{}, viewers: map[chan struct{}]bool{}}, nil
 }
 
 func (d *dash) run(ctx context.Context) {
+	if d.cfg.EventsToken != "" {
+		// The subscription feeds the collector's own event buffer — the
+		// one the events panel reads.
+		go d.col.streamEvents(ctx, eventsURL(d.cfg.MetricsURL), d.cfg.EventsToken)
+	}
 	t := time.NewTicker(d.cfg.Interval)
 	defer t.Stop()
 	for {

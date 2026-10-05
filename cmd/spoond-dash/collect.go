@@ -11,11 +11,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -97,11 +98,85 @@ type Snapshot struct {
 }
 
 // EventLine is one line of the events panel: text plus the grid style
-// it is drawn with ("dim" for journal noise, "warn" for automatic
-// held-lease actions, "bad" for a scrape problem).
+// it is drawn with ("warn" for lost and held-lease events, "dim" for
+// released ones, "text" for the rest, "bad" for a scrape problem).
 type EventLine struct {
 	Text  string
 	Style string
+}
+
+// dashEvent is one lease event as the events panel shows it: when (the
+// event's own clock, HH:MM:SS), the type, the lease id and what the
+// tail column names (holder, then comment, then owner). Detail carries
+// the event's own note; the panel does not draw it, but it is kept so
+// the tests can tell one stream's events apart.
+type dashEvent struct {
+	At                     time.Time
+	Type, LeaseID, Subject string
+	Detail                 string
+}
+
+// eventBuffer is the collector's rolling window of lease events, fed by
+// its one SSE subscription, shown by the events panel (newest first).
+type eventBuffer struct {
+	mu     sync.Mutex
+	events []dashEvent // oldest first, at most maxEvents kept
+}
+
+const maxEvents = 50
+
+// add appends one event, keeping the buffer at most maxEvents long.
+func (b *eventBuffer) add(ev dashEvent) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.events = append(b.events, ev)
+	if len(b.events) > maxEvents {
+		b.events = b.events[len(b.events)-maxEvents:]
+	}
+}
+
+// newest returns up to n events, newest first.
+func (b *eventBuffer) newest(n int) []dashEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]dashEvent, 0, n)
+	for i := len(b.events) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, b.events[i])
+	}
+	return out
+}
+
+// eventStyle is the grid style an event type is drawn with: warn for
+// lost and held-lease actions, dim for releases, text for the rest.
+func eventStyle(t string) string {
+	switch t {
+	case "lost", "held_action":
+		return "warn"
+	case "released":
+		return "dim"
+	default:
+		return "text"
+	}
+}
+
+// eventSubject picks the tail column: the lease's holder, else its
+// comment (a CI job lease has neither holder nor name but carries the
+// job it runs), else the owner the event carries. The rows are the live
+// lease table the same tick built; a lease that has left it (released)
+// falls through to the event's owner.
+func eventSubject(ev dashEvent, rows []LeaseRow) string {
+	for _, r := range rows {
+		if r.ID == ev.LeaseID {
+			if r.Holder != "" {
+				return r.Holder
+			}
+			if r.Comment != "" {
+				return r.Comment
+			}
+			break
+		}
+	}
+	return ev.Subject
 }
 
 // Service is a systemd unit and its state.
@@ -115,14 +190,16 @@ type Service struct {
 // "lapsed"); HoldExpires is the hold's remaining time ("" without a
 // hold) — a held lease's time left is the hold's, not the lease's.
 // LastAction/LastActionAt record the last automatic held-lease action
-// ("rule/action", e.g. "idle/suspend_idle").
+// ("rule/action", e.g. "idle/suspend_idle"). Comment is the lease's
+// own note: the holder column shows it, dim, on a CI job lease with no
+// holder and no name (e.g. "forgejo: lacy.casa/site #218").
 type LeaseRow struct {
-	ID, Image, Owner, State, Policy, Name string
-	Holder, HolderURL, HoldState          string
-	HoldExpires                           string
-	LastAction                            string
-	LastActionAt                          time.Time
-	Age, Left                             string
+	ID, Image, Owner, State, Policy, Name, Comment string
+	Holder, HolderURL, HoldState                   string
+	HoldExpires                                    string
+	LastAction                                     string
+	LastActionAt                                   time.Time
+	Age, Left                                      string
 }
 
 // ImageRow is one catalog image for the table.
@@ -142,6 +219,25 @@ type collector struct {
 	prevAt       time.Time
 	samples      []sample  // cumulative create counters, newest last, at most an hour
 	prevCPU      [2]uint64 // busy, total jiffies
+
+	events *eventBuffer // lease events from the SSE subscription
+
+	// eventsClient has no overall timeout: the subscription is
+	// long-lived and bounded by its context instead (the scrape client's
+	// 5 s would kill the stream every five seconds).
+	eventsClient *http.Client
+
+	rowsMu  sync.Mutex
+	lastRow []LeaseRow // the lease table of the last collect tick
+}
+
+// lastRows returns the rows set by the last fromDB: the holder and name
+// lookup the events panel's tail column reads. Nil before the first
+// collect tick.
+func (c *collector) lastRows() []LeaseRow {
+	c.rowsMu.Lock()
+	defer c.rowsMu.Unlock()
+	return c.lastRow
 }
 
 func newCollector(cfg Config) *collector {
@@ -152,7 +248,23 @@ func newCollector(cfg Config) *collector {
 		}},
 		prevCounters: map[string]float64{},
 		now:          time.Now,
+		events:       &eventBuffer{},
+		eventsClient: &http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{ServerName: cfg.MetricsServerName},
+		}},
 	}
+}
+
+// eventsURL is the lease events stream URL: the metrics URL's scheme
+// and host (the same backend), /api/leases/events on the path.
+func eventsURL(metricsURL string) string {
+	u, err := url.Parse(metricsURL)
+	if err != nil || u.Host == "" {
+		return "https://127.0.0.1:8890/api/leases/events"
+	}
+	u.Path = "/api/leases/events"
+	u.RawQuery, u.Fragment = "", ""
+	return u.String()
 }
 
 // collect builds a snapshot. A failing source fills Err and leaves its
@@ -179,7 +291,7 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 			s.Down++
 		}
 	}
-	c.readActivity(&s, now)
+	s.Events = c.eventLines(now)
 	c.readCert(&s)
 	s.Err = strings.Join(errs, "; ")
 	if s.Err != "" {
@@ -430,62 +542,39 @@ func (c *collector) readCert(s *Snapshot) {
 	}
 }
 
-// readActivity fills the events panel: one line per automatic
-// held-lease action recorded on a live lease (last_action, newest
-// first), then the backend's last journal lines (journalctl, the way
-// services uses systemctl). A host without journald — CI — just
-// contributes the held-lease lines.
-func (c *collector) readActivity(s *Snapshot, now time.Time) {
-	type heldAt struct {
-		line EventLine
-		at   time.Time
+// eventPanelRows is how many events the panel shows.
+const eventPanelRows = 5
+
+// eventLines renders the buffered lease events as the panel's lines,
+// newest first, at most eventPanelRows of them:
+//
+//	HH:MM:SS  <type padded to 14>  <lease id 10>  <subject>
+//
+// (14 fits the longest type, holder_cleared, so the columns line up.)
+//
+// where subject is the holder, else the comment, else the owner.
+// Without DASH_EVENTS_TOKEN the collector never subscribed to anything,
+// and the panel says so instead of looking broken.
+func (c *collector) eventLines(now time.Time) []EventLine {
+	if c.cfg.EventsToken == "" {
+		return []EventLine{{Text: "events need DASH_EVENTS_TOKEN", Style: "dim"}}
 	}
-	var held []heldAt
-	for _, r := range s.Rows {
-		if r.LastAction == "" || r.LastActionAt.IsZero() {
+	evs := c.events.newest(eventPanelRows)
+	lines := make([]EventLine, 0, len(evs))
+	rows := c.lastRows()
+	for _, ev := range evs {
+		// Local time, like the status line's clock on the same frame.
+		at := ev.At.In(now.Location()).Format("15:04:05")
+		if ev.Type == "gap" {
+			// The stream skipped events (a reconnect past the backend's
+			// buffer): say so instead of drawing an empty row.
+			lines = append(lines, EventLine{Text: at + "  ┄ events missed while reconnecting", Style: "warn"})
 			continue
 		}
-		held = append(held, heldAt{
-			line: EventLine{Text: fmt.Sprintf("held lease %s: %s (%s ago)", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))), Style: "warn"},
-			at:   r.LastActionAt,
-		})
+		text := fmt.Sprintf("%s  %-14s  %-10s  %s", at, ev.Type, ev.LeaseID, eventSubject(ev, rows))
+		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev.Type)})
 	}
-	sort.Slice(held, func(i, j int) bool { return held[i].at.After(held[j].at) })
-	for i, h := range held {
-		if i == 4 {
-			break
-		}
-		s.Events = append(s.Events, h.line)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	unit := c.cfg.ActivityUnit
-	if unit == "" {
-		unit = "spoond-backend"
-	}
-	out, err := exec.CommandContext(ctx, "journalctl", "-u", unit, "-n", "8", "--no-pager", "--quiet", "-o", "short-iso").Output()
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		if line == "" {
-			continue
-		}
-		// "2026-10-04T07:19:00+00:00 spoond-backend[123]: message" — keep
-		// the time of day and the message.
-		f := strings.SplitN(line, " ", 3)
-		if len(f) < 3 {
-			continue
-		}
-		when := f[0]
-		if i := strings.IndexByte(when, 'T'); i >= 0 {
-			when = when[i+1:]
-		}
-		s.Events = append(s.Events, EventLine{Text: when + " " + f[2], Style: "dim"})
-	}
-	if n := len(s.Events); n > 8 {
-		s.Events = s.Events[:8]
-	}
+	return lines
 }
 
 func cpuJiffies() (busy, total uint64, cores int, err error) {
@@ -556,6 +645,107 @@ func meminfo() (map[string]uint64, error) {
 	return out, nil
 }
 
+// streamEvents holds the one SSE subscription to the backend's
+// /api/leases/events: it authenticates with the events-only
+// EVENTS_TOKEN (DASH_EVENTS_TOKEN), resumes with Last-Event-ID so a
+// reconnect replays exactly what was missed, backs off when the server
+// refuses it, and appends everything it receives to the collector's own
+// buffer — the one the events panel reads. One subscription per
+// process, for the dashboard's lifetime.
+func (c *collector) streamEvents(ctx context.Context, eventsURL, token string) {
+	const retry = 5 * time.Second // the back-off ceiling
+	backoff := time.Second
+	lastID := ""
+	for ctx.Err() == nil {
+		err := c.streamEventsOnce(ctx, eventsURL, token, &lastID)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			backoff = time.Second // a clean end: start the climb over
+		} else {
+			backoff = min(backoff*2, retry)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+}
+
+// streamEventsOnce runs one connection to the event stream until it
+// ends, updating lastID as id lines arrive (a reconnect sends it as
+// Last-Event-ID and the stream replays from there).
+func (c *collector) streamEventsOnce(ctx context.Context, eventsURL, token string, lastID *string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, eventsURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+	if *lastID != "" {
+		req.Header.Set("Last-Event-ID", *lastID)
+	}
+	resp, err := c.eventsClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		return fmt.Errorf("events: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var ev *dashEvent
+	for sc.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line := sc.Text()
+		switch {
+		case line == "": // the blank line ends one event block
+			if ev != nil {
+				c.events.add(*ev)
+				ev = nil
+			}
+		case strings.HasPrefix(line, "id:"):
+			*lastID = strings.TrimSpace(line[3:])
+		case strings.HasPrefix(line, "event:"):
+			if ev == nil {
+				ev = &dashEvent{}
+			}
+			ev.Type = strings.TrimSpace(line[6:])
+		case strings.HasPrefix(line, "data:"):
+			if ev == nil {
+				ev = &dashEvent{}
+			}
+			var payload struct {
+				At      time.Time `json:"at"`
+				LeaseID string    `json:"lease_id"`
+				Owner   string    `json:"owner"`
+				Detail  string    `json:"detail"`
+			}
+			if json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &payload) == nil {
+				ev.At = payload.At
+				ev.LeaseID = shortID(payload.LeaseID)
+				ev.Subject = payload.Owner
+				ev.Detail = payload.Detail
+			}
+		}
+	}
+	return sc.Err()
+}
+
+func shortID(id string) string {
+	if len(id) > 10 {
+		return id[:10]
+	}
+	return id
+}
+
 // fromDB reads live leases and the image catalog, read-only.
 func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	db, err := sql.Open("sqlite", "file:"+c.cfg.DBPath+"?mode=ro&_pragma=busy_timeout(3000)")
@@ -565,7 +755,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	defer db.Close()
 	names := c.userNames()
 
-	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, created_at, expires_at, persistent,
+	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, comment, created_at, expires_at, persistent,
 		holder, holder_url, hold_expires_at, last_action, last_action_at
 		FROM leases ORDER BY created_at DESC LIMIT 40`)
 	if err != nil {
@@ -575,12 +765,14 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	for rows.Next() {
 		var r LeaseRow
 		var owner, created, expires string
+		var comment string
 		var holder, holderURL, holdExpires, lastAction, lastActionAt string
 		var persistent int
-		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &created, &expires, &persistent,
+		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &comment, &created, &expires, &persistent,
 			&holder, &holderURL, &holdExpires, &lastAction, &lastActionAt); err != nil {
 			return err
 		}
+		r.Comment = comment
 		r.Owner = names[owner]
 		if r.Owner == "" {
 			r.Owner = owner
@@ -640,6 +832,10 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			live[r.Image]++
 		}
 	}
+
+	c.rowsMu.Lock()
+	c.lastRow = s.Rows
+	c.rowsMu.Unlock()
 
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
 	if err != nil {

@@ -117,6 +117,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `GATEWAY_TOKEN` | *(empty)* | SSH gateway's service token; lets the gateway call the backend as the authenticated SSH user (trusted impersonation) |
 | `ADMIN_TOKEN` | *(empty)* | bearer token for `/api/admin/*` (drain, undrain, reconcile); unset = those routes answer `404` |
 | `METRICS_TOKEN` | *(empty)* | scrape-only token for `/metrics`; refused on every other route |
+| `EVENTS_TOKEN` | *(empty)* | events-only token for the lease event streams (every owner's events); refused on every other route — spoond dash's `DASH_EVENTS_TOKEN` |
 | `BIND_ADDR` | `127.0.0.1:8890` | lease API listen address (`0.0.0.0:8890` behind a proxy) |
 | `POOL_SIZE` | `0` | warm-pool size **per image with a current build**; pre-created sandboxes served without a cold restore. `0` disables |
 | `SANDBOX_PROBE` | `1` | check each sandbox runs a healthy toolchain before pooling or leasing it; `0` disables (see [ci-jobs.md](ci-jobs.md)) |

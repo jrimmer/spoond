@@ -33,13 +33,12 @@ const (
 
 // Extra is every non-ASCII rune the dashboard draws beyond grid.Glyphs:
 // ✓ an active unit and ✗ one that is not, · separator, ═ the header's
-// rule, ▲ the attention strip's marker, ┄ a held-lease action in the
-// events panel and the rules inside the capacity and host panels, ■ a
-// lost lease, ∞ a persistent lease's remaining time, and the leases
-// panel's marks — the run-state glyphs ▶ running, ‖ suspended and ⭘
-// recovered, and the hold marks ◆ held and ◉ lapsed hold. It is passed
-// to grid.Check by every renderer, and every rune is asserted to be in
-// the shipped JetBrains Mono (TestExtraGlyphsInFont).
+// rule, ▲ the attention strip's marker, ┄ the rules inside the capacity
+// and host panels, ■ a lost lease, ∞ a persistent lease's remaining
+// time, and the leases panel's marks — the run-state glyphs ▶ running,
+// ‖ suspended and ⭘ recovered, and the hold marks ◆ held and ◉ lapsed
+// hold. It is passed to grid.Check by every renderer, and every rune is
+// asserted to be in the shipped JetBrains Mono (TestExtraGlyphsInFont).
 const Extra = "✓✗·═▲┄■∞◉⭘" + stateGlyphs
 
 // stateGlyphs are the leases panel's run-state and hold glyphs: ▶ ‖ for
@@ -95,17 +94,17 @@ func legendRow() []grid.Seg {
 	segs = append(segs,
 		grid.Seg{Text: "◆ held · ◉ lapsed hold", Style: "state"},
 		grid.Seg{Text: " · ", Style: "dim"},
-		grid.Seg{Text: "✓ active unit", Style: "dim"},
-		grid.Seg{Text: " · ", Style: "dim"},
-		grid.Seg{Text: "┄ held-lease action", Style: "dim"})
+		grid.Seg{Text: "✓ active unit", Style: "dim"})
 	return segs
 }
 
-// fitSegs drops whole legend items from the right (an item ends at a
-// " · " separator) until the row fits w, so a centred legend on a narrow
-// frame loses its least important entries instead of being cut at both
-// edges.
-func fitSegs(segs []grid.Seg, w int) []grid.Seg {
+// fitItems drops whole items from the right of segs until the row fits
+// w, instead of letting the grid clip mid-item. An item ends at one of
+// the two separators the rows use: " · " between the legend's entries,
+// two spaces between the refusals counters. The legend is centred (a
+// narrow frame loses its least important entries, not the row's edges);
+// the refusals counters lose their rightmost ones.
+func fitItems(segs []grid.Seg, w int) []grid.Seg {
 	width := func(ss []grid.Seg) int {
 		n := 0
 		for _, s := range ss {
@@ -116,7 +115,7 @@ func fitSegs(segs []grid.Seg, w int) []grid.Seg {
 	for width(segs) > w {
 		cut := -1
 		for i := len(segs) - 1; i >= 0; i-- {
-			if segs[i].Text == " · " {
+			if segs[i].Text == " · " || segs[i].Text == "  " {
 				cut = i
 				break
 			}
@@ -486,7 +485,7 @@ func (l *layout) header(g *grid.Grid, y int) {
 	for x := 0; x < l.w; x++ {
 		g.Put(x, y+1, '═', "frame")
 	}
-	g.Center(l.w/2, y+2, fitSegs(legendRow(), l.w))
+	g.Center(l.w/2, y+2, fitItems(legendRow(), l.w))
 }
 
 // versionLabel is a version for the header: "?" when the scrape had
@@ -1177,7 +1176,8 @@ func leaseLeft(r LeaseRow) string {
 
 // holder draws the holder column: ◆ before a held lease's holder, ◉
 // when the hold has lapsed; a lease's name when there is no holder; a
-// dash when neither. Cut with … so nothing reaches the border.
+// lease's comment — dim, a CI job lease usually — when there is neither;
+// a dash when nothing at all. Cut with … so nothing reaches the border.
 func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
 	room := l.w - c.hold - 3 // one column clear of the border
 	if r.Holder != "" {
@@ -1202,6 +1202,10 @@ func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
 		g.Text(c.hold, yy, ellipsize(sanitize(r.Name), room), "dim", room)
 		return
 	}
+	if r.Comment != "" {
+		g.Text(c.hold, yy, ellipsize(sanitize(r.Comment), room), "dim", room)
+		return
+	}
 	g.Text(c.hold, yy, "-", "dim", 1)
 }
 
@@ -1216,14 +1220,21 @@ func (l *layout) imagesH() int {
 	return 3 + len(l.s.Images)
 }
 
+// maxServiceRows is the most unit rows the services panel shows before
+// it folds the rest into a "+N more" row — the images panel's cap, so
+// a host with many units cannot stretch the whole band.
+const maxServiceRows = 6
+
 // servicesH is the services panel's own height: title, one row per unit
-// ("no units configured" when none) and the bottom edge. Side by side
-// the panel is drawn as tall as images instead — the taller of the two.
+// up to maxServiceRows ("no units configured" when none), a final
+// "+N more" row when units were folded, and the bottom edge. Side by
+// side the panel is drawn as tall as images instead — the taller of
+// the two.
 func (l *layout) servicesH() int {
 	if len(l.s.Services) == 0 {
 		return 3
 	}
-	return 3 + len(l.s.Services)
+	return 3 + min(len(l.s.Services), maxServiceRows) + boolInt(len(l.s.Services) > maxServiceRows)
 }
 
 // imagesServicesH is the height of the images/services band: as one
@@ -1309,7 +1320,8 @@ func memLabel(mb int) string {
 // drawServices draws the services panel at (x, y) in w cells and
 // returns the row past its bottom edge: one row per systemd unit,
 // the name padded to a fixed column, then the state — ✓ active, ◷ (or
-// ○) a state on its way, ✗ a state that needs a person.
+// ○) a state on its way, ✗ a state that needs a person. When units
+// outrun the panel's maxServiceRows, the last row says "+N more".
 func (l *layout) drawServices(g *grid.Grid, x, y, w, h int) int {
 	top := y
 	y = l.panel(g, x, y, w, h, "services", "services")
@@ -1317,13 +1329,31 @@ func (l *layout) drawServices(g *grid.Grid, x, y, w, h int) int {
 		g.Text(x+2, top+1, "no units configured", "dim", w-4)
 		return y
 	}
-	for i, svc := range l.s.Services {
-		yy := top + 1 + i
-		if yy >= top+h-1 {
-			break // the panel is as tall as images; drop the rest
+	// Down units lead — they are what needs a person — then the active
+	// ones in configured order; only then is the cap applied, so the ✗
+	// rows are never the ones folded into "+N more".
+	rows := make([]Service, 0, len(l.s.Services))
+	for _, svc := range l.s.Services {
+		if svc.State != "active" {
+			rows = append(rows, svc)
 		}
+	}
+	for _, svc := range l.s.Services {
+		if svc.State == "active" {
+			rows = append(rows, svc)
+		}
+	}
+	more := 0
+	if len(rows) > maxServiceRows {
+		rows, more = rows[:maxServiceRows], len(rows)-maxServiceRows
+	}
+	for i, svc := range rows {
+		yy := top + 1 + i
 		g.Text(x+2, yy, ellipsize(sanitize(svc.Name), 22), "text", 22)
 		g.Segs(x+24, yy, []grid.Seg{serviceState(svc.State)}, w-4-22)
+	}
+	if more > 0 {
+		g.Text(x+2, top+1+len(rows), fmt.Sprintf("+%d more", more), "dim", w-4)
 	}
 	return y
 }
@@ -1407,7 +1437,8 @@ func (l *layout) refusals(g *grid.Grid, y int) int {
 	top := y
 	h := l.refusalsH()
 	y = l.panel(g, 0, y, l.w, h, "refusals and failures", "refusals")
-	counters, lat := l.refusalSegs(), l.latencySegs()
+	counters := fitItems(l.refusalSegs(), l.w-4)
+	lat := l.latencySegs()
 	g.Segs(2, top+1, counters, l.w-4)
 	if l.latenciesShareRow() {
 		g.Segs(2+segWidth(counters)+2, top+1, lat, l.w-4-segWidth(counters)-2)
@@ -1436,10 +1467,11 @@ func msLabel(v float64) string {
 	}
 }
 
-// events panel: the backend's last activity — automatic held-lease
-// actions (marker ┄) and the backend's last journal lines, both already
-// collected. The panel is omitted entirely when the collector has
-// nothing to show.
+// events panel: the backend's lease event stream, newest first — one
+// line per event: HH:MM:SS, the type padded to 10, the lease id to 10,
+// then the holder, else the comment, else the owner. Styled by type
+// (lost and held-lease actions warn, releases dim). The panel is
+// omitted entirely when the collector has nothing to show.
 func (l *layout) eventsH() int {
 	if len(l.s.Events) == 0 {
 		return 0
@@ -1454,17 +1486,56 @@ func (l *layout) events(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, 0, y, l.w, l.eventsH(), "events", "events")
 	for i, e := range l.s.Events {
-		style, text := e.Style, sanitize(e.Text)
-		if e.Style == "warn" {
-			// An automatic held-lease action (the legend's ┄): the
-			// marker leads, so the panel's held-lease lines read as one
-			// kind at a glance in the terminal too.
-			style = "state"
-			text = "┄ " + text
-		}
-		g.Text(2, top+1+i, text, style, l.w-4)
+		segs := splitSegs(sanitize(e.Text), e.Style)
+		l.writeRow(g, 2, top+1+i, segs)
 	}
 	return y
+}
+
+// writeRow writes the styled runs of one row at (x, y), rune by rune:
+// one Put per cell. (Segs would run the row's last run over the inner
+// padding, restyling the whole tail to that run's style.)
+func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
+	for _, s := range segs {
+		for _, r := range []rune(s.Text) {
+			if x > l.w-3 {
+				return
+			}
+			g.Put(x, y, r, s.Style)
+			x++
+		}
+	}
+}
+
+// splitSegs breaks one event line into styled runs at its three column
+// separators — the two spaces between time, type, lease id and tail:
+// the time stays dim, the type and the tail take the event's own style,
+// the gaps themselves dim. One style across the whole line would paint
+// the padding dim too. Only those three separators split the line: the
+// tail is free text (a comment can hold two spaces in a row) and is
+// never cut again, so it keeps one style to the panel's edge.
+func splitSegs(line, style string) []grid.Seg {
+	segs := make([]grid.Seg, 0, 7)
+	rest := line
+	for fields := 0; fields < 3; fields++ {
+		i := strings.Index(rest, "  ")
+		if i < 0 {
+			break
+		}
+		if i > 0 {
+			st := style
+			if len(segs) == 0 {
+				st = "dim" // the HH:MM:SS before the first separator
+			}
+			segs = append(segs, grid.Seg{Text: rest[:i], Style: st})
+		}
+		segs = append(segs, grid.Seg{Text: "  ", Style: "dim"})
+		rest = rest[i+2:]
+	}
+	if rest != "" {
+		segs = append(segs, grid.Seg{Text: rest, Style: style})
+	}
+	return segs
 }
 
 // sanitize replaces control characters — anything below 0x20 and 0x7f,

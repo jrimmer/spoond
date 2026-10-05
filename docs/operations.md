@@ -579,7 +579,7 @@ the holder is a link), the image catalog (shape, live leases, lifetime
 uses, baked-at) beside the systemd units, a refusals-and-failures row
 (auth, quota, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and
-the backend's last activity — plus
+the events panel (the backend's lease event stream) — plus
 an attention strip above the panels (one ▲ row per trigger, only when
 something needs a person): a unit not active, a lost lease, free
 hugepages or snapshot disk past the danger level, the TLS certificate
@@ -600,8 +600,16 @@ from spoond's `/metrics` using the scrape-only `METRICS_TOKEN`, the
 SQLite catalog opened read-only, user names from the identity store,
 `/proc` and systemd. Every viewer shares that loop through a single
 server-sent-event stream, and `DASH_HISTORY` (default 150) points of
-history are kept so a new page starts with trends. Configuration lives in
-`cmd/spoond-dash/dash.go`; the notable variables:
+history are kept so a new page starts with trends. With
+`DASH_EVENTS_TOKEN` set, the collector also holds one subscription to
+the backend's lease event stream (`/api/leases/events`, resuming by
+`Last-Event-ID` and backing off when the backend refuses it) and keeps
+the last 50 events; the events panel shows the newest 5 — `HH:MM:SS`,
+the type, the lease id and the holder (else the comment, else the
+owner), lost and held-lease actions highlighted, releases dim. Without
+the token the panel says `events need DASH_EVENTS_TOKEN` instead.
+Configuration lives in `cmd/spoond-dash/dash.go`; the notable
+variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -611,19 +619,44 @@ history are kept so a new page starts with trends. Configuration lives in
 | `METRICS_URL` | `https://127.0.0.1:8890/metrics` | spoond's `/metrics` |
 | `METRICS_SERVER_NAME` | `spoond.example.com` | TLS server name for that URL |
 | `METRICS_TOKEN` | *(required)* | the backend's scrape-only token |
+| `DASH_EVENTS_TOKEN` | *(unset)* | the backend's events-only `EVENTS_TOKEN`; the lease events panel's source (unset: the panel says so) |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
 | `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol` | systemd units to show |
-| `DASH_ACTIVITY_UNIT` | `spoond-backend` | unit whose journal feeds the events panel |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |
 | `DASH_HOST` | *(the hostname)* | header label |
 
 The dashboard can only read: it has no write path to the backend, the
-database or the orchestrator, and the metrics token it holds is refused
-everywhere except `/metrics`.
+database or the orchestrator, and the tokens it holds are refused
+everywhere except their own routes — `METRICS_TOKEN` on `/metrics`,
+`DASH_EVENTS_TOKEN` on `GET /api/leases/events`.
+
+### Setting up the events panel
+
+The backend's `EVENTS_TOKEN` and the dashboard's `DASH_EVENTS_TOKEN`
+are two names for one secret: generate it once, put it in
+`/etc/spoond/backend.env` as `EVENTS_TOKEN` and in the dashboard's
+environment (the `dash.env` file the spoond-dash unit reads) as
+`DASH_EVENTS_TOKEN`, then restart both units. On the backend it is
+admitted on `GET /api/leases/events` alone — every owner's events, and
+nothing else; on the dashboard it turns the events panel on. Generate
+it like the other tokens:
+
+```bash
+EVENTS_TOKEN=$(openssl rand -hex 32)
+printf 'EVENTS_TOKEN=%s\n' "$EVENTS_TOKEN" >> /etc/spoond/backend.env
+printf 'DASH_EVENTS_TOKEN=%s\n' "$EVENTS_TOKEN" >> /etc/spoond/dash.env
+chmod 600 /etc/spoond/backend.env /etc/spoond/dash.env
+systemctl restart spoond-backend spoond-dash
+```
+
+Rolling it out to a running deployment needs both sides at once (the
+panel reads the same secret the backend checks), and a new deployment
+sets it alongside `METRICS_TOKEN` when writing the env files — see
+[install.md](install.md).
 
 ## Metrics
 

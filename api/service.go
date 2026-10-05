@@ -193,6 +193,7 @@ type ServiceConfig struct {
 	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
 	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
 	MetricsToken                    string // METRICS_TOKEN: bearer that may read /metrics only (scrapers, dashboards)
+	EventsToken                     string // EVENTS_TOKEN: bearer that may read the lease event stream only (dashboards)
 	HostAPIPort                     int    // HOST_API_PORT: lease API port lan/internet guests may reach on HostGuestAddr (0 = none)
 	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
 	// CheckpointIntervalDefault is the host default checkpoint interval
