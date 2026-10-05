@@ -953,7 +953,7 @@ wrong or missing token answers `401`.
 | Route | Effect |
 |---|---|
 | `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. |
-| `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases (a lease that fails to resume becomes `lost`). Response `{"resumed":N,"failed":[…]}`. |
+| `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases (a lease that fails to resume becomes `lost`; one over its owner's memory cap stays drained for the next undrain). Response `{"resumed":N,"failed":[…]}`. |
 | `POST /api/admin/reconcile` | Run the crash reconciliation now. Response `{"recovered":N,"lost":M}`. |
 
 These are what `spoond drain --stop|--start` calls from the orchestrator

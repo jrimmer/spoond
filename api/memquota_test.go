@@ -638,3 +638,65 @@ func ownerIDFor(t *testing.T, h http.Handler, token string) string {
 	}
 	return body["user"].(map[string]any)["id"].(string)
 }
+
+// TestMemQuotaUndrainDeferredOverQuota: an undrain whose resume fails
+// the memory cap leaves the lease drained (retryable), not lost; once
+// the cap is raised, undrain brings it back.
+func TestMemQuotaUndrainDeferredOverQuota(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "big", 4096)
+	ids, _ := identity.NewStore("")
+	svc.SetIdentities(ids)
+	srv := NewServer(svc, NewImageRegistry(db))
+	srv.SetAdminToken("admin-tok")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	u, err := ids.AddUser("worker", identity.KindPerson, []string{"SHA256:fp-b"}, "work-tok")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := ids.SetQuota(u.ID, 0, 0, 0, 4096, 0); err != nil {
+		t.Fatalf("set quota: %v", err)
+	}
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, u.ID, "big", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// Shrink the cap under the running lease, then drain: the pause
+	// frees nothing the check can grant — 4096 over a 2048 cap.
+	if err := ids.SetQuota(u.ID, 0, 0, 0, 2048, 0); err != nil {
+		t.Fatalf("shrink quota: %v", err)
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/admin/drain", "admin-tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("drain = %d (%v), want 200", resp.StatusCode, body)
+	}
+	resp, body = doReq(t, "POST", ts.URL+"/api/admin/undrain", "admin-tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("undrain = %d (%v), want 200", resp.StatusCode, body)
+	}
+	failed, ok := body["failed"].([]any)
+	if !ok || len(failed) != 1 {
+		t.Fatalf("undrain failed = %v, want exactly the over-quota lease", body["failed"])
+	}
+	if got := l.State; got != "suspended" || !l.Drained {
+		t.Fatalf("over-quota undrain should leave the lease suspended and drained, got state=%s drained=%v", l.State, l.Drained)
+	}
+	// Raise the cap; the retry resumes the lease.
+	if err := ids.SetQuota(u.ID, 0, 0, 0, 4096, 0); err != nil {
+		t.Fatalf("raise quota: %v", err)
+	}
+	resp, body = doReq(t, "POST", ts.URL+"/api/admin/undrain", "admin-tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("retry undrain = %d (%v), want 200", resp.StatusCode, body)
+	}
+	if body["resumed"] != float64(1) {
+		t.Fatalf("retry undrain resumed = %v, want 1", body["resumed"])
+	}
+	if got := l.State; got != "running" {
+		t.Fatalf("lease after the retry = %s, want running", got)
+	}
+}

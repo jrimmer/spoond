@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -234,6 +235,21 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if _, err := s.resumeLease(ctx, l); err != nil {
+				if errors.Is(err, errQuotaExceeded) {
+					// Over the owner's memory cap (#128): the lease keeps
+					// its Drained flag, so a later undrain retries it —
+					// refusing a resume must not lose the lease the way a
+					// failed resume (a sandbox that would not come back)
+					// does.
+					s.store.mu.Lock()
+					s.saveLeaseLocked(l)
+					s.store.mu.Unlock()
+					mu.Lock()
+					res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error()})
+					mu.Unlock()
+					s.log.Printf("undrain: resume %s deferred (over quota): %v", l.ID, err)
+					return
+				}
 				s.store.mu.Lock()
 				l.setState("lost")
 				l.Drained = false
