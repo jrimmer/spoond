@@ -121,7 +121,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `POOL_SIZE` | `0` | warm-pool size **per image with a current build**; pre-created sandboxes served without a cold restore. `0` disables |
 | `SANDBOX_PROBE` | `1` | check each sandbox runs a healthy toolchain before pooling or leasing it; `0` disables (see [ci-jobs.md](ci-jobs.md)) |
 | `SANDBOX_PROBE_TIMEOUT_SECS` | `20` | exec timeout for each integrity probe |
-| `CHECKPOINT_INTERVAL_MINS` | `60` | background checkpoint interval for active persistent leases (`0` disables) |
+| `CHECKPOINT_INTERVAL_MINS` | `0` | default per-lease background checkpoint interval in minutes for leases without their own `checkpoint_interval` (`0` = never; a lease's own interval overrides) |
 | `GC_DELETE` | `0` | `1` = the snapshot GC actually deletes; default dry-run only logs candidates (see [operations.md](operations.md)) |
 | `PROXY_ADDR` | *(empty)* | `0.0.0.0:8891` to serve the HTTP proxy/LLM gateway listener (Caddy wildcard fronts it) |
 | `PROXY_AUTH_MODE` | `off` | `off` = capability model (lease id is the credential); `forward-auth` = require `X-Proxy-Auth` secret + `Remote-User` identity |

@@ -3,8 +3,9 @@ package api
 // Lease holders (2.1): a lease can name what holds it (a CI job, an
 // orchestrator's flight, a person's scratch work) with a link. A held
 // lease is left alone by the sweepers — not released at its TTL, not
-// idle-suspended — and is checkpointed periodically like a persistent
-// lease. Clearing the holder restores normal sweeping.
+// idle-suspended. Since 2.3 (#122) being held does not itself put a
+// lease on the periodic checkpoint pass: an interval of its own does.
+// Clearing the holder restores normal sweeping.
 
 import (
 	"context"

@@ -370,10 +370,20 @@ delete this lease"}` on exec, stream, proxy and SSH. `POST
 /api/admin/reconcile` runs the reconciliation on demand and returns
 `{"recovered":N,"lost":M}` (admin token).
 
-Persistent leases are checkpointed in the background every
-`CHECKPOINT_INTERVAL_MINS` (default 60, `0` disables), only when they
-have been active since the last checkpoint — that is what bounds the
-loss. Users can force one with `POST /api/leases/{id}/checkpoint`.
+Persistent leases are checkpointed in the background by
+`CHECKPOINT_INTERVAL_MINS` — since 2.3 that value is the **default
+per-lease interval** for leases without their own, and its default is
+`0` = never (before 2.3 it was 60 and applied to every persistent
+lease). A lease's own `checkpoint_interval` (`POST /api/leases`, `PUT
+/api/leases/{id}/checkpoint-policy`) overrides the default: `0` =
+never, 60..604800 = seconds. The loop ticks every minute and
+checkpoints a live lease whose effective interval has elapsed since its
+last checkpoint and that has been active since — that is what bounds
+the loss. Being held no longer puts a lease on the pass (before 2.3 it
+did). Users can force one with `POST /api/leases/{id}/checkpoint`, and
+every checkpoint's guest pause is observed in
+`spoond_checkpoint_pause_seconds` with a log line naming the lease, the
+pause and the image's `memory_mb`.
 
 ## Restarting the backend
 
@@ -454,9 +464,11 @@ readable log API. See [ci-jobs.md](ci-jobs.md).
 sandboxes leased from the backend. Each job lease is labelled with its
 job (#119): right after the create, the runner sets the lease's comment
 to `forgejo job <id> <job URL>`. The lease is deliberately **not held**:
-held leases join the periodic checkpoint pass, which pauses a sandbox
-while it snapshots. A job lease lives for `LEASE_TTL` like any plain
-lease.
+a hold would keep it out of the TTL sweep, and since 2.3 a hold no
+longer brings periodic checkpointing with it anyway (a lease is
+checkpointed only when its own `checkpoint_interval` says so — set one
+on create if a job's work must survive a crash). A job lease lives for
+`LEASE_TTL` like any plain lease.
 
 **Orphan sweep at start.** When the runner starts it lists its token's
 leases and deletes every one whose comment starts with `forgejo job ` —

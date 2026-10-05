@@ -154,10 +154,11 @@ spec's fixed decision D4); spoond makes both cases as harmless as it can.
   `recovered`); a lease without one becomes `lost` and answers `410` on
   exec, stream, proxy and SSH until it is deleted. Leases are never
   marked lost when the sandbox list itself cannot be read.
-- **Persistent leases are checkpointed periodically** (default every
-  `CHECKPOINT_INTERVAL_MINS` = 60 minutes, only when active), which
-  bounds how much a crash can cost. `POST /api/leases/{id}/checkpoint`
-  does it on demand.
+- **Leases with a checkpoint interval are checkpointed periodically**
+  (per-lease `checkpoint_interval`, default the host's
+  `CHECKPOINT_INTERVAL_MINS`, itself `0` = never), which bounds how
+  much a crash can cost. `POST /api/leases/{id}/checkpoint` does it on
+  demand.
 
 The states a lease can be in are `running`, `suspended`, `recovered` and
 `lost`; `recovered` behaves exactly like `running` until the lease is
