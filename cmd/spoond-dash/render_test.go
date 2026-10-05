@@ -33,7 +33,6 @@ func sampleSnapshot() Snapshot {
 		Leases: 5, Queued: 1, Granted: 1234, Swept: 17,
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
 		ByState:   map[string]int{"running": 3, "suspended": 1, "lost": 1},
-		ByImage:   map[string]int{"go-base": 2, "py-base": 1},
 		ReqPerSec: 12.3, CreatesPerMin: 4, CreateMs: 250, ResumeMs: 4100,
 		FwConns: 9, AuthFails: 2, Quota: 1, Throttled: 0, Capacity: 3, BuildFails: 1,
 		CPUPct: 37.5, Load1: 1.4, Cores: 16,
@@ -86,7 +85,7 @@ func sampleHist() map[string][]float64 {
 // drawSample renders the sample frame at w, with the sample history so
 // the sparklines are drawn too.
 func drawSample(w int) *grid.Grid {
-	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow)
+	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow, dashInterval)
 	if err != nil {
 		panic(err)
 	}
@@ -129,8 +128,70 @@ func TestGoldenPlain(t *testing.T) {
 // uses, so a rune missing from Extra fails here, not in spoond top.
 func TestGoldenCheck(t *testing.T) {
 	for _, w := range []int{104, 72} {
-		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow); err != nil {
+		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow, dashInterval); err != nil {
 			t.Fatalf("width %d: %v", w, err)
+		}
+	}
+}
+
+// TestFrameFitsEveryWidth draws the sample frame at every width the
+// frame can take (minW to maxW) and checks two invariants: every row
+// is exactly w cells (nothing overflows or falls short, so Plain rows
+// never misalign), and every cell between a box's corners is that
+// box's │ — a panel drawn or placed one cell wrong would put its
+// right border in another column, or leave a gap in the border.
+func TestFrameFitsEveryWidth(t *testing.T) {
+	for w := minW; w <= maxW; w++ {
+		g := drawSample(w)
+		rows := strings.Split(g.Plain(), "\n")
+		if len(rows) != g.Rows() {
+			t.Fatalf("width %d: %d rows, grid has %d", w, len(rows), g.Rows())
+		}
+		for y, row := range rows {
+			cells := []rune(row)
+			if n := len(cells); n != w {
+				t.Fatalf("width %d: row %d is %d cells, want %d:\n%s", w, y, n, w, row)
+			}
+			checkBoxRow(t, w, y, cells)
+		}
+	}
+}
+
+// checkBoxRow checks one row against the box outlines on the frame:
+// a row carrying corners must pair them (every ┌ closed by a ┐, every
+// └ by a ┘), and a corner-less row between a box's opening and closing
+// corner must be that box's │ there.
+func checkBoxRow(t *testing.T, w, y int, cells []rune) {
+	t.Helper()
+	cornerRow := strings.ContainsAny(string(cells), "┌┐└┘")
+	var spans [][2]int
+	start := -1
+	for x, r := range cells {
+		switch r {
+		case '┌', '└':
+			if start >= 0 {
+				t.Fatalf("width %d: row %d re-opens a box at %d:\n%s", w, y, x, string(cells))
+			}
+			start = x
+		case '┐', '┘':
+			if start < 0 {
+				t.Fatalf("width %d: row %d has ┐/┘ at %d with no opening corner:\n%s", w, y, x, string(cells))
+			}
+			spans = append(spans, [2]int{start, x})
+			start = -1
+		}
+	}
+	if start >= 0 {
+		t.Fatalf("width %d: row %d opens a box at %d that never closes:\n%s", w, y, start, string(cells))
+	}
+	if cornerRow {
+		return // a corner row's interior is ─ and titles, not side borders
+	}
+	for _, s := range spans {
+		for x := s[0] + 1; x < s[1]; x++ {
+			if cells[x] != '│' {
+				t.Fatalf("width %d: row %d col %d is %q between a box's corners, want │:\n%s", w, y, x, cells[x], string(cells))
+			}
 		}
 	}
 }
@@ -179,11 +240,31 @@ func TestDownUnitFramePassesCheck(t *testing.T) {
 	s := sampleSnapshot()
 	s.Services = append(s.Services, Service{Name: "spoond-runner", State: "failed"})
 	for _, w := range []int{DefaultWidth, minW} {
-		if _, err := drawFrame(s, nil, w, "h", fixedNow); err != nil {
+		if _, err := drawFrame(s, nil, w, "h", fixedNow, 0); err != nil {
 			t.Fatalf("width %d: frame with a failed unit failed Check: %v", w, err)
 		}
 		if p := Draw(s, w, fixedNow, "h").Plain(); !strings.Contains(p, "✗ failed") {
 			t.Errorf("width %d: down unit not drawn with ✗:\n%s", w, p)
+		}
+	}
+}
+
+// TestVersionLabel: the header's version is short — a tag as it is, a
+// Go pseudo-version base+7-char hash, "?" when there was none.
+func TestVersionLabel(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "?"},
+		{"v2.2.0", "v2.2.0"},
+		{"v2.1.3-0.20261004183409-7a13d2bd1131", "v2.1.3+7a13d2b"},
+		{"v2.1.3-0.20261004183409-7a13d2b", "v2.1.3+7a13d2b"},
+		{"dev", "dev"},
+		{"5ab27e59fe17", "5ab27e59fe17"},
+		{"v2.1.3-0.20261004183409-7a", "v2.1.3-0.20261004183409-7a"},
+		{"v0.0.0-20260101000000-abcdef123456", "v0.0.0+abcdef1"},
+	}
+	for _, tc := range cases {
+		if got := versionLabel(tc.in); got != tc.want {
+			t.Errorf("versionLabel(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -244,9 +325,9 @@ func TestBannerTriggers(t *testing.T) {
 		if !found {
 			t.Errorf("%s: banner %q lacks %q", tc.name, rows, tc.want)
 		}
-		for _, r := range rows {
-			if !strings.HasPrefix(r, "■ ") {
-				t.Errorf("%s: banner row lacks the ■ marker: %q", tc.name, r)
+		for _, s := range bannerSegs(rows) {
+			if s[0].Text != "▲ " {
+				t.Errorf("%s: attention row lacks the ▲ marker: %q", tc.name, s[0].Text)
 			}
 		}
 	}
@@ -286,8 +367,9 @@ func TestSanitizeReplacesControlChars(t *testing.T) {
 	}
 }
 
-// TestStateGlyphAndStyle: the glyphs the leases panel draws per state,
-// and the styles they carry.
+// TestStateGlyphAndStyle: the glyphs the leases panel draws per run
+// state, and the styles they carry. A hold is not a state — it marks
+// the holder column.
 func TestStateGlyphAndStyle(t *testing.T) {
 	cases := []struct {
 		r     LeaseRow
@@ -295,11 +377,11 @@ func TestStateGlyphAndStyle(t *testing.T) {
 		style string
 	}{
 		{LeaseRow{State: "running"}, '▶', "ok"},
-		{LeaseRow{State: "recovered"}, '▶', "ok"},
+		{LeaseRow{State: "recovered"}, '⭘', "ok"},
 		{LeaseRow{State: "suspended"}, '‖', "warn"},
 		{LeaseRow{State: "lost"}, '■', "bad"},
-		{LeaseRow{State: "running", HoldState: "active"}, '◆', "state"},
-		{LeaseRow{State: "suspended", HoldState: "lapsed"}, '◆', "state"},
+		{LeaseRow{State: "running", HoldState: "active"}, '▶', "ok"},
+		{LeaseRow{State: "suspended", HoldState: "lapsed"}, '‖', "warn"},
 	}
 	for _, tc := range cases {
 		if got := stateGlyph(tc.r); got != tc.glyph {
@@ -311,14 +393,55 @@ func TestStateGlyphAndStyle(t *testing.T) {
 	}
 }
 
-// TestLeasesShowLapsedHold: a lapsed hold shows ◉lapsed after the holder.
-func TestLeasesShowLapsedHold(t *testing.T) {
+// TestLeasesShowHoldMarks: the holder column carries the hold — ◆
+// before a held lease's holder, ◉ before a lapsed hold's — and the run
+// state stays in the state column.
+func TestLeasesShowHoldMarks(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
-	if !strings.Contains(p, "nightly ◉lapsed") {
-		t.Fatalf("lapsed hold not shown after the holder:\n%s", p)
+	lines := strings.Split(p, "\n")
+	var held, lapsed, plain string
+	for _, r := range lines {
+		switch {
+		case strings.Contains(r, "forgejo/job-42"):
+			held = r
+		case strings.Contains(r, "nightly"):
+			lapsed = r
+		case strings.Contains(r, "abcdef0123"):
+			plain = r
+		}
 	}
-	if !strings.Contains(p, "forgejo/job-42") {
-		t.Fatalf("holder text missing:\n%s", p)
+	if held == "" || lapsed == "" || plain == "" {
+		t.Fatalf("lease rows missing:\n%s", p)
+	}
+	if !strings.Contains(held, "◆ forgejo/job-42") || strings.Contains(held, "◆ running") {
+		t.Errorf("held lease's holder not marked ◆:\n%s", held)
+	}
+	if !strings.Contains(lapsed, "◉ nightly") || strings.Contains(lapsed, "◉ suspended") {
+		t.Errorf("lapsed hold's holder not marked ◉:\n%s", lapsed)
+	}
+	if strings.Contains(plain, "◆") || strings.Contains(plain, "◉") {
+		t.Errorf("unheld lease marked held:\n%s", plain)
+	}
+	if !strings.Contains(held, "▶ running") || !strings.Contains(lapsed, "‖ suspended") {
+		t.Errorf("state column must always show the run state:\n%s\n%s", held, lapsed)
+	}
+}
+
+// TestLeasesLeftShowsHoldExpiry: a held lease's left column is the time
+// left on its hold; a persistent lease without a hold shows ∞.
+func TestLeasesLeftShowsHoldExpiry(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{
+		{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m",
+			Holder: "forgejo/job-42", HoldState: "active", HoldExpires: "49m"},
+		{ID: "1234567890", State: "running", Age: "5m", Left: "∞"},
+	}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "49m") {
+		t.Fatalf("held lease's left is not the hold's time:\n%s", p)
+	}
+	if !strings.Contains(p, "∞") {
+		t.Fatalf("persistent lease's left is not ∞:\n%s", p)
 	}
 }
 
@@ -419,7 +542,9 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 	}
 
 	// One lease changes: exactly one row patch, inner mode (the row span
-	// itself stays put).
+	// itself stays put). The lease's image gains a suspended lease, so
+	// the capacity panel's per-image row changes with it — both rows
+	// patch, everything else stays.
 	changed := d.last
 	changed.Rows = append([]LeaseRow(nil), d.last.Rows...)
 	changed.Rows[0].State = "suspended"
@@ -428,8 +553,8 @@ func TestWriteFramePatchesChangedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := w.b.String()
-	if n := strings.Count(body, "event: datastar-patch-elements"); n != 1 {
-		t.Fatalf("one changed lease must patch one row, got %d:\n%s", n, body)
+	if n := strings.Count(body, "event: datastar-patch-elements"); n != 2 {
+		t.Fatalf("one changed lease must patch its row and the image row, got %d:\n%s", n, body)
 	}
 	if !strings.Contains(body, "data: mode inner") {
 		t.Fatalf("row patch must be inner mode:\n%s", body)
@@ -460,15 +585,17 @@ func TestWriteFrameStreamStatesAreIndependent(t *testing.T) {
 	}
 
 	// A change arrives; only viewer a receives its frame. The frame with
-	// a suspended lease has the same row count, so a is patched per row.
+	// a suspended lease has the same row count, so a is patched per row:
+	// its lease row and the capacity panel's per-image row for that
+	// lease's image.
 	changed := d.last
 	changed.Rows = append([]LeaseRow(nil), d.last.Rows...)
 	changed.Rows[0].State = "suspended"
 	if err := d.writeFrame(wa, a, changed, sampleHist()); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(wa.b.String(), "data: selector #r"); n != 1 {
-		t.Fatalf("viewer a: want one row patch, got %d:\n%s", n, wa.b.String())
+	if n := strings.Count(wa.b.String(), "data: selector #r"); n != 2 {
+		t.Fatalf("viewer a: want two row patches, got %d:\n%s", n, wa.b.String())
 	}
 
 	// Viewer b, still on the first frame, must be patched against its
@@ -477,27 +604,57 @@ func TestWriteFrameStreamStatesAreIndependent(t *testing.T) {
 	if err := d.writeFrame(wb, b, changed, sampleHist()); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(wb.b.String(), "data: selector #r"); n != 1 {
-		t.Fatalf("viewer b: want one row patch against its own base, got %d:\n%s", n, wb.b.String())
+	if n := strings.Count(wb.b.String(), "data: selector #r"); n != 2 {
+		t.Fatalf("viewer b: want two row patches against its own base, got %d:\n%s", n, wb.b.String())
 	}
 }
 
-// TestRunningByImagePanel: the capacity panel shows a running count per
-// image, sorted by name.
+// TestRunningByImagePanel: the capacity panel shows one row per image
+// with live leases — a nine-cell bar of three █ per running lease, the
+// count right-aligned — ordered by live count descending, then name.
 func TestRunningByImagePanel(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
-	if !strings.Contains(p, "running by image") {
-		t.Fatalf("capacity panel lacks the running-by-image line:\n%s", p)
+	if !strings.Contains(p, "go-base        ███······") ||
+		!strings.Contains(p, "py-base        ███······") {
+		t.Fatalf("per-image bars missing:\n%s", p)
 	}
-	if !strings.Contains(p, "go-base 2") || !strings.Contains(p, "py-base 1") {
+	if !strings.Contains(p, "1 running") {
 		t.Fatalf("per-image running counts missing:\n%s", p)
 	}
-	if strings.Contains(p, "running by image  · ") {
-		t.Fatalf("running-by-image line starts with a separator:\n%s", p)
+
+	// A suspended-only image shows its bar empty and the suspended
+	// count; a running image that also has suspended leases counts only
+	// the running ones in the bar.
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{
+		{ID: "abcdef0123", Image: "go-base", State: "suspended", Age: "5m", Left: "10m"},
 	}
-	p72 := drawSample(minW).Plain()
-	if !strings.Contains(p72, "running by image") {
-		t.Fatalf("narrow frame lacks the running-by-image line:\n%s", p72)
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "go-base        ·········") ||
+		!strings.Contains(p, "1 suspended") {
+		t.Fatalf("suspended image not drawn as its own row:\n%s", p)
+	}
+
+	// No live leases at all: a dim "no live leases" instead of rows.
+	s = healthySnapshot()
+	s.Rows = nil
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "no live leases") {
+		t.Fatalf("empty capacity panel has no state line:\n%s", p)
+	}
+
+	// The per-image block folds when there are more images than room.
+	s = healthySnapshot()
+	s.Rows = nil
+	for i := 0; i < 8; i++ {
+		s.Rows = append(s.Rows, LeaseRow{
+			ID: fmt.Sprintf("img%d", i), Image: fmt.Sprintf("img-%d", i),
+			State: "running", Age: "5m", Left: "10m",
+		})
+	}
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "+3 more") {
+		t.Fatalf("overflow row missing:\n%s", p)
 	}
 }
 
@@ -512,14 +669,14 @@ func TestLeasesPanelEmptyState(t *testing.T) {
 	}
 	lines := strings.Split(p, "\n")
 	for i, r := range lines {
-		if strings.Contains(r, " lease ") && strings.Contains(r, " holder ") {
-			if !strings.Contains(lines[i+1], "no live leases") {
+		if i < len(lines)-1 && strings.HasPrefix(r, "┌─ leases ") {
+			if !strings.Contains(lines[i+2], "no live leases") {
 				t.Fatalf("the row under the header is not the empty state:\n%s", p)
 			}
 			return
 		}
 	}
-	t.Fatalf("leases panel header not found:\n%s", p)
+	t.Fatalf("leases panel not found:\n%s", p)
 }
 
 // TestEventsPanelMarksHeldActions: automatic held-lease actions are
@@ -555,7 +712,7 @@ func TestNonASCIINamesDrawn(t *testing.T) {
 	}
 	s.Rows[0].Owner = "josé"
 	s.Rows[0].Image = "流-base"
-	g, err := drawFrame(s, nil, 104, "host", fixedNow)
+	g, err := drawFrame(s, nil, 104, "host", fixedNow, 0)
 	if err != nil {
 		t.Fatalf("drawFrame with non-ASCII names: %v", err)
 	}
@@ -602,5 +759,39 @@ func TestPageLinkRowKeepsItsWidth(t *testing.T) {
 	text := html.UnescapeString(regexp.MustCompile(`<[^>]*>`).ReplaceAllString(page, ""))
 	if text != plainRow {
 		t.Fatalf("linked row's text changed:\n got %q\nwant %q", text, plainRow)
+	}
+}
+
+// TestLegendFitsNarrowFrames: a legend wider than the frame drops whole
+// items from its right end, so the first entries (the run states) are
+// always on screen and the row fits.
+func TestLegendFitsNarrowFrames(t *testing.T) {
+	for _, w := range []int{72, 80, 104} {
+		segs := fitSegs(legendRow(), w)
+		n := 0
+		for _, s := range segs {
+			n += len([]rune(s.Text))
+		}
+		if n > w || len(segs) == 0 || segs[0].Text != "▶" {
+			t.Fatalf("width %d: legend %d wide, starts %q", w, n, segs[0].Text)
+		}
+	}
+}
+
+// TestLegendShowsTheMarks: the legend names the run-state glyphs, then
+// the holder column's hold marks.
+func TestLegendShowsTheMarks(t *testing.T) {
+	want := []string{"▶", "running", "‖", "suspended", "■", "lost", "⭘", "recovered", "◆ held · ◉ lapsed hold"}
+	row := strings.Join(func() []string {
+		var out []string
+		for _, s := range legendRow() {
+			out = append(out, s.Text)
+		}
+		return out
+	}(), "")
+	for _, w := range want {
+		if !strings.Contains(row, w) {
+			t.Errorf("legend lacks %q: %s", w, row)
+		}
 	}
 }

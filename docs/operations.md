@@ -554,15 +554,26 @@ means the disk needs attention the leases are paying for.
 `spoond dash` is a read-only, live view of spoond's present operation,
 for watching rather than triage. It draws the whole frame as one
 character grid at a fixed width — capacity (running/limit meter, leases
-by state, queued, granted, swept, running per image), host meters
-(CPU, memory, hugepages, snapshot and root disk), five-minute
-throughput sparklines, live leases with holders, images, systemd units,
-refusal and failure counters, and the backend's last activity — plus
-one attention banner above the panels, shown only when something needs
-a person: a unit not active, a lost lease, free hugepages or snapshot
-disk past the danger level, the TLS certificate inside 30 days of
-expiring, or an automatic held-lease action in the last 24 h. The
-browser page is the grid in a `<pre>` (WebTUI for the chrome, Datastar
+by state, queued, granted, swept, and one row per image with live
+leases) beside the host meters (CPU, memory, hugepages, snapshot and
+root disk) at a wide frame, stacked below it at a narrow one — then a
+full-width throughput panel (running leases, requests per second,
+creates per minute and egress connections, each with its current value
+and a sparkline over the history, titled with the window the history
+covers), live leases (id, image, owner, the run state — ▶ running,
+‖ suspended, ■ lost, ⭘ recovered —, policy, age, time left and the
+holder, ◆ when a hold is active and ◉ once it has lapsed; on the page
+the holder is a link), the image catalog (shape, live leases, lifetime
+uses, baked-at) beside the systemd units, a refusals-and-failures row
+(auth, quota, throttled, capacity, build fails, lost leases — non-zero
+counts highlighted — with the mean create and resume latencies), and
+the backend's last activity — plus
+an attention strip above the panels (one ▲ row per trigger, only when
+something needs a person): a unit not active, a lost lease, free
+hugepages or snapshot disk past the danger level, the TLS certificate
+inside 30 days of expiring, or an automatic held-lease action in the
+last 24 h. A status line under the panels carries the headline numbers
+and the clock. The browser page is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
 styles in the terminal, at the terminal's width (COLUMNS, else 104),
 redrawn every 2 seconds until interrupted. It runs as its own service on **:8893** behind

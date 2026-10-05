@@ -445,13 +445,12 @@ func (d *dash) basicAuth(next http.Handler) http.Handler {
 	})
 }
 
-// pageData is what the page renders: the latest snapshot, the history,
-// the grid's row elements, the host and login names and the width.
+// pageData is what the page renders: the latest snapshot, the history
+// and the grid's row elements (the frame carries the host, the version
+// and the clock in its own header and status line).
 type pageData struct {
 	Snapshot
 	Hist  map[string][]float64
-	User  string
-	Host  string
 	Width int
 	// Grid is the grid's rows as HTML; already escaped by grid.HTML, so
 	// the template must not escape it again.
@@ -465,11 +464,7 @@ func (d *dash) handlePage(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 	g, links := d.gridFor(s, hist, time.Now())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	user, _, ok := r.BasicAuth()
-	if !ok {
-		user = ""
-	}
-	data := pageData{Snapshot: s, Hist: hist, User: user, Host: d.cfg.Host, Width: g.Cols(), Grid: template.HTML(pageGrid(g, links))}
+	data := pageData{Snapshot: s, Hist: hist, Width: g.Cols(), Grid: template.HTML(pageGrid(g, links))}
 	if err := d.page.Execute(w, data); err != nil {
 		log.Printf("spoond dash: render: %v", err)
 	}
@@ -478,7 +473,7 @@ func (d *dash) handlePage(w http.ResponseWriter, r *http.Request) {
 // gridFor renders a snapshot plus history into a grid and the holder
 // links found in it (row → URL), for both the page and the stream.
 func (d *dash) gridFor(s Snapshot, hist map[string][]float64, now time.Time) (*grid.Grid, []linkAt) {
-	g, err := drawFrame(s, hist, d.width, d.cfg.Host, now)
+	g, err := drawFrame(s, hist, d.width, d.cfg.Host, now, d.cfg.Interval)
 	if err != nil {
 		// Check is a rendered invariant, not a data condition: nothing a
 		// snapshot contains should trip it. Report and fall back to an

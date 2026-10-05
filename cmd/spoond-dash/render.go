@@ -1,5 +1,5 @@
 // The dashboard on the character grid (#110): one fixed-width grid holds
-// the whole frame — header, legend, one attention banner when something
+// the whole frame — header, legend, the attention strip when something
 // needs a person, then a column of panels. The same grid feeds Plain
 // (golden tests), ANSI (spoond top) and HTML (the page's <pre>), so the
 // terminal and the browser draw one picture from one snapshot.
@@ -11,7 +11,11 @@ package spoonddash
 
 import (
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/grid"
@@ -28,49 +32,51 @@ const (
 )
 
 // Extra is every non-ASCII rune the dashboard draws beyond grid.Glyphs:
-// ✓ an active unit and ✗ one that is not, · separator, ═ and ║ and the
-// double corners the panel frames use, ┄ a held-lease action in the
-// events panel, ■ the attention marker and the lost state, ∞ a
-// persistent lease's remaining time, ◉ a lapsed hold, and the leases
-// panel's per-state glyphs (▶ running, ‖ suspended, ◆ held). It is
-// passed to grid.Check by every renderer, and every rune is asserted to
-// be in the shipped JetBrains Mono (TestExtraGlyphsInFont).
-const Extra = "✓✗·═║╔╗╚╝┄■∞◉" + stateGlyphs
+// ✓ an active unit and ✗ one that is not, · separator, ═ the header's
+// rule, ▲ the attention strip's marker, ┄ a held-lease action in the
+// events panel and the rules inside the capacity and host panels, ■ a
+// lost lease, ∞ a persistent lease's remaining time, and the leases
+// panel's marks — the run-state glyphs ▶ running, ‖ suspended and ⭘
+// recovered, and the hold marks ◆ held and ◉ lapsed hold. It is passed
+// to grid.Check by every renderer, and every rune is asserted to be in
+// the shipped JetBrains Mono (TestExtraGlyphsInFont).
+const Extra = "✓✗·═▲┄■∞◉⭘" + stateGlyphs
 
-// stateGlyphs are the leases panel's per-state glyphs.
+// stateGlyphs are the leases panel's run-state and hold glyphs: ▶ ‖ for
+// the states with one of their own, ◆ ◉ for the hold marks that lead
+// the holder column.
 const stateGlyphs = "▶‖◆"
 
 // glyphs is the full set every renderer checks against: the grid
 // package's own glyphs plus the dashboard's extras.
 func glyphs() string { return grid.Glyphs + Extra }
 
-// stateGlyph names a lease state: ▶ running (and recovered, which acts
-// like running), ‖ suspended, ◆ held (a hold in any state), ■ lost.
+// stateGlyph names a lease's run state: ▶ running, ‖ suspended,
+// ■ lost, ⭘ recovered (which acts like running). A hold is not a state:
+// it marks the holder column (◆, or ◉ once lapsed).
 func stateGlyph(r LeaseRow) rune {
-	if r.State == "lost" {
+	switch r.State {
+	case "lost":
 		return '■'
-	}
-	if r.HoldState != "" {
-		return '◆'
-	}
-	if r.State == "suspended" {
+	case "suspended":
 		return '‖'
+	case "recovered":
+		return '⭘'
+	default:
+		return '▶'
 	}
-	return '▶'
 }
 
 // stateGlyphStyle is the style a lease's glyph and state are drawn in.
 func stateGlyphStyle(r LeaseRow) string {
-	if r.State == "lost" {
+	switch r.State {
+	case "lost":
 		return "bad"
-	}
-	if r.HoldState != "" {
-		return "state"
-	}
-	if r.State == "suspended" {
+	case "suspended":
 		return "warn"
+	default:
+		return "ok"
 	}
-	return "ok"
 }
 
 // legendRow is the legend line under the header: what each glyph means,
@@ -81,23 +87,53 @@ func legendRow() []grid.Seg {
 	}
 	segs := []grid.Seg{}
 	for _, p := range []struct{ g, name string }{
-		{"▶", "running"}, {"‖", "suspended"}, {"◆", "held"}, {"■", "lost"},
+		{"▶", "running"}, {"‖", "suspended"}, {"■", "lost"}, {"⭘", "recovered"},
 	} {
 		segs = append(segs, seg(p.g, p.name)...)
 		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"})
 	}
 	segs = append(segs,
-		grid.Seg{Text: "✓ active unit", Style: "dim"},
+		grid.Seg{Text: "◆ held · ◉ lapsed hold", Style: "state"},
 		grid.Seg{Text: " · ", Style: "dim"},
-		grid.Seg{Text: "◉ lapsed hold", Style: "state"},
+		grid.Seg{Text: "✓ active unit", Style: "dim"},
 		grid.Seg{Text: " · ", Style: "dim"},
 		grid.Seg{Text: "┄ held-lease action", Style: "dim"})
 	return segs
 }
 
-// bannerRows returns the attention banner's rows — one per trigger, in
-// warn style — or nil when nothing needs a person (the banner is then
-// never drawn; the frame just starts with the panels). Triggers:
+// fitSegs drops whole legend items from the right (an item ends at a
+// " · " separator) until the row fits w, so a centred legend on a narrow
+// frame loses its least important entries instead of being cut at both
+// edges.
+func fitSegs(segs []grid.Seg, w int) []grid.Seg {
+	width := func(ss []grid.Seg) int {
+		n := 0
+		for _, s := range ss {
+			n += len([]rune(s.Text))
+		}
+		return n
+	}
+	for width(segs) > w {
+		cut := -1
+		for i := len(segs) - 1; i >= 0; i-- {
+			if segs[i].Text == " · " {
+				cut = i
+				break
+			}
+		}
+		if cut < 0 {
+			break
+		}
+		segs = segs[:cut]
+	}
+	return segs
+}
+
+// bannerRows returns the attention strip's rows — one per trigger, in
+// the banner style — or nil when nothing needs a person (the strip is
+// then never drawn; the frame just starts with the panels). The rows
+// carry the message only; the ▲ marker is prepended at draw time.
+// Triggers:
 //
 //   - a systemd unit not active,
 //   - a lost lease,
@@ -108,17 +144,17 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	var rows []string
 	for _, svc := range s.Services {
 		if svc.State != "active" {
-			rows = append(rows, fmt.Sprintf("■ unit %s is %s", svc.Name, svc.State))
+			rows = append(rows, fmt.Sprintf("unit %s is %s", svc.Name, svc.State))
 		}
 	}
 	if s.ByState["lost"] > 0 {
-		rows = append(rows, fmt.Sprintf("■ %d lost lease(s) - a substrate crash dropped them", s.ByState["lost"]))
+		rows = append(rows, fmt.Sprintf("%d lost lease(s) - a substrate crash dropped them", s.ByState["lost"]))
 	}
 	if s.HugeFreeGiB > 0 && s.HugeUsedPct >= 92 {
-		rows = append(rows, fmt.Sprintf("■ hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB))
+		rows = append(rows, fmt.Sprintf("hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB))
 	}
 	if s.DiskUsedPct >= 90 {
-		rows = append(rows, fmt.Sprintf("■ snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct))
+		rows = append(rows, fmt.Sprintf("snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct))
 	}
 	if !s.CertNotAfter.IsZero() {
 		if d := s.CertNotAfter.Sub(now); d < 30*24*time.Hour {
@@ -127,7 +163,7 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	}
 	for _, r := range s.Rows {
 		if !r.LastActionAt.IsZero() && now.Sub(r.LastActionAt) < 24*time.Hour {
-			rows = append(rows, fmt.Sprintf("■ held lease %s: %s %s ago", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))))
+			rows = append(rows, fmt.Sprintf("held lease %s: %s %s ago", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))))
 		}
 	}
 	return rows
@@ -138,19 +174,20 @@ func bannerRows(s Snapshot, now time.Time) []string {
 func certBanner(rows []string, d time.Duration, notAfter time.Time) []string {
 	when := notAfter.Format("2006-01-02")
 	if d < 0 {
-		return append(rows, "■ the TLS certificate (TLS_CERT) expired "+when)
+		return append(rows, "the TLS certificate (TLS_CERT) expired "+when)
 	}
 	if d < 7*24*time.Hour {
-		return append(rows, fmt.Sprintf("■ the TLS certificate expires in %s (%s) - renew it", dur(d), when))
+		return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s) - renew it", dur(d), when))
 	}
-	return append(rows, fmt.Sprintf("■ the TLS certificate expires in %s (%s)", dur(d), when))
+	return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s)", dur(d), when))
 }
 
 // Draw renders the whole frame at width w. now timestamps the banner and
-// the ages; host names the node in the header. The sparklines draw
-// empty (no history): goldens that need them call drawFrame directly.
+// the ages; host names the node in the header. There is no history, so
+// the sparklines draw empty and the throughput title carries no window.
+// Goldens that need them call drawFrame directly.
 func Draw(s Snapshot, w int, now time.Time, host string) *grid.Grid {
-	g, err := drawFrame(s, nil, w, host, now)
+	g, err := drawFrame(s, nil, w, host, now, 0)
 	if err != nil {
 		// Callers of Draw (tests, one-off renders) pass fixed snapshots;
 		// a Check failure is a programming error worth panicking on.
@@ -159,16 +196,37 @@ func Draw(s Snapshot, w int, now time.Time, host string) *grid.Grid {
 	return g
 }
 
+// histVals is one sparkline series, empty when there is no history.
+func (l *layout) histVals(key string) []float64 {
+	if l.histFn == nil {
+		return nil
+	}
+	return l.histFn(key)
+}
+
+// histMinutes is the history's window in whole minutes: the points
+// times the scrape interval, rounded up so the title never undersells
+// the window (2 s × 150 points reads "last 5 min"). 0 without a history
+// or a known interval (Draw, a frame before the first tick), which
+// drops the "· last N min" from the title.
+func (l *layout) histMinutes() int {
+	if l.histN <= 0 || l.interval <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(l.histN) * l.interval.Minutes()))
+}
+
 // bannerSegs converts bannerRows' strings to the styled segments the
-// frame draws: one warn-styled row per trigger. Shared by Draw, the
-// page/top renderers and the tests, so the banner is styled one way.
+// frame draws: one banner-styled row per trigger, each led by ▲.
+// Shared by Draw, the page/top renderers and the tests, so the strip is
+// styled one way.
 func bannerSegs(rows []string) [][]grid.Seg {
 	if len(rows) == 0 {
 		return nil
 	}
 	out := make([][]grid.Seg, len(rows))
 	for i, r := range rows {
-		out[i] = []grid.Seg{{Text: r, Style: "warn"}}
+		out[i] = []grid.Seg{{Text: "▲ ", Style: "banner"}, {Text: r, Style: "banner"}}
 	}
 	return out
 }
@@ -176,19 +234,30 @@ func bannerSegs(rows []string) [][]grid.Seg {
 // drawFrame renders a snapshot plus history into the full frame at
 // width w: the shared entry point of Draw, the page, the stream and
 // spoond top. host names the node in the header; now timestamps the
-// banner and the ages. It fails only when grid.Check rejects the
-// finished frame (a rune no renderer can draw) — the terminal path
-// reports it instead of printing a broken frame.
-func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time) (*grid.Grid, error) {
+// banner and the ages; interval is the scrape interval the history
+// points are spaced by (the throughput title's window; 0 when there is
+// none). It fails only when grid.Check rejects the finished frame (a
+// rune no renderer can draw) — the terminal path reports it instead of
+// printing a broken frame.
+func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration) (*grid.Grid, error) {
 	l := &layout{w: clamp(w, minW, maxW), host: host, now: now, s: s,
-		banner: bannerSegs(bannerRows(s, now)),
-		histFn: func(k string) []float64 { return hist[k] }}
+		banner:   bannerSegs(bannerRows(s, now)),
+		histFn:   func(k string) []float64 { return hist[k] },
+		histN:    len(hist["running"]),
+		interval: interval,
+	}
 	g := l.assemble()
 	if err := g.Check(glyphs()); err != nil {
 		return nil, err
 	}
 	return g, nil
 }
+
+// dashInterval is the scrape interval the tests space their history
+// points by: DASH_INTERVAL's default. The renderers take the real
+// interval from the config, so a DASH_INTERVAL of 10 s titles the
+// throughput panel with the window it actually shows.
+const dashInterval = 2 * time.Second
 
 // layout assembles the grid panel by panel.
 type layout struct {
@@ -201,39 +270,194 @@ type layout struct {
 	// sparklines then draw empty) and the page/top fill it from the
 	// collector's history.
 	histFn func(string) []float64
+	// interval is the scrape interval the history points are spaced by;
+	// 0 when unknown.
+	interval time.Duration
+	// histN is the history's length in points; 0 (no history yet) leaves
+	// the window out of the throughput panel's title.
+	histN int
 }
 
 // assemble draws the header, the banner and every panel into one grid.
+// panelsH is the height of the capacity and host panels together: as
+// one side-by-side band (the taller panel's height) or as two stacked
+// panels.
+func (l *layout) panelsH() int {
+	if l.wide() {
+		return max(l.capacityH(), l.hostH())
+	}
+	return l.capacityH() + l.hostH()
+}
+
+// drawPanels draws the capacity and host panels: side by side at wide
+// frames (capacity left, host right, both the taller one's height),
+// stacked full width below it (capacity first).
+func (l *layout) drawPanels(g *grid.Grid, y int) int {
+	if l.wide() {
+		h := max(l.capacityH(), l.hostH())
+		l.drawCapacity(g, 0, y, panelW, h)
+		l.drawHost(g, panelW+panelGap, y, panelW, h)
+		return y + h
+	}
+	y = l.drawCapacity(g, 0, y, l.w, l.capacityH())
+	return l.drawHost(g, 0, y, l.w, l.hostH())
+}
+
 func (l *layout) assemble() *grid.Grid {
-	h := 2 + // header + legend
+	h := headerRows() +
 		len(l.banner) + boolInt(len(l.banner) > 0) + // banner rows + a blank row under them
-		l.capacityH() + l.hostH() + l.throughputH() + l.leasesH() +
-		l.imagesH() + l.servicesH() + l.refusalsH() + l.eventsH()
+		l.panelsH() + l.throughputH() + l.leasesH() +
+		l.imagesServicesH() + l.refusalsH() + l.eventsH() +
+		1 // the status line
 
 	g := grid.New(l.w, h)
 	l.header(g, 0)
-	y := 2
+	y := headerRows()
 
-	// One attention banner row per trigger, then a blank row — only
-	// when something needs a person.
+	// One attention strip row per trigger, painted full width in the
+	// banner style, then a blank row — only when something needs a
+	// person.
 	for _, segs := range l.banner {
 		g.Segs(0, y, segs, l.w)
 		g.Mark(0, y, l.w, 1, "banner")
+		g.PaintRow(y, "banner")
 		y++
 	}
 	if len(l.banner) > 0 {
 		y++
 	}
 
-	y = l.capacity(g, y)
-	y = l.hostPanel(g, y)
+	y = l.drawPanels(g, y)
 	y = l.throughput(g, y)
 	y = l.leases(g, y)
-	y = l.images(g, y)
-	y = l.servicesPanel(g, y)
+	y = l.imagesServices(g, y)
 	y = l.refusals(g, y)
-	l.events(g, y)
+	y = l.events(g, y)
+	l.statusLine(g, y, l.s.At)
 	return g
+}
+
+// statusItem is one status-line entry: label, the value shown in
+// brackets and whether it is healthy (ok style) or not (warn/bad).
+type statusItem struct {
+	label string
+	value string
+	style string
+}
+
+// statusItems builds the status line's entries left to right: leases,
+// hugepages, snapshot disk, the certificate's remaining days and the
+// units. The styles reuse the thresholds the meters and the attention
+// strip already use. The certificate is left out when there is none.
+func statusItems(s Snapshot, now time.Time) []statusItem {
+	items := []statusItem{
+		{"leases", fmt.Sprintf("%d/%d", s.Running, s.Limit), "ok"},
+	}
+	if s.Limit > 0 {
+		if pct := float64(s.Running) / float64(s.Limit) * 100; pct >= 90 {
+			items[0].style = "bad"
+		} else if pct >= 75 {
+			items[0].style = "warn"
+		}
+	}
+	switch {
+	case s.HugeUsedPct >= 92:
+		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "bad"})
+	case s.HugeUsedPct >= 80:
+		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "warn"})
+	default:
+		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "ok"})
+	}
+	switch {
+	case s.DiskUsedPct >= 90:
+		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "bad"})
+	case s.DiskUsedPct >= 80:
+		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "warn"})
+	default:
+		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "ok"})
+	}
+	if !s.CertNotAfter.IsZero() {
+		items = append(items, statusItem{"cert", certDays(s.CertNotAfter.Sub(now)), certStyle(s.CertNotAfter.Sub(now))})
+	}
+	units, down := 0, 0
+	for _, svc := range s.Services {
+		units++
+		if svc.State != "active" {
+			down++
+		}
+	}
+	if units > 0 {
+		st := "ok"
+		if down > 0 {
+			st = "bad"
+		}
+		items = append(items, statusItem{"units", fmt.Sprintf("%d/%d", units-down, units), st})
+	}
+	return items
+}
+
+// certDays is the certificate's remaining time in days: negative when
+// it has already expired.
+func certDays(d time.Duration) string {
+	return fmt.Sprintf("%dd", int(math.Floor(d.Hours()/24)))
+}
+
+// certStyle is the certificate's health: bad once expired, warn inside
+// the attention strip's 30-day window, ok before it.
+func certStyle(d time.Duration) string {
+	switch {
+	case d < 0:
+		return "bad"
+	case d < 30*24*time.Hour:
+		return "warn"
+	default:
+		return "ok"
+	}
+}
+
+// statusLine draws the frame's last row, outside any box: label
+// [value] entries left to right, the clock right-aligned on the same
+// row. At narrow widths entries are dropped from the right (cert, then
+// units) until the line fits.
+func (l *layout) statusLine(g *grid.Grid, y int, at string) {
+	items := statusItems(l.s, l.now)
+	// Drop from the right until what remains fits, the clock always
+	// kept.
+	for len(items) > 0 && statusW(items)+clockW(at, l.w) > l.w {
+		items = items[:len(items)-1]
+	}
+	segs := []grid.Seg{}
+	for _, it := range items {
+		segs = append(segs,
+			grid.Seg{Text: it.label + " ", Style: "dim"},
+			grid.Seg{Text: "[", Style: "dim"},
+			grid.Seg{Text: it.value, Style: it.style},
+			grid.Seg{Text: "]  ", Style: "dim"})
+	}
+	g.Segs(0, y, segs, l.w)
+	g.Right(l.w-1, y, []grid.Seg{{Text: at, Style: "dim"}})
+}
+
+// statusW is the width the items draw at: label, brackets and two
+// trailing spaces each (the last pair included, so the math ignores
+// where the line ends).
+func statusW(items []statusItem) int {
+	n := 0
+	for _, it := range items {
+		n += len(it.label) + len(it.value) + 5
+	}
+	return n
+}
+
+// clockW is the clock's footprint: its cells plus the gap that keeps
+// it clear of the items (at least two columns, on the narrowest frame
+// just its own width).
+func clockW(at string, w int) int {
+	gap := 2
+	if w <= minW {
+		gap = 1
+	}
+	return len(at) + gap
 }
 
 func boolInt(b bool) int {
@@ -243,59 +467,75 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// header: SPOOND, host, spoond version, orchestrator version, uptime,
-// with the frame time on the right; the legend row under it.
+// header: the title line centred — SPOOND · host · version · e2b orch
+// · uptime — an ═ rule across the full width, and the legend row, also
+// centred. The frame time is gone: the status line's clock replaced it.
 func (l *layout) header(g *grid.Grid, y int) {
 	segs := []grid.Seg{
 		{Text: "SPOOND", Style: "head"},
-		{Text: " " + l.host, Style: "text"},
-		{Text: "  spoond " + dashVersion, Style: "text"},
-		{Text: "  orch " + versionLabel(l.s.Version), Style: "text"},
-		{Text: "  up " + fmt.Sprintf("%.0fh", l.s.UptimeH), Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: l.host, Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: versionLabel(dashVersion), Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: "e2b " + versionLabel(l.s.Version), Style: "text"},
+		{Text: " · ", Style: "dim"},
+		{Text: "up " + fmt.Sprintf("%.0fh", l.s.UptimeH), Style: "text"},
 	}
-	g.Segs(0, y, segs, l.w)
-	g.Right(l.w-1, y, []grid.Seg{{Text: l.s.At, Style: "dim"}})
-	g.Segs(0, y+1, legendRow(), l.w)
+	g.Center(l.w/2, y, segs)
+	for x := 0; x < l.w; x++ {
+		g.Put(x, y+1, '═', "frame")
+	}
+	g.Center(l.w/2, y+2, fitSegs(legendRow(), l.w))
 }
 
-// versionLabel is an orchestrator version or "?" when the scrape had none.
+// versionLabel is a version for the header: "?" when the scrape had
+// none. A spoond build version is shortened for the line: a tag stays
+// as it is (v2.2.0), a Go pseudo-version (v2.1.3-0.20261004183409-
+// 7a13d2bd1131) becomes base+first seven of the hash (v2.1.3+7a13d2b).
+// pseudoVersion matches a Go pseudo-version: the base, then the commit
+// hash.
+var pseudoVersion = regexp.MustCompile(`^(v\d+\.\d+\.\d+)-(?:0\.)?\d{14}-([0-9a-f]{7,40})$`)
+
 func versionLabel(v string) string {
 	if v == "" {
 		return "?"
 	}
+	// vX.Y.Z-0.<14-digit time>-<12 hex> after a tag, vX.Y.Z-<time>-<hex>
+	// for a module with no tags (v0.0.0-…).
+	if m := pseudoVersion.FindStringSubmatch(v); m != nil {
+		return m[1] + "+" + m[2][:7]
+	}
 	return v
 }
 
-// panel draws a double-line framed panel of h rows with its title on
-// the frame, at row y, and returns the row past its bottom edge. id is
-// the element id Datastar patches by.
-func (l *layout) panel(g *grid.Grid, y, h int, title, id string) int {
-	drawPanelFrame(g, y, l.w, h)
+// panel draws a single-line framed panel of h rows with its title on
+// the frame's top border at x+2 (┌─ title ───), at row y, and returns
+// the row past its bottom edge. id is the element id Datastar patches
+// by.
+func (l *layout) panel(g *grid.Grid, x, y, w, h int, title, id string) int {
+	g.Box(x, y, w, h, "frame", false)
 	if title != "" {
-		g.Title(3, y, []grid.Seg{{Text: " " + title + " ", Style: "title"}})
+		g.Title(x+2, y, []grid.Seg{{Text: " " + title + " ", Style: "title"}})
 	}
-	g.Mark(1, y+1, l.w-2, h-2, id)
+	g.Mark(x+1, y+1, w-2, h-2, id)
 	return y + h
 }
 
-// drawPanelFrame draws a ═-framed rectangle w×h at (0, y) in the
-// "frame" style: double-line edges, so panels read as distinct from the
-// plain header. Drawn with Put (the package's Box draws single lines
-// only).
-func drawPanelFrame(g *grid.Grid, y, w, h int) {
-	for i := 0; i < w; i++ {
-		g.Put(i, y, '═', "frame")
-		g.Put(i, y+h-1, '═', "frame")
-	}
-	for i := 1; i < h-1; i++ {
-		g.Put(0, y+i, '║', "frame")
-		g.Put(w-1, y+i, '║', "frame")
-	}
-	g.Put(0, y, '╔', "frame")
-	g.Put(w-1, y, '╗', "frame")
-	g.Put(0, y+h-1, '╚', "frame")
-	g.Put(w-1, y+h-1, '╝', "frame")
-}
+// wide reports whether the frame carries the capacity and host panels
+// side by side; below it they stack full width, capacity first.
+func (l *layout) wide() bool { return l.w >= sideBySideW }
+
+// sideBySideW is the least width at which capacity and host sit side
+// by side: two 51-cell boxes with a two-cell gap between them.
+const sideBySideW = 104
+
+// panelW is the width of one side-by-side panel (capacity, host): a
+// 51-cell box, two of which plus the gap fill the 104-cell frame.
+const panelW = 51
+
+// panelGap is the space between two side-by-side panels.
+const panelGap = 2
 
 // stateCount is one name/count pair of the capacity panel.
 type stateCount struct {
@@ -336,13 +576,13 @@ func contains(list []string, s string) bool {
 // holderLinks maps each lease row's y to its holder_url: the page
 // renderer swaps the row's link-styled span for a real anchor. Only
 // leases with a URL appear here. The row math must match assemble:
-// header (2) + banner rows (+ a blank under them) + the panels above
+// header (headerRows) + banner rows (+ a blank under them) + the panels above
 // leases, then the panel's title row, then one row per lease.
 func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 	l := &layout{w: clamp(w, minW, maxW), s: s, now: now,
 		banner: bannerSegs(bannerRows(s, now))}
 	base := headerRows() + len(l.banner) + boolInt(len(l.banner) > 0) +
-		l.capacityH() + l.hostH() + l.throughputH()
+		l.panelsH() + l.throughputH()
 	leaseY := base + 1 // + the leases panel's title row
 	var out []linkAt
 	rows := l.s.Rows
@@ -357,126 +597,295 @@ func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 	return out
 }
 
-// headerRows is the header's row count (title + legend).
-func headerRows() int { return 2 }
+// headerRows is the header's row count: the centred title line, the
+// ═ rule under it and the legend.
+func headerRows() int { return 3 }
 
-// capacity panel: running / limit meter, leases by state, queued,
-// granted, swept, running by image.
+// capacity panel: the running meter, the leases line, queued, granted,
+// swept, then one row per image with live leases. H is the height the
+// panel shares with host when the two sit side by side.
 func (l *layout) capacityH() int {
-	half := (l.w-4)/2 - 2
-	rows := max(kvRowCount(half, l.capLeft()), kvRowCount(half, l.capRight()))
-	h := 4 + rows // title + meter + states + counts (+ frame)
-	if len(l.s.ByImage) > 0 {
-		h++ // the running-by-image line
+	h := 3 + len(l.capacityRows()) // title + rows (+ frame)
+	if l.imageRows() > 0 {
+		h += l.imageRows() + 1 // a ┄ rule, then the image rows
 	}
 	return h
 }
 
-func (l *layout) capLeft() [][2]string {
-	return [][2]string{
-		{"queued", fmt.Sprint(l.s.Queued)},
-		{"granted", fmt.Sprint(l.s.Granted)},
-		{"swept", fmt.Sprint(l.s.Swept)},
+// imageRows is the number of rows the capacity panel's per-image block
+// needs: one per image with live leases, bounded by the room the panel
+// has, with a final "+N more" row when images were dropped.
+func (l *layout) imageRows() int {
+	n := len(l.imageCounts())
+	if n == 0 {
+		return 0
 	}
+	if room := l.imageRoom(); n > room {
+		return room // the last row becomes "+N more"
+	}
+	return n
 }
 
-// capRight is the right column of counts. The GC mode is not here: the
-// task puts it in the host panel, where it already sits.
-func (l *layout) capRight() [][2]string {
-	return [][2]string{
-		{"shares", fmt.Sprint(l.s.Shares)},
-		{"users", fmt.Sprint(l.s.Users)},
-		{"builds", fmt.Sprint(l.s.BuildsBusy)},
+// maxImageRows is the most per-image rows the capacity panel shows
+// before it folds the rest into a "+N more" row.
+const maxImageRows = 6
+
+// imageRoom is how many image rows fit: bounded by maxImageRows, less
+// the shared row the counts block needs at the minimum height.
+func (l *layout) imageRoom() int {
+	room := maxImageRows - max(0, len(l.capacityRows())-capacityMinRows+1)
+	if room < 1 {
+		room = 1
 	}
+	return room
 }
 
-func (l *layout) capacity(g *grid.Grid, y int) int {
-	states := stateOrder(l.s.ByState)
-	top := y
-	y = l.panel(g, y, l.capacityH(), "capacity", "capacity")
+// capacityRow is one plain row of the capacity panel: its segments,
+// whether it draws dim (the shares line) and an optional value drawn
+// right-aligned (the running meter's count).
+type capacityRow struct {
+	segs  []grid.Seg
+	dim   bool
+	right string
+}
 
-	pct, right := 0.0, fmt.Sprintf("%d of %d", l.s.Running, l.s.Limit)
-	if l.s.Limit > 0 {
-		pct = float64(l.s.Running) / float64(l.s.Limit) * 100
-	} else {
-		right = fmt.Sprintf("%d", l.s.Running)
-	}
-	g.Meter(2, top+1, "running", pct, 75, 90, l.w-4, right)
+// capacityMinRows is the least number of rows the capacity panel's
+// fixed block needs, shared meter row included (running, leases,
+// queued, shares): the height a side-by-side frame reserves.
+const capacityMinRows = 4
 
-	// states line: every state, count and glyph style for lost.
-	line := g.Text(2, top+2, "", "", 0)
-	for _, st := range states {
+// capacityRows builds the capacity panel's fixed rows, top to bottom:
+// the running meter, the leases-per-state line, the queued/granted/
+// swept line and the shares/users/builds line (dim). The per-image
+// rows are drawn separately, after a ┄ rule.
+func (l *layout) capacityRows() []capacityRow {
+	m := l.meterSegs("running", l.runningPct(), 75, 90, meterBarW)
+	rows := []capacityRow{{segs: m, right: fmt.Sprintf("%d / %d", l.s.Running, l.s.Limit)}}
+
+	// Leases: total, then running, suspended and lost counts. A zero
+	// count is dim; recovered appears only when non-zero.
+	segs := []grid.Seg{{Text: fmt.Sprintf("%d leases", l.s.Leases), Style: "text"}}
+	for _, st := range []struct {
+		name string
+		n    int
+	}{
+		{"running", l.s.ByState["running"]},
+		{"suspended", l.s.ByState["suspended"]},
+		{"lost", l.s.ByState["lost"]},
+	} {
+		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"})
 		style := "text"
-		if st.name == "lost" && st.n > 0 {
-			style = "bad"
+		if st.n == 0 {
+			style = "dim"
 		}
-		line = g.Segs(line, top+2, []grid.Seg{
-			{Text: fmt.Sprintf("%d", st.n), Style: style},
-			{Text: " " + st.name, Style: "dim"},
-			{Text: "  ", Style: ""},
-		}, l.w-4)
+		segs = append(segs,
+			grid.Seg{Text: fmt.Sprintf("%d", st.n), Style: style},
+			grid.Seg{Text: " " + st.name, Style: "dim"})
 	}
-	// two columns of counts: queued/granted/swept and shares/users/builds.
-	used := l.kv(g, 2, top+3, (l.w-4)/2-2, l.capLeft())
-	used = max(used, l.kv(g, 2+(l.w-4)/2, top+3, (l.w-4)/2-2, l.capRight()))
+	if n := l.s.ByState["recovered"]; n > 0 {
+		segs = append(segs,
+			grid.Seg{Text: " · ", Style: "dim"},
+			grid.Seg{Text: fmt.Sprintf("%d", n), Style: "text"},
+			grid.Seg{Text: " recovered", Style: "dim"})
+	}
+	rows = append(rows, capacityRow{segs: segs})
 
-	// running by image: which images the running leases serve (sorted by
-	// name, so the line is stable frame to frame).
-	if len(l.s.ByImage) > 0 {
-		names := make([]string, 0, len(l.s.ByImage))
-		for name := range l.s.ByImage {
-			names = append(names, name)
+	rows = append(rows, capacityRow{segs: dimLine(
+		fmt.Sprintf("queued %s", fmt.Sprint(l.s.Queued)),
+		fmt.Sprintf("granted %s", thousands(l.s.Granted)),
+		fmt.Sprintf("swept %s", thousands(l.s.Swept)))})
+	rows = append(rows, capacityRow{dim: true, segs: dimLine(
+		fmt.Sprintf("shares %d", l.s.Shares),
+		fmt.Sprintf("users %d", l.s.Users),
+		fmt.Sprintf("builds busy %d", l.s.BuildsBusy))})
+	return rows
+}
+
+// dimLine joins parts with " · " in the dim style.
+func dimLine(parts ...string) []grid.Seg {
+	var segs []grid.Seg
+	for i, p := range parts {
+		if i > 0 {
+			segs = append(segs, grid.Seg{Text: " · ", Style: "dim"})
 		}
-		sort.Strings(names)
-		ly := top + 3 + used
-		cx := g.Text(2, ly, "running by image ", "dim", -1)
-		for i, name := range names {
-			segs := []grid.Seg{
-				{Text: sanitize(name), Style: "text"},
-				{Text: fmt.Sprintf(" %d", l.s.ByImage[name]), Style: "text"},
-			}
-			if i < len(names)-1 {
-				segs = append(segs, grid.Seg{Text: " · ", Style: "dim"})
-			}
-			cx = g.Segs(cx, ly, segs, l.w-2-cx)
+		segs = append(segs, grid.Seg{Text: p, Style: "dim"})
+	}
+	return segs
+}
+
+// thousands formats n with commas every three digits: 1234 reads
+// "1,234".
+func thousands(n int) string {
+	s := strconv.Itoa(n)
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	start := len(s) % 3
+	if start == 0 {
+		start = 3
+	}
+	out := s[:start]
+	for i := start; i < len(s); i += 3 {
+		out += "," + s[i:i+3]
+	}
+	return sign + out
+}
+
+// imageCount is one image's live leases for the capacity panel: the
+// image's name and its running and suspended counts.
+type imageCount struct {
+	name               string
+	running, suspended int
+}
+
+// imageCounts folds the lease rows into per-image live counts: running
+// and suspended per image, ordered by live count descending, then name.
+// Zero-count states do not create rows.
+func (l *layout) imageCounts() []imageCount {
+	m := map[string]*imageCount{}
+	for _, r := range l.s.Rows {
+		if r.State != "running" && r.State != "suspended" {
+			continue
 		}
+		ic := m[r.Image]
+		if ic == nil {
+			ic = &imageCount{name: r.Image}
+			m[r.Image] = ic
+		}
+		if r.State == "running" {
+			ic.running++
+		} else {
+			ic.suspended++
+		}
+	}
+	out := make([]imageCount, 0, len(m))
+	for _, ic := range m {
+		out = append(out, *ic)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		li, lj := out[i].running+out[i].suspended, out[j].running+out[j].suspended
+		if li != lj {
+			return li > lj
+		}
+		return out[i].name < out[j].name
+	})
+	return out
+}
+
+// drawCapacity draws the capacity panel at (x, y) in w cells and
+// returns the row past its bottom edge. The panel keeps its title row,
+// its fixed rows and one ┄ rule before the per-image rows (each: name,
+// a nine-cell live bar, the count right-aligned).
+func (l *layout) drawCapacity(g *grid.Grid, x, y, w, h int) int {
+	top := y
+	y = l.panel(g, x, y, w, h, "capacity", "capacity")
+	inner := w - 4
+
+	row := top + 1
+	for _, r := range l.capacityRows() {
+		segs := r.segs
+		if r.dim {
+			segs = make([]grid.Seg, len(r.segs))
+			copy(segs, r.segs)
+			for i := range segs {
+				segs[i].Style = "dim"
+			}
+		}
+		g.Segs(x+2, row, segs, inner)
+		if r.right != "" {
+			g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
+		}
+		row++
+	}
+	imgs := l.imageCounts()
+	if len(imgs) == 0 {
+		g.Text(x+2, row, "no live leases", "dim", inner)
+		return y
+	}
+	l.rule(g, x, w, row)
+	row++
+
+	names := make([]imageCount, len(imgs))
+	copy(names, imgs)
+	truncated := false
+	if room := l.imageRoom(); len(names) > room {
+		names = names[:room]
+		truncated = true
+	}
+	barX := x + 2 + 15
+	for _, im := range names {
+		g.Text(x+2, row, ellipsize(sanitize(im.name), 15), "text", 15)
+		// Three cells per running lease, at most nine; · fills the rest.
+		fill := min(9, im.running*3)
+		g.Text(barX, row, strings.Repeat("█", fill)+strings.Repeat("·", 9-fill), "ok", 9)
+		right := fmt.Sprintf("%d running", im.running)
+		if im.running == 0 {
+			right = fmt.Sprintf("%d suspended", im.suspended)
+		}
+		// The counts sit a column short of the meters' value column, one
+		// clear of the frame with the two the meters keep.
+		g.Right(x+w-4, row, []grid.Seg{{Text: right, Style: "dim"}})
+		row++
+	}
+	if truncated {
+		g.Text(x+2, row, fmt.Sprintf("+%d more", len(imgs)-len(names)), "dim", inner)
 	}
 	return y
 }
 
-// kv draws "label value" pairs left to right, wrapping to the next row
-// when a pair would not fit; it returns the number of rows it used.
-func (l *layout) kv(g *grid.Grid, x, y, w int, pairs [][2]string) int {
-	cx, row := x, 0
-	for _, p := range pairs {
-		segs := []grid.Seg{
-			{Text: p[0] + " ", Style: "dim"},
-			{Text: p[1], Style: "text"},
-		}
-		n := segWidth(segs)
-		if cx > x && cx+n > x+w {
-			cx = x
-			row++
-		}
-		g.Segs(cx, y+row, segs, x+w-cx)
-		cx += n + 3
+// runningPct is the running meter's fill fraction.
+func (l *layout) runningPct() float64 {
+	if l.s.Limit <= 0 {
+		return 0
 	}
-	return row + 1
+	return float64(l.s.Running) / float64(l.s.Limit) * 100
 }
 
-// kvRowCount is the number of rows kv needs for pairs in w cells.
-func kvRowCount(w int, pairs [][2]string) int {
-	cx, row := 0, 0
-	for _, p := range pairs {
-		n := len(p[0]) + 1 + len(p[1])
-		if cx > 0 && cx+n > w {
-			cx = 0
-			row++
+// meterBarW is the panels' fixed meter bar width: 16 cells, side by
+// side and stacked alike, matching the mockup.
+const meterBarW = 16
+
+// meterSegs is one meter row's left part as styled segments: a label
+// padded to meterLabelW, a space, then a bar of barW cells whose style
+// follows pct (ok below warnPct, warn below dangerPct, bad at or
+// above), with a ╎ tick at the warning level. The value is not part of
+// the row: callers right-align it so it ends one column clear of the
+// panel's inner right edge.
+func (l *layout) meterSegs(label string, pct, warnPct, dangerPct float64, barW int) []grid.Seg {
+	segs := []grid.Seg{{Text: fmt.Sprintf("%-*s", meterLabelW, label), Style: "dim"}, {Text: " ", Style: "dim"}}
+	if barW > 0 {
+		filled := clamp(int(pct/100*float64(barW)), 0, barW)
+		if pct > 0 && filled == 0 {
+			filled = 1 // anything above zero shows: 3 of 64 is not an empty bar
 		}
-		cx += n + 3
+		style := "ok"
+		switch {
+		case pct >= dangerPct:
+			style = "bad"
+		case pct >= warnPct:
+			style = "warn"
+		}
+		bar := make([]rune, barW)
+		for i := range bar {
+			bar[i] = '░'
+			if i < filled {
+				bar[i] = '█'
+			}
+		}
+		if warnPct > 0 && warnPct < 100 {
+			tx := int(warnPct / 100 * float64(barW))
+			if tx < barW {
+				bar[tx] = '╎'
+			}
+		}
+		segs = append(segs, grid.Seg{Text: string(bar), Style: style})
 	}
-	return row + 1
+	return segs
 }
+
+// meterLabelW is the label column both panels' meters pad to.
+const meterLabelW = 13
 
 // hostRow is one meter row of the host panel.
 type hostRow struct {
@@ -499,84 +908,188 @@ func hostPanelRows(s Snapshot) []hostRow {
 	}
 }
 
+// hostH is the host panel's own height: title, meters, rule, the two
+// tail rows and the frame's bottom edge. Side by side, the panel is
+// drawn as tall as capacity instead — the taller of the two.
 func (l *layout) hostH() int {
-	kv := kvRowCount(l.w-4, [][2]string{
-		{"vcpu", fmt.Sprint(l.s.VCPUAlloc)},
-		{"mem allocated", fmt.Sprintf("%.1f GiB", l.s.MemAllocGiB)},
-		{"gc", gcLabel(l.s.GCMode)},
-	})
-	return 3 + len(hostPanelRows(l.s)) + kv - 1
+	return 1 + len(hostPanelRows(l.s)) + 1 + 2 + 1
 }
 
-func (l *layout) hostPanel(g *grid.Grid, y int) int {
-	rows := hostPanelRows(l.s)
-	h := l.hostH() // title row + meters + allocated row + frame
-	top := y
-	y = l.panel(g, y, h, "host", "host")
-	for i, r := range rows {
-		g.Meter(2, top+1+i, r.label, r.pct, r.warn, r.danger, l.w-4, r.right)
+// hostRows builds the host panel's meter rows: cpu, memory, hugepages,
+// snapshot disk, root disk — the meters and levels the old page already
+// showed. right is the value text at the row's end.
+func (l *layout) hostRows() []hostRow {
+	return []hostRow{
+		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1)},
+		{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB)},
+		{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB)},
+		{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB)},
+		{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB)},
 	}
-	l.kv(g, 2, top+1+len(rows), l.w-4, [][2]string{
-		{"vcpu", fmt.Sprint(l.s.VCPUAlloc)},
-		{"mem allocated", fmt.Sprintf("%.1f GiB", l.s.MemAllocGiB)},
-		{"gc", gcLabel(l.s.GCMode)},
-	})
+}
+
+// rule draws a ┄ line across a panel's inner width: from x+2 to
+// x+w-3, one column clear of each border.
+func (l *layout) rule(g *grid.Grid, x, w, y int) {
+	for i := x + 2; i < x+w-2; i++ {
+		g.Put(i, y, '┄', "dim")
+	}
+}
+
+// drawHost draws the host panel at (x, y) in w cells and returns the
+// row past its bottom edge: the meters, a ┄ rule, then vcpu and memory
+// allocations and the build GC's mode and lifetime count.
+func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
+	top := y
+	y = l.panel(g, x, y, w, h, "host", "host")
+	inner := w - 4
+
+	row := top + 1
+	for _, r := range l.hostRows() {
+		g.Segs(x+2, row, l.meterSegs(r.label, r.pct, r.warn, r.danger, meterBarW), inner)
+		g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
+		row++
+	}
+	l.rule(g, x, w, row)
+	row++
+
+	// Allocations: what the running leases hold against the node's
+	// cores and memory (Cores is the total the vcpu fraction is of).
+	alloc := dimLine(
+		fmt.Sprintf("vcpu alloc %d / %d", l.s.VCPUAlloc, l.s.Cores),
+		fmt.Sprintf("mem alloc %.1f GiB", l.s.MemAllocGiB))
+	alloc[0].Style = "text"
+	alloc[2].Style = "text"
+	g.Segs(x+2, row, alloc, inner)
+	row++
+
+	// The build GC's mode — bold ok when deletion is on, dim when it
+	// only logs candidates — and its lifetime count, left out at zero.
+	segs := []grid.Seg{{Text: "gc ", Style: "dim"}, gcSeg(l.s.GCMode)}
+	if l.s.GCDeleted > 0 {
+		segs = append(segs,
+			grid.Seg{Text: " · ", Style: "dim"},
+			grid.Seg{Text: fmt.Sprintf("%s builds deleted", thousands(l.s.GCDeleted)), Style: "text"})
+	}
+	g.Segs(x+2, row, segs, inner)
 	return y
 }
 
 // throughput panel: running leases, requests/s, creates/min, egress
-// connections as sparklines over the collector's history.
-func (l *layout) throughputH() int { return 6 } // title + four sparkline rows + frame
+// connections, each a sparkline over the collector's history.
+func (l *layout) throughputH() int {
+	if l.wide() {
+		return 4 // title, the values row, the sparkline row, the bottom edge
+	}
+	return 6 // the same, 2×2: two value rows and two sparkline rows
+}
 
-func (l *layout) throughput(g *grid.Grid, y int) int {
-	rows := []struct {
+// throughputSeries is one sparkline: its label, the history key and
+// the current value as drawn at the label row's right.
+func (l *layout) throughputSeries() []struct {
+	label string
+	key   string
+	last  string
+} {
+	return []struct {
 		label string
 		key   string
-		vals  []float64
 		last  string
 	}{
-		{"running", "running", nil, fmt.Sprint(l.s.Running)},
-		{"req/s", "reqPerSec", nil, fmt.Sprintf("%.1f", l.s.ReqPerSec)},
-		{"creates/min", "createsPerMin", nil, fmt.Sprintf("%.0f", l.s.CreatesPerMin)},
-		{"egress conns", "fwConns", nil, fmt.Sprint(l.s.FwConns)},
+		{"running leases", "running", fmt.Sprint(l.s.Running)},
+		{"requests / s", "reqPerSec", fmt.Sprintf("%.1f", l.s.ReqPerSec)},
+		{"creates / min", "createsPerMin", fmt.Sprintf("%.0f", l.s.CreatesPerMin)},
+		{"egress conns", "fwConns", fmt.Sprint(l.s.FwConns)},
 	}
-	h := l.throughputH()
+}
+
+// sparkW is the sparkline's width in cells, sparkGap the columns
+// between two side-by-side sparkline columns.
+const (
+	sparkW   = 23
+	sparkGap = 2
+)
+
+// drawThroughput draws the throughput panel at (x, y) in w cells and
+// returns the row past its bottom edge. Four columns of label, current
+// value and sparkline; at a wide frame all four sit on one row of
+// columns, below it 2×2.
+func (l *layout) drawThroughput(g *grid.Grid, x, y, w, h int) int {
 	top := y
-	y = l.panel(g, y, h, "throughput (5 min)", "throughput")
-	spW := 24
-	for i, r := range rows {
-		yy := top + 1 + i
-		g.Text(2, yy, r.label, "dim", 12)
-		vals := r.vals
-		if l.histFn != nil {
-			vals = l.histFn(r.key)
-		}
-		sp := padTo(grid.Sparkline(vals, 0, maxOf(vals)), spW)
-		g.Segs(15, yy, []grid.Seg{{Text: sp, Style: "spark"}}, spW)
-		g.Right(l.w-3, yy, []grid.Seg{{Text: r.last, Style: "text"}})
+	id := "throughput"
+	title := "throughput"
+	if n := l.histMinutes(); n > 0 {
+		title = fmt.Sprintf("throughput · last %d min", n)
+	}
+	y = l.panel(g, x, y, w, h, title, id)
+	series := l.throughputSeries()
+	perRow := 4
+	if !l.wide() {
+		perRow = 2
+	}
+	for i, r := range series {
+		col, row := i%perRow, i/perRow
+		valY := top + 1 + row*2
+		spY := valY + 1
+		cx := x + 2 + (sparkW+sparkGap)*col
+		g.Text(cx, valY, r.label, "dim", 22)
+		g.Right(cx+sparkW-1, valY, []grid.Seg{{Text: r.last, Style: "text"}})
+		vals := l.histVals(r.key)
+		sp := padTo(grid.Sparkline(vals, 0, maxOf(vals)), sparkW)
+		g.Segs(cx, spY, []grid.Seg{{Text: sp, Style: "spark"}}, sparkW)
 	}
 	return y
 }
 
-// leaseCols picks the leases panel's column layout for width w.
+func (l *layout) throughput(g *grid.Grid, y int) int {
+	return l.drawThroughput(g, 0, y, l.w, l.throughputH())
+}
+
+// imagesServices draws the images/services band at (0, y).
+func (l *layout) imagesServices(g *grid.Grid, y int) int {
+	if l.wide() {
+		return l.drawImagesServices(g, y)
+	}
+	g.Mark(0, y, l.w, l.imagesServicesH(), "images-services")
+	return l.drawImagesServices(g, y)
+}
+
+// leaseCols picks the leases panel's column layout for width w. At the
+// wide frame it is the mockup's: id(12) image(17) owner(10) state(13)
+// policy(12) age(6) left(9) holder — the columns start at 2, 14, 31,
+// 41, 54, 66, 72, 81. Below 104 the flexible columns give (headers cut,
+// values never reach the next column) and nothing overflows.
 type leaseCols struct {
 	id, img, own, st, pol, age, left, hold int // column start cells
-	idW, imgW, ownW, stW, polW             int
+	idW, imgW, ownW, stW, polW, leftW      int
 }
 
 func leaseLayout(w int) leaseCols {
-	c := leaseCols{id: 2, idW: 10}
+	if w >= maxW {
+		return leaseCols{
+			id: 2, idW: 12,
+			img: 14, imgW: 17,
+			own: 31, ownW: 10,
+			st: 41, stW: 13,
+			pol: 54, polW: 12,
+			age:  66,
+			left: 72, leftW: 9,
+			hold: 81,
+		}
+	}
+	c := leaseCols{id: 2, idW: clamp(w/10, 6, 12)}
 	c.img = c.id + c.idW + 1
-	c.imgW = clamp(w/9, 9, 16)
+	c.imgW = clamp(w/7, 8, 17)
 	c.own = c.img + c.imgW + 1
-	c.ownW = clamp(w/11, 6, 12)
+	c.ownW = clamp(w/12, 5, 10)
 	c.st = c.own + c.ownW + 1
-	c.stW = 11
+	c.stW = clamp(w/9, 6, 13)
 	c.pol = c.st + c.stW + 1
-	c.polW = clamp(w/16, 6, 10)
+	c.polW = clamp(w/17, 4, 12)
 	c.age = c.pol + c.polW + 1
 	c.left = c.age + 6
-	c.hold = c.left + 6
+	c.leftW = clamp(w/12, 4, 9)
+	c.hold = c.left + c.leftW + 1
 	return c
 }
 
@@ -607,18 +1120,24 @@ func ellipsize(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// leases panel: id, image, owner, state with a glyph, policy, age, left
-// and the holder (the holder text; a lapsed hold shows ◉ after it).
+// leases panel: id, image, owner, run state with its glyph, policy,
+// age, time left (the hold's time when held, ∞ for a persistent lease
+// with no hold) and the holder — ◆ before a held lease's holder, ◉
+// when the hold has lapsed. On the page the holder is a link.
 func (l *layout) leases(g *grid.Grid, y int) int {
 	top := y
-	y = l.panel(g, y, l.leasesH(), "leases", "leases")
+	y = l.panel(g, 0, y, l.w, l.leasesH(), "leases", "leases")
 	c := leaseLayout(l.w)
-	// Each header at its column's start, so it lines up with the rows.
-	for _, h := range []struct {
-		x    int
+	// Each header at its column's start, cut to the column's width so a
+	// narrow frame cannot smear one header into the next.
+	headers := []struct {
+		x, w int
 		text string
-	}{{c.id, "lease"}, {c.img, "image"}, {c.own, "owner"}, {c.st, "state"}, {c.pol, "net"}, {c.age, "age"}, {c.left, "left"}, {c.hold, "holder"}} {
-		g.Text(h.x, top+1, h.text, "dim", l.w-2-h.x)
+	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.own, c.ownW, "owner"},
+		{c.st, c.stW, "state"}, {c.pol, c.polW, "policy"}, {c.age, 5, "age"},
+		{c.left, c.leftW, "left"}, {c.hold, l.w - 2 - c.hold, "holder"}}
+	for _, h := range headers {
+		g.Text(h.x, top+1, h.text, "dim", h.w)
 	}
 
 	rows := l.s.Rows
@@ -635,32 +1154,10 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 			{Text: " " + r.State, Style: stateGlyphStyle(r)},
 		}
 		g.Segs(c.st, yy, segs, c.stW)
-		g.Text(c.pol, yy, r.Policy, "dim", c.polW)
+		g.Text(c.pol, yy, sanitize(r.Policy), "dim", c.polW)
 		g.Text(c.age, yy, r.Age, "dim", 5)
-		g.Text(c.left, yy, r.Left, "text", 5)
-		if r.Holder != "" {
-			room := l.w - c.hold - 3 // one column clear of the border
-			lapsed := ""
-			if r.HoldState == "lapsed" {
-				// The holder keeps at least a few columns: a narrow frame
-				// gets the bare glyph instead of the word.
-				lapsed = " ◉lapsed"
-				if room-len([]rune(lapsed)) < 6 {
-					lapsed = " ◉"
-				}
-				room -= len([]rune(lapsed))
-			}
-			seg := []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: "link"}}
-			if lapsed != "" {
-				seg = append(seg, grid.Seg{Text: lapsed, Style: "warn"})
-			}
-			g.Segs(c.hold, yy, seg, l.w-c.hold-2)
-		} else if r.Name != "" {
-			// no holder: show the lease's name instead
-			g.Text(c.hold, yy, sanitize(r.Name), "dim", l.w-c.hold-2)
-		} else {
-			g.Text(c.hold, yy, "-", "dim", 1)
-		}
+		g.Text(c.left, yy, leaseLeft(r), "text", c.leftW)
+		l.holder(g, c, yy, r)
 	}
 	if len(rows) == 0 {
 		g.Text(2, top+2, "no live leases", "dim", l.w-4)
@@ -668,105 +1165,274 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	return y
 }
 
-// images panel: the catalog — name, live leases, lifetime uses, shape,
-// baked-at.
-func (l *layout) imagesH() int { return 3 + len(l.s.Images) }
-
-func (l *layout) images(g *grid.Grid, y int) int {
-	top := y
-	y = l.panel(g, y, l.imagesH(), "images", "images")
-	nameW := clamp(l.w-40, 12, 44)
-	cx := 2 + nameW + 1 // the numbers' column, after the padded name
-	g.Text(2, top+1, "image", "dim", nameW)
-	g.Text(cx, top+1, "live uses  shape        baked", "dim", l.w-2-cx)
-	for i, im := range l.s.Images {
-		yy := top + 2 + i
-		g.Text(2, yy, sanitize(im.Name), "text", nameW)
-		g.Text(cx, yy, fmt.Sprintf("%4d %4d  %-11s  %s", im.Live, im.Uses, fmt.Sprintf("%dv/%dM", im.VCPU, im.MemMB), im.Updated), "dim", l.w-2-cx)
+// leaseLeft is the row's left column: a held lease shows the time left
+// on its hold, a persistent lease without a hold ∞, the rest the
+// lease's own expiry ("due" when it has passed).
+func leaseLeft(r LeaseRow) string {
+	if r.HoldState != "" && r.HoldExpires != "" {
+		return r.HoldExpires
 	}
-	return y
+	return r.Left
 }
 
-// services panel: one row per systemd unit, ✓ when active, otherwise
-// the state in the bad style. Wide frames use two columns.
+// holder draws the holder column: ◆ before a held lease's holder, ◉
+// when the hold has lapsed; a lease's name when there is no holder; a
+// dash when neither. Cut with … so nothing reaches the border.
+func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
+	room := l.w - c.hold - 3 // one column clear of the border
+	if r.Holder != "" {
+		mark, style := "", "link"
+		switch r.HoldState {
+		case "active":
+			mark = "◆ "
+		case "lapsed":
+			mark = "◉ "
+		}
+		if mark != "" {
+			mw := len([]rune(mark))
+			g.Segs(c.hold, yy, []grid.Seg{{Text: mark, Style: "state"}}, room)
+			room -= mw
+			g.Segs(c.hold+mw, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: style}}, room)
+			return
+		}
+		g.Segs(c.hold, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: style}}, room)
+		return
+	}
+	if r.Name != "" {
+		g.Text(c.hold, yy, ellipsize(sanitize(r.Name), room), "dim", room)
+		return
+	}
+	g.Text(c.hold, yy, "-", "dim", 1)
+}
+
+// images panel: the catalog — name, shape, live leases, lifetime uses,
+// baked-at — beside the services panel at a wide frame, stacked below it.
+// The empty panel keeps a row for "no images" instead of writing over
+// its bottom border.
+func (l *layout) imagesH() int {
+	if len(l.s.Images) == 0 {
+		return 4
+	}
+	return 3 + len(l.s.Images)
+}
+
+// servicesH is the services panel's own height: title, one row per unit
+// ("no units configured" when none) and the bottom edge. Side by side
+// the panel is drawn as tall as images instead — the taller of the two.
 func (l *layout) servicesH() int {
-	n := len(l.s.Services)
-	if n == 0 {
+	if len(l.s.Services) == 0 {
 		return 3
 	}
-	if l.w >= 84 {
-		return 2 + (n+1)/2
-	}
-	return 2 + n
+	return 3 + len(l.s.Services)
 }
 
-func (l *layout) servicesPanel(g *grid.Grid, y int) int {
+// imagesServicesH is the height of the images/services band: as one
+// side-by-side pair, both boxes the taller panel's height; stacked,
+// the two panels' heights together.
+func (l *layout) imagesServicesH() int {
+	if l.wide() {
+		return max(l.imagesH(), l.servicesH())
+	}
+	return l.imagesH() + l.servicesH()
+}
+
+// drawImagesServices draws the images and services panels: images left
+// (61 cells) and services right (41 cells) at a wide frame, both the
+// taller one's height; both full width below it.
+func (l *layout) drawImagesServices(g *grid.Grid, y int) int {
+	if l.wide() {
+		h := max(l.imagesH(), l.servicesH())
+		l.drawImages(g, 0, y, imgPanelW, h)
+		l.drawServices(g, imgPanelW+panelGap, y, l.w-imgPanelW-panelGap, h)
+		return y + h
+	}
+	y = l.drawImages(g, 0, y, l.w, l.imagesH())
+	return l.drawServices(g, 0, y, l.w, l.servicesH())
+}
+
+// imgPanelW is the width of the side-by-side images panel; services
+// takes the rest of the 104-cell frame after the gap.
+const imgPanelW = 61
+
+// imageCol is one column of the images panel: its offset from the
+// panel's left edge and its width in cells.
+type imageCol struct {
+	off, w int
+}
+
+// imageCols lays the images panel's columns out: image, vcpu, mem,
+// live, uses, baked.
+func imageCols(w int) []imageCol {
+	cols := []imageCol{{2, 17}, {19, 6}, {25, 9}, {34, 6}, {40, 7}}
+	cols = append(cols, imageCol{47, w - 4 - 47 + 1}) // baked, to the inner right edge
+	return cols
+}
+
+// drawImages draws the images panel at (x, y) in w cells and returns
+// the row past its bottom edge: a header row, then one row per image.
+func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 	top := y
-	y = l.panel(g, y, l.servicesH(), "units", "services")
-	if len(l.s.Services) == 0 {
-		g.Text(2, top+1, "no units configured", "dim", l.w-4)
-		return y
+	y = l.panel(g, x, y, w, h, "images", "images")
+	cols := imageCols(w)
+	labels := []string{"image", "vcpu", "mem", "live", "uses", "baked"}
+	for i, c := range cols {
+		g.Text(x+c.off, top+1, labels[i], "dim", c.w)
 	}
-	twoCol := l.w >= 84
-	half := (len(l.s.Services) + 1) / 2
-	colW := (l.w - 8) / 2
-	if !twoCol {
-		colW = l.w - 4
+	for i, im := range l.s.Images {
+		yy := top + 2 + i
+		vals := []string{
+			ellipsize(sanitize(im.Name), cols[0].w),
+			fmt.Sprint(im.VCPU),
+			memLabel(im.MemMB),
+			fmt.Sprint(im.Live),
+			fmt.Sprint(im.Uses),
+			im.Updated,
+		}
+		for j, c := range cols {
+			g.Text(x+c.off, yy, vals[j], "text", c.w)
+		}
 	}
-	for i, svc := range l.s.Services {
-		col, row := 0, i
-		if twoCol && i >= half {
-			col, row = 1, i-half
-		}
-		segs := []grid.Seg{{Text: "✓ ", Style: "ok"}, {Text: sanitize(svc.Name), Style: "text"}}
-		if svc.State != "active" {
-			segs = []grid.Seg{{Text: "✗ ", Style: "bad"}, {Text: svc.State + " ", Style: "bad"}, {Text: sanitize(svc.Name), Style: "text"}}
-		}
-		g.Segs(2+col*(colW+4), top+1+row, segs, colW)
+	if len(l.s.Images) == 0 {
+		g.Text(x+2, top+2, "no images", "dim", w-4)
 	}
 	return y
 }
 
-// refusals panel: refusal and failure counters, non-zero ones
-// highlighted in the bad style; create/resume latencies on the right.
-func (l *layout) refusalsH() int { return 4 } // title + counters + latencies + frame
+// memLabel is an image's memory: "2 GiB", "512 MiB".
+func memLabel(mb int) string {
+	if mb >= 1024 {
+		return fmt.Sprintf("%d GiB", mb/1024)
+	}
+	return fmt.Sprintf("%d MiB", mb)
+}
 
-func (l *layout) refusals(g *grid.Grid, y int) int {
+// drawServices draws the services panel at (x, y) in w cells and
+// returns the row past its bottom edge: one row per systemd unit,
+// the name padded to a fixed column, then the state — ✓ active, ◷ (or
+// ○) a state on its way, ✗ a state that needs a person.
+func (l *layout) drawServices(g *grid.Grid, x, y, w, h int) int {
 	top := y
-	y = l.panel(g, y, l.refusalsH(), "refusals & failures", "refusals")
-	pairs := []struct {
+	y = l.panel(g, x, y, w, h, "services", "services")
+	if len(l.s.Services) == 0 {
+		g.Text(x+2, top+1, "no units configured", "dim", w-4)
+		return y
+	}
+	for i, svc := range l.s.Services {
+		yy := top + 1 + i
+		if yy >= top+h-1 {
+			break // the panel is as tall as images; drop the rest
+		}
+		g.Text(x+2, yy, ellipsize(sanitize(svc.Name), 22), "text", 22)
+		g.Segs(x+24, yy, []grid.Seg{serviceState(svc.State)}, w-4-22)
+	}
+	return y
+}
+
+// serviceState is one unit's state as a styled segment: ✓ active (ok);
+// ◷ activating, reloading or waiting (dim — on its way, not wrong;
+// ○ when the font lacks ◷); ✗ anything else (bad).
+func serviceState(state string) grid.Seg {
+	switch {
+	case state == "active":
+		return grid.Seg{Text: "✓ active", Style: "ok"}
+	case state == "activating" || state == "reloading" || state == "waiting":
+		mark := "◷"
+		if !grid.FontHas('◷') {
+			mark = "○"
+		}
+		return grid.Seg{Text: mark + " " + state, Style: "dim"}
+	default:
+		return grid.Seg{Text: "✗ " + state, Style: "bad"}
+	}
+}
+
+// refusals panel: the refusal and failure counters on one row, then
+// create/resume latencies on the same row when they fit (3 rows: title,
+// the row, frame) or on a second row (4 rows). Titled exactly
+// "refusals and failures".
+func (l *layout) refusalsH() int {
+	return boolInt(!l.latenciesShareRow()) + 3
+}
+
+// refusalItems is the counters in the order they are drawn.
+func (l *layout) refusalItems() []struct {
+	label string
+	n     int
+} {
+	return []struct {
 		label string
 		n     int
 	}{
 		{"auth", l.s.AuthFails},
-		{"throttled", l.s.Throttled},
 		{"quota", l.s.Quota},
+		{"throttled", l.s.Throttled},
 		{"capacity", l.s.Capacity},
-		{"builds", l.s.BuildFails},
+		{"build fails", l.s.BuildFails},
+		{"lost leases", l.s.ByState["lost"]},
 	}
-	cx := 2
-	for _, p := range pairs {
+}
+
+// refusalSegs is the counters joined with two spaces, non-zero values
+// in the warn style.
+func (l *layout) refusalSegs() []grid.Seg {
+	segs := []grid.Seg{}
+	for _, p := range l.refusalItems() {
 		style := "dim"
 		if p.n != 0 {
-			style = "bad"
+			style = "warn"
 		}
-		segs := []grid.Seg{{Text: fmt.Sprintf("%s %d", p.label, p.n), Style: style}}
-		g.Segs(cx, top+1, segs, l.w-2-cx)
-		cx += segWidth(segs) + 4
+		if len(segs) > 0 {
+			segs = append(segs, grid.Seg{Text: "  ", Style: "dim"})
+		}
+		segs = append(segs,
+			grid.Seg{Text: p.label + " ", Style: "dim"},
+			grid.Seg{Text: fmt.Sprint(p.n), Style: style})
 	}
-	g.Text(2, top+2, "create "+msLabel(l.s.CreateMs)+"   resume "+msLabel(l.s.ResumeMs), "dim", l.w-4)
+	return segs
+}
+
+// latencySegs is "create N ms · resume N s"; a dash for a latency that
+// never happened, and nothing at all when the frame cannot hold the
+// counters plus the latencies.
+func (l *layout) latencySegs() []grid.Seg {
+	return []grid.Seg{
+		{Text: "create ", Style: "dim"},
+		{Text: msLabel(l.s.CreateMs), Style: "text"},
+		{Text: "  resume ", Style: "dim"},
+		{Text: msLabel(l.s.ResumeMs), Style: "text"},
+	}
+}
+
+func (l *layout) refusals(g *grid.Grid, y int) int {
+	top := y
+	h := l.refusalsH()
+	y = l.panel(g, 0, y, l.w, h, "refusals and failures", "refusals")
+	counters, lat := l.refusalSegs(), l.latencySegs()
+	g.Segs(2, top+1, counters, l.w-4)
+	if l.latenciesShareRow() {
+		g.Segs(2+segWidth(counters)+2, top+1, lat, l.w-4-segWidth(counters)-2)
+	} else {
+		g.Segs(2, top+2, lat, l.w-4)
+	}
 	return y
 }
 
-// msLabel is a latency: "-" when none happened, "250ms" or "1.2s".
+// latenciesShareRow reports whether the counters and the create/resume
+// latencies fit on one row inside the frame (the latencies then sit on
+// the same line; otherwise they take a second row).
+func (l *layout) latenciesShareRow() bool {
+	return segWidth(l.refusalSegs())+2+segWidth(l.latencySegs()) <= l.w-4
+}
+
+// msLabel is a latency: "–" when none happened, "250 ms" or "4.1 s".
 func msLabel(v float64) string {
 	switch {
 	case v < 0:
-		return "-"
+		return "–"
 	case v < 1000:
-		return fmt.Sprintf("%.0fms", v)
+		return fmt.Sprintf("%.0f ms", v)
 	default:
-		return fmt.Sprintf("%.1fs", v/1000)
+		return fmt.Sprintf("%.1f s", v/1000)
 	}
 }
 
@@ -786,7 +1452,7 @@ func (l *layout) events(g *grid.Grid, y int) int {
 		return y
 	}
 	top := y
-	y = l.panel(g, y, l.eventsH(), "events", "events")
+	y = l.panel(g, 0, y, l.w, l.eventsH(), "events", "events")
 	for i, e := range l.s.Events {
 		style, text := e.Style, sanitize(e.Text)
 		if e.Style == "warn" {
@@ -819,6 +1485,15 @@ func gcLabel(mode string) string {
 		return "-"
 	}
 	return mode
+}
+
+// gcSeg is the GC's mode as one segment: bold ok when deletion is on,
+// dim when it is a dry run.
+func gcSeg(mode string) grid.Seg {
+	if mode == "delete" {
+		return grid.Seg{Text: "delete on", Style: "ok"}
+	}
+	return grid.Seg{Text: gcLabel(mode), Style: "dim"}
 }
 
 // padTo right-pads s with spaces to n cells (no-op when already longer).

@@ -117,19 +117,21 @@ for watching rather than triage. It draws one character grid at a fixed
 width (DASH_WIDTH, default 104): framed panels for capacity (a
 running/limit meter, leases by state, queued, granted, swept, running
 leases per image), host meters (CPU, memory, hugepages, snapshot and
-root disk, with the warn/danger levels), five-minute throughput
-sparklines (sandboxes, API requests, lease creates, egress connections),
-live leases (state glyph, network policy, age, time left, holder — on
-the page the holder is a link, a lapsed hold is marked), the image
-catalog, the systemd units, refusal and failure counters, and the
-backend's last activity. Above the panels sits one attention banner,
-shown only when something needs a person: a unit not active, a lost
-lease, free hugepages or snapshot disk past the danger level, the TLS
-certificate inside 30 days of expiring, or an automatic held-lease
-action in the last 24 h. It refreshes every 2 seconds over one
-server-sent-event stream shared by all viewers; the page is the grid in
-a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for the chrome, and
-Datastar patches the rows that changed.
+root disk, with the warn/danger levels), a full-width throughput panel
+(running leases, requests per second, creates per minute, egress
+connections — each with its current value and a sparkline over the
+history), live leases (id, image, owner, run state, policy, age, time
+left, holder — on the page the holder is a link; a hold marks the
+holder ◆, or ◉ once lapsed), the image catalog beside the systemd
+units, a refusals-and-failures row with the mean create and resume
+times, and the backend's last activity. Above the panels sits one
+attention banner, shown only when something needs a person: a unit not
+active, a lost lease, free hugepages or snapshot disk past the danger
+level, the TLS certificate inside 30 days of expiring, or an automatic
+held-lease action in the last 24 h. It refreshes every 2 seconds over
+one server-sent-event stream shared by all viewers; the page is the
+current grid in a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for
+the chrome, and Datastar patches the rows that changed.
 
 `spoond top` draws the same grid with ANSI styles in the terminal, at
 the terminal's width (COLUMNS, else 104), redrawn every 2 seconds until

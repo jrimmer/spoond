@@ -23,17 +23,18 @@ func topStyles() map[string]string {
 		return map[string]string{} // no escapes when piped or redirected
 	}
 	return map[string]string{
-		"head":  "\x1b[1;97m",
-		"frame": "\x1b[2;37m",
-		"title": "\x1b[1;97m",
-		"dim":   "\x1b[2;90m",
-		"text":  "\x1b[0;97m",
-		"ok":    "\x1b[0;32m",
-		"warn":  "\x1b[0;33m",
-		"bad":   "\x1b[0;31m",
-		"state": "\x1b[0;94m",
-		"spark": "\x1b[0;92m",
-		"link":  "\x1b[0;36m",
+		"head":   "\x1b[1;97m",
+		"frame":  "\x1b[2;37m",
+		"title":  "\x1b[1;97m",
+		"dim":    "\x1b[2;90m",
+		"text":   "\x1b[0;97m",
+		"ok":     "\x1b[0;32m",
+		"warn":   "\x1b[0;33m",
+		"bad":    "\x1b[0;31m",
+		"state":  "\x1b[0;94m",
+		"spark":  "\x1b[0;92m",
+		"link":   "\x1b[0;36m",
+		"banner": "\x1b[1;33m",
 	}
 }
 
@@ -73,7 +74,7 @@ func Top(args []string) int {
 	draw := func() {
 		s := col.collect(ctx)
 		appendHist(hist, s, cfg.History)
-		g, err := drawFrame(s, hist, width, cfg.Host, time.Now())
+		g, err := drawFrame(s, hist, width, cfg.Host, time.Now(), cfg.Interval)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "spoond top:", err)
 			return

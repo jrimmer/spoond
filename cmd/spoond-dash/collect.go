@@ -34,7 +34,6 @@ type Snapshot struct {
 	// Leases and sandboxes.
 	Leases     int            `json:"leases"`
 	ByState    map[string]int `json:"byState"`
-	ByImage    map[string]int `json:"byImage"`
 	Queued     int            `json:"queued"`
 	Granted    int            `json:"granted"` // cumulative leases granted
 	Swept      int            `json:"swept"`
@@ -77,6 +76,11 @@ type Snapshot struct {
 
 	Down int `json:"down"` // units not active
 
+	// GCDeleted is the builds the GC has deleted, summed over
+	// spoond_gc_deleted_total's labels. Shown next to the GC's mode;
+	// left out of the frame while it is 0.
+	GCDeleted int `json:"gcDeleted"`
+
 	// GCMode labels the snapshot GC: "delete" (GC_DELETE=1, or the
 	// backend has actually deleted something) or "dry-run".
 	GCMode string `json:"gcMode"`
@@ -108,11 +112,14 @@ type Service struct {
 
 // LeaseRow is one live lease for the table. Holder/HolderURL/HoldState
 // name what holds the lease (HoldState "" when unheld, "active" or
-// "lapsed"); LastAction/LastActionAt record the last automatic
-// held-lease action ("rule/action", e.g. "idle/suspend_idle").
+// "lapsed"); HoldExpires is the hold's remaining time ("" without a
+// hold) — a held lease's time left is the hold's, not the lease's.
+// LastAction/LastActionAt record the last automatic held-lease action
+// ("rule/action", e.g. "idle/suspend_idle").
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name string
 	Holder, HolderURL, HoldState          string
+	HoldExpires                           string
 	LastAction                            string
 	LastActionAt                          time.Time
 	Age, Left                             string
@@ -152,7 +159,7 @@ func newCollector(cfg Config) *collector {
 // fields at zero; the rest of the frame still renders.
 func (c *collector) collect(ctx context.Context) Snapshot {
 	now := c.now()
-	s := Snapshot{At: now.Format("15:04:05"), ByState: map[string]int{}, ByImage: map[string]int{}}
+	s := Snapshot{At: now.Format("15:04:05"), ByState: map[string]int{}}
 	var errs []string
 
 	if fams, err := c.scrape(ctx); err != nil {
@@ -256,7 +263,6 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	g := func(name string) float64 { return value(fams[name]) }
 	s.Leases = int(g("spoond_leases_active"))
 	s.ByState = byLabel(fams["spoond_leases"], "state")
-	s.ByImage = byLabel(fams["spoond_leases_by_image"], "image")
 	s.Queued = int(g("spoond_leases_queued"))
 	s.Granted = int(g("spoond_leases_total"))
 	s.Swept = int(g("spoond_lease_swept_total"))
@@ -273,10 +279,15 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	s.BuildFails = int(g("spoond_builds_failed_total"))
 	s.VCPUAlloc = int(g("orchestrator_sandbox_cpu_allocated"))
 	s.MemAllocGiB = round1(g("orchestrator_sandbox_memory_allocated") / (1 << 30))
+	// The GC's deleted-build counter, summed over its labels, feeds both
+	// the mode (an actual deletion means deletion is on) and the host
+	// panel's lifetime count.
+	s.GCDeleted = int(value(fams["spoond_gc_deleted_total"]))
+
 	// The GC's mode: a configured GC_DELETE=1 or an actually deleted
 	// build means deletion is on; otherwise the GC is in its dry-run
 	// default (it logs candidates but frees nothing).
-	if os.Getenv("GC_DELETE") == "1" || value(fams["spoond_gc_deleted_total"]) > 0 {
+	if os.Getenv("GC_DELETE") == "1" || s.GCDeleted > 0 {
 		s.GCMode = "delete"
 	} else {
 		s.GCMode = "dry-run"
@@ -594,6 +605,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 				r.HoldState = "lapsed"
 			} else {
 				r.HoldState = "active"
+				r.HoldExpires = until(now, holdExpires)
 			}
 		}
 		r.LastAction = lastAction
@@ -620,6 +632,15 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		u.Close()
 	}
 
+	// Live leases per image, from the rows just read (running and
+	// suspended leases hold an image's build).
+	live := map[string]int{}
+	for _, r := range s.Rows {
+		if r.State == "running" || r.State == "suspended" {
+			live[r.Image]++
+		}
+	}
+
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
 	if err != nil {
 		return err
@@ -632,7 +653,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			return err
 		}
 		r.Updated = since(now, updated) + " ago"
-		r.Live = s.ByImage[r.Name]
+		r.Live = live[r.Name]
 		r.Uses = uses[r.Name]
 		s.Images = append(s.Images, r)
 	}

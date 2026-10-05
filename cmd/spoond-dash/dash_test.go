@@ -85,7 +85,7 @@ func TestCollectMetricsAndRates(t *testing.T) {
 	c.now = func() time.Time { return t0 }
 
 	s := c.collect(ctx)
-	if s.Leases != 3 || s.ByState["running"] != 2 || s.ByImage["go-base"] != 2 || s.Granted != 1234 {
+	if s.Leases != 3 || s.ByState["running"] != 2 || s.Granted != 1234 {
 		t.Fatalf("gauges: %+v", s)
 	}
 	if s.Running != 3 || s.Limit != 64 || s.Version != "0.4.2" {
@@ -307,7 +307,7 @@ func TestFromDBReadsLeasesAndImages(t *testing.T) {
 	raw.Close()
 	os.WriteFile(cfg.UsersFile, []byte(`{"users":[{"id":"u-1","name":"ci"}]}`), 0o600)
 
-	s := Snapshot{ByImage: map[string]int{"go-base": 1}}
+	s := Snapshot{}
 	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
 		t.Fatal(err)
 	}

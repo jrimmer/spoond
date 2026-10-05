@@ -21,6 +21,32 @@ summarised from README "Status".
   template is snapshotted. Images must be rebuilt
   (`spoond images build --all`) to pick it up. Conformance L7 checks it.
 
+### Changed
+
+- **The dashboard's panels are laid out to the mockup (#118, parts
+  1–3).** One fixed-width character grid (104 by default, `DASH_WIDTH`
+  72–104) draws, under the header and legend: an attention strip when
+  something needs a person; the capacity and host panels side by side
+  (stacked below 104 cells); a full-width throughput panel — running
+  leases, requests per second, creates per minute and egress
+  connections, each with its current value and a 23-cell sparkline over
+  the history, titled `throughput · last N min` for the window the
+  history actually covers (with `DASH_HISTORY` 150 and the default
+  2 s scrape that is 5 min); the leases table — id, image, owner, the
+  run state (`▶ running`, `‖ suspended`, `■ lost`, `⭘ recovered`),
+  policy, age, time left (a held lease counts down its hold, a
+  persistent lease without a hold shows `∞`) and the holder, `◆` before
+  a held lease's holder and `◉` once the hold has lapsed (on the page
+  the holder is still a link); the image catalog (61 cells: shape, live
+  leases, lifetime uses, baked-at) beside the systemd units (41 cells:
+  `✓ active`, `○` a state on its way, `✗` one that needs a person),
+  stacked below 104 cells; a refusals-and-failures row — auth, quota,
+  throttled, capacity, build fails and lost leases, non-zero counts
+  highlighted, with the mean create and resume latencies (– for none) —
+  and the events panel. `spoond top` draws the same frame with ANSI
+  styles, and a test draws every width from 72 to 104 and checks every
+  row fits with every panel border in its column.
+
 ## [2.2.1] - 2026-10-04
 
 Fixes found running 2.2.0 under real load.
