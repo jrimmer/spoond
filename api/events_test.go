@@ -999,13 +999,14 @@ func TestResumeFromGapPosition(t *testing.T) {
 }
 
 // TestEventsTokenSeesAllStreams: the events-only EVENTS_TOKEN streams
-// every owner's events on /api/leases/events and /api/leases/{id}/events.
+// every owner's events on /api/leases/events, its one route — the
+// one-lease streams refuse it.
 func TestEventsTokenSeesAllStreams(t *testing.T) {
 	ts, svc := newEventsTestServer(t)
 	svc.cfg.EventsToken = "events-tok"
 
 	// Two leases, two owners, emitted before the streams open: the
-	// streams read them through Last-Event-ID replay from position 0.
+	// stream reads them through Last-Event-ID replay from position 0.
 	_, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant a: %v", err)
@@ -1028,19 +1029,23 @@ func TestEventsTokenSeesAllStreams(t *testing.T) {
 		t.Fatalf("event id %q is not <epoch>-<seq>", id)
 	}
 
-	one := startSSE(t, ts, ctx, ts.URL+"/api/leases/"+l2.ID+"/events", "events-tok", svc.bus.epoch+"-0")
+	// The one-lease streams are outside the events token's scope, even
+	// for a lease it could otherwise see: its one route is the
+	// all-events stream.
+	one := startSSE(t, ts, ctx, ts.URL+"/api/leases/"+l2.ID+"/events", "token-b", svc.bus.epoch+"-0")
 	if ev := one.next(); ev.Type != "created" {
 		t.Fatalf("one-lease stream first event %q, want created", ev.Type)
 	}
 
 	// Live flow: a release on lease 2 reaches both streams (the
-	// one-lease stream is filtered to lease 2).
+	// one-lease stream is filtered to lease 2, the events token's stream
+	// sees every owner's).
 	svc.release(context.Background(), l2)
 	if ev := all.next(); ev.Type != "released" {
-		t.Fatalf("all-stream event %q, want released", ev.Type)
+		t.Fatalf("events-token stream event %q, want released", ev.Type)
 	}
 	if ev := one.next(); ev.Type != "released" {
-		t.Fatalf("one-lease stream event %q, want released (its filter is the lease, not the owner)", ev.Type)
+		t.Fatalf("one-lease stream event %q, want released (its filter is the lease)", ev.Type)
 	}
 }
 
@@ -1051,12 +1056,9 @@ func (s *sseStream) lastIDSnapshot() string {
 	return s.lastID
 }
 
-// doSeq stamps TestEventsTokenScopeIsEventsOnly's requests with
-// distinct source addresses.
-var doSeq int
-
-// TestEventsTokenScopeIsEventsOnly: the EVENTS_TOKEN is refused
-// everywhere except the two event stream routes (GET only). Requests
+// TestEventsTokenScopeIsEventsOnly: the EVENTS_TOKEN is refused on
+// every route but GET /api/leases/events — the canonical /api/sandboxes
+// spelling, the one-lease streams and everything else included. Requests
 // hit the handler directly, so the failed-auth throttle (per client IP)
 // never trips and the plain status codes are visible.
 func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
@@ -1065,13 +1067,14 @@ func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
 	svc.cfg.EventsToken = "events-tok"
 	h := NewServer(svc, NewImageRegistry(db)).Handler()
 
+	// Distinct source addresses per call: the failed-auth limiter is per
+	// IP and this test makes a dozen failing requests on purpose.
+	seq := 0
 	do := func(method, path, token string) int {
 		t.Helper()
 		req := httptest.NewRequest(method, path, nil)
-		// A distinct source address per call: the failed-auth limiter is
-		// per IP and this test makes a dozen failing requests on purpose.
-		req.RemoteAddr = fmt.Sprintf("10.255.%d.%d:%d", doSeq/250, doSeq%250, doSeq)
-		doSeq++
+		req.RemoteAddr = fmt.Sprintf("10.255.%d.%d:%d", seq/250, seq%250, seq)
+		seq++
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -1084,10 +1087,14 @@ func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
 		t.Fatalf("grant: %v", err)
 	}
 
-	// The streaming GETs are exercised over a live server (they block
-	// while the stream is open); here just the handler's verdicts.
+	// The streaming GETs are exercised over a live server elsewhere
+	// (they block while the stream is open); here just the handler's
+	// verdicts. The one-lease streams refuse it in both spellings — same
+	// data, one route too wide — as does every deeper path.
 	do("GET", "/api/leases/x/y/events", "events-tok")            // 401: not an events route
 	do("GET", "/api/leases/"+l.ID+"/events/extra", "events-tok") // 401: neither
+	do("GET", "/api/leases/"+l.ID+"/events", "events-tok")       // 401: the one-lease form is not its route
+	do("GET", "/api/sandboxes/events", "events-tok")             // 401: not the documented spelling
 
 	// Every other route refuses it.
 	for _, path := range []string{
@@ -1122,18 +1129,24 @@ func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
 	}
 }
 
-// TestEventsTokenOneLeaseUnknown: the one-lease route 404s the events
-// token on a lease that does not exist, like every other lease route.
-func TestEventsTokenOneLeaseUnknown(t *testing.T) {
+// TestEventsTokenOneLeaseRefused: the events token's one route is the
+// all-events stream; the one-lease spelling refuses it outright, even
+// for a lease that exists (it would otherwise stream it).
+func TestEventsTokenOneLeaseRefused(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	svc.cfg.EventsToken = "events-tok"
 	h := NewServer(svc, NewImageRegistry(db)).Handler()
-	req := httptest.NewRequest("GET", "/api/leases/no-such-lease/events", nil)
-	req.Header.Set("Authorization", "Bearer events-tok")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown lease with the events token: %d, want 404", rec.Code)
+	for _, path := range []string{
+		"/api/leases/no-such-lease/events", // unknown lease
+		"/api/sandboxes/events",            // the canonical spelling
+	} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer events-tok")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("GET %s with the events token: %d, want 401", path, rec.Code)
+		}
 	}
 }

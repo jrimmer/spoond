@@ -53,10 +53,10 @@ func parseLeaseEventID(id string) (epoch string, seq uint64, ok bool) {
 // handleLeaseEvents streams the caller's lease events; admins see every
 // lease's. Filter: ?lease_id=<id> narrows the stream to one lease (a
 // caller who cannot see that lease gets the same 404 as the other
-// lease routes). The events-only EVENTS_TOKEN is accepted in place of a
-// consumer token: it sees every owner's events and nothing else, and
-// only this route — authMiddleware admits it here, every other path
-// refuses it.
+// lease routes). This is the events-only EVENTS_TOKEN's one route: the
+// token is admitted at the top of the handler chain, on GET
+// /api/leases/events only, and reaches this handler with the marker set
+// — it sees every owner's events and no other route, spelling included.
 func (s *Server) handleLeaseEvents(w http.ResponseWriter, r *http.Request) {
 	if s.isEventsToken(r) {
 		leaseID := r.URL.Query().Get("lease_id")
@@ -80,18 +80,12 @@ func (s *Server) handleLeaseEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLeaseEventsOne streams one lease's events. The owner (or an
-// admin); the events-only EVENTS_TOKEN sees every lease's events. Anyone
-// else gets the same 404 as the other lease routes.
+// admin); anyone else gets the same 404 as the other lease routes —
+// the events-only EVENTS_TOKEN included, whose single route is the
+// all-events stream (authMiddleware refuses the token long before the
+// mux dispatches here).
 func (s *Server) handleLeaseEventsOne(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.isEventsToken(r) {
-		if s.svc.lookupAny(id) == nil {
-			writeError(w, http.StatusNotFound, "lease not found")
-			return
-		}
-		s.svc.streamEvents(w, r, EventFilter{LeaseID: id}, true)
-		return
-	}
 	owner := ownerFrom(r.Context())
 	admin := isAdmin(r)
 	if s.svc.lookup(owner, id) == nil && !(admin && s.svc.lookupAny(id) != nil) {

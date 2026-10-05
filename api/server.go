@@ -216,7 +216,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
 	// Lease event streams (2.2, #115): Server-Sent Events of every lease
 	// lifecycle change, the caller's leases (admins see all) or one
-	// lease. The /api/leases alias covers both via rewriteLeasePath.
+	// lease. The /api/leases alias covers both via rewriteLeasePath; the
+	// events-only EVENTS_TOKEN is admitted before that rewrite, on
+	// GET /api/leases/events only (api/server.go).
 	s.mux.HandleFunc("GET /api/sandboxes/events", s.handleLeaseEvents)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/events", s.handleLeaseEventsOne)
 	// Held leases (2.1): set or clear what holds a lease later. Owner or
@@ -432,10 +434,25 @@ func rewriteLeasePath(p string) string {
 // Handler returns the HTTP handler with auth + metrics middleware
 // applied. The /api/leases → /api/sandboxes rewrite sits at the top of
 // the chain — before auth and the mux — so both path families share one
-// auth path and one route table.
+// auth path and one route table. The events-only EVENTS_TOKEN is
+// admitted even before that rewrite, on exactly GET /api/leases/events:
+// its one route, matched on the spelling it is documented and
+// contracted on.
 func (s *Server) Handler() http.Handler {
 	authed := s.authMiddleware(s.mux)
 	rewrite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if eventsPath(r.URL.Path) && s.isEventsToken(r) {
+			if !s.allowEventsToken(w, r) {
+				return
+			}
+			// Hand the request to the stream handler on the route the mux
+			// knows, carrying the marker its second gate reads. Every other
+			// path or spelling carries the token no further than
+			// authMiddleware's refusal.
+			r.URL.Path = apiSandboxPathPrefix + "/events"
+			authed.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxEventsToken{}, true)))
+			return
+		}
 		if p := rewriteLeasePath(r.URL.Path); p != r.URL.Path {
 			r.URL.Path = p
 		}
@@ -581,17 +598,18 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// The events-only token reaches the lease event streams and
-		// nothing else (the dashboard's subscription; the consumer-auth
-		// fall-through below would refuse it). The check re-runs in the
-		// handler, so one token cannot buy any other route by racing a
-		// path rewrite or a mux quirk. The request carries no consumer
-		// identity — the handlers see the marker and stream unfiltered.
-		if eventsPath(r.URL.Path) && s.isEventsToken(r) {
-			if !s.allowEventsToken(w, r) {
+		// The events-only EVENTS_TOKEN was admitted at the top of the
+		// chain, on exactly GET /api/leases/events — the marker below is
+		// set nowhere else. A request still carrying the token here (the
+		// canonical /api/sandboxes spelling, the one-lease streams, any
+		// other route at all) never passed that gate and is refused
+		// before consumer auth gets to count it.
+		if s.isEventsToken(r) {
+			if r.Context().Value(ctxEventsToken{}) != true {
+				writeError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxEventsToken{}, true)))
+			next.ServeHTTP(w, r)
 			return
 		}
 		auth := r.Header.Get("Authorization")
@@ -708,58 +726,27 @@ func clientIP(remoteAddr string) string {
 	return host
 }
 
-// eventsPath reports whether p is one of the two lease event stream
-// routes (in either spelling — the alias rewrite happens later). The
-// events-only EVENTS_TOKEN is admitted on exactly these.
+// eventsPath reports whether p is exactly the events-only EVENTS_
+// TOKEN's one route: /api/leases/events (GET is allowEventsToken's
+// business). The admission runs before the /api/leases rewrite — the
+// mux itself only knows the /api/sandboxes spellings — so the route is
+// matched literally, on the spelling it is documented under; every
+// other path, spelling or depth is refused.
 func eventsPath(p string) bool {
-	for _, base := range []string{"/api/sandboxes/", "/api/leases/"} {
-		rest, ok := strings.CutPrefix(p, base)
-		if !ok {
-			continue
-		}
-		if rest == "events" {
-			return true
-		}
-		if id, ok := strings.CutSuffix(rest, "/events"); ok && id != "" && !strings.Contains(id, "/") {
-			return true // the {id}/events form, alias included
-		}
-	}
-	return false
+	return p == "/api/leases/events"
 }
 
 // allowEventsToken admits a request that authenticated with the
-// events-only EVENTS_TOKEN: 401 when no token is configured (an unset
-// token matches nothing, so this is unreachable through isEventsToken,
-// but the refusal stays here for clarity), 405 for any method but GET
-// (a stream is a read), 404 for the one-lease form when the lease does
-// not exist. Everything else about the route stays the stream handler's
-// job.
+// events-only EVENTS_TOKEN on its one route: 405 for any method but GET
+// (a stream is a read). Everything else about the route stays the
+// stream handler's job. An unset token never gets here — isEventsToken
+// matches nothing when EVENTS_TOKEN is empty.
 func (s *Server) allowEventsToken(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "events token is read-only")
 		return false
 	}
-	id := leaseIDFromEventsPath(r.URL.Path)
-	if id != "" && s.svc.lookupAny(id) == nil {
-		writeError(w, http.StatusNotFound, "lease not found")
-		return false
-	}
 	return true
-}
-
-// leaseIDFromEventsPath extracts the lease id of a /api/{sandboxes|
-// leases}/{id}/events path, "" on the all-events route.
-func leaseIDFromEventsPath(p string) string {
-	for _, base := range []string{"/api/sandboxes/", "/api/leases/"} {
-		rest, ok := strings.CutPrefix(p, base)
-		if !ok || rest == "events" {
-			continue
-		}
-		if id, ok := strings.CutSuffix(rest, "/events"); ok && id != "" && !strings.Contains(id, "/") {
-			return id
-		}
-	}
-	return ""
 }
 
 // userFrom returns the identity-store user attached by authMiddleware,
