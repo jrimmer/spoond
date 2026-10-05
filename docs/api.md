@@ -1116,15 +1116,26 @@ it must be `<= max_mib` when both are set (`400` otherwise). Over-cap
 creates, forks and clones return `429`; so does any operation that
 brings a suspended lease's guest back over the cap — resume, restart,
 restore, crash recovery, undrain — leaving the lease suspended (or
-drained, for undrain) instead; an over-budget keep answers `409` on
-the checkpoint route with the unpinned build's id (see
+drained, for undrain) instead. **Crash recovery of a suspended lease
+re-passes the check against the image's current `memory_mb`, and a
+successful recovery re-stamps `charged_mib` to that value** (a warm
+restart or restore of a suspended lease does the same), so the detail
+row's charge moves to what the recovered sandbox actually runs. An
+over-budget keep answers `409` on the checkpoint route with the
+unpinned build's id (see
 [Keep limits](#post-apileasesidcheckpoint--snapshot-a-running-lease)).
 
 There is no automatic conversion from `max_leases` to a memory limit: a
 user with `max_leases > 0` and no `max_mib` keeps working unchanged. To
-cap a user's memory, set `max_mib` explicitly (e.g. `curl -X POST
-…/api/users/$UID/quota -d '{"max_leases":4,"max_mib":16384}'`); their
-in-flight usage is `used_mib` on `GET /api/users/me`.
+cap a user's memory, set `max_mib` explicitly:
+
+```sh
+curl -fsS -X POST "$SPOOND_URL/api/users/$UID/quota" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"max_leases":4,"max_mib":16384}'
+```
+
+Their in-flight usage is `used_mib` on `GET /api/users/me`.
 
 ### `POST /api/users/{id}/llm-key` — set/rotate/revoke a user's LLM gateway key
 

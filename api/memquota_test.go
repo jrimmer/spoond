@@ -700,3 +700,93 @@ func TestMemQuotaUndrainDeferredOverQuota(t *testing.T) {
 		t.Fatalf("lease after the retry = %s, want running", got)
 	}
 }
+
+// TestMemQuotaRecoveryNoReservationLeak: a successful recovery of a
+// suspended lease must drop its memory reservation — a leaked one stays
+// in the pending sum forever, inflating used_mib and charging every
+// later grant against a phantom (eventually a permanent 429 with
+// nothing running).
+func TestMemQuotaRecoveryNoReservationLeak(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024}, `{"max_mib":2048}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	if _, err := svc.checkpointLease(context.Background(), l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if err := svc.recoverFromCheckpoint(context.Background(), l); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	// The recovered lease is the only charge: used_mib is exactly 1024,
+	// with no reservation left behind.
+	rec, body := doUsersReq(t, h, "GET", "/api/users/me", tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("users/me: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := int(body["user"].(map[string]any)["used_mib"].(float64)); got != 1024 {
+		t.Fatalf("used_mib after recovery = %d, want 1024 (a leaked reservation would inflate it)", got)
+	}
+	// The second 1024 lease still fits the 2048 cap exactly: no
+	// phantom 429 from a reservation that never went away.
+	if rec, _ = createSandboxAs(t, h, tok, "mid"); rec.Code != http.StatusCreated {
+		t.Fatalf("second create after recovery = %d %s, want 201", rec.Code, rec.Body.String())
+	}
+	if rec, body = doUsersReq(t, h, "GET", "/api/users/me", tok, ""); rec.Code != http.StatusOK {
+		t.Fatalf("users/me: %d", rec.Code)
+	}
+	if got := int(body["user"].(map[string]any)["used_mib"].(float64)); got != 2048 {
+		t.Fatalf("used_mib = %d, want 2048", got)
+	}
+}
+
+// TestMemQuotaRecoveryRestampsCurrentMemory: recovery re-admits (and
+// re-stamps) the image's CURRENT memory_mb — if the image's memory_mb
+// grew between grant and recovery, the recovered sandbox runs (and is
+// charged) the new value, not the stale stamp it was granted with.
+func TestMemQuotaRecoveryRestampsCurrentMemory(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024}, `{"max_mib":3072}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+
+	rec, first := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	if _, err := svc.checkpointLease(context.Background(), l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if _, err := svc.suspend(context.Background(), owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	// The image's memory_mb grows while the lease is suspended.
+	seedImage(t, svc.db, "mid", 2048)
+	if err := svc.recoverFromCheckpoint(context.Background(), l); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if l.MemoryMB != 2048 {
+		t.Fatalf("recovered lease charge = %d, want the image's current 2048", l.MemoryMB)
+	}
+	rec, body := doUsersReq(t, h, "GET", "/api/users/me", tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("users/me: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := int(body["user"].(map[string]any)["used_mib"].(float64)); got != 2048 {
+		t.Fatalf("used_mib after recovery = %d, want the re-stamped 2048", got)
+	}
+	// The new charge is the one enforced: a second 1024 lease would
+	// pass the old stamp (3072 exactly) but not the current one.
+	if rec, _ = createSandboxAs(t, h, tok, "mid"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second create = %d %s, want 429 against the re-stamped charge", rec.Code, rec.Body.String())
+	}
+}

@@ -163,7 +163,7 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserView(u, 0)})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }
 
 // handleUsersByKey resolves an SSH key fingerprint to a user. The

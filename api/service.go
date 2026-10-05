@@ -1097,9 +1097,7 @@ func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool)
 		}
 		if active+s.store.pending[owner]+n > u.MaxLeases {
 			if s.metrics != nil {
-				if s.metrics.QuotaExceeded != nil {
-					s.metrics.QuotaExceeded.Inc()
-				}
+				s.metrics.QuotaExceeded.Inc()
 			}
 			return errQuotaExceeded
 		}
@@ -1111,9 +1109,7 @@ func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool)
 		// creates that together fill the cap) must admit exactly one.
 		if s.usedMiBLocked(owner)+n*memoryMB > u.MaxMiB {
 			if s.metrics != nil {
-				if s.metrics.QuotaExceeded != nil {
-					s.metrics.QuotaExceeded.Inc()
-				}
+				s.metrics.QuotaExceeded.Inc()
 			}
 			return errMemoryQuotaExceeded(u.MaxMiB)
 		}
