@@ -134,6 +134,68 @@ func TestGoldenCheck(t *testing.T) {
 	}
 }
 
+// TestFrameFitsEveryWidth draws the sample frame at every width the
+// frame can take (minW to maxW) and checks two invariants: every row
+// is exactly w cells (nothing overflows or falls short, so Plain rows
+// never misalign), and every cell between a box's corners is that
+// box's │ — a panel drawn or placed one cell wrong would put its
+// right border in another column, or leave a gap in the border.
+func TestFrameFitsEveryWidth(t *testing.T) {
+	for w := minW; w <= maxW; w++ {
+		g := drawSample(w)
+		rows := strings.Split(g.Plain(), "\n")
+		if len(rows) != g.Rows() {
+			t.Fatalf("width %d: %d rows, grid has %d", w, len(rows), g.Rows())
+		}
+		for y, row := range rows {
+			cells := []rune(row)
+			if n := len(cells); n != w {
+				t.Fatalf("width %d: row %d is %d cells, want %d:\n%s", w, y, n, w, row)
+			}
+			checkBoxRow(t, w, y, cells)
+		}
+	}
+}
+
+// checkBoxRow checks one row against the box outlines on the frame:
+// a row carrying corners must pair them (every ┌ closed by a ┐, every
+// └ by a ┘), and a corner-less row between a box's opening and closing
+// corner must be that box's │ there.
+func checkBoxRow(t *testing.T, w, y int, cells []rune) {
+	t.Helper()
+	cornerRow := strings.ContainsAny(string(cells), "┌┐└┘")
+	var spans [][2]int
+	start := -1
+	for x, r := range cells {
+		switch r {
+		case '┌', '└':
+			if start >= 0 {
+				t.Fatalf("width %d: row %d re-opens a box at %d:\n%s", w, y, x, string(cells))
+			}
+			start = x
+		case '┐', '┘':
+			if start < 0 {
+				t.Fatalf("width %d: row %d has ┐/┘ at %d with no opening corner:\n%s", w, y, x, string(cells))
+			}
+			spans = append(spans, [2]int{start, x})
+			start = -1
+		}
+	}
+	if start >= 0 {
+		t.Fatalf("width %d: row %d opens a box at %d that never closes:\n%s", w, y, start, string(cells))
+	}
+	if cornerRow {
+		return // a corner row's interior is ─ and titles, not side borders
+	}
+	for _, s := range spans {
+		for x := s[0] + 1; x < s[1]; x++ {
+			if cells[x] != '│' {
+				t.Fatalf("width %d: row %d col %d is %q between a box's corners, want │:\n%s", w, y, x, cells[x], string(cells))
+			}
+		}
+	}
+}
+
 // TestExtraGlyphsInFont asserts every dashboard glyph beyond grid.Glyphs
 // is in the shipped JetBrains Mono (the codepoint list generated from
 // the vendored woff2): the terminal and the page draw with one face.
