@@ -158,9 +158,15 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 		return id, substrate.BuildRefs{}, nil
 	}
 
-	// Identity user with a byte budget. The fake's checkpoint writes
-	// 8192+ allocated bytes per build (writeBuildDir, handler-goroutine
-	// safe), so a 20000-byte budget fits exactly one kept build.
+	// Identity user with a byte budget of one and a half builds, as this
+	// filesystem allocates them: block sizes differ between hosts (4 KiB
+	// on ext4, up to 128 KiB records on ZFS), so measure one first.
+	probe := filepath.Join(t.TempDir(), "probe")
+	one, err := writeBuildDir(probe, 4096, 8192)
+	if err != nil || one <= 0 {
+		t.Fatalf("probe build size %d: %v", one, err)
+	}
+	budget := one + one/2
 	ids, err := identity.NewStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +176,7 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.SetQuota(u.ID, 0, 0, 20000); err != nil {
+	if err := ids.SetQuota(u.ID, 0, 0, budget); err != nil {
 		t.Fatal(err)
 	}
 
