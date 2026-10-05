@@ -128,7 +128,10 @@ whose room does this lease take?
 The class can change at re-admission: a lease that burst because the
 guarantee was full may come back `guaranteed` when the charge has room
 again, while a lease the request forced burst stays burst (`burst` is
-the request's flag, `class` the decided and stored outcome). `priority`
+the request's flag, `class` the decided and stored outcome — the flag
+itself is not persisted, so a backend restart re-classifies from the
+owner's standing at the next resume; the stored class still reads burst
+until then). `priority`
 orders preemption within a class (lower is preempted first, `0` the
 default) and is stored with the lease.
 

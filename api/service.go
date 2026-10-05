@@ -129,7 +129,12 @@ type Lease struct {
 	// classified burst by demand stays burst on resume/restart, while
 	// one classified burst by a full guarantee may fall back to
 	// guaranteed when the charge drops below it. Not persisted; Class
-	// is.
+	// is. The cost of that: a backend restart loads leases from the
+	// store without the flag, so a request-burst lease re-classifies
+	// from the owner's standing at its next resume/restart — its stored
+	// class stays burst until then, but the re-decision may return it
+	// to guaranteed. Accepted for part 2: the flag is the request's,
+	// the stored class stays the truthful last admission.
 	Burst bool `json:"-"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
