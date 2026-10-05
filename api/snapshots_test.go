@@ -167,8 +167,13 @@ func TestSnapshotList(t *testing.T) {
 
 // writeBuildFiles creates buildID's directory under the template
 // storage root with files of the given sizes, the way the substrate
-// leaves a freshly written build (#125).
-func writeBuildFiles(t *testing.T, root, buildID string, sizes ...int) {
+// leaves a freshly written build (#125). It returns the size the OS
+// itself reports for the build (stat blocks × 512, i.e. allocated, not
+// apparent, size) — the number under test, whatever the host's
+// allocation unit. Tests must compare against this, not against the
+// sum of the requested sizes: a filesystem with >4 KiB blocks
+// (64 KiB-page arm64 ext4, some ZFS record sizes) rounds 4096 bytes up.
+func writeBuildFiles(t *testing.T, root, buildID string, sizes ...int) int64 {
 	t.Helper()
 	dir := filepath.Join(root, buildID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -178,6 +183,45 @@ func writeBuildFiles(t *testing.T, root, buildID string, sizes ...int) {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", i)), make([]byte, n), 0o644); err != nil {
 			t.Fatalf("write file: %v", err)
 		}
+	}
+	allocated, err := buildDiskUsage(dir)
+	if err != nil {
+		t.Fatalf("measure %s: %v", dir, err)
+	}
+	return allocated
+}
+
+// TestBuildDiskUsageDistinguishesEmptyFromFailed: buildDiskUsage
+// reports a readable-but-empty (or missing) build directory as 0 with
+// no error, but a directory it cannot read as an error — the write-time
+// path must not treat a legitimately 0-byte build as a failed stat
+// (#125).
+func TestBuildDiskUsageDistinguishesEmptyFromFailed(t *testing.T) {
+	root := t.TempDir()
+
+	// A missing directory is an unwritten build: 0, no error.
+	size, err := buildDiskUsage(filepath.Join(root, "absent"))
+	if size != 0 || err != nil {
+		t.Fatalf("missing dir: size=%d err=%v, want 0, nil", size, err)
+	}
+
+	// A readable, empty directory is a legitimate 0-byte build.
+	empty := filepath.Join(root, "empty")
+	if err := os.Mkdir(empty, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	size, err = buildDiskUsage(empty)
+	if size != 0 || err != nil {
+		t.Fatalf("empty dir: size=%d err=%v, want 0, nil", size, err)
+	}
+
+	// A build path whose stat itself fails — here an over-long name
+	// (ENAMETOOLONG, not IsNotExist) — is a failed measurement, and must
+	// be reported even though the walk still yields size 0. Permission
+	// bits can't force this branch in environments where the tests run
+	// as root, but a too-long component fails for every euid.
+	if _, err := buildDiskUsage(filepath.Join(root, strings.Repeat("l", 300))); err == nil {
+		t.Fatal("failed stat: err=nil, want a measurement failure")
 	}
 }
 
@@ -232,10 +276,13 @@ func seedSnapshotLease(t *testing.T, root string) (*httptest.Server, *Service, *
 func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
 	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
 	// The fake's Checkpoint only mints a build id; write the build
-	// directory the way the real substrate leaves it.
+	// directory the way the real substrate leaves it. Compare against
+	// the OS's own allocation count, not the requested bytes: the
+	// write-time path uses the same stat as the hourly pass.
+	var want int64
 	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
 		id := e2b.NewUUID()
-		writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 8192) // 12 KiB
+		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 8192)
 		return id, substrate.BuildRefs{}, nil
 	}
 
@@ -249,8 +296,8 @@ func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get build: %v", err)
 	}
-	if b.SizeBytes != 12*1024 {
-		t.Fatalf("build row size_bytes = %d, want %d", b.SizeBytes, 12*1024)
+	if b.SizeBytes != want {
+		t.Fatalf("build row size_bytes = %d, want %d", b.SizeBytes, want)
 	}
 
 	// /api/snapshots shows it with no hourly pass in between.
@@ -259,8 +306,20 @@ func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
 	if !ok {
 		t.Fatalf("checkpoint build %s missing from /api/snapshots: %v", buildID, list)
 	}
-	if got != 12*1024 {
-		t.Fatalf("snapshot size_bytes = %d, want %d", got, 12*1024)
+	if got != want {
+		t.Fatalf("snapshot size_bytes = %d, want %d", got, want)
+	}
+
+	// The hourly pass re-measures and stores the same number.
+	if err := svc.accountDisk(context.Background()); err != nil {
+		t.Fatalf("accountDisk: %v", err)
+	}
+	b, err = db.GetBuild(context.Background(), buildID)
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if b.SizeBytes != want {
+		t.Fatalf("after accounting size_bytes = %d, want %d", b.SizeBytes, want)
 	}
 }
 
@@ -269,9 +328,10 @@ func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
 // pauseLease path.
 func TestPauseBuildSizeAtWriteTime(t *testing.T) {
 	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	var want int64
 	sub.pauseFn = func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
 		id := e2b.NewUUID()
-		writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096) // 4 KiB
+		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096)
 		return id, substrate.BuildRefs{}, nil
 	}
 
@@ -287,12 +347,12 @@ func TestPauseBuildSizeAtWriteTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get pause build: %v", err)
 	}
-	if b.SizeBytes != 4096 {
-		t.Fatalf("pause build size_bytes = %d, want 4096", b.SizeBytes)
+	if b.SizeBytes != want {
+		t.Fatalf("pause build size_bytes = %d, want %d", b.SizeBytes, want)
 	}
 	_, list := doReq(t, "GET", ts.URL+"/api/snapshots", "token-a", nil)
-	if got, ok := snapshotSizeBytes(t, list, resume); !ok || got != 4096 {
-		t.Fatalf("snapshot pause size_bytes = %d, %v; want 4096", got, ok)
+	if got, ok := snapshotSizeBytes(t, list, resume); !ok || got != want {
+		t.Fatalf("snapshot pause size_bytes = %d, %v; want %d", got, ok, want)
 	}
 }
 
@@ -319,7 +379,9 @@ func TestBuildSizeMeasurementFailureStoresZero(t *testing.T) {
 		t.Fatalf("size_bytes = %d, want 0 (nothing on disk yet)", b.SizeBytes)
 	}
 
-	// The hourly pass corrects the row once the files are there.
+	// The hourly pass corrects the row once the files are there. The
+	// OS-allocated size of 2×4096 bytes is at least 8192 — exactly that
+	// on 4 KiB-block hosts, more where the allocation unit is larger.
 	writeBuildFiles(t, svc.cfg.TemplateStoragePath, buildID, 4096, 4096)
 	if err := svc.accountDisk(context.Background()); err != nil {
 		t.Fatalf("accountDisk: %v", err)
@@ -328,8 +390,8 @@ func TestBuildSizeMeasurementFailureStoresZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get build: %v", err)
 	}
-	if b.SizeBytes != 8192 {
-		t.Fatalf("after accounting size_bytes = %d, want 8192", b.SizeBytes)
+	if b.SizeBytes < 8192 {
+		t.Fatalf("after accounting size_bytes = %d, want at least 8192", b.SizeBytes)
 	}
 }
 
@@ -338,9 +400,10 @@ func TestBuildSizeMeasurementFailureStoresZero(t *testing.T) {
 // write-time sizes as well (#125).
 func TestDrainPauseBuildSizeAtWriteTime(t *testing.T) {
 	_, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	var want int64
 	sub.pauseFn = func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
 		id := e2b.NewUUID()
-		writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 4096) // 8 KiB
+		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 4096)
 		return id, substrate.BuildRefs{}, nil
 	}
 
@@ -357,7 +420,39 @@ func TestDrainPauseBuildSizeAtWriteTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get pause build: %v", err)
 	}
-	if b.SizeBytes != 8192 {
-		t.Fatalf("drain pause build size_bytes = %d, want 8192", b.SizeBytes)
+	if b.SizeBytes != want {
+		t.Fatalf("drain pause build size_bytes = %d, want %d", b.SizeBytes, want)
+	}
+}
+
+// TestCloneBuildSizeAtWriteTime: a clone's checkpoint build — the same
+// path fork's copies take — records its size at write time (#125),
+// visible in the row and in GET /api/snapshots straight after the
+// clone, with no hourly accounting pass in between.
+func TestCloneBuildSizeAtWriteTime(t *testing.T) {
+	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	var want int64
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		id := e2b.NewUUID()
+		want = writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 4096, 4096)
+		return id, substrate.BuildRefs{}, nil
+	}
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/clone", "token-a", nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("clone: status %d: %v", resp.StatusCode, body)
+	}
+	buildID := body["branch_tag"].(string)
+
+	b, err := db.GetBuild(context.Background(), buildID)
+	if err != nil {
+		t.Fatalf("get clone build: %v", err)
+	}
+	if b.SizeBytes != want {
+		t.Fatalf("clone build size_bytes = %d, want %d", b.SizeBytes, want)
+	}
+	_, list := doReq(t, "GET", ts.URL+"/api/snapshots", "token-a", nil)
+	if got, ok := snapshotSizeBytes(t, list, buildID); !ok || got != want {
+		t.Fatalf("snapshot clone size_bytes = %d, %v; want %d", got, ok, want)
 	}
 }

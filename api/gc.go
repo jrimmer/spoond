@@ -337,38 +337,32 @@ func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) error 
 // storage root (allocated blocks × 512 per regular file): the per-build
 // half of the hourly disk accounting and of the write-time recording a
 // fresh build's row gets (#125, measureNewBuildOnDisk). A missing or
-// unreadable directory measures 0.
-func (s *Service) buildSizeOnDisk(buildID string) int64 {
+// unreadable directory measures 0; the error says which, so the
+// write-time path can tell a real failure from an empty build.
+func (s *Service) buildSizeOnDisk(buildID string) (int64, error) {
 	return buildDiskUsage(filepath.Join(s.cfg.TemplateStoragePath, buildID))
 }
 
 // measureNewBuildOnDisk is the Service's write-time measurer (#125):
 // the substrate has just written buildID's files, so the size goes into
 // the fresh build's row — /api/snapshots then shows a size immediately,
-// not only after the next hourly accounting pass. A missing or
-// unreadable build directory logs and measures 0; the hourly pass
-// corrects the row once it can read the files.
+// not only after the next hourly accounting pass. A build directory the
+// substrate never wrote or that cannot be read logs and measures 0; the
+// hourly pass corrects the row once it can read the files. A readable
+// but empty directory measures 0 without a complaint.
 func (s *Service) measureNewBuildOnDisk(buildID string) int64 {
-	size := s.buildSizeOnDisk(buildID)
-	if size == 0 {
-		s.log.Printf("build size: %s: measured 0 under %s", buildID, s.cfg.TemplateStoragePath)
+	size, err := s.buildSizeOnDisk(buildID)
+	if err != nil {
+		s.log.Printf("build size: %s: %v; storing 0 until the hourly pass", buildID, err)
 	}
 	return size
-}
-
-// measureNewBuild measures a build the substrate just wrote (#125), for
-// storing size_bytes with the fresh build's row. Nil-safe for tests.
-func (s *Service) measureNewBuild(buildID string) int64 {
-	if s.measureBuild == nil {
-		return s.measureNewBuildOnDisk(buildID)
-	}
-	return s.measureBuild(buildID)
 }
 
 // accountDisk measures every non-deleted build's directory (allocated
 // blocks × 512 per regular file) into size_bytes, and sets the
 // snapshot/storage gauges. Runs with the GC, once an hour; it also
-// re-measures builds whose write-time recording (#125) measured 0.
+// re-measures builds whose write-time recording (#125) measured 0
+// because the files were missing or unreadable at write time.
 func (s *Service) accountDisk(ctx context.Context) error {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
@@ -379,7 +373,7 @@ func (s *Service) accountDisk(ctx context.Context) error {
 		if b.State == "deleted" {
 			continue
 		}
-		size := s.buildSizeOnDisk(b.BuildID) // re-measures, correcting write-time zeros
+		size, _ := s.buildSizeOnDisk(b.BuildID)
 		perKind[b.Kind] += size
 		if size != b.SizeBytes {
 			if err := s.db.UpdateBuildSize(ctx, b.BuildID, size); err != nil {
@@ -397,15 +391,30 @@ func (s *Service) accountDisk(ctx context.Context) error {
 }
 
 // buildDiskUsage sums the allocated size (stat blocks × 512) of every
-// regular file under dir. A missing or unreadable directory counts as 0.
-func buildDiskUsage(dir string) int64 {
+// regular file under dir. A missing directory measures 0 with no error
+// (an unwritten build is empty, not failed); any read or stat failure —
+// the root itself or one file's Info — is returned, so callers can tell
+// a failed measurement from a legitimately 0-byte build.
+func buildDiskUsage(dir string) (int64, error) {
 	var total int64
-	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil || !d.Type().IsRegular() {
+	var firstErr error
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			switch {
+			case path == dir && os.IsNotExist(err):
+			case firstErr == nil:
+				firstErr = fmt.Errorf("stat %s: %w", path, err)
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("stat %s: %w", path, err)
+			}
 			return nil
 		}
 		if st, ok := info.Sys().(*syscall.Stat_t); ok {
@@ -413,7 +422,7 @@ func buildDiskUsage(dir string) int64 {
 		}
 		return nil
 	})
-	return total
+	return total, firstErr
 }
 
 // storageFreeBytes reports the statfs free bytes of dir; 0 when statfs

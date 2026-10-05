@@ -260,9 +260,6 @@ type Service struct {
 	// the held-lease pressure and critical rules (2.1). Tests replace it
 	// to exercise those thresholds without a real filesystem.
 	diskCapacity func(path string) (total, free uint64, err error)
-	// measureBuild overrides write-time build-size measurement (2.3
-	// #125) for tests; nil measures the build directory on disk.
-	measureBuild func(buildID string) int64
 	// refreshMu serializes refreshPeers runs, which are scheduled
 	// asynchronously after lifecycle events (U09).
 	refreshMu sync.Mutex
@@ -1345,7 +1342,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 		VCPU:               parent.VCPU,
 		MemoryMB:           parent.MemoryMB,
 		DiskMB:             parent.DiskMB,
-		SizeBytes:          s.measureNewBuild(buildID),
+		SizeBytes:          s.measureNewBuildOnDisk(buildID),
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}); err != nil {
@@ -1653,7 +1650,7 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		VCPU:               parent.VCPU,
 		MemoryMB:           parent.MemoryMB,
 		DiskMB:             parent.DiskMB,
-		SizeBytes:          s.measureNewBuild(buildID),
+		SizeBytes:          s.measureNewBuildOnDisk(buildID),
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
