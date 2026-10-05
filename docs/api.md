@@ -128,7 +128,7 @@ while suspended, where `resume_build_id` is the one to resume from).
 Every lease carries a `generation` (in the create response and in every
 list and detail row): the count of times the guest's memory did **not**
 continue from where its processes left it. It starts at `1` on create
-and is bumped — and persisted — by exactly two paths:
+and is bumped — and persisted — by exactly three paths:
 
 - **Crash recovery.** The crash reconcile resumed the lease from its
   checkpoint build; the processes in the guest find themselves in a
@@ -140,6 +140,10 @@ and is bumped — and persisted — by exactly two paths:
   the generation stays. Before 2.2.1 it bumped there too. The cold mode
   (`?mode=cold`) puts a persistent lease on the fresh-guest path too,
   and bumps its generation.
+- **Restore to a kept checkpoint (2.3, #121).**
+  `POST /api/leases/{id}/restore` replaces the sandbox with one from a
+  checkpoint the lease pinned — the guest finds itself in that older
+  snapshot, so work newer than it is gone.
 
 A planned suspend/resume and the admin drain/undrain continue the
 memory — the guest is resumed from the snapshot its own pause wrote —
@@ -415,10 +419,48 @@ map capacity errors to `503`.
 Owner only, live leases only (`409` otherwise, including while another
 operation is in flight). Writes a checkpoint build the lease can be
 recovered from, and the lease keeps running from it. This is also what
-the background checkpoint loop does for a due lease. Response:
+the background checkpoint loop does for a due lease. The optional body
+`{"keep":true}` **keeps** the checkpoint: the build joins the GC's kept
+set while the lease lives and becomes a restore point for
+`POST /api/leases/{id}/restore` (see below) — otherwise it ages out of
+the catalog like any unreferenced snapshot once the lease moves on.
+Releasing the lease (any path) drops its kept builds, and
+`DELETE /api/snapshots/{build_id}` also unpins a kept build. Response:
 
 ```json
-{"id":"…","build_id":"<uuid>","at":"2026-10-01T12:00:00Z"}
+{"id":"…","build_id":"<uuid>","at":"2026-10-01T12:00:00Z","kept":true}
+```
+
+`kept` mirrors the request (`false` when the body was empty).
+
+### `POST /api/leases/{id}/restore` — roll back to a kept checkpoint
+
+Owner or admin (anyone else gets the usual `404`). Replaces the lease's
+sandbox with one from one of the lease's **own** checkpoints or kept
+builds — the guest rolls back to that snapshot in place:
+
+```json
+{"build_id": "<uuid>"}
+```
+
+The build must be this lease's newest checkpoint or a build it pinned
+with `{"keep":true}`; another lease's checkpoint, another owner's build
+and pause builds all answer `404`, like a lease the caller cannot see.
+Works on a running or a suspended lease; `409` while another operation
+is in flight; a substrate capacity failure maps to `503`.
+
+The lease keeps its id, owner, holder, name, network policy, exposed
+ports and `checkpoint_interval`. Everything else about the guest starts
+over from the checkpoint: files and processes newer than the snapshot
+are gone, the generation bumps (see [Generations](#generations)),
+`/run/spoond/generation` is rewritten, the create-time secrets are
+re-written into the fresh sandbox, and the `restored` event carries the
+build id. The lease comes back running (a suspended lease too), and its
+pause builds stop being its resume point (`resume_build_id` is cleared;
+the next suspend sets it as usual). Response `200`:
+
+```json
+{"id":"…","build_id":"<uuid>","generation":2,"status":"running"}
 ```
 
 ### `PUT /api/leases/{id}/checkpoint-policy` — set the checkpoint interval
@@ -645,6 +687,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
+| `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
@@ -807,7 +850,11 @@ Checks in order: `404` unknown or already deleted; `403` for template
 builds (they belong to the image catalog); `404` for another owner's;
 `409 {"error":"snapshot in use"}` while the GC's kept set references it;
 otherwise the build's files are removed and the row marked deleted →
-`204`.
+`204`. A delete also **unpins** the build (2.3, #121): its kept-builds
+rows go first, so a checkpoint pinned with `{"keep":true}` can be
+removed ahead of the lease's own release (the delete still answers `409`
+first while the lease itself runs from the build; the pin is gone after
+that call, and the next one deletes).
 
 ### `GET /healthz`
 

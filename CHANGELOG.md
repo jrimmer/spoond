@@ -12,6 +12,22 @@ summarised from README "Status".
 
 ### Added
 
+- **Restore a lease in place to a kept checkpoint (#121).**
+  `POST /api/leases/{id}/checkpoint` accepts `{"keep":true}`: the
+  checkpoint build is pinned — it joins the GC's kept set while the
+  lease lives (migration 0011's `lease_kept_builds`) and shows up as a
+  restore point. `POST /api/leases/{id}/restore`
+  `{"build_id":"<uuid>"}` then rolls the lease's guest back to that
+  snapshot in place: the lease keeps its id, holder, name, network
+  policy, exposed ports and `checkpoint_interval`; the generation bumps
+  and `/run/spoond/generation` is rewritten; create-time secrets are
+  re-written; the new `restored` event carries the build id; a
+  suspended lease comes back running. Owner or admin, others `404`; the
+  build must be the lease's own newest checkpoint or a kept build of
+  that lease (anything else is `404`); `409` while busy. Releasing the
+  lease (any path) drops its kept rows, so the next GC pass may reclaim
+  the builds; `DELETE /api/snapshots/{build_id}` also unpins a kept
+  build. Conformance S6 checks it.
 - **Cold restart: `POST /api/leases/{id}/restart?mode=cold` (#120).**
   A warm restart (the default) keeps a persistent lease's guest by
   pausing and resuming it, which cannot unstick a hung process. The new
