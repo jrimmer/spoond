@@ -131,6 +131,20 @@ func (db *DB) DeleteLease(ctx context.Context, id string) error {
 	return nil
 }
 
+// GetLease returns one lease row by id (store.ErrNotFound when the id
+// is unknown).
+func (db *DB) GetLease(ctx context.Context, id string) (LeaseRow, error) {
+	row, err := scanLease(db.r.QueryRowContext(ctx,
+		`SELECT `+leaseColumns+` FROM leases WHERE id = ?`, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LeaseRow{}, ErrNotFound
+	}
+	if err != nil {
+		return LeaseRow{}, fmt.Errorf("store: get lease %s: %w", id, err)
+	}
+	return row, nil
+}
+
 // ListLeases returns every lease row, ordered by id.
 func (db *DB) ListLeases(ctx context.Context) ([]LeaseRow, error) {
 	rows, err := db.r.QueryContext(ctx, `SELECT `+leaseColumns+` FROM leases ORDER BY id`)

@@ -1127,9 +1127,12 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		Holder:      holder,
 		HolderUrl:   holderURL,
 		State:       "running",
-		// Every lease starts on generation 1 (2.2).
-		Generation: 1,
-		TemplateID: img.TemplateID,
+		// Every lease starts on generation 1 (2.2) and on the host's
+		// checkpoint default (-1), unless the create request carries its
+		// own interval (the API stamps it after grant).
+		Generation:         1,
+		CheckpointInterval: checkpointIntervalHost,
+		TemplateID:         img.TemplateID,
 	}
 
 	// Pool: pop the oldest entry for the image. The pool serves
