@@ -19,9 +19,10 @@ import (
 // Builds form chains (parent_build_id) and their headers reference other
 // builds' blocks (build_refs, from E2B's scheduling metadata). The GC
 // computes a root set — every image's current build, every live lease's
-// resume/checkpoint builds, every live sandbox's build, every in-flight
-// build — keeps the closure of that set, and deletes (dry-run by
-// default) ready/failed builds older than an hour that fall outside it.
+// resume/checkpoint builds, every kept build of a live lease (2.3,
+// #121), every live sandbox's build, every in-flight build — keeps the
+// closure of that set, and deletes (dry-run by default) ready/failed
+// builds older than an hour that fall outside it.
 // A lease lost in a substrate crash keeps its resume/checkpoint builds
 // for a grace period after the loss (7 d persistent, 1 d otherwise)
 // before they may be reclaimed (owner decision 2026-10-02). A lease
@@ -168,12 +169,12 @@ func (s *Service) gcPass(ctx context.Context) error {
 }
 
 // keptBuilds computes the GC keep set. Roots are every image's current
-// build, every live lease's resume and checkpoint builds, every live
-// sandbox's build (pool sandboxes included), and every in-flight build.
-// A lost lease's resume and checkpoint builds stay roots for a grace
-// period after the loss — 7 days for a persistent lease, 1 day
-// otherwise — so its snapshots outlive the crash that lost it.
-// Every root's ancestor chain is kept in full, and every kept build's
+// build, every live lease's resume and checkpoint builds, every kept
+// build of a live lease (2.3, #121), every live sandbox's build (pool
+// sandboxes included), and every in-flight build. A lost lease's resume
+// and checkpoint builds stay roots for a grace period after the loss —
+// 7 days for a persistent lease, 1 day otherwise — so its snapshots
+// outlive the crash that lost it. Every root's ancestor chain is kept in full, and every kept build's
 // header-referenced builds (build_refs) are kept in full — including
 // their own ancestors and refs, transitively.
 //
@@ -247,6 +248,10 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gc: list leases: %w", err)
 	}
+	keptBy, err := s.db.ListKeptBuilds(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gc: list kept builds: %w", err)
+	}
 	now := s.now()
 	for _, l := range leases {
 		if l.State == "lost" {
@@ -266,6 +271,12 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 		}
 		keep(l.ResumeBuildID)
 		keep(l.LastCheckpointBuildID)
+		// The builds the lease pinned with {"keep":true} are roots while
+		// the lease lives (2.3, #121); releasing the lease drops its kept
+		// rows, and a lost lease's keeps lapse with its grace period.
+		for _, b := range keptBy[l.ID] {
+			keep(b)
+		}
 	}
 	sbs, err := s.db.ListSandboxes(ctx)
 	if err != nil {
@@ -444,6 +455,14 @@ func (s *Server) handleSnapshotDelete(w http.ResponseWriter, r *http.Request) {
 	if b.Owner != owner {
 		writeError(w, http.StatusNotFound, "snapshot not found")
 		return
+	}
+	// DELETE /api/snapshots/{build_id} also unpins a kept build (2.3,
+	// #121): the owner deleting the snapshot by id counts as releasing
+	// the pin, so a kept build can be removed ahead of the lease's own
+	// release. The rows go first, so a pinned build deletes instead of
+	// answering 409 forever.
+	if err := s.svc.db.UnkeepBuildAny(r.Context(), b.BuildID); err != nil {
+		s.svc.log.Printf("snapshot: unkeep %s: %v", b.BuildID, err)
 	}
 	kept, err := s.svc.keptBuilds(r.Context())
 	if err != nil {

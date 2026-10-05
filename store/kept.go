@@ -38,6 +38,20 @@ func (db *DB) UnkeepBuild(ctx context.Context, leaseID, buildID string) error {
 	return nil
 }
 
+// UnkeepBuildAny drops every kept-builds row naming the build, across
+// all leases. The snapshot delete path uses it: the owner deleting the
+// snapshot unpins it wherever it is pinned (the build row carries the
+// owner; a lease keeping another owner's build is not possible through
+// the API, so this matches at most the caller's own pins).
+func (db *DB) UnkeepBuildAny(ctx context.Context, buildID string) error {
+	_, err := db.w.ExecContext(ctx,
+		`DELETE FROM lease_kept_builds WHERE build_id = ?`, buildID)
+	if err != nil {
+		return fmt.Errorf("store: unkeep build %s: %w", buildID, err)
+	}
+	return nil
+}
+
 // DeleteKeptBuilds drops every kept-builds row of one lease: the release
 // path, so the next GC pass may reclaim the builds.
 func (db *DB) DeleteKeptBuilds(ctx context.Context, leaseID string) error {
