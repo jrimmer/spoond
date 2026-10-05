@@ -30,6 +30,12 @@ type testSub struct {
 	probeFailAll bool
 	execStdout   string // canned stdout for non-probe execs ("" = "ok\n")
 
+	// checkpointFn/pauseFn, when set, replace the fake's Checkpoint and
+	// Pause: they mint the build id and may leave the fresh build's
+	// files on disk (the build-size-at-write-time tests, #125).
+	checkpointFn func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error)
+	pauseFn      func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error)
+
 	// lastStart records the most recent Start request (the stream tests
 	// pin the initial PTY size it carries).
 	startMu   sync.Mutex
@@ -49,6 +55,22 @@ func (ts *testSub) Start(ctx context.Context, sandboxID string, req substrate.St
 	ts.lastStart = req
 	ts.startMu.Unlock()
 	return ts.Fake.Start(ctx, sandboxID, req)
+}
+
+// Checkpoint delegates to checkpointFn when set, the fake otherwise.
+func (ts *testSub) Checkpoint(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+	if ts.checkpointFn != nil {
+		return ts.checkpointFn(ctx, sandboxID)
+	}
+	return ts.Fake.Checkpoint(ctx, sandboxID)
+}
+
+// Pause delegates to pauseFn when set, the fake otherwise.
+func (ts *testSub) Pause(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
+	if ts.pauseFn != nil {
+		return ts.pauseFn(ctx, sandboxID, templateID)
+	}
+	return ts.Fake.Pause(ctx, sandboxID, templateID)
 }
 
 func newTestSub() *testSub {

@@ -3,12 +3,17 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
 	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
@@ -157,5 +162,202 @@ func TestSnapshotList(t *testing.T) {
 	}
 	if snap.CreatedAt == "" || !strings.Contains(snap.CreatedAt, "T") {
 		t.Errorf("created_at = %q, want RFC 3339", snap.CreatedAt)
+	}
+}
+
+// writeBuildFiles creates buildID's directory under the template
+// storage root with files of the given sizes, the way the substrate
+// leaves a freshly written build (#125).
+func writeBuildFiles(t *testing.T, root, buildID string, sizes ...int) {
+	t.Helper()
+	dir := filepath.Join(root, buildID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	for i, n := range sizes {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", i)), make([]byte, n), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+}
+
+// snapshotSizeBytes reads one snapshot's size_bytes out of a
+// GET /api/snapshots body.
+func snapshotSizeBytes(t *testing.T, body map[string]any, buildID string) (int64, bool) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	var out struct {
+		Snapshots []struct {
+			BuildID   string `json:"build_id"`
+			SizeBytes int64  `json:"size_bytes"`
+		} `json:"snapshots"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("decode snapshots: %v", err)
+	}
+	for _, s := range out.Snapshots {
+		if s.BuildID == buildID {
+			return s.SizeBytes, true
+		}
+	}
+	return 0, false
+}
+
+// seedSnapshotLease grants a running persistent lease over the HTTP
+// API. Tests set sub.checkpointFn / sub.pauseFn to leave the fresh
+// build's files under root (svc.cfg.TemplateStoragePath) before the
+// write-time measurement runs.
+func seedSnapshotLease(t *testing.T, root string) (*httptest.Server, *Service, *store.DB, *testSub, *Lease) {
+	t.Helper()
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = root
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status %d: %v", resp.StatusCode, body)
+	}
+	lease := svc.lookup("consumer-a", body["id"].(string))
+	if lease == nil {
+		t.Fatal("created lease not found")
+	}
+	return ts, svc, db, sub, lease
+}
+
+// TestCheckpointBuildSizeAtWriteTime: a manual checkpoint (and the
+// same path the periodic loop, clone and fork take) records the fresh
+// build's size_bytes immediately (#125): the row and GET /api/snapshots
+// show it with no hourly accounting pass in between.
+func TestCheckpointBuildSizeAtWriteTime(t *testing.T) {
+	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	// The fake's Checkpoint only mints a build id; write the build
+	// directory the way the real substrate leaves it.
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		id := e2b.NewUUID()
+		writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 8192) // 12 KiB
+		return id, substrate.BuildRefs{}, nil
+	}
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/checkpoint", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("checkpoint: status %d: %v", resp.StatusCode, body)
+	}
+	buildID := body["build_id"].(string)
+
+	b, err := db.GetBuild(context.Background(), buildID)
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if b.SizeBytes != 12*1024 {
+		t.Fatalf("build row size_bytes = %d, want %d", b.SizeBytes, 12*1024)
+	}
+
+	// /api/snapshots shows it with no hourly pass in between.
+	_, list := doReq(t, "GET", ts.URL+"/api/snapshots", "token-a", nil)
+	got, ok := snapshotSizeBytes(t, list, buildID)
+	if !ok {
+		t.Fatalf("checkpoint build %s missing from /api/snapshots: %v", buildID, list)
+	}
+	if got != 12*1024 {
+		t.Fatalf("snapshot size_bytes = %d, want %d", got, 12*1024)
+	}
+}
+
+// TestPauseBuildSizeAtWriteTime: a suspend's pause build records its
+// size at write time too (#125). The drain pauses through the same
+// pauseLease path.
+func TestPauseBuildSizeAtWriteTime(t *testing.T) {
+	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	sub.pauseFn = func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
+		id := e2b.NewUUID()
+		writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096) // 4 KiB
+		return id, substrate.BuildRefs{}, nil
+	}
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/suspend", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("suspend: status %d: %v", resp.StatusCode, body)
+	}
+	svc.store.mu.Lock()
+	resume := lease.ResumeBuildID
+	svc.store.mu.Unlock()
+
+	b, err := db.GetBuild(context.Background(), resume)
+	if err != nil {
+		t.Fatalf("get pause build: %v", err)
+	}
+	if b.SizeBytes != 4096 {
+		t.Fatalf("pause build size_bytes = %d, want 4096", b.SizeBytes)
+	}
+	_, list := doReq(t, "GET", ts.URL+"/api/snapshots", "token-a", nil)
+	if got, ok := snapshotSizeBytes(t, list, resume); !ok || got != 4096 {
+		t.Fatalf("snapshot pause size_bytes = %d, %v; want 4096", got, ok)
+	}
+}
+
+// TestBuildSizeMeasurementFailureStoresZero: a build directory the
+// substrate never wrote (or that cannot be read) stores 0 at write
+// time; the hourly pass re-measures and corrects the row.
+func TestBuildSizeMeasurementFailureStoresZero(t *testing.T) {
+	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	// The fake writes nothing: the build directory is missing.
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		return e2b.NewUUID(), substrate.BuildRefs{}, nil
+	}
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/checkpoint", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("checkpoint: status %d: %v", resp.StatusCode, body)
+	}
+	buildID := body["build_id"].(string)
+	b, err := db.GetBuild(context.Background(), buildID)
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if b.SizeBytes != 0 {
+		t.Fatalf("size_bytes = %d, want 0 (nothing on disk yet)", b.SizeBytes)
+	}
+
+	// The hourly pass corrects the row once the files are there.
+	writeBuildFiles(t, svc.cfg.TemplateStoragePath, buildID, 4096, 4096)
+	if err := svc.accountDisk(context.Background()); err != nil {
+		t.Fatalf("accountDisk: %v", err)
+	}
+	b, err = db.GetBuild(context.Background(), buildID)
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if b.SizeBytes != 8192 {
+		t.Fatalf("after accounting size_bytes = %d, want 8192", b.SizeBytes)
+	}
+}
+
+// TestDrainPauseBuildSizeAtWriteTime: the admin drain pauses every live
+// lease through the same pauseLease path, so its pause builds carry
+// write-time sizes as well (#125).
+func TestDrainPauseBuildSizeAtWriteTime(t *testing.T) {
+	_, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	sub.pauseFn = func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
+		id := e2b.NewUUID()
+		writeBuildFiles(t, svc.cfg.TemplateStoragePath, id, 4096, 4096) // 8 KiB
+		return id, substrate.BuildRefs{}, nil
+	}
+
+	// The full drain waits for the node to go quiet, which the fake
+	// never reports; the per-lease pause is the path under test.
+	if _, err := svc.pauseLease(context.Background(), lease, true); err != nil {
+		t.Fatalf("drain pause: %v", err)
+	}
+
+	svc.store.mu.Lock()
+	resume := lease.ResumeBuildID
+	svc.store.mu.Unlock()
+	b, err := db.GetBuild(context.Background(), resume)
+	if err != nil {
+		t.Fatalf("get pause build: %v", err)
+	}
+	if b.SizeBytes != 8192 {
+		t.Fatalf("drain pause build size_bytes = %d, want 8192", b.SizeBytes)
 	}
 }
