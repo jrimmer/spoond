@@ -96,6 +96,12 @@ type Lease struct {
 	// memory and do not bump it. Returned by the lease API as
 	// "generation" and written into the guest at /run/spoond/generation.
 	Generation int64 `json:"generation"`
+	// CheckpointInterval is the lease's own periodic checkpoint
+	// interval in seconds (2.3, #122): -1 = the host default
+	// (CHECKPOINT_INTERVAL_MINS, itself 0 = never), 0 = never,
+	// >0 = seconds. The lease API reports the effective value (the
+	// host default already resolved) as "checkpoint_interval".
+	CheckpointInterval int64 `json:"-"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -2360,6 +2366,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LastAction:            l.LastAction,
 		LastActionAt:          l.LastActionAt,
 		Generation:            l.Generation,
+		CheckpointInterval:    l.CheckpointInterval,
 	}
 }
 
@@ -2398,6 +2405,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LastAction:            r.LastAction,
 		LastActionAt:          r.LastActionAt,
 		Generation:            r.Generation,
+		CheckpointInterval:    r.CheckpointInterval,
 	}
 }
 
