@@ -144,6 +144,18 @@ the same value as `DASH_EVENTS_TOKEN` in the dashboard's.
   one mid-item, and the services panel folds units past its row cap
   into a final `+N more` row.
 
+### Fixed
+
+- **A snapshot's `size_bytes` was 0 until the next hourly accounting
+  pass (#125).** A fresh checkpoint or pause build's disk size is now
+  measured when the build is written and stored with its row, so
+  `GET /api/snapshots` and the dashboard show a size immediately
+  instead of up to an hour later. The measurement covers every path
+  that writes a fresh build: checkpoints (manual, periodic, clone and
+  fork), suspend and the admin drain. A failed measurement logs and
+  stores 0; the hourly pass still re-measures every build and corrects
+  the row.
+
 ### Security
 
 - **Guest system binaries were writable by any user (#124).** E2B's

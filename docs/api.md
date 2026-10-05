@@ -849,6 +849,10 @@ ones:
                "created_at":"…","in_use":false}]}
 ```
 
+`size_bytes` is measured when the build is written (checkpoint, pause,
+clone, fork, drain) and re-measured by the hourly disk accounting pass,
+which also corrects any build whose write-time measurement came out 0.
+
 ### `DELETE /api/snapshots/{build_id}` — delete a snapshot build
 
 Checks in order: `404` unknown or already deleted; `403` for template

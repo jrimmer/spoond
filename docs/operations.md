@@ -259,7 +259,9 @@ outside it that have been idle for an hour.
 Disk accounting runs with the GC: each non-deleted build's `size_bytes`
 is refreshed (allocated blocks, not apparent size) and exposed as
 `spoond_snapshot_bytes{kind}`, with `spoond_storage_free_bytes` for the
-store's free space.
+store's free space. A freshly written build's `size_bytes` is measured
+at write time and then confirmed hourly, so `GET /api/snapshots` shows
+a new snapshot's size immediately.
 
 Interaction with the held-lease critical rule (rule 5 in [Held-lease
 limits](#held-lease-limits)): a release frees no disk by itself — the
