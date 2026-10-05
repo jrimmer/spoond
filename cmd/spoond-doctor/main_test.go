@@ -91,7 +91,7 @@ func TestCheckLeasesLost(t *testing.T) {
 		t.Helper()
 		if err := db.UpsertLease(context.Background(), store.LeaseRow{
 			ID: id, Owner: "user-1", Image: "py-base", State: "lost",
-			Persistent: persistent, LostAt: lostAt,
+			Persistent: persistent, LostAt: lostAt, Class: "guaranteed",
 			CreatedAt: now, ExpiresAt: now, LastActive: now,
 		}); err != nil {
 			t.Fatalf("seed lease %s: %v", id, err)
@@ -101,7 +101,7 @@ func TestCheckLeasesLost(t *testing.T) {
 	// the keep-until time of its grace period (7 d persistent, 1 d not).
 	if err := db.UpsertLease(context.Background(), store.LeaseRow{
 		ID: "l-run", Owner: "user-1", Image: "go-base", State: "running",
-		CreatedAt: now, ExpiresAt: now, LastActive: now,
+		CreatedAt: now, ExpiresAt: now, LastActive: now, Class: "guaranteed",
 	}); err != nil {
 		t.Fatalf("seed running lease: %v", err)
 	}
