@@ -35,6 +35,9 @@ const (
 	// LeaseCheckpointPolicy marks a per-lease checkpoint interval change
 	// (2.3, #122): the detail carries the new effective seconds.
 	LeaseCheckpointPolicy LeaseEventType = "checkpoint_policy"
+	// LeaseRestored marks a restore in place to a kept checkpoint
+	// (2.3, #121): the detail carries the restored-to build id.
+	LeaseRestored LeaseEventType = "restored"
 	// LeaseStreamGap marks a hole in a stream rather than a lifecycle
 	// change. It is synthesized when a consumer's position cannot be
 	// honoured (the epoch changed after a restart, the pointed-at event

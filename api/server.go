@@ -228,6 +228,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Per-lease checkpoint interval (2.3, #122): owner or admin, 404 for
 	// anyone else.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/checkpoint-policy", s.handleCheckpointPolicy)
+	// Restore in place to a kept checkpoint (2.3, #121): owner or admin,
+	// 404 for anyone else and for a build that is not the lease's own.
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/restore", s.handleRestore)
 	// Lease file operations (#114): download/upload/stat/mkdir/remove a
 	// guest file through the substrate. Owner or admin; 404 for anyone
 	// else, 409 while suspended.
