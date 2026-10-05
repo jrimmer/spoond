@@ -1740,24 +1740,27 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 // longer its resume point (the next suspend sets it as usual). A
 // suspended lease comes back running.
 func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lease, error) {
-	if l.Suspended {
-		// A suspended lease holds no hugepages, so its charge was freed
-		// at suspend; the fresh guest needs it back, so the cold restart
-		// re-passes the memory check before any sandbox is created
-		// (#128). The restart adds no lease, so only the memory cap
-		// applies.
-		if err := s.reserveQuota(owner, 1, l.MemoryMB, false); err != nil {
-			return nil, err
-		}
-		defer func() { s.releaseQuotaReservation(owner, 1, l.MemoryMB) }()
-	}
-	// The fresh guest is created before the old one goes: a failed
-	// create (no capacity, the image gone) leaves the lease exactly as it
-	// was, running or suspended, instead of live with no sandbox.
+	// The fresh guest runs the image's current memory_mb, so that is the
+	// charge to re-admit for a suspended lease (#128) — fetched before
+	// anything else, so a catalog failure answers before any change. A
+	// cold restart adds no lease, so only the memory cap applies. A
+	// running lease is already charged; its stamp is re-set below.
 	img, b, err := s.imageBuild(ctx, l.Image)
 	if err != nil {
 		return nil, err
 	}
+	if l.Suspended {
+		// A suspended lease holds no hugepages, so its charge was freed
+		// at suspend; the fresh guest needs it back, so the cold restart
+		// re-passes the memory check before any sandbox is created.
+		if err := s.reserveQuota(owner, 1, img.MemoryMB, false); err != nil {
+			return nil, err
+		}
+		defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
+	}
+	// The fresh guest is created before the old one goes: a failed
+	// create (no capacity) leaves the lease exactly as it was, running
+	// or suspended, instead of live with no sandbox.
 	sb, err := s.createSandbox(ctx, img, b, false, "", l)
 	if err != nil {
 		return nil, err
