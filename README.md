@@ -35,7 +35,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
 - **Lease API**: `POST /api/leases` (image, TTL, persistent, network
   policy, exposed ports, holder, secrets; `/api/sandboxes` is kept as an
   alias), then exec, stream (WebSocket PTY), keepalive, suspend/resume,
-  restart, checkpoint, fork, clone, tag, comment, delete. Auth via bearer
+  restart (warm or cold), checkpoint, restore, fork, clone, tag, comment,
+  delete. Auth via bearer
   tokens (`CONSUMER_TOKENS=token=owner,...`) or per-user identity tokens.
   Leases and the image catalog persist in SQLite, so a backend restart
   loses nothing. On every lease:
@@ -52,8 +53,13 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     positions.
   - **Generations**: a `generation` counter, also in
     `/run/spoond/generation` in the guest, bumped when the guest's memory
-    did not continue (crash recovery, restart), so a client can tell its
-    processes were restored.
+    did not continue (crash recovery, a cold or non-persistent restart, a
+    restore), so a client can tell its processes were restored.
+  - **Checkpoints on request**: no periodic checkpoints unless the lease
+    asks (`checkpoint_interval`); `POST /checkpoint` any time, with
+    `keep: true` to pin it, and `POST /restore` puts the lease back to a
+    kept checkpoint in place. `restart?mode=cold` gives the lease a fresh
+    guest from its image, keeping its id.
   - **Holders**: `holder` and `holder_url` say what holds a lease (a CI
     job, an orchestrator's run, someone's scratch work). A held lease
     outlives its TTL until its hold lapses, and automatic limits (idle
@@ -124,7 +130,10 @@ history), live leases (id, image, owner, run state, policy, age, time
 left, holder — on the page the holder is a link; a hold marks the
 holder ◆, or ◉ once lapsed), the image catalog beside the systemd
 units, a refusals-and-failures row with the mean create and resume
-times, and the backend's last activity. Above the panels sits one
+times, and the newest lease events (from the lease event stream,
+through a read-only `EVENTS_TOKEN`), with a status line at the bottom.
+Its layout puts capacity and host side by side at 104 columns and
+stacks them below that. Above the panels sits one
 attention banner, shown only when something needs a person: a unit not
 active, a lost lease, free hugepages or snapshot disk past the danger
 level, the TLS certificate inside 30 days of expiring, or an automatic
@@ -141,7 +150,8 @@ tag.
 
 On host it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
 auth). Its data access is read-only: `/metrics` through the scrape-only
-`METRICS_TOKEN` (which the lease API refuses), the SQLite catalog opened
+`METRICS_TOKEN` (which the lease API refuses), the lease event stream
+through the events-only `EVENTS_TOKEN`, the SQLite catalog opened
 read-only, user names from the identity store, `/proc` and systemd.
 
 Setting it up is manual today; generating the credentials as part of
@@ -182,6 +192,13 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v2.3: checkpoints on the lease's terms.** Periodic checkpoints are off
+by default and set per lease (`checkpoint_interval`); a checkpoint can be
+kept and a lease restored to it in place; `restart?mode=cold` gives a
+lease a fresh guest without changing its id. Guest images no longer
+leave root-run binaries writable by other users. The dashboard is laid
+out to its mockup, with a lease events panel.
 
 **v2.2: driving work inside a lease.** Lease files, guest port dial,
 secrets as files, the lease event stream and generations on the lease
