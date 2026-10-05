@@ -556,10 +556,18 @@ for watching rather than triage. It draws the whole frame as one
 character grid at a fixed width — capacity (running/limit meter, leases
 by state, queued, granted, swept, and one row per image with live
 leases) beside the host meters (CPU, memory, hugepages, snapshot and
-root disk) at a wide frame, stacked below it at a narrow one — then
-five-minute throughput sparklines, live leases with holders, images,
-systemd units, refusal and failure counters, and the backend's last
-activity — plus
+root disk) at a wide frame, stacked below it at a narrow one — then a
+full-width throughput panel (running leases, requests per second,
+creates per minute and egress connections, each with its current value
+and a sparkline over the history, titled with the window the history
+covers), live leases (id, image, owner, the run state — ▶ running,
+‖ suspended, ■ lost, ⭘ recovered —, policy, age, time left and the
+holder, ◆ when a hold is active and ◉ once it has lapsed; on the page
+the holder is a link), the image catalog (shape, live leases, lifetime
+uses, baked-at) beside the systemd units, a refusals-and-failures row
+(auth, quota, throttled, capacity, build fails, lost leases — non-zero
+counts highlighted — with the mean create and resume latencies), and
+the backend's last activity — plus
 an attention strip above the panels (one ▲ row per trigger, only when
 something needs a person): a unit not active, a lost lease, free
 hugepages or snapshot disk past the danger level, the TLS certificate
