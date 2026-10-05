@@ -265,3 +265,20 @@ func TestL6_StatAndHealth(t *testing.T) {
 		failf(t, "metrics: status %d, want 200 or 403: %s", st, truncate(body))
 	}
 }
+
+// TestL7_NoWorldWritableSystemBinaries (#124): nothing under /usr is
+// writable by group or others, and envd (it runs as root) is 0755. E2B's
+// template build leaves /usr/local 777 and envd 0777; spoond-guest-init
+// tightens them before the template is snapshotted.
+func TestL7_NoWorldWritableSystemBinaries(t *testing.T) {
+	begin(t)
+	l := createLease(t, map[string]any{"image": "py-base", "ttl": 300})
+	out := execOK(t, l.ID, "find /usr -xdev \\( -type f -o -type d \\) -perm /022 -not -type l 2>/dev/null | head -5; stat -c '%a' /usr/bin/envd")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if mode := lines[len(lines)-1]; mode != "755" {
+		failf(t, "/usr/bin/envd mode %s, want 755", mode)
+	}
+	if len(lines) > 1 {
+		failf(t, "group/world-writable paths under /usr:\n%s", strings.Join(lines[:len(lines)-1], "\n"))
+	}
+}
