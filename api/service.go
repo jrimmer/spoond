@@ -260,6 +260,9 @@ type Service struct {
 	// the held-lease pressure and critical rules (2.1). Tests replace it
 	// to exercise those thresholds without a real filesystem.
 	diskCapacity func(path string) (total, free uint64, err error)
+	// measureBuild overrides write-time build-size measurement (2.3
+	// #125) for tests; nil measures the build directory on disk.
+	measureBuild func(buildID string) int64
 	// refreshMu serializes refreshPeers runs, which are scheduled
 	// asynchronously after lifecycle events (U09).
 	refreshMu sync.Mutex
@@ -1320,7 +1323,8 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 		return "", err
 	}
 	// The pause build records what was snapshotted: versions and sizes
-	// copied from the parent build row.
+	// copied from the parent build row. Its own size_bytes is measured
+	// at write time (2.3 #125), like a checkpoint build's.
 	parent, err := s.db.GetBuild(ctx, l.BuildID)
 	if err != nil {
 		return "", fmt.Errorf("load parent build %s: %w", l.BuildID, err)
@@ -1341,6 +1345,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 		VCPU:               parent.VCPU,
 		MemoryMB:           parent.MemoryMB,
 		DiskMB:             parent.DiskMB,
+		SizeBytes:          s.measureNewBuild(buildID),
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}); err != nil {
@@ -1608,7 +1613,9 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 // checkpointLease checkpoints a running sandbox into a new build,
 // inserts the checkpoint build row (versions and sizes copied from the
 // parent build row; refs stored from the Checkpoint response), and
-// applies the checkpoint bookkeeping to the source lease (item 18). It
+// applies the checkpoint bookkeeping to the source lease (item 18). The
+// fresh build's size_bytes is measured at write time (2.3 #125), so it
+// shows in /api/snapshots before the next hourly accounting pass. It
 // returns the new build row.
 func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildRow, error) {
 	start := time.Now()
@@ -1646,6 +1653,7 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		VCPU:               parent.VCPU,
 		MemoryMB:           parent.MemoryMB,
 		DiskMB:             parent.DiskMB,
+		SizeBytes:          s.measureNewBuild(buildID),
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}

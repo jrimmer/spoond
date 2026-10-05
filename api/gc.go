@@ -333,9 +333,42 @@ func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) error 
 	return nil
 }
 
+// buildSizeOnDisk measures one build's directory under the template
+// storage root (allocated blocks × 512 per regular file): the per-build
+// half of the hourly disk accounting and of the write-time recording a
+// fresh build's row gets (#125, measureNewBuildOnDisk). A missing or
+// unreadable directory measures 0.
+func (s *Service) buildSizeOnDisk(buildID string) int64 {
+	return buildDiskUsage(filepath.Join(s.cfg.TemplateStoragePath, buildID))
+}
+
+// measureNewBuildOnDisk is the Service's write-time measurer (#125):
+// the substrate has just written buildID's files, so the size goes into
+// the fresh build's row — /api/snapshots then shows a size immediately,
+// not only after the next hourly accounting pass. A missing or
+// unreadable build directory logs and measures 0; the hourly pass
+// corrects the row once it can read the files.
+func (s *Service) measureNewBuildOnDisk(buildID string) int64 {
+	size := s.buildSizeOnDisk(buildID)
+	if size == 0 {
+		s.log.Printf("build size: %s: measured 0 under %s", buildID, s.cfg.TemplateStoragePath)
+	}
+	return size
+}
+
+// measureNewBuild measures a build the substrate just wrote (#125), for
+// storing size_bytes with the fresh build's row. Nil-safe for tests.
+func (s *Service) measureNewBuild(buildID string) int64 {
+	if s.measureBuild == nil {
+		return s.measureNewBuildOnDisk(buildID)
+	}
+	return s.measureBuild(buildID)
+}
+
 // accountDisk measures every non-deleted build's directory (allocated
 // blocks × 512 per regular file) into size_bytes, and sets the
-// snapshot/storage gauges. Runs with the GC, once an hour.
+// snapshot/storage gauges. Runs with the GC, once an hour; it also
+// re-measures builds whose write-time recording (#125) measured 0.
 func (s *Service) accountDisk(ctx context.Context) error {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
@@ -346,7 +379,7 @@ func (s *Service) accountDisk(ctx context.Context) error {
 		if b.State == "deleted" {
 			continue
 		}
-		size := buildDiskUsage(filepath.Join(s.cfg.TemplateStoragePath, b.BuildID))
+		size := s.buildSizeOnDisk(b.BuildID) // re-measures, correcting write-time zeros
 		perKind[b.Kind] += size
 		if size != b.SizeBytes {
 			if err := s.db.UpdateBuildSize(ctx, b.BuildID, size); err != nil {
