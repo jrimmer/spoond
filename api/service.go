@@ -1541,10 +1541,11 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
-	if err := s.reserveQuota(l.Owner, 1, s.imageMiB(l.Image)); err != nil {
+	memPer := s.imageMiB(l.Image)
+	if err := s.reserveQuota(l.Owner, 1, memPer); err != nil {
 		return nil, err
 	}
-	defer func() { s.releaseQuotaReservation(l.Owner, 1, s.imageMiB(l.Image)) }()
+	defer func() { s.releaseQuotaReservation(l.Owner, 1, memPer) }()
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
 	}
@@ -1849,10 +1850,11 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	defer s.endBusy(src)
 
 	// The clone costs its image's memory_mb like any create (#128).
-	if err := s.reserveQuota(owner, 1, s.imageMiB(src.Image)); err != nil {
+	memPer := s.imageMiB(src.Image)
+	if err := s.reserveQuota(owner, 1, memPer); err != nil {
 		return nil, "", err
 	}
-	defer func() { s.releaseQuotaReservation(owner, 1, s.imageMiB(src.Image)) }()
+	defer func() { s.releaseQuotaReservation(owner, 1, memPer) }()
 
 	img, _, err := s.imageBuild(ctx, src.Image)
 	if err != nil {

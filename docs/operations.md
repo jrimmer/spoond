@@ -600,10 +600,11 @@ means the disk needs attention the leases are paying for.
     `max_mib` keeps working unchanged — no count is converted into a
     memory number. To cap a user's memory, set it explicitly, sizing it
     from their current charge: `GET /api/users/me` (or `GET
-    /api/users`) for `used_mib`, then `POST /api/users/{id}/quota` with `"max_mib": <MiB>` (and
-    `"guaranteed_mib"` at most that). Rolling change: existing leases
-    are never evicted when a quota lands; only new grants and resumes
-    are refused once the user is over.
+    /api/users`) for `used_mib`, then `POST /api/users/{id}/quota` with
+    `"max_mib": <MiB>` (and `"guaranteed_mib"` at most that). Setting a
+    quota deletes nothing, but it bites on the next grant or resume —
+    size `max_mib` before a drain, since a drained lease whose resume
+    fails the check comes back lost.
 - **Token/key hashes** are HMAC-SHA256 with a per-store salt (sidecar
   `<users-file>.salt`); back the salt up alongside the store or existing
   hashes become unverifiable on restore.
