@@ -128,7 +128,7 @@ while suspended, where `resume_build_id` is the one to resume from).
 Every lease carries a `generation` (in the create response and in every
 list and detail row): the count of times the guest's memory did **not**
 continue from where its processes left it. It starts at `1` on create
-and is bumped — and persisted — by exactly three paths:
+and is bumped — and persisted — by exactly four paths:
 
 - **Crash recovery.** The crash reconcile resumed the lease from its
   checkpoint build; the processes in the guest find themselves in a
@@ -431,7 +431,8 @@ Releasing the lease (any path) drops its kept builds, and
 {"id":"…","build_id":"<uuid>","at":"2026-10-01T12:00:00Z","kept":true}
 ```
 
-`kept` mirrors the request (`false` when the body was empty).
+`kept` mirrors the request (`false` when the body was empty; a
+malformed body is the usual `400`, not a silent "keep nothing").
 
 ### `POST /api/leases/{id}/restore` — roll back to a kept checkpoint
 
@@ -446,8 +447,10 @@ builds — the guest rolls back to that snapshot in place:
 The build must be this lease's newest checkpoint or a build it pinned
 with `{"keep":true}`; another lease's checkpoint, another owner's build
 and pause builds all answer `404`, like a lease the caller cannot see.
-Works on a running or a suspended lease; `409` while another operation
-is in flight; a substrate capacity failure maps to `503`.
+Works on a running or a suspended lease; a lease lost in a substrate
+crash answers `410` like every other route (restore does not resurrect
+it); `409` while another operation is in flight; a substrate capacity
+failure maps to `503`.
 
 The lease keeps its id, owner, holder, name, network policy, exposed
 ports and `checkpoint_interval`. Everything else about the guest starts
@@ -455,9 +458,11 @@ over from the checkpoint: files and processes newer than the snapshot
 are gone, the generation bumps (see [Generations](#generations)),
 `/run/spoond/generation` is rewritten, the create-time secrets are
 re-written into the fresh sandbox, and the `restored` event carries the
-build id. The lease comes back running (a suspended lease too), and its
-pause builds stop being its resume point (`resume_build_id` is cleared;
-the next suspend sets it as usual). Response `200`:
+build id. The lease comes back running (a suspended lease too, a
+drained one included — the restored sandbox is running, so undrain no
+longer owes it a resume), and its pause builds stop being its resume
+point (`resume_build_id` is cleared; the next suspend sets it as
+usual). Response `200`:
 
 ```json
 {"id":"…","build_id":"<uuid>","generation":2,"status":"running"}

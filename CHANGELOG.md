@@ -22,12 +22,14 @@ summarised from README "Status".
   policy, exposed ports and `checkpoint_interval`; the generation bumps
   and `/run/spoond/generation` is rewritten; create-time secrets are
   re-written; the new `restored` event carries the build id; a
-  suspended lease comes back running. Owner or admin, others `404`; the
-  build must be the lease's own newest checkpoint or a kept build of
-  that lease (anything else is `404`); `409` while busy. Releasing the
-  lease (any path) drops its kept rows, so the next GC pass may reclaim
-  the builds; `DELETE /api/snapshots/{build_id}` also unpins a kept
-  build. Conformance S6 checks it.
+  suspended (or drained) lease comes back running. Owner or admin,
+  others `404`; the build must be the lease's own newest checkpoint or
+  a kept build of that lease (anything else is `404`); a lost lease is
+  `410` like every other route; `409` while busy. Releasing the lease
+  (any path) drops its kept rows, so the next GC pass may reclaim the
+  builds; a lost lease's kept rows go when its grace period lapses;
+  `DELETE /api/snapshots/{build_id}` also unpins a kept build.
+  Conformance S6 checks it.
 - **Cold restart: `POST /api/leases/{id}/restart?mode=cold` (#120).**
   A warm restart (the default) keeps a persistent lease's guest by
   pausing and resuming it, which cannot unstick a hung process. The new

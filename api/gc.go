@@ -175,9 +175,9 @@ func (s *Service) gcPass(ctx context.Context) error {
 // and checkpoint builds stay roots for a grace period after the loss —
 // 7 days for a persistent lease, 1 day otherwise — so its snapshots
 // outlive the crash that lost it. Every root's ancestor chain is kept
-// in full, and every kept build's header-referenced builds
-// (build_refs) are kept in full — including their own ancestors and
-// refs, transitively.
+// in full, and every kept build's header-referenced builds (build_refs)
+// are kept in full — including their own ancestors and refs,
+// transitively.
 //
 // The chain walk is over *non-deleted* builds only: a deleted build
 // keeps nothing, so the files a GC pass or an owner delete already
