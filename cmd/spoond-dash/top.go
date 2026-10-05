@@ -1,8 +1,9 @@
 // spoond top: the same character grid as the dashboard, drawn with ANSI
 // styles at the terminal's width (COLUMNS, else 104) and redrawn every
-// 2 s until interrupted. It reads the same sources as spoond dash: the
-// collector is shared, only the rendering target differs — the terminal
-// instead of a browser page. No colour when stdout is not a terminal.
+// 2 s until interrupted. It reads the same sources as spoond dash — the
+// collector is shared, the lease event stream subscription included —
+// only the rendering target differs: the terminal instead of a browser
+// page. No colour when stdout is not a terminal.
 package spoonddash
 
 import (
@@ -63,6 +64,14 @@ func Top(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The events panel's source, like the dashboard's: one subscription
+	// to the backend's lease event stream for the run's lifetime, into
+	// the collector's own buffer. No DASH_EVENTS_TOKEN, no panel data —
+	// the frame then says so.
+	if cfg.EventsToken != "" {
+		go col.streamEvents(ctx, eventsURL(cfg.MetricsURL), cfg.EventsToken)
+	}
 
 	// The clear goes to a terminal only: piped or redirected output is
 	// the plain frame, one after another.
