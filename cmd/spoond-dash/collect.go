@@ -34,17 +34,22 @@ type Snapshot struct {
 	Err     string `json:"err"`     // last scrape problem, if any
 
 	// Leases and sandboxes.
-	Leases     int            `json:"leases"`
-	ByState    map[string]int `json:"byState"`
-	Burst      int            `json:"burst"` // live leases in the burst class (#128 part 2)
-	Queued     int            `json:"queued"`
-	Granted    int            `json:"granted"` // cumulative leases granted
-	Swept      int            `json:"swept"`
-	Running    int            `json:"running"` // sandboxes on the node
-	Limit      int            `json:"limit"`   // node sandbox limit
-	Shares     int            `json:"shares"`
-	Users      int            `json:"users"`
-	BuildsBusy int            `json:"buildsBusy"`
+	Leases  int            `json:"leases"`
+	ByState map[string]int `json:"byState"`
+	// Burst is the live leases (running, suspended, recovered) in the
+	// burst class, counted in the store: the hugepages burst holds now.
+	// It is deliberately not the same set the leases panel's ·b marker
+	// shows, which is the stored class of the displayed rows, lost
+	// rows included (#128 part 2).
+	Burst      int `json:"burst"`
+	Queued     int `json:"queued"`
+	Granted    int `json:"granted"` // cumulative leases granted
+	Swept      int `json:"swept"`
+	Running    int `json:"running"` // sandboxes on the node
+	Limit      int `json:"limit"`   // node sandbox limit
+	Shares     int `json:"shares"`
+	Users      int `json:"users"`
+	BuildsBusy int `json:"buildsBusy"`
 
 	// Rates and latencies over the last interval.
 	ReqPerSec     float64 `json:"reqPerSec"`

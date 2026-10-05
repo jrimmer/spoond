@@ -49,6 +49,9 @@ func (s *Service) burstReserveMiB() int {
 // the substrate's NodeInfo cached for at most nodeInfoCacheTTL. A
 // failed refresh answers with the last good value — staleness beats a
 // wrong refusal — and errors only when nothing has ever been cached.
+// The cache mutex is held across a refresh's RPC on purpose: concurrent
+// burst admissions then share one round trip instead of stampeding the
+// orchestrator, at the cost of serialising them for the call.
 func (s *Service) freeHugepageMiB(ctx context.Context) (uint64, error) {
 	s.nodeInfoMu.Lock()
 	defer s.nodeInfoMu.Unlock()
