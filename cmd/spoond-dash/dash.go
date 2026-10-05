@@ -473,7 +473,7 @@ func (d *dash) handlePage(w http.ResponseWriter, r *http.Request) {
 // gridFor renders a snapshot plus history into a grid and the holder
 // links found in it (row → URL), for both the page and the stream.
 func (d *dash) gridFor(s Snapshot, hist map[string][]float64, now time.Time) (*grid.Grid, []linkAt) {
-	g, err := drawFrame(s, hist, d.width, d.cfg.Host, now)
+	g, err := drawFrame(s, hist, d.width, d.cfg.Host, now, d.cfg.Interval)
 	if err != nil {
 		// Check is a rendered invariant, not a data condition: nothing a
 		// snapshot contains should trip it. Report and fall back to an

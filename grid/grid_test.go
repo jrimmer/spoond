@@ -380,6 +380,18 @@ func TestSparklineEmpty(t *testing.T) {
 	}
 }
 
+// A constant zero series draws ▁, not the middle rung: ▅ would read as
+// history a flat line does not have. A constant non-zero series keeps
+// the middle rung.
+func TestSparklineConstantZero(t *testing.T) {
+	if got := Sparkline([]float64{0, 0, 0, 0}, 0, 0); got != "▁▁▁▁" {
+		t.Fatalf("constant zero Sparkline: %q", got)
+	}
+	if got := Sparkline([]float64{7, 7}, 7, 7); got != "▅▅" {
+		t.Fatalf("constant non-zero Sparkline: %q", got)
+	}
+}
+
 func TestSpinner(t *testing.T) {
 	cycle := []rune("▖▘▝▗")
 	for i, want := range cycle {

@@ -85,7 +85,7 @@ func sampleHist() map[string][]float64 {
 // drawSample renders the sample frame at w, with the sample history so
 // the sparklines are drawn too.
 func drawSample(w int) *grid.Grid {
-	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow)
+	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow, dashInterval)
 	if err != nil {
 		panic(err)
 	}
@@ -128,7 +128,7 @@ func TestGoldenPlain(t *testing.T) {
 // uses, so a rune missing from Extra fails here, not in spoond top.
 func TestGoldenCheck(t *testing.T) {
 	for _, w := range []int{104, 72} {
-		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow); err != nil {
+		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow, dashInterval); err != nil {
 			t.Fatalf("width %d: %v", w, err)
 		}
 	}
@@ -178,7 +178,7 @@ func TestDownUnitFramePassesCheck(t *testing.T) {
 	s := sampleSnapshot()
 	s.Services = append(s.Services, Service{Name: "spoond-runner", State: "failed"})
 	for _, w := range []int{DefaultWidth, minW} {
-		if _, err := drawFrame(s, nil, w, "h", fixedNow); err != nil {
+		if _, err := drawFrame(s, nil, w, "h", fixedNow, 0); err != nil {
 			t.Fatalf("width %d: frame with a failed unit failed Check: %v", w, err)
 		}
 		if p := Draw(s, w, fixedNow, "h").Plain(); !strings.Contains(p, "✗ failed") {
@@ -305,8 +305,9 @@ func TestSanitizeReplacesControlChars(t *testing.T) {
 	}
 }
 
-// TestStateGlyphAndStyle: the glyphs the leases panel draws per state,
-// and the styles they carry.
+// TestStateGlyphAndStyle: the glyphs the leases panel draws per run
+// state, and the styles they carry. A hold is not a state — it marks
+// the holder column.
 func TestStateGlyphAndStyle(t *testing.T) {
 	cases := []struct {
 		r     LeaseRow
@@ -314,11 +315,11 @@ func TestStateGlyphAndStyle(t *testing.T) {
 		style string
 	}{
 		{LeaseRow{State: "running"}, '▶', "ok"},
-		{LeaseRow{State: "recovered"}, '▶', "ok"},
+		{LeaseRow{State: "recovered"}, '⭘', "ok"},
 		{LeaseRow{State: "suspended"}, '‖', "warn"},
 		{LeaseRow{State: "lost"}, '■', "bad"},
-		{LeaseRow{State: "running", HoldState: "active"}, '◆', "state"},
-		{LeaseRow{State: "suspended", HoldState: "lapsed"}, '◆', "state"},
+		{LeaseRow{State: "running", HoldState: "active"}, '▶', "ok"},
+		{LeaseRow{State: "suspended", HoldState: "lapsed"}, '‖', "warn"},
 	}
 	for _, tc := range cases {
 		if got := stateGlyph(tc.r); got != tc.glyph {
@@ -330,14 +331,55 @@ func TestStateGlyphAndStyle(t *testing.T) {
 	}
 }
 
-// TestLeasesShowLapsedHold: a lapsed hold shows ◉lapsed after the holder.
-func TestLeasesShowLapsedHold(t *testing.T) {
+// TestLeasesShowHoldMarks: the holder column carries the hold — ◆
+// before a held lease's holder, ◉ before a lapsed hold's — and the run
+// state stays in the state column.
+func TestLeasesShowHoldMarks(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
-	if !strings.Contains(p, "nightly ◉lapsed") {
-		t.Fatalf("lapsed hold not shown after the holder:\n%s", p)
+	lines := strings.Split(p, "\n")
+	var held, lapsed, plain string
+	for _, r := range lines {
+		switch {
+		case strings.Contains(r, "forgejo/job-42"):
+			held = r
+		case strings.Contains(r, "nightly"):
+			lapsed = r
+		case strings.Contains(r, "abcdef0123"):
+			plain = r
+		}
 	}
-	if !strings.Contains(p, "forgejo/job-42") {
-		t.Fatalf("holder text missing:\n%s", p)
+	if held == "" || lapsed == "" || plain == "" {
+		t.Fatalf("lease rows missing:\n%s", p)
+	}
+	if !strings.Contains(held, "◆ forgejo/job-42") || strings.Contains(held, "◆ running") {
+		t.Errorf("held lease's holder not marked ◆:\n%s", held)
+	}
+	if !strings.Contains(lapsed, "◉ nightly") || strings.Contains(lapsed, "◉ suspended") {
+		t.Errorf("lapsed hold's holder not marked ◉:\n%s", lapsed)
+	}
+	if strings.Contains(plain, "◆") || strings.Contains(plain, "◉") {
+		t.Errorf("unheld lease marked held:\n%s", plain)
+	}
+	if !strings.Contains(held, "▶ running") || !strings.Contains(lapsed, "‖ suspended") {
+		t.Errorf("state column must always show the run state:\n%s\n%s", held, lapsed)
+	}
+}
+
+// TestLeasesLeftShowsHoldExpiry: a held lease's left column is the time
+// left on its hold; a persistent lease without a hold shows ∞.
+func TestLeasesLeftShowsHoldExpiry(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{
+		{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m",
+			Holder: "forgejo/job-42", HoldState: "active", HoldExpires: "49m"},
+		{ID: "1234567890", State: "running", Age: "5m", Left: "∞"},
+	}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "49m") {
+		t.Fatalf("held lease's left is not the hold's time:\n%s", p)
+	}
+	if !strings.Contains(p, "∞") {
+		t.Fatalf("persistent lease's left is not ∞:\n%s", p)
 	}
 }
 
@@ -565,14 +607,14 @@ func TestLeasesPanelEmptyState(t *testing.T) {
 	}
 	lines := strings.Split(p, "\n")
 	for i, r := range lines {
-		if strings.Contains(r, " lease ") && strings.Contains(r, " holder ") {
-			if !strings.Contains(lines[i+1], "no live leases") {
+		if i < len(lines)-1 && strings.HasPrefix(r, "┌─ leases ") {
+			if !strings.Contains(lines[i+2], "no live leases") {
 				t.Fatalf("the row under the header is not the empty state:\n%s", p)
 			}
 			return
 		}
 	}
-	t.Fatalf("leases panel header not found:\n%s", p)
+	t.Fatalf("leases panel not found:\n%s", p)
 }
 
 // TestEventsPanelMarksHeldActions: automatic held-lease actions are
@@ -608,7 +650,7 @@ func TestNonASCIINamesDrawn(t *testing.T) {
 	}
 	s.Rows[0].Owner = "josé"
 	s.Rows[0].Image = "流-base"
-	g, err := drawFrame(s, nil, 104, "host", fixedNow)
+	g, err := drawFrame(s, nil, 104, "host", fixedNow, 0)
 	if err != nil {
 		t.Fatalf("drawFrame with non-ASCII names: %v", err)
 	}
@@ -670,6 +712,24 @@ func TestLegendFitsNarrowFrames(t *testing.T) {
 		}
 		if n > w || len(segs) == 0 || segs[0].Text != "▶" {
 			t.Fatalf("width %d: legend %d wide, starts %q", w, n, segs[0].Text)
+		}
+	}
+}
+
+// TestLegendShowsTheMarks: the legend names the run-state glyphs, then
+// the holder column's hold marks.
+func TestLegendShowsTheMarks(t *testing.T) {
+	want := []string{"▶", "running", "‖", "suspended", "■", "lost", "⭘", "recovered", "◆ held · ◉ lapsed hold"}
+	row := strings.Join(func() []string {
+		var out []string
+		for _, s := range legendRow() {
+			out = append(out, s.Text)
+		}
+		return out
+	}(), "")
+	for _, w := range want {
+		if !strings.Contains(row, w) {
+			t.Errorf("legend lacks %q: %s", w, row)
 		}
 	}
 }

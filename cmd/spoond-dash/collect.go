@@ -112,11 +112,14 @@ type Service struct {
 
 // LeaseRow is one live lease for the table. Holder/HolderURL/HoldState
 // name what holds the lease (HoldState "" when unheld, "active" or
-// "lapsed"); LastAction/LastActionAt record the last automatic
-// held-lease action ("rule/action", e.g. "idle/suspend_idle").
+// "lapsed"); HoldExpires is the hold's remaining time ("" without a
+// hold) — a held lease's time left is the hold's, not the lease's.
+// LastAction/LastActionAt record the last automatic held-lease action
+// ("rule/action", e.g. "idle/suspend_idle").
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name string
 	Holder, HolderURL, HoldState          string
+	HoldExpires                           string
 	LastAction                            string
 	LastActionAt                          time.Time
 	Age, Left                             string
@@ -602,6 +605,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 				r.HoldState = "lapsed"
 			} else {
 				r.HoldState = "active"
+				r.HoldExpires = until(now, holdExpires)
 			}
 		}
 		r.LastAction = lastAction

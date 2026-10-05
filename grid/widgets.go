@@ -71,8 +71,10 @@ func (g *Grid) Meter(x, y int, label string, pct, warnPct, dangerPct float64, wi
 
 // Sparkline renders values as a string of block rungs ▁▂▃▄▅▆▇█, lo to
 // hi scaled to the full range. Values below lo get ▁, above hi get █.
-// A flat series (lo == hi) gives every value the middle rung ▅ instead
-// of dividing by zero. Empty values gives an empty string.
+// A flat series gives every value the ▁ of an all-zero series — a
+// string of ▅ would read as history that is not there — and the middle
+// rung ▅ otherwise, instead of dividing by zero. Empty values gives an
+// empty string.
 func Sparkline(values []float64, lo, hi float64) string {
 	if len(values) == 0 {
 		return ""
@@ -80,11 +82,17 @@ func Sparkline(values []float64, lo, hi float64) string {
 	rungs := []rune("▁▂▃▄▅▆▇█")
 	var b strings.Builder
 	b.Grow(len(values))
-	for _, v := range values {
-		if lo == hi {
-			b.WriteRune(rungs[len(rungs)/2])
-			continue
+	if lo == hi {
+		flat := rungs[0]
+		if lo != 0 {
+			flat = rungs[len(rungs)/2]
 		}
+		for range values {
+			b.WriteRune(flat)
+		}
+		return b.String()
+	}
+	for _, v := range values {
 		t := (v - lo) / (hi - lo)
 		idx := int(t * float64(len(rungs)))
 		idx = clamp(idx, 0, len(rungs)-1)

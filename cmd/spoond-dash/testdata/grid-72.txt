@@ -1,6 +1,6 @@
            SPOOND · vm2.lacy.casa · dev · e2b 0.4.2 · up 720h           
 ════════════════════════════════════════════════════════════════════════
-        ▶ running · ‖ suspended · ◆ held · ■ lost · ✓ active unit       
+ ▶ running · ‖ suspended · ■ lost · ⭘ recovered · ◆ held · ◉ lapsed hold
 ▲ 1 lost lease(s) - a substrate crash dropped them                      
 ▲ held lease fedcba0987: expiry/expire 3h00m ago                        
                                                                         
@@ -24,34 +24,35 @@
 │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB                              │
 │ gc dry-run                                                           │
 └──────────────────────────────────────────────────────────────────────┘
-┌─ throughput (5 min) ─────────────────────────────────────────────────┐
-│ running      ▃▅▇▅█▇                                                3 │
-│ req/s        ▅▇█▆██                                             12.3 │
-│ creates/min  ▁▃▁▅██                                                4 │
-│ egress conns ▅▆█▇██                                                9 │
+┌─ throughput · last 1 min ────────────────────────────────────────────┐
+│ running leases        3  requests / s       12.3                     │
+│ ▃▅▇▅█▇                   ▅▇█▆██                                      │
+│ creates / min         4  egress conns          9                     │
+│ ▁▃▁▅██                   ▅▆█▇██                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ leases ─────────────────────────────────────────────────────────────┐
-│ lease      image     owner  state       net    age   left  holder    │
-│ abcdef0123 go-base   jason  ▶ running   intern 5m    10m   -         │
-│ 1234567890 py-base   ci     ◆ running   restri 2h31m ∞     forgejo…  │
-│ fedcba0987 go-base   agent  ◆ suspended lan    1d    due   night… ◉  │
+│ id      image      owner  state    poli age   left   holder          │
+│ abcdef0 go-base    jason  ▶ runnin inte 5m    10m    -               │
+│ 1234567 py-base    ci     ▶ runnin rest 2h31m ∞      ◆ forgejo/job…  │
+│ fedcba0 go-base    agent  ‖ suspen lan  1d    due    ◉ nightly       │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ images ─────────────────────────────────────────────────────────────┐
-│ image                            live uses  shape        baked       │
-│ go-base                             2   51  2v/2048M     2d ago      │
-│ py-base                             1    7  1v/1024M     9h ago      │
+│ image            vcpu  mem      live  uses   baked                   │
+│ go-base          2     2 GiB    2     51     2d ago                  │
+│ py-base          1     1 GiB    1     7      9h ago                  │
 └──────────────────────────────────────────────────────────────────────┘
-┌─ units ──────────────────────────────────────────────────────────────┐
-│ ✓ spoond-backend                                                     │
-│ ✓ spoond-runner                                                      │
-│ ✓ e2b-orchestrator                                                   │
-│ ✓ e2b-guard                                                          │
-│ ✓ spoond-sshd-gateway                                                │
-│ ✓ otelcol                                                            │
+┌─ services ───────────────────────────────────────────────────────────┐
+│ spoond-backend        ✓ active                                       │
+│ spoond-runner         ✓ active                                       │
+│ e2b-orchestrator      ✓ active                                       │
+│ e2b-guard             ✓ active                                       │
+│ spoond-sshd-gateway   ✓ active                                       │
+│ otelcol               ✓ active                                       │
+│                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
-┌─ refusals & failures ────────────────────────────────────────────────┐
-│ auth 2    throttled 0    quota 1    capacity 3    builds 1           │
-│ create 250ms   resume 4.1s                                           │
+┌─ refusals and failures ──────────────────────────────────────────────┐
+│ auth 2  quota 1  throttled 0  capacity 3  build fails 1  lost leases │
+│ create 250 ms  resume 4.1 s                                          │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ events ─────────────────────────────────────────────────────────────┐
 │ ┄ 07:19:02 held lease abc: idle/suspend_idle (2h ago)                │
