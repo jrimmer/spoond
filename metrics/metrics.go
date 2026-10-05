@@ -8,6 +8,7 @@ package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	"time"
 )
 
 // ---------- Backend metrics ----------
@@ -73,6 +74,10 @@ type BackendMetrics struct {
 
 	// Webhook notifications (2.2, #117)
 	Notifications *prometheus.CounterVec // {webhook,severity,result}: delivery outcomes
+
+	// StartTime is when this backend process started (unix seconds), so a
+	// reader can tell the backend's uptime from the host's.
+	StartTime prometheus.Gauge
 
 	// Builds (image bake)
 	BuildsInFlight prometheus.Gauge   // active bakes
@@ -286,6 +291,11 @@ func NewBackendMetrics() *BackendMetrics {
 	// webhook's index in NOTIFY_WEBHOOKS — never the URL, which may
 	// carry secrets — and "-" when no webhook was chosen (queue,
 	// dedupe and drop-before-match outcomes).
+	m.StartTime = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "backend_start_time_seconds",
+		Help: "Unix time the backend process started.",
+	})
+	m.StartTime.Set(float64(time.Now().UnixNano()) / 1e9)
 	m.Notifications = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "notifications_total",
 		Help: "Webhook notification delivery outcomes. `webhook` is the receiver's index in NOTIFY_WEBHOOKS (never its URL); result is sent, retry, dropped, deduped or rate_limited.",
@@ -391,7 +401,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.AuthThrottled, m.QuotaExceeded, m.QuotaReserved,
 		m.SharesActive, m.BusySlots,
 		m.StoreErrors,
-		m.Notifications,
+		m.Notifications, m.StartTime,
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur, m.CheckpointPause,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,

@@ -29,7 +29,7 @@ var fixedNow = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 // banner tests below add the triggers).
 func sampleSnapshot() Snapshot {
 	return Snapshot{
-		At: "12:00:00", Version: "0.4.2",
+		At: "12:00:00", Version: "0.4.2", BackendUp: 9 * time.Minute,
 		Leases: 5, Queued: 1, Granted: 1234, Swept: 17,
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
 		ByState:   map[string]int{"running": 3, "suspended": 1, "lost": 1},
@@ -40,7 +40,7 @@ func sampleSnapshot() Snapshot {
 		HugeUsedPct: 44.3, HugeFreeGiB: 23.9,
 		DiskUsedPct: 61.2, DiskFreeGiB: 121.5,
 		RootUsedPct: 41.0, RootFreeGiB: 30.2,
-		VCPUAlloc: 11, MemAllocGiB: 19.5, UptimeH: 720.4,
+		VCPUAlloc: 11, MemAllocGiB: 19.5,
 		GCMode: "dry-run",
 		Services: []Service{
 			{Name: "spoond-backend", State: "active"},

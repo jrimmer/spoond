@@ -71,9 +71,11 @@ type Snapshot struct {
 	DiskFreeGiB float64 `json:"diskFreeGiB"`
 	VCPUAlloc   int     `json:"vcpuAlloc"`
 	MemAllocGiB float64 `json:"memAllocGiB"`
-	UptimeH     float64 `json:"uptimeH"`
-	RootUsedPct float64 `json:"rootUsedPct"` // the root filesystem, not the snapshot store
-	RootFreeGiB float64 `json:"rootFreeGiB"`
+	// BackendUp is how long the spoond backend has run (from
+	// spoond_backend_start_time_seconds); 0 when /metrics does not say.
+	BackendUp   time.Duration `json:"-"`
+	RootUsedPct float64       `json:"rootUsedPct"` // the root filesystem, not the snapshot store
+	RootFreeGiB float64       `json:"rootFreeGiB"`
 
 	Down int `json:"down"` // units not active
 
@@ -400,6 +402,9 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	// the mode (an actual deletion means deletion is on) and the host
 	// panel's lifetime count.
 	s.GCDeleted = int(value(fams["spoond_gc_deleted_total"]))
+	if st := g("spoond_backend_start_time_seconds"); st > 0 {
+		s.BackendUp = c.now().Sub(time.Unix(0, int64(st*1e9)))
+	}
 
 	// The GC's mode: a configured GC_DELETE=1 or an actually deleted
 	// build means deletion is on; otherwise the GC is in its dry-run
@@ -490,12 +495,6 @@ func (c *collector) fromHost(s *Snapshot) error {
 	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
 		if f := strings.Fields(string(b)); len(f) > 0 {
 			s.Load1, _ = strconv.ParseFloat(f[0], 64)
-		}
-	}
-	if b, err := os.ReadFile("/proc/uptime"); err == nil {
-		if f := strings.Fields(string(b)); len(f) > 0 {
-			up, _ := strconv.ParseFloat(f[0], 64)
-			s.UptimeH = round1(up / 3600)
 		}
 	}
 	busy, total, cores, err := cpuJiffies()
