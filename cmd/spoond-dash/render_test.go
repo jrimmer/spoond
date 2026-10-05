@@ -30,7 +30,7 @@ var fixedNow = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 func sampleSnapshot() Snapshot {
 	return Snapshot{
 		At: "12:00:00", Version: "0.4.2", BackendUp: 9 * time.Minute,
-		Leases: 5, Queued: 1, Granted: 1234, Swept: 17,
+		Leases: 5, Queued: 1, Granted: 1234, Swept: 17, Burst: 1,
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
 		ByState:   map[string]int{"running": 3, "suspended": 1, "lost": 1},
 		ReqPerSec: 12.3, CreatesPerMin: 4, CreateMs: 250, ResumeMs: 4100,
@@ -52,7 +52,7 @@ func sampleSnapshot() Snapshot {
 		},
 		Rows: []LeaseRow{
 			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet",
-				Age: "5m", Left: "10m"},
+				Burst: true, Age: "5m", Left: "10m"},
 			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "running", Policy: "restricted",
 				Holder: "forgejo/job-42", HolderURL: "https://git.lacy.casa/job/42", HoldState: "active",
 				Age: "2h31m", Left: "∞"},

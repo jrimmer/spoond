@@ -690,7 +690,8 @@ func (l *layout) capacityRows() []capacityRow {
 	rows := []capacityRow{{segs: m, right: fmt.Sprintf("%d / %d", l.s.Running, l.s.Limit)}}
 
 	// Leases: total, then running, suspended and lost counts. A zero
-	// count is dim; recovered appears only when non-zero.
+	// count is dim; recovered appears only when non-zero; burst adds
+	// "burst N" when any live lease bursts (#128 part 2).
 	segs := []grid.Seg{{Text: fmt.Sprintf("%d leases", l.s.Leases), Style: "text"}}
 	for _, st := range []struct {
 		name string
@@ -714,6 +715,12 @@ func (l *layout) capacityRows() []capacityRow {
 			grid.Seg{Text: " · ", Style: "dim"},
 			grid.Seg{Text: fmt.Sprintf("%d", n), Style: "text"},
 			grid.Seg{Text: " recovered", Style: "dim"})
+	}
+	if n := l.s.Burst; n > 0 {
+		segs = append(segs,
+			grid.Seg{Text: " · ", Style: "dim"},
+			grid.Seg{Text: fmt.Sprintf("%d", n), Style: "text"},
+			grid.Seg{Text: " burst", Style: "dim"})
 	}
 	rows = append(rows, capacityRow{segs: segs})
 
@@ -1183,9 +1190,16 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(c.id, yy, sanitize(r.ID), "text", c.idW)
 		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
 		g.Text(c.own, yy, sanitize(r.Owner), "text", c.ownW)
+		// The state cell names the burst class (#128 part 2): "▶
+		// running·b" — the ·b suffix rides the state so the columns stay
+		// aligned (the policy column keeps its own width).
+		state := r.State
+		if r.Burst {
+			state += "·b"
+		}
 		segs := []grid.Seg{
 			{Text: string(stateGlyph(r)), Style: stateGlyphStyle(r)},
-			{Text: " " + r.State, Style: stateGlyphStyle(r)},
+			{Text: " " + state, Style: stateGlyphStyle(r)},
 		}
 		g.Segs(c.st, yy, segs, c.stW)
 		g.Text(c.pol, yy, sanitize(r.Policy), "dim", c.polW)

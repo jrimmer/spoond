@@ -52,15 +52,9 @@ func newClassServer(t *testing.T, images map[string]int, quota string) (*Server,
 	return srv, h, sub, "work-tok", uid
 }
 
-// createWithBody is createSandboxBody returning only the response.
-func createWithBody(t *testing.T, h http.Handler, token, body string) *http.Response {
-	t.Helper()
-	rec, _ := createSandboxBody(t, h, token, body)
-	return rec.Result()
-}
-
-// createBodyResp is createWithBody with the body readable (tests that
-// match the error text).
+// createBodyResp POSTs the create body and returns the status, the
+// body text (tests that match the error text) and the headers
+// (Retry-After).
 func createBodyResp(t *testing.T, h http.Handler, token, body string) (int, string, http.Header) {
 	t.Helper()
 	rec, _ := createSandboxBody(t, h, token, body)

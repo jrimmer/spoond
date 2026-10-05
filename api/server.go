@@ -789,8 +789,6 @@ func isAdmin(r *http.Request) bool {
 	return u != nil && u.Admin
 }
 
-// handleCreate grants a new sandbox lease.
-
 // burstRetryAfterSecs is the Retry-After a refused burst carries: the
 // reserve frees as guaranteed work suspends, usually well inside a
 // minute.
@@ -1388,6 +1386,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// hugepages) back, so it re-passes the memory check (#128):
 			// over max_mib answers 429 and the lease stays suspended.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errBurstReserve):
+			// Restart re-admits a suspended lease like a resume, so a
+			// burst lease restarting into a full reserve answers 503
+			// with a retry hint too (#128 part 2); the lease stays
+			// suspended.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")

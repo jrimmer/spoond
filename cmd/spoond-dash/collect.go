@@ -36,6 +36,7 @@ type Snapshot struct {
 	// Leases and sandboxes.
 	Leases     int            `json:"leases"`
 	ByState    map[string]int `json:"byState"`
+	Burst      int            `json:"burst"` // live leases in the burst class (#128 part 2)
 	Queued     int            `json:"queued"`
 	Granted    int            `json:"granted"` // cumulative leases granted
 	Swept      int            `json:"swept"`
@@ -209,9 +210,12 @@ type Service struct {
 // LastAction/LastActionAt record the last automatic held-lease action
 // ("rule/action", e.g. "idle/suspend_idle"). Comment is the lease's
 // own note: the holder column shows it, dim, on a CI job lease with no
-// holder and no name (e.g. "forgejo: lacy.casa/site #218").
+// holder and no name (e.g. "forgejo: lacy.casa/site #218"). Burst is
+// the lease's admission class (#128 part 2): the state cell shows it
+// as "·b".
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name, Comment string
+	Burst                                          bool
 	Holder, HolderURL, HoldState                   string
 	HoldExpires                                    string
 	LastAction                                     string
@@ -793,7 +797,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	names := c.userNames()
 
 	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, comment, created_at, expires_at, persistent,
-		holder, holder_url, hold_expires_at, last_action, last_action_at
+		holder, holder_url, hold_expires_at, last_action, last_action_at, class
 		FROM leases ORDER BY created_at DESC LIMIT 40`)
 	if err != nil {
 		return err
@@ -805,8 +809,9 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		var comment string
 		var holder, holderURL, holdExpires, lastAction, lastActionAt string
 		var persistent int
+		var class string
 		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &comment, &created, &expires, &persistent,
-			&holder, &holderURL, &holdExpires, &lastAction, &lastActionAt); err != nil {
+			&holder, &holderURL, &holdExpires, &lastAction, &lastActionAt, &class); err != nil {
 			return err
 		}
 		r.Comment = comment
@@ -817,6 +822,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		if r.Policy == "" {
 			r.Policy = "restricted"
 		}
+		r.Burst = class == "burst"
 		if len(r.ID) > 10 {
 			r.ID = r.ID[:10]
 		}
@@ -873,6 +879,17 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	c.rowsMu.Lock()
 	c.lastRow = s.Rows
 	c.rowsMu.Unlock()
+
+	// The capacity panel's burst count (#128 part 2): every live lease
+	// in the burst class, counted in the store — not over the ≤40 rows
+	// the leases panel displays, where an older burst lease would go
+	// missing. The same live set the per-image counts read (running,
+	// suspended and recovered hold or will hold hugepages).
+	if err := db.QueryRow(`SELECT COUNT(*) FROM leases
+		WHERE class = 'burst' AND state IN ('running','suspended','recovered')`).Scan(&s.Burst); err != nil {
+		s.Burst = 0
+		return fmt.Errorf("count burst leases: %w", err)
+	}
 
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
 	if err != nil {

@@ -151,6 +151,7 @@ func TestGCProtectsAncestorChain(t *testing.T) {
 		ID: "l1", Owner: "consumer-a", Image: "py-base",
 		LastCheckpointBuildID: c3,
 		CreatedAt:             gcOld, ExpiresAt: gcOld, LastActive: gcOld, State: "running",
+		Class: "guaranteed",
 	}); err != nil {
 		t.Fatalf("seed lease: %v", err)
 	}
@@ -217,6 +218,7 @@ func TestGCLiveLeaseResumeAndCheckpointProtected(t *testing.T) {
 			ID: id, Owner: "consumer-a", Image: "py-base",
 			ResumeBuildID: pause, LastCheckpointBuildID: ckpt,
 			CreatedAt: gcOld, ExpiresAt: gcOld, LastActive: gcOld, State: state,
+			Class: "guaranteed",
 		}); err != nil {
 			t.Fatalf("seed lease %s: %v", id, err)
 		}
@@ -342,7 +344,7 @@ func TestGCPausedSandboxBuildChainProtected(t *testing.T) {
 	if err := db.UpsertLease(context.Background(), store.LeaseRow{
 		ID: "l1", Owner: "consumer-a", Image: "py-base",
 		ResumeBuildID: pause, State: "suspended", Suspended: true, Persistent: true,
-		CreatedAt: gcOld, ExpiresAt: gcOld, LastActive: gcOld,
+		CreatedAt: gcOld, ExpiresAt: gcOld, LastActive: gcOld, Class: "guaranteed",
 	}); err != nil {
 		t.Fatalf("seed lease: %v", err)
 	}

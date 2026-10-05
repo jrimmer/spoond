@@ -76,6 +76,7 @@ func seedGCLease(t *testing.T, db *store.DB, leaseID, sandboxID, buildID string)
 	if err := db.UpsertLease(ctx, store.LeaseRow{
 		ID: leaseID, Owner: "consumer-a", Image: "py-base", SandboxID: sandboxID,
 		CreatedAt: gcOld, ExpiresAt: gcOld, LastActive: gcOld, State: "running",
+		Class: "guaranteed",
 	}); err != nil {
 		t.Fatalf("seed lease: %v", err)
 	}

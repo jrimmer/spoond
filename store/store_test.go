@@ -53,12 +53,13 @@ func TestLeaseRoundTrip(t *testing.T) {
 		LastCheckpointAt: base.Add(2 * time.Minute), RecoveredFrom: base,
 		LostAt: base.Add(3 * time.Minute), Drained: true,
 		Holder: "ci-job-42", HolderUrl: "https://ci.example.com/jobs/42",
+		Class: "guaranteed",
 	}
 	// Zero times, nil slices and empty strings everywhere they can be.
 	minimal := LeaseRow{
 		ID: "lease-2", Owner: "bob", Image: "go-base",
 		CreatedAt: base, ExpiresAt: base.Add(time.Hour), LastActive: base,
-		State: "running",
+		State: "running", Class: "guaranteed",
 	}
 
 	for _, row := range []LeaseRow{full, minimal} {
@@ -117,7 +118,7 @@ func TestDeleteLeaseCascadesShares(t *testing.T) {
 	if err := db.UpsertLease(ctx, LeaseRow{
 		ID: "lease-1", Owner: "alice", Image: "py-base",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
-		State: "running",
+		State: "running", Class: "guaranteed",
 	}); err != nil {
 		t.Fatalf("upsert lease: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestUniqueOwnerName(t *testing.T) {
 		return LeaseRow{
 			ID: id, Owner: "owner-1", Image: "py-base", Name: name,
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
-			State: "running",
+			State: "running", Class: "guaranteed",
 		}
 	}
 
@@ -228,7 +229,7 @@ func TestUpdateLastActive(t *testing.T) {
 		if err := db.UpsertLease(ctx, LeaseRow{
 			ID: id, Owner: "o", Image: "py-base",
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
-			State: "running",
+			State: "running", Class: "guaranteed",
 		}); err != nil {
 			t.Fatalf("upsert %s: %v", id, err)
 		}
@@ -406,7 +407,7 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		if err := db.UpsertLease(ctx, LeaseRow{
 			ID: id, Owner: "alice", Image: "py-base",
 			CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
-			LastActive: time.Now(), State: "running",
+			LastActive: time.Now(), State: "running", Class: "guaranteed",
 		}); err != nil {
 			t.Fatalf("seed lease %s: %v", id, err)
 		}
