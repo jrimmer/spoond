@@ -294,7 +294,8 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN last_action_at`,
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10)`,
+		`DROP TABLE lease_kept_builds`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -351,7 +352,8 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10)`,
+		`DROP TABLE lease_kept_builds`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
