@@ -304,7 +304,7 @@ func TestRestartNonPersistent(t *testing.T) {
 	}
 	oldSandbox := l.SandboxID
 
-	if _, err := svc.restart(ctx, "c", l.ID); err != nil {
+	if _, err := svc.restart(ctx, "c", l.ID, ""); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
 	if l.ID == "" || svc.lookup("c", l.ID) == nil {

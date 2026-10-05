@@ -101,7 +101,7 @@ func TestGenerationRestart(t *testing.T) {
 		t.Fatalf("guest file after suspend/resume = %q, want \"1\\n\"", got)
 	}
 
-	if _, err := svc.restart(ctx, "c", p.ID); err != nil {
+	if _, err := svc.restart(ctx, "c", p.ID, ""); err != nil {
 		t.Fatalf("restart persistent: %v", err)
 	}
 	if p.Generation != 1 {
@@ -112,7 +112,7 @@ func TestGenerationRestart(t *testing.T) {
 	}
 
 	oldSandbox := n.SandboxID
-	if _, err := svc.restart(ctx, "c", n.ID); err != nil {
+	if _, err := svc.restart(ctx, "c", n.ID, ""); err != nil {
 		t.Fatalf("restart non-persistent: %v", err)
 	}
 	if n.SandboxID == oldSandbox {
@@ -216,7 +216,7 @@ func TestGenerationWriteFailureIsBestEffort(t *testing.T) {
 	// Every future WriteFile fails (the file write on restart, for
 	// instance): the restart must still succeed.
 	sub.FailCall("WriteFile", 0, errors.New("disk gone"))
-	if _, err := svc.restart(ctx, "c", l.ID); err != nil {
+	if _, err := svc.restart(ctx, "c", l.ID, ""); err != nil {
 		t.Fatalf("restart with a failing generation write: %v", err)
 	}
 	if l.Generation != 2 {

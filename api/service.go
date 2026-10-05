@@ -1440,11 +1440,22 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	return l, nil
 }
 
-// restart restarts a lease. Persistent and running: suspend, then resume
-// (lossless through the pause build). Persistent and suspended: resume.
-// Non-persistent: delete the sandbox and create a fresh one from the
-// image's current build, keeping the lease id (A1 §17 item 4).
-func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error) {
+// restart restarts a lease. mode "" or "warm" is the default: a
+// persistent running lease suspends then resumes (lossless through the
+// pause build); a persistent suspended lease resumes; a non-persistent
+// lease gets a fresh sandbox. mode "cold" runs the fresh-sandbox path
+// for any lease, persistent or not (#120): the sandbox is deleted and a
+// new one is created from the image's current build, keeping the lease
+// id, owner, holder, name, network policy and exposed ports, re-writing
+// the create-time secrets, bumping the generation and rewriting
+// /run/spoond/generation. A persistent lease stays persistent but loses
+// its resume point (its pause builds stop being its resume point; the
+// next suspend sets resume_build_id again), and a suspended lease comes
+// back running.
+func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, error) {
+	if mode != "" && mode != "warm" && mode != "cold" {
+		return nil, errBadRestartMode
+	}
 	s.store.mu.Lock()
 	l := s.store.leases[id]
 	if l == nil || l.Owner != owner || l.released {
@@ -1460,6 +1471,10 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 	suspended := l.Suspended
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
+
+	if mode == "cold" {
+		return s.restartCold(ctx, owner, l)
+	}
 
 	if persistent {
 		if !suspended {
@@ -1508,6 +1523,51 @@ func (s *Service) restart(ctx context.Context, owner, id string) (*Lease, error)
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "cold-restarted from image "+l.Image)
+	return l, nil
+}
+
+// restartCold is the cold path of restart (#120): any lease, persistent
+// or not, running or suspended, gets a fresh guest from the image's
+// current build. The lease keeps its id, owner, holder, name, network
+// policy and exposed ports — everything else about the guest starts
+// over: the generation bumps and the create-time secrets are re-written
+// into the new sandbox. A persistent lease keeps being persistent, but
+// its resume_build_id is cleared: the pause builds it accumulated are no
+// longer its resume point (the next suspend sets it as usual). A
+// suspended lease comes back running.
+func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lease, error) {
+	_ = s.sub.Delete(ctx, l.SandboxID)
+	s.deleteSandboxRow(l.SandboxID)
+	img, b, err := s.imageBuild(ctx, l.Image)
+	if err != nil {
+		return nil, err
+	}
+	sb, err := s.createSandbox(ctx, img, b, false, "", l)
+	if err != nil {
+		return nil, err
+	}
+	s.store.mu.Lock()
+	l.SandboxID = sb.ID
+	l.HostIP = sb.HostIP
+	l.ExposedIP = sb.HostIP
+	l.BuildID = b.BuildID
+	l.setState("running")
+	l.Suspended = false
+	// The pause builds stop being the lease's resume point: the next
+	// suspend writes a fresh one.
+	l.ResumeBuildID = ""
+	l.LastActive = time.Now()
+	s.bumpGenerationLocked(l)
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
+	s.writeGeneration(l)
+	// A fresh sandbox never had the lease's secrets: re-write them
+	// (create-time only; exec-time secrets ride their request) (#80).
+	s.restageCreateSecrets(ctx, l, "restart")
+	if len(l.ExposePorts) > 0 {
+		s.refreshPeersAsync(ctx)
+	}
+	s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "cold")
 	return l, nil
 }
 
@@ -2693,6 +2753,7 @@ var (
 	errBadForkCount   = &leaseError{"count must be 1..20"}
 	errLeaseBusy      = &leaseError{"lease is busy; retry"}
 	errHolderMismatch = &leaseError{"holder does not match the lease's current holder"}
+	errBadRestartMode = &leaseError{"mode must be warm or cold"}
 )
 
 // leaseError is a simple sentinel error.

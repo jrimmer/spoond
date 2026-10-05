@@ -589,7 +589,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id>, cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
+		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id> [--cold], cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {
@@ -693,10 +693,25 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		}
 		return runShelly(ctx, fields[1])
 	case "restart":
-		if len(fields) < 2 {
-			return `{"error":"usage: restart <lease-id>"}`
+		cold := false
+		args := fields[1:]
+		kept := args[:0]
+		for _, f := range args {
+			if f == "--cold" {
+				cold = true
+				continue
+			}
+			kept = append(kept, f)
 		}
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/restart", nil)
+		args = kept
+		if len(args) < 1 {
+			return `{"error":"usage: restart <lease-id> [--cold]"}`
+		}
+		var payload []byte
+		if cold {
+			payload = []byte(`{"mode":"cold"}`)
+		}
+		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+args[0]+"/restart", payload)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
