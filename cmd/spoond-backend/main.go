@@ -21,7 +21,9 @@
 //	                  (Prometheus, spoond dash); empty disables
 //	HOST_API_PORT     lease API port lan/internet guests may reach on
 //	                  HOST_GUEST_SERVICE_ADDR (default: BIND_ADDR's port)
-//	CHECKPOINT_INTERVAL_MINS  periodic checkpoint interval (U10; default 60)
+//	CHECKPOINT_INTERVAL_MINS  default per-lease checkpoint interval in
+//	                  minutes for leases without their own (2.3; default 0 =
+//	                  never; a lease's checkpoint_interval overrides)
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
 //	                  (default /forkdcache/e2b/storage/templates)
@@ -230,7 +232,11 @@ func Main(args []string) int {
 		defaultAPIPort, _ = strconv.Atoi(p)
 	}
 	hostAPIPort := envIntOr("HOST_API_PORT", defaultAPIPort)
-	checkpointEvery := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 60)) * time.Minute
+	// Checkpointing (2.3, #122): CHECKPOINT_INTERVAL_MINS is the default
+	// per-lease interval for leases without their own (-1), itself
+	// defaulting to 0 = never. A lease's own checkpoint_interval (0 or
+	// 60..604800 seconds) overrides it.
+	checkpointDefault := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 0)) * time.Minute
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
@@ -282,27 +288,27 @@ func Main(args []string) int {
 	}
 
 	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
-		PoolSize:               poolSize,
-		DefaultTTL:             defaultTTL,
-		MaxTTL:                 maxTTL,
-		IdleTimeout:            idleTimeout,
-		HostGuestAddr:          hostGuestAddr,
-		HostGuestPort:          hostGuestPort,
-		HostAPIPort:            hostAPIPort,
-		MetricsToken:           os.Getenv("METRICS_TOKEN"),
-		ProxyURL:               cfg.ProxyURL,
-		CheckpointEvery:        checkpointEvery,
-		TemplateStoragePath:    storagePath,
-		LostGracePersistent:    lostGracePersistent,
-		LostGrace:              lostGrace,
-		HeldIdleTimeout:        heldIdle,
-		HeldSuspendedRelease:   heldRelease,
-		HoldTTL:                holdTTL,
-		HoldTTLMax:             holdTTLMax,
-		PressureDiskFreePct:    float64(envIntOr("PRESSURE_DISK_FREE_PCT", api.DefaultPressureDiskFreePct)),
-		PressureHeldIdle:       pressureIdle,
-		CriticalDiskFreePct:    float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
-		CriticalDiskRecoverPct: float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
+		PoolSize:                  poolSize,
+		DefaultTTL:                defaultTTL,
+		MaxTTL:                    maxTTL,
+		IdleTimeout:               idleTimeout,
+		HostGuestAddr:             hostGuestAddr,
+		HostGuestPort:             hostGuestPort,
+		HostAPIPort:               hostAPIPort,
+		MetricsToken:              os.Getenv("METRICS_TOKEN"),
+		ProxyURL:                  cfg.ProxyURL,
+		CheckpointIntervalDefault: int64(checkpointDefault / time.Second),
+		TemplateStoragePath:       storagePath,
+		LostGracePersistent:       lostGracePersistent,
+		LostGrace:                 lostGrace,
+		HeldIdleTimeout:           heldIdle,
+		HeldSuspendedRelease:      heldRelease,
+		HoldTTL:                   holdTTL,
+		HoldTTLMax:                holdTTLMax,
+		PressureDiskFreePct:       float64(envIntOr("PRESSURE_DISK_FREE_PCT", api.DefaultPressureDiskFreePct)),
+		PressureHeldIdle:          pressureIdle,
+		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
+		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
 	})
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
 	// a ping and then fails the job deep inside a build, so verify it from

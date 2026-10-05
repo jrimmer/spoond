@@ -10,9 +10,11 @@ import (
 )
 
 // TestPeriodicCheckpointSkipsIdle: the periodic pass checkpoints a
-// persistent live lease that was active since its last checkpoint, then
-// skips it until the next activity. Non-persistent and suspended leases
-// are never checkpointed.
+// live lease whose own interval is due and that was active since its
+// last checkpoint, then skips it until the next activity. A lease with
+// no interval (the host default 0 = never) and a suspended lease are
+// never checkpointed — persistent alone no longer puts a lease on the
+// pass (2.3, #122).
 func TestPeriodicCheckpointSkipsIdle(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -27,8 +29,21 @@ func TestPeriodicCheckpointSkipsIdle(t *testing.T) {
 		t.Fatalf("grant plain: %v", err)
 	}
 
-	// First pass: the persistent lease is due (active, never
-	// checkpointed); the non-persistent one never is.
+	// Neither lease has an interval of its own and the host default is
+	// 0 = never: the pass does nothing despite activity.
+	svc.checkpointIdleLeases(ctx)
+	if got := calls(sub.Fake, "Checkpoint "+l.SandboxID); got != 0 {
+		t.Fatalf("never-interval lease checkpointed %d times, want 0", got)
+	}
+
+	// Give the persistent lease its own interval: now it is due (active,
+	// never checkpointed); the plain lease stays off the pass.
+	svc.store.mu.Lock()
+	l.CheckpointInterval = 60
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+
+	// First pass: the lease with an interval is due.
 	svc.checkpointIdleLeases(ctx)
 	if got := calls(sub.Fake, "Checkpoint "+l.SandboxID); got != 1 {
 		t.Fatalf("due lease checkpointed %d times, want 1 (calls %v)", got, sub.Fake.CallLog())
@@ -43,7 +58,12 @@ func TestPeriodicCheckpointSkipsIdle(t *testing.T) {
 		t.Fatalf("idle lease checkpointed again: %d total, want 1", got)
 	}
 
-	// Activity re-arms the lease.
+	// Age the last checkpoint past the interval and touch the lease:
+	// active since, and the interval has elapsed → due again.
+	svc.store.mu.Lock()
+	l.LastCheckpointAt = svc.now().Add(-2 * time.Minute)
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
 	svc.touch(l.ID)
 	svc.checkpointIdleLeases(ctx)
 	if got := calls(sub.Fake, "Checkpoint "+l.SandboxID); got != 2 {

@@ -223,6 +223,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// admin; the handler 404s for anyone else, like the other lease
 	// routes.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/holder", s.handleHolder)
+	// Per-lease checkpoint interval (2.3, #122): owner or admin, 404 for
+	// anyone else.
+	s.mux.HandleFunc("PUT /api/sandboxes/{id}/checkpoint-policy", s.handleCheckpointPolicy)
 	// Lease file operations (#114): download/upload/stat/mkdir/remove a
 	// guest file through the substrate. Owner or admin; 404 for anyone
 	// else, 409 while suspended.
@@ -741,6 +744,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
 		HoldTTL   int    `json:"hold_ttl"`
+		// CheckpointInterval is the lease's own periodic checkpoint
+		// interval in seconds (2.3, #122): 0 = never; omitted (nil) =
+		// the host default (CHECKPOINT_INTERVAL_MINS).
+		CheckpointInterval *int64 `json:"checkpoint_interval"`
 		// Secrets (#80) become files under /run/secrets in the guest
 		// (mode 0600, on a 0700 tmpfs). Values are kept in memory only,
 		// never stored, logged or returned.
@@ -778,6 +785,18 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.HoldTTL < 0 {
 		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
 		return
+	}
+	// Per-lease checkpoint interval (2.3, #122): omitted (nil) is the
+	// host default; otherwise 0 (never) or 60..604800 seconds.
+	ckptSet := false
+	var ckptSecs int64
+	if req.CheckpointInterval != nil {
+		ckptSet = true
+		ckptSecs = *req.CheckpointInterval
+		if err := validateCheckpointInterval(ckptSecs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	secrets, err := validateSecrets(req.Secrets)
 	if err != nil {
@@ -843,27 +862,33 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Stamp the hold's clock on the granted lease (grant itself leaves
-	// it zero so unheld grants carry no hold).
+	// it zero so unheld grants carry no hold), and the create request's
+	// own checkpoint interval (grant leaves the stored -1, the host
+	// default).
+	s.svc.store.mu.Lock()
 	if req.Holder != "" {
-		s.svc.store.mu.Lock()
 		s.svc.setHoldLocked(lease, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second, s.svc.now())
-		s.svc.saveLeaseLocked(lease)
-		s.svc.store.mu.Unlock()
 	}
+	if ckptSet {
+		lease.CheckpointInterval = ckptSecs
+	}
+	s.svc.saveLeaseLocked(lease)
+	s.svc.store.mu.Unlock()
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":              lease.ID,
-		"owner":           lease.Owner,
-		"address":         lease.HostIP,
-		"image":           lease.Image,
-		"ttl":             int(ttl.Seconds()),
-		"persistent":      lease.Persistent,
-		"expires_at":      lease.ExpiresAt.UTC().Format(time.RFC3339),
-		"holder":          lease.Holder,
-		"holder_url":      lease.HolderUrl,
-		"hold_expires_at": formatRFC3339(lease.HoldExpiresAt),
-		"hold_state":      holdState(lease),
-		"exposed":         exposedMap(lease),
-		"generation":      lease.Generation,
+		"id":                  lease.ID,
+		"owner":               lease.Owner,
+		"address":             lease.HostIP,
+		"image":               lease.Image,
+		"ttl":                 int(ttl.Seconds()),
+		"persistent":          lease.Persistent,
+		"expires_at":          lease.ExpiresAt.UTC().Format(time.RFC3339),
+		"holder":              lease.Holder,
+		"holder_url":          lease.HolderUrl,
+		"hold_expires_at":     formatRFC3339(lease.HoldExpiresAt),
+		"hold_state":          holdState(lease),
+		"exposed":             exposedMap(lease),
+		"generation":          lease.Generation,
+		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
 	})
 }
 
@@ -1940,7 +1965,7 @@ func (s *Server) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, leaseDetailMap(lease))
+	writeJSON(w, http.StatusOK, s.svc.leaseDetailMap(lease))
 }
 
 // handleImages lists the images with a current build. Without a detail

@@ -289,8 +289,11 @@ func TestHeldLeaseNotIdleSuspended(t *testing.T) {
 	}
 }
 
-// TestHeldPlainLeaseCheckpointed: the periodic checkpoint pass covers a
-// held plain (non-persistent) lease, and skips it once unheld.
+// TestHeldPlainLeaseCheckpointed: a held lease without an interval is
+// not on the periodic pass (being held no longer means being
+// checkpointed, 2.3 #122); one with an interval of its own is, and
+// skips once unheld only because its interval is cleared with the
+// holder in this scenario — the hold itself is irrelevant to the pass.
 func TestHeldPlainLeaseCheckpointed(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -301,16 +304,30 @@ func TestHeldPlainLeaseCheckpointed(t *testing.T) {
 		t.Fatalf("grant: %v", err)
 	}
 
+	// Held with no interval (host default 0 = never): not picked.
+	svc.checkpointIdleLeases(ctx)
+	if got := calls(sub.Fake, "Checkpoint "+l.SandboxID); got != 0 {
+		t.Fatalf("held plain lease without interval checkpointed %d times, want 0", got)
+	}
+
+	// An interval of its own puts the held plain lease on the pass.
+	svc.store.mu.Lock()
+	l.CheckpointInterval = 60
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
 	svc.checkpointIdleLeases(ctx)
 	if got := calls(sub.Fake, "Checkpoint "+l.SandboxID); got != 1 {
-		t.Fatalf("held plain lease checkpointed %d times, want 1", got)
+		t.Fatalf("held plain lease with interval checkpointed %d times, want 1", got)
 	}
 
 	// Activity re-arms the lease (LastActive after LastCheckpointAt);
-	// with the holder cleared the pass no longer touches the plain
-	// lease.
+	// with the interval set back to never the pass no longer touches
+	// the plain lease.
 	svc.touch(l.ID)
-	l.Holder = ""
+	svc.store.mu.Lock()
+	l.CheckpointInterval = 0
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
 	svc.checkpointIdleLeases(ctx)
 	if got := calls(sub.Fake, "Checkpoint "+l.SandboxID); got != 1 {
 		t.Fatalf("unheld plain lease checkpointed %d times total, want 1", got)

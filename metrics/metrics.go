@@ -80,6 +80,9 @@ type BackendMetrics struct {
 
 	// Checkpoints (U10)
 	CheckpointDur prometheus.Histogram // sub.Checkpoint snapshot duration
+	// CheckpointPause (2.3, #122): how long one checkpoint pauses the
+	// guest, in seconds, buckets 1..600.
+	CheckpointPause prometheus.Histogram
 
 	// Snapshot catalog (U11)
 	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
@@ -303,6 +306,14 @@ func NewBackendMetrics() *BackendMetrics {
 		Help:    "Duration of one substrate Checkpoint call.",
 		Buckets: prometheus.ExponentialBuckets(0.5, 2, 10), // 0.5s → 256s
 	})
+	// Checkpoint pause (2.3, #122): how long each checkpoint leaves the
+	// guest paused, whatever surfaced it (periodic pass, manual route,
+	// clone, fork).
+	m.CheckpointPause = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "checkpoint_pause_seconds",
+		Help:    "How long one checkpoint pauses the guest, in seconds.",
+		Buckets: []float64{1, 2, 5, 10, 30, 60, 120, 300, 600},
+	})
 
 	// Snapshot catalog (U11)
 	m.SnapshotBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -382,7 +393,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.StoreErrors,
 		m.Notifications,
 		m.BuildsInFlight, m.BuildsFailed,
-		m.CheckpointDur,
+		m.CheckpointDur, m.CheckpointPause,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 		m.HeldActions,
 		m.GuestDialsActive, m.GuestDialsTotal,
