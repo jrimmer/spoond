@@ -207,17 +207,14 @@ func (s *Service) keptBytesOfOwner(ctx context.Context, owner string) (int64, er
 	}
 	size := make(map[string]int64, len(builds))
 	for _, b := range builds {
-		if b.State == "deleted" {
-			continue
+		if b.Owner == owner && b.State != "deleted" {
+			size[b.BuildID] = b.SizeBytes
 		}
-		size[b.BuildID] = b.SizeBytes
 	}
 	var total int64
 	for _, ids := range keptBy {
 		for _, id := range ids {
-			if sz, ok := size[id]; ok {
-				total += sz
-			}
+			total += size[id]
 		}
 	}
 	return total, nil

@@ -181,15 +181,25 @@ func (s *Service) UpdateKeptMetrics(ctx context.Context) {
 	if s.metrics == nil {
 		return
 	}
+	pins, bytes, err := s.keptPins(ctx)
+	if err != nil {
+		s.log.Printf("kept metrics: %v", err)
+		return
+	}
+	s.metrics.KeptBuilds.Set(float64(pins))
+	s.metrics.KeptBuildsBytes.Set(float64(bytes))
+}
+
+// keptPins counts the kept-checkpoint pins of live leases and sums
+// their recorded size_bytes (#126).
+func (s *Service) keptPins(ctx context.Context) (pins, bytes int64, err error) {
 	keptBy, err := s.db.ListKeptBuilds(ctx)
 	if err != nil {
-		s.log.Printf("kept metrics: list kept builds: %v", err)
-		return
+		return 0, 0, err
 	}
 	leases, err := s.db.ListLeases(ctx)
 	if err != nil {
-		s.log.Printf("kept metrics: list leases: %v", err)
-		return
+		return 0, 0, err
 	}
 	live := make(map[string]bool, len(leases))
 	for _, l := range leases {
@@ -199,8 +209,7 @@ func (s *Service) UpdateKeptMetrics(ctx context.Context) {
 	}
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
-		s.log.Printf("kept metrics: list builds: %v", err)
-		return
+		return 0, 0, err
 	}
 	size := make(map[string]int64, len(builds))
 	for _, b := range builds {
@@ -208,7 +217,6 @@ func (s *Service) UpdateKeptMetrics(ctx context.Context) {
 			size[b.BuildID] = b.SizeBytes
 		}
 	}
-	var pins, bytes int64
 	for leaseID, ids := range keptBy {
 		if !live[leaseID] {
 			continue
@@ -218,8 +226,7 @@ func (s *Service) UpdateKeptMetrics(ctx context.Context) {
 			bytes += size[id]
 		}
 	}
-	s.metrics.KeptBuilds.Set(float64(pins))
-	s.metrics.KeptBuildsBytes.Set(float64(bytes))
+	return pins, bytes, nil
 }
 
 // keptBuilds computes the GC keep set. Roots are every image's current

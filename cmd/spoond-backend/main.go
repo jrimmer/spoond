@@ -81,6 +81,10 @@
 //	                  to the database)
 //	BACKUP_MAX_AGE_SECS  how old the newest database backup may get
 //	                  before the notifier warns (default 93600 = 26 h)
+//	KEPT_DISK_WARN_PCT  kept-checkpoint share of the snapshot disk past
+//	                  which the notifier's disk.kept check warns and the
+//	                  dashboard's attention strip shows a row (#126;
+//	                  default 40; 0 disables both)
 package spoondbackend
 
 import (
@@ -149,6 +153,15 @@ func envIntOr(key string, def int) int {
 // staleness check uses.
 func notifyBackupMaxAge() time.Duration {
 	return notify.BackupMaxAgeSecs(envIntOr("BACKUP_MAX_AGE_SECS", 0))
+}
+
+// keptDiskWarnPct is the kept-checkpoint disk share (#126) past which
+// the notifier's disk.kept check warns: KEPT_DISK_WARN_PCT, default 40.
+// A configured 0 disables the check (and the dashboard's banner row,
+// which reads the same knob) — the check is only registered when the
+// value is positive.
+func keptDiskWarnPct() float64 {
+	return float64(envIntOr("KEPT_DISK_WARN_PCT", int(notify.DefaultKeptDiskWarnPct)))
 }
 
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
@@ -410,6 +423,15 @@ func Main(args []string) int {
 			svc.GCLastError(),
 		).Checks() {
 			notifier.AddCheck(c)
+		}
+		// Kept checkpoints vs the snapshot disk (#126): disk.kept warns
+		// past KEPT_DISK_WARN_PCT (default 40; 0 = off). The critical-disk
+		// rule never deletes a kept build, so only a person can act on it.
+		if warn := keptDiskWarnPct(); warn > 0 {
+			keptSrc := &notify.CheckSources{KeptDisk: svc.KeptDiskProbe(storagePath), KeptWarnPct: warn}
+			for _, c := range keptSrc.Checks() {
+				notifier.AddCheck(c)
+			}
 		}
 		notifier.Start(ctx)
 		defer notifier.Stop()

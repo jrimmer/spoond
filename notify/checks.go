@@ -27,6 +27,7 @@ const (
 	KeyTLSCert1        = "tls.cert.1d"
 	KeyGCFailed        = "gc.failed"
 	KeyBackupStale     = "backup.stale"
+	KeyDiskKept        = "disk.kept"
 )
 
 // Warn/danger levels for the snapshot disk and the hugepage pool: the
@@ -38,6 +39,12 @@ const (
 	HugepagesWarnUsedPct   = 80.0
 	HugepagesDangerUsedPct = 92.0
 )
+
+// DefaultKeptDiskWarnPct is the kept-checkpoint share of the snapshot
+// disk (#126) past which disk.kept warns (KEPT_DISK_WARN_PCT on both
+// the backend's notifier and the dashboard; default 40). A configured
+// 0 disables the check.
+const DefaultKeptDiskWarnPct = 40.0
 
 // DefaultBackupMaxAge is how old the newest database backup may get
 // before the backup check alerts (BACKUP_MAX_AGE_SECS, default 93600
@@ -81,6 +88,11 @@ type LastBackup func() (time.Time, error)
 // not run yet is not a failure). Replaced in tests.
 type GCLastError func() error
 
+// KeptDisk reports the bytes kept checkpoints hold and the snapshot
+// disk's total size (#126). Replaced in tests. A nil probe (or one that
+// errors) disables the disk.kept check.
+type KeptDisk func() (keptBytes, diskTotal uint64, err error)
+
 // CheckSources carries the probes the periodic checks read. Every
 // field is optional: a nil source disables its checks (no TLS_CERT
 // disables the certificate check, no backup directory the backup
@@ -93,6 +105,8 @@ type CheckSources struct {
 	Cert         CertExpiry
 	LastBackup   LastBackup
 	GCFailed     GCLastError
+	KeptDisk     KeptDisk      // kept checkpoints vs the snapshot disk (#126); nil = no check
+	KeptWarnPct  float64       // disk.kept warn level, % of the disk; 0 = DefaultKeptDiskWarnPct
 	BackupMaxAge time.Duration // 0 = DefaultBackupMaxAge
 }
 
@@ -208,6 +222,16 @@ func (src *CheckSources) Checks() []Check {
 			return []Event{resolved(KeyGCFailed, Warn, now)}
 		})
 	}
+	if src.KeptDisk != nil && src.KeptWarnPct >= 0 {
+		warn := src.KeptWarnPct
+		if warn == 0 {
+			warn = DefaultKeptDiskWarnPct
+		}
+		keptDisk := src.KeptDisk
+		out = append(out, func(_ context.Context, now time.Time) []Event {
+			return keptDiskCheck(keptDisk, warn, now)
+		})
+	}
 	return out
 }
 
@@ -280,6 +304,29 @@ func diskCheck(usage DiskUsage, now time.Time) []Event {
 	default:
 		return []Event{resolved(KeyDiskWarn, Warn, now), resolved(KeyDiskDanger, Critical, now)}
 	}
+}
+
+// keptDiskCheck warns when kept checkpoints (#126) hold past warnPct
+// percent of the snapshot disk. A probe that cannot run (or a disk whose
+// total is 0) is not an incident: the check stays silent. Kept builds
+// are owner-pinned and the critical-disk rule never deletes one, so an
+// over-growing kept set is exactly what a person should hear about.
+func keptDiskCheck(kept KeptDisk, warnPct float64, now time.Time) []Event {
+	bytes, total, err := kept()
+	if err != nil || total == 0 {
+		return nil
+	}
+	pct := float64(bytes) / float64(total) * 100
+	if pct >= warnPct {
+		return []Event{{
+			Key:      KeyDiskKept,
+			Severity: Warn,
+			Title:    "Kept checkpoints fill the snapshot disk",
+			Body:     fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk (%s of %s), warn level %.0f%%", pct, humanBytes(bytes), humanBytes(total), warnPct),
+			At:       now,
+		}}
+	}
+	return []Event{resolved(KeyDiskKept, Warn, now)}
 }
 
 // hugepagesCheck watches the hugepage pool past the dashboard's warn

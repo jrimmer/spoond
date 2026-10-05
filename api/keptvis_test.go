@@ -232,3 +232,51 @@ func TestKeptBudgetIsPerOwner(t *testing.T) {
 		t.Fatalf("kept rows after the plain retry = %v (%v), want none", keeps, err)
 	}
 }
+
+// TestKeptDiskProbeFeedsNotify: the service's KeptDiskProbe reports the
+// live leases' kept bytes and the snapshot disk's total, so the
+// notifier's disk.kept check sees them (#126).
+func TestKeptDiskProbeFeedsNotify(t *testing.T) {
+	ts, svc, db, _ := keptMetricsTestServer(t)
+	seedImage(t, db, "py-base", 2048)
+	// A tiny "disk": 100 bytes total. One kept build (≥ 8192 allocated
+	// bytes) is far past the 40 % warn level.
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 50, nil }
+
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
+		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	id := create["id"].(string)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "token-a",
+		map[string]any{"keep": true})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("keep: status %d (%v)", resp.StatusCode, body)
+	}
+
+	probe := svc.KeptDiskProbe(t.TempDir())
+	kept, total, err := probe()
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if total != 100 {
+		t.Fatalf("probe total = %d, want 100 (from diskCapacity)", total)
+	}
+	if kept == 0 {
+		t.Fatal("probe kept = 0, want the kept build's recorded size")
+	}
+	b, err := db.GetBuild(context.Background(), body["build_id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept != uint64(b.SizeBytes) {
+		t.Fatalf("probe kept = %d, want the build's recorded %d", kept, b.SizeBytes)
+	}
+	// Released: the pins are gone, the probe reads zero.
+	svc.release(context.Background(), svc.lookup("consumer-a", id))
+	kept, _, err = probe()
+	if err != nil {
+		t.Fatalf("probe after release: %v", err)
+	}
+	if kept != 0 {
+		t.Fatalf("probe kept after release = %d, want 0", kept)
+	}
+}
