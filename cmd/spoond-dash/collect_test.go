@@ -175,8 +175,9 @@ func TestEventBufferCap(t *testing.T) {
 }
 
 // TestEventLinesFormat: the panel's lines are
-// "HH:MM:SS  <type padded to 10>  <lease id 10>  <subject>", styled by
-// type; without DASH_EVENTS_TOKEN the panel says so, dim.
+// "HH:MM:SS  <type padded to 14>  <lease id 10>  <subject>" in the
+// frame clock's zone, styled by type; a gap is a marker line; without
+// DASH_EVENTS_TOKEN the panel says so, dim.
 func TestEventLinesFormat(t *testing.T) {
 	c := newCollector(Config{}) // no events token
 	lines := c.eventLines(time.Unix(1_800_000_000, 0))
@@ -196,14 +197,20 @@ func TestEventLinesFormat(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3", len(lines))
 	}
-	if want := "07:19:02  held_action  fedcba0987  nightly"; lines[0].Text != want || lines[0].Style != "warn" {
+	if want := "07:19:02  held_action     fedcba0987  nightly"; lines[0].Text != want || lines[0].Style != "warn" {
 		t.Fatalf("line 0 = %+v, want %q", lines[0], want)
 	}
-	if want := "07:19:01  released    abcdef0123  jason"; lines[1].Text != want || lines[1].Style != "dim" {
+	if want := "07:19:01  released        abcdef0123  jason"; lines[1].Text != want || lines[1].Style != "dim" {
 		t.Fatalf("line 1 = %+v, want %q", lines[1], want)
 	}
-	if want := "07:19:00  lost        1234567890  agent"; lines[2].Text != want || lines[2].Style != "warn" {
+	if want := "07:19:00  lost            1234567890  agent"; lines[2].Text != want || lines[2].Style != "warn" {
 		t.Fatalf("line 2 = %+v, want %q", lines[2], want)
+	}
+
+	// A gap (events missed on a reconnect) is a marker, not an empty row.
+	c.events.add(dashEvent{At: at.Add(time.Second), Type: "gap"})
+	if l := c.eventLines(at.Add(time.Second))[0]; l.Text != "07:19:03  ┄ events missed while reconnecting" || l.Style != "warn" {
+		t.Fatalf("gap line = %+v", l)
 	}
 
 	// Only the newest eventPanelRows lines are shown.

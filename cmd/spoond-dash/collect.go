@@ -255,8 +255,6 @@ func newCollector(cfg Config) *collector {
 	}
 }
 
-// collect builds a snapshot. A failing source fills Err and leaves its
-// fields at zero; the rest of the frame still renders.
 // eventsURL is the lease events stream URL: the metrics URL's scheme
 // and host (the same backend), /api/leases/events on the path.
 func eventsURL(metricsURL string) string {
@@ -269,6 +267,8 @@ func eventsURL(metricsURL string) string {
 	return u.String()
 }
 
+// collect builds a snapshot. A failing source fills Err and leaves its
+// fields at zero; the rest of the frame still renders.
 func (c *collector) collect(ctx context.Context) Snapshot {
 	now := c.now()
 	s := Snapshot{At: now.Format("15:04:05"), ByState: map[string]int{}}
@@ -548,7 +548,9 @@ const eventPanelRows = 5
 // eventLines renders the buffered lease events as the panel's lines,
 // newest first, at most eventPanelRows of them:
 //
-//	HH:MM:SS  <type padded to 10>  <lease id 10>  <subject>
+//	HH:MM:SS  <type padded to 14>  <lease id 10>  <subject>
+//
+// (14 fits the longest type, holder_cleared, so the columns line up.)
 //
 // where subject is the holder, else the comment, else the owner.
 // Without DASH_EVENTS_TOKEN the collector never subscribed to anything,
@@ -559,10 +561,17 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 	}
 	evs := c.events.newest(eventPanelRows)
 	lines := make([]EventLine, 0, len(evs))
+	rows := c.lastRows()
 	for _, ev := range evs {
-		text := fmt.Sprintf("%s  %-10s  %-10s  %s",
-			ev.At.In(time.UTC).Format("15:04:05"), ev.Type, ev.LeaseID,
-			eventSubject(ev, c.lastRows()))
+		// Local time, like the status line's clock on the same frame.
+		at := ev.At.In(now.Location()).Format("15:04:05")
+		if ev.Type == "gap" {
+			// The stream skipped events (a reconnect past the backend's
+			// buffer): say so instead of drawing an empty row.
+			lines = append(lines, EventLine{Text: at + "  ┄ events missed while reconnecting", Style: "warn"})
+			continue
+		}
+		text := fmt.Sprintf("%s  %-14s  %-10s  %s", at, ev.Type, ev.LeaseID, eventSubject(ev, rows))
 		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev.Type)})
 	}
 	return lines

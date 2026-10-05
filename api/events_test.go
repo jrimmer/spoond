@@ -1091,10 +1091,16 @@ func TestEventsTokenScopeIsEventsOnly(t *testing.T) {
 	// (they block while the stream is open); here just the handler's
 	// verdicts. The one-lease streams refuse it in both spellings — same
 	// data, one route too wide — as does every deeper path.
-	do("GET", "/api/leases/x/y/events", "events-tok")            // 401: not an events route
-	do("GET", "/api/leases/"+l.ID+"/events/extra", "events-tok") // 401: neither
-	do("GET", "/api/leases/"+l.ID+"/events", "events-tok")       // 401: the one-lease form is not its route
-	do("GET", "/api/sandboxes/events", "events-tok")             // 401: not the documented spelling
+	for _, path := range []string{
+		"/api/leases/x/y/events",                // not an events route
+		"/api/leases/" + l.ID + "/events/extra", // neither
+		"/api/leases/" + l.ID + "/events",       // the one-lease form is not its route
+		"/api/sandboxes/events",                 // not the documented spelling
+	} {
+		if got := do("GET", path, "events-tok"); got != http.StatusUnauthorized {
+			t.Errorf("GET %s with the events token: %d, want 401", path, got)
+		}
+	}
 
 	// Every other route refuses it.
 	for _, path := range []string{
