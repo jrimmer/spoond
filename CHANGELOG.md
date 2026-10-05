@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Security
+
+- **Guest system binaries were writable by any user (#124).** E2B's
+  template build runs `chmod -R 777 /usr/local` and `/code`, and writes
+  envd with mode 0777, so an unprivileged user inside a guest could
+  replace binaries that root runs (spoond-guest-init, e2b-provision-runner,
+  envd). spoond-guest-init now removes group and other write access under
+  /usr/local, sets envd to 0755 and makes /code sticky (1777) before the
+  template is snapshotted. Images must be rebuilt
+  (`spoond images build --all`) to pick it up. Conformance L7 checks it.
+
 ## [2.2.1] - 2026-10-04
 
 Fixes found running 2.2.0 under real load.
