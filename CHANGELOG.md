@@ -66,9 +66,9 @@ summarised from README "Status".
 - **Dashboard follow-ups (#118).** The events panel is fed by the
   backend's lease event stream instead of the backend's journal: the
   backend gained an events-only `EVENTS_TOKEN` (constant-time compare,
-  empty disables) that may `GET /api/leases/events` and
-  `/api/leases/{id}/events` — every owner's events — and is refused on
-  every other route, and the dashboard holds one SSE subscription with
+  empty disables) that may `GET /api/leases/events` — every owner's
+  events, and that route only — and is refused on every other route,
+  and the dashboard holds one SSE subscription with
   it (`DASH_EVENTS_TOKEN`, resuming by `Last-Event-ID`, backing off on
   errors) and keeps the last 50 events. The panel shows the newest 5 —
   `HH:MM:SS`, the type padded to 10, the lease id to 10, then the

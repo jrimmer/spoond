@@ -532,14 +532,16 @@ receives only events for their own leases. `?lease_id=<id>` narrows the
 stream to one lease (a lease you cannot see answers the same `404` as
 the other lease routes). Requires a bearer token: a consumer token (or
 an admin user), or the events-only `EVENTS_TOKEN` — which sees every
-owner's events and is refused on every other route (a stream is a read:
-any other method gets `405`).
+owner's events and works on this route only. Everywhere else — the
+one-lease streams, the `/api/sandboxes` spellings included — refuses
+it, and any method but GET gets `405` here.
 
 ### `GET /api/leases/{id}/events` — stream one lease's events
 
 Same stream, pre-filtered to the lease in the path. The owner (or an
-admin); the events-only `EVENTS_TOKEN` (every lease's events); anyone
-else gets `404`, like every other lease route.
+admin); anyone else gets `404`, like every other lease route — the
+events-only `EVENTS_TOKEN` included: its one route is the all-events
+stream above.
 
 ### Wire format
 

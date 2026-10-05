@@ -162,6 +162,7 @@ BOOTSTRAP_TOKEN=$(openssl rand -hex 24)
 GATEWAY_TOKEN=$(openssl rand -hex 32)
 ADMIN_TOKEN=$(openssl rand -hex 32)
 METRICS_TOKEN=$(openssl rand -hex 32)
+EVENTS_TOKEN=$(openssl rand -hex 32)
 
 # self-signed cert with the host's name as a DNS SAN: the backend serves
 # HTTPS on :8890 only when TLS_CERT and TLS_KEY are both set
@@ -195,6 +196,7 @@ BOOTSTRAP_TOKEN=$BOOTSTRAP_TOKEN
 GATEWAY_TOKEN=$GATEWAY_TOKEN
 ADMIN_TOKEN=$ADMIN_TOKEN
 METRICS_TOKEN=$METRICS_TOKEN
+EVENTS_TOKEN=$EVENTS_TOKEN
 TLS_CERT=/etc/spoond/tls/cert.pem
 TLS_KEY=/etc/spoond/tls/privkey.pem
 BIND_ADDR=0.0.0.0:8890
@@ -209,8 +211,11 @@ without it) and the consumer name in `CONSUMER_TOKENS` (required; the
 backend exits without it too). `USERS_FILE` is the identity store that
 turns on multi-user tenancy; `BOOTSTRAP_TOKEN` gates the first (admin)
 user, `GATEWAY_TOKEN` is the SSH gateway's service token, `ADMIN_TOKEN`
-drives `/api/admin/*` (drain, undrain, reconcile) and `METRICS_TOKEN` is
-the scrape-only `/metrics` token. `TLS_CERT`/`TLS_KEY` must both be set
+drives `/api/admin/*` (drain, undrain, reconcile), `METRICS_TOKEN` is
+the scrape-only `/metrics` token and `EVENTS_TOKEN` is the events-only
+token the dashboard's lease events panel subscribes with (set the same
+value as its `DASH_EVENTS_TOKEN`; see [operations.md](operations.md)).
+`TLS_CERT`/`TLS_KEY` must both be set
 or neither — without the pair the backend serves plain HTTP. No inline
 comments in the file: systemd's `EnvironmentFile` parser keeps a
 trailing `#` as part of the value.
@@ -300,8 +305,8 @@ Then the runner and the dashboard, if you want them:
 systemctl enable --now spoond-runner        # needs /etc/spoond-runner.env
 /opt/spoond/spoond dash hash '<password>'    # bcrypt hash for DASH_PASSWORD_HASH
 # /etc/spoond/dash.env: DASH_USER, DASH_PASSWORD_HASH, METRICS_TOKEN,
-#                      DASH_EVENTS_TOKEN, DASH_TLS_CERT, DASH_TLS_KEY —
-#                      see operations.md
+#                      DASH_EVENTS_TOKEN (the EVENTS_TOKEN above),
+#                      DASH_TLS_CERT, DASH_TLS_KEY — see operations.md
 systemctl enable --now spoond-dash   # your unit wrapping `spoond dash`
 ```
 
