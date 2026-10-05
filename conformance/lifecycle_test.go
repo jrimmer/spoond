@@ -267,13 +267,15 @@ func TestL6_StatAndHealth(t *testing.T) {
 }
 
 // TestL7_NoWorldWritableSystemBinaries (#124): nothing under /usr is
-// writable by group or others, and envd (it runs as root) is 0755. E2B's
+// writable by others or by a non-root group, and envd (it runs as root) is 0755. E2B's
 // template build leaves /usr/local 777 and envd 0777; spoond-guest-init
 // tightens them before the template is snapshotted.
 func TestL7_NoWorldWritableSystemBinaries(t *testing.T) {
 	begin(t)
 	l := createLease(t, map[string]any{"image": "py-base", "ttl": 300})
-	out := execOK(t, l.ID, "find /usr -xdev \\( -type f -o -type d \\) -perm /022 -not -type l 2>/dev/null | head -5; stat -c '%a' /usr/bin/envd")
+	// Writable by others, or by a group other than root: Debian ships a
+	// few root:root 775 man directories, which only root's group writes.
+	out := execOK(t, l.ID, "find /usr -xdev \\( -type f -o -type d \\) \\( -perm -002 -o \\( -perm -020 ! -group root \\) \\) 2>/dev/null | head -5; stat -c '%a' /usr/bin/envd")
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if mode := lines[len(lines)-1]; mode != "755" {
 		failf(t, "/usr/bin/envd mode %s, want 755", mode)
