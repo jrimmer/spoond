@@ -54,19 +54,6 @@ summarised from README "Status".
   entirely, while planned restarts and drains pause into a build
   first and lose nothing.
 
-### Security
-
-- **Guest system binaries were writable by any user (#124).** E2B's
-  template build runs `chmod -R 777 /usr/local` and `/code`, and writes
-  envd with mode 0777, so an unprivileged user inside a guest could
-  replace binaries that root runs (spoond-guest-init, e2b-provision-runner,
-  envd). spoond-guest-init now removes group and other write access under
-  /usr/local, sets envd to 0755 and makes /code sticky (1777) before the
-  template is snapshotted. Images must be rebuilt
-  (`spoond images build --all`) to pick it up. Conformance L7 checks it.
-
-### Changed
-
 - **The dashboard's panels are laid out to the mockup (#118, parts
   1–3).** One fixed-width character grid (104 by default, `DASH_WIDTH`
   72–104) draws, under the header and legend: an attention strip when
@@ -90,6 +77,17 @@ summarised from README "Status".
   and the events panel. `spoond top` draws the same frame with ANSI
   styles, and a test draws every width from 72 to 104 and checks every
   row fits with every panel border in its column.
+
+### Security
+
+- **Guest system binaries were writable by any user (#124).** E2B's
+  template build runs `chmod -R 777 /usr/local` and `/code`, and writes
+  envd with mode 0777, so an unprivileged user inside a guest could
+  replace binaries that root runs (spoond-guest-init, e2b-provision-runner,
+  envd). spoond-guest-init now removes group and other write access under
+  /usr/local, sets envd to 0755 and makes /code sticky (1777) before the
+  template is snapshotted. Images must be rebuilt
+  (`spoond images build --all`) to pick it up. Conformance L7 checks it.
 
 ## [2.2.1] - 2026-10-04
 
