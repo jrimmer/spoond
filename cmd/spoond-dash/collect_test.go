@@ -81,20 +81,19 @@ func (s *sseServer) end() { s.once.Do(func() { close(s.closed) }) }
 func TestStreamEventsSSE(t *testing.T) {
 	srv := newSSEServer(t, "events-tok")
 	c := newCollector(Config{MetricsServerName: "127.0.0.1"})
-	buf := &eventBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go c.streamEvents(ctx, srv.URL+"/api/leases/events", "events-tok", buf)
+	go c.streamEvents(ctx, srv.URL+"/api/leases/events", "events-tok")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(buf.newest(1)) == 1 {
+		if len(c.events.newest(1)) == 1 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	evs := buf.newest(maxEvents)
+	evs := c.events.newest(maxEvents)
 	if len(evs) != 1 {
 		t.Fatalf("buffer = %d events, want the one the server streamed", len(evs))
 	}
@@ -129,10 +128,10 @@ func TestStreamEventsSSE(t *testing.T) {
 // connections at most within the first second.
 func TestStreamEventsBadTokenBacksOff(t *testing.T) {
 	srv := newSSEServer(t, "events-tok")
-	c := newCollector(Config{})
+	c := newCollector(Config{EventsToken: "events-tok"})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	c.streamEvents(ctx, srv.URL+"/api/leases/events", "wrong-token", &eventBuffer{})
+	c.streamEvents(ctx, srv.URL+"/api/leases/events", "wrong-token")
 	srv.mu.Lock()
 	n := srv.requests
 	srv.mu.Unlock()
@@ -225,7 +224,7 @@ func TestEventLinesFormat(t *testing.T) {
 }
 
 // TestEventLinesSubjectPrefersHolder: the tail column is the lease's
-// holder from the last tick's rows, else the name, else the event's
+// holder from the last tick's rows, else its comment, else the event's
 // owner — released leases are gone from the table by the time their
 // event is drawn, so the owner the event carries names them.
 func TestEventLinesSubjectPrefersHolder(t *testing.T) {
@@ -237,10 +236,11 @@ func TestEventLinesSubjectPrefersHolder(t *testing.T) {
 		t.Fatalf("holder not preferred: %q", lines[0].Text)
 	}
 
-	c.lastRow = []LeaseRow{{ID: "abcdef0123", Name: "scratch space"}}
+	// A CI job lease: no holder, but the comment names the job.
+	c.lastRow = []LeaseRow{{ID: "abcdef0123", Comment: "forgejo: lacy.casa/site #218"}}
 	lines = c.eventLines(time.Unix(1_800_000_000, 0))
-	if !strings.HasSuffix(lines[0].Text, "scratch space") {
-		t.Fatalf("name not second: %q", lines[0].Text)
+	if !strings.HasSuffix(lines[0].Text, "forgejo: lacy.casa/site #218") {
+		t.Fatalf("comment not second: %q", lines[0].Text)
 	}
 
 	// A lease the table no longer has (released): the owner.

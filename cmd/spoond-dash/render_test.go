@@ -783,7 +783,8 @@ func TestEventsPanelColumns(t *testing.T) {
 }
 
 // TestEventsPanelSubjectPreference: the tail column is the holder, else
-// the lease's name, else the owner the event carries.
+// the lease's comment (a CI job lease has neither holder nor name), else
+// the owner the event carries.
 func TestEventsPanelSubjectPreference(t *testing.T) {
 	ev := dashEvent{LeaseID: "abc", Subject: "u-owner"}
 	rows := []LeaseRow{
@@ -792,9 +793,9 @@ func TestEventsPanelSubjectPreference(t *testing.T) {
 	if got := eventSubject(ev, rows); got != "forgejo/job-9" {
 		t.Fatalf("subject = %q, want the holder", got)
 	}
-	rows[0] = LeaseRow{ID: "abc", Name: "scratch space"}
-	if got := eventSubject(ev, rows); got != "scratch space" {
-		t.Fatalf("subject = %q, want the name", got)
+	rows[0] = LeaseRow{ID: "abc", Comment: "forgejo: lacy.casa/site #9"}
+	if got := eventSubject(ev, rows); got != "forgejo: lacy.casa/site #9" {
+		t.Fatalf("subject = %q, want the comment", got)
 	}
 	rows[0] = LeaseRow{ID: "other"}
 	if got := eventSubject(ev, rows); got != "u-owner" {

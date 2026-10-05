@@ -49,7 +49,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -228,8 +227,6 @@ type dash struct {
 	last    Snapshot
 	hist    map[string][]float64 // sparkline series, oldest first
 	viewers map[chan struct{}]bool
-
-	events *eventBuffer // lease events, shared by the SSE loop and the collector
 }
 
 // Sparkline series kept in history, by signal name.
@@ -249,14 +246,15 @@ func newDash(cfg Config) (*dash, error) {
 	if err != nil {
 		return nil, err
 	}
-	events := &eventBuffer{}
 	return &dash{cfg: cfg, col: newCollector(cfg), page: page, width: cfg.Width,
-		hist: map[string][]float64{}, viewers: map[chan struct{}]bool{}, events: events}, nil
+		hist: map[string][]float64{}, viewers: map[chan struct{}]bool{}}, nil
 }
 
 func (d *dash) run(ctx context.Context) {
 	if d.cfg.EventsToken != "" {
-		go d.col.streamEvents(ctx, eventsURL(d.cfg.MetricsURL), d.cfg.EventsToken, d.events)
+		// The subscription feeds the collector's own event buffer — the
+		// one the events panel reads.
+		go d.col.streamEvents(ctx, eventsURL(d.cfg.MetricsURL), d.cfg.EventsToken)
 	}
 	t := time.NewTicker(d.cfg.Interval)
 	defer t.Stop()
@@ -278,18 +276,6 @@ func (d *dash) run(ctx context.Context) {
 		case <-t.C:
 		}
 	}
-}
-
-// eventsURL is the lease events stream URL: the metrics URL's scheme
-// and host (the same backend), /api/leases/events on the path.
-func eventsURL(metricsURL string) string {
-	u, err := url.Parse(metricsURL)
-	if err != nil || u.Host == "" {
-		return "https://127.0.0.1:8890/api/leases/events"
-	}
-	u.Path = "/api/leases/events"
-	u.RawQuery, u.Fragment = "", ""
-	return u.String()
 }
 
 // appendHist appends one snapshot's sparkline values to hist, keeping

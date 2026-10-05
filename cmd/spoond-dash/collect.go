@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -106,9 +107,9 @@ type EventLine struct {
 
 // dashEvent is one lease event as the events panel shows it: when (the
 // event's own clock, HH:MM:SS), the type, the lease id and what the
-// tail column names (holder, then name, then owner). Detail carries the
-// event's own note; the panel does not draw it, but it is kept so the
-// tests can tell one stream's events apart.
+// tail column names (holder, then comment, then owner). Detail carries
+// the event's own note; the panel does not draw it, but it is kept so
+// the tests can tell one stream's events apart.
 type dashEvent struct {
 	At                     time.Time
 	Type, LeaseID, Subject string
@@ -145,14 +146,6 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 	return out
 }
 
-// oldestFirst returns the buffered events in arrival order (the SSE
-// subscription's own view; the panel reads newest() instead).
-func (b *eventBuffer) oldestFirst() []dashEvent {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]dashEvent(nil), b.events...)
-}
-
 // eventStyle is the grid style an event type is drawn with: warn for
 // lost and held-lease actions, dim for releases, text for the rest.
 func eventStyle(t string) string {
@@ -167,17 +160,18 @@ func eventStyle(t string) string {
 }
 
 // eventSubject picks the tail column: the lease's holder, else its
-// name, else the owner the event carries. The rows are the live lease
-// table the same tick built; a lease that has left it (released) falls
-// through to the event's owner.
+// comment (a CI job lease has neither holder nor name but carries the
+// job it runs), else the owner the event carries. The rows are the live
+// lease table the same tick built; a lease that has left it (released)
+// falls through to the event's owner.
 func eventSubject(ev dashEvent, rows []LeaseRow) string {
 	for _, r := range rows {
 		if r.ID == ev.LeaseID {
 			if r.Holder != "" {
 				return r.Holder
 			}
-			if r.Name != "" {
-				return r.Name
+			if r.Comment != "" {
+				return r.Comment
 			}
 			break
 		}
@@ -263,6 +257,18 @@ func newCollector(cfg Config) *collector {
 
 // collect builds a snapshot. A failing source fills Err and leaves its
 // fields at zero; the rest of the frame still renders.
+// eventsURL is the lease events stream URL: the metrics URL's scheme
+// and host (the same backend), /api/leases/events on the path.
+func eventsURL(metricsURL string) string {
+	u, err := url.Parse(metricsURL)
+	if err != nil || u.Host == "" {
+		return "https://127.0.0.1:8890/api/leases/events"
+	}
+	u.Path = "/api/leases/events"
+	u.RawQuery, u.Fragment = "", ""
+	return u.String()
+}
+
 func (c *collector) collect(ctx context.Context) Snapshot {
 	now := c.now()
 	s := Snapshot{At: now.Format("15:04:05"), ByState: map[string]int{}}
@@ -544,9 +550,9 @@ const eventPanelRows = 5
 //
 //	HH:MM:SS  <type padded to 10>  <lease id 10>  <subject>
 //
-// where subject is the holder, else the name, else the owner. Without
-// DASH_EVENTS_TOKEN the collector never subscribed to anything, and the
-// panel says so instead of looking broken.
+// where subject is the holder, else the comment, else the owner.
+// Without DASH_EVENTS_TOKEN the collector never subscribed to anything,
+// and the panel says so instead of looking broken.
 func (c *collector) eventLines(now time.Time) []EventLine {
 	if c.cfg.EventsToken == "" {
 		return []EventLine{{Text: "events need DASH_EVENTS_TOKEN", Style: "dim"}}
@@ -634,15 +640,15 @@ func meminfo() (map[string]uint64, error) {
 // /api/leases/events: it authenticates with the events-only
 // EVENTS_TOKEN (DASH_EVENTS_TOKEN), resumes with Last-Event-ID so a
 // reconnect replays exactly what was missed, backs off when the server
-// refuses it, and appends everything it receives to the buffer the
-// events panel reads. One subscription per process, for the dashboard's
-// lifetime.
-func (c *collector) streamEvents(ctx context.Context, eventsURL, token string, buf *eventBuffer) {
+// refuses it, and appends everything it receives to the collector's own
+// buffer — the one the events panel reads. One subscription per
+// process, for the dashboard's lifetime.
+func (c *collector) streamEvents(ctx context.Context, eventsURL, token string) {
 	const retry = 5 * time.Second // the back-off ceiling
 	backoff := time.Second
 	lastID := ""
 	for ctx.Err() == nil {
-		err := c.streamEventsOnce(ctx, eventsURL, token, buf, &lastID)
+		err := c.streamEventsOnce(ctx, eventsURL, token, &lastID)
 		if ctx.Err() != nil {
 			return
 		}
@@ -662,7 +668,7 @@ func (c *collector) streamEvents(ctx context.Context, eventsURL, token string, b
 // streamEventsOnce runs one connection to the event stream until it
 // ends, updating lastID as id lines arrive (a reconnect sends it as
 // Last-Event-ID and the stream replays from there).
-func (c *collector) streamEventsOnce(ctx context.Context, eventsURL, token string, buf *eventBuffer, lastID *string) error {
+func (c *collector) streamEventsOnce(ctx context.Context, eventsURL, token string, lastID *string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, eventsURL, nil)
 	if err != nil {
 		return err
@@ -693,7 +699,7 @@ func (c *collector) streamEventsOnce(ctx context.Context, eventsURL, token strin
 		switch {
 		case line == "": // the blank line ends one event block
 			if ev != nil {
-				buf.add(*ev)
+				c.events.add(*ev)
 				ev = nil
 			}
 		case strings.HasPrefix(line, "id:"):
