@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-10-05
+
+Upgrading: no schema change.
+
 ### Fixed
 
 - **A fresh build's recorded size was partial.** The orchestrator
