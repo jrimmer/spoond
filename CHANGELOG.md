@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-10-05
+
+Dashboard fixes. No schema change.
+
 ### Fixed
 
 - **The dashboard's sparklines vanished after the first frame.** The
