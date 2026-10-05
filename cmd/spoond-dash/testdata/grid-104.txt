@@ -1,4 +1,4 @@
-                           SPOOND · vm2.lacy.casa · dev · e2b 0.4.2 · up 720h                           
+                            SPOOND · vm2.lacy.casa · dev · e2b 0.4.2 · up 9m                            
 ════════════════════════════════════════════════════════════════════════════════════════════════════════
          ▶ running · ‖ suspended · ■ lost · ⭘ recovered · ◆ held · ◉ lapsed hold · ✓ active unit        
 ▲ 1 lost lease(s) - a substrate crash dropped them                                                      

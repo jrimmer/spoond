@@ -478,8 +478,11 @@ func (l *layout) header(g *grid.Grid, y int) {
 		{Text: versionLabel(dashVersion), Style: "text"},
 		{Text: " · ", Style: "dim"},
 		{Text: "e2b " + versionLabel(l.s.Version), Style: "text"},
-		{Text: " · ", Style: "dim"},
-		{Text: "up " + fmt.Sprintf("%.0fh", l.s.UptimeH), Style: "text"},
+	}
+	// spoond's own uptime (the backend process), not the host's: the
+	// host's read as spoond's right after a deploy.
+	if l.s.BackendUp > 0 {
+		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"}, grid.Seg{Text: "up " + dur(l.s.BackendUp), Style: "text"})
 	}
 	g.Center(l.w/2, y, segs)
 	for x := 0; x < l.w; x++ {

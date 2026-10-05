@@ -20,6 +20,9 @@ summarised from README "Status".
   images panel it still stopped at six units and said "+1 more" over
   empty rows; it now fills the rows the box has and folds only what does
   not fit.
+- **The dashboard's uptime was the host's.** The header's "up 58h" right
+  after a deploy was vm2's uptime; it now shows how long the spoond
+  backend has run, from a new `spoond_backend_start_time_seconds` gauge.
 
 ## [2.3.0] - 2026-10-05
 

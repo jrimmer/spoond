@@ -684,6 +684,7 @@ marker. The substrate-specific series:
 | `spoond_capacity_rejections_total` | admission refusals |
 | `spoond_store_errors_total{op}` | SQLite write failures |
 | `spoond_notifications_total{webhook,severity,result}` | webhook notification delivery outcomes; `webhook` is the receiver's index in `NOTIFY_WEBHOOKS` (never its URL — the URL may carry secrets), `severity` is the message's grade, `result` is `sent`, `retry`, `dropped`, `deduped` or `rate_limited` |
+| `spoond_backend_start_time_seconds` | Unix time the backend process started; the dashboard header shows its uptime from it |
 
 `spoond_leases{state="lost"}` above zero means an orchestrator crash
 happened — it is the number the soak watch uses. Deploying
