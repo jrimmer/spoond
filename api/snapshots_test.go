@@ -1,14 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,6 +168,43 @@ func TestSnapshotList(t *testing.T) {
 	}
 }
 
+// captureLogs redirects the service's log output into an in-memory
+// buffer for capturedLogs to fetch (tests assert on log lines; the
+// logger is swapped, not the global, so no t.Parallel anywhere near).
+type logCapture struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (lc *logCapture) Write(p []byte) (int, error) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	return lc.buf.Write(p)
+}
+
+// captureLogs swaps svc's logger to a capture and restores it at
+// cleanup.
+func captureLogs(t *testing.T, svc *Service) *logCapture {
+	t.Helper()
+	lc := &logCapture{}
+	old := svc.log
+	svc.log = log.New(lc, "", 0)
+	t.Cleanup(func() { svc.log = old })
+	return lc
+}
+
+// capturedLogs returns everything written to the capture so far.
+func capturedLogs(t *testing.T, svc *Service) string {
+	t.Helper()
+	lc, ok := svc.log.Writer().(*logCapture)
+	if !ok {
+		t.Fatalf("service logger is %T, want *logCapture (captureLogs first)", svc.log.Writer())
+	}
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	return lc.buf.String()
+}
+
 // writeBuildFiles creates buildID's directory under the template
 // storage root with files of the given sizes, the way the substrate
 // leaves a freshly written build (#125). It returns the size the OS
@@ -184,6 +224,13 @@ func writeBuildFiles(t *testing.T, root, buildID string, sizes ...int) int64 {
 			t.Fatalf("write file: %v", err)
 		}
 	}
+	return allocatedSize(t, dir)
+}
+
+// allocatedSize returns dir's allocated size via buildDiskUsage,
+// failing the test when the walk itself fails.
+func allocatedSize(t *testing.T, dir string) int64 {
+	t.Helper()
 	allocated, err := buildDiskUsage(dir)
 	if err != nil {
 		t.Fatalf("measure %s: %v", dir, err)
@@ -215,13 +262,93 @@ func TestBuildDiskUsageDistinguishesEmptyFromFailed(t *testing.T) {
 		t.Fatalf("empty dir: size=%d err=%v, want 0, nil", size, err)
 	}
 
-	// A build path whose stat itself fails — here an over-long name
-	// (ENAMETOOLONG, not IsNotExist) — is a failed measurement, and must
-	// be reported even though the walk still yields size 0. Permission
-	// bits can't force this branch in environments where the tests run
-	// as root, but a too-long component fails for every euid.
-	if _, err := buildDiskUsage(filepath.Join(root, strings.Repeat("l", 300))); err == nil {
-		t.Fatal("failed stat: err=nil, want a measurement failure")
+	// A walk that fails part way through (here: an unreadable
+	// subdirectory) reports the error; its total is partial and callers
+	// must not store it. Permission bits can't create an unreadable
+	// directory in environments where the tests run as root, so make
+	// the failure one no euid escapes: a file path where a directory
+	// is needed (ENOTDIR).
+	file := filepath.Join(root, "f")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := buildDiskUsage(filepath.Join(file, "sub")); err == nil {
+		t.Fatal("failed walk: err=nil, want a measurement failure")
+	}
+}
+
+// TestBuildSizeFailedWalkStoresZero: a build whose write-time
+// measurement fails — the directory exists with a readable file in
+// it, but the walk cannot read all of it — stores 0, never the
+// partial size, and logs the failure (#125); the hourly pass records
+// the real number once it can read the files. The failure is forced
+// through the diskUsage seam: permission bits cannot make a walk fail
+// in environments where the tests run as root, and a stand-in error
+// exercises exactly the branch a mid-walk failure takes.
+func TestBuildSizeFailedWalkStoresZero(t *testing.T) {
+	ts, svc, db, sub, lease := seedSnapshotLease(t, t.TempDir())
+	root := svc.cfg.TemplateStoragePath
+	var buildID string
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		buildID = e2b.NewUUID()
+		// A readable file: the walk has real bytes to (wrongly) report.
+		// Runs on the HTTP handler's goroutine — failures must not use
+		// t.Fatal(t.F) off the test goroutine.
+		dir := filepath.Join(root, buildID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "f0"), make([]byte, 8192), 0o644); err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		return buildID, substrate.BuildRefs{}, nil
+	}
+	// The walk fails after reading f0, the way an unreadable
+	// subdirectory fails it: a partial total plus the error.
+	svc.diskUsage = func(dir string) (int64, error) {
+		size, err := buildDiskUsage(dir)
+		if err == nil {
+			return size, fmt.Errorf("stat %s/sub: permission denied", dir)
+		}
+		return size, err
+	}
+
+	captureLogs(t, svc)
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+lease.ID+"/checkpoint", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("checkpoint: status %d: %v", resp.StatusCode, body)
+	}
+	id := body["build_id"].(string)
+	if id != buildID {
+		t.Fatalf("checkpoint build id %q, want %q", id, buildID)
+	}
+	b, err := db.GetBuild(context.Background(), buildID)
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if b.SizeBytes != 0 {
+		t.Fatalf("size_bytes = %d, want 0: a failed walk must not store its partial size", b.SizeBytes)
+	}
+	if got := capturedLogs(t, svc); !strings.Contains(got, "storing 0 until the hourly pass") || !strings.Contains(got, buildID) {
+		t.Fatalf("log %q does not record the failed measurement for %s", got, buildID)
+	}
+
+	// The hourly pass re-measures and corrects the row: it stores what
+	// it read, unlike the write-time path.
+	svc.diskUsage = buildDiskUsage
+	want := allocatedSize(t, filepath.Join(root, buildID))
+	if want < 8192 {
+		t.Fatalf("allocated size = %d, want at least 8192", want)
+	}
+	if err := svc.accountDisk(context.Background()); err != nil {
+		t.Fatalf("accountDisk: %v", err)
+	}
+	b, err = db.GetBuild(context.Background(), buildID)
+	if err != nil {
+		t.Fatalf("get build: %v", err)
+	}
+	if b.SizeBytes != want {
+		t.Fatalf("after accounting size_bytes = %d, want %d", b.SizeBytes, want)
 	}
 }
 

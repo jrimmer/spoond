@@ -260,6 +260,11 @@ type Service struct {
 	// the held-lease pressure and critical rules (2.1). Tests replace it
 	// to exercise those thresholds without a real filesystem.
 	diskCapacity func(path string) (total, free uint64, err error)
+	// diskUsage measures one build directory (allocated bytes): the
+	// per-build half of disk accounting and of write-time size
+	// recording (#125). Tests replace it to force a measurement
+	// failure, which permission bits cannot do when tests run as root.
+	diskUsage func(dir string) (int64, error)
 	// refreshMu serializes refreshPeers runs, which are scheduled
 	// asynchronously after lifecycle events (U09).
 	refreshMu sync.Mutex
@@ -312,6 +317,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		sweepInterval: 5 * time.Second,
 		now:           time.Now,
 		diskCapacity:  statfsCapacity,
+		diskUsage:     buildDiskUsage,
 		appliedEgress: map[string]string{},
 		createSecrets: map[string]map[string]string{},
 		log:           log.Default(),

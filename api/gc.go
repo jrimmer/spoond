@@ -333,27 +333,21 @@ func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) error 
 	return nil
 }
 
-// buildSizeOnDisk measures one build's directory under the template
-// storage root (allocated blocks × 512 per regular file): the per-build
-// half of the hourly disk accounting and of the write-time recording a
-// fresh build's row gets (#125, measureNewBuildOnDisk). A missing or
-// unreadable directory measures 0; the error says which, so the
-// write-time path can tell a real failure from an empty build.
-func (s *Service) buildSizeOnDisk(buildID string) (int64, error) {
-	return buildDiskUsage(filepath.Join(s.cfg.TemplateStoragePath, buildID))
-}
-
 // measureNewBuildOnDisk is the Service's write-time measurer (#125):
-// the substrate has just written buildID's files, so the size goes into
-// the fresh build's row — /api/snapshots then shows a size immediately,
-// not only after the next hourly accounting pass. A build directory the
-// substrate never wrote or that cannot be read logs and measures 0; the
-// hourly pass corrects the row once it can read the files. A readable
-// but empty directory measures 0 without a complaint.
+// the substrate has just written buildID's files under the template
+// storage root, so the size goes into the fresh build's row —
+// /api/snapshots then shows a size immediately, not only after the
+// next hourly accounting pass. A failed measurement logs and measures
+// 0 — never the partial size of whatever part of the walk was
+// readable — whether the substrate never wrote the files or the walk
+// failed part way through; the hourly pass records the real number
+// once it can read them. A readable but empty directory measures 0
+// without a complaint.
 func (s *Service) measureNewBuildOnDisk(buildID string) int64 {
-	size, err := s.buildSizeOnDisk(buildID)
+	size, err := s.diskUsage(filepath.Join(s.cfg.TemplateStoragePath, buildID))
 	if err != nil {
 		s.log.Printf("build size: %s: %v; storing 0 until the hourly pass", buildID, err)
+		return 0
 	}
 	return size
 }
@@ -361,8 +355,9 @@ func (s *Service) measureNewBuildOnDisk(buildID string) int64 {
 // accountDisk measures every non-deleted build's directory (allocated
 // blocks × 512 per regular file) into size_bytes, and sets the
 // snapshot/storage gauges. Runs with the GC, once an hour; it also
-// re-measures builds whose write-time recording (#125) measured 0
-// because the files were missing or unreadable at write time.
+// corrects builds whose write-time recording (#125) stored a stale
+// number — 0 because the files were missing or the walk failed at
+// write time, or anything else the disk has since disproved.
 func (s *Service) accountDisk(ctx context.Context) error {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
@@ -373,7 +368,7 @@ func (s *Service) accountDisk(ctx context.Context) error {
 		if b.State == "deleted" {
 			continue
 		}
-		size, _ := s.buildSizeOnDisk(b.BuildID)
+		size, _ := s.diskUsage(filepath.Join(s.cfg.TemplateStoragePath, b.BuildID))
 		perKind[b.Kind] += size
 		if size != b.SizeBytes {
 			if err := s.db.UpdateBuildSize(ctx, b.BuildID, size); err != nil {
@@ -393,8 +388,10 @@ func (s *Service) accountDisk(ctx context.Context) error {
 // buildDiskUsage sums the allocated size (stat blocks × 512) of every
 // regular file under dir. A missing directory measures 0 with no error
 // (an unwritten build is empty, not failed); any read or stat failure —
-// the root itself or one file's Info — is returned, so callers can tell
-// a failed measurement from a legitimately 0-byte build.
+// the root itself or one file's Info — is returned together with the
+// partial total, so callers can tell a failed measurement from a
+// legitimately 0-byte build and must not store the partial number
+// (the write-time path stores 0 instead, #125).
 func buildDiskUsage(dir string) (int64, error) {
 	var total int64
 	var firstErr error
