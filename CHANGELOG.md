@@ -10,6 +10,14 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-10-05
+
+Limits for kept checkpoints, sizes recorded when builds are written, and
+dashboard fixes found in the first hours of 2.3.
+
+Upgrading: no schema change. `MAX_KEPT_PER_LEASE` (default 4) caps kept
+checkpoints per lease; `max_kept_bytes` on a user's quota is optional.
+
 ### Added
 
 - **Kept checkpoints are visible (#126).** `GET /api/leases/{id}`

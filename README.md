@@ -57,8 +57,9 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     restore), so a client can tell its processes were restored.
   - **Checkpoints on request**: no periodic checkpoints unless the lease
     asks (`checkpoint_interval`); `POST /checkpoint` any time, with
-    `keep: true` to pin it, and `POST /restore` puts the lease back to a
-    kept checkpoint in place. `restart?mode=cold` gives the lease a fresh
+    `keep: true` to pin it (at most `MAX_KEPT_PER_LEASE`, default 4, and
+    an optional per-owner byte budget), and `POST /restore` puts the lease
+    back to a kept checkpoint in place. `restart?mode=cold` gives the lease a fresh
     guest from its image, keeping its id.
   - **Holders**: `holder` and `holder_url` say what holds a lease (a CI
     job, an orchestrator's run, someone's scratch work). A held lease
