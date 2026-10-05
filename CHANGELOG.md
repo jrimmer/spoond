@@ -16,6 +16,10 @@ summarised from README "Status".
   with no holder or comment named its owner as an identity id
   (`u-42f5…`); it now shows the user's name, as the leases table does
   (#127).
+- **The services panel folded units it had room for.** Beside a taller
+  images panel it still stopped at six units and said "+1 more" over
+  empty rows; it now fills the rows the box has and folds only what does
+  not fit.
 
 ## [2.3.0] - 2026-10-05
 

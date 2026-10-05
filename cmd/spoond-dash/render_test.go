@@ -943,3 +943,31 @@ func TestLegendShowsTheMarks(t *testing.T) {
 		}
 	}
 }
+
+// TestServicesFillTallerPanel: beside a taller images panel the services
+// panel shows every unit that fits instead of folding at
+// maxServiceRows; it folds only units that do not fit at all.
+func TestServicesFillTallerPanel(t *testing.T) {
+	s := sampleSnapshot()
+	s.Services = nil
+	for i := 0; i < maxServiceRows+1; i++ {
+		s.Services = append(s.Services, Service{Name: fmt.Sprintf("unit-%d", i), State: "active"})
+	}
+	s.Images = nil
+	for i := 0; i < maxServiceRows+4; i++ {
+		s.Images = append(s.Images, ImageRow{Name: fmt.Sprintf("img-%d", i)})
+	}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(p, "more") || !strings.Contains(p, fmt.Sprintf("unit-%d", maxServiceRows)) {
+		t.Fatalf("all units should show beside a taller images panel:\n%s", p)
+	}
+	// With a short images panel the services panel keeps its own cap.
+	s.Images = s.Images[:1]
+	for i := maxServiceRows + 1; i < maxServiceRows+5; i++ {
+		s.Services = append(s.Services, Service{Name: fmt.Sprintf("unit-%d", i), State: "active"})
+	}
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "more") {
+		t.Fatalf("units past the panel should fold into +N more:\n%s", p)
+	}
+}

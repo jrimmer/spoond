@@ -1321,7 +1321,7 @@ func memLabel(mb int) string {
 // returns the row past its bottom edge: one row per systemd unit,
 // the name padded to a fixed column, then the state — ✓ active, ◷ (or
 // ○) a state on its way, ✗ a state that needs a person. When units
-// outrun the panel's maxServiceRows, the last row says "+N more".
+// outrun the rows the box has, the last row says "+N more".
 func (l *layout) drawServices(g *grid.Grid, x, y, w, h int) int {
 	top := y
 	y = l.panel(g, x, y, w, h, "services", "services")
@@ -1343,9 +1343,13 @@ func (l *layout) drawServices(g *grid.Grid, x, y, w, h int) int {
 			rows = append(rows, svc)
 		}
 	}
+	// Fill the rows the box actually has: beside a taller images panel
+	// that is more than the panel's own maxServiceRows. Fold into
+	// "+N more" only when the units still do not fit.
+	room := h - 3 // title, bottom edge, and the row servicesH keeps
 	more := 0
-	if len(rows) > maxServiceRows {
-		rows, more = rows[:maxServiceRows], len(rows)-maxServiceRows
+	if len(rows) > room {
+		rows, more = rows[:room-1], len(rows)-(room-1)
 	}
 	for i, svc := range rows {
 		yy := top + 1 + i
