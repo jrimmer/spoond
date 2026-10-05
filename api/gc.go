@@ -424,40 +424,55 @@ func (s *Service) SetBuildSizeSettle(every, limit time.Duration) {
 // changing, then records it. The orchestrator finishes writing a build's
 // memory file after Checkpoint/Pause return (on vm2: moments for a small
 // guest, minutes past the ZFS dirty-data threshold for a large one), so
-// the write-time number is often 0 or a fraction of the build. Settled
-// means the memory file exists and two readings in a row agree: before
-// the memfile lands the directory holds only headers, whose size is
-// stable too (2.3.2's first cut stopped there, at 64,000 bytes). It gives
-// up after sizeSettleFor and leaves the rest to the hourly pass.
+// the write-time number is often 0 or a fraction of the build. And on
+// ZFS a file's allocated blocks only show up once its transaction group
+// commits (every ~5 s), so a just-written memfile still measures as the
+// headers alone (64,000 bytes for a 130 MB py-base build on vm2). So
+// every new reading is recorded once the memfile exists, and the build
+// counts as settled when its size has not changed for sizeSettleQuiet
+// (15 s, several commit intervals). It gives up after sizeSettleFor and
+// leaves the rest to the hourly pass.
 func (s *Service) settleBuildSize(buildID string) {
-	every, limit := s.sizeSettleEvery, s.sizeSettleFor
+	every, limit, quiet := s.sizeSettleEvery, s.sizeSettleFor, s.sizeSettleQuiet
 	if every <= 0 || limit <= 0 {
 		return
 	}
+	if quiet <= 0 {
+		quiet = 15 * time.Second
+	}
 	go func() {
 		dir := filepath.Join(s.cfg.TemplateStoragePath, buildID)
+		record := func(size int64) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := s.db.UpdateBuildSize(ctx, buildID, size); err != nil {
+				s.log.Printf("build size: %s: %v", buildID, err)
+			}
+			if s.metrics != nil {
+				s.UpdateKeptMetrics(context.Background())
+			}
+		}
 		var last int64 = -1
-		for waited := time.Duration(0); waited < limit; waited += every {
+		var changed time.Time
+		for start := time.Now(); time.Since(start) < limit; {
 			time.Sleep(every)
 			if fi, err := os.Stat(filepath.Join(dir, "memfile")); err != nil || fi.Size() == 0 {
 				continue // the memory snapshot has not landed yet
 			}
 			size, err := s.diskUsage(dir)
-			if err != nil {
+			if err != nil || size <= 0 {
 				continue
 			}
-			if size > 0 && size == last {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				if err := s.db.UpdateBuildSize(ctx, buildID, size); err != nil {
-					s.log.Printf("build size: %s: %v", buildID, err)
-				}
-				cancel()
-				if s.metrics != nil {
-					s.UpdateKeptMetrics(context.Background())
-				}
-				return
+			if size != last {
+				// Record every new reading, so the row improves even
+				// before it settles; then wait for quiet.
+				record(size)
+				last, changed = size, time.Now()
+				continue
 			}
-			last = size
+			if time.Since(changed) >= quiet {
+				return // unchanged across ZFS's commit interval: settled
+			}
 		}
 	}()
 }

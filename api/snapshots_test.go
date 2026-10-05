@@ -634,7 +634,9 @@ func TestBuildSizeSettles(t *testing.T) {
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
-	readings := []int64{900000, 1400000, 1400000}
+	// The memfile's blocks show up late (ZFS): a first reading as small as
+	// the headers, then the real size, which then holds.
+	readings := []int64{64000, 64000, 1400000}
 	svc.diskUsage = func(string) (int64, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -649,6 +651,7 @@ func TestBuildSizeSettles(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 	svc.SetBuildSizeSettle(5*time.Millisecond, time.Second)
+	svc.sizeSettleQuiet = 30 * time.Millisecond
 	svc.settleBuildSize("b-settle")
 	// Headers only, stable at 64,000: not settled while there is no
 	// memfile (2.3.2's first cut recorded exactly that).

@@ -275,6 +275,7 @@ type Service struct {
 	// them.
 	sizeSettleEvery time.Duration
 	sizeSettleFor   time.Duration
+	sizeSettleQuiet time.Duration // 0 = 15 s
 	// refreshMu serializes refreshPeers runs, which are scheduled
 	// asynchronously after lifecycle events (U09).
 	refreshMu sync.Mutex
