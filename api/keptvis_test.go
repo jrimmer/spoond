@@ -200,7 +200,7 @@ func TestKeptBudgetIsPerOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A 1-byte budget: nothing fits, every keep is over budget.
-	if err := ids.SetQuota(u.ID, 0, 0, 1); err != nil {
+	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, 1); err != nil {
 		t.Fatal(err)
 	}
 
