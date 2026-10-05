@@ -71,9 +71,9 @@ type Lease struct {
 	Drained bool
 	// Holder names what holds the lease (a CI job, an orchestrator's
 	// flight, a person's scratch work) and HolderUrl links to it. A
-	// non-empty holder makes the lease held: not released at its TTL,
-	// not idle-suspended, and checkpointed periodically like a
-	// persistent lease. "" = unheld, normal sweeping.
+	// non-empty holder makes the lease held: not released at its TTL and
+	// not idle-suspended. (Periodic checkpoints follow the lease's own
+	// checkpoint_interval since 2.3, not the hold.) "" = unheld.
 	Holder    string `json:"holder,omitempty"`
 	HolderUrl string `json:"holder_url,omitempty"`
 	// HoldSetAt/HoldExpiresAt bound the hold (2.1): it lasts HoldTTL
@@ -96,6 +96,12 @@ type Lease struct {
 	// memory and do not bump it. Returned by the lease API as
 	// "generation" and written into the guest at /run/spoond/generation.
 	Generation int64 `json:"generation"`
+	// CheckpointInterval is the lease's own periodic checkpoint
+	// interval in seconds (2.3, #122): -1 = the host default
+	// (CHECKPOINT_INTERVAL_MINS, itself 0 = never), 0 = never,
+	// >0 = seconds. The lease API reports the effective value (the
+	// host default already resolved) as "checkpoint_interval".
+	CheckpointInterval int64 `json:"-"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -189,8 +195,11 @@ type ServiceConfig struct {
 	MetricsToken                    string // METRICS_TOKEN: bearer that may read /metrics only (scrapers, dashboards)
 	HostAPIPort                     int    // HOST_API_PORT: lease API port lan/internet guests may reach on HostGuestAddr (0 = none)
 	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
-	CheckpointEvery                 time.Duration
-	TemplateStoragePath             string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
+	// CheckpointIntervalDefault is the host default checkpoint interval
+	// in seconds (2.3, #122) applied to leases whose own interval is -1
+	// ("the host default"). 0 = never. CHECKPOINT_INTERVAL_MINS.
+	CheckpointIntervalDefault int64
+	TemplateStoragePath       string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
 	// lost_at — 7 days for persistent leases, 1 day for the rest, so a
@@ -761,8 +770,9 @@ func (s *Service) Start(ctx context.Context) {
 			}
 		}
 	}()
-	// Periodic checkpoints (U10): persistent and held leases that saw activity
-	// since their last snapshot, one at a time, spaced 2 s apart.
+	// Periodic checkpoints (U10, 2.3 #122): leases whose effective
+	// interval says so and that saw activity since their last snapshot,
+	// one at a time, spaced 2 s apart. The loop ticks every minute.
 	go s.runCheckpointLoop(ctx)
 	// Snapshot catalog GC + disk accounting (U11): once 10 minutes
 	// after the backend starts, then once an hour.
@@ -1065,6 +1075,16 @@ func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow,
 	return img, b, nil
 }
 
+// imageMemoryMB returns the image's memory_mb for the checkpoint pause
+// log line (2.3, #122); 0 when the catalog cannot answer.
+func (s *Service) imageMemoryMB(ctx context.Context, image string) (int, error) {
+	img, err := s.db.GetImage(ctx, image)
+	if err != nil {
+		return 0, err
+	}
+	return img.MemoryMB, nil
+}
+
 // grant creates a new lease for owner: served from the warm pool when
 // one is configured and stocked, else a cold create from the image's
 // current build. Persistent leases are intended for interactive use:
@@ -1107,9 +1127,12 @@ func (s *Service) grant(ctx context.Context, owner, image string, ttl time.Durat
 		Holder:      holder,
 		HolderUrl:   holderURL,
 		State:       "running",
-		// Every lease starts on generation 1 (2.2).
-		Generation: 1,
-		TemplateID: img.TemplateID,
+		// Every lease starts on generation 1 (2.2) and on the host's
+		// checkpoint default (-1), unless the create request carries its
+		// own interval (the API stamps it after grant).
+		Generation:         1,
+		CheckpointInterval: checkpointIntervalHost,
+		TemplateID:         img.TemplateID,
 	}
 
 	// Pool: pop the oldest entry for the image. The pool serves
@@ -1584,9 +1607,16 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildRow, error) {
 	start := time.Now()
 	buildID, refs, err := s.sub.Checkpoint(ctx, src.SandboxID)
+	pause := time.Since(start)
 	if s.metrics != nil {
-		s.metrics.CheckpointDur.Observe(time.Since(start).Seconds())
+		s.metrics.CheckpointDur.Observe(pause.Seconds())
+		s.metrics.CheckpointPause.Observe(pause.Seconds())
 	}
+	// The pause is what guests feel (2.3, #122): one line per checkpoint
+	// with the lease, how long the guest was frozen and how much memory
+	// had to be snapshotted.
+	memMB, _ := s.imageMemoryMB(ctx, src.Image) // 0 when the catalog cannot say
+	s.log.Printf("checkpoint: lease %s paused %.3fs (memory_mb %d, err %v)", src.ID, pause.Seconds(), memMB, err)
 	if err != nil {
 		return store.BuildRow{}, err
 	}
@@ -1710,9 +1740,12 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		NetPolicy:   src.NetPolicy,
 		NetAllow:    append([]string(nil), src.NetAllow...),
 		ExposePorts: append([]int(nil), src.ExposePorts...),
-		State:       "running",
-		Generation:  1, // every lease starts on generation 1 (2.2)
-		TemplateID:  img.TemplateID,
+		// The clone continues the source's work (2.3, #122): its
+		// checkpoint policy continues too.
+		CheckpointInterval: src.CheckpointInterval,
+		State:              "running",
+		Generation:         1, // every lease starts on generation 1 (2.2)
+		TemplateID:         img.TemplateID,
 	}
 	sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 	if err != nil {
@@ -1819,9 +1852,12 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			ExposePorts: append([]int(nil), src.ExposePorts...),
 			Holder:      holder,
 			HolderUrl:   holderURL,
-			State:       "running",
-			Generation:  1, // every lease starts on generation 1 (2.2)
-			TemplateID:  img.TemplateID,
+			// The forks continue the source's work (2.3, #122): its
+			// checkpoint policy continues too.
+			CheckpointInterval: src.CheckpointInterval,
+			State:              "running",
+			Generation:         1, // every lease starts on generation 1 (2.2)
+			TemplateID:         img.TemplateID,
 		}
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
@@ -1850,6 +1886,52 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 // the sweepers: a non-empty holder keeps it past its TTL and out of the
 // idle sweep.
 func (l *Lease) held() bool { return l.Holder != "" }
+
+// Checkpoint interval bounds (2.3, #122): the create field and the
+// policy PUT accept 0 (never) or 60..604800 seconds (a minute to a
+// week). -1 on the stored lease alone means "the host default".
+const (
+	checkpointIntervalMin  = 60
+	checkpointIntervalMax  = 604800
+	checkpointIntervalHost = -1
+)
+
+// validateCheckpointInterval checks a requested checkpoint_interval:
+// 0 (never) or 60..604800 seconds. The message names the field.
+func validateCheckpointInterval(secs int64) error {
+	if secs == 0 {
+		return nil
+	}
+	if secs < checkpointIntervalMin || secs > checkpointIntervalMax {
+		return fmt.Errorf("checkpoint_interval must be 0 (never) or %d..%d seconds",
+			checkpointIntervalMin, checkpointIntervalMax)
+	}
+	return nil
+}
+
+// effectiveCheckpointInterval resolves the lease's checkpoint interval
+// to seconds: its own value when set (0 = never, >0 seconds), otherwise
+// the host default (CheckpointIntervalDefault; 0 = never).
+func (s *Service) effectiveCheckpointInterval(l *Lease) int64 {
+	if l.CheckpointInterval != checkpointIntervalHost {
+		return l.CheckpointInterval
+	}
+	return s.cfg.CheckpointIntervalDefault
+}
+
+// setCheckpointPolicy stores the lease's own checkpoint interval
+// (2.3, #122) and emits a checkpoint_policy event naming the new
+// effective seconds. Call without s.store.mu.
+func (s *Service) setCheckpointPolicy(l *Lease, secs int64) (*Lease, error) {
+	s.store.mu.Lock()
+	l.CheckpointInterval = secs
+	s.saveLeaseLocked(l)
+	effective := s.effectiveCheckpointInterval(l)
+	s.store.mu.Unlock()
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseCheckpointPolicy,
+		fmt.Sprintf("checkpoint_interval %d", effective))
+	return l, nil
+}
 
 // validateHolder checks the create/fork/holder fields: holder at most
 // 128 printable characters; holderURL empty or an absolute http(s) URL
@@ -2148,8 +2230,10 @@ func holdState(l *Lease) string {
 	return "active"
 }
 
-// leaseMap renders a lease as one GET /api/sandboxes row.
-func leaseMap(l *Lease) map[string]any {
+// leaseMap renders a lease as one GET /api/sandboxes row. The
+// checkpointInterval argument is the lease's effective interval in
+// seconds (the host default already resolved; 0 = never).
+func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 	m := map[string]any{
 		"id":               l.ID,
 		"owner":            l.Owner,
@@ -2171,6 +2255,9 @@ func leaseMap(l *Lease) map[string]any {
 		// Continuity generation (2.2): bumped when the guest's memory
 		// does not continue from where its processes left it.
 		"generation": l.Generation,
+		// Effective per-lease checkpoint interval in seconds (2.3,
+		// #122): the host default resolved; 0 = never.
+		"checkpoint_interval": checkpointInterval,
 	}
 	if !l.HoldExpiresAt.IsZero() {
 		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
@@ -2187,8 +2274,8 @@ func leaseMap(l *Lease) map[string]any {
 
 // leaseDetailMap is a list row plus the lifecycle fields served by
 // GET /api/sandboxes/{id}.
-func leaseDetailMap(l *Lease) map[string]any {
-	m := leaseMap(l)
+func (s *Service) leaseDetailMap(l *Lease) map[string]any {
+	m := leaseMap(l, s.effectiveCheckpointInterval(l))
 	m["state"] = l.State
 	m["recovered_from"] = formatRFC3339(l.RecoveredFrom)
 	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
@@ -2213,7 +2300,7 @@ func (s *Service) list(owner string) []map[string]any {
 	var out []map[string]any
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
-			out = append(out, leaseMap(l))
+			out = append(out, leaseMap(l, s.effectiveCheckpointInterval(l)))
 		}
 	}
 	return out
@@ -2360,6 +2447,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LastAction:            l.LastAction,
 		LastActionAt:          l.LastActionAt,
 		Generation:            l.Generation,
+		CheckpointInterval:    l.CheckpointInterval,
 	}
 }
 
@@ -2398,6 +2486,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LastAction:            r.LastAction,
 		LastActionAt:          r.LastActionAt,
 		Generation:            r.Generation,
+		CheckpointInterval:    r.CheckpointInterval,
 	}
 }
 

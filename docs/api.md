@@ -45,9 +45,10 @@ Request:
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
 | `egress_allowlist` | []string | *(empty)* | IPs/CIDRs/domains for `restricted`; also lease references (see below) |
 | `expose_ports` | []int | *(none)* | guest TCP ports published for peer leases. Max 8; port 49983 (envd) is refused; duplicates and out-of-range ports are refused |
-| `holder` | string | `""` | what holds the lease (a CI job, an orchestrator's flight, a person's scratch work). At most 128 printable characters. A non-empty holder makes the lease **held**: it is not released at its TTL, not idle-suspended by the plain sweep, and checkpointed periodically like a persistent lease. A hold expires on its own (see `hold_ttl`) — the automatic held-lease limits in [operations.md](operations.md) act regardless |
+| `holder` | string | `""` | what holds the lease (a CI job, an orchestrator's flight, a person's scratch work). At most 128 printable characters. A non-empty holder makes the lease **held**: it is not released at its TTL and not idle-suspended by the plain sweep. A hold expires on its own (see `hold_ttl`) — the automatic held-lease limits in [operations.md](operations.md) act regardless |
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
 | `hold_ttl` | int | `0` | seconds the hold lasts from now instead of the default `HOLD_TTL_SECS`; capped at `HOLD_TTL_MAX_SECS`. Ignored when `holder` is empty |
+| `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
 | `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
 
 Response `201 Created`:
@@ -65,6 +66,7 @@ Response `201 Created`:
   "holder_url": "https://ci.example.com/jobs/42",
   "hold_expires_at": "2026-10-08T03:00:00Z",
   "generation": 1,
+  "checkpoint_interval": 300,
   "exposed": {"9042": "10.11.0.7:9042"}
 }
 ```
@@ -75,6 +77,14 @@ Response `201 Created`:
 `generation` is the lease's continuity generation: `1` on create, bumped
 whenever the guest's memory does not continue from where its processes
 left it — see [Generations](#generations).
+
+`checkpoint_interval` in the response is the **effective** interval in
+seconds: the lease's own value, or the host default when the lease has
+none. `0` means the periodic checkpoint loop never touches the lease.
+Clone and fork copy the source's interval; a lease created without the
+field keeps the host default until `PUT
+/api/leases/{id}/checkpoint-policy` changes it — see
+[Checkpoints](#checkpoints).
 
 `address` is the lease's host-side address (no port). `exposed` maps
 each published port to `<address>:<port>` — reachable from peers whose
@@ -91,7 +101,8 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `id`, `owner`, `image`, `address`, `expires` (unix seconds),
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
 `name`, `comment`, `holder`, `holder_url`, `net_policy`,
-`egress_allowlist`, `exposed`, `generation`.
+`egress_allowlist`, `exposed`, `generation`, `checkpoint_interval`
+(effective seconds; `0` = never).
 
 A held lease's row adds `hold_expires_at` (RFC 3339, when the hold
 expires and normal sweeping resumes) and — after the first automatic
@@ -404,11 +415,64 @@ map capacity errors to `503`.
 Owner only, live leases only (`409` otherwise, including while another
 operation is in flight). Writes a checkpoint build the lease can be
 recovered from, and the lease keeps running from it. This is also what
-the background checkpoint loop does for active persistent leases. Response:
+the background checkpoint loop does for a due lease. Response:
 
 ```json
 {"id":"…","build_id":"<uuid>","at":"2026-10-01T12:00:00Z"}
 ```
+
+### `PUT /api/leases/{id}/checkpoint-policy` — set the checkpoint interval
+
+Owner or admin (anyone else gets the usual `404`). Sets the lease's own
+periodic checkpoint interval, overriding the host default:
+
+```json
+{"checkpoint_interval": 3600}
+```
+
+`checkpoint_interval` is required: `0` = the loop never checkpoints the
+lease; `60`–`604800` = seconds between periodic checkpoints. Anything
+else is `400` naming the field. Response `200 OK`:
+
+```json
+{"id":"…","checkpoint_interval":3600,"ok":true}
+```
+
+`checkpoint_interval` in the response is the effective value (the value
+just set). The change emits a `checkpoint_policy` lease event naming the
+new effective seconds — see [Lease events](#lease-events-server-sent-events) — and takes effect on
+the loop's next pass (it ticks every minute). While a lease is busy
+(409-checking lifecycle operations), the setting still applies; the loop
+itself skips busy leases.
+
+### Checkpoints
+
+A running lease can be snapshotted into a **checkpoint build**: the
+guest's RAM is written out while the guest is paused briefly, and the
+lease keeps running from the new build. Checkpoints happen three ways:
+
+- on demand, `POST /api/leases/{id}/checkpoint`;
+- periodically, for leases whose effective `checkpoint_interval` is
+  `> 0` and that have been active since their last checkpoint — the
+  host default comes from `CHECKPOINT_INTERVAL_MINS` (default `0` =
+  never, see [operations.md](operations.md)), a lease's own
+  `checkpoint_interval` overrides it;
+- implicitly, as the first half of clone and fork (and the persistent
+  restart round-trip).
+
+The snapshot is what makes the lease survivable: an **orchestrator
+(crash) recovery resumes a lease from its newest checkpoint**, so a
+lease that has never been checkpointed **is lost** when the orchestrator
+dies with the sandbox — its memory is gone with the VM. A planned
+restart (or a suspend/resume, or the admin drain) is different: those
+pause the guest into a fresh build first and resume from it, so nothing
+is lost in a planned drain — drain suspends every lease into its own
+pause build and undrain resumes exactly those. The loss window of a
+crash is therefore bounded by the checkpoint interval: how long a lease
+can run after its last checkpoint. `recovered_from` and
+`last_checkpoint_at` on the lease detail show when that snapshot was
+taken; the `spoond_checkpoint_pause_seconds` metric shows how long each
+checkpoint pauses its guest.
 
 ### `POST /api/leases/{id}/clone` — branch to a new lease
 
@@ -483,10 +547,13 @@ the hold: it lasts another `HOLD_TTL_SECS` (or the given, capped
 take the lease over by clearing first.
 
 **Held-lease semantics:** a lease with a non-empty `holder` is not
-released by the TTL sweeper, is not idle-suspended by the plain sweep,
-and is checkpointed periodically like a persistent lease — a CI job or
-an orchestrator can hold a plain (non-persistent) lease past its TTL
-without keep-alive calls, and its work survives a crash. The hold ends
+released by the TTL sweeper and is not idle-suspended by the plain
+sweep — a CI job or an orchestrator can hold a plain (non-persistent)
+lease past its TTL without keep-alive calls. Being held does not itself
+put the lease on the periodic checkpoint pass: set the lease's
+`checkpoint_interval` (on create or via `PUT
+/api/leases/{id}/checkpoint-policy`) so its work survives a crash — see
+[Checkpoints](#checkpoints). The hold ends
 on its own (`HOLD_TTL_SECS` from when it was set or renewed, at most
 `HOLD_TTL_MAX_SECS` for an explicit `hold_ttl`): a lapsed hold suspends
 a running lease and never releases one; the lease keeps its holder,
@@ -575,6 +642,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
+| `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 
 ### Resume and gaps

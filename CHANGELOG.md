@@ -26,19 +26,33 @@ summarised from README "Status".
   suspended lease restarted cold comes back running. Any other mode is
   `400`. `spoondctl restart <id> --cold` and the ctl verb
   `restart <id> --cold` drive it.
-
-### Security
-
-- **Guest system binaries were writable by any user (#124).** E2B's
-  template build runs `chmod -R 777 /usr/local` and `/code`, and writes
-  envd with mode 0777, so an unprivileged user inside a guest could
-  replace binaries that root runs (spoond-guest-init, e2b-provision-runner,
-  envd). spoond-guest-init now removes group and other write access under
-  /usr/local, sets envd to 0755 and makes /code sticky (1777) before the
-  template is snapshotted. Images must be rebuilt
-  (`spoond images build --all`) to pick it up. Conformance L7 checks it.
+- **Per-lease checkpoint intervals (#122).** `POST /api/leases` accepts
+  `checkpoint_interval` (seconds; `0` = never; omitted = the host
+  default) and `PUT /api/leases/{id}/checkpoint-policy` changes it
+  later (owner or admin, others `404`; emits a `checkpoint_policy`
+  event). Every lease row and detail reports the effective
+  `checkpoint_interval` in seconds, host default resolved. Clone and
+  fork copy the source's interval. The host default is
+  `CHECKPOINT_INTERVAL_MINS` and applies to leases storing -1; the new
+  `spoond_checkpoint_pause_seconds` histogram (buckets 1..600)
+  measures how long each checkpoint pauses its guest, next to a log
+  line naming the lease, the pause and the image's `memory_mb`.
 
 ### Changed
+
+- **Periodic checkpointing now defaults to never and is per-lease
+  (#122).** `CHECKPOINT_INTERVAL_MINS` defaults to `0` (was `60`) and
+  is only the default for leases without their own interval. The
+  background pass ticks every minute and checkpoints a lease whose
+  effective interval has elapsed and that has been active since its
+  last checkpoint — previously every active persistent lease and every
+  held lease was checkpointed hourly. A held lease is checkpointed
+  only if it has an interval: set one if the holder's work must survive
+  an orchestrator crash. Leases created before 2.3 get the host default. An
+  orchestrator crash loses the work a lease has done since its last
+  checkpoint; a lease that has never been checkpointed is lost
+  entirely, while planned restarts and drains pause into a build
+  first and lose nothing.
 
 - **The dashboard's panels are laid out to the mockup (#118, parts
   1–3).** One fixed-width character grid (104 by default, `DASH_WIDTH`
@@ -63,6 +77,17 @@ summarised from README "Status".
   and the events panel. `spoond top` draws the same frame with ANSI
   styles, and a test draws every width from 72 to 104 and checks every
   row fits with every panel border in its column.
+
+### Security
+
+- **Guest system binaries were writable by any user (#124).** E2B's
+  template build runs `chmod -R 777 /usr/local` and `/code`, and writes
+  envd with mode 0777, so an unprivileged user inside a guest could
+  replace binaries that root runs (spoond-guest-init, e2b-provision-runner,
+  envd). spoond-guest-init now removes group and other write access under
+  /usr/local, sets envd to 0755 and makes /code sticky (1777) before the
+  template is snapshotted. Images must be rebuilt
+  (`spoond images build --all`) to pick it up. Conformance L7 checks it.
 
 ## [2.2.1] - 2026-10-04
 
