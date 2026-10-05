@@ -584,6 +584,26 @@ means the disk needs attention the leases are paying for.
 - **Quotas** are per-user (`max_leases`/`max_ttl` via `POST
   /api/users/{id}/quota`); over-cap creates and forks return `429`. A
   user with `max_leases: 0` is unlimited.
+- **Memory quotas** (#128) are per-user too (`guaranteed_mib`/
+  `max_mib`, same endpoint). A lease costs its image's `memory_mb`;
+  the sum over a user's **running** leases may not pass `max_mib` — a
+  suspended lease holds no hugepages and is not charged, so suspending
+  frees the budget and resuming re-checks it (an over-budget resume
+  answers `429` and the lease stays suspended). Create, clone and fork
+  (each child's `memory_mb`, reserved up front, all or nothing) are
+  checked under the same lock as `max_leases`, so races cannot blow
+  past either cap. `guaranteed_mib` is the user's floor of host
+  memory; admission does not count it against them. Watch a user's
+  charge as `used_mib` on `GET /api/users/me` (and `charged_mib` on the
+  lease detail).
+  - **Migration:** none, by design. A user with `max_leases > 0` and no
+    `max_mib` keeps working unchanged — no count is converted into a
+    memory number. To cap a user's memory, set it explicitly, sizing it
+    from their current charge: `GET /api/users/me` (or `GET
+    /api/users`) for `used_mib`, then `POST /api/users/{id}/quota` with `"max_mib": <MiB>` (and
+    `"guaranteed_mib"` at most that). Rolling change: existing leases
+    are never evicted when a quota lands; only new grants and resumes
+    are refused once the user is over.
 - **Token/key hashes** are HMAC-SHA256 with a per-store salt (sidecar
   `<users-file>.salt`); back the salt up alongside the store or existing
   hashes become unverifiable on restore.

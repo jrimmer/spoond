@@ -92,8 +92,9 @@ egress policy permits it (see [Network policy](#network-policy)), never
 from the LAN. The same map appears in `GET /api/leases`.
 
 Errors: `400` bad policy/ports/memory/holder/secret fields, `404` unknown image,
-`429` quota, `503` capacity (not enough free hugepage memory for the
-image, or the node is not healthy).
+`429` quota — the user's concurrent-lease cap or their memory cap
+(#128, see `POST /api/users/{id}/quota`), `503` capacity (not enough
+free hugepage memory for the image, or the node is not healthy).
 
 ### `GET /api/leases` — list leases
 
@@ -124,6 +125,12 @@ pinned with `{"keep":true}` (#126), oldest keep first:
 `size_bytes` is the recorded disk size (allocated bytes, #125), so the
 list shows what unpinning would free. Requires the owner or an `http`
 share.
+
+A lease with an identity-store owner also carries its owner's memory
+quota (#128): `charged_mib` (the owner's current running-lease charge —
+what this lease contributes to while it runs), `guaranteed_mib` and
+`max_mib` (`0` = unset) — the same numbers as `GET /api/users/me`,
+scoped to this lease's owner.
 
 `state` is `running`, `suspended`, `recovered` or `lost`. `recovered`
 behaves exactly like `running` — it marks a lease the crash reconcile
@@ -383,7 +390,10 @@ too); the SSH gateway's service token may resume any lease before a
 session starts. Response
 `{"id":"…","status":"running","address":"…"}`. `400` if neither persistent nor held,
 `409` if the lease is busy (another lifecycle operation is in flight).
-Resuming a lease that is already running does nothing and answers `200`
+A suspended lease holds no hugepages, so resuming one re-passes the
+owner's memory quota (#128): `429` when the charge would pass
+`max_mib` — the lease stays suspended. Resuming a lease that is
+already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.)
 
@@ -559,6 +569,10 @@ friendly *name*). Response `201 Created`:
 {"id":"…","image":"…","source":"<source-id>","branch_tag":"<build id>","persistent":true,"expires_at":"…"}
 ```
 
+The clone costs the source image's `memory_mb` against the owner's
+memory quota like any create (#128); `429` when it would pass
+`max_mib`.
+
 ### `POST /api/leases/{id}/fork` — N copies of a running lease
 
 Owner only, as clone (shares are not honoured). Checkpoints the source
@@ -577,7 +591,9 @@ holder wants its work kept).
 Response `201 Created`:
 `{"source":"<id>","build_id":"<uuid>","ids":["…","…"],"hold_expires_at":"…"}`.
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
-suspended or busy, `429` quota, `503` capacity.
+suspended or busy, `429` quota — including the memory cap (#128): each
+fork costs its image's `memory_mb`, `count` times, reserved up front,
+all or nothing — `503` capacity.
 
 ### `POST /api/leases/{id}/network` — change egress policy live
 
@@ -1048,8 +1064,9 @@ user becomes admin. After that, admin only.
   entry, but bound to the identity).
 
 Response `201 Created`: `{"user": {id, name, kind, admin, fingerprints,
-max_leases, max_ttl, created_at}}` — the token hash and LLM key hash are
-never exposed.
+max_leases, max_ttl, guaranteed_mib, max_mib, used_mib, created_at}}` —
+the token hash and LLM key hash are
+never exposed. `used_mib` is `0` on a fresh user.
 
 ### `GET /api/users` — list users (admin only)
 
@@ -1057,7 +1074,11 @@ never exposed.
 
 ### `GET /api/users/me` — current user
 
-Self-service: `{"user": {id, name, kind, admin, max_leases, max_ttl}}`.
+Self-service: `{"user": {id, name, kind, admin, max_leases, max_ttl,
+guaranteed_mib, max_mib, used_mib}}` (#128). `used_mib` is the
+user's current memory charge — the sum of `memory_mb` over their
+running leases (suspended ones hold no hugepages); `guaranteed_mib` and
+`max_mib` are `0` when unset.
 
 ### `GET /api/users/by-name/{name}` — minimal lookup
 
@@ -1077,13 +1098,24 @@ present, so removing the user invalidates all their keys immediately.
 
 ### `POST /api/users/{id}/quota` — set lease quota (admin only)
 
-Request `{"max_leases": N, "max_ttl": S, "max_kept_bytes": B}` —
-concurrent-lease cap, per-user TTL ceiling, and the kept-checkpoint byte
-budget (#126): the sum of `size_bytes` over the user's kept builds may
-not pass `B` (`0` = no budget). All three default to `0` =
-unlimited/unset. Over-cap creates and forks return `429`; an over-budget
-keep answers `409` on the checkpoint route with the unpinned build's id
-(see [Keep limits](#post-apileasesidcheckpoint--snapshot-a-running-lease)).
+Request `{"max_leases": N, "max_ttl": S, "max_kept_bytes": B,
+"guaranteed_mib": G, "max_mib": M}` — concurrent-lease cap, per-user
+TTL ceiling, the kept-checkpoint byte budget (#126), and the memory
+quota (#128): the sum of `memory_mb` over the user's **running** leases
+may not pass `M` (`0` = no cap; a suspended lease holds no hugepages
+and is not charged). All five default to `0` =
+unlimited/unset. `guaranteed_mib` is the user's memory floor, advisory
+in this part (#128 part 1): admission never counts it against them, and
+it must be `<= max_mib` when both are set (`400` otherwise). Over-cap
+creates, forks, clones and resumes return `429`; an over-budget keep
+answers `409` on the checkpoint route with the unpinned build's id (see
+[Keep limits](#post-apileasesidcheckpoint--snapshot-a-running-lease)).
+
+There is no automatic conversion from `max_leases` to a memory limit: a
+user with `max_leases > 0` and no `max_mib` keeps working unchanged. To
+cap a user's memory, set `max_mib` explicitly (e.g. `curl -X POST
+…/api/users/$UID/quota -d '{"max_leases":4,"max_mib":16384}'`); their
+in-flight usage is `used_mib` on `GET /api/users/me`.
 
 ### `POST /api/users/{id}/llm-key` — set/rotate/revoke a user's LLM gateway key
 
