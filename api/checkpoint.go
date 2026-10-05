@@ -143,11 +143,27 @@ func (s *Server) handleCheckpointPolicy(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// keepBuild pins a checkpoint build of the lease (2.3, #121): the build
+// joins the GC's kept set while the lease lives and is a restore point
+// for POST /api/leases/{id}/restore. Keeping the same build twice keeps
+// the first kept_at.
+func (s *Service) keepBuild(ctx context.Context, leaseID, buildID string) error {
+	return s.db.KeepBuild(ctx, leaseID, buildID, s.now())
+}
+
 // handleCheckpoint checkpoints one lease on demand. Owner only, live
-// leases only (409 otherwise, including busy).
+// leases only (409 otherwise, including busy). The optional body
+// {"keep":true} pins the checkpoint build: it joins the GC's kept set
+// while the lease lives and can be restored in place (2.3, #121).
 func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
+	var req struct {
+		Keep bool `json:"keep"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // optional body
+	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
@@ -170,9 +186,15 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if req.Keep {
+		if err := s.svc.keepBuild(r.Context(), lease.ID, b.BuildID); err != nil {
+			s.svc.log.Printf("checkpoint: keep %s: %v", b.BuildID, err)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       lease.ID,
 		"build_id": b.BuildID,
 		"at":       formatRFC3339(lease.LastCheckpointAt),
+		"kept":     req.Keep,
 	})
 }
