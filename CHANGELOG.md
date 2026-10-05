@@ -12,6 +12,16 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A snapshot's `size_bytes` was 0 until the next hourly accounting
+  pass (#125).** A fresh checkpoint or pause build's disk size is now
+  measured when the build is written and stored with its row, so
+  `GET /api/snapshots` and the dashboard show a size immediately
+  instead of up to an hour later. The measurement covers every path
+  that writes a fresh build: checkpoints (manual, periodic, clone and
+  fork), suspend and the admin drain, and template builds from
+  `spoond images build`. A failed measurement logs and
+  stores 0; the hourly pass still re-measures every build and corrects
+  the row.
 - **The dashboard's events panel showed owner ids.** An event for a lease
   with no holder or comment named its owner as an identity id
   (`u-42f5…`); it now shows the user's name, as the leases table does
@@ -143,6 +153,8 @@ the same value as `DASH_EVENTS_TOKEN` in the dashboard's.
   widths now drops whole counters from the right instead of clipping
   one mid-item, and the services panel folds units past its row cap
   into a final `+N more` row.
+
+### Fixed
 
 ### Security
 

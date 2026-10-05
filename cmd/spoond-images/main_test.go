@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,16 +18,30 @@ import (
 )
 
 // stubSubstrate records the BuildTemplate request and answers with a
-// fixed result (or error).
+// fixed result (or error). When storageRoot is set, BuildTemplate leaves
+// the fresh build's files under root/<buildID> the way the orchestrator
+// leaves them (#125).
 type stubSubstrate struct {
 	*fake.Fake
-	req substrate.BuildRequest
-	res substrate.BuildResult
-	err error
+	req         substrate.BuildRequest
+	res         substrate.BuildResult
+	err         error
+	storageRoot string
 }
 
 func (s *stubSubstrate) BuildTemplate(ctx context.Context, req substrate.BuildRequest) (substrate.BuildResult, error) {
 	s.req = req
+	if s.storageRoot != "" {
+		dir := filepath.Join(s.storageRoot, req.BuildID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return substrate.BuildResult{}, err
+		}
+		for i, n := range []int{4096, 8192} {
+			if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", i)), make([]byte, n), 0o644); err != nil {
+				return substrate.BuildResult{}, err
+			}
+		}
+	}
 	if s.err != nil {
 		return substrate.BuildResult{}, s.err
 	}
@@ -115,7 +131,8 @@ func TestBuildOneSuccess(t *testing.T) {
 		build.KernelVersion != "vmlinux-6.1.158" ||
 		build.FirecrackerVersion != "v1.14-0.2.0" ||
 		build.EnvdVersion != "0.1.40" || build.DiskMB != 5000 ||
-		build.VCPU != 2 || build.MemoryMB != 1024 {
+		build.VCPU != 2 || build.MemoryMB != 1024 ||
+		build.SizeBytes != 0 { // no storage root: the fake wrote nothing, so 0
 		t.Fatalf("build row after build = %+v", build)
 	}
 	if build.CreatedAt.After(time.Now()) {
@@ -132,6 +149,43 @@ func TestBuildOneSuccess(t *testing.T) {
 	}
 	if want := "built py-base build=" + build.BuildID + " digest=" + wantDigest + "\n"; out.String() != want {
 		t.Fatalf("stdout = %q, want %q", out.String(), want)
+	}
+}
+
+// TestTemplateBuildSizeAtWriteTime: a template build records its disk
+// size when it is written (#125), the same write-time measurement the
+// service gives checkpoint and pause builds — not only after the next
+// hourly accounting pass.
+func TestTemplateBuildSizeAtWriteTime(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{
+		KernelVersion: "vmlinux-6.1.158", FirecrackerVersion: "v1.14-0.2.0",
+		EnvdVersion: "0.1.40", DiskSizeMB: 5000,
+	}, storageRoot: t.TempDir()}
+	// templateBuildSize reads the storage root from the environment,
+	// like the service does.
+	t.Setenv("E2B_TEMPLATE_STORAGE_PATH", sub.storageRoot)
+	db := setup(t, sub)
+	ctx := context.Background()
+
+	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+
+	build, err := db.GetBuild(ctx, sub.req.BuildID)
+	if err != nil {
+		t.Fatalf("GetBuild: %v", err)
+	}
+	// The stub wrote f0 (4096 B) and f1 (8192 B); compare against what
+	// the OS allocated for them, the number the helper stores.
+	want, err := store.BuildDiskUsage(filepath.Join(sub.storageRoot, sub.req.BuildID))
+	if err != nil {
+		t.Fatalf("measure build dir: %v", err)
+	}
+	if want < 8192 {
+		t.Fatalf("allocated size = %d, want at least 8192", want)
+	}
+	if build.SizeBytes != want {
+		t.Fatalf("template build size_bytes = %d, want %d (measured at write time)", build.SizeBytes, want)
 	}
 }
 
