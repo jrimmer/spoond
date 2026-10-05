@@ -34,7 +34,7 @@ only.
 | `keepalive` | `keepalive <id>` (alias `ka`) | extend persistent lease |
 | `suspend` | `suspend <id>` | snapshot + stop (persistent leases) |
 | `resume` | `resume <id>` | start from snapshot |
-| `restart` | `restart <id>` | persistent: pause + resume, guest state kept (not a reboot: a hung process stays hung); plain: fresh guest from the image |
+| `restart` | `restart <id>` | persistent: pause + resume, guest state kept (not a reboot: a hung process stays hung); plain: fresh guest from the image. `restart <id> --cold` gives any lease a fresh guest from the image's current build, keeping the lease id (memory, ephemeral disk and the resume chain lost; generation bumps; secrets re-written) |
 | `cp` | `cp <id> [tag]` (alias `clone`) | checkpoint the running lease + spawn a clone from it |
 | `tag` | `tag <id> <name>` | friendly name (then `ssh <name>@…`) |
 | `comment` | `comment <id> [text…]` | annotate; no text clears |
@@ -51,7 +51,10 @@ verb; `POST /api/leases/{id}/exec` is the API equivalent (see
 `suspend`/`resume`/`restart`/`cp` act on the E2B snapshot machinery
 (pause = snapshot + stop, resume = restore with the same sandbox id):
 what that means for a live tmux session is covered in
-[substrate.md](substrate.md#restart-and-crash-behaviour).
+[substrate.md](substrate.md#restart-and-crash-behaviour). The exception
+is `restart <id> --cold`, which skips the snapshot machinery: the lease
+gets a brand-new guest from the image's current build (see the restart
+row above and [api.md](api.md#post-apileasesidrestart--pause-and-resume-or-a-fresh-guest)).
 
 ## Examples
 

@@ -126,7 +126,9 @@ and is bumped — and persisted — by exactly two paths:
   replaces its sandbox with a fresh one from the image, so the guest
   starts over. Restarting a persistent lease is a snapshot round-trip
   (pause, then resume from that pause build): the memory continues and
-  the generation stays. Before 2.2.1 it bumped there too.
+  the generation stays. Before 2.2.1 it bumped there too. The cold mode
+  (`?mode=cold`) puts a persistent lease on the fresh-guest path too,
+  and bumps its generation.
 
 A planned suspend/resume and the admin drain/undrain continue the
 memory — the guest is resumed from the snapshot its own pause wrote —
@@ -361,23 +363,41 @@ restored the pause build again, rolling the guest's memory back.)
 
 ### `POST /api/leases/{id}/restart` — pause and resume, or a fresh guest
 
-Persistent and running: suspend then resume (same lease, same build
-chain, lossless through the pause build). This is **not a reboot**: the
-guest comes back with the same memory and processes, so a hung or
-out-of-memory process is still there afterwards. To start a persistent
-lease's guest over, delete it or clone from an earlier checkpoint (a
-cold restart that keeps the lease id is planned, #120). Persistent and suspended:
-resume. Non-persistent: delete the sandbox and create a fresh one from
-the image's current build, keeping the lease id (its disk is lost —
-there is no snapshot to restore). The non-persistent path bumps the
-lease's generation and rewrites `/run/spoond/generation`; the
-persistent path continues the guest's memory and keeps it (see
-[Generations](#generations)). Response
-`{"id":"…","status":"running","message":"lease restarted"}`.
-`404` unknown, `409` when busy; a substrate
-failure on the non-persistent path (which does create a sandbox)
-surfaces as `500`, not `503` — unlike create, fork and clone, restart
-does not map capacity errors to `503`.
+Takes an optional `mode`: `warm` (the default, also when the parameter
+or body field is absent) or `cold`. The mode comes from `?mode=` or the
+JSON body `{"mode":"…"}`; the body wins when both are set. Anything else
+is `400`.
+
+**Warm** (the default) is the behaviour described first below. Persistent and
+running: suspend then resume (same lease, same build chain, lossless
+through the pause build). This is **not a reboot**: the guest comes back
+with the same memory and processes, so a hung or out-of-memory process
+is still there afterwards. Persistent and suspended: resume.
+Non-persistent: delete the sandbox and create a fresh one from the
+image's current build, keeping the lease id (its disk is lost — there is
+no snapshot to restore). The non-persistent path bumps the lease's
+generation and rewrites `/run/spoond/generation`; the persistent path
+continues the guest's memory and keeps it (see
+[Generations](#generations)).
+
+**Cold** (`?mode=cold`) gives any lease — persistent or not, running or
+suspended — the fresh-guest path: the sandbox is deleted and a new one
+is created from the image's current build, keeping the lease id, owner,
+holder, name, network policy and exposed ports. The generation bumps and
+`/run/spoond/generation` is rewritten, and the create-time secrets are
+re-written into the fresh sandbox. What cold loses: everything the guest
+held in memory and on its ephemeral disk, any exec-time secrets (they
+ride their request, as always), and — on a persistent lease — the pause
+builds: `resume_build_id` is cleared, so the lease's next suspend writes
+a fresh resume point and older checkpoints stay but are no longer on the
+resume chain. A persistent lease restarted cold keeps being persistent,
+and a suspended lease restarted cold comes back running.
+
+Response `{"id":"…","status":"running","message":"lease restarted"}`.
+`404` unknown, `400` for an unknown mode, `409` when busy; a substrate
+failure on the fresh-guest path (which does create a sandbox) surfaces
+as `500`, not `503` — unlike create, fork and clone, restart does not
+map capacity errors to `503`.
 
 ### `POST /api/leases/{id}/checkpoint` — snapshot a running lease
 

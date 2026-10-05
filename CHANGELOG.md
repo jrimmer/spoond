@@ -10,6 +10,23 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Cold restart: `POST /api/leases/{id}/restart?mode=cold` (#120).**
+  A warm restart (the default) keeps a persistent lease's guest by
+  pausing and resuming it, which cannot unstick a hung process. The new
+  `mode=cold` (also accepted as the body `{"mode":"cold"}`) gives any
+  lease — persistent or not, running or suspended — a fresh guest from
+  the image's current build while keeping the lease id, holder, name,
+  network policy and exposed ports: create-time secrets are re-written,
+  the generation bumps and `/run/spoond/generation` is rewritten, and
+  the "restarted" event carries detail "cold". A persistent lease stays
+  persistent but its pause builds stop being its resume point
+  (`resume_build_id` is cleared; the next suspend sets it as usual); a
+  suspended lease restarted cold comes back running. Any other mode is
+  `400`. `spoondctl restart <id> --cold` and the ctl verb
+  `restart <id> --cold` drive it.
+
 ### Security
 
 - **Guest system binaries were writable by any user (#124).** E2B's
