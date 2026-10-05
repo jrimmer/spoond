@@ -26,6 +26,9 @@
 //	CHECKPOINT_INTERVAL_MINS  default per-lease checkpoint interval in
 //	                  minutes for leases without their own (2.3; default 0 =
 //	                  never; a lease's checkpoint_interval overrides)
+//	MAX_KEPT_PER_LEASE  kept-checkpoint cap per lease (#126; default 4;
+//	                  0 = no cap). A keep on a lease already at the cap
+//	                  answers 409; nothing is evicted.
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
 //	                  (default /forkdcache/e2b/storage/templates)
@@ -78,6 +81,10 @@
 //	                  to the database)
 //	BACKUP_MAX_AGE_SECS  how old the newest database backup may get
 //	                  before the notifier warns (default 93600 = 26 h)
+//	KEPT_DISK_WARN_PCT  kept-checkpoint share of the snapshot disk past
+//	                  which the notifier's disk.kept check warns and the
+//	                  dashboard's attention strip shows a row (#126;
+//	                  default 40; 0 disables both)
 package spoondbackend
 
 import (
@@ -146,6 +153,22 @@ func envIntOr(key string, def int) int {
 // staleness check uses.
 func notifyBackupMaxAge() time.Duration {
 	return notify.BackupMaxAgeSecs(envIntOr("BACKUP_MAX_AGE_SECS", 0))
+}
+
+// keptDiskWarnPct is the kept-checkpoint disk share (#126) past which
+// the notifier's disk.kept check warns: KEPT_DISK_WARN_PCT, default 40.
+// A configured 0 disables the check (and the dashboard's banner row,
+// which reads the same knob) — the check is only registered when the
+// value is positive.
+func keptDiskWarnPct() float64 {
+	// Parsed as a float, as the dashboard parses the same knob, so a
+	// fractional setting (40.5) means the same in both.
+	if v := os.Getenv("KEPT_DISK_WARN_PCT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			return f
+		}
+	}
+	return notify.DefaultKeptDiskWarnPct
 }
 
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
@@ -312,6 +335,7 @@ func Main(args []string) int {
 		PressureHeldIdle:          pressureIdle,
 		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
+		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 	})
 	// Per-create integrity probe: a sandbox with a corrupt toolchain answers
 	// a ping and then fails the job deep inside a build, so verify it from
@@ -406,6 +430,15 @@ func Main(args []string) int {
 			svc.GCLastError(),
 		).Checks() {
 			notifier.AddCheck(c)
+		}
+		// Kept checkpoints vs the snapshot disk (#126): disk.kept warns
+		// past KEPT_DISK_WARN_PCT (default 40; 0 = off). The critical-disk
+		// rule never deletes a kept build, so only a person can act on it.
+		if warn := keptDiskWarnPct(); warn > 0 {
+			keptSrc := &notify.CheckSources{KeptDisk: svc.KeptDiskProbe(storagePath), KeptWarnPct: warn}
+			for _, c := range keptSrc.Checks() {
+				notifier.AddCheck(c)
+			}
 		}
 		notifier.Start(ctx)
 		defer notifier.Stop()

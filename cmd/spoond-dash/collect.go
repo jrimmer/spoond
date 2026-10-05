@@ -88,6 +88,15 @@ type Snapshot struct {
 	// backend has actually deleted something) or "dry-run".
 	GCMode string `json:"gcMode"`
 
+	// KeptBuilds and KeptBuildsBytes are the kept checkpoints of live
+	// leases and their disk bytes (#126, from spoond_kept_builds and
+	// spoond_kept_builds_bytes). The host panel's GC row appends them
+	// when N > 0; KeptDiskPct is kept bytes over the snapshot disk's
+	// size, for the attention strip.
+	KeptBuilds      int     `json:"keptBuilds"`
+	KeptBuildsBytes int64   `json:"keptBuildsBytes"`
+	KeptDiskPct     float64 `json:"keptDiskPct"`
+
 	// CertNotAfter is the served TLS pair's expiry (DASH_TLS_CERT); zero
 	// when the dashboard serves plain HTTP. Only the banner reads it.
 	CertNotAfter time.Time `json:"-"`
@@ -234,6 +243,12 @@ type collector struct {
 	// 5 s would kill the stream every five seconds).
 	eventsClient *http.Client
 
+	// diskTotal remembers the snapshot disk's size from the last fromHost
+	// statfs (0 until it succeeds): the kept-bytes percentage (#126) is
+	// a metrics value over a host value, so it is computed after both
+	// sources have run.
+	diskTotal uint64
+
 	rowsMu  sync.Mutex
 	lastRow []LeaseRow // the lease table of the last collect tick
 }
@@ -300,6 +315,13 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 	}
 	s.Events = c.eventLines(now)
 	c.readCert(&s)
+	// Kept bytes as a share of the snapshot disk (#126): the attention
+	// strip's "kept checkpoints use X% of the snapshot disk". The disk
+	// total comes from fromHost's statfs; with no total (statfs failed)
+	// the strip stays off.
+	if s.KeptBuildsBytes > 0 && c.diskTotal > 0 {
+		s.KeptDiskPct = float64(s.KeptBuildsBytes) / float64(c.diskTotal) * 100
+	}
 	s.Err = strings.Join(errs, "; ")
 	if s.Err != "" {
 		// A scrape problem heads the events panel: the rest of the frame
@@ -402,6 +424,11 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	// the mode (an actual deletion means deletion is on) and the host
 	// panel's lifetime count.
 	s.GCDeleted = int(value(fams["spoond_gc_deleted_total"]))
+	// Kept checkpoints (#126): the pin count and their disk bytes; the
+	// percentage of the snapshot disk they fill feeds the attention
+	// strip (disk total comes from fromHost's statfs).
+	s.KeptBuilds = int(g("spoond_kept_builds"))
+	s.KeptBuildsBytes = int64(g("spoond_kept_builds_bytes"))
 	if st := g("spoond_backend_start_time_seconds"); st > 0 {
 		s.BackendUp = c.now().Sub(time.Unix(0, int64(st*1e9)))
 	}
@@ -516,6 +543,7 @@ func (c *collector) fromHost(s *Snapshot) error {
 	if err := syscall.Statfs(c.cfg.StoragePath, &st); err == nil && st.Blocks > 0 {
 		s.DiskFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))
 		s.DiskUsedPct = round1(float64(st.Blocks-st.Bfree) / float64(st.Blocks) * 100)
+		c.diskTotal = st.Blocks * uint64(st.Bsize)
 	}
 	if err := syscall.Statfs("/", &st); err == nil && st.Blocks > 0 {
 		s.RootFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))

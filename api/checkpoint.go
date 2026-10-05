@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -21,6 +22,44 @@ import (
 // leases (2.3, #122): every minute; a lease's effective interval (a
 // minute at the smallest) decides whether it is due.
 const checkpointLoopTick = time.Minute
+
+// DefaultMaxKeptPerLease is the per-lease kept-checkpoint cap (#126)
+// when MAX_KEPT_PER_LEASE is unset: four restore points per lease, so a
+// keep-happy loop cannot pin the whole catalog. 0 = no cap.
+const DefaultMaxKeptPerLease = 4
+
+// keptCapError is returned by checkpointLeaseBusy when a keep would
+// push the lease past its kept-checkpoint cap (#126). The checkpoint is
+// not taken and nothing is evicted; the API maps it to 409.
+type keptCapError struct{ cap int }
+
+func (e *keptCapError) Error() string {
+	return fmt.Sprintf("kept checkpoint limit reached (%d per lease); unpin one with DELETE /api/snapshots/{build_id}", e.cap)
+}
+
+// checkKeptCap refuses a keep on a lease already holding cap kept
+// checkpoints (#126): nothing is evicted, and the caller must unpin one
+// (DELETE /api/snapshots/{build_id}) to free a slot. cap 0 = no cap.
+// Called inside the busy window, before the checkpoint runs, so a
+// rejected keep costs no snapshot write; the busy flag already excludes
+// a concurrent keep on the same lease, so the count cannot grow under
+// us.
+func (s *Service) checkKeptCap(ctx context.Context, l *Lease, cap int) error {
+	if cap <= 0 {
+		return nil
+	}
+	n, err := s.db.CountKeptBuilds(ctx, l.ID)
+	if err != nil {
+		// Unknowable is not over: let the keep through rather than block
+		// checkpoints on a catalog hiccup; keepBuild logs its own failures.
+		s.log.Printf("checkpoint: count kept builds of %s: %v", l.ID, err)
+		return nil
+	}
+	if n >= cap {
+		return &keptCapError{cap: cap}
+	}
+	return nil
+}
 
 // checkpointIntervalSpacing separates two periodic checkpoints so a
 // batch of leases does not produce one burst of snapshot writes.
@@ -102,14 +141,113 @@ func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease, keep bool) 
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
+	// The per-lease cap is checked inside the busy window, before the
+	// checkpoint runs (#126): a lease at the cap answers 409 and takes
+	// no snapshot at all.
+	if keep {
+		if cerr := s.checkKeptCap(ctx, l, s.cfg.MaxKeptPerLease); cerr != nil {
+			return store.BuildRow{}, cerr
+		}
+	}
 	b, err := s.checkpointLease(ctx, l)
 	if err == nil && keep {
+		// The owner's byte budget (#126) runs before the pin: the build's
+		// size is only known now that it is written. Over budget, the pin
+		// is refused and the error names the build — the checkpoint stays
+		// written but unpinned (GC-able), and the route answers 409 with
+		// the build_id so the caller can retry without keep.
+		var budget int64
+		if s.identities != nil {
+			if u := s.identities.UserByID(l.Owner); u != nil {
+				budget = u.MaxKeptBytes
+			}
+		}
+		if berr := s.enforceKeptBudget(ctx, l.Owner, b.BuildID, budget); berr != nil {
+			return b, berr
+		}
 		if kerr := s.keepBuild(ctx, l.ID, b.BuildID); kerr != nil {
 			// The checkpoint stands; only the pin failed.
 			s.log.Printf("checkpoint: keep %s: %v", b.BuildID, kerr)
+		} else {
+			// The pin moved the kept totals (#126): the gauges follow
+			// without waiting for the next GC pass.
+			s.UpdateKeptMetrics(ctx)
 		}
 	}
 	return b, err
+}
+
+// keptBudgetError is returned by checkpointLeaseBusy when a keep would
+// push the owner's kept bytes past their budget (#126). The checkpoint
+// was written but is NOT pinned; buildID names it so the caller can
+// retry without keep. The API maps it to 409 with the build_id in the
+// body.
+type keptBudgetError struct {
+	budget, kept, build int64
+	buildID             string
+}
+
+func (e *keptBudgetError) Error() string {
+	return fmt.Sprintf("kept checkpoint byte budget exceeded (%d + %d would pass %d); the checkpoint %s was written but not kept — retry without keep, or unpin builds with DELETE /api/snapshots/{build_id}",
+		e.kept, e.build, e.budget, e.buildID)
+}
+
+// keptBytesOfOwner sums size_bytes over the owner's kept, non-deleted
+// builds (#126). Rows whose build is gone (the build row deleted under
+// the pin, or the pin written for an unknown build) count nothing: a
+// pin on thin air holds no disk.
+func (s *Service) keptBytesOfOwner(ctx context.Context, owner string) (int64, error) {
+	keptBy, err := s.db.ListKeptBuilds(ctx)
+	if err != nil {
+		return 0, err
+	}
+	builds, err := s.db.ListBuilds(ctx)
+	if err != nil {
+		return 0, err
+	}
+	size := make(map[string]int64, len(builds))
+	for _, b := range builds {
+		if b.Owner == owner && b.State != "deleted" {
+			size[b.BuildID] = b.SizeBytes
+		}
+	}
+	var total int64
+	for _, ids := range keptBy {
+		for _, id := range ids {
+			total += size[id]
+		}
+	}
+	return total, nil
+}
+
+// enforceKeptBudget is the owner-side half of the kept caps (#126). The
+// checkpoint is already written when this runs (the size is only known
+// then): when the fresh build would push the owner's kept bytes past
+// maxKeptBytes, the pin is refused — the build stays an ordinary,
+// GC-able checkpoint — and a keptBudgetError naming the build comes
+// back, so the caller can retry without keep. maxKeptBytes 0 = no
+// budget; a caller with no identity row is governed by nothing.
+func (s *Service) enforceKeptBudget(ctx context.Context, owner, buildID string, maxKeptBytes int64) error {
+	if maxKeptBytes <= 0 {
+		return nil
+	}
+	b, err := s.db.GetBuild(ctx, buildID)
+	if err != nil {
+		// No row, no size: the pin itself will fail later and log. Let
+		// the keep try.
+		return nil
+	}
+	kept, err := s.keptBytesOfOwner(ctx, owner)
+	if err != nil {
+		// Unknowable is not over: pin anyway rather than leave the keep
+		// silently unkept on a catalog hiccup.
+		s.log.Printf("checkpoint: kept bytes of %s: %v", owner, err)
+		return nil
+	}
+	if kept+b.SizeBytes > maxKeptBytes {
+		return &keptBudgetError{budget: maxKeptBytes, kept: kept, build: b.SizeBytes, buildID: buildID}
+	}
+	return nil
 }
 
 // handleCheckpointPolicy sets the lease's own checkpoint interval
@@ -194,9 +332,24 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := s.svc.checkpointLeaseBusy(r.Context(), lease, keep)
 	if err != nil {
+		var capErr *keptCapError
+		var budgetErr *keptBudgetError
 		switch {
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.As(err, &capErr):
+			// At the per-lease cap (#126): nothing was taken, nothing
+			// evicted; the caller unpins a build to free a slot.
+			writeError(w, http.StatusConflict, capErr.Error())
+		case errors.As(err, &budgetErr):
+			// Over the owner's kept-bytes budget (#126): the checkpoint was
+			// written but not pinned, so the caller can retry without
+			// keep; the body names the build for that retry.
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":    budgetErr.Error(),
+				"build_id": budgetErr.buildID,
+				"kept":     false,
+			})
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:

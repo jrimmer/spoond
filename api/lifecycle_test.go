@@ -159,7 +159,7 @@ func TestForkRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.SetQuota(u.ID, 5, 0); err != nil {
+	if err := ids.SetQuota(u.ID, 5, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 

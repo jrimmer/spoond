@@ -223,6 +223,11 @@ type ServiceConfig struct {
 	PressureHeldIdle       time.Duration
 	CriticalDiskFreePct    float64
 	CriticalDiskRecoverPct float64
+	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
+	// keep on a lease already holding this many kept builds answers 409
+	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default
+	// DefaultMaxKeptPerLease.
+	MaxKeptPerLease int
 }
 
 // Service is the lease API backend.
@@ -2290,7 +2295,9 @@ func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 }
 
 // leaseDetailMap is a list row plus the lifecycle fields served by
-// GET /api/sandboxes/{id}.
+// GET /api/sandboxes/{id}. The lease's kept checkpoints (#126) ride
+// along: build_id, size_bytes and kept_at each, oldest keep first —
+// what the caller may restore, and what unpins would free.
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	m := leaseMap(l, s.effectiveCheckpointInterval(l))
 	m["state"] = l.State
@@ -2299,6 +2306,21 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	if !l.LostAt.IsZero() {
 		m["lost_at"] = formatRFC3339(l.LostAt)
 	}
+	kept := []map[string]any{}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	if rows, err := s.db.ListKeptBuildRows(ctx, l.ID); err != nil {
+		s.log.Printf("lease detail: kept builds of %s: %v", l.ID, err)
+	} else {
+		for _, r := range rows {
+			kept = append(kept, map[string]any{
+				"build_id":   r.BuildID,
+				"size_bytes": r.SizeBytes,
+				"kept_at":    formatRFC3339(r.KeptAt),
+			})
+		}
+	}
+	m["kept_builds"] = kept
 	return m
 }
 
@@ -2790,6 +2812,14 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 		shares += len(grantees)
 	}
 	m.SharesActive.Set(float64(shares))
+
+	s.store.mu.Unlock()
+	// Kept checkpoints (#126): pins of live leases and their recorded
+	// bytes, refreshed on every scrape. CollectMetrics holds the store
+	// lock only for the lease set it needs; the kept rows live in the
+	// catalog.
+	s.UpdateKeptMetrics(context.Background())
+	s.store.mu.Lock()
 }
 
 // ReconcileOrphans aligns the substrate with the state loaded from the

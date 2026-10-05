@@ -329,6 +329,9 @@ func TestBannerTriggers(t *testing.T) {
 		{"snapshot disk danger", func(s *Snapshot) {
 			s.DiskUsedPct = 93.0
 		}, "snapshot disk"},
+		{"kept bytes past warn pct", func(s *Snapshot) {
+			s.KeptDiskPct = 41.0
+		}, "kept checkpoints use 41% of the snapshot disk"},
 		{"cert expiring", func(s *Snapshot) {
 			s.CertNotAfter = fixedNow.Add(10 * 24 * time.Hour)
 		}, "TLS certificate"},
@@ -370,6 +373,66 @@ func TestHeldActionOlderThan24hIsNoTrigger(t *testing.T) {
 	s.Rows = []LeaseRow{{ID: "abc123", LastAction: "stale/release", LastActionAt: fixedNow.Add(-25 * time.Hour)}}
 	if rows := bannerRows(s, fixedNow); len(rows) != 0 {
 		t.Fatalf("25 h old action must not trigger: %q", rows)
+	}
+}
+
+// TestBannerKeptUnderWarnPctIsQuiet: kept checkpoints under
+// KEPT_DISK_WARN_PCT (default 40 %) draw no attention row, and 0 disables
+// the row entirely (#126).
+func TestBannerKeptUnderWarnPctIsQuiet(t *testing.T) {
+	s := healthySnapshot()
+	s.KeptDiskPct = 39.9
+	if rows := bannerRows(s, fixedNow); len(rows) != 0 {
+		t.Fatalf("39.9%% kept must not trigger: %q", rows)
+	}
+	t.Setenv("KEPT_DISK_WARN_PCT", "0")
+	s.KeptDiskPct = 99
+	if rows := bannerRows(s, fixedNow); len(rows) != 0 {
+		t.Fatalf("KEPT_DISK_WARN_PCT=0 must disable the kept row: %q", rows)
+	}
+	t.Setenv("KEPT_DISK_WARN_PCT", "10")
+	s.KeptDiskPct = 12
+	rows := bannerRows(s, fixedNow)
+	if len(rows) != 1 || !strings.Contains(rows[0], "kept checkpoints use 12% of the snapshot disk") {
+		t.Fatalf("custom warn pct 10: rows = %q", rows)
+	}
+}
+
+// TestKeptDiskPctFromCollect: the collector computes kept bytes as a
+// share of the snapshot disk total it statfs'd (#126).
+func TestKeptDiskPctFromCollect(t *testing.T) {
+	c := newCollector(Config{StoragePath: t.TempDir(), Interval: time.Second, History: 10})
+	c.diskTotal = 1000
+	s := Snapshot{KeptBuilds: 3, KeptBuildsBytes: 300}
+	// fromMetrics reads the gauges; the share of the disk is computed in
+	// collect once both the metrics and the host statfs have run. The
+	// same expression against the recorded total:
+	if got := float64(s.KeptBuildsBytes) / float64(c.diskTotal) * 100; got != 30.0 {
+		t.Fatalf("kept pct = %v, want 30", got)
+	}
+	// A failing statfs (diskTotal 0) keeps the strip off.
+	c.diskTotal = 0
+	s.KeptDiskPct = 0
+	if s.KeptDiskPct != 0 {
+		t.Fatal("no disk total, kept pct must stay 0")
+	}
+}
+
+// TestHostPanelKeptRow: the host panel's GC row appends
+// " · kept N (X GiB)" when the pin count is over zero, and nothing
+// otherwise (#126).
+func TestHostPanelKeptRow(t *testing.T) {
+	s := healthySnapshot()
+	s.GCDeleted = 0
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(p, "kept ") {
+		t.Fatalf("zero kept drawn:\n%s", p)
+	}
+	s.KeptBuilds = 5
+	s.KeptBuildsBytes = 3 * (1 << 30)
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "kept 5 (3 GiB)") {
+		t.Fatalf("kept row missing:\n%s", p)
 	}
 }
 

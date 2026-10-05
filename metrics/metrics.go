@@ -93,6 +93,9 @@ type BackendMetrics struct {
 	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
 	StorageFree   prometheus.Gauge       // free bytes at the template storage path
 	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
+	// Kept checkpoints (#126): pins of live leases and their bytes.
+	KeptBuildsBytes prometheus.Gauge // summed size_bytes over kept builds of live leases
+	KeptBuilds      prometheus.Gauge // pin count over live leases
 
 	// Held-lease limits (2.1): automatic actions on held leases
 	HeldActions *prometheus.CounterVec // {rule,action}: idle/stale/expiry/pressure/critical × suspend/release/expire
@@ -338,6 +341,15 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "gc_deleted_total",
 		Help: "Builds deleted by the catalog GC, by kind.",
 	}, []string{"kind"})
+	// Kept checkpoints (2.3 #121, #126): the pins and their disk bytes.
+	m.KeptBuildsBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "kept_builds_bytes",
+		Help: "Disk bytes held by kept checkpoints of live leases (summed recorded size_bytes).",
+	})
+	m.KeptBuilds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "kept_builds",
+		Help: "Kept checkpoints of live leases (pins; a build pinned twice counts once per lease).",
+	})
 
 	// Held-lease limits (2.1): automatic actions on held leases.
 	m.HeldActions = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -405,6 +417,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur, m.CheckpointPause,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
+		m.KeptBuildsBytes, m.KeptBuilds,
 		m.HeldActions,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,

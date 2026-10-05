@@ -10,6 +10,35 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Kept checkpoints are visible (#126).** `GET /api/leases/{id}`
+  lists `kept_builds` — `build_id`, `size_bytes` and `kept_at` each,
+  oldest keep first — and two gauges report the totals over live
+  leases: `spoond_kept_builds` (pins) and `spoond_kept_builds_bytes`
+  (their recorded sizes). The dashboard's host panel GC row appends
+  `· kept N (X GiB)` when N > 0.
+- **A disk warning for kept checkpoints (#126).** When kept bytes pass
+  `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk, the
+  dashboard's attention strip shows "kept checkpoints use X% of the
+  snapshot disk" and the notifier emits `disk.kept` (warn) from its
+  periodic checks, deduped and resolved like every condition key. The
+  held-lease critical-disk rule still never deletes a kept build —
+  unpinning is the owner's call.
+- **A per-owner kept-bytes budget (#126).** `POST
+  /api/users/{id}/quota` takes `max_kept_bytes` (user-record field,
+  `0` = none) beside `max_leases`/`max_ttl`. A keep whose fresh build
+  would push the owner's kept bytes (the recorded `size_bytes` over
+  their kept builds) past the budget answers `409` naming the budget and
+  the new `build_id`: the checkpoint was written but not pinned, so it
+  ages out like any unreferenced snapshot and the caller can retry
+  without `keep`.
+- **Kept checkpoints are capped per lease (#126).** `MAX_KEPT_PER_LEASE`
+  (default 4, `0` = no cap) bounds how many builds one lease may pin
+  with `{"keep":true}`. A keep on a lease already at the cap answers
+  `409` naming the limit and `DELETE /api/snapshots/{build_id}`; nothing
+  is evicted and no checkpoint is taken. Unpinning a build frees a slot.
+
 ### Fixed
 
 - **A snapshot's `size_bytes` was 0 until the next hourly accounting

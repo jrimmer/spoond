@@ -51,6 +51,11 @@ type User struct {
 	// Quota (T4/#31). 0 = no per-user cap (global defaults apply).
 	MaxLeases int `json:"max_leases"` // max concurrent leases (0 = unlimited)
 	MaxTTL    int `json:"max_ttl"`    // max lease TTL seconds (0 = global max applies)
+	// MaxKeptBytes is the user's kept-checkpoint byte budget (#126): the
+	// sum of size_bytes over their kept builds may not exceed it. A keep
+	// whose checkpoint build would push the total past the budget is not
+	// pinned (the build stays an ordinary, GC-able checkpoint). 0 = none.
+	MaxKeptBytes int64 `json:"max_kept_bytes"` // kept-build byte budget (0 = none)
 }
 
 // Store is a thread-safe user registry with optional JSON persistence.
@@ -375,8 +380,9 @@ func (s *Store) Users() []*User {
 }
 
 // SetQuota updates a user's lease quota (T4/#31). maxLeases 0 =
-// unlimited; maxTTL 0 = global default cap applies.
-func (s *Store) SetQuota(userID string, maxLeases, maxTTL int) error {
+// unlimited; maxTTL 0 = global default cap applies. maxKeptBytes is the
+// kept-checkpoint byte budget (#126); 0 = none.
+func (s *Store) SetQuota(userID string, maxLeases, maxTTL int, maxKeptBytes int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u := s.users[userID]
@@ -385,6 +391,7 @@ func (s *Store) SetQuota(userID string, maxLeases, maxTTL int) error {
 	}
 	u.MaxLeases = maxLeases
 	u.MaxTTL = maxTTL
+	u.MaxKeptBytes = maxKeptBytes
 	return s.save()
 }
 

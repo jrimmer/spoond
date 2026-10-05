@@ -386,6 +386,7 @@ var otelClient = &http.Client{Timeout: 2 * time.Second}
 // service and identity state (issue #20). Called before gathering
 // metrics for /metrics so gauges reflect the moment of scrape.
 func (s *Server) collectServiceMetrics() {
+	// CollectMetrics also refreshes the kept-checkpoint gauges (#126).
 	s.svc.CollectMetrics(s.metrics)
 	// Identity user counts.
 	if s.svc.identities != nil {

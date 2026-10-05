@@ -151,3 +151,22 @@ func (s *Service) GCLastError() func() error {
 	}
 	return s.gcErr.Last
 }
+
+// KeptDiskProbe adapts the service's kept accounting (#126) into the
+// notifier's KeptDisk source: the recorded size_bytes over kept builds
+// of live leases, and the snapshot disk's total size from the same
+// statfs the held-lease disk rules read. An unreadable disk reports an
+// error, and the disk.kept check stays silent for the pass.
+func (s *Service) KeptDiskProbe(diskPath string) func() (uint64, uint64, error) {
+	return func() (uint64, uint64, error) {
+		_, bytes, err := s.keptPins(context.Background())
+		if err != nil {
+			return 0, 0, err
+		}
+		total, _, err := s.diskCapacity(diskPath)
+		if err != nil {
+			return 0, 0, err
+		}
+		return uint64(bytes), total, nil
+	}
+}

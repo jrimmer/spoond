@@ -112,7 +112,18 @@ held-lease action — `last_action` (`"rule/action"`, e.g.
 
 ### `GET /api/leases/{id}` — lease detail
 The same object as a list row plus `state`, `recovered_from` (RFC 3339 or
-`""`) and `last_checkpoint_at`. Requires the owner or an `http` share.
+`""`), `last_checkpoint_at` and `kept_builds` — the checkpoints the lease
+pinned with `{"keep":true}` (#126), oldest keep first:
+
+```json
+"kept_builds": [
+  {"build_id": "<uuid>", "size_bytes": 83928702976, "kept_at": "2026-10-01T12:00:00Z"}
+]
+```
+
+`size_bytes` is the recorded disk size (allocated bytes, #125), so the
+list shows what unpinning would free. Requires the owner or an `http`
+share.
 
 `state` is `running`, `suspended`, `recovered` or `lost`. `recovered`
 behaves exactly like `running` — it marks a lease the crash reconcile
@@ -433,6 +444,21 @@ Releasing the lease (any path) drops its kept builds, and
 
 `kept` mirrors the request (`false` when the body was empty; a
 malformed body is the usual `400`, not a silent "keep nothing").
+
+**Keep limits (#126).** Two caps govern `keep`:
+
+- **Per lease** — `MAX_KEPT_PER_LEASE` (default `4`, `0` = no cap). A
+  keep on a lease already holding that many kept builds answers `409`
+  `{"error":"kept checkpoint limit reached (4 per lease); unpin one with
+  DELETE /api/snapshots/{build_id}"}`. Nothing is evicted and **no
+  checkpoint is taken**; unpin a build to free a slot.
+- **Per owner** — an optional `max_kept_bytes` on the user record (set
+  via `POST /api/users/{id}/quota`). The build's size is only known
+  after it is written, so an over-budget keep **takes the checkpoint**
+  and then refuses the pin: `409` naming the budget with the new build's
+  `build_id` and `"kept":false`. The build stays an ordinary,
+  GC-able checkpoint — retry without `keep`, or unpin builds to make
+  room.
 
 ### `POST /api/leases/{id}/restore` — roll back to a kept checkpoint
 
@@ -1051,9 +1077,13 @@ present, so removing the user invalidates all their keys immediately.
 
 ### `POST /api/users/{id}/quota` — set lease quota (admin only)
 
-Request `{"max_leases": N, "max_ttl": S}` — concurrent-lease cap and
-per-user TTL ceiling. `0` = unlimited/unset. Over-cap creates and forks
-return `429`.
+Request `{"max_leases": N, "max_ttl": S, "max_kept_bytes": B}` —
+concurrent-lease cap, per-user TTL ceiling, and the kept-checkpoint byte
+budget (#126): the sum of `size_bytes` over the user's kept builds may
+not pass `B` (`0` = no budget). All three default to `0` =
+unlimited/unset. Over-cap creates and forks return `429`; an over-budget
+keep answers `409` on the checkpoint route with the unpinned build's id
+(see [Keep limits](#post-apileasesidcheckpoint--snapshot-a-running-lease)).
 
 ### `POST /api/users/{id}/llm-key` — set/rotate/revoke a user's LLM gateway key
 

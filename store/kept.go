@@ -76,6 +76,55 @@ func (db *DB) ListKeptBuilds(ctx context.Context) (map[string][]string, error) {
 	return out, nil
 }
 
+// KeptBuildRow is one kept checkpoint as the lease detail shows it
+// (#126): the build's id, its recorded disk size and when it was kept.
+type KeptBuildRow struct {
+	BuildID   string
+	SizeBytes int64
+	KeptAt    time.Time
+}
+
+// ListKeptBuildRows returns the lease's kept builds with sizes and
+// kept_at, oldest keep first. A kept build whose row is gone (deleted
+// under the pin) is skipped: it holds no disk and restores nothing.
+func (db *DB) ListKeptBuildRows(ctx context.Context, leaseID string) ([]KeptBuildRow, error) {
+	rows, err := db.r.QueryContext(ctx, `
+		SELECT k.build_id, COALESCE(b.size_bytes, 0), k.kept_at
+		FROM lease_kept_builds k
+		LEFT JOIN builds b ON b.build_id = k.build_id
+		WHERE k.lease_id = ?
+		ORDER BY k.kept_at`, leaseID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list kept build rows of lease %s: %w", leaseID, err)
+	}
+	defer rows.Close()
+	var out []KeptBuildRow
+	for rows.Next() {
+		var r KeptBuildRow
+		var keptAt string
+		if err := rows.Scan(&r.BuildID, &r.SizeBytes, &keptAt); err != nil {
+			return nil, fmt.Errorf("store: list kept build rows of lease %s: %w", leaseID, err)
+		}
+		r.KeptAt = parseTime(keptAt)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list kept build rows of lease %s: %w", leaseID, err)
+	}
+	return out, nil
+}
+
+// CountKeptBuilds returns how many builds the lease has pinned. The
+// per-lease cap (#126) reads it before taking a kept checkpoint.
+func (db *DB) CountKeptBuilds(ctx context.Context, leaseID string) (int, error) {
+	var n int
+	if err := db.r.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM lease_kept_builds WHERE lease_id = ?`, leaseID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count kept builds of lease %s: %w", leaseID, err)
+	}
+	return n, nil
+}
+
 // LeaseKeepsBuild reports whether the lease keeps the build.
 func (db *DB) LeaseKeepsBuild(ctx context.Context, leaseID, buildID string) (bool, error) {
 	var one int

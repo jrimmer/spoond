@@ -234,6 +234,45 @@ func TestGCCheck(t *testing.T) {
 	}
 }
 
+// TestKeptDiskCheck: disk.kept warns when kept checkpoints hold past
+// the warn percentage of the snapshot disk, resolves back under it, and
+// stays silent on a broken probe or an unreadable disk (#126). A
+// negative KeptWarnPct configures the check off.
+func TestKeptDiskCheck(t *testing.T) {
+	// 400 GiB disk, 160 GiB kept = 40 %: at the default warn level → warn.
+	evs := keptDiskCheck(func() (uint64, uint64, error) { return 160 << 30, 400 << 30, nil }, 40, checkNow)
+	if len(evs) != 1 || evs[0].Key != KeyDiskKept || evs[0].Severity != Warn || evs[0].Resolved {
+		t.Fatalf("kept at warn = %+v", evs)
+	}
+	if !contains(evs[0].Body, "40% of the snapshot disk") {
+		t.Fatalf("body %q lacks the percentage", evs[0].Body)
+	}
+	// 159.9… GiB kept = under 40 % → resolved.
+	evs = keptDiskCheck(func() (uint64, uint64, error) { return 100 << 30, 400 << 30, nil }, 40, checkNow)
+	if len(evs) != 1 || !evs[0].Resolved || evs[0].Severity != Warn {
+		t.Fatalf("kept under warn = %+v", evs)
+	}
+	// A broken probe or a zero total is not an incident.
+	evs = keptDiskCheck(func() (uint64, uint64, error) { return 0, 0, errors.New("statfs gone") }, 40, checkNow)
+	if len(evs) != 0 {
+		t.Fatalf("broken probe = %+v, want silence", evs)
+	}
+	evs = keptDiskCheck(func() (uint64, uint64, error) { return 1 << 30, 0, nil }, 40, checkNow)
+	if len(evs) != 0 {
+		t.Fatalf("zero total = %+v, want silence", evs)
+	}
+	// A custom warn level applies.
+	evs = keptDiskCheck(func() (uint64, uint64, error) { return 10 << 30, 400 << 30, nil }, 2, checkNow)
+	if len(evs) != 1 || evs[0].Resolved {
+		t.Fatalf("kept at custom warn = %+v", evs)
+	}
+	// KeptWarnPct < 0 configures the check off: not registered at all.
+	src := &CheckSources{KeptDisk: func() (uint64, uint64, error) { return 399 << 30, 400 << 30, nil }, KeptWarnPct: -1}
+	if checks := src.Checks(); len(checks) != 0 {
+		t.Fatalf("checks with KeptWarnPct -1 = %d, want 0", len(checks))
+	}
+}
+
 // TestCheckSourcesEmpty: no probes, no checks.
 func TestCheckSourcesEmpty(t *testing.T) {
 	if checks := (&CheckSources{}).Checks(); len(checks) != 0 {
