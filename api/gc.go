@@ -164,7 +164,62 @@ func (s *Service) gcPass(ctx context.Context) error {
 	if err := s.gcCandidates(ctx, kept); err != nil {
 		return err
 	}
-	return s.accountDisk(ctx)
+	if err := s.accountDisk(ctx); err != nil {
+		return err
+	}
+	// The kept gauges ride the same hourly pass as the disk accounting
+	// they summarize (#126).
+	s.UpdateKeptMetrics(ctx)
+	return nil
+}
+
+// UpdateKeptMetrics sets the kept-checkpoint gauges (#126):
+// spoond_kept_builds (pins over live leases) and spoond_kept_builds_bytes
+// (their recorded size_bytes). A failed read leaves the gauges at their
+// last values.
+func (s *Service) UpdateKeptMetrics(ctx context.Context) {
+	if s.metrics == nil {
+		return
+	}
+	keptBy, err := s.db.ListKeptBuilds(ctx)
+	if err != nil {
+		s.log.Printf("kept metrics: list kept builds: %v", err)
+		return
+	}
+	leases, err := s.db.ListLeases(ctx)
+	if err != nil {
+		s.log.Printf("kept metrics: list leases: %v", err)
+		return
+	}
+	live := make(map[string]bool, len(leases))
+	for _, l := range leases {
+		if l.State != "lost" {
+			live[l.ID] = true
+		}
+	}
+	builds, err := s.db.ListBuilds(ctx)
+	if err != nil {
+		s.log.Printf("kept metrics: list builds: %v", err)
+		return
+	}
+	size := make(map[string]int64, len(builds))
+	for _, b := range builds {
+		if b.State != "deleted" {
+			size[b.BuildID] = b.SizeBytes
+		}
+	}
+	var pins, bytes int64
+	for leaseID, ids := range keptBy {
+		if !live[leaseID] {
+			continue
+		}
+		for _, id := range ids {
+			pins++
+			bytes += size[id]
+		}
+	}
+	s.metrics.KeptBuilds.Set(float64(pins))
+	s.metrics.KeptBuildsBytes.Set(float64(bytes))
 }
 
 // keptBuilds computes the GC keep set. Roots are every image's current
@@ -493,5 +548,7 @@ func (s *Server) handleSnapshotDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
+	// The pin count and kept bytes may have moved (#126).
+	s.svc.UpdateKeptMetrics(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }

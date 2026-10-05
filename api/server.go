@@ -387,6 +387,9 @@ var otelClient = &http.Client{Timeout: 2 * time.Second}
 // metrics for /metrics so gauges reflect the moment of scrape.
 func (s *Server) collectServiceMetrics() {
 	s.svc.CollectMetrics(s.metrics)
+	// Kept checkpoints (#126): the pin count and their recorded bytes
+	// ride every scrape, like the other live gauges.
+	s.svc.UpdateKeptMetrics(context.Background())
 	// Identity user counts.
 	if s.svc.identities != nil {
 		persons, agents, admins := 0, 0, 0

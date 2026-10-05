@@ -12,6 +12,12 @@ summarised from README "Status".
 
 ### Added
 
+- **Kept checkpoints are visible (#126).** `GET /api/leases/{id}`
+  lists `kept_builds` — `build_id`, `size_bytes` and `kept_at` each,
+  oldest keep first — and two gauges report the totals over live
+  leases: `spoond_kept_builds` (pins) and `spoond_kept_builds_bytes`
+  (their recorded sizes). The dashboard's host panel GC row appends
+  `· kept N (X GiB)` when N > 0.
 - **A per-owner kept-bytes budget (#126).** `POST
   /api/users/{id}/quota` takes `max_kept_bytes` (user-record field,
   `0` = none) beside `max_leases`/`max_ttl`. A keep whose fresh build

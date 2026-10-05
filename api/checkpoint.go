@@ -168,6 +168,10 @@ func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease, keep bool) 
 		if kerr := s.keepBuild(ctx, l.ID, b.BuildID); kerr != nil {
 			// The checkpoint stands; only the pin failed.
 			s.log.Printf("checkpoint: keep %s: %v", b.BuildID, kerr)
+		} else {
+			// The pin moved the kept totals (#126): the gauges follow
+			// without waiting for the next GC pass.
+			s.UpdateKeptMetrics(ctx)
 		}
 	}
 	return b, err

@@ -12,6 +12,7 @@ package spoonddash
 import (
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -137,6 +138,8 @@ func fitItems(segs []grid.Seg, w int) []grid.Seg {
 //   - a systemd unit not active,
 //   - a lost lease,
 //   - free hugepages or snapshot disk past the danger level,
+//   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
+//     (#126),
 //   - the served TLS certificate (TLS_CERT) within 30 days of expiring,
 //   - an automatic held-lease action in the last 24 h (from last_action).
 func bannerRows(s Snapshot, now time.Time) []string {
@@ -155,6 +158,9 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	if s.DiskUsedPct >= 90 {
 		rows = append(rows, fmt.Sprintf("snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct))
 	}
+	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
+		rows = append(rows, fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct))
+	}
 	if !s.CertNotAfter.IsZero() {
 		if d := s.CertNotAfter.Sub(now); d < 30*24*time.Hour {
 			rows = certBanner(rows, d, s.CertNotAfter)
@@ -166,6 +172,25 @@ func bannerRows(s Snapshot, now time.Time) []string {
 		}
 	}
 	return rows
+}
+
+// DefaultKeptDiskWarnPct is the kept-checkpoint disk share (#126) past
+// which the attention strip warns, when KEPT_DISK_WARN_PCT is unset.
+const DefaultKeptDiskWarnPct = 40.0
+
+// keptDiskWarnPct reads the kept-checkpoint disk-share warn level
+// (KEPT_DISK_WARN_PCT): a 0 disables the banner row; unset or an
+// unparsable value means the default.
+func keptDiskWarnPct() float64 {
+	v := os.Getenv("KEPT_DISK_WARN_PCT")
+	if v == "" {
+		return DefaultKeptDiskWarnPct
+	}
+	p, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return DefaultKeptDiskWarnPct
+	}
+	return p
 }
 
 // certBanner appends the TLS certificate's row: at 30 days it needs a
@@ -967,11 +992,18 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 
 	// The build GC's mode — bold ok when deletion is on, dim when it
 	// only logs candidates — and its lifetime count, left out at zero.
+	// The kept checkpoints ride the same row (#126): "kept N (X GiB)"
+	// when N > 0.
 	segs := []grid.Seg{{Text: "gc ", Style: "dim"}, gcSeg(l.s.GCMode)}
 	if l.s.GCDeleted > 0 {
 		segs = append(segs,
 			grid.Seg{Text: " · ", Style: "dim"},
 			grid.Seg{Text: fmt.Sprintf("%s builds deleted", thousands(l.s.GCDeleted)), Style: "text"})
+	}
+	if l.s.KeptBuilds > 0 {
+		segs = append(segs,
+			grid.Seg{Text: " · ", Style: "dim"},
+			grid.Seg{Text: fmt.Sprintf("kept %s (%s GiB)", thousands(l.s.KeptBuilds), thousands(int(l.s.KeptBuildsBytes/(1<<30)))), Style: "text"})
 	}
 	g.Segs(x+2, row, segs, inner)
 	return y
