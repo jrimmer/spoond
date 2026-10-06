@@ -590,6 +590,10 @@ func (c *collector) fromHost(s *Snapshot) error {
 	return nil
 }
 
+// eventSubjectMax caps the events panel's subject column (holder,
+// comment or owner); longer subjects end in ….
+const eventSubjectMax = 24
+
 // eventPanelRows is how many events the panel shows.
 const eventPanelRows = 5
 
@@ -600,7 +604,9 @@ const eventPanelRows = 5
 //
 // (the detail is the event's own text, build ids shortened)
 //
-// (14 fits the longest type, holder_cleared, so the columns line up.)
+// (the type and subject columns are sized to the events shown, the
+// subject at most eventSubjectMax, so the columns line up and the detail
+// keeps the room.)
 //
 // where subject is the holder, else the comment, else the owner.
 // Without DASH_EVENTS_TOKEN the collector never subscribed to anything,
@@ -613,6 +619,18 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 	lines := make([]EventLine, 0, len(evs))
 	rows := c.lastRows()
 	names := c.userNames()
+	// The type and subject columns are as wide as the events shown need
+	// (the subject at most eventSubjectMax, cut with …), so the detail —
+	// the part that varies most — gets the rest of the row.
+	typeW, subjW := 0, 0
+	for _, ev := range evs {
+		if ev.Type == "gap" {
+			continue
+		}
+		typeW = max(typeW, len([]rune(ev.Type)))
+		subjW = max(subjW, len([]rune(eventSubject(ev, rows, names))))
+	}
+	subjW = min(subjW, eventSubjectMax)
 	for _, ev := range evs {
 		// Local time, like the status line's clock on the same frame.
 		at := ev.At.In(now.Location()).Format("15:04:05")
@@ -622,8 +640,8 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 			lines = append(lines, EventLine{Text: at + "  ┄ events missed while reconnecting", Style: "warn"})
 			continue
 		}
-		text := strings.TrimRight(fmt.Sprintf("%s  %-14s  %-10s  %-32s  %s", at, ev.Type, ev.LeaseID,
-			ellipsize(eventSubject(ev, rows, names), 32), shortBuildIDs(ev.Detail)), " ")
+		text := strings.TrimRight(fmt.Sprintf("%s  %-*s  %-10s  %-*s  %s", at, typeW, ev.Type, ev.LeaseID,
+			subjW, ellipsize(eventSubject(ev, rows, names), subjW), shortBuildIDs(ev.Detail)), " ")
 		style := eventStyle(ev)
 		if ev.Type == "job_exited" {
 			style = jobExitedStyle(ev.Detail)

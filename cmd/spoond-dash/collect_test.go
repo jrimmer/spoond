@@ -197,13 +197,13 @@ func TestEventLinesFormat(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3", len(lines))
 	}
-	if want := "07:19:02  held_action     fedcba0987  nightly"; lines[0].Text != want || lines[0].Style != "warn" {
+	if want := "07:19:02  held_action  fedcba0987  nightly"; lines[0].Text != want || lines[0].Style != "warn" {
 		t.Fatalf("line 0 = %+v, want %q", lines[0], want)
 	}
-	if want := "07:19:01  released        abcdef0123  jason"; lines[1].Text != want || lines[1].Style != "dim" {
+	if want := "07:19:01  released     abcdef0123  jason"; lines[1].Text != want || lines[1].Style != "dim" {
 		t.Fatalf("line 1 = %+v, want %q", lines[1], want)
 	}
-	if want := "07:19:00  lost            1234567890  agent"; lines[2].Text != want || lines[2].Style != "warn" {
+	if want := "07:19:00  lost         1234567890  agent"; lines[2].Text != want || lines[2].Style != "warn" {
 		t.Fatalf("line 2 = %+v, want %q", lines[2], want)
 	}
 
@@ -266,7 +266,8 @@ func TestEventLinesSubjectPrefersHolder(t *testing.T) {
 	// A CI job lease: no holder, but the comment names the job.
 	c.lastRow = []LeaseRow{{ID: "abcdef0123", Comment: "forgejo: lacy.casa/site #218"}}
 	lines = c.eventLines(time.Unix(1_800_000_000, 0))
-	if !strings.HasSuffix(lines[0].Text, "forgejo: lacy.casa/site #218") {
+	// (cut to the subject column's cap, eventSubjectMax)
+	if !strings.HasSuffix(lines[0].Text, ellipsize("forgejo: lacy.casa/site #218", eventSubjectMax)) {
 		t.Fatalf("comment not second: %q", lines[0].Text)
 	}
 
@@ -285,7 +286,7 @@ func TestEventLinesDetail(t *testing.T) {
 	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
 	c.events.add(dashEvent{At: at, Type: "suspended", LeaseID: "12aeb66651", Subject: "conformance",
 		Detail: "paused into build 1ede0933-20dc-40ee-9350-e6f77652a856"})
-	want := "04:15:59  suspended       12aeb66651  conformance                       paused into build 1ede0933"
+	want := "04:15:59  suspended  12aeb66651  conformance  paused into build 1ede0933"
 	if got := c.eventLines(at)[0].Text; got != want {
 		t.Fatalf("line = %q\nwant   %q", got, want)
 	}
