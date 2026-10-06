@@ -356,6 +356,10 @@ func Main(args []string) int {
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		BurstReserveMiB:           burstReserveMiB,
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
+		// Background exec jobs (2.6, #135): per-lease running cap and
+		// exited-record retention.
+		MaxRunningJobsPerLease: envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
+		JobRetentionSecs:       int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).

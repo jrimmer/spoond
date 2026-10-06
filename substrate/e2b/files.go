@@ -81,6 +81,64 @@ func (c *Client) ReadFile(ctx context.Context, sandboxID, path string, max int64
 	return data, nil
 }
 
+// ReadFileRange reads at most limit bytes of path starting at offset,
+// via envd's HTTP /files endpoint with a Range header. A missing path
+// wraps substrate.ErrNotFound; an offset past the end yields no bytes.
+// Used by the background-job output endpoints (2.6, #135) so a client
+// can follow output without downloading the whole file.
+func (c *Client) ReadFileRange(ctx context.Context, sandboxID, path string, offset, limit int64) ([]byte, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, filesURL(c.cfg.ProxyURL, path), nil)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: read range %s %s: %w", sandboxID, path, err)
+	}
+	if limit > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+limit-1))
+	} else {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+	resp, err := c.envdClient(sandboxID, "").Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("e2b: read range %s %s: %w", sandboxID, path, err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// The server ignored the Range header: skip the prefix itself.
+		if offset > 0 {
+			if _, err := io.CopyN(io.Discard, resp.Body, offset); err != nil && err != io.EOF {
+				return nil, fmt.Errorf("e2b: read range %s %s: %w", sandboxID, path, err)
+			}
+		}
+	case http.StatusPartialContent:
+		// read below
+	case http.StatusRequestedRangeNotSatisfiable:
+		return nil, nil
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("e2b: read range %s %s: %w", sandboxID, path, substrate.ErrNotFound)
+	default:
+		return nil, fmt.Errorf("e2b: read range %s %s: unexpected status %s", sandboxID, path, resp.Status)
+	}
+	// limit+1 so an over-size answer is detectable without reading it all.
+	readLimit := limit
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
+	if err != nil {
+		return nil, fmt.Errorf("e2b: read range %s %s: %w", sandboxID, path, err)
+	}
+	if int64(len(data)) > limit {
+		data = data[:limit]
+	}
+	return data, nil
+}
+
 // Stat reports path's metadata through envd's filesystem.Stat.
 func (c *Client) Stat(ctx context.Context, sandboxID, path string) (substrate.FileInfo, error) {
 	resp, err := c.envdFilesystem(sandboxID, "").Stat(ctx, connect.NewRequest(&filesystem.StatRequest{Path: path}))

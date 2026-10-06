@@ -366,6 +366,36 @@ func (f *Fake) ReadFile(ctx context.Context, sandboxID, name string, max int64) 
 	return fs.read(name, max)
 }
 
+// ReadFileRange reads at most limit bytes of name starting at offset,
+// for the background-job output endpoints (2.6, #135). A missing file
+// wraps substrate.ErrNotFound; an offset past the end yields no bytes.
+func (f *Fake) ReadFileRange(ctx context.Context, sandboxID, name string, offset, limit int64) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("ReadFileRange", sandboxID); err != nil {
+		return nil, err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return nil, fmt.Errorf("fake: ReadFileRange %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+	}
+	data, err := fs.read(name, int64(1<<62))
+	if err != nil {
+		return nil, err
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= int64(len(data)) {
+		return nil, nil
+	}
+	end := offset + limit
+	if limit <= 0 || end > int64(len(data)) {
+		end = int64(len(data))
+	}
+	return bytes.Clone(data[offset:end]), nil
+}
+
 func (f *Fake) Stat(ctx context.Context, sandboxID, name string) (substrate.FileInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -219,6 +219,11 @@ type Store struct {
 	// lastActiveDirty batches touch() updates; the sweeper flushes them
 	// to the store once per tick instead of writing on every activity.
 	lastActiveDirty map[string]time.Time
+	// runningJobs counts each lease's running background exec jobs (2.6,
+	// #135). The idle sweeps read it under the same lock as the leases
+	// they walk, so a lease with a running job counts as active without a
+	// store round trip.
+	runningJobs map[string]int
 }
 
 func newStore() *Store {
@@ -229,6 +234,7 @@ func newStore() *Store {
 		pending:         make(map[string]int),
 		pendingMiB:      make(map[string]int),
 		lastActiveDirty: make(map[string]time.Time),
+		runningJobs:     make(map[string]int),
 	}
 }
 
@@ -291,6 +297,12 @@ type ServiceConfig struct {
 	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default
 	// DefaultPreemptDiskFloorPct. 0 or negative means the default.
 	PreemptDiskFloorPct float64
+	// MaxRunningJobsPerLease bounds concurrent background exec jobs per
+	// lease (2.6, #135). 0 = DefaultMaxRunningJobsPerLease.
+	MaxRunningJobsPerLease int
+	// JobRetentionSecs is how long an exited background job record is
+	// kept before pruning (2.6, #135). 0 = DefaultJobRetentionSecs.
+	JobRetentionSecs int64
 }
 
 // Service is the lease API backend.
@@ -391,6 +403,16 @@ type Service struct {
 	// each suspend a different burst lease for themselves. Held across
 	// the whole preempt-then-admit sequence (see admitClass).
 	preemptMu sync.Mutex
+
+	// jobStartMu serialises background job starts (2.6, #135): the
+	// per-lease running-job cap is a check-then-insert against SQLite,
+	// so two concurrent starts for one lease must not both pass it.
+	jobStartMu sync.Mutex
+	// liveJobSecrets holds the secret names staged for each running job
+	// (memory only, never the lease_jobs row): the exit watcher removes
+	// exactly those files if the guest wrapper did not. Lost on restart,
+	// when the wrapper's own cleanup is the only one left.
+	liveJobSecrets map[string][]string
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -414,6 +436,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		probeTimeout:  20 * time.Second,
 		bus:           newEventBus(),
 		gcErr:         newGCTracker(),
+		liveJobSecrets: map[string][]string{},
 	}
 }
 
@@ -831,6 +854,7 @@ func (s *Service) Start(ctx context.Context) {
 			case <-t.C:
 				s.sweepExpired(ctx)
 				s.refillPool(ctx)
+				s.pruneJobs(ctx)
 			}
 		}
 	}()
@@ -881,6 +905,10 @@ func (s *Service) Start(ctx context.Context) {
 	// Preemption resume queue (#128 part 3): every 15 s, resume preempted
 	// leases that fit again.
 	go s.runPreemptResumeLoop(ctx)
+	// Background exec jobs (2.6, #135): every 10 s reconcile running job
+	// records against the guest files (a backend restart or a broken
+	// envd stream left them unobserved).
+	go s.runJobReconcileLoop(ctx)
 	// Webhook notifications (2.2, #117): forward the bus's
 	// person-relevant events. Only when a notifier is installed.
 	if s.notifier != nil {
@@ -975,7 +1003,7 @@ func (s *Service) sweepExpired(ctx context.Context) {
 			expired = append(expired, l)
 			continue
 		}
-		if l.Persistent && !l.held() && s.cfg.IdleTimeout > 0 && !l.Suspended && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
+		if l.Persistent && !l.held() && s.cfg.IdleTimeout > 0 && !l.Suspended && !s.hasRunningJobLocked(l.ID) && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
 			s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
 			idleSuspend = append(idleSuspend, l)
 		}
@@ -1035,6 +1063,30 @@ func (s *Service) touch(id string) {
 		l.LastActive = now
 		s.store.lastActiveDirty[id] = now
 	}
+}
+
+// incRunningJob records that a lease gained a running background job.
+func (s *Service) incRunningJob(leaseID string) {
+	s.store.mu.Lock()
+	s.store.runningJobs[leaseID]++
+	s.store.mu.Unlock()
+}
+
+// decRunningJob records that a lease lost a running background job.
+func (s *Service) decRunningJob(leaseID string) {
+	s.store.mu.Lock()
+	if s.store.runningJobs[leaseID] <= 1 {
+		delete(s.store.runningJobs, leaseID)
+	} else {
+		s.store.runningJobs[leaseID]--
+	}
+	s.store.mu.Unlock()
+}
+
+// hasRunningJobLocked reports whether a lease has a running background
+// job. Call with s.store.mu held (the idle checks run under it).
+func (s *Service) hasRunningJobLocked(leaseID string) bool {
+	return s.store.runningJobs[leaseID] > 0
 }
 
 // markActive records activity on a lease and persists it immediately:
@@ -1851,6 +1903,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// The fresh guest runs none of the old jobs: every running one is
+	// lost (2.6, #135).
+	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease restarted; the job did not survive")
 	// A fresh sandbox never had the lease's secrets: re-write them
 	// (create-time only; exec-time secrets ride their request) (#80).
 	s.restageCreateSecrets(ctx, l, "restart")
@@ -1927,6 +1982,9 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// The fresh guest runs none of the old jobs: every running one is
+	// lost (2.6, #135).
+	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease restarted; the job did not survive")
 	// A fresh sandbox never had the lease's secrets: re-write them
 	// (create-time only; exec-time secrets ride their request) (#80).
 	s.restageCreateSecrets(ctx, l, "restart")
@@ -2680,6 +2738,9 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		}
 	}
 	m["kept_builds"] = kept
+	// Background jobs (2.6, #135): how many of the lease's jobs run and
+	// its most recent exit, for the lease view.
+	m["jobs"] = s.leaseJobsView(ctx, l.ID)
 	// Memory quota of the lease's owner (#128): the running-lease charge
 	// plus the user's limits, 0 = unset. Best effort: an identity-store
 	// hiccup leaves the fields off rather than failing the read.
@@ -2703,15 +2764,48 @@ func formatRFC3339(t time.Time) string {
 
 // list returns the caller's live leases as plain maps.
 func (s *Service) list(owner string) []map[string]any {
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	// One pass over the job tables for every lease, rather than two
+	// queries per row.
+	running, err := s.db.CountRunningJobsByLease(ctx)
+	if err != nil {
+		s.storeError("count_running_jobs", owner, err)
+	}
+	exits, err := s.db.LatestJobExit(ctx)
+	if err != nil {
+		s.storeError("latest_job_exits", owner, err)
+	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	var out []map[string]any
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
-			out = append(out, leaseMap(l, s.effectiveCheckpointInterval(l)))
+			m := leaseMap(l, s.effectiveCheckpointInterval(l))
+			m["jobs"] = jobsSummaryView(running[l.ID], exits[l.ID])
+			out = append(out, m)
 		}
 	}
 	return out
+}
+
+// jobsSummaryView renders the lease view's jobs field from an already
+// fetched running count and latest exited row.
+func jobsSummaryView(running int, last store.JobRow) map[string]any {
+	view := map[string]any{"running": running, "last_exit": nil}
+	if last.JobID == "" {
+		return view
+	}
+	exit := 0
+	if last.ExitCode != nil {
+		exit = *last.ExitCode
+	}
+	view["last_exit"] = map[string]any{
+		"job_id":    last.JobID,
+		"exit_code": exit,
+		"ended_at":  formatRFC3339(last.EndedAt),
+	}
+	return view
 }
 
 // integrityProbe is run inside a sandbox before it is pooled or leased. It
@@ -3118,7 +3212,32 @@ func (s *Service) LoadState(ctx context.Context) error {
 	for img, ids := range pool {
 		s.store.pool[img] = ids
 	}
+	// Running background jobs (2.6, #135): seed the in-memory counts the
+	// idle sweeps and the running gauge read, so a job that ended while
+	// the backend was down is noticed by the reconcile pass.
+	s.loadRunningJobsLocked(ctx, loaded)
 	return nil
+}
+
+// loadRunningJobsLocked seeds the running-job counts from the store.
+// Call with s.store.mu held.
+func (s *Service) loadRunningJobsLocked(ctx context.Context, leases map[string]*Lease) {
+	rows, err := s.db.ListRunningJobs(ctx)
+	if err != nil {
+		s.storeError("list_running_jobs", "load", err)
+		return
+	}
+	n := 0
+	for _, j := range rows {
+		if leases[j.LeaseID] == nil {
+			continue // the lease is gone; its record goes with it
+		}
+		s.store.runningJobs[j.LeaseID]++
+		n++
+	}
+	if s.metrics != nil {
+		s.metrics.JobsRunning.Set(float64(n))
+	}
 }
 
 // LiveLeases returns the ids of active (unreleased) leases. Used by
