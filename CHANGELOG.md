@@ -10,6 +10,12 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.5] - 2026-10-06
+
+A user's guarantee no longer drifts to all-burst; restore names its
+checkpoint's time. No schema change; the `grid` package is unchanged
+since 2.4.0.
+
 ### Added
 
 - **The restore response names when its checkpoint was taken:**
