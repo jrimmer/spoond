@@ -10,6 +10,32 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Per-lease idle reclamation (#129, part 2).** A persistent lease can
+  be suspended after a period without activity, freeing its hugepages
+  and memory while keeping everything for the next use. Each lease
+  carries an `idle_suspend` threshold in seconds (`0` = never;
+  `60`–`604800` = suspend after that long without activity; omitted =
+  the host default `IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never), set
+  on `POST /api/leases` or with `PUT /api/leases/{id}/idle-policy`
+  (owner or admin) — **migration 0015** adds `idle_suspend` with a
+  default of `-1` (host default), so existing leases are unchanged. A
+  non-zero value needs a persistent lease (`400` otherwise). The idle
+  sweep suspends through the normal pause path (the generation does not
+  change), shares preemption's snapshot-disk floor
+  (`PREEMPT_DISK_FLOOR_PCT`), records `last_action`
+  `idle_suspend/suspend_idle`, emits an `idle_suspended` event and
+  counts in `spoond_idle_suspends_total`; a lease with a non-zero
+  effective `idle_suspend` is reclaimed on it alone, so the plain
+  `IDLE_TIMEOUT_SECS` sweep and held rule 1 skip it, and rules 2 and 5
+  may later release it if it stays idle-suspended and untouched. The
+  **next call resumes it**: exec, stream, the files API and guest port
+  dial on an idle-suspended lease resume it first (admission, class and
+  quota apply) and then serve the call, while any other suspension
+  keeps the `409`. Clone and fork copy the source's value, and the
+  dashboard marks idle-suspended rows (`‖ suspended·i`).
+
 ## [2.4.0] - 2026-10-06
 
 Capacity: memory quotas, guaranteed and burst leases, and preemption of

@@ -293,6 +293,55 @@ func (s *Server) handleCheckpointPolicy(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleIdlePolicy sets the lease's own idle_suspend threshold
+// (2.5, #129 part 2). Owner or admin; anyone else gets 404 like every
+// owner-scoped route. Body {"idle_suspend": N} with the same validation
+// as create: 0 (never) or 60..604800 seconds. A non-zero value needs a
+// persistent lease (suspension needs persistence) and answers 400
+// otherwise. Emits an idle_policy lease event carrying the new effective
+// seconds.
+func (s *Server) handleIdlePolicy(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		IdleSuspend *int64 `json:"idle_suspend"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.IdleSuspend == nil {
+		writeError(w, http.StatusBadRequest, "idle_suspend is required")
+		return
+	}
+	lease := s.svc.lookup(owner, id)
+	if lease == nil && isAdmin(r) {
+		lease = s.svc.lookupAny(id)
+	}
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	if err := validateIdleSuspend(*req.IdleSuspend); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if *req.IdleSuspend != 0 && !lease.Persistent {
+		writeError(w, http.StatusBadRequest, "idle_suspend needs a persistent lease")
+		return
+	}
+	updated, err := s.svc.setIdlePolicy(lease, *req.IdleSuspend)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to set idle policy")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":           updated.ID,
+		"idle_suspend": s.svc.effectiveIdleSuspend(updated),
+		"ok":           true,
+	})
+}
+
 // keepBuild pins a checkpoint build of the lease (2.3, #121): the build
 // joins the GC's kept set while the lease lives and is a restore point
 // for POST /api/leases/{id}/restore. Keeping the same build twice keeps

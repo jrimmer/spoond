@@ -542,6 +542,25 @@ func TestLeasesShowPreemptMarks(t *testing.T) {
 	}
 }
 
+// TestLeasesShowIdleSuspendMark: an idle-suspended lease shows
+// "‖ suspended·i" (2.5, #129 part 2), and the mark replaces ·b (an
+// idle-suspended burst lease is still shown as ·i, since the suspension
+// is the more specific state).
+func TestLeasesShowIdleSuspendMark(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{
+		{ID: "idlesusp001", Image: "py-base", State: "suspended", IdleSuspended: true, Age: "5m", Left: "∞"},
+		{ID: "idleburst01", Image: "py-base", State: "suspended", Burst: true, IdleSuspended: true, Age: "5m", Left: "∞"},
+	}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "‖ suspended·i") {
+		t.Fatalf("idle-suspended row not marked suspended·i:\n%s", p)
+	}
+	if strings.Contains(p, "suspended·i·b") {
+		t.Fatalf("the ·i mark must replace ·b, not stack:\n%s", p)
+	}
+}
+
 // TestLeasesLeftShowsHoldExpiry: a held lease's left column is the time
 // left on its hold; a persistent lease without a hold shows ∞.
 func TestLeasesLeftShowsHoldExpiry(t *testing.T) {

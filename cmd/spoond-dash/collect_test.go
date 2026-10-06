@@ -230,6 +230,26 @@ func TestEventLinesFormat(t *testing.T) {
 	}
 }
 
+// TestEventLinesIdleSuspended: the events panel draws an idle_suspended
+// event as a warn line naming the idle duration (2.5, #129 part 2).
+func TestEventLinesIdleSuspended(t *testing.T) {
+	c := newCollector(Config{EventsToken: "events-tok"})
+	at := time.Date(2026, 10, 4, 7, 19, 2, 0, time.UTC)
+	c.events.add(dashEvent{At: at, Type: "idle_suspended", LeaseID: "abcdef0123", Subject: "jason", Detail: "idle for 1m0s"})
+	lines := c.eventLines(at)
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	l := lines[0]
+	if !strings.Contains(l.Text, "idle_suspended") || !strings.Contains(l.Text, "jason") ||
+		!strings.Contains(l.Text, "idle for 1m0s") {
+		t.Fatalf("idle_suspended line = %+v, want type, subject and detail", l)
+	}
+	if l.Style != "warn" {
+		t.Fatalf("idle_suspended style = %q, want warn", l.Style)
+	}
+}
+
 // TestEventLinesSubjectPrefersHolder: the tail column is the lease's
 // holder from the last tick's rows, else its comment, else the event's
 // owner — released leases are gone from the table by the time their

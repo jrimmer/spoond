@@ -614,7 +614,7 @@ the drain is never released by them.
 
 | # | Rule | Variable | Default | Meaning |
 |---|---|---|---|---|
-| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach) |
+| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat, files, guest dial — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach). A lease whose own effective `idle_suspend` is `> 0` is reclaimed by the idle sweep on that value instead and is skipped by rule 1 (and by rule 4's shortening); see [Idle reclamation](#idle-reclamation) |
 | 2 | Stale release | `HELD_SUSPENDED_RELEASE_SECS` | `604800` (7 d) | a held lease suspended by rule 1, 3 or 4 and untouched since for this long is **released** (deleted); the GC reclaims its builds |
 | 3 | Hold lapse | `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS` | `604800` (7 d), `2592000` (30 d) | an unrenewed hold lapses: a running lease is **suspended** (never released), stays held with no expiry, and rule 2 takes it from there |
 | 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a 1 GiB lease — no seeded image is smaller), rule 1 uses the shorter threshold |
@@ -628,6 +628,48 @@ and `HOLD_TTL_MAX_SECS` cannot be disabled: `0` means their default, so
 every hold lapses eventually. Watch the rules with `journalctl -u spoond-backend | grep 'held
 lease'` and `spoond_held_actions_total` — a rising `critical{release}`
 means the disk needs attention the leases are paying for.
+
+## Idle reclamation
+
+Persistent leases can be suspended after a period without activity,
+freeing their hugepages and disk-backed memory while keeping everything
+for the next use (the guest's memory continues on resume, so the
+generation does not change). Two mechanisms share the job:
+
+- **the plain sweep** (`IDLE_TIMEOUT_SECS`) and **held rule 1**
+  (`HELD_IDLE_TIMEOUT_SECS`, shortened under pressure by rule 4) apply to
+  leases whose effective `idle_suspend` is `0` — today's behaviour;
+- **the idle sweep** (`#129` part 2) applies to a lease whose effective
+  `idle_suspend` is `> 0`: the lease's own value, or the host default
+  `IDLE_SUSPEND_DEFAULT_SECS` when it has none. `POST /api/leases` and
+  `PUT /api/leases/{id}/idle-policy` set it (`0` = never, `60`–`604800`
+  seconds). A non-zero value needs a persistent lease.
+
+A lease with a non-zero `idle_suspend` is reclaimed on that value alone;
+the plain sweep and rule 1 skip it. Activity is what the sweeps already
+count — exec, stream, proxy, keepalive, guest heartbeat, the files API
+and guest port dial — and the threshold is measured from `LastActive`.
+The sweep suspends through the normal pause path and shares preemption's
+snapshot-disk floor (`PREEMPT_DISK_FLOOR_PCT`): a pause that would take
+the disk under the floor is skipped for that pass and retried on the
+next one. An idle suspension marks the lease `last_action
+idle_suspend/suspend_idle`, emits an `idle_suspended` event and counts
+in `spoond_idle_suspends_total`. Because it is a rule suspension, rules
+2 and 5 may later release the lease if it stays idle-suspended and
+untouched — a preempted lease stays excluded, and nothing running is
+ever released.
+
+The **next call resumes it**: exec, stream, files and guest port dial on
+an `idle_suspend`-suspended lease resume it first through the normal
+resume path (admission, class and quota apply) and then serve the call;
+a refused resume answers what resume would (`429` over quota, `503` with
+`Retry-After` for capacity or the burst reserve) and the lease stays
+suspended. Any other suspension keeps answering `409 lease is suspended;
+resume it first`; an explicit `resume` (and the SSH gateway's resume on
+attach) works as always. `IDLE_TIMEOUT_SECS` remains the legacy host-wide
+knob — new deployments should set `IDLE_SUSPEND_DEFAULT_SECS` and the
+per-lease value instead. Watch idle suspensions with `journalctl -u
+spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
 
 ## Users & identity
 

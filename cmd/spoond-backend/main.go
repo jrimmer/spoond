@@ -271,6 +271,11 @@ func Main(args []string) int {
 	// defaulting to 0 = never. A lease's own checkpoint_interval (0 or
 	// 60..604800 seconds) overrides it.
 	checkpointDefault := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 0)) * time.Minute
+	// Idle reclamation (2.5, #129 part 2): IDLE_SUSPEND_DEFAULT_SECS is
+	// the default idle_suspend for persistent leases without their own
+	// (-1), itself defaulting to 0 = never; a lease's own idle_suspend
+	// overrides it. Kept in seconds (not a duration) like the lease field.
+	idleSuspendDefault := int64(envIntOr("IDLE_SUSPEND_DEFAULT_SECS", 0))
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 	// The burst lease reserve (#128 part 2): BURST_RESERVE_MIB keeps
 	// this much hugepage memory free of burst leases, so guaranteed
@@ -342,6 +347,7 @@ func Main(args []string) int {
 		EventsToken:               os.Getenv("EVENTS_TOKEN"),
 		ProxyURL:                  cfg.ProxyURL,
 		CheckpointIntervalDefault: int64(checkpointDefault / time.Second),
+		IdleSuspendDefault:        idleSuspendDefault,
 		TemplateStoragePath:       storagePath,
 		LostGracePersistent:       lostGracePersistent,
 		LostGrace:                 lostGrace,
