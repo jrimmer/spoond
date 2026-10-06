@@ -353,25 +353,58 @@ func TestAdmitWaitBackfill(t *testing.T) {
 	svc.drainQueue()
 }
 
-// TestAdmitWaitMaxLeasesNotWaitable: the lease-count cap is not waitable
-// — it answers 429 at once even with wait set.
-func TestAdmitWaitMaxLeasesNotWaitable(t *testing.T) {
+// TestAdmitWaitMaxLeasesWaitable: since 2.5.1 the lease-count cap is
+// waitable: a create at the cap queues ("lease cap") and is admitted
+// once one of the owner's own leases is released.
+func TestAdmitWaitMaxLeasesWaitable(t *testing.T) {
 	_, h, svc, _, ids := newAdmitServer(t)
 	setQuota(t, ids, uid(t, ids, "tok-1"), 1, 0, 0) // one lease only
+	svc.admitQ.tick = time.Hour                     // the release wakes the queue
+	first := waitCreate(t, h, "tok-1", `{"image":"small","ttl":60}`)
+	if first.code != http.StatusCreated {
+		t.Fatalf("first create: %d %v", first.code, first.body)
+	}
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+	res := startCreate(t, h, context.Background(), "tok-1", `{"image":"small","ttl":60,"wait":30}`)
+	waitDepth(t, svc, 1)
+	var detail string
+	deadline := time.Now().Add(3 * time.Second)
+	for detail == "" && time.Now().Before(deadline) {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseQueued {
+				detail = ev.Detail
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if !strings.HasPrefix(detail, "lease cap; position 1 of 1") {
+		t.Fatalf("queued detail = %q, want lease cap; position 1 of 1", detail)
+	}
+	svc.admitQ.admitMu.Lock()
+	svc.admitQ.admitMu.Unlock()
+	deleteLease(t, h, "tok-1", first.body["id"].(string))
+	if r := waitResult(t, res); r.code != http.StatusCreated {
+		t.Fatalf("lease-cap waiting create = %d, want 201 (%v)", r.code, r.body)
+	}
+}
+
+// TestAdmitWaitMaxLeasesTimesOut: at the lease-count cap with nothing
+// released, the wait ends in the cap's own 429.
+func TestAdmitWaitMaxLeasesTimesOut(t *testing.T) {
+	_, h, svc, _, ids := newAdmitServer(t)
+	setQuota(t, ids, uid(t, ids, "tok-1"), 1, 0, 0)
 	svc.admitQ.tick = 10 * time.Millisecond
 	if r := waitCreate(t, h, "tok-1", `{"image":"small","ttl":60}`); r.code != http.StatusCreated {
 		t.Fatalf("first create: %d %v", r.code, r.body)
 	}
-	start := time.Now()
-	r := waitCreate(t, h, "tok-1", `{"image":"small","ttl":60,"wait":30}`)
+	r := waitCreate(t, h, "tok-1", `{"image":"small","ttl":60,"wait":1}`)
 	if r.code != http.StatusTooManyRequests {
-		t.Fatalf("max_leases create with wait = %d, want 429 (%v)", r.code, r.body)
+		t.Fatalf("lease-cap wait timeout = %d, want 429 (%v)", r.code, r.body)
 	}
-	if time.Since(start) > 3*time.Second {
-		t.Fatalf("max_leases refusal waited %s; it must answer at once", time.Since(start))
-	}
-	if svc.queueDepth() != 0 {
-		t.Fatalf("queue depth = %d, want 0", svc.queueDepth())
+	if _, ok := r.body["waited_ms"]; !ok {
+		t.Fatalf("timed-out create should carry waited_ms: %v", r.body)
 	}
 }
 

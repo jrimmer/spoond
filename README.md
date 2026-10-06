@@ -82,8 +82,10 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   priority, then newest) and resumes them by itself once they fit again
   (`preempted`/`resumed` events; the memory continues). A user without
   a `guaranteed_mib` keeps every lease guaranteed. A create may
-  **wait** for room (`"wait": <seconds>`, up to `MAX_ADMIT_WAIT_SECS`)
-  instead of failing, served in fair-share order; a persistent lease
+  **wait** for room or for one of its owner's own leases to go
+  (`"wait": <seconds>`, up to `MAX_ADMIT_WAIT_SECS`) instead of failing
+  on capacity, the memory cap or the lease-count cap, served in
+  fair-share order; a persistent lease
   may set `idle_suspend` to give its memory back when idle, and the
   next exec, files call or dial resumes it.
 - **Images**: one Dockerfile per capability in `images/`, built into E2B

@@ -204,9 +204,12 @@ retried):
   disk floor blocked it.
 - `429 … memory limit of N MiB exceeded` — the owner's `max_mib` cap
   refused it.
+- `429 lease quota exceeded` — the owner is at its lease-count cap
+  (`max_leases`); the create waits for one of the owner's own leases to
+  be released (since 2.5.1). The `queued` event names it `lease cap`.
 
-Everything else answers at once: the lease-count cap (`max_leases`),
-bad requests, auth failures and unknown images are **not** waitable.
+Everything else answers at once: bad requests, auth failures and
+unknown images are **not** waitable.
 
 The wait is capped at `MAX_ADMIT_WAIT_SECS` (default `900`; `0` disables
 waiting and the field is accepted and ignored — see

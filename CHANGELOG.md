@@ -10,6 +10,19 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-10-06
+
+### Changed
+
+- **`wait` covers the lease-count cap.** A create refused because its
+  owner is at `max_leases` (`429 lease quota exceeded`) now waits like
+  the other capacity refusals when it sends `wait`, and is admitted
+  once one of the owner's own leases is released; on timeout it gets
+  the same `429` plus `waited_ms`. The `queued` event names it `lease
+  cap`. The cap's own decisions are unchanged, and a create without
+  `wait` answers at once as before. The `grid` package is unchanged
+  since 2.4.0.
+
 ## [2.5.0] - 2026-10-06
 
 Waiting for admission and per-lease idle reclamation (#129). Store
