@@ -10,6 +10,23 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Admin crash test.** `POST /api/admin/leases/{id}/crash` (and the
+  `/api/admin/sandboxes/{id}/crash` alias) runs one lease through the
+  crash-recovery path on demand: it deletes the lease's sandbox as a
+  crash would (without releasing the lease), drops the sandbox row and
+  runs the same per-lease recovery the startup reconcile runs — from
+  the lease's last checkpoint (`generation` +1, state `recovered`) or
+  `lost` with no checkpoint. The response is
+  `{"id","result":"recovered"|"lost","generation","state"}`. A
+  `crash_test` lease event (detail `crashed by an admin`) precedes the
+  recovery event. Admin only; `409` busy or suspended, `410` already
+  lost, `404` unknown or released. Built for on-demand crash testing
+  (Honey's M3 suite); the reconcile code is factored so the startup pass
+  and this endpoint share one function. No effect on other leases, the
+  warm pool or any release path.
+
 ## [2.5.1] - 2026-10-06
 
 ### Changed

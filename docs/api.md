@@ -994,6 +994,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
+| `crash_test` | an admin ran `POST /api/admin/leases/{id}/crash` | `crashed by an admin` (before the `recovered`/`lost` event that follows) |
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
@@ -1210,6 +1211,7 @@ wrong or missing token answers `401`.
 | `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. |
 | `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases (a lease that fails to resume becomes `lost`; one over its owner's memory cap stays drained for the next undrain). Response `{"resumed":N,"failed":[…]}`. |
 | `POST /api/admin/reconcile` | Run the crash reconciliation now. Response `{"recovered":N,"lost":M}`. |
+| `POST /api/admin/leases/{id}/crash` | **Testing only.** Run one lease through the crash-recovery path on demand. It deletes `{id}`'s sandbox through the substrate directly — as a crash would, without releasing the lease or emitting `released` — deletes the sandbox row, then runs the same per-lease recovery the startup pass runs: from the lease's newest checkpoint (`generation` +1, state `recovered`, event `recovered`) or, with no checkpoint, marks it `lost` (event `lost`). Response `200` `{"id":"…","result":"recovered"|"lost","generation":N,"state":"recovered"|"lost"}`. `403` for a non-admin, `404` unknown or released lease (and when no `ADMIN_TOKEN` is configured), `409` busy or suspended (nothing is running to crash), `410` already lost. Emits a `crash_test` lease event (detail `crashed by an admin`) immediately before the recovery event, so a reader can tell a test from a real crash. Touches only that one lease: no warm-pool sweep, no peer refresh, no `released` and no release. |
 
 These are what `spoond drain --stop|--start` calls from the orchestrator
 unit's `ExecStop`/`ExecStartPost`; see [operations.md](operations.md)
