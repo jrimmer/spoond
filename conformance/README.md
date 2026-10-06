@@ -55,6 +55,8 @@ See `U02-conformance-suite.md` §Configuration for the full table. Required:
 `CONFORMANCE_PROXY_SECRET` (may be empty), `CONFORMANCE_PROXY_SUFFIX`,
 `CONFORMANCE_GUEST_SERVICE`. Optional: `CONFORMANCE_DESTRUCTIVE`,
 `CONFORMANCE_CAPACITY`, `CONFORMANCE_SECOND_TOKEN`,
+`CONFORMANCE_ADMIN_TOKEN` (the backend's `ADMIN_TOKEN`; without it the
+always-on admin crash-test case X1 is skipped),
 `CONFORMANCE_IMAGES` (default
 `py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla`).
 
