@@ -10,6 +10,11 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-10-06
+
+More detail in the events panel (#132 part 2). No schema change; the
+`grid` package is unchanged since 2.4.0.
+
 ### Added
 
 - **Events panel details: release reasons, grant and checkpoint
