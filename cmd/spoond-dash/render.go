@@ -678,6 +678,9 @@ type capacityRow struct {
 	dim   bool
 	right string
 	wrap  bool
+	// alts are shorter forms of segs, tried in order when segs does not
+	// fit; wrapping applies to the last one only if none fits.
+	alts [][]grid.Seg
 }
 
 // capacityMinRows is the least number of rows the capacity panel's
@@ -693,40 +696,32 @@ func (l *layout) capacityRows() []capacityRow {
 	m := l.meterSegs("running", l.runningPct(), 75, 90, meterBarW)
 	rows := []capacityRow{{segs: m, right: fmt.Sprintf("%d / %d", l.s.Running, l.s.Limit)}}
 
-	// Leases: total, then running, suspended and lost counts. A zero
-	// count is dim; recovered appears only when non-zero; burst adds
-	// "burst N" when any live lease bursts (#128 part 2).
-	segs := []grid.Seg{{Text: fmt.Sprintf("%d leases", l.s.Leases), Style: "text"}}
-	for _, st := range []struct {
-		name string
-		n    int
-	}{
-		{"running", l.s.ByState["running"]},
-		{"suspended", l.s.ByState["suspended"]},
-		{"lost", l.s.ByState["lost"]},
-	} {
-		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"})
-		style := "text"
-		if st.n == 0 {
-			style = "dim"
+	// Leases: total, then running (with its burst share in brackets,
+	// #128), suspended and lost; recovered only when non-zero. A zero
+	// count is dim. One line: when the full words do not fit the panel,
+	// "susp"/"recov" stand in (alts), and only then does it wrap.
+	leaseLine := func(susp, recov string) []grid.Seg {
+		count := func(n int, label string) []grid.Seg {
+			style := "text"
+			if n == 0 {
+				style = "dim"
+			}
+			return []grid.Seg{{Text: " · ", Style: "dim"}, {Text: fmt.Sprintf("%d", n), Style: style}, {Text: " " + label, Style: "dim"}}
 		}
-		segs = append(segs,
-			grid.Seg{Text: fmt.Sprintf("%d", st.n), Style: style},
-			grid.Seg{Text: " " + st.name, Style: "dim"})
+		segs := []grid.Seg{{Text: fmt.Sprintf("%d leases", l.s.Leases), Style: "text"}}
+		segs = append(segs, count(l.s.ByState["running"], "running")...)
+		if n := l.s.Burst; n > 0 {
+			segs = append(segs, grid.Seg{Text: fmt.Sprintf(" (%d burst)", n), Style: "dim"})
+		}
+		segs = append(segs, count(l.s.ByState["suspended"], susp)...)
+		segs = append(segs, count(l.s.ByState["lost"], "lost")...)
+		if n := l.s.ByState["recovered"]; n > 0 {
+			segs = append(segs, count(n, recov)...)
+		}
+		return segs
 	}
-	if n := l.s.ByState["recovered"]; n > 0 {
-		segs = append(segs,
-			grid.Seg{Text: " · ", Style: "dim"},
-			grid.Seg{Text: fmt.Sprintf("%d", n), Style: "text"},
-			grid.Seg{Text: " recovered", Style: "dim"})
-	}
-	if n := l.s.Burst; n > 0 {
-		segs = append(segs,
-			grid.Seg{Text: " · ", Style: "dim"},
-			grid.Seg{Text: fmt.Sprintf("%d", n), Style: "text"},
-			grid.Seg{Text: " burst", Style: "dim"})
-	}
-	rows = append(rows, capacityRow{segs: segs, wrap: true})
+	rows = append(rows, capacityRow{segs: leaseLine("suspended", "recovered"), wrap: true,
+		alts: [][]grid.Seg{leaseLine("susp", "recov")}})
 
 	queued := fmt.Sprintf("queued %s", fmt.Sprint(l.s.Queued))
 	if l.s.Queued > 0 && l.s.QueuedOldest > 0 {
@@ -835,7 +830,11 @@ func (l *layout) drawCapacity(g *grid.Grid, x, y, w, h int) int {
 					segs[i].Style = "dim"
 				}
 			}
-			g.Segs(x+2, row, segs, inner)
+			room := inner
+			if r.right == "" {
+				room = inner + 1 // no right value: the line may use its column
+			}
+			g.Segs(x+2, row, segs, room)
 			if r.right != "" {
 				g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
 			}
@@ -887,7 +886,24 @@ func (l *layout) drawCapacity(g *grid.Grid, x, y, w, h int) int {
 // dropped with it (a line never starts or ends with " · "). Every
 // other row is one line, clipped as before.
 func wrapCapacityRow(r capacityRow, max int) [][]grid.Seg {
-	if !r.wrap || segWidth(r.segs) <= max {
+	// A row with no right-aligned value may use the column the value
+	// would have taken, up to the frame.
+	room := max
+	if r.right == "" {
+		room = max + 1
+	}
+	if segWidth(r.segs) <= room {
+		return [][]grid.Seg{r.segs}
+	}
+	for _, alt := range r.alts {
+		if segWidth(alt) <= room {
+			return [][]grid.Seg{alt}
+		}
+	}
+	if len(r.alts) > 0 {
+		r.segs = r.alts[len(r.alts)-1]
+	}
+	if !r.wrap {
 		return [][]grid.Seg{r.segs}
 	}
 	var lines [][]grid.Seg

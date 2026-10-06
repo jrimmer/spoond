@@ -12,6 +12,13 @@ summarised from README "Status".
 
 ### Changed
 
+- **Dashboard capacity panel: the lease counts on one line,** with the
+  burst share inside the running count: `8 leases · 8 running (3
+  burst) · 0 suspended · 0 lost` (`susp` when the full word does not
+  fit). The burst count no longer drops onto a line of its own.
+- **Dashboard events panel: the detail gets the room.** The type and
+  subject columns are as wide as the events shown need (the subject at
+  most 24 characters, cut with `…`), instead of fixed 14 and 32.
 - **Dashboard header: no orchestrator version.** The title line reads
   `SPOOND · host · version · up …`; the substrate's version
   (`e2b 0.16.1`) is gone from it.

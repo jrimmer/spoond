@@ -5,7 +5,7 @@
                                                                         
 ┌─ capacity ───────────────────────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░                               3 / 64  │
-│ 3 leases · 2 running · 1 suspended · 0 lost · 2 burst                │
+│ 3 leases · 2 running (2 burst) · 1 suspended · 0 lost                │
 │ queued 1 · granted 1,234 · swept 17                                  │
 │ shares 2 · users 7 · builds busy 1                                   │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
