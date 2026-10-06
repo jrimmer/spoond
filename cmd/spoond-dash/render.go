@@ -79,26 +79,6 @@ func stateGlyphStyle(r LeaseRow) string {
 	}
 }
 
-// legendRow is the legend line under the header: what each glyph means,
-// so the leases and units panels need no legends of their own.
-func legendRow() []grid.Seg {
-	seg := func(g, name string) []grid.Seg {
-		return []grid.Seg{{Text: g, Style: "state"}, {Text: " " + name, Style: "dim"}}
-	}
-	segs := []grid.Seg{}
-	for _, p := range []struct{ g, name string }{
-		{"▶", "running"}, {"‖", "suspended"}, {"■", "lost"}, {"⭘", "recovered"},
-	} {
-		segs = append(segs, seg(p.g, p.name)...)
-		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"})
-	}
-	segs = append(segs,
-		grid.Seg{Text: "◆ held · ◉ lapsed hold", Style: "state"},
-		grid.Seg{Text: " · ", Style: "dim"},
-		grid.Seg{Text: "✓ active unit", Style: "dim"})
-	return segs
-}
-
 // fitItems drops whole items from the right of segs until the row fits
 // w, instead of letting the grid clip mid-item. An item ends at one of
 // the two separators the rows use: " · " between the legend's entries,
@@ -476,8 +456,9 @@ func boolInt(b bool) int {
 }
 
 // header: the title line centred — SPOOND · host · version · uptime —
-// an ═ rule across the full width, and the legend row, also
-// centred. The frame time is gone: the status line's clock replaced it.
+// with a blank row under it as the gutter before the panels (headerRows).
+// The holder column's header explains its two marks; every other state
+// is spelled out where it is shown. The frame time is gone: the status line's clock replaced it.
 func (l *layout) header(g *grid.Grid, y int) {
 	segs := []grid.Seg{
 		{Text: "SPOOND", Style: "head"},
@@ -492,10 +473,6 @@ func (l *layout) header(g *grid.Grid, y int) {
 		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"}, grid.Seg{Text: "up " + dur(l.s.BackendUp), Style: "text"})
 	}
 	g.Center(l.w/2, y, segs)
-	for x := 0; x < l.w; x++ {
-		g.Put(x, y+1, '═', "frame")
-	}
-	g.Center(l.w/2, y+2, fitItems(legendRow(), l.w))
 }
 
 // versionLabel is a version for the header: "?" when the scrape had
@@ -608,7 +585,7 @@ func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 
 // headerRows is the header's row count: the centred title line, the
 // ═ rule under it and the legend.
-func headerRows() int { return 3 }
+func headerRows() int { return 2 } // the title and a blank gutter row
 
 // capacity panel: the running meter, the leases line, queued, granted,
 // swept, then one row per image with live leases. H is the height the
@@ -1296,8 +1273,13 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		{c.left, c.leftW, "left"}, {c.hold, l.w - 2 - c.hold, "holder"}}
 	for _, h := range headers {
 		text := h.text
-		if text == "policy" {
+		switch text {
+		case "policy":
 			text = fitWord([]string{"policy", "net"}, h.w-1)
+		case "holder":
+			// The holder column's marks, spelled out where they are used.
+			text = fitWord([]string{"holder (◆ held · ◉ lapsed hold)", "holder ◆ held ◉ lapsed",
+				"◆ held · ◉ lapsed hold", "◆ held · ◉ lapsed", "holder"}, h.w)
 		}
 		g.Text(h.x, top+1, text, "dim", h.w)
 	}
