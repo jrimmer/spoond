@@ -385,7 +385,7 @@ func TestPreemptionAPIReportsPreempted(t *testing.T) {
 		t.Fatalf("guaranteed create: %v", err)
 	}
 
-	m := leaseMap(victim, svc.effectiveCheckpointInterval(victim))
+	m := leaseMap(victim, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim))
 	if got := m["preempted"]; got != true {
 		t.Fatalf("preempted field = %v, want true", got)
 	}
@@ -543,7 +543,7 @@ func TestPreemptedColdRestartClearsFlag(t *testing.T) {
 	if victim.State != "running" || !victim.PreemptedAt.IsZero() {
 		t.Fatalf("after a cold restart state=%s preempted=%v, want running and not preempted", victim.State, !victim.PreemptedAt.IsZero())
 	}
-	if m := leaseMap(victim, svc.effectiveCheckpointInterval(victim)); m["preempted"] != false {
+	if m := leaseMap(victim, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim)); m["preempted"] != false {
 		t.Fatalf("preempted field = %v, want false", m["preempted"])
 	}
 	svc.store.mu.Lock()

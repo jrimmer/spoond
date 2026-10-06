@@ -102,6 +102,13 @@ type Lease struct {
 	// >0 = seconds. The lease API reports the effective value (the
 	// host default already resolved) as "checkpoint_interval".
 	CheckpointInterval int64 `json:"-"`
+	// IdleSuspend is the lease's own idle reclamation threshold in
+	// seconds (2.5, #129 part 2): -1 = the host default
+	// (IDLE_SUSPEND_DEFAULT_SECS, itself 0 = never), 0 = never, >0 =
+	// suspend the persistent lease after that long without activity,
+	// resuming it on the next call. The lease API reports the effective
+	// value (the host default already resolved) as "idle_suspend".
+	IdleSuspend int64 `json:"-"`
 	// MemoryMB is the lease's MiB charge (#128): the image's memory_mb,
 	// stamped when the guest is granted or rebuilt, and summed over a
 	// user's running leases for admission (a suspended lease keeps its
@@ -253,7 +260,12 @@ type ServiceConfig struct {
 	// in seconds (2.3, #122) applied to leases whose own interval is -1
 	// ("the host default"). 0 = never. CHECKPOINT_INTERVAL_MINS.
 	CheckpointIntervalDefault int64
-	TemplateStoragePath       string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
+	// IdleSuspendDefault is the host default idle reclamation threshold
+	// in seconds (2.5, #129 part 2) applied to persistent leases whose
+	// own idle_suspend is -1 ("the host default"). 0 = never.
+	// IDLE_SUSPEND_DEFAULT_SECS.
+	IdleSuspendDefault  int64
+	TemplateStoragePath string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
 	// lost_at — 7 days for persistent leases, 1 day for the rest, so a
@@ -287,9 +299,9 @@ type ServiceConfig struct {
 	// DefaultBurstReserveMiB. 0 disables the reserve.
 	BurstReserveMiB int
 	// PreemptDiskFloorPct is the snapshot-disk free percentage a
-	// preemption pause must leave after it (#128 part 3), estimated from
-	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default
-	// DefaultPreemptDiskFloorPct. 0 or negative means the default.
+	// preemption or idle-suspend pause must leave after it (#128 part 3,
+	// 2.5). PREEMPT_DISK_FLOOR_PCT, default DefaultPreemptDiskFloorPct.
+	// 0 or negative means the default.
 	PreemptDiskFloorPct float64
 }
 
@@ -975,7 +987,7 @@ func (s *Service) sweepExpired(ctx context.Context) {
 			expired = append(expired, l)
 			continue
 		}
-		if l.Persistent && !l.held() && s.cfg.IdleTimeout > 0 && !l.Suspended && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
+		if l.Persistent && !l.held() && s.effectiveIdleSuspend(l) <= 0 && s.cfg.IdleTimeout > 0 && !l.Suspended && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
 			s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
 			idleSuspend = append(idleSuspend, l)
 		}
@@ -987,6 +999,11 @@ func (s *Service) sweepExpired(ctx context.Context) {
 	// already-expired TTL releases the lease in the second pass below;
 	// seenNow keeps leases already collected out of it.
 	s.runHeldRules(ctx, now)
+	// Per-lease idle reclamation (2.5, #129 part 2): leases with their own
+	// idle_suspend are suspended on that threshold and not on the plain
+	// idle timeout or held rule 1 (both skipped such leases above and in
+	// suspendIdleHeld).
+	s.suspendIdleLeases(ctx, now)
 	seenNow := make(map[*Lease]bool, len(expired))
 	for _, l := range expired {
 		seenNow[l] = true
@@ -1374,10 +1391,11 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// always agree and quota sums never re-read the catalog.
 		MemoryMB: img.MemoryMB,
 		// Every lease starts on generation 1 (2.2) and on the host's
-		// checkpoint default (-1), unless the create request carries its
-		// own interval (the API stamps it after grant).
+		// checkpoint and idle-suspend defaults (-1), unless the create
+		// request carries its own (the API stamps it after grant).
 		Generation:         1,
 		CheckpointInterval: checkpointIntervalHost,
+		IdleSuspend:        checkpointIntervalHost,
 		TemplateID:         img.TemplateID,
 		// The class knobs (#128 part 2): priority rides the request,
 		// and the class stamp lands after admitClass decides it below.
@@ -2085,8 +2103,9 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		NetAllow:    append([]string(nil), src.NetAllow...),
 		ExposePorts: append([]int(nil), src.ExposePorts...),
 		// The clone continues the source's work (2.3, #122): its
-		// checkpoint policy continues too.
+		// checkpoint and idle policies continue too.
 		CheckpointInterval: src.CheckpointInterval,
+		IdleSuspend:        src.IdleSuspend,
 		State:              "running",
 		MemoryMB:           img.MemoryMB, // the admitted charge (#128)
 		Generation:         1,            // every lease starts on generation 1 (2.2)
@@ -2209,8 +2228,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			Holder:      holder,
 			HolderUrl:   holderURL,
 			// The forks continue the source's work (2.3, #122): its
-			// checkpoint policy continues too.
+			// checkpoint and idle policies continue too.
 			CheckpointInterval: src.CheckpointInterval,
+			IdleSuspend:        src.IdleSuspend,
 			State:              "running",
 			MemoryMB:           img.MemoryMB, // the admitted charge (#128)
 			Generation:         1,            // every lease starts on generation 1 (2.2)
@@ -2275,6 +2295,43 @@ func validateCheckpointInterval(secs int64) error {
 			checkpointIntervalMin, checkpointIntervalMax)
 	}
 	return nil
+}
+
+// validateIdleSuspend checks a requested idle_suspend: 0 (never) or
+// 60..604800 seconds. The message names the field.
+func validateIdleSuspend(secs int64) error {
+	if secs == 0 {
+		return nil
+	}
+	if secs < checkpointIntervalMin || secs > checkpointIntervalMax {
+		return fmt.Errorf("idle_suspend must be 0 (never) or %d..%d seconds",
+			checkpointIntervalMin, checkpointIntervalMax)
+	}
+	return nil
+}
+
+// effectiveIdleSuspend resolves the lease's idle_suspend to seconds: its
+// own value when set (0 = never, >0 seconds), otherwise the host default
+// (IdleSuspendDefault; 0 = never).
+func (s *Service) effectiveIdleSuspend(l *Lease) int64 {
+	if l.IdleSuspend != checkpointIntervalHost {
+		return l.IdleSuspend
+	}
+	return s.cfg.IdleSuspendDefault
+}
+
+// setIdlePolicy stores the lease's own idle reclamation threshold
+// (2.5, #129 part 2) and emits an idle_policy event naming the new
+// effective seconds. Call without s.store.mu.
+func (s *Service) setIdlePolicy(l *Lease, secs int64) (*Lease, error) {
+	s.store.mu.Lock()
+	l.IdleSuspend = secs
+	s.saveLeaseLocked(l)
+	effective := s.effectiveIdleSuspend(l)
+	s.store.mu.Unlock()
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseIdlePolicy,
+		fmt.Sprintf("idle_suspend %d", effective))
+	return l, nil
 }
 
 // effectiveCheckpointInterval resolves the lease's checkpoint interval
@@ -2599,9 +2656,9 @@ func holdState(l *Lease) string {
 }
 
 // leaseMap renders a lease as one GET /api/sandboxes row. The
-// checkpointInterval argument is the lease's effective interval in
-// seconds (the host default already resolved; 0 = never).
-func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
+// checkpointInterval and idleSuspend arguments are the lease's effective
+// values in seconds (the host default already resolved; 0 = never).
+func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 	m := map[string]any{
 		"id":               l.ID,
 		"owner":            l.Owner,
@@ -2626,6 +2683,9 @@ func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 		// Effective per-lease checkpoint interval in seconds (2.3,
 		// #122): the host default resolved; 0 = never.
 		"checkpoint_interval": checkpointInterval,
+		// Effective per-lease idle reclamation threshold in seconds
+		// (2.5, #129 part 2): the host default resolved; 0 = never.
+		"idle_suspend": idleSuspend,
 		// Admission class and scheduling priority (#128 part 2):
 		// guaranteed within the owner's guaranteed_mib, burst above it
 		// (preemptible, held to the node's reserve); a lower priority
@@ -2658,7 +2718,7 @@ func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 // and max_mib, the same numbers as GET /api/users/me scoped to this
 // lease's owner.
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
-	m := leaseMap(l, s.effectiveCheckpointInterval(l))
+	m := leaseMap(l, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
 	m["state"] = l.State
 	m["recovered_from"] = formatRFC3339(l.RecoveredFrom)
 	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
@@ -2708,7 +2768,7 @@ func (s *Service) list(owner string) []map[string]any {
 	var out []map[string]any
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
-			out = append(out, leaseMap(l, s.effectiveCheckpointInterval(l)))
+			out = append(out, leaseMap(l, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l)))
 		}
 	}
 	return out
@@ -2856,6 +2916,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LastActionAt:          l.LastActionAt,
 		Generation:            l.Generation,
 		CheckpointInterval:    l.CheckpointInterval,
+		IdleSuspend:           l.IdleSuspend,
 		MemoryMB:              l.MemoryMB,
 		Class:                 leaseClassRow(l),
 		Priority:              l.Priority,
@@ -2909,6 +2970,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LastActionAt:          r.LastActionAt,
 		Generation:            r.Generation,
 		CheckpointInterval:    r.CheckpointInterval,
+		IdleSuspend:           r.IdleSuspend,
 		MemoryMB:              r.MemoryMB,
 		Class:                 r.Class,
 		Priority:              r.Priority,

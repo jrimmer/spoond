@@ -35,6 +35,14 @@ const (
 	// LeaseCheckpointPolicy marks a per-lease checkpoint interval change
 	// (2.3, #122): the detail carries the new effective seconds.
 	LeaseCheckpointPolicy LeaseEventType = "checkpoint_policy"
+	// LeaseIdlePolicy marks a per-lease idle_suspend change (2.5, #129
+	// part 2): the detail carries the new effective seconds.
+	LeaseIdlePolicy LeaseEventType = "idle_policy"
+	// LeaseIdleSuspended marks a lease suspended by the idle sweep (2.5,
+	// #129 part 2): the detail carries how long it had been idle. The
+	// lease's generation does not change: the pause/resume memory
+	// continues, and the next call resumes it.
+	LeaseIdleSuspended LeaseEventType = "idle_suspended"
 	// LeaseRestored marks a restore in place to a kept checkpoint
 	// (2.3, #121): the detail carries the restored-to build id.
 	LeaseRestored LeaseEventType = "restored"
