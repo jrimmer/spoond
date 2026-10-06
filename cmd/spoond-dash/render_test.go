@@ -227,7 +227,6 @@ func healthySnapshot() Snapshot {
 	s.Services = []Service{{Name: "spoond-backend", State: "active"}}
 	s.ByState = map[string]int{"running": 3, "suspended": 1}
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m"}}
-	s.CertNotAfter = time.Time{}
 	s.HugeUsedPct, s.HugeFreeGiB = 44.3, 23.9
 	s.DiskUsedPct = 61.2
 	return s
@@ -309,8 +308,8 @@ func TestBannerAbsentWhenWell(t *testing.T) {
 }
 
 // TestBannerTriggers covers one trigger each: a unit not active, a lost
-// lease, free hugepages and snapshot disk past the danger level, the TLS
-// certificate inside 30 days, and a held-lease action within 24 h.
+// lease, free hugepages and snapshot disk past the danger level, and a
+// held lease a held-lease rule suspended that is still suspended.
 func TestBannerTriggers(t *testing.T) {
 	cases := []struct {
 		name string
@@ -332,14 +331,8 @@ func TestBannerTriggers(t *testing.T) {
 		{"kept bytes past warn pct", func(s *Snapshot) {
 			s.KeptDiskPct = 41.0
 		}, "kept checkpoints use 41% of the snapshot disk"},
-		{"cert expiring", func(s *Snapshot) {
-			s.CertNotAfter = fixedNow.Add(10 * 24 * time.Hour)
-		}, "TLS certificate"},
-		{"cert expired", func(s *Snapshot) {
-			s.CertNotAfter = fixedNow.Add(-1 * time.Hour)
-		}, "expired"},
-		{"held action in 24h", func(s *Snapshot) {
-			s.Rows = []LeaseRow{{ID: "abc123", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
+		{"held rule suspended", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
 		}, "idle/suspend_idle"},
 		{"preempted leases", func(s *Snapshot) {
 			s.Preempted = 3
@@ -1186,5 +1179,39 @@ func TestServicesFillTallerPanel(t *testing.T) {
 	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
 	if !strings.Contains(p, "more") {
 		t.Fatalf("units past the panel should fold into +N more:\n%s", p)
+	}
+}
+
+// TestBannerQuietCases: what does not need a person stays off the
+// strip: a held lease running again after a rule suspended it, and suspensions that are not a
+// held-lease rule's (preemption has its own row while preempted; a
+// hand, drain or idle_suspend pause is expected).
+func TestBannerQuietCases(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*Snapshot)
+	}{
+		{"rule-suspended lease running again", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "running", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-time.Hour)}}
+		}},
+		{"preempted then resumed", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "f959ca027f", State: "running", LastAction: "preempt/suspend", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+		{"suspended by hand", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "suspend/hand", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+		{"drained", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "drain/suspend", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+		{"own idle_suspend", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "idle_suspend/suspend_idle", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+	}
+	for _, c := range cases {
+		snap := healthySnapshot()
+		c.mut(&snap)
+		if rows := bannerRows(snap, fixedNow); len(rows) != 0 {
+			t.Errorf("%s: banner rows = %q, want none", c.name, rows)
+		}
 	}
 }

@@ -140,8 +140,11 @@ func fitItems(segs []grid.Seg, w int) []grid.Seg {
 //   - free hugepages or snapshot disk past the danger level,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
 //     (#126),
-//   - the served TLS certificate (TLS_CERT) within 30 days of expiring,
-//   - an automatic held-lease action in the last 24 h (from last_action).
+//   - a held lease that a held-lease rule (idle, pressure, a lapsed
+//     hold) suspended and that is still suspended (from last_action).
+//     A pause by hand, by the drain, by preemption (it has its own row
+//     while preempted) or by the lease's own idle_suspend is not one,
+//     and the row clears as soon as the lease runs again.
 func bannerRows(s Snapshot, now time.Time) []string {
 	var rows []string
 	for _, svc := range s.Services {
@@ -164,17 +167,30 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
 		rows = append(rows, fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct))
 	}
-	if !s.CertNotAfter.IsZero() {
-		if d := s.CertNotAfter.Sub(now); d < 30*24*time.Hour {
-			rows = certBanner(rows, d, s.CertNotAfter)
-		}
-	}
 	for _, r := range s.Rows {
-		if !r.LastActionAt.IsZero() && now.Sub(r.LastActionAt) < 24*time.Hour {
+		if heldRuleSuspended(r) {
 			rows = append(rows, fmt.Sprintf("held lease %s: %s %s ago", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))))
 		}
 	}
 	return rows
+}
+
+// heldRuleSuspended reports whether a held-lease rule acted on r and r
+// is still suspended: rule 1 (idle), rule 4 (pressure, its shorter
+// idle) and rule 3 (a lapsed hold, suspending the lease or expiring the
+// hold of one already suspended: it is released after the stale limit
+// unless someone renews it). Those wait on a person or on the lease's
+// next use; every other last_action (a pause by hand, the drain,
+// preemption, the lease's own idle_suspend) does not.
+func heldRuleSuspended(r LeaseRow) bool {
+	if r.State != "suspended" || r.LastActionAt.IsZero() {
+		return false
+	}
+	switch r.LastAction {
+	case "idle/suspend_idle", "pressure/suspend_idle", "expiry/suspend_lapsed", "expiry/expire":
+		return true
+	}
+	return false
 }
 
 // DefaultKeptDiskWarnPct is the kept-checkpoint disk share (#126) past
@@ -194,19 +210,6 @@ func keptDiskWarnPct() float64 {
 		return DefaultKeptDiskWarnPct
 	}
 	return p
-}
-
-// certBanner appends the TLS certificate's row: at 30 days it needs a
-// person before basic auth starts failing; inside 7 days it is urgent.
-func certBanner(rows []string, d time.Duration, notAfter time.Time) []string {
-	when := notAfter.Format("2006-01-02")
-	if d < 0 {
-		return append(rows, "the TLS certificate (TLS_CERT) expired "+when)
-	}
-	if d < 7*24*time.Hour {
-		return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s) - renew it", dur(d), when))
-	}
-	return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s)", dur(d), when))
 }
 
 // Draw renders the whole frame at width w. now timestamps the banner and
@@ -403,9 +406,6 @@ func statusItems(s Snapshot, now time.Time) []statusItem {
 	default:
 		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "ok"})
 	}
-	if !s.CertNotAfter.IsZero() {
-		items = append(items, statusItem{"cert", certDays(s.CertNotAfter.Sub(now)), certStyle(s.CertNotAfter.Sub(now))})
-	}
 	units, down := 0, 0
 	for _, svc := range s.Services {
 		units++
@@ -423,29 +423,10 @@ func statusItems(s Snapshot, now time.Time) []statusItem {
 	return items
 }
 
-// certDays is the certificate's remaining time in days: negative when
-// it has already expired.
-func certDays(d time.Duration) string {
-	return fmt.Sprintf("%dd", int(math.Floor(d.Hours()/24)))
-}
-
-// certStyle is the certificate's health: bad once expired, warn inside
-// the attention strip's 30-day window, ok before it.
-func certStyle(d time.Duration) string {
-	switch {
-	case d < 0:
-		return "bad"
-	case d < 30*24*time.Hour:
-		return "warn"
-	default:
-		return "ok"
-	}
-}
-
 // statusLine draws the frame's last row, outside any box: label
 // [value] entries left to right, the clock right-aligned on the same
-// row. At narrow widths entries are dropped from the right (cert, then
-// units) until the line fits.
+// row. At narrow widths entries are dropped from the right (units
+// first) until the line fits.
 func (l *layout) statusLine(g *grid.Grid, y int, at string) {
 	items := statusItems(l.s, l.now)
 	// Drop from the right until what remains fits, the clock always

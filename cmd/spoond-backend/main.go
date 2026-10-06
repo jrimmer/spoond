@@ -463,7 +463,6 @@ func Main(args []string) int {
 		for _, c := range notify.ProductionSources(
 			notifyUnits(),
 			storagePath, backupDir, backupPrefix,
-			tlsCert, tlsKey,
 			notifyBackupMaxAge(),
 			svc.GCLastError(),
 		).Checks() {

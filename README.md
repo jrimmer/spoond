@@ -125,8 +125,7 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   [docs/operations.md](docs/operations.md#uptime-monitoring-gatus)).
 - **Notifications**: with `NOTIFY_WEBHOOKS` set, the backend pushes what
   needs a person (a lost lease, a held-lease rule acting, a unit down,
-  disk or hugepages past their levels, the TLS certificate near expiry,
-  a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
+  disk or hugepages past their levels, a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
   receiver, with hourly dedupe, resolved messages, retries and a rate
   limit. `spoond notify test` checks the setup; see
   [docs/operations.md](docs/operations.md#notifications-to-webhooks).
@@ -155,8 +154,8 @@ never alone: every coloured state keeps its glyph or word. Above the
 panels sits one
 attention banner, shown only when something needs a person: a unit not
 active, a lost lease, free hugepages or snapshot disk past the danger
-level, the TLS certificate inside 30 days of expiring, or an automatic
-held-lease action in the last 24 h. It refreshes every 2 seconds over
+level, preempted burst leases, or a held lease that a held-lease rule suspended and that is
+still suspended. It refreshes every 2 seconds over
 one server-sent-event stream shared by all viewers; the page is the
 current grid in a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for
 the chrome, and Datastar patches the rows that changed.
