@@ -303,6 +303,10 @@ type ServiceConfig struct {
 	// 2.5). PREEMPT_DISK_FLOOR_PCT, default DefaultPreemptDiskFloorPct.
 	// 0 or negative means the default.
 	PreemptDiskFloorPct float64
+	// MaxAdmitWaitSecs caps how long a create may wait for admission
+	// (#129 part 1). MAX_ADMIT_WAIT_SECS, default DefaultMaxAdmitWaitSecs;
+	// 0 disables waiting (the request field is accepted and ignored).
+	MaxAdmitWaitSecs int
 }
 
 // Service is the lease API backend.
@@ -403,6 +407,13 @@ type Service struct {
 	// each suspend a different burst lease for themselves. Held across
 	// the whole preempt-then-admit sequence (see admitClass).
 	preemptMu sync.Mutex
+
+	// admitQ holds creates waiting for admission (#129 part 1) and
+	// serialises their admissions.
+	admitQ admissionQueue
+	// wakeScheduled guards against piling up wake-up passes: at most one
+	// queued-admission retry runs at a time.
+	wakeScheduled atomic.Bool
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -893,6 +904,9 @@ func (s *Service) Start(ctx context.Context) {
 	// Preemption resume queue (#128 part 3): every 15 s, resume preempted
 	// leases that fit again.
 	go s.runPreemptResumeLoop(ctx)
+	// Queued admission (#129 part 1): retry waiting creates every 5 s
+	// even when nothing signalled.
+	go s.runAdmitQueueLoop(ctx)
 	// Webhook notifications (2.2, #117): forward the bus's
 	// person-relevant events. Only when a notifier is installed.
 	if s.notifier != nil {
@@ -933,7 +947,7 @@ func (s *Service) updateNodeMetrics(ctx context.Context) {
 	}
 	s.metrics.NodeRunning.Set(float64(info.RunningSandboxes))
 	s.metrics.NodeWork.Set(float64(info.OutstandingWork))
-	s.metrics.NodeHugepagesFree.Set(float64((info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes))
+	s.metrics.NodeHugepagesFree.Set(float64(info.FreeHugepageBytes()))
 }
 
 // refillPool pre-creates cfg.PoolSize sandboxes for every image with a
@@ -1116,6 +1130,12 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 		return
 	}
 	l.released = true
+	// A running lease's hugepages come back with the release; a
+	// suspended one holds none.
+	freedMiB := 0
+	if l.live() {
+		freedMiB = l.MemoryMB
+	}
 	s.store.mu.Unlock()
 	// Create-time secrets are memory-only bookkeeping; the sandbox they
 	// were staged into goes with the release (#80).
@@ -1139,6 +1159,9 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, reason)
+	s.creditNodeInfo(freedMiB)
+	// A release frees hugepages and quota: retry waiting creates (#129).
+	s.wakeAdmissionQueue()
 }
 
 // errQuotaExceeded is returned when a user hits their concurrent-lease
@@ -1146,11 +1169,28 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 // maps it to HTTP 429. The error's message says which cap it was.
 var errQuotaExceeded = fmt.Errorf("lease quota exceeded")
 
+// memoryQuotaError marks the memory-cap refusal (#128) as distinct from
+// the lease-count refusal, so queued admission (#129) knows which one it
+// may wait out: a full memory cap frees when other leases end, while the
+// count cap is final. Its Error and Unwrap are the wrapped
+// errQuotaExceeded, so callers that only test errors.Is(err,
+// errQuotaExceeded) are unchanged.
+type memoryQuotaError struct{ err error }
+
+func (e *memoryQuotaError) Error() string { return e.err.Error() }
+func (e *memoryQuotaError) Unwrap() error { return e.err }
+
+// isMemoryQuotaRefusal reports whether err is the memory-cap refusal.
+func isMemoryQuotaRefusal(err error) bool {
+	var m *memoryQuotaError
+	return errors.As(err, &m)
+}
+
 // errMemoryQuotaExceeded is errQuotaExceeded carrying the memory cap in
 // its message (#128): reserving MiB past the user's max_mib answers 429
 // with a message that names the memory limit.
 func errMemoryQuotaExceeded(maxMiB int) error {
-	return fmt.Errorf("%w: memory limit of %d MiB exceeded", errQuotaExceeded, maxMiB)
+	return &memoryQuotaError{fmt.Errorf("%w: memory limit of %d MiB exceeded", errQuotaExceeded, maxMiB)}
 }
 
 // reserveQuota enforces a user's concurrent-lease cap (T4/#31) and
@@ -1341,6 +1381,11 @@ type leaseRequest struct {
 	exposePorts       []int
 	burst             bool
 	priority          int
+	// leaseID is the id the caller already allocated and announced —
+	// the queued-admission path (#129) reserves it when the create is
+	// queued so the `queued` and `created` events name the same lease.
+	// Empty allocates a fresh id at grant.
+	leaseID string
 }
 
 // grantLease is grant with the class admission (#128 part 2): the
@@ -1372,8 +1417,12 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		s.metrics.LeasesTotal.Inc()
 	}
 	now := time.Now()
+	leaseID := req.leaseID
+	if leaseID == "" {
+		leaseID = newID()
+	}
 	lease := &Lease{
-		ID:          newID(),
+		ID:          leaseID,
 		Owner:       owner,
 		Image:       image,
 		CreatedAt:   now,
@@ -1655,6 +1704,13 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseSuspended, "paused into build "+buildID)
+	// A pause frees the lease's hugepages and quota: retry waiting
+	// creates (#129).
+	// The pause freed the lease's hugepages: the next admission inside
+	// the cache window sees them (every pause: hand, drain, idle, held
+	// rules and preemption alike).
+	s.creditNodeInfo(l.MemoryMB)
+	s.wakeAdmissionQueue()
 	return buildID, nil
 }
 
@@ -1790,6 +1846,9 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	} else {
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "resumed from build "+resumeBuild)
 	}
+	// A resume frees its prior preemption and can move capacity: retry
+	// waiting creates (#129).
+	s.wakeAdmissionQueue()
 	return l, nil
 }
 
@@ -3310,8 +3369,25 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	// preemption, awaiting the resume queue.
 	preempted := s.preemptedCountLocked()
 
+	// Queued creates waiting for admission (#129 part 1).
+	s.admitQ.mu.Lock()
+	queued := len(s.admitQ.tickets)
+	var oldestQueued time.Time
+	for _, t := range s.admitQ.tickets {
+		if oldestQueued.IsZero() || t.queuedAt.Before(oldestQueued) {
+			oldestQueued = t.queuedAt
+		}
+	}
+	s.admitQ.mu.Unlock()
+
 	s.store.mu.Unlock()
 	m.PreemptedLeases.Set(float64(preempted))
+	m.LeasesQueued.Set(float64(queued))
+	oldest := float64(0)
+	if !oldestQueued.IsZero() {
+		oldest = s.now().Sub(oldestQueued).Seconds()
+	}
+	m.LeasesQueuedOldest.Set(oldest)
 	// Kept checkpoints (#126): pins of live leases and their recorded
 	// bytes, refreshed on every scrape. CollectMetrics holds the store
 	// lock only for the lease set it needs; the kept rows live in the

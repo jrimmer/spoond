@@ -222,6 +222,9 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	// A quota change can free room for a waiting create (#129 part 1):
+	// for example raising an owner's max_mib.
+	s.svc.wakeAdmissionQueue()
 	u := s.svc.identities.UserByID(id)
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }

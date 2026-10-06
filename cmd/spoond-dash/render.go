@@ -749,8 +749,12 @@ func (l *layout) capacityRows() []capacityRow {
 	}
 	rows = append(rows, capacityRow{segs: segs, wrap: true})
 
+	queued := fmt.Sprintf("queued %s", fmt.Sprint(l.s.Queued))
+	if l.s.Queued > 0 && l.s.QueuedOldest > 0 {
+		queued = fmt.Sprintf("%s (oldest %s)", queued, dur(time.Duration(l.s.QueuedOldest*float64(time.Second))))
+	}
 	rows = append(rows, capacityRow{segs: dimLine(
-		fmt.Sprintf("queued %s", fmt.Sprint(l.s.Queued)),
+		queued,
 		fmt.Sprintf("granted %s", thousands(l.s.Granted)),
 		fmt.Sprintf("swept %s", thousands(l.s.Swept)))})
 	rows = append(rows, capacityRow{dim: true, segs: dimLine(

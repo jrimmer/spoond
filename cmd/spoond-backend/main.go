@@ -85,6 +85,9 @@
 //	                  which the notifier's disk.kept check warns and the
 //	                  dashboard's attention strip shows a row (#126;
 //	                  default 40; 0 disables both)
+//	MAX_ADMIT_WAIT_SECS  how long a create may wait for admission when
+//	                  it sends "wait" (#129 part 1; default 600; 0
+//	                  disables waiting)
 package spoondbackend
 
 import (
@@ -286,6 +289,10 @@ func Main(args []string) int {
 	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default 15;
 	// fractional values (e.g. 12.5) are honoured.
 	preemptDiskFloorPct := envFloatOr("PREEMPT_DISK_FLOOR_PCT", api.DefaultPreemptDiskFloorPct)
+	// Queued admission (#129 part 1): MAX_ADMIT_WAIT_SECS caps how long
+	// a create may wait for room. 0 disables waiting (the request's
+	// "wait" field is accepted and ignored).
+	maxAdmitWaitSecs := envIntOr("MAX_ADMIT_WAIT_SECS", api.DefaultMaxAdmitWaitSecs)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -362,6 +369,7 @@ func Main(args []string) int {
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		BurstReserveMiB:           burstReserveMiB,
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
+		MaxAdmitWaitSecs:          maxAdmitWaitSecs,
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).

@@ -57,6 +57,15 @@ const (
 	// left the ring) or when a subscriber was too slow and events were
 	// dropped. It never enters the ring and carries Seq 0.
 	LeaseStreamGap LeaseEventType = "gap"
+	// LeaseQueued marks a create that was refused but is waiting for
+	// admission (#129 part 1). The detail names the refusal it is
+	// waiting out (e.g. "memory cap" or "no burst capacity"). The lease
+	// id is already allocated, and the created lease keeps it.
+	LeaseQueued LeaseEventType = "queued"
+	// LeaseTimedOut marks a waiting create that gave up: its wait
+	// elapsed (detail "waited Ns"), the client went away ("client
+	// gone") or a drain started ("draining").
+	LeaseTimedOut LeaseEventType = "timed_out"
 )
 
 // LeaseEvent is one lease lifecycle change.

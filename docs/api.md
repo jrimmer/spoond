@@ -52,6 +52,7 @@ Request:
 | `idle_suspend` | int | host default | the lease's own idle reclamation threshold in seconds: `0` = never; `60`–`604800` = suspend the lease after that long without activity (exec, stream, proxy, keepalive, guest heartbeat, files, guest port dial), resuming it on the next call. Omitted = the host default (`IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never — see [Idle reclamation](#idle-reclamation)). Anything else is `400`, and a non-zero value needs a persistent lease (`400`) — a non-persistent lease has nothing to suspend into |
 | `burst` | bool | `false` | force the **burst** admission class: the lease is scheduled preemptibly even while the owner's charge stays within their `guaranteed_mib` — see [Lease classes](#lease-classes) |
 | `priority` | int | `0` | preemption order within the lease's class: a lower number is preempted first, between `-128` and `127` (anything else is `400`) — see [Preemption](#preemption) |
+| `wait` | int | `0` | seconds a create refused for a **waitable** reason may wait for room instead of failing (see [Queued admission](#queued-admission)). `0` keeps the immediate refusal; above `0` it is capped at `MAX_ADMIT_WAIT_SECS` (`0` disables waiting, the field is accepted and ignored); negative is `400` |
 | `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
 
 Response `201 Created`:
@@ -79,6 +80,10 @@ Response `201 Created`:
 
 `hold_expires_at` is `""` when the lease was created without a holder
 (the zero time renders as `""`).
+
+When the request set `wait`, the response also carries `waited_ms` (how
+long admission took, in milliseconds) — `0` or a few ms when it fit at
+once. See [Queued admission](#queued-admission).
 
 `generation` is the lease's continuity generation: `1` on create, bumped
 whenever the guest's memory does not continue from where its processes
@@ -181,6 +186,75 @@ clears that floor, the guaranteed admission answers `503`
 Honey-like clients should treat a `preempted` lease as temporarily
 unavailable and wait for its `resumed` event (or poll the lease) rather
 than deleting and recreating it.
+
+### Queued admission
+
+A create refused only because the node is full can wait for room instead
+of failing: send `"wait": N` (seconds) on `POST /api/leases` (and its
+`/api/sandboxes` alias). `wait` defaults to `0`, which keeps today's
+immediate refusal exactly; a negative value is `400`.
+
+Only these refusals are **waitable** (the request is held open and
+retried):
+
+- `503 capacity: …` — hugepages full and preemption could not make room
+  (or the node is not healthy).
+- `503 no burst capacity` — the burst reserve would be crossed.
+- `503 capacity: cannot preempt (snapshot disk low)` — the preemption
+  disk floor blocked it.
+- `429 … memory limit of N MiB exceeded` — the owner's `max_mib` cap
+  refused it.
+
+Everything else answers at once: the lease-count cap (`max_leases`),
+bad requests, auth failures and unknown images are **not** waitable.
+
+The wait is capped at `MAX_ADMIT_WAIT_SECS` (default `900`; `0` disables
+waiting and the field is accepted and ignored — see
+[operations.md](operations.md)). The queue lives in the backend process
+and is lost on restart (a waiting client sees its connection go and
+retries). Waiting creates are served in **fair-share order**: the owner
+furthest under its `guaranteed_mib` first (an owner with no
+`guaranteed_mib`, or already at it, ranks after every owner with
+headroom), then FIFO. Each wake-up admits every queued create that fits,
+so a smaller create may pass a larger one that still does not fit. The
+order is re-read before every attempt; it is best-effort only when room
+frees in the middle of a pass (a create tried just before may miss room
+that one tried just after gets).
+Admissions from the queue go through the normal admission path, so
+classes, the burst reserve, quotas and preemption apply unchanged. The
+queue is retried whenever capacity may have freed (a release, suspend,
+resume, preemption or quota change) and on a 5 s tick.
+
+Outcomes:
+
+- **Admitted** — the usual `201` body, plus `waited_ms` (the wait in
+  milliseconds).
+- **Timed out** — the refusal the create would have got had it not
+  waited: the same status, body and `Retry-After`, plus `waited_ms`.
+- **Client gone** — the ticket is dropped; nothing is written.
+- **Drain** — a drain that starts answers every queued create `503
+  draining` at once.
+
+The `queued` event names the refusal being waited out and the create's
+place in the fair-share order at that moment, e.g. `memory cap; position
+2 of 3`; the lease id is allocated when the create is queued and the
+created lease keeps it. On admission a `created` event follows as usual;
+a wait that ends without a lease emits `timed_out` with detail `waited
+Ns`, `client gone` or `draining`.
+
+The create holds its HTTP request open for the whole wait. spoond sets
+no server write timeout, but the client's own timeout must be longer
+than its `wait` (`curl -m`, Go's `http.Client.Timeout`), or the client
+gives up first and its ticket is dropped.
+
+### `GET /api/leases/queue` — creates waiting for admission
+
+Lists the caller's waiting creates (an admin sees every owner's) in
+fair-share order: `{"queued": [{"id", "owner", "image", "position",
+"waited_s", "reason"}]}`. `position` is the place in the whole queue
+(1 is tried first), `reason` the refusal being waited out. Empty when
+nothing waits. A client whose create is waiting can poll this to show
+progress.
 
 ### Idle reclamation
 

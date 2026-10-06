@@ -104,6 +104,10 @@ func (s *Service) drain(ctx context.Context) (drainResult, error) {
 	s.draining.Store(true)
 	res := drainResult{Failed: []drainFailure{}}
 
+	// Waiting creates are pointless on a draining node: answer them all
+	// with 503 draining at once (#129 part 1).
+	s.drainQueue()
+
 	// Pause every live lease, up to 4 at a time.
 	s.store.mu.Lock()
 	var targets []*Lease

@@ -300,7 +300,7 @@ func (s *Service) pressureShortensIdle(ctx context.Context) (bool, string) {
 	if s.cfg.PressureHeldIdle > 0 {
 		need := uint64(defaultAdmitMemoryMB) * 1024 * 1024
 		if info, err := s.sub.NodeInfo(ctx); err == nil {
-			free := (info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes
+			free := info.FreeHugepageBytes()
 			if info.Status == "healthy" && free < need {
 				return true, fmt.Sprintf("hugepages %d bytes free < %d needed for a default lease", free, need)
 			}

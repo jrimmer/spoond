@@ -202,7 +202,7 @@ func checkOrchestrator(cfg e2b.Config, cfgErr error) []checkResult {
 		out = append(out, checkResult{"orchestrator: node info", "FAIL", fmt.Sprintf("%v", err)})
 		return out
 	}
-	free := (info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes
+	free := info.FreeHugepageBytes()
 	detail := fmt.Sprintf("status=%s running=%d hugepages free=%d GiB", info.Status, info.RunningSandboxes, free>>30)
 	var warns []string
 	if info.Status != "healthy" {

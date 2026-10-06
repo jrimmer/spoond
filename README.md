@@ -291,8 +291,9 @@ Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
 services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
 may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `NOTIFY_WEBHOOKS`, the capacity settings (`BURST_RESERVE_MIB`,
-`PREEMPT_DISK_FLOOR_PCT`), and the held-lease limits (`HOLD_TTL_SECS` and the
-rest, in [docs/operations.md](docs/operations.md)).
+`PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`), and the held-lease
+limits (`HOLD_TTL_SECS` and the rest, in
+[docs/operations.md](docs/operations.md)).
 
 ## Tests
 

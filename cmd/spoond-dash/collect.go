@@ -45,15 +45,18 @@ type Snapshot struct {
 	// Preempted is the live leases suspended by preemption (#128 part
 	// 3), counted in the store: burst leases the resume queue will bring
 	// back when capacity allows. The attention strip names them.
-	Preempted  int `json:"preempted"`
-	Queued     int `json:"queued"`
-	Granted    int `json:"granted"` // cumulative leases granted
-	Swept      int `json:"swept"`
-	Running    int `json:"running"` // sandboxes on the node
-	Limit      int `json:"limit"`   // node sandbox limit
-	Shares     int `json:"shares"`
-	Users      int `json:"users"`
-	BuildsBusy int `json:"buildsBusy"`
+	Preempted int `json:"preempted"`
+	Queued    int `json:"queued"`
+	// QueuedOldest is the age in seconds of the oldest create waiting for
+	// admission (#129 part 1); 0 when nothing waits.
+	QueuedOldest float64 `json:"queuedOldest"`
+	Granted      int     `json:"granted"` // cumulative leases granted
+	Swept        int     `json:"swept"`
+	Running      int     `json:"running"` // sandboxes on the node
+	Limit        int     `json:"limit"`   // node sandbox limit
+	Shares       int     `json:"shares"`
+	Users        int     `json:"users"`
+	BuildsBusy   int     `json:"buildsBusy"`
 
 	// Rates and latencies over the last interval.
 	ReqPerSec     float64 `json:"reqPerSec"`
@@ -425,6 +428,7 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	s.Leases = int(g("spoond_leases_active"))
 	s.ByState = byLabel(fams["spoond_leases"], "state")
 	s.Queued = int(g("spoond_leases_queued"))
+	s.QueuedOldest = g("spoond_leases_queued_oldest_seconds")
 	s.Granted = int(g("spoond_leases_total"))
 	s.Swept = int(g("spoond_lease_swept_total"))
 	s.Running = int(g("spoond_node_running_sandboxes"))

@@ -63,9 +63,22 @@ func (s *Service) guaranteedFits(ctx context.Context, memoryMB int) (bool, error
 // creditNodeInfoLocked returns memoryMB MiB of hugepages to the cached
 // NodeInfo when a lease is paused: the next admission inside the same
 // cache window sees them free, exactly as debitNodeInfoLocked takes them
-// on admission. The cache's timestamp is refreshed so the credited
-// reading is not immediately overwritten by a stale refresh. Caller
-// holds nodeInfoMu.
+// on admission. The cache's timestamp is left alone: credits and debits
+// only adjust the reading inside its TTL, and the next refresh replaces
+// it with the substrate's own figure (accurate once the pause or delete
+// has returned), so they never accumulate drift. Caller holds
+// nodeInfoMu.
+// creditNodeInfo is creditNodeInfoLocked with nodeInfoMu taken. A
+// release or pause calls it; neither runs with nodeInfoMu held.
+func (s *Service) creditNodeInfo(memoryMB int) {
+	s.nodeInfoMu.Lock()
+	s.creditNodeInfoLocked(memoryMB)
+	s.nodeInfoMu.Unlock()
+	if memoryMB > 0 {
+		s.admitQ.capacityGen.Add(1)
+	}
+}
+
 func (s *Service) creditNodeInfoLocked(memoryMB int) {
 	info := &s.nodeInfoCache
 	if s.nodeInfoAt.IsZero() || info.HugepageSizeBytes == 0 || memoryMB <= 0 {
@@ -78,7 +91,6 @@ func (s *Service) creditNodeInfoLocked(memoryMB int) {
 	} else {
 		info.HugepagesUsed -= pages
 	}
-	s.nodeInfoAt = s.now()
 }
 
 // ownerOverGuaranteeLocked is how far over its guaranteed_mib an owner
@@ -296,11 +308,11 @@ func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string
 		s.metrics.PreemptionsTotal.Inc()
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeasePreempted, "for a guaranteed lease of "+targetOwner)
-	// The pause freed this lease's hugepages: let the next fits check in
-	// this preemption window see them.
-	s.nodeInfoMu.Lock()
-	s.creditNodeInfoLocked(l.MemoryMB)
-	s.nodeInfoMu.Unlock()
+	// The pause already credited this lease's hugepages to the cached
+	// reading (pauseLeaseBody), so the next fits check in this
+	// preemption window sees them.
+	// A preemption frees capacity: retry waiting creates (#129).
+	s.wakeAdmissionQueue()
 	return nil
 }
 
