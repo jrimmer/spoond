@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for wanting to help with spoond! This project is
-Apache-2.0 licensed (see `LICENSE`) and developed in the open.
+BSD-3-Clause licensed (see `LICENSE`) and developed in the open.
 
 ## Code of conduct
 
@@ -37,8 +37,8 @@ Requirements: Go 1.27.1+ (see `go.mod`).
    ```bash
    git commit -s
    ```
-   By signing you agree to license your contribution under Apache-2.0
-   (LICENSE, Section 5).
+   By signing you agree to license your contribution under the
+   BSD 3-Clause License (`LICENSE`).
 5. **Open the PR** referencing the issue. Describe what changed, how
    you verified it, and any trade-offs/drawbacks you're aware of.
 

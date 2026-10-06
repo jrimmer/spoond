@@ -290,5 +290,7 @@ against a live spoond, as root; see [conformance/README.md](conformance/README.m
 
 ## License
 
-Apache-2.0; see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+BSD-3-Clause from 2.4.0 (2.3.3 and earlier: Apache-2.0); see
+[`LICENSE`](LICENSE) and [`NOTICE`](NOTICE), which lists the
+third-party files that keep their own licenses.
 Contributions welcome: see [`CONTRIBUTING.md`](CONTRIBUTING.md).
