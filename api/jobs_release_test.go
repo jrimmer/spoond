@@ -55,3 +55,26 @@ func TestReleaseSettlesRunningJobs(t *testing.T) {
 		}
 	}
 }
+
+// TestRunningJobKeepsLeaseOutOfIdleSuspend: a lease with its own
+// idle_suspend is not suspended while a background job runs on it.
+func TestRunningJobKeepsLeaseOutOfIdleSuspend(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(l, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	installJobProcess(t, sub, fake.NewProcess(1011))
+	startBackgroundJob(t, ts, l.ID, map[string]any{"cmd": "sleep 600"})
+	svc.store.mu.Lock()
+	l.LastActive = time.Now().Add(-10 * time.Minute)
+	svc.store.mu.Unlock()
+	svc.suspendIdleLeases(ctx, time.Now())
+	if l.Suspended {
+		t.Fatal("idle_suspend suspended a lease with a running background job")
+	}
+}

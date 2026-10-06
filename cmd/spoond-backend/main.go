@@ -373,7 +373,7 @@ func Main(args []string) int {
 		// exited-record retention.
 		MaxRunningJobsPerLease: envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:       int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
-		MaxAdmitWaitSecs:          maxAdmitWaitSecs,
+		MaxAdmitWaitSecs:       maxAdmitWaitSecs,
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
