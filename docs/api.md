@@ -49,8 +49,10 @@ Request:
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
 | `hold_ttl` | int | `0` | seconds the hold lasts from now instead of the default `HOLD_TTL_SECS`; capped at `HOLD_TTL_MAX_SECS`. Ignored when `holder` is empty |
 | `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
+| `idle_suspend` | int | host default | the lease's own idle reclamation threshold in seconds: `0` = never; `60`–`604800` = suspend the lease after that long without activity (exec, stream, proxy, keepalive, guest heartbeat, files, guest port dial), resuming it on the next call. Omitted = the host default (`IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never — see [Idle reclamation](#idle-reclamation)). Anything else is `400`, and a non-zero value needs a persistent lease (`400`) — a non-persistent lease has nothing to suspend into |
 | `burst` | bool | `false` | force the **burst** admission class: the lease is scheduled preemptibly even while the owner's charge stays within their `guaranteed_mib` — see [Lease classes](#lease-classes) |
 | `priority` | int | `0` | preemption order within the lease's class: a lower number is preempted first, between `-128` and `127` (anything else is `400`) — see [Preemption](#preemption) |
+| `wait` | int | `0` | seconds a create refused for a **waitable** reason may wait for room instead of failing (see [Queued admission](#queued-admission)). `0` keeps the immediate refusal; above `0` it is capped at `MAX_ADMIT_WAIT_SECS` (`0` disables waiting, the field is accepted and ignored); negative is `400` |
 | `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
 
 Response `201 Created`:
@@ -69,6 +71,7 @@ Response `201 Created`:
   "hold_expires_at": "2026-10-08T03:00:00Z",
   "generation": 1,
   "checkpoint_interval": 300,
+  "idle_suspend": 0,
   "class": "guaranteed",
   "priority": 0,
   "exposed": {"9042": "10.11.0.7:9042"}
@@ -77,6 +80,10 @@ Response `201 Created`:
 
 `hold_expires_at` is `""` when the lease was created without a holder
 (the zero time renders as `""`).
+
+When the request set `wait`, the response also carries `waited_ms` (how
+long admission took, in milliseconds) — `0` or a few ms when it fit at
+once. See [Queued admission](#queued-admission).
 
 `generation` is the lease's continuity generation: `1` on create, bumped
 whenever the guest's memory does not continue from where its processes
@@ -89,6 +96,13 @@ Clone and fork copy the source's interval; a lease created without the
 field keeps the host default until `PUT
 /api/leases/{id}/checkpoint-policy` changes it — see
 [Checkpoints](#checkpoints).
+
+`idle_suspend` is the **effective** idle reclamation threshold in
+seconds with the same shape (the lease's own value, or the host default;
+`0` = never). Clone and fork copy the source's value; a lease created
+without the field keeps the host default until `PUT
+/api/leases/{id}/idle-policy` changes it — see
+[Idle reclamation](#idle-reclamation).
 
 `address` is the lease's host-side address (no port). `exposed` maps
 each published port to `<address>:<port>` — reachable from peers whose
@@ -173,6 +187,110 @@ Honey-like clients should treat a `preempted` lease as temporarily
 unavailable and wait for its `resumed` event (or poll the lease) rather
 than deleting and recreating it.
 
+### Queued admission
+
+A create refused only because the node is full can wait for room instead
+of failing: send `"wait": N` (seconds) on `POST /api/leases` (and its
+`/api/sandboxes` alias). `wait` defaults to `0`, which keeps today's
+immediate refusal exactly; a negative value is `400`.
+
+Only these refusals are **waitable** (the request is held open and
+retried):
+
+- `503 capacity: …` — hugepages full and preemption could not make room
+  (or the node is not healthy).
+- `503 no burst capacity` — the burst reserve would be crossed.
+- `503 capacity: cannot preempt (snapshot disk low)` — the preemption
+  disk floor blocked it.
+- `429 … memory limit of N MiB exceeded` — the owner's `max_mib` cap
+  refused it.
+- `429 lease quota exceeded` — the owner is at its lease-count cap
+  (`max_leases`); the create waits for one of the owner's own leases to
+  be released (since 2.5.1). The `queued` event names it `lease cap`.
+
+Everything else answers at once: bad requests, auth failures and
+unknown images are **not** waitable.
+
+The wait is capped at `MAX_ADMIT_WAIT_SECS` (default `900`; `0` disables
+waiting and the field is accepted and ignored — see
+[operations.md](operations.md)). The queue lives in the backend process
+and is lost on restart (a waiting client sees its connection go and
+retries). Waiting creates are served in **fair-share order**: the owner
+furthest under its `guaranteed_mib` first (an owner with no
+`guaranteed_mib`, or already at it, ranks after every owner with
+headroom), then FIFO. Each wake-up admits every queued create that fits,
+so a smaller create may pass a larger one that still does not fit. The
+order is re-read before every attempt; it is best-effort only when room
+frees in the middle of a pass (a create tried just before may miss room
+that one tried just after gets).
+Admissions from the queue go through the normal admission path, so
+classes, the burst reserve, quotas and preemption apply unchanged. The
+queue is retried whenever capacity may have freed (a release, suspend,
+resume, preemption or quota change) and on a 5 s tick.
+
+Outcomes:
+
+- **Admitted** — the usual `201` body, plus `waited_ms` (the wait in
+  milliseconds).
+- **Timed out** — the refusal the create would have got had it not
+  waited: the same status, body and `Retry-After`, plus `waited_ms`.
+- **Client gone** — the ticket is dropped; nothing is written.
+- **Drain** — a drain that starts answers every queued create `503
+  draining` at once.
+
+The `queued` event names the refusal being waited out and the create's
+place in the fair-share order at that moment, e.g. `memory cap; position
+2 of 3`; the lease id is allocated when the create is queued and the
+created lease keeps it. On admission a `created` event follows as usual;
+a wait that ends without a lease emits `timed_out` with detail `waited
+Ns`, `client gone` or `draining`.
+
+The create holds its HTTP request open for the whole wait. spoond sets
+no server write timeout, but the client's own timeout must be longer
+than its `wait` (`curl -m`, Go's `http.Client.Timeout`), or the client
+gives up first and its ticket is dropped.
+
+### `GET /api/leases/queue` — creates waiting for admission
+
+Lists the caller's waiting creates (an admin sees every owner's) in
+fair-share order: `{"queued": [{"id", "owner", "image", "position",
+"waited_s", "reason"}]}`. `position` is the place in the whole queue
+(1 is tried first), `reason` the refusal being waited out. Empty when
+nothing waits. A client whose create is waiting can poll this to show
+progress.
+
+### Idle reclamation
+
+A persistent lease may be suspended after a period without activity —
+its own `idle_suspend` (or the host default `IDLE_SUSPEND_DEFAULT_SECS`,
+both `0` = never). The plain `IDLE_TIMEOUT_SECS` sweep and the
+held-lease idle rule (rule 1, and rule 4's pressure shortening) apply to
+leases whose effective `idle_suspend` is `0`; a lease with a non-zero
+value is reclaimed on that value alone. The idle sweep suspends it
+through the normal pause path: memory and hugepages are freed into a
+pause build, nothing is deleted, the generation does not change, and the
+idle sweep shares preemption's snapshot-disk floor
+(`PREEMPT_DISK_FLOOR_PCT`) — a pause that would take the disk under it
+is skipped for that sweep and retried on the next one.
+
+Activity is what the sweep counts: exec, stream, proxy, keepalive, guest
+heartbeat, files API and guest port dial all move `LastActive`. An idle
+suspension records `last_action` `idle_suspend/suspend_idle` with
+`last_action_at` (persisted, like the held rules) and emits an
+`idle_suspended` event whose detail is `idle for <duration>`. Because it
+is a rule suspension, the stale-release (rule 2) and critical-disk
+(rule 5) held-lease rules may later release the lease if it stays
+idle-suspended and untouched; a preempted lease stays excluded.
+
+**Resume on next use:** an exec, files call, guest port dial or stream
+on a lease suspended by `idle_suspend` resumes it first through the
+normal resume path (admission, class and quota apply) and then serves
+the call; a refusal answers what resume would (`429` over quota, `503`
+with `Retry-After` for capacity or the burst reserve) and the lease stays
+suspended. A lease suspended any other way keeps the `409`
+`lease is suspended; resume it first`. An explicit resume works as
+always, and the SSH gateway already resumes on attach.
+
 ### `GET /api/leases` — list leases
 
 Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
@@ -180,7 +298,8 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
 `name`, `comment`, `holder`, `holder_url`, `net_policy`,
 `egress_allowlist`, `exposed`, `generation`, `checkpoint_interval`
-(effective seconds; `0` = never), `class`, `priority` and `preempted`
+(effective seconds; `0` = never), `idle_suspend` (effective seconds;
+`0` = never), `class`, `priority` and `preempted`
 (see [Lease classes](#lease-classes) and
 [Preemption](#preemption)).
 
@@ -294,6 +413,13 @@ Response `200 OK`:
 the per-owner concurrent exec/stream cap is reached. (Exec does not wait for or take the lease's lifecycle lock; its concurrency
 guard is the per-owner cap, which yields `429`. A busy lease shows up only
 as the `409` below.)
+
+A lease the idle sweep suspended (`idle_suspend`) is the exception: a
+suspended lease whose `last_action` is `idle_suspend/suspend_idle` is
+resumed first through the normal resume path and the exec then served;
+a refused resume answers what resume would (`429` over quota, `503` with
+`Retry-After` for capacity or the burst reserve). Any other suspension
+keeps the plain `409` — see [Idle reclamation](#idle-reclamation).
 
 While a lifecycle operation is in flight on the lease (the periodic
 checkpoint, a suspend or a restart), the orchestrator briefly reports
@@ -414,7 +540,9 @@ Access follows the strictest lease model: the **owner** (or an admin,
 who may act on any lease); a grantee's `http` share does **not** carry
 file content, and anyone else gets the usual `404`. Every call counts
 as activity for the idle sweeper. A suspended lease answers `409` on
-every file route (resume it first); a `lost` lease answers `410`. File
+every file route (resume it first), except one suspended by
+`idle_suspend`, which is resumed first and then served (see
+[Idle reclamation](#idle-reclamation)); a `lost` lease answers `410`. File
 counts and sizes are capped at **256 MiB**: a bigger upload is refused
 with `413` before anything is written, and a bigger download with
 `413` instead of the bytes.
@@ -520,7 +648,10 @@ frames carry the same control JSON as above. `started`, `exit_code` and
 `error` stay text JSON frames in both modes.
 
 Closing the WebSocket stops the relay but does **not** kill the process;
-send `stop` or `kill` for that.
+send `stop` or `kill` for that. A stream attach on a lease the idle
+sweep suspended resumes the lease first and then starts the process (see
+[Idle reclamation](#idle-reclamation)); any other suspension keeps the
+`409`.
 
 ### `GET /api/leases/{id}/ports/{port}/dial` — raw TCP to a guest port (WebSocket)
 
@@ -546,7 +677,9 @@ every guest port, a step past what an `http` share grants.
 
 Errors: `400` port out of range or not a number, `403` port 49983 (envd,
 the guest's management port), `404` unknown lease or not the owner's,
-`409` suspended (resume it first), `410` lost, `429` when the owner's 16
+`409` suspended (resume it first — except a lease the idle sweep
+suspended, which is resumed first and then dialed; see
+[Idle reclamation](#idle-reclamation)), `410` lost, `429` when the owner's 16
 concurrent dials are already open, `502` when the lease has no running
 sandbox or the guest port refuses the connection.
 
@@ -726,6 +859,30 @@ new effective seconds — see [Lease events](#lease-events-server-sent-events) �
 the loop's next pass (it ticks every minute). While a lease is busy
 (409-checking lifecycle operations), the setting still applies; the loop
 itself skips busy leases.
+
+### `PUT /api/leases/{id}/idle-policy` — set the idle reclamation threshold
+
+Owner or admin (anyone else gets the usual `404`). Sets the lease's own
+idle reclamation threshold, overriding the host default:
+
+```json
+{"idle_suspend": 3600}
+```
+
+`idle_suspend` is required: `0` = never reclaimed by the idle sweep;
+`60`–`604800` = seconds without activity before the sweep suspends the
+lease. Anything else is `400` naming the field; a non-zero value on a
+non-persistent lease is `400` (suspension needs a persistent lease).
+Response `200 OK`:
+
+```json
+{"id":"…","idle_suspend":3600,"ok":true}
+```
+
+`idle_suspend` in the response is the effective value (the value just
+set). The change emits an `idle_policy` lease event naming the new
+effective seconds — see [Lease events](#lease-events-server-sent-events) — and takes effect on
+the sweep's next pass.
 
 ### Checkpoints
 
@@ -946,6 +1103,8 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `job_exited` | a background exec job ended | `exit <code>` and the last 10 stderr lines (at most 1 KiB) |
 | `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
+| `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
+| `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 
 ### Resume and gaps

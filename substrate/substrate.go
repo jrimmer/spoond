@@ -76,6 +76,19 @@ type NodeInfo struct {
 	HugepageSizeBytes uint64
 }
 
+// FreeHugepageBytes is the hugepage memory neither used nor reserved,
+// in bytes. It saturates at 0: a reading taken while sandboxes start or
+// stop can briefly report used+reserved above total, and the unsigned
+// subtraction would otherwise wrap to an enormous free figure that
+// admits anything.
+func (n NodeInfo) FreeHugepageBytes() uint64 {
+	taken := n.HugepagesUsed + n.HugepagesReserved
+	if taken >= n.HugepagesTotal {
+		return 0
+	}
+	return (n.HugepagesTotal - taken) * n.HugepageSizeBytes
+}
+
 type ExecRequest struct {
 	Args    []string      // argv; spoond passes buildShellArgs(...)
 	Timeout time.Duration // 0 = 30 s

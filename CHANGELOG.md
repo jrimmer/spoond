@@ -38,6 +38,98 @@ summarised from README "Status".
   `spoond_jobs_exited_total{result}`; the dashboard events panel shows
   `job_exited` lines.
 
+### Changed
+
+- **`spoond dash` colour roles.** The dashboard's palette now follows
+  the mockup on the black background: cyan titles and lease ids, blue
+  run state, green ok, amber warn, red bad, violet owners, and each
+  event type coloured by its kind — the lifecycle in cyan, a lease put
+  aside in amber, one lost or timed out in red, anything else dim.
+  Meters draw an amber tick at their warning level, and `spoond top`
+  maps the same roles to ANSI colours. Colour never carries a state
+  alone: every coloured state keeps its glyph or word.
+
+## [2.5.1] - 2026-10-06
+
+### Changed
+
+- **`wait` covers the lease-count cap.** A create refused because its
+  owner is at `max_leases` (`429 lease quota exceeded`) now waits like
+  the other capacity refusals when it sends `wait`, and is admitted
+  once one of the owner's own leases is released; on timeout it gets
+  the same `429` plus `waited_ms`. The `queued` event names it `lease
+  cap`. The cap's own decisions are unchanged, and a create without
+  `wait` answers at once as before. The `grid` package is unchanged
+  since 2.4.0.
+
+## [2.5.0] - 2026-10-06
+
+Waiting for admission and per-lease idle reclamation (#129). Store
+migration 15 adds a column with a default; both features are opt-in, so
+nothing changes until a create sends `wait` or a lease sets
+`idle_suspend`. The `grid` package is unchanged since 2.4.0.
+
+### Added
+
+- **Queued admission (#129 part 1).** A create that cannot be admitted
+  right now can wait for room instead of failing. `POST
+  /api/leases` (and its `/api/sandboxes` alias) gains a `wait` field
+  (seconds, default `0` = today's behaviour exactly), capped at the new
+  `MAX_ADMIT_WAIT_SECS` (default `900`; `0` disables waiting). Only
+  capacity, burst-reserve, cannot-preempt and the `max_mib` refusal
+  wait; the lease-count cap, bad requests, auth and unknown images still
+  answer at once. The in-memory queue is served in fair-share order
+  (the owner furthest under its `guaranteed_mib` first, then FIFO; the
+  `queued` event carries the position, and `GET /api/leases/queue`
+  lists waiting creates with position, age and reason), with
+  each wake-up admitting every queued create that fits, so a smaller one
+  may pass a larger one. Admitted creates carry `waited_ms`; a timeout
+  answers the original refusal with `waited_ms`; a client that goes away
+  drops its ticket; a drain answers every queued create `503 draining`.
+  The lease id is allocated when the create is queued, and the queue
+  emits `queued`/`timed_out` events. New metrics
+  `spoond_leases_queued_oldest_seconds`, `spoond_admit_wait_seconds` and
+  `spoond_admit_timeouts_total`, and the dashboard shows the oldest
+  ticket's age. No schema migration.
+- **Per-lease idle reclamation (#129, part 2).** A persistent lease can
+  be suspended after a period without activity, freeing its hugepages
+  and memory while keeping everything for the next use. Each lease
+  carries an `idle_suspend` threshold in seconds (`0` = never;
+  `60`–`604800` = suspend after that long without activity; omitted =
+  the host default `IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never), set
+  on `POST /api/leases` or with `PUT /api/leases/{id}/idle-policy`
+  (owner or admin) — **migration 0015** adds `idle_suspend` with a
+  default of `-1` (host default), so existing leases are unchanged. A
+  non-zero value needs a persistent lease (`400` otherwise). The idle
+  sweep suspends through the normal pause path (the generation does not
+  change), shares preemption's snapshot-disk floor
+  (`PREEMPT_DISK_FLOOR_PCT`), records `last_action`
+  `idle_suspend/suspend_idle`, emits an `idle_suspended` event and
+  counts in `spoond_idle_suspends_total`; a lease with a non-zero
+  effective `idle_suspend` is reclaimed on it alone, so the plain
+  `IDLE_TIMEOUT_SECS` sweep and held rule 1 skip it, and rules 2 and 5
+  may later release it if it stays idle-suspended and untouched. The
+  **next call resumes it**: exec, stream, the files API and guest port
+  dial on an idle-suspended lease resume it first (admission, class and
+  quota apply) and then serve the call, while any other suspension
+  keeps the `409`. Clone and fork copy the source's value, and the
+  dashboard marks idle-suspended rows (`‖ suspended·i`).
+
+### Fixed
+
+- **Free hugepages never wrap.** A node reading that briefly reports
+  more hugepages used and reserved than it has (sandboxes starting or
+  stopping) made the unsigned free figure wrap to an enormous value, so
+  admission, the held pressure rule, the free-hugepages gauge and
+  `spoond doctor` saw a nearly empty node. Free memory now saturates at
+  0 (`NodeInfo.FreeHugepageBytes`).
+- **Room freed by a release or pause is seen at once.** Since 2.4,
+  admissions take their memory from a cached node reading (refreshed
+  every 15 s); only a preemption gave memory back to it. A release or
+  any other pause now credits the reading too, so a burst or guaranteed
+  admission right after a release is no longer refused on the stale
+  figure until the next refresh.
+
 ## [2.4.0] - 2026-10-06
 
 Capacity: memory quotas, guaranteed and burst leases, and preemption of

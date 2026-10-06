@@ -295,13 +295,14 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN last_action_at`,
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
+		`ALTER TABLE leases DROP COLUMN idle_suspend`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN class`,
 		`ALTER TABLE leases DROP COLUMN priority`,
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
 		`DROP TABLE IF EXISTS lease_jobs`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 16)`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -358,13 +359,14 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
+		`ALTER TABLE leases DROP COLUMN idle_suspend`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN class`,
 		`ALTER TABLE leases DROP COLUMN priority`,
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
 		`DROP TABLE IF EXISTS lease_jobs`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 16)`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -435,7 +437,8 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN priority`,
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE IF EXISTS lease_jobs`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 16)`,
+		`ALTER TABLE leases DROP COLUMN idle_suspend`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
@@ -463,5 +466,56 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 	}
 	if got["lease-without-image"] != 0 {
 		t.Fatalf("memory_mb of a lease with no image row should stay 0, got %d", got["lease-without-image"])
+	}
+}
+
+// TestMigration15IdleSuspendOnV14Database builds a database by hand at
+// version 14 (one existing lease row) and opens it: migration 15 must
+// apply, stamping idle_suspend defaulted to -1 (the host default) so
+// existing leases keep today's behaviour (2.5, #129 part 2).
+func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v14.db")
+	{
+		db, err := Open(path) // applies 0001..0015
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind the file to version 14: drop the column migration 15 added
+	// and remove its schema_migrations row, so the next Open applies
+	// 0015 for real.
+	db14, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN idle_suspend`,
+		`DELETE FROM schema_migrations WHERE version = 15`,
+	} {
+		if _, err := db14.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	if _, err := db14.Exec(
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		 VALUES ('lease-v14', 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'running')`); err != nil {
+		t.Fatalf("seed v14 lease: %v", err)
+	}
+	db14.Close()
+
+	db, err := Open(path) // migration 15 applies here
+	if err != nil {
+		t.Fatalf("open v14 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	row, err := db.GetLease(context.Background(), "lease-v14")
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if row.IdleSuspend != -1 {
+		t.Fatalf("idle_suspend after migration = %d, want -1 (the host default)", row.IdleSuspend)
 	}
 }

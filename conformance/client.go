@@ -338,6 +338,9 @@ type leaseInfo struct {
 	Name          string            `json:"name"`
 	Class         string            `json:"class"`
 	Preempted     bool              `json:"preempted"`
+	// WaitedMS is how long a queued create waited for admission
+	// (#129 part 1); absent (0) when it answered at once.
+	WaitedMS int64 `json:"waited_ms"`
 }
 
 // statResult is the /stat response shape (A1 §5.9).

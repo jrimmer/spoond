@@ -28,14 +28,22 @@ type BackendMetrics struct {
 	PoolEvicted    *prometheus.CounterVec   // {image,reason}: evictions
 
 	// Leases
-	LeasesActive    prometheus.Gauge       // leased (non-warm) sandboxes
-	LeasesQueued    prometheus.Gauge       // demand waiting for a slot
-	LeasesTotal     prometheus.Counter     // cumulative leases granted
-	LeaseGrantDur   prometheus.Histogram   // time from request to ready
-	LeaseOps        *prometheus.CounterVec // {op}: suspend, resume, restart, clone, keepalive
-	LeaseSwept      prometheus.Counter     // TTL-expired leases swept
-	LeaseOrphaned   prometheus.Counter     // orphans detected on startup
-	LeaseHeartbeats prometheus.Counter     // guest-service lease heartbeats accepted
+	LeasesActive prometheus.Gauge // leased (non-warm) sandboxes
+	LeasesQueued prometheus.Gauge // demand waiting for a slot
+	// LeasesQueuedOldest is how long the oldest waiting create has waited
+	// (#129 part 1), for the dashboard's capacity panel.
+	LeasesQueuedOldest prometheus.Gauge
+	LeasesTotal        prometheus.Counter     // cumulative leases granted
+	LeaseGrantDur      prometheus.Histogram   // time from request to ready
+	LeaseOps           *prometheus.CounterVec // {op}: suspend, resume, restart, clone, keepalive
+	LeaseSwept         prometheus.Counter     // TTL-expired leases swept
+	LeaseOrphaned      prometheus.Counter     // orphans detected on startup
+	LeaseHeartbeats    prometheus.Counter     // guest-service lease heartbeats accepted
+
+	// Queued admission (#129 part 1): creates that could not be admitted
+	// are held in process and retried in fair-share order.
+	AdmitWait     prometheus.Histogram // how long admitted creates waited
+	AdmitTimeouts prometheus.Counter   // queued creates that timed out or were cancelled
 
 	// API health
 	HTTPReqs *prometheus.CounterVec   // {path,method,code}: API usage
@@ -105,6 +113,10 @@ type BackendMetrics struct {
 	PreemptionsTotal prometheus.Counter // cumulative preemptions
 	PreemptedLeases  prometheus.Gauge   // leases currently preempted
 
+	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
+	// the idle sweep through the pause path; the next call resumes them.
+	IdleSuspendsTotal prometheus.Counter // cumulative idle suspensions
+
 	// Guest port dials (2.2, #113): host-to-guest TCP over a WebSocket
 	GuestDialsActive prometheus.Gauge       // open WebSocket→guest TCP bridges
 	GuestDialsTotal  *prometheus.CounterVec // {result}: ok, refused, error
@@ -166,6 +178,19 @@ func NewBackendMetrics() *BackendMetrics {
 	m.LeasesQueued = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases_queued",
 		Help: "Demand waiting for a slot — the real capacity-pressure signal.",
+	})
+	m.LeasesQueuedOldest = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "leases_queued_oldest_seconds",
+		Help: "Age of the oldest create waiting for admission.",
+	})
+	m.AdmitWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "admit_wait_seconds",
+		Help:    "How long a queued create waited before it was admitted.",
+		Buckets: []float64{0, 1, 2, 5, 10, 30, 60, 120, 300, 600},
+	})
+	m.AdmitTimeouts = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "admit_timeouts_total",
+		Help: "Queued creates that gave up waiting (timeout, client gone or drain).",
 	})
 	m.LeasesTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "leases_total",
@@ -377,6 +402,13 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Burst leases currently suspended by preemption, awaiting the resume queue.",
 	})
 
+	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
+	// the idle sweep. The next call resumes them.
+	m.IdleSuspendsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "idle_suspends_total",
+		Help: "Persistent leases suspended by the idle sweep (idle_suspend).",
+	})
+
 	// Guest port dials (2.2, #113)
 	m.GuestDialsActive = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "guest_dials_active",
@@ -432,8 +464,9 @@ func NewBackendMetrics() *BackendMetrics {
 	reg.MustRegister(
 		m.PoolReady, m.PoolCap, m.PoolRefill, m.PoolRefillFail,
 		m.PoolRefillDur, m.PoolEvicted,
-		m.LeasesActive, m.LeasesQueued, m.LeasesTotal, m.LeaseGrantDur,
+		m.LeasesActive, m.LeasesQueued, m.LeasesQueuedOldest, m.LeasesTotal, m.LeaseGrantDur,
 		m.LeaseOps, m.LeaseSwept, m.LeaseOrphaned, m.LeaseHeartbeats,
+		m.AdmitWait, m.AdmitTimeouts,
 		m.HTTPReqs, m.HTTPDur,
 		m.LLMReqs, m.LLMDur, m.LLMErrors, m.LLMRateLimit,
 		m.LLMKeyFail, m.LLMKeylessDen, m.LLMInflight,
@@ -450,6 +483,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.KeptBuildsBytes, m.KeptBuilds,
 		m.HeldActions,
 		m.PreemptionsTotal, m.PreemptedLeases,
+		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,

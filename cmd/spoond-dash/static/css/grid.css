@@ -36,6 +36,8 @@ pre.grid > span.gr { display: block; white-space: pre; }
 .g-warn  { color: var(--warn); }
 .g-bad   { color: var(--bad); }
 .g-state { color: var(--state); }
+.g-owner { color: var(--owner); }
+.g-id    { color: var(--title); }
 .g-spark { color: var(--spark); }
 .g-link  { color: var(--link); text-decoration: underline; cursor: pointer; }
 .g-banner { color: var(--banner); font-weight: 700; }

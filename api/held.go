@@ -251,7 +251,12 @@ func suspendedByRule(l *Lease) (time.Time, bool) {
 	switch l.LastAction {
 	case heldRuleIdle + "/" + heldActionSuspendIdle,
 		heldRulePressure + "/" + heldActionSuspendIdle,
-		heldRuleExpiry + "/" + heldActionSuspendLapse:
+		heldRuleExpiry + "/" + heldActionSuspendLapse,
+		// A per-lease idle_suspend suspension (2.5, #129 part 2) is a
+		// rule suspension too: rules 2 and 5 may release it once it has
+		// stayed idle-suspended and untouched. A preempted lease is
+		// excluded above, as before.
+		idleSuspendRule + "/" + heldActionSuspendIdle:
 	default:
 		return time.Time{}, false
 	}
@@ -295,7 +300,7 @@ func (s *Service) pressureShortensIdle(ctx context.Context) (bool, string) {
 	if s.cfg.PressureHeldIdle > 0 {
 		need := uint64(defaultAdmitMemoryMB) * 1024 * 1024
 		if info, err := s.sub.NodeInfo(ctx); err == nil {
-			free := (info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes
+			free := info.FreeHugepageBytes()
 			if info.Status == "healthy" && free < need {
 				return true, fmt.Sprintf("hugepages %d bytes free < %d needed for a default lease", free, need)
 			}
@@ -487,8 +492,11 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 			continue
 		}
 		// A lease with a running background job is active (2.6, #135):
-		// no held rule may suspend it mid-job.
-		if s.hasRunningJobLocked(l.ID) {
+		// no held rule may suspend it mid-job. A lease with its own
+		// effective idle_suspend is reclaimed on its own threshold by
+		// suspendIdleLeases (2.5, #129 part 2): rule 1 and rule 4's
+		// shortening do not apply to it.
+		if s.hasRunningJobLocked(l.ID) || s.effectiveIdleSuspend(l) > 0 {
 			continue
 		}
 		if !now.After(l.LastActive.Add(timeout)) {
@@ -504,7 +512,8 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 		// suspended.
 		s.store.mu.Lock()
 		lastActive := l.LastActive
-		skip := l.released || !l.held() || l.Suspended || l.busy || s.hasRunningJobLocked(l.ID) || !now.After(lastActive.Add(timeout))
+		skip := l.released || !l.held() || l.Suspended || l.busy || s.hasRunningJobLocked(l.ID) ||
+			s.effectiveIdleSuspend(l) > 0 || !now.After(lastActive.Add(timeout))
 		s.store.mu.Unlock()
 		if skip {
 			continue

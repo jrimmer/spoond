@@ -138,7 +138,8 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set |
 | `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |
 | `MAX_TTL_SECS` | `3600` | maximum TTL a consumer may request |
-| `IDLE_TIMEOUT_SECS` | `0` | auto-suspend persistent leases idle for this long (`0` disables) |
+| `IDLE_TIMEOUT_SECS` | `0` | legacy plain-sweep auto-suspend: suspend a persistent lease idle for this long when its effective `idle_suspend` is `0` (`0` disables; new deployments should use `IDLE_SUSPEND_DEFAULT_SECS` and per-lease `idle_suspend`) |
+| `IDLE_SUSPEND_DEFAULT_SECS` | `0` | default per-lease idle reclamation threshold for leases without their own `idle_suspend` (`0` = never; a lease's own `idle_suspend` overrides; #129 part 2) |
 | `HELD_IDLE_TIMEOUT_SECS` | `14400` | suspend a held lease idle this long (held-lease rule 1; `0` disables) |
 | `HELD_SUSPENDED_RELEASE_SECS` | `604800` | release a held lease a rule suspended once it stays untouched this long (rule 2; `0` disables) |
 | `HOLD_TTL_SECS` | `604800` | how long a hold lasts from when it was set or renewed (rule 3; `0` means the default) |

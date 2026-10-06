@@ -45,15 +45,18 @@ type Snapshot struct {
 	// Preempted is the live leases suspended by preemption (#128 part
 	// 3), counted in the store: burst leases the resume queue will bring
 	// back when capacity allows. The attention strip names them.
-	Preempted  int `json:"preempted"`
-	Queued     int `json:"queued"`
-	Granted    int `json:"granted"` // cumulative leases granted
-	Swept      int `json:"swept"`
-	Running    int `json:"running"` // sandboxes on the node
-	Limit      int `json:"limit"`   // node sandbox limit
-	Shares     int `json:"shares"`
-	Users      int `json:"users"`
-	BuildsBusy int `json:"buildsBusy"`
+	Preempted int `json:"preempted"`
+	Queued    int `json:"queued"`
+	// QueuedOldest is the age in seconds of the oldest create waiting for
+	// admission (#129 part 1); 0 when nothing waits.
+	QueuedOldest float64 `json:"queuedOldest"`
+	Granted      int     `json:"granted"` // cumulative leases granted
+	Swept        int     `json:"swept"`
+	Running      int     `json:"running"` // sandboxes on the node
+	Limit        int     `json:"limit"`   // node sandbox limit
+	Shares       int     `json:"shares"`
+	Users        int     `json:"users"`
+	BuildsBusy   int     `json:"buildsBusy"`
 
 	// Rates and latencies over the last interval.
 	ReqPerSec     float64 `json:"reqPerSec"`
@@ -169,10 +172,11 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 }
 
 // eventStyle is the grid style an event type is drawn with: warn for
-// lost and held-lease actions, dim for releases, text for the rest.
+// lost, held-lease actions and idle suspensions, dim for releases, text
+// for the rest.
 func eventStyle(t string) string {
 	switch t {
-	case "lost", "held_action", "job_lost":
+	case "lost", "held_action", "job_lost", "idle_suspended":
 		return "warn"
 	case "released":
 		return "dim"
@@ -232,11 +236,14 @@ type Service struct {
 // holder and no name (e.g. "forgejo: lacy.casa/site #218"). Burst is
 // the lease's admission class (#128 part 2): the state cell shows it
 // as "·b". Preempted marks a burst lease suspended by preemption (#128
-// part 3): the state cell shows it as "·p".
+// part 3): the state cell shows it as "·p". IdleSuspended marks a
+// persistent lease suspended by its own idle_suspend threshold (2.5,
+// #129 part 2): the state cell shows it as "·i".
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name, Comment string
 	Burst                                          bool
 	Preempted                                      bool
+	IdleSuspended                                  bool
 	Holder, HolderURL, HoldState                   string
 	HoldExpires                                    string
 	LastAction                                     string
@@ -431,6 +438,7 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	s.Leases = int(g("spoond_leases_active"))
 	s.ByState = byLabel(fams["spoond_leases"], "state")
 	s.Queued = int(g("spoond_leases_queued"))
+	s.QueuedOldest = g("spoond_leases_queued_oldest_seconds")
 	s.Granted = int(g("spoond_leases_total"))
 	s.Swept = int(g("spoond_lease_swept_total"))
 	s.Running = int(g("spoond_node_running_sandboxes"))
@@ -854,6 +862,10 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		// preempted_at in the store but must not claim to be waiting for
 		// a resume, and the attention strip already excludes lost rows.
 		r.Preempted = preemptedAt != "" && (r.State == "suspended" || r.State == "running" || r.State == "recovered")
+		// An idle-suspended lease shows the "·i" mark while it is
+		// suspended and no preemption claims the row (2.5, #129 part 2).
+		r.IdleSuspended = r.State == "suspended" && preemptedAt == "" &&
+			lastAction == "idle_suspend/suspend_idle"
 		if len(r.ID) > 10 {
 			r.ID = r.ID[:10]
 		}

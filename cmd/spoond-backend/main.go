@@ -85,6 +85,9 @@
 //	                  which the notifier's disk.kept check warns and the
 //	                  dashboard's attention strip shows a row (#126;
 //	                  default 40; 0 disables both)
+//	MAX_ADMIT_WAIT_SECS  how long a create may wait for admission when
+//	                  it sends "wait" (#129 part 1; default 600; 0
+//	                  disables waiting)
 package spoondbackend
 
 import (
@@ -271,6 +274,11 @@ func Main(args []string) int {
 	// defaulting to 0 = never. A lease's own checkpoint_interval (0 or
 	// 60..604800 seconds) overrides it.
 	checkpointDefault := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 0)) * time.Minute
+	// Idle reclamation (2.5, #129 part 2): IDLE_SUSPEND_DEFAULT_SECS is
+	// the default idle_suspend for persistent leases without their own
+	// (-1), itself defaulting to 0 = never; a lease's own idle_suspend
+	// overrides it. Kept in seconds (not a duration) like the lease field.
+	idleSuspendDefault := int64(envIntOr("IDLE_SUSPEND_DEFAULT_SECS", 0))
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 	// The burst lease reserve (#128 part 2): BURST_RESERVE_MIB keeps
 	// this much hugepage memory free of burst leases, so guaranteed
@@ -281,6 +289,10 @@ func Main(args []string) int {
 	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default 15;
 	// fractional values (e.g. 12.5) are honoured.
 	preemptDiskFloorPct := envFloatOr("PREEMPT_DISK_FLOOR_PCT", api.DefaultPreemptDiskFloorPct)
+	// Queued admission (#129 part 1): MAX_ADMIT_WAIT_SECS caps how long
+	// a create may wait for room. 0 disables waiting (the request's
+	// "wait" field is accepted and ignored).
+	maxAdmitWaitSecs := envIntOr("MAX_ADMIT_WAIT_SECS", api.DefaultMaxAdmitWaitSecs)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -342,6 +354,7 @@ func Main(args []string) int {
 		EventsToken:               os.Getenv("EVENTS_TOKEN"),
 		ProxyURL:                  cfg.ProxyURL,
 		CheckpointIntervalDefault: int64(checkpointDefault / time.Second),
+		IdleSuspendDefault:        idleSuspendDefault,
 		TemplateStoragePath:       storagePath,
 		LostGracePersistent:       lostGracePersistent,
 		LostGrace:                 lostGrace,
@@ -360,6 +373,7 @@ func Main(args []string) int {
 		// exited-record retention.
 		MaxRunningJobsPerLease: envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:       int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
+		MaxAdmitWaitSecs:          maxAdmitWaitSecs,
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).

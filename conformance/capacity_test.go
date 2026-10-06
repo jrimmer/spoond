@@ -211,6 +211,138 @@ func TestC1_PreemptionRefillsGuaranteed(t *testing.T) {
 	}
 }
 
+// TestC2_QueuedAdmissionWaitsForRoom: fill the host with burst leases
+// until 503, then a burst create with `"wait": 60` waits instead of
+// failing; deleting one filler admits it within 60 s and the response
+// carries waited_ms > 0 (#129 part 1).
+func TestC2_QueuedAdmissionWaitsForRoom(t *testing.T) {
+	requireCapacity(t)
+	rec := begin(t)
+
+	image := envOr("CONFORMANCE_PREEMPT_IMAGE", "py-base")
+	burstTok := cfg.SecondToken
+
+	// Fill the host with burst leases until 503.
+	var burstIDs []string
+	for i := 0; ; i++ {
+		var st int
+		var body []byte
+		var err error
+		withToken(burstTok, func() {
+			st, body, err = cl.create(map[string]any{
+				"image": image, "ttl": 600, "persistent": true, "burst": true,
+			})
+		})
+		if err != nil {
+			failf(t, "fill create %d: %v", i, err)
+		}
+		if st == 503 {
+			break
+		}
+		if st == 429 {
+			failf(t, "fill create %d: 429 %s: CONFORMANCE_SECOND_TOKEN's user needs no max_leases cap (group C fills the host)", i, truncate(body))
+		}
+		if st != 201 {
+			failf(t, "fill create %d: status %d: %s", i, st, truncate(body))
+		}
+		var l leaseInfo
+		if err := json.Unmarshal(body, &l); err != nil {
+			failf(t, "fill create %d: bad body: %v", i, err)
+		}
+		trackAs(t, burstTok, l.ID)
+		burstIDs = append(burstIDs, l.ID)
+		if i >= 200 {
+			failf(t, "filled 200 burst leases without a 503")
+		}
+	}
+	if len(burstIDs) == 0 {
+		failf(t, "no burst lease was admitted before the 503")
+	}
+	rec.set("burst_leases", len(burstIDs))
+
+	// A burst create that is willing to wait: it is queued, not refused.
+	// Run it on its own goroutine so the test can free room underneath
+	// it.
+	type createOutcome struct {
+		st   int
+		body []byte
+	}
+	done := make(chan createOutcome, 1)
+	go func() {
+		var st int
+		var body []byte
+		var err error
+		withToken(burstTok, func() {
+			st, body, err = cl.create(map[string]any{
+				"image": image, "ttl": 600, "persistent": true, "burst": true, "wait": 60,
+			})
+		})
+		if err != nil {
+			done <- createOutcome{st: 0}
+			return
+		}
+		done <- createOutcome{st: st, body: body}
+	}()
+
+	// Give it a moment to queue, then delete one filler to free room.
+	time.Sleep(2 * time.Second)
+	victim := burstIDs[len(burstIDs)-1]
+	withToken(burstTok, func() {
+		if st, b, err := cl.delete(victim); err != nil || (st != 204 && st != 404) {
+			failf(t, "delete filler %s: status %d: %s (%v)", victim, st, truncate(b), err)
+		}
+	})
+
+	var got createOutcome
+	select {
+	case got = <-done:
+	case <-time.After(60 * time.Second):
+		failf(t, "waiting create did not finish within 60 s")
+	}
+	if got.st != 201 {
+		failf(t, "waiting create status %d, want 201: %s", got.st, truncate(got.body))
+	}
+	var l leaseInfo
+	if err := json.Unmarshal(got.body, &l); err != nil {
+		failf(t, "waiting create: bad body: %v", err)
+	}
+	if l.WaitedMS <= 0 {
+		failf(t, "waiting create waited_ms = %d, want > 0", l.WaitedMS)
+	}
+	rec.set("waited_ms", l.WaitedMS)
+	trackAs(t, burstTok, l.ID)
+}
+
+// TestC3_WaitOnIdleHostAnswersAtOnce: a create with `"wait": 30` on an
+// idle host is admitted at once with waited_ms below 1000 (#129 part 1),
+// always on and outside group C.
+func TestC3_WaitOnIdleHostAnswersAtOnce(t *testing.T) {
+	rec := begin(t)
+	image := envOr("CONFORMANCE_IDLE_IMAGE", "py-base")
+
+	start := time.Now()
+	st, body, err := cl.create(map[string]any{"image": image, "ttl": 60, "wait": 30})
+	if err != nil {
+		failf(t, "create with wait: %v", err)
+	}
+	elapsed := time.Since(start)
+	if st != 201 {
+		failf(t, "idle-host create with wait = %d, want 201: %s", st, truncate(body))
+	}
+	var l leaseInfo
+	if err := json.Unmarshal(body, &l); err != nil {
+		failf(t, "idle-host create: bad body: %v", err)
+	}
+	trackAs(t, cfg.Token, l.ID)
+	if l.WaitedMS >= 1000 {
+		failf(t, "idle-host create waited_ms = %d, want < 1000", l.WaitedMS)
+	}
+	if elapsed > 5*time.Second {
+		failf(t, "idle-host create took %s, want it admitted at once", elapsed)
+	}
+	rec.set("waited_ms", l.WaitedMS)
+}
+
 func strField(m map[string]any, k string) string {
 	if v, ok := m[k].(string); ok {
 		return v

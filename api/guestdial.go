@@ -85,10 +85,10 @@ func (s *Server) handleGuestDial(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	// A suspended lease has no running sandbox to dial into; resume it
-	// first.
-	if lease.Suspended {
-		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+	// A suspended lease has no running sandbox to dial into. One that
+	// idle_suspend suspended resumes first (2.5, #129 part 2); any other
+	// suspension keeps the 409.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	if lease.State == "lost" {

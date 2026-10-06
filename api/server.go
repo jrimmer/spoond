@@ -181,6 +181,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.svc.SetMetrics(s.metrics)
 	s.mux.HandleFunc("POST /api/sandboxes", s.handleCreate)
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
+	s.mux.HandleFunc("GET /api/sandboxes/queue", s.handleQueue)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}", s.handleGetSandbox)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
 	// Background exec jobs (2.6, #135): list, read (with long-poll),
@@ -234,6 +235,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Per-lease checkpoint interval (2.3, #122): owner or admin, 404 for
 	// anyone else.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/checkpoint-policy", s.handleCheckpointPolicy)
+	// Per-lease idle reclamation threshold (2.5, #129 part 2): owner or
+	// admin, 404 for anyone else.
+	s.mux.HandleFunc("PUT /api/sandboxes/{id}/idle-policy", s.handleIdlePolicy)
 	// Restore in place to a kept checkpoint (2.3, #121): owner or admin,
 	// 404 for anyone else and for a build that is not the lease's own.
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restore", s.handleRestore)
@@ -826,6 +830,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// interval in seconds (2.3, #122): 0 = never; omitted (nil) =
 		// the host default (CHECKPOINT_INTERVAL_MINS).
 		CheckpointInterval *int64 `json:"checkpoint_interval"`
+		// IdleSuspend is the lease's own idle reclamation threshold in
+		// seconds (2.5, #129 part 2): 0 = never; omitted (nil) = the
+		// host default (IDLE_SUSPEND_DEFAULT_SECS). Only persistent
+		// leases may set it: suspension needs persistence.
+		IdleSuspend *int64 `json:"idle_suspend"`
 		// Burst asks for a preemptible lease (#128 part 2): it is
 		// classified burst even within the owner's guaranteed_mib, and
 		// admitted only while the node keeps its burst reserve free.
@@ -833,6 +842,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// preempted first (0 = the default).
 		Burst    bool `json:"burst"`
 		Priority *int `json:"priority"`
+		// Wait is how many seconds a create refused for a waitable reason
+		// (#129 part 1) may wait for admission instead. 0 keeps today's
+		// behaviour (answer at once); above 0 it is capped at
+		// MAX_ADMIT_WAIT_SECS, and negative is a bad request.
+		Wait int `json:"wait"`
 		// Secrets (#80) become files under /run/secrets in the guest
 		// (mode 0600, on a 0700 tmpfs). Values are kept in memory only,
 		// never stored, logged or returned.
@@ -883,6 +897,24 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Per-lease idle reclamation (2.5, #129 part 2): omitted (nil) is the
+	// host default; otherwise 0 (never) or 60..604800 seconds. Only a
+	// persistent lease may set a non-zero value: suspension needs
+	// persistence.
+	idleSet := false
+	var idleSecs int64
+	if req.IdleSuspend != nil {
+		idleSet = true
+		idleSecs = *req.IdleSuspend
+		if err := validateIdleSuspend(idleSecs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if idleSecs != 0 && !req.Persistent {
+			writeError(w, http.StatusBadRequest, "idle_suspend needs a persistent lease")
+			return
+		}
+	}
 	secrets, err := validateSecrets(req.Secrets)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -895,6 +927,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		priority = *req.Priority
+	}
+	if req.Wait < 0 {
+		writeError(w, http.StatusBadRequest, "wait must be >= 0")
+		return
 	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
 	if err != nil {
@@ -939,48 +975,104 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			ttl = userMax
 		}
 	}
-	lease, err := s.svc.grantLease(r.Context(), leaseRequest{
+	leaseReq := leaseRequest{
 		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
 		createSecrets: secrets, exposePorts: expose, burst: req.Burst, priority: priority,
-	})
-	if err != nil {
-		switch {
-		case errors.Is(err, errQuotaExceeded):
-			writeError(w, http.StatusTooManyRequests, err.Error())
-		case errors.Is(err, errUnknownImage):
-			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
-		case errors.Is(err, errBurstReserve):
-			// A burst lease that would dip the node under its reserve
-			// (#128 part 2): 503 with a retry hint, not a generic
-			// capacity error.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
-		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
-		default:
-			s.svc.log.Printf("create: grant %s: %v", req.Image, err)
-			writeError(w, http.StatusInternalServerError, "failed to grant lease")
+	}
+	grantStart := time.Now()
+	lease, err := s.svc.grantLease(r.Context(), leaseReq)
+	// Queued admission (#129 part 1): a waitable refusal with "wait" set
+	// is held in the queue and retried in fair-share order while the
+	// request stays open.
+	if err != nil && waitRefusal(err) {
+		if wait, ok := s.svc.admissionWait(req.Wait); ok {
+			t := s.svc.newAdmissionTicket(leaseReq.owner, leaseReq, err, wait)
+			s.svc.wakeAdmissionQueue()
+			var waited time.Duration
+			lease, waited, err = s.svc.waitForAdmission(r.Context(), t)
+			if err != nil {
+				if r.Context().Err() != nil {
+					// The client went away: nothing to write.
+					return
+				}
+				s.writeCreateRefusal(w, req.Image, err, waited)
+				return
+			}
+			s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+			return
 		}
+	}
+	if err != nil {
+		s.writeCreateRefusal(w, req.Image, err, 0)
 		return
 	}
-	// Stamp the hold's clock on the granted lease (grant itself leaves
-	// it zero so unheld grants carry no hold), and the create request's
-	// own checkpoint interval (grant leaves the stored -1, the host
-	// default).
+	// A create that asked to wait but fit at once still reports how long
+	// admission took, so a client can always read waited_ms for a wait
+	// request.
+	waited := time.Duration(0)
+	if req.Wait > 0 {
+		waited = time.Since(grantStart)
+	}
+	s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+}
+
+// writeCreateRefusal writes the failure response for a refused create,
+// including waited_ms when a wait timed out. It carries the same status,
+// body and Retry-After as the immediate refusal.
+func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err error, waited time.Duration) {
+	status := http.StatusInternalServerError
+	msg := "failed to grant lease"
+	retryAfter := 0
+	switch {
+	case errors.Is(err, errQuotaExceeded):
+		status, msg = http.StatusTooManyRequests, err.Error()
+	case errors.Is(err, errUnknownImage):
+		status, msg = http.StatusNotFound, "unknown image tag: "+image
+	case errors.Is(err, errPreemptCannot):
+		// A guaranteed lease that could not preempt (#128 part 3): the
+		// snapshot disk is too full to pause a burst lease.
+		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), burstRetryAfterSecs
+	case errors.Is(err, errBurstReserve):
+		// A burst lease that would dip the node under its reserve
+		// (#128 part 2): 503 with a retry hint, not a generic capacity
+		// error.
+		status, msg, retryAfter = http.StatusServiceUnavailable, err.Error(), burstRetryAfterSecs
+	case errors.Is(err, errDraining):
+		status, msg = http.StatusServiceUnavailable, "draining"
+	case errors.Is(err, substrate.ErrCapacity):
+		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
+	default:
+		s.svc.log.Printf("create: grant %s: %v", image, err)
+	}
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	}
+	body := map[string]any{"error": msg}
+	if waited > 0 {
+		body["waited_ms"] = waited.Milliseconds()
+	}
+	writeJSON(w, status, body)
+}
+
+// writeCreatedLease writes the 201 for a granted create (both the
+// immediate and the queued path): it stamps the hold and the request's
+// checkpoint interval and idle_suspend, then the usual body plus waited_ms when the
+// create waited for admission.
+func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, holderURL string, holdTTL int, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration) {
 	s.svc.store.mu.Lock()
-	if req.Holder != "" {
-		s.svc.setHoldLocked(lease, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second, s.svc.now())
+	if holder != "" {
+		s.svc.setHoldLocked(lease, holder, holderURL, time.Duration(holdTTL)*time.Second, s.svc.now())
 	}
 	if ckptSet {
 		lease.CheckpointInterval = ckptSecs
 	}
+	if idleSet {
+		lease.IdleSuspend = idleSecs
+	}
 	s.svc.saveLeaseLocked(lease)
 	s.svc.store.mu.Unlock()
-	writeJSON(w, http.StatusCreated, map[string]any{
+	body := map[string]any{
 		"id":                  lease.ID,
 		"owner":               lease.Owner,
 		"address":             lease.HostIP,
@@ -995,9 +1087,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"exposed":             exposedMap(lease),
 		"generation":          lease.Generation,
 		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
+		"idle_suspend":        s.svc.effectiveIdleSuspend(lease),
 		"class":               leaseClassRow(lease),
 		"priority":            lease.Priority,
-	})
+	}
+	if waited > 0 {
+		body["waited_ms"] = waited.Milliseconds()
+	}
+	writeJSON(w, http.StatusCreated, body)
 }
 
 // handleEndpoint reports a lease's sandbox endpoint: the substrate
@@ -1052,9 +1149,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id) // stream attach is activity for the idle sweeper
-	// A suspended lease has no running sandbox; resume it first.
-	if lease.Suspended {
-		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+	// A suspended lease has no running sandbox. One that idle_suspend
+	// suspended resumes first (2.5, #129 part 2); any other suspension
+	// keeps the 409.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	// A lease lost in a substrate crash has no sandbox to attach to; the
@@ -1654,28 +1752,8 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
-		case errors.Is(err, errNotPersistent):
-			writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
-		case errors.Is(err, errLeaseBusy):
-			writeError(w, http.StatusConflict, err.Error())
-		case errors.Is(err, errQuotaExceeded):
-			// A suspended lease holds no hugepages, so resuming one
-			// re-passes the memory check (#128): over max_mib answers
-			// 429 and the lease stays suspended.
-			writeError(w, http.StatusTooManyRequests, err.Error())
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
-		case errors.Is(err, errBurstReserve):
-			// A burst lease resuming into a full reserve (#128 part 2):
-			// 503 with a retry hint, the lease stays suspended.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
-		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
-			s.svc.log.Printf("resume %s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "resume failed")
+			s.writeResumeRefusal(w, id, err)
 		}
 		return
 	}
@@ -1684,6 +1762,17 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		"status":  "running",
 		"address": lease.HostIP,
 	})
+}
+
+// handleQueue lists the caller's creates waiting for admission (#129),
+// each with its position in the whole fair-share queue; an admin sees
+// every owner's.
+func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	if isAdmin(r) {
+		owner = ""
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queued": s.svc.queuedCreates(owner)})
 }
 
 // handleList returns the caller's leases.
@@ -1710,10 +1799,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id) // exec is activity for the idle sweeper
-	// A suspended workspace-backed lease has no running sandbox; resume
-	// first.
-	if lease.Suspended {
-		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+	// A suspended workspace-backed lease has no running sandbox. One that
+	// idle_suspend suspended resumes first through the normal resume path
+	// (2.5, #129 part 2); any other suspension keeps the 409.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	// A lease lost in a substrate crash has nothing to exec into (U10).

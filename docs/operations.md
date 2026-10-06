@@ -495,6 +495,24 @@ poll the lease — deleting and recreating it throws away the paused
 work. A client's own `resume` of a preempted lease takes the same path
 and answers `503` while capacity is still short.
 
+**Queued admission** (#129 part 1): a create can wait for room instead
+of failing, by sending `"wait": N` (seconds) on `POST /api/leases` (see
+[api.md](api.md#queued-admission)). `MAX_ADMIT_WAIT_SECS` caps the wait
+(default `900`; `0` disables waiting — the request field is accepted and
+ignored). The queue lives in the backend process and is lost on restart.
+Waiting creates are served in fair-share order: the owner furthest under
+their `guaranteed_mib` first (an owner with no `guaranteed_mib`, or
+already at it, ranks after every owner with headroom), then FIFO; each
+wake-up admits every queued create that fits, so a smaller one may pass
+a larger one. The queue is retried whenever capacity may have freed (a
+lease released, suspended, preempted-and-resumed, or a quota changed)
+and on a 5 s tick. The metrics: `spoond_leases_queued` (current queue
+depth), `spoond_leases_queued_oldest_seconds` (the oldest ticket's age),
+`spoond_admit_wait_seconds` (histogram of the wait of admitted creates)
+and `spoond_admit_timeouts_total` (waits that ended without a lease —
+timeout, client gone or drain). The dashboard's capacity panel shows
+this as `queued N (oldest Ms)`.
+
 `POOL_SIZE` pre-creates that many sandboxes per image with a current
 build so grants are served without a cold restore. Production runs
 `POOL_SIZE=0` — with snapshot restores, a cold grant is tens of
@@ -514,6 +532,7 @@ each request's env.
 |---|---|---|
 | `503 capacity: … bytes of hugepage memory free` | not enough free hugepages for the image, or the node is draining/unhealthy | free sandboxes, lower `POOL_SIZE`, or raise `vm.nr_hugepages` (then re-check with doctor) |
 | `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
+| `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
 | lease shows `preempted` / `‖ suspended·p` | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
 | `410 lease lost in a substrate crash` | the lease had no checkpoint when the orchestrator died | delete the lease; nothing to resume |
 | `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
@@ -614,7 +633,7 @@ the drain is never released by them.
 
 | # | Rule | Variable | Default | Meaning |
 |---|---|---|---|---|
-| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach) |
+| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat, files, guest dial — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach). A lease whose own effective `idle_suspend` is `> 0` is reclaimed by the idle sweep on that value instead and is skipped by rule 1 (and by rule 4's shortening); see [Idle reclamation](#idle-reclamation) |
 | 2 | Stale release | `HELD_SUSPENDED_RELEASE_SECS` | `604800` (7 d) | a held lease suspended by rule 1, 3 or 4 and untouched since for this long is **released** (deleted); the GC reclaims its builds |
 | 3 | Hold lapse | `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS` | `604800` (7 d), `2592000` (30 d) | an unrenewed hold lapses: a running lease is **suspended** (never released), stays held with no expiry, and rule 2 takes it from there |
 | 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a 1 GiB lease — no seeded image is smaller), rule 1 uses the shorter threshold |
@@ -670,6 +689,48 @@ deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
 shows `job_exited` lines, non-zero exits in the warning colour. The
 endpoints, the events and the lease's `jobs` summary are in
 [api.md](api.md).
+
+## Idle reclamation
+
+Persistent leases can be suspended after a period without activity,
+freeing their hugepages and disk-backed memory while keeping everything
+for the next use (the guest's memory continues on resume, so the
+generation does not change). Two mechanisms share the job:
+
+- **the plain sweep** (`IDLE_TIMEOUT_SECS`) and **held rule 1**
+  (`HELD_IDLE_TIMEOUT_SECS`, shortened under pressure by rule 4) apply to
+  leases whose effective `idle_suspend` is `0` — today's behaviour;
+- **the idle sweep** (`#129` part 2) applies to a lease whose effective
+  `idle_suspend` is `> 0`: the lease's own value, or the host default
+  `IDLE_SUSPEND_DEFAULT_SECS` when it has none. `POST /api/leases` and
+  `PUT /api/leases/{id}/idle-policy` set it (`0` = never, `60`–`604800`
+  seconds). A non-zero value needs a persistent lease.
+
+A lease with a non-zero `idle_suspend` is reclaimed on that value alone;
+the plain sweep and rule 1 skip it. Activity is what the sweeps already
+count — exec, stream, proxy, keepalive, guest heartbeat, the files API
+and guest port dial — and the threshold is measured from `LastActive`.
+The sweep suspends through the normal pause path and shares preemption's
+snapshot-disk floor (`PREEMPT_DISK_FLOOR_PCT`): a pause that would take
+the disk under the floor is skipped for that pass and retried on the
+next one. An idle suspension marks the lease `last_action
+idle_suspend/suspend_idle`, emits an `idle_suspended` event and counts
+in `spoond_idle_suspends_total`. Because it is a rule suspension, rules
+2 and 5 may later release the lease if it stays idle-suspended and
+untouched — a preempted lease stays excluded, and nothing running is
+ever released.
+
+The **next call resumes it**: exec, stream, files and guest port dial on
+an `idle_suspend`-suspended lease resume it first through the normal
+resume path (admission, class and quota apply) and then serve the call;
+a refused resume answers what resume would (`429` over quota, `503` with
+`Retry-After` for capacity or the burst reserve) and the lease stays
+suspended. Any other suspension keeps answering `409 lease is suspended;
+resume it first`; an explicit `resume` (and the SSH gateway's resume on
+attach) works as always. `IDLE_TIMEOUT_SECS` remains the legacy host-wide
+knob — new deployments should set `IDLE_SUSPEND_DEFAULT_SECS` and the
+per-lease value instead. Watch idle suspensions with `journalctl -u
+spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
 
 ## Users & identity
 
