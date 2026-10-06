@@ -475,8 +475,8 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// header: the title line centred — SPOOND · host · version · e2b orch
-// · uptime — an ═ rule across the full width, and the legend row, also
+// header: the title line centred — SPOOND · host · version · uptime —
+// an ═ rule across the full width, and the legend row, also
 // centred. The frame time is gone: the status line's clock replaced it.
 func (l *layout) header(g *grid.Grid, y int) {
 	segs := []grid.Seg{
@@ -485,8 +485,6 @@ func (l *layout) header(g *grid.Grid, y int) {
 		{Text: l.host, Style: "text"},
 		{Text: " · ", Style: "dim"},
 		{Text: versionLabel(dashVersion), Style: "text"},
-		{Text: " · ", Style: "dim"},
-		{Text: "e2b " + versionLabel(l.s.Version), Style: "text"},
 	}
 	// spoond's own uptime (the backend process), not the host's: the
 	// host's read as spoond's right after a deploy.

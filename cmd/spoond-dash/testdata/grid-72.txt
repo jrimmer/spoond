@@ -1,4 +1,4 @@
-            SPOOND · vm2.lacy.casa · dev · e2b 0.4.2 · up 9m            
+                  SPOOND · vm2.lacy.casa · dev · up 9m                  
 ════════════════════════════════════════════════════════════════════════
  ▶ running · ‖ suspended · ■ lost · ⭘ recovered · ◆ held · ◉ lapsed hold
 ▲ held lease fedcba0987: expiry/expire 3h00m ago                        
