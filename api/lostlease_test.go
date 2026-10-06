@@ -134,7 +134,7 @@ func seedLostLease(t *testing.T, db *store.DB, id, pause, ckpt string, persisten
 	if err := db.UpsertLease(context.Background(), store.LeaseRow{
 		ID: id, Owner: "consumer-a", Image: "py-base",
 		ResumeBuildID: pause, LastCheckpointBuildID: ckpt,
-		Persistent: persistent, State: "lost",
+		Persistent: persistent, State: "lost", Class: "guaranteed",
 		CreatedAt: gcOld, ExpiresAt: gcOld, LastActive: gcOld, LostAt: lostAt,
 	}); err != nil {
 		t.Fatalf("seed lease %s: %v", id, err)

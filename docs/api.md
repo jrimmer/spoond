@@ -49,6 +49,8 @@ Request:
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
 | `hold_ttl` | int | `0` | seconds the hold lasts from now instead of the default `HOLD_TTL_SECS`; capped at `HOLD_TTL_MAX_SECS`. Ignored when `holder` is empty |
 | `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
+| `burst` | bool | `false` | force the **burst** admission class: the lease is scheduled preemptibly even while the owner's charge stays within their `guaranteed_mib` — see [Lease classes](#lease-classes) |
+| `priority` | int | `0` | preemption order within the lease's class: a lower number is preempted first, between `-128` and `127` (anything else is `400`). Advisory until #128 part 3 makes the scheduler act on it |
 | `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
 
 Response `201 Created`:
@@ -67,6 +69,8 @@ Response `201 Created`:
   "hold_expires_at": "2026-10-08T03:00:00Z",
   "generation": 1,
   "checkpoint_interval": 300,
+  "class": "guaranteed",
+  "priority": 0,
   "exposed": {"9042": "10.11.0.7:9042"}
 }
 ```
@@ -94,7 +98,42 @@ from the LAN. The same map appears in `GET /api/leases`.
 Errors: `400` bad policy/ports/memory/holder/secret fields, `404` unknown image,
 `429` quota — the user's concurrent-lease cap or their memory cap
 (#128, see `POST /api/users/{id}/quota`), `503` capacity (not enough
-free hugepage memory for the image, or the node is not healthy).
+free hugepage memory for the image, or the node is not healthy), and
+`503` `no burst capacity` with `Retry-After: 30` when the lease is
+burst (asked for, or above the owner's `guaranteed_mib`) and the node's
+free hugepages would dip under `BURST_RESERVE_MIB` after it — see
+[Lease classes](#lease-classes).
+
+### Lease classes
+
+Every lease is admitted as `guaranteed` or `burst`, decided once at
+admission (create, fork, clone and every path that resumes a suspended
+lease: resume, warm and cold restart, restore, crash recovery,
+undrain) and persisted with the lease. The class answers one question:
+whose room does this lease take?
+
+- **`guaranteed`** — the owner's running charge with this lease stays
+  within their `guaranteed_mib`. A user with no `guaranteed_mib` keeps
+  every lease guaranteed, which is today's behaviour.
+- **`burst`** — the lease passes the guarantee (the first lease past it
+  bursts), or the request forced it with `"burst": true`. A burst lease
+  is preemptible even within another user's guarantee, and it is
+  admitted only while the node's free hugepages stay above
+  `BURST_RESERVE_MIB` (default 8192, `0` = the reserve is disabled;
+  see [operations.md](operations.md)) after its own — guaranteed work
+  and crash recovery always have room to land. A burst lease refused on
+  the reserve answers `503` `no burst capacity` with `Retry-After: 30`
+  and stays as it was (suspended on resume, uncreated on create).
+
+The class can change at re-admission: a lease that burst because the
+guarantee was full may come back `guaranteed` when the charge has room
+again, while a lease the request forced burst stays burst (`burst` is
+the request's flag, `class` the decided and stored outcome — the flag
+itself is not persisted, so a backend restart re-classifies from the
+owner's standing at the next resume; the stored class still reads burst
+until then). `priority`
+orders preemption within a class (lower is preempted first, `0` the
+default) and is stored with the lease.
 
 ### `GET /api/leases` — list leases
 
@@ -103,7 +142,8 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
 `name`, `comment`, `holder`, `holder_url`, `net_policy`,
 `egress_allowlist`, `exposed`, `generation`, `checkpoint_interval`
-(effective seconds; `0` = never).
+(effective seconds; `0` = never), `class` and `priority` (see
+[Lease classes](#lease-classes)).
 
 A held lease's row adds `hold_expires_at` (RFC 3339, when the hold
 expires and normal sweeping resumes) and — after the first automatic
@@ -392,7 +432,10 @@ session starts. Response
 `409` if the lease is busy (another lifecycle operation is in flight).
 A suspended lease holds no hugepages, so resuming one re-passes the
 owner's memory quota (#128): `429` when the charge would pass
-`max_mib` — the lease stays suspended. Resuming a lease that is
+`max_mib` — the lease stays suspended. The resume re-decides the
+lease's class too (#128 part 2): a burst lease coming back into a full
+burst reserve answers `503` `no burst capacity` with `Retry-After: 30`
+and stays suspended. Resuming a lease that is
 already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.)
@@ -433,8 +476,11 @@ Response `{"id":"…","status":"running","message":"lease restarted"}`.
 `404` unknown, `400` for an unknown mode, `409` when busy; restarting a
 suspended lease brings its guest (and its hugepages) back, so it
 re-passes the owner's memory quota (#128): `429` when the charge would
-pass `max_mib` — the lease stays suspended, untouched. A substrate
-failure on the fresh-guest path (which does create a sandbox) surfaces
+pass `max_mib` — the lease stays suspended, untouched. The restart
+re-decides the lease's class (#128 part 2), so a burst lease restarting
+into a full burst reserve answers `503` `no burst capacity` with
+`Retry-After: 30` — like resume, fork and clone — and stays suspended.
+A substrate failure on the fresh-guest path (which does create a sandbox) surfaces
 as `500`, not `503` — unlike create, fork and clone, restart does not
 map capacity errors to `503`.
 
@@ -492,7 +538,10 @@ it); `409` while another operation is in flight; a substrate capacity
 failure maps to `503`. Restoring a suspended lease brings a running
 sandbox (and its hugepages) back, so it re-passes the owner's memory
 quota (#128): `429` when the charge would pass `max_mib` — the lease
-stays suspended, untouched.
+stays suspended, untouched. The restore re-decides the lease's class
+(#128 part 2), so a burst lease restored into a full burst reserve
+answers `503` `no burst capacity` with `Retry-After: 30`, and the
+lease stays as it was.
 
 The lease keeps its id, owner, holder, name, network policy, exposed
 ports and `checkpoint_interval`. Everything else about the guest starts
@@ -577,7 +626,8 @@ friendly *name*). Response `201 Created`:
 
 The clone costs the source image's `memory_mb` against the owner's
 memory quota like any create (#128); `429` when it would pass
-`max_mib`.
+`max_mib`. The clone is classified and held to the burst reserve like
+any create (#128 part 2); a refusal answers `503` `no burst capacity`.
 
 ### `POST /api/leases/{id}/fork` — N copies of a running lease
 
@@ -599,7 +649,10 @@ Response `201 Created`:
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
 suspended or busy, `429` quota — including the memory cap (#128): each
 fork costs its image's `memory_mb`, `count` times, reserved up front,
-all or nothing — `503` capacity.
+all or nothing — `503` capacity. Every child is classified at
+admission (#128 part 2): with the whole batch's charge pending, all
+children of a fork past the guarantee burst together, and a burst child
+refused on the reserve fails the call with `503` `no burst capacity`.
 
 ### `POST /api/leases/{id}/network` — change egress policy live
 
@@ -1110,9 +1163,11 @@ TTL ceiling, the kept-checkpoint byte budget (#126), and the memory
 quota (#128): the sum of `memory_mb` over the user's **running** leases
 may not pass `M` (`0` = no cap; a suspended lease holds no hugepages
 and is not charged). All five default to `0` =
-unlimited/unset. `guaranteed_mib` is the user's memory floor, advisory
-in this part (#128 part 1): admission never counts it against them, and
-it must be `<= max_mib` when both are set (`400` otherwise). Over-cap
+unlimited/unset. `guaranteed_mib` is the user's guaranteed-memory
+floor: a lease whose charge keeps the owner's running sum within it is
+admitted `guaranteed`; once the sum passes it, the next lease is
+admitted `burst` (see [Lease classes](#lease-classes)). It must be
+`<= max_mib` when both are set (`400` otherwise). Over-cap
 creates, forks and clones return `429`; so does any operation that
 brings a suspended lease's guest back over the cap — resume, restart,
 restore, crash recovery, undrain — leaving the lease suspended (or

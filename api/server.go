@@ -789,6 +789,11 @@ func isAdmin(r *http.Request) bool {
 	return u != nil && u.Admin
 }
 
+// burstRetryAfterSecs is the Retry-After a refused burst carries: the
+// reserve frees as guaranteed work suspends, usually well inside a
+// minute.
+const burstRetryAfterSecs = 30
+
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -815,6 +820,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// interval in seconds (2.3, #122): 0 = never; omitted (nil) =
 		// the host default (CHECKPOINT_INTERVAL_MINS).
 		CheckpointInterval *int64 `json:"checkpoint_interval"`
+		// Burst asks for a preemptible lease (#128 part 2): it is
+		// classified burst even within the owner's guaranteed_mib, and
+		// admitted only while the node keeps its burst reserve free.
+		// Priority orders preemption within a class: a lower number is
+		// preempted first (0 = the default).
+		Burst    bool `json:"burst"`
+		Priority *int `json:"priority"`
 		// Secrets (#80) become files under /run/secrets in the guest
 		// (mode 0600, on a 0700 tmpfs). Values are kept in memory only,
 		// never stored, logged or returned.
@@ -870,6 +882,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	priority := 0
+	if req.Priority != nil {
+		if *req.Priority < -128 || *req.Priority > 127 {
+			writeError(w, http.StatusBadRequest, "priority must be between -128 and 127")
+			return
+		}
+		priority = *req.Priority
+	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "image catalog unavailable")
@@ -913,13 +933,22 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			ttl = userMax
 		}
 	}
-	lease, err := s.svc.grant(r.Context(), ownerFrom(r.Context()), req.Image, ttl, req.Persistent, req.NetPolicy, req.NetAllow, req.Holder, req.HolderURL, secrets, expose...)
+	lease, err := s.svc.grantLease(r.Context(), leaseRequest{
+		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
+		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
+		createSecrets: secrets, exposePorts: expose, burst: req.Burst, priority: priority,
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
 		case errors.Is(err, errUnknownImage):
 			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
+		case errors.Is(err, errBurstReserve):
+			// A burst lease that would dip the node under its reserve
+			// (#128 part 2): 503 with a retry hint, not a generic
+			// capacity error.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
@@ -956,6 +985,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"exposed":             exposedMap(lease),
 		"generation":          lease.Generation,
 		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
+		"class":               leaseClassRow(lease),
+		"priority":            lease.Priority,
 	})
 }
 
@@ -1355,6 +1386,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// hugepages) back, so it re-passes the memory check (#128):
 			// over max_mib answers 429 and the lease stays suspended.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errBurstReserve):
+			// Restart re-admits a suspended lease like a resume, so a
+			// burst lease restarting into a full reserve answers 503
+			// with a retry hint too (#128 part 2); the lease stays
+			// suspended.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")
@@ -1612,6 +1649,10 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 			// re-passes the memory check (#128): over max_mib answers
 			// 429 and the lease stays suspended.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errBurstReserve):
+			// A burst lease resuming into a full reserve (#128 part 2):
+			// 503 with a retry hint, the lease stays suspended.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
@@ -1949,6 +1990,8 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// Quota enforcement (security review #37 rescan F1): clone
 			// surfaces the same 429 as create, not a generic 500.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errBurstReserve):
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
@@ -2006,6 +2049,8 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errBurstReserve):
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
@@ -2154,6 +2199,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeErrorAfter is writeError with a Retry-After header (seconds):
+// the shape a refused burst is answered with (#128 part 2).
+func writeErrorAfter(w http.ResponseWriter, status int, retryAfter int, msg string) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeError(w, status, msg)
 }
 
 // tailStr returns the last n bytes of s, prefixed with a truncation marker

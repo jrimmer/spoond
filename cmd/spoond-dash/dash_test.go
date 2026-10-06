@@ -282,6 +282,58 @@ func TestUserNamesLayouts(t *testing.T) {
 	}
 }
 
+// TestFromDBBurstCountsAllLiveBurstLeases: the capacity panel's burst
+// count comes from the store over every live burst lease, not from the
+// ≤40 rows the leases panel reads — a burst lease older than the
+// display window still counts.
+func TestFromDBBurstCountsAllLiveBurstLeases(t *testing.T) {
+	cfg := testConfig(t, "")
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	raw, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
+	// 41 running burst leases (the oldest outside the 40-row window), a
+	// guaranteed lease, a lost burst lease (not live) and a suspended
+	// burst lease.
+	queries := []string{
+		`INSERT INTO images (name, template_id, current_build_id, vcpu, memory_mb, disk_mb, updated_at) VALUES ('go-base','t1','b1',2,2048,6144,'` + ts(-48*time.Hour) + `')`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class) VALUES ('guaranteed','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','running','guaranteed')`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class) VALUES ('lost-burst','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','lost','burst')`,
+	}
+	for i := 0; i < 41; i++ {
+		queries = append(queries, fmt.Sprintf(
+			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class) VALUES ('burst-%02d','u-1','go-base','%s','%s','%s','running','burst')`,
+			i, ts(-time.Duration(i+2)*time.Minute), ts(time.Hour), ts(0)))
+	}
+	queries = append(queries,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class) VALUES ('susp-burst','u-1','go-base','`+ts(-2*time.Hour)+`','`+ts(time.Hour)+`','`+ts(0)+`','suspended',1,'burst')`)
+	for _, q := range queries {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	raw.Close()
+	os.WriteFile(cfg.UsersFile, []byte(`{"users":[{"id":"u-1","name":"ci"}]}`), 0o600)
+
+	var s Snapshot
+	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Rows) != 40 {
+		t.Fatalf("rows = %d, want the display window's 40", len(s.Rows))
+	}
+	if s.Burst != 42 {
+		t.Fatalf("burst = %d, want 42 (41 running + 1 suspended, live; the lost one and the guaranteed one excluded)", s.Burst)
+	}
+}
+
 func TestFromDBReadsLeasesAndImages(t *testing.T) {
 	cfg := testConfig(t, "")
 	db, err := store.Open(cfg.DBPath)

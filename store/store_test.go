@@ -53,12 +53,13 @@ func TestLeaseRoundTrip(t *testing.T) {
 		LastCheckpointAt: base.Add(2 * time.Minute), RecoveredFrom: base,
 		LostAt: base.Add(3 * time.Minute), Drained: true,
 		Holder: "ci-job-42", HolderUrl: "https://ci.example.com/jobs/42",
+		Class: "guaranteed",
 	}
 	// Zero times, nil slices and empty strings everywhere they can be.
 	minimal := LeaseRow{
 		ID: "lease-2", Owner: "bob", Image: "go-base",
 		CreatedAt: base, ExpiresAt: base.Add(time.Hour), LastActive: base,
-		State: "running",
+		State: "running", Class: "guaranteed",
 	}
 
 	for _, row := range []LeaseRow{full, minimal} {
@@ -117,7 +118,7 @@ func TestDeleteLeaseCascadesShares(t *testing.T) {
 	if err := db.UpsertLease(ctx, LeaseRow{
 		ID: "lease-1", Owner: "alice", Image: "py-base",
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
-		State: "running",
+		State: "running", Class: "guaranteed",
 	}); err != nil {
 		t.Fatalf("upsert lease: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestUniqueOwnerName(t *testing.T) {
 		return LeaseRow{
 			ID: id, Owner: "owner-1", Image: "py-base", Name: name,
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
-			State: "running",
+			State: "running", Class: "guaranteed",
 		}
 	}
 
@@ -228,7 +229,7 @@ func TestUpdateLastActive(t *testing.T) {
 		if err := db.UpsertLease(ctx, LeaseRow{
 			ID: id, Owner: "o", Image: "py-base",
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
-			State: "running",
+			State: "running", Class: "guaranteed",
 		}); err != nil {
 			t.Fatalf("upsert %s: %v", id, err)
 		}
@@ -295,8 +296,10 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
+		`ALTER TABLE leases DROP COLUMN class`,
+		`ALTER TABLE leases DROP COLUMN priority`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12)`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -354,8 +357,10 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN generation`,
 		`ALTER TABLE leases DROP COLUMN checkpoint_interval`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
+		`ALTER TABLE leases DROP COLUMN class`,
+		`ALTER TABLE leases DROP COLUMN priority`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12)`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -402,7 +407,7 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		if err := db.UpsertLease(ctx, LeaseRow{
 			ID: id, Owner: "alice", Image: "py-base",
 			CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
-			LastActive: time.Now(), State: "running",
+			LastActive: time.Now(), State: "running", Class: "guaranteed",
 		}); err != nil {
 			t.Fatalf("seed lease %s: %v", id, err)
 		}
@@ -414,20 +419,23 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// Rewind to version 11 so migration 12 applies for real.
+	// Rewind to version 12 so migration 13 applies for real, and to 11
+	// so migration 12 (the memory_mb backfill this test pins) applies
+	// after it.
 	db11, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if _, err := db11.Exec(
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN class`,
+		`ALTER TABLE leases DROP COLUMN priority`,
+		`DELETE FROM schema_migrations WHERE version = 13`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
-	); err != nil {
-		t.Fatalf("rewind: %v", err)
-	}
-	if _, err := db11.Exec(
 		`DELETE FROM schema_migrations WHERE version = 12`,
-	); err != nil {
-		t.Fatalf("rewind version: %v", err)
+	} {
+		if _, err := db11.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
 	}
 	db11.Close()
 

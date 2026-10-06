@@ -263,6 +263,10 @@ func Main(args []string) int {
 	// 60..604800 seconds) overrides it.
 	checkpointDefault := time.Duration(envIntOr("CHECKPOINT_INTERVAL_MINS", 0)) * time.Minute
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
+	// The burst lease reserve (#128 part 2): BURST_RESERVE_MIB keeps
+	// this much hugepage memory free of burst leases, so guaranteed
+	// work always has room to land; 0 disables the reserve.
+	burstReserveMiB := envIntOr("BURST_RESERVE_MIB", api.DefaultBurstReserveMiB)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -336,6 +340,7 @@ func Main(args []string) int {
 		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
+		BurstReserveMiB:           burstReserveMiB,
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
