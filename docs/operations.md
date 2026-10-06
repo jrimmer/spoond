@@ -278,14 +278,25 @@ A directory is **needed**, and never touched, when it is:
 - modified within the last `ORPHAN_MIN_AGE_SECS` (default `3600`), so a
   directory in use or still being written is spared.
 
-Everything else is an orphan. With the dry-run GC the pass logs
-`gc: would reap orphan <id> (<size>)` and deletes nothing; with
-`GC_DELETE=1` it removes the directory (`os.RemoveAll`), reads
-`spoond_gc_orphans_reaped_total` and
-`spoond_gc_orphan_bytes_reaped_total`, and counts the space into the
-pass's `gc` event. The reap is refused (logged and skipped, never
-failing the pass) when the catalog read fails or names no needed builds
-at all.
+Everything else is an orphan. `ORPHAN_REAP` selects what happens to one:
+
+- `dryrun` (the default) logs
+  `gc: would reap orphan <id> (<size>)` and changes nothing;
+- `quarantine` moves the directory to
+  `<storage path>/../quarantine/<id>`, dropping a `.spoond-quarantine`
+  marker that dates the move; every later pass moves a quarantined
+  directory back if a catalog build, lease, kept build, sandbox or image
+  needs it again, and deletes it only once it has sat there for
+  `ORPHAN_QUARANTINE_SECS` (default `86400`) — so a misclassification is
+  recoverable for a day, across backend restarts;
+- `off` disables the reap entirely.
+
+`GC_DELETE` does not control the orphan reap. When a quarantined
+orphan is finally deleted, it is removed with `os.RemoveAll`, and the
+space counts into `spoond_gc_orphans_reaped_total`,
+`spoond_gc_orphan_bytes_reaped_total` and the pass's `gc` event. The
+reap is refused (logged and skipped, never failing the pass) when the
+catalog read fails or names no needed builds at all.
 
 Disk accounting runs with the GC: each non-deleted build's `size_bytes`
 is refreshed (allocated blocks, not apparent size) and exposed as

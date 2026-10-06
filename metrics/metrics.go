@@ -102,8 +102,10 @@ type BackendMetrics struct {
 	StorageFree   prometheus.Gauge       // free bytes at the template storage path
 	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
 	// GCOrphansReaped / GCOrphanBytesReaped count the orphan build
-	// directories the catalog never records (spoond-5sr): how many were
-	// removed and the bytes they held.
+	// directories the GC finally deletes (the catalog never records
+	// them; spoond-5sr): how many went and the bytes they held. In
+	// quarantine mode a directory is deleted only after it has sat in
+	// quarantine for ORPHAN_QUARANTINE_SECS.
 	GCOrphansReaped     prometheus.Counter
 	GCOrphanBytesReaped prometheus.Counter
 	// Kept checkpoints (#126): pins of live leases and their bytes.
@@ -382,7 +384,7 @@ func NewBackendMetrics() *BackendMetrics {
 	}, []string{"kind"})
 	m.GCOrphansReaped = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "gc_orphans_reaped_total",
-		Help: "Orphan build directories removed by the GC (never recorded or already deleted).",
+		Help: "Orphan build directories deleted by the GC (never recorded or already deleted).",
 	})
 	m.GCOrphanBytesReaped = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "gc_orphan_bytes_reaped_total",

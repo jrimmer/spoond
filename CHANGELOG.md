@@ -24,10 +24,14 @@ summarised from README "Status".
   keeping any directory a catalog build, lease, kept build, sandbox or
   image still names, any directory reachable from those through a
   `memfile.header` / `rootfs.ext4.header`, and any changed within
-  `ORPHAN_MIN_AGE_SECS` (default 1 h). The reap honours `GC_DELETE`
-  (dry-run logs `gc: would reap orphan <id> (<size>)`), counts
-  `spoond_gc_orphans_reaped_total` and
-  `spoond_gc_orphan_bytes_reaped_total`, and rides the pass's `gc` event.
+  `ORPHAN_MIN_AGE_SECS` (default 1 h). `ORPHAN_REAP` chooses the policy:
+  `dryrun` (default) logs `gc: would reap orphan <id> (<size>)` and
+  changes nothing, `quarantine` moves the directory to
+  `<storage path>/../quarantine/<id>` with a marker and restores or
+  finally deletes it (after `ORPHAN_QUARANTINE_SECS`, default 24 h), and
+  `off` disables the reap. `GC_DELETE` no longer governs this path. The
+  reap counts `spoond_gc_orphans_reaped_total` and
+  `spoond_gc_orphan_bytes_reaped_total` and rides the pass's `gc` event.
 
 ## [2.6.4] - 2026-10-06
 

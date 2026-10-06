@@ -45,11 +45,11 @@ func dirExists(path string) bool {
 }
 
 // TestReapOrphansKeepsCatalogBuild: a non-deleted catalog build's
-// directory is needed and never reaped, even with GC_DELETE=1 and an old
-// mtime.
+// directory is needed and never reaped, even in quarantine mode and with
+// an old mtime.
 func TestReapOrphansKeepsCatalogBuild(t *testing.T) {
 	svc, buf, db, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "1")
+	t.Setenv("ORPHAN_REAP", "quarantine")
 	buildID := e2b.NewUUID()
 	seedGCBuild(t, db, buildID, "template", "", "consumer-a", "ready", e2b.NewTemplateID())
 	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, buildID)
@@ -72,7 +72,7 @@ func TestReapOrphansKeepsCatalogBuild(t *testing.T) {
 // an old, unrecorded, unreferenced directory is reaped.
 func TestReapOrphansKeepsHeaderChain(t *testing.T) {
 	svc, _, db, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "1")
+	t.Setenv("ORPHAN_REAP", "quarantine")
 	a := e2b.NewUUID()
 	seedGCBuild(t, db, a, "template", "", "consumer-a", "ready", e2b.NewTemplateID())
 	b, c, orphan := e2b.NewUUID(), e2b.NewUUID(), e2b.NewUUID()
@@ -97,24 +97,28 @@ func TestReapOrphansKeepsHeaderChain(t *testing.T) {
 		ageDir(t, d)
 	}
 
-	if reaped, _ := svc.reapOrphans(context.Background()); reaped != 1 {
-		t.Errorf("reaped = %d, want 1 (the unreferenced orphan)", reaped)
+	// The reap quarantines the orphan; removal takes a second pass after
+	// the quarantine period, which the delete-after-age test covers.
+	if _, _ = svc.reapOrphans(context.Background()); dirExists(dirOrphan) {
+		t.Errorf("unreferenced orphan %s stayed in the storage path", orphan)
 	}
 	for _, d := range []string{dirA, dirB, dirC} {
 		if !dirExists(d) {
 			t.Errorf("header-referenced build %s was removed", filepath.Base(d))
 		}
 	}
-	if dirExists(dirOrphan) {
-		t.Errorf("unreferenced orphan %s survived", orphan)
+	// The orphan is now in quarantine, not deleted.
+	if !dirExists(filepath.Join(svc.quarantineDir(), orphan)) {
+		t.Errorf("orphan %s was not quarantined", orphan)
 	}
 }
 
-// TestReapOrphansReapsDeletedAndUnknown: a catalog build marked deleted
-// and a directory the catalog never recorded are both orphans and go.
-func TestReapOrphansReapsDeletedAndUnknown(t *testing.T) {
+// TestReapOrphansQuarantinesDeletedAndUnknown: a catalog build marked
+// deleted and a directory the catalog never recorded are both orphans and
+// are moved to quarantine (not deleted) in quarantine mode.
+func TestReapOrphansQuarantinesDeletedAndUnknown(t *testing.T) {
 	svc, buf, db, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "1")
+	t.Setenv("ORPHAN_REAP", "quarantine")
 	// One non-deleted build keeps the root set non-empty.
 	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
 	deleted := e2b.NewUUID()
@@ -126,20 +130,158 @@ func TestReapOrphansReapsDeletedAndUnknown(t *testing.T) {
 	ageDir(t, dirUnknown)
 
 	reaped, freed := svc.reapOrphans(context.Background())
-	if reaped != 2 {
-		t.Errorf("reaped = %d, want 2", reaped)
+	if reaped != 0 {
+		t.Errorf("reaped = %d, want 0 (quarantine only)", reaped)
+	}
+	if freed != 0 {
+		t.Errorf("freed = %d, want 0 (quarantine only)", freed)
+	}
+	if dirExists(dirDeleted) || dirExists(dirUnknown) {
+		t.Errorf("a deleted or unknown directory stayed in the storage path; log:\n%s", buf.String())
+	}
+	for _, id := range []string{deleted, unknown} {
+		if !dirExists(filepath.Join(svc.quarantineDir(), id)) {
+			t.Errorf("orphan %s was not quarantined", id)
+		}
+	}
+}
+
+// TestReapOrphansQuarantineRestore: a quarantined directory that a later
+// pass needs again is moved back into the storage path and its marker
+// dropped.
+func TestReapOrphansQuarantineRestore(t *testing.T) {
+	svc, _, db, _ := gcTestService(t)
+	t.Setenv("ORPHAN_REAP", "quarantine")
+	// Keep the root set non-empty with an unrelated live build.
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	id := e2b.NewUUID()
+	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, id)
+	ageDir(t, dir)
+
+	if _, _ = svc.reapOrphans(context.Background()); dirExists(dir) {
+		t.Fatalf("orphan was not quarantined")
+	}
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	if !dirExists(qdir) {
+		t.Fatalf("orphan not found in quarantine")
+	}
+	// A catalog build row naming the quarantined id makes it needed.
+	seedGCBuild(t, db, id, "pause", "", "consumer-a", "ready", e2b.NewTemplateID())
+	svc.reapOrphans(context.Background())
+
+	if !dirExists(dir) {
+		t.Errorf("needed quarantined directory was not restored")
+	}
+	if dirExists(qdir) {
+		t.Errorf("quarantined copy survived the restore")
+	}
+	if _, err := os.Stat(filepath.Join(dir, orphanQuarantineMarker)); !os.IsNotExist(err) {
+		t.Errorf("marker survived the restore: %v", err)
+	}
+}
+
+// TestReapOrphansQuarantineDeletesAfterAge: a quarantined directory is
+// deleted only after ORPHAN_QUARANTINE_SECS, and the marker date survives
+// a restart (a fresh Service reading the same directory).
+func TestReapOrphansQuarantineDeletesAfterAge(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	t.Setenv("ORPHAN_REAP", "quarantine")
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	id := e2b.NewUUID()
+	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, id)
+	ageDir(t, dir)
+
+	if _, _ = svc.reapOrphans(context.Background()); dirExists(dir) {
+		t.Fatalf("orphan was not quarantined")
+	}
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	if !dirExists(qdir) {
+		t.Fatalf("quarantined directory missing")
+	}
+
+	// A fresh service (a restart) sees a young quarantine and deletes
+	// nothing.
+	svc2, _, db2, _ := gcTestService(t)
+	svc2.cfg.TemplateStoragePath = svc.cfg.TemplateStoragePath
+	seedGCBuild(t, db2, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	if reaped, _ := svc2.reapOrphans(context.Background()); reaped != 0 {
+		t.Errorf("young quarantine reaped = %d, want 0", reaped)
+	}
+	if !dirExists(qdir) {
+		t.Fatalf("young quarantined directory was removed")
+	}
+
+	// With no quarantine period left, the next pass deletes it.
+	t.Setenv("ORPHAN_QUARANTINE_SECS", "1")
+	time.Sleep(1100 * time.Millisecond)
+	reaped, freed := svc2.reapOrphans(context.Background())
+	if reaped != 1 {
+		t.Errorf("aged quarantine reaped = %d, want 1; log:\n%s", reaped, buf.String())
 	}
 	if freed <= 0 {
 		t.Errorf("freed = %d, want > 0", freed)
 	}
-	if dirExists(dirDeleted) || dirExists(dirUnknown) {
-		t.Errorf("a deleted or unknown directory survived; log:\n%s", buf.String())
+	if dirExists(qdir) {
+		t.Errorf("aged quarantined directory survived")
 	}
-	if n := counterValue(t, svc.metrics.GCOrphansReaped); n != 2 {
-		t.Errorf("gc_orphans_reaped_total = %v, want 2", n)
+	if n := counterValue(t, svc2.metrics.GCOrphansReaped); n != 1 {
+		t.Errorf("gc_orphans_reaped_total = %v, want 1", n)
 	}
-	if n := counterValue(t, svc.metrics.GCOrphanBytesReaped); n <= 0 {
+	if n := counterValue(t, svc2.metrics.GCOrphanBytesReaped); n <= 0 {
 		t.Errorf("gc_orphan_bytes_reaped_total = %v, want > 0", n)
+	}
+}
+
+// TestReapOrphansQuarantineMarkerSurvivesRestart: the marker, not the
+// directory mtime, dates the quarantine, so a marker written in the past
+// is honoured by a service that just started.
+func TestReapOrphansQuarantineMarkerSurvivesRestart(t *testing.T) {
+	svc, _, db, _ := gcTestService(t)
+	t.Setenv("ORPHAN_REAP", "quarantine")
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	id := e2b.NewUUID()
+	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, id)
+	ageDir(t, dir)
+	if _, _ = svc.reapOrphans(context.Background()); dirExists(dir) {
+		t.Fatalf("orphan was not quarantined")
+	}
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	// Backdate the marker (and the directory) by two days: past the
+	// default 24 h quarantine.
+	old := time.Now().Add(-48 * time.Hour)
+	if err := writeQuarantineMarker(qdir, old); err != nil {
+		t.Fatalf("backdate marker: %v", err)
+	}
+
+	svc2, _, db2, _ := gcTestService(t)
+	svc2.cfg.TemplateStoragePath = svc.cfg.TemplateStoragePath
+	seedGCBuild(t, db2, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	if reaped, _ := svc2.reapOrphans(context.Background()); reaped != 1 {
+		t.Errorf("reaped = %d, want 1 (marker dated it)", reaped)
+	}
+	if dirExists(qdir) {
+		t.Errorf("quarantined directory survived despite an old marker")
+	}
+}
+
+// TestReapOrphansOff: ORPHAN_REAP=off leaves everything alone, even a
+// clear orphan.
+func TestReapOrphansOff(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	t.Setenv("ORPHAN_REAP", "off")
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	orphan := e2b.NewUUID()
+	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, orphan)
+	ageDir(t, dir)
+
+	if reaped, _ := svc.reapOrphans(context.Background()); reaped != 0 {
+		t.Errorf("reaped = %d, want 0 with ORPHAN_REAP=off", reaped)
+	}
+	if !dirExists(dir) {
+		t.Errorf("ORPHAN_REAP=off touched the orphan")
+	}
+	if strings.Contains(buf.String(), orphan) {
+		t.Errorf("ORPHAN_REAP=off logged the orphan:\n%s", buf.String())
 	}
 }
 
@@ -147,7 +289,7 @@ func TestReapOrphansReapsDeletedAndUnknown(t *testing.T) {
 // ORPHAN_MIN_AGE_SECS may still be in use, so it is never touched.
 func TestReapOrphansKeepsRecent(t *testing.T) {
 	svc, _, db, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "1")
+	t.Setenv("ORPHAN_REAP", "quarantine")
 	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
 	recent := e2b.NewUUID()
 	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, recent) // mtime now
@@ -156,15 +298,15 @@ func TestReapOrphansKeepsRecent(t *testing.T) {
 		t.Errorf("reaped = %d, want 0: a recent directory was touched", reaped)
 	}
 	if !dirExists(dir) {
-		t.Errorf("recent directory was removed")
+		t.Errorf("recent directory was quarantined")
 	}
 }
 
-// TestReapOrphansDryRun: the default (GC_DELETE unset) logs the orphan
-// and removes nothing.
+// TestReapOrphansDryRun: the default (ORPHAN_REAP unset) logs the orphan
+// and changes nothing.
 func TestReapOrphansDryRun(t *testing.T) {
 	svc, buf, db, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "")
+	t.Setenv("ORPHAN_REAP", "")
 	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
 	orphan := e2b.NewUUID()
 	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, orphan)
@@ -177,6 +319,9 @@ func TestReapOrphansDryRun(t *testing.T) {
 	if !dirExists(dir) {
 		t.Errorf("dry run removed the orphan")
 	}
+	if dirExists(filepath.Join(svc.quarantineDir(), orphan)) {
+		t.Errorf("dry run quarantined the orphan")
+	}
 	if !strings.Contains(buf.String(), "gc: would reap orphan "+orphan) {
 		t.Errorf("dry run did not log the orphan:\n%s", buf.String())
 	}
@@ -187,7 +332,7 @@ func TestReapOrphansDryRun(t *testing.T) {
 // (pointing outside the storage path) are left alone.
 func TestReapOrphansIgnoresNonUUIDAndSymlink(t *testing.T) {
 	svc, _, db, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "1")
+	t.Setenv("ORPHAN_REAP", "quarantine")
 	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
 
 	plain := mkOrphanDir(t, svc.cfg.TemplateStoragePath, "not-a-uuid")
@@ -220,7 +365,7 @@ func TestReapOrphansIgnoresNonUUIDAndSymlink(t *testing.T) {
 // everything, logging the skip rather than failing.
 func TestReapOrphansEmptyCatalogSkips(t *testing.T) {
 	svc, buf, _, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "1")
+	t.Setenv("ORPHAN_REAP", "quarantine")
 	orphan := e2b.NewUUID()
 	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, orphan)
 	ageDir(t, dir)
@@ -241,7 +386,7 @@ func TestReapOrphansEmptyCatalogSkips(t *testing.T) {
 // kept build, a sandbox or an image's current build is needed and kept.
 func TestReapOrphansLiveReferences(t *testing.T) {
 	svc, _, db, _ := gcTestService(t)
-	t.Setenv("GC_DELETE", "1")
+	t.Setenv("ORPHAN_REAP", "quarantine")
 
 	resume, ckpt, kept, sbBuild, current := e2b.NewUUID(), e2b.NewUUID(), e2b.NewUUID(), e2b.NewUUID(), e2b.NewUUID()
 	// One non-deleted build keeps the root set non-empty (the roots
