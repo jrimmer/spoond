@@ -171,14 +171,21 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 	return out
 }
 
-// eventStyle is the grid style an event type is drawn with: warn for
-// lost, held-lease actions and idle suspensions, dim for releases, text
+// eventStyle is the grid style an event is drawn with: warn for lost,
+// held-lease actions and idle suspensions, and for a release whose
+// reason names a failure (the CI runner's "✗"); ok for a gc pass that
+// deleted something (spoond's own maintenance); dim for releases, text
 // for the rest.
-func eventStyle(t string) string {
-	switch t {
+func eventStyle(ev dashEvent) string {
+	switch ev.Type {
 	case "lost", "held_action", "idle_suspended":
 		return "warn"
+	case "gc":
+		return "ok"
 	case "released":
+		if strings.Contains(ev.Detail, "✗") {
+			return "warn"
+		}
 		return "dim"
 	default:
 		return "text"
@@ -187,10 +194,14 @@ func eventStyle(t string) string {
 
 // eventSubject picks the tail column: the lease's holder, else its
 // comment (a CI job lease has neither holder nor name but carries the
-// job it runs), else the owner the event carries. The rows are the live
-// lease table the same tick built; a lease that has left it (released)
-// falls through to the event's owner.
+// job it runs), else the owner the event carries. A lease-less event
+// (the catalog gc) has no subject at all, so it names spoond. The rows
+// are the live lease table the same tick built; a lease that has left
+// it (released) falls through to the event's owner.
 func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string {
+	if ev.LeaseID == "" {
+		return "spoond"
+	}
 	for _, r := range rows {
 		if r.ID == ev.LeaseID {
 			if r.Holder != "" {
@@ -632,7 +643,7 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 		}
 		text := strings.TrimRight(fmt.Sprintf("%s  %-14s  %-10s  %-32s  %s", at, ev.Type, ev.LeaseID,
 			ellipsize(eventSubject(ev, rows, names), 32), shortBuildIDs(ev.Detail)), " ")
-		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev.Type)})
+		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev)})
 	}
 	return lines
 }

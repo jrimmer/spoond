@@ -71,6 +71,14 @@ type SandboxProvider interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// LeaseReleaser is the optional capability of a SandboxProvider to
+// release a lease with a reason its `released` event carries (2.5,
+// #132 part 2). The executor calls it with the job's outcome and
+// duration instead of Delete when its Sandbox implements it.
+type LeaseReleaser interface {
+	DeleteReason(ctx context.Context, id, reason string) error
+}
+
 // JobSource yields jobs to execute. Adapters: Forgejo runner protocol,
 // exe.dev harness, pi/code harness.
 type JobSource interface {

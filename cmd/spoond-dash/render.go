@@ -1685,7 +1685,7 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 // title cyan for the lease lifecycle (created, released, resumed,
 // restarted, restored, checkpointed, recovered), warn for a lease put
 // aside (suspended, preempted, idle_suspended, queued), bad for one lost
-// or timed out, dim for anything else.
+// or timed out, ok for spoond's own catalog gc, dim for anything else.
 func eventTypeStyle(t string) string {
 	switch t {
 	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
@@ -1694,6 +1694,8 @@ func eventTypeStyle(t string) string {
 		return "warn"
 	case "lost", "timed_out":
 		return "bad"
+	case "gc":
+		return "ok"
 	default:
 		return "dim"
 	}

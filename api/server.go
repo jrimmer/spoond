@@ -2055,16 +2055,27 @@ func parseInt64(s string) int64 {
 	return v
 }
 
-// handleDelete releases a sandbox owned by the caller.
+// handleDelete releases a sandbox owned by the caller. It accepts an
+// optional release reason (2.5, #132 part 2): `?reason=` or a JSON body
+// {"reason"}, at most 120 printable characters, which the `released`
+// event carries; without one the event keeps "deleted through the API".
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
+	reason, err := releaseReason(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	s.svc.releaseBecause(r.Context(), lease, "deleted through the API")
+	if reason == "" {
+		reason = "deleted through the API"
+	}
+	s.svc.releaseBecause(r.Context(), lease, reason)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -1573,7 +1573,8 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if s.metrics != nil {
 		s.metrics.LeaseGrantDur.Observe(time.Since(start).Seconds())
 	}
-	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("granted from image %s", image))
+	s.emitLeaseEvent(lease.ID, owner, LeaseCreated,
+		fmt.Sprintf("granted from image %s in %s", image, eventDuration(time.Since(start))))
 	return lease, nil
 }
 
@@ -2092,14 +2093,16 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	// The source keeps running from the new build (A2 §3.5, §3.6, the
 	// "resume-fresh" path), so its build id and — possibly changed — host
 	// IP are re-recorded (item 18).
-	s.afterCheckpoint(ctx, src, buildID)
+	s.afterCheckpoint(ctx, src, buildID, start)
 	return b, nil
 }
 
 // afterCheckpoint records a checkpoint on the source lease: it now runs
 // from the checkpoint build; its host IP is re-read from the substrate
-// because the resume-fresh path may move it. Call without s.store.mu.
-func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID string) {
+// because the resume-fresh path may move it. start is when
+// checkpointLease began, so the checkpointed event carries how long the
+// checkpoint took (2.5, #132 part 2). Call without s.store.mu.
+func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID string, start time.Time) {
 	sbs, err := s.sub.List(ctx)
 	if err != nil {
 		s.log.Printf("checkpoint: list sandboxes: %v", err)
@@ -2130,7 +2133,8 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 	if len(src.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
-	s.emitLeaseEvent(src.ID, src.Owner, LeaseCheckpointed, "checkpointed into build "+buildID)
+	s.emitLeaseEvent(src.ID, src.Owner, LeaseCheckpointed,
+		fmt.Sprintf("%s · build %s", eventDuration(time.Since(start)), shortEventBuildID(buildID)))
 }
 
 // clone checkpoints a running sandbox into a new build and grants a new

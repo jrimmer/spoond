@@ -87,12 +87,25 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	if err != nil {
 		return e.fail(ctx, job, fmt.Errorf("create sandbox: %w", err))
 	}
-	defer e.Sandbox.Delete(context.Background(), sandboxID)
 
 	state := &JobState{
 		ID:     job.ID,
 		Result: ResultSuccess,
 	}
+	// Release the lease with the job's outcome and duration (2.5, #132
+	// part 2), so the lease's `released` event says why it went. A
+	// provider without the LeaseReleaser capability gets the plain
+	// delete.
+	defer func() {
+		reason := releaseReason(job, state.Result, time.Since(jobStart))
+		if r, ok := e.Sandbox.(LeaseReleaser); ok {
+			if err := r.DeleteReason(context.Background(), sandboxID, reason); err != nil {
+				log.Printf("executor: job %d release with reason: %v", job.ID, err)
+			}
+			return
+		}
+		_ = e.Sandbox.Delete(context.Background(), sandboxID)
+	}()
 	ctx2 := &EvalContext{
 		GitHub:  job.Context,
 		Env:     map[string]string{},

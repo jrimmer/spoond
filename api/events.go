@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -66,6 +67,12 @@ const (
 	// elapsed (detail "waited Ns"), the client went away ("client
 	// gone") or a drain started ("draining").
 	LeaseTimedOut LeaseEventType = "timed_out"
+	// LeaseGC marks a catalog GC pass that deleted builds (2.5, #132
+	// part 2). It is spoond's own maintenance, not a lease's lifecycle:
+	// the lease id and owner are empty, so only the all-leases stream
+	// (and the events-only token) carries it, never a per-lease one.
+	// The detail names the count and the freed bytes.
+	LeaseGC LeaseEventType = "gc"
 )
 
 // LeaseEvent is one lease lifecycle change.
@@ -349,4 +356,59 @@ func (s *Service) Subscribe(f EventFilter) *EventSubscription {
 // streams and in-process subscribers are fed from here.
 func (s *Service) emitLeaseEvent(leaseID, owner string, typ LeaseEventType, detail string) {
 	s.bus.emit(leaseID, owner, typ, detail)
+}
+
+// emitGCEvent records one catalog GC pass that deleted something (2.5,
+// #132 part 2). It is spoond's own maintenance, not a lease's: the
+// event carries no lease id and no owner, so a per-lease subscription
+// never receives it while the all-leases stream (and the events-only
+// token) does.
+func (s *Service) emitGCEvent(detail string) {
+	s.bus.emit("", "", LeaseGC, detail)
+}
+
+// Lease-event detail formats (2.5, #132 part 2). The units stay in the
+// event text rather than a machine field: the dashboard draws the detail
+// verbatim and an operator reads it, so "61 ms" beats "0.061".
+
+// eventDuration renders a duration for an event detail: sub-second in
+// whole milliseconds, else a decimal with up to three places for the
+// short ones and a whole-second form for the long ones. A zero or
+// negative duration (clock skew) reads as 0 ms.
+func eventDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Second {
+		return strconv.FormatInt(d.Milliseconds(), 10) + " ms"
+	}
+	if d < time.Minute {
+		return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + " s"
+	}
+	return d.Round(time.Second).String()
+}
+
+// shortEventBuildID is a build id as an event detail names it: the
+// first 8 characters, with an ellipsis when there was more. It is not
+// rune-safe on purpose — build ids are UUID hex.
+func shortEventBuildID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8] + "…"
+}
+
+// formatEventBytes renders a byte count for a GC detail: GiB with two
+// decimals once it is at least one GiB, else MiB with one, else whole
+// KiB (a freed build is never 0 here — the GC emits only when it
+// deleted something).
+func formatEventBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return strconv.FormatFloat(float64(n)/(1<<30), 'f', 2, 64) + " GiB"
+	case n >= 1<<20:
+		return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MiB"
+	default:
+		return strconv.FormatInt(n>>10, 10) + " KiB"
+	}
 }
