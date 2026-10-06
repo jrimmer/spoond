@@ -45,11 +45,15 @@ type Fake struct {
 
 	execHandler  func(sandboxID string, args []string) substrate.ExecResult
 	startHandler func(sandboxID string, req substrate.StartRequest) (substrate.Process, error)
-	nodeInfo     substrate.NodeInfo
-	nodeInfoFn   func(ctx context.Context) (substrate.NodeInfo, error)
-	nodeErr      error
-	healthErrs   map[string]error
-	fails        []failSpec
+	// startCtx is the context of the most recent Start, kept so tests can
+	// pin that a background job's start context outlives its HTTP request
+	// (2.6 #135).
+	startCtx   context.Context
+	nodeInfo   substrate.NodeInfo
+	nodeInfoFn func(ctx context.Context) (substrate.NodeInfo, error)
+	nodeErr    error
+	healthErrs map[string]error
+	fails      []failSpec
 }
 
 type failSpec struct {
@@ -90,6 +94,16 @@ func (f *Fake) SetStartHandler(h func(sandboxID string, req substrate.StartReque
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startHandler = h
+}
+
+// StartContext returns the context the most recent Start was called
+// with. A background job's start context must outlive the HTTP request
+// that asked for it, so a test can cancel that request and pin that the
+// context the substrate holds stays live (2.6 #135).
+func (f *Fake) StartContext() context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.startCtx
 }
 
 // EnableJobRunner makes Start actually run background jobs (2.6, #135)
@@ -434,6 +448,7 @@ func (f *Fake) Start(ctx context.Context, sandboxID string, req substrate.StartR
 		f.mu.Unlock()
 		return nil, err
 	}
+	f.startCtx = ctx
 	h := f.startHandler
 	runner := f.jobDir
 	f.mu.Unlock()

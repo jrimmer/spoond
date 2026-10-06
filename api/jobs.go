@@ -204,6 +204,14 @@ func jobCommandBody(cmd, cwd string) string {
 // and the envd Process carrying the stream (the caller watches it), or
 // an error the caller maps onto an HTTP status.
 func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string) (string, time.Time, substrate.Process, error) {
+	// The job outlives the HTTP request that asked for it. Detach the
+	// whole start from the request's cancellation so (a) the envd Start
+	// stream — the stream the watcher holds to notice the exit at once —
+	// is not canceled when the 202 response finalises the request or a
+	// proxy/client disconnects mid-start, and (b) a disconnect cannot
+	// leave a started process unrecorded. context.WithoutCancel keeps the
+	// request's values; the caller is already resolved by now.
+	ctx = context.WithoutCancel(ctx)
 	// The per-lease cap is a check-then-insert against SQLite: hold one
 	// lock for both so two concurrent starts for one lease cannot both
 	// pass it.
@@ -312,6 +320,12 @@ func (s *Service) watchJob(proc substrate.Process, job store.JobRow, sandboxID s
 			return
 		}
 	}
+	// The channel closed without an exit or error event (for example the
+	// backend's envd client saw its context canceled before it could
+	// report the error). The detached command may still be running, so
+	// leave the record for the reconcile pass — but say so, since this is
+	// exactly the stream-broke case the at-once path cannot cover.
+	s.log.Printf("jobs: %s: stream ended without an exit", job.JobID)
 }
 
 // finishJobFromGuest reads a job's rc and stderr tail from the guest
@@ -484,10 +498,11 @@ func (s *Service) markJobLost(ctx context.Context, job store.JobRow, sandboxID s
 
 // markLeaseJobsLost marks every running job of a lease lost: the guest's
 // memory did not continue (a generation bump). Called without the store
-// lock; safe from any goroutine. The cleanup guard uses each job's own
-// generation, so a lost job's secrets are never removed from a sandbox
-// that replaced the one it ran in (a cold restart's new guest never had
-// them).
+// lock; safe from any goroutine. It runs after the lease was moved to its
+// new sandbox/generation, so removeJobSecrets's continuity guard never
+// matches: the lost job's staged files went with the old guest, and the
+// new guest never had them. The in-memory names are still dropped, which
+// is what markJobLost's cleanup does in that case.
 func (s *Service) markLeaseJobsLost(ctx context.Context, leaseID, owner, why string) {
 	sandboxID, _, _ := s.leaseContinuity(leaseID)
 	rows, err := s.db.ListRunningJobs(ctx)
@@ -686,10 +701,12 @@ func (s *Service) readJobRange(ctx context.Context, sandboxID, jobID, stream str
 		return rr.ReadFileRange(ctx, sandboxID, path, int64(offset), int64(limit))
 	}
 	// Fallback: read the prefix up to offset+limit and slice. Fine for
-	// substrates without the optional range read.
+	// substrates without the optional range read. A file larger than the
+	// requested prefix cannot be read whole, so a tail request degrades to
+	// empty rather than an error the caller would surface as unavailable.
 	data, err := s.sub.ReadFile(ctx, sandboxID, path, int64(offset+limit))
 	if err != nil {
-		if errors.Is(err, substrate.ErrNotFound) {
+		if errors.Is(err, substrate.ErrNotFound) || errors.Is(err, substrate.ErrTooLarge) {
 			return nil, nil
 		}
 		return nil, err

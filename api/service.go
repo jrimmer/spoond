@@ -1168,6 +1168,9 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
+	// The lease's job rows cascade with the lease row; drop the in-memory
+	// running-job count too, which only exit/lost would otherwise clear.
+	delete(s.store.runningJobs, l.ID)
 	s.deleteLeaseLocked(l.ID)
 	s.store.mu.Unlock()
 	if len(l.ExposePorts) > 0 {

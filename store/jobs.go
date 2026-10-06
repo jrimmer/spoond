@@ -151,12 +151,16 @@ func (db *DB) CountRunningJobsByLease(ctx context.Context) (map[string]int, erro
 }
 
 // LatestJobExit returns the most recent exited job of each lease, for
-// the lease view's jobs.last_exit field.
+// the lease view's jobs.last_exit field. The row is the newest by
+// (started_at, job_id), so exact start-time ties resolve deterministically.
 func (db *DB) LatestJobExit(ctx context.Context) (map[string]JobRow, error) {
 	rows, err := db.r.QueryContext(ctx, `
 SELECT `+jobColumns+` FROM lease_jobs j
-WHERE state='exited' AND started_at = (
-  SELECT MAX(started_at) FROM lease_jobs x WHERE x.lease_id = j.lease_id AND x.state='exited'
+WHERE state='exited' AND NOT EXISTS (
+  SELECT 1 FROM lease_jobs x
+  WHERE x.lease_id = j.lease_id AND x.state='exited'
+    AND (x.started_at > j.started_at
+         OR (x.started_at = j.started_at AND x.job_id > j.job_id))
 )`)
 	if err != nil {
 		return nil, fmt.Errorf("store: latest job exits: %w", err)
@@ -168,9 +172,7 @@ WHERE state='exited' AND started_at = (
 	}
 	out := map[string]JobRow{}
 	for _, r := range all {
-		if cur, ok := out[r.LeaseID]; !ok || r.StartedAt.After(cur.StartedAt) {
-			out[r.LeaseID] = r
-		}
+		out[r.LeaseID] = r
 	}
 	return out, nil
 }

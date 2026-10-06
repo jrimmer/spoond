@@ -727,3 +727,61 @@ func TestJobGetOutputKeysStable(t *testing.T) {
 		t.Fatalf("stderr key missing: %v", body)
 	}
 }
+
+// TestJobStartContextDetached: the envd Start stream must outlive the
+// HTTP request that started the job. The watcher holds that stream to
+// notice the exit at once, so if it were derived from the request's
+// context it would be canceled when the 202 finalises or the client
+// disconnects, and the at-once path would be dead. The substrate must
+// see a context that is still live after the response is written.
+func TestJobStartContextDetached(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1017)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+
+	startCtx := sub.Fake.StartContext()
+	if startCtx == nil {
+		t.Fatalf("Start never recorded a context")
+	}
+	select {
+	case <-startCtx.Done():
+		t.Fatalf("start context already canceled after the 202: %v", startCtx.Err())
+	default:
+	}
+
+	// The exit is still noticed through the stream, so the watcher's
+	// stream was not canceled with the request.
+	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
+	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 0})
+	waitJobState(t, db, jobID, "exited", 3*time.Second)
+	_ = svc
+}
+
+// TestJobWatchClosedStreamLeavesRunning: if the envd stream ends without
+// an exit or error event (the backend's client saw its context die), the
+// detached command may still run, so the record stays running for the
+// reconcile pass rather than being marked exited.
+func TestJobWatchClosedStreamLeavesRunning(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, _ := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1018)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+
+	// Close the stream without an exit event: the watcher must not
+	// finish the record.
+	_ = p.Close()
+	time.Sleep(100 * time.Millisecond)
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.State != "running" {
+		t.Fatalf("job state = %q after a silently closed stream, want running", row.State)
+	}
+	_ = svc
+}
