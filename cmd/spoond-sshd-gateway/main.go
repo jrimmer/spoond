@@ -1514,9 +1514,10 @@ func resolveName(ctx context.Context, name string) (string, bool) {
 // runShelly implements the `shelly <lease-id>` ctl verb: it bootstraps
 // the coding agent inside the lease. The binary is fetched from the
 // backend's asset server (plain HTTP on the proxy listener, reachable
-// from guests at 10.43.0.1), a shelley.json is written pointing at the
-// lease's LLM gateway, and the agent server is started on :9000
-// (detached via setsid so the one-shot exec does not kill it). Returns
+// from guests at the host guest-service address), a shelley.json is
+// written pointing at the lease's LLM gateway, and the agent server is
+// started on :9000 (detached via setsid so the one-shot exec does not
+// kill it). Returns
 // JSON with the public web URL.
 func runShelly(ctx context.Context, leaseID string) string {
 	// The lease must exist (and be the caller's): the endpoint route is

@@ -92,7 +92,7 @@ resolver:
 SPOOND_GUEST_DNS_ADDR=10.1.0.2 spoond images build --all
 ```
 
-Without it, `spoon-guest-init` leaves the image's own `resolv.conf`
+Without it, `spoond-guest-init` leaves the image's own `resolv.conf`
 alone (generic, no pinned resolver).
 
 ## Not environment (still needs vm2 values at config level)
@@ -102,9 +102,11 @@ alone (generic, no pinned resolver).
 - `spoondctl`: `SPOOND_CTL_HOST` default changed `sandbox.lacy.casa` →
   `sandbox.example.com`. VM2 callers that relied on the default must
   export `SPOOND_CTL_HOST=sandbox.lacy.casa`.
-- Integration tests (`tests/integration/*.sh`) take `SSHHOST`,
-  `NETPOL_TARGET`, `NETPOL_BLOCKED`, `PROXY_SUFFIX` and `BE_TLS_HOST`
-  from the environment; the old vm2 values are no longer baked in.
+- Integration tests (`tests/integration/*.sh`) take `NETPOL_TARGET`,
+  `NETPOL_BLOCKED`, `PROXY_SUFFIX` and `BE_TLS_HOST` from the
+  environment; the old vm2 values are no longer baked in. (`SSHHOST` is
+  the remote-runner host used by `run.sh`; the ctl tests dial
+  `ctl@127.0.0.1 -p 2222` directly.)
 - Conformance (`conformance/README.md`) already uses
   `CONFORMANCE_*` environment values; LAN probe addresses in
   `network_test.go` are now `10.0.0.203`/`10.0.0.11` placeholders.
