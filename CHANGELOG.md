@@ -10,6 +10,12 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.6] - 2026-10-06
+
+The GC finds orphan build directories (dry run by default, quarantine
+before delete); image builds stop leaving dangling images. No schema
+change; the `grid` package is unchanged since 2.4.0.
+
 ### Fixed
 
 - **The snapshot disk leak from orphan build directories.** The catalog

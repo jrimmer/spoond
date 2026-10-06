@@ -324,7 +324,8 @@ may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `NOTIFY_WEBHOOKS`, the capacity settings (`BURST_RESERVE_MIB`,
 `PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`,
 `IDLE_SUSPEND_DEFAULT_SECS`), background jobs
-(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`), `CRASH_TEST`, and
+(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`), `CRASH_TEST`, the
+orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
 the held-lease
 limits (`HOLD_TTL_SECS` and the rest, in
 [docs/operations.md](docs/operations.md)).
