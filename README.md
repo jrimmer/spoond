@@ -42,6 +42,15 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   loses nothing. On every lease:
   - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
     and removes files in the guest, up to 256 MiB per file.
+  - **Background jobs**: `POST /api/leases/{id}/exec` with
+    `"background": true` starts a tracked job (202 + `job_id`);
+    `GET …/jobs/{job}?wait=<s>` long-polls to its exit, and
+    `…/jobs/{job}/output` follows stdout/stderr by byte range, while
+    `job_started`/`job_exited`/`job_lost` ride the event stream.
+  - **Crash test**: on a host with `CRASH_TEST=1`, `POST
+    /api/leases/{id}/crash-test` sends the caller's own lease through
+    crash recovery (back from its last checkpoint with a new generation,
+    or lost without one), so a client can test how it survives a crash.
   - **Guest port dial**: `GET /api/leases/{id}/ports/{port}/dial` opens
     raw TCP to any port in the guest over a WebSocket (a database's own
     protocol, a debugger, a REPL), under every network policy.
@@ -125,8 +134,7 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   [docs/operations.md](docs/operations.md#uptime-monitoring-gatus)).
 - **Notifications**: with `NOTIFY_WEBHOOKS` set, the backend pushes what
   needs a person (a lost lease, a held-lease rule acting, a unit down,
-  disk or hugepages past their levels, the TLS certificate near expiry,
-  a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
+  disk or hugepages past their levels, a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
   receiver, with hourly dedupe, resolved messages, retries and a rate
   limit. `spoond notify test` checks the setup; see
   [docs/operations.md](docs/operations.md#notifications-to-webhooks).
@@ -155,8 +163,8 @@ never alone: every coloured state keeps its glyph or word. Above the
 panels sits one
 attention banner, shown only when something needs a person: a unit not
 active, a lost lease, free hugepages or snapshot disk past the danger
-level, the TLS certificate inside 30 days of expiring, or an automatic
-held-lease action in the last 24 h. It refreshes every 2 seconds over
+level, preempted burst leases, or a held lease that a held-lease rule suspended and that is
+still suspended. It refreshes every 2 seconds over
 one server-sent-event stream shared by all viewers; the page is the
 current grid in a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for
 the chrome, and Datastar patches the rows that changed.
@@ -211,6 +219,13 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v2.6: background jobs and crash testing.** A long command runs as a
+tracked background job in its lease, with its exit, output and a
+`job_exited` event spoond keeps even across backend restarts. A host
+running crash suites can let lease owners send a lease through crash
+recovery on demand (`CRASH_TEST=1`). The dashboard takes the mockup's
+colour roles on its black background.
 
 **v2.5: waiting and idle reclamation.** A create can wait for room
 (`"wait"`, fair-share order, with its queue position on the event
@@ -308,7 +323,9 @@ services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
 may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `NOTIFY_WEBHOOKS`, the capacity settings (`BURST_RESERVE_MIB`,
 `PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`,
-`IDLE_SUSPEND_DEFAULT_SECS`), and the held-lease
+`IDLE_SUSPEND_DEFAULT_SECS`), background jobs
+(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`), `CRASH_TEST`, and
+the held-lease
 limits (`HOLD_TTL_SECS` and the rest, in
 [docs/operations.md](docs/operations.md)).
 

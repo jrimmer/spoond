@@ -52,31 +52,11 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 
 	var summary recoverySummary
 	for _, l := range targets {
-		if l.LastCheckpointBuildID == "" {
-			// No checkpoint to recover from: the running state is gone.
-			s.store.mu.Lock()
-			l.setState("lost")
-			s.saveLeaseLocked(l)
-			s.store.mu.Unlock()
-			s.deleteSandboxRow(l.SandboxID)
+		if s.recoverOneLease(ctx, l).Result == "recovered" {
+			summary.Recovered++
+		} else {
 			summary.Lost++
-			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "no checkpoint to recover from; the running state is gone")
-			s.log.Printf("recovery: lease %s lost (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
-			continue
 		}
-		if err := s.recoverFromCheckpoint(ctx, l); err != nil {
-			s.store.mu.Lock()
-			l.setState("lost")
-			s.saveLeaseLocked(l)
-			s.store.mu.Unlock()
-			summary.Lost++
-			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, fmt.Sprintf("recovery from checkpoint %s failed: %v", l.LastCheckpointBuildID, err))
-			s.log.Printf("recovery: lease %s lost (checkpoint %s): %v", l.ID, formatRFC3339(l.LastCheckpointAt), err)
-			continue
-		}
-		summary.Recovered++
-		s.emitLeaseEvent(l.ID, l.Owner, LeaseRecovered, fmt.Sprintf("recovered from checkpoint %s", l.LastCheckpointBuildID))
-		s.log.Printf("recovery: lease %s recovered (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
 	}
 
 	// Pool entries whose sandbox is not live are dead.
@@ -97,6 +77,51 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 	// Recovered leases change the peer allowances (new host IPs).
 	s.refreshPeersAsync(ctx)
 	return summary
+}
+
+// recoveryOutcome is what recoverOneLease did with one lease: "recovered"
+// (it came back from its checkpoint) or "lost" (it had none, or the
+// recovery failed). Generation and State are the lease's values after the
+// call. The crash test reports it; the reconcile loop counts it.
+type recoveryOutcome struct {
+	Result     string `json:"result"`
+	Generation int64  `json:"generation"`
+	State      string `json:"state"`
+}
+
+// recoverOneLease runs the per-lease half of crash reconciliation for one
+// lease whose sandbox has vanished: from its newest checkpoint when it has
+// one (generation +1, event "recovered", state recovered), lost otherwise
+// (event "lost"). It is shared by the startup/background reconcile loop
+// and the crash test, so both take the identical path. The caller
+// has already removed the lease's sandbox (a real or simulated crash);
+// this function emits the lease events and writes the log lines.
+func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome {
+	if l.LastCheckpointBuildID == "" {
+		// No checkpoint to recover from: the running state is gone.
+		s.store.mu.Lock()
+		l.setState("lost")
+		s.saveLeaseLocked(l)
+		s.store.mu.Unlock()
+		s.deleteSandboxRow(l.SandboxID)
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "no checkpoint to recover from; the running state is gone")
+		s.log.Printf("recovery: lease %s lost (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
+		s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost in a crash; the job did not survive")
+		return recoveryOutcome{Result: "lost", Generation: l.Generation, State: l.State}
+	}
+	if err := s.recoverFromCheckpoint(ctx, l); err != nil {
+		s.store.mu.Lock()
+		l.setState("lost")
+		s.saveLeaseLocked(l)
+		s.store.mu.Unlock()
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, fmt.Sprintf("recovery from checkpoint %s failed: %v", l.LastCheckpointBuildID, err))
+		s.log.Printf("recovery: lease %s lost (checkpoint %s): %v", l.ID, formatRFC3339(l.LastCheckpointAt), err)
+		s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost in a crash; the job did not survive")
+		return recoveryOutcome{Result: "lost", Generation: l.Generation, State: l.State}
+	}
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseRecovered, fmt.Sprintf("recovered from checkpoint %s", l.LastCheckpointBuildID))
+	s.log.Printf("recovery: lease %s recovered (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
+	return recoveryOutcome{Result: "recovered", Generation: l.Generation, State: l.State}
 }
 
 // recoverFromCheckpoint resumes a lease from its checkpoint build with
@@ -157,6 +182,9 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// Crash recovery rebuilt the guest from a checkpoint: its memory did
+	// not continue, so every running job is lost (2.6, #135).
+	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease recovered from a checkpoint; the job did not survive")
 	// Crash recovery replaced the sandbox; put the lease's create-time
 	// secrets back into the fresh tmpfs (#80).
 	s.restageCreateSecrets(ctx, l, "recovery")

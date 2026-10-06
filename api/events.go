@@ -47,11 +47,23 @@ const (
 	// LeaseRestored marks a restore in place to a kept checkpoint
 	// (2.3, #121): the detail carries the restored-to build id.
 	LeaseRestored LeaseEventType = "restored"
+	// LeaseCrashTest marks a crash test (owner or admin): a reader
+	// of the stream can tell a simulated crash from a real one. It
+	// is emitted before the recovery events (recovered/lost) that follow
+	// the same call.
+	LeaseCrashTest LeaseEventType = "crash_test"
 	// LeasePreempted marks a burst lease suspended to free hugepages for
 	// a guaranteed admission (#128 part 3). Its generation does not
 	// change: the pause/resume memory continues. The detail names the
 	// guaranteed lease's owner.
 	LeasePreempted LeaseEventType = "preempted"
+	// LeaseJobStarted, LeaseJobExited and LeaseJobLost mark a background
+	// exec job's life (2.6, #135): started carries the command (cut to
+	// 120 chars), exited the exit code and a short stderr tail, lost a
+	// job whose guest memory did not continue.
+	LeaseJobStarted LeaseEventType = "job_started"
+	LeaseJobExited  LeaseEventType = "job_exited"
+	LeaseJobLost    LeaseEventType = "job_lost"
 	// LeaseStreamGap marks a hole in a stream rather than a lifecycle
 	// change. It is synthesized when a consumer's position cannot be
 	// honoured (the epoch changed after a restart, the pointed-at event

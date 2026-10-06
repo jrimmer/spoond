@@ -37,7 +37,9 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 	var idle []*Lease
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
-		if l.released || l.Suspended || l.busy || !l.Persistent {
+		// A running background job is activity (2.6, #135): never
+		// suspend a lease mid-job.
+		if l.released || l.Suspended || l.busy || !l.Persistent || s.hasRunningJobLocked(l.ID) {
 			continue
 		}
 		threshold := time.Duration(s.effectiveIdleSuspend(l)) * time.Second

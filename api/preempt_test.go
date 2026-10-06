@@ -624,3 +624,35 @@ func TestPreemptionUndrainDefers(t *testing.T) {
 		t.Fatalf("preempt-refused undrain: state=%s drained=%v lost=%v, want suspended, drained, not lost", g.State, g.Drained, !g.LostAt.IsZero())
 	}
 }
+
+// TestGuaranteedUsesReserveWithoutPreempting: the burst reserve is room
+// kept for guaranteed work, so a guaranteed create that fits in free
+// memory is admitted without preempting anyone, even when that dips
+// into the reserve. Only a guaranteed lease that does not fit preempts.
+func TestGuaranteedUsesReserveWithoutPreempting(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	svc.cfg.BurstReserveMiB = 2048
+	// Room for a burst lease above the reserve: 16 GiB, nothing used.
+	installDynamicNode(t, svc, sub, 8192, 0, 512)
+	victim := burstLease(t, svc, ctx, "burst-a", "mid")
+
+	// Now 2 GiB free (1024 pages): a 1 GiB guaranteed lease fits, though
+	// it takes the node under the 2 GiB reserve. Preempting the burst
+	// lease would restore the reserve, and must not happen.
+	installDynamicNode(t, svc, sub, 8192, 8192-1024-512, 512)
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("guaranteed create: %v", err)
+	}
+	if victim.Suspended || !victim.PreemptedAt.IsZero() {
+		t.Fatal("a guaranteed lease that fits preempted a burst lease to protect the reserve")
+	}
+
+	// Full node (nothing free): the next guaranteed lease does preempt.
+	installDynamicNode(t, svc, sub, 8192, 8192-2*512, 512)
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("guaranteed create on a full node: %v", err)
+	}
+	if !victim.Suspended || victim.PreemptedAt.IsZero() {
+		t.Fatal("a guaranteed lease that does not fit should preempt the burst lease")
+	}
+}

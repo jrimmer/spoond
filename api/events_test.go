@@ -862,6 +862,7 @@ func TestEventTypesDocumented(t *testing.T) {
 		LeaseHolderSet:     "holder_set",
 		LeaseHolderCleared: "holder_cleared",
 		LeaseHeldAction:    "held_action",
+		LeaseCrashTest:     "crash_test",
 		LeaseStreamGap:     "gap",
 	} {
 		if string(typ) != want {

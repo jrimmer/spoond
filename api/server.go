@@ -184,6 +184,12 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/sandboxes/queue", s.handleQueue)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}", s.handleGetSandbox)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
+	// Background exec jobs (2.6, #135): list, read (with long-poll),
+	// stream raw output by range, and signal a job.
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/jobs", s.handleJobsList)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/jobs/{job}", s.handleJobGet)
+	s.mux.HandleFunc("GET /api/sandboxes/{id}/jobs/{job}/output", s.handleJobOutput)
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/jobs/{job}/signal", s.handleJobSignal)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/keepalive", s.handleKeepAlive)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/suspend", s.handleSuspend)
@@ -235,6 +241,11 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Restore in place to a kept checkpoint (2.3, #121): owner or admin,
 	// 404 for anyone else and for a build that is not the lease's own.
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restore", s.handleRestore)
+	// Crash test for one lease (Honey M3): delete its sandbox as a crash
+	// would and run the same per-lease recovery the reconcile pass does.
+	// Owner or admin, 404 for anyone else; only when the host sets
+	// CRASH_TEST (404 otherwise). See api/crash.go.
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/crash-test", s.handleCrashTest)
 	// Lease file operations (#114): download/upload/stat/mkdir/remove a
 	// guest file through the substrate. Owner or admin; 404 for anyone
 	// else, 409 while suspended.
@@ -1809,6 +1820,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		Cwd     string            `json:"cwd"`
 		Env     map[string]string `json:"env"`
 		Timeout int               `json:"timeout"`
+		// Background (2.6, #135): start the command and answer 202 as soon
+		// as it is running, instead of holding the request until it exits.
+		// timeout is ignored.
+		Background bool `json:"background"`
 		// Secrets (#80) are staged as /run/secrets/<name> files for this
 		// command only and removed afterwards. Values are kept in memory
 		// only, never stored, logged or returned.
@@ -1825,6 +1840,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	execSecrets, err := validateSecrets(req.Secrets)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Background {
+		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets)
 		return
 	}
 	timeout := req.Timeout

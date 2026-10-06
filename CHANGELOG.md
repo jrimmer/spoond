@@ -29,6 +29,62 @@ summarised from README "Status".
   but never a per-lease one. The dashboard colours `gc` events ok and a
   failed CI release warn.
 
+## [2.6.0] - 2026-10-06
+
+Background exec jobs (#135), an owner-scoped crash test for recovery
+suites, and the dashboard's colour roles (#132 part 1). Store migration
+16 adds the `lease_jobs` table. The `grid` package is unchanged since
+2.4.0.
+
+### Added
+
+- **Crash test.** `POST /api/leases/{id}/crash-test` (and the
+  `/api/sandboxes/{id}/crash-test` alias) runs one lease through the
+  crash-recovery path on demand: it deletes the lease's sandbox as a
+  crash would (without releasing the lease), drops the sandbox row and
+  runs the same per-lease recovery the startup reconcile runs — from
+  the lease's last checkpoint (`generation` +1, state `recovered`) or
+  `lost` with no checkpoint. The response is
+  `{"id","result":"recovered"|"lost","generation","state"}`. A
+  `crash_test` lease event (detail `crashed by its owner` or `crashed
+  by an admin`) precedes the recovery event. It is off unless the host
+  sets `CRASH_TEST=1` (the route answers `404` otherwise), so an
+  ordinary user can drive a crash suite without an admin token. The
+  lease's owner may crash their own lease and an admin any lease;
+  anyone else gets `404`. `409` busy or suspended, `410` already lost,
+  `404` unknown or released. The recovery runs to the end even if the
+  client hangs up. Built for on-demand crash testing (Honey's M3
+  suite); the reconcile code is factored so the startup pass and this
+  endpoint share one function. No effect on other leases, the warm pool
+  or any release path. The conformance case X1 runs with
+  `CONFORMANCE_CRASH_TEST=1`.
+
+- **Background exec jobs (2.6, #135).** `POST
+  /api/leases/{id}/exec` (and the `/api/sandboxes` alias) accepts
+  `"background": true`: the command runs in the caller's lease and the
+  request answers `202 {"job_id","started_at"}` as soon as it has
+  started (`timeout` is ignored). The guest records the outcome itself
+  under `/var/lib/spoond/jobs/<job_id>/` (`stdout`, `stderr`, `pid` and
+  an atomically written `rc`), detached from the envd stream, so a
+  backend restart does not kill the job and the files — not the stream
+  — are the source of truth. The `env` object rides the substrate's
+  start request, never the job directory, the record, the logs or an
+  event. Jobs are tracked in a new `lease_jobs`
+  table (**migration 0016**), deleted with their lease and pruned after
+  `JOB_RETENTION_SECS` (default 7 days), when the guest's job directory
+  is removed too; at most
+  `MAX_RUNNING_JOBS_PER_LEASE` (default 16) run per lease (`429` past
+  it). Read them with `GET …/jobs` (newest first) and
+  `GET …/jobs/{job}` (record plus the last 64 KiB of output, or
+  `?wait=<seconds>` to long-poll to the exit), follow output with
+  `GET …/jobs/{job}/output?stream=&offset=&limit=`, and signal a job
+  with `POST …/jobs/{job}/signal`. `job_started`, `job_exited` and
+  `job_lost` ride the lease event stream, the lease object gains a
+  `jobs` summary, and a lease with a running job counts as active for
+  every idle rule. New metrics `spoond_jobs_running` and
+  `spoond_jobs_exited_total{result}`; the dashboard events panel shows
+  `job_exited` lines.
+
 ### Changed
 
 - **`spoond dash` colour roles.** The dashboard's palette now follows
@@ -39,6 +95,39 @@ summarised from README "Status".
   Meters draw an amber tick at their warning level, and `spoond top`
   maps the same roles to ANSI colours. Colour never carries a state
   alone: every coloured state keeps its glyph or word.
+
+## [2.5.2] - 2026-10-06
+
+### Fixed
+
+- **A guaranteed lease no longer preempts to protect the burst reserve.**
+  The reserve (`BURST_RESERVE_MIB`) keeps room free for guaranteed work:
+  burst leases may not dip into it, but a guaranteed lease may. Since
+  2.4 a guaranteed admission instead treated the reserve as its own
+  floor and suspended burst leases whenever free memory was under
+  reserve + its size, so a short CI job could pause a burst worker on a
+  host with plenty of room. It now preempts only when its own memory is
+  not free.
+- **Dashboard attention strip: only what needs a person.** The
+  held-lease row showed any held lease with a `last_action` in the last
+  24 h, so since 2.5 (when every pause started recording its action) an
+  ordinary preemption, drain or hand suspend stayed on the strip for a
+  day, even after the lease ran again. It now shows a held lease only
+  while a held-lease rule (idle, pressure or a lapsed hold) has it
+  suspended, and clears when the lease runs again; preempted leases keep
+  their own row while preempted.
+
+### Removed
+
+- **TLS certificate expiry monitoring.** The dashboard's certificate row
+  and `cert` status item and the backend's `tls.cert.30d`/`.7d`/`.1d`
+  notifications are gone: watching certificates is the host's IT
+  tooling's job (the Gatus example in docs/operations.md does it), not
+  spoond's. spoond still serves HTTPS with `TLS_CERT`/`DASH_TLS_CERT`,
+  and `spoond doctor` still checks that the configured certificate can
+  be loaded and trusted.
+
+The `grid` package is unchanged since 2.4.0. No schema change.
 
 ## [2.5.1] - 2026-10-06
 

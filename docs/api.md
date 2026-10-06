@@ -437,6 +437,108 @@ minutes. Exec, stat, guest dial and the file routes then answer `409`
 with `Retry-After: 5`, not `410`: retry. `410` means the sandbox is gone
 with nothing in flight.
 
+#### Background exec (2.6, #135)
+
+Add `"background": true` to the exec body and the command runs as a
+tracked job instead of holding the request open. The other fields keep
+their meaning (`cmd`, `cwd`, `env`, `secrets`); `timeout` is ignored —
+a background job runs until it exits, is signalled, or the lease does.
+
+Response `202 Accepted` as soon as the process has started:
+
+```json
+{"job_id": "<hex>", "started_at": "2026-10-05T12:00:00.123456789Z"}
+```
+
+Without `background` nothing changes. A suspended lease still answers
+`409` and a `lost` one `410`. At most `MAX_RUNNING_JOBS_PER_LEASE`
+(default 16) jobs may run at once per lease; past it the request answers
+`429`.
+
+The command runs in the caller's lease and is detached from the envd
+stream, so a backend restart does not kill it. The guest records the
+outcome itself under `/var/lib/spoond/jobs/<job_id>/`: `stdout`,
+`stderr`, `pid`, and `rc` (written atomically when the command ends).
+Those files, not the stream, are the source of truth, and they are kept
+as long as the record — they are removed when the exited record is
+pruned (`JOB_RETENTION_SECS`). Per-exec `secrets` stay staged under
+`/run/secrets` for the job's life and are removed when it exits (the
+guest wrapper removes them; the backend also removes them on
+reconcile). Neither `env` nor secret values are ever stored in the job
+record, logged, sent in an event or written to the guest's job
+directory — `env` rides the substrate's start request — and `cmd` is
+stored as given (put credentials in `env` or `secrets`, not argv).
+
+See [`GET /api/leases/{id}/jobs`](#get-apileasesidjobs--list-background-jobs)
+for reading and controlling jobs.
+
+### `GET /api/leases/{id}/jobs` — list background jobs
+
+Lists the lease's background jobs, newest first:
+
+```json
+{"jobs": [
+  {"job_id": "…", "lease_id": "…", "owner": "…", "cmd": "…", "cwd": "",
+   "state": "exited", "exit_code": 7, "started_at": "…",
+   "ended_at": "…", "stderr_tail": "…"}
+]}
+```
+
+`state` is `running`, `exited` or `lost` (the guest's memory did not
+continue — a cold restart, restore, crash recovery or generation bump).
+`exit_code` is `null` while running. `stderr_tail` is the last 4 KiB of
+stderr. Owner, admins and `http` shares as exec has them.
+
+### `GET /api/leases/{id}/jobs/{job}` — read one job
+
+Returns the record plus the last 64 KiB of `stdout` and `stderr`:
+
+```json
+{"job": {…}, "stdout": "…", "stderr": "…"}
+```
+
+The `stdout` and `stderr` keys are always present (empty when the guest
+has no output or the sandbox is not reachable, e.g. a suspended lease);
+on a non-fatal read failure an extra `stdout_error` / `stderr_error`
+key marks it rather than dropping the field.
+
+With `?wait=<seconds>` (at most 900) the request long-polls until the
+job is no longer running or the wait ends, then answers the current
+record. This is the easy way to follow a job to completion.
+
+### `GET /api/leases/{id}/jobs/{job}/output` — stream job output
+
+Returns raw bytes from one stream so a client can follow output:
+
+| Query | Default | Notes |
+|---|---|---|
+| `stream` | `stdout` | `stdout` or `stderr` |
+| `offset` | `0` | byte offset |
+| `limit` | `1048576` (1 MiB) | capped at 16 MiB |
+
+### `POST /api/leases/{id}/jobs/{job}/signal` — signal a job
+
+```json
+{"signal": "TERM"}
+```
+
+`TERM` or `KILL`; signals the job's process group. `200` on success,
+`409` when the job is not running.
+
+Background jobs emit `job_started` (detail: the command, cut to 120
+chars), `job_exited` (detail: `exit <code>` and the last 10 stderr
+lines, at most 1 KiB) and `job_lost` on the lease's event stream. The
+lease object (`GET /api/leases/{id}` and every list row) carries a
+`jobs` field:
+
+```json
+"jobs": {"running": 1, "last_exit": {"job_id": "…", "exit_code": 7, "ended_at": "…"}}
+```
+
+`last_exit` is `null` when the lease has no exited job. A lease with a
+running job counts as active for every idle rule, so none suspends it
+mid-job.
+
 ### `…/api/leases/{id}/files/{path…}` — lease files
 
 Read and write files inside the lease's filesystem. `{path…}` is the
@@ -820,6 +922,39 @@ can run after its last checkpoint. `recovered_from` and
 taken; the `spoond_checkpoint_pause_seconds` metric shows how long each
 checkpoint pauses its guest.
 
+### `POST /api/leases/{id}/crash-test` — crash a lease and recover it
+
+**For testing crash recovery.** The route exists only when the host
+sets `CRASH_TEST=1` (see [operations.md](operations.md#crash-test));
+otherwise it answers `404 {"error":"not found"}` like an unknown route,
+whoever calls it. Owner or admin: the owner may crash their own lease,
+an admin any lease; anyone else gets the usual `404` `lease not found`.
+No body.
+
+It deletes the lease's sandbox through the substrate directly — as a
+crash would, without releasing the lease or emitting `released` —
+drops the sandbox row, then runs the same per-lease recovery the
+backend runs after a real crash (see [operations.md](operations.md#crash-recovery)):
+with a checkpoint the lease comes back from its newest one (generation
++1, state `recovered`, event `recovered`; files newer than the
+checkpoint are gone); without one it is marked `lost` (event `lost`)
+and answers `410` from then on. A `crash_test` event comes first, with
+the detail `crashed by its owner` or `crashed by an admin`, so a reader
+of the event stream can tell a test from a real crash.
+
+It touches only that one lease: no other lease, no warm-pool sweep, no
+peer refresh and no release. The recovery runs to the end even if the
+client hangs up. `409` while another operation is in flight or while
+the lease is suspended (nothing is running to crash), `410` for a lease
+already lost, `404` for an unknown or released lease. Response `200`:
+
+```json
+{"id":"…","result":"recovered","generation":2,"state":"recovered"}
+```
+
+`result` and `state` are `lost` (and `generation` unchanged) when there
+was no checkpoint.
+
 ### `POST /api/leases/{id}/clone` — branch to a new lease
 
 Checkpoints the running sandbox and grants a fresh **persistent** lease
@@ -1003,9 +1138,13 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
+| `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
+| `job_started` | a background exec job started (2.6, #135) | the command, cut to 120 chars |
+| `job_exited` | a background exec job ended | `exit <code>` and the last 10 stderr lines (at most 1 KiB) |
+| `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |

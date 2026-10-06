@@ -30,7 +30,8 @@ Per-run variables: `CONFORMANCE_SUBSTRATE` (`e2b`),
 `CONFORMANCE_GUEST_SERVICE`, `CONFORMANCE_DESTRUCTIVE` (unset/absent
 enables nothing; `1` enables group R, which is an Autonomous window step),
 `CONFORMANCE_CAPACITY` (unset/absent enables nothing; `1` enables group C,
-which fills the host).
+which fills the host), `CONFORMANCE_CRASH_TEST` (unset/absent enables
+nothing; `1` enables the crash-test case X1).
 The `-results` path must be absolute: `go test` runs the test binary in the
 package directory. To run a single test, add `-run '^<TestName>$'` before
 `-args`.
@@ -45,6 +46,12 @@ lease as that second user (the conformance user is not admin and can
 neither create users nor set quotas), so it must be provisioned on the
 host like `CONFORMANCE_TOKEN`.
 
+The crash-test case X1 (`TestX1_CrashTestRecovers`) runs only with
+`CONFORMANCE_CRASH_TEST=1`, against a backend started with
+`CRASH_TEST=1` (the route answers 404 otherwise). It uses the ordinary
+conformance token: it crashes and recovers only leases it created
+itself, so no admin token is needed.
+
 ## Configuration
 
 See `U02-conformance-suite.md` §Configuration for the full table. Required:
@@ -55,6 +62,7 @@ See `U02-conformance-suite.md` §Configuration for the full table. Required:
 `CONFORMANCE_PROXY_SECRET` (may be empty), `CONFORMANCE_PROXY_SUFFIX`,
 `CONFORMANCE_GUEST_SERVICE`. Optional: `CONFORMANCE_DESTRUCTIVE`,
 `CONFORMANCE_CAPACITY`, `CONFORMANCE_SECOND_TOKEN`,
+`CONFORMANCE_CRASH_TEST`,
 `CONFORMANCE_IMAGES` (default
 `py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla`).
 

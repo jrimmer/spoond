@@ -4,10 +4,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,10 +109,6 @@ type Snapshot struct {
 	KeptBuildsBytes int64   `json:"keptBuildsBytes"`
 	KeptDiskPct     float64 `json:"keptDiskPct"`
 
-	// CertNotAfter is the served TLS pair's expiry (DASH_TLS_CERT); zero
-	// when the dashboard serves plain HTTP. Only the banner reads it.
-	CertNotAfter time.Time `json:"-"`
-
 	// Rendered as HTML element patches, not sent as signals.
 	Services []Service   `json:"-"`
 	Rows     []LeaseRow  `json:"-"`
@@ -178,7 +172,7 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 // for the rest.
 func eventStyle(ev dashEvent) string {
 	switch ev.Type {
-	case "lost", "held_action", "idle_suspended":
+	case "lost", "held_action", "job_lost", "idle_suspended":
 		return "warn"
 	case "gc":
 		return "ok"
@@ -190,6 +184,16 @@ func eventStyle(ev dashEvent) string {
 	default:
 		return "text"
 	}
+}
+
+// jobExitedStyle picks the job_exited line's style: a non-zero exit is
+// drawn in the warning colour (2.6, #135), a zero exit like any other
+// event.
+func jobExitedStyle(detail string) string {
+	if strings.HasPrefix(detail, "exit 0") {
+		return "text"
+	}
+	return "warn"
 }
 
 // eventSubject picks the tail column: the lease's holder, else its
@@ -348,7 +352,6 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 		}
 	}
 	s.Events = c.eventLines(now)
-	c.readCert(&s)
 	// Kept bytes as a share of the snapshot disk (#126): the attention
 	// strip's "kept checkpoints use X% of the snapshot disk". The disk
 	// total comes from fromHost's statfs; with no total (statfs failed)
@@ -587,28 +590,6 @@ func (c *collector) fromHost(s *Snapshot) error {
 	return nil
 }
 
-// readCert stamps the served TLS pair's expiry for the banner: a
-// certificate within 30 days of expiring needs a person before basic
-// auth starts failing in browsers. A missing or unreadable file is not
-// an error here (the dashboard then serves plain HTTP or keeps the last
-// good frame); the server itself reports real certificate problems.
-func (c *collector) readCert(s *Snapshot) {
-	if c.cfg.TLSCert == "" {
-		return
-	}
-	b, err := os.ReadFile(c.cfg.TLSCert)
-	if err != nil {
-		return
-	}
-	blk, _ := pem.Decode(b)
-	if blk == nil {
-		return
-	}
-	if crt, err := x509.ParseCertificate(blk.Bytes); err == nil {
-		s.CertNotAfter = crt.NotAfter
-	}
-}
-
 // eventPanelRows is how many events the panel shows.
 const eventPanelRows = 5
 
@@ -643,7 +624,11 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 		}
 		text := strings.TrimRight(fmt.Sprintf("%s  %-14s  %-10s  %-32s  %s", at, ev.Type, ev.LeaseID,
 			ellipsize(eventSubject(ev, rows, names), 32), shortBuildIDs(ev.Detail)), " ")
-		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev)})
+		style := eventStyle(ev)
+		if ev.Type == "job_exited" {
+			style = jobExitedStyle(ev.Detail)
+		}
+		lines = append(lines, EventLine{Text: text, Style: style})
 	}
 	return lines
 }

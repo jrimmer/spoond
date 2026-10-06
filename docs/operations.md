@@ -129,7 +129,6 @@ What arrives, with its key and severity:
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
 | `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
-| `tls.cert.30d` / `.7d` / `.1d` | warn / warn / critical | the TLS certificate within 30, 7 or 1 day of expiry |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
 | `backup.stale` | warn | the newest database backup older than its age limit — `BACKUP_MAX_AGE_SECS`, default 93600 (26 h: the 03:00 daily run plus one missed day) |
 
@@ -418,6 +417,17 @@ the GC section. `KEPT_DISK_WARN_PCT` (default `40`, `0` = off) is when
 kept bytes alone start drawing attention: the dashboard's strip and the
 notifier's `disk.kept` both read it.
 
+### Crash test
+
+`CRASH_TEST=1` (or `true`) in the backend's environment enables `POST
+/api/leases/{id}/crash-test` ([api.md](api.md)), which crashes one lease
+and runs it through the recovery above on demand: from its checkpoint
+or `lost`, with a `crash_test` event first. It is off by default, and
+the route then answers `404` like an unknown route; set it only on hosts
+that run crash suites. It affects only the caller's own leases (an admin
+may crash any lease), and nothing else: no other lease, no pool, no
+release. Each run logs `crash-test: lease <id> crashed by <caller id>`.
+
 ## Restarting the backend
 
 A backend restart loses nothing: leases, shares, the pool and the catalog
@@ -648,6 +658,48 @@ every hold lapses eventually. Watch the rules with `journalctl -u spoond-backend
 lease'` and `spoond_held_actions_total` — a rising `critical{release}`
 means the disk needs attention the leases are paying for.
 
+## Background exec jobs
+
+`POST /api/leases/{id}/exec` with `"background": true` (2.6, #135)
+starts a tracked job in the lease instead of holding the request open.
+The guest records its outcome under `/var/lib/spoond/jobs/<job_id>/`
+inside the lease: `stdout`, `stderr`, `pid` and — written atomically
+when the command ends — `rc`. Those files are the source of truth, so a
+backend restart or a broken envd stream does not lose an outcome: while
+the backend holds the stream it notices the exit at once, and otherwise
+a reconcile pass (every 10 s while any job runs) reads `rc` through the
+files path. The files are kept until the exited record is pruned (after
+`JOB_RETENTION_SECS`), when the sweeper removes the job directory too;
+the job record outlives the files only within that window.
+
+A running job keeps its lease out of every idle rule — the plain
+`IDLE_TIMEOUT_SECS` sweep, held rule 1 and idle suspension — so nothing
+suspends a lease mid-job. A lease that does suspend normally with a job
+running leaves the job record `running` (the memory continues; reconcile
+after resume). When the guest's memory does **not** continue — a cold
+restart, a restore or crash recovery, i.e. a generation bump — every
+running job is marked `lost`.
+
+The per-exec `secrets` stay staged under `/run/secrets` for the job's
+whole life; the guest wrapper removes them at exit and the backend also
+removes them on reconcile. Neither `env` nor secret values are ever
+stored in the job record, logged, emitted in an event or written to the
+guest's job directory — `env` rides the substrate's start request — and
+`cmd` is stored as given.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background jobs per lease; past it a start answers `429` |
+| `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept) |
+
+The job record lives in the `lease_jobs` table (migration 0016) and is
+deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
+`spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`). Events:
+`job_started`, `job_exited`, `job_lost`; the dashboard events panel
+shows `job_exited` lines, non-zero exits in the warning colour. The
+endpoints, the events and the lease's `jobs` summary are in
+[api.md](api.md).
+
 ## Idle reclamation
 
 Persistent leases can be suspended after a period without activity,
@@ -772,9 +824,10 @@ the events panel (the backend's lease event stream) — plus
 an attention strip above the panels (one ▲ row per trigger, only when
 something needs a person): a unit not active, a lost lease, free
 hugepages or snapshot disk past the danger level, kept checkpoints past
-`KEPT_DISK_WARN_PCT` of the snapshot disk (#126), the TLS certificate
-inside 30 days of expiring, or an automatic held-lease action in the
-last 24 h. The host panel's GC row also shows the kept total —
+`KEPT_DISK_WARN_PCT` of the snapshot disk (#126), preempted burst
+leases, or a held lease that a held-lease rule (idle, pressure, a lapsed
+hold) suspended and that is still suspended. TLS certificate expiry is
+left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
 `kept N (X GiB)` when any build is pinned. A status line under the panels carries the headline numbers
 and the clock. The browser page is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
@@ -874,6 +927,8 @@ marker. The substrate-specific series:
 | `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
+| `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |
+| `spoond_jobs_exited_total{result}` | background exec jobs that ended: `ok` (exit 0), `error` (non-zero exit) or `lost` (the guest did not continue, #135) |
 | `spoond_capacity_rejections_total` | admission refusals |
 | `spoond_store_errors_total{op}` | SQLite write failures |
 | `spoond_notifications_total{webhook,severity,result}` | webhook notification delivery outcomes; `webhook` is the receiver's index in `NOTIFY_WEBHOOKS` (never its URL — the URL may carry secrets), `severity` is the message's grade, `result` is `sent`, `retry`, `dropped`, `deduped` or `rate_limited` |
