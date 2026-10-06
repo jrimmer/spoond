@@ -2,15 +2,30 @@ spoond
 Copyright 2026 Jason Rimmer and spoond contributors
 
 This product is developed and stewarded by Jason Rimmer
-(https://github.com/jrimmer), and is licensed under
-Apache License 2.0.
+(https://github.com/jrimmer). From 2.4.0 it is licensed under the
+BSD 3-Clause License; see LICENSE. Releases up to and including 2.3.3
+were published under the Apache License 2.0 and remain available
+under it.
 
-See LICENSE for the full text of the license.
+External contributions are accepted under the BSD 3-Clause License:
+by submitting a contribution, you agree to license it under the same
+terms (see CONTRIBUTING.md).
 
-External contributions are governed by the Apache 2.0 contribution
-terms (Section 5). By submitting a Contribution, you agree to license
-it under the same terms.
+Third-party material in this repository keeps its own license:
+
+- substrate/e2b/proto/*.proto and the Go generated from them
+  (substrate/e2b/gen/): E2B's orchestrator, template-manager and info
+  APIs, from https://github.com/e2b-dev/infra. Apache License 2.0;
+  see substrate/e2b/proto/LICENSE.
+- cmd/spoond-dash/static/vendor/webtui/: WebTUI CSS. MIT; see the
+  LICENSE beside it.
+- cmd/spoond-dash/static/vendor/datastar-rocket.js: Datastar and
+  Rocket, from https://github.com/starfederation/datastar. MIT; see
+  cmd/spoond-dash/static/vendor/LICENSE-datastar.md.
+- cmd/spoond-dash/static/fonts/: JetBrains Mono. SIL Open Font
+  License 1.1; see OFL-JetBrainsMono.txt.
 
 The sandbox substrate spoond runs on is E2B's node runtime
 (https://github.com/e2b-dev/runtime), used from a patch-queue fork
-(`example.com/e2b-runtime`), Apache License 2.0.
+(`example.com/e2b-runtime`), Apache License 2.0. spoond talks to it
+over gRPC and does not include its code.

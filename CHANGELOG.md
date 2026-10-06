@@ -10,6 +10,15 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **License: BSD 3-Clause.** spoond is licensed under the BSD 3-Clause
+  License from this release; 2.3.3 and earlier stay available under
+  Apache-2.0. E2B's API definitions (`substrate/e2b/proto/`) keep their
+  Apache-2.0 license, and NOTICE lists every third-party file and its
+  license. Datastar's MIT license text now ships beside the vendored
+  build.
+
 ### Added
 
 - **Memory quotas (#128, part 1).** A user's quota gains
