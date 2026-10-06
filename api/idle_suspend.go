@@ -107,10 +107,11 @@ func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 }
 
 // idleSuspended reports whether l is suspended by the idle_suspend rule
-// and only that — a lease the resume queue preempted, or one suspended
-// by hand or the drain, is not. Call with s.store.mu held.
+// and only that — a lease the resume queue preempted, one suspended
+// by hand or the drain, or one whose resume/checkpoint is in flight is
+// not. Call with s.store.mu held.
 func idleSuspended(l *Lease) bool {
-	return l.Suspended && l.PreemptedAt.IsZero() &&
+	return l.Suspended && !l.busy && l.PreemptedAt.IsZero() &&
 		l.LastAction == idleSuspendRule+"/"+heldActionSuspendIdle
 }
 

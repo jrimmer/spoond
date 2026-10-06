@@ -13,7 +13,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -48,7 +47,7 @@ func TestIdleSuspendEffectiveValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	if l.IdleSuspend != checkpointIntervalHost {
+	if l.IdleSuspend != idleSuspendHost {
 		t.Fatalf("stored idle_suspend = %d, want -1 (the host default)", l.IdleSuspend)
 	}
 	if got := svc.effectiveIdleSuspend(l); got != 300 {
@@ -258,7 +257,7 @@ func TestIdleSuspendForkNonPersistentDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fork non-persistent: %v", err)
 	}
-	if np[0].IdleSuspend != checkpointIntervalHost {
+	if np[0].IdleSuspend != idleSuspendHost {
 		t.Fatalf("non-persistent fork stored idle_suspend = %d, want -1", np[0].IdleSuspend)
 	}
 	if got := svc.effectiveIdleSuspend(np[0]); got != 0 {
@@ -828,36 +827,93 @@ func TestIdleSuspendExecAutoResumes(t *testing.T) {
 	}
 }
 
-// TestIdleSuspendExecResumeRefusal: an auto-resume that cannot admit the
-// lease answers what resume would (429/503 with Retry-After) and leaves
-// the lease suspended.
-func TestIdleSuspendExecResumeRefusal(t *testing.T) {
-	ts, svc, _, _ := newTestServerWithService(t)
+// TestIdleSuspendExecResumeRefusalQuota: an auto-resume refused by the
+// memory quota answers what resume would — 429 naming the limit — and
+// leaves the lease suspended.
+func TestIdleSuspendExecResumeRefusalQuota(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
-	if err != nil {
-		t.Fatalf("grant: %v", err)
+	rec, first := createPersistentAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
 	if _, err := svc.setIdlePolicy(l, 60); err != nil {
 		t.Fatalf("setIdlePolicy: %v", err)
 	}
-	if _, err := svc.pauseLease(ctx, l, false); err != nil {
-		t.Fatalf("pause: %v", err)
+	if _, err := svc.suspend(ctx, owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
 	}
 	svc.store.mu.Lock()
 	l.LastAction, l.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, time.Now()
 	svc.store.mu.Unlock()
-	// Force the resume's admission to refuse: a failing NodeInfo.
-	svc.sub.(*testSub).SetNodeInfoFunc(func(context.Context) (substrate.NodeInfo, error) {
-		return substrate.NodeInfo{}, errors.New("node info unavailable")
-	})
-	dropNodeCache(svc)
+	// Spend the budget on a second lease so the resume cannot re-admit.
+	rec, _ = createSandboxAs(t, h, tok, "big")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+	}
 
-	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a",
-		map[string]any{"cmd": "echo hi"})
-	if resp.StatusCode != http.StatusInternalServerError && resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("exec auto-resume refusal: %d, want 5xx: %v", resp.StatusCode, body)
+	rec2 := postLeaseAction(t, h, tok, "/api/leases/"+id+"/exec", `{"cmd":"echo hi"}`)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("exec auto-resume quota refusal = %d, want 429: %s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), "memory") {
+		t.Fatalf("429 should name the memory limit, got %s", rec2.Body.String())
+	}
+	if !l.Suspended {
+		t.Fatal("a refused auto-resume left the lease running")
+	}
+}
+
+// TestIdleSuspendExecResumeRefusalBurst: an auto-resume refused by the
+// burst reserve answers what resume would — 503 no burst capacity with
+// Retry-After: 30 — and leaves the lease suspended.
+func TestIdleSuspendExecResumeRefusalBurst(t *testing.T) {
+	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
+	srv.svc.cfg.BurstReserveMiB = 8192
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+	ctx := context.Background()
+
+	rec, first := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	l.Burst = true // the flag the request would have carried
+	if _, err := svc.setIdlePolicy(l, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	if _, err := svc.suspend(ctx, owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.LastAction, l.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, time.Now()
+	svc.store.mu.Unlock()
+	// Shrink the node so the burst admission cannot fit.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    512 + 1,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.nodeInfoMu.Lock()
+	svc.nodeInfoAt = time.Time{}
+	svc.nodeInfoMu.Unlock()
+
+	rec2 := postLeaseAction(t, h, tok, "/api/leases/"+id+"/exec", `{"cmd":"echo hi"}`)
+	if rec2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("exec auto-resume burst refusal = %d, want 503: %s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), "no burst capacity") {
+		t.Fatalf("503 should name the burst capacity, got %s", rec2.Body.String())
+	}
+	if ra := rec2.Header().Get("Retry-After"); ra != "30" {
+		t.Fatalf("Retry-After = %q, want 30", ra)
 	}
 	if !l.Suspended {
 		t.Fatal("a refused auto-resume left the lease running")

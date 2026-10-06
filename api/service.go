@@ -1395,7 +1395,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// request carries its own (the API stamps it after grant).
 		Generation:         1,
 		CheckpointInterval: checkpointIntervalHost,
-		IdleSuspend:        checkpointIntervalHost,
+		IdleSuspend:        idleSuspendHost,
 		TemplateID:         img.TemplateID,
 		// The class knobs (#128 part 2): priority rides the request,
 		// and the class stamp lands after admitClass decides it below.
@@ -2219,7 +2219,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			// A non-persistent fork cannot be idle-suspended (there is
 			// no snapshot to resume), so it takes the host default
 			// rather than the source's value (2.5, #129 part 2).
-			idleSuspend = checkpointIntervalHost
+			idleSuspend = idleSuspendHost
 		}
 		lease := &Lease{
 			ID:          newID(),
@@ -2294,10 +2294,12 @@ const (
 
 // Idle-suspend bounds (2.5, #129 part 2). They happen to match the
 // checkpoint interval's, but the names stay separate so the two fields
-// can move independently.
+// can move independently. -1 on the stored lease means "the host
+// default" (IdleSuspendDefault), exactly as for checkpoint_interval.
 const (
-	idleSuspendMin = 60
-	idleSuspendMax = 604800
+	idleSuspendMin  = 60
+	idleSuspendMax  = 604800
+	idleSuspendHost = -1
 )
 
 // validateCheckpointInterval checks a requested checkpoint_interval:
@@ -2337,7 +2339,7 @@ func (s *Service) effectiveIdleSuspend(l *Lease) int64 {
 	if !l.Persistent {
 		return 0
 	}
-	if l.IdleSuspend != checkpointIntervalHost {
+	if l.IdleSuspend != idleSuspendHost {
 		return l.IdleSuspend
 	}
 	return s.cfg.IdleSuspendDefault
