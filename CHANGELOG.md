@@ -16,6 +16,8 @@ summarised from README "Status".
   leases run concurrently instead of serialising on one global lock.
 - Signalling a job whose lease is suspended answers 409 "lease is
   suspended; resume it first" instead of reaching the substrate.
+- Event-detail cuts and the stderr tail cut land on rune boundaries, and
+  invalid UTF-8 from the guest is replaced with U+FFFD.
 
 ## [2.6.1] - 2026-10-06
 

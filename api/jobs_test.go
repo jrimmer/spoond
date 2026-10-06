@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
@@ -279,6 +280,58 @@ func TestJobOutputRange(t *testing.T) {
 	}
 	if got := get("stream=stdout&offset=99"); got != "" {
 		t.Fatalf("offset past end = %q, want empty", got)
+	}
+}
+
+// TestJobUTF8SafeCuts: cutDetail and jobExitDetail never split a
+// multi-byte rune, and invalid guest bytes become U+FFFD in a stored or
+// emitted tail.
+func TestJobUTF8SafeCuts(t *testing.T) {
+	// "aébcdef": é is two bytes at [1,3). A cut at byte 2 would split it.
+	s := "aébcdef"
+	got := cutDetail(s, 5)
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "...") {
+		t.Fatalf("cutDetail split a rune: %q", got)
+	}
+	if got != "a..." {
+		t.Fatalf("cutDetail = %q, want a...", got)
+	}
+
+	// A 1 KiB detail whose boundary lands inside a multi-byte rune.
+	long := strings.Repeat("é", 1000)
+	detail := jobExitDetail(0, long)
+	if len(detail) > jobEventDetailBytes {
+		t.Fatalf("detail = %d bytes, want <= %d", len(detail), jobEventDetailBytes)
+	}
+	if !utf8.ValidString(detail) {
+		t.Fatalf("jobExitDetail split a rune: %q", detail)
+	}
+
+	// Invalid UTF-8 from the guest becomes U+FFFD before it is stored or
+	// emitted.
+	bad := "ok \xff\xfe end"
+	valid := toValidUTF8(bad)
+	if !utf8.ValidString(valid) || !strings.Contains(valid, "\uFFFD") {
+		t.Fatalf("toValidUTF8 = %q", valid)
+	}
+
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	p := fake.NewProcess(1020)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+
+	// A stderr tail that begins with an invalid byte: the stored form is
+	// valid UTF-8.
+	writeJobFile(t, sub, sandbox, jobID, "stderr", "\xffoops")
+	writeJobFile(t, sub, sandbox, jobID, "rc", "1\n")
+	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 1})
+	row := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if !utf8.ValidString(row.StderrTail) {
+		t.Fatalf("stored stderr tail is not valid UTF-8: %q", row.StderrTail)
+	}
+	if !strings.ContainsRune(row.StderrTail, '\uFFFD') {
+		t.Fatalf("invalid byte not replaced in stored tail: %q", row.StderrTail)
 	}
 }
 
