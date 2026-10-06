@@ -121,6 +121,10 @@ type BackendMetrics struct {
 	GuestDialsActive prometheus.Gauge       // open WebSocket→guest TCP bridges
 	GuestDialsTotal  *prometheus.CounterVec // {result}: ok, refused, error
 
+	// Background exec jobs (2.6, #135): running jobs and their outcomes.
+	JobsRunning     prometheus.Gauge       // background exec jobs currently running
+	JobsExitedTotal *prometheus.CounterVec // {result}: ok, error, lost
+
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
 	LeasesByImage     *prometheus.GaugeVec     // {image}: live leases per image
@@ -415,6 +419,16 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Guest port dial attempts by result: ok, refused (per-owner cap), error (the guest dial failed).",
 	}, []string{"result"})
 
+	// Background exec jobs (2.6, #135)
+	m.JobsRunning = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "jobs_running",
+		Help: "Background exec jobs currently running.",
+	})
+	m.JobsExitedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "jobs_exited_total",
+		Help: "Background exec jobs that ended, by result: ok, error, lost.",
+	}, []string{"result"})
+
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases",
@@ -471,6 +485,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.PreemptionsTotal, m.PreemptedLeases,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
+		m.JobsRunning, m.JobsExitedTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)

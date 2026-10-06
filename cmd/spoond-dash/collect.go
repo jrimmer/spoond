@@ -170,13 +170,23 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 // for the rest.
 func eventStyle(t string) string {
 	switch t {
-	case "lost", "held_action", "idle_suspended":
+	case "lost", "held_action", "job_lost", "idle_suspended":
 		return "warn"
 	case "released":
 		return "dim"
 	default:
 		return "text"
 	}
+}
+
+// jobExitedStyle picks the job_exited line's style: a non-zero exit is
+// drawn in the warning colour (2.6, #135), a zero exit like any other
+// event.
+func jobExitedStyle(detail string) string {
+	if strings.HasPrefix(detail, "exit 0") {
+		return "text"
+	}
+	return "warn"
 }
 
 // eventSubject picks the tail column: the lease's holder, else its
@@ -603,7 +613,11 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 		}
 		text := strings.TrimRight(fmt.Sprintf("%s  %-14s  %-10s  %-32s  %s", at, ev.Type, ev.LeaseID,
 			ellipsize(eventSubject(ev, rows, names), 32), shortBuildIDs(ev.Detail)), " ")
-		lines = append(lines, EventLine{Text: text, Style: eventStyle(ev.Type)})
+		style := eventStyle(ev.Type)
+		if ev.Type == "job_exited" {
+			style = jobExitedStyle(ev.Detail)
+		}
+		lines = append(lines, EventLine{Text: text, Style: style})
 	}
 	return lines
 }

@@ -42,6 +42,11 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   loses nothing. On every lease:
   - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
     and removes files in the guest, up to 256 MiB per file.
+  - **Background jobs**: `POST /api/leases/{id}/exec` with
+    `"background": true` starts a tracked job (202 + `job_id`);
+    `GET …/jobs/{job}?wait=<s>` long-polls to its exit, and
+    `…/jobs/{job}/output` follows stdout/stderr by byte range, while
+    `job_started`/`job_exited`/`job_lost` ride the event stream.
   - **Guest port dial**: `GET /api/leases/{id}/ports/{port}/dial` opens
     raw TCP to any port in the guest over a WebSocket (a database's own
     protocol, a debugger, a REPL), under every network policy.

@@ -10,6 +10,34 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Background exec jobs (2.6, #135).** `POST
+  /api/leases/{id}/exec` (and the `/api/sandboxes` alias) accepts
+  `"background": true`: the command runs in the caller's lease and the
+  request answers `202 {"job_id","started_at"}` as soon as it has
+  started (`timeout` is ignored). The guest records the outcome itself
+  under `/var/lib/spoond/jobs/<job_id>/` (`stdout`, `stderr`, `pid` and
+  an atomically written `rc`), detached from the envd stream, so a
+  backend restart does not kill the job and the files — not the stream
+  — are the source of truth. The `env` object rides the substrate's
+  start request, never the job directory, the record, the logs or an
+  event. Jobs are tracked in a new `lease_jobs`
+  table (**migration 0016**), deleted with their lease and pruned after
+  `JOB_RETENTION_SECS` (default 7 days), when the guest's job directory
+  is removed too; at most
+  `MAX_RUNNING_JOBS_PER_LEASE` (default 16) run per lease (`429` past
+  it). Read them with `GET …/jobs` (newest first) and
+  `GET …/jobs/{job}` (record plus the last 64 KiB of output, or
+  `?wait=<seconds>` to long-poll to the exit), follow output with
+  `GET …/jobs/{job}/output?stream=&offset=&limit=`, and signal a job
+  with `POST …/jobs/{job}/signal`. `job_started`, `job_exited` and
+  `job_lost` ride the lease event stream, the lease object gains a
+  `jobs` summary, and a lease with a running job counts as active for
+  every idle rule. New metrics `spoond_jobs_running` and
+  `spoond_jobs_exited_total{result}`; the dashboard events panel shows
+  `job_exited` lines.
+
 ### Changed
 
 - **`spoond dash` colour roles.** The dashboard's palette now follows

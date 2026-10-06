@@ -157,6 +157,9 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// Crash recovery rebuilt the guest from a checkpoint: its memory did
+	// not continue, so every running job is lost (2.6, #135).
+	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease recovered from a checkpoint; the job did not survive")
 	// Crash recovery replaced the sandbox; put the lease's create-time
 	// secrets back into the fresh tmpfs (#80).
 	s.restageCreateSecrets(ctx, l, "recovery")
