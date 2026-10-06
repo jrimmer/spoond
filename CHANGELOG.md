@@ -19,6 +19,11 @@ summarised from README "Status".
 - **Dashboard events panel: the detail gets the room.** The type and
   subject columns are as wide as the events shown need (the subject at
   most 24 characters, cut with `…`), instead of fixed 14 and 32.
+- **Dashboard header: a title and a gutter.** The legend line and the
+  `═` rule under the title are gone; a blank row separates the title
+  from the panels. Every state is spelled out where it is shown, and
+  the holder column's header explains its two marks (`◆ held · ◉
+  lapsed`).
 - **Dashboard header: no orchestrator version.** The title line reads
   `SPOOND · host · version · up …`; the substrate's version
   (`e2b 0.16.1`) is gone from it.

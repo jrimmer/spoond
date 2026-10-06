@@ -1,6 +1,5 @@
                                   SPOOND · vm2.lacy.casa · dev · up 9m                                  
-════════════════════════════════════════════════════════════════════════════════════════════════════════
-         ▶ running · ‖ suspended · ■ lost · ⭘ recovered · ◆ held · ◉ lapsed hold · ✓ active unit        
+                                                                                                        
 ▲ held lease fedcba0987: expiry/expire 3h00m ago                                                        
                                                                                                         
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
@@ -18,7 +17,7 @@
 │ ▃▅▇▅█▇                   ▅▇█▆██                   ▁▃▁▅██                   ▅▆█▇██                    │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ leases ─────────────────────────────────────────────────────────────────────────────────────────────┐
-│ id         image           owner     state              policy     age    left   holder              │
+│ id         image           owner     state              policy     age    left   ◆ held · ◉ lapsed   │
 │ abcdef0123 go-base         jason     ▶ running, burst   internet   5m     10m    -                   │
 │ 1234567890 py-base         ci        ▶ running          restricted 2h31m  ∞      ◆ forgejo/job-42    │
 │ fedcba0987 go-base         agent     ‖ suspended, burst lan        1d     due    ◉ nightly           │

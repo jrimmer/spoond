@@ -1135,40 +1135,6 @@ func TestPageLinkRowKeepsItsWidth(t *testing.T) {
 	}
 }
 
-// TestLegendFitsNarrowFrames: a legend wider than the frame drops whole
-// items from its right end, so the first entries (the run states) are
-// always on screen and the row fits.
-func TestLegendFitsNarrowFrames(t *testing.T) {
-	for _, w := range []int{72, 80, 104} {
-		segs := fitItems(legendRow(), w)
-		n := 0
-		for _, s := range segs {
-			n += len([]rune(s.Text))
-		}
-		if n > w || len(segs) == 0 || segs[0].Text != "▶" {
-			t.Fatalf("width %d: legend %d wide, starts %q", w, n, segs[0].Text)
-		}
-	}
-}
-
-// TestLegendShowsTheMarks: the legend names the run-state glyphs, then
-// the holder column's hold marks.
-func TestLegendShowsTheMarks(t *testing.T) {
-	want := []string{"▶", "running", "‖", "suspended", "■", "lost", "⭘", "recovered", "◆ held · ◉ lapsed hold"}
-	row := strings.Join(func() []string {
-		var out []string
-		for _, s := range legendRow() {
-			out = append(out, s.Text)
-		}
-		return out
-	}(), "")
-	for _, w := range want {
-		if !strings.Contains(row, w) {
-			t.Errorf("legend lacks %q: %s", w, row)
-		}
-	}
-}
-
 // TestServicesFillTallerPanel: beside a taller images panel the services
 // panel shows every unit that fits instead of folding at
 // maxServiceRows; it folds only units that do not fit at all.
