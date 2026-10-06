@@ -152,7 +152,9 @@ func TestC1_PreemptionRefillsGuaranteed(t *testing.T) {
 		trackAs(t, burstTok, l.ID)
 		burstIDs = append(burstIDs, l.ID)
 		last = l
-		execOK(t, l.ID, "echo "+marker+" > /dev/shm/capacity-marker")
+		withToken(burstTok, func() {
+			execOK(t, l.ID, "echo "+marker+" > /dev/shm/capacity-marker")
+		})
 		if i >= 200 {
 			failf(t, "filled 200 burst leases without a 503")
 		}
@@ -195,8 +197,12 @@ func TestC1_PreemptionRefillsGuaranteed(t *testing.T) {
 		m, ok := leaseAs(t, burstTok, last.ID)
 		return ok && !boolField(m, "preempted") && !boolField(m, "suspended") && strField(m, "state") == "running"
 	})
-	if got := execOK(t, last.ID, "cat /dev/shm/capacity-marker"); got != marker {
-		failf(t, "/dev/shm marker after resume = %q, want %q", got, marker)
+	var gotMarker string
+	withToken(burstTok, func() {
+		gotMarker = execOK(t, last.ID, "cat /dev/shm/capacity-marker")
+	})
+	if gotMarker != marker {
+		failf(t, "/dev/shm marker after resume = %q, want %q", gotMarker, marker)
 	}
 	if m, ok := leaseAs(t, burstTok, last.ID); ok {
 		if got := int64(numberField(m, "generation")); got != genBefore {
