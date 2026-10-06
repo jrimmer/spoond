@@ -2,8 +2,6 @@ package notify
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,9 +20,6 @@ const (
 	KeyDiskDanger      = "disk.danger"
 	KeyHugepagesWarn   = "hugepages.warn"
 	KeyHugepagesDanger = "hugepages.danger"
-	KeyTLSCert30       = "tls.cert.30d"
-	KeyTLSCert7        = "tls.cert.7d"
-	KeyTLSCert1        = "tls.cert.1d"
 	KeyGCFailed        = "gc.failed"
 	KeyBackupStale     = "backup.stale"
 	KeyDiskKept        = "disk.kept"
@@ -75,10 +70,6 @@ type DiskUsage func() (total, free uint64, err error)
 // counts and page size (the substrate's NodeInfo). Replaced in tests.
 type HugepageUsage func() (total, used, reserved uint64, pageBytes uint64, err error)
 
-// CertExpiry reports the configured TLS certificate's NotAfter.
-// Replaced in tests.
-type CertExpiry func() (time.Time, error)
-
 // LastBackup reports the modification time of the newest database
 // backup, or an error when none is usable. Replaced in tests.
 type LastBackup func() (time.Time, error)
@@ -94,15 +85,15 @@ type GCLastError func() error
 type KeptDisk func() (keptBytes, diskTotal uint64, err error)
 
 // CheckSources carries the probes the periodic checks read. Every
-// field is optional: a nil source disables its checks (no TLS_CERT
-// disables the certificate check, no backup directory the backup
-// check) — absence of configuration is not an incident.
+// field is optional: a nil source disables its checks (no backup
+// directory disables the backup check) — absence of configuration is
+// not an incident. TLS certificate expiry is not watched here: that is
+// for the host's own IT tooling.
 type CheckSources struct {
 	Unit         SystemdUnit
 	Units        []string // systemd units to watch (e.g. spoond-backend)
 	Disk         DiskUsage
 	Hugepages    HugepageUsage
-	Cert         CertExpiry
 	LastBackup   LastBackup
 	GCFailed     GCLastError
 	KeptDisk     KeptDisk      // kept checkpoints vs the snapshot disk (#126); nil = no check
@@ -111,13 +102,12 @@ type CheckSources struct {
 }
 
 // ProductionSources builds the checks the backend runs: systemd units
-// via systemctl, the snapshot disk via statfs, the certificate from
-// TLS_CERT/TLS_KEY, the newest backup from the backup directory (its
+// via systemctl, the snapshot disk via statfs, the newest backup from the backup directory (its
 // age limit from BACKUP_MAX_AGE_SECS, 0 or unset meaning
 // DefaultBackupMaxAge), and whatever lastError reports for the GC.
 // Hugepage probing needs the substrate, so the caller installs it
 // separately — HugepagesFromNodeInfo adapts a NodeInfo fetch.
-func ProductionSources(units []string, diskPath, backupDir, backupPrefix, tlsCert, tlsKey string, backupMaxAge time.Duration, lastError GCLastError) *CheckSources {
+func ProductionSources(units []string, diskPath, backupDir, backupPrefix string, backupMaxAge time.Duration, lastError GCLastError) *CheckSources {
 	if diskPath == "" {
 		diskPath = DefaultDiskPath
 	}
@@ -132,9 +122,6 @@ func ProductionSources(units []string, diskPath, backupDir, backupPrefix, tlsCer
 		Units: units,
 		Disk: func() (uint64, uint64, error) {
 			return statfsUsage(diskPath)
-		},
-		Cert: func() (time.Time, error) {
-			return certNotAfter(tlsCert, tlsKey)
 		},
 		LastBackup: func() (time.Time, error) {
 			return newestBackup(backupDir, backupPrefix)
@@ -190,12 +177,6 @@ func (src *CheckSources) Checks() []Check {
 		hp := src.Hugepages
 		out = append(out, func(_ context.Context, now time.Time) []Event {
 			return hugepagesCheck(hp, now)
-		})
-	}
-	if src.Cert != nil {
-		cert := src.Cert
-		out = append(out, func(_ context.Context, now time.Time) []Event {
-			return certCheck(cert, now)
 		})
 	}
 	if src.LastBackup != nil {
@@ -365,51 +346,6 @@ func hugepagesCheck(usage HugepageUsage, now time.Time) []Event {
 	}
 }
 
-// certCheck watches the configured TLS certificate's expiry at 30 and
-// 7 days (warn) and 1 day (critical). Each threshold is its own key;
-// passing a deeper threshold resolves the shallower one, and renewal
-// resolves the deepest still-open one.
-func certCheck(expiry CertExpiry, now time.Time) []Event {
-	notAfter, err := expiry()
-	if err != nil {
-		return nil // no certificate configured: the doctor reports that
-	}
-	left := notAfter.Sub(now)
-	// A certificate with exactly 30, 7 or 1 day left is already inside
-	// that threshold: "within 30 days" includes the day itself, so the
-	// comparison is days*24h (inclusive), not a whole-day count. Each
-	// deeper threshold resolves every shallower one — a certificate can
-	// cross several boundaries between two passes.
-	switch {
-	case left <= 24*time.Hour:
-		return []Event{{
-			Key:      KeyTLSCert1,
-			Severity: Critical,
-			Title:    "TLS certificate expires within a day",
-			Body:     fmt.Sprintf("expires %s (%s left)", notAfter.UTC().Format(time.RFC3339), left.Round(time.Minute)),
-			At:       now,
-		}, resolved(KeyTLSCert30, Warn, now), resolved(KeyTLSCert7, Warn, now)}
-	case left <= 7*24*time.Hour:
-		return []Event{{
-			Key:      KeyTLSCert7,
-			Severity: Warn,
-			Title:    "TLS certificate expires within a week",
-			Body:     fmt.Sprintf("expires %s (%s left)", notAfter.UTC().Format(time.RFC3339), left.Round(24*time.Hour)),
-			At:       now,
-		}, resolved(KeyTLSCert30, Warn, now), resolved(KeyTLSCert1, Critical, now)}
-	case left <= 30*24*time.Hour:
-		return []Event{{
-			Key:      KeyTLSCert30,
-			Severity: Warn,
-			Title:    "TLS certificate expires within 30 days",
-			Body:     fmt.Sprintf("expires %s (%s left)", notAfter.UTC().Format(time.RFC3339), left.Round(24*time.Hour)),
-			At:       now,
-		}, resolved(KeyTLSCert7, Warn, now), resolved(KeyTLSCert1, Critical, now)}
-	default:
-		return []Event{resolved(KeyTLSCert30, Warn, now), resolved(KeyTLSCert7, Warn, now), resolved(KeyTLSCert1, Critical, now)}
-	}
-}
-
 // backupCheck warns when the newest database backup is older than
 // maxAge (BACKUP_MAX_AGE_SECS). A missing or unreadable backup counts
 // as stale.
@@ -486,25 +422,9 @@ func newestBackup(dir, prefix string) (time.Time, error) {
 	return newest, nil
 }
 
-// certNotAfter loads the configured certificate pair and reports its
-// leaf's NotAfter. An unconfigured pair is errNoSource, not an error:
-// a plain-HTTP deployment has nothing to watch.
+// errNoSource marks a probe whose source is not configured: absence of
+// configuration is not an incident.
 var errNoSource = fmt.Errorf("not configured")
-
-func certNotAfter(certFile, keyFile string) (time.Time, error) {
-	if certFile == "" || keyFile == "" {
-		return time.Time{}, errNoSource
-	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return time.Time{}, err
-	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
-	if err != nil {
-		return time.Time{}, err
-	}
-	return leaf.NotAfter, nil
-}
 
 // humanBytes renders a byte count for event bodies.
 func humanBytes(n uint64) string {

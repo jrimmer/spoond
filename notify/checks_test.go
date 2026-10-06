@@ -145,51 +145,6 @@ func TestHugepagesCheck(t *testing.T) {
 	}
 }
 
-func TestCertCheck(t *testing.T) {
-	expiry := func(left time.Duration) CertExpiry {
-		return func() (time.Time, error) { return checkNow.Add(left), nil }
-	}
-	// 40 days: healthy, all three resolve.
-	evs := certCheck(expiry(40*24*time.Hour), checkNow)
-	if len(evs) != 3 {
-		t.Fatalf("healthy = %+v", evs)
-	}
-	for _, k := range []string{KeyTLSCert30, KeyTLSCert7, KeyTLSCert1} {
-		if ev, ok := findByKey(t, evs, k); !ok || !ev.Resolved {
-			t.Fatalf("%s not resolved: %+v", k, ev)
-		}
-	}
-	// Boundary: exactly 30 days is already "within 30 days".
-	evs = certCheck(expiry(30*24*time.Hour), checkNow)
-	if ev, ok := findByKey(t, evs, KeyTLSCert30); !ok || ev.Resolved || ev.Severity != Warn {
-		t.Fatalf("exactly 30 d = %+v (want a 30d alert)", evs)
-	}
-	// Exactly 7 days: the 7-day alert, and the 30-day key resolves.
-	evs = certCheck(expiry(7*24*time.Hour), checkNow)
-	ev, _ := findByKey(t, evs, KeyTLSCert7)
-	if ev.Resolved || ev.Severity != Warn {
-		t.Fatalf("exactly 7 d = %+v", evs)
-	}
-	if ev, _ := findByKey(t, evs, KeyTLSCert30); !ev.Resolved {
-		t.Fatal("30d key not resolved once inside 7 d")
-	}
-	// Exactly 1 day (24 h): critical.
-	evs = certCheck(expiry(24*time.Hour), checkNow)
-	if ev, ok := findByKey(t, evs, KeyTLSCert1); !ok || ev.Resolved || ev.Severity != Critical {
-		t.Fatalf("exactly 1 d = %+v", evs)
-	}
-	// 12 hours: critical.
-	evs = certCheck(expiry(12*time.Hour), checkNow)
-	if ev, _ := findByKey(t, evs, KeyTLSCert1); ev.Resolved || ev.Severity != Critical {
-		t.Fatalf("12 h = %+v", evs)
-	}
-	// No certificate configured: not an incident.
-	evs = certCheck(func() (time.Time, error) { return time.Time{}, errNoSource }, checkNow)
-	if evs != nil {
-		t.Fatalf("no cert = %+v", evs)
-	}
-}
-
 func TestBackupCheck(t *testing.T) {
 	// Fresh backup: resolved.
 	evs := backupCheck(func() (time.Time, error) { return checkNow.Add(-2 * time.Hour), nil }, DefaultBackupMaxAge, checkNow)
@@ -291,12 +246,11 @@ func TestCheckSourcesOrder(t *testing.T) {
 		Units:      []string{"u"},
 		Disk:       func() (uint64, uint64, error) { return 0, 0, errors.New("skip") },
 		Hugepages:  func() (uint64, uint64, uint64, uint64, error) { return 0, 0, 0, 0, errors.New("skip") },
-		Cert:       func() (time.Time, error) { return time.Time{}, errNoSource },
 		LastBackup: func() (time.Time, error) { return time.Time{}, errors.New("skip") },
 		GCFailed:   func() error { return nil },
 	}
-	if got := len(src.Checks()); got != 6 {
-		t.Fatalf("checks = %d, want 6 (unit, disk, hugepages, cert, backup, gc)", got)
+	if got := len(src.Checks()); got != 5 {
+		t.Fatalf("checks = %d, want 5 (unit, disk, hugepages, backup, gc)", got)
 	}
 }
 
@@ -347,28 +301,6 @@ func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
 
-// TestCertCheckCrossesBoundaries: a certificate that crosses from
-// healthy past 7 days straight to less than a day resolves the 30- and
-// 7-day keys in the same pass it raises the 1-day critical.
-func TestCertCheckCrossesBoundaries(t *testing.T) {
-	evs := certCheck(func() (time.Time, error) { return checkNow.Add(10 * time.Hour), nil }, checkNow)
-	var keys []string
-	for _, ev := range evs {
-		keys = append(keys, ev.Key)
-	}
-	if len(keys) != 3 {
-		t.Fatalf("events = %v", keys)
-	}
-	if keys[0] != KeyTLSCert1 {
-		t.Fatalf("order = %v, want the 1d alert first", keys)
-	}
-	for _, k := range []string{KeyTLSCert30, KeyTLSCert7} {
-		if ev, ok := findByKey(t, evs, k); !ok || !ev.Resolved {
-			t.Fatalf("%s not resolved while inside 1 d: %v", k, evs)
-		}
-	}
-}
-
 // TestBackupMaxAgeSecs: BACKUP_MAX_AGE_SECS parses to a duration, 0 or
 // negative falls back to the 26 h default.
 func TestBackupMaxAgeSecs(t *testing.T) {
@@ -399,7 +331,7 @@ func TestProductionSourcesBackupMaxAge(t *testing.T) {
 	}
 	runAllChecks := func(maxAge time.Duration) []Event {
 		var evs []Event
-		for _, c := range ProductionSources(nil, "", dir, "spoond", "", "", maxAge, nil).Checks() {
+		for _, c := range ProductionSources(nil, "", dir, "spoond", maxAge, nil).Checks() {
 			evs = append(evs, c(context.Background(), checkNow)...)
 		}
 		return evs
