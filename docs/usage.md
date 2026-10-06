@@ -132,9 +132,15 @@ ssh ctl@sandbox.example.com "resume <id>"    # back to work
 ```
 
 Take a checkpoint of a *running* persistent lease to bound what a host
-restart can cost (`POST /api/leases/{id}/checkpoint`); the platform
-also checkpoints active persistent leases hourly by default. A lease
-lost with no checkpoint answers `410` — delete it and start again.
+restart can cost (`POST /api/leases/{id}/checkpoint`, with `{"keep":
+true}` to pin it). spoond takes **no periodic checkpoints by default**
+(since 2.3): a lease opts in with `checkpoint_interval` on create or
+`PUT /api/leases/{id}/checkpoint-policy`, and the host default
+`CHECKPOINT_INTERVAL_MINS` is `0` (never). Being held does not change
+that. Only kept checkpoints count against `MAX_KEPT_PER_LEASE`; a
+periodic checkpoint is never kept. The checkpoint response's `at` is
+the checkpoint's time. A lease lost with no checkpoint answers `410` —
+delete it and start again.
 
 ## Clones and forks (snapshot branching)
 
