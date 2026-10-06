@@ -104,3 +104,52 @@ func TestJobRoundTripAndTieBreak(t *testing.T) {
 		t.Fatalf("job survived lease deletion: %v", err)
 	}
 }
+
+// TestJobRetentionFractionBoundary pins that the retention comparison
+// orders ended_at by parsed time, not by the stored RFC3339 string. A
+// value with a fractional second that is later than the cutoff sorts
+// before it as a string ("12:00:00.5Z" < "12:00:00Z") and a string
+// comparison would wrongly prune it; the parsed comparison keeps it.
+func TestJobRetentionFractionBoundary(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := db.UpsertLease(ctx, LeaseRow{
+		ID: "l-1", Owner: "alice", Image: "py-base",
+		CreatedAt: base, ExpiresAt: base.Add(time.Hour), LastActive: base,
+		State: "running", Class: "guaranteed",
+	}); err != nil {
+		t.Fatalf("upsert lease: %v", err)
+	}
+	insert := func(id string, ended time.Time) {
+		t.Helper()
+		if err := db.InsertJob(ctx, JobRow{
+			JobID: id, LeaseID: "l-1", Owner: "alice", Cmd: "echo " + id,
+			State: "exited", StartedAt: ended.Add(-time.Minute), EndedAt: ended,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	// One ends 500 ms before the cutoff, one 500 ms after. A string
+	// comparison mis-orders the later one ("12:00:00.5" sorts before
+	// "12:00:00Z") and would prune it; the parsed comparison keeps it.
+	insert("j-earlier", base.Add(-500*time.Millisecond))
+	insert("j-later", base.Add(500*time.Millisecond))
+
+	expired, err := db.ListExpiredJobs(ctx, base)
+	if err != nil {
+		t.Fatalf("list expired: %v", err)
+	}
+	if len(expired) != 1 || expired[0].JobID != "j-earlier" {
+		t.Fatalf("expired = %+v, want just j-earlier", expired)
+	}
+	if _, err := db.PruneJobs(ctx, base); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := db.GetJob(ctx, "j-earlier"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("j-earlier survived prune: %v", err)
+	}
+	if _, err := db.GetJob(ctx, "j-later"); err != nil {
+		t.Fatalf("j-later wrongly pruned: %v", err)
+	}
+}

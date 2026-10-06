@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- Background job starts use a per-lease lock, so starts on different
+  leases run concurrently instead of serialising on one global lock.
+- Signalling a job whose lease is suspended answers 409 "lease is
+  suspended; resume it first" instead of reaching the substrate.
+- Event-detail cuts and the stderr tail cut land on rune boundaries, and
+  invalid UTF-8 from the guest is replaced with U+FFFD.
+- Job retention compares parsed ended_at times instead of RFC3339
+  strings, so values with and without fractional seconds order correctly.
+
 ## [2.6.1] - 2026-10-06
 
 More detail in the events panel (#132 part 2). No schema change; the

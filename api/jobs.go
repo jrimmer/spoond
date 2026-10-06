@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
@@ -200,6 +202,40 @@ func jobCommandBody(cmd, cwd string) string {
 	return "cd " + shellQuote(cwd) + " && " + cmd
 }
 
+// jobStartLock is one lease's start lock with a waiter count, so the
+// per-lease entry can be dropped once no start holds or waits on it.
+type jobStartLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquireJobStart returns the held start lock for a lease. Callers must
+// release it with releaseJobStart.
+func (s *Service) acquireJobStart(leaseID string) *jobStartLock {
+	s.jobStartMu.Lock()
+	l := s.jobStarts[leaseID]
+	if l == nil {
+		l = &jobStartLock{}
+		s.jobStarts[leaseID] = l
+	}
+	l.refs++
+	s.jobStartMu.Unlock()
+	l.mu.Lock()
+	return l
+}
+
+// releaseJobStart unlocks a lease's start lock and drops its entry when
+// no other start holds or waits on it.
+func (s *Service) releaseJobStart(leaseID string, l *jobStartLock) {
+	l.mu.Unlock()
+	s.jobStartMu.Lock()
+	l.refs--
+	if l.refs == 0 {
+		delete(s.jobStarts, leaseID)
+	}
+	s.jobStartMu.Unlock()
+}
+
 // startJob starts a background exec. It returns the job id, start time
 // and the envd Process carrying the stream (the caller watches it), or
 // an error the caller maps onto an HTTP status.
@@ -212,11 +248,11 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	// leave a started process unrecorded. context.WithoutCancel keeps the
 	// request's values; the caller is already resolved by now.
 	ctx = context.WithoutCancel(ctx)
-	// The per-lease cap is a check-then-insert against SQLite: hold one
-	// lock for both so two concurrent starts for one lease cannot both
-	// pass it.
-	s.jobStartMu.Lock()
-	defer s.jobStartMu.Unlock()
+	// The per-lease cap is a check-then-insert against SQLite: hold the
+	// lease's start lock for both so two concurrent starts for one lease
+	// cannot both pass it, while starts on other leases run concurrently.
+	startLock := s.acquireJobStart(lease.ID)
+	defer s.releaseJobStart(lease.ID, startLock)
 	n, err := s.db.CountRunningJobs(ctx, lease.ID)
 	if err != nil {
 		return "", time.Time{}, nil, err
@@ -535,29 +571,42 @@ func (s *Service) readJobRC(ctx context.Context, sandboxID, jobID string) (int, 
 	return code, true, nil
 }
 
+// toValidUTF8 replaces invalid UTF-8 from the guest with U+FFFD, so
+// non-UTF-8 bytes never reach a record or an event.
+func toValidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
 // readJobStderrTail reads the last n bytes of a job's stderr. A missing
 // file is an empty tail, not an error. The read goes through the range
 // reader (a true tail), not the prefix ReadFile: an over-limit stderr
-// must still yield its last bytes, not a substrate.ErrTooLarge.
+// must still yield its last bytes, not a substrate.ErrTooLarge. The
+// bytes are made valid UTF-8 (a tail read can start mid-rune and the
+// guest may write arbitrary bytes), so the stored tail and the emitted
+// detail are always valid text.
 func (s *Service) readJobStderrTail(ctx context.Context, sandboxID, jobID string, n int) (string, error) {
 	data, err := s.readJobRange(ctx, sandboxID, jobID, "stderr", -1, n)
-	return string(data), err
+	return toValidUTF8(string(data)), err
 }
 
 // jobExitDetail renders the job_exited event detail: "exit <code>"
-// plus up to 10 stderr lines, at most 1 KiB total (spec item 8).
+// plus up to 10 stderr lines, at most 1 KiB total (spec item 8). The
+// cut is rune-safe, so it never splits a multi-byte rune.
 func jobExitDetail(exitCode int, stderrTail string) string {
 	detail := fmt.Sprintf("exit %d", exitCode)
-	if lines := lastLines(stderrTail, jobEventStderrLines); lines != "" {
+	if lines := lastLines(toValidUTF8(stderrTail), jobEventStderrLines); lines != "" {
 		detail += "\n" + lines
 	}
 	if len(detail) > jobEventDetailBytes {
-		detail = detail[:jobEventDetailBytes]
+		detail = cutToRunes(detail, jobEventDetailBytes)
 	}
 	return detail
 }
 
-// lastLines returns the last n non-empty lines of s.
+// lastLines returns the last n lines of s, keeping empty ones.
 func lastLines(s string, n int) string {
 	s = strings.TrimRight(s, "\n")
 	if s == "" {
@@ -570,16 +619,29 @@ func lastLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
+// cutToRunes truncates s to at most n bytes, backing up to a rune
+// boundary so a multi-byte rune is never split.
+func cutToRunes(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // cutDetail shortens s to n bytes, marking an ellipsis when it was
-// longer. Used for event details.
+// longer. The cut lands on a rune boundary, so it never splits a
+// multi-byte rune. Used for event details.
 func cutDetail(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	if n <= 3 {
-		return s[:n]
+		return cutToRunes(s, n)
 	}
-	return s[:n-3] + "..."
+	return cutToRunes(s, n-3) + "..."
 }
 
 // runJobReconcileLoop reconciles running jobs every 10 s while any job
@@ -666,10 +728,11 @@ func (s *Service) pruneJobs(ctx context.Context) {
 	}
 }
 
-// readJobOutput reads the last n bytes of a job's stdout or stderr.
+// readJobOutput reads the last n bytes of a job's stdout or stderr. The
+// bytes are made valid UTF-8 before they are emitted in the record view.
 func (s *Service) readJobOutput(ctx context.Context, sandboxID, jobID, stream string, n int) (string, error) {
 	data, err := s.readJobRange(ctx, sandboxID, jobID, stream, -1, n)
-	return string(data), err
+	return toValidUTF8(string(data)), err
 }
 
 // jobRangeReader is the optional substrate extension the output

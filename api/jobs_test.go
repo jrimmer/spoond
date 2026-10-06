@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
@@ -281,6 +283,83 @@ func TestJobOutputRange(t *testing.T) {
 	}
 }
 
+// TestJobUTF8SafeCuts: cutDetail and jobExitDetail never split a
+// multi-byte rune, and invalid guest bytes become U+FFFD in a stored or
+// emitted tail.
+func TestJobUTF8SafeCuts(t *testing.T) {
+	// "aébcdef": é is two bytes at [1,3). A cut at byte 2 would split it.
+	s := "aébcdef"
+	got := cutDetail(s, 5)
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "...") {
+		t.Fatalf("cutDetail split a rune: %q", got)
+	}
+	if got != "a..." {
+		t.Fatalf("cutDetail = %q, want a...", got)
+	}
+
+	// A 1 KiB detail whose boundary lands inside a multi-byte rune.
+	long := strings.Repeat("é", 1000)
+	detail := jobExitDetail(0, long)
+	if len(detail) > jobEventDetailBytes {
+		t.Fatalf("detail = %d bytes, want <= %d", len(detail), jobEventDetailBytes)
+	}
+	if !utf8.ValidString(detail) {
+		t.Fatalf("jobExitDetail split a rune: %q", detail)
+	}
+
+	// Invalid UTF-8 from the guest becomes U+FFFD before it is stored or
+	// emitted.
+	bad := "ok \xff\xfe end"
+	valid := toValidUTF8(bad)
+	if !utf8.ValidString(valid) || !strings.Contains(valid, "\uFFFD") {
+		t.Fatalf("toValidUTF8 = %q", valid)
+	}
+
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	p := fake.NewProcess(1020)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+
+	// A stderr tail that begins with an invalid byte: the stored form is
+	// valid UTF-8.
+	writeJobFile(t, sub, sandbox, jobID, "stderr", "\xffoops")
+	writeJobFile(t, sub, sandbox, jobID, "rc", "1\n")
+	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 1})
+	row := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if !utf8.ValidString(row.StderrTail) {
+		t.Fatalf("stored stderr tail is not valid UTF-8: %q", row.StderrTail)
+	}
+	if !strings.ContainsRune(row.StderrTail, '\uFFFD') {
+		t.Fatalf("invalid byte not replaced in stored tail: %q", row.StderrTail)
+	}
+}
+
+// TestJobSignalOnSuspendedLease: signalling a running job whose lease is
+// suspended answers 409 without reaching the substrate (there is no
+// running sandbox to exec in until the lease resumes).
+func TestJobSignalOnSuspendedLease(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := body["id"].(string)
+
+	p := fake.NewProcess(1019)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	before := calls(sub.Fake, "Exec")
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("signal on suspended lease = %d, want 409: %v", resp.StatusCode, body)
+	}
+	if got := calls(sub.Fake, "Exec"); got != before {
+		t.Fatalf("signal on suspended lease reached the substrate: Exec calls %d -> %d", before, got)
+	}
+}
+
 // TestJobSignal: a running job's process group is signalled; a finished
 // job answers 409.
 func TestJobSignal(t *testing.T) {
@@ -315,6 +394,76 @@ func TestJobSignal(t *testing.T) {
 	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "KILL"})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("signal of exited job = %d, want 409", resp.StatusCode)
+	}
+}
+
+// TestJobStartPerLeaseLock: the start lock is per lease. Two concurrent
+// starts on one lease at cap-1 admit exactly one; starts on two leases
+// do not wait for each other even while one substrate Start is blocked.
+func TestJobStartPerLeaseLock(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	idA, leaseA, _ := createJobLease(t, ts, svc)
+	idB, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.MaxRunningJobsPerLease = 1
+
+	// Block Start for lease A's sandbox until released, so its first
+	// start holds A's lock across the whole substrate round trip; starts
+	// for lease B are not blocked.
+	release := make(chan struct{})
+	var once sync.Once
+	sub.SetStartHandler(func(sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
+		if sandboxID == leaseA.SandboxID {
+			<-release
+		}
+		return fake.NewProcess(3001), nil
+	})
+	t.Cleanup(func() {
+		once.Do(func() { close(release) })
+		sub.SetStartHandler(nil)
+	})
+
+	status := func(id string) int {
+		resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 600", "background": true})
+		return resp.StatusCode
+	}
+
+	// A start on lease B must complete even though lease A's start is
+	// still blocked in the substrate: the locks are independent.
+	bDone := make(chan int, 1)
+	go func() { bDone <- status(idB) }()
+	select {
+	case code := <-bDone:
+		if code != http.StatusAccepted {
+			t.Fatalf("lease B start = %d, want 202", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("lease B start waited on lease A's start lock")
+	}
+
+	// Two concurrent starts on lease A at cap-1: exactly one admits.
+	aCodes := make(chan int, 2)
+	go func() { aCodes <- status(idA) }()
+	go func() { aCodes <- status(idA) }()
+	// Let the first acquire the lock and block in Start; the second then
+	// waits on the same lock rather than racing the cap check.
+	time.Sleep(200 * time.Millisecond)
+	once.Do(func() { close(release) })
+
+	got := []int{<-aCodes, <-aCodes}
+	accepted, rejected := 0, 0
+	for _, c := range got {
+		switch c {
+		case http.StatusAccepted:
+			accepted++
+		case http.StatusTooManyRequests:
+			rejected++
+		}
+	}
+	if accepted != 1 || rejected != 1 {
+		t.Fatalf("concurrent starts on one lease = %v, want one 202 and one 429", got)
+	}
+	if n, _ := db.CountRunningJobs(context.Background(), idA); n != 1 {
+		t.Fatalf("running jobs on lease A = %d, want 1", n)
 	}
 }
 

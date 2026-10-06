@@ -273,6 +273,13 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "job is not running")
 		return
 	}
+	// A suspended lease has no running sandbox; the job may still be
+	// running in its paused guest, but the substrate cannot be reached
+	// until the lease resumes. Answer 409 without calling the substrate.
+	if s.svc.leaseSuspended(lease.ID) {
+		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+		return
+	}
 	var req struct {
 		Signal string `json:"signal"`
 	}
