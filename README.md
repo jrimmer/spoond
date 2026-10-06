@@ -81,7 +81,11 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   and when guaranteed work needs room spoond suspends them (lowest
   priority, then newest) and resumes them by itself once they fit again
   (`preempted`/`resumed` events; the memory continues). A user without
-  a `guaranteed_mib` keeps every lease guaranteed.
+  a `guaranteed_mib` keeps every lease guaranteed. A create may
+  **wait** for room (`"wait": <seconds>`, up to `MAX_ADMIT_WAIT_SECS`)
+  instead of failing, served in fair-share order; a persistent lease
+  may set `idle_suspend` to give its memory back when idle, and the
+  next exec, files call or dial resumes it.
 - **Images**: one Dockerfile per capability in `images/`, built into E2B
   templates by `spoond images build <name>` (or `--all`). Every guest
   resolves names through the LAN resolver only and carries a container
@@ -202,6 +206,12 @@ stack does not exist yet.
 
 ## Status
 
+**v2.5: waiting and idle reclamation.** A create can wait for room
+(`"wait"`, fair-share order, with its queue position on the event
+stream and at `GET /api/leases/queue`) instead of failing on a full
+host, and a persistent lease can set its own `idle_suspend` so idle
+memory goes back to the host and the next call resumes it.
+
 **v2.4: capacity on shared hosts.** Memory quotas per user
 (`guaranteed_mib`, `max_mib`), guaranteed and burst leases with a
 hugepage reserve, and preemption of burst leases by suspend with an
@@ -291,7 +301,8 @@ Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
 services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
 may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `NOTIFY_WEBHOOKS`, the capacity settings (`BURST_RESERVE_MIB`,
-`PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`), and the held-lease
+`PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`,
+`IDLE_SUSPEND_DEFAULT_SECS`), and the held-lease
 limits (`HOLD_TTL_SECS` and the rest, in
 [docs/operations.md](docs/operations.md)).
 

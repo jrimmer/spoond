@@ -10,6 +10,13 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-06
+
+Waiting for admission and per-lease idle reclamation (#129). Store
+migration 15 adds a column with a default; both features are opt-in, so
+nothing changes until a create sends `wait` or a lease sets
+`idle_suspend`. The `grid` package is unchanged since 2.4.0.
+
 ### Added
 
 - **Queued admission (#129 part 1).** A create that cannot be admitted
@@ -55,6 +62,21 @@ summarised from README "Status".
   quota apply) and then serve the call, while any other suspension
   keeps the `409`. Clone and fork copy the source's value, and the
   dashboard marks idle-suspended rows (`‖ suspended·i`).
+
+### Fixed
+
+- **Free hugepages never wrap.** A node reading that briefly reports
+  more hugepages used and reserved than it has (sandboxes starting or
+  stopping) made the unsigned free figure wrap to an enormous value, so
+  admission, the held pressure rule, the free-hugepages gauge and
+  `spoond doctor` saw a nearly empty node. Free memory now saturates at
+  0 (`NodeInfo.FreeHugepageBytes`).
+- **Room freed by a release or pause is seen at once.** Since 2.4,
+  admissions take their memory from a cached node reading (refreshed
+  every 15 s); only a preemption gave memory back to it. A release or
+  any other pause now credits the reading too, so a burst or guaranteed
+  admission right after a release is no longer refused on the stale
+  figure until the next refresh.
 
 ## [2.4.0] - 2026-10-06
 
