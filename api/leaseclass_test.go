@@ -547,3 +547,96 @@ func TestNodeMetricsFillsBurstCache(t *testing.T) {
 		t.Fatalf("burst create on the gauge-cached node = %d %s, want 201", code, body)
 	}
 }
+
+// shrinkNodeTo makes the fake node report only the given free pages and
+// drops the service's NodeInfo cache, so the next admission sees it.
+func shrinkNodeTo(t *testing.T, svc *Service, sub *testSub, freePages uint64) {
+	t.Helper()
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    freePages,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.nodeInfoMu.Lock()
+	svc.nodeInfoAt = time.Time{}
+	svc.nodeInfoMu.Unlock()
+}
+
+// TestBurstReserveRestoreRefused: restore is a re-admission like a
+// resume, so a burst lease restored into a full reserve answers 503 no
+// burst capacity and stays suspended.
+func TestBurstReserveRestoreRefused(t *testing.T) {
+	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
+	srv.svc.cfg.BurstReserveMiB = 8192
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+	ctx := context.Background()
+
+	rec, first := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	b, err := svc.checkpointLease(ctx, l)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if err := svc.keepBuild(ctx, id, b.BuildID); err != nil {
+		t.Fatalf("keep: %v", err)
+	}
+	l.Burst = true // the flag the request would have carried
+	if _, err := svc.suspend(ctx, owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	shrinkNodeTo(t, svc, sub, 512+1)
+
+	rec = postLeaseAction(t, h, tok, "/api/leases/"+id+"/restore", `{"build_id":"`+b.BuildID+`"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("burst restore = %d %s, want 503", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no burst capacity") {
+		t.Fatalf("restore 503 should name the burst capacity, got %s", rec.Body.String())
+	}
+	if ra := rec.Header().Get("Retry-After"); ra != "30" {
+		t.Fatalf("restore Retry-After = %q, want 30", ra)
+	}
+	if l := svc.lookup(uid, id); l == nil || !l.Suspended {
+		t.Fatal("refused restore must leave the lease suspended")
+	}
+}
+
+// TestBurstReserveRecoveryRefused: crash recovery is a re-admission
+// too, so recovering a suspended burst lease into a full reserve fails
+// with no burst capacity and leaves the lease suspended.
+func TestBurstReserveRecoveryRefused(t *testing.T) {
+	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
+	srv.svc.cfg.BurstReserveMiB = 8192
+	svc := srv.svc
+	owner := ownerIDFor(t, h, tok)
+	ctx := context.Background()
+
+	rec, first := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := first["id"].(string)
+	l := svc.lookup(uid, id)
+	if _, err := svc.checkpointLease(ctx, l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	l.Burst = true
+	if _, err := svc.suspend(ctx, owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	shrinkNodeTo(t, svc, sub, 512+1)
+
+	if err := svc.recoverFromCheckpoint(ctx, l); err == nil {
+		t.Fatal("recovery into a full reserve should fail")
+	} else if !strings.Contains(err.Error(), "no burst capacity") {
+		t.Fatalf("recovery error should name the burst capacity, got %v", err)
+	}
+	if l.Suspended != true {
+		t.Fatal("refused recovery must leave the lease suspended")
+	}
+}
