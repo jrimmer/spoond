@@ -23,6 +23,39 @@ summarised from README "Status".
 
 ### Changed
 
+- **Built-in defaults are generic; deployment-specific hosts and LAN
+  addresses are settings.** No code carries a maintainer hostname or
+  address any more. Operators must set the new variables (the generic
+  defaults keep localhost/example.com only):
+  - `SPOOND_GUEST_DNS_ADDR` (backend, image build, live test) — the
+    guest DNS resolver; granted on port 53 and baked into the guest
+    image by `images/guest/spoond-guest-init`. Empty = no resolver
+    allowance and the image keeps its own `resolv.conf`.
+  - `SPOOND_PROXY_HOST_SUFFIX` (backend) — the wildcard hostname suffix
+    the HTTP proxy routes; default `.sandbox.example.com`.
+  - `HOST_GUEST_SERVICE_ADDR` / `HOST_GUEST_SERVICE_PORT` now also
+    default the gateway's `SHELLY_BINARY_URL` and `LLM_GATEWAY_URL`
+    (default `http://127.0.0.1:8891/...` when unset).
+  - `SPOOND_GATEWAY_HOST`, `SPOOND_CTL_HOST` default to
+    `sandbox.example.com`; the gateway `sessionEnv` host address uses
+    `HOST_GUEST_SERVICE_ADDR` (default `127.0.0.1`).
+  - `SPOOND_SSH_CONNECTION_ADDR` (gateway) — the server address
+    reported in `SSH_CONNECTION`; defaults to
+    `HOST_GUEST_SERVICE_ADDR`. Single-host deploys need not set it.
+  - `deploy/e2b/orchestrator.env` ships `NODE_ID=node1` instead of the
+    maintainer's host. `NODE_ID` is required and is the orchestrator's
+    `ServiceInfo.ClientId` and telemetry host id.
+  - `METRICS_SERVER_NAME` (dashboard) has no hostname default: unset
+    means no explicit TLS server name.
+  - `FORGEJO_URL`, `REPO_BASE_URL` (runner) have no hostname default;
+    `FORGEJO_URL` is now required and `REPO_BASE_URL` must be set for
+    `actions/checkout` (a missing value fails the checkout step
+    clearly).
+  - `NETWATCH_TARGETS` (netwatch) and the integration tests' LAN
+    targets are required/configurable instead of baked-in addresses.
+  The exact values a deployment needs to keep its pre-2.7 behaviour are
+  listed in
+  [`deploy/PRODUCTION-ENV-2.7.md`](deploy/PRODUCTION-ENV-2.7.md).
 - **Dashboard attention strip: only what needs a person.** A held
   lease the idle or pressure rule suspended no longer raises a row: it
   resumes on its next use, and the leases table already shows it

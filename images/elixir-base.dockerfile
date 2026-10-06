@@ -6,4 +6,6 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/*
 RUN for b in elixir mix erl git; do command -v "$b" >/dev/null || { echo "MISSING TOOL: $b" >&2; exit 1; }; done
 COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
-RUN mkdir -p /etc/spoond/init.d
+ARG SPOOND_GUEST_DNS_ADDR=
+RUN mkdir -p /etc/spoond/init.d \
+ && printf '%s\n' "$SPOOND_GUEST_DNS_ADDR" > /etc/spoond/guest-dns

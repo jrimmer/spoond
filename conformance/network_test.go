@@ -26,8 +26,8 @@ func TestN1_Policies(t *testing.T) {
 	if canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "none: 1.1.1.1:443 reachable, want blocked")
 	}
-	if canTCP(t, l.ID, "10.1.0.203", 443) {
-		failf(t, "none: 10.1.0.203:443 reachable, want blocked")
+	if canTCP(t, l.ID, "10.0.0.203", 443) {
+		failf(t, "none: 10.0.0.203:443 reachable, want blocked")
 	}
 
 	// internet: public and LAN reachable (internet maps to public plus the
@@ -36,21 +36,21 @@ func TestN1_Policies(t *testing.T) {
 	if !canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "internet: 1.1.1.1:443 blocked, want reachable")
 	}
-	if !canTCP(t, l.ID, "10.1.0.203", 443) {
-		failf(t, "internet: 10.1.0.203:443 blocked, want reachable")
+	if !canTCP(t, l.ID, "10.0.0.203", 443) {
+		failf(t, "internet: 10.0.0.203:443 blocked, want reachable")
 	}
 
 	// lan: private yes, public no; the host's own addresses are refused
 	// except the granted service port (e2b only).
 	l = createLease(t, map[string]any{"image": "py-base", "ttl": 600, "network_policy": "lan"})
-	if !canTCP(t, l.ID, "10.1.0.203", 443) {
-		failf(t, "lan: 10.1.0.203:443 blocked, want reachable")
+	if !canTCP(t, l.ID, "10.0.0.203", 443) {
+		failf(t, "lan: 10.0.0.203:443 blocked, want reachable")
 	}
 	if canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "lan: 1.1.1.1:443 reachable, want blocked")
 	}
-	if cfg.Substrate == "e2b" && canTCP(t, l.ID, "10.1.0.11", 22) {
-		failf(t, "lan: host 10.1.0.11:22 reachable, want refused")
+	if cfg.Substrate == "e2b" && canTCP(t, l.ID, "10.0.0.11", 22) {
+		failf(t, "lan: host 10.0.0.11:22 reachable, want refused")
 	}
 
 	// restricted with an allowlist: example.com answers, google fails.

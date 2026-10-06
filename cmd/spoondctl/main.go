@@ -24,7 +24,7 @@
 //	spoondctl ssh <id|name>          drop into a shell (delegates to ssh)
 //	spoondctl help
 //
-// Environment: SPOOND_CTL_HOST (default sandbox.lacy.casa), SPOOND_CTL_PORT
+// Environment: SPOOND_CTL_HOST (default sandbox.example.com), SPOOND_CTL_PORT
 // (default 2222), SPOOND_CTL_KEY (default ~/.ssh/id_ed25519). The
 // pre-2.0 FORKD_CTL_* names still work but log a deprecation warning.
 package spoondctl
@@ -48,7 +48,7 @@ func Main(args []string) int {
 	verb := args[0]
 	rest := args[1:]
 
-	host := env.Get("SPOOND_CTL_HOST", "sandbox.lacy.casa")
+	host := env.Get("SPOOND_CTL_HOST", "sandbox.example.com")
 	port := env.Get("SPOOND_CTL_PORT", "2222")
 	key := env.Get("SPOOND_CTL_KEY", filepath.Join(homeDir(), ".ssh", "id_ed25519"))
 
@@ -231,7 +231,7 @@ usage:
   spoondctl ssh <id|name>          drop into a shell
   spoondctl help
 
-env: SPOOND_CTL_HOST (sandbox.lacy.casa), SPOOND_CTL_PORT (2222), SPOOND_CTL_KEY (~/.ssh/id_ed25519)
+env: SPOOND_CTL_HOST (sandbox.example.com), SPOOND_CTL_PORT (2222), SPOOND_CTL_KEY (~/.ssh/id_ed25519)
 `)
 }
 

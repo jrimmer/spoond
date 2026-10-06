@@ -61,15 +61,15 @@ func TestF2ProxyStripsGateHeaders(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	srv := NewServer(svc, NewImageRegistry(db))
-	srv.SetProxyAuth("forward-auth", "s3cret", "10.1.0.203/32")
+	srv.SetProxyAuth("forward-auth", "s3cret", "10.0.0.203/32")
 	ph := srv.ProxyHandler()
 
 	// Trusted peer + correct secret + known user → not 403 at the gate.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.example.com/", nil)
 	req.Header.Set("X-Proxy-Auth", "s3cret")
 	req.Header.Set("Remote-User", "jason")
-	req.RemoteAddr = "10.1.0.203:5555"
+	req.RemoteAddr = "10.0.0.203:5555"
 	ph.ServeHTTP(rec, req)
 	// Gate passed → lookup fails (no such lease) → 404, NOT 403.
 	if rec.Code == http.StatusForbidden {
@@ -78,7 +78,7 @@ func TestF2ProxyStripsGateHeaders(t *testing.T) {
 
 	// Untrusted peer with secret must 403 (M3).
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "http://deadbeef.sandbox.lacy.casa/", nil)
+	req = httptest.NewRequest("GET", "http://deadbeef.sandbox.example.com/", nil)
 	req.Header.Set("X-Proxy-Auth", "s3cret")
 	req.Header.Set("Remote-User", "jason")
 	req.RemoteAddr = "203.0.113.7:5555"
@@ -102,7 +102,7 @@ func TestF4CapabilityNoFriendlyNames(t *testing.T) {
 	// Friendly name with identity store present (capability mode):
 	// must NOT resolve cross-tenant → 404.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "http://web.sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://web.sandbox.example.com/", nil)
 	ph.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("friendly name in store mode should 404, got %d", rec.Code)

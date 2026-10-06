@@ -451,12 +451,12 @@ func (s *Service) SetBuildSizeSettle(every, limit time.Duration) {
 
 // settleBuildSize keeps measuring a fresh build until its size stops
 // changing, then records it. The orchestrator finishes writing a build's
-// memory file after Checkpoint/Pause return (on vm2: moments for a small
+// memory file after Checkpoint/Pause return (moments for a small
 // guest, minutes past the ZFS dirty-data threshold for a large one), so
 // the write-time number is often 0 or a fraction of the build. And on
 // ZFS a file's allocated blocks only show up once its transaction group
 // commits (every ~5 s), so a just-written memfile still measures as the
-// headers alone (64,000 bytes for a 130 MB py-base build on vm2). So
+// headers alone (64,000 bytes for a 130 MB py-base build). So
 // every new reading is recorded once the memfile exists, and the build
 // counts as settled when its size has not changed for sizeSettleQuiet
 // (15 s, several commit intervals). It gives up after sizeSettleFor and

@@ -57,8 +57,8 @@ func TestEgressConfig(t *testing.T) {
 		DeniedCIDRs:    []string{"192.0.2.0/24"},
 		AllowedDomains: []string{"example.com"},
 		Private: []substrate.PrivateAllowance{
-			{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8891}},
-			{CIDR: "10.1.0.12/32"},
+			{CIDR: "10.0.0.11/32", TCPPorts: []uint32{8891}},
+			{CIDR: "10.0.0.12/32"},
 		},
 	}
 	cfg := egressConfig(eg)
@@ -86,11 +86,11 @@ func TestEgressConfig(t *testing.T) {
 		t.Fatalf("allowed_private = %v", cfg.GetAllowedPrivate())
 	}
 	p0 := cfg.GetAllowedPrivate()[0]
-	if p0.GetCidr() != "10.1.0.11/32" || len(p0.GetTcpPorts()) != 1 || p0.GetTcpPorts()[0] != 8891 {
+	if p0.GetCidr() != "10.0.0.11/32" || len(p0.GetTcpPorts()) != 1 || p0.GetTcpPorts()[0] != 8891 {
 		t.Fatalf("allowed_private[0] = %+v", p0)
 	}
 	p1 := cfg.GetAllowedPrivate()[1]
-	if p1.GetCidr() != "10.1.0.12/32" || len(p1.GetTcpPorts()) != 0 {
+	if p1.GetCidr() != "10.0.0.12/32" || len(p1.GetTcpPorts()) != 0 {
 		t.Fatalf("allowed_private[1] = %+v", p1)
 	}
 

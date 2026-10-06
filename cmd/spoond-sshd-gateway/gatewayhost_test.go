@@ -26,7 +26,7 @@ func TestGatewayHostNames(t *testing.T) {
 
 	t.Setenv("SPOOND_GATEWAY_HOST", "new.example.com")
 	t.Setenv("FORKD_GATEWAY_HOST", "old.example.com")
-	if got := env.Get("SPOOND_GATEWAY_HOST", "sandbox.lacy.casa"); got != "new.example.com" {
+	if got := env.Get("SPOOND_GATEWAY_HOST", "sandbox.example.com"); got != "new.example.com" {
 		t.Fatalf("SPOOND_GATEWAY_HOST must win, got %q", got)
 	}
 
@@ -41,7 +41,7 @@ func TestGatewayHostNames(t *testing.T) {
 			log.SetOutput(out)
 			log.SetFlags(flags)
 		}()
-		if got := env.Get("SPOOND_GATEWAY_HOST", "sandbox.lacy.casa"); got != "old.example.com" {
+		if got := env.Get("SPOOND_GATEWAY_HOST", "sandbox.example.com"); got != "old.example.com" {
 			t.Errorf("FORKD_GATEWAY_HOST fallback must still work, got %q", got)
 		}
 	}()

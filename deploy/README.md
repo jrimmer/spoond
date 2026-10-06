@@ -15,7 +15,10 @@ they depend on:
 > [docs/api.md](../docs/api.md), [docs/ctl.md](../docs/ctl.md),
 > [docs/usage.md](../docs/usage.md),
 > [docs/operations.md](../docs/operations.md). This file is the
-> deploy-specific quick reference.
+> deploy-specific quick reference. Upgrading the production host to 2.7
+> (generic defaults): see
+> [PRODUCTION-ENV-2.7.md](PRODUCTION-ENV-2.7.md) for the exact values
+> vm2 must set before the new binaries run.
 
 ## 0. e2b-orchestrator (substrate)
 
@@ -47,13 +50,18 @@ install -m 644 deploy/spoond-backend.service /etc/systemd/system/
 
 On host, create `/etc/spoond/backend.env` (mode 0600). The full variable
 reference is in [docs/setup.md](../docs/setup.md) and
-[docs/install.md](../docs/install.md); the minimum:
+[docs/install.md](../docs/install.md). Example files for every unit live
+beside the units: `deploy/spoond-backend.env.example`,
+`deploy/spoond-gateway.env.example`, `deploy/spoond-runner.env.example`
+and `deploy/e2b/spoond-netwatch.env.example`. The minimum:
 
 ```bash
 cat > /etc/spoond/backend.env <<'EOF'
 CONSUMER_TOKENS=<token>=<consumer>,<token2>=<consumer2>
 E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
 HOST_GUEST_SERVICE_ADDR=10.0.0.11
+SPOOND_GUEST_DNS_ADDR=10.0.0.2
+SPOOND_PROXY_HOST_SUFFIX=.sandbox.example.com
 TLS_CERT=/etc/spoond/tls/fullchain.pem
 TLS_KEY=/etc/spoond/tls/privkey.pem
 EOF

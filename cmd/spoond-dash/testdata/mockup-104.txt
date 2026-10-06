@@ -1,7 +1,7 @@
-                    SPOOND  ·  sandbox.lacy.casa  ·  v2.0.0  ·  e2b 0.4.2  ·  up 31h
+                    SPOOND  ·  sandbox.example.com  ·  v2.0.0  ·  e2b 0.4.2  ·  up 31h
 ════════════════════════════════════════════════════════════════════════════════════════════════════════
              ■ leases · host   ■ flights · agents   ■ healthy   ■ people   ■ needs attention
- ▲ attention · the TLS certificate for vm2.lacy.casa expires in 24 days (2026-10-27) · spoond-x5c
+ ▲ attention · the TLS certificate for spoond.example.com expires in 24 days (2026-10-27) · spoond-x5c
 
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░           4 / 64 │  │ cpu           ██░░░░░░░░░░╎░░░   11% · load 0.8 │
@@ -26,7 +26,7 @@
 │ 9a0d77c1e3  go-base          honey     ◓ running    restricted  36m   held     fl-9c21               │
 │ b42f1c0d9e  py-base          runner    ◓ running    lan         3m    117s     ci 3611               │
 │ d08e5ab2c1  elixir-release   runner    ◓ running    lan         11m   49m      ci 3609               │
-│ 51aa0c3b7d  dev-base         jrimmer   ◌ suspended  internet    2d    persist  scratch               │
+│ 51aa0c3b7d  dev-base         alice     ◌ suspended  internet    2d    persist  scratch               │
 │                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 

@@ -54,7 +54,7 @@ func sampleSnapshot() Snapshot {
 			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet",
 				Burst: true, Age: "5m", Left: "10m"},
 			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "running", Policy: "restricted",
-				Holder: "forgejo/job-42", HolderURL: "https://git.lacy.casa/job/42", HoldState: "active",
+				Holder: "forgejo/job-42", HolderURL: "https://git.example.com/job/42", HoldState: "active",
 				Age: "2h31m", Left: "∞"},
 			{ID: "fedcba0987", Image: "go-base", Owner: "agent", State: "suspended", Policy: "lan",
 				Name: "scratch space", Holder: "nightly", HoldState: "lapsed",
@@ -85,7 +85,7 @@ func sampleHist() map[string][]float64 {
 // drawSample renders the sample frame at w, with the sample history so
 // the sparklines are drawn too.
 func drawSample(w int) *grid.Grid {
-	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow, dashInterval)
+	g, err := drawFrame(sampleSnapshot(), sampleHist(), w, "spoond.example.com", fixedNow, dashInterval)
 	if err != nil {
 		panic(err)
 	}
@@ -128,7 +128,7 @@ func TestGoldenPlain(t *testing.T) {
 // uses, so a rune missing from Extra fails here, not in spoond top.
 func TestGoldenCheck(t *testing.T) {
 	for _, w := range []int{104, 72} {
-		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "vm2.lacy.casa", fixedNow, dashInterval); err != nil {
+		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "spoond.example.com", fixedNow, dashInterval); err != nil {
 			t.Fatalf("width %d: %v", w, err)
 		}
 	}
@@ -608,18 +608,18 @@ func TestLeaseNameShownWhenNoHolder(t *testing.T) {
 // holder or a name present the comment stays hidden.
 func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
 	s := healthySnapshot()
-	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Comment: "forgejo: lacy.casa/site #218",
+	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Comment: "forgejo: example.com/site #218",
 		Age: "5m", Left: "10m"}}
 	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
 	p := l.assemble().Plain()
-	if !strings.Contains(p, "forgejo: lacy.cas") || !strings.Contains(p, "…") {
+	if !strings.Contains(p, "forgejo: example") || !strings.Contains(p, "…") {
 		t.Fatalf("lease comment not shown in the holder column:\n%s", p)
 	}
 
 	// A holder wins; the comment is not drawn anywhere.
 	s.Rows[0].Holder = "forgejo/job-42"
 	p = l.assemble().Plain()
-	if !strings.Contains(p, "forgejo/job-42") || strings.Contains(p, "lacy.casa/site") {
+	if !strings.Contains(p, "forgejo/job-42") || strings.Contains(p, "example.com/site") {
 		t.Fatalf("comment drawn despite the holder:\n%s", p)
 	}
 
@@ -627,7 +627,7 @@ func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
 	s.Rows[0].Holder = ""
 	s.Rows[0].Name = "scratch space"
 	p = l.assemble().Plain()
-	if !strings.Contains(p, "scratch space") || strings.Contains(p, "lacy.casa/site") {
+	if !strings.Contains(p, "scratch space") || strings.Contains(p, "example.com/site") {
 		t.Fatalf("comment drawn despite the name:\n%s", p)
 	}
 }
@@ -636,10 +636,10 @@ func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
 // rel=noopener, replacing the link span in that row only.
 func TestPageLinksAreAnchors(t *testing.T) {
 	s := sampleSnapshot()
-	g := Draw(s, DefaultWidth, fixedNow, "vm2.lacy.casa")
+	g := Draw(s, DefaultWidth, fixedNow, "spoond.example.com")
 
 	links := holderLinks(s, DefaultWidth, fixedNow)
-	if len(links) != 1 || links[0].url != "https://git.lacy.casa/job/42" {
+	if len(links) != 1 || links[0].url != "https://git.example.com/job/42" {
 		t.Fatalf("holderLinks = %+v", links)
 	}
 	if links[0].row < 0 || links[0].row >= g.Rows() {
@@ -651,7 +651,7 @@ func TestPageLinksAreAnchors(t *testing.T) {
 	}
 
 	html := pageGrid(g, links)
-	if !strings.Contains(html, `href="https://git.lacy.casa/job/42"`) {
+	if !strings.Contains(html, `href="https://git.example.com/job/42"`) {
 		t.Fatalf("holder URL missing from the page grid:\n%s", html)
 	}
 	if !strings.Contains(html, `rel="noopener"`) && !strings.Contains(html, `rel=noopener`) {
@@ -1023,8 +1023,8 @@ func TestEventsPanelSubjectPreference(t *testing.T) {
 	if got := eventSubject(ev, rows, nil); got != "forgejo/job-9" {
 		t.Fatalf("subject = %q, want the holder", got)
 	}
-	rows[0] = LeaseRow{ID: "abc", Comment: "forgejo: lacy.casa/site #9"}
-	if got := eventSubject(ev, rows, nil); got != "forgejo: lacy.casa/site #9" {
+	rows[0] = LeaseRow{ID: "abc", Comment: "forgejo: example.com/site #9"}
+	if got := eventSubject(ev, rows, nil); got != "forgejo: example.com/site #9" {
 		t.Fatalf("subject = %q, want the comment", got)
 	}
 	rows[0] = LeaseRow{ID: "other"}
@@ -1124,7 +1124,7 @@ func TestPageLinkRowKeepsItsWidth(t *testing.T) {
 			s.Rows[i].Holder = "pool:honey/work-47-with-a-much-longer-holder-name-than-fits-the-column"
 		}
 	}
-	g := Draw(s, DefaultWidth, fixedNow, "vm2.lacy.casa")
+	g := Draw(s, DefaultWidth, fixedNow, "spoond.example.com")
 	links := holderLinks(s, DefaultWidth, fixedNow)
 	if len(links) != 1 {
 		t.Fatalf("holderLinks = %+v", links)

@@ -189,6 +189,8 @@ E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
 IMAGE_REGISTRY=localhost:5000
 HOST_GUEST_SERVICE_ADDR=<host primary IP>
 HOST_GUEST_SERVICE_PORT=8891
+SPOOND_GUEST_DNS_ADDR=<guest resolver IP>
+SPOOND_PROXY_HOST_SUFFIX=.sandbox.example.com
 E2B_TEMPLATE_STORAGE_PATH=/forkdcache/e2b/storage/templates
 SPOOND_BACKUP_DIR=/var/lib/spoond/backups
 USERS_FILE=/var/lib/spoond/users.json
@@ -208,7 +210,11 @@ chmod 600 /etc/spoond/backend.env
 Two lines to edit by hand: `HOST_GUEST_SERVICE_ADDR` (the host's primary
 IP — required, what guests use to reach host services; the backend exits
 without it) and the consumer name in `CONSUMER_TOKENS` (required; the
-backend exits without it too). `USERS_FILE` is the identity store that
+backend exits without it too). `SPOOND_GUEST_DNS_ADDR` is the guest's DNS
+resolver (granted on port 53 and baked into the guest image; empty
+leaves no resolver allowance), and `SPOOND_PROXY_HOST_SUFFIX` is the
+wildcard hostname suffix the HTTP proxy routes (default
+`.sandbox.example.com`). `USERS_FILE` is the identity store that
 turns on multi-user tenancy; `BOOTSTRAP_TOKEN` gates the first (admin)
 user, `GATEWAY_TOKEN` is the SSH gateway's service token, `ADMIN_TOKEN`
 drives `/api/admin/*` (drain, undrain, reconcile), `METRICS_TOKEN` is
@@ -264,14 +270,24 @@ systemd's default 90 s, a slow undrain would fail the start and
 ## 5. Build the image catalog
 
 Every image the platform may grant must exist as an E2B template build
-recorded in the catalog before the backend can grant it:
+recorded in the catalog before the backend can grant it. The image build
+must be given the same guest DNS resolver as the backend: the backend
+grants the resolver a port-53 egress allowance and
+`images/guest/spoond-guest-init` writes it to `/etc/resolv.conf`, so if
+`SPOOND_GUEST_DNS_ADDR` is set in `/etc/spoond/backend.env` it must also
+be exported for the build (or set per entry in `images/manifest.yaml`):
 
 ```bash
 cd /root/src/spoond
+SPOOND_GUEST_DNS_ADDR=<guest resolver IP> \
 /opt/spoond/spoond images build --all \
   --manifest images/manifest.yaml --context images
 /opt/spoond/spoond images list
 ```
+
+When `SPOOND_GUEST_DNS_ADDR` is unset the images keep their own
+`resolv.conf` (the backend grants no resolver allowance); the two must
+agree.
 
 This runs on the host as root, uses docker, pushes to
 `$IMAGE_REGISTRY` (default `localhost:5000`) and drives a template build

@@ -73,12 +73,14 @@ Two constraints inherited from the substrate:
 
 The common Dockerfile tail (`images/guest/spoond-guest-init`) is what
 runs at template-build time and ends up in every sandbox's restored
-memory and disk: it points `/etc/resolv.conf` at the LAN resolver only,
-empties dpkg's statoverride (so tools that unpack a base image over the
-live root, such as kaniko, do not abort apt), drops `/.dockerenv` so
-container-aware tools behave, runs `/etc/spoond/init.d/*` hooks (the
-scylla service, for instance) and then waits on a ready file. The
-snapshot is taken after the ready command succeeds.
+memory and disk: it writes `/etc/resolv.conf` with the build-time
+`SPOOND_GUEST_DNS_ADDR` (and leaves the image's own resolver alone when
+that is empty), empties dpkg's statoverride (so tools that unpack a base
+image over the live root, such as kaniko, do not abort apt), drops
+`/.dockerenv` so container-aware tools behave, runs the
+`/etc/spoond/init.d/*` hooks (the scylla service, for instance) and then
+waits on a ready file. The snapshot is taken after the ready command
+succeeds.
 
 ## Writing inside the sandbox
 

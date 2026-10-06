@@ -1,7 +1,7 @@
 #!/bin/bash
 # U04 host bring-up, steps 1-5, 7 and 9 of
 # docs/plans/2026-09-30-e2b-substrate/U04-host-bringup.md.
-# Runs as root on vm2. Steps 6, 7b, 8 and 10 are applied separately.
+# Runs as root on the E2B host. Steps 6, 7b, 8 and 10 are applied separately.
 set -euo pipefail
 
 # Step 1: packages and modules

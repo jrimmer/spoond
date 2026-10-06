@@ -20,7 +20,7 @@
 //	DASH_USER            basic-auth user (required)
 //	DASH_PASSWORD_HASH   bcrypt hash of the password (required)
 //	METRICS_URL          spoond /metrics (default https://127.0.0.1:8890/metrics)
-//	METRICS_SERVER_NAME  TLS server name for METRICS_URL (default vm2.lacy.casa)
+//	METRICS_SERVER_NAME  TLS server name for METRICS_URL (default: METRICS_URL host)
 //	METRICS_TOKEN        spoond's scrape-only token (required)
 //	DASH_EVENTS_TOKEN    the backend's events-only EVENTS_TOKEN; the
 //	                     lease events panel's source. Without it the
@@ -117,7 +117,7 @@ func configFromEnv() (Config, error) {
 		User:              os.Getenv("DASH_USER"),
 		PasswordHash:      os.Getenv("DASH_PASSWORD_HASH"),
 		MetricsURL:        env("METRICS_URL", "https://127.0.0.1:8890/metrics"),
-		MetricsServerName: env("METRICS_SERVER_NAME", "vm2.lacy.casa"),
+		MetricsServerName: env("METRICS_SERVER_NAME", ""),
 		MetricsToken:      os.Getenv("METRICS_TOKEN"),
 		DBPath:            env("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"),
 		UsersFile:         env("USERS_FILE", "/var/lib/spoond/users.json"),

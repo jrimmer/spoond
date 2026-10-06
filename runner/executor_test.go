@@ -248,11 +248,11 @@ jobs:
 		Labels:       map[string]string{"ubuntu-latest": "py-base"},
 		DefaultImage: "py-base",
 		TTL:          600,
-		RepoBaseURL:  "https://code.lacy.casa",
+		RepoBaseURL:  "https://code.example.com",
 	}
 	job := testJob(payload)
 	job.Secrets = map[string]string{"GITHUB_TOKEN": "tok123"}
-	job.Context = map[string]string{"repository": "lacy.casa/spoond"}
+	job.Context = map[string]string{"repository": "example.com/spoond"}
 	if err := exec.Run(context.Background(), job); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -263,7 +263,7 @@ jobs:
 	// repo URL and token header, and the run step should use /workspace.
 	var sawClone, sawRun bool
 	for i, c := range lease.cmds {
-		if strings.Contains(c, "git") && strings.Contains(c, "lacy.casa/spoond.git") {
+		if strings.Contains(c, "git") && strings.Contains(c, "example.com/spoond.git") {
 			sawClone = true
 			// The token rides the exec env, never the command line
 			// (it would show in the guest's /proc/<pid>/cmdline).
@@ -291,6 +291,45 @@ jobs:
 				t.Fatalf("run step cwd = %q, want /workspace", lease.cwds[i])
 			}
 		}
+	}
+}
+
+// A checkout step with no REPO_BASE_URL configured fails the step and
+// reports the failure instead of silently cloning from a guessed host.
+func TestExecutorCheckoutMissingRepoBaseURL(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo hi
+`
+	lease := &checkoutRecordingLease{fakeLease: newFakeLease()}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	job := testJob(payload)
+	job.Context = map[string]string{"repository": "example.com/spoond"}
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultFailure {
+		t.Fatalf("expected failure without REPO_BASE_URL, got %+v", sink.reports)
+	}
+	var sawClone bool
+	for _, c := range lease.cmds {
+		if strings.Contains(c, "git clone") {
+			sawClone = true
+		}
+	}
+	if sawClone {
+		t.Fatalf("checkout must not clone without REPO_BASE_URL, got: %v", lease.cmds)
 	}
 }
 
@@ -409,7 +448,7 @@ jobs:
 	job := testJob(payload)
 	// Flat context keys are looked up under github.* by EvalContext.
 	job.Context = map[string]string{
-		"repository": "jrimmer/netcrawl",
+		"repository": "example-org/netcrawl",
 		"sha":        "abc123",
 	}
 	if err := exec.Run(context.Background(), job); err != nil {
@@ -419,8 +458,8 @@ jobs:
 		t.Fatalf("expected exec env captured")
 	}
 	env := lease.envs[0]
-	if env["CI_REPO_OWNER"] != "jrimmer" {
-		t.Fatalf("CI_REPO_OWNER = %q, want jrimmer (env=%+v)", env["CI_REPO_OWNER"], env)
+	if env["CI_REPO_OWNER"] != "example-org" {
+		t.Fatalf("CI_REPO_OWNER = %q, want example-org (env=%+v)", env["CI_REPO_OWNER"], env)
 	}
 	if env["CI_REPO_NAME"] != "netcrawl" {
 		t.Fatalf("CI_REPO_NAME = %q, want netcrawl (env=%+v)", env["CI_REPO_NAME"], env)

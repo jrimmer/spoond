@@ -114,9 +114,10 @@ images:
         not applied. Toolchains must expose binaries in /usr/local/bin (go-base
         pattern). rustc/cargo are direct symlinks to the toolchain, bypassing
         the rustup proxy (which needs RUSTUP_HOME env the agent won't pass).
-      - images/guest/spoond-guest-init lists the LAN resolver only — sandbox DNS
-        is otherwise public, and git.example.com then resolves to the public edge
-        whose /v2/ registry path is SSO-gated (302 to login).
+      - images/guest/spoond-guest-init writes the build-time resolver
+        (SPOOND_GUEST_DNS_ADDR) only — sandbox DNS is otherwise public, and
+        the internal git host then resolves to the public edge whose /v2/
+        registry path is SSO-gated (302 to login).
 
   - name: llm-review
     capability: llm-review

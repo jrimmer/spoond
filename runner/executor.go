@@ -24,8 +24,8 @@ type Executor struct {
 	// TTL is the sandbox lease TTL in seconds.
 	TTL int
 	// RepoBaseURL is the git host base URL used to construct clone URLs
-	// for actions/checkout (e.g. https://code.lacy.casa). The repo path
-	// comes from the github.repository context.
+	// for actions/checkout (e.g. https://code.example.com). The repo path
+	// comes from the github.repository context. Required for checkout.
 	RepoBaseURL string
 	// WorkspaceDir is the directory inside the sandbox where the repo is
 	// checked out and run steps execute. Defaults to /workspace.
@@ -41,7 +41,7 @@ type Executor struct {
 	// job). Empty disables recording. Set via JOB_RECORD_DIR.
 	RecordDir string
 	// ForgejoURL is the Forgejo instance base URL (e.g.
-	// https://code.lacy.casa). When set, the lease the job runs in is
+	// https://code.example.com). When set, the lease the job runs in is
 	// labelled with the job (#119): its comment is
 	// "forgejo job <id> <job URL>" — see the LeaseLabeler port in
 	// ports.go. Empty disables the label.
@@ -189,8 +189,8 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		// GitHub Actions always provides PATH; the guest agent REPLACES the
 		// environment with the step's env map when one is supplied, and its
 		// own default PATH is not applied to that case — so a step env
-		// without PATH loses /usr/bin entirely ("date: command not found"
-		// in otherwise-green jobs, lacy-infra#26).
+		// without PATH loses /usr/bin entirely (broken tools in
+		// otherwise-green jobs).
 		if env["PATH"] == "" {
 			env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 		}
@@ -214,7 +214,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		// keyspace named cytale_ci_${GITHUB_RUN_ID:-local}) silently fall
 		// back to their default — and EVERY run then shares one state
 		// bucket: cancelled runs leave rows that poison the next suite
-		// (lacy-infra#26: ReactionController/bot clusters, same-sha drift).
+		// (clashing state between jobs, same-sha drift).
 		// Preference: context run_id, then run_number, then the task id
 		// (unique per attempt, so even a re-run isolates its state).
 		if env["GITHUB_RUN_ID"] == "" {
@@ -455,7 +455,11 @@ func (e *Executor) checkout(ctx context.Context, sandboxID, ws string, job *Job,
 	}
 	base := e.RepoBaseURL
 	if base == "" {
-		base = "https://code.lacy.casa"
+		stepState.Result = ResultFailure
+		e.log(ctx, job, *logIndex, "checkout: REPO_BASE_URL is not configured")
+		*logIndex++
+		stepState.LogLength = 1
+		return fmt.Errorf("checkout: REPO_BASE_URL is not configured")
 	}
 	base = strings.TrimRight(base, "/")
 	cloneURL := base + "/" + repo + ".git"

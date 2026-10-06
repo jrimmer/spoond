@@ -325,7 +325,7 @@ func TestLeaseHeartbeatOnGuestServiceListener(t *testing.T) {
 	l.LastActive = stale
 	svc.store.mu.Unlock()
 
-	req := httptest.NewRequest("POST", "http://10.43.0.1:8891/lease/"+l.ID+"/active", nil)
+	req := httptest.NewRequest("POST", "http://10.0.0.11:8891/lease/"+l.ID+"/active", nil)
 	rec := httptest.NewRecorder()
 	ph.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
@@ -336,7 +336,7 @@ func TestLeaseHeartbeatOnGuestServiceListener(t *testing.T) {
 	}
 
 	// Wrong method on the same listener.
-	req2 := httptest.NewRequest("GET", "http://10.43.0.1:8891/lease/"+l.ID+"/active", nil)
+	req2 := httptest.NewRequest("GET", "http://10.0.0.11:8891/lease/"+l.ID+"/active", nil)
 	rec2 := httptest.NewRecorder()
 	ph.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusMethodNotAllowed {

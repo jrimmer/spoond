@@ -258,10 +258,20 @@ type ServiceConfig struct {
 	DefaultTTL, MaxTTL, IdleTimeout time.Duration
 	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
 	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
-	MetricsToken                    string // METRICS_TOKEN: bearer that may read /metrics only (scrapers, dashboards)
-	EventsToken                     string // EVENTS_TOKEN: bearer that may read the lease event stream only (dashboards)
-	HostAPIPort                     int    // HOST_API_PORT: lease API port lan/internet guests may reach on HostGuestAddr (0 = none)
-	ProxyURL                        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
+	// GuestDNSAddr is the guest's DNS resolver address (SPOOND_GUEST_DNS_ADDR).
+	// It is granted to every lease's egress policy on port 53. Empty =
+	// no resolver allowance (the deployment relies on the guest's own
+	// resolv.conf).
+	GuestDNSAddr string
+	// ProxyHostSuffix is the wildcard hostname suffix the HTTP proxy
+	// routes (SPOOND_PROXY_HOST_SUFFIX), e.g. ".sandbox.example.com":
+	// <lease-id>.<suffix> and <lease-id>-<port>.<suffix>. Empty = the
+	// generic default.
+	ProxyHostSuffix string
+	MetricsToken    string // METRICS_TOKEN: bearer that may read /metrics only (scrapers, dashboards)
+	EventsToken     string // EVENTS_TOKEN: bearer that may read the lease event stream only (dashboards)
+	HostAPIPort     int    // HOST_API_PORT: lease API port lan/internet guests may reach on HostGuestAddr (0 = none)
+	ProxyURL        string // E2B orchestrator sandbox proxy (e.g. http://127.0.0.1:5007)
 	// CheckpointIntervalDefault is the host default checkpoint interval
 	// in seconds (2.3, #122) applied to leases whose own interval is -1
 	// ("the host default"). 0 = never. CHECKPOINT_INTERVAL_MINS.
@@ -557,8 +567,13 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		CIDR:     s.cfg.HostGuestAddr + "/32",
 		TCPPorts: []uint32{uint32(s.cfg.HostGuestPort)},
 	}
-	// Guests resolve through Technitium only (images/guest/spoond-guest-init).
-	dns := substrate.PrivateAllowance{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}}
+	// Guests resolve through the configured resolver only
+	// (SPOOND_GUEST_DNS_ADDR, baked into the guest image by
+	// images/guest/spoond-guest-init). Empty = no allowance.
+	var dns []substrate.PrivateAllowance
+	if a, ok := dnsAllowance(s.cfg.GuestDNSAddr); ok {
+		dns = []substrate.PrivateAllowance{a}
+	}
 	// The fork's host-address guard admits a destination on the host only
 	// when an allowance names both the IP and the port; the LAN ranges'
 	// any-port allowances do not count. So lan and internet name the lease
@@ -580,16 +595,16 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 	case PolicyInternet:
 		// Public destinations stay allowed; listing the LAN ranges as
 		// private allowances keeps private/LAN addresses reachable.
-		return substrate.Egress{Private: append(append(lanPrivate(l, hostSvc, dns), hostAPI...), s.peerAllowances(l)...)}
+		return substrate.Egress{Private: append(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.peerAllowances(l)...)}
 	case PolicyLAN:
 		return substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
-			Private:     append(append(lanPrivate(l, hostSvc, dns), hostAPI...), s.peerAllowances(l)...),
+			Private:     append(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.peerAllowances(l)...),
 		}
 	default: // restricted: the default when empty
 		eg := substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
-			Private:     []substrate.PrivateAllowance{hostSvc, dns},
+			Private:     append([]substrate.PrivateAllowance{hostSvc}, dns...),
 		}
 		for _, entry := range l.NetAllow {
 			entry = strings.TrimSpace(entry)
@@ -624,14 +639,30 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 }
 
 // lanPrivate is the allowance list of the lan and internet policies:
-// the LAN ranges (empty port scope), then the host service and DNS.
-func lanPrivate(l *Lease, hostSvc, dns substrate.PrivateAllowance) []substrate.PrivateAllowance {
-	out := make([]substrate.PrivateAllowance, 0, len(lanRanges)+2)
+// the LAN ranges (empty port scope), then the host service. The caller
+// appends the configured guest DNS allowance.
+func lanPrivate(l *Lease, hostSvc substrate.PrivateAllowance) []substrate.PrivateAllowance {
+	out := make([]substrate.PrivateAllowance, 0, len(lanRanges)+1)
 	for _, cidr := range lanRanges {
 		out = append(out, substrate.PrivateAllowance{CIDR: cidr})
 	}
-	out = append(out, hostSvc, dns)
+	out = append(out, hostSvc)
 	return out
+}
+
+// dnsAllowance turns the configured guest DNS address into a port-53
+// allowance. A bare IP gets /32; an entry that already carries a prefix
+// is used as-is.
+func dnsAllowance(addr string) (substrate.PrivateAllowance, bool) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return substrate.PrivateAllowance{}, false
+	}
+	cidr := addr
+	if !strings.Contains(addr, "/") {
+		cidr = addr + "/32"
+	}
+	return substrate.PrivateAllowance{CIDR: cidr, TCPPorts: []uint32{53}}, true
 }
 
 // isPrivateCIDR reports whether cidr lies within 10/8, 172.16/12,
@@ -2665,7 +2696,7 @@ func (s *Service) setNetwork(ctx context.Context, owner, id, policy string, allo
 
 // lookupByName returns a live lease with the given name regardless of
 // owner. Used by the SSH gateway (username = name) and the public proxy
-// (<name>.sandbox.lacy.casa); both treat the name as the capability, the
+// (<name>.<proxy suffix>); both treat the name as the capability, the
 // same model as lease ids. Names are unique per owner.
 func (s *Service) lookupByName(name string) *Lease {
 	s.store.mu.Lock()

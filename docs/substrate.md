@@ -115,10 +115,11 @@ build <name>` (or `--all`) builds it with docker, pushes it to the local
 registry on `127.0.0.1:5000`, and has the orchestrator's template
 manager turn it into a template build. The Dockerfile must be
 Debian/Ubuntu/Fedora/Arch/Alpine/NixOS-based (E2B rejects RHEL); the
-common tail (`images/guest/spoond-guest-init`) sets guest DNS to the LAN
-resolver, drops a container marker for tools such as kaniko, runs
-`/etc/spoond/init.d/*` hooks and then waits for the ready file, which is
-the moment the snapshot is taken.
+common tail (`images/guest/spoond-guest-init`) writes the guest DNS
+resolver from the build-time `SPOOND_GUEST_DNS_ADDR` (and leaves
+`/etc/resolv.conf` alone when it is empty), drops a container marker for
+tools such as kaniko, runs `/etc/spoond/init.d/*` hooks and then waits
+for the ready file, which is the moment the snapshot is taken.
 
 Catalog state — the current build of each image and every build ever
 recorded, with its kind (`template`, `pause`, `checkpoint`), versions and

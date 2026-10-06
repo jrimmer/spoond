@@ -1,6 +1,6 @@
 //go:build e2blive
 
-// Live file-operations test against the orchestrator on vm2. Run with:
+// Live file-operations test against the orchestrator on the E2B host. Run with:
 //
 //	go test -tags e2blive -count=1 -timeout 30m -run TestLiveFiles ./substrate/e2b/
 //

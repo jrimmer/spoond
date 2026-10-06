@@ -238,7 +238,7 @@ type Service struct {
 // LastAction/LastActionAt record the last automatic held-lease action
 // ("rule/action", e.g. "idle/suspend_idle"). Comment is the lease's
 // own note: the holder column shows it, dim, on a CI job lease with no
-// holder and no name (e.g. "forgejo: lacy.casa/site #218"). Burst is
+// holder and no name (e.g. "forgejo: example.com/site #218"). Burst is
 // the lease's admission class (#128 part 2): the state cell shows it
 // as "·b". Preempted marks a burst lease suspended by preemption (#128
 // part 3): the state cell shows it as "·p". IdleSuspended marks a

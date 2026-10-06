@@ -54,12 +54,12 @@ func TestCtlHostNames(t *testing.T) {
 	unsetCtl(t, "SPOOND_CTL_HOST", "FORKD_CTL_HOST")
 	t.Setenv("SPOOND_CTL_HOST", "new.example.com")
 	t.Setenv("FORKD_CTL_HOST", "old.example.com")
-	if got := env.Get("SPOOND_CTL_HOST", "sandbox.lacy.casa"); got != "new.example.com" {
+	if got := env.Get("SPOOND_CTL_HOST", "sandbox.example.com"); got != "new.example.com" {
 		t.Fatalf("SPOOND_CTL_HOST must win, got %q", got)
 	}
 	unsetCtl(t, "SPOOND_CTL_HOST")
 	warnings := captureWarnings(t, func() {
-		if got := env.Get("SPOOND_CTL_HOST", "sandbox.lacy.casa"); got != "old.example.com" {
+		if got := env.Get("SPOOND_CTL_HOST", "sandbox.example.com"); got != "old.example.com" {
 			t.Fatalf("FORKD_CTL_HOST fallback must still work, got %q", got)
 		}
 	})
@@ -107,7 +107,7 @@ func TestCtlKeyNames(t *testing.T) {
 func TestCtlDefaults(t *testing.T) {
 	unsetCtl(t, "SPOOND_CTL_HOST", "SPOOND_CTL_PORT", "SPOOND_CTL_KEY",
 		"FORKD_CTL_HOST", "FORKD_CTL_PORT", "FORKD_CTL_KEY")
-	if got := env.Get("SPOOND_CTL_HOST", "sandbox.lacy.casa"); got != "sandbox.lacy.casa" {
+	if got := env.Get("SPOOND_CTL_HOST", "sandbox.example.com"); got != "sandbox.example.com" {
 		t.Fatalf("default host, got %q", got)
 	}
 	if got := env.Get("SPOOND_CTL_PORT", "2222"); got != "2222" {

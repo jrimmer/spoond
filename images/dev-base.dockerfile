@@ -8,4 +8,6 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/*
 COPY --chmod=755 guest/spoond-tmux.sh /etc/profile.d/spoond-tmux.sh
 COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
-RUN mkdir -p /etc/spoond/init.d
+ARG SPOOND_GUEST_DNS_ADDR=
+RUN mkdir -p /etc/spoond/init.d \
+ && printf '%s\n' "$SPOOND_GUEST_DNS_ADDR" > /etc/spoond/guest-dns

@@ -52,7 +52,7 @@ type config struct {
 
 // client is a small HTTP client for the lease API (U02 §Harness
 // requirements). TLS verification is skipped because the backend serves a
-// self-signed cert on vm2 (docs/security.md), matching every other spoond
+// self-signed cert on the host (docs/security.md), matching every other spoond
 // client (gateway, tests/integration/wsclient).
 type client struct {
 	base, token, proxyURL, proxyUser, proxySecret, proxySuffix string

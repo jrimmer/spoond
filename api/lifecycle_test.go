@@ -25,8 +25,9 @@ func newLifecycleService(t *testing.T) (*Service, *testSub) {
 	svc := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{
 		DefaultTTL:    time.Minute,
 		MaxTTL:        10 * time.Minute,
-		HostGuestAddr: "10.1.0.11",
+		HostGuestAddr: "10.0.0.11",
 		HostGuestPort: 8891,
+		GuestDNSAddr:  "10.0.0.2",
 		HostAPIPort:   8890,
 	})
 	return svc, sub
@@ -38,8 +39,8 @@ func newLifecycleService(t *testing.T) (*Service, *testSub) {
 // CIDRs and private allowances.
 func TestEgressForEachPolicy(t *testing.T) {
 	svc, _ := newLifecycleService(t)
-	hostSvc := substrate.PrivateAllowance{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8891}}
-	dns := substrate.PrivateAllowance{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}}
+	hostSvc := substrate.PrivateAllowance{CIDR: "10.0.0.11/32", TCPPorts: []uint32{8891}}
+	dns := substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}
 
 	lanPrivateWant := make([]substrate.PrivateAllowance, 0, len(lanRanges)+2)
 	for _, cidr := range lanRanges {
@@ -49,7 +50,7 @@ func TestEgressForEachPolicy(t *testing.T) {
 	// fork's host-address guard ignores the any-port LAN ranges for the
 	// host's own address.
 	lanPrivateWant = append(lanPrivateWant, hostSvc, dns,
-		substrate.PrivateAllowance{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8890}})
+		substrate.PrivateAllowance{CIDR: "10.0.0.11/32", TCPPorts: []uint32{8890}})
 
 	t.Run("none", func(t *testing.T) {
 		got := svc.egressFor(&Lease{NetPolicy: "none"})
@@ -109,6 +110,30 @@ func TestEgressForEachPolicy(t *testing.T) {
 			t.Fatalf("got %+v, want %+v", got, want)
 		}
 	})
+}
+
+// TestDNSAllowance pins the guest-DNS allowance conversion: empty means
+// no allowance, a bare IP gets /32 and port 53, an explicit prefix is
+// kept, and surrounding whitespace is trimmed.
+func TestDNSAllowance(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    substrate.PrivateAllowance
+		wantOK  bool
+		comment string
+	}{
+		{"", substrate.PrivateAllowance{}, false, "empty = no allowance"},
+		{"   ", substrate.PrivateAllowance{}, false, "blank = no allowance"},
+		{"10.0.0.2", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "bare IP gets /32"},
+		{"  10.0.0.2\t", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "trimmed"},
+		{"192.0.2.0/24", substrate.PrivateAllowance{CIDR: "192.0.2.0/24", TCPPorts: []uint32{53}}, true, "explicit prefix kept"},
+	}
+	for _, tc := range cases {
+		got, ok := dnsAllowance(tc.in)
+		if ok != tc.wantOK || !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("dnsAllowance(%q) = (%+v, %v), want (%+v, %v): %s", tc.in, got, ok, tc.want, tc.wantOK, tc.comment)
+		}
+	}
 }
 
 // TestAdmit: a create is admitted when the node is healthy and the free
