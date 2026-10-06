@@ -378,6 +378,54 @@ func TestFromDBPreemptedCountsOutsideTheWindow(t *testing.T) {
 	}
 }
 
+// TestFromDBLostPreemptedNotMarked: a lost row keeps its preempted_at
+// in the store, but it is not waiting for a resume, so neither the "·p"
+// row mark nor the attention-strip count applies.
+func TestFromDBLostPreemptedNotMarked(t *testing.T) {
+	cfg := testConfig(t, "")
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	raw, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
+	for _, q := range []string{
+		`INSERT INTO images (name, template_id, current_build_id, vcpu, memory_mb, disk_mb, updated_at) VALUES ('go-base','t1','b1',2,2048,6144,'` + ts(-48*time.Hour) + `')`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class, preempted_at) VALUES ('lost-preempt','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','lost','burst','` + ts(-time.Minute) + `')`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class, preempted_at) VALUES ('susp-preempt','u-1','go-base','` + ts(-2*time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','suspended',1,'burst','` + ts(-time.Minute) + `')`,
+	} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	raw.Close()
+	os.WriteFile(cfg.UsersFile, []byte(`{"users":[{"id":"u-1","name":"ci"}]}`), 0o600)
+
+	var s Snapshot
+	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
+		t.Fatal(err)
+	}
+	if s.Preempted != 1 {
+		t.Fatalf("preempted = %d, want 1 (the lost row excluded)", s.Preempted)
+	}
+	for _, r := range s.Rows {
+		switch r.ID {
+		case "lost-preempt":
+			if r.Preempted {
+				t.Fatal("lost preempted row must not show the ·p mark")
+			}
+		case "susp-preempt":
+			if !r.Preempted {
+				t.Fatal("suspended preempted row must show the ·p mark")
+			}
+		}
+	}
+}
 func TestFromDBReadsLeasesAndImages(t *testing.T) {
 	cfg := testConfig(t, "")
 	db, err := store.Open(cfg.DBPath)

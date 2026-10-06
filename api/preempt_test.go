@@ -453,3 +453,61 @@ func TestPreemptionCandidateOrderOverGuarantee(t *testing.T) {
 		t.Fatalf("first candidate = %s, want the owner furthest over its guarantee (%s)", cands[0].ID, l2.ID)
 	}
 }
+
+// TestPreemptionDiskFloorMixedPreemptsNothing: when the disk-allowed
+// candidates cannot free enough but the disk-blocked ones would, the
+// disk floor is the only obstacle, so the admission answers
+// errPreemptCannot and suspends nothing.
+func TestPreemptionDiskFloorMixedPreemptsNothing(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	small := burstLease(t, svc, ctx, "burst-a", "mid") // 1024 MiB, disk-allowed
+	large := burstLease(t, svc, ctx, "burst-b", "big") // 2048 MiB, disk-blocked
+
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	svc.cfg.PreemptDiskFloorPct = 15
+	var total uint64 = 100 << 30
+	// 16.5 GiB free: a 1024 MiB pause leaves 15.5 GiB (>= 15%), a
+	// 2048 MiB one leaves 14.5 GiB (< 15%).
+	svc.diskCapacity = func(string) (uint64, uint64, error) {
+		return total, 16<<30 + 1<<29, nil
+	}
+	// The node has 512 MiB free: even pausing the small lease (1024) is
+	// not enough for a 2048 MiB guaranteed lease, but pausing the large
+	// one (2048) would be.
+	installDynamicNode(t, svc, sub, 1024, 512, 512)
+
+	_, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "big", ttl: time.Hour})
+	if !errors.Is(err, errPreemptCannot) {
+		t.Fatalf("guaranteed create err = %v, want errPreemptCannot", err)
+	}
+	if small.Suspended || !small.PreemptedAt.IsZero() {
+		t.Fatal("disk-floor refusal must not preempt the disk-allowed lease")
+	}
+	if large.Suspended || !large.PreemptedAt.IsZero() {
+		t.Fatal("disk-floor refusal must not preempt the disk-blocked lease")
+	}
+}
+
+// TestPreemptionUnfulfillablePreemptsNothing: when no combination of
+// candidates can free enough memory, preemption suspends nothing and
+// falls through to the ordinary capacity check (not errPreemptCannot).
+func TestPreemptionUnfulfillablePreemptsNothing(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	victim := burstLease(t, svc, ctx, "burst-a", "mid")
+
+	// Zero MiB free and one 1024 MiB burst lease: a 2048 MiB guaranteed
+	// lease cannot be hosted even after pausing every candidate.
+	installDynamicNode(t, svc, sub, 768, 256, 512)
+	_, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "big", ttl: time.Hour})
+	if err == nil {
+		t.Fatal("guaranteed create succeeded, want an ordinary capacity refusal")
+	}
+	if errors.Is(err, errPreemptCannot) {
+		t.Fatalf("unfulfillable admission = errPreemptCannot, want the ordinary capacity check: %v", err)
+	}
+	if victim.Suspended || !victim.PreemptedAt.IsZero() {
+		t.Fatalf("unfulfillable admission preempted a lease (err=%v)", err)
+	}
+}

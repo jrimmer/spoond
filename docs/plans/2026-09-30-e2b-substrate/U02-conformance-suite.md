@@ -58,7 +58,8 @@ U01 is done.
 ## Configuration (environment variables read by the suite)
 
 Every variable except the per-run ones (`CONFORMANCE_SUBSTRATE`,
-`CONFORMANCE_GUEST_SERVICE`, `CONFORMANCE_DESTRUCTIVE`) comes from an env
+`CONFORMANCE_GUEST_SERVICE`, `CONFORMANCE_DESTRUCTIVE`,
+`CONFORMANCE_CAPACITY`) comes from an env
 file loaded with `set -a; . <file>; set +a`: `/etc/spoond/conformance.env`
 for production (provisioned before kickoff, README §Production conformance
 credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
@@ -71,6 +72,8 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 | `CONFORMANCE_SUBSTRATE` | yes | `forkd` or `e2b`. Selects the host-level check implementations |
 | `CONFORMANCE_BACKEND_UNIT` | yes | the systemd unit of the backend under test: `spoond-backend` (production) or `spoond-backend-staging` (staging). R3 restarts exactly this unit |
 | `CONFORMANCE_DESTRUCTIVE` | no | `1` enables group R (restarts and crashes). Default off |
+| `CONFORMANCE_CAPACITY` | no | `1` enables group C (preemption, #128 part 3). Default off: C1 fills the host |
+| `CONFORMANCE_SECOND_TOKEN` | group C | the token of a second, **non-admin** identity user. C1 creates its guaranteed lease as that user because the production conformance user is not admin and there is no promote API. Provisioned on the host beside `CONFORMANCE_TOKEN`; unset means C1 skips |
 | `CONFORMANCE_IMAGES` | no | comma list. Default `py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla` |
 | `CONFORMANCE_SSH_GATEWAY` | yes | `127.0.0.1:2222` (gateway `--listen :2222`, A1 §7.1) |
 | `CONFORMANCE_SSH_KEY` | yes | path to the conformance user's private key; its fingerprint was registered when the user was created |

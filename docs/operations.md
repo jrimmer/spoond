@@ -475,9 +475,12 @@ lease's owner; `spoond_preemptions_total` counts them and
 The pause writes a snapshot, so preemption stops before the snapshot
 disk does: `PREEMPT_DISK_FLOOR_PCT` (default `15`) is the free
 percentage a pause must leave, estimated from the burst lease's
-`memory_mb`. If every candidate would take the disk below it, the
-guaranteed admission answers `503` `capacity: cannot preempt (snapshot
-disk low)` with `Retry-After: 30` and preempts nothing.
+`memory_mb`. If preemption can free enough memory only by pausing
+leases the floor blocks, the guaranteed admission answers `503`
+`capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`
+and suspends no one. If the node cannot host the lease even after
+pausing every candidate, preemption suspends no one and the admission
+falls through to the ordinary capacity check.
 
 The **resume queue** runs every 15 s: it resumes preempted leases,
 oldest preemption first, whenever they fit again — host hugepages above

@@ -3195,7 +3195,7 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 
 	// Preempted leases (#128 part 3): live leases suspended by
 	// preemption, awaiting the resume queue.
-	preempted := s.preemptedCount()
+	preempted := s.preemptedCountLocked()
 
 	s.store.mu.Unlock()
 	m.PreemptedLeases.Set(float64(preempted))

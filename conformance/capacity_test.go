@@ -10,21 +10,18 @@ import (
 )
 
 // Group C: preemption (#128 part 3). C1 fills the host, so it runs only
-// with CONFORMANCE_CAPACITY=1 and never on a shared host.
+// with CONFORMANCE_CAPACITY=1 and never on a shared host. It needs a
+// second identity user's token (CONFORMANCE_SECOND_TOKEN): the
+// production conformance user is not admin and there is no promote API,
+// so the suite cannot create one itself.
 
 func requireCapacity(t *testing.T) {
 	if os.Getenv("CONFORMANCE_CAPACITY") != "1" {
 		skipf(t, "group C requires CONFORMANCE_CAPACITY=1 (it fills the host)")
 	}
-}
-
-// capacityUser is the shape of one /api/users row.
-type capacityUser struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	GuaranteedMiB int    `json:"guaranteed_mib"`
-	MaxMiB        int    `json:"max_mib"`
-	UsedMiB       int    `json:"used_mib"`
+	if cfg.SecondToken == "" {
+		skipf(t, "group C requires CONFORMANCE_SECOND_TOKEN (a second, non-admin identity user)")
+	}
 }
 
 // withToken runs fn with the client's bearer token temporarily replaced.
@@ -34,59 +31,6 @@ func withToken(tok string, fn func()) {
 	cl.token = tok
 	defer func() { cl.token = old }()
 	fn()
-}
-
-// createCapacityUser creates a user with the given token and quota and
-// registers it for deletion. It must run with an admin token.
-func createCapacityUser(t *testing.T, name, token, quota string) capacityUser {
-	t.Helper()
-	var u capacityUser
-	withToken(cfg.Token, func() {
-		st, body, err := cl.do("POST", "/api/users", map[string]any{
-			"name": name, "kind": "person", "token": token,
-		})
-		if err != nil {
-			failf(t, "create user %s: %v", name, err)
-		}
-		if st != 201 {
-			failf(t, "create user %s: status %d: %s", name, st, truncate(body))
-		}
-		var resp struct {
-			User capacityUser `json:"user"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			failf(t, "create user %s: bad body: %v", name, err)
-		}
-		u = resp.User
-		if quota != "" {
-			st, body, err := cl.do("POST", "/api/users/"+u.ID+"/quota", jsonObject(quota))
-			if err != nil {
-				failf(t, "quota %s: %v", name, err)
-			}
-			if st != 200 {
-				failf(t, "quota %s: status %d: %s", name, st, truncate(body))
-			}
-		}
-	})
-	t.Cleanup(func() {
-		withToken(cfg.Token, func() {
-			if st, _, err := cl.do("DELETE", "/api/users/"+u.ID, nil); err != nil {
-				t.Logf("cleanup: delete user %s: %v", name, err)
-			} else if st != 200 && st != 204 && st != 404 {
-				t.Logf("cleanup: delete user %s: status %d", name, st)
-			}
-		})
-	})
-	return u
-}
-
-// jsonObject decodes a raw JSON object.
-func jsonObject(s string) map[string]any {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
-		panic(err)
-	}
-	return m
 }
 
 // trackAs registers a lease for deletion with its owner's token in
@@ -155,20 +99,26 @@ func leaseAs(t *testing.T, token, id string) (map[string]any, bool) {
 	return m, ok
 }
 
-// TestC1_PreemptionRefillsGuaranteed: a test user with guaranteed_mib=0
-// fills the host with burst leases until creates answer 503; a guaranteed
-// lease created by a second user then preempts the newest burst lease
-// (preempted=true). Deleting the guaranteed lease lets the resume queue
-// bring the burst lease back within 60 s with its /dev/shm file intact.
+// TestC1_PreemptionRefillsGuaranteed: a test user (CONFORMANCE_SECOND_TOKEN,
+// no lease cap: it must take leases until the host answers 503) fills the
+// host with forced-burst leases. A guaranteed lease created by the
+// conformance user (also classified guaranteed: it has no guaranteed_mib)
+// then preempts the newest burst lease (preempted=true). Deleting the
+// guaranteed lease lets the resume queue bring the burst lease back within
+// 60 s with its /dev/shm file intact. "burst": true forces the filler's
+// class because without a guaranteed_mib the owner would otherwise keep
+// every lease guaranteed, and the suite has no admin access to set quotas.
 func TestC1_PreemptionRefillsGuaranteed(t *testing.T) {
 	requireCapacity(t)
 	rec := begin(t)
 
 	image := envOr("CONFORMANCE_PREEMPT_IMAGE", "py-base")
-	burstTok := cfg.Token + "-burst"
-	guaranteedTok := cfg.Token + "-guaranteed"
-	createCapacityUser(t, "capacity-burst", burstTok, `{"guaranteed_mib":0}`)
-	createCapacityUser(t, "capacity-guaranteed", guaranteedTok, `{"guaranteed_mib":0}`)
+	// The filler must not have a low max_leases: the conformance user has
+	// max_leases=20, which would answer 429 before the host's 503, so the
+	// second user (uncapped) takes the fill and the conformance user takes
+	// the single guaranteed lease.
+	burstTok := cfg.SecondToken
+	guaranteedTok := cfg.Token
 
 	// Fill the host with burst leases, each carrying a /dev/shm marker.
 	marker := randMarker()

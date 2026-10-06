@@ -125,6 +125,15 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 	return def
 }
 
+func envFloatOr(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
 // backupStale reports whether dir holds no <prefix>-*.db backup newer
 // than 24 h (a missing or unreadable newest backup counts as stale).
 func backupStale(dir, prefix string) bool {
@@ -269,8 +278,9 @@ func Main(args []string) int {
 	burstReserveMiB := envIntOr("BURST_RESERVE_MIB", api.DefaultBurstReserveMiB)
 	// The preemption disk floor (#128 part 3): a preemption pause must
 	// leave this percentage of the snapshot disk free, estimated from
-	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default 15.
-	preemptDiskFloorPct := float64(envIntOr("PREEMPT_DISK_FLOOR_PCT", api.DefaultPreemptDiskFloorPct))
+	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default 15;
+	// fractional values (e.g. 12.5) are honoured.
+	preemptDiskFloorPct := envFloatOr("PREEMPT_DISK_FLOOR_PCT", api.DefaultPreemptDiskFloorPct)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.

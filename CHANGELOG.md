@@ -72,8 +72,8 @@ summarised from README "Status".
   leases, oldest preemption first, when they fit again, clearing
   `preempted` and emitting `resumed` with detail `after preemption`;
   the same path serves a client's explicit resume. New metrics
-  `spoond_preemptions_total` and `spoond_preempted_leases`, dashboard
-  state marks (`‖ suspended·b·p`) and an attention-strip row name
+  `spoond_preemptions_total` and `spoond_preempted_leases`, a dashboard
+  state mark (`‖ suspended·p`) and an attention-strip row name
   them.
 
 ## [2.3.3] - 2026-10-05

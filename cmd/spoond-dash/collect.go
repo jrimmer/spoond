@@ -835,7 +835,11 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			r.Policy = "restricted"
 		}
 		r.Burst = class == "burst"
-		r.Preempted = preemptedAt != ""
+		// A preempted lease shows the "·p" mark only while it is live
+		// (suspended, running or recovered). A lost row keeps its
+		// preempted_at in the store but must not claim to be waiting for
+		// a resume, and the attention strip already excludes lost rows.
+		r.Preempted = preemptedAt != "" && (r.State == "suspended" || r.State == "running" || r.State == "recovered")
 		if len(r.ID) > 10 {
 			r.ID = r.ID[:10]
 		}

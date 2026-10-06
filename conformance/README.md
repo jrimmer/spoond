@@ -28,13 +28,22 @@ go test -tags conformance -count=1 -timeout 90m -v ./conformance/ \
 
 Per-run variables: `CONFORMANCE_SUBSTRATE` (`e2b`),
 `CONFORMANCE_GUEST_SERVICE`, `CONFORMANCE_DESTRUCTIVE` (unset/absent
-enables nothing; `1` enables group R, which is an Autonomous window step).
+enables nothing; `1` enables group R, which is an Autonomous window step),
+`CONFORMANCE_CAPACITY` (unset/absent enables nothing; `1` enables group C,
+which fills the host).
 The `-results` path must be absolute: `go test` runs the test binary in the
 package directory. To run a single test, add `-run '^<TestName>$'` before
 `-args`.
 
 Group R runs only with `CONFORMANCE_DESTRUCTIVE=1`; it restarts backend,
 gateway and orchestrator units, so it never runs against production traffic.
+
+Group C (preemption, #128 part 3) runs only with `CONFORMANCE_CAPACITY=1`
+because it fills the host. It also needs `CONFORMANCE_SECOND_TOKEN`, the
+token of a second, non-admin identity user: it creates the guaranteed
+lease as that second user (the conformance user is not admin and can
+neither create users nor set quotas), so it must be provisioned on the
+host like `CONFORMANCE_TOKEN`.
 
 ## Configuration
 
@@ -45,6 +54,7 @@ See `U02-conformance-suite.md` §Configuration for the full table. Required:
 `CONFORMANCE_USER_ID`, `CONFORMANCE_PROXY_URL`,
 `CONFORMANCE_PROXY_SECRET` (may be empty), `CONFORMANCE_PROXY_SUFFIX`,
 `CONFORMANCE_GUEST_SERVICE`. Optional: `CONFORMANCE_DESTRUCTIVE`,
+`CONFORMANCE_CAPACITY`, `CONFORMANCE_SECOND_TOKEN`,
 `CONFORMANCE_IMAGES` (default
 `py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla`).
 

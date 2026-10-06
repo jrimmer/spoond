@@ -177,22 +177,59 @@ func (s *Service) admitGuaranteed(ctx context.Context, owner string, memoryMB in
 // preemptForGuaranteed suspends burst leases (lowest priority, then
 // newest, then the owner furthest over its guarantee) until the node can
 // host memoryMB with the reserve intact, then returns. The caller holds
-// preemptMu and performs the debit. It returns errPreemptCannot when it
-// needed to preempt but the disk floor refused every candidate;
-// otherwise an unfulfillable request falls through to the ordinary
-// capacity check.
+// preemptMu and performs the debit.
+//
+// It first checks whether the disk-allowed candidates can free enough:
+// when they cannot but the disk-blocked ones would, the disk floor is
+// what stops the admission and it returns errPreemptCannot **without
+// preempting anything**. When not even every candidate together is
+// enough, there is nothing to gain from preempting and it falls through
+// to the ordinary capacity check. A NodeInfo read failure likewise
+// falls through rather than failing here (the ordinary check answers).
 func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memoryMB int) error {
 	fits, err := s.guaranteedFits(ctx, memoryMB)
 	if err != nil {
-		return err
+		// The node could not be read: do not fail the guaranteed
+		// admission here. createSandbox's ordinary capacity check reads
+		// NodeInfo again and answers; before part 3 guaranteed
+		// admissions did not consult NodeInfo at this point at all.
+		s.log.Printf("preempt: node info: %v", err)
+		return nil
 	}
 	if fits {
 		return nil
 	}
-	floorBlocked := false
-	for _, v := range s.preemptionCandidates() {
+
+	candidates := s.preemptionCandidates()
+	var freeable, blocked uint64
+	diskBlocked := false
+	for _, v := range candidates {
+		if s.preemptDiskOK(v) {
+			freeable += uint64(v.MemoryMB)
+		} else {
+			diskBlocked = true
+			blocked += uint64(v.MemoryMB)
+		}
+	}
+	freeMiB, err := s.cachedFreeHugepageMiB(ctx)
+	if err != nil {
+		s.log.Printf("preempt: node info: %v", err)
+		return nil
+	}
+	need := uint64(s.burstReserveMiB()) + uint64(memoryMB)
+	if freeMiB+freeable < need {
+		if diskBlocked && freeMiB+freeable+blocked >= need {
+			// The disk floor is the only thing in the way: refuse
+			// without suspending any lease.
+			return errPreemptCannot
+		}
+		// Not enough memory exists at all: preempting would only
+		// suspend leases for an admission that cannot succeed.
+		return nil
+	}
+
+	for _, v := range candidates {
 		if !s.preemptDiskOK(v) {
-			floorBlocked = true
 			continue
 		}
 		if err := s.preemptLease(ctx, v, owner); err != nil {
@@ -202,16 +239,23 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 			continue
 		}
 		if fits, err = s.guaranteedFits(ctx, memoryMB); err != nil {
-			return err
+			s.log.Printf("preempt: node info: %v", err)
+			return nil
 		}
 		if fits {
 			return nil
 		}
 	}
-	if floorBlocked {
-		return errPreemptCannot
-	}
 	return nil
+}
+
+// cachedFreeHugepageMiB reads the node's free hugepage memory in MiB from
+// the service's cache (filling it on demand), without the healthy-status
+// short-circuit guaranteedFits applies.
+func (s *Service) cachedFreeHugepageMiB(ctx context.Context) (uint64, error) {
+	s.nodeInfoMu.Lock()
+	defer s.nodeInfoMu.Unlock()
+	return s.freeHugepageMiBLocked(ctx)
 }
 
 // preemptLease suspends one burst lease through the pause path and
@@ -233,9 +277,13 @@ func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string
 	}
 
 	s.store.mu.Lock()
-	if !l.Suspended {
-		// A concurrent resume won the race: do not stamp a running
-		// lease as preempted.
+	if !l.Suspended || l.busy {
+		// A concurrent resume won the race: pauseLease cleared busy as
+		// it returned, so a resume may have taken it and still be in
+		// its sub calls with Suspended true. Testing busy as well stops
+		// us stamping (and crediting memory for) a lease that is coming
+		// back, and keeps a spurious preempted event/counter off the
+		// stream.
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
@@ -278,6 +326,11 @@ func (s *Service) runPreemptResumeLoop(ctx context.Context) {
 // and re-decides its class, so it comes back as a burst lease if the
 // owner is still above the guarantee. A lease that does not fit yet is
 // left for a later tick.
+//
+// A preempted lease that comes back classified guaranteed may itself
+// preempt other burst leases (normal admission does that). The cascade
+// is bounded — each tick only brings back preempted leases — and is the
+// spec-conforming consequence of the class re-decision, not a leak.
 func (s *Service) resumePreempted(ctx context.Context) {
 	type victim struct {
 		l  *Lease
@@ -307,7 +360,7 @@ func (s *Service) resumePreempted(ctx context.Context) {
 
 // preemptedCountLocked reports how many live leases are currently
 // preempted (for the gauge). Caller holds the store lock.
-func (s *Service) preemptedCount() int {
+func (s *Service) preemptedCountLocked() int {
 	n := 0
 	for _, l := range s.store.leases {
 		if !l.released && !l.PreemptedAt.IsZero() {
