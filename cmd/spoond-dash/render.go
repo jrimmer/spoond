@@ -120,11 +120,14 @@ func fitItems(segs []grid.Seg, w int) []grid.Seg {
 //   - free hugepages or snapshot disk past the danger level,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
 //     (#126),
-//   - a held lease that a held-lease rule (idle, pressure, a lapsed
-//     hold) suspended and that is still suspended (from last_action).
-//     A pause by hand, by the drain, by preemption (it has its own row
-//     while preempted) or by the lease's own idle_suspend is not one,
-//     and the row clears as soon as the lease runs again.
+//   - a held lease whose hold lapsed and that the expiry rule
+//     suspended, still suspended (from last_action): it is released at
+//     the stale limit unless someone renews it. A held lease the idle
+//     or pressure rule suspended is not one — it resumes on its next
+//     use and the leases table shows it suspended — nor is a pause by
+//     hand, by the drain, by preemption (it has its own row while
+//     preempted) or by the lease's own idle_suspend. The row clears as
+//     soon as the lease runs again.
 func bannerRows(s Snapshot, now time.Time) []string {
 	var rows []string
 	for _, svc := range s.Services {
@@ -132,9 +135,7 @@ func bannerRows(s Snapshot, now time.Time) []string {
 			rows = append(rows, fmt.Sprintf("unit %s is %s", svc.Name, svc.State))
 		}
 	}
-	if s.ByState["lost"] > 0 {
-		rows = append(rows, fmt.Sprintf("%d lost lease(s) - a substrate crash dropped them", s.ByState["lost"]))
-	}
+	rows = append(rows, lostRows(s)...)
 	if s.Preempted > 0 {
 		rows = append(rows, fmt.Sprintf("%d burst lease(s) preempted", s.Preempted))
 	}
@@ -148,26 +149,56 @@ func bannerRows(s Snapshot, now time.Time) []string {
 		rows = append(rows, fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct))
 	}
 	for _, r := range s.Rows {
-		if heldRuleSuspended(r) {
-			rows = append(rows, fmt.Sprintf("held lease %s: %s %s ago", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))))
+		if lapsedHoldSuspended(r) {
+			rows = append(rows, fmt.Sprintf("held lease %s (%s): hold lapsed %s ago - renew it", r.ID, r.Owner, dur(now.Sub(r.LastActionAt))))
 		}
 	}
 	return rows
 }
 
-// heldRuleSuspended reports whether a held-lease rule acted on r and r
-// is still suspended: rule 1 (idle), rule 4 (pressure, its shorter
-// idle) and rule 3 (a lapsed hold, suspending the lease or expiring the
-// hold of one already suspended: it is released after the stale limit
-// unless someone renews it). Those wait on a person or on the lease's
-// next use; every other last_action (a pause by hand, the drain,
-// preemption, the lease's own idle_suspend) does not.
-func heldRuleSuspended(r LeaseRow) bool {
+// maxLostRows caps the per-lease lost rows; past it the rest are
+// counted in one row, so a crash that drops many leases does not push
+// the panels off the screen.
+const maxLostRows = 3
+
+// lostRows names each lost lease and its owner — the owner has to
+// delete it (it still counts against their quota) — up to maxLostRows,
+// then one row for the rest. The count comes from ByState, so lost
+// leases the table does not list still count.
+func lostRows(s Snapshot) []string {
+	n := s.ByState["lost"]
+	if n == 0 {
+		return nil
+	}
+	var rows []string
+	for _, r := range s.Rows {
+		if r.State != "lost" || len(rows) == maxLostRows {
+			continue
+		}
+		rows = append(rows, fmt.Sprintf("lost lease %s (%s) - a substrate crash dropped it; its owner should delete it", r.ID, r.Owner))
+	}
+	if rest := n - len(rows); rest > 0 {
+		if len(rows) == 0 {
+			rows = append(rows, fmt.Sprintf("%d lost lease(s) - a substrate crash dropped them", n))
+		} else {
+			rows = append(rows, fmt.Sprintf("%d more lost lease(s)", rest))
+		}
+	}
+	return rows
+}
+
+// lapsedHoldSuspended reports whether r's hold lapsed and the expiry
+// rule (rule 3) suspended it or expired the hold of one already
+// suspended, and r is still suspended: it is released at the stale
+// limit unless someone renews the hold, so it waits on a person. The
+// idle and pressure rules (1 and 4) also suspend held leases, but those
+// resume on their next use and need nobody.
+func lapsedHoldSuspended(r LeaseRow) bool {
 	if r.State != "suspended" || r.LastActionAt.IsZero() {
 		return false
 	}
 	switch r.LastAction {
-	case "idle/suspend_idle", "pressure/suspend_idle", "expiry/suspend_lapsed", "expiry/expire":
+	case "expiry/suspend_lapsed", "expiry/expire":
 		return true
 	}
 	return false

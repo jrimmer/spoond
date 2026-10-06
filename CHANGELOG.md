@@ -23,6 +23,13 @@ summarised from README "Status".
 
 ### Changed
 
+- **Dashboard attention strip: only what needs a person.** A held
+  lease the idle or pressure rule suspended no longer raises a row: it
+  resumes on its next use, and the leases table already shows it
+  suspended. A held lease whose hold lapsed keeps its row (`hold lapsed
+  3h00m ago - renew it`), now with its owner. Lost leases are named with
+  their owner (`lost lease e151d2653d (honey) - … its owner should delete
+  it`), up to three, then one counting row.
 - **Dashboard capacity panel: the lease counts on one line,** with the
   burst share inside the running count: `8 leases · 8 running (3
   burst) · 0 suspended · 0 lost` (`susp` when the full word does not
