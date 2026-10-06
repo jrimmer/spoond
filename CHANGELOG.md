@@ -55,6 +55,13 @@ summarised from README "Status".
   and detail; the dashboard marks burst rows (`▶ running·b`) and adds
   `burst N` to the capacity panel.
 
+### Fixed
+
+- **Dashboard: no scrollbar beside the grid.** The grid had its own
+  vertical scrollbar whenever its content was a fraction of a pixel
+  taller than its box (2.3.3 hid only the page's). It no longer scrolls
+  vertically, and a narrow window scrolls it sideways without a bar.
+
 ## [2.3.3] - 2026-10-05
 
 Dashboard fixes. No schema change.
