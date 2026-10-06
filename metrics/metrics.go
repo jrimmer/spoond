@@ -113,6 +113,10 @@ type BackendMetrics struct {
 	PreemptionsTotal prometheus.Counter // cumulative preemptions
 	PreemptedLeases  prometheus.Gauge   // leases currently preempted
 
+	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
+	// the idle sweep through the pause path; the next call resumes them.
+	IdleSuspendsTotal prometheus.Counter // cumulative idle suspensions
+
 	// Guest port dials (2.2, #113): host-to-guest TCP over a WebSocket
 	GuestDialsActive prometheus.Gauge       // open WebSocket→guest TCP bridges
 	GuestDialsTotal  *prometheus.CounterVec // {result}: ok, refused, error
@@ -394,6 +398,13 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Burst leases currently suspended by preemption, awaiting the resume queue.",
 	})
 
+	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
+	// the idle sweep. The next call resumes them.
+	m.IdleSuspendsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "idle_suspends_total",
+		Help: "Persistent leases suspended by the idle sweep (idle_suspend).",
+	})
+
 	// Guest port dials (2.2, #113)
 	m.GuestDialsActive = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "guest_dials_active",
@@ -458,6 +469,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.KeptBuildsBytes, m.KeptBuilds,
 		m.HeldActions,
 		m.PreemptionsTotal, m.PreemptedLeases,
+		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,

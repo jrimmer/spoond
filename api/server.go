@@ -229,6 +229,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Per-lease checkpoint interval (2.3, #122): owner or admin, 404 for
 	// anyone else.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/checkpoint-policy", s.handleCheckpointPolicy)
+	// Per-lease idle reclamation threshold (2.5, #129 part 2): owner or
+	// admin, 404 for anyone else.
+	s.mux.HandleFunc("PUT /api/sandboxes/{id}/idle-policy", s.handleIdlePolicy)
 	// Restore in place to a kept checkpoint (2.3, #121): owner or admin,
 	// 404 for anyone else and for a build that is not the lease's own.
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restore", s.handleRestore)
@@ -821,6 +824,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// interval in seconds (2.3, #122): 0 = never; omitted (nil) =
 		// the host default (CHECKPOINT_INTERVAL_MINS).
 		CheckpointInterval *int64 `json:"checkpoint_interval"`
+		// IdleSuspend is the lease's own idle reclamation threshold in
+		// seconds (2.5, #129 part 2): 0 = never; omitted (nil) = the
+		// host default (IDLE_SUSPEND_DEFAULT_SECS). Only persistent
+		// leases may set it: suspension needs persistence.
+		IdleSuspend *int64 `json:"idle_suspend"`
 		// Burst asks for a preemptible lease (#128 part 2): it is
 		// classified burst even within the owner's guaranteed_mib, and
 		// admitted only while the node keeps its burst reserve free.
@@ -880,6 +888,24 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ckptSecs = *req.CheckpointInterval
 		if err := validateCheckpointInterval(ckptSecs); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	// Per-lease idle reclamation (2.5, #129 part 2): omitted (nil) is the
+	// host default; otherwise 0 (never) or 60..604800 seconds. Only a
+	// persistent lease may set a non-zero value: suspension needs
+	// persistence.
+	idleSet := false
+	var idleSecs int64
+	if req.IdleSuspend != nil {
+		idleSet = true
+		idleSecs = *req.IdleSuspend
+		if err := validateIdleSuspend(idleSecs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if idleSecs != 0 && !req.Persistent {
+			writeError(w, http.StatusBadRequest, "idle_suspend needs a persistent lease")
 			return
 		}
 	}
@@ -1035,6 +1061,9 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, 
 	if ckptSet {
 		lease.CheckpointInterval = ckptSecs
 	}
+	if idleSet {
+		lease.IdleSuspend = idleSecs
+	}
 	s.svc.saveLeaseLocked(lease)
 	s.svc.store.mu.Unlock()
 	body := map[string]any{
@@ -1052,6 +1081,7 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, 
 		"exposed":             exposedMap(lease),
 		"generation":          lease.Generation,
 		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
+		"idle_suspend":        s.svc.effectiveIdleSuspend(lease),
 		"class":               leaseClassRow(lease),
 		"priority":            lease.Priority,
 	}
@@ -1113,9 +1143,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id) // stream attach is activity for the idle sweeper
-	// A suspended lease has no running sandbox; resume it first.
-	if lease.Suspended {
-		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+	// A suspended lease has no running sandbox. One that idle_suspend
+	// suspended resumes first (2.5, #129 part 2); any other suspension
+	// keeps the 409.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	// A lease lost in a substrate crash has no sandbox to attach to; the
@@ -1715,28 +1746,8 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
-		case errors.Is(err, errNotPersistent):
-			writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
-		case errors.Is(err, errLeaseBusy):
-			writeError(w, http.StatusConflict, err.Error())
-		case errors.Is(err, errQuotaExceeded):
-			// A suspended lease holds no hugepages, so resuming one
-			// re-passes the memory check (#128): over max_mib answers
-			// 429 and the lease stays suspended.
-			writeError(w, http.StatusTooManyRequests, err.Error())
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
-		case errors.Is(err, errBurstReserve):
-			// A burst lease resuming into a full reserve (#128 part 2):
-			// 503 with a retry hint, the lease stays suspended.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
-		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
-			s.svc.log.Printf("resume %s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "resume failed")
+			s.writeResumeRefusal(w, id, err)
 		}
 		return
 	}
@@ -1782,10 +1793,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id) // exec is activity for the idle sweeper
-	// A suspended workspace-backed lease has no running sandbox; resume
-	// first.
-	if lease.Suspended {
-		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+	// A suspended workspace-backed lease has no running sandbox. One that
+	// idle_suspend suspended resumes first through the normal resume path
+	// (2.5, #129 part 2); any other suspension keeps the 409.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	// A lease lost in a substrate crash has nothing to exec into (U10).

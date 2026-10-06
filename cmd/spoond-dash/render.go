@@ -1285,16 +1285,19 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(c.id, yy, sanitize(r.ID), "text", c.idW)
 		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
 		g.Text(c.own, yy, sanitize(r.Owner), "text", c.ownW)
-		// The state cell names the burst class and preemption (#128
-		// part 2/3): "▶ running·b" and a preempted (always burst) lease
-		// as "‖ suspended·p" — the suffix rides the state so the columns
-		// stay aligned (the policy column keeps its own width), and it
-		// fits the state column: ·b and ·p replace each other rather
-		// than stack.
+		// The state cell names the burst class, preemption and idle
+		// suspension (#128 part 2/3, 2.5 #129 part 2): "▶ running·b", a
+		// preempted (always burst) lease as "‖ suspended·p", and an
+		// idle-suspended lease as "‖ suspended·i" — the suffix rides the
+		// state so the columns stay aligned (the policy column keeps its
+		// own width), and ·b, ·p and ·i replace each other rather than
+		// stack.
 		state := r.State
 		switch {
 		case r.Preempted:
 			state += "·p"
+		case r.IdleSuspended:
+			state += "·i"
 		case r.Burst:
 			state += "·b"
 		}

@@ -121,9 +121,10 @@ func (s *Server) mapFileError(w http.ResponseWriter, lease *Lease, op string, er
 }
 
 // filesGate is the common path of every files route: resolve the lease
-// (404 for anyone but the owner or an admin), refuse a suspended lease
-// (409 — it has no running sandbox to touch), refuse a lost one (410),
-// count the call as activity for the idle sweep.
+// (404 for anyone but the owner or an admin), resume one suspended by
+// idle_suspend (2.5, #129 part 2) — otherwise a suspended lease has no
+// running sandbox to touch, 409 — refuse a lost one (410), and count the
+// call as activity for the idle sweep.
 func (s *Server) filesGate(w http.ResponseWriter, r *http.Request) *Lease {
 	lease := s.filesTarget(r)
 	if lease == nil {
@@ -131,8 +132,7 @@ func (s *Server) filesGate(w http.ResponseWriter, r *http.Request) *Lease {
 		return nil
 	}
 	s.svc.touch(lease.ID) // files traffic is activity for the idle sweeper
-	if lease.Suspended {
-		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+	if !s.ensureRunning(w, r, lease) {
 		return nil
 	}
 	if lease.State == "lost" {

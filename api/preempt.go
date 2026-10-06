@@ -288,6 +288,7 @@ func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string
 		return errLeaseBusy
 	}
 	l.PreemptedAt = s.now()
+	l.LastAction, l.LastActionAt = pauseActionPreempt, l.PreemptedAt
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 
