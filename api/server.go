@@ -993,7 +993,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				s.writeCreateRefusal(w, req.Image, err, waited)
 				return
 			}
-			s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, ttl, waited)
+			s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 			return
 		}
 	}
@@ -1008,7 +1008,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Wait > 0 {
 		waited = time.Since(grantStart)
 	}
-	s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, ttl, waited)
+	s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 }
 
 // writeCreateRefusal writes the failure response for a refused create,
@@ -1051,9 +1051,9 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err err
 
 // writeCreatedLease writes the 201 for a granted create (both the
 // immediate and the queued path): it stamps the hold and the request's
-// checkpoint interval, then the usual body plus waited_ms when the
+// checkpoint interval and idle_suspend, then the usual body plus waited_ms when the
 // create waited for admission.
-func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, holderURL string, holdTTL int, ckptSet bool, ckptSecs int64, ttl, waited time.Duration) {
+func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, holderURL string, holdTTL int, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration) {
 	s.svc.store.mu.Lock()
 	if holder != "" {
 		s.svc.setHoldLocked(lease, holder, holderURL, time.Duration(holdTTL)*time.Second, s.svc.now())
