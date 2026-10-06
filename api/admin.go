@@ -235,10 +235,12 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if _, err := s.resumeLease(ctx, l); err != nil {
-				if errors.Is(err, errQuotaExceeded) || errors.Is(err, errBurstReserve) {
-					// Over the owner's memory cap, or a burst lease that
+				if errors.Is(err, errQuotaExceeded) || errors.Is(err, errBurstReserve) || errors.Is(err, errPreemptCannot) {
+					// Over the owner's memory cap, a burst lease that
 					// would dip the node under its burst reserve (#128
-					// part 2): both refusals are transient admission
+					// part 2), or a guaranteed lease that could not
+					// preempt for room (part 3, snapshot disk under its
+					// floor): all three refusals are transient admission
 					// answers, so the lease keeps its Drained flag and a
 					// later undrain retries it — refusing a resume must
 					// not lose the lease the way a failed resume (a

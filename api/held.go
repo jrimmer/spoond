@@ -242,6 +242,12 @@ func suspendedByRule(l *Lease) (time.Time, bool) {
 	if l.released || !l.held() || l.State != "suspended" || !l.Suspended || l.LastActionAt.IsZero() {
 		return time.Time{}, false
 	}
+	if !l.PreemptedAt.IsZero() {
+		// A preempted lease waits for the resume queue (#128 part 3):
+		// no rule released it into suspension, so none releases it from
+		// there, however long it waits or whatever LastAction it kept.
+		return time.Time{}, false
+	}
 	switch l.LastAction {
 	case heldRuleIdle + "/" + heldActionSuspendIdle,
 		heldRulePressure + "/" + heldActionSuspendIdle,

@@ -339,7 +339,7 @@ func (s *Service) resumePreempted(ctx context.Context) {
 	s.store.mu.Lock()
 	var victims []victim
 	for _, l := range s.store.leases {
-		if l.released || l.PreemptedAt.IsZero() {
+		if l.released || l.PreemptedAt.IsZero() || l.State != "suspended" {
 			continue
 		}
 		victims = append(victims, victim{l, l.PreemptedAt})
@@ -363,7 +363,7 @@ func (s *Service) resumePreempted(ctx context.Context) {
 func (s *Service) preemptedCountLocked() int {
 	n := 0
 	for _, l := range s.store.leases {
-		if !l.released && !l.PreemptedAt.IsZero() {
+		if !l.released && !l.PreemptedAt.IsZero() && l.State == "suspended" {
 			n++
 		}
 	}

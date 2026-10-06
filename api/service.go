@@ -165,6 +165,14 @@ func (l *Lease) live() bool { return l.State == "running" || l.State == "recover
 // it.
 func (l *Lease) setState(state string) {
 	l.State = state
+	// Only a suspended lease can be preempted (#128 part 3): every path
+	// that runs it again — resume, restore, cold restart, recovery — or
+	// loses it ends the preemption here, so none can leave a running or
+	// lost lease flagged for the resume queue. resumeLease reads the
+	// flag before this call for its event detail.
+	if state != "suspended" {
+		l.PreemptedAt = time.Time{}
+	}
 	if state == "lost" {
 		if l.LostAt.IsZero() {
 			l.LostAt = time.Now()
@@ -1726,12 +1734,11 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = resumeBuild
+	// A preempted lease comes back here: read the preemption before
+	// setState clears it, for the event's detail below (#128 part 3).
+	preempted := !l.PreemptedAt.IsZero()
 	l.setState("running")
 	l.Suspended = false
-	// A preempted lease comes back here: clear the preemption before the
-	// event below decides its detail (#128 part 3).
-	preempted := !l.PreemptedAt.IsZero()
-	l.PreemptedAt = time.Time{}
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()

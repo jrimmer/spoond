@@ -511,3 +511,116 @@ func TestPreemptionUnfulfillablePreemptsNothing(t *testing.T) {
 		t.Fatalf("unfulfillable admission preempted a lease (err=%v)", err)
 	}
 }
+
+// preemptOne preempts a single burst lease of burst-a for a guaranteed
+// create and returns the victim.
+func preemptOne(t *testing.T, svc *Service, sub *testSub, ctx context.Context) *Lease {
+	t.Helper()
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	victim := burstLease(t, svc, ctx, "burst-a", "mid")
+	installDynamicNode(t, svc, sub, 2048, 2048-512, 512)
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("guaranteed create: %v", err)
+	}
+	if victim.PreemptedAt.IsZero() || !victim.Suspended {
+		t.Fatal("setup: the burst lease was not preempted")
+	}
+	return victim
+}
+
+// TestPreemptedColdRestartClearsFlag: a path other than resume that runs
+// a preempted lease again (here a cold restart) ends the preemption, so
+// the lease does not report preempted while running, the gauge drops
+// it, and the resume queue no longer picks it up.
+func TestPreemptedColdRestartClearsFlag(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	victim := preemptOne(t, svc, sub, ctx)
+
+	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
+	if _, err := svc.restartCold(ctx, "burst-a", victim); err != nil {
+		t.Fatalf("cold restart: %v", err)
+	}
+	if victim.State != "running" || !victim.PreemptedAt.IsZero() {
+		t.Fatalf("after a cold restart state=%s preempted=%v, want running and not preempted", victim.State, !victim.PreemptedAt.IsZero())
+	}
+	if m := leaseMap(victim, svc.effectiveCheckpointInterval(victim)); m["preempted"] != false {
+		t.Fatalf("preempted field = %v, want false", m["preempted"])
+	}
+	svc.store.mu.Lock()
+	n := svc.preemptedCountLocked()
+	svc.store.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("preempted gauge count = %d, want 0", n)
+	}
+}
+
+// TestPreemptedLostLeaseNotCounted: a preempted lease that is lost is no
+// longer preempted, so the gauge (like the dashboard) does not count it.
+func TestPreemptedLostLeaseNotCounted(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	victim := preemptOne(t, svc, sub, ctx)
+	svc.store.mu.Lock()
+	victim.setState("lost")
+	n := svc.preemptedCountLocked()
+	svc.store.mu.Unlock()
+	if n != 0 || !victim.PreemptedAt.IsZero() {
+		t.Fatalf("lost preempted lease: count=%d preempted=%v, want 0 and false", n, !victim.PreemptedAt.IsZero())
+	}
+}
+
+// TestPreemptedHeldLeaseNeverStaleReleased: a held lease waiting in the
+// resume queue is not released by the stale rule, even when it still
+// carries an idle-suspend LastAction older than the release limit.
+func TestPreemptedHeldLeaseNeverStaleReleased(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	victim := preemptOne(t, svc, sub, ctx)
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	svc.store.mu.Lock()
+	victim.Holder = "pool:honey/work-1"
+	victim.LastAction = heldRuleIdle + "/" + heldActionSuspendIdle
+	victim.LastActionAt = old
+	victim.LastActive = old.Add(-time.Hour)
+	svc.store.mu.Unlock()
+	svc.cfg.HeldSuspendedRelease = time.Hour
+
+	svc.releaseStaleHeld(ctx, time.Now())
+	if victim.released || victim.State != "suspended" || victim.PreemptedAt.IsZero() {
+		t.Fatalf("stale rule touched a preempted lease: released=%v state=%s", victim.released, victim.State)
+	}
+}
+
+// TestPreemptionUndrainDefers: an undrain whose guaranteed lease needs
+// room it cannot preempt for (the snapshot disk is under the floor)
+// leaves the lease drained and suspended, not lost.
+func TestPreemptionUndrainDefers(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	g, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("guaranteed create: %v", err)
+	}
+	if _, err := svc.suspend(ctx, "guaranteed", g.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	svc.store.mu.Lock()
+	g.Drained = true
+	svc.saveLeaseLocked(g)
+	svc.store.mu.Unlock()
+	burstLease(t, svc, ctx, "burst-a", "mid")
+
+	// Full node, disk under the floor: the resume would have to preempt
+	// and cannot.
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	svc.cfg.PreemptDiskFloorPct = 15
+	var total uint64 = 100 << 30
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return total, total / 10, nil }
+	installDynamicNode(t, svc, sub, 2048, 2048-512, 512)
+
+	res := svc.undrain(ctx)
+	if len(res.Failed) != 1 || res.Resumed != 0 {
+		t.Fatalf("undrain = %+v, want the guaranteed lease in failed", res)
+	}
+	if !g.Drained || g.State != "suspended" || !g.LostAt.IsZero() {
+		t.Fatalf("preempt-refused undrain: state=%s drained=%v lost=%v, want suspended, drained, not lost", g.State, g.Drained, !g.LostAt.IsZero())
+	}
+}

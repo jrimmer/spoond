@@ -525,7 +525,8 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 }
 
 // TestLeasesShowPreemptMarks: the state cell names the burst class and
-// preemption (#128 part 2/3): "‖ suspended·b·p".
+// preemption (#128 part 2/3): "▶ running·b" for a burst lease and
+// "‖ suspended·p" for a preempted one (·p replaces ·b).
 func TestLeasesShowPreemptMarks(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{
