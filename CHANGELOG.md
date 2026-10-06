@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard: the lease state is always spelled out.** The state cell
+  no longer carries cryptic suffixes (`running·b`, `suspended·p`,
+  `suspended·i`). The glyph carries the run state (▶ running, ‖
+  suspended, ■ lost, ⭘ recovered) and the word spells it out with its
+  qualifier: `running, burst`, `suspended, burst`, `preempted`,
+  `idle-suspended`. In a narrow window the word steps down through
+  fixed shorter forms (`run, burst` → `running` → `run`), dropping the
+  qualifier before the state and never cutting a word mid-way.
+
 ## [2.6.2] - 2026-10-06
 
 Background jobs polish. No schema change; the `grid` package is

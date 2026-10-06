@@ -543,7 +543,7 @@ each request's env.
 | `503 capacity: … bytes of hugepage memory free` | not enough free hugepages for the image, or the node is draining/unhealthy | free sandboxes, lower `POOL_SIZE`, or raise `vm.nr_hugepages` (then re-check with doctor) |
 | `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
 | `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
-| lease shows `preempted` / `‖ suspended·p` | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
+| lease shows `preempted` / `‖ preempted` on the dashboard | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
 | `410 lease lost in a substrate crash` | the lease had no checkpoint when the orchestrator died | delete the lease; nothing to resume |
 | `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
 | `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
@@ -770,7 +770,7 @@ spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
   `GET /api/users/me` (and `charged_mib` on the lease detail).
 - **Lease classes** (#128 part 2): every lease is `guaranteed` or
   `burst`, decided at admission and stored with it (dashboard: `▶
-  running·b` and `burst N` in the capacity panel). A lease past the
+  running, burst` and `burst N` in the capacity panel). A lease past the
   owner's `guaranteed_mib` bursts, as does one created with
   `"burst": true`; a user with no `guaranteed_mib` keeps every lease
   guaranteed. A burst lease is preemptible even within another user's
