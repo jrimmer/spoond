@@ -1200,15 +1200,18 @@ type leaseCols struct {
 
 func leaseLayout(w int) leaseCols {
 	if w >= maxW {
+		// The state column fits its longest word in full ("‖ suspended,
+		// burst": 18), taking slack from the id (10 shown), the image
+		// ("honey-go-worker" still fits) and left; the holder keeps 21.
 		return leaseCols{
-			id: 2, idW: 12,
-			img: 14, imgW: 17,
-			own: 31, ownW: 10,
-			st: 41, stW: 13,
-			pol: 55, polW: 11,
-			age:  67,
-			left: 73, leftW: 9,
-			hold: 81,
+			id: 2, idW: 11,
+			img: 13, imgW: 16,
+			own: 29, ownW: 10,
+			st: 39, stW: 19,
+			pol: 58, polW: 11,
+			age:  69,
+			left: 75, leftW: 8,
+			hold: 83,
 		}
 	}
 	c := leaseCols{id: 2, idW: clamp(w/10, 6, 12)}
@@ -1217,7 +1220,7 @@ func leaseLayout(w int) leaseCols {
 	c.own = c.img + c.imgW + 1
 	c.ownW = clamp(w/12, 5, 10)
 	c.st = c.own + c.ownW + 1
-	c.stW = clamp(w/9, 6, 13)
+	c.stW = clamp(w/7, 6, 17)
 	c.pol = c.st + c.stW + 1
 	c.polW = clamp(w/17, 4, 12)
 	c.age = c.pol + c.polW + 1
@@ -1283,25 +1286,16 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(c.id, yy, sanitize(r.ID), "id", c.idW)
 		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
 		g.Text(c.own, yy, sanitize(r.Owner), "owner", c.ownW)
-		// The state cell names the burst class, preemption and idle
-		// suspension (#128 part 2/3, 2.5 #129 part 2): "▶ running·b", a
-		// preempted (always burst) lease as "‖ suspended·p", and an
-		// idle-suspended lease as "‖ suspended·i" — the suffix rides the
-		// state so the columns stay aligned (the policy column keeps its
-		// own width), and ·b, ·p and ·i replace each other rather than
-		// stack.
-		state := r.State
-		switch {
-		case r.Preempted:
-			state += "·p"
-		case r.IdleSuspended:
-			state += "·i"
-		case r.Burst:
-			state += "·b"
-		}
+		// The state cell (#128, #129): the glyph always carries the run
+		// state (▶ ‖ ■ ⭘, explained by the legend), and the word spells
+		// it out with any qualifier — "running, burst", "preempted",
+		// "idle-suspended". When the column is narrow the word steps down
+		// through fixed shorter forms (stateWords), so the state is never
+		// a cryptic suffix or a word cut mid-way.
+		word := fitWord(stateWords(r), c.stW-2)
 		segs := []grid.Seg{
 			{Text: string(stateGlyph(r)), Style: stateGlyphStyle(r)},
-			{Text: " " + state, Style: stateGlyphStyle(r)},
+			{Text: " " + word, Style: stateGlyphStyle(r)},
 		}
 		g.Segs(c.st, yy, segs, c.stW)
 		g.Text(c.pol, yy, sanitize(r.Policy), "dim", c.polW)
@@ -1313,6 +1307,43 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(2, top+2, "no live leases", "dim", l.w-4)
 	}
 	return y
+}
+
+// stateWords is a lease row's state word, longest form first, each next
+// one shorter: the run state with its qualifier (burst class,
+// preemption, idle suspension).
+func stateWords(r LeaseRow) []string {
+	// The qualifier goes first as the column narrows; the state word
+	// (or its short form) stays to the end.
+	switch {
+	case r.Preempted:
+		return []string{"preempted", "preempt", "susp"}
+	case r.IdleSuspended:
+		return []string{"idle-suspended", "idle-susp", "susp"}
+	case r.State == "running" && r.Burst:
+		return []string{"running, burst", "run, burst", "running", "run"}
+	case r.State == "running":
+		return []string{"running", "run"}
+	case r.State == "suspended" && r.Burst:
+		return []string{"suspended, burst", "susp, burst", "suspended", "susp"}
+	case r.State == "suspended":
+		return []string{"suspended", "susp"}
+	case r.State == "recovered":
+		return []string{"recovered", "recov"}
+	default:
+		return []string{r.State}
+	}
+}
+
+// fitWord is the first form that fits n cells, or the shortest form cut
+// to n as a last resort.
+func fitWord(forms []string, n int) string {
+	for _, f := range forms {
+		if len([]rune(f)) <= n {
+			return f
+		}
+	}
+	return ellipsize(forms[len(forms)-1], n)
 }
 
 // leaseLeft is the row's left column: a held lease shows the time left

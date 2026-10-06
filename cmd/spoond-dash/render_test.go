@@ -517,40 +517,54 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 	}
 }
 
-// TestLeasesShowPreemptMarks: the state cell names the burst class and
-// preemption (#128 part 2/3): "▶ running·b" for a burst lease and
-// "‖ suspended·p" for a preempted one (·p replaces ·b).
-func TestLeasesShowPreemptMarks(t *testing.T) {
+// TestLeasesShowStateWords: the state cell spells out the run state and
+// its qualifier (#128, #129) at full width: "running, burst",
+// "preempted", "idle-suspended", "suspended, burst"; never a ·b/·p/·i
+// suffix.
+func TestLeasesShowStateWords(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{
 		{ID: "preempt0001", Image: "py-base", State: "suspended", Burst: true, Preempted: true, Age: "5m", Left: "∞"},
 		{ID: "burst00001", Image: "py-base", State: "running", Burst: true, Age: "5m", Left: "10m"},
+		{ID: "idlesusp001", Image: "py-base", State: "suspended", IdleSuspended: true, Age: "5m", Left: "∞"},
+		{ID: "suspburst01", Image: "py-base", State: "suspended", Burst: true, Age: "5m", Left: "∞"},
 	}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "‖ suspended·p") {
-		t.Fatalf("preempted burst row not marked suspended·p:\n%s", p)
+	for _, want := range []string{"‖ preempted", "▶ running, burst", "‖ idle-suspended", "‖ suspended, burst"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("state cell %q missing:\n%s", want, p)
+		}
 	}
-	if !strings.Contains(p, "▶ running·b") {
-		t.Fatalf("plain burst row not marked running·b:\n%s", p)
+	for _, bad := range []string{"·b", "·p", "·i"} {
+		if strings.Contains(p, bad) {
+			t.Errorf("state cell still carries the %q suffix:\n%s", bad, p)
+		}
 	}
 }
 
-// TestLeasesShowIdleSuspendMark: an idle-suspended lease shows
-// "‖ suspended·i" (2.5, #129 part 2), and the mark replaces ·b (an
-// idle-suspended burst lease is still shown as ·i, since the suspension
-// is the more specific state).
-func TestLeasesShowIdleSuspendMark(t *testing.T) {
-	s := healthySnapshot()
-	s.Rows = []LeaseRow{
-		{ID: "idlesusp001", Image: "py-base", State: "suspended", IdleSuspended: true, Age: "5m", Left: "∞"},
-		{ID: "idleburst01", Image: "py-base", State: "suspended", Burst: true, IdleSuspended: true, Age: "5m", Left: "∞"},
+// TestStateWordsNarrow: as the column narrows the qualifier goes first
+// and the state word (or its short form) stays; no word is cut mid-way.
+func TestStateWordsNarrow(t *testing.T) {
+	cases := []struct {
+		r    LeaseRow
+		n    int
+		want string
+	}{
+		{LeaseRow{State: "running", Burst: true}, 16, "running, burst"},
+		{LeaseRow{State: "running", Burst: true}, 10, "run, burst"},
+		{LeaseRow{State: "running", Burst: true}, 7, "running"},
+		{LeaseRow{State: "running", Burst: true}, 4, "run"},
+		{LeaseRow{State: "suspended", Preempted: true}, 7, "preempt"},
+		{LeaseRow{State: "suspended", Preempted: true}, 5, "susp"},
+		{LeaseRow{State: "suspended", IdleSuspended: true}, 9, "idle-susp"},
+		{LeaseRow{State: "suspended"}, 8, "susp"},
+		{LeaseRow{State: "recovered"}, 6, "recov"},
+		{LeaseRow{State: "lost"}, 4, "lost"},
 	}
-	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "‖ suspended·i") {
-		t.Fatalf("idle-suspended row not marked suspended·i:\n%s", p)
-	}
-	if strings.Contains(p, "suspended·i·b") {
-		t.Fatalf("the ·i mark must replace ·b, not stack:\n%s", p)
+	for _, c := range cases {
+		if got := fitWord(stateWords(c.r), c.n); got != c.want {
+			t.Errorf("%+v in %d cells = %q, want %q", c.r, c.n, got, c.want)
+		}
 	}
 }
 
@@ -593,7 +607,7 @@ func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
 		Age: "5m", Left: "10m"}}
 	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
 	p := l.assemble().Plain()
-	if !strings.Contains(p, "forgejo: lacy.casa/") || !strings.Contains(p, "…") {
+	if !strings.Contains(p, "forgejo: lacy.cas") || !strings.Contains(p, "…") {
 		t.Fatalf("lease comment not shown in the holder column:\n%s", p)
 	}
 
