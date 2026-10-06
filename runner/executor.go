@@ -189,8 +189,8 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		// GitHub Actions always provides PATH; the guest agent REPLACES the
 		// environment with the step's env map when one is supplied, and its
 		// own default PATH is not applied to that case — so a step env
-		// without PATH loses /usr/bin entirely ("date: command not found"
-		// in otherwise-green jobs, lacy-infra#26).
+		// without PATH loses /usr/bin entirely (broken tools in
+		// otherwise-green jobs).
 		if env["PATH"] == "" {
 			env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 		}
@@ -214,7 +214,7 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 		// keyspace named cytale_ci_${GITHUB_RUN_ID:-local}) silently fall
 		// back to their default — and EVERY run then shares one state
 		// bucket: cancelled runs leave rows that poison the next suite
-		// (lacy-infra#26: ReactionController/bot clusters, same-sha drift).
+		// (clashing state between jobs, same-sha drift).
 		// Preference: context run_id, then run_number, then the task id
 		// (unique per attempt, so even a re-run isolates its state).
 		if env["GITHUB_RUN_ID"] == "" {

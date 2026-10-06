@@ -316,6 +316,44 @@ func TestBuildOneFromBase(t *testing.T) {
 	}
 }
 
+// resolveBase injects the deployment's guest DNS resolver as a build
+// arg: from SPOOND_GUEST_DNS_ADDR when the manifest entry does not set
+// its own, absent when neither does, and the manifest entry wins when
+// both do.
+func TestResolveBaseGuestDNS(t *testing.T) {
+	db := setup(t, &stubSubstrate{})
+	img := manifestImage{Name: "x", Dockerfile: "x.dockerfile"}
+	has := func(flags []string, want string) bool {
+		for _, f := range flags {
+			if f == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Setenv("SPOOND_GUEST_DNS_ADDR", "")
+	if _, flags, err := resolveBase(context.Background(), db, img); err != nil {
+		t.Fatalf("resolveBase: %v", err)
+	} else if has(flags, "SPOOND_GUEST_DNS_ADDR=") {
+		t.Fatalf("unset env must not inject a resolver, flags = %v", flags)
+	}
+
+	t.Setenv("SPOOND_GUEST_DNS_ADDR", "10.0.0.2")
+	if _, flags, err := resolveBase(context.Background(), db, img); err != nil {
+		t.Fatalf("resolveBase: %v", err)
+	} else if !has(flags, "SPOOND_GUEST_DNS_ADDR=10.0.0.2") {
+		t.Fatalf("env resolver not injected, flags = %v", flags)
+	}
+
+	img.BuildArgs = map[string]string{"SPOOND_GUEST_DNS_ADDR": "192.0.2.53"}
+	if _, flags, err := resolveBase(context.Background(), db, img); err != nil {
+		t.Fatalf("resolveBase: %v", err)
+	} else if !has(flags, "SPOOND_GUEST_DNS_ADDR=192.0.2.53") || has(flags, "SPOOND_GUEST_DNS_ADDR=10.0.0.2") {
+		t.Fatalf("manifest build_arg must win, flags = %v", flags)
+	}
+}
+
 // A From naming an image with no build is refused before docker runs.
 func TestBuildOneFromUnknownBase(t *testing.T) {
 	sub := &stubSubstrate{}

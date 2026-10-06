@@ -6,6 +6,10 @@ recovery, restarting the orchestrator or the backend, and the dashboard.
 What the substrate is and why it behaves this way is
 [substrate.md](substrate.md).
 
+> Deploying the 2.7 generic-defaults change on the production host: the
+> exact settings vm2 must carry before the swap are listed in
+> [`deploy/PRODUCTION-ENV-2.7.md`](../deploy/PRODUCTION-ENV-2.7.md).
+
 ## Component health
 
 | Check | Command |

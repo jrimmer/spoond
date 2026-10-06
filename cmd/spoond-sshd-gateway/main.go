@@ -87,6 +87,12 @@ var (
 	// the shelley binary and LLM gateway URLs when their env is unset.
 	guestServiceAddr = env.Get("HOST_GUEST_SERVICE_ADDR", "127.0.0.1")
 	guestServicePort = env.Get("HOST_GUEST_SERVICE_PORT", "8891")
+	// sshConnectionAddr is the server address reported in the session's
+	// SSH_CONNECTION (the address the client connected to). It is
+	// conceptually separate from the guest-service address; on a
+	// single-host deploy they are the same. Empty = use the
+	// guest-service address.
+	sshConnectionAddr = envOr("SPOOND_SSH_CONNECTION_ADDR", guestServiceAddr)
 	// shellyBinaryURL is where the `shelly` ctl verb fetches the agent
 	// binary from inside the sandbox (host-side asset server on the
 	// plain-HTTP proxy listener; guests reach it at the host service
@@ -1195,7 +1201,7 @@ collect:
 		Binary bool              `json:"binary"`
 		Cols   uint32            `json:"cols"`
 		Rows   uint32            `json:"rows"`
-	}{cmd.Args, sessionEnv(envReq, term, clientIP, clientPort, guestServiceAddr), cmd.Pty, true, cols, rows})
+	}{cmd.Args, sessionEnv(envReq, term, clientIP, clientPort, sshConnectionAddr), cmd.Pty, true, cols, rows})
 	if err != nil {
 		log.Printf("session %s: first frame: %v", leaseID, err)
 		return

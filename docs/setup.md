@@ -139,6 +139,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `HOST_GUEST_SERVICE_PORT` | `8891` | host TCP port granted to guests with the above |
 | `SPOOND_GUEST_DNS_ADDR` | *(empty)* | guest DNS resolver: granted to every lease's egress policy on port 53 and baked into the guest image (empty = no resolver allowance) |
 | `SPOOND_PROXY_HOST_SUFFIX` | `.sandbox.example.com` | wildcard hostname suffix the HTTP proxy routes (`<id>.<suffix>`, `<id>-<port>.<suffix>`) |
+| `SPOOND_SSH_CONNECTION_ADDR` | `HOST_GUEST_SERVICE_ADDR` | gateway: server address reported in `SSH_CONNECTION` (single-host deploys need not set it) |
 | `HOST_API_PORT` | `BIND_ADDR`'s port | lease API port `lan`/`internet` guests may reach on `HOST_GUEST_SERVICE_ADDR` (`0` = none) |
 | `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set |
 | `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |

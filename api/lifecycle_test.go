@@ -112,6 +112,30 @@ func TestEgressForEachPolicy(t *testing.T) {
 	})
 }
 
+// TestDNSAllowance pins the guest-DNS allowance conversion: empty means
+// no allowance, a bare IP gets /32 and port 53, an explicit prefix is
+// kept, and surrounding whitespace is trimmed.
+func TestDNSAllowance(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    substrate.PrivateAllowance
+		wantOK  bool
+		comment string
+	}{
+		{"", substrate.PrivateAllowance{}, false, "empty = no allowance"},
+		{"   ", substrate.PrivateAllowance{}, false, "blank = no allowance"},
+		{"10.0.0.2", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "bare IP gets /32"},
+		{"  10.0.0.2\t", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "trimmed"},
+		{"192.0.2.0/24", substrate.PrivateAllowance{CIDR: "192.0.2.0/24", TCPPorts: []uint32{53}}, true, "explicit prefix kept"},
+	}
+	for _, tc := range cases {
+		got, ok := dnsAllowance(tc.in)
+		if ok != tc.wantOK || !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("dnsAllowance(%q) = (%+v, %v), want (%+v, %v): %s", tc.in, got, ok, tc.want, tc.wantOK, tc.comment)
+		}
+	}
+}
+
 // TestAdmit: a create is admitted when the node is healthy and the free
 // hugepage memory covers the build's, refused with ErrCapacity otherwise
 // (handlers map that to 503).

@@ -1,5 +1,10 @@
 # E2B upgrade procedure
 
+> Upgrading spoond itself (not the E2B fork): the 2.7 generic-defaults
+> change needs vm2's deployment-specific values set before the new
+> binary runs. See
+> [`deploy/PRODUCTION-ENV-2.7.md`](../../deploy/PRODUCTION-ENV-2.7.md).
+
 1. **Pick a target.** Take the newest upstream commit on `main` that is at
    least 7 days old. A tag is preferred when one exists.
 2. **Update `upstream`** (on the host, in `/root/src/e2b-runtime`):

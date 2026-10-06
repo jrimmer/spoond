@@ -95,21 +95,53 @@ SPOOND_GUEST_DNS_ADDR=10.1.0.2 spoond images build --all
 Without it, `spoond-guest-init` leaves the image's own `resolv.conf`
 alone (generic, no pinned resolver).
 
-## Not environment (still needs vm2 values at config level)
+## /etc/e2b/orchestrator.env (E2B orchestrator unit)
 
-- `deploy/e2b/orchestrator.env`: `NODE_ID` changed `vm2` → `node1`
-  (cosmetic node label; set `NODE_ID=vm2` locally if the label matters).
-- `spoondctl`: `SPOOND_CTL_HOST` default changed `sandbox.lacy.casa` →
-  `sandbox.example.com`. VM2 callers that relied on the default must
-  export `SPOOND_CTL_HOST=sandbox.lacy.casa`.
-- Integration tests (`tests/integration/*.sh`) take `NETPOL_TARGET`,
-  `NETPOL_BLOCKED`, `PROXY_SUFFIX` and `BE_TLS_HOST` from the
-  environment; the old vm2 values are no longer baked in. (`SSHHOST` is
-  the remote-runner host used by `run.sh`; the ctl tests dial
-  `ctl@127.0.0.1 -p 2222` directly.)
-- Conformance (`conformance/README.md`) already uses
-  `CONFORMANCE_*` environment values; LAN probe addresses in
-  `network_test.go` are now `10.0.0.203`/`10.0.0.11` placeholders.
+The repo's `deploy/e2b/orchestrator.env` now ships the generic
+`NODE_ID=node1`, and `docs/install.md` §2 / `deploy/README.md` install
+that file verbatim. `NODE_ID` is **required and not cosmetic**: the E2B
+runtime uses it as `ServiceInfo.ClientId` and the telemetry host id, so
+vm2 must be pinned back to its existing value before the orchestrator
+unit is restarted with the new file:
+
+```ini
+# Mandatory: the orchestrator's node identity (ClientId, telemetry
+# host id). Was the repo default before 2.7; the repo example is
+# generic now.
+NODE_ID=vm2
+```
+
+Everything else in that file is unchanged on vm2.
+
+## spoondctl / callers that relied on the old default
+
+`SPOOND_CTL_HOST` now defaults to `sandbox.example.com` instead of
+`sandbox.lacy.casa`. VM2 callers that relied on the default must export
+`SPOOND_CTL_HOST=sandbox.lacy.casa` (or pass `-host`).
+
+## Integration tests (not deployed units)
+
+`tests/integration/*.sh` take their deployment-specific values from the
+environment; the old vm2 values are no longer baked in. A vm2 run needs:
+
+```bash
+BE_TLS_HOST=vm2.lacy.casa \
+PROXY_SUFFIX=sandbox.lacy.casa \
+NETPOL_TARGET=10.1.0.47:3000 \
+NETPOL_BLOCKED=10.1.0.203:80 \
+SSHHOST=root@10.1.0.11 \
+  tests/integration/run.sh
+```
+
+`BE_TLS_HOST` is the name on the backend certificate (the Go clients
+verify TLS while `curl -sk` callers use `BE_API` directly).
+`NETPOL_TARGET`/`NETPOL_BLOCKED` are a reachable and an unreachable LAN
+host:port for the policy probes. `SSHHOST` is the remote-runner host
+used by `run.sh`; the ctl tests dial `ctl@127.0.0.1 -p 2222` directly.
+
+Conformance (`conformance/README.md`) already uses `CONFORMANCE_*`
+environment values; LAN probe addresses in `network_test.go` are now
+`10.0.0.203`/`10.0.0.11` placeholders.
 
 ## Deprecated-name fallbacks
 

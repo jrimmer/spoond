@@ -287,6 +287,45 @@ jobs:
 	}
 }
 
+// A checkout step with no REPO_BASE_URL configured fails the step and
+// reports the failure instead of silently cloning from a guessed host.
+func TestExecutorCheckoutMissingRepoBaseURL(t *testing.T) {
+	payload := `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo hi
+`
+	lease := &checkoutRecordingLease{fakeLease: newFakeLease()}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	job := testJob(payload)
+	job.Context = map[string]string{"repository": "example.com/spoond"}
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultFailure {
+		t.Fatalf("expected failure without REPO_BASE_URL, got %+v", sink.reports)
+	}
+	var sawClone bool
+	for _, c := range lease.cmds {
+		if strings.Contains(c, "git clone") {
+			sawClone = true
+		}
+	}
+	if sawClone {
+		t.Fatalf("checkout must not clone without REPO_BASE_URL, got: %v", lease.cmds)
+	}
+}
+
 func TestExecutorRunWithoutCheckoutUsesEmptyCwd(t *testing.T) {
 	payload := `
 jobs:

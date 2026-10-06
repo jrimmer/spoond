@@ -15,7 +15,10 @@ they depend on:
 > [docs/api.md](../docs/api.md), [docs/ctl.md](../docs/ctl.md),
 > [docs/usage.md](../docs/usage.md),
 > [docs/operations.md](../docs/operations.md). This file is the
-> deploy-specific quick reference.
+> deploy-specific quick reference. Upgrading the production host to 2.7
+> (generic defaults): see
+> [PRODUCTION-ENV-2.7.md](PRODUCTION-ENV-2.7.md) for the exact values
+> vm2 must set before the new binaries run.
 
 ## 0. e2b-orchestrator (substrate)
 

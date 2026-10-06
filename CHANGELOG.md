@@ -28,6 +28,12 @@ summarised from README "Status".
   - `SPOOND_GATEWAY_HOST`, `SPOOND_CTL_HOST` default to
     `sandbox.example.com`; the gateway `sessionEnv` host address uses
     `HOST_GUEST_SERVICE_ADDR` (default `127.0.0.1`).
+  - `SPOOND_SSH_CONNECTION_ADDR` (gateway) — the server address
+    reported in `SSH_CONNECTION`; defaults to
+    `HOST_GUEST_SERVICE_ADDR`. Single-host deploys need not set it.
+  - `deploy/e2b/orchestrator.env` ships `NODE_ID=node1` instead of the
+    maintainer's host. `NODE_ID` is required and is the orchestrator's
+    `ServiceInfo.ClientId` and telemetry host id.
   - `METRICS_SERVER_NAME` (dashboard) has no hostname default: unset
     means no explicit TLS server name.
   - `FORGEJO_URL`, `REPO_BASE_URL` (runner) have no hostname default;
@@ -36,6 +42,9 @@ summarised from README "Status".
     clearly).
   - `NETWATCH_TARGETS` (netwatch) and the integration tests' LAN
     targets are required/configurable instead of baked-in addresses.
+  The exact values a deployment needs to keep its pre-2.7 behaviour are
+  listed in
+  [`deploy/PRODUCTION-ENV-2.7.md`](deploy/PRODUCTION-ENV-2.7.md).
 - **Dashboard capacity panel: the lease counts on one line,** with the
   burst share inside the running count: `8 leases · 8 running (3
   burst) · 0 suspended · 0 lost` (`susp` when the full word does not
