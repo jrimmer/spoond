@@ -1210,7 +1210,7 @@ func leaseLayout(w int) leaseCols {
 			st: 39, stW: 19,
 			pol: 58, polW: 11,
 			age:  69,
-			left: 75, leftW: 8,
+			left: 76, leftW: 7,
 			hold: 83,
 		}
 	}
@@ -1222,9 +1222,9 @@ func leaseLayout(w int) leaseCols {
 	c.st = c.own + c.ownW + 1
 	c.stW = clamp(w/7, 6, 17)
 	c.pol = c.st + c.stW + 1
-	c.polW = clamp(w/17, 4, 12)
+	c.polW = clamp(w/14, 5, 12)
 	c.age = c.pol + c.polW + 1
-	c.left = c.age + 6
+	c.left = c.age + ageW
 	c.leftW = clamp(w/12, 4, 9)
 	c.hold = c.left + c.leftW + 1
 	return c
@@ -1244,6 +1244,13 @@ func (l *layout) leasesH() int {
 // maxLeaseRows bounds the leases panel: at least eight rows even at the
 // minimum width, never more than sixteen.
 func maxLeaseRows(w int) int { return min(16, max(8, (w-8)/6)) }
+
+// ageW is the age column's width: "10h37m" and a separating space.
+const ageW = 7
+
+// cell fits s into a table column of width w, leaving the last column
+// as space before the next cell: cut to w-1 runes, ending in … when cut.
+func cell(s string, w int) string { return ellipsize(s, w-1) }
 
 // ellipsize cuts s to at most n runes, ending in … when it was cut.
 func ellipsize(s string, n int) string {
@@ -1274,7 +1281,11 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		{c.st, c.stW, "state"}, {c.pol, c.polW, "policy"}, {c.age, 5, "age"},
 		{c.left, c.leftW, "left"}, {c.hold, l.w - 2 - c.hold, "holder"}}
 	for _, h := range headers {
-		g.Text(h.x, top+1, h.text, "dim", h.w)
+		text := h.text
+		if text == "policy" {
+			text = fitWord([]string{"policy", "net"}, h.w-1)
+		}
+		g.Text(h.x, top+1, text, "dim", h.w)
 	}
 
 	rows := l.s.Rows
@@ -1283,9 +1294,13 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	}
 	for i, r := range rows {
 		yy := top + 2 + i
-		g.Text(c.id, yy, sanitize(r.ID), "id", c.idW)
-		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
-		g.Text(c.own, yy, sanitize(r.Owner), "owner", c.ownW)
+		// Every cell keeps one column of space before the next and ends
+		// in … when cut, so neighbouring cells never run together.
+		// An id is shown as a prefix (the API accepts any unique
+		// prefix), so it is cut without an ellipsis.
+		g.Text(c.id, yy, sanitize(r.ID), "id", c.idW-1)
+		g.Text(c.img, yy, cell(sanitize(r.Image), c.imgW), "text", c.imgW)
+		g.Text(c.own, yy, cell(sanitize(r.Owner), c.ownW), "owner", c.ownW)
 		// The state cell (#128, #129): the glyph always carries the run
 		// state (▶ ‖ ■ ⭘, explained by the legend), and the word spells
 		// it out with any qualifier — "running, burst", "preempted",
@@ -1298,9 +1313,9 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 			{Text: " " + word, Style: stateGlyphStyle(r)},
 		}
 		g.Segs(c.st, yy, segs, c.stW)
-		g.Text(c.pol, yy, sanitize(r.Policy), "dim", c.polW)
-		g.Text(c.age, yy, r.Age, "dim", 5)
-		g.Text(c.left, yy, leaseLeft(r), "text", c.leftW)
+		g.Text(c.pol, yy, fitWord(policyWords(r.Policy), c.polW-1), "dim", c.polW)
+		g.Text(c.age, yy, cell(r.Age, ageW), "dim", ageW)
+		g.Text(c.left, yy, cell(leaseLeft(r), c.leftW), "text", c.leftW)
 		l.holder(g, c, yy, r)
 	}
 	if len(rows) == 0 {
@@ -1332,6 +1347,18 @@ func stateWords(r LeaseRow) []string {
 		return []string{"recovered", "recov"}
 	default:
 		return []string{r.State}
+	}
+}
+
+// policyWords is a network policy, longest form first.
+func policyWords(p string) []string {
+	switch p {
+	case "restricted":
+		return []string{"restricted", "rstr"}
+	case "internet":
+		return []string{"internet", "inet"}
+	default:
+		return []string{sanitize(p)}
 	}
 }
 

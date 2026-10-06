@@ -30,10 +30,10 @@
 │ ▁▃▁▅██                   ▅▆█▇██                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ leases ─────────────────────────────────────────────────────────────┐
-│ id      image      owner  state      poli age   left   holder        │
-│ abcdef0 go-base    jason  ▶ running  inte 5m    10m    -             │
-│ 1234567 py-base    ci     ▶ running  rest 2h31m ∞      ◆ forgejo/j…  │
-│ fedcba0 go-base    agent  ‖ susp     lan  1d    due    ◉ nightly     │
+│ id      image      owner  state      net   age    left   holder      │
+│ abcdef  go-base    jason  ▶ running  inet  5m     10m    -           │
+│ 123456  py-base    ci     ▶ running  rstr  2h31m  ∞      ◆ forgejo…  │
+│ fedcba  go-base    agent  ‖ susp     lan   1d     due    ◉ nightly   │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ images ─────────────────────────────────────────────────────────────┐
 │ image            vcpu  mem      live  uses   baked                   │

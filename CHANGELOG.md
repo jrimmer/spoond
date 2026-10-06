@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.4] - 2026-10-06
+
+Dashboard only. No backend change, no schema change; the `grid` package
+is unchanged since 2.4.0.
+
+### Fixed
+
+- **Leases table cells never run together.** Every cell keeps a space
+  before the next and ends in `…` when cut, so a long owner no longer
+  runs into the state (`test-consu▶ running`). The age column fits
+  `10h37m`. Lease ids are cut as prefixes, and in a narrow window the
+  policy shows `inet`/`rstr` under a `net` header instead of a word cut
+  mid-way.
+
 ## [2.6.3] - 2026-10-06
 
 Dashboard only: readable lease states. No backend change, no schema
