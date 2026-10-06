@@ -79,7 +79,8 @@ func newTestSub() *testSub {
 	return ts
 }
 
-func (ts *testSub) exec(sandboxID string, args []string) substrate.ExecResult {
+func (ts *testSub) exec(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {
+	args := req.Args
 	if len(args) == 3 && args[0] == "sh" && args[2] == integrityProbe {
 		if reason, bad := ts.probeFail[sandboxID]; bad || ts.probeFailAll {
 			return substrate.ExecResult{Stdout: "PROBE_FAIL " + reason + "\n", ExitCode: 1}
@@ -649,10 +650,11 @@ func TestWarmPoolGrant(t *testing.T) {
 	}
 }
 
-// TestBuildShellArgs verifies cwd/env are quoted and the command is
-// wrapped in a single shell invocation.
+// TestBuildShellArgs verifies cwd is quoted and the command is wrapped in
+// a single shell invocation. Env values never enter argv; they travel in
+// ExecRequest.Env.
 func TestBuildShellArgs(t *testing.T) {
-	args := buildShellArgs("echo hi", "/tmp", map[string]string{"FOO": "bar"})
+	args := buildShellArgs("echo hi", "/tmp")
 	if len(args) != 3 || args[0] != "/bin/bash" || args[1] != "-c" {
 		t.Fatalf("unexpected args: %v", args)
 	}
@@ -660,20 +662,68 @@ func TestBuildShellArgs(t *testing.T) {
 	if !strings.Contains(joined, "cd '/tmp' &&") {
 		t.Fatalf("expected cd with quoted cwd, got: %s", joined)
 	}
-	if !strings.Contains(joined, "export 'FOO'='bar';") {
-		t.Fatalf("expected export with quoted key and value, got: %s", joined)
-	}
 	if !strings.Contains(joined, "echo hi") {
 		t.Fatalf("expected command preserved, got: %s", joined)
 	}
 }
 
-// TestBuildShellArgsQuoting verifies embedded single quotes are escaped.
+// TestBuildShellArgsQuoting verifies embedded single quotes in cwd are
+// escaped.
 func TestBuildShellArgsQuoting(t *testing.T) {
-	args := buildShellArgs("echo", "", map[string]string{"X": "it's"})
+	args := buildShellArgs("echo", "/tmp/it's")
 	joined := args[2]
-	if !strings.Contains(joined, `export 'X'='it'\''s';`) {
+	if !strings.Contains(joined, `cd '/tmp/it'\''s' &&`) {
 		t.Fatalf("expected single-quote escaping, got: %s", joined)
+	}
+}
+
+// TestBuildShellArgsNoEnvInArgv pins the security fix: neither env keys
+// nor values appear anywhere in the argv built for an exec, so nothing
+// is readable in the guest's /proc/<pid>/cmdline.
+func TestBuildShellArgsNoEnvInArgv(t *testing.T) {
+	args := buildShellArgs("echo hi", "/workspace")
+	joined := strings.Join(args, "\x00")
+	for _, secret := range []string{"AMAIL_TOKEN", "deploy-key-value", "FOO", "bar"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("argv contains env key or value %q: %v", secret, args)
+		}
+	}
+}
+
+// TestExecEnvNotInArgvAndVisibleToCommand drives an exec with env through
+// the API and pins both halves of the fix: the request carries the env
+// where the process environment can see it, and its argv holds neither
+// the key nor the value.
+func TestExecEnvNotInArgvAndVisibleToCommand(t *testing.T) {
+	ts, _, _, sub := newTestServerWithService(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id, _ := body["id"].(string)
+	if id == "" {
+		t.Fatalf("create lease: no id in %v", body)
+	}
+
+	sub.SetExecHandler(func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {
+		return substrate.ExecResult{Stdout: req.Env["FOO"] + "\n"}
+	})
+	t.Cleanup(func() { sub.SetExecHandler(nil) })
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
+		map[string]any{"cmd": "echo hi", "env": map[string]string{"FOO": "env-secret-value"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("exec status %d: %v", resp.StatusCode, body)
+	}
+	if stdout, _ := body["stdout"].(string); strings.TrimSpace(stdout) != "env-secret-value" {
+		t.Fatalf("command did not see env: stdout=%q", stdout)
+	}
+	// The recorded request carries the env and its argv carries neither
+	// the key nor the value.
+	execReq := sub.LastExec()
+	if execReq.Env["FOO"] != "env-secret-value" {
+		t.Fatalf("ExecRequest.Env = %v, want FOO=env-secret-value", execReq.Env)
+	}
+	joined := strings.Join(execReq.Args, "\x00")
+	if strings.Contains(joined, "FOO") || strings.Contains(joined, "env-secret-value") {
+		t.Fatalf("env leaked into argv: %v", execReq.Args)
 	}
 }
 

@@ -39,6 +39,7 @@ type filesTestEnvd struct {
 	protoErr  connect.Code          // nonzero: Stat/MakeDir/Remove fail with it
 	fileData  []byte                // GET /files body
 	fileErr   bool                  // GET /files returns 404
+	execEnvs  []map[string]string   // process env of each Start, in order
 }
 
 type uploadRecord struct {
@@ -181,6 +182,7 @@ type execHandler struct {
 
 func (h *execHandler) Start(ctx context.Context, r *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
 	args := append([]string{r.Msg.GetProcess().GetCmd()}, r.Msg.GetProcess().GetArgs()...)
+	h.e.execEnvs = append(h.e.execEnvs, r.Msg.GetProcess().GetEnvs())
 	h.e.execs = append(h.e.execs, strings.Join(args, " "))
 	if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_Start{Start: &process.ProcessEvent_StartEvent{Pid: 1}}}}); err != nil {
 		return err

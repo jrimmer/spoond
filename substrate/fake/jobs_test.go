@@ -97,6 +97,39 @@ done:
 	}
 }
 
+// TestExecRunnerSeesEnvNotArgv: with the exec runner enabled, a command
+// that reads an env var prints the value, and the value is not part of
+// the request's argv.
+func TestExecRunnerSeesEnvNotArgv(t *testing.T) {
+	f := New()
+	f.EnableExecRunner()
+
+	const sandboxID = "i0123456789abcdefghij"
+	if _, err := f.Create(t.Context(), substrate.CreateRequest{SandboxID: sandboxID}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	res, err := f.Exec(t.Context(), sandboxID, substrate.ExecRequest{
+		Args: []string{"/bin/bash", "-c", `echo "$FOO"`},
+		Env:  map[string]string{"FOO": "env-secret-value"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", res.ExitCode, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) != "env-secret-value" {
+		t.Fatalf("stdout = %q, want the env value", res.Stdout)
+	}
+	// The argv naturally names the variable it echoes, but the value must
+	// not appear in it.
+	joined := strings.Join(f.LastExec().Args, "\x00")
+	if strings.Contains(joined, "env-secret-value") {
+		t.Fatalf("env value leaked into argv: %v", f.LastExec().Args)
+	}
+}
+
 // TestJobRunnerDisabledByDefault: without EnableJobRunner, Start is the
 // inert process factory and the production job paths stay in the
 // in-memory filesystem.

@@ -184,7 +184,7 @@ func (s *Service) jobRetention() time.Duration {
 
 // buildJobWrapperArgs builds the argv handed to substrate.Start: the
 // wrapper script, the job id, and the command as a shell invocation. cwd
-// applies the same way exec's buildShellArgs applies it. Env values ride
+// applies the same way exec applies it. Env values ride
 // StartRequest.Env, so nothing is written to the guest's job directory
 // and no value reaches argv.
 func buildJobWrapperArgs(jobID, cmd, cwd string) []string {

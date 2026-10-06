@@ -90,9 +90,10 @@ func (n NodeInfo) FreeHugepageBytes() uint64 {
 }
 
 type ExecRequest struct {
-	Args    []string      // argv; spoond passes buildShellArgs(...)
-	Timeout time.Duration // 0 = 30 s
-	User    string        // "" = "root"
+	Args    []string          // argv; spoond passes buildShellArgs(...)
+	Env     map[string]string // process environment, never argv
+	Timeout time.Duration     // 0 = 30 s
+	User    string            // "" = "root"
 }
 
 type ExecResult struct {

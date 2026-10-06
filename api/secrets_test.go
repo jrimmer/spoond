@@ -217,7 +217,8 @@ func TestExecSecretsPresentDuringCommand(t *testing.T) {
 	// Use the fake's exec handler to capture the filesystem state at the
 	// moment the command runs: the secret must already be there, mode
 	// 0600. The mount script also rides Exec; it must keep succeeding.
-	s.sub.SetExecHandler(func(sid string, args []string) substrate.ExecResult {
+	s.sub.SetExecHandler(func(sid string, req substrate.ExecRequest) substrate.ExecResult {
+		args := req.Args
 		if len(args) == 3 && args[0] == "/bin/bash" && args[2] == secretMountScript {
 			return substrate.ExecResult{Stdout: "ok\n"}
 		}

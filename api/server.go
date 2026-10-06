@@ -1713,7 +1713,8 @@ echo "AGENT_TIMEOUT"`, msg64, mod64)
 	s.svc.log.Printf("prompt %s: %s", id, req.Message)
 	start := time.Now()
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
-		Args:    buildShellArgs(script, "", requestEnv(lease, nil)),
+		Args:    buildShellArgs(script, ""),
+		Env:     requestEnv(lease, nil),
 		Timeout: 240 * time.Second,
 	})
 	if err != nil {
@@ -1853,7 +1854,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if timeout > maxExecTimeout {
 		timeout = maxExecTimeout
 	}
-	args := buildShellArgs(req.Cmd, req.Cwd, requestEnv(lease, req.Env))
+	args := buildShellArgs(req.Cmd, req.Cwd)
+	execEnv := requestEnv(lease, req.Env)
 	// Stage this request's secrets (#80) before the command runs. The
 	// cleanup below runs on every exit path — including a half-failed
 	// staging — so nothing exec-time outlives the request.
@@ -1888,6 +1890,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
 		Args:    args,
+		Env:     execEnv,
 		Timeout: time.Duration(timeout) * time.Second,
 	})
 	if err != nil {
@@ -1957,7 +1960,8 @@ echo "== netdev =="; cat /proc/net/dev
 echo "== df =="; df -P /
 `
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{
-		Args:    buildShellArgs(probe, "", requestEnv(lease, nil)),
+		Args:    buildShellArgs(probe, ""),
+		Env:     requestEnv(lease, nil),
 		Timeout: 5 * time.Second,
 	})
 	if err != nil {
@@ -2303,17 +2307,15 @@ func requestEnv(lease *Lease, env map[string]string) map[string]string {
 	return out
 }
 
-// buildShellArgs wraps a command with cwd/env into a single shell
-// invocation, since the substrate's exec takes argv and no cwd/env. Both env
-// keys and values are shell-quoted so a hostile key cannot inject
-// shell metacharacters.
-func buildShellArgs(cmd, cwd string, env map[string]string) []string {
+// buildShellArgs wraps a command with its working directory into a
+// single shell invocation. The cwd is applied with `cd` so a bad
+// directory fails the command exactly as it did before; env travels in
+// ExecRequest.Env, never argv, so no value is visible in the guest's
+// command line.
+func buildShellArgs(cmd, cwd string) []string {
 	var parts []string
 	if cwd != "" {
 		parts = append(parts, "cd "+shellQuote(cwd)+" &&")
-	}
-	for k, v := range env {
-		parts = append(parts, "export "+shellQuote(k)+"="+shellQuote(v)+";")
 	}
 	parts = append(parts, cmd)
 	// Use bash, not sh. GitHub Actions / Forgejo wrap `run:` steps with

@@ -42,8 +42,13 @@ type Fake struct {
 	// jobDir is the host directory a "real wrapper" job runner writes a
 	// job's files into; empty means the runner is disabled.
 	jobDir string
+	// execRunner makes Exec run its argv on the host with req.Env in the
+	// process environment instead of echoing the argv. Tests enable it to
+	// pin that exec env reaches the command and never argv.
+	execRunner bool
 
-	execHandler  func(sandboxID string, args []string) substrate.ExecResult
+	execHandler  func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult
+	lastExec     substrate.ExecRequest
 	startHandler func(sandboxID string, req substrate.StartRequest) (substrate.Process, error)
 	// startCtx is the context of the most recent Start, kept so tests can
 	// pin that a background job's start context outlives its HTTP request
@@ -80,8 +85,9 @@ func New() *Fake {
 	}
 }
 
-// SetExecHandler overrides Exec's default echo behaviour.
-func (f *Fake) SetExecHandler(h func(sandboxID string, args []string) substrate.ExecResult) {
+// SetExecHandler overrides Exec's default echo behaviour. It receives
+// the whole request, so tests can observe the process environment.
+func (f *Fake) SetExecHandler(h func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execHandler = h
@@ -119,6 +125,24 @@ func (f *Fake) EnableJobRunner(dir string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.jobDir = dir
+}
+
+// EnableExecRunner makes Exec actually run its argv (through exec, the
+// way envd's process API does) with req.Env in the process environment,
+// instead of echoing the argv. Tests enable it to pin that exec env
+// reaches the command and never appears in argv. DisableExecRunner
+// restores the echo default.
+func (f *Fake) EnableExecRunner() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execRunner = true
+}
+
+// DisableExecRunner restores Exec's default echo behaviour.
+func (f *Fake) DisableExecRunner() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execRunner = false
 }
 
 // JobProcess returns the process the fake created for the background
@@ -217,6 +241,14 @@ func (f *Fake) JobState(jobID string) (rc, stdout, stderr string, err error) {
 		return string(b)
 	}
 	return read("rc"), read("stdout"), read("stderr"), nil
+}
+
+// LastExec returns the most recent Exec request, so tests can observe
+// its argv and environment.
+func (f *Fake) LastExec() substrate.ExecRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastExec
 }
 
 // SetNodeInfo fixes what NodeInfo returns.
@@ -434,12 +466,47 @@ func (f *Fake) Exec(ctx context.Context, sandboxID string, req substrate.ExecReq
 		f.mu.Unlock()
 		return substrate.ExecResult{}, err
 	}
+	f.lastExec = req
 	h := f.execHandler
+	runner := f.execRunner
 	f.mu.Unlock()
 	if h != nil {
-		return h(sandboxID, req.Args), nil
+		return h(sandboxID, req), nil
+	}
+	// When the exec runner is enabled, run the argv for real so req.Env
+	// reaches the command the way envd's process API does.
+	if runner {
+		return f.runExec(req)
 	}
 	return substrate.ExecResult{Stdout: strings.Join(req.Args, " "), ExitCode: 0}, nil
+}
+
+// runExec executes an ExecRequest through exec, passing req.Env in the
+// process environment and collecting stdout, stderr and the exit code.
+// It backs the fake's optional exec runner (EnableExecRunner); secrets
+// and cwd are intentionally out of scope (Exec has no cwd field — spoond
+// passes `cd` in the argv).
+func (f *Fake) runExec(req substrate.ExecRequest) (substrate.ExecResult, error) {
+	if len(req.Args) == 0 {
+		return substrate.ExecResult{ExitCode: 1}, nil
+	}
+	cmd := exec.Command(req.Args[0], req.Args[1:]...)
+	cmd.Env = os.Environ()
+	for k, v := range req.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		} else {
+			return substrate.ExecResult{}, err
+		}
+	}
+	return substrate.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, nil
 }
 
 func (f *Fake) Start(ctx context.Context, sandboxID string, req substrate.StartRequest) (substrate.Process, error) {

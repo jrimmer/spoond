@@ -221,11 +221,13 @@ type checkoutRecordingLease struct {
 	*fakeLease
 	cmds []string
 	cwds []string
+	envs []map[string]string
 }
 
 func (f *checkoutRecordingLease) Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error) {
 	f.cmds = append(f.cmds, cmd)
 	f.cwds = append(f.cwds, cwd)
+	f.envs = append(f.envs, env)
 	return &ExecResult{Stdout: "ok\n", Exit: 0}, nil
 }
 
@@ -260,11 +262,16 @@ jobs:
 	// The checkout step should have issued mkdir + git clone with the
 	// repo URL and token header, and the run step should use /workspace.
 	var sawClone, sawRun bool
-	for _, c := range lease.cmds {
+	for i, c := range lease.cmds {
 		if strings.Contains(c, "git") && strings.Contains(c, "lacy.casa/spoond.git") {
 			sawClone = true
-			if !strings.Contains(c, "Authorization: token tok123") {
-				t.Fatalf("clone missing token header: %s", c)
+			// The token rides the exec env, never the command line
+			// (it would show in the guest's /proc/<pid>/cmdline).
+			if strings.Contains(c, "tok123") {
+				t.Fatalf("token in the clone command line: %s", c)
+			}
+			if got := lease.envs[i]["GIT_CONFIG_VALUE_0"]; got != "Authorization: token tok123" {
+				t.Fatalf("clone env GIT_CONFIG_VALUE_0 = %q, want the token header", got)
 			}
 		}
 		if strings.Contains(c, "go test ./...") {

@@ -341,7 +341,7 @@ func (c *Client) Exec(ctx context.Context, sandboxID string, req substrate.ExecR
 			timeout = d
 		}
 	}
-	p, err := c.startProcess(ctx, sandboxID, substrate.StartRequest{Args: req.Args, User: req.User})
+	p, err := c.startProcess(ctx, sandboxID, substrate.StartRequest{Args: req.Args, Env: req.Env, User: req.User})
 	if err != nil {
 		if !c.listed(ctx, sandboxID) {
 			return substrate.ExecResult{}, fmt.Errorf("%w: %v", substrate.ErrNotFound, err)
