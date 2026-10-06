@@ -875,13 +875,20 @@ func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 }
 
 // updateNodeMetrics sets the node gauges from NodeInfo; on error the
-// gauges keep their last values.
+// gauges keep their last values. The fetched NodeInfo also refreshes
+// the shared cache behind freeHugepageMiB (#128 part 2): the burst
+// reserve then reads the same value the gauges do, and a run with no
+// burst admissions still keeps that value at most nodeInfoCacheTTL old.
 func (s *Service) updateNodeMetrics(ctx context.Context) {
-	if s.metrics == nil {
-		return
-	}
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
+		return
+	}
+	s.nodeInfoMu.Lock()
+	s.nodeInfoCache = info
+	s.nodeInfoAt = s.now()
+	s.nodeInfoMu.Unlock()
+	if s.metrics == nil {
 		return
 	}
 	s.metrics.NodeRunning.Set(float64(info.RunningSandboxes))

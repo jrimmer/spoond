@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
@@ -514,5 +515,35 @@ func TestBurstReserveUndrainDefers(t *testing.T) {
 	}
 	if l.State != "running" || l.Drained {
 		t.Fatalf("lease after the retry = %s drained=%v, want running and undrained", l.State, l.Drained)
+	}
+}
+
+// TestNodeMetricsFillsBurstCache: the node-gauge refresh and the burst
+// reserve read the same NodeInfo cache (#128 part 2). A gauge pass under
+// a roomy node caches it, so a burst admission right after the node
+// shrinks is still admitted from the cached (roomy) value instead of
+// fetching the shrunken one and refusing on the reserve.
+func TestNodeMetricsFillsBurstCache(t *testing.T) {
+	srv, h, sub, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
+	svc := srv.svc
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	svc.cfg.BurstReserveMiB = 8192
+	// The gauge loop sees a node with plenty of headroom and caches it.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    8192 + 512 + 1,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.updateNodeMetrics(context.Background())
+	// The node shrinks before the burst admission, but the cached value
+	// (fresh, under nodeInfoCacheTTL) still admits it.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    512 + 1,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60,"burst":true}`)
+	if code != http.StatusCreated {
+		t.Fatalf("burst create on the gauge-cached node = %d %s, want 201", code, body)
 	}
 }
