@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **`spoond dash` colour roles.** The dashboard's palette now follows
+  the mockup on the black background: cyan titles and lease ids, blue
+  run state, green ok, amber warn, red bad, violet owners, and each
+  event type coloured by its kind — the lifecycle in cyan, a lease put
+  aside in amber, one lost or timed out in red, anything else dim.
+  Meters draw an amber tick at their warning level, and `spoond top`
+  maps the same roles to ANSI colours. Colour never carries a state
+  alone: every coloured state keeps its glyph or word.
+
 ## [2.5.1] - 2026-10-06
 
 ### Changed

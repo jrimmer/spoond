@@ -148,7 +148,11 @@ units, a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`), with a status line at the bottom.
 Its layout puts capacity and host side by side at 104 columns and
-stacks them below that. Above the panels sits one
+stacks them below that. The palette gives each state a colour role on
+the black background — cyan for titles and lease ids, blue for run
+state, green ok, amber warn, red bad, violet owner, and amber banners —
+never alone: every coloured state keeps its glyph or word. Above the
+panels sits one
 attention banner, shown only when something needs a person: a unit not
 active, a lost lease, free hugepages or snapshot disk past the danger
 level, the TLS certificate inside 30 days of expiring, or an automatic
