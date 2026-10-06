@@ -10,6 +10,13 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-06
+
+Background exec jobs (#135), an owner-scoped crash test for recovery
+suites, and the dashboard's colour roles (#132 part 1). Store migration
+16 adds the `lease_jobs` table. The `grid` package is unchanged since
+2.4.0.
+
 ### Added
 
 - **Crash test.** `POST /api/leases/{id}/crash-test` (and the

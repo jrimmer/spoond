@@ -47,6 +47,10 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     `GET …/jobs/{job}?wait=<s>` long-polls to its exit, and
     `…/jobs/{job}/output` follows stdout/stderr by byte range, while
     `job_started`/`job_exited`/`job_lost` ride the event stream.
+  - **Crash test**: on a host with `CRASH_TEST=1`, `POST
+    /api/leases/{id}/crash-test` sends the caller's own lease through
+    crash recovery (back from its last checkpoint with a new generation,
+    or lost without one), so a client can test how it survives a crash.
   - **Guest port dial**: `GET /api/leases/{id}/ports/{port}/dial` opens
     raw TCP to any port in the guest over a WebSocket (a database's own
     protocol, a debugger, a REPL), under every network policy.
@@ -216,6 +220,13 @@ stack does not exist yet.
 
 ## Status
 
+**v2.6: background jobs and crash testing.** A long command runs as a
+tracked background job in its lease, with its exit, output and a
+`job_exited` event spoond keeps even across backend restarts. A host
+running crash suites can let lease owners send a lease through crash
+recovery on demand (`CRASH_TEST=1`). The dashboard takes the mockup's
+colour roles on its black background.
+
 **v2.5: waiting and idle reclamation.** A create can wait for room
 (`"wait"`, fair-share order, with its queue position on the event
 stream and at `GET /api/leases/queue`) instead of failing on a full
@@ -312,7 +323,9 @@ services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
 may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `NOTIFY_WEBHOOKS`, the capacity settings (`BURST_RESERVE_MIB`,
 `PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`,
-`IDLE_SUSPEND_DEFAULT_SECS`), and the held-lease
+`IDLE_SUSPEND_DEFAULT_SECS`), background jobs
+(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`), `CRASH_TEST`, and
+the held-lease
 limits (`HOLD_TTL_SECS` and the rest, in
 [docs/operations.md](docs/operations.md)).
 
