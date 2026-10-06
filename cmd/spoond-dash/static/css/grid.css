@@ -13,9 +13,16 @@ pre.grid {
   padding: 0;
   line-height: 1.15;
   white-space: pre;
+  /* A narrow window scrolls the grid sideways, without a visible bar.
+     overflow-x: auto alone would make overflow-y auto too, and the
+     underlined links' sub-pixel overflow then gave the grid its own
+     vertical scrollbar beside the last column. */
   overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
   font-size: 13px;
 }
+pre.grid::-webkit-scrollbar { display: none; }
 /* One row element per grid row: the unit Datastar patches. */
 pre.grid > span.gr { display: block; white-space: pre; }
 
