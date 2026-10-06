@@ -46,8 +46,8 @@ const (
 	// LeaseRestored marks a restore in place to a kept checkpoint
 	// (2.3, #121): the detail carries the restored-to build id.
 	LeaseRestored LeaseEventType = "restored"
-	// LeaseCrashTest marks an admin-triggered crash test: an operator
-	// reading the stream can tell a simulated crash from a real one. It
+	// LeaseCrashTest marks a crash test (owner or admin): a reader
+	// of the stream can tell a simulated crash from a real one. It
 	// is emitted before the recovery events (recovered/lost) that follow
 	// the same call.
 	LeaseCrashTest LeaseEventType = "crash_test"

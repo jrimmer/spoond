@@ -82,7 +82,7 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 // recoveryOutcome is what recoverOneLease did with one lease: "recovered"
 // (it came back from its checkpoint) or "lost" (it had none, or the
 // recovery failed). Generation and State are the lease's values after the
-// call. The admin crash test reports it; the reconcile loop counts it.
+// call. The crash test reports it; the reconcile loop counts it.
 type recoveryOutcome struct {
 	Result     string `json:"result"`
 	Generation int64  `json:"generation"`
@@ -93,7 +93,7 @@ type recoveryOutcome struct {
 // lease whose sandbox has vanished: from its newest checkpoint when it has
 // one (generation +1, event "recovered", state recovered), lost otherwise
 // (event "lost"). It is shared by the startup/background reconcile loop
-// and the admin crash test, so both take the identical path. The caller
+// and the crash test, so both take the identical path. The caller
 // has already removed the lease's sandbox (a real or simulated crash);
 // this function emits the lease events and writes the log lines.
 func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome {

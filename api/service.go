@@ -307,6 +307,11 @@ type ServiceConfig struct {
 	// (#129 part 1). MAX_ADMIT_WAIT_SECS, default DefaultMaxAdmitWaitSecs;
 	// 0 disables waiting (the request field is accepted and ignored).
 	MaxAdmitWaitSecs int
+	// CrashTest enables POST /api/leases/{id}/crash-test, which runs one
+	// lease through crash recovery on demand (api/crash.go). Off by
+	// default; when off the route answers 404 like an unknown route.
+	// CRASH_TEST ("1" or "true").
+	CrashTest bool
 }
 
 // Service is the lease API backend.

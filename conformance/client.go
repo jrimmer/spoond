@@ -46,11 +46,6 @@ type config struct {
 	// there is no promote API, so the suite cannot create a second user
 	// there.
 	SecondToken string
-	// AdminToken is the ADMIN_TOKEN of the backend under test
-	// (CONFORMANCE_ADMIN_TOKEN). The always-on crash-test case uses it to
-	// drive POST /api/admin/leases/{id}/crash; without it that case is
-	// skipped.
-	AdminToken string
 }
 
 // client is a small HTTP client for the lease API (U02 §Harness

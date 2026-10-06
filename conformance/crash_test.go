@@ -4,19 +4,20 @@ package conformance
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 )
 
-// TestX1_AdminCrashTest runs one lease through the admin crash-test
-// endpoint: a checkpointed lease comes back "recovered" (generation +1,
-// state from the checkpoint), a lease without one becomes "lost". It is
-// always on — it touches only its own leases — but needs
-// CONFORMANCE_ADMIN_TOKEN (the backend's ADMIN_TOKEN) and is skipped
-// without it.
-func TestX1_AdminCrashTest(t *testing.T) {
+// TestX1_CrashTestRecovers runs one lease through the crash-test
+// endpoint as its owner: a checkpointed lease comes back "recovered"
+// (generation +1, state from the checkpoint), a lease without one
+// becomes "lost". It touches only its own leases, but the backend must
+// run with CRASH_TEST=1 (the route is 404 otherwise), so it runs only
+// with CONFORMANCE_CRASH_TEST=1.
+func TestX1_CrashTestRecovers(t *testing.T) {
 	begin(t)
-	if cfg.AdminToken == "" {
-		skipf(t, "the admin crash test requires CONFORMANCE_ADMIN_TOKEN")
+	if os.Getenv("CONFORMANCE_CRASH_TEST") != "1" {
+		skipf(t, "the crash test requires CONFORMANCE_CRASH_TEST=1 (and CRASH_TEST=1 on the backend)")
 	}
 
 	// A checkpointed lease: /root/a is in the checkpoint, /root/b is not.
@@ -37,7 +38,7 @@ func TestX1_AdminCrashTest(t *testing.T) {
 		Generation int64  `json:"generation"`
 		State      string `json:"state"`
 	}
-	st, body, err = crashAsAdmin(t, l.ID)
+	st, body, err = crashLease(l.ID)
 	if err != nil {
 		failf(t, "crash: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestX1_AdminCrashTest(t *testing.T) {
 
 	// A lease without a checkpoint is lost.
 	bare := createLease(t, map[string]any{"image": "py-base", "persistent": true, "ttl": 3600})
-	st, body, err = crashAsAdmin(t, bare.ID)
+	st, body, err = crashLease(bare.ID)
 	if err != nil {
 		failf(t, "crash bare: %v", err)
 	}
@@ -93,16 +94,8 @@ func TestX1_AdminCrashTest(t *testing.T) {
 	}
 }
 
-// crashAsAdmin POSTs the admin crash-test route with the ADMIN_TOKEN,
-// leaving the client's bearer token untouched for the owner-scoped calls
-// around it.
-func crashAsAdmin(t *testing.T, id string) (int, []byte, error) {
-	t.Helper()
-	var st int
-	var body []byte
-	var err error
-	withToken(cfg.AdminToken, func() {
-		st, body, err = cl.do("POST", "/api/admin/leases/"+id+"/crash", nil)
-	})
-	return st, body, err
+// crashLease POSTs the crash-test route for a lease with the client's
+// own token: the conformance user owns the lease.
+func crashLease(id string) (int, []byte, error) {
+	return cl.do("POST", "/api/leases/"+id+"/crash-test", nil)
 }

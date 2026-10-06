@@ -811,6 +811,39 @@ can run after its last checkpoint. `recovered_from` and
 taken; the `spoond_checkpoint_pause_seconds` metric shows how long each
 checkpoint pauses its guest.
 
+### `POST /api/leases/{id}/crash-test` — crash a lease and recover it
+
+**For testing crash recovery.** The route exists only when the host
+sets `CRASH_TEST=1` (see [operations.md](operations.md#crash-test));
+otherwise it answers `404 {"error":"not found"}` like an unknown route,
+whoever calls it. Owner or admin: the owner may crash their own lease,
+an admin any lease; anyone else gets the usual `404` `lease not found`.
+No body.
+
+It deletes the lease's sandbox through the substrate directly — as a
+crash would, without releasing the lease or emitting `released` —
+drops the sandbox row, then runs the same per-lease recovery the
+backend runs after a real crash (see [operations.md](operations.md#crash-recovery)):
+with a checkpoint the lease comes back from its newest one (generation
++1, state `recovered`, event `recovered`; files newer than the
+checkpoint are gone); without one it is marked `lost` (event `lost`)
+and answers `410` from then on. A `crash_test` event comes first, with
+the detail `crashed by its owner` or `crashed by an admin`, so a reader
+of the event stream can tell a test from a real crash.
+
+It touches only that one lease: no other lease, no warm-pool sweep, no
+peer refresh and no release. The recovery runs to the end even if the
+client hangs up. `409` while another operation is in flight or while
+the lease is suspended (nothing is running to crash), `410` for a lease
+already lost, `404` for an unknown or released lease. Response `200`:
+
+```json
+{"id":"…","result":"recovered","generation":2,"state":"recovered"}
+```
+
+`result` and `state` are `lost` (and `generation` unchanged) when there
+was no checkpoint.
+
 ### `POST /api/leases/{id}/clone` — branch to a new lease
 
 Checkpoints the running sandbox and grants a fresh **persistent** lease
@@ -994,7 +1027,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
-| `crash_test` | an admin ran `POST /api/admin/leases/{id}/crash` | `crashed by an admin` (before the `recovered`/`lost` event that follows) |
+| `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
@@ -1211,7 +1244,6 @@ wrong or missing token answers `401`.
 | `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. |
 | `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases (a lease that fails to resume becomes `lost`; one over its owner's memory cap stays drained for the next undrain). Response `{"resumed":N,"failed":[…]}`. |
 | `POST /api/admin/reconcile` | Run the crash reconciliation now. Response `{"recovered":N,"lost":M}`. |
-| `POST /api/admin/leases/{id}/crash` | **Testing only.** Run one lease through the crash-recovery path on demand. It deletes `{id}`'s sandbox through the substrate directly — as a crash would, without releasing the lease or emitting `released` — deletes the sandbox row, then runs the same per-lease recovery the startup pass runs: from the lease's newest checkpoint (`generation` +1, state `recovered`, event `recovered`) or, with no checkpoint, marks it `lost` (event `lost`). Response `200` `{"id":"…","result":"recovered"|"lost","generation":N,"state":"recovered"|"lost"}`. `403` for a non-admin, `404` unknown or released lease (and when no `ADMIN_TOKEN` is configured), `409` busy or suspended (nothing is running to crash), `410` already lost. Emits a `crash_test` lease event (detail `crashed by an admin`) immediately before the recovery event, so a reader can tell a test from a real crash. Touches only that one lease: no warm-pool sweep, no peer refresh, no `released` and no release. |
 
 These are what `spoond drain --stop|--start` calls from the orchestrator
 unit's `ExecStop`/`ExecStartPost`; see [operations.md](operations.md)
