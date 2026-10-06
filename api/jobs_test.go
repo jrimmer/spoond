@@ -282,6 +282,31 @@ func TestJobOutputRange(t *testing.T) {
 	}
 }
 
+// TestJobSignalOnSuspendedLease: signalling a running job whose lease is
+// suspended answers 409 without reaching the substrate (there is no
+// running sandbox to exec in until the lease resumes).
+func TestJobSignalOnSuspendedLease(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := body["id"].(string)
+
+	p := fake.NewProcess(1019)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	before := calls(sub.Fake, "Exec")
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("signal on suspended lease = %d, want 409: %v", resp.StatusCode, body)
+	}
+	if got := calls(sub.Fake, "Exec"); got != before {
+		t.Fatalf("signal on suspended lease reached the substrate: Exec calls %d -> %d", before, got)
+	}
+}
+
 // TestJobSignal: a running job's process group is signalled; a finished
 // job answers 409.
 func TestJobSignal(t *testing.T) {

@@ -14,6 +14,8 @@ summarised from README "Status".
 
 - Background job starts use a per-lease lock, so starts on different
   leases run concurrently instead of serialising on one global lock.
+- Signalling a job whose lease is suspended answers 409 "lease is
+  suspended; resume it first" instead of reaching the substrate.
 
 ## [2.6.1] - 2026-10-06
 
