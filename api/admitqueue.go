@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/substrate"
@@ -105,6 +106,9 @@ type admissionQueue struct {
 	admitMu sync.Mutex
 	// tick is the periodic retry interval (overridable in tests).
 	tick time.Duration
+	// capacityGen counts capacity freeing (releases and pauses), so a
+	// pass can tell that room appeared while it ran.
+	capacityGen atomic.Uint64
 }
 
 // maxAdmitWaitSecs is the effective wait cap: the configured value
@@ -254,10 +258,38 @@ func (s *Service) ticketDone(t *admissionTicket) bool {
 func (s *Service) tryAdmitQueued(ctx context.Context) {
 	s.admitQ.admitMu.Lock()
 	defer s.admitQ.admitMu.Unlock()
-	for _, t := range s.orderedTickets() {
-		if s.ticketDone(t) {
-			continue
+	// Re-read the fair-share order before every attempt: a create queued
+	// while this pass runs, or an owner whose headroom changed with an
+	// admission, must be tried in its place, not after tickets ranked
+	// below it that an older snapshot listed first. tried keeps the pass
+	// finite (each ticket at most once).
+	tried := map[*admissionTicket]bool{}
+	gen := s.admitQ.capacityGen.Load()
+	refused := false // a ticket was turned away in this pass
+	restarts := 0
+	for {
+		// Room freed during the pass (a release or pause bumped the
+		// generation) after a ticket was turned away: start over from
+		// the top, so the higher-ranked ticket gets that room before
+		// anyone ranked below it. Bounded, so churn cannot livelock.
+		if refused && restarts < 3 {
+			if g := s.admitQ.capacityGen.Load(); g != gen {
+				gen, refused = g, false
+				restarts++
+				clear(tried)
+			}
 		}
+		var t *admissionTicket
+		for _, x := range s.orderedTickets() {
+			if !tried[x] && !s.ticketDone(x) {
+				t = x
+				break
+			}
+		}
+		if t == nil {
+			return
+		}
+		tried[t] = true
 		lease, err := s.grantQueued(ctx, t)
 		if err != nil {
 			if errors.Is(err, errDraining) {
@@ -272,6 +304,7 @@ func (s *Service) tryAdmitQueued(ctx context.Context) {
 			}
 			// Still no room (or another refusal): leave the ticket for
 			// the next wake-up.
+			refused = true
 			continue
 		}
 		if !s.finishTicket(t) {

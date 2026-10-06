@@ -1130,6 +1130,12 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 		return
 	}
 	l.released = true
+	// A running lease's hugepages come back with the release; a
+	// suspended one holds none.
+	freedMiB := 0
+	if l.live() {
+		freedMiB = l.MemoryMB
+	}
 	s.store.mu.Unlock()
 	// Create-time secrets are memory-only bookkeeping; the sandbox they
 	// were staged into goes with the release (#80).
@@ -1153,6 +1159,7 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, reason)
+	s.creditNodeInfo(freedMiB)
 	// A release frees hugepages and quota: retry waiting creates (#129).
 	s.wakeAdmissionQueue()
 }
@@ -1699,6 +1706,10 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseSuspended, "paused into build "+buildID)
 	// A pause frees the lease's hugepages and quota: retry waiting
 	// creates (#129).
+	// The pause freed the lease's hugepages: the next admission inside
+	// the cache window sees them (every pause: hand, drain, idle, held
+	// rules and preemption alike).
+	s.creditNodeInfo(l.MemoryMB)
 	s.wakeAdmissionQueue()
 	return buildID, nil
 }

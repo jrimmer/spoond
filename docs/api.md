@@ -216,7 +216,10 @@ retries). Waiting creates are served in **fair-share order**: the owner
 furthest under its `guaranteed_mib` first (an owner with no
 `guaranteed_mib`, or already at it, ranks after every owner with
 headroom), then FIFO. Each wake-up admits every queued create that fits,
-so a smaller create may pass a larger one that still does not fit.
+so a smaller create may pass a larger one that still does not fit. The
+order is re-read before every attempt; it is best-effort only when room
+frees in the middle of a pass (a create tried just before may miss room
+that one tried just after gets).
 Admissions from the queue go through the normal admission path, so
 classes, the burst reserve, quotas and preemption apply unchanged. The
 queue is retried whenever capacity may have freed (a release, suspend,

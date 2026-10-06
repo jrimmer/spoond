@@ -279,7 +279,12 @@ func TestAdmitWaitFairShare(t *testing.T) {
 	_, h, svc, sub, ids := newAdmitServer(t)
 	setQuota(t, ids, uid(t, ids, "tok-1"), 0, 4096, 8192)
 	fillers := fillTwo(t, h, sub, svc, "tok-1")
-	svc.admitQ.tick = 10 * time.Millisecond
+	// No periodic pass: the release's own wake-up (its last step, after
+	// the room is credited) runs the pass. A tick landing mid-release
+	// could try the guaranteed create before the room appears and the
+	// other just after; fair share is best-effort across that window
+	// (docs/api.md), and this test checks the ordering itself.
+	svc.admitQ.tick = time.Hour
 
 	// The no-guarantee owner queues first…
 	resNoGuarantee := startCreate(t, h, context.Background(), "tok-2", `{"image":"mid","ttl":60,"wait":60}`)
@@ -288,6 +293,10 @@ func TestAdmitWaitFairShare(t *testing.T) {
 	resGuaranteed := startCreate(t, h, context.Background(), "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
 	waitDepth(t, svc, 2)
 
+	// Let the pass that queuing started finish before freeing room, so
+	// the release's own wake-up decides who gets it.
+	svc.admitQ.admitMu.Lock()
+	svc.admitQ.admitMu.Unlock()
 	deleteLease(t, h, "tok-1", fillers[0])
 
 	r := waitResult(t, resGuaranteed)
