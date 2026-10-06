@@ -177,11 +177,31 @@ func (c *HTTPLeaseClient) Exec(ctx context.Context, id, cmd, cwd string, env map
 
 // Delete releases a sandbox.
 func (c *HTTPLeaseClient) Delete(ctx context.Context, id string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/api/leases/"+id, nil)
+	return c.DeleteReason(ctx, id, "")
+}
+
+// DeleteReason releases a sandbox with a reason (2.5, #132 part 2): the
+// reason rides the DELETE as JSON {"reason"} and the backend puts it on
+// the released event. An empty reason sends no body, so the backend
+// keeps "deleted through the API".
+func (c *HTTPLeaseClient) DeleteReason(ctx context.Context, id, reason string) error {
+	var body *bytes.Reader
+	header := ""
+	if reason != "" {
+		data, _ := json.Marshal(map[string]string{"reason": reason})
+		body = bytes.NewReader(data)
+		header = "application/json"
+	} else {
+		body = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/api/leases/"+id, body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if header != "" {
+		req.Header.Set("Content-Type", header)
+	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
 		return err

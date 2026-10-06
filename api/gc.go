@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -161,8 +162,15 @@ func (s *Service) gcPass(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := s.gcCandidates(ctx, kept); err != nil {
+	deleted, freed, err := s.gcCandidates(ctx, kept)
+	if err != nil {
 		return err
+	}
+	// A pass that deleted builds is spoond's own maintenance and emits
+	// one lease-less `gc` event (2.5, #132 part 2); a pass that deleted
+	// nothing (the default dry run included) emits nothing.
+	if deleted > 0 {
+		s.emitGCEvent(fmt.Sprintf("%s · %s freed", pluralBuilds(deleted), formatEventBytes(freed)))
 	}
 	if err := s.accountDisk(ctx); err != nil {
 		return err
@@ -171,6 +179,15 @@ func (s *Service) gcPass(ctx context.Context) error {
 	// they summarize (#126).
 	s.UpdateKeptMetrics(ctx)
 	return nil
+}
+
+// pluralBuilds renders a deleted-build count for a gc event detail:
+// "1 build deleted" / "N builds deleted".
+func pluralBuilds(n int) string {
+	if n == 1 {
+		return "1 build deleted"
+	}
+	return strconv.Itoa(n) + " builds deleted"
 }
 
 // UpdateKeptMetrics sets the kept-checkpoint gauges (#126):
@@ -360,11 +377,13 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 
 // gcCandidates deletes (GC_DELETE=1) or logs (dry-run, the default)
 // every ready/failed build outside kept with an updated_at older than
-// gcAge.
-func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) error {
+// gcAge. It returns how many builds it actually deleted and how many
+// bytes those builds' rows recorded, for the lease-less gc event
+// (2.5, #132 part 2).
+func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) (deleted int, freed int64, err error) {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
-		return fmt.Errorf("gc: list builds: %w", err)
+		return 0, 0, fmt.Errorf("gc: list builds: %w", err)
 	}
 	cutoff := time.Now().Add(-gcAge)
 	delete := os.Getenv("GC_DELETE") == "1"
@@ -390,8 +409,10 @@ func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) error 
 		if s.metrics != nil {
 			s.metrics.GCDeleted.WithLabelValues(b.Kind).Inc()
 		}
+		deleted++
+		freed += b.SizeBytes
 	}
-	return nil
+	return deleted, freed, nil
 }
 
 // measureNewBuildOnDisk is the Service's write-time measurer (#125):

@@ -897,6 +897,7 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		{"preempted", "warn"},
 		{"idle_suspended", "warn"},
 		{"queued", "warn"},
+		{"gc", "ok"},
 		{"holder_set", "dim"},
 	}
 	for _, tc := range cases {

@@ -290,3 +290,65 @@ func TestEventLinesDetail(t *testing.T) {
 		t.Fatalf("line = %q\nwant   %q", got, want)
 	}
 }
+
+// TestEventLinesGC: a lease-less gc event draws with the ok colour, a
+// "spoond" subject and its count-and-freed detail; a per-lease panel
+// never sees it because the collector's subscription is all-leases.
+func TestEventLinesGC(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.events.add(dashEvent{At: at, Type: "gc", Detail: "3 builds deleted · 1.50 GiB freed"})
+	lines := c.eventLines(at)
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	l := lines[0]
+	if l.Style != "ok" {
+		t.Fatalf("gc line style = %q, want ok", l.Style)
+	}
+	if !strings.Contains(l.Text, "gc") || !strings.Contains(l.Text, "spoond") ||
+		!strings.Contains(l.Text, "3 builds deleted · 1.50 GiB freed") {
+		t.Fatalf("gc line = %+v, want type, spoond subject and detail", l)
+	}
+	// The lease id column is empty for a lease-less event.
+	if strings.Contains(l.Text, "  ") && !strings.HasPrefix(l.Text, "04:15:59  gc") {
+		t.Fatalf("gc line does not start with the time and type: %q", l.Text)
+	}
+}
+
+// TestEventLinesFailedCIReleaseWarn: a released event whose reason names
+// a failure (the runner's ✗) draws warn; a plain release stays dim.
+func TestEventLinesFailedCIReleaseWarn(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.events.add(dashEvent{At: at.Add(-time.Second), Type: "released", LeaseID: "abcdef0124",
+		Subject: "jason", Detail: "deleted through the API"})
+	c.events.add(dashEvent{At: at, Type: "released", LeaseID: "abcdef0123",
+		Subject: "ci", Detail: "ci job 3604 ✗ 4m10s"})
+	lines := c.eventLines(at)
+	if lines[0].Style != "warn" {
+		t.Fatalf("failed CI release style = %q, want warn", lines[0].Style)
+	}
+	if lines[1].Style != "dim" {
+		t.Fatalf("plain release style = %q, want dim", lines[1].Style)
+	}
+}
+
+// TestEventLinesNewDetails: the created and checkpointed details pass
+// through with their build ids shortened for the panel.
+func TestEventLinesNewDetails(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.events.add(dashEvent{At: at.Add(-time.Second), Type: "created", LeaseID: "abcdef0123",
+		Subject: "jason", Detail: "granted from image py-base in 61 ms"})
+	c.events.add(dashEvent{At: at, Type: "checkpointed", LeaseID: "abcdef0123",
+		Subject: "jason", Detail: "540 ms · build 9e1f2ab3-20dc-40ee-9350-e6f77652a856"})
+	lines := c.eventLines(at)
+	if !strings.Contains(lines[1].Text, "granted from image py-base in 61 ms") {
+		t.Fatalf("created line = %q", lines[1].Text)
+	}
+	if !strings.Contains(lines[0].Text, "540 ms · build 9e1f2ab3") ||
+		strings.Contains(lines[0].Text, "9e1f2ab3-20dc") {
+		t.Fatalf("checkpointed line = %q, want the short build id", lines[0].Text)
+	}
+}
