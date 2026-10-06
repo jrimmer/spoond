@@ -1,6 +1,6 @@
                                   SPOOND · vm2.lacy.casa · dev · up 9m                                  
                                                                                                         
-▲ held lease fedcba0987: expiry/expire 3h00m ago                                                        
+▲ held lease fedcba0987 (agent): hold lapsed 3h00m ago - renew it                                       
                                                                                                         
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │

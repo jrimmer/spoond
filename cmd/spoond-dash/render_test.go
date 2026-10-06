@@ -308,8 +308,9 @@ func TestBannerAbsentWhenWell(t *testing.T) {
 }
 
 // TestBannerTriggers covers one trigger each: a unit not active, a lost
-// lease, free hugepages and snapshot disk past the danger level, and a
-// held lease a held-lease rule suspended that is still suspended.
+// lease (named with its owner, or counted when the table lacks it), free
+// hugepages and snapshot disk past the danger level, and a held lease
+// whose lapsed hold got it suspended.
 func TestBannerTriggers(t *testing.T) {
 	cases := []struct {
 		name string
@@ -321,7 +322,11 @@ func TestBannerTriggers(t *testing.T) {
 		}, "unit spoond-runner is failed"},
 		{"lost lease", func(s *Snapshot) {
 			s.ByState = map[string]int{"lost": 1}
-		}, "lost lease"},
+			s.Rows = []LeaseRow{{ID: "e151d2653d", Owner: "honey", State: "lost"}}
+		}, "lost lease e151d2653d (honey)"},
+		{"lost lease not in the table", func(s *Snapshot) {
+			s.ByState = map[string]int{"lost": 2}
+		}, "2 lost lease(s)"},
 		{"hugepages danger", func(s *Snapshot) {
 			s.HugeUsedPct, s.HugeFreeGiB = 95.0, 1.2
 		}, "hugepages"},
@@ -331,9 +336,9 @@ func TestBannerTriggers(t *testing.T) {
 		{"kept bytes past warn pct", func(s *Snapshot) {
 			s.KeptDiskPct = 41.0
 		}, "kept checkpoints use 41% of the snapshot disk"},
-		{"held rule suspended", func(s *Snapshot) {
-			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
-		}, "idle/suspend_idle"},
+		{"lapsed hold suspended", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", Owner: "honey", State: "suspended", LastAction: "expiry/suspend_lapsed", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
+		}, "held lease abc123 (honey): hold lapsed"},
 		{"preempted leases", func(s *Snapshot) {
 			s.Preempted = 3
 		}, "3 burst lease(s) preempted"},
@@ -1184,6 +1189,12 @@ func TestBannerQuietCases(t *testing.T) {
 		{"drained", func(s *Snapshot) {
 			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "drain/suspend", LastActionAt: fixedNow.Add(-time.Minute)}}
 		}},
+		{"held idle rule", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+		{"held pressure rule", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "pressure/suspend_idle", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
 		{"own idle_suspend", func(s *Snapshot) {
 			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "idle_suspend/suspend_idle", LastActionAt: fixedNow.Add(-time.Minute)}}
 		}},
@@ -1208,5 +1219,19 @@ func TestLeaseCellsNeverRunTogether(t *testing.T) {
 	}
 	if !strings.Contains(p, "10h37m") {
 		t.Errorf("age 10h37m cut:\n%s", p)
+	}
+}
+
+// TestLostRowsCapped: past maxLostRows the remaining lost leases share
+// one counting row.
+func TestLostRowsCapped(t *testing.T) {
+	s := healthySnapshot()
+	s.ByState = map[string]int{"lost": 5}
+	for _, id := range []string{"a1", "a2", "a3", "a4", "a5"} {
+		s.Rows = append(s.Rows, LeaseRow{ID: id, Owner: "honey", State: "lost"})
+	}
+	rows := lostRows(s)
+	if len(rows) != maxLostRows+1 || rows[maxLostRows] != "2 more lost lease(s)" {
+		t.Fatalf("lost rows = %q", rows)
 	}
 }
