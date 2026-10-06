@@ -215,6 +215,12 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
+	// Admin crash test for one lease (Honey M3): delete its sandbox as a
+	// crash would and run the same per-lease recovery the reconcile pass
+	// does. Admin only; see api/crash.go. The /api/admin/sandboxes
+	// spelling is the same route, matching the lease API's alias.
+	s.mux.HandleFunc("POST /api/admin/leases/{id}/crash", s.handleAdminCrash)
+	s.mux.HandleFunc("POST /api/admin/sandboxes/{id}/crash", s.handleAdminCrash)
 	// Lease event streams (2.2, #115): Server-Sent Events of every lease
 	// lifecycle change, the caller's leases (admins see all) or one
 	// lease. The /api/leases alias covers both via rewriteLeasePath; the
