@@ -342,6 +342,13 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	if digest == "" {
 		return errors.New("docker inspect: empty digest")
 	}
+	// Re-tagging :latest leaves the previous build's image dangling; the
+	// registry holds the canonical copy, so drop dangling images (only
+	// those: nothing a container or another tag uses). Best effort: a
+	// failed prune never fails the build.
+	if err := runCmd(ctx, stdout, "docker", "image", "prune", "-f"); err != nil {
+		fmt.Fprintf(stdout, "warning: docker image prune: %v\n", err)
+	}
 
 	// The image row (and its template id) is created before the first
 	// template build; it is stable for the life of the image name.

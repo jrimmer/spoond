@@ -1232,6 +1232,8 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, reason)
 	s.creditNodeInfo(freedMiB)
+	// The owner's guarantee may have room now (#128).
+	s.promoteBurst(l.Owner)
 	// A release frees hugepages and quota: retry waiting creates (#129).
 	s.wakeAdmissionQueue()
 }
@@ -1527,7 +1529,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// charge above is the sum the guarantee is measured against) and
 	// holds a burst lease to the node's reserve. A refusal answers
 	// before any sandbox exists.
-	class, err := s.admitClass(ctx, owner, img.MemoryMB, req.burst)
+	class, err := s.admitClass(ctx, owner, img.MemoryMB, req.burst, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1783,6 +1785,10 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	// the cache window sees them (every pause: hand, drain, idle, held
 	// rules and preemption alike).
 	s.creditNodeInfo(l.MemoryMB)
+	// A paused guaranteed lease frees its owner's guarantee (#128).
+	if l.Class != ClassBurst {
+		s.promoteBurst(l.Owner)
+	}
 	s.wakeAdmissionQueue()
 	return buildID, nil
 }
@@ -1863,7 +1869,7 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	// burst (and held to the reserve); a lease that burst because the
 	// guarantee was full may come back guaranteed now that the charge
 	// has room — the class follows the owner's current standing.
-	class, err := s.admitClass(ctx, l.Owner, memPer, l.Burst)
+	class, err := s.admitClass(ctx, l.Owner, memPer, l.Burst, l.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1973,7 +1979,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		// Class re-admission (#128 part 2), as for a resume: a
 		// demand-burst lease stays burst, a guarantee-burst one may
 		// fall back to guaranteed.
-		class, err := s.admitClass(ctx, owner, l.MemoryMB, l.Burst)
+		class, err := s.admitClass(ctx, owner, l.MemoryMB, l.Burst, l.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -2063,7 +2069,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		// Class re-admission (#128 part 2) against the image's current
 		// charge — the number the fresh guest runs (and is stamped with
 		// below), as for the memory check above.
-		class, err := s.admitClass(ctx, owner, img.MemoryMB, l.Burst)
+		class, err := s.admitClass(ctx, owner, img.MemoryMB, l.Burst, l.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -2274,7 +2280,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	// Class admission (#128 part 2): a clone takes its own class from
 	// the owner's guarantee — a full one bursts the clone — and never
 	// carries a request's burst flag or priority.
-	class, err := s.admitClass(ctx, owner, img.MemoryMB, false)
+	class, err := s.admitClass(ctx, owner, img.MemoryMB, false, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -2410,7 +2416,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		// fork call gets the same class (the charge the class measures
 		// moves only when a sandbox is created, one at a time below),
 		// decided once here so the batch behaves as one.
-		class, err := s.admitClass(ctx, owner, img.MemoryMB, false)
+		class, err := s.admitClass(ctx, owner, img.MemoryMB, false, "")
 		if err != nil {
 			return rollback(err)
 		}

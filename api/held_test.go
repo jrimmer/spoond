@@ -320,7 +320,11 @@ func TestPressureShortensHeldIdle(t *testing.T) {
 	svc.cfg.HeldIdleTimeout = 4 * time.Hour
 	svc.cfg.PressureDiskFreePct = 15
 	svc.cfg.PressureHeldIdle = 30 * time.Minute
-	svc.cfg.TemplateStoragePath = t.TempDir() // an empty dir is never under pressure
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	// No pressure to start with, whatever the test machine's own disk
+	// looks like (statfs on the real temp dir made this test depend on
+	// how full the host was).
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 90, nil }
 	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)

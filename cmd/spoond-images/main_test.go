@@ -102,6 +102,7 @@ func TestBuildOneSuccess(t *testing.T) {
 	wantCmds := []string{
 		"docker build --pull -f images/py-base.dockerfile -t localhost:5000/py-base:latest images",
 		"docker push localhost:5000/py-base:latest",
+		"docker image prune -f",
 	}
 	if len(cmdLog) != len(wantCmds) {
 		t.Fatalf("docker commands = %v", cmdLog)

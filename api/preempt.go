@@ -334,6 +334,8 @@ func (s *Service) runPreemptResumeLoop(ctx context.Context) {
 				continue
 			}
 			s.resumePreempted(ctx)
+			// Keep every owner's guarantee filled as leases churn (#128).
+			s.promoteAllBurst()
 		}
 	}
 }
