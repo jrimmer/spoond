@@ -156,13 +156,29 @@ func (s *Service) jobRetention() time.Duration {
 }
 
 // buildJobWrapperArgs builds the argv handed to substrate.Start: the
-// wrapper script, the job id, and the command as a shell invocation
-// (buildShellArgs, the same wrapping exec uses, so cwd/env behave
-// identically). Secret values never reach argv: they are staged as files
-// under /run/secrets.
-func buildJobWrapperArgs(jobID, cmd, cwd string, env map[string]string) []string {
+// wrapper script, the job id, and the command as a shell invocation. cwd
+// and env apply the same way exec's buildShellArgs applies them, but the
+// env values come from envFile (a shell file the command sources) rather
+// than argv, so no value is exposed in the process table. Secret values
+// are staged as files under /run/secrets, never passed here.
+func buildJobWrapperArgs(jobID, cmd, cwd, envFile string) []string {
+	body := jobCommandBody(cmd, cwd, envFile)
 	args := []string{"/bin/bash", "-c", jobWrapperScript, "bash", jobID}
-	return append(args, buildShellArgs(cmd, cwd, env)...)
+	return append(args, "/bin/bash", "-c", body)
+}
+
+// jobCommandBody renders the command as a bash -c body: source the env
+// file when present, change directory when cwd is set, then run cmd.
+func jobCommandBody(cmd, cwd, envFile string) string {
+	var parts []string
+	if envFile != "" {
+		parts = append(parts, ". "+shellQuote(envFile))
+	}
+	if cwd != "" {
+		parts = append(parts, "cd "+shellQuote(cwd))
+	}
+	parts = append(parts, cmd)
+	return strings.Join(parts, " && ")
 }
 
 // startJob starts a background exec. It returns the job id, start time
@@ -202,7 +218,26 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 		}
 	}
 
-	args := buildJobWrapperArgs(jobID, cmd, cwd, requestEnv(lease, env))
+	// The command's env (and the pooled-lease id) is written to a file the
+	// command shell sources, so no value reaches argv, the recorded
+	// command, the logs or an event (spec item 3).
+	envFile := ""
+	fullEnv := requestEnv(lease, env)
+	if len(fullEnv) > 0 {
+		var b strings.Builder
+		for _, k := range sortedKeys(fullEnv) {
+			fmt.Fprintf(&b, "export %s=%s\n", shellQuote(k), shellQuote(fullEnv[k]))
+		}
+		envFile = jobPath(jobID, "env")
+		if err := s.sub.WriteFile(ctx, lease.SandboxID, envFile, []byte(b.String()), 0o600); err != nil {
+			if len(secretNames) > 0 {
+				s.removeSecrets(lease.SandboxID, secretNames)
+			}
+			return "", time.Time{}, nil, fmt.Errorf("write job env: %w", err)
+		}
+	}
+
+	args := buildJobWrapperArgs(jobID, cmd, cwd, envFile)
 	proc, err := s.sub.Start(ctx, lease.SandboxID, substrate.StartRequest{Args: args})
 	if err != nil {
 		if len(secretNames) > 0 {

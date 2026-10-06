@@ -629,6 +629,45 @@ every hold lapses eventually. Watch the rules with `journalctl -u spoond-backend
 lease'` and `spoond_held_actions_total` — a rising `critical{release}`
 means the disk needs attention the leases are paying for.
 
+## Background exec jobs
+
+`POST /api/leases/{id}/exec` with `"background": true` (2.6, #135)
+starts a tracked job in the lease instead of holding the request open.
+The guest records its outcome under `/var/lib/spoond/jobs/<job_id>/`
+inside the lease: `stdout`, `stderr`, `pid` and — written atomically
+when the command ends — `rc`. Those files are the source of truth, so a
+backend restart or a broken envd stream does not lose an outcome: while
+the backend holds the stream it notices the exit at once, and otherwise
+a reconcile pass (every 10 s while any job runs) reads `rc` through the
+files path.
+
+A running job keeps its lease out of every idle rule — the plain
+`IDLE_TIMEOUT_SECS` sweep, held rule 1 and idle suspension — so nothing
+suspends a lease mid-job. A lease that does suspend normally with a job
+running leaves the job record `running` (the memory continues; reconcile
+after resume). When the guest's memory does **not** continue — a cold
+restart, a restore or crash recovery, i.e. a generation bump — every
+running job is marked `lost`.
+
+The per-exec `secrets` stay staged under `/run/secrets` for the job's
+whole life; the guest wrapper removes them at exit and the backend also
+removes them on reconcile. Neither `env` nor secret values are ever
+stored in the job record, logged or emitted in an event. `cmd` is stored
+as given.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background jobs per lease; past it a start answers `429` |
+| `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept) |
+
+The job record lives in the `lease_jobs` table (migration 0016) and is
+deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
+`spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`). Events:
+`job_started`, `job_exited`, `job_lost`; the dashboard events panel
+shows `job_exited` lines, non-zero exits in the warning colour. The
+endpoints, the events and the lease's `jobs` summary are in
+[api.md](api.md).
+
 ## Users & identity
 
 - **Revoking access** = `DELETE /api/users/{id}` (or `ssh-key rm
@@ -813,6 +852,8 @@ marker. The substrate-specific series:
 | `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
+| `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |
+| `spoond_jobs_exited_total{result}` | background exec jobs that ended: `ok` (exit 0), `error` (non-zero exit) or `lost` (the guest did not continue, #135) |
 | `spoond_capacity_rejections_total` | admission refusals |
 | `spoond_store_errors_total{op}` | SQLite write failures |
 | `spoond_notifications_total{webhook,severity,result}` | webhook notification delivery outcomes; `webhook` is the receiver's index in `NOTIFY_WEBHOOKS` (never its URL — the URL may carry secrets), `severity` is the message's grade, `result` is `sent`, `retry`, `dropped`, `deduped` or `rate_limited` |

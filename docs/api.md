@@ -302,6 +302,99 @@ minutes. Exec, stat, guest dial and the file routes then answer `409`
 with `Retry-After: 5`, not `410`: retry. `410` means the sandbox is gone
 with nothing in flight.
 
+#### Background exec (2.6, #135)
+
+Add `"background": true` to the exec body and the command runs as a
+tracked job instead of holding the request open. The other fields keep
+their meaning (`cmd`, `cwd`, `env`, `secrets`); `timeout` is ignored —
+a background job runs until it exits, is signalled, or the lease does.
+
+Response `202 Accepted` as soon as the process has started:
+
+```json
+{"job_id": "<hex>", "started_at": "2026-10-05T12:00:00.123456789Z"}
+```
+
+Without `background` nothing changes. A suspended lease still answers
+`409` and a `lost` one `410`. At most `MAX_RUNNING_JOBS_PER_LEASE`
+(default 16) jobs may run at once per lease; past it the request answers
+`429`.
+
+The command runs in the caller's lease and is detached from the envd
+stream, so a backend restart does not kill it. The guest records the
+outcome itself under `/var/lib/spoond/jobs/<job_id>/`: `stdout`,
+`stderr`, `pid`, and `rc` (written atomically when the command ends).
+Those files, not the stream, are the source of truth. Per-exec
+`secrets` stay staged under `/run/secrets` for the job's life and are
+removed when it exits. Neither `env` nor secret values are ever stored
+in the job record, logged or sent in an event; `cmd` is stored as given
+(put credentials in `env` or `secrets`, not argv).
+
+See [`GET /api/leases/{id}/jobs`](#get-apileasesidjobs--list-background-jobs)
+for reading and controlling jobs.
+
+### `GET /api/leases/{id}/jobs` — list background jobs
+
+Lists the lease's background jobs, newest first:
+
+```json
+{"jobs": [
+  {"job_id": "…", "lease_id": "…", "owner": "…", "cmd": "…", "cwd": "",
+   "state": "exited", "exit_code": 7, "started_at": "…",
+   "ended_at": "…", "stderr_tail": "…"}
+]}
+```
+
+`state` is `running`, `exited` or `lost` (the guest's memory did not
+continue — a cold restart, restore, crash recovery or generation bump).
+`exit_code` is `null` while running. `stderr_tail` is the last 4 KiB of
+stderr. Owner, admins and `http` shares as exec has them.
+
+### `GET /api/leases/{id}/jobs/{job}` — read one job
+
+Returns the record plus the last 64 KiB of `stdout` and `stderr`:
+
+```json
+{"job": {…}, "stdout": "…", "stderr": "…"}
+```
+
+With `?wait=<seconds>` (at most 900) the request long-polls until the
+job is no longer running or the wait ends, then answers the current
+record. This is the easy way to follow a job to completion.
+
+### `GET /api/leases/{id}/jobs/{job}/output` — stream job output
+
+Returns raw bytes from one stream so a client can follow output:
+
+| Query | Default | Notes |
+|---|---|---|
+| `stream` | `stdout` | `stdout` or `stderr` |
+| `offset` | `0` | byte offset |
+| `limit` | `1048576` (1 MiB) | capped at 16 MiB |
+
+### `POST /api/leases/{id}/jobs/{job}/signal` — signal a job
+
+```json
+{"signal": "TERM"}
+```
+
+`TERM` or `KILL`; signals the job's process group. `200` on success,
+`409` when the job is not running.
+
+Background jobs emit `job_started` (detail: the command, cut to 120
+chars), `job_exited` (detail: `exit <code>` and the last 10 stderr
+lines, at most 1 KiB) and `job_lost` on the lease's event stream. The
+lease object (`GET /api/leases/{id}` and every list row) carries a
+`jobs` field:
+
+```json
+"jobs": {"running": 1, "last_exit": {"job_id": "…", "exit_code": 7, "ended_at": "…"}}
+```
+
+`last_exit` is `null` when the lease has no exited job. A lease with a
+running job counts as active for every idle rule, so none suspends it
+mid-job.
+
 ### `…/api/leases/{id}/files/{path…}` — lease files
 
 Read and write files inside the lease's filesystem. `{path…}` is the
@@ -840,6 +933,9 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
+| `job_started` | a background exec job started (2.6, #135) | the command, cut to 120 chars |
+| `job_exited` | a background exec job ended | `exit <code>` and the last 10 stderr lines (at most 1 KiB) |
+| `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 

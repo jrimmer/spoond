@@ -8,7 +8,9 @@
 package conformance
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -186,6 +188,74 @@ func (c *client) checkpointKeep(id string) (int, []byte, error) {
 	return c.do("POST", "/api/sandboxes/"+id+"/checkpoint", map[string]any{"keep": true})
 }
 
+// startJob runs a command as a background job (2.6, #135).
+func (c *client) startJob(id string, req execReq) (int, []byte, error) {
+	req.Background = true
+	return c.exec(id, req)
+}
+
+// readJob reads a job record (with optional wait seconds) and its output.
+func (c *client) readJob(id, jobID string, wait int) (int, []byte, error) {
+	path := "/api/leases/" + id + "/jobs/" + jobID
+	if wait > 0 {
+		path += "?wait=" + strconv.Itoa(wait)
+	}
+	return c.do("GET", path, nil)
+}
+
+// listJobs lists a lease's background jobs.
+func (c *client) listJobs(id string) (int, []byte, error) {
+	return c.do("GET", "/api/leases/"+id+"/jobs", nil)
+}
+
+// signalJob signals a job's process group.
+func (c *client) signalJob(id, jobID, sig string) (int, []byte, error) {
+	return c.do("POST", "/api/leases/"+id+"/jobs/"+jobID+"/signal", map[string]any{"signal": sig})
+}
+
+// eventsURL returns the lease event stream URL for one lease.
+func (c *client) eventsURL(id string) string {
+	return c.base + "/api/leases/" + id + "/events"
+}
+
+// watchEvents opens the lease's event SSE stream and returns a channel
+// of event data payloads. The returned cancel function stops the stream.
+// Used by the background-job conformance group to catch job_started and
+// job_exited (2.6, #135).
+func (c *client) watchEvents(ctx context.Context, id string) (<-chan string, func()) {
+	ch := make(chan string, 64)
+	ctx, cancel := context.WithCancel(ctx)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.eventsURL(id), nil)
+	if err != nil {
+		cancel()
+		close(ch)
+		return ch, func() {}
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	go func() {
+		defer close(ch)
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+		for sc.Scan() {
+			line := sc.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			select {
+			case ch <- strings.TrimPrefix(line, "data: "):
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ch, cancel
+}
+
 // restore rolls the lease in place back to the kept checkpoint build
 // (2.3, #121).
 func (c *client) restore(id, buildID string) (int, []byte, error) {
@@ -210,11 +280,38 @@ func (c *client) deleteSnapshot(buildID string) (int, []byte, error) {
 }
 
 // execReq is the exec body: {"cmd","cwd","env","timeout"} (A1 §5).
+// Background (2.6, #135) starts the command as a tracked job.
 type execReq struct {
-	Cmd     string            `json:"cmd"`
-	Cwd     string            `json:"cwd,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Timeout int               `json:"timeout,omitempty"`
+	Cmd        string            `json:"cmd"`
+	Cwd        string            `json:"cwd,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	Timeout    int               `json:"timeout,omitempty"`
+	Background bool              `json:"background,omitempty"`
+}
+
+// jobInfo is the background-job record shape (2.6, #135).
+type jobInfo struct {
+	JobID      string `json:"job_id"`
+	LeaseID    string `json:"lease_id"`
+	Cmd        string `json:"cmd"`
+	State      string `json:"state"`
+	ExitCode   *int   `json:"exit_code"`
+	StartedAt  string `json:"started_at"`
+	EndedAt    string `json:"ended_at"`
+	StderrTail string `json:"stderr_tail"`
+}
+
+// jobStart is the POST .../exec "background": true answer.
+type jobStart struct {
+	JobID     string `json:"job_id"`
+	StartedAt string `json:"started_at"`
+}
+
+// jobRead is the GET .../jobs/{job} answer.
+type jobRead struct {
+	Job    jobInfo `json:"job"`
+	Stdout string  `json:"stdout"`
+	Stderr string  `json:"stderr"`
 }
 
 // execResult is the exec response: {"stdout","stderr","exit"}.
