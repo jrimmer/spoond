@@ -129,7 +129,6 @@ What arrives, with its key and severity:
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
 | `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
-| `tls.cert.30d` / `.7d` / `.1d` | warn / warn / critical | the TLS certificate within 30, 7 or 1 day of expiry |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
 | `backup.stale` | warn | the newest database backup older than its age limit — `BACKUP_MAX_AGE_SECS`, default 93600 (26 h: the 03:00 daily run plus one missed day) |
 
@@ -772,9 +771,10 @@ the events panel (the backend's lease event stream) — plus
 an attention strip above the panels (one ▲ row per trigger, only when
 something needs a person): a unit not active, a lost lease, free
 hugepages or snapshot disk past the danger level, kept checkpoints past
-`KEPT_DISK_WARN_PCT` of the snapshot disk (#126), the TLS certificate
-inside 30 days of expiring, or an automatic held-lease action in the
-last 24 h. The host panel's GC row also shows the kept total —
+`KEPT_DISK_WARN_PCT` of the snapshot disk (#126), preempted burst
+leases, or a held lease that a held-lease rule (idle, pressure, a lapsed
+hold) suspended and that is still suspended. TLS certificate expiry is
+left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
 `kept N (X GiB)` when any build is pinned. A status line under the panels carries the headline numbers
 and the clock. The browser page is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
