@@ -12,9 +12,9 @@ import (
 )
 
 // releaseReason renders the reason the runner sends when it releases a
-// job's lease: the job id, a glyph for the outcome (✓ success, ✗ failure,
-// ↷ cancelled, - skipped) and the run duration. A cancelled job names
-// itself distinctly so a replay of a shutdown reads at a glance.
+// job's lease: the job id, a glyph for the outcome (✓ success, ✗ failure)
+// and the run duration. Cancelled and skipped jobs name themselves
+// distinctly, so a replay of a shutdown reads at a glance.
 func releaseReason(job *Job, result Result, d time.Duration) string {
 	if result == ResultCancelled {
 		return fmt.Sprintf("ci job %d cancelled", job.ID)
@@ -30,8 +30,8 @@ func releaseReason(job *Job, result Result, d time.Duration) string {
 }
 
 // humanDuration renders a job duration compactly: HhMMmSSs past an hour,
-// MmSSs past a minute, else Ss with a millisecond fraction for the short
-// runs. It is the runner's own form, not Go's time.Duration string.
+// MmSSs past a minute, else Ss. It is the runner's own form, not Go's
+// time.Duration string.
 func humanDuration(d time.Duration) string {
 	if d < 0 {
 		d = 0
