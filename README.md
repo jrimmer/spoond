@@ -69,11 +69,19 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     automatically.
 - **Multi-user tenancy**: people and agents are first-class identities,
   with per-user SSH keys, per-user tokens, quotas
-  (`max_leases`/`max_ttl`), admin roles, lease sharing with expiry,
+  (`max_leases`/`max_ttl`, memory: `guaranteed_mib`/`max_mib`), admin roles, lease sharing with expiry,
   per-user LLM gateway keys, and per-user proxy hostnames
   (`<label>.<user>.sandbox.example`). See
   [docs/security.md](docs/security.md) and the [Users & identity API
   section](docs/api.md#users--identity).
+- **Capacity classes**: a lease is **guaranteed** while its owner's
+  running memory stays within their `guaranteed_mib`, and **burst** past
+  it or when asked (`"burst": true`, with a `priority`). Burst leases
+  are admitted only while `BURST_RESERVE_MIB` of hugepages stays free,
+  and when guaranteed work needs room spoond suspends them (lowest
+  priority, then newest) and resumes them by itself once they fit again
+  (`preempted`/`resumed` events; the memory continues). A user without
+  a `guaranteed_mib` keeps every lease guaranteed.
 - **Images**: one Dockerfile per capability in `images/`, built into E2B
   templates by `spoond images build <name>` (or `--all`). Every guest
   resolves names through the LAN resolver only and carries a container
@@ -194,6 +202,13 @@ stack does not exist yet.
 
 ## Status
 
+**v2.4: capacity on shared hosts.** Memory quotas per user
+(`guaranteed_mib`, `max_mib`), guaranteed and burst leases with a
+hugepage reserve, and preemption of burst leases by suspend with an
+automatic resume queue, so CI and other guaranteed work get room on a
+busy host without losing anyone's state. spoond is BSD-3-Clause
+licensed from this release.
+
 **v2.3: checkpoints on the lease's terms.** Periodic checkpoints are off
 by default and set per lease (`checkpoint_interval`); a checkpoint can be
 kept and a lease restored to it in place; `restart?mode=cold` gives a
@@ -275,7 +290,8 @@ deployment are listed in
 Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
 services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
 may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
-`NOTIFY_WEBHOOKS`, and the held-lease limits (`HOLD_TTL_SECS` and the
+`NOTIFY_WEBHOOKS`, the capacity settings (`BURST_RESERVE_MIB`,
+`PREEMPT_DISK_FLOOR_PCT`), and the held-lease limits (`HOLD_TTL_SECS` and the
 rest, in [docs/operations.md](docs/operations.md)).
 
 ## Tests

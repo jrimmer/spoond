@@ -10,6 +10,13 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-06
+
+Capacity: memory quotas, guaranteed and burst leases, and preemption of
+burst leases by suspend (#128). Store migrations 12–14 add columns with
+defaults: a user without a `guaranteed_mib` keeps every lease
+guaranteed, so admission behaves as in 2.3 until quotas are set.
+
 ### Changed
 
 - **License: BSD 3-Clause.** spoond is licensed under the BSD 3-Clause
@@ -59,8 +66,7 @@ summarised from README "Status".
   clone — and stays as it was; an undrain defers it (drained, retried
   later) instead of losing it. Create takes `"priority"` (int,
   default `0`, between `-128` and `127`): preemption order within a
-  class, lower preempted first,
-  advisory until part 3. `class` and `priority` ride every lease row
+  class, lower preempted first. `class` and `priority` ride every lease row
   and detail; the dashboard marks burst rows (`▶ running·b`) and adds
   `burst N` to the capacity panel.
 - **Preemption by suspend (#128, part 3).** A guaranteed admission
@@ -72,7 +78,7 @@ summarised from README "Status".
   furthest over its `guaranteed_mib`, stops as soon as enough memory is
   free, and is serialised so two guaranteed creates cannot each preempt
   for themselves. Every preempted lease is persisted with `preempted`
-  and emits a `preempted` event (`for a guaranteed lease of <owner>`).
+  (**migration 0014** adds `preempted_at`) and emits a `preempted` event (`for a guaranteed lease of <owner>`).
   A **disk floor** guards the pause: preemption stops while the snapshot
   disk would fall under `PREEMPT_DISK_FLOOR_PCT` (default `15`), and a
   guaranteed admission that cannot preempt answers `503` `capacity:
@@ -80,7 +86,10 @@ summarised from README "Status".
   background **resume queue** runs every 15 s and resumes preempted
   leases, oldest preemption first, when they fit again, clearing
   `preempted` and emitting `resumed` with detail `after preemption`;
-  the same path serves a client's explicit resume. New metrics
+  the same path serves a client's explicit resume. Any other path that
+  runs the lease again (restore, cold restart, recovery) or loses it
+  ends the preemption too, and the held-lease rules never release a
+  preempted lease. New metrics
   `spoond_preemptions_total` and `spoond_preempted_leases`, a dashboard
   state mark (`‖ suspended·p`) and an attention-strip row name
   them.
