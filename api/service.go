@@ -2214,6 +2214,13 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 
 	now := time.Now()
 	for range count {
+		idleSuspend := src.IdleSuspend
+		if !persistent {
+			// A non-persistent fork cannot be idle-suspended (there is
+			// no snapshot to resume), so it takes the host default
+			// rather than the source's value (2.5, #129 part 2).
+			idleSuspend = checkpointIntervalHost
+		}
 		lease := &Lease{
 			ID:          newID(),
 			Owner:       owner, // quota is charged to the caller
@@ -2228,9 +2235,10 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			Holder:      holder,
 			HolderUrl:   holderURL,
 			// The forks continue the source's work (2.3, #122): its
-			// checkpoint and idle policies continue too.
+			// checkpoint and idle policies continue too (a non-persistent
+			// fork falls back to the host default idle policy above).
 			CheckpointInterval: src.CheckpointInterval,
-			IdleSuspend:        src.IdleSuspend,
+			IdleSuspend:        idleSuspend,
 			State:              "running",
 			MemoryMB:           img.MemoryMB, // the admitted charge (#128)
 			Generation:         1,            // every lease starts on generation 1 (2.2)
@@ -2284,6 +2292,14 @@ const (
 	checkpointIntervalHost = -1
 )
 
+// Idle-suspend bounds (2.5, #129 part 2). They happen to match the
+// checkpoint interval's, but the names stay separate so the two fields
+// can move independently.
+const (
+	idleSuspendMin = 60
+	idleSuspendMax = 604800
+)
+
 // validateCheckpointInterval checks a requested checkpoint_interval:
 // 0 (never) or 60..604800 seconds. The message names the field.
 func validateCheckpointInterval(secs int64) error {
@@ -2303,17 +2319,24 @@ func validateIdleSuspend(secs int64) error {
 	if secs == 0 {
 		return nil
 	}
-	if secs < checkpointIntervalMin || secs > checkpointIntervalMax {
+	if secs < idleSuspendMin || secs > idleSuspendMax {
 		return fmt.Errorf("idle_suspend must be 0 (never) or %d..%d seconds",
-			checkpointIntervalMin, checkpointIntervalMax)
+			idleSuspendMin, idleSuspendMax)
 	}
 	return nil
 }
 
 // effectiveIdleSuspend resolves the lease's idle_suspend to seconds: its
 // own value when set (0 = never, >0 seconds), otherwise the host default
-// (IdleSuspendDefault; 0 = never).
+// (IdleSuspendDefault; 0 = never). A non-persistent lease can never be
+// idle-suspended — there is no snapshot to resume from — so its
+// effective value is always 0 (never), whatever the host default is.
+// This also keeps held rule 1 in force for non-persistent held leases
+// (2.5, #129 part 2).
 func (s *Service) effectiveIdleSuspend(l *Lease) int64 {
+	if !l.Persistent {
+		return 0
+	}
 	if l.IdleSuspend != checkpointIntervalHost {
 		return l.IdleSuspend
 	}

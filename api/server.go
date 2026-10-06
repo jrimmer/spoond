@@ -1679,28 +1679,8 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
-		case errors.Is(err, errNotPersistent):
-			writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
-		case errors.Is(err, errLeaseBusy):
-			writeError(w, http.StatusConflict, err.Error())
-		case errors.Is(err, errQuotaExceeded):
-			// A suspended lease holds no hugepages, so resuming one
-			// re-passes the memory check (#128): over max_mib answers
-			// 429 and the lease stays suspended.
-			writeError(w, http.StatusTooManyRequests, err.Error())
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
-		case errors.Is(err, errBurstReserve):
-			// A burst lease resuming into a full reserve (#128 part 2):
-			// 503 with a retry hint, the lease stays suspended.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
-		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		default:
-			s.svc.log.Printf("resume %s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "resume failed")
+			s.writeResumeRefusal(w, id, err)
 		}
 		return
 	}

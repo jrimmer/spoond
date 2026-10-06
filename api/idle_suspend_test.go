@@ -12,6 +12,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -165,7 +166,7 @@ func TestIdleSuspendPolicyPut(t *testing.T) {
 }
 
 // TestIdleSuspendPolicyPutHTTP: the route's owner/admin scoping and
-// validation, including the non-persistent 400.
+// validation, including the non-persistent 400 and the admin branch.
 func TestIdleSuspendPolicyPutHTTP(t *testing.T) {
 	h, _, _ := newShareTestServer(t)
 	lid := createLeaseAs(h, "tok-a")
@@ -205,6 +206,103 @@ func TestIdleSuspendPolicyPutHTTP(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"idle_suspend":0`) {
 		t.Fatalf("PUT response missing idle_suspend 0: %s", rec.Body)
+	}
+
+	// An admin may set another owner's persistent lease: create one as a
+	// and PUT it as the admin (a non-zero value is allowed here).
+	preq := httptest.NewRequest("POST", "/api/leases",
+		strings.NewReader(`{"image":"py-base","ttl":120,"persistent":true}`))
+	preq.Header.Set("Authorization", "Bearer tok-a")
+	preq.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, preq)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("persistent create: %d, want 201: %s", rec.Code, rec.Body)
+	}
+	var created map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	plid, _ := created["id"].(string)
+	areq := httptest.NewRequest("PUT", "/api/leases/"+plid+"/idle-policy", strings.NewReader(`{"idle_suspend":120}`))
+	areq.Header.Set("Authorization", "Bearer admin-tok")
+	areq.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, areq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin PUT: %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"idle_suspend":120`) {
+		t.Fatalf("admin PUT response missing idle_suspend 120: %s", rec.Body)
+	}
+}
+
+// TestIdleSuspendForkNonPersistentDefault: a non-persistent fork of a
+// lease with its own idle_suspend takes the host default (stored -1,
+// effective 0), keeping held rule 1 in force for it; a persistent fork
+// inherits the source's value (2.5, #129 part 2).
+func TestIdleSuspendForkNonPersistentDefault(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.IdleSuspendDefault = 300
+
+	src, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant src: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(src, 120); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+
+	// A non-persistent fork cannot carry a value: stored -1, effective 0.
+	np, _, err := svc.fork(ctx, "c", src.ID, 1, false, time.Hour, "", "")
+	if err != nil {
+		t.Fatalf("fork non-persistent: %v", err)
+	}
+	if np[0].IdleSuspend != checkpointIntervalHost {
+		t.Fatalf("non-persistent fork stored idle_suspend = %d, want -1", np[0].IdleSuspend)
+	}
+	if got := svc.effectiveIdleSuspend(np[0]); got != 0 {
+		t.Fatalf("non-persistent fork effective idle_suspend = %d, want 0", got)
+	}
+	// A persistent fork inherits the source's 120.
+	p, _, err := svc.fork(ctx, "c", src.ID, 1, true, time.Hour, "", "")
+	if err != nil {
+		t.Fatalf("fork persistent: %v", err)
+	}
+	if p[0].IdleSuspend != 120 {
+		t.Fatalf("persistent fork stored idle_suspend = %d, want 120", p[0].IdleSuspend)
+	}
+}
+
+// TestIdleSuspendNonPersistentHeldRule1: with a non-zero host default, a
+// non-persistent held lease still falls to held rule 1 — the host
+// default must not silently disable it (2.5, #129 part 2).
+func TestIdleSuspendNonPersistentHeldRule1(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.IdleSuspendDefault = 300
+	svc.cfg.HeldIdleTimeout = time.Minute
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, false, "", nil, "ci-job", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.LastActive = base
+	svc.store.mu.Unlock()
+
+	if got := svc.effectiveIdleSuspend(l); got != 0 {
+		t.Fatalf("non-persistent effective idle_suspend = %d, want 0", got)
+	}
+	svc.runHeldRules(ctx, base.Add(2*time.Minute))
+	if !l.Suspended {
+		t.Fatal("held rule 1 did not suspend a non-persistent held lease")
+	}
+	if l.LastAction != heldRuleIdle+"/"+heldActionSuspendIdle {
+		t.Fatalf("suspended by %q, want held rule 1", l.LastAction)
 	}
 }
 

@@ -137,7 +137,7 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 		return false
 	}
 	if _, err := s.svc.resumeLease(r.Context(), l); err != nil {
-		s.writeResumeRefusal(w, l, err)
+		s.writeResumeRefusal(w, l.ID, err)
 		return false
 	}
 	return true
@@ -145,9 +145,13 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 
 // writeResumeRefusal maps a failed resume onto the response the resume
 // route would give: a quota or burst-reserve refusal is 429/503 with a
-// Retry-After, a busy lease is 409, a lost sandbox 410/500 as usual.
-func (s *Server) writeResumeRefusal(w http.ResponseWriter, l *Lease, err error) {
+// Retry-After, a busy lease is 409, a lost sandbox 410/500 as usual. It
+// is shared by the resume route and the idle auto-resume paths so the
+// two cannot drift.
+func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error) {
 	switch {
+	case errors.Is(err, errNotPersistent):
+		writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
 	case errors.Is(err, errLeaseBusy):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errQuotaExceeded):
@@ -159,7 +163,7 @@ func (s *Server) writeResumeRefusal(w http.ResponseWriter, l *Lease, err error) 
 	case errors.Is(err, substrate.ErrCapacity):
 		writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 	default:
-		s.svc.log.Printf("idle resume %s: %v", l.ID, err)
+		s.svc.log.Printf("resume %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "resume failed")
 	}
 }

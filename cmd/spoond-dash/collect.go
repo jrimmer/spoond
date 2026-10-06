@@ -169,10 +169,11 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 }
 
 // eventStyle is the grid style an event type is drawn with: warn for
-// lost and held-lease actions, dim for releases, text for the rest.
+// lost, held-lease actions and idle suspensions, dim for releases, text
+// for the rest.
 func eventStyle(t string) string {
 	switch t {
-	case "lost", "held_action":
+	case "lost", "held_action", "idle_suspended":
 		return "warn"
 	case "released":
 		return "dim"
