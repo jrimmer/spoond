@@ -1163,9 +1163,11 @@ TTL ceiling, the kept-checkpoint byte budget (#126), and the memory
 quota (#128): the sum of `memory_mb` over the user's **running** leases
 may not pass `M` (`0` = no cap; a suspended lease holds no hugepages
 and is not charged). All five default to `0` =
-unlimited/unset. `guaranteed_mib` is the user's memory floor, advisory
-in this part (#128 part 1): admission never counts it against them, and
-it must be `<= max_mib` when both are set (`400` otherwise). Over-cap
+unlimited/unset. `guaranteed_mib` is the user's guaranteed-memory
+floor: a lease whose charge keeps the owner's running sum within it is
+admitted `guaranteed`; once the sum passes it, the next lease is
+admitted `burst` (see [Lease classes](#lease-classes)). It must be
+`<= max_mib` when both are set (`400` otherwise). Over-cap
 creates, forks and clones return `429`; so does any operation that
 brings a suspended lease's guest back over the cap — resume, restart,
 restore, crash recovery, undrain — leaving the lease suspended (or
