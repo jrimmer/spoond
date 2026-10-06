@@ -127,7 +127,10 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background exec jobs per lease; past it a start answers `429` (#135) |
 | `JOB_RETENTION_SECS` | `604800` | exited background-job records older than this (seconds) are pruned by the sweeper; running and lost records are kept (#135) |
 | `KEPT_DISK_WARN_PCT` | `40` | kept-checkpoint share of the snapshot disk past which the notifier's `disk.kept` check warns and the dashboard's strip shows a row (`0` = off; #126) |
-| `GC_DELETE` | `0` | `1` = the snapshot GC actually deletes; default dry-run only logs candidates (see [operations.md](operations.md)) |
+| `GC_DELETE` | `0` | `1` = the snapshot catalog GC actually deletes; default dry-run only logs candidates (see [operations.md](operations.md)) |
+| `ORPHAN_REAP` | `dryrun` | what the GC does with orphan build directories: `off`, `dryrun` (log only), or `quarantine` (move aside, delete after `ORPHAN_QUARANTINE_SECS`; see [operations.md](operations.md)) |
+| `ORPHAN_MIN_AGE_SECS` | `3600` | don't reap a build directory modified more recently than this (it may still be written; see [operations.md](operations.md)) |
+| `ORPHAN_QUARANTINE_SECS` | `86400` | how long a `quarantine`-mode orphan waits before it may be deleted (see [operations.md](operations.md)) |
 | `PROXY_ADDR` | *(empty)* | `0.0.0.0:8891` to serve the HTTP proxy/LLM gateway listener (Caddy wildcard fronts it) |
 | `PROXY_AUTH_MODE` | `off` | `off` = capability model (lease id is the credential); `forward-auth` = require `X-Proxy-Auth` secret + `Remote-User` identity |
 | `PROXY_AUTH_SECRET` | *(empty)* | shared secret for `forward-auth` mode (set by Caddy/IdP; never forwarded to guests) |

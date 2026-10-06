@@ -12,6 +12,26 @@ summarised from README "Status".
 
 ### Fixed
 
+- **The snapshot disk leak from orphan build directories.** The catalog
+  GC only walked builds rows, so it never saw two kinds of directory
+  that piled up under `E2B_TEMPLATE_STORAGE_PATH`: a build spoond marked
+  `deleted` at creation (an abandoned pause or checkpoint whose memory
+  file the orchestrator finished writing seconds later, so the directory
+  reappeared after the delete), and a directory spoond never recorded
+  (an image build's intermediate layers, or a build whose catalog insert
+  failed) — about 91 GiB in 84 directories on vm2. Each GC pass now
+  reaps the direct child build directories the catalog does not need,
+  keeping any directory a catalog build, lease, kept build, sandbox or
+  image still names, any directory reachable from those through a
+  `memfile.header` / `rootfs.ext4.header`, and any changed within
+  `ORPHAN_MIN_AGE_SECS` (default 1 h). `ORPHAN_REAP` chooses the policy:
+  `dryrun` (default) logs `gc: would reap orphan <id> (<size>)` and
+  changes nothing, `quarantine` moves the directory to
+  `<storage path>/../quarantine/<id>` with a marker and restores or
+  finally deletes it (after `ORPHAN_QUARANTINE_SECS`, default 24 h), and
+  `off` disables the reap. `GC_DELETE` no longer governs this path. The
+  reap counts `spoond_gc_orphans_reaped_total` and
+  `spoond_gc_orphan_bytes_reaped_total` and rides the pass's `gc` event.
 - **`spoond images build` no longer leaves a dangling image per build.**
   Re-tagging `:latest` left the previous build's image behind in the
   local Docker store (about 1.5–1.9 GB per worker image rebuild); after
