@@ -111,7 +111,9 @@ func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 // by hand or the drain, or one whose resume/checkpoint is in flight is
 // not. Call with s.store.mu held.
 func idleSuspended(l *Lease) bool {
-	return l.Suspended && !l.busy && l.PreemptedAt.IsZero() &&
+	// Every pause records its own LastAction (pauseLeaseBody), so the
+	// idle_suspend marker here always describes the current suspension.
+	return l.Suspended && !l.busy && !l.Drained && l.PreemptedAt.IsZero() &&
 		l.LastAction == idleSuspendRule+"/"+heldActionSuspendIdle
 }
 

@@ -506,10 +506,20 @@ func TestIdleSuspendFilesCountsAsActivity(t *testing.T) {
 // TestIdleSuspendGuestDialCountsAsActivity: a guest dial attach moves
 // LastActive and keeps the lease out of the idle sweep.
 func TestIdleSuspendGuestDialCountsAsActivity(t *testing.T) {
-	ts, svc, _, id := filesSetup(t)
+	ts, svc, _, _ := newTestServerWithService(t)
+	ctx := context.Background()
+	// A persistent lease with a 60 s idle_suspend: two minutes without
+	// the dial's touch would put it past its threshold.
+	pl, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(pl, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	id := pl.ID
 	host, port := newEchoServer(t)
 	pointHostIP(t, svc, id, host, port)
-	ctx := context.Background()
 
 	svc.store.mu.Lock()
 	l := svc.store.leases[id]
@@ -917,5 +927,56 @@ func TestIdleSuspendExecResumeRefusalBurst(t *testing.T) {
 	}
 	if !l.Suspended {
 		t.Fatal("a refused auto-resume left the lease running")
+	}
+}
+
+// TestIdleSuspendStaleMarkerDoesNotResume: a lease once idle-suspended,
+// resumed by use and later suspended by hand, or drained, keeps the
+// stale idle_suspend LastAction; its next exec must answer 409 like any
+// other suspended lease instead of resuming it.
+func TestIdleSuspendStaleMarkerDoesNotResume(t *testing.T) {
+	ts, svc, _, _ := newTestServerWithService(t)
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(l, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.LastActive = time.Now().Add(-2 * time.Minute)
+	svc.store.mu.Unlock()
+	svc.suspendIdleLeases(ctx, time.Now())
+	if !svc.isIdleSuspended(l) {
+		t.Fatal("setup: the lease was not idle-suspended")
+	}
+	// Use resumes it.
+	if _, err := svc.resumeLease(ctx, l); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	// Suspended by hand: the stale marker must not count.
+	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
+		t.Fatalf("hand suspend: %v", err)
+	}
+	if svc.isIdleSuspended(l) {
+		t.Fatal("a hand-suspended lease reads as idle-suspended through a stale marker")
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a",
+		map[string]any{"cmd": "echo hi"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("exec on a hand-suspended lease = %d, want 409: %v", resp.StatusCode, body)
+	}
+
+	// A drained lease carrying the marker is not idle-suspended either.
+	svc.store.mu.Lock()
+	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
+	l.LastActionAt = time.Now()
+	l.LastActive = l.LastActionAt.Add(-time.Minute)
+	l.Drained = true
+	ok := idleSuspended(l)
+	svc.store.mu.Unlock()
+	if ok {
+		t.Fatal("a drained lease reads as idle-suspended")
 	}
 }

@@ -922,7 +922,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
-| `idle_suspended` | the idle sweep suspended the lease through the pause path (2.5, #129 part 2) | `idle for <duration>` |
+| `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 
 ### Resume and gaps

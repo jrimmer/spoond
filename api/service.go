@@ -1571,6 +1571,13 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 // (a second operation on a busy lease returns errLeaseBusy), pauses into
 // a new build, inserts the pause build row and marks the lease
 // suspended — plus Drained when drained.
+// LastAction values a pause records before any rule overwrites them.
+const (
+	pauseActionHand    = "suspend/hand"
+	pauseActionDrain   = "drain/suspend"
+	pauseActionPreempt = "preempt/suspend"
+)
+
 func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (string, error) {
 	s.store.mu.Lock()
 	if l.busy {
@@ -1633,6 +1640,18 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	if drained {
 		l.Drained = true
 	}
+	// Every pause records why the lease is suspended now. The idle
+	// sweep, the held rules and preemption overwrite this right after
+	// with their own action; a hand suspend or a drain keeps it. Without
+	// it a stale rule action from an earlier suspension (e.g. an
+	// idle_suspend the lease was since resumed from) would still
+	// describe this one, and an idle-suspended-only behaviour such as
+	// resume-on-next-call would apply to a lease suspended by hand.
+	l.LastAction = pauseActionHand
+	if drained {
+		l.LastAction = pauseActionDrain
+	}
+	l.LastActionAt = s.now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseSuspended, "paused into build "+buildID)
