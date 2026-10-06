@@ -10,6 +10,15 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spoond images build` no longer leaves a dangling image per build.**
+  Re-tagging `:latest` left the previous build's image behind in the
+  local Docker store (about 1.5–1.9 GB per worker image rebuild); after
+  a successful push the build now prunes dangling images (only those;
+  the registry keeps the canonical copy). Best effort: a failed prune
+  never fails the build.
+
 ## [2.6.4] - 2026-10-06
 
 Dashboard only. No backend change, no schema change; the `grid` package
