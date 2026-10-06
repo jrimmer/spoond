@@ -199,7 +199,7 @@ retried):
 Everything else answers at once: the lease-count cap (`max_leases`),
 bad requests, auth failures and unknown images are **not** waitable.
 
-The wait is capped at `MAX_ADMIT_WAIT_SECS` (default `600`; `0` disables
+The wait is capped at `MAX_ADMIT_WAIT_SECS` (default `900`; `0` disables
 waiting and the field is accepted and ignored — see
 [operations.md](operations.md)). The queue lives in the backend process
 and is lost on restart (a waiting client sees its connection go and
@@ -223,11 +223,26 @@ Outcomes:
 - **Drain** — a drain that starts answers every queued create `503
   draining` at once.
 
-The `queued` event names the refusal being waited out (e.g. `memory
-cap`, `no burst capacity`, `capacity`); the lease id is allocated when
-the create is queued and the created lease keeps it. On admission a
-`created` event follows as usual; a wait that ends without a lease emits
-`timed_out` with detail `waited Ns`, `client gone` or `draining`.
+The `queued` event names the refusal being waited out and the create's
+place in the fair-share order at that moment, e.g. `memory cap; position
+2 of 3`; the lease id is allocated when the create is queued and the
+created lease keeps it. On admission a `created` event follows as usual;
+a wait that ends without a lease emits `timed_out` with detail `waited
+Ns`, `client gone` or `draining`.
+
+The create holds its HTTP request open for the whole wait. spoond sets
+no server write timeout, but the client's own timeout must be longer
+than its `wait` (`curl -m`, Go's `http.Client.Timeout`), or the client
+gives up first and its ticket is dropped.
+
+### `GET /api/leases/queue` — creates waiting for admission
+
+Lists the caller's waiting creates (an admin sees every owner's) in
+fair-share order: `{"queued": [{"id", "owner", "image", "position",
+"waited_s", "reason"}]}`. `position` is the place in the whole queue
+(1 is tried first), `reason` the refusal being waited out. Empty when
+nothing waits. A client whose create is waiting can poll this to show
+progress.
 
 ### `GET /api/leases` — list leases
 

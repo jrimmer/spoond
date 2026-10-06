@@ -181,6 +181,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.svc.SetMetrics(s.metrics)
 	s.mux.HandleFunc("POST /api/sandboxes", s.handleCreate)
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleList)
+	s.mux.HandleFunc("GET /api/sandboxes/queue", s.handleQueue)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}", s.handleGetSandbox)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/exec", s.handleExec)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}", s.handleDelete)
@@ -1744,6 +1745,17 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		"status":  "running",
 		"address": lease.HostIP,
 	})
+}
+
+// handleQueue lists the caller's creates waiting for admission (#129),
+// each with its position in the whole fair-share queue; an admin sees
+// every owner's.
+func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	if isAdmin(r) {
+		owner = ""
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queued": s.svc.queuedCreates(owner)})
 }
 
 // handleList returns the caller's leases.

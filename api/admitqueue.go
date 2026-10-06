@@ -20,8 +20,8 @@ import (
 
 // DefaultMaxAdmitWaitSecs is the queued-admission wait cap when
 // MAX_ADMIT_WAIT_SECS is unset: a waiting create is admitted or refused
-// within ten minutes.
-const DefaultMaxAdmitWaitSecs = 600
+// within fifteen minutes (Honey's flight leases ask for wait: 900).
+const DefaultMaxAdmitWaitSecs = 900
 
 // admitQueueTick is how often the queue retries its tickets even when
 // nothing signalled: capacity can free in ways that do not call wake
@@ -108,7 +108,7 @@ type admissionQueue struct {
 }
 
 // maxAdmitWaitSecs is the effective wait cap: the configured value
-// (main.go resolves MAX_ADMIT_WAIT_SECS, default 600). 0 disables
+// (main.go resolves MAX_ADMIT_WAIT_SECS, default 900). 0 disables
 // waiting; a negative value reads as 0.
 func (s *Service) maxAdmitWaitSecs() int {
 	if s.cfg.MaxAdmitWaitSecs < 0 {
@@ -156,7 +156,8 @@ func (s *Service) newAdmissionTicket(owner string, req leaseRequest, refusal err
 	depth := len(s.admitQ.tickets)
 	s.admitQ.mu.Unlock()
 
-	s.bus.emit(t.id, owner, LeaseQueued, waitRefusalDetail(refusal))
+	pos, of := s.ticketPosition(t)
+	s.bus.emit(t.id, owner, LeaseQueued, fmt.Sprintf("%s; position %d of %d", waitRefusalDetail(refusal), pos, of))
 	if s.metrics != nil {
 		s.metrics.LeasesQueued.Set(float64(depth))
 	}
@@ -406,4 +407,48 @@ func (s *Service) runAdmitQueueLoop(ctx context.Context) {
 			s.tryAdmitQueued(ctx)
 		}
 	}
+}
+
+// ticketPosition is t's 1-based place in the current fair-share order
+// and the queue's length; 0 when t is no longer queued.
+func (s *Service) ticketPosition(t *admissionTicket) (int, int) {
+	list := s.orderedTickets()
+	for i, x := range list {
+		if x == t {
+			return i + 1, len(list)
+		}
+	}
+	return 0, len(list)
+}
+
+// QueuedCreate is one waiting create as GET /api/leases/queue shows it.
+type QueuedCreate struct {
+	ID       string `json:"id"`
+	Owner    string `json:"owner"`
+	Image    string `json:"image"`
+	Position int    `json:"position"`
+	WaitedS  int    `json:"waited_s"`
+	Reason   string `json:"reason"`
+}
+
+// queuedCreates lists the waiting creates in fair-share order, with
+// each one's position in the whole queue; owner "" lists everyone's
+// (admins), otherwise only that owner's.
+func (s *Service) queuedCreates(owner string) []QueuedCreate {
+	now := s.now()
+	out := []QueuedCreate{}
+	for i, t := range s.orderedTickets() {
+		if owner != "" && t.owner != owner {
+			continue
+		}
+		out = append(out, QueuedCreate{
+			ID:       t.id,
+			Owner:    t.owner,
+			Image:    t.leaseReq.image,
+			Position: i + 1,
+			WaitedS:  int(now.Sub(t.queuedAt) / time.Second),
+			Reason:   waitRefusalDetail(t.refusal),
+		})
+	}
+	return out
 }

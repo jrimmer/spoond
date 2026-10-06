@@ -64,12 +64,7 @@ func (s *Service) freeHugepageMiBLocked(ctx context.Context) (uint64, error) {
 			return 0, fmt.Errorf("node info: %w", err)
 		}
 	}
-	info := s.nodeInfoCache
-	taken := info.HugepagesUsed + info.HugepagesReserved
-	if taken >= info.HugepagesTotal {
-		return 0, nil
-	}
-	return (info.HugepagesTotal - taken) * info.HugepageSizeBytes / (1024 * 1024), nil
+	return s.nodeInfoCache.FreeHugepageBytes() / (1024 * 1024), nil
 }
 
 // debitNodeInfoLocked marks memoryMB MiB of hugepages used in the cached
@@ -107,7 +102,7 @@ func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 	if err != nil {
 		return fmt.Errorf("node info: %w", err)
 	}
-	free := (info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes
+	free := info.FreeHugepageBytes()
 	if info.Status != "healthy" {
 		return fmt.Errorf("%w: node status %s", substrate.ErrCapacity, info.Status)
 	}

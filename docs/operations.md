@@ -498,7 +498,7 @@ and answers `503` while capacity is still short.
 **Queued admission** (#129 part 1): a create can wait for room instead
 of failing, by sending `"wait": N` (seconds) on `POST /api/leases` (see
 [api.md](api.md#queued-admission)). `MAX_ADMIT_WAIT_SECS` caps the wait
-(default `600`; `0` disables waiting — the request field is accepted and
+(default `900`; `0` disables waiting — the request field is accepted and
 ignored). The queue lives in the backend process and is lost on restart.
 Waiting creates are served in fair-share order: the owner furthest under
 their `guaranteed_mib` first (an owner with no `guaranteed_mib`, or

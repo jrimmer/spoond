@@ -935,7 +935,7 @@ func (s *Service) updateNodeMetrics(ctx context.Context) {
 	}
 	s.metrics.NodeRunning.Set(float64(info.RunningSandboxes))
 	s.metrics.NodeWork.Set(float64(info.OutstandingWork))
-	s.metrics.NodeHugepagesFree.Set(float64((info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes))
+	s.metrics.NodeHugepagesFree.Set(float64(info.FreeHugepageBytes()))
 }
 
 // refillPool pre-creates cfg.PoolSize sandboxes for every image with a

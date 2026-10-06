@@ -328,6 +328,10 @@ func TestAdmitWaitBackfill(t *testing.T) {
 	installDynamicNode(t, svc, sub, 1408, 256, 512)
 	svc.wakeAdmissionQueue()
 
+	// The fake counts every live sandbox as 512 pages, the small one
+	// too, so once it is live the node reports more used than total.
+	// Free must read 0 then (NodeInfo.FreeHugepageBytes saturates), not
+	// wrap to an enormous figure that would admit the big create.
 	rSmall := waitResult(t, resSmall)
 	if rSmall.code != http.StatusCreated {
 		t.Fatalf("small backfill create = %d, want 201 (%v)", rSmall.code, rSmall.body)
@@ -496,4 +500,58 @@ func gaugeValue(t *testing.T, svc *Service, name string) float64 {
 	}
 	t.Fatalf("metric %s not found", name)
 	return -1
+}
+
+// TestAdmitWaitQueuePosition: the queued event carries the create's
+// place in the fair-share order, and GET /api/leases/queue lists the
+// caller's waiting creates (an admin's view: everyone's) with their
+// positions in the whole queue.
+func TestAdmitWaitQueuePosition(t *testing.T) {
+	_, h, svc, sub, _ := newAdmitServer(t)
+	fillTwo(t, h, sub, svc, "tok-1")
+	svc.admitQ.tick = time.Hour // no retries during the test
+
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startCreate(t, h, ctx, "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
+	waitDepth(t, svc, 1)
+	startCreate(t, h, ctx, "tok-2", `{"image":"small","ttl":60,"wait":60}`)
+	waitDepth(t, svc, 2)
+
+	var details []string
+	deadline := time.Now().Add(3 * time.Second)
+	for len(details) < 2 && time.Now().Before(deadline) {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseQueued {
+				details = append(details, ev.Detail)
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if len(details) != 2 || !strings.HasSuffix(details[0], "; position 1 of 1") || !strings.HasSuffix(details[1], "; position 2 of 2") {
+		t.Fatalf("queued details = %q, want positions 1 of 1 and 2 of 2", details)
+	}
+
+	queue := func(tok string) []any {
+		rec, body := doUsersReq(t, h, "GET", "/api/leases/queue", tok, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET queue as %s: %d %s", tok, rec.Code, rec.Body.String())
+		}
+		q, _ := body["queued"].([]any)
+		return q
+	}
+	one, two, all := queue("tok-1"), queue("tok-2"), queue("admin-tok")
+	if len(one) != 1 || len(two) != 1 || len(all) != 2 {
+		t.Fatalf("queue sizes tok-1=%d tok-2=%d admin=%d, want 1, 1, 2", len(one), len(two), len(all))
+	}
+	if p := two[0].(map[string]any)["position"]; p != float64(2) {
+		t.Fatalf("tok-2's create position = %v, want 2 (its place in the whole queue)", p)
+	}
+	if img := one[0].(map[string]any)["image"]; img != "mid" {
+		t.Fatalf("tok-1's queued image = %v, want mid", img)
+	}
+	svc.drainQueue()
 }
