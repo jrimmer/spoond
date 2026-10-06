@@ -300,6 +300,8 @@ func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string
 	s.nodeInfoMu.Lock()
 	s.creditNodeInfoLocked(l.MemoryMB)
 	s.nodeInfoMu.Unlock()
+	// A preemption frees capacity: retry waiting creates (#129).
+	s.wakeAdmissionQueue()
 	return nil
 }
 

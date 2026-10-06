@@ -827,6 +827,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// preempted first (0 = the default).
 		Burst    bool `json:"burst"`
 		Priority *int `json:"priority"`
+		// Wait is how many seconds a create refused for a waitable reason
+		// (#129 part 1) may wait for admission instead. 0 keeps today's
+		// behaviour (answer at once); above 0 it is capped at
+		// MAX_ADMIT_WAIT_SECS, and negative is a bad request.
+		Wait int `json:"wait"`
 		// Secrets (#80) become files under /run/secrets in the guest
 		// (mode 0600, on a 0700 tmpfs). Values are kept in memory only,
 		// never stored, logged or returned.
@@ -890,6 +895,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		priority = *req.Priority
 	}
+	if req.Wait < 0 {
+		writeError(w, http.StatusBadRequest, "wait must be >= 0")
+		return
+	}
 	ok, err := s.reg.Has(r.Context(), req.Image)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "image catalog unavailable")
@@ -933,48 +942,101 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			ttl = userMax
 		}
 	}
-	lease, err := s.svc.grantLease(r.Context(), leaseRequest{
+	leaseReq := leaseRequest{
 		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
 		createSecrets: secrets, exposePorts: expose, burst: req.Burst, priority: priority,
-	})
-	if err != nil {
-		switch {
-		case errors.Is(err, errQuotaExceeded):
-			writeError(w, http.StatusTooManyRequests, err.Error())
-		case errors.Is(err, errUnknownImage):
-			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
-		case errors.Is(err, errBurstReserve):
-			// A burst lease that would dip the node under its reserve
-			// (#128 part 2): 503 with a retry hint, not a generic
-			// capacity error.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
-		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
-		default:
-			s.svc.log.Printf("create: grant %s: %v", req.Image, err)
-			writeError(w, http.StatusInternalServerError, "failed to grant lease")
+	}
+	grantStart := time.Now()
+	lease, err := s.svc.grantLease(r.Context(), leaseReq)
+	// Queued admission (#129 part 1): a waitable refusal with "wait" set
+	// is held in the queue and retried in fair-share order while the
+	// request stays open.
+	if err != nil && waitRefusal(err) {
+		if wait, ok := s.svc.admissionWait(req.Wait); ok {
+			t := s.svc.newAdmissionTicket(leaseReq.owner, leaseReq, err, wait)
+			s.svc.wakeAdmissionQueue()
+			var waited time.Duration
+			lease, waited, err = s.svc.waitForAdmission(r.Context(), t)
+			if err != nil {
+				if r.Context().Err() != nil {
+					// The client went away: nothing to write.
+					return
+				}
+				s.writeCreateRefusal(w, req.Image, err, waited)
+				return
+			}
+			s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, ttl, waited)
+			return
 		}
+	}
+	if err != nil {
+		s.writeCreateRefusal(w, req.Image, err, 0)
 		return
 	}
-	// Stamp the hold's clock on the granted lease (grant itself leaves
-	// it zero so unheld grants carry no hold), and the create request's
-	// own checkpoint interval (grant leaves the stored -1, the host
-	// default).
+	// A create that asked to wait but fit at once still reports how long
+	// admission took, so a client can always read waited_ms for a wait
+	// request.
+	waited := time.Duration(0)
+	if req.Wait > 0 {
+		waited = time.Since(grantStart)
+	}
+	s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, ttl, waited)
+}
+
+// writeCreateRefusal writes the failure response for a refused create,
+// including waited_ms when a wait timed out. It carries the same status,
+// body and Retry-After as the immediate refusal.
+func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err error, waited time.Duration) {
+	status := http.StatusInternalServerError
+	msg := "failed to grant lease"
+	retryAfter := 0
+	switch {
+	case errors.Is(err, errQuotaExceeded):
+		status, msg = http.StatusTooManyRequests, err.Error()
+	case errors.Is(err, errUnknownImage):
+		status, msg = http.StatusNotFound, "unknown image tag: "+image
+	case errors.Is(err, errPreemptCannot):
+		// A guaranteed lease that could not preempt (#128 part 3): the
+		// snapshot disk is too full to pause a burst lease.
+		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), burstRetryAfterSecs
+	case errors.Is(err, errBurstReserve):
+		// A burst lease that would dip the node under its reserve
+		// (#128 part 2): 503 with a retry hint, not a generic capacity
+		// error.
+		status, msg, retryAfter = http.StatusServiceUnavailable, err.Error(), burstRetryAfterSecs
+	case errors.Is(err, errDraining):
+		status, msg = http.StatusServiceUnavailable, "draining"
+	case errors.Is(err, substrate.ErrCapacity):
+		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
+	default:
+		s.svc.log.Printf("create: grant %s: %v", image, err)
+	}
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	}
+	body := map[string]any{"error": msg}
+	if waited > 0 {
+		body["waited_ms"] = waited.Milliseconds()
+	}
+	writeJSON(w, status, body)
+}
+
+// writeCreatedLease writes the 201 for a granted create (both the
+// immediate and the queued path): it stamps the hold and the request's
+// checkpoint interval, then the usual body plus waited_ms when the
+// create waited for admission.
+func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, holderURL string, holdTTL int, ckptSet bool, ckptSecs int64, ttl, waited time.Duration) {
 	s.svc.store.mu.Lock()
-	if req.Holder != "" {
-		s.svc.setHoldLocked(lease, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second, s.svc.now())
+	if holder != "" {
+		s.svc.setHoldLocked(lease, holder, holderURL, time.Duration(holdTTL)*time.Second, s.svc.now())
 	}
 	if ckptSet {
 		lease.CheckpointInterval = ckptSecs
 	}
 	s.svc.saveLeaseLocked(lease)
 	s.svc.store.mu.Unlock()
-	writeJSON(w, http.StatusCreated, map[string]any{
+	body := map[string]any{
 		"id":                  lease.ID,
 		"owner":               lease.Owner,
 		"address":             lease.HostIP,
@@ -991,7 +1053,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
 		"class":               leaseClassRow(lease),
 		"priority":            lease.Priority,
-	})
+	}
+	if waited > 0 {
+		body["waited_ms"] = waited.Milliseconds()
+	}
+	writeJSON(w, http.StatusCreated, body)
 }
 
 // handleEndpoint reports a lease's sandbox endpoint: the substrate

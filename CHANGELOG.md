@@ -10,6 +10,27 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Queued admission (#129 part 1).** A create that cannot be admitted
+  right now can wait for room instead of failing. `POST
+  /api/leases` (and its `/api/sandboxes` alias) gains a `wait` field
+  (seconds, default `0` = today's behaviour exactly), capped at the new
+  `MAX_ADMIT_WAIT_SECS` (default `600`; `0` disables waiting). Only
+  capacity, burst-reserve, cannot-preempt and the `max_mib` refusal
+  wait; the lease-count cap, bad requests, auth and unknown images still
+  answer at once. The in-memory queue is served in fair-share order
+  (the owner furthest under its `guaranteed_mib` first, then FIFO), with
+  each wake-up admitting every queued create that fits, so a smaller one
+  may pass a larger one. Admitted creates carry `waited_ms`; a timeout
+  answers the original refusal with `waited_ms`; a client that goes away
+  drops its ticket; a drain answers every queued create `503 draining`.
+  The lease id is allocated when the create is queued, and the queue
+  emits `queued`/`timed_out` events. New metrics
+  `spoond_leases_queued_oldest_seconds`, `spoond_admit_wait_seconds` and
+  `spoond_admit_timeouts_total`, and the dashboard shows the oldest
+  ticket's age. No schema migration.
+
 ## [2.4.0] - 2026-10-06
 
 Capacity: memory quotas, guaranteed and burst leases, and preemption of

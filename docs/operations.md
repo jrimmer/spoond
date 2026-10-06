@@ -495,6 +495,24 @@ poll the lease — deleting and recreating it throws away the paused
 work. A client's own `resume` of a preempted lease takes the same path
 and answers `503` while capacity is still short.
 
+**Queued admission** (#129 part 1): a create can wait for room instead
+of failing, by sending `"wait": N` (seconds) on `POST /api/leases` (see
+[api.md](api.md#queued-admission)). `MAX_ADMIT_WAIT_SECS` caps the wait
+(default `600`; `0` disables waiting — the request field is accepted and
+ignored). The queue lives in the backend process and is lost on restart.
+Waiting creates are served in fair-share order: the owner furthest under
+their `guaranteed_mib` first (an owner with no `guaranteed_mib`, or
+already at it, ranks after every owner with headroom), then FIFO; each
+wake-up admits every queued create that fits, so a smaller one may pass
+a larger one. The queue is retried whenever capacity may have freed (a
+lease released, suspended, preempted-and-resumed, or a quota changed)
+and on a 5 s tick. The metrics: `spoond_leases_queued` (current queue
+depth), `spoond_leases_queued_oldest_seconds` (the oldest ticket's age),
+`spoond_admit_wait_seconds` (histogram of the wait of admitted creates)
+and `spoond_admit_timeouts_total` (waits that ended without a lease —
+timeout, client gone or drain). The dashboard's capacity panel shows
+this as `queued N (oldest Ms)`.
+
 `POOL_SIZE` pre-creates that many sandboxes per image with a current
 build so grants are served without a cold restore. Production runs
 `POOL_SIZE=0` — with snapshot restores, a cold grant is tens of
@@ -514,6 +532,7 @@ each request's env.
 |---|---|---|
 | `503 capacity: … bytes of hugepage memory free` | not enough free hugepages for the image, or the node is draining/unhealthy | free sandboxes, lower `POOL_SIZE`, or raise `vm.nr_hugepages` (then re-check with doctor) |
 | `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
+| `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
 | lease shows `preempted` / `‖ suspended·p` | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
 | `410 lease lost in a substrate crash` | the lease had no checkpoint when the orchestrator died | delete the lease; nothing to resume |
 | `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
