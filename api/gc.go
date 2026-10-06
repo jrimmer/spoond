@@ -166,6 +166,14 @@ func (s *Service) gcPass(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// After the catalog candidates, sweep the directories under the
+	// storage path that the catalog never sees (an abandoned pause whose
+	// memory file lands after the build was marked deleted, or a build
+	// that was never recorded). Nothing here fails the pass: a catalog
+	// or storage read that does not support the walk skips the reap.
+	orphans, orphanFreed := s.reapOrphans(ctx)
+	deleted += orphans
+	freed += orphanFreed
 	// A pass that deleted builds is spoond's own maintenance and emits
 	// one lease-less `gc` event (2.5, #132 part 2); a pass that deleted
 	// nothing (the default dry run included) emits nothing.

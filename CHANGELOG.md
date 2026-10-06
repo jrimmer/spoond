@@ -10,6 +10,25 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **The snapshot disk leak from orphan build directories.** The catalog
+  GC only walked builds rows, so it never saw two kinds of directory
+  that piled up under `E2B_TEMPLATE_STORAGE_PATH`: a build spoond marked
+  `deleted` at creation (an abandoned pause or checkpoint whose memory
+  file the orchestrator finished writing seconds later, so the directory
+  reappeared after the delete), and a directory spoond never recorded
+  (an image build's intermediate layers, or a build whose catalog insert
+  failed) — about 91 GiB in 84 directories on vm2. Each GC pass now
+  reaps the direct child build directories the catalog does not need,
+  keeping any directory a catalog build, lease, kept build, sandbox or
+  image still names, any directory reachable from those through a
+  `memfile.header` / `rootfs.ext4.header`, and any changed within
+  `ORPHAN_MIN_AGE_SECS` (default 1 h). The reap honours `GC_DELETE`
+  (dry-run logs `gc: would reap orphan <id> (<size>)`), counts
+  `spoond_gc_orphans_reaped_total` and
+  `spoond_gc_orphan_bytes_reaped_total`, and rides the pass's `gc` event.
+
 ## [2.6.4] - 2026-10-06
 
 Dashboard only. No backend change, no schema change; the `grid` package

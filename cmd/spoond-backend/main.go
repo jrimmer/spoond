@@ -49,6 +49,10 @@
 //	GC_LOST_GRACE   how long a non-persistent lease's snapshots stay
 //	                  kept after the lease is lost (Go duration;
 //	                  default 24h = 1 d)
+//	ORPHAN_MIN_AGE_SECS  don't reap a build directory under
+//	                  E2B_TEMPLATE_STORAGE_PATH modified more recently
+//	                  than this (default 3600): it may be in use or still
+//	                  being written
 //	HELD_IDLE_TIMEOUT_SECS  how long a held lease may sit idle (no exec,
 //	                  stream, proxy, keepalive or heartbeat) before the
 //	                  sweep suspends it (default 14400 = 4 h; 0 disables)

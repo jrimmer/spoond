@@ -101,6 +101,11 @@ type BackendMetrics struct {
 	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
 	StorageFree   prometheus.Gauge       // free bytes at the template storage path
 	GCDeleted     *prometheus.CounterVec // {kind}: builds deleted by the catalog GC
+	// GCOrphansReaped / GCOrphanBytesReaped count the orphan build
+	// directories the catalog never records (spoond-5sr): how many were
+	// removed and the bytes they held.
+	GCOrphansReaped     prometheus.Counter
+	GCOrphanBytesReaped prometheus.Counter
 	// Kept checkpoints (#126): pins of live leases and their bytes.
 	KeptBuildsBytes prometheus.Gauge // summed size_bytes over kept builds of live leases
 	KeptBuilds      prometheus.Gauge // pin count over live leases
@@ -375,6 +380,14 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "gc_deleted_total",
 		Help: "Builds deleted by the catalog GC, by kind.",
 	}, []string{"kind"})
+	m.GCOrphansReaped = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "gc_orphans_reaped_total",
+		Help: "Orphan build directories removed by the GC (never recorded or already deleted).",
+	})
+	m.GCOrphanBytesReaped = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "gc_orphan_bytes_reaped_total",
+		Help: "Bytes freed by the GC's orphan build directory reap.",
+	})
 	// Kept checkpoints (2.3 #121, #126): the pins and their disk bytes.
 	m.KeptBuildsBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "kept_builds_bytes",
@@ -480,6 +493,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur, m.CheckpointPause,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
+		m.GCOrphansReaped, m.GCOrphanBytesReaped,
 		m.KeptBuildsBytes, m.KeptBuilds,
 		m.HeldActions,
 		m.PreemptionsTotal, m.PreemptedLeases,

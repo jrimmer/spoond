@@ -256,6 +256,37 @@ outside it that have been idle for an hour.
   `DELETE /api/snapshots/{build_id}` removes one (`409` while anything
   references it, `403` for template builds). See [api.md](api.md).
 
+After the catalog candidates each pass also reaps **orphan build
+directories**: directories under `E2B_TEMPLATE_STORAGE_PATH` that the
+catalog never sees, either because spoond marked the build `deleted` at
+creation while the orchestrator finished writing its memory file seconds
+later (so the directory reappeared after the delete), or because the
+directory was never recorded at all (an image build's intermediate
+layers, or a build whose catalog insert failed). Only direct child
+directories whose name parses as a UUID are considered, and symlinks are
+never followed.
+
+A directory is **needed**, and never touched, when it is:
+
+- a catalog build that is not `deleted`;
+- named by any lease (`resume_build_id`, `last_checkpoint_build_id`), any
+  kept build (`lease_kept_builds`), any sandbox row or any image's
+  current build;
+- reachable from a needed build through its `memfile.header` /
+  `rootfs.ext4.header`, transitively (a header records the build ids it
+  maps pages from as 16 raw UUID bytes);
+- modified within the last `ORPHAN_MIN_AGE_SECS` (default `3600`), so a
+  directory in use or still being written is spared.
+
+Everything else is an orphan. With the dry-run GC the pass logs
+`gc: would reap orphan <id> (<size>)` and deletes nothing; with
+`GC_DELETE=1` it removes the directory (`os.RemoveAll`), reads
+`spoond_gc_orphans_reaped_total` and
+`spoond_gc_orphan_bytes_reaped_total`, and counts the space into the
+pass's `gc` event. The reap is refused (logged and skipped, never
+failing the pass) when the catalog read fails or names no needed builds
+at all.
+
 Disk accounting runs with the GC: each non-deleted build's `size_bytes`
 is refreshed (allocated blocks, not apparent size) and exposed as
 `spoond_snapshot_bytes{kind}`, with `spoond_storage_free_bytes` for the
