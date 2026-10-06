@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -315,6 +316,76 @@ func TestJobSignal(t *testing.T) {
 	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "KILL"})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("signal of exited job = %d, want 409", resp.StatusCode)
+	}
+}
+
+// TestJobStartPerLeaseLock: the start lock is per lease. Two concurrent
+// starts on one lease at cap-1 admit exactly one; starts on two leases
+// do not wait for each other even while one substrate Start is blocked.
+func TestJobStartPerLeaseLock(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	idA, leaseA, _ := createJobLease(t, ts, svc)
+	idB, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.MaxRunningJobsPerLease = 1
+
+	// Block Start for lease A's sandbox until released, so its first
+	// start holds A's lock across the whole substrate round trip; starts
+	// for lease B are not blocked.
+	release := make(chan struct{})
+	var once sync.Once
+	sub.SetStartHandler(func(sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
+		if sandboxID == leaseA.SandboxID {
+			<-release
+		}
+		return fake.NewProcess(3001), nil
+	})
+	t.Cleanup(func() {
+		once.Do(func() { close(release) })
+		sub.SetStartHandler(nil)
+	})
+
+	status := func(id string) int {
+		resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 600", "background": true})
+		return resp.StatusCode
+	}
+
+	// A start on lease B must complete even though lease A's start is
+	// still blocked in the substrate: the locks are independent.
+	bDone := make(chan int, 1)
+	go func() { bDone <- status(idB) }()
+	select {
+	case code := <-bDone:
+		if code != http.StatusAccepted {
+			t.Fatalf("lease B start = %d, want 202", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("lease B start waited on lease A's start lock")
+	}
+
+	// Two concurrent starts on lease A at cap-1: exactly one admits.
+	aCodes := make(chan int, 2)
+	go func() { aCodes <- status(idA) }()
+	go func() { aCodes <- status(idA) }()
+	// Let the first acquire the lock and block in Start; the second then
+	// waits on the same lock rather than racing the cap check.
+	time.Sleep(200 * time.Millisecond)
+	once.Do(func() { close(release) })
+
+	got := []int{<-aCodes, <-aCodes}
+	accepted, rejected := 0, 0
+	for _, c := range got {
+		switch c {
+		case http.StatusAccepted:
+			accepted++
+		case http.StatusTooManyRequests:
+			rejected++
+		}
+	}
+	if accepted != 1 || rejected != 1 {
+		t.Fatalf("concurrent starts on one lease = %v, want one 202 and one 429", got)
+	}
+	if n, _ := db.CountRunningJobs(context.Background(), idA); n != 1 {
+		t.Fatalf("running jobs on lease A = %d, want 1", n)
 	}
 }
 

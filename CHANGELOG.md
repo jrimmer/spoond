@@ -10,6 +10,11 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- Background job starts use a per-lease lock, so starts on different
+  leases run concurrently instead of serialising on one global lock.
+
 ## [2.6.1] - 2026-10-06
 
 More detail in the events panel (#132 part 2). No schema change; the

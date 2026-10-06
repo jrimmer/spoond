@@ -425,10 +425,16 @@ type Service struct {
 	// the whole preempt-then-admit sequence (see admitClass).
 	preemptMu sync.Mutex
 
-	// jobStartMu serialises background job starts (2.6, #135): the
-	// per-lease running-job cap is a check-then-insert against SQLite,
-	// so two concurrent starts for one lease must not both pass it.
+	// jobStartMu guards the jobStarts map: one start lock per lease,
+	// held across the per-lease running-job cap check-then-insert (2.6,
+	// #135). A single global lock serialised every background start on
+	// every lease across the substrate Start round trip; per-lease locks
+	// keep starts on different leases concurrent while two starts on one
+	// lease still cannot both pass the cap.
 	jobStartMu sync.Mutex
+	// jobStarts holds the per-lease start locks, reference counted so an
+	// idle lease's entry is dropped once no start holds or waits on it.
+	jobStarts map[string]*jobStartLock
 	// liveJobSecrets holds the secret names staged for each running job
 	// (memory only, never the lease_jobs row): the exit watcher removes
 	// exactly those files if the guest wrapper did not. Lost on restart,
@@ -464,6 +470,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		bus:            newEventBus(),
 		gcErr:          newGCTracker(),
 		liveJobSecrets: map[string][]string{},
+		jobStarts:      map[string]*jobStartLock{},
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/store"
@@ -200,6 +201,40 @@ func jobCommandBody(cmd, cwd string) string {
 	return "cd " + shellQuote(cwd) + " && " + cmd
 }
 
+// jobStartLock is one lease's start lock with a waiter count, so the
+// per-lease entry can be dropped once no start holds or waits on it.
+type jobStartLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquireJobStart returns the held start lock for a lease. Callers must
+// release it with releaseJobStart.
+func (s *Service) acquireJobStart(leaseID string) *jobStartLock {
+	s.jobStartMu.Lock()
+	l := s.jobStarts[leaseID]
+	if l == nil {
+		l = &jobStartLock{}
+		s.jobStarts[leaseID] = l
+	}
+	l.refs++
+	s.jobStartMu.Unlock()
+	l.mu.Lock()
+	return l
+}
+
+// releaseJobStart unlocks a lease's start lock and drops its entry when
+// no other start holds or waits on it.
+func (s *Service) releaseJobStart(leaseID string, l *jobStartLock) {
+	l.mu.Unlock()
+	s.jobStartMu.Lock()
+	l.refs--
+	if l.refs == 0 {
+		delete(s.jobStarts, leaseID)
+	}
+	s.jobStartMu.Unlock()
+}
+
 // startJob starts a background exec. It returns the job id, start time
 // and the envd Process carrying the stream (the caller watches it), or
 // an error the caller maps onto an HTTP status.
@@ -212,11 +247,11 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	// leave a started process unrecorded. context.WithoutCancel keeps the
 	// request's values; the caller is already resolved by now.
 	ctx = context.WithoutCancel(ctx)
-	// The per-lease cap is a check-then-insert against SQLite: hold one
-	// lock for both so two concurrent starts for one lease cannot both
-	// pass it.
-	s.jobStartMu.Lock()
-	defer s.jobStartMu.Unlock()
+	// The per-lease cap is a check-then-insert against SQLite: hold the
+	// lease's start lock for both so two concurrent starts for one lease
+	// cannot both pass it, while starts on other leases run concurrently.
+	startLock := s.acquireJobStart(lease.ID)
+	defer s.releaseJobStart(lease.ID, startLock)
 	n, err := s.db.CountRunningJobs(ctx, lease.ID)
 	if err != nil {
 		return "", time.Time{}, nil, err
