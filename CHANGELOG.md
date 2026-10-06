@@ -10,6 +10,39 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-10-06
+
+### Fixed
+
+- **A guaranteed lease no longer preempts to protect the burst reserve.**
+  The reserve (`BURST_RESERVE_MIB`) keeps room free for guaranteed work:
+  burst leases may not dip into it, but a guaranteed lease may. Since
+  2.4 a guaranteed admission instead treated the reserve as its own
+  floor and suspended burst leases whenever free memory was under
+  reserve + its size, so a short CI job could pause a burst worker on a
+  host with plenty of room. It now preempts only when its own memory is
+  not free.
+- **Dashboard attention strip: only what needs a person.** The
+  held-lease row showed any held lease with a `last_action` in the last
+  24 h, so since 2.5 (when every pause started recording its action) an
+  ordinary preemption, drain or hand suspend stayed on the strip for a
+  day, even after the lease ran again. It now shows a held lease only
+  while a held-lease rule (idle, pressure or a lapsed hold) has it
+  suspended, and clears when the lease runs again; preempted leases keep
+  their own row while preempted.
+
+### Removed
+
+- **TLS certificate expiry monitoring.** The dashboard's certificate row
+  and `cert` status item and the backend's `tls.cert.30d`/`.7d`/`.1d`
+  notifications are gone: watching certificates is the host's IT
+  tooling's job (the Gatus example in docs/operations.md does it), not
+  spoond's. spoond still serves HTTPS with `TLS_CERT`/`DASH_TLS_CERT`,
+  and `spoond doctor` still checks that the configured certificate can
+  be loaded and trusted.
+
+The `grid` package is unchanged since 2.4.0. No schema change.
+
 ## [2.5.1] - 2026-10-06
 
 ### Changed

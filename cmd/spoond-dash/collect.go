@@ -4,10 +4,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -110,10 +108,6 @@ type Snapshot struct {
 	KeptBuilds      int     `json:"keptBuilds"`
 	KeptBuildsBytes int64   `json:"keptBuildsBytes"`
 	KeptDiskPct     float64 `json:"keptDiskPct"`
-
-	// CertNotAfter is the served TLS pair's expiry (DASH_TLS_CERT); zero
-	// when the dashboard serves plain HTTP. Only the banner reads it.
-	CertNotAfter time.Time `json:"-"`
 
 	// Rendered as HTML element patches, not sent as signals.
 	Services []Service   `json:"-"`
@@ -337,7 +331,6 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 		}
 	}
 	s.Events = c.eventLines(now)
-	c.readCert(&s)
 	// Kept bytes as a share of the snapshot disk (#126): the attention
 	// strip's "kept checkpoints use X% of the snapshot disk". The disk
 	// total comes from fromHost's statfs; with no total (statfs failed)
@@ -574,28 +567,6 @@ func (c *collector) fromHost(s *Snapshot) error {
 		s.RootUsedPct = round1(float64(st.Blocks-st.Bfree) / float64(st.Blocks) * 100)
 	}
 	return nil
-}
-
-// readCert stamps the served TLS pair's expiry for the banner: a
-// certificate within 30 days of expiring needs a person before basic
-// auth starts failing in browsers. A missing or unreadable file is not
-// an error here (the dashboard then serves plain HTTP or keeps the last
-// good frame); the server itself reports real certificate problems.
-func (c *collector) readCert(s *Snapshot) {
-	if c.cfg.TLSCert == "" {
-		return
-	}
-	b, err := os.ReadFile(c.cfg.TLSCert)
-	if err != nil {
-		return
-	}
-	blk, _ := pem.Decode(b)
-	if blk == nil {
-		return
-	}
-	if crt, err := x509.ParseCertificate(blk.Bytes); err == nil {
-		s.CertNotAfter = crt.NotAfter
-	}
 }
 
 // eventPanelRows is how many events the panel shows.

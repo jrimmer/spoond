@@ -57,7 +57,11 @@ func (s *Service) guaranteedFits(ctx context.Context, memoryMB int) (bool, error
 	if s.nodeInfoCache.Status != "healthy" {
 		return true, nil
 	}
-	return freeMiB >= uint64(s.burstReserveMiB())+uint64(memoryMB), nil
+	// The burst reserve keeps room free *for* guaranteed work: burst
+	// leases may not dip into it, a guaranteed lease may. So a
+	// guaranteed admission fits whenever its own memory is free, and
+	// preempts only when it is not.
+	return freeMiB >= uint64(memoryMB), nil
 }
 
 // creditNodeInfoLocked returns memoryMB MiB of hugepages to the cached
@@ -228,7 +232,7 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 		s.log.Printf("preempt: node info: %v", err)
 		return nil
 	}
-	need := uint64(s.burstReserveMiB()) + uint64(memoryMB)
+	need := uint64(memoryMB) // the reserve is for guaranteed work (guaranteedFits)
 	if freeMiB+freeable < need {
 		if diskBlocked && freeMiB+freeable+blocked >= need {
 			// The disk floor is the only thing in the way: refuse
