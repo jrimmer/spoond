@@ -78,3 +78,20 @@ func TestRunningJobKeepsLeaseOutOfIdleSuspend(t *testing.T) {
 		t.Fatal("idle_suspend suspended a lease with a running background job")
 	}
 }
+
+// TestCrashLostMarksJobsLost: a lease lost in a crash (no checkpoint to
+// recover from) takes its running jobs with it: they are marked lost,
+// not left running forever.
+func TestCrashLostMarksJobsLost(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.CrashTest = true
+	id, _, _ := createJobLease(t, ts, svc)
+	installJobProcess(t, sub, fake.NewProcess(1013))
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/crash-test", "token-a", nil)
+	if resp.StatusCode != 200 || body["result"] != "lost" {
+		t.Fatalf("crash test = %d %v, want 200 lost", resp.StatusCode, body)
+	}
+	waitJobState(t, db, jobID, "lost", 2*time.Second)
+}

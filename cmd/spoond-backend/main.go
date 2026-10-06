@@ -88,6 +88,10 @@
 //	MAX_ADMIT_WAIT_SECS  how long a create may wait for admission when
 //	                  it sends "wait" (#129 part 1; default 600; 0
 //	                  disables waiting)
+//	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
+//	                  which crashes one lease and runs it through crash
+//	                  recovery (owner or admin; default off, the route
+//	                  then answers 404). For hosts that run crash suites.
 package spoondbackend
 
 import (
@@ -374,6 +378,7 @@ func Main(args []string) int {
 		MaxRunningJobsPerLease: envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:       int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
 		MaxAdmitWaitSecs:       maxAdmitWaitSecs,
+		CrashTest:              os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).

@@ -241,6 +241,11 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Restore in place to a kept checkpoint (2.3, #121): owner or admin,
 	// 404 for anyone else and for a build that is not the lease's own.
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/restore", s.handleRestore)
+	// Crash test for one lease (Honey M3): delete its sandbox as a crash
+	// would and run the same per-lease recovery the reconcile pass does.
+	// Owner or admin, 404 for anyone else; only when the host sets
+	// CRASH_TEST (404 otherwise). See api/crash.go.
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/crash-test", s.handleCrashTest)
 	// Lease file operations (#114): download/upload/stat/mkdir/remove a
 	// guest file through the substrate. Owner or admin; 404 for anyone
 	// else, 409 while suspended.

@@ -417,6 +417,17 @@ the GC section. `KEPT_DISK_WARN_PCT` (default `40`, `0` = off) is when
 kept bytes alone start drawing attention: the dashboard's strip and the
 notifier's `disk.kept` both read it.
 
+### Crash test
+
+`CRASH_TEST=1` (or `true`) in the backend's environment enables `POST
+/api/leases/{id}/crash-test` ([api.md](api.md)), which crashes one lease
+and runs it through the recovery above on demand: from its checkpoint
+or `lost`, with a `crash_test` event first. It is off by default, and
+the route then answers `404` like an unknown route; set it only on hosts
+that run crash suites. It affects only the caller's own leases (an admin
+may crash any lease), and nothing else: no other lease, no pool, no
+release. Each run logs `crash-test: lease <id> crashed by <caller id>`.
+
 ## Restarting the backend
 
 A backend restart loses nothing: leases, shares, the pool and the catalog
