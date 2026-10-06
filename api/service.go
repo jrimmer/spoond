@@ -1165,6 +1165,12 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	if err := s.db.DeleteKeptBuilds(ctx, l.ID); err != nil {
 		s.log.Printf("release: delete kept builds of %s: %v", l.ID, err)
 	}
+	// Jobs still running die with the sandbox (2.6, #135). Their rows
+	// cascade away with the lease below, so no exit or reconcile path
+	// will ever finish them: settle them here — the running gauge, the
+	// remembered secret names (the files went with the guest) and a
+	// job_lost event, so a watcher learns the job ended.
+	s.settleJobsOfReleasedLease(ctx, l)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)

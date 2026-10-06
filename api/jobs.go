@@ -743,3 +743,27 @@ func (s *Service) leaseJobsView(ctx context.Context, leaseID string) map[string]
 	}
 	return view
 }
+
+// settleJobsOfReleasedLease ends the bookkeeping of every job still
+// running on a lease being released: the running gauge goes down, the
+// job's remembered secret names are dropped (the guest and its files are
+// gone) and a job_lost event says why. The rows themselves cascade with
+// the lease row.
+func (s *Service) settleJobsOfReleasedLease(ctx context.Context, l *Lease) {
+	jobs, err := s.db.ListJobs(ctx, l.ID)
+	if err != nil {
+		s.log.Printf("release: list jobs of %s: %v", l.ID, err)
+		return
+	}
+	for _, j := range jobs {
+		if j.State != "running" {
+			continue
+		}
+		s.takeJobSecrets(j.JobID)
+		if s.metrics != nil {
+			s.metrics.JobsRunning.Dec()
+			s.metrics.JobsExitedTotal.WithLabelValues("lost").Inc()
+		}
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseJobLost, "job "+j.JobID+": lease released")
+	}
+}
