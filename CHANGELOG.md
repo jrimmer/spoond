@@ -17,7 +17,9 @@ summarised from README "Status".
   'K'='V';` into the `bash -c` argv, where any process in the guest
   could read them from `/proc/<pid>/cmdline`. They now travel in
   `ExecRequest.Env` and are set in the process environment by envd; the
-  argv carries only the command and any `cd <cwd> &&` prefix.
+  argv carries only the command and any `cd <cwd> &&` prefix. The CI
+  runner's checkout likewise passes its `GITHUB_TOKEN` header in the
+  exec env instead of prefixing `git clone` with it.
 
 ### Changed
 
