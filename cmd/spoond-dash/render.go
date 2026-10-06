@@ -1700,11 +1700,13 @@ func eventTypeStyle(t string) string {
 }
 
 // splitSegs breaks one event line into styled runs at its three column
-// separators — the two spaces between time, type, lease id and tail:
+// separators — the run of spaces between time, type, lease id and tail:
 // the time stays dim, the type takes its kind's colour, the lease id the
-// id style, the tail the event's own style, the gaps themselves dim. One
-// style across the whole line would paint the padding dim too. Only
-// those three separators split the line: the tail is free text (a
+// id style, the tail the event's own style, the separator runs themselves
+// dim. The type and id columns are padded, so their padding merges with
+// the separator: the whole run of spaces is consumed as one separator,
+// and one style across the whole line would paint the padding dim too.
+// Only those three separators split the line: the tail is free text (a
 // comment can hold two spaces in a row) and is never cut again, so it
 // keeps one style to the panel's edge.
 func splitSegs(line, style string) []grid.Seg {
@@ -1715,6 +1717,10 @@ func splitSegs(line, style string) []grid.Seg {
 		i := strings.Index(rest, "  ")
 		if i < 0 {
 			break
+		}
+		j := i
+		for j < len(rest) && rest[j] == ' ' {
+			j++
 		}
 		if i > 0 {
 			st := style
@@ -1729,8 +1735,8 @@ func splitSegs(line, style string) []grid.Seg {
 			segs = append(segs, grid.Seg{Text: rest[:i], Style: st})
 			chunk++
 		}
-		segs = append(segs, grid.Seg{Text: "  ", Style: "dim"})
-		rest = rest[i+2:]
+		segs = append(segs, grid.Seg{Text: rest[i:j], Style: "dim"})
+		rest = rest[j:]
 	}
 	if rest != "" {
 		segs = append(segs, grid.Seg{Text: rest, Style: style})

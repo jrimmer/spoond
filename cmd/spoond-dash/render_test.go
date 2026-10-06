@@ -927,6 +927,38 @@ func TestEventsPanelTypeColour(t *testing.T) {
 	}
 }
 
+// TestEventsPanelLostAndCreatedColours draws the events panel with a lost
+// and a created event and checks the type words reach the page with their
+// kind's class: lost bad, created the title style.
+func TestEventsPanelLostAndCreatedColours(t *testing.T) {
+	s := healthySnapshot()
+	s.Events = []EventLine{
+		{Text: "07:19:02  lost        fedcba0987  nightly", Style: "warn"},
+		{Text: "07:18:44  created     abcdef0123  jason", Style: "text"},
+	}
+	rows := strings.Split(Draw(s, DefaultWidth, fixedNow, "h").HTML(), "\n")
+	var lost, created string
+	for _, r := range rows {
+		if strings.Contains(r, "lost") {
+			lost = r
+		}
+		if strings.Contains(r, "created") {
+			created = r
+		}
+	}
+	if lost == "" || !strings.Contains(lost, `g-bad" data-id="events">lost`) {
+		t.Fatalf("lost type not drawn bad:\n%s", lost)
+	}
+	if created == "" || !strings.Contains(created, `g-title" data-id="events">created`) {
+		t.Fatalf("created type not drawn with the title style:\n%s", created)
+	}
+	for _, r := range []string{lost, created} {
+		if !strings.Contains(r, `g-id"`) {
+			t.Fatalf("lease id not drawn with the id style:\n%s", r)
+		}
+	}
+}
+
 // TestMeterWarningTick: a meter with a warning level draws a warn-coloured
 // ╎ at that level without changing the bar's width; a meter with no
 // warning level draws no tick.
