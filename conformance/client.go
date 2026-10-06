@@ -233,6 +233,8 @@ type leaseInfo struct {
 	ResumeBuildID string            `json:"resume_build_id"`
 	Generation    int64             `json:"generation"`
 	Name          string            `json:"name"`
+	Class         string            `json:"class"`
+	Preempted     bool              `json:"preempted"`
 }
 
 // statResult is the /stat response shape (A1 §5.9).

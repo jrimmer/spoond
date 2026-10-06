@@ -102,7 +102,11 @@ free hugepage memory for the image, or the node is not healthy), and
 `503` `no burst capacity` with `Retry-After: 30` when the lease is
 burst (asked for, or above the owner's `guaranteed_mib`) and the node's
 free hugepages would dip under `BURST_RESERVE_MIB` after it — see
-[Lease classes](#lease-classes).
+[Lease classes](#lease-classes). A **guaranteed** lease that cannot get
+its hugepages preempts burst leases instead (see
+[Preemption](#preemption)); when the snapshot disk is too full to pause
+one, the create answers `503`
+`capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`.
 
 ### Lease classes
 
@@ -135,6 +139,40 @@ until then). `priority`
 orders preemption within a class (lower is preempted first, `0` the
 default) and is stored with the lease.
 
+### Preemption
+
+When a **guaranteed** admission (create, fork, clone, resume, warm or
+cold restart, restore, crash recovery, undrain) cannot get its
+hugepages — free hugepages less the burst reserve is smaller than the
+lease's `memory_mb` — spoond reclaims them from burst leases. It
+suspends them through the normal pause path (a snapshot build; the
+memory continues on resume, so the generation does **not** change), in
+this order: lowest `priority`, then newest, then the owner furthest
+over its `guaranteed_mib`. It stops as soon as enough memory is free and
+admits the guaranteed lease. Preemption is serialised: one preempting
+admission at a time, so two guaranteed creates cannot each preempt for
+themselves.
+
+A preempted lease is marked `preempted: true` in `GET /api/leases` and
+`GET /api/leases/{id}`, keeps its `resume_build_id`, and emits a
+`preempted` event with detail `for a guaranteed lease of <owner>`. It
+stays suspended until it fits again: the backend resumes preempted
+leases every 15 s, oldest preemption first, through the normal resume
+path (as a burst lease again if the owner is still above the
+guarantee). On resume `preempted` is cleared and a `resumed` event is
+emitted with detail `after preemption`. A client's explicit resume of a
+preempted lease takes the same path; until it succeeds the lease stays
+suspended.
+
+Preemption has a disk floor: it pauses a burst lease only while the
+snapshot disk stays above `PREEMPT_DISK_FLOOR_PCT` (default 15) after
+the pause, estimated from the lease's `memory_mb`. When no candidate
+clears that floor, the guaranteed admission answers `503`
+`capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`.
+Honey-like clients should treat a `preempted` lease as temporarily
+unavailable and wait for its `resumed` event (or poll the lease) rather
+than deleting and recreating it.
+
 ### `GET /api/leases` — list leases
 
 Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
@@ -142,8 +180,9 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `persistent`, `suspended`, `state`, `build_id`, `resume_build_id`,
 `name`, `comment`, `holder`, `holder_url`, `net_policy`,
 `egress_allowlist`, `exposed`, `generation`, `checkpoint_interval`
-(effective seconds; `0` = never), `class` and `priority` (see
-[Lease classes](#lease-classes)).
+(effective seconds; `0` = never), `class`, `priority` and `preempted`
+(see [Lease classes](#lease-classes) and
+[Preemption](#preemption)).
 
 A held lease's row adds `hold_expires_at` (RFC 3339, when the hold
 expires and normal sweeping resumes) and — after the first automatic
@@ -435,7 +474,10 @@ owner's memory quota (#128): `429` when the charge would pass
 `max_mib` — the lease stays suspended. The resume re-decides the
 lease's class too (#128 part 2): a burst lease coming back into a full
 burst reserve answers `503` `no burst capacity` with `Retry-After: 30`
-and stays suspended. Resuming a lease that is
+and stays suspended. Resuming a lease that a preemption suspended
+(#128 part 3, `preempted: true`) takes the same path and answers the
+same way; on success `preempted` is cleared and the `resumed` event's
+detail is `after preemption`. Resuming a lease that is
 already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.)

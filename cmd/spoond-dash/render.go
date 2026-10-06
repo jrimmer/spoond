@@ -1282,15 +1282,17 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
 		g.Text(c.own, yy, sanitize(r.Owner), "text", c.ownW)
 		// The state cell names the burst class and preemption (#128
-		// part 2/3): "▶ running·b" and "‖ suspended·b·p" — the suffixes
-		// ride the state so the columns stay aligned (the policy column
-		// keeps its own width).
+		// part 2/3): "▶ running·b" and a preempted (always burst) lease
+		// as "‖ suspended·p" — the suffix rides the state so the columns
+		// stay aligned (the policy column keeps its own width), and it
+		// fits the state column: ·b and ·p replace each other rather
+		// than stack.
 		state := r.State
-		if r.Burst {
-			state += "·b"
-		}
-		if r.Preempted {
+		switch {
+		case r.Preempted:
 			state += "·p"
+		case r.Burst:
+			state += "·b"
 		}
 		segs := []grid.Seg{
 			{Text: string(stateGlyph(r)), Style: stateGlyphStyle(r)},

@@ -341,6 +341,9 @@ func TestBannerTriggers(t *testing.T) {
 		{"held action in 24h", func(s *Snapshot) {
 			s.Rows = []LeaseRow{{ID: "abc123", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
 		}, "idle/suspend_idle"},
+		{"preempted leases", func(s *Snapshot) {
+			s.Preempted = 3
+		}, "3 burst lease(s) preempted"},
 	}
 	for _, tc := range cases {
 		s := healthySnapshot()
@@ -518,6 +521,23 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 	}
 	if !strings.Contains(held, "▶ running") || !strings.Contains(lapsed, "‖ suspended") {
 		t.Errorf("state column must always show the run state:\n%s\n%s", held, lapsed)
+	}
+}
+
+// TestLeasesShowPreemptMarks: the state cell names the burst class and
+// preemption (#128 part 2/3): "‖ suspended·b·p".
+func TestLeasesShowPreemptMarks(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{
+		{ID: "preempt0001", Image: "py-base", State: "suspended", Burst: true, Preempted: true, Age: "5m", Left: "∞"},
+		{ID: "burst00001", Image: "py-base", State: "running", Burst: true, Age: "5m", Left: "10m"},
+	}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "‖ suspended·p") {
+		t.Fatalf("preempted burst row not marked suspended·p:\n%s", p)
+	}
+	if !strings.Contains(p, "▶ running·b") {
+		t.Fatalf("plain burst row not marked running·b:\n%s", p)
 	}
 }
 

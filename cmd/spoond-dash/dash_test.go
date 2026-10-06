@@ -334,6 +334,50 @@ func TestFromDBBurstCountsAllLiveBurstLeases(t *testing.T) {
 	}
 }
 
+// TestFromDBPreemptedCountsOutsideTheWindow: the preempted count comes
+// from the store over every live preempted lease (#128 part 3), even one
+// older than the leases panel's 40-row window.
+func TestFromDBPreemptedCountsOutsideTheWindow(t *testing.T) {
+	cfg := testConfig(t, "")
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	raw, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
+	queries := []string{
+		`INSERT INTO images (name, template_id, current_build_id, vcpu, memory_mb, disk_mb, updated_at) VALUES ('go-base','t1','b1',2,2048,6144,'` + ts(-48*time.Hour) + `')`,
+		// 41 preempted leases, the oldest outside the display window, and
+		// one running lease that is not preempted.
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class, preempted_at) VALUES ('running','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','running',0,'burst','')`,
+	}
+	for i := 0; i < 41; i++ {
+		queries = append(queries, fmt.Sprintf(
+			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class, preempted_at) VALUES ('preempt-%02d','u-1','go-base','%s','%s','%s','suspended',1,'burst','%s')`,
+			i, ts(-time.Duration(i+2)*time.Minute), ts(time.Hour), ts(0), ts(-time.Duration(i+1)*time.Minute)))
+	}
+	for _, q := range queries {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	raw.Close()
+	os.WriteFile(cfg.UsersFile, []byte(`{"users":[{"id":"u-1","name":"ci"}]}`), 0o600)
+
+	var s Snapshot
+	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
+		t.Fatal(err)
+	}
+	if s.Preempted != 41 {
+		t.Fatalf("preempted = %d, want 41 (the running lease excluded)", s.Preempted)
+	}
+}
+
 func TestFromDBReadsLeasesAndImages(t *testing.T) {
 	cfg := testConfig(t, "")
 	db, err := store.Open(cfg.DBPath)

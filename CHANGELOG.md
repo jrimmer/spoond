@@ -54,6 +54,27 @@ summarised from README "Status".
   advisory until part 3. `class` and `priority` ride every lease row
   and detail; the dashboard marks burst rows (`▶ running·b`) and adds
   `burst N` to the capacity panel.
+- **Preemption by suspend (#128, part 3).** A guaranteed admission
+  (create, fork, clone, resume, warm or cold restart, restore, crash
+  recovery, undrain) that cannot get its hugepages now reclaims them by
+  suspending burst leases through the normal pause path — memory
+  continues on resume, so the generation does not change. Preemption
+  takes the lowest `priority`, then the newest lease, then the owner
+  furthest over its `guaranteed_mib`, stops as soon as enough memory is
+  free, and is serialised so two guaranteed creates cannot each preempt
+  for themselves. Every preempted lease is persisted with `preempted`
+  and emits a `preempted` event (`for a guaranteed lease of <owner>`).
+  A **disk floor** guards the pause: preemption stops while the snapshot
+  disk would fall under `PREEMPT_DISK_FLOOR_PCT` (default `15`), and a
+  guaranteed admission that cannot preempt answers `503` `capacity:
+  cannot preempt (snapshot disk low)` with `Retry-After: 30`. A
+  background **resume queue** runs every 15 s and resumes preempted
+  leases, oldest preemption first, when they fit again, clearing
+  `preempted` and emitting `resumed` with detail `after preemption`;
+  the same path serves a client's explicit resume. New metrics
+  `spoond_preemptions_total` and `spoond_preempted_leases`, dashboard
+  state marks (`‖ suspended·b·p`) and an attention-strip row name
+  them.
 
 ## [2.3.3] - 2026-10-05
 
