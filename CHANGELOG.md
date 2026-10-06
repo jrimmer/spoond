@@ -17,7 +17,7 @@ summarised from README "Status".
   how long the grant took (measured from admission start, so a queued
   create reports its admission time, not its wait): `granted from image
   py-base in 61 ms`. The `checkpointed` event gains the duration and the
-  short build id: `540 ms · build 9e1f…`. `DELETE /api/leases/{id}` (and
+  short build id: `540 ms · build 9e1f2ab3…`. `DELETE /api/leases/{id}` (and
   the `/api/sandboxes` alias) accepts an optional `reason` (query
   `?reason=` or JSON body `{"reason"}`, at most 120 printable
   characters, sanitised like comments) that its `released` event

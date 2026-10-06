@@ -998,7 +998,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse) | the pause build id |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
-| `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f…` |
+| `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
