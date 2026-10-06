@@ -300,6 +300,11 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 	if body["generation"].(float64) != 2 {
 		t.Fatalf("restore generation = %v, want 2", body["generation"])
 	}
+	if at, _ := body["build_created_at"].(string); at == "" {
+		t.Fatalf("restore response has no build_created_at: %v", body)
+	} else if _, err := time.Parse(time.RFC3339, at); err != nil {
+		t.Fatalf("build_created_at %q is not RFC 3339: %v", at, err)
+	}
 	if body["build_id"] != b.BuildID {
 		t.Fatalf("restore build_id = %v, want %s", body["build_id"], b.BuildID)
 	}

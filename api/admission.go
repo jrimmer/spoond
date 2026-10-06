@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/substrate"
@@ -113,16 +114,17 @@ func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 	return nil
 }
 
-// classify decides a lease's class (#128 part 2): burst when the
-// request forced it (preemptible even within the guarantee) or when the
-// owner's running charge — the leases live now plus the reservations
-// in flight, this lease already among them — passes their
-// guaranteed_mib; guaranteed otherwise — including every lease of a
-// user without a guaranteed_mib, which keeps today's behaviour, and
-// owners without an identity-store user (legacy consumer tokens). The
-// charge is read at the moment of the decision: the first lease past
-// the guarantee is the one that bursts.
-func (s *Service) classify(owner string, burst bool) string {
+// classify decides a lease's class (#128 part 2): burst when the request
+// forced it (preemptible even within the guarantee) or when the owner's
+// guaranteed charge — the memory of its live *guaranteed* leases,
+// other than self (a lease being re-admitted) — plus this lease's
+// memoryMB would pass their guaranteed_mib; guaranteed otherwise,
+// including every lease of a user without a guaranteed_mib (today's
+// behaviour) and owners without an identity-store user (legacy
+// consumer tokens). Burst leases do not count against the guarantee: an
+// owner whose guaranteed leases went away gets the room back for the
+// next lease, and promoteBurst moves running burst leases into it.
+func (s *Service) classify(owner string, burst bool, memoryMB int, self string) string {
 	if burst {
 		return ClassBurst
 	}
@@ -133,22 +135,85 @@ func (s *Service) classify(owner string, burst bool) string {
 	if u == nil || u.GuaranteedMiB <= 0 {
 		return ClassGuaranteed
 	}
-	if s.usedMiB(owner) > u.GuaranteedMiB {
+	s.store.mu.Lock()
+	charge := s.guaranteedMiBLocked(owner, self)
+	s.store.mu.Unlock()
+	if charge+memoryMB > u.GuaranteedMiB {
 		return ClassBurst
 	}
 	return ClassGuaranteed
 }
 
-// admitClass decides a lease's class and admits it (#128 part 2/3). It
-// returns the class — to be stamped on the lease when admitted — and the
-// refusal, if any. A guaranteed lease may preempt burst leases to make
-// room (preemption is serialised inside admitGuaranteed). A burst lease
-// is admitted only while the node's free hugepages stay above
-// BurstReserveMiB after its own. The plain hugepage capacity check is
-// not repeated here: createSandbox runs it for every cold create, and
-// a guaranteed lease's admission is exactly what the reserve protects.
-func (s *Service) admitClass(ctx context.Context, owner string, memoryMB int, burst bool) (string, error) {
-	class := s.classify(owner, burst)
+// guaranteedMiBLocked sums the memory of owner's live guaranteed leases,
+// leaving out self. Caller holds the store lock.
+func (s *Service) guaranteedMiBLocked(owner, self string) int {
+	n := 0
+	for _, l := range s.store.leases {
+		if l.released || l.Owner != owner || !l.live() || l.ID == self || l.Class == ClassBurst {
+			continue
+		}
+		n += l.MemoryMB
+	}
+	return n
+}
+
+// promoteBurst moves an owner's running burst leases to guaranteed,
+// oldest first, while they fit their guaranteed_mib (#128). A lease
+// created with "burst": true stays burst. Promotion changes bookkeeping
+// only — the VM is untouched — and emits a "promoted" event. It runs
+// when an owner's guaranteed lease goes (release, pause) and on the
+// resume queue's tick, so the guarantee stays filled as leases churn.
+func (s *Service) promoteBurst(owner string) {
+	if s.identities == nil {
+		return
+	}
+	u := s.identities.UserByID(owner)
+	if u == nil || u.GuaranteedMiB <= 0 {
+		return
+	}
+	s.store.mu.Lock()
+	var cand []*Lease
+	for _, l := range s.store.leases {
+		if !l.released && l.Owner == owner && l.live() && !l.busy && l.Class == ClassBurst && !l.Burst {
+			cand = append(cand, l)
+		}
+	}
+	sort.Slice(cand, func(i, j int) bool { return cand[i].CreatedAt.Before(cand[j].CreatedAt) })
+	charge := s.guaranteedMiBLocked(owner, "")
+	var promoted []*Lease
+	for _, l := range cand {
+		if charge+l.MemoryMB > u.GuaranteedMiB {
+			break
+		}
+		l.Class = ClassGuaranteed
+		charge += l.MemoryMB
+		s.saveLeaseLocked(l)
+		promoted = append(promoted, l)
+	}
+	s.store.mu.Unlock()
+	for _, l := range promoted {
+		s.emitLeaseEvent(l.ID, l.Owner, LeasePromoted, "to guaranteed: the owner's guarantee has room")
+	}
+}
+
+// promoteAllBurst runs promoteBurst for every owner with a running
+// burst lease (the resume queue's tick).
+func (s *Service) promoteAllBurst() {
+	s.store.mu.Lock()
+	owners := map[string]bool{}
+	for _, l := range s.store.leases {
+		if !l.released && l.live() && l.Class == ClassBurst && !l.Burst {
+			owners[l.Owner] = true
+		}
+	}
+	s.store.mu.Unlock()
+	for o := range owners {
+		s.promoteBurst(o)
+	}
+}
+
+func (s *Service) admitClass(ctx context.Context, owner string, memoryMB int, burst bool, self string) (string, error) {
+	class := s.classify(owner, burst, memoryMB, self)
 	if class != ClassBurst {
 		// A guaranteed admission preempts burst leases when the node
 		// cannot host it, then takes its hugepages from the cached

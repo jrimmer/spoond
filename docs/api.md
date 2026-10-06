@@ -130,11 +130,20 @@ lease: resume, warm and cold restart, restore, crash recovery,
 undrain) and persisted with the lease. The class answers one question:
 whose room does this lease take?
 
-- **`guaranteed`** — the owner's running charge with this lease stays
-  within their `guaranteed_mib`. A user with no `guaranteed_mib` keeps
-  every lease guaranteed, which is today's behaviour.
-- **`burst`** — the lease passes the guarantee (the first lease past it
-  bursts), or the request forced it with `"burst": true`. A burst lease
+- **`guaranteed`** — the memory of the owner's live *guaranteed*
+  leases, plus this lease, stays within their `guaranteed_mib` (burst
+  leases do not count against the guarantee). A user with no
+  `guaranteed_mib` keeps every lease guaranteed, which is today's
+  behaviour.
+- **`burst`** — the lease would pass the guarantee, or the request
+  forced it with `"burst": true`.
+- **Promotion.** When an owner's guaranteed lease is released or
+  paused, and every 15 s, spoond moves the owner's oldest running burst
+  leases to guaranteed while they fit the guarantee, and emits
+  `promoted` for each. The VM is untouched; only its class changes. A
+  lease created with `"burst": true` is never promoted. So the
+  guarantee stays filled as leases come and go, and does not drift to
+  all-burst. A burst lease
   is preemptible even within another user's guarantee, and it is
   admitted only while the node's free hugepages stay above
   `BURST_RESERVE_MIB` (default 8192, `0` = the reserve is disabled;
@@ -842,7 +851,7 @@ point (`resume_build_id` is cleared; the next suspend sets it as
 usual). Response `200`:
 
 ```json
-{"id":"…","build_id":"<uuid>","generation":2,"status":"running"}
+{"id":"…","build_id":"<uuid>","generation":2,"status":"running","build_created_at":"2026-10-06T09:12:30Z"}
 ```
 
 ### `PUT /api/leases/{id}/checkpoint-policy` — set the checkpoint interval
@@ -1147,6 +1156,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
+| `promoted` | a running burst lease moved to guaranteed: its owner's guarantee has room again | `to guaranteed: the owner's guarantee has room` |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
 | `gc` | a catalog GC pass deleted builds (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |

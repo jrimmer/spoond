@@ -19,6 +19,31 @@ summarised from README "Status".
   the registry keeps the canonical copy). Best effort: a failed prune
   never fails the build.
 
+## [2.6.5] - 2026-10-06
+
+A user's guarantee no longer drifts to all-burst; restore names its
+checkpoint's time. No schema change; the `grid` package is unchanged
+since 2.4.0.
+
+### Added
+
+- **The restore response names when its checkpoint was taken:**
+  `build_created_at` (RFC 3339) beside `build_id`.
+
+### Fixed
+
+- **A user's guarantee no longer drifts to all-burst.** A lease's class
+  was decided once, at admission, against the owner's *total* running
+  memory, burst leases included. Once an owner had burst leases every
+  new lease came in burst, and as the older guaranteed leases went
+  nothing moved the survivors back; a busy owner ended up with every
+  lease burst and preemptible. A lease is now guaranteed while the
+  owner's guaranteed leases plus it fit `guaranteed_mib` (burst leases
+  do not count), and running burst leases are promoted, oldest first,
+  when the guarantee has room again (on a release or pause of a
+  guaranteed lease, and every 15 s), with a `promoted` event. A lease
+  created with `"burst": true` stays burst.
+
 ## [2.6.4] - 2026-10-06
 
 Dashboard only. No backend change, no schema change; the `grid` package
