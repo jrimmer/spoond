@@ -313,10 +313,10 @@ func TestC2_QueuedAdmissionWaitsForRoom(t *testing.T) {
 	trackAs(t, burstTok, l.ID)
 }
 
-// TestAdmitWaitIdleHostAnswersAtOnce: a create with `"wait": 30` on an
+// TestC3_WaitOnIdleHostAnswersAtOnce: a create with `"wait": 30` on an
 // idle host is admitted at once with waited_ms below 1000 (#129 part 1),
 // always on and outside group C.
-func TestAdmitWaitIdleHostAnswersAtOnce(t *testing.T) {
+func TestC3_WaitOnIdleHostAnswersAtOnce(t *testing.T) {
 	rec := begin(t)
 	image := envOr("CONFORMANCE_IDLE_IMAGE", "py-base")
 
