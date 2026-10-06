@@ -206,6 +206,19 @@ func (db *DB) PruneJobs(ctx context.Context, cutoff time.Time) (int64, error) {
 	return n, nil
 }
 
+// ListExpiredJobs returns the exited jobs older than retention, for the
+// guest-side cleanup that follows a prune.
+func (db *DB) ListExpiredJobs(ctx context.Context, cutoff time.Time) ([]JobRow, error) {
+	rows, err := db.r.QueryContext(ctx,
+		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='exited' AND ended_at != '' AND ended_at < ?`,
+		formatTime(cutoff))
+	if err != nil {
+		return nil, fmt.Errorf("store: list expired jobs: %w", err)
+	}
+	defer rows.Close()
+	return scanJobs(rows)
+}
+
 // DeleteJobsOfLease removes a lease's job rows. The foreign key already
 // cascades on lease deletion; this is for the explicit paths.
 func (db *DB) DeleteJobsOfLease(ctx context.Context, leaseID string) error {

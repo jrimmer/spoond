@@ -5,13 +5,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +34,14 @@ type Fake struct {
 	files     map[string]*memFS // per-sandbox in-memory filesystem
 	procs     map[uint32]*FakeProcess
 	nextPID   uint32
+	// jobProcs and jobPIDOf track guest processes started by a
+	// background-job wrapper (spoond-job): JobProcess drives their exit
+	// and JobState reads what they left in dir (2.6, #135).
+	jobProcs map[uint32]*FakeProcess
+	jobPIDOf map[string]uint32
+	// jobDir is the host directory a "real wrapper" job runner writes a
+	// job's files into; empty means the runner is disabled.
+	jobDir string
 
 	execHandler  func(sandboxID string, args []string) substrate.ExecResult
 	startHandler func(sandboxID string, req substrate.StartRequest) (substrate.Process, error)
@@ -53,6 +65,8 @@ func New() *Fake {
 		sandboxes:  map[string]substrate.Sandbox{},
 		files:      map[string]*memFS{},
 		procs:      map[uint32]*FakeProcess{},
+		jobProcs:   map[uint32]*FakeProcess{},
+		jobPIDOf:   map[string]uint32{},
 		healthErrs: map[string]error{},
 		nodeInfo: substrate.NodeInfo{
 			Status:            "healthy",
@@ -76,6 +90,119 @@ func (f *Fake) SetStartHandler(h func(sandboxID string, req substrate.StartReque
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startHandler = h
+}
+
+// EnableJobRunner makes Start actually run background jobs (2.6, #135)
+// instead of returning an inert process: a command whose argv is the
+// spoond job wrapper is executed for real, writing its stdout/stderr/rc
+// files into host directory dir, and the fake hands the test a process
+// it drives. req.Env's SPOOND_JOBS_DIR and SPOOND_SECRETS_DIR are
+// rewritten to subdirectories of dir, so the wrapper never touches the
+// test host's /var/lib/spoond or /run/secrets. Jobs started this way are
+// listed by JobProcess and JobState. Call before any job starts; nil
+// disables the runner.
+func (f *Fake) EnableJobRunner(dir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobDir = dir
+}
+
+// JobProcess returns the process the fake created for the background
+// job with this job id, or nil. The test drives its exit by finishing
+// the real command and pushing a ProcessEvent, or simply lets the real
+// process write rc and waits with JobDone.
+func (f *Fake) JobProcess(jobID string) *FakeProcess {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pid, ok := f.jobPIDOf[jobID]
+	if !ok {
+		return nil
+	}
+	return f.jobProcs[pid]
+}
+
+// JobDone reports whether the wrapper for jobID has written rc (the
+// guest-side source of truth).
+func (f *Fake) JobDone(jobID string) bool {
+	f.mu.Lock()
+	dir := f.jobDir
+	f.mu.Unlock()
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "jobs", jobID, "rc"))
+	return err == nil
+}
+
+// JobPID returns the command pid the wrapper recorded for jobID.
+func (f *Fake) JobPID(jobID string) (int, bool) {
+	f.mu.Lock()
+	dir := f.jobDir
+	f.mu.Unlock()
+	if dir == "" {
+		return 0, false
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "jobs", jobID, "pid"))
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, false
+	}
+	return pid, true
+}
+
+// KillProcessGroup signals a process group, the way the guest /bin/kill
+// does for a job's pid (2.6, #135).
+func (f *Fake) KillProcessGroup(pid int, kill bool) error {
+	sig := syscall.SIGTERM
+	if kill {
+		sig = syscall.SIGKILL
+	}
+	return syscall.Kill(-pid, sig)
+}
+
+// StopAllJobs kills every wrapper-run job's process group and removes
+// the runner's temp files. Tests register it as cleanup so a long-running
+// job (a `sleep 600`) does not outlive the suite.
+func (f *Fake) StopAllJobs() {
+	f.mu.Lock()
+	dir := f.jobDir
+	jobs := make([]string, 0, len(f.jobPIDOf))
+	for id := range f.jobPIDOf {
+		jobs = append(jobs, id)
+	}
+	f.mu.Unlock()
+	for _, id := range jobs {
+		if pid, ok := f.JobPID(id); ok {
+			_ = f.KillProcessGroup(pid, true)
+		}
+	}
+	if dir != "" {
+		_ = os.RemoveAll(filepath.Join(dir, "jobs"))
+		_ = os.RemoveAll(filepath.Join(dir, "secrets"))
+	}
+}
+
+// JobState is what a finished (or running) real-wrapper job left in its
+// host directory: the rc contents ("" when still running) and the
+// stdout/stderr bytes. A missing file is empty.
+func (f *Fake) JobState(jobID string) (rc, stdout, stderr string, err error) {
+	f.mu.Lock()
+	dir := f.jobDir
+	f.mu.Unlock()
+	if dir == "" {
+		return "", "", "", fmt.Errorf("fake: job runner is not enabled")
+	}
+	read := func(name string) string {
+		b, e := os.ReadFile(filepath.Join(dir, "jobs", jobID, name))
+		if e != nil {
+			return ""
+		}
+		return string(b)
+	}
+	return read("rc"), read("stdout"), read("stderr"), nil
 }
 
 // SetNodeInfo fixes what NodeInfo returns.
@@ -308,9 +435,13 @@ func (f *Fake) Start(ctx context.Context, sandboxID string, req substrate.StartR
 		return nil, err
 	}
 	h := f.startHandler
+	runner := f.jobDir
 	f.mu.Unlock()
 	if h != nil {
 		return h(sandboxID, req)
+	}
+	if runner != "" && isJobWrapperArgs(req.Args) {
+		return f.startJobProcess(runner, req)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -320,6 +451,123 @@ func (f *Fake) Start(ctx context.Context, sandboxID string, req substrate.StartR
 	f.procs[pid] = p
 	p.Push(substrate.ProcessEvent{Kind: substrate.EventStarted, PID: pid})
 	return p, nil
+}
+
+// isJobWrapperArgs reports whether args are the spoond background-job
+// wrapper invocation: /bin/bash -c <script> spoond-job <job_id> <cmd...>.
+func isJobWrapperArgs(args []string) bool {
+	return len(args) >= 5 && args[0] == "/bin/bash" && args[1] == "-c" && args[3] == "spoond-job"
+}
+
+// The production guest paths a real-wrapper job's files live under. When
+// the runner is enabled the fake maps these onto host files so the actual
+// wrapper script, its setsid child, the rc.tmp+rename write and the
+// secrets cleanup all run for real (2.6, #135).
+const (
+	fakeJobsDir    = "/var/lib/spoond/jobs"
+	fakeSecretsDir = "/run/secrets"
+)
+
+// startJobProcess runs a background-job wrapper for real: the wrapper
+// script (req.Args[2]) is executed through bash with the job id and the
+// command argv, writing the job's files into host dir. The returned
+// process carries the wrapper's exit on its stream.
+func (f *Fake) startJobProcess(dir string, req substrate.StartRequest) (substrate.Process, error) {
+	jobID := req.Args[4]
+	cmd := append([]string(nil), req.Args[5:]...)
+	env := map[string]string{}
+	for k, v := range req.Env {
+		env[k] = v
+	}
+	env["SPOOND_JOBS_DIR"] = filepath.Join(dir, "jobs")
+	env["SPOOND_SECRETS_DIR"] = filepath.Join(dir, "secrets")
+	script := req.Args[2]
+
+	f.mu.Lock()
+	f.nextPID++
+	pid := f.nextPID
+	p := newFakeProcess(pid)
+	f.procs[pid] = p
+	f.jobProcs[pid] = p
+	f.jobPIDOf[jobID] = pid
+	f.mu.Unlock()
+	p.Push(substrate.ProcessEvent{Kind: substrate.EventStarted, PID: pid})
+
+	go func() {
+		runRealWrapper(script, jobID, cmd, env)
+		rc := 0
+		if b, err := os.ReadFile(filepath.Join(dir, "jobs", jobID, "rc")); err == nil {
+			rc, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+		}
+		p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: rc})
+	}()
+	return p, nil
+}
+
+// runRealWrapper executes the guest wrapper script through bash.
+func runRealWrapper(script, jobID string, cmd []string, env map[string]string) {
+	args := []string{"-c", script, "spoond-job", jobID}
+	args = append(args, cmd...)
+	c := exec.Command("/bin/bash", args...)
+	c.Env = os.Environ()
+	for k, v := range env {
+		c.Env = append(c.Env, k+"="+v)
+	}
+	_ = c.Run()
+}
+
+// hostFilePathLocked maps a production job or secret path onto the
+// runner's host directory. Call with f.mu held. Returns ok=false when the
+// runner is disabled or the path is not one of the mapped trees.
+func (f *Fake) hostFilePathLocked(name string) (string, bool) {
+	if f.jobDir == "" {
+		return "", false
+	}
+	switch {
+	case name == fakeJobsDir:
+		return filepath.Join(f.jobDir, "jobs"), true
+	case strings.HasPrefix(name, fakeJobsDir+"/"):
+		return filepath.Join(f.jobDir, "jobs", strings.TrimPrefix(name, fakeJobsDir+"/")), true
+	case name == fakeSecretsDir:
+		return filepath.Join(f.jobDir, "secrets"), true
+	case strings.HasPrefix(name, fakeSecretsDir+"/"):
+		return filepath.Join(f.jobDir, "secrets", strings.TrimPrefix(name, fakeSecretsDir+"/")), true
+	}
+	return "", false
+}
+
+func fakeReadHost(path string, max int64) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", substrate.ErrNotFound, path)
+		}
+		return nil, err
+	}
+	if max >= 0 && int64(len(data)) > max {
+		return nil, fmt.Errorf("%w: %s is %d bytes, max %d", substrate.ErrTooLarge, path, len(data), max)
+	}
+	return data, nil
+}
+
+func fakeReadHostRange(path string, offset, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", substrate.ErrNotFound, path)
+		}
+		return nil, err
+	}
+	defer f.Close()
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	if limit <= 0 {
+		return io.ReadAll(f)
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
 }
 
 // DialGuest opens a real TCP connection to hostIP:port. The fake has no
@@ -363,6 +611,18 @@ func (f *Fake) WriteFile(ctx context.Context, sandboxID, name string, data []byt
 	if err := f.record("WriteFile", sandboxID); err != nil {
 		return err
 	}
+	if host, ok := f.hostFilePathLocked(name); ok {
+		if _, exists := f.sandboxes[sandboxID]; !exists {
+			return fmt.Errorf("fake: WriteFile %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+		}
+		if err := os.MkdirAll(filepath.Dir(host), 0o755); err != nil {
+			return err
+		}
+		if mode == 0 {
+			mode = 0o644
+		}
+		return os.WriteFile(host, data, mode.Perm())
+	}
 	fs := f.fileFS(sandboxID)
 	if fs == nil {
 		return fmt.Errorf("fake: WriteFile %s %s: %w", sandboxID, name, substrate.ErrNotFound)
@@ -375,6 +635,12 @@ func (f *Fake) ReadFile(ctx context.Context, sandboxID, name string, max int64) 
 	defer f.mu.Unlock()
 	if err := f.record("ReadFile", sandboxID); err != nil {
 		return nil, err
+	}
+	if host, ok := f.hostFilePathLocked(name); ok {
+		if _, exists := f.sandboxes[sandboxID]; !exists {
+			return nil, fmt.Errorf("fake: ReadFile %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+		}
+		return fakeReadHost(host, max)
 	}
 	fs := f.fileFS(sandboxID)
 	if fs == nil {
@@ -391,6 +657,12 @@ func (f *Fake) ReadFileRange(ctx context.Context, sandboxID, name string, offset
 	defer f.mu.Unlock()
 	if err := f.record("ReadFileRange", sandboxID); err != nil {
 		return nil, err
+	}
+	if host, ok := f.hostFilePathLocked(name); ok {
+		if _, exists := f.sandboxes[sandboxID]; !exists {
+			return nil, fmt.Errorf("fake: ReadFileRange %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+		}
+		return fakeReadHostRange(host, offset, limit)
 	}
 	fs := f.fileFS(sandboxID)
 	if fs == nil {
@@ -419,6 +691,25 @@ func (f *Fake) Stat(ctx context.Context, sandboxID, name string) (substrate.File
 	if err := f.record("Stat", sandboxID); err != nil {
 		return substrate.FileInfo{}, err
 	}
+	if host, ok := f.hostFilePathLocked(name); ok {
+		if _, exists := f.sandboxes[sandboxID]; !exists {
+			return substrate.FileInfo{}, fmt.Errorf("fake: Stat %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+		}
+		info, err := os.Stat(host)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return substrate.FileInfo{}, fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+			}
+			return substrate.FileInfo{}, err
+		}
+		return substrate.FileInfo{
+			Name:    info.Name(),
+			Size:    info.Size(),
+			Mode:    info.Mode(),
+			ModTime: info.ModTime(),
+			IsDir:   info.IsDir(),
+		}, nil
+	}
 	fs := f.fileFS(sandboxID)
 	if fs == nil {
 		return substrate.FileInfo{}, fmt.Errorf("fake: Stat %s %s: %w", sandboxID, name, substrate.ErrNotFound)
@@ -444,6 +735,21 @@ func (f *Fake) Remove(ctx context.Context, sandboxID, name string, recursive boo
 	defer f.mu.Unlock()
 	if err := f.record("Remove", sandboxID); err != nil {
 		return err
+	}
+	if host, ok := f.hostFilePathLocked(name); ok {
+		if _, exists := f.sandboxes[sandboxID]; !exists {
+			return fmt.Errorf("fake: Remove %s %s: %w", sandboxID, name, substrate.ErrNotFound)
+		}
+		if recursive {
+			return os.RemoveAll(host)
+		}
+		if err := os.Remove(host); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("%w: %s", substrate.ErrNotFound, name)
+			}
+			return err
+		}
+		return nil
 	}
 	fs := f.fileFS(sandboxID)
 	if fs == nil {

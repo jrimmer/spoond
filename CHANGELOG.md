@@ -20,9 +20,12 @@ summarised from README "Status".
   under `/var/lib/spoond/jobs/<job_id>/` (`stdout`, `stderr`, `pid` and
   an atomically written `rc`), detached from the envd stream, so a
   backend restart does not kill the job and the files — not the stream
-  — are the source of truth. Jobs are tracked in a new `lease_jobs`
+  — are the source of truth. The `env` object rides the substrate's
+  start request, never the job directory, the record, the logs or an
+  event. Jobs are tracked in a new `lease_jobs`
   table (**migration 0016**), deleted with their lease and pruned after
-  `JOB_RETENTION_SECS` (default 7 days); at most
+  `JOB_RETENTION_SECS` (default 7 days), when the guest's job directory
+  is removed too; at most
   `MAX_RUNNING_JOBS_PER_LEASE` (default 16) run per lease (`429` past
   it). Read them with `GET …/jobs` (newest first) and
   `GET …/jobs/{job}` (record plus the last 64 KiB of output, or

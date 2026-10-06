@@ -639,7 +639,9 @@ when the command ends — `rc`. Those files are the source of truth, so a
 backend restart or a broken envd stream does not lose an outcome: while
 the backend holds the stream it notices the exit at once, and otherwise
 a reconcile pass (every 10 s while any job runs) reads `rc` through the
-files path.
+files path. The files are kept until the exited record is pruned (after
+`JOB_RETENTION_SECS`), when the sweeper removes the job directory too;
+the job record outlives the files only within that window.
 
 A running job keeps its lease out of every idle rule — the plain
 `IDLE_TIMEOUT_SECS` sweep, held rule 1 and idle suspension — so nothing
@@ -652,8 +654,9 @@ running job is marked `lost`.
 The per-exec `secrets` stay staged under `/run/secrets` for the job's
 whole life; the guest wrapper removes them at exit and the backend also
 removes them on reconcile. Neither `env` nor secret values are ever
-stored in the job record, logged or emitted in an event. `cmd` is stored
-as given.
+stored in the job record, logged, emitted in an event or written to the
+guest's job directory — `env` rides the substrate's start request — and
+`cmd` is stored as given.
 
 | Variable | Default | Meaning |
 |---|---|---|

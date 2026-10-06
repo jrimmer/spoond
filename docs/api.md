@@ -324,11 +324,15 @@ The command runs in the caller's lease and is detached from the envd
 stream, so a backend restart does not kill it. The guest records the
 outcome itself under `/var/lib/spoond/jobs/<job_id>/`: `stdout`,
 `stderr`, `pid`, and `rc` (written atomically when the command ends).
-Those files, not the stream, are the source of truth. Per-exec
-`secrets` stay staged under `/run/secrets` for the job's life and are
-removed when it exits. Neither `env` nor secret values are ever stored
-in the job record, logged or sent in an event; `cmd` is stored as given
-(put credentials in `env` or `secrets`, not argv).
+Those files, not the stream, are the source of truth, and they are kept
+as long as the record — they are removed when the exited record is
+pruned (`JOB_RETENTION_SECS`). Per-exec `secrets` stay staged under
+`/run/secrets` for the job's life and are removed when it exits (the
+guest wrapper removes them; the backend also removes them on
+reconcile). Neither `env` nor secret values are ever stored in the job
+record, logged, sent in an event or written to the guest's job
+directory — `env` rides the substrate's start request — and `cmd` is
+stored as given (put credentials in `env` or `secrets`, not argv).
 
 See [`GET /api/leases/{id}/jobs`](#get-apileasesidjobs--list-background-jobs)
 for reading and controlling jobs.
@@ -357,6 +361,11 @@ Returns the record plus the last 64 KiB of `stdout` and `stderr`:
 ```json
 {"job": {…}, "stdout": "…", "stderr": "…"}
 ```
+
+The `stdout` and `stderr` keys are always present (empty when the guest
+has no output or the sandbox is not reachable, e.g. a suspended lease);
+on a non-fatal read failure an extra `stdout_error` / `stderr_error`
+key marks it rather than dropping the field.
 
 With `?wait=<seconds>` (at most 900) the request long-polls until the
 job is no longer running or the wait ends, then answers the current

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,10 +19,21 @@ import (
 )
 
 // The tests in this file exercise background exec jobs (2.6, #135)
-// through the lease API and the service, with the fake substrate driving
-// the guest's job files. The fake writes no real processes, so a test
-// installs a Start handler that returns a *fake.FakeProcess it drives
-// and writes the job's stdout/stderr/rc files with sub.WriteFile.
+// through the lease API and the service. Most tests drive the guest
+// files directly through the fake so they can script the exact timing of
+// an exit; the tests in jobs_wrapper_test.go run the real guest wrapper
+// through the fake's job runner and cover the wrapper, its setsid child,
+// the rc atomic write and the secrets cleanup.
+
+// useJobRunner enables the fake's real-wrapper job runner on a private
+// temp directory and registers cleanup for any still-running job.
+func useJobRunner(t *testing.T, sub *testSub) string {
+	t.Helper()
+	dir := t.TempDir()
+	sub.Fake.EnableJobRunner(dir)
+	t.Cleanup(sub.Fake.StopAllJobs)
+	return dir
+}
 
 // createJobLease creates a lease through the API and returns its id, the
 // lease, and the sandbox id.
@@ -345,7 +357,7 @@ func TestJobLostOnColdRestart(t *testing.T) {
 	installJobProcess(t, sub, p)
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 
-	if _, err := svc.restart(ctxBackground(), lease.Owner, id, "cold"); err != nil {
+	if _, err := svc.restart(context.Background(), lease.Owner, id, "cold"); err != nil {
 		t.Fatalf("cold restart: %v", err)
 	}
 	row := waitJobState(t, db, jobID, "lost", 2*time.Second)
@@ -503,7 +515,7 @@ func writeJobFile2(t *testing.T, sub *testSub, sandboxID, jobID string) {
 // plus the last lines of stderr, cut to 1 KiB.
 func TestJobExitedDetailCut(t *testing.T) {
 	long := strings.Repeat("line that is fairly long\n", 200)
-	detail := jobExitDetail("cmd", 7, long)
+	detail := jobExitDetail(7, long)
 	if !strings.HasPrefix(detail, "exit 7") {
 		t.Fatalf("detail prefix = %q", detail)
 	}
@@ -658,5 +670,60 @@ func TestJobOutputSurvivesRestart(t *testing.T) {
 	}
 }
 
-// ctxBackground is time-independent context for direct service calls.
-func ctxBackground() context.Context { return context.Background() }
+// TestJobSignalRejectsHostilePid: the pid file is guest-writable state,
+// so a non-numeric pid is refused before any guest exec runs — it must
+// never become shell input.
+func TestJobSignalRejectsHostilePid(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1015)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "123; touch /tmp/spoond-pwned\n")
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("hostile pid accepted: %v", body)
+	}
+	// No guest exec ran with the injected text.
+	for _, c := range sub.Fake.CallLog() {
+		if strings.Contains(c, "pwned") {
+			t.Fatalf("injected text reached the substrate: %q", c)
+		}
+	}
+	if _, err := os.Stat("/tmp/spoond-pwned"); err == nil {
+		_ = os.Remove("/tmp/spoond-pwned")
+		t.Fatalf("injection executed on the host")
+	}
+	_ = svc
+	_ = db
+}
+
+// TestJobGetOutputKeysStable: the record view always carries stdout and
+// stderr, even when the guest cannot be read (a suspended lease's envd is
+// gone), so the JSON shape does not depend on lease state.
+func TestJobGetOutputKeysStable(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := body["id"].(string)
+
+	// Start the job, then suspend the lease: the sandbox is gone from the
+	// fake's file view, so the outputs read nothing.
+	p := fake.NewProcess(1016)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	l := svc.lookupAny(id)
+	sub.Fake.Kill(l.SandboxID)
+
+	resp, body := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID, "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("get status %d", resp.StatusCode)
+	}
+	if _, ok := body["stdout"]; !ok {
+		t.Fatalf("stdout key missing: %v", body)
+	}
+	if _, ok := body["stderr"]; !ok {
+		t.Fatalf("stderr key missing: %v", body)
+	}
+}

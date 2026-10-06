@@ -39,14 +39,16 @@ func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, le
 	}
 	// Watch the envd stream for the exit. The guest rc file is the source
 	// of truth, so a stream that ends early only defers the notice to the
-	// reconcile pass.
+	// reconcile pass. Snapshot the sandbox and generation now: a cold
+	// restart later must not redirect this watcher to a new guest.
+	sandboxID, generation := lease.SandboxID, lease.Generation
 	go s.svc.watchJob(proc, store.JobRow{
 		JobID:      jobID,
 		LeaseID:    lease.ID,
 		Owner:      owner,
 		Cmd:        cmd,
-		Generation: lease.Generation,
-	}, lease)
+		Generation: generation,
+	}, sandboxID, generation)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id":     jobID,
 		"started_at": startedAt.Format(time.RFC3339Nano),
@@ -123,13 +125,19 @@ func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 		row = s.waitJob(r, lease, row, wait)
 	}
 	resp := map[string]any{"job": jobInfoOf(row)}
-	// Output is best effort: a vanished guest file yields empty output,
-	// not a failed read.
+	// Output is best effort, but the keys are always present so the shape
+	// does not depend on the lease's state (a suspended lease's envd is
+	// gone and returns nothing to read).
+	resp["stdout"], resp["stderr"] = "", ""
 	if out, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stdout", jobStdoutReadBytes); err == nil {
 		resp["stdout"] = out
+	} else if !errors.Is(err, substrate.ErrNotFound) {
+		resp["stdout_error"] = "output unavailable"
 	}
 	if errText, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stderr", jobStderrReadBytes); err == nil {
 		resp["stderr"] = errText
+	} else if !errors.Is(err, substrate.ErrNotFound) {
+		resp["stderr_error"] = "output unavailable"
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -151,8 +159,11 @@ func jobWaitSeconds(r *http.Request) int {
 }
 
 // waitJob polls a job record until it is no longer running or wait
-// seconds pass, then returns the current record.
+// seconds pass, then returns the current record. It snapshots the sandbox
+// and generation once: the guest files it reads are the job's own, never
+// a new sandbox's after a cold restart.
 func (s *Server) waitJob(r *http.Request, lease *Lease, row store.JobRow, wait int) store.JobRow {
+	sandboxID, generation := lease.SandboxID, lease.Generation
 	deadline := time.Now().Add(time.Duration(wait) * time.Second)
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
@@ -171,7 +182,7 @@ func (s *Server) waitJob(r *http.Request, lease *Lease, row store.JobRow, wait i
 		// Read the guest files in case the watcher missed the exit (a
 		// stream that broke, a backend that restarted): the poll must not
 		// depend on an in-process goroutine.
-		s.svc.finishJobFromGuest(r.Context(), row, lease)
+		s.svc.finishJobFromGuest(r.Context(), row, sandboxID, generation)
 		next, err := s.svc.db.GetJob(r.Context(), row.JobID)
 		if err != nil {
 			return row
@@ -289,25 +300,25 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 }
 
 // signalJob signals a running job's process group. The job's pid was
-// recorded by the wrapper in the job directory; envd's Signal targets
-// the process it started, so we read the pid and send to its process
-// group through a one-shot exec (kill -SIGNAL -pid) — the wrapper runs
-// the command via setsid, so the pid is a process-group leader.
+// recorded by the wrapper in the job directory; the wrapper starts the
+// command via setsid, so that pid is the process-group leader. The pid
+// is guest-writable state, so it is validated as a plain number and
+// passed as positional arguments to /bin/kill — it can never become
+// shell input. A pid file that has not appeared yet (the 202 beat the
+// wrapper's write) is waited for briefly, so a signal sent immediately
+// after the start still reaches the job; only when it stays missing does
+// the caller answer 409.
 func (s *Service) signalJob(ctx context.Context, lease *Lease, row store.JobRow, sig string) error {
-	pidData, err := s.sub.ReadFile(ctx, lease.SandboxID, jobPath(row.JobID, "pid"), 64)
+	pid, err := s.jobPID(ctx, lease.SandboxID, row.JobID)
 	if err != nil {
 		return err
 	}
-	pid := strings.TrimSpace(string(pidData))
-	if pid == "" {
-		return fmt.Errorf("no pid recorded")
-	}
-	flag := "-TERM"
-	if sig == "KILL" {
-		flag = "-KILL"
-	}
+	// /bin/kill's -SIGNAL -PGID form through a fixed script, with the
+	// signal and pid as arguments (never as part of the command text).
+	// dash's kill does not accept a `--` separator, so the pid is written
+	// straight after the dash; it is already a validated integer.
 	res, err := s.sub.Exec(ctx, lease.SandboxID, substrate.ExecRequest{
-		Args:    []string{"/bin/sh", "-c", "kill " + flag + " -" + pid},
+		Args:    []string{"/bin/sh", "-c", `kill -"$1" -"$2"`, "kill", sig, strconv.Itoa(pid)},
 		Timeout: 10 * time.Second,
 	})
 	if err != nil {
@@ -317,4 +328,31 @@ func (s *Service) signalJob(ctx context.Context, lease *Lease, row store.JobRow,
 		return fmt.Errorf("kill exit %d: %s", res.ExitCode, res.Stderr)
 	}
 	return nil
+}
+
+// jobPID reads and validates a running job's pid file, retrying briefly
+// while the wrapper has not written it yet.
+func (s *Service) jobPID(ctx context.Context, sandboxID, jobID string) (int, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := s.sub.ReadFile(ctx, sandboxID, jobPath(jobID, "pid"), 64)
+		if err == nil {
+			pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if perr != nil || pid <= 1 {
+				return 0, fmt.Errorf("no valid pid recorded")
+			}
+			return pid, nil
+		}
+		if !errors.Is(err, substrate.ErrNotFound) {
+			return 0, err
+		}
+		if !time.Now().Before(deadline) {
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
