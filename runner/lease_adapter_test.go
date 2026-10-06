@@ -236,3 +236,41 @@ func TestSweepOrphansListFailure(t *testing.T) {
 		t.Fatalf("deleted %v after a failed list, want none", backend.deleted)
 	}
 }
+
+// TestHTTPLeaseClientDeleteReason: DeleteReason sends the reason as a
+// JSON body on the DELETE; Delete without a reason sends no body, so the
+// backend keeps its default detail.
+func TestHTTPLeaseClientDeleteReason(t *testing.T) {
+	var gotReason string
+	var gotBody bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %s, want DELETE", r.Method)
+		}
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			gotBody = true
+			gotReason = body.Reason
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	if err := c.DeleteReason(context.Background(), "sb-1", "ci job 42 ✗ 4m10s"); err != nil {
+		t.Fatalf("DeleteReason: %v", err)
+	}
+	if !gotBody || gotReason != "ci job 42 ✗ 4m10s" {
+		t.Fatalf("reason body = %q (present=%v), want the CI reason", gotReason, gotBody)
+	}
+
+	gotBody, gotReason = false, ""
+	if err := c.Delete(context.Background(), "sb-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if gotBody {
+		t.Fatalf("plain Delete sent a reason body: %q", gotReason)
+	}
+}

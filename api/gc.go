@@ -170,7 +170,7 @@ func (s *Service) gcPass(ctx context.Context) error {
 	// one lease-less `gc` event (2.5, #132 part 2); a pass that deleted
 	// nothing (the default dry run included) emits nothing.
 	if deleted > 0 {
-		s.emitGCEvent(fmt.Sprintf("%s · %s", pluralBuilds(deleted), formatEventBytes(freed)))
+		s.emitGCEvent(fmt.Sprintf("%s · %s freed", pluralBuilds(deleted), formatEventBytes(freed)))
 	}
 	if err := s.accountDisk(ctx); err != nil {
 		return err

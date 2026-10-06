@@ -10,6 +10,25 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Events panel details: release reasons, grant and checkpoint
+  durations, and GC events (#132 part 2).** The `created` event gains
+  how long the grant took (measured from admission start, so a queued
+  create reports its admission time, not its wait): `granted from image
+  py-base in 61 ms`. The `checkpointed` event gains the duration and the
+  short build id: `540 ms · build 9e1f…`. `DELETE /api/leases/{id}` (and
+  the `/api/sandboxes` alias) accepts an optional `reason` (query
+  `?reason=` or JSON body `{"reason"}`, at most 120 printable
+  characters, sanitised like comments) that its `released` event
+  carries, else the event keeps `deleted through the API`. The CI runner
+  sends the job's outcome and duration as that reason (`ci job 3609 ✓
+  11m02s`, `ci job 3604 ✗ 4m10s`, `ci job N cancelled` on drain), and a
+  catalog GC pass that deleted builds emits one lease-less `gc` event
+  (`N builds deleted · X GiB freed`) which reaches the all-leases stream
+  but never a per-lease one. The dashboard colours `gc` events ok and a
+  failed CI release warn.
+
 ### Changed
 
 - **`spoond dash` colour roles.** The dashboard's palette now follows

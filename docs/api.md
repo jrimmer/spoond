@@ -392,6 +392,15 @@ scripts.
 Releases the lease and its sandbox. `204 No Content`. Builds are left for
 the GC (and stay listed by `GET /api/snapshots` until reclaimed).
 
+The delete accepts an optional **reason** that its `released` event
+carries, so a caller (the CI runner, an operator's script) can say why
+it let the lease go: `?reason=<text>` on the query string, or a JSON
+body `{"reason": "<text>"}`. The text is at most 120 printable
+characters, sanitised like a lease comment (control and format
+characters become spaces), and `400` otherwise. Without a reason the
+event keeps its `deleted through the API` detail. The same reason works
+through the `/api/sandboxes` alias.
+
 ### `POST /api/leases/{id}/exec` — run a command
 
 | Field | Type | Default | Notes |
@@ -984,12 +993,12 @@ every 15 s thereafter, so proxies do not close an idle stream.
 
 | `event` | emitted when | `detail` names |
 |---|---|---|
-| `created` | a lease is granted, forked or cloned | the source image (forks: the source lease and build; clones: the source lease and checkpoint build) |
-| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release) | why: `deleted through the API`, `TTL expired`, `released by a held-lease rule` (or `lease released`) |
+| `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build) |
+| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule` (or `lease released`) |
 | `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse) | the pause build id |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
-| `checkpointed` | a running lease is checkpointed | the checkpoint build id |
+| `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f…` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
@@ -1000,7 +1009,14 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
+| `gc` | a catalog GC pass deleted builds (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
+
+A `gc` event is lease-less: its `lease_id` and `owner` are empty, it
+reaches the all-leases stream (and the events-only `EVENTS_TOKEN`) but
+never `GET /api/leases/{id}/events` or a per-lease in-process
+subscription, and the dashboard shows its subject as `spoond`. A GC
+pass that deletes nothing (the default dry run included) emits none.
 
 ### Resume and gaps
 
