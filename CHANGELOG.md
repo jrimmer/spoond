@@ -10,6 +10,11 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-10-06
+
+Background jobs polish. No schema change; the `grid` package is
+unchanged since 2.4.0.
+
 ### Fixed
 
 - Background job starts use a per-lease lock, so starts on different
