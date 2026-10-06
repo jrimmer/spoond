@@ -115,7 +115,7 @@ message SandboxNetworkDomainRules {
 }
 
 message SandboxPrivateAllowance {
-  // IPv4 CIDR inside the always-denied private ranges, e.g. "10.1.0.11/32" or "10.0.0.0/13".
+  // IPv4 CIDR inside the always-denied private ranges, e.g. "10.0.0.11/32" or "10.0.0.0/13".
   string cidr = 1;
   // TCP destination ports allowed to this CIDR. Empty = every TCP port.
   repeated uint32 tcp_ports = 2;

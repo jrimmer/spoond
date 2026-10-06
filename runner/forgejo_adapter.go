@@ -36,7 +36,7 @@ type ForgejoAdapter struct {
 }
 
 // NewForgejoAdapter builds a Forgejo runner protocol adapter.
-// baseURL is the Forgejo instance URL (e.g. https://code.lacy.casa).
+// baseURL is the Forgejo instance URL (e.g. https://code.example.com).
 // The runner protocol is mounted under /api/actions, matching the
 // official forgejo-runner.
 func NewForgejoAdapter(baseURL string, hc *http.Client) *ForgejoAdapter {
@@ -179,7 +179,7 @@ func (a *ForgejoAdapter) Fetch(ctx context.Context, version int64) (*Job, int64,
 	// for `${{ github.server_url }}`) and/or as prefixed keys
 	// (github.server_url). Set both forms unconditionally so reviewdog's
 	// GITEA_ADDRESS and similar resolve to the internal host, not
-	// code.lacy.casa (which 302-redirects through Pangolin to HTML).
+	// the internal edge (which 302-redirects through the SSO proxy to HTML).
 	//
 	// api_url must keep the /api/v1 suffix (workflows build REST paths
 	// like ${{ github.api_url }}/repos/... and POST to them); server_url

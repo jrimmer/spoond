@@ -3,7 +3,8 @@
 //
 // Configuration is read from the environment:
 //
-//	FORGEJO_URL       Forgejo instance base URL (e.g. https://code.lacy.casa)
+//	FORGEJO_URL       Forgejo instance base URL (e.g. https://code.example.com)
+//	                   (required)
 //	RUNNER_TOKEN       Runner registration token
 //	RUNNER_NAME        Runner name prefix (default "spoond-runner")
 //	RUNNER_LABELS      Comma-separated labels (default "ubuntu-latest")
@@ -13,7 +14,7 @@
 //	                   (e.g. "ubuntu-latest=py-base")
 //	DEFAULT_IMAGE      Image tag when no label maps (default "py-base")
 //	REPO_BASE_URL      Git host base URL for actions/checkout clones
-//	                   (default https://code.lacy.casa)
+//	                   (no default; checkout fails without it)
 //	LEASE_TTL          Sandbox lease TTL seconds (default 600)
 //	EXEC_TIMEOUT_SECS  Per-step exec timeout seconds (default 300)
 //	RUNNER_FLOOR       Minimum registered runners (default 3)
@@ -82,7 +83,10 @@ func envDurOr(key string, def time.Duration) time.Duration {
 // they are cancelled — each executor's deferred Delete releases its
 // job's lease, and Main exits 0 so systemd sees a clean stop.
 func Main(args []string) int {
-	forgejoURL := envOr("FORGEJO_URL", "https://code.lacy.casa")
+	forgejoURL := os.Getenv("FORGEJO_URL")
+	if forgejoURL == "" {
+		log.Fatal("FORGEJO_URL is required (the Forgejo instance base URL, e.g. https://code.example.com)")
+	}
 	token := os.Getenv("RUNNER_TOKEN")
 	if token == "" {
 		log.Fatal("RUNNER_TOKEN is required")
@@ -191,7 +195,7 @@ func Main(args []string) int {
 			Labels:       imageMap,
 			DefaultImage: defaultImage,
 			TTL:          ttl,
-			RepoBaseURL:  envOr("REPO_BASE_URL", "https://code.lacy.casa"),
+			RepoBaseURL:  envOr("REPO_BASE_URL", ""),
 			StepTimeout:  stepTimeout,
 			RecordDir:    envOr("JOB_RECORD_DIR", "/var/lib/spoond/jobs"),
 			// #119: the job lease's comment names the job and links to

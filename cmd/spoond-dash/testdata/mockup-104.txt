@@ -1,7 +1,7 @@
-                    SPOOND  ·  sandbox.lacy.casa  ·  v2.0.0  ·  e2b 0.4.2  ·  up 31h
+                    SPOOND  ·  sandbox.example.com  ·  v2.0.0  ·  e2b 0.4.2  ·  up 31h
 ════════════════════════════════════════════════════════════════════════════════════════════════════════
              ■ leases · host   ■ flights · agents   ■ healthy   ■ people   ■ needs attention
- ▲ attention · the TLS certificate for vm2.lacy.casa expires in 24 days (2026-10-27) · spoond-x5c
+ ▲ attention · the TLS certificate for spoond.example.com expires in 24 days (2026-10-27) · spoond-x5c
 
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░           4 / 64 │  │ cpu           ██░░░░░░░░░░╎░░░   11% · load 0.8 │

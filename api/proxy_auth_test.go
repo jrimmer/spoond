@@ -42,7 +42,7 @@ func newProxyAuthServer(t *testing.T) (http.Handler, http.Handler, string) {
 
 func TestProxyAuthRequiresSecret(t *testing.T) {
 	ph, _, _ := newProxyAuthServer(t)
-	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.example.com/", nil)
 	req.Header.Set("Remote-User", "jason")
 	rec := httptest.NewRecorder()
 	ph.ServeHTTP(rec, req)
@@ -53,7 +53,7 @@ func TestProxyAuthRequiresSecret(t *testing.T) {
 
 func TestProxyAuthWrongSecret(t *testing.T) {
 	ph, _, _ := newProxyAuthServer(t)
-	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.example.com/", nil)
 	req.Header.Set("Remote-User", "jason")
 	req.Header.Set("X-Proxy-Auth", "wrong")
 	rec := httptest.NewRecorder()
@@ -65,7 +65,7 @@ func TestProxyAuthWrongSecret(t *testing.T) {
 
 func TestProxyAuthRequiresUser(t *testing.T) {
 	ph, _, _ := newProxyAuthServer(t)
-	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.example.com/", nil)
 	req.Header.Set("X-Proxy-Auth", "s3cret")
 	rec := httptest.NewRecorder()
 	ph.ServeHTTP(rec, req)
@@ -76,7 +76,7 @@ func TestProxyAuthRequiresUser(t *testing.T) {
 
 func TestProxyAuthUnknownUser(t *testing.T) {
 	ph, _, _ := newProxyAuthServer(t)
-	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://deadbeef.sandbox.example.com/", nil)
 	req.Header.Set("X-Proxy-Auth", "s3cret")
 	req.Header.Set("Remote-User", "mallory")
 	rec := httptest.NewRecorder()
@@ -95,7 +95,7 @@ func TestProxyAuthOwnerScopesLookup(t *testing.T) {
 	if lid == "" {
 		t.Fatal("no lease id available")
 	}
-	req := httptest.NewRequest("GET", "http://"+lid+".sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://"+lid+".sandbox.example.com/", nil)
 	req.Header.Set("X-Proxy-Auth", "s3cret")
 	req.Header.Set("Remote-User", "jason")
 	rec := httptest.NewRecorder()

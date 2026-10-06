@@ -4,11 +4,16 @@
 # (test -f /run/spoond-guest-ready) succeeds, so everything done here is in
 # every sandbox's restored memory and disk.
 set -u
-# Resolve only through the LAN resolver (Technitium). No public fallback:
-# public DNS answers *.lacy.casa with the public edge, where credentialed
-# calls must never go, and the router (10.1.0.1) gives stale LAN answers.
-rm -f /etc/resolv.conf
-printf 'nameserver 10.1.0.2\noptions timeout:2 attempts:3\n' > /etc/resolv.conf
+# Resolve only through the configured spoond resolver. The address is baked
+# at image build as /etc/spoond/guest-dns (SPOOND_GUEST_DNS_ADDR). No public
+# fallback: public DNS answers the deployment's wildcard host with the
+# public edge, where credentialed calls must never go, and a router may
+# give stale answers. Empty = keep the image's resolv.conf.
+GUEST_DNS="$(cat /etc/spoond/guest-dns 2>/dev/null || true)"
+if [ -n "$GUEST_DNS" ]; then
+  rm -f /etc/resolv.conf
+  printf 'nameserver %s\noptions timeout:2 attempts:3\n' "$GUEST_DNS" > /etc/resolv.conf
+fi
 # Empty dpkg's statoverride. Tools that unpack a base image over the live
 # root (kaniko) keep this file while replacing /etc/group, so any override
 # whose group the base lacks (E2B's chrony adds _chrony; images with dbus

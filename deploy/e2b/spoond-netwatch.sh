@@ -16,14 +16,18 @@
 # Settings (environment, /etc/default/spoond-netwatch):
 #   NETWATCH_IF       physical port to bounce        (default enp1s0f0)
 #   NETWATCH_BRIDGE   bridge that holds the address  (default vmbr0)
-#   NETWATCH_TARGETS  space-separated probe targets  (default "10.1.0.1 10.1.0.2")
+#   NETWATCH_TARGETS  space-separated probe targets  (required; e.g. "10.0.0.1 10.0.0.2")
 #   NETWATCH_INTERVAL probe interval, s              (default 15)
 #   FAIL_AFTER, STEP_WAIT, REBOOT_AFTER, REBOOT_MIN_GAP  (120, 60, 600, 43200)
 #   NETWATCH_DRYRUN   1 = log the actions, take none
 set -uo pipefail
 IF=${NETWATCH_IF:-enp1s0f0}
 BR=${NETWATCH_BRIDGE:-vmbr0}
-TARGETS=${NETWATCH_TARGETS:-10.1.0.1 10.1.0.2}
+TARGETS=${NETWATCH_TARGETS:-}
+if [ -z "$TARGETS" ]; then
+  echo "netwatch: NETWATCH_TARGETS is required (space-separated probe targets, e.g. \"10.0.0.1 10.0.0.2\")" >&2
+  exit 2
+fi
 INTERVAL=${NETWATCH_INTERVAL:-15}
 FAIL_AFTER=${FAIL_AFTER:-120}
 STEP_WAIT=${STEP_WAIT:-60}

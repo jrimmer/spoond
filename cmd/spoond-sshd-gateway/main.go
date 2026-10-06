@@ -1,7 +1,7 @@
 //go:build linux
 
 // Command spoond-sshd-gateway is the interactive access point for spoond
-// sandboxes: `ssh <lease-id>@sandbox.lacy.casa`. It authenticates the
+// sandboxes: `ssh <lease-id>@<gateway-host>`. It authenticates the
 // caller with a public key, resolves the lease id to a sandbox, and
 // relays the SSH session onto a process in the sandbox through the
 // backend's /api/sandboxes/{id}/stream WebSocket (dev-base attaches to
@@ -62,7 +62,7 @@ var (
 	flags = flag.NewFlagSet("spoond-gateway", flag.ExitOnError)
 
 	// gatewayHost is the public hostname advertised in MOTDs.
-	gatewayHost = flags.String("gateway-host", env.Get("SPOOND_GATEWAY_HOST", "sandbox.lacy.casa"), "public hostname advertised in MOTDs")
+	gatewayHost = flags.String("gateway-host", env.Get("SPOOND_GATEWAY_HOST", "sandbox.example.com"), "public hostname advertised in MOTDs")
 	listenAddr  = flags.String("listen", ":2222", "listen address")
 	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
 	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
@@ -81,15 +81,21 @@ var (
 	// flag (the staging unit file passes it); the gateway no longer
 	// connects into sandboxes with it.
 	gatewayKeyPath = flags.String("gateway-key", "/etc/spoond-gateway/gateway_ed25519", "gateway identity key")
+	// guestServiceAddr/Port is the host address and port guests use to
+	// reach host services (the proxy/LLM gateway/assets). It matches the
+	// backend's HOST_GUEST_SERVICE_ADDR/PORT and is the default base for
+	// the shelley binary and LLM gateway URLs when their env is unset.
+	guestServiceAddr = env.Get("HOST_GUEST_SERVICE_ADDR", "127.0.0.1")
+	guestServicePort = env.Get("HOST_GUEST_SERVICE_PORT", "8891")
 	// shellyBinaryURL is where the `shelly` ctl verb fetches the agent
 	// binary from inside the sandbox (host-side asset server on the
 	// plain-HTTP proxy listener; guests reach it at the host service
 	// address).
-	shellyBinaryURL = flags.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://10.1.0.11:8891/assets/shelley"), "URL the lease fetches the shelley binary from")
+	shellyBinaryURL = flags.String("shelly-binary-url", envOr("SHELLY_BINARY_URL", "http://"+guestServiceAddr+":"+guestServicePort+"/assets/shelley"), "URL the lease fetches the shelley binary from")
 	// llmGatewayURL is the per-lease LLM gateway base the shelley agent
 	// is pointed at (host-side proxy listener; guests reach it at the
 	// host service address). The lease id is appended.
-	llmGatewayURL = flags.String("llm-gateway-url", envOr("LLM_GATEWAY_URL", "http://10.1.0.11:8891/llm/"), "base URL of the per-lease LLM gateway (lease id appended)")
+	llmGatewayURL = flags.String("llm-gateway-url", envOr("LLM_GATEWAY_URL", "http://"+guestServiceAddr+":"+guestServicePort+"/llm/"), "base URL of the per-lease LLM gateway (lease id appended)")
 	// shellyModel is the default model id written into shelley.json. It
 	// must be an id the LLM gateway's LLM_MODEL_MAP understands (the
 	// exe.dev catalog id, not the upstream id).
@@ -506,12 +512,12 @@ func createSandbox(ctx context.Context, user string) (string, string, error) {
 // the exec command as a lease API call, writes JSON to the channel and
 // closes it. Usage:
 //
-//	ssh ctl@sandbox.lacy.casa "new [image]"     create a persistent lease
-//	ssh ctl@sandbox.lacy.casa "ls"              list leases
-//	ssh ctl@sandbox.lacy.casa "rm <lease-id>"   delete a lease
-//	ssh ctl@sandbox.lacy.casa "keepalive <id>"  extend a lease
-//	ssh ctl@sandbox.lacy.casa "cp <id> [tag]"   clone a sandbox (branch)
-//	ssh ctl@sandbox.lacy.casa "help"
+//	ssh ctl@sandbox.example.com "new [image]"     create a persistent lease
+//	ssh ctl@sandbox.example.com "ls"              list leases
+//	ssh ctl@sandbox.example.com "rm <lease-id>"   delete a lease
+//	ssh ctl@sandbox.example.com "keepalive <id>"  extend a lease
+//	ssh ctl@sandbox.example.com "cp <id> [tag]"   clone a sandbox (branch)
+//	ssh ctl@sandbox.example.com "help"
 func handleControlPlane(chans <-chan ssh.NewChannel, gatewayKey ssh.Signer, keyID, userID, userName string) {
 	// Note: ctl command metrics would need gwMetrics passed through the
 	// call chain. For now, connection-level metrics are captured here;
@@ -1000,7 +1006,7 @@ func commandForRequest(reqType, payload string, ptyReq bool) (sessionCommand, bo
 // client collected, TERM (default xterm-256color), the
 // SSH_CONNECTION/SSH_CLIENT pair whose presence triggers dev-base's tmux
 // attach, and the root account fields.
-func sessionEnv(collected map[string]string, term, clientIP, clientPort string) map[string]string {
+func sessionEnv(collected map[string]string, term, clientIP, clientPort, serverAddr string) map[string]string {
 	env := make(map[string]string, len(collected)+6)
 	for k, v := range collected {
 		env[k] = v
@@ -1009,7 +1015,7 @@ func sessionEnv(collected map[string]string, term, clientIP, clientPort string) 
 		term = "xterm-256color"
 	}
 	env["TERM"] = term
-	env["SSH_CONNECTION"] = clientIP + " " + clientPort + " 10.1.0.11 22"
+	env["SSH_CONNECTION"] = clientIP + " " + clientPort + " " + serverAddr + " 22"
 	env["SSH_CLIENT"] = clientIP + " " + clientPort + " 22"
 	env["USER"] = "root"
 	env["HOME"] = "/root"
@@ -1189,7 +1195,7 @@ collect:
 		Binary bool              `json:"binary"`
 		Cols   uint32            `json:"cols"`
 		Rows   uint32            `json:"rows"`
-	}{cmd.Args, sessionEnv(envReq, term, clientIP, clientPort), cmd.Pty, true, cols, rows})
+	}{cmd.Args, sessionEnv(envReq, term, clientIP, clientPort, guestServiceAddr), cmd.Pty, true, cols, rows})
 	if err != nil {
 		log.Printf("session %s: first frame: %v", leaseID, err)
 		return

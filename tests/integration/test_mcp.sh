@@ -13,10 +13,12 @@ if [ ! -x "$MCP_BIN" ]; then
   exit 0
 fi
 
-# The Go binaries verify TLS; the backend cert only has vm2.lacy.casa
-# SAN, so translate a loopback BE_API to the hostname form (vm2's
-# /etc/hosts resolves it). curl -sk callers keep using BE_API directly.
-GO_BE_API="${BE_API/https:\/\/127.0.0.1:8890/https:\/\/vm2.lacy.casa:8890}"
+# The Go binaries verify TLS; the backend cert is issued for a hostname
+# while BE_API may be a loopback URL, so translate a loopback BE_API to
+# the hostname form (resolved via /etc/hosts). Set BE_TLS_HOST to the
+# name on the certificate. curl -sk callers keep using BE_API directly.
+BE_TLS_HOST="${BE_TLS_HOST:-backend.example.com}"
+GO_BE_API="${BE_API/https:\/\/127.0.0.1:8890/https:\/\/$BE_TLS_HOST:8890}"
 
 # rpc <name> <args-json> — send one JSON-RPC request, print the result line.
 # NOTE: params must be a complete JSON object (own braces). Avoid

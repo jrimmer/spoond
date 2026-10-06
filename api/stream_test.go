@@ -230,7 +230,7 @@ func TestStreamSSHShareWithGatewayToken(t *testing.T) {
 	svc := NewService(sub, db, map[string]string{
 		"gw-tok": "gateway", // the gateway's service token, as deployed
 	}, ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute,
-		HostGuestAddr: "10.1.0.11", HostGuestPort: 8891})
+		HostGuestAddr: "10.0.0.11", HostGuestPort: 8891})
 	svc.log = log.New(io.Discard, "", 0)
 	svc.SetGatewayToken("gw-tok")
 	ids, err := identity.NewStore("")

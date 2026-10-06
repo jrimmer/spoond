@@ -92,12 +92,12 @@ func TestCommandForRequest(t *testing.T) {
 // fields are set.
 func TestSessionEnv(t *testing.T) {
 	got := sessionEnv(map[string]string{"LANG": "C.UTF-8", "FOO": "bar"},
-		"vt100", "192.168.1.7", "5522")
+		"vt100", "192.168.1.7", "5522", "10.0.0.11")
 	want := map[string]string{
 		"LANG":           "C.UTF-8",
 		"FOO":            "bar",
 		"TERM":           "vt100",
-		"SSH_CONNECTION": "192.168.1.7 5522 10.1.0.11 22",
+		"SSH_CONNECTION": "192.168.1.7 5522 10.0.0.11 22",
 		"SSH_CLIENT":     "192.168.1.7 5522 22",
 		"USER":           "root",
 		"HOME":           "/root",
@@ -108,7 +108,7 @@ func TestSessionEnv(t *testing.T) {
 	}
 
 	// No pty-req: TERM falls back to xterm-256color.
-	got = sessionEnv(nil, "", "10.0.0.1", "22")
+	got = sessionEnv(nil, "", "10.0.0.1", "22", "10.0.0.11")
 	if got["TERM"] != "xterm-256color" {
 		t.Fatalf("default TERM = %q", got["TERM"])
 	}

@@ -1,6 +1,6 @@
 //go:build e2blive
 
-// Live test against the orchestrator on vm2. Run with:
+// Live test against the orchestrator on the E2B host. Run with:
 //
 //	go test -tags e2blive -count=1 -timeout 30m ./substrate/e2b/
 //

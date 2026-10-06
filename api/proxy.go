@@ -14,14 +14,25 @@ import (
 	"time"
 )
 
-// proxyHostSuffix is the wildcard hostname suffix for the HTTP proxy.
-// Caddy terminates TLS for *.sandbox.lacy.casa and forwards here.
-const proxyHostSuffix = ".sandbox.lacy.casa"
+// defaultProxyHostSuffix is the wildcard hostname suffix the HTTP proxy
+// routes when no deployment-specific suffix is configured. Operators set
+// SPOOND_PROXY_HOST_SUFFIX (ServiceConfig.ProxyHostSuffix) to their own
+// wildcard domain.
+const defaultProxyHostSuffix = ".sandbox.example.com"
+
+// proxySuffix is the configured wildcard suffix, or the generic default
+// when unset.
+func (s *Service) proxySuffix() string {
+	if s.cfg.ProxyHostSuffix != "" {
+		return s.cfg.ProxyHostSuffix
+	}
+	return defaultProxyHostSuffix
+}
 
 // defaultProxyPort is the guest port used when the hostname carries none.
 // exe.dev uses the Dockerfile EXPOSE port; we have no Dockerfiles, so the
 // convention is port 3000 unless the caller names another via
-// <lease-id>-<port>.sandbox.lacy.casa.
+// <lease-id>-<port>.<suffix>.
 const defaultProxyPort = 3000
 
 // envdPort is the guest's management port (envd's HTTP + Connect-RPC
@@ -30,9 +41,10 @@ const envdPort = 49983
 
 // ProxyHandler returns the HTTP handler for the public proxy listener
 // (plain HTTP on an internal port; Caddy fronts it with wildcard TLS).
-// Every request's Host header names a lease: <lease-id>.sandbox.lacy.casa
-// → guest:3000, <lease-id>-<port>.sandbox.lacy.casa → guest:<port>.
-// The lease id in the hostname is the capability (same model as SSH).
+// Every request's Host header names a lease:
+// <lease-id>.<suffix> → guest:3000, <lease-id>-<port>.<suffix> →
+// guest:<port>, where <suffix> is SPOOND_PROXY_HOST_SUFFIX. The lease id
+// in the hostname is the capability (same model as SSH).
 //
 // Under forward-auth (U7/T7) the capability model is replaced: the
 // proxy requires X-Proxy-Auth == the shared secret and resolves the
@@ -40,7 +52,7 @@ const envdPort = 49983
 func (s *Server) ProxyHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The LLM gateway also lives on the plain-HTTP proxy listener:
-		// guests reach it at http://10.43.0.1:8891/llm/<lease-id>/...,
+		// guests reach it at http://<HOST_GUEST_SERVICE_ADDR>:8891/llm/<lease-id>/...,
 		// avoiding TLS validation of the backend's self-signed cert.
 		if s.llm != nil && strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			s.llm.ServeHTTP(w, r)
@@ -54,8 +66,8 @@ func (s *Server) ProxyHandler() http.Handler {
 			return
 		}
 		// Static assets (e.g. the shelley agent binary) served to guests
-		// at http://10.43.0.1:8891/assets/<file>. This is how a lease
-		// fetches tooling that is too big for the exec API cmdline.
+		// at http://<HOST_GUEST_SERVICE_ADDR>:8891/assets/<file>. This is how
+		// a lease fetches tooling that is too big for the exec API cmdline.
 		if s.assetsDir != "" && strings.HasPrefix(r.URL.Path, "/assets/") {
 			// Containment (security review #37 rescan): never rely on the
 			// stdlib's incidental dot-dot rejection for a host-filesystem
@@ -148,7 +160,7 @@ func (s *Server) peerTrusted(remoteAddr string) bool {
 func (s *Server) SetAssetsDir(dir string) { s.assetsDir = dir }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	label, hostUser, port, ok := parseProxyHost2(r.Host)
+	label, hostUser, port, ok := parseProxyHost2(r.Host, s.svc.proxySuffix())
 	if !ok {
 		http.Error(w, "unknown lease hostname", http.StatusNotFound)
 		return
@@ -294,13 +306,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseProxyHost extracts a lease id and guest port from a proxy Host
-// header. Accepted forms:
+// header. Accepted forms (suffix = SPOOND_PROXY_HOST_SUFFIX):
 //
-//	<32-hex-lease-id>.sandbox.lacy.casa        → port 3000
-//	<32-hex-lease-id>-<port>.sandbox.lacy.casa → that port
+//	<32-hex-lease-id>.<suffix>        → port 3000
+//	<32-hex-lease-id>-<port>.<suffix> → that port
 //
 // Returns ok=false for anything else (including the bare apex hostname).
-func parseProxyHost(host string) (leaseID string, port int, ok bool) {
+func parseProxyHost(host, suffix string) (leaseID string, port int, ok bool) {
 	h := strings.ToLower(strings.TrimSpace(host))
 	// Strip any explicit :port from the Host header (rare on 443, cheap).
 	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.HasSuffix(h, "]") {
@@ -308,10 +320,10 @@ func parseProxyHost(host string) (leaseID string, port int, ok bool) {
 			h = h[:i]
 		}
 	}
-	if !strings.HasSuffix(h, proxyHostSuffix) {
+	if !strings.HasSuffix(h, suffix) {
 		return "", 0, false
 	}
-	label := strings.TrimSuffix(h, proxyHostSuffix)
+	label := strings.TrimSuffix(h, suffix)
 	if label == "" {
 		return "", 0, false
 	}
@@ -334,15 +346,16 @@ func parseProxyHost(host string) (leaseID string, port int, ok bool) {
 }
 
 // parseProxyHost2 is the U7/T7 extension of parseProxyHost. It accepts
-// the legacy single-label form plus the per-user form:
+// the legacy single-label form plus the per-user form (suffix =
+// SPOOND_PROXY_HOST_SUFFIX):
 //
-//	<label>.sandbox.lacy.casa              → user "" (any/legacy)
-//	<label>.<user>.sandbox.lacy.casa       → user <user>
+//	<label>.<suffix>        → user "" (any/legacy)
+//	<label>.<user>.<suffix> → user <user>
 //
 // Returns user="" when the hostname has no user segment. The caller
 // (handleProxy) decides whether the user segment is allowed for the
 // authenticated owner.
-func parseProxyHost2(host string) (label, user string, port int, ok bool) {
+func parseProxyHost2(host, suffix string) (label, user string, port int, ok bool) {
 	h := strings.ToLower(strings.TrimSpace(host))
 	// Strip any explicit :port from the Host header (rare on 443, cheap).
 	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.HasSuffix(h, "]") {
@@ -350,10 +363,10 @@ func parseProxyHost2(host string) (label, user string, port int, ok bool) {
 			h = h[:i]
 		}
 	}
-	if !strings.HasSuffix(h, proxyHostSuffix) {
+	if !strings.HasSuffix(h, suffix) {
 		return "", "", 0, false
 	}
-	pre := strings.TrimSuffix(h, proxyHostSuffix)
+	pre := strings.TrimSuffix(h, suffix)
 	if pre == "" {
 		return "", "", 0, false
 	}
@@ -366,7 +379,7 @@ func parseProxyHost2(host string) (label, user string, port int, ok bool) {
 		return label, user, defaultProxyPort, true
 	}
 	// Single-label form: delegate to parseProxyHost (port suffix etc.).
-	label, port, ok = parseProxyHost(host)
+	label, port, ok = parseProxyHost(host, suffix)
 	if !ok {
 		return "", "", 0, false
 	}

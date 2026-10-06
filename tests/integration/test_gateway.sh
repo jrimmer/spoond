@@ -1,7 +1,7 @@
 #!/bin/bash
 source "$(dirname "$0")/lib.sh"
 # test_gateway.sh — SSH gateway integration tests.
-# Requires: lib.sh sourced, run ON vm2 (needs local systemd + gateway keys dir).
+# Requires: lib.sh sourced, run ON the host (needs local systemd + gateway keys dir).
 # Adds a temporary test key to the allowlist, tests, then restores the unit.
 set -u
 UNIT=/etc/systemd/system/spoond-sshd-gateway.service

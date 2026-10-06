@@ -4,13 +4,13 @@
 // orchestrator restarts; `--start` undrains it afterwards, resuming the
 // drained leases.
 //
-// Configuration comes from the environment (vm2: /etc/e2b/drain.env):
+// Configuration comes from the environment (host: /etc/e2b/drain.env):
 //
 //	SPOOND_DRAIN_URL          backend base URL(s), comma-separated
 //	SPOOND_ADMIN_TOKEN_FILE   file(s) holding the ADMIN_TOKEN bearer
 //	                          token, a list of the same length
 //	SPOOND_DRAIN_INSECURE     1 skips TLS verification (the certificate
-//	                          is for vm2.lacy.casa; the call goes to
+//	                          is for a hostname cert; the call goes to
 //	                          127.0.0.1)
 //
 // Each URL/token pair is called in list order; a failure on one pair is
@@ -128,12 +128,12 @@ func postAdmin(client *http.Client, tgt target, path string, timeout time.Durati
 }
 
 // newHTTPClient builds the HTTP client. SPOOND_DRAIN_INSECURE=1 skips
-// TLS verification: the certificate is for vm2.lacy.casa while the call
+// TLS verification: the certificate is for a hostname while the call
 // goes to 127.0.0.1.
 func newHTTPClient() *http.Client {
 	tr := &http.Transport{}
 	if os.Getenv("SPOOND_DRAIN_INSECURE") == "1" {
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // vm2 cert vs 127.0.0.1 loopback call
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // hostname cert vs 127.0.0.1 loopback call
 	}
 	return &http.Client{Transport: tr}
 }

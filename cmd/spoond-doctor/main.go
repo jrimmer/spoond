@@ -51,7 +51,7 @@ type checkResult struct {
 	detail string
 }
 
-// doctorArtifacts are the E2B artifacts U04 installed on vm2, with the
+// doctorArtifacts are the E2B artifacts U04 installs on the host, with the
 // SHA-256 values they must have.
 var doctorArtifacts = []struct {
 	path string
@@ -568,7 +568,7 @@ func checkBackend() []checkResult {
 	// Probe /healthz. For https, trust the local backend by loading its own
 	// cert chain from disk — never skip verification (no curl -k). When the
 	// bind address is a wildcard the cert SAN (hostname) won't match it, so
-	// probe via a DNS SAN from the leaf cert itself (e.g. vm2.lacy.casa).
+	// probe via a DNS SAN from the leaf cert itself (e.g. a cert hostname).
 	probeHost := bind
 	if h, p, err := net.SplitHostPort(bind); err == nil && (h == "" || h == "0.0.0.0" || h == "::") {
 		if san := leafCertSAN(os.Getenv("TLS_CERT")); san != "" {

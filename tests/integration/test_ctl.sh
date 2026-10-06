@@ -1,7 +1,7 @@
 #!/bin/bash
 source "$(dirname "$0")/lib.sh"
 # test_ctl.sh — SSH-as-API control plane (U3) integration tests.
-# Requires: lib.sh sourced, run ON vm2, spoond-sshd-gateway with ctl support.
+# Requires: lib.sh sourced, run ON the host, spoond-sshd-gateway with ctl support.
 # Adds a temporary test key to the allowlist, tests, then restores the unit.
 set -u
 UNIT=/etc/systemd/system/spoond-sshd-gateway.service

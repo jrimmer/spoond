@@ -16,7 +16,7 @@
 //	--db        SQLite database path (default $SPOOND_DB_PATH)
 //	--registry  registry to push to (default $IMAGE_REGISTRY, localhost:5000)
 //
-// Runs on vm2 as root and talks to the orchestrator via
+// Runs on the E2B host as root and talks to the orchestrator via
 // substrate/e2b.FromEnv().
 package spoondimages
 
@@ -248,12 +248,22 @@ func templateBuildSize(buildID string) int64 {
 // resolveBase applies a manifest entry's From and BuildArgs: it looks up
 // the base image's current digest (passed as BASE), fills vcpu, memory,
 // disk and env from the base where the entry leaves them unset (entry
-// env keys win), passes that env as WARM_ENV, and returns the docker
-// --build-arg flags, sorted.
+// env keys win), passes that env as WARM_ENV, injects the deployment's
+// guest DNS resolver (SPOOND_GUEST_DNS_ADDR) unless the entry sets it,
+// and returns the docker --build-arg flags, sorted.
 func resolveBase(ctx context.Context, db *store.DB, img manifestImage) (manifestImage, []string, error) {
 	vals := map[string]string{}
 	for k, v := range img.BuildArgs {
 		vals[k] = v
+	}
+	// The guest DNS resolver baked into every image's spoond-guest-init
+	// (SPOOND_GUEST_DNS_ADDR). A manifest entry may override it in its
+	// own build_args; unset leaves the Dockerfile's generic empty default
+	// (no resolver pinned).
+	if _, ok := vals["SPOOND_GUEST_DNS_ADDR"]; !ok {
+		if v := os.Getenv("SPOOND_GUEST_DNS_ADDR"); v != "" {
+			vals["SPOOND_GUEST_DNS_ADDR"] = v
+		}
 	}
 	if img.From != "" {
 		base, err := db.GetImage(ctx, img.From)

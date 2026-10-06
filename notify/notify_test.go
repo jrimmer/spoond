@@ -266,10 +266,10 @@ func TestEnqueueStampsAndDefaults(t *testing.T) {
 // body); a path prefix and the query (?auth=) stay.
 func TestNtfyPublishURL(t *testing.T) {
 	for in, want := range map[string]string{
-		"https://ntfy.example/alerts":           "https://ntfy.example/",
-		"https://ntfy.example/alerts/":          "https://ntfy.example/",
-		"https://lacy.casa/ntfy/alerts?auth=tk": "https://lacy.casa/ntfy/?auth=tk",
-		"https://u:p@ntfy.example/alerts":       "https://u:p@ntfy.example/",
+		"https://ntfy.example/alerts":                  "https://ntfy.example/",
+		"https://ntfy.example/alerts/":                 "https://ntfy.example/",
+		"https://ntfy.example.com/ntfy/alerts?auth=tk": "https://ntfy.example.com/ntfy/?auth=tk",
+		"https://u:p@ntfy.example/alerts":              "https://u:p@ntfy.example/",
 	} {
 		if got := ntfyPublishURL(in); got != want {
 			t.Errorf("ntfyPublishURL(%q) = %q, want %q", in, got, want)

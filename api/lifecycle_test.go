@@ -25,8 +25,9 @@ func newLifecycleService(t *testing.T) (*Service, *testSub) {
 	svc := NewService(sub, db, map[string]string{"t": "c"}, ServiceConfig{
 		DefaultTTL:    time.Minute,
 		MaxTTL:        10 * time.Minute,
-		HostGuestAddr: "10.1.0.11",
+		HostGuestAddr: "10.0.0.11",
 		HostGuestPort: 8891,
+		GuestDNSAddr:  "10.0.0.2",
 		HostAPIPort:   8890,
 	})
 	return svc, sub
@@ -38,8 +39,8 @@ func newLifecycleService(t *testing.T) (*Service, *testSub) {
 // CIDRs and private allowances.
 func TestEgressForEachPolicy(t *testing.T) {
 	svc, _ := newLifecycleService(t)
-	hostSvc := substrate.PrivateAllowance{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8891}}
-	dns := substrate.PrivateAllowance{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}}
+	hostSvc := substrate.PrivateAllowance{CIDR: "10.0.0.11/32", TCPPorts: []uint32{8891}}
+	dns := substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}
 
 	lanPrivateWant := make([]substrate.PrivateAllowance, 0, len(lanRanges)+2)
 	for _, cidr := range lanRanges {
@@ -49,7 +50,7 @@ func TestEgressForEachPolicy(t *testing.T) {
 	// fork's host-address guard ignores the any-port LAN ranges for the
 	// host's own address.
 	lanPrivateWant = append(lanPrivateWant, hostSvc, dns,
-		substrate.PrivateAllowance{CIDR: "10.1.0.11/32", TCPPorts: []uint32{8890}})
+		substrate.PrivateAllowance{CIDR: "10.0.0.11/32", TCPPorts: []uint32{8890}})
 
 	t.Run("none", func(t *testing.T) {
 		got := svc.egressFor(&Lease{NetPolicy: "none"})

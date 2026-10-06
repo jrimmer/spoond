@@ -107,8 +107,11 @@ RUN pkg-config --exists webkit2gtk-4.1 \
  && echo TAURI_SYS_DEPS_OK
 
 # NOTE: DNS/registry reachability is fixed at the INIT level, not here:
-# images/guest/spoond-guest-init lists the LAN resolver only, so
-# git.example.com resolves to the LAN edge whose /v2/ path is not
-# SSO-gated. Image-level /etc/hosts pinning does not survive guest boot.
+# images/guest/spoond-guest-init writes the resolver configured at build
+# (SPOOND_GUEST_DNS_ADDR), so the deployment's git host resolves to the
+# internal edge rather than the public one. Image-level /etc/hosts pinning
+# does not survive guest boot.
 COPY --chmod=755 guest/spoond-guest-init /usr/local/bin/spoond-guest-init
-RUN mkdir -p /etc/spoond/init.d
+ARG SPOOND_GUEST_DNS_ADDR=
+RUN mkdir -p /etc/spoond/init.d \
+ && printf '%s\n' "$SPOOND_GUEST_DNS_ADDR" > /etc/spoond/guest-dns

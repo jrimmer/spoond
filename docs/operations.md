@@ -53,7 +53,7 @@ and response-time conditions:
 ```yaml
 endpoints:
   - name: lease-api-readyz
-    url: https://vm2.lacy.casa:8890/readyz
+    url: https://spoond.example.com:8890/readyz
     interval: 30s
     conditions:
       - "[STATUS] == 200"
@@ -61,7 +61,7 @@ endpoints:
       - "[CERTIFICATE_EXPIRATION] > 72h"
 
   - name: dashboard-readyz
-    url: https://vm2.lacy.casa:8893/readyz
+    url: https://dash.example.com:8893/readyz
     interval: 30s
     conditions:
       - "[STATUS] == 200"
@@ -69,7 +69,7 @@ endpoints:
       - "[CERTIFICATE_EXPIRATION] > 72h" # needs DASH_TLS_CERT set, else drop this condition
 
   - name: ssh-gateway
-    url: tcp://vm2.lacy.casa:2222       # a TCP connect proves the listener answers
+    url: tcp://sandbox.example.com:2222       # a TCP connect proves the listener answers
     interval: 30s
     conditions:
       - "[CONNECTED] == true"
@@ -903,7 +903,7 @@ variables:
 | `DASH_USER`, `DASH_PASSWORD_HASH` | *(required)* | basic auth (`spoond dash hash PASS` makes the hash) |
 | `DASH_TLS_CERT`, `DASH_TLS_KEY` | *(unset)* | serve HTTPS (set both or neither) |
 | `METRICS_URL` | `https://127.0.0.1:8890/metrics` | spoond's `/metrics` |
-| `METRICS_SERVER_NAME` | `spoond.example.com` | TLS server name for that URL |
+| `METRICS_SERVER_NAME` | *(METRICS_URL host)* | TLS server name for that URL |
 | `METRICS_TOKEN` | *(required)* | the backend's scrape-only token |
 | `DASH_EVENTS_TOKEN` | *(unset)* | the backend's events-only `EVENTS_TOKEN`; the lease events panel's source (unset: the panel says so) |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |

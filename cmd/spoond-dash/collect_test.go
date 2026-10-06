@@ -264,10 +264,10 @@ func TestEventLinesSubjectPrefersHolder(t *testing.T) {
 	}
 
 	// A CI job lease: no holder, but the comment names the job.
-	c.lastRow = []LeaseRow{{ID: "abcdef0123", Comment: "forgejo: lacy.casa/site #218"}}
+	c.lastRow = []LeaseRow{{ID: "abcdef0123", Comment: "forgejo: example.com/site #218"}}
 	lines = c.eventLines(time.Unix(1_800_000_000, 0))
 	// (cut to the subject column's cap, eventSubjectMax)
-	if !strings.HasSuffix(lines[0].Text, ellipsize("forgejo: lacy.casa/site #218", eventSubjectMax)) {
+	if !strings.HasSuffix(lines[0].Text, ellipsize("forgejo: example.com/site #218", eventSubjectMax)) {
 		t.Fatalf("comment not second: %q", lines[0].Text)
 	}
 

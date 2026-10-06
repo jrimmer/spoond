@@ -189,6 +189,8 @@ E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
 IMAGE_REGISTRY=localhost:5000
 HOST_GUEST_SERVICE_ADDR=<host primary IP>
 HOST_GUEST_SERVICE_PORT=8891
+SPOOND_GUEST_DNS_ADDR=<guest resolver IP>
+SPOOND_PROXY_HOST_SUFFIX=.sandbox.example.com
 E2B_TEMPLATE_STORAGE_PATH=/forkdcache/e2b/storage/templates
 SPOOND_BACKUP_DIR=/var/lib/spoond/backups
 USERS_FILE=/var/lib/spoond/users.json
@@ -208,7 +210,11 @@ chmod 600 /etc/spoond/backend.env
 Two lines to edit by hand: `HOST_GUEST_SERVICE_ADDR` (the host's primary
 IP — required, what guests use to reach host services; the backend exits
 without it) and the consumer name in `CONSUMER_TOKENS` (required; the
-backend exits without it too). `USERS_FILE` is the identity store that
+backend exits without it too). `SPOOND_GUEST_DNS_ADDR` is the guest's DNS
+resolver (granted on port 53 and baked into the guest image; empty
+leaves no resolver allowance), and `SPOOND_PROXY_HOST_SUFFIX` is the
+wildcard hostname suffix the HTTP proxy routes (default
+`.sandbox.example.com`). `USERS_FILE` is the identity store that
 turns on multi-user tenancy; `BOOTSTRAP_TOKEN` gates the first (admin)
 user, `GATEWAY_TOKEN` is the SSH gateway's service token, `ADMIN_TOKEN`
 drives `/api/admin/*` (drain, undrain, reconcile), `METRICS_TOKEN` is

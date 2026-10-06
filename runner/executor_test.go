@@ -246,11 +246,11 @@ jobs:
 		Labels:       map[string]string{"ubuntu-latest": "py-base"},
 		DefaultImage: "py-base",
 		TTL:          600,
-		RepoBaseURL:  "https://code.lacy.casa",
+		RepoBaseURL:  "https://code.example.com",
 	}
 	job := testJob(payload)
 	job.Secrets = map[string]string{"GITHUB_TOKEN": "tok123"}
-	job.Context = map[string]string{"repository": "lacy.casa/spoond"}
+	job.Context = map[string]string{"repository": "example.com/spoond"}
 	if err := exec.Run(context.Background(), job); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -261,7 +261,7 @@ jobs:
 	// repo URL and token header, and the run step should use /workspace.
 	var sawClone, sawRun bool
 	for _, c := range lease.cmds {
-		if strings.Contains(c, "git") && strings.Contains(c, "lacy.casa/spoond.git") {
+		if strings.Contains(c, "git") && strings.Contains(c, "example.com/spoond.git") {
 			sawClone = true
 			if !strings.Contains(c, "Authorization: token tok123") {
 				t.Fatalf("clone missing token header: %s", c)
@@ -402,7 +402,7 @@ jobs:
 	job := testJob(payload)
 	// Flat context keys are looked up under github.* by EvalContext.
 	job.Context = map[string]string{
-		"repository": "jrimmer/netcrawl",
+		"repository": "example-org/netcrawl",
 		"sha":        "abc123",
 	}
 	if err := exec.Run(context.Background(), job); err != nil {
@@ -412,8 +412,8 @@ jobs:
 		t.Fatalf("expected exec env captured")
 	}
 	env := lease.envs[0]
-	if env["CI_REPO_OWNER"] != "jrimmer" {
-		t.Fatalf("CI_REPO_OWNER = %q, want jrimmer (env=%+v)", env["CI_REPO_OWNER"], env)
+	if env["CI_REPO_OWNER"] != "example-org" {
+		t.Fatalf("CI_REPO_OWNER = %q, want example-org (env=%+v)", env["CI_REPO_OWNER"], env)
 	}
 	if env["CI_REPO_NAME"] != "netcrawl" {
 		t.Fatalf("CI_REPO_NAME = %q, want netcrawl (env=%+v)", env["CI_REPO_NAME"], env)

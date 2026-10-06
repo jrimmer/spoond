@@ -2,13 +2,13 @@
 # run.sh — spoond integration test suite orchestrator.
 #
 # Runs the full integration suite against a live spoond stack on an
-# E2B host (vm2). By default tests run locally against 127.0.0.1:8890;
+# E2B host. By default tests run locally against 127.0.0.1:8890;
 # pass SSHHOST to stage and run on a remote host (e.g.
-# SSHHOST=root@10.1.0.11).
+# SSHHOST=root@10.0.0.11).
 #
 # Usage:
-#   tests/integration/run.sh              # run locally on vm2
-#   SSHHOST=root@10.1.0.11 tests/integration/run.sh   # from another host
+#   tests/integration/run.sh              # run locally on the host
+#   SSHHOST=root@10.0.0.11 tests/integration/run.sh   # from another host
 set -u
 cd "$(dirname "$0")"
 DIR="$(pwd)"
@@ -28,8 +28,8 @@ if [ -n "$SSHHOST" ]; then
   ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" "mkdir -p /tmp/spoond-itest"
   scp -q -r "$DIR/." "$SSHHOST:/tmp/spoond-itest/"
   # gateway test needs the backend token in its env file; run.sh picks it up from /etc
-  # The cap runs REMOTELY (vm2 has GNU timeout; the local machine may
-  # be macOS/zsh where `timeout` doesn't exist). If the remote run
+  # The cap runs REMOTELY (the host has GNU timeout; the local machine
+  # may be macOS/zsh where `timeout` doesn't exist). If the remote run
   # hangs, timeout kills it and ssh returns.
   ssh -o BatchMode=yes -o ConnectTimeout=6 "$SSHHOST" \
     "cd /tmp/spoond-itest && timeout 600 env BE_API='$BE_API' bash run.sh"
@@ -37,7 +37,7 @@ if [ -n "$SSHHOST" ]; then
   exit $RC
 fi
 
-# Local run (on vm2 or wherever the backend is reachable).
+# Local run (on the host or wherever the backend is reachable).
 source ./lib.sh
 echo "== spoond integration suite =="
 echo "backend: $BE_API  host: $(hostname)"

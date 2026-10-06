@@ -1,4 +1,4 @@
-                  SPOOND · vm2.lacy.casa · dev · up 9m                  
+                SPOOND · spoond.example.com · dev · up 9m               
                                                                         
 ▲ held lease fedcba0987: expiry/expire 3h00m ago                        
                                                                         

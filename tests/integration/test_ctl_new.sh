@@ -1,9 +1,10 @@
 #!/bin/bash
 source "$(dirname "$0")/lib.sh"
 # test_ctl_new.sh — extended ctl surface (U7): tag, restart, prompt, names.
-# Requires: lib.sh sourced, run ON vm2, spoond-sshd-gateway with ctl support.
+# Requires: lib.sh sourced, run ON the host, spoond-sshd-gateway with ctl support.
 # Adds a temporary test key to the allowlist, tests, then restores the unit.
 set -u
+PROXY_SUFFIX="${PROXY_SUFFIX:-sandbox.example.com}"
 UNIT=/etc/systemd/system/spoond-sshd-gateway.service
 KEYS=/etc/spoond-gateway/keys
 GWKEY=/tmp/itest_gw_key
@@ -58,7 +59,7 @@ if [ -n "$CTLID" ]; then
   assert_contains "exec works after restart" "$OUT2" "RESTARTED_OK"
   # proxy after restart must work (guest address preserved across resume)
   sleep 5
-  CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $CTLID-8080.sandbox.lacy.casa" "http://127.0.0.1:8891/")
+  CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $CTLID-8080.$PROXY_SUFFIX" "http://127.0.0.1:8891/")
   # guest has nothing on 8080; 502 is fine (proxy dialed), 400/404 is a proxy-path regression
   if [ "$CODE" = "502" ] || [ "$CODE" = "000" ]; then
     ok "proxy-after-restart reached guest network (502 = connected, nothing listening)"

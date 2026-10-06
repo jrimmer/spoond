@@ -16,22 +16,22 @@ func TestParseProxyHost(t *testing.T) {
 		wantPort int
 		wantOK   bool
 	}{
-		{"a1b2c3d4e5f60718293a4b5c6d7e8f90.sandbox.lacy.casa", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 3000, true},
-		{"a1b2c3d4e5f60718293a4b5c6d7e8f90.sandbox.lacy.casa:443", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 3000, true},
-		{"a1b2c3d4e5f60718293a4b5c6d7e8f90-8080.sandbox.lacy.casa", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 8080, true},
-		{"A1B2C3D4E5F60718293A4B5C6D7E8F90.sandbox.lacy.casa", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 3000, true},
-		{"sandbox.lacy.casa", "", 0, false},
-		{"nope.sandbox.lacy.casa", "nope", 3000, true},                                                                       // friendly name (resolves at lookup)
-		{"mybox-9000.sandbox.lacy.casa", "mybox", 9000, true},                                                                // name + port
-		{"mybox-0.sandbox.lacy.casa", "mybox-0", 3000, true},                                                                 // hyphenated name, not a port
-		{"toolongid123456789012345678901234567890.sandbox.lacy.casa", "toolongid123456789012345678901234567890", 3000, true}, // 39 chars — valid name
-		{"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789.sandbox.lacy.casa", "", 0, false},         // >63 chars
-		{"a1b2c3d4e5f60718293a4b5c6d7e8f90-0.sandbox.lacy.casa", "", 0, false},                                               // port 0 invalid
-		{"a1b2c3d4e5f60718293a4b5c6d7e8f90-70000.sandbox.lacy.casa", "", 0, false},                                           // port >65535 invalid
+		{"a1b2c3d4e5f60718293a4b5c6d7e8f90.sandbox.example.com", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 3000, true},
+		{"a1b2c3d4e5f60718293a4b5c6d7e8f90.sandbox.example.com:443", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 3000, true},
+		{"a1b2c3d4e5f60718293a4b5c6d7e8f90-8080.sandbox.example.com", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 8080, true},
+		{"A1B2C3D4E5F60718293A4B5C6D7E8F90.sandbox.example.com", "a1b2c3d4e5f60718293a4b5c6d7e8f90", 3000, true},
+		{"sandbox.example.com", "", 0, false},
+		{"nope.sandbox.example.com", "nope", 3000, true},                                                                       // friendly name (resolves at lookup)
+		{"mybox-9000.sandbox.example.com", "mybox", 9000, true},                                                                // name + port
+		{"mybox-0.sandbox.example.com", "mybox-0", 3000, true},                                                                 // hyphenated name, not a port
+		{"toolongid123456789012345678901234567890.sandbox.example.com", "toolongid123456789012345678901234567890", 3000, true}, // 39 chars — valid name
+		{"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789.sandbox.example.com", "", 0, false},         // >63 chars
+		{"a1b2c3d4e5f60718293a4b5c6d7e8f90-0.sandbox.example.com", "", 0, false},                                               // port 0 invalid
+		{"a1b2c3d4e5f60718293a4b5c6d7e8f90-70000.sandbox.example.com", "", 0, false},                                           // port >65535 invalid
 		{"other.example.com", "", 0, false},
 	}
 	for _, c := range cases {
-		id, port, ok := parseProxyHost(c.host)
+		id, port, ok := parseProxyHost(c.host, defaultProxyHostSuffix)
 		if id != c.wantID || port != c.wantPort || ok != c.wantOK {
 			t.Errorf("parseProxyHost(%q) = (%q,%d,%v), want (%q,%d,%v)",
 				c.host, id, port, ok, c.wantID, c.wantPort, c.wantOK)
@@ -70,7 +70,7 @@ func TestProxyDirectorHeaders(t *testing.T) {
 	sandboxID := l.SandboxID
 
 	ph := NewServer(svc, NewImageRegistry(db)).ProxyHandler()
-	req := httptest.NewRequest("GET", "http://"+l.ID+"-8080.sandbox.lacy.casa/app?q=1", nil)
+	req := httptest.NewRequest("GET", "http://"+l.ID+"-8080.sandbox.example.com/app?q=1", nil)
 	req.Header.Set("X-Proxy-Auth", "gate-secret")
 	req.Header.Set("Remote-User", "jason")
 	req.Header.Set("X-Spoond-User-Id", "u-9")
@@ -114,7 +114,7 @@ func TestProxyDirectorHeaders(t *testing.T) {
 			t.Fatalf("%s reached the upstream: %q", stripped, v)
 		}
 	}
-	if v := h.Get("X-Forwarded-Host"); v != l.ID+"-8080.sandbox.lacy.casa" {
+	if v := h.Get("X-Forwarded-Host"); v != l.ID+"-8080.sandbox.example.com" {
 		t.Fatalf("X-Forwarded-Host = %q, want the inbound Host", v)
 	}
 	if v := h.Get("X-Forwarded-Proto"); v != "https" {
@@ -125,7 +125,7 @@ func TestProxyDirectorHeaders(t *testing.T) {
 	}
 
 	// No TLS and no inbound proto header → http.
-	req2 := httptest.NewRequest("GET", "http://"+l.ID+".sandbox.lacy.casa/", nil)
+	req2 := httptest.NewRequest("GET", "http://"+l.ID+".sandbox.example.com/", nil)
 	rec2 := httptest.NewRecorder()
 	ph.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusOK {
@@ -137,7 +137,7 @@ func TestProxyDirectorHeaders(t *testing.T) {
 	if v := h.Get("X-Forwarded-Proto"); v != "http" {
 		t.Fatalf("X-Forwarded-Proto = %q, want http", v)
 	}
-	if v := h.Get("X-Forwarded-Host"); v != l.ID+".sandbox.lacy.casa" {
+	if v := h.Get("X-Forwarded-Host"); v != l.ID+".sandbox.example.com" {
 		t.Fatalf("X-Forwarded-Host = %q", v)
 	}
 	if v := h.Get("E2b-Sandbox-Port"); v != "3000" {
@@ -156,7 +156,7 @@ func TestProxyRefusesEnvdPortAndSuspended(t *testing.T) {
 	proxy := NewServer(svc, NewImageRegistry(db)).ProxyHandler()
 
 	// 49983 → 403.
-	req := httptest.NewRequest("GET", "http://"+id+"-49983.sandbox.lacy.casa/", nil)
+	req := httptest.NewRequest("GET", "http://"+id+"-49983.sandbox.example.com/", nil)
 	rec := httptest.NewRecorder()
 	proxy.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -168,7 +168,7 @@ func TestProxyRefusesEnvdPortAndSuspended(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("suspend status %d", resp.StatusCode)
 	}
-	req = httptest.NewRequest("GET", "http://"+id+"-3000.sandbox.lacy.casa/", nil)
+	req = httptest.NewRequest("GET", "http://"+id+"-3000.sandbox.example.com/", nil)
 	rec = httptest.NewRecorder()
 	proxy.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {

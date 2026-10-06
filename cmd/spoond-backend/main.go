@@ -17,6 +17,10 @@
 //	MAX_TTL_SECS      max lease TTL (default 3600)
 //	HOST_GUEST_SERVICE_ADDR  address guests use to reach host services (required)
 //	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
+//	SPOOND_GUEST_DNS_ADDR  guest DNS resolver granted on port 53 and baked
+//	                  into the guest image (empty = no resolver allowance)
+//	SPOOND_PROXY_HOST_SUFFIX  wildcard hostname suffix the HTTP proxy
+//	                  routes (default .sandbox.example.com)
 //	METRICS_TOKEN     bearer that may read /metrics and nothing else
 //	                  (Prometheus, spoond dash); empty disables
 //	EVENTS_TOKEN      bearer that may read the lease event streams and
@@ -278,6 +282,13 @@ func Main(args []string) int {
 	if hostGuestAddr == "" {
 		log.Fatal("HOST_GUEST_SERVICE_ADDR is required (the address guests use to reach host services)")
 	}
+	// The guest's DNS resolver (SPOOND_GUEST_DNS_ADDR). It is granted to
+	// every lease's egress policy and baked into the guest image for
+	// spoond-guest-init. Empty = no resolver allowance.
+	guestDNSAddr := os.Getenv("SPOOND_GUEST_DNS_ADDR")
+	// The wildcard hostname suffix the HTTP proxy routes
+	// (SPOOND_PROXY_HOST_SUFFIX). Empty = the generic default.
+	proxyHostSuffix := os.Getenv("SPOOND_PROXY_HOST_SUFFIX")
 	hostGuestPort := envIntOr("HOST_GUEST_SERVICE_PORT", 8891)
 	defaultAPIPort := 0
 	if _, p, err := net.SplitHostPort(bindAddr); err == nil {
@@ -364,6 +375,8 @@ func Main(args []string) int {
 		IdleTimeout:               idleTimeout,
 		HostGuestAddr:             hostGuestAddr,
 		HostGuestPort:             hostGuestPort,
+		GuestDNSAddr:              guestDNSAddr,
+		ProxyHostSuffix:           proxyHostSuffix,
 		HostAPIPort:               hostAPIPort,
 		MetricsToken:              os.Getenv("METRICS_TOKEN"),
 		EventsToken:               os.Getenv("EVENTS_TOKEN"),
@@ -551,7 +564,7 @@ func Main(args []string) int {
 	httpSrv := newHTTPServer(bindAddr, srv.Handler())
 
 	// Optional second listener: the public HTTP proxy (wildcard
-	// *.sandbox.lacy.casa via Caddy). Plain HTTP — Caddy terminates TLS.
+	// *.sandbox.example.com via Caddy). Plain HTTP — Caddy terminates TLS.
 	var proxySrv *http.Server
 	if proxyAddr != "" {
 		proxySrv = newHTTPServer(proxyAddr, srv.ProxyHandler())

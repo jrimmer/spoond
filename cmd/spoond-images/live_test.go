@@ -1,14 +1,15 @@
 //go:build e2blive
 
-// Live check per image against the orchestrator on vm2. Run with:
+// Live check per image against the orchestrator on the E2B host. Run with:
 //
 //	go test -tags e2blive -count=1 -timeout 60m ./cmd/spoond-images/
 //
 // from /root/src/spoond, with the E2B_* environment set (FromEnv
 // defaults). For every baked manifest image it creates a sandbox from
 // the image's current_build_id with the manifest env, runs `cat
-// /etc/resolv.conf`, requires the first line to be `nameserver
-// 10.1.0.1`, and deletes the sandbox.
+// /etc/resolv.conf`, checks the first line is `nameserver
+// $SPOOND_GUEST_DNS_ADDR` (skipped when that is unset), and deletes the
+// sandbox.
 package spoondimages
 
 import (
@@ -101,9 +102,13 @@ func TestLiveImages(t *testing.T) {
 				t.Fatalf("Exec cat /etc/resolv.conf: %v", err)
 			}
 			firstLine := strings.SplitN(r.Stdout, "\n", 2)[0]
-			if firstLine != "nameserver 10.1.0.1" {
+			want := envOr("SPOOND_GUEST_DNS_ADDR", "")
+			if want == "" {
+				t.Skip("SPOOND_GUEST_DNS_ADDR not set; resolver check skipped")
+			}
+			if firstLine != "nameserver "+want {
 				t.Fatalf("/etc/resolv.conf first line = %q, want %q (stdout=%q stderr=%q exit=%d)",
-					firstLine, "nameserver 10.1.0.1", r.Stdout, r.Stderr, r.ExitCode)
+					firstLine, "nameserver "+want, r.Stdout, r.Stderr, r.ExitCode)
 			}
 
 			dctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

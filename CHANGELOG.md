@@ -12,6 +12,30 @@ summarised from README "Status".
 
 ### Changed
 
+- **Built-in defaults are generic; deployment-specific hosts and LAN
+  addresses are settings.** No code carries a maintainer hostname or
+  address any more. Operators must set the new variables (the generic
+  defaults keep localhost/example.com only):
+  - `SPOOND_GUEST_DNS_ADDR` (backend, image build, live test) — the
+    guest DNS resolver; granted on port 53 and baked into the guest
+    image by `images/guest/spoond-guest-init`. Empty = no resolver
+    allowance and the image keeps its own `resolv.conf`.
+  - `SPOOND_PROXY_HOST_SUFFIX` (backend) — the wildcard hostname suffix
+    the HTTP proxy routes; default `.sandbox.example.com`.
+  - `HOST_GUEST_SERVICE_ADDR` / `HOST_GUEST_SERVICE_PORT` now also
+    default the gateway's `SHELLY_BINARY_URL` and `LLM_GATEWAY_URL`
+    (default `http://127.0.0.1:8891/...` when unset).
+  - `SPOOND_GATEWAY_HOST`, `SPOOND_CTL_HOST` default to
+    `sandbox.example.com`; the gateway `sessionEnv` host address uses
+    `HOST_GUEST_SERVICE_ADDR` (default `127.0.0.1`).
+  - `METRICS_SERVER_NAME` (dashboard) has no hostname default: unset
+    means no explicit TLS server name.
+  - `FORGEJO_URL`, `REPO_BASE_URL` (runner) have no hostname default;
+    `FORGEJO_URL` is now required and `REPO_BASE_URL` must be set for
+    `actions/checkout` (a missing value fails the checkout step
+    clearly).
+  - `NETWATCH_TARGETS` (netwatch) and the integration tests' LAN
+    targets are required/configurable instead of baked-in addresses.
 - **Dashboard capacity panel: the lease counts on one line,** with the
   burst share inside the running count: `8 leases · 8 running (3
   burst) · 0 suspended · 0 lost` (`susp` when the full word does not

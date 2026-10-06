@@ -701,7 +701,7 @@ func (x *SandboxNetworkDomainRules) GetRules() []*SandboxNetworkRule {
 
 type SandboxPrivateAllowance struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// IPv4 CIDR inside the always-denied private ranges, e.g. "10.1.0.11/32" or "10.0.0.0/13".
+	// IPv4 CIDR inside the always-denied private ranges, e.g. "10.0.0.11/32" or "10.0.0.0/13".
 	Cidr string `protobuf:"bytes,1,opt,name=cidr,proto3" json:"cidr,omitempty"`
 	// TCP destination ports allowed to this CIDR. Empty = every TCP port.
 	TcpPorts      []uint32 `protobuf:"varint,2,rep,packed,name=tcp_ports,json=tcpPorts,proto3" json:"tcp_ports,omitempty"`

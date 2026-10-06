@@ -9,7 +9,7 @@ import (
 
 // PrivateAllowance permits egress into an otherwise-denied private range (patch P4).
 type PrivateAllowance struct {
-	CIDR     string   // e.g. "10.1.0.11/32"
+	CIDR     string   // e.g. "10.0.0.11/32"
 	TCPPorts []uint32 // empty = all TCP ports
 }
 
