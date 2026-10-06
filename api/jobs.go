@@ -606,7 +606,7 @@ func jobExitDetail(exitCode int, stderrTail string) string {
 	return detail
 }
 
-// lastLines returns the last n non-empty lines of s.
+// lastLines returns the last n lines of s, keeping empty ones.
 func lastLines(s string, n int) string {
 	s = strings.TrimRight(s, "\n")
 	if s == "" {
