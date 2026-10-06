@@ -1230,3 +1230,17 @@ func TestBannerQuietCases(t *testing.T) {
 		}
 	}
 }
+
+// TestLeaseCellsNeverRunTogether: a long owner ends in … and leaves a
+// space before the state cell, and a long age ("10h37m") shows whole.
+func TestLeaseCellsNeverRunTogether(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{{ID: "038f2ef4c5", Image: "go-base", Owner: "test-consumer", State: "running", Policy: "internet", Age: "10h37m", Left: "2h29m"}}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "test-con… ▶ running") {
+		t.Errorf("long owner should end in … with a space before the state:\n%s", p)
+	}
+	if !strings.Contains(p, "10h37m") {
+		t.Errorf("age 10h37m cut:\n%s", p)
+	}
+}
