@@ -100,6 +100,11 @@ type BackendMetrics struct {
 	// Held-lease limits (2.1): automatic actions on held leases
 	HeldActions *prometheus.CounterVec // {rule,action}: idle/stale/expiry/pressure/critical × suspend/release/expire
 
+	// Preemption (#128 part 3): burst leases suspended to make room for
+	// a guaranteed admission, and how many are preempted right now.
+	PreemptionsTotal prometheus.Counter // cumulative preemptions
+	PreemptedLeases  prometheus.Gauge   // leases currently preempted
+
 	// Guest port dials (2.2, #113): host-to-guest TCP over a WebSocket
 	GuestDialsActive prometheus.Gauge       // open WebSocket→guest TCP bridges
 	GuestDialsTotal  *prometheus.CounterVec // {result}: ok, refused, error
@@ -357,6 +362,17 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Automatic actions on held leases, by rule (idle, stale, expiry, pressure, critical) and action (suspend_idle, release, expire).",
 	}, []string{"rule", "action"})
 
+	// Preemption (#128 part 3): burst leases suspended to make room for
+	// a guaranteed admission.
+	m.PreemptionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "preemptions_total",
+		Help: "Burst leases suspended to make room for a guaranteed admission.",
+	})
+	m.PreemptedLeases = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "preempted_leases",
+		Help: "Burst leases currently suspended by preemption, awaiting the resume queue.",
+	})
+
 	// Guest port dials (2.2, #113)
 	m.GuestDialsActive = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "guest_dials_active",
@@ -419,6 +435,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 		m.KeptBuildsBytes, m.KeptBuilds,
 		m.HeldActions,
+		m.PreemptionsTotal, m.PreemptedLeases,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,

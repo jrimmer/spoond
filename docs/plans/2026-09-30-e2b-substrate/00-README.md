@@ -71,6 +71,7 @@ registered by fingerprint, and writes `/etc/spoond/conformance.env` (root,
 ```ini
 CONFORMANCE_API=https://spoond.example.com:8890
 CONFORMANCE_TOKEN=<token>
+CONFORMANCE_SECOND_TOKEN=<token of a second, non-admin user>
 CONFORMANCE_USER=conformance
 CONFORMANCE_USER_ID=<user id>
 CONFORMANCE_SSH=local

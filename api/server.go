@@ -944,6 +944,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusTooManyRequests, err.Error())
 		case errors.Is(err, errUnknownImage):
 			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
+		case errors.Is(err, errPreemptCannot):
+			// A guaranteed lease that could not preempt (#128 part 3):
+			// the snapshot disk is too full to pause a burst lease.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case errors.Is(err, errBurstReserve):
 			// A burst lease that would dip the node under its reserve
 			// (#128 part 2): 503 with a retry hint, not a generic
@@ -1386,6 +1390,10 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// hugepages) back, so it re-passes the memory check (#128):
 			// over max_mib answers 429 and the lease stays suspended.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errPreemptCannot):
+			// A guaranteed lease that could not preempt (#128 part 3):
+			// the snapshot disk is too full to pause a burst lease.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case errors.Is(err, errBurstReserve):
 			// Restart re-admits a suspended lease like a resume, so a
 			// burst lease restarting into a full reserve answers 503
@@ -1649,6 +1657,10 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 			// re-passes the memory check (#128): over max_mib answers
 			// 429 and the lease stays suspended.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errPreemptCannot):
+			// A guaranteed lease that could not preempt (#128 part 3):
+			// the snapshot disk is too full to pause a burst lease.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case errors.Is(err, errBurstReserve):
 			// A burst lease resuming into a full reserve (#128 part 2):
 			// 503 with a retry hint, the lease stays suspended.
@@ -1990,6 +2002,10 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// Quota enforcement (security review #37 rescan F1): clone
 			// surfaces the same 429 as create, not a generic 500.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errPreemptCannot):
+			// A guaranteed lease that could not preempt (#128 part 3):
+			// the snapshot disk is too full to pause a burst lease.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case errors.Is(err, errBurstReserve):
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
@@ -2049,6 +2065,10 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errPreemptCannot):
+			// A guaranteed lease that could not preempt (#128 part 3):
+			// the snapshot disk is too full to pause a burst lease.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case errors.Is(err, errBurstReserve):
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):

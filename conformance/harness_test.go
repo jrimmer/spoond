@@ -88,6 +88,7 @@ func loadConfig() bool {
 		return false
 	}
 	cfg.Destructive = os.Getenv("CONFORMANCE_DESTRUCTIVE") == "1"
+	cfg.SecondToken = os.Getenv("CONFORMANCE_SECOND_TOKEN")
 	images := envOr("CONFORMANCE_IMAGES", "py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla")
 	for _, name := range strings.Split(images, ",") {
 		if name = strings.TrimSpace(name); name != "" {

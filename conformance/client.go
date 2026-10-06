@@ -40,6 +40,12 @@ type config struct {
 	ProxySecret  string
 	ProxySuffix  string
 	GuestService string
+	// SecondToken is the token of a second, non-admin identity user
+	// (CONFORMANCE_SECOND_TOKEN). Group C uses it as the owner of the
+	// guaranteed lease: the production conformance user is not admin and
+	// there is no promote API, so the suite cannot create a second user
+	// there.
+	SecondToken string
 }
 
 // client is a small HTTP client for the lease API (U02 §Harness
@@ -233,6 +239,8 @@ type leaseInfo struct {
 	ResumeBuildID string            `json:"resume_build_id"`
 	Generation    int64             `json:"generation"`
 	Name          string            `json:"name"`
+	Class         string            `json:"class"`
+	Preempted     bool              `json:"preempted"`
 }
 
 // statResult is the /stat response shape (A1 §5.9).

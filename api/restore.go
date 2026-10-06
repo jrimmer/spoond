@@ -180,6 +180,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errPreemptCannot):
+			// A guaranteed lease that could not preempt (#128 part 3):
+			// the snapshot disk is too full to pause a burst lease.
+			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case errors.Is(err, errBurstReserve):
 			// A burst lease restored into a full reserve (#128 part 2):
 			// 503 with a retry hint, the lease stays as it was.

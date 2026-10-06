@@ -459,6 +459,42 @@ reserve frees as guaranteed work suspends. Size it from your crash
 recovery headroom: everything you want a recovered lease to be able to
 resume into, minus what guaranteed tenants are entitled to.
 
+**Preemption reclaims burst capacity by suspending** (#128 part 3). When
+a guaranteed admission (create, fork, clone, resume, warm or cold
+restart, restore, crash recovery, undrain) cannot get its hugepages,
+spoond suspends burst leases through the usual pause path — memory
+continues on resume, so the generation does not change — in order of
+lowest `priority`, then newest, then the owner furthest over their
+`guaranteed_mib`. It stops as soon as enough memory is free and admits
+the guaranteed lease, and it serialises preemption, so two guaranteed
+creates cannot each preempt for themselves. Each preempted lease is
+marked `preempted` and emits a `preempted` event naming the guaranteed
+lease's owner; `spoond_preemptions_total` counts them and
+`spoond_preempted_leases` is the current gauge.
+
+The pause writes a snapshot, so preemption stops before the snapshot
+disk does: `PREEMPT_DISK_FLOOR_PCT` (default `15`) is the free
+percentage a pause must leave, estimated from the burst lease's
+`memory_mb`. The floor cannot be turned off: `0` or a negative value
+means the default. If preemption can free enough memory only by pausing
+leases the floor blocks, the guaranteed admission answers `503`
+`capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`
+and suspends no one. If the node cannot host the lease even after
+pausing every candidate, preemption suspends no one and the admission
+falls through to the ordinary capacity check.
+
+The **resume queue** runs every 15 s: it resumes preempted leases,
+oldest preemption first, whenever they fit again — host hugepages above
+the reserve and the owner within `max_mib` — through the normal
+admission path, as a burst lease again if the owner is still above the
+guarantee. On resume `preempted` is cleared and a `resumed` event is
+emitted with detail `after preemption`. A preemption is therefore
+temporary: clients (Honey included) should treat a `preempted` lease as
+waiting rather than gone, and simply wait for its `resumed` event or
+poll the lease — deleting and recreating it throws away the paused
+work. A client's own `resume` of a preempted lease takes the same path
+and answers `503` while capacity is still short.
+
 `POOL_SIZE` pre-creates that many sandboxes per image with a current
 build so grants are served without a cold restore. Production runs
 `POOL_SIZE=0` — with snapshot restores, a cold grant is tens of
@@ -477,6 +513,8 @@ each request's env.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `503 capacity: … bytes of hugepage memory free` | not enough free hugepages for the image, or the node is draining/unhealthy | free sandboxes, lower `POOL_SIZE`, or raise `vm.nr_hugepages` (then re-check with doctor) |
+| `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
+| lease shows `preempted` / `‖ suspended·p` | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
 | `410 lease lost in a substrate crash` | the lease had no checkpoint when the orchestrator died | delete the lease; nothing to resume |
 | `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
 | `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
