@@ -10,6 +10,11 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-10-06
+
+Dashboard only: readable lease states. No backend change, no schema
+change; the `grid` package is unchanged since 2.4.0.
+
 ### Changed
 
 - **Dashboard: the lease state is always spelled out.** The state cell
