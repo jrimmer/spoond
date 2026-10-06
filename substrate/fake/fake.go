@@ -31,12 +31,13 @@ type Fake struct {
 	procs     map[uint32]*FakeProcess
 	nextPID   uint32
 
-	execHandler func(sandboxID string, args []string) substrate.ExecResult
-	nodeInfo    substrate.NodeInfo
-	nodeInfoFn  func(ctx context.Context) (substrate.NodeInfo, error)
-	nodeErr     error
-	healthErrs  map[string]error
-	fails       []failSpec
+	execHandler  func(sandboxID string, args []string) substrate.ExecResult
+	startHandler func(sandboxID string, req substrate.StartRequest) (substrate.Process, error)
+	nodeInfo     substrate.NodeInfo
+	nodeInfoFn   func(ctx context.Context) (substrate.NodeInfo, error)
+	nodeErr      error
+	healthErrs   map[string]error
+	fails        []failSpec
 }
 
 type failSpec struct {
@@ -66,6 +67,15 @@ func (f *Fake) SetExecHandler(h func(sandboxID string, args []string) substrate.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execHandler = h
+}
+
+// SetStartHandler overrides Start. Tests use it to capture the returned
+// substrate.Process (to script background-job exits, 2.6 #135); nil
+// restores the default empty process.
+func (f *Fake) SetStartHandler(h func(sandboxID string, req substrate.StartRequest) (substrate.Process, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.startHandler = h
 }
 
 // SetNodeInfo fixes what NodeInfo returns.
@@ -293,10 +303,17 @@ func (f *Fake) Exec(ctx context.Context, sandboxID string, req substrate.ExecReq
 
 func (f *Fake) Start(ctx context.Context, sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if err := f.record("Start", sandboxID); err != nil {
+		f.mu.Unlock()
 		return nil, err
 	}
+	h := f.startHandler
+	f.mu.Unlock()
+	if h != nil {
+		return h(sandboxID, req)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.nextPID++
 	pid := f.nextPID
 	p := newFakeProcess(pid)
@@ -638,6 +655,12 @@ func (p *FakeProcess) State() ProcState {
 func newFakeProcess(pid uint32) *FakeProcess {
 	return &FakeProcess{pid: pid, events: make(chan substrate.ProcessEvent, 256)}
 }
+
+// NewProcess builds a detached FakeProcess a test can drive directly
+// (push events, inspect Signals) without going through Start. Used by
+// background-job tests (2.6, #135) that script an exit on their own
+// schedule.
+func NewProcess(pid uint32) *FakeProcess { return newFakeProcess(pid) }
 
 // Push delivers an event to Events(); a pushed EventExit or EventError closes
 // the channel.

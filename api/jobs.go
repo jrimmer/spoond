@@ -203,7 +203,7 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	}
 
 	args := buildJobWrapperArgs(jobID, cmd, cwd, requestEnv(lease, env))
-	proc, err := s.sub.Start(ctx, lease.SandboxID, substrate.StartRequest{Args: args, Stdin: true})
+	proc, err := s.sub.Start(ctx, lease.SandboxID, substrate.StartRequest{Args: args})
 	if err != nil {
 		if len(secretNames) > 0 {
 			s.removeSecrets(lease.SandboxID, secretNames)
@@ -328,15 +328,12 @@ func (s *Service) removeJobSecrets(lease *Lease, jobID string) {
 // emits the event. It is idempotent: an already-finished record is left
 // alone, so the watcher and the reconcile pass cannot both count it.
 func (s *Service) finishJob(ctx context.Context, job store.JobRow, exitCode int, stderrTail string) error {
-	wasRunning, err := s.jobIsRunning(ctx, job.JobID)
+	changed, err := s.db.UpdateJobExit(ctx, job.JobID, exitCode, time.Now().UTC(), stderrTail)
 	if err != nil {
 		return err
 	}
-	if !wasRunning {
-		return nil
-	}
-	if err := s.db.UpdateJobExit(ctx, job.JobID, exitCode, time.Now().UTC(), stderrTail); err != nil {
-		return err
+	if !changed {
+		return nil // another path already finished it
 	}
 	s.emitLeaseEvent(job.LeaseID, job.Owner, LeaseJobExited, jobExitDetail(job.Cmd, exitCode, stderrTail))
 	s.jobFinishedMetrics(jobResult(exitCode))
@@ -345,15 +342,6 @@ func (s *Service) finishJob(ctx context.Context, job store.JobRow, exitCode int,
 		s.removeJobSecrets(l, job.JobID)
 	}
 	return nil
-}
-
-// jobIsRunning reports whether the record is still running.
-func (s *Service) jobIsRunning(ctx context.Context, jobID string) (bool, error) {
-	r, err := s.db.GetJob(ctx, jobID)
-	if err != nil {
-		return false, err
-	}
-	return r.State == "running", nil
 }
 
 // jobFinishedMetrics bumps the running gauge down and the exited
@@ -366,15 +354,16 @@ func (s *Service) jobFinishedMetrics(result string) {
 	s.metrics.JobsExitedTotal.WithLabelValues(result).Inc()
 }
 
-// markJobLost marks a running job lost (generation bump, cold restart).
-// Idempotent.
+// markJobLost marks a running job lost (generation bump, cold restart)
+// and emits the event. Idempotent: an already-finished record is left
+// alone.
 func (s *Service) markJobLost(ctx context.Context, job store.JobRow, detail string) {
-	wasRunning, err := s.jobIsRunning(ctx, job.JobID)
-	if err != nil || !wasRunning {
+	changed, err := s.db.MarkJobLost(ctx, job.JobID, time.Now().UTC())
+	if err != nil {
+		s.storeError("mark_job_lost", job.JobID, err)
 		return
 	}
-	if err := s.db.MarkJobLost(ctx, job.JobID, time.Now().UTC()); err != nil {
-		s.storeError("mark_job_lost", job.JobID, err)
+	if !changed {
 		return
 	}
 	s.emitLeaseEvent(job.LeaseID, job.Owner, LeaseJobLost, detail)

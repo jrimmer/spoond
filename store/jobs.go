@@ -47,30 +47,36 @@ INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 }
 
 // UpdateJobExit marks a job exited: its exit code, end time and stderr
-// tail. Rows already exited or lost are left alone (the first outcome
-// wins).
-func (db *DB) UpdateJobExit(ctx context.Context, jobID string, exitCode int, endedAt time.Time, stderrTail string) error {
-	_, err := db.w.ExecContext(ctx, `
+// tail. changed is false when the row was already exited or lost (the
+// first outcome wins).
+func (db *DB) UpdateJobExit(ctx context.Context, jobID string, exitCode int, endedAt time.Time, stderrTail string) (bool, error) {
+	res, err := db.w.ExecContext(ctx, `
 UPDATE lease_jobs SET state='exited', exit_code=?, ended_at=?, stderr_tail=?
 WHERE job_id=? AND state='running'`,
 		exitCode, formatTime(endedAt), stderrTail, jobID)
 	if err != nil {
-		return fmt.Errorf("store: update job exit %s: %w", jobID, err)
+		return false, fmt.Errorf("store: update job exit %s: %w", jobID, err)
 	}
-	return nil
+	return rowsChanged(res), nil
 }
 
-// MarkJobLost marks a running job lost. An already-exited job is left
-// alone.
-func (db *DB) MarkJobLost(ctx context.Context, jobID string, endedAt time.Time) error {
-	_, err := db.w.ExecContext(ctx, `
+// MarkJobLost marks a running job lost. changed is false when it was
+// already exited or lost.
+func (db *DB) MarkJobLost(ctx context.Context, jobID string, endedAt time.Time) (bool, error) {
+	res, err := db.w.ExecContext(ctx, `
 UPDATE lease_jobs SET state='lost', ended_at=?
 WHERE job_id=? AND state='running'`,
 		formatTime(endedAt), jobID)
 	if err != nil {
-		return fmt.Errorf("store: mark job lost %s: %w", jobID, err)
+		return false, fmt.Errorf("store: mark job lost %s: %w", jobID, err)
 	}
-	return nil
+	return rowsChanged(res), nil
+}
+
+// rowsChanged reports whether an ExecContext changed at least one row.
+func rowsChanged(res sql.Result) bool {
+	n, err := res.RowsAffected()
+	return err == nil && n > 0
 }
 
 // GetJob returns one job by id (ErrNotFound when unknown).
