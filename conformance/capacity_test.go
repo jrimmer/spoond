@@ -139,6 +139,9 @@ func TestC1_PreemptionRefillsGuaranteed(t *testing.T) {
 		if st == 503 {
 			break
 		}
+		if st == 429 {
+			failf(t, "fill create %d: 429 %s: CONFORMANCE_SECOND_TOKEN's user needs no max_leases cap (group C fills the host)", i, truncate(body))
+		}
 		if st != 201 {
 			failf(t, "fill create %d: status %d: %s", i, st, truncate(body))
 		}
@@ -159,8 +162,8 @@ func TestC1_PreemptionRefillsGuaranteed(t *testing.T) {
 		failf(t, "no burst lease was admitted before the 503")
 	}
 
-	// The second user's guaranteed lease cannot fit: it preempts the
-	// newest burst lease.
+	// The conformance user's guaranteed lease cannot fit: it preempts
+	// the newest burst lease.
 	guaranteed := createLeaseAs(t, guaranteedTok, map[string]any{
 		"image": image, "ttl": 600, "persistent": true,
 	})
