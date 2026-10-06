@@ -227,7 +227,6 @@ func healthySnapshot() Snapshot {
 	s.Services = []Service{{Name: "spoond-backend", State: "active"}}
 	s.ByState = map[string]int{"running": 3, "suspended": 1}
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m"}}
-	s.CertNotAfter = time.Time{}
 	s.HugeUsedPct, s.HugeFreeGiB = 44.3, 23.9
 	s.DiskUsedPct = 61.2
 	return s
@@ -309,8 +308,8 @@ func TestBannerAbsentWhenWell(t *testing.T) {
 }
 
 // TestBannerTriggers covers one trigger each: a unit not active, a lost
-// lease, free hugepages and snapshot disk past the danger level, the TLS
-// certificate inside 30 days, and a held-lease action within 24 h.
+// lease, free hugepages and snapshot disk past the danger level, and a
+// held lease a held-lease rule suspended that is still suspended.
 func TestBannerTriggers(t *testing.T) {
 	cases := []struct {
 		name string
@@ -332,14 +331,8 @@ func TestBannerTriggers(t *testing.T) {
 		{"kept bytes past warn pct", func(s *Snapshot) {
 			s.KeptDiskPct = 41.0
 		}, "kept checkpoints use 41% of the snapshot disk"},
-		{"cert expiring", func(s *Snapshot) {
-			s.CertNotAfter = fixedNow.Add(10 * 24 * time.Hour)
-		}, "TLS certificate"},
-		{"cert expired", func(s *Snapshot) {
-			s.CertNotAfter = fixedNow.Add(-1 * time.Hour)
-		}, "expired"},
-		{"held action in 24h", func(s *Snapshot) {
-			s.Rows = []LeaseRow{{ID: "abc123", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
+		{"held rule suspended", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
 		}, "idle/suspend_idle"},
 		{"preempted leases", func(s *Snapshot) {
 			s.Preempted = 3
@@ -885,6 +878,120 @@ func TestEventsPanelColumns(t *testing.T) {
 	}
 }
 
+// TestEventsPanelTypeColour: the type word takes its kind's colour — a
+// lost event bad, a created event in the title cyan, a suspended one
+// warn, and the lease id cyan (the id style) on every line; the tail
+// keeps the event's own style.
+func TestEventsPanelTypeColour(t *testing.T) {
+	cases := []struct{ typ, want string }{
+		{"lost", "bad"},
+		{"timed_out", "bad"},
+		{"created", "title"},
+		{"released", "title"},
+		{"resumed", "title"},
+		{"restarted", "title"},
+		{"restored", "title"},
+		{"checkpointed", "title"},
+		{"recovered", "title"},
+		{"suspended", "warn"},
+		{"preempted", "warn"},
+		{"idle_suspended", "warn"},
+		{"queued", "warn"},
+		{"holder_set", "dim"},
+	}
+	for _, tc := range cases {
+		line := "07:19:02  " + tc.typ + "  abcdef0123  jason"
+		segs := splitSegs(line, "text")
+		var typSeg, idSeg *grid.Seg
+		for i := range segs {
+			if segs[i].Text == tc.typ {
+				typSeg = &segs[i]
+			}
+			if segs[i].Text == "abcdef0123" {
+				idSeg = &segs[i]
+			}
+		}
+		if typSeg == nil || typSeg.Style != tc.want {
+			t.Fatalf("%s: type style = %v, want %q (segs %+v)", tc.typ, typSeg, tc.want, segs)
+		}
+		if idSeg == nil || idSeg.Style != "id" {
+			t.Fatalf("%s: id style = %v, want id (segs %+v)", tc.typ, idSeg, segs)
+		}
+	}
+}
+
+// TestEventsPanelLostAndCreatedColours draws the events panel with a lost
+// and a created event and checks the type words reach the page with their
+// kind's class: lost bad, created the title style.
+func TestEventsPanelLostAndCreatedColours(t *testing.T) {
+	s := healthySnapshot()
+	s.Events = []EventLine{
+		{Text: "07:19:02  lost        fedcba0987  nightly", Style: "warn"},
+		{Text: "07:18:44  created     abcdef0123  jason", Style: "text"},
+	}
+	rows := strings.Split(Draw(s, DefaultWidth, fixedNow, "h").HTML(), "\n")
+	var lost, created string
+	for _, r := range rows {
+		if strings.Contains(r, "lost") {
+			lost = r
+		}
+		if strings.Contains(r, "created") {
+			created = r
+		}
+	}
+	if lost == "" || !strings.Contains(lost, `g-bad" data-id="events">lost`) {
+		t.Fatalf("lost type not drawn bad:\n%s", lost)
+	}
+	if created == "" || !strings.Contains(created, `g-title" data-id="events">created`) {
+		t.Fatalf("created type not drawn with the title style:\n%s", created)
+	}
+	for _, r := range []string{lost, created} {
+		if !strings.Contains(r, `g-id"`) {
+			t.Fatalf("lease id not drawn with the id style:\n%s", r)
+		}
+	}
+}
+
+// TestMeterWarningTick: a meter with a warning level draws a warn-coloured
+// ╎ at that level without changing the bar's width; a meter with no
+// warning level draws no tick.
+func TestMeterWarningTick(t *testing.T) {
+	l := &layout{w: DefaultWidth, host: "h", now: fixedNow}
+	segs := l.meterSegs("cpu", 50, 75, 90, meterBarW)
+	tick := false
+	for _, s := range segs {
+		for _, r := range []rune(s.Text) {
+			if r == '╎' {
+				tick = true
+				if s.Style != "warn" {
+					t.Fatalf("tick style = %q, want warn", s.Style)
+				}
+			}
+		}
+	}
+	if !tick {
+		t.Fatalf("meter with a warning level drew no tick: %+v", segs)
+	}
+	if got := segWidth(segs); got != meterLabelW+1+meterBarW {
+		t.Fatalf("meter width = %d, want %d (the tick must not widen the bar): %+v", got, meterLabelW+1+meterBarW, segs)
+	}
+
+	noWarn := l.meterSegs("cpu", 50, 0, 90, meterBarW)
+	if strings.Contains(segWidthText(noWarn), "╎") {
+		t.Fatalf("meter without a warning level drew a tick: %+v", noWarn)
+	}
+}
+
+// segWidthText reassembles a segment list's text, for style-agnostic
+// assertions.
+func segWidthText(segs []grid.Seg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		b.WriteString(s.Text)
+	}
+	return b.String()
+}
+
 // TestEventsPanelSubjectPreference: the tail column is the holder, else
 // the lease's comment (a CI job lease has neither holder nor name), else
 // the owner the event carries, by name when the identity store has one.
@@ -1072,5 +1179,39 @@ func TestServicesFillTallerPanel(t *testing.T) {
 	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
 	if !strings.Contains(p, "more") {
 		t.Fatalf("units past the panel should fold into +N more:\n%s", p)
+	}
+}
+
+// TestBannerQuietCases: what does not need a person stays off the
+// strip: a held lease running again after a rule suspended it, and suspensions that are not a
+// held-lease rule's (preemption has its own row while preempted; a
+// hand, drain or idle_suspend pause is expected).
+func TestBannerQuietCases(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*Snapshot)
+	}{
+		{"rule-suspended lease running again", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "running", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-time.Hour)}}
+		}},
+		{"preempted then resumed", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "f959ca027f", State: "running", LastAction: "preempt/suspend", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+		{"suspended by hand", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "suspend/hand", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+		{"drained", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "drain/suspend", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+		{"own idle_suspend", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "idle_suspend/suspend_idle", LastActionAt: fixedNow.Add(-time.Minute)}}
+		}},
+	}
+	for _, c := range cases {
+		snap := healthySnapshot()
+		c.mut(&snap)
+		if rows := bannerRows(snap, fixedNow); len(rows) != 0 {
+			t.Errorf("%s: banner rows = %q, want none", c.name, rows)
+		}
 	}
 }

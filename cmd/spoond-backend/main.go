@@ -373,8 +373,12 @@ func Main(args []string) int {
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		BurstReserveMiB:           burstReserveMiB,
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
-		MaxAdmitWaitSecs:          maxAdmitWaitSecs,
-		CrashTest:                 os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		// Background exec jobs (2.6, #135): per-lease running cap and
+		// exited-record retention.
+		MaxRunningJobsPerLease: envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
+		JobRetentionSecs:       int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
+		MaxAdmitWaitSecs:       maxAdmitWaitSecs,
+		CrashTest:              os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
@@ -468,7 +472,6 @@ func Main(args []string) int {
 		for _, c := range notify.ProductionSources(
 			notifyUnits(),
 			storagePath, backupDir, backupPrefix,
-			tlsCert, tlsKey,
 			notifyBackupMaxAge(),
 			svc.GCLastError(),
 		).Checks() {

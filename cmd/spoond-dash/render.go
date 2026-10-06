@@ -140,8 +140,11 @@ func fitItems(segs []grid.Seg, w int) []grid.Seg {
 //   - free hugepages or snapshot disk past the danger level,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
 //     (#126),
-//   - the served TLS certificate (TLS_CERT) within 30 days of expiring,
-//   - an automatic held-lease action in the last 24 h (from last_action).
+//   - a held lease that a held-lease rule (idle, pressure, a lapsed
+//     hold) suspended and that is still suspended (from last_action).
+//     A pause by hand, by the drain, by preemption (it has its own row
+//     while preempted) or by the lease's own idle_suspend is not one,
+//     and the row clears as soon as the lease runs again.
 func bannerRows(s Snapshot, now time.Time) []string {
 	var rows []string
 	for _, svc := range s.Services {
@@ -164,17 +167,30 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
 		rows = append(rows, fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct))
 	}
-	if !s.CertNotAfter.IsZero() {
-		if d := s.CertNotAfter.Sub(now); d < 30*24*time.Hour {
-			rows = certBanner(rows, d, s.CertNotAfter)
-		}
-	}
 	for _, r := range s.Rows {
-		if !r.LastActionAt.IsZero() && now.Sub(r.LastActionAt) < 24*time.Hour {
+		if heldRuleSuspended(r) {
 			rows = append(rows, fmt.Sprintf("held lease %s: %s %s ago", r.ID, r.LastAction, dur(now.Sub(r.LastActionAt))))
 		}
 	}
 	return rows
+}
+
+// heldRuleSuspended reports whether a held-lease rule acted on r and r
+// is still suspended: rule 1 (idle), rule 4 (pressure, its shorter
+// idle) and rule 3 (a lapsed hold, suspending the lease or expiring the
+// hold of one already suspended: it is released after the stale limit
+// unless someone renews it). Those wait on a person or on the lease's
+// next use; every other last_action (a pause by hand, the drain,
+// preemption, the lease's own idle_suspend) does not.
+func heldRuleSuspended(r LeaseRow) bool {
+	if r.State != "suspended" || r.LastActionAt.IsZero() {
+		return false
+	}
+	switch r.LastAction {
+	case "idle/suspend_idle", "pressure/suspend_idle", "expiry/suspend_lapsed", "expiry/expire":
+		return true
+	}
+	return false
 }
 
 // DefaultKeptDiskWarnPct is the kept-checkpoint disk share (#126) past
@@ -194,19 +210,6 @@ func keptDiskWarnPct() float64 {
 		return DefaultKeptDiskWarnPct
 	}
 	return p
-}
-
-// certBanner appends the TLS certificate's row: at 30 days it needs a
-// person before basic auth starts failing; inside 7 days it is urgent.
-func certBanner(rows []string, d time.Duration, notAfter time.Time) []string {
-	when := notAfter.Format("2006-01-02")
-	if d < 0 {
-		return append(rows, "the TLS certificate (TLS_CERT) expired "+when)
-	}
-	if d < 7*24*time.Hour {
-		return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s) - renew it", dur(d), when))
-	}
-	return append(rows, fmt.Sprintf("the TLS certificate expires in %s (%s)", dur(d), when))
 }
 
 // Draw renders the whole frame at width w. now timestamps the banner and
@@ -403,9 +406,6 @@ func statusItems(s Snapshot, now time.Time) []statusItem {
 	default:
 		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "ok"})
 	}
-	if !s.CertNotAfter.IsZero() {
-		items = append(items, statusItem{"cert", certDays(s.CertNotAfter.Sub(now)), certStyle(s.CertNotAfter.Sub(now))})
-	}
 	units, down := 0, 0
 	for _, svc := range s.Services {
 		units++
@@ -423,29 +423,10 @@ func statusItems(s Snapshot, now time.Time) []statusItem {
 	return items
 }
 
-// certDays is the certificate's remaining time in days: negative when
-// it has already expired.
-func certDays(d time.Duration) string {
-	return fmt.Sprintf("%dd", int(math.Floor(d.Hours()/24)))
-}
-
-// certStyle is the certificate's health: bad once expired, warn inside
-// the attention strip's 30-day window, ok before it.
-func certStyle(d time.Duration) string {
-	switch {
-	case d < 0:
-		return "bad"
-	case d < 30*24*time.Hour:
-		return "warn"
-	default:
-		return "ok"
-	}
-}
-
 // statusLine draws the frame's last row, outside any box: label
 // [value] entries left to right, the clock right-aligned on the same
-// row. At narrow widths entries are dropped from the right (cert, then
-// units) until the line fits.
+// row. At narrow widths entries are dropped from the right (units
+// first) until the line fits.
 func (l *layout) statusLine(g *grid.Grid, y int, at string) {
 	items := statusItems(l.s, l.now)
 	// Drop from the right until what remains fits, the clock always
@@ -1000,13 +981,26 @@ func (l *layout) meterSegs(label string, pct, warnPct, dangerPct float64, barW i
 				bar[i] = '█'
 			}
 		}
+		// The warning-level tick is a warn-coloured cell inside the bar,
+		// not part of it: the bar keeps its width, and a meter without a
+		// warning level draws no tick.
+		tick := -1
 		if warnPct > 0 && warnPct < 100 {
-			tx := int(warnPct / 100 * float64(barW))
-			if tx < barW {
-				bar[tx] = '╎'
+			if tx := int(warnPct / 100 * float64(barW)); tx < barW {
+				tick = tx
 			}
 		}
-		segs = append(segs, grid.Seg{Text: string(bar), Style: style})
+		if tick < 0 {
+			segs = append(segs, grid.Seg{Text: string(bar), Style: style})
+		} else {
+			if tick > 0 {
+				segs = append(segs, grid.Seg{Text: string(bar[:tick]), Style: style})
+			}
+			segs = append(segs, grid.Seg{Text: "╎", Style: "warn"})
+			if tick+1 < barW {
+				segs = append(segs, grid.Seg{Text: string(bar[tick+1:]), Style: style})
+			}
+		}
 	}
 	return segs
 }
@@ -1118,22 +1112,26 @@ func (l *layout) throughputH() int {
 	return 6 // the same, 2×2: two value rows and two sparkline rows
 }
 
-// throughputSeries is one sparkline: its label, the history key and
-// the current value as drawn at the label row's right.
+// throughputSeries is one sparkline: its label, the history key, the
+// current value as drawn at the label row's right, and the style its
+// sparkline carries (the running-leases series the state colour, the
+// rest the spark colour).
 func (l *layout) throughputSeries() []struct {
 	label string
 	key   string
 	last  string
+	style string
 } {
 	return []struct {
 		label string
 		key   string
 		last  string
+		style string
 	}{
-		{"running leases", "running", fmt.Sprint(l.s.Running)},
-		{"requests / s", "reqPerSec", fmt.Sprintf("%.1f", l.s.ReqPerSec)},
-		{"creates / min", "createsPerMin", fmt.Sprintf("%.0f", l.s.CreatesPerMin)},
-		{"egress conns", "fwConns", fmt.Sprint(l.s.FwConns)},
+		{"running leases", "running", fmt.Sprint(l.s.Running), "state"},
+		{"requests / s", "reqPerSec", fmt.Sprintf("%.1f", l.s.ReqPerSec), "spark"},
+		{"creates / min", "createsPerMin", fmt.Sprintf("%.0f", l.s.CreatesPerMin), "spark"},
+		{"egress conns", "fwConns", fmt.Sprint(l.s.FwConns), "spark"},
 	}
 }
 
@@ -1170,7 +1168,7 @@ func (l *layout) drawThroughput(g *grid.Grid, x, y, w, h int) int {
 		g.Right(cx+sparkW-1, valY, []grid.Seg{{Text: r.last, Style: "text"}})
 		vals := l.histVals(r.key)
 		sp := padTo(grid.Sparkline(vals, 0, maxOf(vals)), sparkW)
-		g.Segs(cx, spY, []grid.Seg{{Text: sp, Style: "spark"}}, sparkW)
+		g.Segs(cx, spY, []grid.Seg{{Text: sp, Style: r.style}}, sparkW)
 	}
 	return y
 }
@@ -1282,9 +1280,9 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	}
 	for i, r := range rows {
 		yy := top + 2 + i
-		g.Text(c.id, yy, sanitize(r.ID), "text", c.idW)
+		g.Text(c.id, yy, sanitize(r.ID), "id", c.idW)
 		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
-		g.Text(c.own, yy, sanitize(r.Owner), "text", c.ownW)
+		g.Text(c.own, yy, sanitize(r.Owner), "owner", c.ownW)
 		// The state cell names the burst class, preemption and idle
 		// suspension (#128 part 2/3, 2.5 #129 part 2): "▶ running·b", a
 		// preempted (always burst) lease as "‖ suspended·p", and an
@@ -1664,30 +1662,62 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 	}
 }
 
+// eventTypeStyle is the colour the events panel's type word takes: the
+// title cyan for the lease lifecycle (created, released, resumed,
+// restarted, restored, checkpointed, recovered), warn for a lease put
+// aside (suspended, preempted, idle_suspended, queued), bad for one lost
+// or timed out, dim for anything else.
+func eventTypeStyle(t string) string {
+	switch t {
+	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
+		return "title"
+	case "suspended", "preempted", "idle_suspended", "queued":
+		return "warn"
+	case "lost", "timed_out":
+		return "bad"
+	default:
+		return "dim"
+	}
+}
+
 // splitSegs breaks one event line into styled runs at its three column
-// separators — the two spaces between time, type, lease id and tail:
-// the time stays dim, the type and the tail take the event's own style,
-// the gaps themselves dim. One style across the whole line would paint
-// the padding dim too. Only those three separators split the line: the
-// tail is free text (a comment can hold two spaces in a row) and is
-// never cut again, so it keeps one style to the panel's edge.
+// separators — the run of spaces between time, type, lease id and tail:
+// the time stays dim, the type takes its kind's colour, the lease id the
+// id style, the tail the event's own style, the separator runs themselves
+// dim. The type and id columns are padded, so their padding merges with
+// the separator: the whole run of spaces is consumed as one separator,
+// and one style across the whole line would paint the padding dim too.
+// Only those three separators split the line: the tail is free text (a
+// comment can hold two spaces in a row) and is never cut again, so it
+// keeps one style to the panel's edge.
 func splitSegs(line, style string) []grid.Seg {
 	segs := make([]grid.Seg, 0, 7)
 	rest := line
+	chunk := 0
 	for fields := 0; fields < 3; fields++ {
 		i := strings.Index(rest, "  ")
 		if i < 0 {
 			break
 		}
+		j := i
+		for j < len(rest) && rest[j] == ' ' {
+			j++
+		}
 		if i > 0 {
 			st := style
-			if len(segs) == 0 {
+			switch chunk {
+			case 0:
 				st = "dim" // the HH:MM:SS before the first separator
+			case 1:
+				st = eventTypeStyle(strings.TrimSpace(rest[:i])) // the type word's kind colour
+			case 2:
+				st = "id" // the lease id, cyan like the leases table
 			}
 			segs = append(segs, grid.Seg{Text: rest[:i], Style: st})
+			chunk++
 		}
-		segs = append(segs, grid.Seg{Text: "  ", Style: "dim"})
-		rest = rest[i+2:]
+		segs = append(segs, grid.Seg{Text: rest[i:j], Style: "dim"})
+		rest = rest[j:]
 	}
 	if rest != "" {
 		segs = append(segs, grid.Seg{Text: rest, Style: style})

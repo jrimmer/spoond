@@ -42,6 +42,11 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   loses nothing. On every lease:
   - **Files**: `/api/leases/{id}/files/{path}` puts, gets, stats, makes
     and removes files in the guest, up to 256 MiB per file.
+  - **Background jobs**: `POST /api/leases/{id}/exec` with
+    `"background": true` starts a tracked job (202 + `job_id`);
+    `GET …/jobs/{job}?wait=<s>` long-polls to its exit, and
+    `…/jobs/{job}/output` follows stdout/stderr by byte range, while
+    `job_started`/`job_exited`/`job_lost` ride the event stream.
   - **Guest port dial**: `GET /api/leases/{id}/ports/{port}/dial` opens
     raw TCP to any port in the guest over a WebSocket (a database's own
     protocol, a debugger, a REPL), under every network policy.
@@ -125,8 +130,7 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   [docs/operations.md](docs/operations.md#uptime-monitoring-gatus)).
 - **Notifications**: with `NOTIFY_WEBHOOKS` set, the backend pushes what
   needs a person (a lost lease, a held-lease rule acting, a unit down,
-  disk or hugepages past their levels, the TLS certificate near expiry,
-  a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
+  disk or hugepages past their levels, a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
   receiver, with hourly dedupe, resolved messages, retries and a rate
   limit. `spoond notify test` checks the setup; see
   [docs/operations.md](docs/operations.md#notifications-to-webhooks).
@@ -148,11 +152,15 @@ units, a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`), with a status line at the bottom.
 Its layout puts capacity and host side by side at 104 columns and
-stacks them below that. Above the panels sits one
+stacks them below that. The palette gives each state a colour role on
+the black background — cyan for titles and lease ids, blue for run
+state, green ok, amber warn, red bad, violet owner, and amber banners —
+never alone: every coloured state keeps its glyph or word. Above the
+panels sits one
 attention banner, shown only when something needs a person: a unit not
 active, a lost lease, free hugepages or snapshot disk past the danger
-level, the TLS certificate inside 30 days of expiring, or an automatic
-held-lease action in the last 24 h. It refreshes every 2 seconds over
+level, preempted burst leases, or a held lease that a held-lease rule suspended and that is
+still suspended. It refreshes every 2 seconds over
 one server-sent-event stream shared by all viewers; the page is the
 current grid in a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for
 the chrome, and Datastar patches the rows that changed.

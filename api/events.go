@@ -56,6 +56,13 @@ const (
 	// change: the pause/resume memory continues. The detail names the
 	// guaranteed lease's owner.
 	LeasePreempted LeaseEventType = "preempted"
+	// LeaseJobStarted, LeaseJobExited and LeaseJobLost mark a background
+	// exec job's life (2.6, #135): started carries the command (cut to
+	// 120 chars), exited the exit code and a short stderr tail, lost a
+	// job whose guest memory did not continue.
+	LeaseJobStarted LeaseEventType = "job_started"
+	LeaseJobExited  LeaseEventType = "job_exited"
+	LeaseJobLost    LeaseEventType = "job_lost"
 	// LeaseStreamGap marks a hole in a stream rather than a lifecycle
 	// change. It is synthesized when a consumer's position cannot be
 	// honoured (the epoch changed after a restart, the pointed-at event

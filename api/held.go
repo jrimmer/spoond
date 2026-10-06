@@ -491,10 +491,12 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 		if l.released || !l.held() || l.Suspended || l.busy {
 			continue
 		}
-		// A lease with its own effective idle_suspend is reclaimed on its
-		// own threshold by suspendIdleLeases (2.5, #129 part 2): rule 1
-		// and rule 4's shortening do not apply to it.
-		if s.effectiveIdleSuspend(l) > 0 {
+		// A lease with a running background job is active (2.6, #135):
+		// no held rule may suspend it mid-job. A lease with its own
+		// effective idle_suspend is reclaimed on its own threshold by
+		// suspendIdleLeases (2.5, #129 part 2): rule 1 and rule 4's
+		// shortening do not apply to it.
+		if s.hasRunningJobLocked(l.ID) || s.effectiveIdleSuspend(l) > 0 {
 			continue
 		}
 		if !now.After(l.LastActive.Add(timeout)) {
@@ -510,7 +512,7 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 		// suspended.
 		s.store.mu.Lock()
 		lastActive := l.LastActive
-		skip := l.released || !l.held() || l.Suspended || l.busy ||
+		skip := l.released || !l.held() || l.Suspended || l.busy || s.hasRunningJobLocked(l.ID) ||
 			s.effectiveIdleSuspend(l) > 0 || !now.After(lastActive.Add(timeout))
 		s.store.mu.Unlock()
 		if skip {

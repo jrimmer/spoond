@@ -301,7 +301,8 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN priority`,
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15)`,
+		`DROP TABLE IF EXISTS lease_jobs`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -364,7 +365,8 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN priority`,
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15)`,
+		`DROP TABLE IF EXISTS lease_jobs`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -434,8 +436,9 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN class`,
 		`ALTER TABLE leases DROP COLUMN priority`,
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
+		`DROP TABLE IF EXISTS lease_jobs`,
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15)`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
@@ -473,7 +476,7 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v14.db")
 	{
-		db, err := Open(path) // applies 0001..0015
+		db, err := Open(path) // applies every migration
 		if err != nil {
 			t.Fatalf("open fresh: %v", err)
 		}
@@ -481,16 +484,18 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 			t.Fatalf("close: %v", err)
 		}
 	}
-	// Rewind the file to version 14: drop the column migration 15 added
-	// and remove its schema_migrations row, so the next Open applies
-	// 0015 for real.
+	// Rewind the file to version 14: undo migration 16 (lease_jobs) and
+	// drop the column migration 15 added, and remove their
+	// schema_migrations rows, so the next Open applies 0015 (and 0016)
+	// for real — migrate only applies versions above the highest row.
 	db14, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS lease_jobs`,
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
-		`DELETE FROM schema_migrations WHERE version = 15`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
