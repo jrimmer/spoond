@@ -668,3 +668,47 @@ func TestBurstReserveRecoveryRefused(t *testing.T) {
 		t.Fatal("refused recovery must leave the lease suspended")
 	}
 }
+
+// TestBurstReserveDebitsCachedReading: admissions inside one NodeInfo
+// cache window take their hugepages from the cached reading, so a run
+// of burst creates cannot each pass against the same free figure and
+// together eat the reserve. 3 GiB free over a 1 GiB reserve admits two
+// 1 GiB burst leases, then refuses the third without a fresh reading;
+// a guaranteed lease in between also counts.
+func TestBurstReserveDebitsCachedReading(t *testing.T) {
+	srv, h, sub, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":16384}`)
+	srv.svc.cfg.BurstReserveMiB = 1024
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    1536 + 512, // 4 GiB of 2 MiB pages
+		HugepagesUsed:     512,        // 1 GiB already used: 3 GiB free
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+
+	for i := 0; i < 2; i++ {
+		if code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60,"burst":true}`); code != http.StatusCreated {
+			t.Fatalf("burst create %d = %d %s, want 201", i, code, body)
+		}
+	}
+	// 1 GiB left in the cached reading: a third burst lease would take
+	// the node under its reserve, though the fake still reports 3 GiB.
+	code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60,"burst":true}`)
+	if code != http.StatusServiceUnavailable || !strings.Contains(body, "no burst capacity") {
+		t.Fatalf("third burst create = %d %s, want 503 no burst capacity", code, body)
+	}
+
+	// A guaranteed admission debits too: start over from 3 GiB free,
+	// admit one guaranteed and one burst lease; the next burst is refused.
+	srv.svc.nodeInfoMu.Lock()
+	srv.svc.nodeInfoAt = time.Time{}
+	srv.svc.nodeInfoMu.Unlock()
+	if code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60,"burst":true}`); code != http.StatusCreated {
+		t.Fatalf("burst after refresh = %d %s, want 201", code, body)
+	}
+	if code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60}`); code != http.StatusCreated {
+		t.Fatalf("guaranteed create = %d %s, want 201", code, body)
+	}
+	if code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60,"burst":true}`); code != http.StatusServiceUnavailable {
+		t.Fatalf("burst after a guaranteed debit = %d %s, want 503", code, body)
+	}
+}

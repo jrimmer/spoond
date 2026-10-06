@@ -359,7 +359,7 @@ type Service struct {
 	gcErr *gcTracker
 
 	// nodeInfoCache is the substrate's last good NodeInfo with its
-	// fetch time, behind freeHugepageMiB (#128 part 2): the burst
+	// fetch time, behind freeHugepageMiBLocked (#128 part 2): the burst
 	// reserve is checked against a value at most nodeInfoCacheTTL old,
 	// so a burst of admissions costs the orchestrator one call. The
 	// node gauges' loop refreshes it too.
@@ -876,7 +876,7 @@ func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 
 // updateNodeMetrics sets the node gauges from NodeInfo; on error the
 // gauges keep their last values. The fetched NodeInfo also refreshes
-// the shared cache behind freeHugepageMiB (#128 part 2): the burst
+// the shared cache behind freeHugepageMiBLocked (#128 part 2): the burst
 // reserve then reads the same value the gauges do, and a run with no
 // burst admissions still keeps that value at most nodeInfoCacheTTL old.
 func (s *Service) updateNodeMetrics(ctx context.Context) {

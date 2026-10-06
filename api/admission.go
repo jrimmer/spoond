@@ -24,7 +24,7 @@ const (
 // work (and crash recovery) always has room to land.
 const DefaultBurstReserveMiB = 8192
 
-// nodeInfoCacheTTL bounds how long freeHugepageMiB trusts its cached
+// nodeInfoCacheTTL bounds how long freeHugepageMiBLocked trusts its cached
 // NodeInfo: long enough that a burst of admissions costs the
 // orchestrator one round trip, short enough that the reserve cannot be
 // raced past for long. The cache is filled on demand here and by the
@@ -46,15 +46,15 @@ func (s *Service) burstReserveMiB() int {
 }
 
 // freeHugepageMiB reports the node's free hugepage memory in MiB, from
-// the substrate's NodeInfo cached for at most nodeInfoCacheTTL. A
-// failed refresh answers with the last good value — staleness beats a
+// the substrate's NodeInfo cached for at most nodeInfoCacheTTL, less
+// what admissions have taken since that reading (see debitNodeInfoLocked).
+// A failed refresh answers with the last good value — staleness beats a
 // wrong refusal — and errors only when nothing has ever been cached.
-// The cache mutex is held across a refresh's RPC on purpose: concurrent
-// burst admissions then share one round trip instead of stampeding the
-// orchestrator, at the cost of serialising them for the call.
-func (s *Service) freeHugepageMiB(ctx context.Context) (uint64, error) {
-	s.nodeInfoMu.Lock()
-	defer s.nodeInfoMu.Unlock()
+// The caller holds nodeInfoMu across the call and its debit, on
+// purpose: concurrent admissions then share one round trip instead of
+// stampeding the orchestrator, and two burst admissions cannot both
+// pass against the same reading.
+func (s *Service) freeHugepageMiBLocked(ctx context.Context) (uint64, error) {
 	if s.nodeInfoAt.IsZero() || s.now().Sub(s.nodeInfoAt) >= nodeInfoCacheTTL {
 		if info, err := s.sub.NodeInfo(ctx); err == nil {
 			s.nodeInfoCache = info
@@ -64,7 +64,27 @@ func (s *Service) freeHugepageMiB(ctx context.Context) (uint64, error) {
 		}
 	}
 	info := s.nodeInfoCache
-	return (info.HugepagesTotal - info.HugepagesUsed - info.HugepagesReserved) * info.HugepageSizeBytes / (1024 * 1024), nil
+	taken := info.HugepagesUsed + info.HugepagesReserved
+	if taken >= info.HugepagesTotal {
+		return 0, nil
+	}
+	return (info.HugepagesTotal - taken) * info.HugepageSizeBytes / (1024 * 1024), nil
+}
+
+// debitNodeInfoLocked marks memoryMB MiB of hugepages used in the cached
+// NodeInfo when a lease is admitted, so the next admission inside the
+// same cache window sees them gone: without it, every burst admission
+// in a 15 s window passed against one reading and together they could
+// eat the whole reserve. A debit for a create that then fails only
+// makes burst admission stricter until the next refresh. No-op while
+// nothing is cached. The caller holds nodeInfoMu.
+func (s *Service) debitNodeInfoLocked(memoryMB int) {
+	info := &s.nodeInfoCache
+	if s.nodeInfoAt.IsZero() || info.HugepageSizeBytes == 0 || memoryMB <= 0 {
+		return
+	}
+	bytes := uint64(memoryMB) * 1024 * 1024
+	info.HugepagesUsed += (bytes + info.HugepageSizeBytes - 1) / info.HugepageSizeBytes
 }
 
 // admit checks that the node can host a sandbox of memoryMB MiB: enough
@@ -132,10 +152,15 @@ func (s *Service) classify(owner string, burst bool) string {
 // a guaranteed lease's admission is exactly what the reserve protects.
 func (s *Service) admitClass(ctx context.Context, owner string, memoryMB int, burst bool) (string, error) {
 	class := s.classify(owner, burst)
+	s.nodeInfoMu.Lock()
+	defer s.nodeInfoMu.Unlock()
 	if class != ClassBurst {
+		// A guaranteed admission skips the reserve but still takes its
+		// hugepages from the cached reading.
+		s.debitNodeInfoLocked(memoryMB)
 		return class, nil
 	}
-	freeMiB, err := s.freeHugepageMiB(ctx)
+	freeMiB, err := s.freeHugepageMiBLocked(ctx)
 	if err != nil {
 		if s.metrics != nil {
 			s.metrics.CapacityRej.Inc()
@@ -149,5 +174,6 @@ func (s *Service) admitClass(ctx context.Context, owner string, memoryMB int, bu
 		return class, fmt.Errorf("%w: a burst lease of %d MiB would leave the node under its %d MiB reserve (%d MiB free)",
 			errBurstReserve, memoryMB, s.burstReserveMiB(), freeMiB)
 	}
+	s.debitNodeInfoLocked(memoryMB)
 	return class, nil
 }
