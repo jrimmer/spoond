@@ -518,6 +518,34 @@ func TestBurstReserveUndrainDefers(t *testing.T) {
 	}
 }
 
+// TestClassPriorityBounds: create takes a priority in -128..127 (the
+// range the stored column and the future scheduler use); outside it
+// answers 400 and grants nothing.
+func TestClassPriorityBounds(t *testing.T) {
+	_, h, _, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
+
+	for _, body := range []string{
+		`{"image":"mid","ttl":60,"priority":128}`,
+		`{"image":"mid","ttl":60,"priority":-129}`,
+	} {
+		if code, resp, _ := createBodyResp(t, h, tok, body); code != http.StatusBadRequest {
+			t.Fatalf("create %s = %d %s, want 400", body, code, resp)
+		}
+	}
+	if ids := leaseIDs(t, h, tok); len(ids) != 0 {
+		t.Fatalf("rejected priorities granted %d leases, want 0", len(ids))
+	}
+	// The bounds themselves are accepted.
+	for _, body := range []string{
+		`{"image":"mid","ttl":60,"priority":127}`,
+		`{"image":"mid","ttl":60,"priority":-128}`,
+	} {
+		if code, resp, _ := createBodyResp(t, h, tok, body); code != http.StatusCreated {
+			t.Fatalf("create %s = %d %s, want 201", body, code, resp)
+		}
+	}
+}
+
 // TestNodeMetricsFillsBurstCache: the node-gauge refresh and the burst
 // reserve read the same NodeInfo cache (#128 part 2). A gauge pass under
 // a roomy node caches it, so a burst admission right after the node

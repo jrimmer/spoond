@@ -48,8 +48,9 @@ summarised from README "Status".
   the reserve answers `503` `no burst capacity` with `Retry-After: 30`
   on every admission path — create, resume, restart, restore, fork,
   clone — and stays as it was; an undrain defers it (drained, retried
-  later) instead of losing it. Create takes `"priority"` (int, default
-  `0`): preemption order within a class, lower preempted first,
+  later) instead of losing it. Create takes `"priority"` (int,
+  default `0`, between `-128` and `127`): preemption order within a
+  class, lower preempted first,
   advisory until part 3. `class` and `priority` ride every lease row
   and detail; the dashboard marks burst rows (`▶ running·b`) and adds
   `burst N` to the capacity panel.
