@@ -75,7 +75,7 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		// Class re-admission (#128 part 2), as for a resume: a
 		// demand-burst lease stays burst and re-passes the reserve; a
 		// guarantee-burst one may fall back to guaranteed.
-		class, err := s.admitClass(ctx, l.Owner, img.MemoryMB, l.Burst)
+		class, err := s.admitClass(ctx, l.Owner, img.MemoryMB, l.Burst, l.ID)
 		if err != nil {
 			return err
 		}
@@ -210,5 +210,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		"build_id":   b.BuildID,
 		"generation": lease.Generation,
 		"status":     "running",
+		// When the restored checkpoint was taken, for clients' logs.
+		"build_created_at": formatRFC3339(b.CreatedAt),
 	})
 }

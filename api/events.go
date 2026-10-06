@@ -57,6 +57,10 @@ const (
 	// change: the pause/resume memory continues. The detail names the
 	// guaranteed lease's owner.
 	LeasePreempted LeaseEventType = "preempted"
+	// LeasePromoted marks a running burst lease moved to guaranteed
+	// because its owner's guarantee has room again (#128): bookkeeping
+	// only, the VM is untouched.
+	LeasePromoted LeaseEventType = "promoted"
 	// LeaseJobStarted, LeaseJobExited and LeaseJobLost mark a background
 	// exec job's life (2.6, #135): started carries the command (cut to
 	// 120 chars), exited the exit code and a short stderr tail, lost a
