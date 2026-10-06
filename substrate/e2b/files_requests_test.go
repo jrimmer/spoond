@@ -328,3 +328,32 @@ func TestReadFileLimitOverflow(t *testing.T) {
 		t.Fatalf("ReadFile max MaxInt64 = %q, %v", data, err)
 	}
 }
+
+// TestExecPassesEnvNotArgv pins that Exec hands req.Env to the process
+// config's Envs, so envd sets the process environment and the values
+// never appear in the command line.
+func TestExecPassesEnvNotArgv(t *testing.T) {
+	e := &filesTestEnvd{}
+	c := newFilesEnvd(t, e)
+	defer e.close()
+
+	res, err := c.Exec(context.Background(), filesSandboxID, substrate.ExecRequest{
+		Args: []string{"/bin/bash", "-c", `echo hi`},
+		Env:  map[string]string{"FOO": "env-secret-value"},
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", res.ExitCode)
+	}
+	if len(e.execs) != 1 {
+		t.Fatalf("execs = %v, want 1", e.execs)
+	}
+	if len(e.execEnvs) != 1 || e.execEnvs[0]["FOO"] != "env-secret-value" {
+		t.Fatalf("process envs = %v, want FOO=env-secret-value", e.execEnvs)
+	}
+	if strings.Contains(e.execs[0], "FOO") || strings.Contains(e.execs[0], "env-secret-value") {
+		t.Fatalf("env leaked into argv: %q", e.execs[0])
+	}
+}

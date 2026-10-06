@@ -10,6 +10,15 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Security
+
+- **Exec env no longer appears in the guest command line.** Per-request
+  env values (tokens, deploy keys) used to be inlined as `export
+  'K'='V';` into the `bash -c` argv, where any process in the guest
+  could read them from `/proc/<pid>/cmdline`. They now travel in
+  `ExecRequest.Env` and are set in the process environment by envd; the
+  argv carries only the command and any `cd <cwd> &&` prefix.
+
 ### Changed
 
 - **Dashboard capacity panel: the lease counts on one line,** with the

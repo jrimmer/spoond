@@ -145,7 +145,8 @@ func TestBackgroundExecRealWrapperSignal(t *testing.T) {
 // the signal to the signed pid, the way the guest /bin/kill would.
 func installJobKillExec(t *testing.T, sub *testSub) {
 	t.Helper()
-	sub.SetExecHandler(func(sandboxID string, args []string) substrate.ExecResult {
+	sub.SetExecHandler(func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {
+		args := req.Args
 		if len(args) >= 6 && args[0] == "/bin/sh" && strings.HasPrefix(args[2], "kill ") {
 			sig := args[4]
 			pid, err := strconv.Atoi(args[5])
@@ -158,7 +159,7 @@ func installJobKillExec(t *testing.T, sub *testSub) {
 			}
 			return substrate.ExecResult{ExitCode: 0}
 		}
-		return sub.exec(sandboxID, args)
+		return sub.exec(sandboxID, req)
 	})
 	t.Cleanup(func() { sub.SetExecHandler(nil) })
 }
