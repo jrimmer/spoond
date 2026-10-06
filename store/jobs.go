@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -194,10 +195,28 @@ func (db *DB) LatestJobExitOfLease(ctx context.Context, leaseID string) (JobRow,
 
 // PruneJobs deletes exited jobs older than cutoff, returning how many
 // rows went. Running and lost jobs are kept.
+//
+// ended_at is stored as RFC3339 with a variable-width fraction, so a
+// string comparison (ended_at < ?) mis-orders values with and without
+// fractional seconds: "12:00:00" sorts after "12:00:00.5" even though
+// the latter is earlier. Select the exited rows and compare the parsed
+// times in Go instead; retention is days, so reading the candidate set
+// is cheap.
 func (db *DB) PruneJobs(ctx context.Context, cutoff time.Time) (int64, error) {
+	expired, err := db.ListExpiredJobs(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	if len(expired) == 0 {
+		return 0, nil
+	}
+	ids := make([]any, len(expired))
+	for i, r := range expired {
+		ids[i] = r.JobID
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	res, err := db.w.ExecContext(ctx,
-		`DELETE FROM lease_jobs WHERE state='exited' AND ended_at != '' AND ended_at < ?`,
-		formatTime(cutoff))
+		`DELETE FROM lease_jobs WHERE state='exited' AND job_id IN (`+placeholders+`)`, ids...)
 	if err != nil {
 		return 0, fmt.Errorf("store: prune jobs: %w", err)
 	}
@@ -208,17 +227,28 @@ func (db *DB) PruneJobs(ctx context.Context, cutoff time.Time) (int64, error) {
 	return n, nil
 }
 
-// ListExpiredJobs returns the exited jobs older than retention, for the
-// guest-side cleanup that follows a prune.
+// ListExpiredJobs returns the exited jobs whose parsed ended_at is
+// before cutoff, for the guest-side cleanup that follows a prune. The
+// comparison is in Go because the stored RFC3339 fraction width varies
+// (see PruneJobs).
 func (db *DB) ListExpiredJobs(ctx context.Context, cutoff time.Time) ([]JobRow, error) {
 	rows, err := db.r.QueryContext(ctx,
-		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='exited' AND ended_at != '' AND ended_at < ?`,
-		formatTime(cutoff))
+		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='exited' AND ended_at IS NOT NULL AND ended_at != ''`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list expired jobs: %w", err)
 	}
 	defer rows.Close()
-	return scanJobs(rows)
+	all, err := scanJobs(rows)
+	if err != nil {
+		return nil, err
+	}
+	out := all[:0]
+	for _, r := range all {
+		if r.EndedAt.Before(cutoff) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // DeleteJobsOfLease removes a lease's job rows. The foreign key already

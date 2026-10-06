@@ -18,6 +18,8 @@ summarised from README "Status".
   suspended; resume it first" instead of reaching the substrate.
 - Event-detail cuts and the stderr tail cut land on rune boundaries, and
   invalid UTF-8 from the guest is replaced with U+FFFD.
+- Job retention compares parsed ended_at times instead of RFC3339
+  strings, so values with and without fractional seconds order correctly.
 
 ## [2.6.1] - 2026-10-06
 
