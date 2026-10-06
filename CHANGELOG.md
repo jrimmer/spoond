@@ -10,6 +10,12 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard header: no orchestrator version.** The title line reads
+  `SPOOND · host · version · up …`; the substrate's version
+  (`e2b 0.16.1`) is gone from it.
+
 ## [2.6.6] - 2026-10-06
 
 The GC finds orphan build directories (dry run by default, quarantine
