@@ -1000,13 +1000,26 @@ func (l *layout) meterSegs(label string, pct, warnPct, dangerPct float64, barW i
 				bar[i] = '█'
 			}
 		}
+		// The warning-level tick is a warn-coloured cell inside the bar,
+		// not part of it: the bar keeps its width, and a meter without a
+		// warning level draws no tick.
+		tick := -1
 		if warnPct > 0 && warnPct < 100 {
-			tx := int(warnPct / 100 * float64(barW))
-			if tx < barW {
-				bar[tx] = '╎'
+			if tx := int(warnPct / 100 * float64(barW)); tx < barW {
+				tick = tx
 			}
 		}
-		segs = append(segs, grid.Seg{Text: string(bar), Style: style})
+		if tick < 0 {
+			segs = append(segs, grid.Seg{Text: string(bar), Style: style})
+		} else {
+			if tick > 0 {
+				segs = append(segs, grid.Seg{Text: string(bar[:tick]), Style: style})
+			}
+			segs = append(segs, grid.Seg{Text: "╎", Style: "warn"})
+			if tick+1 < barW {
+				segs = append(segs, grid.Seg{Text: string(bar[tick+1:]), Style: style})
+			}
+		}
 	}
 	return segs
 }
@@ -1118,22 +1131,26 @@ func (l *layout) throughputH() int {
 	return 6 // the same, 2×2: two value rows and two sparkline rows
 }
 
-// throughputSeries is one sparkline: its label, the history key and
-// the current value as drawn at the label row's right.
+// throughputSeries is one sparkline: its label, the history key, the
+// current value as drawn at the label row's right, and the style its
+// sparkline carries (the running-leases series the state colour, the
+// rest the spark colour).
 func (l *layout) throughputSeries() []struct {
 	label string
 	key   string
 	last  string
+	style string
 } {
 	return []struct {
 		label string
 		key   string
 		last  string
+		style string
 	}{
-		{"running leases", "running", fmt.Sprint(l.s.Running)},
-		{"requests / s", "reqPerSec", fmt.Sprintf("%.1f", l.s.ReqPerSec)},
-		{"creates / min", "createsPerMin", fmt.Sprintf("%.0f", l.s.CreatesPerMin)},
-		{"egress conns", "fwConns", fmt.Sprint(l.s.FwConns)},
+		{"running leases", "running", fmt.Sprint(l.s.Running), "state"},
+		{"requests / s", "reqPerSec", fmt.Sprintf("%.1f", l.s.ReqPerSec), "spark"},
+		{"creates / min", "createsPerMin", fmt.Sprintf("%.0f", l.s.CreatesPerMin), "spark"},
+		{"egress conns", "fwConns", fmt.Sprint(l.s.FwConns), "spark"},
 	}
 }
 
@@ -1170,7 +1187,7 @@ func (l *layout) drawThroughput(g *grid.Grid, x, y, w, h int) int {
 		g.Right(cx+sparkW-1, valY, []grid.Seg{{Text: r.last, Style: "text"}})
 		vals := l.histVals(r.key)
 		sp := padTo(grid.Sparkline(vals, 0, maxOf(vals)), sparkW)
-		g.Segs(cx, spY, []grid.Seg{{Text: sp, Style: "spark"}}, sparkW)
+		g.Segs(cx, spY, []grid.Seg{{Text: sp, Style: r.style}}, sparkW)
 	}
 	return y
 }
@@ -1282,9 +1299,9 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	}
 	for i, r := range rows {
 		yy := top + 2 + i
-		g.Text(c.id, yy, sanitize(r.ID), "text", c.idW)
+		g.Text(c.id, yy, sanitize(r.ID), "id", c.idW)
 		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
-		g.Text(c.own, yy, sanitize(r.Owner), "text", c.ownW)
+		g.Text(c.own, yy, sanitize(r.Owner), "owner", c.ownW)
 		// The state cell names the burst class, preemption and idle
 		// suspension (#128 part 2/3, 2.5 #129 part 2): "▶ running·b", a
 		// preempted (always burst) lease as "‖ suspended·p", and an
@@ -1664,16 +1681,36 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 	}
 }
 
+// eventTypeStyle is the colour the events panel's type word takes: the
+// title cyan for the lease lifecycle (created, released, resumed,
+// restarted, restored, checkpointed, recovered), warn for a lease put
+// aside (suspended, preempted, idle_suspended, queued), bad for one lost
+// or timed out, dim for anything else.
+func eventTypeStyle(t string) string {
+	switch t {
+	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
+		return "title"
+	case "suspended", "preempted", "idle_suspended", "queued":
+		return "warn"
+	case "lost", "timed_out":
+		return "bad"
+	default:
+		return "dim"
+	}
+}
+
 // splitSegs breaks one event line into styled runs at its three column
 // separators — the two spaces between time, type, lease id and tail:
-// the time stays dim, the type and the tail take the event's own style,
-// the gaps themselves dim. One style across the whole line would paint
-// the padding dim too. Only those three separators split the line: the
-// tail is free text (a comment can hold two spaces in a row) and is
-// never cut again, so it keeps one style to the panel's edge.
+// the time stays dim, the type takes its kind's colour, the lease id the
+// id style, the tail the event's own style, the gaps themselves dim. One
+// style across the whole line would paint the padding dim too. Only
+// those three separators split the line: the tail is free text (a
+// comment can hold two spaces in a row) and is never cut again, so it
+// keeps one style to the panel's edge.
 func splitSegs(line, style string) []grid.Seg {
 	segs := make([]grid.Seg, 0, 7)
 	rest := line
+	chunk := 0
 	for fields := 0; fields < 3; fields++ {
 		i := strings.Index(rest, "  ")
 		if i < 0 {
@@ -1681,10 +1718,16 @@ func splitSegs(line, style string) []grid.Seg {
 		}
 		if i > 0 {
 			st := style
-			if len(segs) == 0 {
+			switch chunk {
+			case 0:
 				st = "dim" // the HH:MM:SS before the first separator
+			case 1:
+				st = eventTypeStyle(strings.TrimSpace(rest[:i])) // the type word's kind colour
+			case 2:
+				st = "id" // the lease id, cyan like the leases table
 			}
 			segs = append(segs, grid.Seg{Text: rest[:i], Style: st})
+			chunk++
 		}
 		segs = append(segs, grid.Seg{Text: "  ", Style: "dim"})
 		rest = rest[i+2:]
