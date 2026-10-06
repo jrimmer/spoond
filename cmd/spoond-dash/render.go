@@ -152,6 +152,9 @@ func bannerRows(s Snapshot, now time.Time) []string {
 	if s.ByState["lost"] > 0 {
 		rows = append(rows, fmt.Sprintf("%d lost lease(s) - a substrate crash dropped them", s.ByState["lost"]))
 	}
+	if s.Preempted > 0 {
+		rows = append(rows, fmt.Sprintf("%d burst lease(s) preempted", s.Preempted))
+	}
 	if s.HugeFreeGiB > 0 && s.HugeUsedPct >= 92 {
 		rows = append(rows, fmt.Sprintf("hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB))
 	}
@@ -1278,12 +1281,16 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(c.id, yy, sanitize(r.ID), "text", c.idW)
 		g.Text(c.img, yy, sanitize(r.Image), "text", c.imgW)
 		g.Text(c.own, yy, sanitize(r.Owner), "text", c.ownW)
-		// The state cell names the burst class (#128 part 2): "▶
-		// running·b" — the ·b suffix rides the state so the columns stay
-		// aligned (the policy column keeps its own width).
+		// The state cell names the burst class and preemption (#128
+		// part 2/3): "▶ running·b" and "‖ suspended·b·p" — the suffixes
+		// ride the state so the columns stay aligned (the policy column
+		// keeps its own width).
 		state := r.State
 		if r.Burst {
 			state += "·b"
+		}
+		if r.Preempted {
+			state += "·p"
 		}
 		segs := []grid.Seg{
 			{Text: string(stateGlyph(r)), Style: stateGlyphStyle(r)},

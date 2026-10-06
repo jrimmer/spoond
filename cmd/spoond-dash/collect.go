@@ -41,7 +41,11 @@ type Snapshot struct {
 	// It is deliberately not the same set the leases panel's ·b marker
 	// shows, which is the stored class of the displayed rows, lost
 	// rows included (#128 part 2).
-	Burst      int `json:"burst"`
+	Burst int `json:"burst"`
+	// Preempted is the live leases suspended by preemption (#128 part
+	// 3), counted in the store: burst leases the resume queue will bring
+	// back when capacity allows. The attention strip names them.
+	Preempted  int `json:"preempted"`
 	Queued     int `json:"queued"`
 	Granted    int `json:"granted"` // cumulative leases granted
 	Swept      int `json:"swept"`
@@ -217,10 +221,12 @@ type Service struct {
 // own note: the holder column shows it, dim, on a CI job lease with no
 // holder and no name (e.g. "forgejo: lacy.casa/site #218"). Burst is
 // the lease's admission class (#128 part 2): the state cell shows it
-// as "·b".
+// as "·b". Preempted marks a burst lease suspended by preemption (#128
+// part 3): the state cell shows it as "·p".
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name, Comment string
 	Burst                                          bool
+	Preempted                                      bool
 	Holder, HolderURL, HoldState                   string
 	HoldExpires                                    string
 	LastAction                                     string
@@ -802,7 +808,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	names := c.userNames()
 
 	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, comment, created_at, expires_at, persistent,
-		holder, holder_url, hold_expires_at, last_action, last_action_at, class
+		holder, holder_url, hold_expires_at, last_action, last_action_at, class, preempted_at
 		FROM leases ORDER BY created_at DESC LIMIT 40`)
 	if err != nil {
 		return err
@@ -815,8 +821,9 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		var holder, holderURL, holdExpires, lastAction, lastActionAt string
 		var persistent int
 		var class string
+		var preemptedAt string
 		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &comment, &created, &expires, &persistent,
-			&holder, &holderURL, &holdExpires, &lastAction, &lastActionAt, &class); err != nil {
+			&holder, &holderURL, &holdExpires, &lastAction, &lastActionAt, &class, &preemptedAt); err != nil {
 			return err
 		}
 		r.Comment = comment
@@ -828,6 +835,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			r.Policy = "restricted"
 		}
 		r.Burst = class == "burst"
+		r.Preempted = preemptedAt != ""
 		if len(r.ID) > 10 {
 			r.ID = r.ID[:10]
 		}
@@ -894,6 +902,13 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		WHERE class = 'burst' AND state IN ('running','suspended','recovered')`).Scan(&s.Burst); err != nil {
 		s.Burst = 0
 		return fmt.Errorf("count burst leases: %w", err)
+	}
+	// The preempted count (#128 part 3): live leases the resume queue is
+	// holding until capacity allows, wherever they sit in the row window.
+	if err := db.QueryRow(`SELECT COUNT(*) FROM leases
+		WHERE preempted_at != '' AND state IN ('running','suspended','recovered')`).Scan(&s.Preempted); err != nil {
+		s.Preempted = 0
+		return fmt.Errorf("count preempted leases: %w", err)
 	}
 
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)

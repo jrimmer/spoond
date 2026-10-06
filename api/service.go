@@ -118,9 +118,15 @@ type Lease struct {
 	// the node's free hugepages stay above BurstReserveMiB after this
 	// lease's own. Reported by the lease API as "class".
 	Class string `json:"-"`
+	// PreemptedAt is when the lease was preempted (#128 part 3): it was
+	// suspended through the pause path to free hugepages for a
+	// guaranteed admission. A preempted lease is a burst lease the
+	// resume queue brings back when capacity allows; resume clears the
+	// instant. Zero = not preempted. Persisted as preempted_at and
+	// reported by the lease API as "preempted".
+	PreemptedAt time.Time `json:"-"`
 	// Priority orders preemption within a class (#128 part 2): a lower
-	// number is preempted first. 0 = the default; advisory until
-	// #128 part 3 makes the reconciler act on it. Reported as
+	// number is preempted first. 0 = the default. Reported as
 	// "priority".
 	Priority int `json:"-"`
 	// Burst records the request's "burst": true (#128 part 2) — the
@@ -272,6 +278,11 @@ type ServiceConfig struct {
 	// guaranteed class never runs into it. BURST_RESERVE_MIB, default
 	// DefaultBurstReserveMiB. 0 disables the reserve.
 	BurstReserveMiB int
+	// PreemptDiskFloorPct is the snapshot-disk free percentage a
+	// preemption pause must leave after it (#128 part 3), estimated from
+	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default
+	// DefaultPreemptDiskFloorPct. 0 or negative means the default.
+	PreemptDiskFloorPct float64
 }
 
 // Service is the lease API backend.
@@ -366,6 +377,12 @@ type Service struct {
 	nodeInfoMu    sync.Mutex
 	nodeInfoCache substrate.NodeInfo
 	nodeInfoAt    time.Time
+
+	// preemptMu serialises preemption (#128 part 3): one guaranteed
+	// admission preempts at a time, so two concurrent creates cannot
+	// each suspend a different burst lease for themselves. Held across
+	// the whole preempt-then-admit sequence (see admitClass).
+	preemptMu sync.Mutex
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -853,6 +870,9 @@ func (s *Service) Start(ctx context.Context) {
 	go s.runGCCatalogLoop(ctx)
 	// Node gauges (U11): refreshed every 15 s.
 	go s.runNodeMetricsLoop(ctx)
+	// Preemption resume queue (#128 part 3): every 15 s, resume preempted
+	// leases that fit again.
+	go s.runPreemptResumeLoop(ctx)
 	// Webhook notifications (2.2, #117): forward the bus's
 	// person-relevant events. Only when a notifier is installed.
 	if s.notifier != nil {
@@ -1708,6 +1728,10 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	l.BuildID = resumeBuild
 	l.setState("running")
 	l.Suspended = false
+	// A preempted lease comes back here: clear the preemption before the
+	// event below decides its detail (#128 part 3).
+	preempted := !l.PreemptedAt.IsZero()
+	l.PreemptedAt = time.Time{}
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
@@ -1717,7 +1741,11 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "resumed from build "+resumeBuild)
+	if preempted {
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "after preemption")
+	} else {
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "resumed from build "+resumeBuild)
+	}
 	return l, nil
 }
 
@@ -2597,6 +2625,10 @@ func leaseMap(l *Lease, checkpointInterval int64) map[string]any {
 		// is preempted first.
 		"class":    leaseClassRow(l),
 		"priority": l.Priority,
+		// Preemption (#128 part 3): true when this burst lease was
+		// suspended to make room for a guaranteed lease; the resume
+		// queue brings it back when capacity allows.
+		"preempted": !l.PreemptedAt.IsZero(),
 	}
 	if !l.HoldExpiresAt.IsZero() {
 		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
@@ -2820,6 +2852,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		MemoryMB:              l.MemoryMB,
 		Class:                 leaseClassRow(l),
 		Priority:              l.Priority,
+		PreemptedAt:           l.PreemptedAt,
 	}
 }
 
@@ -2872,6 +2905,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		MemoryMB:              r.MemoryMB,
 		Class:                 r.Class,
 		Priority:              r.Priority,
+		PreemptedAt:           r.PreemptedAt,
 	}
 }
 
@@ -3159,7 +3193,12 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	}
 	m.SharesActive.Set(float64(shares))
 
+	// Preempted leases (#128 part 3): live leases suspended by
+	// preemption, awaiting the resume queue.
+	preempted := s.preemptedCount()
+
 	s.store.mu.Unlock()
+	m.PreemptedLeases.Set(float64(preempted))
 	// Kept checkpoints (#126): pins of live leases and their recorded
 	// bytes, refreshed on every scrape. CollectMetrics holds the store
 	// lock only for the lease set it needs; the kept rows live in the

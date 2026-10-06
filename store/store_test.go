@@ -298,8 +298,9 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN class`,
 		`ALTER TABLE leases DROP COLUMN priority`,
+		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13)`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -359,8 +360,9 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN class`,
 		`ALTER TABLE leases DROP COLUMN priority`,
+		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13)`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -429,7 +431,8 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN class`,
 		`ALTER TABLE leases DROP COLUMN priority`,
-		`DELETE FROM schema_migrations WHERE version = 13`,
+		`ALTER TABLE leases DROP COLUMN preempted_at`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {

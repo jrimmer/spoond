@@ -38,6 +38,11 @@ const (
 	// LeaseRestored marks a restore in place to a kept checkpoint
 	// (2.3, #121): the detail carries the restored-to build id.
 	LeaseRestored LeaseEventType = "restored"
+	// LeasePreempted marks a burst lease suspended to free hugepages for
+	// a guaranteed admission (#128 part 3). Its generation does not
+	// change: the pause/resume memory continues. The detail names the
+	// guaranteed lease's owner.
+	LeasePreempted LeaseEventType = "preempted"
 	// LeaseStreamGap marks a hole in a stream rather than a lifecycle
 	// change. It is synthesized when a consumer's position cannot be
 	// honoured (the epoch changed after a restart, the pointed-at event

@@ -267,6 +267,10 @@ func Main(args []string) int {
 	// this much hugepage memory free of burst leases, so guaranteed
 	// work always has room to land; 0 disables the reserve.
 	burstReserveMiB := envIntOr("BURST_RESERVE_MIB", api.DefaultBurstReserveMiB)
+	// The preemption disk floor (#128 part 3): a preemption pause must
+	// leave this percentage of the snapshot disk free, estimated from
+	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default 15.
+	preemptDiskFloorPct := float64(envIntOr("PREEMPT_DISK_FLOOR_PCT", api.DefaultPreemptDiskFloorPct))
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -341,6 +345,7 @@ func Main(args []string) int {
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		BurstReserveMiB:           burstReserveMiB,
+		PreemptDiskFloorPct:       preemptDiskFloorPct,
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).

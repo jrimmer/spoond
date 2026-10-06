@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -143,23 +144,31 @@ func (s *Service) classify(owner string, burst bool) string {
 	return ClassGuaranteed
 }
 
-// admitClass decides a lease's class and holds a burst lease to the
-// burst reserve (#128 part 2). It returns the class — to be stamped on
-// the lease when admitted — and the refusal, if any: a burst lease is
-// admitted only while the node's free hugepages stay above
+// admitClass decides a lease's class and admits it (#128 part 2/3). It
+// returns the class — to be stamped on the lease when admitted — and the
+// refusal, if any. A guaranteed lease may preempt burst leases to make
+// room (preemption is serialised inside admitGuaranteed). A burst lease
+// is admitted only while the node's free hugepages stay above
 // BurstReserveMiB after its own. The plain hugepage capacity check is
 // not repeated here: createSandbox runs it for every cold create, and
 // a guaranteed lease's admission is exactly what the reserve protects.
 func (s *Service) admitClass(ctx context.Context, owner string, memoryMB int, burst bool) (string, error) {
 	class := s.classify(owner, burst)
-	s.nodeInfoMu.Lock()
-	defer s.nodeInfoMu.Unlock()
 	if class != ClassBurst {
-		// A guaranteed admission skips the reserve but still takes its
-		// hugepages from the cached reading.
-		s.debitNodeInfoLocked(memoryMB)
+		// A guaranteed admission preempts burst leases when the node
+		// cannot host it, then takes its hugepages from the cached
+		// reading (#128 part 3).
+		if err := s.admitGuaranteed(ctx, owner, memoryMB); err != nil {
+			if s.metrics != nil && errors.Is(err, errPreemptCannot) {
+				s.metrics.CapacityRej.Inc()
+			}
+			return class, err
+		}
 		return class, nil
 	}
+
+	s.nodeInfoMu.Lock()
+	defer s.nodeInfoMu.Unlock()
 	freeMiB, err := s.freeHugepageMiBLocked(ctx)
 	if err != nil {
 		if s.metrics != nil {
