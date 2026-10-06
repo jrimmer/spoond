@@ -12,14 +12,14 @@ import (
 	"time"
 )
 
-// TestI1_IdleSuspendResumesOnNextUse covers per-lease idle reclamation
+// TestI4_IdleSuspendResumesOnNextUse covers per-lease idle reclamation
 // (2.5, #129 part 2) end to end: a persistent lease with idle_suspend 60
 // and a /dev/shm marker, no activity. The idle sweep suspends it within
 // the threshold (watched on the event stream as an idle_suspended
 // event), and an exec resumes it first through the normal pause/resume
 // path with the marker intact. Always on; the lease is deleted at the
 // end.
-func TestI1_IdleSuspendResumesOnNextUse(t *testing.T) {
+func TestI4_IdleSuspendResumesOnNextUse(t *testing.T) {
 	rec := begin(t)
 
 	image := envOr("CONFORMANCE_IDLE_IMAGE", "py-base")
