@@ -10,6 +10,19 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-10-07
+
+spoond looks after more of itself and says less on the dashboard about
+things a viewer cannot act on. A lost lease now answers `410`
+with `code: lease_lost` and its reason, and is released once its grace period
+lapses, so its owner's quota comes back; every orchestrator call has a
+deadline. The dashboard gains a Notifications panel for spoond system
+messages only (dismissable per viewer), i/o stall and disk-busy meters,
+a left-aligned header with uptime and clock, a footer with the version,
+release date and a GitHub link, and a leases table whose access column
+says isolated for no network and whose columns fit their content. Store migration 0019 is additive; the grid package is
+unchanged since 2.7.0.
+
 ### Added
 
 - **The dashboard's host panel shows disk I/O pressure and the snapshot
