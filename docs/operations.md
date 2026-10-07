@@ -1008,8 +1008,17 @@ trouble is not a dashboard message: the viewer cannot act on a lease,
 so spoond tells the lease's initiator itself (the lease event stream
 and the API's `409 lease_lost` with `lost_reason`). TLS certificate expiry is
 left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
-`kept N (X GiB)` when any build is pinned. A status line under the panels carries the headline numbers
-and the clock. The browser page is the grid in a `<pre>` (Datastar
+`kept N (X GiB)` when any build is pinned. The header centres
+`SPOOND · <host>` and right-aligns spoond's uptime and the frame's clock
+as `up <dur>, <time>` (the uptime drops before the clock on a narrow
+frame). The footer is one dim, centred line naming the project —
+`spoond · github.com/jrimmer/spoond · v2.7.0 (2026-10-07)` — with
+`DASH_PROJECT_URL` (shown without its scheme), the dashboard binary's
+version (`debug.ReadBuildInfo`, shortened like the header used to) and
+the build's release date (`vcs.time` as `YYYY-MM-DD`, omitted for a dev
+build); on a narrow frame the URL drops first, then the date. The
+browser page
+is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
 styles in the terminal, at the terminal's width (COLUMNS, else 104),
 redrawn every 2 seconds until interrupted. It runs as its own service on **:8893** behind
@@ -1057,11 +1066,12 @@ variables:
 | `DASH_DISK_DEVICE` | *(auto from the storage mount)* | block device for the write-throughput and busy readout |
 | `DASH_IO_FULL_WARN_PCT` | `5` | PSI full avg60 at which the pressure meter turns warn |
 | `DASH_IO_FULL_BAD_PCT` | `15` | PSI full avg60 at which it turns bad and the notification fires |
-| `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol` | systemd units to show |
+| `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch` | systemd units to show |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |
 | `DASH_HOST` | *(the hostname)* | header label |
+| `DASH_PROJECT_URL` | `github.com/jrimmer/spoond` | the footer's project URL, shown without its scheme and linked in the page |
 
 The I/O thresholds are a first cut, to be tuned from #136's
 measurements. `iowait` is deliberately not used: it is CPU idle time

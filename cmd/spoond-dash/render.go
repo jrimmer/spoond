@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -283,14 +284,15 @@ func (l *layout) histMinutes() int {
 
 // drawFrame renders a snapshot plus history into the full frame at
 // width w: the shared entry point of Draw, the page, the stream and
-// spoond top. host names the node in the header; now timestamps the
-// ages; interval is the scrape interval the history points are spaced by
-// (the throughput title's window; 0 when there is none). It fails only
-// when grid.Check rejects the finished frame (a rune no renderer can
-// draw) — the terminal path reports it instead of printing a broken
-// frame.
+// spoond top. host names the node in the header; now is the frame's
+// timestamp, carried by the snapshot's own ages and clock rather than
+// read here; interval is the scrape interval the history points are
+// spaced by (the throughput title's window; 0 when there is none). It
+// fails only when grid.Check rejects the finished frame (a rune no
+// renderer can draw) — the terminal path reports it instead of printing
+// a broken frame.
 func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration) (*grid.Grid, error) {
-	l := &layout{w: clamp(w, minW, maxW), host: host, now: now, s: s,
+	l := &layout{w: clamp(w, minW, maxW), host: host, s: s,
 		notices:  notices(s),
 		histFn:   func(k string) []float64 { return hist[k] },
 		histN:    len(hist["running"]),
@@ -314,7 +316,6 @@ type layout struct {
 	w       int
 	notices []Notice
 	host    string
-	now     time.Time
 	s       Snapshot
 	// histFn serves the sparkline series; Draw leaves it nil (the
 	// sparklines then draw empty) and the page/top fill it from the
@@ -359,7 +360,7 @@ func (l *layout) assemble() *grid.Grid {
 		l.noticesH() +
 		l.panelsH() + l.throughputH() + l.leasesH() +
 		l.imagesServicesH() + l.refusalsH() + l.eventsH() +
-		1 // the status line
+		1 // the footer line
 
 	g := grid.New(l.w, h)
 	l.header(g, 0)
@@ -372,111 +373,114 @@ func (l *layout) assemble() *grid.Grid {
 	y = l.imagesServices(g, y)
 	y = l.refusals(g, y)
 	y = l.events(g, y)
-	l.statusLine(g, y, l.s.At)
+	l.footer(g, y)
 	return g
 }
 
-// statusItem is one status-line entry: label, the value shown in
-// brackets and whether it is healthy (ok style) or not (warn/bad).
-type statusItem struct {
-	label string
-	value string
-	style string
+// defaultProjectURL is the footer's URL when DASH_PROJECT_URL is unset:
+// the module's home.
+const defaultProjectURL = "github.com/jrimmer/spoond"
+
+// projectHref is the URL the footer links to: DASH_PROJECT_URL, else the
+// module's home, with an https scheme when none is given.
+func projectHref() string {
+	u := os.Getenv("DASH_PROJECT_URL")
+	if u == "" {
+		u = defaultProjectURL
+	}
+	if !strings.Contains(u, "://") {
+		u = "https://" + u
+	}
+	return u
 }
 
-// statusItems builds the status line's entries left to right: leases,
-// hugepages, snapshot disk, the certificate's remaining days and the
-// units. The styles reuse the thresholds the meters and the other
-// panels already use. The certificate is left out when there is none.
-func statusItems(s Snapshot, now time.Time) []statusItem {
-	items := []statusItem{
-		{"leases", fmt.Sprintf("%d/%d", s.Running, s.Limit), "ok"},
+// projectURL is the footer's display text: the href shown without its
+// scheme, trailing slash trimmed. The line is plain text in the terminal
+// grid; in the page the same span becomes an anchor (applyProjectLink).
+func projectURL() string {
+	u := projectHref()
+	if i := strings.Index(u, "://"); i >= 0 {
+		u = u[i+3:]
 	}
-	if s.Limit > 0 {
-		if pct := float64(s.Running) / float64(s.Limit) * 100; pct >= 90 {
-			items[0].style = "bad"
-		} else if pct >= 75 {
-			items[0].style = "warn"
+	return strings.TrimSuffix(u, "/")
+}
+
+// releaseDate is the build's release date: the vcs.time build setting of
+// the binary's own build (the release commit's date) as YYYY-MM-DD, or
+// "" for a dev build with no VCS stamp.
+func releaseDate() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	return releaseDateFrom(bi.Settings)
+}
+
+// releaseDateFrom turns build settings into the footer's date: the
+// vcs.time stamp as YYYY-MM-DD, or "" when there is none (a dev build)
+// or it does not parse.
+func releaseDateFrom(settings []debug.BuildSetting) string {
+	for _, s := range settings {
+		if s.Key == "vcs.time" {
+			if t, err := time.Parse(time.RFC3339, s.Value); err == nil {
+				return t.Format("2006-01-02")
+			}
 		}
 	}
-	switch {
-	case s.HugeUsedPct >= 92:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "bad"})
-	case s.HugeUsedPct >= 80:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "warn"})
-	default:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "ok"})
+	return ""
+}
+
+// footerParts is the footer line's three parts: the project name, the
+// URL and the version plus its release date in parentheses. The date is
+// part of the last part so that dropping the URL first and then the date
+// keeps the name and version intact.
+type footerParts struct {
+	name, url, version string
+}
+
+// footer builds the line's parts from the dashboard build. The release
+// date is omitted when the build has no vcs.time.
+func footerPartsFor() footerParts {
+	f := footerParts{name: "spoond", url: projectURL(), version: versionLabel(dashVersion)}
+	if d := releaseDate(); d != "" {
+		f.version += " (" + d + ")"
 	}
-	switch {
-	case s.DiskUsedPct >= 90:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "bad"})
-	case s.DiskUsedPct >= 80:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "warn"})
-	default:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "ok"})
+	return f
+}
+
+// footerSegs renders the footer parts as one dim line, dropping the URL
+// first and the date second (by way of the version part) when the line
+// does not fit w. The name and version always stay.
+func footerSegs(f footerParts, w int) []grid.Seg {
+	sep := grid.Seg{Text: " · ", Style: "dim"}
+	name := grid.Seg{Text: f.name, Style: "dim"}
+	url := grid.Seg{Text: f.url, Style: "linkdim"}
+	ver := grid.Seg{Text: f.version, Style: "dim"}
+	full := []grid.Seg{name, sep, url, sep, ver}
+	if segWidth(full) <= w {
+		return full
 	}
-	units, down := 0, 0
-	for _, svc := range s.Services {
-		units++
-		if svc.State != "active" {
-			down++
+	withVer := []grid.Seg{name, sep, ver}
+	if segWidth(withVer) <= w {
+		return withVer
+	}
+	// The version's release date is the last thing to go.
+	if i := strings.Index(f.version, " ("); i > 0 {
+		if noDate := []grid.Seg{name, sep, {Text: f.version[:i], Style: "dim"}}; segWidth(noDate) <= w {
+			return noDate
 		}
 	}
-	if units > 0 {
-		st := "ok"
-		if down > 0 {
-			st = "bad"
-		}
-		items = append(items, statusItem{"units", fmt.Sprintf("%d/%d", units-down, units), st})
-	}
-	return items
+	return []grid.Seg{name}
 }
 
-// statusLine draws the frame's last row, outside any box: label
-// [value] entries left to right, the clock right-aligned on the same
-// row. At narrow widths entries are dropped from the right (units
-// first) until the line fits.
-func (l *layout) statusLine(g *grid.Grid, y int, at string) {
-	items := statusItems(l.s, l.now)
-	// Drop from the right until what remains fits, the clock always
-	// kept.
-	for len(items) > 0 && statusW(items)+clockW(at, l.w) > l.w {
-		items = items[:len(items)-1]
-	}
-	segs := []grid.Seg{}
-	for _, it := range items {
-		segs = append(segs,
-			grid.Seg{Text: it.label + " ", Style: "dim"},
-			grid.Seg{Text: "[", Style: "dim"},
-			grid.Seg{Text: it.value, Style: it.style},
-			grid.Seg{Text: "]  ", Style: "dim"})
-	}
-	g.Segs(0, y, segs, l.w)
-	g.Right(l.w-1, y, []grid.Seg{{Text: at, Style: "dim"}})
+// footer draws the frame's last row: one dim line about the project —
+// name, URL, version and release date. It is centred like the header's
+// title. On a narrow frame the URL drops first, then the date. The URL
+// span carries the linkdim style: dim like the rest of the line in the
+// terminal, and swapped for an anchor by the page (applyProjectLink).
+func (l *layout) footer(g *grid.Grid, y int) {
+	g.Center(l.w/2, y, footerSegs(footerPartsFor(), l.w))
 }
-
-// statusW is the width the items draw at: label, brackets and two
-// trailing spaces each (the last pair included, so the math ignores
-// where the line ends).
-func statusW(items []statusItem) int {
-	n := 0
-	for _, it := range items {
-		n += len(it.label) + len(it.value) + 5
-	}
-	return n
-}
-
-// clockW is the clock's footprint: its cells plus the gap that keeps
-// it clear of the items (at least two columns, on the narrowest frame
-// just its own width).
-func clockW(at string, w int) int {
-	gap := 2
-	if w <= minW {
-		gap = 1
-	}
-	return len(at) + gap
-}
-
 func boolInt(b bool) int {
 	if b {
 		return 1
@@ -484,24 +488,36 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// header: the title line centred — SPOOND · host · version · uptime —
-// with a blank row under it as the gutter before the panels (headerRows).
-// The holder column's header explains its two marks; every other state
-// is spelled out where it is shown. The frame time is gone: the status line's clock replaced it.
+// header: the title line centred — SPOOND · host — with a blank row
+// under it as the gutter before the panels (headerRows). The version is
+// not here: it lives on the footer with the project's name, URL and
+// release date, so it never shows twice. The holder column's header
+// explains its two marks; every other state is spelled out where it is
+// shown. Right-aligned on the same row is spoond's own uptime (the
+// backend process, not the host's, which would read as spoond's right
+// after a deploy) and the frame's clock: "up 35m, 12:41:07". On a frame
+// too narrow for both, the uptime is dropped before the time, and the
+// time is dropped rather than overlap the centred title.
 func (l *layout) header(g *grid.Grid, y int) {
-	segs := []grid.Seg{
+	title := []grid.Seg{
 		{Text: "SPOOND", Style: "head"},
 		{Text: " · ", Style: "dim"},
 		{Text: l.host, Style: "text"},
-		{Text: " · ", Style: "dim"},
-		{Text: versionLabel(dashVersion), Style: "text"},
 	}
-	// spoond's own uptime (the backend process), not the host's: the
-	// host's read as spoond's right after a deploy.
+	// The right side keeps the clock always and the uptime only when it
+	// fits clear of the centred title. titleEnd is one past the title's
+	// last cell; the right text must start a column beyond it.
+	titleEnd := l.w/2 - segWidth(title)/2 + segWidth(title)
+	right := l.s.At
 	if l.s.BackendUp > 0 {
-		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"}, grid.Seg{Text: "up " + dur(l.s.BackendUp), Style: "text"})
+		if with := "up " + dur(l.s.BackendUp) + ", " + l.s.At; l.w-segWidth([]grid.Seg{{Text: with}}) > titleEnd {
+			right = with
+		}
 	}
-	g.Center(l.w/2, y, segs)
+	if l.w-segWidth([]grid.Seg{{Text: right}}) > titleEnd {
+		g.Right(l.w-1, y, []grid.Seg{{Text: right, Style: "dim"}})
+	}
+	g.Center(l.w/2, y, title)
 }
 
 // versionLabel is a version for the header: "?" when the scrape had
@@ -627,7 +643,7 @@ func contains(list []string, s string) bool {
 // header (headerRows) + the notifications panel + the panels above
 // leases, then the panel's title row, then one row per lease.
 func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
-	l := &layout{w: clamp(w, minW, maxW), s: s, now: now,
+	l := &layout{w: clamp(w, minW, maxW), s: s,
 		notices: notices(s)}
 	base := headerRows() + l.noticesH() +
 		l.panelsH() + l.throughputH()
