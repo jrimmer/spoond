@@ -360,7 +360,17 @@ it lossless. Do not stop the backend first.
 3. The orchestrator stops; on start, `ExecStartPost=/opt/spoond/spoond
    drain --start` waits for the node (up to 120 s), calls
    `POST /api/admin/undrain`, which clears draining and resumes exactly
-   the drained leases. A lease that fails to resume becomes `lost`.
+   the drained leases. Resumes run `UNDRAIN_CONCURRENCY` (default `2`)
+   at a time, so restoring a batch of large memory snapshots does not
+   stack the node's I/O and memory. A resume that fails with a
+   retryable envd/start error ("syncing took too long", a context
+   deadline, envd init) is retried `UNDRAIN_RESUME_RETRIES` (default
+   `2`) times with a short backoff before the lease becomes `lost`; the
+   response's `failed` entry and the log line name how many attempts
+   were made. A lease that fails permanently (its build is gone, or the
+   node keeps refusing the resume) still becomes `lost`; one over its
+   owner's memory cap, without burst room, or unable to preempt stays
+   `drained` for a later undrain.
 4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.

@@ -106,6 +106,19 @@ summarised from README "Status".
 - **A create refused while the node drains says when to retry.** The
   `503 draining` answer (during a planned orchestrator restart) now
   carries `Retry-After: 30`, like the burst-reserve and preemption 503s.
+- **An undrain no longer loses leases to a transient envd start/sync
+  timeout.** After the 2026-10-07 orchestrator swap, undrain resumed
+  five of eight drained leases and marked the other three `lost` with
+  `syncing took too long`: it resumed all of them at once (an I/O and
+  memory spike restoring 8 × 4 GiB snapshots) and made a single resume
+  attempt before giving up. `POST /api/admin/undrain` now resumes at most
+  `UNDRAIN_CONCURRENCY` leases at a time (default `2`), and a resume that
+  fails with a retryable envd/start error ("syncing took too long", a
+  context deadline, envd init) is retried `UNDRAIN_RESUME_RETRIES`
+  (default `2`) times with a short backoff before the lease is marked
+  `lost`; a permanent failure (a missing image or build) is not retried.
+  The response's `failed` entries and the per-lease log lines report how
+  many attempts were made (spoond-urm).
 
 ### Changed
 
