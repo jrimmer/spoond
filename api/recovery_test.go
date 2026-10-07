@@ -106,9 +106,9 @@ func TestReconcileCrashListFailureChangesNothing(t *testing.T) {
 	}
 }
 
-// TestLostLeaseExec410: a lost lease answers exec with 409 code
+// TestLostLeaseExec409: a lost lease answers exec with 409 code
 // lease_lost and the reason, and GET names the reason.
-func TestLostLeaseExec410(t *testing.T) {
+func TestLostLeaseExec409(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
