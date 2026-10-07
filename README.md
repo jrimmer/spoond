@@ -70,6 +70,19 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     an optional per-owner byte budget), and `POST /restore` puts the lease
     back to a kept checkpoint in place. `restart?mode=cold` gives the lease a fresh
     guest from its image, keeping its id.
+  - **Named snapshots**: `POST /api/leases/{id}/snapshots` saves a live
+    lease as a named, versioned checkpoint that outlives it (`name` or
+    `name@v`); a later lease starts from it with `"snapshot":
+    "spoond/warm@3"` (the version's memory, a new lease id and generation
+    `1`). Saves are idempotent by an `idempotency_key`, the `/run/secrets`
+    files are scrubbed before the checkpoint, and a name keeps its last
+    `SNAPSHOT_KEEP_VERSIONS` versions. `GET`/`DELETE
+    /api/named-snapshots/{name}[@v]` list, show and delete them. On the
+    source, spoond writes `/run/spoond/last-save`; on a lease started
+    from a snapshot it writes `/run/spoond/lease-id`,
+    `/run/spoond/generation` and `/run/spoond/started-from`, so a
+    restored process can tell which side it is on — see
+    [api.md](docs/api.md#identity-in-a-restored-guest).
   - **Holders**: `holder` and `holder_url` say what holds a lease (a CI
     job, an orchestrator's run, someone's scratch work). A held lease
     outlives its TTL until its hold lapses, and automatic limits (idle
@@ -105,10 +118,10 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   sandbox; `ssh <lease-id>@sandbox.example` re-attaches; friendly names
   after `tag`. Sessions land in a tmux session.
 - **Control plane over SSH**: `ssh ctl@sandbox.example "ls"` (pretty
-  table by default; `--json` for raw). Verbs: `new`, `ls`, `stat`,
-  `rm`, `keepalive`, `suspend`, `resume`, `restart`, `cp` (clone),
-  `tag`, `comment`, `exec`, `share`, `ssh-key` (admin), `whoami`,
-  `shelly`, `prompt`.
+  table by default; `--json` for raw). Verbs: `new`, `create`, `ls`,
+  `stat`, `rm`, `keepalive`, `suspend`, `resume`, `restart`, `cp`
+  (clone), `snapshot save|ls|show|rm`, `tag`, `comment`, `exec`,
+  `share`, `ssh-key` (admin), `whoami`, `shelly`, `prompt`.
 - **HTTP proxy**: `<lease-id>.sandbox.example` and `<id>-<port>`
   public URLs for sandbox web servers (Caddy fronts TLS).
 - **LLM gateway**: per-lease OpenAI-compatible endpoint

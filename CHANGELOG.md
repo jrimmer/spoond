@@ -47,6 +47,16 @@ summarised from README "Status".
   a lease started from, indexed by migration 0018. See
   [docs/api.md](docs/api.md). `spoondctl` and the conformance case
   follow.
+- **Named snapshots (2.7, #83): spoondctl and conformance.** `spoondctl
+  snapshot save <lease> <name> [--key K] [--keep N]`, `snapshot ls
+  [prefix]`, `snapshot show <name[@v]>` and `snapshot rm <name[@v]>
+  [--force]` manage the catalog, and `spoondctl create [image]
+  [--snapshot <name[@v]>]` starts a lease from one; the `ctl` SSH
+  control plane carries the same verbs (`create`, `snapshot`). The
+  `S7_NamedSnapshots` conformance case exercises the save, a replay, a
+  start-from (marker, the new lease id, `/run/secrets` and the guest
+  clock within 1 s of the host), retention with `keep: 1`, the in-use
+  delete `409` and the `204` delete. See [docs/ctl.md](docs/ctl.md).
 - **Named snapshots (2.7, #83): start a lease from a snapshot.** A lease
   create accepts `"snapshot": "name"` or `"name@v"`: it starts from the
   version's build rather than the image's current build, with `image`

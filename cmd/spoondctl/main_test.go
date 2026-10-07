@@ -117,3 +117,74 @@ func TestCtlDefaults(t *testing.T) {
 		t.Fatalf("default key, got %q", got)
 	}
 }
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns
+// what fn wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var b bytes.Buffer
+		_, _ = b.ReadFrom(r)
+		done <- b.String()
+	}()
+	fn()
+	_ = w.Close()
+	os.Stderr = old
+	return <-done
+}
+
+// TestHelpListsSnapshots pins the help text: the new create and snapshot
+// verbs are documented.
+func TestHelpListsSnapshots(t *testing.T) {
+	out := captureStderr(t, func() {
+		if code := Main([]string{"help"}); code != 0 {
+			t.Fatalf("help exit = %d, want 0", code)
+		}
+	})
+	for _, want := range []string{
+		"spoondctl create [image]",
+		"--snapshot",
+		"spoondctl snapshot save <lease> <name> [--key K] [--keep N]",
+		"spoondctl snapshot ls [prefix]",
+		"spoondctl snapshot show <name[@v]>",
+		"spoondctl snapshot rm <name[@v]> [--force]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestSnapshotArgValidation pins the local usage checks: a malformed
+// snapshot invocation fails before any ssh call (no runCtl), and the
+// usage text reaches stderr.
+func TestSnapshotArgValidation(t *testing.T) {
+	cases := [][]string{
+		{"snapshot"},
+		{"snapshot", "save"},
+		{"snapshot", "save", "lease"},
+		{"snapshot", "show"},
+		{"snapshot", "show", "a", "b"},
+		{"snapshot", "rm"},
+		{"snapshot", "rm", "a", "b", "c"},
+		{"snapshot", "frobnicate"},
+		{"create"},
+	}
+	for _, args := range cases {
+		var code int
+		out := captureStderr(t, func() { code = Main(args) })
+		if code != 1 {
+			t.Fatalf("%v: exit = %d, want 1", args, code)
+		}
+		if !strings.Contains(out, "usage:") {
+			t.Fatalf("%v: stderr = %q, want usage", args, out)
+		}
+	}
+}

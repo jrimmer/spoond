@@ -36,6 +36,11 @@ only.
 | `resume` | `resume <id>` | start from snapshot |
 | `restart` | `restart <id>` | persistent: pause + resume, guest state kept (not a reboot: a hung process stays hung); plain: fresh guest from the image. `restart <id> --cold` gives any lease a fresh guest from the image's current build, keeping the lease id (memory, ephemeral disk and the resume chain lost; generation bumps; secrets re-written) |
 | `cp` | `cp <id> [tag]` (alias `clone`) | checkpoint the running lease + spawn a clone from it |
+| `create` | `create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]` | create a lease; with `--snapshot` it starts from a named snapshot version instead of the image's current build (the version's memory, a new lease id and generation `1`; see [api.md](api.md#named-snapshots-27-83)) |
+| `snapshot save` | `snapshot save <lease> <name> [--key K] [--keep N]` | save a live lease as a named snapshot: checkpoint it, insert a new version, and scrub `/run/secrets` first. `--key` makes the save idempotent; `--keep` sets the name's retention (`1`–`20`) |
+| `snapshot ls` | `snapshot ls [prefix]` | list your named snapshots with their versions, `in_use` and `stale` (pretty table; `--json` for raw). `prefix` narrows the list |
+| `snapshot show` | `snapshot show <name[@v]>` | show one version (the latest when `@v` is omitted) |
+| `snapshot rm` | `snapshot rm <name[@v]> [--force]` | delete one version, or every version when `@v` is omitted. `409` while a live lease started from it; `--force` drops the row anyway |
 | `tag` | `tag <id> <name>` | friendly name (then `ssh <name>@…`) |
 | `comment` | `comment <id> [text…]` | annotate; no text clears |
 | `share` | `share add <id> <user> [ssh\|http] [ttl]` / `share ls` / `share rm <id> <user>` | grant/list/revoke lease access (`share ls` lists every share on your leases; mode defaults to `http`) |

@@ -303,6 +303,82 @@ func (c *client) deleteSnapshot(buildID string) (int, []byte, error) {
 	return c.do("DELETE", "/api/snapshots/"+buildID, nil)
 }
 
+// saveNamedSnapshot is POST /api/leases/{id}/snapshots (2.7, #83): save a
+// live lease as a named snapshot. keep is omitted when <= 0, so the
+// server default applies; key is omitted when empty.
+func (c *client) saveNamedSnapshot(id, name, key string, keep int) (int, []byte, error) {
+	body := map[string]any{"name": name}
+	if key != "" {
+		body["idempotency_key"] = key
+	}
+	if keep > 0 {
+		body["keep"] = keep
+	}
+	return c.do("POST", "/api/leases/"+id+"/snapshots", body)
+}
+
+// listNamedSnapshots is GET /api/named-snapshots (?prefix=).
+func (c *client) listNamedSnapshots(prefix string) (int, []byte, error) {
+	path := "/api/named-snapshots"
+	if prefix != "" {
+		path += "?prefix=" + urlQueryEscape(prefix)
+	}
+	return c.do("GET", path, nil)
+}
+
+// showNamedSnapshot is GET /api/named-snapshots/{name[@v]}.
+func (c *client) showNamedSnapshot(ref string) (int, []byte, error) {
+	return c.do("GET", "/api/named-snapshots/"+ref, nil)
+}
+
+// deleteNamedSnapshot is DELETE /api/named-snapshots/{name[@v]} [?force=1].
+func (c *client) deleteNamedSnapshot(ref string, force bool) (int, []byte, error) {
+	path := "/api/named-snapshots/" + ref
+	if force {
+		path += "?force=1"
+	}
+	return c.do("DELETE", path, nil)
+}
+
+// setNamedSnapshotKeep is PUT /api/named-snapshots/{name} {"keep":N}.
+func (c *client) setNamedSnapshotKeep(name string, keep int) (int, []byte, error) {
+	return c.do("PUT", "/api/named-snapshots/"+name, map[string]any{"keep": keep})
+}
+
+// hostClock reads the API host's clock from a response Date header. It
+// issues GET /healthz (no auth required) and parses Date per RFC 7231.
+// Used by the named-snapshot case's guest-clock check.
+func (c *client) hostClock() (time.Time, error) {
+	req, err := http.NewRequest("GET", c.base+"/healthz", nil)
+	if err != nil {
+		return time.Time{}, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer resp.Body.Close()
+	date := resp.Header.Get("Date")
+	if date == "" {
+		return time.Time{}, fmt.Errorf("no Date header")
+	}
+	return http.ParseTime(date)
+}
+
+// urlQueryEscape escapes a prefix for a query string.
+func urlQueryEscape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '~' {
+			b.WriteByte(ch)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", ch)
+	}
+	return b.String()
+}
+
 // execReq is the exec body: {"cmd","cwd","env","timeout"} (A1 §5).
 // Background (2.6, #135) starts the command as a tracked job.
 type execReq struct {
@@ -365,6 +441,17 @@ type leaseInfo struct {
 	// WaitedMS is how long a queued create waited for admission
 	// (#129 part 1); absent (0) when it answered at once.
 	WaitedMS int64 `json:"waited_ms"`
+	// Snapshot is the resolved named-snapshot version a lease started
+	// from (2.7, #83 A3), or nil.
+	Snapshot *snapshotRef `json:"snapshot"`
+}
+
+// snapshotRef is the {"name","version","build_id"} object a lease
+// carries when it started from a named snapshot (A3).
+type snapshotRef struct {
+	Name    string `json:"name"`
+	Version int64  `json:"version"`
+	BuildID string `json:"build_id"`
 }
 
 // statResult is the /stat response shape (A1 §5.9).
