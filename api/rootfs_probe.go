@@ -27,27 +27,35 @@ const (
 	// rootfsProbeTimeout bounds one probe exec. A probe that does not
 	// answer within it is a failure: the guest is the only vantage point
 	// from which a dead root disk is visible.
-	rootfsProbeTimeout = 10 * time.Second
+	rootfsProbeDuration = 10 * time.Second
 	// rootfsProbeFailuresThreshold is how many consecutive failures turn
 	// a sandbox into a crashed one.
 	rootfsProbeFailuresThreshold = 3
 )
 
 // rootfsProbe is the probe script. It reads one 4096-byte block of the
-// guest's root block device at a random offset with O_DIRECT
+// guest's root block device at a pseudo-random offset with O_DIRECT
 // (iflag=direct), so the page cache cannot answer the read and the check
 // reaches the actual device. findmnt names the mounted root device in
 // the Debian-based base images; when it is missing or does not name a
 // block device the script falls back to /dev/vda, the E2B root device.
 // status=none keeps dd quiet on success; on EIO it writes the error to
 // stderr, which the probe looks for.
+//
+// The offset comes from the kernel's /dev/urandom rather than $RANDOM:
+// the base images run the script under dash, which has no RANDOM
+// variable and would silently make every probe read block 0.
 const rootfsProbe = `src=$(findmnt -no SOURCE / 2>/dev/null || true)
 case "$src" in
   /dev/*) dev=$src ;;
   *) dev=/dev/vda ;;
 esac
 [ -b "$dev" ] || dev=/dev/vda
-dd if="$dev" of=/dev/null bs=4096 count=1 skip=$((RANDOM*8)) iflag=direct status=none`
+rnd=$(od -An -N2 -tu2 </dev/urandom 2>/dev/null | tr -d ' ')
+case "$rnd" in
+  ''|*[!0-9]*) rnd=0 ;;
+esac
+dd if="$dev" of=/dev/null bs=4096 count=1 skip=$(( (rnd % 32768) * 8 )) iflag=direct status=none`
 
 // rootfsProbeOutcome classifies one probe.
 type rootfsProbeOutcome int
@@ -60,8 +68,14 @@ const (
 	// rootfsProbeEIO: the block device answered an I/O error. This is
 	// unambiguous guest-level evidence, even if every lease reports it.
 	rootfsProbeEIO
-	// rootfsProbeTransport: the exec did not answer (transport failure or
-	// timeout). On its own across every lease it points at the
+	// rootfsProbeTimeout: the probe did not finish in time. The
+	// substrate answered (envd kills the hung process and returns exit
+	// 124) or the probe's context expired, but the guest did not read
+	// its root device: a failure, though not evidence that the
+	// orchestrator is unreachable.
+	rootfsProbeTimeout
+	// rootfsProbeTransport: the exec did not answer at all (transport
+	// failure). On its own across every lease it points at the
 	// orchestrator, not the guests.
 	rootfsProbeTransport
 )
@@ -75,12 +89,13 @@ type rootfsProbeFailure struct {
 }
 
 // runRootfsProbeLoop runs the rootfs liveness probe every
-// rootfsProbeSecs. It returns immediately when the probe is disabled.
+// probe interval. It returns immediately when the probe is disabled.
 func (s *Service) runRootfsProbeLoop(ctx context.Context) {
-	if s.rootfsProbeSecs <= 0 {
+	every := s.rootfsProbeEvery()
+	if every <= 0 {
 		return
 	}
-	t := time.NewTicker(time.Duration(s.rootfsProbeSecs) * time.Second)
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
@@ -95,11 +110,12 @@ func (s *Service) runRootfsProbeLoop(ctx context.Context) {
 // probeRootfsLeases runs one probe pass over the running leases. It
 // skips the admin drain, busy leases (checkpoint, restart, suspend in
 // flight) and leases with a successful exec inside the last
-// rootfsProbeSecs. When every probe in the pass fails with a transport
+// probe interval. When every probe in the pass fails with a transport
 // error, the substrate itself is unreachable: nothing is counted or
 // recovered, and the condition is logged once per outage.
 func (s *Service) probeRootfsLeases(ctx context.Context) {
-	if s.rootfsProbeSecs <= 0 || s.draining.Load() {
+	every := s.rootfsProbeEvery()
+	if every <= 0 || s.draining.Load() {
 		return
 	}
 	now := s.now()
@@ -115,7 +131,7 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		if l.released || !l.live() || l.busy {
 			continue
 		}
-		if ok, seen := aliveAt[l.ID]; seen && now.Sub(ok) < time.Duration(s.rootfsProbeSecs)*time.Second {
+		if ok, seen := aliveAt[l.ID]; seen && now.Sub(ok) < every {
 			// A recent successful exec already proved the guest is
 			// alive; probing anyway only burns an exec.
 			continue
@@ -136,9 +152,9 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		outcomes[i] = s.probeRootfsOnce(ctx, l)
 	}
 
-	// If every target failed without a single I/O error, the
-	// orchestrator is unreachable, not the guests: log once and change
-	// nothing. A guest that answers with an I/O error has proven the
+	// If every target failed at the transport, the orchestrator is
+	// unreachable, not the guests: log once and change nothing. A guest
+	// that answers with an I/O error or a timeout has proven the
 	// orchestrator is reachable, so a mixed pass still acts on the
 	// affected leases.
 	allTransport := len(targets) > 0
@@ -161,7 +177,7 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		case rootfsProbeOK:
 			s.recordRootfsAlive(l.ID)
 			s.resetRootfsFailures(l.ID)
-		case rootfsProbeEIO, rootfsProbeTransport:
+		case rootfsProbeEIO, rootfsProbeTimeout, rootfsProbeTransport:
 			s.countRootfsFailure(ctx, l)
 		}
 	}
@@ -170,13 +186,20 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 // probeRootfsOnce runs the probe against one lease and classifies the
 // result.
 func (s *Service) probeRootfsOnce(parent context.Context, l *Lease) rootfsProbeOutcome {
-	ctx, cancel := context.WithTimeout(parent, rootfsProbeTimeout)
+	ctx, cancel := context.WithTimeout(parent, rootfsProbeDuration)
 	defer cancel()
 	res, err := s.sub.Exec(ctx, l.SandboxID, substrate.ExecRequest{
 		Args:    []string{"/bin/sh", "-c", rootfsProbe},
-		Timeout: rootfsProbeTimeout,
+		Timeout: rootfsProbeDuration,
 	})
 	if err != nil {
+		// A substrate that returns the probe's own deadline as an error
+		// is still a timeout (some backends cancel the stream when the
+		// context fires). A cancelled parent means the loop is stopping,
+		// not that the guest failed, so it stays a transport result.
+		if parent.Err() == nil && ctx.Err() == context.DeadlineExceeded {
+			return rootfsProbeTimeout
+		}
 		return rootfsProbeTransport
 	}
 	if res.ExitCode == 0 {
@@ -185,9 +208,29 @@ func (s *Service) probeRootfsOnce(parent context.Context, l *Lease) rootfsProbeO
 	if isIOError(res.Stderr) || isIOError(res.Stdout) {
 		return rootfsProbeEIO
 	}
+	if rootfsProbeTimedOut(res) {
+		// The substrate killed a probe that outlived its timer and
+		// returned exit 124 rather than an error. A dead root disk that
+		// presents as a hang lands here, so it must count.
+		return rootfsProbeTimeout
+	}
 	// A non-zero exit for any other reason (dd missing, bad argv) says
 	// nothing about the root disk: the guest answered, so it is alive.
 	return rootfsProbeOK
+}
+
+// rootfsProbeTimedOut reports whether an exec result is the substrate's
+// own timeout marker. The e2b backend kills a process that outlives its
+// timer and returns exit code 124 with a "[spoond] exec timed out" line
+// and a nil error, so a hung probe can arrive as an ordinary non-zero
+// result; the wording check also catches other substrates that report a
+// timeout the same way.
+func rootfsProbeTimedOut(res substrate.ExecResult) bool {
+	if res.ExitCode == 124 {
+		return true
+	}
+	text := strings.ToLower(res.Stderr + "\n" + res.Stdout)
+	return strings.Contains(text, "timed out") || strings.Contains(text, "timeout")
 }
 
 // isIOError reports whether s carries an "Input/output error", the
@@ -230,6 +273,10 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	s.store.mu.Lock()
 	if l.busy || l.released || !l.live() {
 		s.store.mu.Unlock()
+		// The lease was already being checkpointed, restarted or
+		// recovered: that operation's own execs are live evidence that
+		// the sandbox is reachable, so the accumulated count is dropped
+		// rather than acted on out of turn.
 		s.resetRootfsFailures(l.ID)
 		return
 	}

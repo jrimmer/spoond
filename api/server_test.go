@@ -33,9 +33,11 @@ type testSub struct {
 	// rootfsFail, keyed by sandbox id, makes the rootfs liveness probe
 	// answer the given stderr with exit code 1 ("Input/output error" for
 	// a dead disk). rootfsErr, keyed the same way, makes it a transport
-	// failure instead (spoond-5ca).
-	rootfsFail map[string]string
-	rootfsErr  map[string]bool
+	// failure instead; rootfsTimeout makes it the substrate's own timeout
+	// marker (exit 124, nil error) (spoond-5ca).
+	rootfsFail    map[string]string
+	rootfsErr     map[string]bool
+	rootfsTimeout map[string]bool
 
 	// checkpointFn/pauseFn, when set, replace the fake's Checkpoint and
 	// Pause: they mint the build id and may leave the fresh build's
@@ -86,7 +88,7 @@ func (ts *testSub) Pause(ctx context.Context, sandboxID, templateID string) (str
 }
 
 func newTestSub() *testSub {
-	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}, rootfsFail: map[string]string{}, rootfsErr: map[string]bool{}}
+	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}, rootfsFail: map[string]string{}, rootfsErr: map[string]bool{}, rootfsTimeout: map[string]bool{}}
 	ts.Fake.SetExecHandler(ts.exec)
 	return ts
 }
@@ -105,6 +107,11 @@ func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.Exe
 		ts.rootfsProbeMu.Unlock()
 		if ts.rootfsErr[sandboxID] {
 			return substrate.ExecResult{}, fmt.Errorf("exec %s: agent unreachable", sandboxID)
+		}
+		if ts.rootfsTimeout[sandboxID] {
+			// The e2b backend kills a probe that outlives its timer and
+			// returns exit 124 with a nil error rather than an error.
+			return substrate.ExecResult{Stderr: "[spoond] exec timed out after 10s", ExitCode: 124}, nil
 		}
 		if msg, bad := ts.rootfsFail[sandboxID]; bad {
 			return substrate.ExecResult{Stderr: msg, ExitCode: 1}, nil

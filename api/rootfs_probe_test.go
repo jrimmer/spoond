@@ -102,6 +102,9 @@ func TestRootfsProbeLostWithoutCheckpoint(t *testing.T) {
 	if lostDetails[0] != "root disk unreadable (I/O errors)" {
 		t.Fatalf("first lost detail = %q, want the root-disk marker", lostDetails[0])
 	}
+	if lostDetails[1] != "no checkpoint to recover from; the running state is gone" {
+		t.Fatalf("second lost detail = %q, want the recovery reason", lostDetails[1])
+	}
 }
 
 // TestRootfsProbeSuccessResetsFailures: a success between failures
@@ -217,10 +220,11 @@ func TestRootfsProbeAllTransportFailingDoesNothing(t *testing.T) {
 	}
 }
 
-// TestRootfsProbeTimeoutCountsAsFailure: a probe exec that returns a
-// transport error (a 10 s timeout) counts toward the threshold when
-// another lease in the same pass answered with an I/O error, which
-// proves the orchestrator itself is reachable.
+// TestRootfsProbeTimeoutCountsAsFailure: a probe that the substrate
+// answers with its own timeout marker (exit 124, nil error) counts
+// toward the threshold even though the exec itself did not fail, and a
+// mixed pass with an I/O-error lease proves the orchestrator is
+// reachable so the timeout is acted on.
 func TestRootfsProbeTimeoutCountsAsFailure(t *testing.T) {
 	svc, sub, l := newRootfsProbeService(t, true)
 	ctx := context.Background()
@@ -234,14 +238,35 @@ func TestRootfsProbeTimeoutCountsAsFailure(t *testing.T) {
 		t.Fatalf("grant second: %v", err)
 	}
 	sub.rootfsFail[dead.SandboxID] = "dd: error reading '/dev/vda': Input/output error"
-	sub.rootfsErr[l.SandboxID] = true
+	sub.rootfsTimeout[l.SandboxID] = true
 
 	for i := 0; i < rootfsProbeFailuresThreshold; i++ {
 		svc.probeRootfsLeases(ctx)
 	}
-	// The transitively-failing lease is recovered from its checkpoint;
-	// the EIO one has no checkpoint and goes through recovery the same
-	// way (untested here beyond not panicking).
+	// The timed-out lease is recovered from its checkpoint; the EIO one
+	// has no checkpoint and is marked lost.
+	if l.State != "recovered" || l.Generation != 2 {
+		t.Fatalf("lease = %s gen %d, want recovered gen 2", l.State, l.Generation)
+	}
+	if dead.State != "lost" || dead.live() {
+		t.Fatalf("dead lease = %s (live=%v), want lost", dead.State, dead.live())
+	}
+}
+
+// TestRootfsProbeTimeoutMarkerOnly: an exit-124 result with no other
+// lease in the pass must not be mistaken for an orchestrator-wide
+// transport outage; it is a guest-level timeout and counts.
+func TestRootfsProbeTimeoutMarkerOnly(t *testing.T) {
+	svc, sub, l := newRootfsProbeService(t, true)
+	ctx := context.Background()
+	if _, err := svc.checkpointLease(ctx, l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	sub.rootfsTimeout[l.SandboxID] = true
+
+	for i := 0; i < rootfsProbeFailuresThreshold; i++ {
+		svc.probeRootfsLeases(ctx)
+	}
 	if l.State != "recovered" || l.Generation != 2 {
 		t.Fatalf("lease = %s gen %d, want recovered gen 2", l.State, l.Generation)
 	}
@@ -276,7 +301,7 @@ func TestRootfsProbeDisabled(t *testing.T) {
 // TestRootfsProbeScriptReadsRootDevice: the probe script bypasses the
 // page cache and falls back to /dev/vda.
 func TestRootfsProbeScriptReadsRootDevice(t *testing.T) {
-	for _, want := range []string{"findmnt -no SOURCE /", "iflag=direct", "/dev/vda", "skip="} {
+	for _, want := range []string{"findmnt -no SOURCE /", "iflag=direct", "/dev/vda", "skip=", "/dev/urandom"} {
 		if !strings.Contains(rootfsProbe, want) {
 			t.Errorf("probe script does not contain %q:\n%s", want, rootfsProbe)
 		}

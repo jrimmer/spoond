@@ -483,13 +483,17 @@ guest then answers I/O errors on every uncached read, execs return HTTP
 `ROOTFS_PROBE_SECS` (default `120`, `0` disables) makes the backend
 catch that: every interval it runs one cheap exec per running lease that
 reads a single 4096-byte block of the guest's root block device at a
-random offset with `O_DIRECT` (`iflag=direct`), so the page cache cannot
-answer the read. The script takes the device from `findmnt -no SOURCE
-/`, falling back to `/dev/vda` when that is not a block device.
+pseudo-random offset with `O_DIRECT` (`iflag=direct`), so the page cache
+cannot answer the read. The offset is drawn from `/dev/urandom` rather
+than `$RANDOM`, which dash does not provide. The script takes the device
+from `findmnt -no SOURCE /`, falling back to `/dev/vda` when that is not
+a block device.
 
-A probe that does not answer within 10 s (a transport failure or
-timeout), or a non-zero exit whose stderr says `Input/output error`, is
-a failure. **Three consecutive failures** treat the sandbox as crashed:
+A probe is a failure when it answers an `Input/output error`, when it
+hits the 10 s timeout (the substrate kills the hung exec and reports it
+the way the e2b backend does: exit `124` with a `timed out` line), or
+when the exec itself fails at the transport. **Three consecutive
+failures** treat the sandbox as crashed:
 the backend logs the lease, emits a `lost` event with detail `root disk
 unreadable (I/O errors)`, deletes the dead sandbox through the substrate
 and runs the same per-lease recovery as the crash reconcile — from the
@@ -501,9 +505,9 @@ suspend in flight) and every pass during the admin drain.
 
 If **every** lease's probe fails at the transport in one pass, the
 orchestrator is unreachable, not the guests: the pass logs once and
-changes nothing. A probe that answers an I/O error proves the
-orchestrator is reachable, so a mixed pass still recovers the affected
-leases. The counters are `spoond_rootfs_probe_failures_total`
+changes nothing. A probe that answers an I/O error or a timeout proves
+the orchestrator is reachable, so a mixed pass still recovers the
+affected leases. The counters are `spoond_rootfs_probe_failures_total`
 (failures, by probe) and `spoond_rootfs_dead_total` (leases declared
 dead). `ROOTFS_PROBE_SECS=0` disables the probe entirely.
 

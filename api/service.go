@@ -362,15 +362,17 @@ type Service struct {
 	// pooled or handed to a lease. probeTimeout bounds that exec.
 	probeEnabled bool
 	probeTimeout time.Duration
-	// rootfsProbeSecs is how often the rootfs liveness probe runs against
-	// running leases (spoond-5ca). 0 disables it. rootfsProbeMu guards the
-	// last-success times and the consecutive-failure counters; both are
-	// keyed by lease id, the failures also by sandbox id so a replacement
-	// sandbox starts clean.
-	rootfsProbeSecs int
-	rootfsProbeMu   sync.Mutex
+	// rootfsProbeInterval is how often the rootfs liveness probe runs
+	// against running leases (spoond-5ca) as a duration; 0 disables it.
+	// It is atomic so the probe loop reads it without a lock even if
+	// SetRootfsProbe runs concurrently with a pass. rootfsProbeMu guards
+	// the last-success times and the consecutive-failure counters; both
+	// are keyed by lease id, the failures also by sandbox id so a
+	// replacement sandbox starts clean.
+	rootfsProbeInterval atomic.Int64
+	rootfsProbeMu       sync.Mutex
 	// rootfsProbeOK is the last successful exec time per lease: an exec
-	// that started within rootfsProbeSecs already proves the guest is
+	// that started within the probe interval already proves the guest is
 	// alive, so the probe is skipped.
 	rootfsProbeOK map[string]time.Time
 	// rootfsProbeFails is the consecutive rootfs-probe failure count per
@@ -479,7 +481,7 @@ type Service struct {
 // mutation is persisted (U05). tokens maps legacy consumer tokens to
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
-	return &Service{
+	svc := &Service{
 		sub:              sub,
 		db:               db,
 		store:            newStore(),
@@ -494,7 +496,6 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		log:              log.Default(),
 		probeEnabled:     true,
 		probeTimeout:     20 * time.Second,
-		rootfsProbeSecs:  DefaultRootfsProbeSecs,
 		rootfsProbeOK:    map[string]time.Time{},
 		rootfsProbeFails: map[string]*rootfsProbeFailure{},
 		bus:              newEventBus(),
@@ -502,6 +503,8 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		liveJobSecrets:   map[string][]string{},
 		jobStarts:        map[string]*jobStartLock{},
 	}
+	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
+	return svc
 }
 
 // SetMetrics installs the Prometheus metrics collector (issue #20).
@@ -533,8 +536,14 @@ func (s *Service) SetSandboxProbe(enabled bool, timeout time.Duration) {
 // leaves the default in place.
 func (s *Service) SetRootfsProbe(secs int) {
 	if secs >= 0 {
-		s.rootfsProbeSecs = secs
+		s.rootfsProbeInterval.Store(int64(time.Duration(secs) * time.Second))
 	}
+}
+
+// rootfsProbeEvery returns how often the rootfs liveness probe runs. It
+// is safe to call while SetRootfsProbe runs.
+func (s *Service) rootfsProbeEvery() time.Duration {
+	return time.Duration(s.rootfsProbeInterval.Load())
 }
 
 // SetIdentities installs the identity store used for token→user and
@@ -1003,7 +1012,7 @@ func (s *Service) Start(ctx context.Context) {
 	// records against the guest files (a backend restart or a broken
 	// envd stream left them unobserved).
 	go s.runJobReconcileLoop(ctx)
-	// Rootfs liveness probe (spoond-5ca): every rootfsProbeSecs check that
+	// Rootfs liveness probe (spoond-5ca): every probe interval check that
 	// each running lease's root block device still reads, and recover a
 	// guest whose disk died like a crash.
 	go s.runRootfsProbeLoop(ctx)
