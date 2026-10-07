@@ -1155,9 +1155,11 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease
 	}
 	// A lease started from a named snapshot carries what it started from
 	// (A3).
-	if view := s.svc.snapshotView(context.WithoutCancel(r.Context()), lease); view != nil {
+	vctx, vcancel := context.WithTimeout(context.WithoutCancel(r.Context()), storeWriteTimeout)
+	if view := s.svc.snapshotView(vctx, lease); view != nil {
 		body["snapshot"] = view
 	}
+	vcancel()
 	if waited > 0 {
 		body["waited_ms"] = waited.Milliseconds()
 	}
