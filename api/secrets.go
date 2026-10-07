@@ -184,24 +184,41 @@ func (s *Service) clearCreateSecrets(leaseID string) {
 
 // markExecSecretsStaged records that a synchronous exec has exec-time
 // secrets staged on the lease right now (2.7, #83). A named snapshot
-// save refuses while the count is positive. unmarkExecSecretsStaged
-// drops one such staging.
-func (s *Service) markExecSecretsStaged(leaseID string) {
+// save refuses while the count is positive, and scrubs the names even if
+// a save raced the check. unmarkExecSecretsStaged drops one such
+// staging.
+func (s *Service) markExecSecretsStaged(leaseID string, names []string) {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
 	if s.stagedExecSecrets == nil {
 		s.stagedExecSecrets = map[string]int{}
 	}
 	s.stagedExecSecrets[leaseID]++
+	if s.stagedExecSecretNames == nil {
+		s.stagedExecSecretNames = map[string][]string{}
+	}
+	s.stagedExecSecretNames[leaseID] = append(s.stagedExecSecretNames[leaseID], names...)
 }
 
-func (s *Service) unmarkExecSecretsStaged(leaseID string) {
+func (s *Service) unmarkExecSecretsStaged(leaseID string, names []string) {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
 	if s.stagedExecSecrets[leaseID] <= 1 {
 		delete(s.stagedExecSecrets, leaseID)
+		delete(s.stagedExecSecretNames, leaseID)
 	} else {
 		s.stagedExecSecrets[leaseID]--
+		// Drop one staging's names (the first occurrence of each).
+		left := s.stagedExecSecretNames[leaseID]
+		for _, n := range names {
+			for i, got := range left {
+				if got == n {
+					left = append(left[:i], left[i+1:]...)
+					break
+				}
+			}
+		}
+		s.stagedExecSecretNames[leaseID] = left
 	}
 }
 
@@ -211,6 +228,16 @@ func (s *Service) hasStagedExecSecrets(leaseID string) bool {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
 	return s.stagedExecSecrets[leaseID] > 0
+}
+
+// stagedExecSecretNamesFor returns the names of synchronous exec-time
+// secrets staged on the lease right now. A save that raced the refuse
+// check scrubs them before its checkpoint.
+func (s *Service) stagedExecSecretNamesFor(leaseID string) []string {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	out := append([]string(nil), s.stagedExecSecretNames[leaseID]...)
+	return out
 }
 
 // hasRunningJobWithSecrets reports whether a lease has a live background
@@ -244,6 +271,39 @@ func (s *Service) hasRunningJobWithSecrets(leaseID string) bool {
 		}
 	}
 	return false
+}
+
+// jobSecretNamesFor returns the secret file names every job of a lease
+// was given, running or not. A save scrubs them too: a job whose wrapper
+// never cleaned up would otherwise leave its files to be captured.
+func (s *Service) jobSecretNamesFor(leaseID string) []string {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	var out []string
+	seen := map[string]bool{}
+	for jobID, jobLease := range s.jobSecretLeases {
+		if jobLease != leaseID {
+			continue
+		}
+		for _, n := range s.stagedJobSecrets[jobID] {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// sortedSecretNamesFromSet returns a set's members in sorted order, so
+// staging and cleanup are deterministic.
+func sortedSecretNamesFromSet(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // removeAllSecrets removes every file spoond staged under /run/secrets

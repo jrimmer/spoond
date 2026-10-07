@@ -89,12 +89,6 @@ func errSnapshotInUse(msg string) *namedSnapshotError {
 func errNamedNotFound() *namedSnapshotError {
 	return &namedSnapshotError{status: http.StatusNotFound, code: "not_found", msg: "snapshot not found"}
 }
-func errImageMismatch(msg string) *namedSnapshotError {
-	return &namedSnapshotError{status: http.StatusBadRequest, code: "image_mismatch", msg: msg}
-}
-func errCannotStart(msg string) *namedSnapshotError {
-	return &namedSnapshotError{status: http.StatusConflict, code: "cannot_start", msg: msg}
-}
 
 // namedSaveState is the in-memory state of one (owner, name,
 // idempotency_key) save: in flight, or failed for 24 h with its error.
@@ -243,13 +237,32 @@ func (s *Service) orchestratorVersion(ctx context.Context) string {
 	return info.Version
 }
 
-// scrubSecretsForSnapshot removes every file spoond staged under
-// /run/secrets on the lease's sandbox: the create-time secret names and
-// any exec-time ones still present. Called right before the checkpoint so
-// none are captured.
+// scrubSecretsForSnapshot removes the secret files spoond staged under
+// /run/secrets on the lease's sandbox. It removes the create-time secret
+// names plus the exec-time names of any job whose files are still
+// present (its wrapper normally cleaned them; a save must not capture a
+// lingering one). Called right before the checkpoint so none are
+// captured. Callers have already refused the save when a synchronous or
+// background job with secrets is still running, so those names are
+// mostly defensive.
 func (s *Service) scrubSecretsForSnapshot(ctx context.Context, l *Lease) {
-	names := sortedSecretNames(s.createSecretsFor(l.ID))
-	s.removeAllSecrets(l.SandboxID, names)
+	names := map[string]bool{}
+	for _, n := range sortedSecretNames(s.createSecretsFor(l.ID)) {
+		names[n] = true
+	}
+	// The secret names of every job tracked on this lease, running or
+	// not: a stale file left by a wrapper that never cleaned up would
+	// otherwise be captured by the checkpoint.
+	for _, n := range s.jobSecretNamesFor(l.ID) {
+		names[n] = true
+	}
+	// A synchronous exec that staged secrets after the refuse check but
+	// before this scrub (the check does not take the lease's busy flag)
+	// would otherwise be captured.
+	for _, n := range s.stagedExecSecretNamesFor(l.ID) {
+		names[n] = true
+	}
+	s.removeAllSecrets(l.SandboxID, sortedSecretNamesFromSet(names))
 }
 
 // saveNamedSnapshot performs one save of a lease into a named snapshot:
@@ -289,7 +302,7 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	// The per-owner kept-bytes budget counts named snapshot bytes
 	// alongside kept checkpoints. The size is only known after the
 	// checkpoint, so the budget is enforced below.
-	b, err := s.checkpointLeaseBusyNoKeep(ctx, l)
+	b, err := s.checkpointLease(ctx, l)
 	if err != nil {
 		return store.NamedSnapshotRow{}, s.mapSnapshotCheckpointError(err)
 	}
@@ -305,6 +318,15 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	// alongside kept checkpoints.
 	if berr := s.enforceNamedSnapshotBudget(ctx, l.Owner, b.SizeBytes); berr != nil {
 		return store.NamedSnapshotRow{}, berr
+	}
+	// The save point that simulates a backend stopping between the
+	// checkpoint and the row insert (A7): the build is written but never
+	// named, so a replay with the same key starts from scratch.
+	if s.saveInterrupt != nil {
+		if err := s.saveInterrupt(ctx, l, b.BuildID); err != nil {
+			s.log.Printf("snapshot: save of %s/%s interrupted: %v", l.Owner, name, err)
+			return store.NamedSnapshotRow{}, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "save interrupted"}
+		}
 	}
 	row := store.NamedSnapshotRow{
 		Owner:               l.Owner,
@@ -406,21 +428,12 @@ func (s *Service) enforceNamedSnapshotBudget(ctx context.Context, owner string, 
 	return nil
 }
 
-// checkpointLeaseBusyNoKeep runs the checkpoint for a lease whose busy
-// flag the caller already holds (the save path). It runs checkpointLease
-// directly: checkpointLeaseBusy would take the flag itself and refuse.
-func (s *Service) checkpointLeaseBusyNoKeep(ctx context.Context, l *Lease) (store.BuildRow, error) {
-	return s.checkpointLease(ctx, l)
-}
-
 // mapSnapshotCheckpointError maps a checkpoint failure onto a named
 // snapshot error.
 func (s *Service) mapSnapshotCheckpointError(err error) *namedSnapshotError {
 	var capErr *keptCapError
 	var budgetErr *keptBudgetError
 	switch {
-	case errors.Is(err, errLeaseBusy):
-		return errLeaseBusyNamed()
 	case errors.As(err, &capErr), errors.As(err, &budgetErr):
 		return errKeptBudget(err.Error())
 	default:
@@ -716,6 +729,12 @@ func (s *Server) handleNamedSnapshotKeyLookup(w http.ResponseWriter, r *http.Req
 			"build_id": row.BuildID,
 		})
 		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		// A catalog failure is not "absent": a key whose row may exist
+		// must not read as unsaved.
+		s.svc.log.Printf("snapshot: lookup key %s/%s: %v", owner, name, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read snapshot", "code": "internal"})
+		return
 	}
 	switch st := s.svc.saves.lookup(owner, name, key); st.state {
 	case "in_progress":
@@ -788,8 +807,9 @@ func (s *Server) handleNamedSnapshotDelete(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	// No version: delete every version of the name.
-	rows, err := s.svc.db.ListNamedSnapshots(r.Context(), owner, name)
+	// No version: delete every version of the name. List the exact name
+	// (not the prefix form): deleting "warm" must not see "warmup".
+	rows, err := s.svc.db.ListNamedSnapshotsExact(r.Context(), owner, name)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to delete snapshot", "code": "internal"})
 		return
@@ -854,10 +874,4 @@ func (s *Server) handleNamedSnapshotKeep(w http.ResponseWriter, r *http.Request)
 	}
 	s.svc.UpdateNamedSnapshotMetrics(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "keep": *req.Keep, "ok": true})
-}
-
-// snapshotStartError formats the cannot-start 409 for task 2 (kept here
-// so the string is defined once).
-func snapshotStartError(ref string, reason string) *namedSnapshotError {
-	return errCannotStart(fmt.Sprintf("snapshot %s cannot start on this host (%s); save it again", ref, reason))
 }

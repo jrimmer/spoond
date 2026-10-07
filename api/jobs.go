@@ -321,7 +321,7 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 		return "", time.Time{}, nil, err
 	}
 	if len(secretNames) > 0 {
-		s.recordJobSecrets(jobID, secretNames)
+		s.recordJobSecrets(lease.ID, jobID, secretNames)
 	}
 	s.touch(lease.ID)
 	if s.metrics != nil {
@@ -393,14 +393,32 @@ func (s *Service) cleanupJobFiles(ctx context.Context, sandboxID, jobID string) 
 	}
 }
 
-// recordJobSecrets remembers the secret names staged for a running job.
-func (s *Service) recordJobSecrets(jobID string, names []string) {
+// recordJobSecrets remembers the secret names staged for a running job,
+// keyed by job id and by lease so a save can scrub a lingering file.
+func (s *Service) recordJobSecrets(leaseID, jobID string, names []string) {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
 	if s.liveJobSecrets == nil {
 		s.liveJobSecrets = map[string][]string{}
 	}
 	s.liveJobSecrets[jobID] = append([]string(nil), names...)
+	if s.stagedJobSecrets == nil {
+		s.stagedJobSecrets = map[string][]string{}
+	}
+	s.stagedJobSecrets[jobID] = append([]string(nil), names...)
+	if s.jobSecretLeases == nil {
+		s.jobSecretLeases = map[string]string{}
+	}
+	s.jobSecretLeases[jobID] = leaseID
+}
+
+// takeJobSecretNames drops a pruned job's remembered names (the row and
+// the files they guarded are gone).
+func (s *Service) takeJobSecretNames(jobID string) {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	delete(s.stagedJobSecrets, jobID)
+	delete(s.jobSecretLeases, jobID)
 }
 
 // takeJobSecrets removes and returns the secret names remembered for a
@@ -722,6 +740,7 @@ func (s *Service) pruneJobs(ctx context.Context) {
 		return
 	}
 	for _, job := range expired {
+		s.takeJobSecretNames(job.JobID)
 		if sandboxID, _, ok := s.leaseContinuity(job.LeaseID); ok {
 			s.cleanupJobFiles(ctx, sandboxID, job.JobID)
 		}

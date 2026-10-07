@@ -1908,8 +1908,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		}
 		// A named snapshot save refuses while these are staged (2.7,
 		// #83): the checkpoint would capture them.
-		s.svc.markExecSecretsStaged(lease.ID)
-		defer s.svc.unmarkExecSecretsStaged(lease.ID)
+		s.svc.markExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
+		defer s.svc.unmarkExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
 	}
 	start := time.Now()
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
 	"github.com/jrimmer/spoond/v2/substrate/e2b"
@@ -183,16 +185,32 @@ func TestNamedSnapshotInterruptedSave(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	id := createLiveLease(t, ts.URL, "token-a", nil)
 
-	// A save that completes, then the version row is lost as if the
-	// backend stopped before inserting it: the key must read absent and
-	// a replay must create version 1.
-	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm", "idempotency_key": "k1"})
-	if err := db.DeleteNamedSnapshot(context.Background(), "consumer-a", "warm", 1); err != nil {
-		t.Fatalf("delete row: %v", err)
+	// The fake hook fires once, after the checkpoint and before the row
+	// insert: the build is written but never named, exactly as when the
+	// backend stops mid-save. The save answers 500 and stores nothing.
+	var interruptedBuild string
+	svc.saveInterrupt = func(ctx context.Context, l *Lease, buildID string) error {
+		interruptedBuild = buildID
+		svc.saveInterrupt = nil
+		return errors.New("backend stopped")
 	}
+	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm", "idempotency_key": "k1"})
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("interrupted save: status %d: %v", resp.StatusCode, body)
+	}
+	if _, err := db.GetNamedSnapshotLatest(context.Background(), "consumer-a", "warm"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("interrupted save left a version row: %v", err)
+	}
+	if interruptedBuild == "" {
+		t.Fatal("saveInterrupt did not run; the save never reached the row insert")
+	}
+	// A backend restart loses the in-memory failure: the key reads
+	// absent, and a replay with the same key runs a fresh save and
+	// creates version 1 (A7).
+	svc.saves = namedSaveInFlight{saves: map[string]*namedSaveState{}}
 	resp, lookup := doReq(t, "GET", ts.URL+"/api/named-snapshots/warm?idempotency_key=k1", "token-a", nil)
 	if resp.StatusCode != http.StatusOK || lookup["state"] != "absent" {
-		t.Fatalf("lookup = %d %v, want absent after the row was dropped", resp.StatusCode, lookup)
+		t.Fatalf("lookup = %d %v, want absent after a restart", resp.StatusCode, lookup)
 	}
 	resp, replay := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm", "idempotency_key": "k1"})
 	if resp.StatusCode != http.StatusCreated {
@@ -426,8 +444,8 @@ func TestNamedSnapshotExecSecretsConflict(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	id := createLiveLease(t, ts.URL, "token-a", nil)
 
-	svc.markExecSecretsStaged(id)
-	defer svc.unmarkExecSecretsStaged(id)
+	svc.markExecSecretsStaged(id, []string{"EXECTOK"})
+	defer svc.unmarkExecSecretsStaged(id, []string{"EXECTOK"})
 	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
 	if resp.StatusCode != http.StatusConflict || body["code"] != "secrets_in_use" {
 		t.Fatalf("save with staged exec secrets: status %d (%v), want 409 secrets_in_use", resp.StatusCode, body)
@@ -649,5 +667,248 @@ func TestNamedSnapshotStale(t *testing.T) {
 	}
 	if !detail["stale"].(bool) {
 		t.Fatalf("stale = %v, want true after the image was rebuilt", detail)
+	}
+}
+
+// TestNamedSnapshotDeleteCollidingPrefix: deleting a name that only
+// shares a prefix with an existing one is 404, not 204-and-noop, and an
+// in-use colliding name is not consulted (BLOCKER fix).
+func TestNamedSnapshotDeleteCollidingPrefix(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warmup"})
+
+	// Only "warmup" exists. Deleting "warm" must not see it.
+	resp, body := doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warm", "token-a", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete warm with only warmup present: status %d (%v), want 404", resp.StatusCode, body)
+	}
+	if rows, _ := db.ListNamedSnapshotsExact(context.Background(), "consumer-a", "warmup"); len(rows) != 1 {
+		t.Fatalf("warmup rows = %d, want 1 (untouched)", len(rows))
+	}
+
+	// Mark warmup in use, then delete "warm": 404, never 409 from warmup's
+	// versions.
+	row, _ := db.GetNamedSnapshotLatest(context.Background(), "consumer-a", "warmup")
+	leaseRow, _ := db.GetLease(context.Background(), id)
+	leaseRow.SnapshotBuildID = row.BuildID
+	_ = db.UpsertLease(context.Background(), leaseRow)
+	resp, body = doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warm", "token-a", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete warm with warmup in use: status %d (%v), want 404", resp.StatusCode, body)
+	}
+	// The real name still deletes (it is in use, so 409, then forced 204).
+	resp, body = doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warmup", "token-a", nil)
+	if resp.StatusCode != http.StatusConflict || body["code"] != "snapshot_in_use" {
+		t.Fatalf("delete warmup in use: status %d (%v), want 409 snapshot_in_use", resp.StatusCode, body)
+	}
+}
+
+// TestNamedSnapshotKeptBudget: named snapshot bytes count toward the
+// owner's max_kept_bytes; a save past it is 409 kept_budget and stores
+// nothing (the untested limit from the task's test list).
+func TestNamedSnapshotKeptBudget(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	root := t.TempDir()
+	svc.cfg.TemplateStoragePath = root
+	seedImage(t, db, "py-base", 2048)
+
+	// Each checkpoint writes a real build directory so size_bytes is
+	// nonzero and measurable.
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		id := e2b.NewUUID()
+		if _, err := writeBuildDir(filepath.Join(root, id), 4096, 8192); err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		return id, substrate.BuildRefs{}, nil
+	}
+
+	// Measure one build's allocated size on this filesystem, then allow
+	// only one build's worth: the first save fits, the second does not.
+	probe := filepath.Join(t.TempDir(), "probe")
+	one, err := writeBuildDir(probe, 4096, 8192)
+	if err != nil || one <= 0 {
+		t.Fatalf("probe build size %d: %v", one, err)
+	}
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetIdentities(ids)
+	u, err := ids.AddUser("keeper", identity.KindPerson, []string{"SHA256:fp-k"}, "keeper-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, one+one/2); err != nil {
+		t.Fatal(err)
+	}
+
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
+		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	id := create["id"].(string)
+
+	// First save lands under the budget.
+	if v := saveSnapshotOK(t, ts.URL, "keeper-tok", id, map[string]any{"name": "warm"}); v != 1 {
+		t.Fatalf("first save version = %d, want 1", v)
+	}
+	// The next save would pass it: 409 kept_budget, no new version.
+	resp, body := saveSnapshot(t, ts.URL, "keeper-tok", id, map[string]any{"name": "warm"})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "kept_budget" {
+		t.Fatalf("over-budget save: status %d (%v), want 409 kept_budget", resp.StatusCode, body)
+	}
+	rows, err := db.ListNamedSnapshotsExact(context.Background(), u.ID, "warm")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows after over-budget save = %+v (%v), want just v1", rows, err)
+	}
+}
+
+// TestNamedSnapshotKeysErrorsHaveCodes: every named-snapshot route's
+// error body carries a machine-readable code beside error (A2).
+func TestNamedSnapshotKeysErrorsHaveCodes(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	_ = id
+
+	cases := []struct {
+		method, path string
+		body         any
+		wantStatus   int
+		wantCode     string
+	}{
+		{"GET", "/api/named-snapshots/nope", nil, http.StatusNotFound, "not_found"},
+		{"DELETE", "/api/named-snapshots/nope", nil, http.StatusNotFound, "not_found"},
+		{"GET", "/api/named-snapshots/warm@99", nil, http.StatusNotFound, "not_found"},
+		{"DELETE", "/api/named-snapshots/warm@99", nil, http.StatusNotFound, "not_found"},
+		{"PUT", "/api/named-snapshots/nope", map[string]any{"keep": 2}, http.StatusNotFound, "not_found"},
+		{"GET", "/api/named-snapshots/warm@0", nil, http.StatusBadRequest, "bad_request"},
+	}
+	for _, c := range cases {
+		resp, body := doReq(t, c.method, ts.URL+c.path, "token-a", c.body)
+		if resp.StatusCode != c.wantStatus {
+			t.Fatalf("%s %s: status %d (%v), want %d", c.method, c.path, resp.StatusCode, body, c.wantStatus)
+		}
+		if body["code"] != c.wantCode {
+			t.Fatalf("%s %s: code = %v (%v), want %q", c.method, c.path, body["code"], body, c.wantCode)
+		}
+	}
+}
+
+// TestNamedSnapshotEventDetail: a save emits a snapshot_saved event with
+// the documented detail.
+func TestNamedSnapshotEventDetail(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+
+	bus := svc.bus
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	found := false
+	for _, ev := range bus.ring {
+		if ev.Type == LeaseSnapshotSaved && ev.LeaseID == id {
+			found = true
+			if !strings.HasPrefix(ev.Detail, "saved as warm@1 · ") {
+				t.Fatalf("snapshot_saved detail = %q, want \"saved as warm@1 · ...\"", ev.Detail)
+			}
+			if !strings.Contains(ev.Detail, " · ") {
+				t.Fatalf("snapshot_saved detail = %q, want a size and duration", ev.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no snapshot_saved event on the bus")
+	}
+}
+
+// TestNamedSnapshotLeaseIDFileAfterFork: a fork writes
+// /run/spoond/lease-id for the child too.
+func TestNamedSnapshotLeaseIDFileAfterFork(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+
+	resp, out := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/fork", "token-a", map[string]any{"count": 1})
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		t.Fatalf("fork: status %d: %v", resp.StatusCode, out)
+	}
+	// Find the child lease and read its lease-id file.
+	list, err := db.ListLeases(context.Background())
+	if err != nil {
+		t.Fatalf("list leases: %v", err)
+	}
+	var child *store.LeaseRow
+	for i := range list {
+		if list[i].ID != id && list[i].Owner == "consumer-a" {
+			child = &list[i]
+		}
+	}
+	if child == nil {
+		t.Fatalf("fork produced no child lease: %v", list)
+	}
+	sb, err := db.GetSandboxByLease(context.Background(), child.ID)
+	if err != nil {
+		t.Fatalf("child sandbox: %v", err)
+	}
+	data, err := sub.Fake.ReadFile(t.Context(), sb.SandboxID, leaseIDPath, 1024)
+	if err != nil {
+		t.Fatalf("read child lease-id: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != child.ID {
+		t.Fatalf("child lease-id = %q, want %q", data, child.ID)
+	}
+
+	// A resume rewrites it too.
+	if resp, out := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/suspend", "token-a", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("suspend: %d %v", resp.StatusCode, out)
+	}
+	if resp, out := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/resume", "token-a", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("resume: %d %v", resp.StatusCode, out)
+	}
+	sb, _ = db.GetSandboxByLease(context.Background(), id)
+	data, err = sub.Fake.ReadFile(t.Context(), sb.SandboxID, leaseIDPath, 1024)
+	if err != nil {
+		t.Fatalf("read resumed lease-id: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != id {
+		t.Fatalf("resumed lease-id = %q, want %q", data, id)
+	}
+}
+
+// TestNamedSnapshotLingeringExecSecretScrubbed: an exec-time secret file
+// a failed cleanup left behind is scrubbed before the checkpoint, so it
+// is never captured (NOTE fix).
+func TestNamedSnapshotLingeringExecSecretScrubbed(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	sandbox := svc.store.leases[id].SandboxID
+
+	// A job staged an exec-time secret and never cleaned it up.
+	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/EXECTOK", []byte("v"), 0o600); err != nil {
+		t.Fatalf("write lingering secret: %v", err)
+	}
+	svc.secretsMu.Lock()
+	svc.stagedJobSecrets["job-1"] = []string{"EXECTOK"}
+	svc.jobSecretLeases["job-1"] = id
+	svc.secretsMu.Unlock()
+	defer svc.takeJobSecretNames("job-1")
+
+	var atCheckpoint error
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		_, atCheckpoint = sub.Fake.ReadFile(ctx, sandboxID, "/run/secrets/EXECTOK", 1024)
+		return e2b.NewUUID(), substrate.BuildRefs{}, nil
+	}
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if atCheckpoint == nil {
+		t.Fatal("lingering exec-time secret was still present at checkpoint time; want it scrubbed")
 	}
 }

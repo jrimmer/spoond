@@ -24,8 +24,7 @@ summarised from README "Status".
   key, with an in-memory in-flight/failed state and a
   `?idempotency_key=` lookup; errors carry machine-readable codes
   (`save_in_progress`, `secrets_in_use`, `lease_busy`, `kept_budget`,
-  `snapshot_limit`, `snapshot_in_use`, `not_found`, `image_mismatch`,
-  `cannot_start`). Limits: `MAX_NAMED_SNAPSHOTS` names per owner and the
+  `snapshot_limit`, `snapshot_in_use`, `not_found`). Limits: `MAX_NAMED_SNAPSHOTS` names per owner and the
   owner's `max_kept_bytes`; `SNAPSHOT_KEEP_VERSIONS` versions per name
   (never dropping one a live lease started from). Named builds are GC
   roots, and two gauges (`spoond_named_snapshots`,

@@ -1348,7 +1348,7 @@ removed ahead of the lease's own release (the delete still answers `409`
 first while the lease itself runs from the build; the pin is gone after
 that call, and the next one deletes).
 
-### Named snapshots (2.7, #83)
+## Named snapshots (2.7, #83)
 
 A **named snapshot** is a checkpoint build that has a name and a
 version. It is owned by an identity and outlives the lease it was saved
@@ -1368,7 +1368,7 @@ Every route is owner-scoped (a consumer token, or an admin): another
 owner's name is invisible and answers `404 not_found`. Error bodies
 carry a machine-readable `code` beside `error`.
 
-#### `POST /api/leases/{id}/snapshots` — save a lease
+### `POST /api/leases/{id}/snapshots` — save a lease as a named snapshot
 
 Owner only; live leases only (`409 lease_busy` when the lease is
 suspended, lost, or busy with another operation).
@@ -1426,7 +1426,7 @@ stops mid-save writes no version: at startup a `checkpoint` build still
 `building` with no named row is marked `failed`, so nothing is stranded
 (A7).
 
-#### `GET /api/named-snapshots` — list your snapshots
+### `GET /api/named-snapshots` — list your snapshots
 
 `?prefix=spoond/` narrows the list. `200`:
 
@@ -1441,14 +1441,14 @@ nothing uses it). `stale` is `true` when the image's current build is no
 longer the version's `image_build_id` — the image was rebuilt since the
 save — and is informational only.
 
-#### `GET /api/named-snapshots/{name}[@v]` — show one
+### `GET /api/named-snapshots/{name}[@v]` — show one
 
 `{name}` selects the latest version, `{name}@{v}` one version. A slash
 in the name is allowed in the path. Response `200` is one version object
 as in the list, with `in_use` and `stale`. `404 not_found` for an
 unknown name or version.
 
-#### `DELETE /api/named-snapshots/{name}[@v]` — delete
+### `DELETE /api/named-snapshots/{name}[@v]` — delete
 
 `{name}` deletes every version, `{name}@{v}` one version. `409
 snapshot_in_use` when a live lease started from it; `?force=1` drops the
@@ -1456,7 +1456,7 @@ row anyway (the build stays until the lease no longer needs it).
 Responds `204`; a second delete answers `404 not_found`. Deleting a
 name's last version deletes its retention setting too.
 
-#### `PUT /api/named-snapshots/{name}` — set retention
+### `PUT /api/named-snapshots/{name}` — set retention
 
 ```json
 {"keep": 3}

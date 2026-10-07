@@ -471,6 +471,24 @@ type Service struct {
 	// named snapshot save refuses while any is staged (2.7, #83): the
 	// checkpoint would capture them. Guarded by secretsMu.
 	stagedExecSecrets map[string]int
+	// stagedExecSecretNames holds the names of those synchronous
+	// exec-time secrets, so a save that raced the refuse check scrubs
+	// them before its checkpoint. Guarded by secretsMu.
+	stagedExecSecretNames map[string][]string
+	// stagedJobSecrets maps a job id to the secret names its wrapper was
+	// given (a superset of liveJobSecrets: it survives the job's exit for
+	// as long as the record does). A snapshot save reads it to scrub a
+	// file an exited job's wrapper failed to clean up. Guarded by
+	// secretsMu.
+	stagedJobSecrets map[string][]string
+	// jobSecretLeases maps a job id to the lease it ran on, so a save can
+	// find the lease's jobs without reading the catalog for every one.
+	// Guarded by secretsMu.
+	jobSecretLeases map[string]string
+	// saveInterrupt, when set by a test, runs between a save's checkpoint
+	// and its version-row insert to simulate a backend that stops
+	// mid-save (A7). Nil in production.
+	saveInterrupt func(ctx context.Context, l *Lease, buildID string) error
 	// saves tracks in-flight and recently failed named-snapshot saves in
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
@@ -488,26 +506,29 @@ type Service struct {
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
 	return &Service{
-		sub:               sub,
-		db:                db,
-		store:             newStore(),
-		tokens:            tokens,
-		cfg:               cfg,
-		sweepInterval:     5 * time.Second,
-		now:               time.Now,
-		diskCapacity:      statfsCapacity,
-		diskUsage:         store.BuildDiskUsage,
-		appliedEgress:     map[string]string{},
-		createSecrets:     map[string]map[string]string{},
-		log:               log.Default(),
-		probeEnabled:      true,
-		probeTimeout:      20 * time.Second,
-		bus:               newEventBus(),
-		gcErr:             newGCTracker(),
-		liveJobSecrets:    map[string][]string{},
-		stagedExecSecrets: map[string]int{},
-		saves:             namedSaveInFlight{saves: map[string]*namedSaveState{}},
-		jobStarts:         map[string]*jobStartLock{},
+		sub:                   sub,
+		db:                    db,
+		store:                 newStore(),
+		tokens:                tokens,
+		cfg:                   cfg,
+		sweepInterval:         5 * time.Second,
+		now:                   time.Now,
+		diskCapacity:          statfsCapacity,
+		diskUsage:             store.BuildDiskUsage,
+		appliedEgress:         map[string]string{},
+		createSecrets:         map[string]map[string]string{},
+		log:                   log.Default(),
+		probeEnabled:          true,
+		probeTimeout:          20 * time.Second,
+		bus:                   newEventBus(),
+		gcErr:                 newGCTracker(),
+		liveJobSecrets:        map[string][]string{},
+		stagedExecSecrets:     map[string]int{},
+		stagedExecSecretNames: map[string][]string{},
+		stagedJobSecrets:      map[string][]string{},
+		jobSecretLeases:       map[string]string{},
+		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
+		jobStarts:             map[string]*jobStartLock{},
 	}
 }
 

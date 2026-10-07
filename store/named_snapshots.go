@@ -129,21 +129,36 @@ func (db *DB) ListNamedSnapshots(ctx context.Context, owner, prefix string) ([]N
 		args = append(args, likePrefix(prefix))
 	}
 	q += ` ORDER BY name, version DESC`
+	return db.queryNamedSnapshots(ctx, q, args...)
+}
+
+// ListNamedSnapshotsExact returns every version of one exact name
+// (owner-scoped), newest first. It is the exact-name counterpart of
+// ListNamedSnapshots' prefix match: the whole-name delete must not be
+// tricked by a longer name sharing a prefix.
+func (db *DB) ListNamedSnapshotsExact(ctx context.Context, owner, name string) ([]NamedSnapshotRow, error) {
+	q := `SELECT ` + namedSnapshotColumns + ` FROM named_snapshots
+		WHERE owner = ? AND name = ? ORDER BY version DESC`
+	return db.queryNamedSnapshots(ctx, q, owner, name)
+}
+
+// queryNamedSnapshots runs a named_snapshots query and scans the rows.
+func (db *DB) queryNamedSnapshots(ctx context.Context, q string, args ...any) ([]NamedSnapshotRow, error) {
 	rows, err := db.r.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: list named snapshots of %s: %w", owner, err)
+		return nil, fmt.Errorf("store: list named snapshots: %w", err)
 	}
 	defer rows.Close()
 	var out []NamedSnapshotRow
 	for rows.Next() {
 		r, err := scanNamedSnapshot(rows.Scan)
 		if err != nil {
-			return nil, fmt.Errorf("store: list named snapshots of %s: %w", owner, err)
+			return nil, fmt.Errorf("store: list named snapshots: %w", err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list named snapshots of %s: %w", owner, err)
+		return nil, fmt.Errorf("store: list named snapshots: %w", err)
 	}
 	return out, nil
 }
