@@ -293,6 +293,7 @@ func (c *Client) NodeInfo(ctx context.Context) (substrate.NodeInfo, error) {
 	}
 	return substrate.NodeInfo{
 		Status:            statusString(resp.GetServiceStatus()),
+		Version:           resp.GetServiceVersion(),
 		RunningSandboxes:  int(resp.GetMetricSandboxesRunning()),
 		OutstandingWork:   int(resp.GetOutstandingWork()),
 		HugepagesTotal:    resp.GetMetricHugepagesTotal(),

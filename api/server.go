@@ -215,6 +215,14 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Snapshot catalog (U11): list and delete the caller's builds.
 	s.mux.HandleFunc("GET /api/snapshots", s.handleSnapshots)
 	s.mux.HandleFunc("DELETE /api/snapshots/{build_id}", s.handleSnapshotDelete)
+	// Named snapshots (2.7, #83): save a lease as a named snapshot, and
+	// list/show/delete/retune the owner's named snapshots. The {name...}
+	// wildcard accepts a slash in the name and an @version suffix.
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/snapshots", s.handleLeaseSnapshotSave)
+	s.mux.HandleFunc("GET /api/named-snapshots", s.handleNamedSnapshotsList)
+	s.mux.HandleFunc("GET /api/named-snapshots/{name...}", s.handleNamedSnapshotShow)
+	s.mux.HandleFunc("PUT /api/named-snapshots/{name...}", s.handleNamedSnapshotKeep)
+	s.mux.HandleFunc("DELETE /api/named-snapshots/{name...}", s.handleNamedSnapshotDelete)
 	// Admin endpoints (U10): drain, undrain and crash reconcile. Auth is
 	// done in api/admin.go (ADMIN_TOKEN is not a consumer token, so
 	// authMiddleware lets /api/admin/ through).
@@ -587,6 +595,11 @@ func normalizePath(p string) string {
 			}
 			return "/api/users/:id"
 		}
+	}
+	// Named-snapshot names are high-cardinality and caller-chosen: the
+	// request counters keep the route, not one series per name.
+	if strings.HasPrefix(p, "/api/named-snapshots/") {
+		return "/api/named-snapshots/:name"
 	}
 	return p
 }
@@ -1893,6 +1906,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to stage secrets")
 			return
 		}
+		// A named snapshot save refuses while these are staged (2.7,
+		// #83): the checkpoint would capture them.
+		s.svc.markExecSecretsStaged(lease.ID)
+		defer s.svc.unmarkExecSecretsStaged(lease.ID)
 	}
 	start := time.Now()
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{

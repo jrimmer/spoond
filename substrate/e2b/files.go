@@ -161,6 +161,18 @@ func (c *Client) MakeDir(ctx context.Context, sandboxID, path string, mode os.Fi
 	return c.chmod(ctx, sandboxID, path, mode)
 }
 
+// Rename moves oldPath to newPath, replacing newPath, through envd's
+// filesystem.Move. It backs the atomic guest-file writes (2.7, #83).
+func (c *Client) Rename(ctx context.Context, sandboxID, oldPath, newPath string) error {
+	if _, err := c.envdFilesystem(sandboxID, "").Move(ctx, connect.NewRequest(&filesystem.MoveRequest{
+		Source:      oldPath,
+		Destination: newPath,
+	})); err != nil {
+		return fmt.Errorf("e2b: rename %s %s -> %s: %w", sandboxID, oldPath, newPath, mapConnectError(err))
+	}
+	return nil
+}
+
 // Remove deletes path. Recursive removes go through envd's filesystem.Remove,
 // which deletes directories with all their contents. A non-recursive remove
 // keeps POSIX semantics without recursion: files go through filesystem.Remove

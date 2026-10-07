@@ -373,6 +373,16 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 			keep(b)
 		}
 	}
+	// Named snapshots (2.7, #83): every version's build is a GC root,
+	// with its parent chain and refs like a kept build. Deleting the row
+	// makes the build an ordinary candidate after gcAge.
+	named, err := s.db.NamedSnapshotBuilds(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gc: list named snapshot builds: %w", err)
+	}
+	for id := range named {
+		keep(id)
+	}
 	sbs, err := s.db.ListSandboxes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list sandboxes: %w", err)

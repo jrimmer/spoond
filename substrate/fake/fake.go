@@ -840,6 +840,22 @@ func (f *Fake) Remove(ctx context.Context, sandboxID, name string, recursive boo
 	return fs.remove(name, recursive)
 }
 
+// Rename moves oldPath to newPath, replacing newPath, through the
+// in-memory filesystem. It backs the atomic guest-file writes (2.7,
+// #83). A missing source wraps substrate.ErrNotFound.
+func (f *Fake) Rename(ctx context.Context, sandboxID, oldPath, newPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("Rename", sandboxID); err != nil {
+		return err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return fmt.Errorf("fake: Rename %s %s: %w", sandboxID, oldPath, substrate.ErrNotFound)
+	}
+	return fs.rename(oldPath, newPath)
+}
+
 // memFS is an in-memory filesystem with real path semantics: absolute,
 // cleaned paths only, directories are explicit nodes, parents are created as
 // needed, and modes are kept exactly as given. The root is "" (meaning "/")
@@ -964,6 +980,25 @@ func (m *memFS) mkdir(name string, mode os.FileMode) error {
 		return fmt.Errorf("%w: %s", substrate.ErrExist, name)
 	}
 	return m.mkdirAll(name, mode)
+}
+
+// rename moves oldName to newName, replacing newName. Only files are
+// moved (the guest builders write files); directories are an error.
+func (m *memFS) rename(oldName, newName string) error {
+	oldName, newName = cleanPath(oldName), cleanPath(newName)
+	f, ok := m.files[oldName]
+	if !ok {
+		return fmt.Errorf("%w: %s", substrate.ErrNotFound, oldName)
+	}
+	if _, ok := m.dirs[newName]; ok {
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, newName)
+	}
+	if err := m.mkdirAll(path.Dir(newName), 0o755); err != nil {
+		return err
+	}
+	delete(m.files, oldName)
+	m.files[newName] = f
+	return nil
 }
 
 func (m *memFS) remove(name string, recursive bool) error {

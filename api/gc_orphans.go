@@ -198,6 +198,14 @@ func (s *Service) orphanRoots(ctx context.Context) (map[string]bool, error) {
 			needed[id] = true
 		}
 	}
+	// Named snapshots (2.7, #83): every version's build is an orphan root.
+	named, err := s.db.NamedSnapshotBuilds(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list named snapshot builds: %w", err)
+	}
+	for id := range named {
+		needed[id] = true
+	}
 	sbs, err := s.db.ListSandboxes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes: %w", err)

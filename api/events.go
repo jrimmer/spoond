@@ -89,6 +89,10 @@ const (
 	// (and the events-only token) carries it, never a per-lease one.
 	// The detail names the count and the freed bytes.
 	LeaseGC LeaseEventType = "gc"
+	// LeaseSnapshotSaved marks a lease saved as a named snapshot (2.7,
+	// #83): the detail names the name@version, the size and how long the
+	// checkpoint took.
+	LeaseSnapshotSaved LeaseEventType = "snapshot_saved"
 )
 
 // LeaseEvent is one lease lifecycle change.

@@ -33,6 +33,11 @@
 //	MAX_KEPT_PER_LEASE  kept-checkpoint cap per lease (#126; default 4;
 //	                  0 = no cap). A keep on a lease already at the cap
 //	                  answers 409; nothing is evicted.
+//	MAX_NAMED_SNAPSHOTS  per-owner cap on distinct named-snapshot names
+//	                  (2.7, #83; default 64; 0 = no cap).
+//	SNAPSHOT_KEEP_VERSIONS  default named-snapshot retention: the last N
+//	                  versions of a name survive a save (2.7, #83;
+//	                  default 3).
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
 //	                  (default /forkdcache/e2b/storage/templates)
@@ -395,6 +400,8 @@ func Main(args []string) int {
 		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
+		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),
+		SnapshotKeepVersions:      envIntOr("SNAPSHOT_KEEP_VERSIONS", api.DefaultSnapshotKeepVersions),
 		BurstReserveMiB:           burstReserveMiB,
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
 		// Background exec jobs (2.6, #135): per-lease running cap and

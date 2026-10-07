@@ -182,6 +182,85 @@ func (s *Service) clearCreateSecrets(leaseID string) {
 	delete(s.createSecrets, leaseID)
 }
 
+// markExecSecretsStaged records that a synchronous exec has exec-time
+// secrets staged on the lease right now (2.7, #83). A named snapshot
+// save refuses while the count is positive. unmarkExecSecretsStaged
+// drops one such staging.
+func (s *Service) markExecSecretsStaged(leaseID string) {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	if s.stagedExecSecrets == nil {
+		s.stagedExecSecrets = map[string]int{}
+	}
+	s.stagedExecSecrets[leaseID]++
+}
+
+func (s *Service) unmarkExecSecretsStaged(leaseID string) {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	if s.stagedExecSecrets[leaseID] <= 1 {
+		delete(s.stagedExecSecrets, leaseID)
+	} else {
+		s.stagedExecSecrets[leaseID]--
+	}
+}
+
+// hasStagedExecSecrets reports whether a synchronous exec holds
+// exec-time secrets on the lease right now.
+func (s *Service) hasStagedExecSecrets(leaseID string) bool {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	return s.stagedExecSecrets[leaseID] > 0
+}
+
+// hasRunningJobWithSecrets reports whether a lease has a live background
+// job that staged exec-time secrets (2.7, #83): such a job's files are
+// under /run/secrets while it runs, so a save would capture them.
+func (s *Service) hasRunningJobWithSecrets(leaseID string) bool {
+	s.secretsMu.Lock()
+	live := map[string]bool{}
+	for jobID := range s.liveJobSecrets {
+		live[jobID] = true
+	}
+	s.secretsMu.Unlock()
+	if len(live) == 0 {
+		return false
+	}
+	// The in-memory running count is the fast path; the rows decide
+	// which of those jobs belong to this lease and still run.
+	if !s.hasRunningJob(leaseID) {
+		return false
+	}
+	rows, err := s.db.ListJobs(context.Background(), leaseID)
+	if err != nil {
+		// Unknowable is not "safe to capture": a live job with secrets
+		// would be captured. Refuse.
+		s.log.Printf("snapshot: list jobs of %s: %v", leaseID, err)
+		return true
+	}
+	for _, r := range rows {
+		if r.State == "running" && live[r.JobID] {
+			return true
+		}
+	}
+	return false
+}
+
+// removeAllSecrets removes every file spoond staged under /run/secrets
+// for a lease: the create-time files and any exec-time files still
+// present. Best effort per file: a missing file is not an error. Used by
+// the named-snapshot save to scrub secrets before the checkpoint (2.7,
+// #83). The secrets tmpfs itself stays mounted.
+func (s *Service) removeAllSecrets(sandboxID string, names []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), secretsStageTimeout)
+	defer cancel()
+	for _, name := range names {
+		if err := s.sub.Remove(ctx, sandboxID, secretPath(name), false); err != nil {
+			s.log.Printf("snapshot: remove secret %s: %v", name, err)
+		}
+	}
+}
+
 // restageCreateSecrets re-writes a lease's create-time secrets after
 // the sandbox came back (resume, restart, crash recovery): a fresh
 // sandbox never had the tmpfs, and a rewrite after a snapshot resume is

@@ -10,6 +10,33 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Named snapshots (2.7, #83): save, list, show, delete.** A lease can
+  be saved as a checkpoint build with a name and a version that outlives
+  it: `POST /api/leases/{id}/snapshots` checkpoints the lease, scrubs the
+  `/run/secrets` files it staged, inserts the version, applies retention
+  and emits a `snapshot_saved` event. `GET /api/named-snapshots`
+  (`?prefix=`) lists the caller's names with `in_use` and `stale`;
+  `GET`/`DELETE /api/named-snapshots/{name}[@v]` show and delete one
+  (`?force=1` overrides the live-lease `409`); `PUT` sets a name's
+  retention. Saves are idempotent by an `(owner, name, idempotency_key)`
+  key, with an in-memory in-flight/failed state and a
+  `?idempotency_key=` lookup; errors carry machine-readable codes
+  (`save_in_progress`, `secrets_in_use`, `lease_busy`, `kept_budget`,
+  `snapshot_limit`, `snapshot_in_use`, `not_found`, `image_mismatch`,
+  `cannot_start`). Limits: `MAX_NAMED_SNAPSHOTS` names per owner and the
+  owner's `max_kept_bytes`; `SNAPSHOT_KEEP_VERSIONS` versions per name
+  (never dropping one a live lease started from). Named builds are GC
+  roots, and two gauges (`spoond_named_snapshots`,
+  `spoond_named_snapshot_bytes`) report the catalog. Every path that
+  (re)creates a guest now writes `/run/spoond/lease-id` (`0644`) beside
+  `/run/spoond/generation`, and a save writes a `/run/spoond/last-save`
+  marker on the source; all are written atomically. The
+  `leases.snapshot_build_id` column (migration 0017) is in place for
+  start-from-snapshot in the next task. See [docs/api.md](docs/api.md).
+  Start-from-snapshot, `spoondctl` and the conformance case follow.
+
 ### Security
 
 - **Exec env no longer appears in the guest command line.** Per-request
