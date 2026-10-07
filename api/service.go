@@ -138,6 +138,12 @@ type Lease struct {
 	// version whose build a live lease runs from is never dropped by
 	// retention. Start-from-snapshot (and its API field) is task 2.
 	SnapshotBuildID string `json:"-"`
+	// SnapshotName and SnapshotVersion name the named-snapshot version
+	// the lease started from, for the "snapshot" object in the API
+	// (A3). They are not persisted; a lease loaded from the store looks
+	// its version up by SnapshotBuildID when the API needs it.
+	SnapshotName    string `json:"-"`
+	SnapshotVersion int64  `json:"-"`
 	// Priority orders preemption within a class (#128 part 2): a lower
 	// number is preempted first. 0 = the default. Reported as
 	// "priority".
@@ -1408,6 +1414,10 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	delete(s.store.runningJobs, l.ID)
 	s.deleteLeaseLocked(l.ID)
 	s.store.mu.Unlock()
+	// A version that retention spared only because this lease ran from it
+	// is dropped once no live lease uses it (S5): re-run the name's
+	// retention now that the lease row is gone.
+	s.rerunSnapshotRetention(context.WithoutCancel(ctx), l)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -1636,11 +1646,39 @@ type leaseRequest struct {
 	exposePorts       []int
 	burst             bool
 	priority          int
+	// snapshot, when set, starts the lease from a named snapshot version
+	// (2.7, #83 task 2) instead of the image's current build. The image
+	// is the version's image and the memory charge is the version's
+	// memory_mb. The pool is bypassed and lease.snapshot_build_id is
+	// stamped, so retention never drops a version a live lease runs
+	// from.
+	snapshot *snapshotStart
 	// leaseID is the id the caller already allocated and announced —
 	// the queued-admission path (#129) reserves it when the create is
 	// queued so the `queued` and `created` events name the same lease.
 	// Empty allocates a fresh id at grant.
 	leaseID string
+}
+
+// snapshotStart is one resolved named-snapshot version a lease create
+// starts from. The row carries the name, version, build and memory_mb
+// the grant needs.
+type snapshotStart struct {
+	row store.NamedSnapshotRow
+}
+
+// snapshotStartError is returned when a lease cannot start from a named
+// snapshot version on this host (2.7, #83): the build row or its files
+// are gone, or the substrate refuses the build. The API maps it to 409
+// cannot_start; there is no retry loop.
+type snapshotStartError struct {
+	name    string
+	version int64
+	cause   string
+}
+
+func (e *snapshotStartError) Error() string {
+	return fmt.Sprintf("snapshot %s@%d cannot start on this host (%s); save it again", e.name, e.version, e.cause)
 }
 
 // grantLease is grant with the class admission (#128 part 2): the
@@ -1651,14 +1689,43 @@ type leaseRequest struct {
 func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, error) {
 	owner, image, ttl, persistent := req.owner, req.image, req.ttl, req.persistent
 	start := time.Now()
-	img, b, err := s.imageBuild(ctx, image)
-	if err != nil {
-		return nil, err
+	// A create from a named snapshot starts from the version's build, not
+	// the image's current build (2.7, #83): the image is the version's
+	// image and the memory charge is the version's memory_mb. The lease
+	// is never served from the warm pool. A version whose build row is
+	// gone answers cannot_start before admission.
+	snap := req.snapshot
+	var img store.ImageRow
+	var b store.BuildRow
+	memoryMB := 0
+	if snap != nil {
+		image = snap.row.Image
+		var err error
+		img, err = s.db.GetImage(ctx, image)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("load image %s: %w", image, err)
+		}
+		b, err = s.db.GetBuild(ctx, snap.row.BuildID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: "build files missing"}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load snapshot build %s: %w", snap.row.BuildID, err)
+		}
+		memoryMB = snap.row.MemoryMB
+	} else {
+		var err error
+		img, b, err = s.imageBuild(ctx, image)
+		if err != nil {
+			return nil, err
+		}
+		memoryMB = img.MemoryMB
 	}
 	// The lease costs its image's memory_mb (#128): admission checks the
 	// user's running-lease memory before the sandbox is created, and the
-	// deferred release below drops the same number it reserved.
-	if err := s.reserveQuota(owner, 1, img.MemoryMB, true); err != nil {
+	// deferred release below drops the same number it reserved. A
+	// snapshot start charges the version's memory_mb.
+	if err := s.reserveQuota(owner, 1, memoryMB, true); err != nil {
 		return nil, err
 	}
 	// The reservation becomes the real lease when it's stored below;
@@ -1667,7 +1734,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// active so the pending reservation must be dropped (security
 	// review #37 H2). Both mutations take the same store lock, so a
 	// concurrent reserveQuota sees a consistent active+pending count.
-	defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
+	defer func() { s.releaseQuotaReservation(owner, 1, memoryMB) }()
 	if s.metrics != nil {
 		s.metrics.LeasesTotal.Inc()
 	}
@@ -1693,7 +1760,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// The lease's MiB charge (#128): the image's memory_mb, the very
 		// number reserveQuota admitted with, so accounting and release
 		// always agree and quota sums never re-read the catalog.
-		MemoryMB: img.MemoryMB,
+		MemoryMB: memoryMB,
 		// Every lease starts on generation 1 (2.2) and on the host's
 		// checkpoint and idle-suspend defaults (-1), unless the create
 		// request carries its own (the API stamps it after grant).
@@ -1706,11 +1773,26 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		Priority: req.priority,
 		Burst:    req.burst,
 	}
+	if lease.TemplateID == "" {
+		// A snapshot start does not need the image's current build, so a
+		// vanished image row is not fatal: the build row carries the
+		// template.
+		lease.TemplateID = b.TemplateID
+	}
+	if snap != nil {
+		// The named-snapshot version this lease starts from (2.7, #83):
+		// the build is persisted so retention never drops a version a
+		// live lease runs from, and the name/version ride the response
+		// and the lease detail (A3).
+		lease.SnapshotBuildID = snap.row.BuildID
+		lease.SnapshotName = snap.row.Name
+		lease.SnapshotVersion = snap.row.Version
+	}
 	// Class admission (#128 part 2): decides guaranteed vs burst (the
 	// charge above is the sum the guarantee is measured against) and
 	// holds a burst lease to the node's reserve. A refusal answers
 	// before any sandbox exists.
-	class, err := s.admitClass(ctx, owner, img.MemoryMB, req.burst, "")
+	class, err := s.admitClass(ctx, owner, memoryMB, req.burst, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1721,8 +1803,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// created for the "pool" placeholder lease, so its egress policy and
 	// EndAt are updated for the new lease, and its sandboxes row moves to
 	// it. Entries from another build, with no row, or unhealthy are
-	// discarded and the next one is tried.
-	if s.cfg.PoolSize > 0 {
+	// discarded and the next one is tried. A create from a named
+	// snapshot never uses the pool (the pooled sandbox is the image's
+	// current build, not the version's).
+	if s.cfg.PoolSize > 0 && snap == nil {
 		for {
 			s.store.mu.Lock()
 			pool := s.store.pool[image]
@@ -1780,12 +1864,27 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if lease.SandboxID == "" {
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
+			if snap != nil {
+				if cause, ok := snapshotCreateCannotStart(err); ok {
+					return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: cause}
+				}
+			}
 			return nil, err
 		}
 		lease.SandboxID = sb.ID
 		lease.HostIP = sb.HostIP
 		lease.ExposedIP = sb.HostIP
 		lease.BuildID = b.BuildID
+	}
+
+	// A lease started from a snapshot gets its copy-side markers before
+	// any exec the API runs in it (A4/A7): /run/spoond/lease-id,
+	// /run/spoond/generation and /run/spoond/started-from exist before
+	// the integrity probe below. The snapshot's sandbox is fresh and
+	// never reused, so writing before the probe is safe.
+	if snap != nil {
+		s.writeGeneration(lease)
+		s.writeStartedFromMarker(lease)
 	}
 
 	// The integrity probe runs through exec before the sandbox is handed
@@ -1811,8 +1910,11 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 
 	// The guest's generation file always exists (2.2): generation 1 on a
 	// fresh lease. Best effort, after the probe so a recycled sandbox
-	// never sees it.
-	s.writeGeneration(lease)
+	// never sees it. A snapshot start already wrote it (and its
+	// started-from marker) before the probe.
+	if snap == nil {
+		s.writeGeneration(lease)
+	}
 
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
@@ -1828,8 +1930,11 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if s.metrics != nil {
 		s.metrics.LeaseGrantDur.Observe(time.Since(start).Seconds())
 	}
-	s.emitLeaseEvent(lease.ID, owner, LeaseCreated,
-		fmt.Sprintf("granted from image %s in %s", image, eventDuration(time.Since(start))))
+	detail := fmt.Sprintf("granted from image %s in %s", image, eventDuration(time.Since(start)))
+	if snap != nil {
+		detail = fmt.Sprintf("started from snapshot %s@%d in %s", snap.row.Name, snap.row.Version, eventDuration(time.Since(start)))
+	}
+	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, detail)
 	return lease, nil
 }
 
@@ -3125,6 +3230,11 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		}
 	}
 	m["kept_builds"] = kept
+	// The named-snapshot version this lease started from (A3): the same
+	// object the create response carries.
+	if view := s.snapshotView(ctx, l); view != nil {
+		m["snapshot"] = view
+	}
 	// Background jobs (2.6, #135): how many of the lease's jobs run and
 	// its most recent exit, for the lease view.
 	m["jobs"] = s.leaseJobsView(ctx, l.ID)

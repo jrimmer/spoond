@@ -67,6 +67,11 @@ type testSub struct {
 	// file behind and report it: it exercises the save's scrub_failed
 	// abort (2.7, #83 B1/S2).
 	scrubLeftover string
+
+	// execBefore, when set, runs at the start of every Exec the fake
+	// serves. A test uses it to observe the guest's state at the first
+	// exec (the integrity probe) of a create (2.7, #83 A4/A7).
+	execBefore func(sandboxID string, req substrate.ExecRequest)
 }
 
 // LastStart returns the most recent Start request.
@@ -122,6 +127,9 @@ func isRootfsProbeReq(req substrate.ExecRequest) bool {
 // Exec services the rootfs liveness probe's injectable outcomes and
 // delegates everything else to the fake.
 func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.ExecRequest) (substrate.ExecResult, error) {
+	if ts.execBefore != nil {
+		ts.execBefore(sandboxID, req)
+	}
 	if isRootfsProbeReq(req) {
 		ts.rootfsProbeMu.Lock()
 		ts.rootfsProbes++

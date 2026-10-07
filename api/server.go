@@ -837,6 +837,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Persistent bool     `json:"persistent"`
 		NetPolicy  string   `json:"network_policy"`
 		NetAllow   []string `json:"egress_allowlist"`
+		// Snapshot starts the lease from a named snapshot version instead
+		// of the image's current build (2.7, #83): "name" or "name@v".
+		// image then may be omitted; when given it must equal the
+		// snapshot's image (400).
+		Snapshot string `json:"snapshot"`
 		// ExposePorts publishes guest TCP ports for other sandboxes to
 		// reach (each peer's egress policy decides reachability).
 		ExposePorts []int `json:"expose_ports"`
@@ -878,9 +883,24 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Image == "" {
+	if req.Image == "" && req.Snapshot == "" {
 		writeError(w, http.StatusBadRequest, "image is required")
 		return
+	}
+	// A create from a named snapshot (2.7, #83): resolve the version
+	// owner-scoped before anything else. The image is the snapshot's
+	// image; an explicit image must match it.
+	var start *snapshotStart
+	if req.Snapshot != "" {
+		owner := ownerFrom(r.Context())
+		var serr *namedSnapshotError
+		start, serr = s.svc.snapshotStartFromRequest(r.Context(), owner, req.Snapshot, req.Image)
+		if serr != nil {
+			serr.write(w)
+			return
+		}
+		// Snapshot starts never use the warm pool: the pool holds the
+		// image's current build, not the version's.
 	}
 	// Egress policy (security review #37 rescan F3): default restricted —
 	// NOT lan. The default must not let a guest reach other tenants'
@@ -954,28 +974,34 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "wait must be >= 0")
 		return
 	}
-	ok, err := s.reg.Has(r.Context(), req.Image)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "image catalog unavailable")
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
-		return
-	}
-	// Memory is fixed per image (D16): a snapshot restores with its
-	// build's RAM, so a per-lease memory override is impossible.
-	if req.MemoryMiB != 0 {
-		img, err := s.svc.db.GetImage(r.Context(), req.Image)
+	if start == nil {
+		ok, err := s.reg.Has(r.Context(), req.Image)
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, "image catalog unavailable")
+			return
+		}
+		if !ok {
 			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
 			return
 		}
-		if req.MemoryMiB != img.MemoryMB {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf(
-				"memory is fixed per image on this backend: %s has %d MiB", req.Image, img.MemoryMB))
-			return
+		// Memory is fixed per image (D16): a snapshot restores with its
+		// build's RAM, so a per-lease memory override is impossible.
+		if req.MemoryMiB != 0 {
+			img, err := s.svc.db.GetImage(r.Context(), req.Image)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
+				return
+			}
+			if req.MemoryMiB != img.MemoryMB {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf(
+					"memory is fixed per image on this backend: %s has %d MiB", req.Image, img.MemoryMB))
+				return
+			}
 		}
+	} else if req.MemoryMiB != 0 && req.MemoryMiB != start.row.MemoryMB {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"memory is fixed by the snapshot: %s@%d has %d MiB", start.row.Name, start.row.Version, start.row.MemoryMB))
+		return
 	}
 	// Cap the requested TTL in seconds BEFORE converting to a duration,
 	// so a huge ttl value cannot overflow time.Duration and bypass the
@@ -1001,6 +1027,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
 		createSecrets: secrets, exposePorts: expose, burst: req.Burst, priority: priority,
+		snapshot: start,
 	}
 	grantStart := time.Now()
 	lease, err := s.svc.grantLease(r.Context(), leaseReq)
@@ -1021,7 +1048,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				s.writeCreateRefusal(w, req.Image, err, waited)
 				return
 			}
-			s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+			s.writeCreatedLease(w, r, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 			return
 		}
 	}
@@ -1036,7 +1063,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Wait > 0 {
 		waited = time.Since(grantStart)
 	}
-	s.writeCreatedLease(w, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+	s.writeCreatedLease(w, r, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 }
 
 // writeCreateRefusal writes the failure response for a refused create,
@@ -1046,7 +1073,14 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err err
 	status := http.StatusInternalServerError
 	msg := "failed to grant lease"
 	retryAfter := 0
+	code := ""
+	var snapErr *snapshotStartError
 	switch {
+	case errors.As(err, &snapErr):
+		// A lease that cannot start from a named snapshot on this host
+		// (2.7, #83): 409 with a machine-readable code and no retry
+		// loop.
+		status, msg, code = http.StatusConflict, err.Error(), "cannot_start"
 	case errors.Is(err, errQuotaExceeded):
 		status, msg = http.StatusTooManyRequests, err.Error()
 	case errors.Is(err, errUnknownImage):
@@ -1074,6 +1108,9 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err err
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	}
 	body := map[string]any{"error": msg}
+	if code != "" {
+		body["code"] = code
+	}
 	if waited > 0 {
 		body["waited_ms"] = waited.Milliseconds()
 	}
@@ -1084,7 +1121,7 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err err
 // immediate and the queued path): it stamps the hold and the request's
 // checkpoint interval and idle_suspend, then the usual body plus waited_ms when the
 // create waited for admission.
-func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, holderURL string, holdTTL int, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration) {
+func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease *Lease, holder, holderURL string, holdTTL int, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration) {
 	s.svc.store.mu.Lock()
 	if holder != "" {
 		s.svc.setHoldLocked(lease, holder, holderURL, time.Duration(holdTTL)*time.Second, s.svc.now())
@@ -1115,6 +1152,11 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, lease *Lease, holder, 
 		"idle_suspend":        s.svc.effectiveIdleSuspend(lease),
 		"class":               leaseClassRow(lease),
 		"priority":            lease.Priority,
+	}
+	// A lease started from a named snapshot carries what it started from
+	// (A3).
+	if view := s.svc.snapshotView(context.WithoutCancel(r.Context()), lease); view != nil {
+		body["snapshot"] = view
 	}
 	if waited > 0 {
 		body["waited_ms"] = waited.Milliseconds()
