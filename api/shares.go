@@ -53,6 +53,9 @@ func (s *Server) handleShareGrant(w http.ResponseWriter, r *http.Request) {
 		mode = ShareHTTP
 	}
 	if err := s.svc.GrantShare(owner, id, req.Grantee, mode, time.Duration(req.TTL)*time.Second); err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		if strings.Contains(err.Error(), "lease not found") {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
@@ -73,6 +76,9 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.RevokeShare(owner, id, grantee); err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}

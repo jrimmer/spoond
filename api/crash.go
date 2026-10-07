@@ -82,7 +82,7 @@ func (s *Server) handleCrashTest(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errSuspended):
 		writeError(w, http.StatusConflict, "lease is suspended; nothing is running to crash")
 	case errors.Is(err, errLost):
-		writeError(w, http.StatusGone, lostLeaseMessage)
+		writeLeaseLost(w, lease)
 	default:
 		s.svc.log.Printf("crash-test: lease %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "crash test failed")

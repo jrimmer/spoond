@@ -22,8 +22,11 @@ type LeaseRow struct {
 	LastCheckpointAt, RecoveredFrom      time.Time // zero = unset ('')
 	// LostAt is when the lease became lost (zero = unset). The GC keeps
 	// a lost lease's snapshot builds for a grace period counted from it.
-	LostAt  time.Time
-	Drained bool // paused by the admin drain, resumed by undrain (U10)
+	LostAt time.Time
+	// LostReason is why the lease was lost (the lost event's detail);
+	// "" for a lease lost before the column existed.
+	LostReason string
+	Drained    bool // paused by the admin drain, resumed by undrain (U10)
 	// Holder names what holds the lease (a CI job, a person) and
 	// HolderUrl links to it. A non-empty holder keeps the lease out of
 	// every sweeper (TTL, idle); checkpoints follow checkpoint_interval.
@@ -81,6 +84,7 @@ const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires
 	persistent, last_active, workspace, suspended, name, net_policy, net_allow,
 	expose_ports, exposed_ip, comment, state, resume_build_id,
 	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained, lost_at,
+	lost_reason,
 	holder, holder_url, hold_set_at, hold_expires_at, hold_ttl,
 	last_action, last_action_at, generation, checkpoint_interval, idle_suspend,
 	memory_mb, class, priority, preempted_at, snapshot_build_id`
@@ -99,7 +103,7 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?
 )
 ON CONFLICT(id) DO UPDATE SET
@@ -126,6 +130,7 @@ ON CONFLICT(id) DO UPDATE SET
   recovered_from=excluded.recovered_from,
   drained=excluded.drained,
   lost_at=excluded.lost_at,
+  lost_reason=excluded.lost_reason,
   holder=excluded.holder,
   holder_url=excluded.holder_url,
   hold_set_at=excluded.hold_set_at,
@@ -147,7 +152,7 @@ ON CONFLICT(id) DO UPDATE SET
 		l.NetPolicy, string(netAllow), string(exposePorts), l.ExposedIP,
 		l.Comment, l.State, l.ResumeBuildID, l.LastCheckpointBuildID,
 		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom), l.Drained,
-		formatTime(l.LostAt), l.Holder, l.HolderUrl,
+		formatTime(l.LostAt), l.LostReason, l.Holder, l.HolderUrl,
 		formatTime(l.HoldSetAt), formatTime(l.HoldExpiresAt), l.HoldTTL,
 		l.LastAction, formatTime(l.LastActionAt), l.Generation,
 		l.CheckpointInterval, l.IdleSuspend, l.MemoryMB, l.Class, l.Priority,
@@ -234,7 +239,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&r.Suspended, &r.Name, &r.NetPolicy, &netAllow, &exposePorts,
 		&r.ExposedIP, &r.Comment, &r.State, &r.ResumeBuildID,
 		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained,
-		&lostAt, &r.Holder, &r.HolderUrl,
+		&lostAt, &r.LostReason, &r.Holder, &r.HolderUrl,
 		&holdSetAt, &holdExpiresAt, &r.HoldTTL,
 		&r.LastAction, &lastActionAt, &r.Generation, &r.CheckpointInterval,
 		&r.IdleSuspend, &r.MemoryMB, &r.Class, &r.Priority, &preemptedAt,

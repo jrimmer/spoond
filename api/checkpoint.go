@@ -283,6 +283,9 @@ func (s *Server) handleCheckpointPolicy(w http.ResponseWriter, r *http.Request) 
 	}
 	updated, err := s.svc.setCheckpointPolicy(lease, *req.CheckpointInterval)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to set checkpoint policy")
 		return
 	}
@@ -332,6 +335,9 @@ func (s *Server) handleIdlePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := s.svc.setIdlePolicy(lease, *req.IdleSuspend)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to set idle policy")
 		return
 	}
@@ -376,6 +382,10 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !lease.live() {
+		if lease.State == "lost" {
+			writeLeaseLost(w, lease)
+			return
+		}
 		writeError(w, http.StatusConflict, "lease is not running")
 		return
 	}

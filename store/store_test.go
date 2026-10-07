@@ -305,7 +305,8 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshots`,
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -372,7 +373,8 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshots`,
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -447,7 +449,8 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
@@ -507,7 +510,8 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -559,7 +563,8 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshots`,
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version = 17`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)

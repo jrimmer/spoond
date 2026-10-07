@@ -135,8 +135,7 @@ func (s *Server) filesGate(w http.ResponseWriter, r *http.Request) *Lease {
 	if !s.ensureRunning(w, r, lease) {
 		return nil
 	}
-	if lease.State == "lost" {
-		writeError(w, http.StatusGone, lostLeaseMessage)
+	if !s.ensureLive(w, lease) {
 		return nil
 	}
 	return lease

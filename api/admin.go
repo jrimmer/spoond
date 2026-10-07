@@ -273,11 +273,13 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 					return
 				}
 				s.store.mu.Lock()
+				reason := "undrain resume failed: " + err.Error()
+				setLostReason(l, reason)
 				l.setState("lost")
 				l.Drained = false
 				s.saveLeaseLocked(l)
 				s.store.mu.Unlock()
-				s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "undrain resume failed: "+err.Error())
+				s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 				mu.Lock()
 				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error()})
 				mu.Unlock()

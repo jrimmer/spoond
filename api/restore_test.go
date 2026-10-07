@@ -362,10 +362,11 @@ func TestRestoreRouteAdminAndBody(t *testing.T) {
 	}
 }
 
-// TestRestoreLostLease410: a lost lease answers 410 like every other
-// route — restore must not resurrect a lease the whole API reports dead
-// (exec, stream, proxy, dial) with nothing but a "restored" event.
-func TestRestoreLostLease410(t *testing.T) {
+// TestRestoreLostLease409: a lost lease answers 409 lease_lost like
+// every other route — restore must not resurrect a lease the whole API
+// reports dead (exec, stream, proxy, dial) with nothing but a
+// "restored" event.
+func TestRestoreLostLease409(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
@@ -401,8 +402,14 @@ func TestRestoreLostLease410(t *testing.T) {
 	t.Cleanup(ts.Close)
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/restore", "token-a",
 		map[string]any{"build_id": b.BuildID})
-	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("restore a lost lease = %d (%v), want 410", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("restore a lost lease = %d (%v), want 409", resp.StatusCode, body)
+	}
+	if body["code"] != "lease_lost" {
+		t.Fatalf("code = %v, want lease_lost", body["code"])
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "no checkpoint to recover from") {
+		t.Fatalf("error = %q, want the lost reason", msg)
 	}
 	if l.State != "lost" {
 		t.Fatalf("restore changed a lost lease's state to %q", l.State)

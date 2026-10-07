@@ -163,8 +163,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	if lease.State == "lost" {
-		writeError(w, http.StatusGone, lostLeaseMessage)
+	if !s.ensureLive(w, lease) {
 		return
 	}
 	var req struct {

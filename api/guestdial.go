@@ -91,8 +91,7 @@ func (s *Server) handleGuestDial(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureRunning(w, r, lease) {
 		return
 	}
-	if lease.State == "lost" {
-		writeError(w, http.StatusGone, lostLeaseMessage)
+	if !s.ensureLive(w, lease) {
 		return
 	}
 	// envd is the guest's management surface; the proxy and

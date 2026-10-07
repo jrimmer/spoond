@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,8 +106,8 @@ func TestReconcileCrashListFailureChangesNothing(t *testing.T) {
 	}
 }
 
-// TestLostLeaseExec410: a lost lease answers exec with 410 and the
-// exact error.
+// TestLostLeaseExec410: a lost lease answers exec with 409 code
+// lease_lost and the reason, and GET names the reason.
 func TestLostLeaseExec410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
@@ -114,14 +115,26 @@ func TestLostLeaseExec410(t *testing.T) {
 
 	svc.store.mu.Lock()
 	svc.store.leases[id].State = "lost"
+	svc.store.leases[id].LostReason = "substrate crashed"
 	svc.store.mu.Unlock()
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
-	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("exec on a lost lease = %d (%v), want 410", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("exec on a lost lease = %d (%v), want 409", resp.StatusCode, body)
 	}
-	if body["error"] != lostLeaseMessage {
-		t.Fatalf("error = %v, want %q", body["error"], lostLeaseMessage)
+	if body["code"] != "lease_lost" {
+		t.Fatalf("code = %v, want lease_lost", body["code"])
+	}
+	msg, _ := body["error"].(string)
+	for _, want := range []string{"substrate lost this lease's sandbox", "substrate crashed", "DELETE the lease to free its quota"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error = %q, want it to contain %q", msg, want)
+		}
+	}
+	// GET shows the lost state and the reason.
+	_, detail := doReq(t, "GET", ts.URL+"/api/sandboxes/"+id, "token-a", nil)
+	if detail["state"] != "lost" || detail["lost_reason"] != "substrate crashed" {
+		t.Fatalf("detail = %v, want state lost and lost_reason substrate crashed", detail)
 	}
 }
 

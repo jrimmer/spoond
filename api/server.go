@@ -1133,6 +1133,9 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
+	if !s.ensureLive(w, lease) {
+		return
+	}
 	// forkd_id keeps its pre-2.0 name: response keys are stored/protocol
 	// data and renaming would break clients.
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1182,9 +1185,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	// A lease lost in a substrate crash has no sandbox to attach to; the
 	// SSH gateway relays sessions through this route, so it covers SSH
-	// too (U10).
-	if lease.State == "lost" {
-		writeError(w, http.StatusGone, lostLeaseMessage)
+	// too (U10). 409 lease_lost carries the reason the lease was lost.
+	if !s.ensureLive(w, lease) {
 		return
 	}
 
@@ -1411,6 +1413,9 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	lease, err := s.svc.setNetwork(r.Context(), owner, id, req.NetPolicy, req.NetAllow)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		switch err {
 		case errNotFound:
 			writeError(w, http.StatusNotFound, "lease not found")
@@ -1441,6 +1446,9 @@ func (s *Server) handleKeepAlive(w http.ResponseWriter, r *http.Request) {
 	ttl := time.Duration(req.TTL) * time.Second
 	lease, err := s.svc.keepAlive(owner, id, ttl)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		switch err {
 		case errNotFound:
 			writeError(w, http.StatusNotFound, "lease not found")
@@ -1466,6 +1474,9 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	lease, err := s.svc.suspend(r.Context(), owner, id)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		switch err {
 		case errNotFound:
 			writeError(w, http.StatusNotFound, "lease not found")
@@ -1505,6 +1516,9 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	lease, err := s.svc.restart(r.Context(), owner, id, mode)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
@@ -1555,6 +1569,9 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 	}
 	lease, err := s.svc.setName(owner, id, req.Name)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		if err == errNotFound {
 			writeError(w, http.StatusNotFound, "lease not found")
 			return
@@ -1583,6 +1600,9 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	}
 	lease, err := s.svc.setComment(owner, id, req.Comment)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		if err == errNotFound {
 			writeError(w, http.StatusNotFound, "lease not found")
 			return
@@ -1653,6 +1673,9 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		updated, err = s.svc.setHolderWithTTL(lease.Owner, id, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second)
 	}
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		if err == errNotFound {
 			writeError(w, http.StatusNotFound, "lease not found")
 			return
@@ -1660,6 +1683,7 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":              updated.ID,
 		"holder":          updated.Holder,
@@ -1689,6 +1713,9 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	lease := s.svc.lookupWithShare(owner, id, ShareSSH)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	if !s.ensureLive(w, lease) {
 		return
 	}
 	if lease.Suspended {
@@ -1834,8 +1861,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A lease lost in a substrate crash has nothing to exec into (U10).
-	if lease.State == "lost" {
-		writeError(w, http.StatusGone, lostLeaseMessage)
+	// 409 lease_lost carries the reason and points at DELETE.
+	if !s.ensureLive(w, lease) {
 		return
 	}
 	var req struct {
@@ -1973,6 +2000,9 @@ func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id)
+	if !s.ensureLive(w, lease) {
+		return
+	}
 	if lease.Suspended {
 		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		return
@@ -2142,6 +2172,9 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 
 	cloned, buildID, err := s.svc.clone(r.Context(), owner, id)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
@@ -2203,6 +2236,9 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	}
 	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second, req.Holder, req.HolderURL)
 	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, errBadForkCount):
 			writeError(w, http.StatusBadRequest, err.Error())
