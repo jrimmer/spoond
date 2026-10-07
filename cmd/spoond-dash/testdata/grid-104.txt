@@ -2,7 +2,7 @@ SPOOND · spoond.example.com                                                    
                                                                                                         
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
-│ 3 leases · 2 running (2 burst) · 1 susp · 0 lost│  │ i/o stall     ╎░░░░░░░░░░░░░░░0.0% (some 0.2%)  │
+│ 3 leases · 2 running (2 burst) · 1 susp · 0 lost│  │ i/o stall     ╎░░░░░░░░░░░░░░░       0.0% full  │
 │ queued 1 · granted 1,234 · swept 17             │  │ nvme0n1 busy  ██░░░░░░░░░░╎░░░ 18% · 12 MB/s w  │
 │ shares 2 · users 7 · builds busy 1              │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │

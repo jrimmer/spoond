@@ -1041,8 +1041,8 @@ comes from `/proc/pressure/io` (PSI: `some` and `full` over 60 s, not
 `iowait`, which drops when CPUs are busy even if the disk is saturated)
 and `/proc/diskstats` (the snapshot device's write MB/s and busy share,
 a delta between collections). The i/o stall meter's value is the full
-60 s average, its value text names the 60 s `some` average too
-(`0.4% (some 2.1%)`); the busy meter's value text is
+60 s average, shown as `0.4% full` (the 60 s `some` average stays in
+the metrics, not on the meter); the busy meter's value text is
 `<busy>% · <N> MB/s w`, its label the device name (`nvme0n1 busy`)
 when that fits the meter label column, else `disk busy`. A kernel
 without PSI (no `/proc/pressure`) simply hides the stall meter;

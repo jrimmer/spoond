@@ -1550,7 +1550,7 @@ func TestIOHostRowsDrawn(t *testing.T) {
 	s.IOSome10, s.IOSome60 = 0.3, 0.2
 	s.DiskDevice, s.DiskWriteMB, s.DiskBusyPct = "nvme0n1", 12, 18
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "i/o stall") || !strings.Contains(p, "0.0% (some 0.2%)") {
+	if !strings.Contains(p, "i/o stall") || !strings.Contains(p, "0.0% full") {
 		t.Fatalf("stall meter missing:\n%s", p)
 	}
 	if !strings.Contains(p, "nvme0n1 busy") || !strings.Contains(p, "18% · 12 MB/s w") {

@@ -15,8 +15,8 @@ summarised from README "Status".
 - **The dashboard's host panel shows disk I/O pressure and the snapshot
   disk's throughput as meters under the CPU meter.** Two new meter rows
   directly under `cpu`: `i/o stall`, whose value is the PSI `full` 60 s
-  average drawn on the same 0-100 scale as the other meters, with the
-  `some` 60 s average in its value text (`0.4% (some 2.1%)`), and
+  average drawn on the same 0-100 scale as the other meters, its value
+  text `0.4% full`, and
   `<dev> busy`, whose value is the snapshot device's busy share with
   `<N> MB/s w` in its value text (`nvme0n1 busy ... 18% · 12 MB/s w`).
   The stall meter reads `/proc/pressure/io` and warns at

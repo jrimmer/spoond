@@ -1108,7 +1108,7 @@ func (l *layout) hostRows() []hostRow {
 // device the collector could not resolve (DiskDevice "") hides the busy
 // meter only.
 //
-//	i/o stall      ░░░░░░░░░░░░░░░░      0.4% (some 2.1%)
+//	i/o stall      ░░░░░░░░░░░░░░░░           0.4% full
 //	nvme0n1 busy   ██░░░░░░░░░░░░░░     18% · 12 MB/s w
 //
 // The stall meter's value is the PSI io full 60 s average against the
@@ -1122,7 +1122,7 @@ func ioHostRows(s Snapshot) []hostRow {
 			pct:    s.IOFull60,
 			warn:   ioFullWarnPct(),
 			danger: ioFullBadPct(),
-			right:  fmt.Sprintf("%.1f%% (some %.1f%%)", s.IOFull60, s.IOSome60),
+			right:  fmt.Sprintf("%.1f%% full", s.IOFull60),
 		})
 	}
 	if s.DiskDevice != "" {
