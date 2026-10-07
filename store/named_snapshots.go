@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -101,6 +102,21 @@ func (db *DB) GetNamedSnapshot(ctx context.Context, owner, name string, version 
 	row := db.r.QueryRowContext(ctx,
 		`SELECT `+namedSnapshotColumns+` FROM named_snapshots WHERE owner = ? AND name = ? AND version = ?`,
 		owner, name, version)
+	return scanNamedSnapshot(row.Scan)
+}
+
+// GetNamedSnapshotByBuild returns the version row a lease's
+// snapshot_build_id points at, owner-scoped. It resolves the name and
+// version for a lease's "snapshot" view (A3) and for the retention
+// re-run after a lease is released (S5), or ErrNotFound when no row
+// carries the build (a forced delete).
+func (db *DB) GetNamedSnapshotByBuild(ctx context.Context, owner, buildID string) (NamedSnapshotRow, error) {
+	if buildID == "" {
+		return NamedSnapshotRow{}, ErrNotFound
+	}
+	row := db.r.QueryRowContext(ctx,
+		`SELECT `+namedSnapshotColumns+` FROM named_snapshots WHERE owner = ? AND build_id = ?`,
+		owner, buildID)
 	return scanNamedSnapshot(row.Scan)
 }
 
@@ -394,6 +410,44 @@ func (db *DB) NamedSnapshotBuilds(ctx context.Context) (map[string]bool, error) 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: named snapshot builds: %w", err)
+	}
+	return out, nil
+}
+
+// LiveLeaseCountsByBuild counts non-lost leases started from each of
+// buildIDs in one query: the list route's in_use values without one
+// query per version (N5). A build absent from the result has zero live
+// leases.
+func (db *DB) LiveLeaseCountsByBuild(ctx context.Context, buildIDs []string) (map[string]int, error) {
+	out := make(map[string]int, len(buildIDs))
+	if len(buildIDs) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(buildIDs))
+	args := make([]any, len(buildIDs))
+	for i, id := range buildIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := db.r.QueryContext(ctx,
+		`SELECT snapshot_build_id, COUNT(*) FROM leases
+		 WHERE snapshot_build_id IN (`+strings.Join(placeholders, ", ")+`)
+		   AND state <> 'lost'
+		 GROUP BY snapshot_build_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: live leases by build: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("store: live leases by build: %w", err)
+		}
+		out[id] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: live leases by build: %w", err)
 	}
 	return out, nil
 }
