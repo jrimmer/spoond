@@ -687,6 +687,48 @@ func (f *Fake) fileFS(sandboxID string) *memFS {
 	return fs
 }
 
+// ScrubSecrets implements the guest side of the named-snapshot save's
+// secret scrub (2.7, #83): it removes every entry directly under
+// /run/secrets and returns the names removed and the names that remain,
+// so a test can make the scrub fail by leaving one. It backs the scrub
+// script for tests that route the save's scrub exec through here instead
+// of a real shell.
+func (f *Fake) ScrubSecrets(sandboxID string) (removed, left []string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return nil, nil, fmt.Errorf("fake: scrub %s: %w", sandboxID, substrate.ErrNotFound)
+	}
+	// Collect the direct children of /run/secrets in a stable order.
+	for p := range fs.files {
+		if path.Dir(p) == fakeSecretsDir {
+			removed = append(removed, path.Base(p))
+		}
+	}
+	for _, n := range removed {
+		delete(fs.files, path.Join(fakeSecretsDir, n))
+	}
+	// With the real-wrapper job runner enabled, secrets live on the host.
+	if f.jobDir != "" {
+		host := filepath.Join(f.jobDir, "secrets")
+		if entries, err := os.ReadDir(host); err == nil {
+			for _, e := range entries {
+				_ = os.Remove(filepath.Join(host, e.Name()))
+			}
+		}
+	}
+	// What remains (files the test planted after the removal point).
+	for p := range fs.files {
+		if path.Dir(p) == fakeSecretsDir {
+			left = append(left, path.Base(p))
+		}
+	}
+	sort.Strings(removed)
+	sort.Strings(left)
+	return removed, left, nil
+}
+
 func (f *Fake) WriteFile(ctx context.Context, sandboxID, name string, data []byte, mode os.FileMode) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -840,6 +882,22 @@ func (f *Fake) Remove(ctx context.Context, sandboxID, name string, recursive boo
 	return fs.remove(name, recursive)
 }
 
+// Rename moves oldPath to newPath, replacing newPath, through the
+// in-memory filesystem. It backs the atomic guest-file writes (2.7,
+// #83). A missing source wraps substrate.ErrNotFound.
+func (f *Fake) Rename(ctx context.Context, sandboxID, oldPath, newPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("Rename", sandboxID); err != nil {
+		return err
+	}
+	fs := f.fileFS(sandboxID)
+	if fs == nil {
+		return fmt.Errorf("fake: Rename %s %s: %w", sandboxID, oldPath, substrate.ErrNotFound)
+	}
+	return fs.rename(oldPath, newPath)
+}
+
 // memFS is an in-memory filesystem with real path semantics: absolute,
 // cleaned paths only, directories are explicit nodes, parents are created as
 // needed, and modes are kept exactly as given. The root is "" (meaning "/")
@@ -964,6 +1022,25 @@ func (m *memFS) mkdir(name string, mode os.FileMode) error {
 		return fmt.Errorf("%w: %s", substrate.ErrExist, name)
 	}
 	return m.mkdirAll(name, mode)
+}
+
+// rename moves oldName to newName, replacing newName. Only files are
+// moved (the guest builders write files); directories are an error.
+func (m *memFS) rename(oldName, newName string) error {
+	oldName, newName = cleanPath(oldName), cleanPath(newName)
+	f, ok := m.files[oldName]
+	if !ok {
+		return fmt.Errorf("%w: %s", substrate.ErrNotFound, oldName)
+	}
+	if _, ok := m.dirs[newName]; ok {
+		return fmt.Errorf("%w: %s is a directory", substrate.ErrInvalidOp, newName)
+	}
+	if err := m.mkdirAll(path.Dir(newName), 0o755); err != nil {
+		return err
+	}
+	delete(m.files, oldName)
+	m.files[newName] = f
+	return nil
 }
 
 func (m *memFS) remove(name string, recursive bool) error {

@@ -6,6 +6,8 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/substrate"
@@ -60,6 +62,48 @@ var secretNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // user's) and is idempotent, so concurrent staging passes are safe.
 const secretMountScript = `grep -q ' /run/secrets tmpfs ' /proc/mounts || ` +
 	`{ mkdir -p /run/secrets && mount -t tmpfs -o mode=0700,uid=$(id -u),gid=$(id -g) tmpfs /run/secrets; }`
+
+// secretsScrubScript removes every entry under /run/secrets and then
+// lists what is left. It backs the named-snapshot save's pre-checkpoint
+// scrub (2.7, #83 B1): it touches the guest directly, so it removes
+// secret files a backend restart no longer remembers. The save aborts
+// when the listing after =LEFT= is not empty. A missing directory is not
+// an error: a lease that never had secrets must save (R1). The wildcards
+// cover dotfiles and dotdot-prefixed names (`..x`). The listing before
+// =LEFT= lets the backend report how many files it removed that it did
+// not know about (R4).
+const secretsScrubScript = `[ -d /run/secrets ] || exit 0
+ls -A /run/secrets 2>/dev/null
+rm -f /run/secrets/* /run/secrets/.[!.]* /run/secrets/..?* 2>/dev/null
+echo =LEFT=
+ls -A /run/secrets 2>/dev/null`
+
+// scrubSeparator splits the scrub script's stdout: the removed entries
+// before it, the entries left after it.
+const scrubSeparator = "=LEFT="
+
+// parseScrubOutput splits a scrub script's stdout into the entries it
+// saw before the removal and those left afterwards. A missing marker
+// (and any output before it) is treated as a removed list.
+func parseScrubOutput(out string) (removed, left []string) {
+	lines := strings.Split(out, "\n")
+	i := 0
+	for ; i < len(lines); i++ {
+		if lines[i] == scrubSeparator {
+			i++
+			break
+		}
+		if lines[i] != "" {
+			removed = append(removed, lines[i])
+		}
+	}
+	for ; i < len(lines); i++ {
+		if lines[i] != "" {
+			left = append(left, lines[i])
+		}
+	}
+	return removed, left
+}
 
 // validateSecrets checks one request's secrets against the name,
 // count and total-size limits. It returns a copy (nil when the input
@@ -182,6 +226,188 @@ func (s *Service) clearCreateSecrets(leaseID string) {
 	delete(s.createSecrets, leaseID)
 }
 
+// scrubAllSecrets removes everything under /run/secrets through a
+// guest exec and verifies the directory is empty afterwards. Unlike the
+// in-memory name lists, it does not rely on what this backend process
+// remembers, so a secret staged before a backend restart is still
+// removed (2.7, #83 B1). A non-empty listing (or a failed exec) is an
+// error: the caller must abort the save rather than checkpoint a
+// captured secret. It returns how many removed entries were not in
+// known, so the caller can warn about secrets this backend lost track of
+// (R4).
+func (s *Service) scrubAllSecrets(ctx context.Context, sandboxID string, known map[string]bool) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, secretsStageTimeout)
+	defer cancel()
+	res, err := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{
+		Args:    []string{"/bin/bash", "-c", secretsScrubScript},
+		Timeout: secretsStageTimeout,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("scrub %s: %w", secretsDir, err)
+	}
+	if res.ExitCode != 0 {
+		return 0, fmt.Errorf("scrub %s: exit %d: %s", secretsDir, res.ExitCode, tailStr(res.Stderr, 200))
+	}
+	removed, left := parseScrubOutput(res.Stdout)
+	if len(left) > 0 {
+		// Names only: the listing is file names, never values.
+		return 0, fmt.Errorf("scrub %s: %s remains", secretsDir, strings.Join(left, " "))
+	}
+	unknown := 0
+	for _, name := range removed {
+		if !known[name] {
+			unknown++
+		}
+	}
+	return unknown, nil
+}
+
+// secretsGate serialises a named-snapshot save's secret scrub against
+// exec and background-job secret staging on the same lease (2.7, #83
+// B2). A save holds it from its secrets check through the checkpoint
+// and the create-time re-stage; while a save holds it an exec or job
+// that wants to stage answers 409 lease_busy. While a staging runs, a
+// save refuses (secrets_in_use). It is memory-only, like the secrets
+// themselves.
+type secretsGate struct {
+	mu      sync.Mutex
+	saving  map[string]int
+	staging map[string]int
+}
+
+// beginSave claims the lease for a save. It returns false when a save
+// or a secret staging already holds the lease.
+func (g *secretsGate) beginSave(leaseID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.saving == nil {
+		g.saving = map[string]int{}
+		g.staging = map[string]int{}
+	}
+	if g.saving[leaseID] > 0 || g.staging[leaseID] > 0 {
+		return false
+	}
+	g.saving[leaseID]++
+	return true
+}
+
+func (g *secretsGate) endSave(leaseID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.saving[leaseID] <= 1 {
+		delete(g.saving, leaseID)
+	} else {
+		g.saving[leaseID]--
+	}
+}
+
+// beginStaging records an exec or job about to stage secrets. It returns
+// false while a save holds the lease.
+func (g *secretsGate) beginStaging(leaseID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.saving == nil {
+		g.saving = map[string]int{}
+		g.staging = map[string]int{}
+	}
+	if g.saving[leaseID] > 0 {
+		return false
+	}
+	g.staging[leaseID]++
+	return true
+}
+
+func (g *secretsGate) endStaging(leaseID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.staging[leaseID] <= 1 {
+		delete(g.staging, leaseID)
+	} else {
+		g.staging[leaseID]--
+	}
+}
+
+// markExecSecretsStaged records that a synchronous exec has exec-time
+// secrets staged on the lease right now (2.7, #83). A named snapshot
+// save refuses while the count is positive, and scrubs the names even if
+// a save raced the check. unmarkExecSecretsStaged drops one such
+// staging.
+func (s *Service) markExecSecretsStaged(leaseID string, names []string) {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	if s.stagedExecSecrets == nil {
+		s.stagedExecSecrets = map[string]int{}
+	}
+	s.stagedExecSecrets[leaseID]++
+	if s.stagedExecSecretNames == nil {
+		s.stagedExecSecretNames = map[string][]string{}
+	}
+	s.stagedExecSecretNames[leaseID] = append(s.stagedExecSecretNames[leaseID], names...)
+}
+
+func (s *Service) unmarkExecSecretsStaged(leaseID string, names []string) {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	if s.stagedExecSecrets[leaseID] <= 1 {
+		delete(s.stagedExecSecrets, leaseID)
+		delete(s.stagedExecSecretNames, leaseID)
+	} else {
+		s.stagedExecSecrets[leaseID]--
+		// Drop one staging's names (the first occurrence of each).
+		left := s.stagedExecSecretNames[leaseID]
+		for _, n := range names {
+			for i, got := range left {
+				if got == n {
+					left = append(left[:i], left[i+1:]...)
+					break
+				}
+			}
+		}
+		s.stagedExecSecretNames[leaseID] = left
+	}
+}
+
+// hasStagedExecSecrets reports whether a synchronous exec holds
+// exec-time secrets on the lease right now.
+func (s *Service) hasStagedExecSecrets(leaseID string) bool {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	return s.stagedExecSecrets[leaseID] > 0
+}
+
+// hasRunningJobWithSecrets reports whether a lease has a live background
+// job that staged exec-time secrets (2.7, #83): such a job's files are
+// under /run/secrets while it runs, so a save would capture them.
+func (s *Service) hasRunningJobWithSecrets(leaseID string) bool {
+	s.secretsMu.Lock()
+	live := map[string]bool{}
+	for jobID := range s.liveJobSecrets {
+		live[jobID] = true
+	}
+	s.secretsMu.Unlock()
+	if len(live) == 0 {
+		return false
+	}
+	// The in-memory running count is the fast path; the rows decide
+	// which of those jobs belong to this lease and still run.
+	if !s.hasRunningJob(leaseID) {
+		return false
+	}
+	rows, err := s.db.ListJobs(context.Background(), leaseID)
+	if err != nil {
+		// Unknowable is not "safe to capture": a live job with secrets
+		// would be captured. Refuse.
+		s.log.Printf("snapshot: list jobs of %s: %v", leaseID, err)
+		return true
+	}
+	for _, r := range rows {
+		if r.State == "running" && live[r.JobID] {
+			return true
+		}
+	}
+	return false
+}
+
 // restageCreateSecrets re-writes a lease's create-time secrets after
 // the sandbox came back (resume, restart, crash recovery): a fresh
 // sandbox never had the tmpfs, and a rewrite after a snapshot resume is
@@ -214,4 +440,51 @@ func (s *Service) restageSecrets(sandboxID string, names []string, create map[st
 			s.log.Printf("exec: re-stage secret %s: %v", name, err)
 		}
 	}
+}
+
+// knownSecretNames is the set of secret file names this backend knows
+// on a lease: its create-time names plus any exec-time or job names
+// currently staged. A scrub that removes a file outside this set is one
+// this backend lost track of (R4); the union keeps a still-known
+// exec/job file from being miscounted as forgotten (Q3).
+func (s *Service) knownSecretNames(leaseID string, create map[string]string) map[string]bool {
+	known := make(map[string]bool, len(create))
+	for name := range create {
+		known[name] = true
+	}
+	s.secretsMu.Lock()
+	for _, name := range s.stagedExecSecretNames[leaseID] {
+		known[name] = true
+	}
+	for _, names := range s.liveJobSecrets {
+		for _, name := range names {
+			known[name] = true
+		}
+	}
+	s.secretsMu.Unlock()
+	return known
+}
+
+// deferSecretRemoval records exec-time secret names a finishing job
+// could not remove because a named-snapshot save held the lease's
+// secrets gate. The save drains them (drainDeferredSecretRemovals)
+// before its create-time re-stage, so the final source state is exactly
+// the create-time secret set and no exec-time file remains (Q1).
+func (s *Service) deferSecretRemoval(leaseID string, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	s.pendingSecretRemovals[leaseID] = append(s.pendingSecretRemovals[leaseID], names...)
+}
+
+// drainDeferredSecretRemovals removes and returns the exec-time secret
+// names a finishing job deferred while a save held the gate (Q1).
+func (s *Service) drainDeferredSecretRemovals(leaseID string) []string {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	names := s.pendingSecretRemovals[leaseID]
+	delete(s.pendingSecretRemovals, leaseID)
+	return names
 }

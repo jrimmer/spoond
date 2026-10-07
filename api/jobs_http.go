@@ -29,6 +29,11 @@ func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, le
 		switch {
 		case errors.Is(err, errJobCap):
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errLeaseBusySave):
+			// A named-snapshot save holds the lease's secrets gate (2.7,
+			// #83 B2): the job did not start, so retrying is safe.
+			w.Header().Set("Retry-After", "5")
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "lease_busy"})
 		case errors.Is(err, substrate.ErrNotFound):
 			s.writeSandboxGone(w, lease)
 		default:

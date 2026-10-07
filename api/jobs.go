@@ -69,6 +69,11 @@ const (
 // errJobCap is returned when a lease is at its running-job cap.
 var errJobCap = errors.New("too many running background jobs for this lease")
 
+// errLeaseBusySave is returned when a named-snapshot save holds a
+// lease's secrets gate, so a background job that wants to stage secrets
+// must wait and answer 409 lease_busy (2.7, #83 B2).
+var errLeaseBusySave = errors.New("a named snapshot save is in progress; retry")
+
 // jobWrapperScript is the guest-side wrapper. It starts the command
 // with setsid, so the command is its own process group and is detached
 // from the envd Start stream's lifetime: a backend restart does not
@@ -270,13 +275,27 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	// recorded, in the job directory and in memory.
 	secretNames := sortedSecretNames(secrets)
 	if len(secrets) > 0 {
+		// The per-lease secrets gate (2.7, #83 B2): take it before
+		// staging, so a named-snapshot save that holds it makes this job
+		// 409 lease_busy instead of letting it write a secret into the
+		// checkpoint. Hold the gate across the staging. The names are
+		// marked staged before the files are written, so a save that
+		// somehow overlapped scrubs them.
+		if !s.secretsGate.beginStaging(lease.ID) {
+			return "", time.Time{}, nil, errLeaseBusySave
+		}
+		defer s.secretsGate.endStaging(lease.ID)
+		s.recordJobSecrets(lease.ID, jobID, secretNames)
 		if err := s.stageSecrets(ctx, lease.SandboxID, secrets); err != nil {
+			s.forgetJobSecrets(jobID)
 			return "", time.Time{}, nil, fmt.Errorf("stage secrets: %w", err)
 		}
 		// A names-only list the wrapper reads to clean up. Values are
 		// never written here.
 		if err := s.sub.WriteFile(ctx, lease.SandboxID, jobPath(jobID, "secrets"),
 			[]byte(strings.Join(secretNames, "\n")+"\n"), 0o600); err != nil {
+			s.removeSecrets(lease.SandboxID, secretNames)
+			s.forgetJobSecrets(jobID)
 			return "", time.Time{}, nil, fmt.Errorf("write job secrets list: %w", err)
 		}
 	}
@@ -297,6 +316,7 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	if err != nil {
 		if len(secretNames) > 0 {
 			s.removeSecrets(lease.SandboxID, secretNames)
+			s.forgetJobSecrets(jobID)
 		}
 		return "", time.Time{}, nil, fmt.Errorf("start: %w", err)
 	}
@@ -317,11 +337,9 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 		_ = proc.Close()
 		if len(secretNames) > 0 {
 			s.removeSecrets(lease.SandboxID, secretNames)
+			s.forgetJobSecrets(jobID)
 		}
 		return "", time.Time{}, nil, err
-	}
-	if len(secretNames) > 0 {
-		s.recordJobSecrets(jobID, secretNames)
 	}
 	s.touch(lease.ID)
 	if s.metrics != nil {
@@ -393,8 +411,9 @@ func (s *Service) cleanupJobFiles(ctx context.Context, sandboxID, jobID string) 
 	}
 }
 
-// recordJobSecrets remembers the secret names staged for a running job.
-func (s *Service) recordJobSecrets(jobID string, names []string) {
+// recordJobSecrets remembers the secret names staged for a running job,
+// keyed by job id. takeJobSecrets clears them at exit.
+func (s *Service) recordJobSecrets(leaseID, jobID string, names []string) {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
 	if s.liveJobSecrets == nil {
@@ -413,12 +432,27 @@ func (s *Service) takeJobSecrets(jobID string) []string {
 	return names
 }
 
+// forgetJobSecrets drops a job's remembered secret names when it never
+// started (a staging or Start failure).
+func (s *Service) forgetJobSecrets(jobID string) {
+	s.takeJobSecrets(jobID)
+}
+
 // removeJobSecrets deletes a job's staged secret files and, for names
 // that shadow a create-time secret, restores the lease's value (#80).
 // Best effort: the guest wrapper normally did this already. It touches
 // only a sandbox still on the job's continuity generation: after a cold
 // restart the job's secrets are gone with the old guest, and removing
 // them from a different sandbox would be wrong.
+//
+// The removal and the shadowed re-stage run together under the per-lease
+// secrets gate (Q1). While a save holds the gate, neither may run: a
+// re-stage would land between the save's scrub and its checkpoint, and a
+// removal would leave the source without the create-time value the
+// save's own re-stage is about to restore. So the names are recorded and
+// the save removes them (drainDeferredSecretRemovals) before it
+// re-stages every create-time secret. When the gate is free this path
+// removes and re-stages as before.
 func (s *Service) removeJobSecrets(leaseID, jobID, sandboxID string, generation int64) {
 	names := s.takeJobSecrets(jobID)
 	if len(names) == 0 {
@@ -427,18 +461,62 @@ func (s *Service) removeJobSecrets(leaseID, jobID, sandboxID string, generation 
 	if !s.leaseOnGeneration(leaseID, sandboxID, generation) {
 		return
 	}
+	create := s.createSecretsFor(leaseID)
+	shadowed := shadowedNames(create, names)
+	if !s.secretsGate.beginStaging(leaseID) {
+		s.deferSecretRemoval(leaseID, names)
+		return
+	}
+	defer s.secretsGate.endStaging(leaseID)
 	s.removeSecrets(sandboxID, names)
-	if create := s.createSecretsFor(leaseID); len(create) > 0 {
-		var shadowed []string
-		for _, name := range names {
-			if _, ok := create[name]; ok {
-				shadowed = append(shadowed, name)
-			}
-		}
-		if len(shadowed) > 0 {
-			s.restageSecrets(sandboxID, shadowed, create)
+	s.restageSecrets(sandboxID, shadowed, create)
+}
+
+// shadowedNames returns the names that also exist as create-time
+// secrets, i.e. the ones whose removal must be followed by a re-stage.
+func shadowedNames(create map[string]string, names []string) []string {
+	if len(create) == 0 {
+		return nil
+	}
+	var shadowed []string
+	for _, name := range names {
+		if _, ok := create[name]; ok {
+			shadowed = append(shadowed, name)
 		}
 	}
+	return shadowed
+}
+
+// cleanupExecSecrets removes a finished synchronous exec's secret files
+// and restores any that shadowed a create-time secret. It is the
+// deferred cleanup of exec: it must run while the exec still holds the
+// per-lease secrets gate, so a save that is scrubbing cannot see a
+// re-staged shadowed file (R2).
+func (s *Service) cleanupExecSecrets(l *Lease, execSecrets map[string]string) {
+	if len(execSecrets) == 0 {
+		return
+	}
+	s.removeSecrets(l.SandboxID, sortedSecretNames(execSecrets))
+	s.restageShadowedSecrets(l.ID, l.SandboxID, sortedSecretNames(execSecrets))
+}
+
+// restageShadowedSecrets re-writes the create-time secrets whose names
+// a just-removed exec-time or job secret shadowed. Re-staging takes the
+// per-lease secrets gate; while a save holds it the re-stage is skipped
+// — the save restores every create-time secret after its checkpoint —
+// so a shadowed file can never land between the save's scrub and its
+// checkpoint (R2). The caller has already removed the exec-time files.
+func (s *Service) restageShadowedSecrets(leaseID, sandboxID string, names []string) {
+	create := s.createSecretsFor(leaseID)
+	shadowed := shadowedNames(create, names)
+	if len(shadowed) == 0 {
+		return
+	}
+	if !s.secretsGate.beginStaging(leaseID) {
+		return
+	}
+	defer s.secretsGate.endStaging(leaseID)
+	s.restageSecrets(sandboxID, shadowed, create)
 }
 
 // leaseOnGeneration reports whether a live lease's current sandbox is

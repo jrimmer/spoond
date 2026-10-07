@@ -382,12 +382,23 @@ create and on every resume, so a lease created before 2.2 gets it the
 first time it resumes. The write is best
 effort: a failure is logged and changes nothing else.
 
+Alongside it, every path that (re)creates a guest — create, resume,
+restart, cold restart, restore, crash recovery, fork and clone — writes
+the current lease id to `/run/spoond/lease-id` (`0644`, one line,
+`"<uuid>\n"`). A process captured in a memory snapshot keeps the source
+lease's `SPOOND_LEASE_ID`; a long-running process should re-read this
+file to notice that it is now in a different lease. Both files are
+written atomically (a temp file, then a rename), so an inotify watcher
+on `/run/spoond` sees each whole write. See
+[Identity in a restored guest](#identity-in-a-restored-guest).
+
 Processes in the guest read the file to notice that their memory did
 not continue, and re-derive whatever they keep only in process (caches,
 locks, half-finished work):
 
 ```bash
 cat /run/spoond/generation   # e.g. 2
+cat /run/spoond/lease-id     # e.g. 8f3a1c…
 ```
 
 ### `GET /api/names/{name}` — resolve by name
@@ -1143,6 +1154,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
+| `snapshot_saved` | `POST /api/leases/{id}/snapshots` saved the lease as a named snapshot (2.7, #83) | `saved as <name>@<version> · <size> · <duration>`, e.g. `saved as spoond/warm@4 · 2.1 GiB · 820 ms` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
 | `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume), or its root disk answered I/O errors (rootfs liveness probe) | the reason; `root disk unreadable (I/O errors)` for a probe-detected dead disk |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
@@ -1335,6 +1347,180 @@ rows go first, so a checkpoint pinned with `{"keep":true}` can be
 removed ahead of the lease's own release (the delete still answers `409`
 first while the lease itself runs from the build; the pin is gone after
 that call, and the next one deletes).
+
+## Named snapshots (2.7, #83)
+
+A **named snapshot** is a checkpoint build that has a name and a
+version. It is owned by an identity and outlives the lease it was saved
+from. Save one with `POST /api/leases/{id}/snapshots`, then start new
+leases from it (task 2) and manage it under `/api/named-snapshots`.
+
+- **Name:** `<project>/<name>` or a bare `<name>`; each part matches
+  `[a-z0-9][a-z0-9._-]{0,62}`. Names are unique per owner (the prefix is
+  a convention, not a project concept).
+- **Version:** an integer per (owner, name), starting at `1`. A version
+  number is never reused: deleting a version and saving again gives the
+  next number, not the deleted one (the name's high-water mark). `name`
+  means the latest version; `name@3` pins one.
+- A version row is inserted only after its checkpoint build is `ready`,
+  in one transaction that computes `max(version)+1`, so a failed or
+  in-flight save is never visible and `latest` moves atomically.
+
+Every route is owner-scoped (a consumer token, or an admin): another
+owner's name is invisible and answers `404 not_found`. Error bodies
+carry a machine-readable `code` beside `error`.
+
+### `POST /api/leases/{id}/snapshots` — save a lease as a named snapshot
+
+Owner only; live leases only. An unknown lease answers `404 not_found`
+with `"lease not found"`; a released or lost lease answers `409
+lease_not_live` (a lease busy with another operation answers `409
+lease_busy`). A replay whose key already committed answers `200` before
+the live check, so it works even after the source lease is gone.
+
+```json
+{"name": "spoond/warm", "idempotency_key": "fl-81c2/steps/warm", "keep": 3}
+```
+
+Saving checkpoints the lease (the guest pauses briefly and carries on)
+and inserts the version. Response `201`:
+
+```json
+{"name":"spoond/warm","version":1,"build_id":"<uuid>","image":"py-base",
+ "memory_mb":2048,"size_bytes":2254857830,"created_at":"2026-10-06T09:12:30Z"}
+```
+
+- **Idempotent replay.** A save whose `(name, idempotency_key)` already
+  exists answers `200` with that version and takes **no** checkpoint.
+  The key is scoped by `(owner, name)`, never by lease: a replay from a
+  different lease answers the same version (A1). A concurrent save with
+  the same key while the first runs answers `409 save_in_progress` with
+  `Retry-After: 5`. Without a key, every save makes a new version.
+- **Secrets are not captured.** Before the checkpoint spoond removes
+  **everything** under `/run/secrets` through a guest exec and verifies
+  the directory is empty (so a secret staged before a backend restart is
+  removed even though the process no longer remembers it; a directory
+  that is not empty aborts the save with `500 scrub_failed` and no
+  checkpoint), then re-stages the create-time secrets on the source
+  after. A running background job that staged exec-time secrets makes
+  the save `409 secrets_in_use`. A save and an exec/job that stages
+  secrets are serialised by a per-lease gate: while a save runs an exec
+  or job with secrets answers `409 lease_busy` with `Retry-After: 5`
+  (it did not start, so retrying is safe). Anything else in guest memory
+  or on disk is the caller's to scrub. Because the scrub touches the
+  guest rather than this process's memory, **a save after a backend
+  restart drops the source lease's create-time secrets**: the backend no
+  longer knows their values, so it cannot re-stage them. It logs the
+  lease id and how many removed files it no longer knew about (R4);
+  re-send the secrets on the next exec.
+- **Limits.** Named snapshot bytes count toward the owner's
+  `max_kept_bytes` alongside kept checkpoints (`409 kept_budget`), and a
+  save that would add a name past `MAX_NAMED_SNAPSHOTS` (`0` = no cap)
+  answers `409 snapshot_limit`. An existing name is always savable.
+- **Retention.** A name keeps its last `SNAPSHOT_KEEP_VERSIONS` versions
+  (default `3`; the first save's optional `keep`, `1`–`20`, overrides it
+  for the name — A6). Older versions lose their row after a save unless
+  a live lease started from them (`leases.snapshot_build_id`); those go
+  once no such lease remains. The builds are freed by the GC as usual.
+- **Event.** A `snapshot_saved` event on the source lease, e.g.
+  `saved as spoond/warm@4 · 2.1 GiB · 820 ms`.
+
+A failed save stores nothing, so a replay with the same key runs a fresh
+save (the key is not poisoned). Look the key up without starting a
+checkpoint:
+
+```
+GET /api/named-snapshots/spoond/warm?idempotency_key=fl-81c2/steps/warm
+```
+
+answers `200` with `{"state":"in_progress"}`,
+`{"state":"ready","version":4,"build_id":"…"}`,
+`{"state":"failed","error":"…","code":"…"}` or
+`{"state":"absent"}`. In-flight/failed state lives in memory for up to
+24 h; after a backend restart a key reads `absent` (A2). A backend that
+stops mid-save writes no version: at startup a `checkpoint` build still
+`building` with no named row is marked `failed`, so nothing is stranded
+(A7).
+
+### `GET /api/named-snapshots` — list your snapshots
+
+`?prefix=spoond/` narrows the list. `200`:
+
+```json
+{"snapshots":[{"name":"spoond/warm","latest":4,"versions":[
+  {"version":4,"build_id":"…","image":"go-base-worker","memory_mb":4096,
+   "size_bytes":2254857830,"created_at":"…","in_use":1,"stale":false}]}]}
+```
+
+`in_use` counts the live leases started from that version (`0` while
+nothing uses it). `stale` is `true` when the image's current build is no
+longer the version's `image_build_id` — the image was rebuilt since the
+save — and is informational only.
+
+### `GET /api/named-snapshots/{name}[@v]` — show one
+
+`{name}` selects the latest version, `{name}@{v}` one version. A slash
+in the name is allowed in the path. Response `200` is one version object
+as in the list, with `in_use` and `stale`. `404 not_found` for an
+unknown name or version.
+
+### `DELETE /api/named-snapshots/{name}[@v]` — delete
+
+`{name}` deletes every version, `{name}@{v}` one version. `409
+snapshot_in_use` when a live lease started from it; `?force=1` drops the
+row anyway (the build stays until the lease no longer needs it).
+Responds `204`; a second delete answers `404 not_found`. The name's
+retention setting (and its version high-water mark) is kept, so a later
+save gets the next number, not a deleted one.
+
+### `PUT /api/named-snapshots/{name}` — set retention
+
+```json
+{"keep": 3}
+```
+
+`keep` is required and `1`–`20`. Changes the name's retention and
+applies it at once (the live-lease rule still holds). Response `200
+{"name":"…","keep":3,"ok":true}`; `404 not_found` for an unknown
+name. `keep` is set per name, so a `@version` in the path is `400
+bad_request` (`"keep is set per name; drop the @version"`).
+
+### Identity in a restored guest
+
+A memory snapshot resumes every captured process as soon as the VM runs,
+before spoond can write anything, so spoond cannot promise that files
+exist before captured processes run. Instead it guarantees markers so a
+process that knows a save is coming can tell which side it is on (A4).
+
+- **Source side.** On the source lease, right after the checkpoint
+  completes and before the save answers, spoond writes
+  `/run/spoond/last-save` (`0644`, JSON
+  `{"name","version","build_id","idempotency_key"}`). The copy's
+  memory was captured before this write, so a copy never sees this
+  save's marker.
+- **Copy side.** On a lease started from a snapshot, spoond writes
+  `/run/spoond/lease-id`, `/run/spoond/generation` and
+  `/run/spoond/started-from` (JSON `{"name","version","build_id"}`)
+  before the create answers and before any exec or job the API runs in
+  it.
+
+All of these are written atomically (a temp file, then a rename), so
+inotify on `/run/spoond` sees whole writes. A process such as Honey's
+stepd records `save pending (key K)` before it asks for the save; after
+that it acts on no captured handle until either `last-save` shows key
+`K` (it is the source and carries on) or `lease-id` differs from the id
+it recorded (it is a copy and runs its restore path).
+
+**Known limit (A5).** No spoond credential is bound to the generation: a
+lease id is a capability (the heartbeat and the LLM gateway key on it),
+and processes captured in a snapshot keep the source's
+`SPOOND_LEASE_ID`. While the source lease lives, a copy that still uses
+that id acts as the source (fork and clone already behave this way). A
+new lease gets a new id and generation `1`, but the generation revokes
+nothing. Meanwhile: save **before** long-running agent processes start,
+and release the source after saving. A guest capability bound to
+`(lease id, generation, guest identity)` is a separate issue, not part
+of 2.7.
 
 ### `GET /healthz`
 

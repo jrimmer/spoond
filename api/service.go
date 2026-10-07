@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,6 +133,11 @@ type Lease struct {
 	// instant. Zero = not preempted. Persisted as preempted_at and
 	// reported by the lease API as "preempted".
 	PreemptedAt time.Time `json:"-"`
+	// SnapshotBuildID is the named-snapshot version's build the lease was
+	// started from (2.7, #83); '' when it did not start from one. A
+	// version whose build a live lease runs from is never dropped by
+	// retention. Start-from-snapshot (and its API field) is task 2.
+	SnapshotBuildID string `json:"-"`
 	// Priority orders preemption within a class (#128 part 2): a lower
 	// number is preempted first. 0 = the default. Reported as
 	// "priority".
@@ -309,6 +315,16 @@ type ServiceConfig struct {
 	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default
 	// DefaultMaxKeptPerLease.
 	MaxKeptPerLease int
+	// MaxNamedSnapshots is the per-owner cap on distinct named-snapshot
+	// names (2.7, #83): a save that would add a new name past it answers
+	// 409. 0 = no cap. MAX_NAMED_SNAPSHOTS, default
+	// DefaultMaxNamedSnapshots.
+	MaxNamedSnapshots int
+	// SnapshotKeepVersions is the default retention for a named snapshot
+	// name (2.7, #83): the last N versions survive a save. A name's own
+	// first-save keep overrides it. SNAPSHOT_KEEP_VERSIONS, default
+	// DefaultSnapshotKeepVersions.
+	SnapshotKeepVersions int
 	// BurstReserveMiB is the hugepage reserve (#128 part 2) a burst
 	// lease must leave free on the node after its own hugepages — the
 	// guaranteed class never runs into it. BURST_RESERVE_MIB, default
@@ -491,6 +507,44 @@ type Service struct {
 	// exactly those files if the guest wrapper did not. Lost on restart,
 	// when the wrapper's own cleanup is the only one left.
 	liveJobSecrets map[string][]string
+	// stagedExecSecrets counts leases with synchronous exec-time secrets
+	// staged right now (between stageSecrets and its deferred cleanup). A
+	// named snapshot save refuses while any is staged (2.7, #83): the
+	// checkpoint would capture them. Guarded by secretsMu.
+	stagedExecSecrets map[string]int
+	// stagedExecSecretNames holds the names of those synchronous
+	// exec-time secrets, so a save that raced the refuse check scrubs
+	// them before its checkpoint. Guarded by secretsMu.
+	stagedExecSecretNames map[string][]string
+	// pendingSecretRemovals records the exec-time secret names a
+	// finishing job could not remove because a named-snapshot save held
+	// the lease's secrets gate. The save drains it before its
+	// create-time re-stage, so the source ends with its create-time
+	// values and no exec-time file survives the save (Q1). Guarded by
+	// secretsMu.
+	pendingSecretRemovals map[string][]string
+	// saveInterrupt, when set by a test, runs between a save's checkpoint
+	// and its version-row insert to simulate a backend that stops
+	// mid-save (A7). Nil in production.
+	saveInterrupt func(ctx context.Context, l *Lease, buildID string) error
+	// saveAfterClaim, when set by a test, runs after a save claims its
+	// idempotency key in memory and before it re-checks the catalog for a
+	// committed replay (S3). Nil in production.
+	saveAfterClaim func(owner, name, key string)
+	// saveBeforeInsert, when set by a test, runs after a save's
+	// checkpoint and before it inserts its version row, so a test can
+	// commit a conflicting row and exercise the insert-conflict replay
+	// (R5). Nil in production.
+	saveBeforeInsert func(owner, name, key string)
+	// saves tracks in-flight and recently failed named-snapshot saves in
+	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
+	// failed key is retryable, and both read absent after a restart.
+	saves namedSaveInFlight
+	// secretsGate serialises a named-snapshot save's secret scrub against
+	// exec and job secret staging on the same lease (2.7, #83 B2): a save
+	// holds it across the checkpoint, an exec/job staging takes it first
+	// and answers 409 lease_busy while a save holds it.
+	secretsGate secretsGate
 	// admitQ holds creates waiting for admission (#129 part 1) and
 	// serialises their admissions.
 	admitQ admissionQueue
@@ -511,26 +565,31 @@ type Service struct {
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
 	svc := &Service{
-		sub:              sub,
-		db:               db,
-		store:            newStore(),
-		tokens:           tokens,
-		cfg:              cfg,
-		sweepInterval:    5 * time.Second,
-		now:              time.Now,
-		diskCapacity:     statfsCapacity,
-		diskUsage:        store.BuildDiskUsage,
-		appliedEgress:    map[string]string{},
-		createSecrets:    map[string]map[string]string{},
-		log:              log.Default(),
-		probeEnabled:     true,
-		probeTimeout:     20 * time.Second,
-		rootfsProbeOK:    map[string]time.Time{},
-		rootfsProbeFails: map[string]*rootfsProbeFailure{},
-		bus:              newEventBus(),
-		gcErr:            newGCTracker(),
-		liveJobSecrets:   map[string][]string{},
-		jobStarts:        map[string]*jobStartLock{},
+		sub:                   sub,
+		db:                    db,
+		store:                 newStore(),
+		tokens:                tokens,
+		cfg:                   cfg,
+		sweepInterval:         5 * time.Second,
+		now:                   time.Now,
+		diskCapacity:          statfsCapacity,
+		diskUsage:             store.BuildDiskUsage,
+		appliedEgress:         map[string]string{},
+		createSecrets:         map[string]map[string]string{},
+		log:                   log.Default(),
+		probeEnabled:          true,
+		probeTimeout:          20 * time.Second,
+		rootfsProbeOK:         map[string]time.Time{},
+		rootfsProbeFails:      map[string]*rootfsProbeFailure{},
+		bus:                   newEventBus(),
+		gcErr:                 newGCTracker(),
+		liveJobSecrets:        map[string][]string{},
+		stagedExecSecrets:     map[string]int{},
+		stagedExecSecretNames: map[string][]string{},
+		pendingSecretRemovals: map[string][]string{},
+		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
+		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
+		jobStarts:             map[string]*jobStartLock{},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
 	svc.snapshotLimiters = snapshotLimiters{
@@ -1240,6 +1299,14 @@ func (s *Service) decRunningJob(leaseID string) {
 // hasRunningJobLocked reports whether a lease has a running background
 // job. Call with s.store.mu held (the idle checks run under it).
 func (s *Service) hasRunningJobLocked(leaseID string) bool {
+	return s.store.runningJobs[leaseID] > 0
+}
+
+// hasRunningJob reports whether a lease has a running background job,
+// taking the store lock itself.
+func (s *Service) hasRunningJob(leaseID string) bool {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
 	return s.store.runningJobs[leaseID] > 0
 }
 
@@ -3275,6 +3342,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		Class:                 leaseClassRow(l),
 		Priority:              l.Priority,
 		PreemptedAt:           l.PreemptedAt,
+		SnapshotBuildID:       l.SnapshotBuildID,
 	}
 }
 
@@ -3329,6 +3397,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		Class:                 r.Class,
 		Priority:              r.Priority,
 		PreemptedAt:           r.PreemptedAt,
+		SnapshotBuildID:       r.SnapshotBuildID,
 	}
 }
 
@@ -3390,17 +3459,52 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 const (
 	generationPath = "/run/spoond/generation"
 	generationMode = 0o644
+
+	// leaseIDPath is the guest file carrying the current lease id (2.7,
+	// #83). Processes captured in a memory snapshot keep the source's
+	// SPOOND_LEASE_ID; a process that needs the current one reads this
+	// file, which every path that (re)creates a guest rewrites.
+	leaseIDPath = "/run/spoond/lease-id"
+	leaseIDMode = 0o644
+
+	// lastSavePath is the source-side marker of a named snapshot save
+	// (2.7, #83 A4): JSON {name, version, build_id, idempotency_key},
+	// written after the checkpoint completes and before the save
+	// answers. A copy's memory was captured before this write, so a copy
+	// never sees this save's marker.
+	lastSavePath = "/run/spoond/last-save"
+	// startedFromPath is the copy-side marker of a lease started from a
+	// named snapshot (2.7, #83 A4): JSON {name, version, build_id}.
+	startedFromPath = "/run/spoond/started-from"
 )
 
 // writeGeneration writes the lease's current generation into the guest
-// at /run/spoond/generation (0644, parent /run/spoond 0755). Best
-// effort: failures are logged, never returned. Call without s.store.mu.
+// at /run/spoond/generation (0644, parent /run/spoond 0755) and the
+// lease id at /run/spoond/lease-id (0644). Best effort: failures are
+// logged, never returned. Both files are written atomically (temp file,
+// then rename), so inotify on /run/spoond sees each whole write. Call
+// without s.store.mu.
 func (s *Service) writeGeneration(l *Lease) {
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	data := fmt.Sprintf("%d\n", l.Generation)
-	if err := s.sub.WriteFile(ctx, l.SandboxID, generationPath, []byte(data), generationMode); err != nil {
-		s.log.Printf("generation: write %s into %s: %v", generationPath, l.ID, err)
+	s.writeGuestFileAtomic(ctx, l, generationPath, []byte(data), generationMode)
+	s.writeGuestFileAtomic(ctx, l, leaseIDPath, []byte(l.ID+"\n"), leaseIDMode)
+}
+
+// writeGuestFileAtomic writes data to path in the lease's guest through
+// a sibling temp file plus a rename, so a reader (an inotify watcher
+// included) never sees a partially written file. A failed write or
+// rename is logged and otherwise ignored: these files are announcements,
+// not constraints. Call without s.store.mu.
+func (s *Service) writeGuestFileAtomic(ctx context.Context, l *Lease, path string, data []byte, mode os.FileMode) {
+	tmp := path + ".tmp"
+	if err := s.sub.WriteFile(ctx, l.SandboxID, tmp, data, mode); err != nil {
+		s.log.Printf("guest file: write %s into %s: %v", tmp, l.ID, err)
+		return
+	}
+	if err := s.sub.Rename(ctx, l.SandboxID, tmp, path); err != nil {
+		s.log.Printf("guest file: rename %s -> %s in %s: %v", tmp, path, l.ID, err)
 	}
 }
 
@@ -3552,6 +3656,15 @@ func (s *Service) LoadState(ctx context.Context) error {
 	// idle sweeps and the running gauge read, so a job that ended while
 	// the backend was down is noticed by the reconcile pass.
 	s.loadRunningJobsLocked(ctx, loaded)
+	// A backend that stopped mid-save wrote no version: a checkpoint
+	// build still "building" with no named row is marked failed (A7), so
+	// the orchestrator's later completion is an ordinary GC candidate or
+	// orphan.
+	if n, err := s.db.MarkUnnamedCheckpointsFailed(ctx); err != nil {
+		s.log.Printf("snapshot: mark unnamed checkpoints failed: %v", err)
+	} else if n > 0 {
+		s.log.Printf("snapshot: marked %d interrupted checkpoint build(s) failed", n)
+	}
 	return nil
 }
 
@@ -3683,6 +3796,7 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	// lock only for the lease set it needs; the kept rows live in the
 	// catalog.
 	s.UpdateKeptMetrics(context.Background())
+	s.UpdateNamedSnapshotMetrics(context.Background())
 	s.store.mu.Lock()
 }
 

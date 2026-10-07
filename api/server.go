@@ -215,6 +215,14 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Snapshot catalog (U11): list and delete the caller's builds.
 	s.mux.HandleFunc("GET /api/snapshots", s.handleSnapshots)
 	s.mux.HandleFunc("DELETE /api/snapshots/{build_id}", s.handleSnapshotDelete)
+	// Named snapshots (2.7, #83): save a lease as a named snapshot, and
+	// list/show/delete/retune the owner's named snapshots. The {name...}
+	// wildcard accepts a slash in the name and an @version suffix.
+	s.mux.HandleFunc("POST /api/sandboxes/{id}/snapshots", s.handleLeaseSnapshotSave)
+	s.mux.HandleFunc("GET /api/named-snapshots", s.handleNamedSnapshotsList)
+	s.mux.HandleFunc("GET /api/named-snapshots/{name...}", s.handleNamedSnapshotShow)
+	s.mux.HandleFunc("PUT /api/named-snapshots/{name...}", s.handleNamedSnapshotKeep)
+	s.mux.HandleFunc("DELETE /api/named-snapshots/{name...}", s.handleNamedSnapshotDelete)
 	// Admin endpoints (U10): drain, undrain and crash reconcile. Auth is
 	// done in api/admin.go (ADMIN_TOKEN is not a consumer token, so
 	// authMiddleware lets /api/admin/ through).
@@ -587,6 +595,11 @@ func normalizePath(p string) string {
 			}
 			return "/api/users/:id"
 		}
+	}
+	// Named-snapshot names are high-cardinality and caller-chosen: the
+	// request counters keep the route, not one series per name.
+	if strings.HasPrefix(p, "/api/named-snapshots/") {
+		return "/api/named-snapshots/:name"
 	}
 	return p
 }
@@ -1865,30 +1878,26 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	args := buildShellArgs(req.Cmd, req.Cwd)
 	execEnv := requestEnv(lease, req.Env)
-	// Stage this request's secrets (#80) before the command runs. The
-	// cleanup below runs on every exit path — including a half-failed
-	// staging — so nothing exec-time outlives the request.
-	defer func() {
-		if len(execSecrets) > 0 {
-			// The command is done: its secrets go. A name that shadows a
-			// create-time secret gets the lease's value re-written, so the
-			// shadowed file outlives the command like every other
-			// create-time secret.
-			s.svc.removeSecrets(lease.SandboxID, sortedSecretNames(execSecrets))
-			if create := s.svc.createSecretsFor(lease.ID); len(create) > 0 {
-				var shadowed []string
-				for name := range execSecrets {
-					if _, ok := create[name]; ok {
-						shadowed = append(shadowed, name)
-					}
-				}
-				if len(shadowed) > 0 {
-					s.svc.restageSecrets(lease.SandboxID, shadowed, create)
-				}
-			}
-		}
-	}()
 	if len(execSecrets) > 0 {
+		// The per-lease secrets gate (2.7, #83 B2): take it before
+		// looking at the files, so a save that holds it makes this exec
+		// 409 lease_busy rather than letting it stage a secret into the
+		// checkpoint. Mark the names staged maximally before writing the
+		// files.
+		if !s.svc.secretsGate.beginStaging(lease.ID) {
+			w.Header().Set("Retry-After", "5")
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "a named snapshot save is in progress; retry", "code": "lease_busy"})
+			return
+		}
+		defer s.svc.secretsGate.endStaging(lease.ID)
+		// The cleanup runs inside the gate: it is registered after
+		// beginStaging, and its re-stage of shadowed create-time secrets
+		// takes the gate itself, so it cannot race a save's scrub (R2). The
+		// cleanup runs on every exit path — including a half-failed
+		// staging — so nothing exec-time outlives the request.
+		defer s.svc.cleanupExecSecrets(lease, execSecrets)
+		s.svc.markExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
+		defer s.svc.unmarkExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
 		if err := s.svc.stageSecrets(r.Context(), lease.SandboxID, execSecrets); err != nil {
 			// The error names a secret file name at most, never a value.
 			s.svc.log.Printf("exec: stage secrets %s: %v", lease.SandboxID, err)

@@ -62,6 +62,11 @@ type testSub struct {
 	// probe execs the fake served (spoond-5ca).
 	rootfsProbeMu sync.Mutex
 	rootfsProbes  int
+
+	// scrubLeftover, when set, makes the secrets-scrub exec leave that
+	// file behind and report it: it exercises the save's scrub_failed
+	// abort (2.7, #83 B1/S2).
+	scrubLeftover string
 }
 
 // LastStart returns the most recent Start request.
@@ -150,6 +155,23 @@ func (ts *testSub) RootfsProbeCalls() int {
 
 func (ts *testSub) exec(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {
 	args := req.Args
+	if len(args) == 3 && args[0] == "/bin/bash" && args[2] == secretsScrubScript {
+		removed, left, err := ts.Fake.ScrubSecrets(sandboxID)
+		if err != nil {
+			return substrate.ExecResult{Stderr: err.Error(), ExitCode: 1}
+		}
+		if ts.scrubLeftover != "" {
+			// Simulate a file the scrub could not remove: the save must
+			// abort rather than checkpoint it.
+			_ = ts.Fake.WriteFile(context.Background(), sandboxID, secretsDir+"/"+ts.scrubLeftover, []byte("x"), 0o600)
+			left = append(left, ts.scrubLeftover)
+		}
+		out := strings.Join(removed, "\n") + "\n" + scrubSeparator + "\n" + strings.Join(left, "\n")
+		if len(left) > 0 {
+			out += "\n"
+		}
+		return substrate.ExecResult{Stdout: out, ExitCode: 0}
+	}
 	if len(args) == 3 && args[0] == "sh" && args[2] == integrityProbe {
 		if reason, bad := ts.probeFail[sandboxID]; bad || ts.probeFailAll {
 			return substrate.ExecResult{Stdout: "PROBE_FAIL " + reason + "\n", ExitCode: 1}

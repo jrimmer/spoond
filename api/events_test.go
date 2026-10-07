@@ -856,6 +856,7 @@ func TestEventTypesDocumented(t *testing.T) {
 		LeaseSuspended:     "suspended",
 		LeaseResumed:       "resumed",
 		LeaseCheckpointed:  "checkpointed",
+		LeaseSnapshotSaved: "snapshot_saved",
 		LeaseRecovered:     "recovered",
 		LeaseLost:          "lost",
 		LeaseRestarted:     "restarted",

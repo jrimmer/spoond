@@ -302,7 +302,10 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
 		`DROP TABLE IF EXISTS lease_jobs`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)`,
+		`DROP TABLE IF EXISTS named_snapshots`,
+		`DROP TABLE IF EXISTS named_snapshot_names`,
+		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -366,7 +369,10 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE lease_kept_builds`,
 		`DROP TABLE IF EXISTS lease_jobs`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16)`,
+		`DROP TABLE IF EXISTS named_snapshots`,
+		`DROP TABLE IF EXISTS named_snapshot_names`,
+		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -437,8 +443,11 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN priority`,
 		`ALTER TABLE leases DROP COLUMN preempted_at`,
 		`DROP TABLE IF EXISTS lease_jobs`,
+		`DROP TABLE IF EXISTS named_snapshots`,
+		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16)`,
+		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
@@ -494,8 +503,11 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 	}
 	for _, stmt := range []string{
 		`DROP TABLE IF EXISTS lease_jobs`,
+		`DROP TABLE IF EXISTS named_snapshots`,
+		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16)`,
+		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -519,5 +531,63 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 	}
 	if row.IdleSuspend != -1 {
 		t.Fatalf("idle_suspend after migration = %d, want -1 (the host default)", row.IdleSuspend)
+	}
+}
+
+// TestMigration17NamedSnapshotsOnV16Database builds a database by hand at
+// version 16 (one existing lease row) and opens it: migration 17 must
+// apply, adding the named_snapshots and named_snapshot_names tables and
+// the leases.snapshot_build_id column defaulted empty (2.7, #83).
+func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v16.db")
+	{
+		db, err := Open(path) // applies every migration
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind to version 16: drop what migration 17 added and its row, so
+	// the next Open applies 0017 for real.
+	db16, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS named_snapshots`,
+		`DROP TABLE IF EXISTS named_snapshot_names`,
+		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
+		`DELETE FROM schema_migrations WHERE version = 17`,
+	} {
+		if _, err := db16.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	if _, err := db16.Exec(
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		 VALUES ('lease-v16', 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'running')`); err != nil {
+		t.Fatalf("seed v16 lease: %v", err)
+	}
+	db16.Close()
+
+	db, err := Open(path) // migration 17 applies here
+	if err != nil {
+		t.Fatalf("open v16 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	row, err := db.GetLease(context.Background(), "lease-v16")
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if row.SnapshotBuildID != "" {
+		t.Fatalf("snapshot_build_id after migration = %q, want empty", row.SnapshotBuildID)
+	}
+	// The named tables exist and are writable.
+	if _, err := db.InsertNamedSnapshot(context.Background(), NamedSnapshotRow{
+		Owner: "alice", Name: "warm", BuildID: "b1", CreatedAt: time.Now(),
+	}, 3); err != nil {
+		t.Fatalf("insert named snapshot after migration: %v", err)
 	}
 }

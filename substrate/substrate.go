@@ -68,6 +68,7 @@ type Sandbox struct {
 
 type NodeInfo struct {
 	Status            string // "healthy" | "draining" | "unhealthy" | "standby" | "shutting_down"
+	Version           string // orchestrator build version ("" when unknown)
 	RunningSandboxes  int
 	OutstandingWork   int
 	HugepagesTotal    uint64
@@ -180,6 +181,10 @@ type Substrate interface {
 	// MakeDir creates path and any missing parents. ErrNotFound when the
 	// sandbox is unknown.
 	MakeDir(ctx context.Context, sandboxID, path string, mode os.FileMode) error
+	// Rename moves oldPath to newPath, replacing newPath. It backs the
+	// atomic guest-file writes (2.7, #83): write a temp file, rename it
+	// over the target. ErrNotFound when the source does not exist.
+	Rename(ctx context.Context, sandboxID, oldPath, newPath string) error
 	// Remove deletes path; recursive removes non-empty directories.
 	Remove(ctx context.Context, sandboxID, path string, recursive bool) error
 }

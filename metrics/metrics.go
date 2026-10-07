@@ -118,6 +118,10 @@ type BackendMetrics struct {
 	KeptBuildsBytes prometheus.Gauge // summed size_bytes over kept builds of live leases
 	KeptBuilds      prometheus.Gauge // pin count over live leases
 
+	// Named snapshots (2.7, #83): versions and their recorded disk bytes.
+	NamedSnapshots     prometheus.Gauge // named snapshot version rows
+	NamedSnapshotBytes prometheus.Gauge // summed size_bytes over named snapshot versions
+
 	// Held-lease limits (2.1): automatic actions on held leases
 	HeldActions *prometheus.CounterVec // {rule,action}: idle/stale/expiry/pressure/critical × suspend/release/expire
 
@@ -424,6 +428,14 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "kept_builds",
 		Help: "Kept checkpoints of live leases (pins; a build pinned twice counts once per lease).",
 	})
+	m.NamedSnapshots = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "named_snapshots",
+		Help: "Named snapshot versions stored (2.7, #83).",
+	})
+	m.NamedSnapshotBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "named_snapshot_bytes",
+		Help: "Disk bytes held by named snapshot versions (summed recorded size_bytes).",
+	})
 
 	// Held-lease limits (2.1): automatic actions on held leases.
 	m.HeldActions = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -532,6 +544,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 		m.GCOrphansReaped, m.GCOrphanBytesReaped,
 		m.KeptBuildsBytes, m.KeptBuilds,
+		m.NamedSnapshots, m.NamedSnapshotBytes,
 		m.HeldActions,
 		m.PreemptionsTotal, m.PreemptedLeases,
 		m.IdleSuspendsTotal,
