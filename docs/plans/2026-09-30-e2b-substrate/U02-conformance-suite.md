@@ -83,6 +83,10 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 | `CONFORMANCE_PROXY_SECRET` | yes (may be empty) | the backend's `PROXY_AUTH_SECRET`; empty when the backend runs without forward-auth |
 | `CONFORMANCE_PROXY_SUFFIX` | yes | `.sandbox.example.com` |
 | `CONFORMANCE_GUEST_SERVICE` | yes | host service address guests use (see N6) |
+| `CONFORMANCE_MIXED_PRIVATE` | vm2 | private (LAN) IP a restricted lease allowlists together with a public domain (N9). **No default**: when unset (or `CONFORMANCE_MIXED_BLOCKED_PRIVATE` unset), N9 skips so a run never probes an assumed LAN address |
+| `CONFORMANCE_MIXED_PRIVATE_PORT` | no | the TLS port of `CONFORMANCE_MIXED_PRIVATE` (N9). Default `443` |
+| `CONFORMANCE_MIXED_DOMAIN` | no | public domain the same restricted lease allowlists (N9). Default `example.com` |
+| `CONFORMANCE_MIXED_BLOCKED_PRIVATE` | vm2 | private IP the same restricted lease does **not** allowlist; a connection to it must be blocked (N9). **No default**: N9 skips with `CONFORMANCE_MIXED_PRIVATE` when unset |
 
 ## Running
 
@@ -332,6 +336,20 @@ For every N test, a helper `canTCP(id, host, port) bool` runs:
   - `10.0.0.11:18891` for staging;
   - `10.0.0.11:8891` for production on E2B;
   - `10.43.0.1:8891` on forkd.
+- **`TestN9_MixedRestrictedAllowlist`** (skips unless
+  `CONFORMANCE_MIXED_PRIVATE` and `CONFORMANCE_MIXED_BLOCKED_PRIVATE` are
+  set, so a run never probes an assumed LAN address): create `py-base` with
+  `restricted` and `egress_allowlist: [CONFORMANCE_MIXED_PRIVATE,
+  CONFORMANCE_MIXED_DOMAIN]` (default domain `example.com`, port
+  `CONFORMANCE_MIXED_PRIVATE_PORT` default `443`).
+  1. `canTCP(CONFORMANCE_MIXED_PRIVATE, CONFORMANCE_MIXED_PRIVATE_PORT) = yes`
+     — a domain in the allowlist must not break the allow-listed private IP
+     (spoond-4pa).
+  2. `canTCP(CONFORMANCE_MIXED_DOMAIN, 443) = yes`.
+  3. `canTCP(www.google.com, 443) = no` — an unlisted public host stays
+     blocked.
+  4. `canTCP(CONFORMANCE_MIXED_BLOCKED_PRIVATE, 443) = no` — an unlisted
+     private address stays blocked.
 
 ### Group R — restarts and crashes (only with `CONFORMANCE_DESTRUCTIVE=1`)
 

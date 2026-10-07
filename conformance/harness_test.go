@@ -89,6 +89,22 @@ func loadConfig() bool {
 	}
 	cfg.Destructive = os.Getenv("CONFORMANCE_DESTRUCTIVE") == "1"
 	cfg.SecondToken = os.Getenv("CONFORMANCE_SECOND_TOKEN")
+	// The mixed-allowlist case has no LAN-independent defaults: an
+	// unset private address means the case skips (vm2 sets all of these).
+	// MixedDomain keeps a public default, which needs no LAN.
+	cfg.MixedPrivate = os.Getenv("CONFORMANCE_MIXED_PRIVATE")
+	cfg.MixedDomain = envOr("CONFORMANCE_MIXED_DOMAIN", "example.com")
+	cfg.MixedBlockedPrivate = os.Getenv("CONFORMANCE_MIXED_BLOCKED_PRIVATE")
+	cfg.MixedPrivatePort = 443
+	if p := os.Getenv("CONFORMANCE_MIXED_PRIVATE_PORT"); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n <= 0 || n > 65535 {
+			fmt.Fprintf(os.Stderr, "conformance: bad CONFORMANCE_MIXED_PRIVATE_PORT %q\n", p)
+			ok = false
+		} else {
+			cfg.MixedPrivatePort = n
+		}
+	}
 	images := envOr("CONFORMANCE_IMAGES", "py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla")
 	for _, name := range strings.Split(images, ",") {
 		if name = strings.TrimSpace(name); name != "" {

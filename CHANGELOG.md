@@ -53,6 +53,18 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A restricted allowlist that mixes an IP and a domain keeps the IP
+  reachable.** The guest's `allowed_cidrs` gained the DNS fallback as a
+  bare `8.8.8.8` whenever the allowlist named any domain; the
+  orchestrator's layer-2 egress decision parses `allowed_cidrs` with
+  `net.ParseCIDR`, so that one entry made every connection that reached
+  the loop — including an allow-listed private IP with no matching SNI —
+  fail with a TLS EOF (`curl` 000; `--resolve` did not help). The
+  fallback is now `8.8.8.8/32`. On the orchestrator side (fork patch
+  `fix/private-allowance-domain-path`), a domain that resolves to an
+  allow-listed private address is accepted on the SNI path, so an
+  allow-listed LAN name works together with an allow-listed LAN IP;
+  everything not explicitly allowed is still refused.
 - **A create refused while the node drains says when to retry.** The
   `503 draining` answer (during a planned orchestrator restart) now
   carries `Retry-After: 30`, like the burst-reserve and preemption 503s.
