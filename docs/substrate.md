@@ -152,7 +152,9 @@ spec's fixed decision D4); spoond makes both cases as harmless as it can.
   start, every 30 s, and as soon as the orchestrator answers again,
   `reconcileCrash` compares the leases with the sandboxes that survived:
   a lease with a checkpoint is resumed from it (same sandbox id, state
-  `recovered`); a lease without one becomes `lost` and answers `410` on
+  `recovered`); a lease without one becomes `lost` and answers `409`
+  (`code: lease_lost`, with the reason and the `DELETE` that frees the
+  quota) on
   exec, stream, proxy and SSH until it is deleted. Leases are never
   marked lost when the sandbox list itself cannot be read.
 - **Leases with a checkpoint interval are checkpointed periodically**

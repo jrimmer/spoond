@@ -334,7 +334,9 @@ held-lease action — `last_action` (`"rule/action"`, e.g.
 ### `GET /api/leases/{id}` — lease detail
 The same object as a list row plus `state`, `recovered_from` (RFC 3339 or
 `""`), `last_checkpoint_at` and `kept_builds` — the checkpoints the lease
-pinned with `{"keep":true}` (#126), oldest keep first:
+pinned with `{"keep":true}` (#126), oldest keep first. A lease in the
+`lost` state also carries `lost_at` (RFC 3339) and `lost_reason` (the
+cause the `lost` event reported; see [Lost leases](#lost-leases)):
 
 ```json
 "kept_builds": [
@@ -356,7 +358,10 @@ scoped to this lease's owner.
 behaves exactly like `running` — it marks a lease the crash reconcile
 resumed from a checkpoint, and keeps showing `recovered` until the lease
 is suspended or restarted. `lost` means the sandbox died with no
-checkpoint; those leases answer `410` and should be deleted.
+checkpoint (or its recovery failed); the detail carries `lost_reason`,
+the cause the `lost` event reported, and every call on the lease answers
+`409` with `code: lease_lost` (see [Lost leases](#lost-leases)); the
+lease should be deleted to free its quota.
 
 A lost lease keeps its resume and checkpoint snapshots for a grace
 period after the loss — 7 days for a persistent lease, 1 day otherwise
@@ -427,6 +432,35 @@ cat /run/spoond/generation   # e.g. 2
 cat /run/spoond/lease-id     # e.g. 8f3a1c…
 ```
 
+### Lost leases
+
+A lease becomes `lost` when the crash reconcile finds its sandbox gone
+and cannot recover it: it had no checkpoint, or its recovery from one
+failed. The reconcile emits a `lost` event whose `detail` is the reason
+(e.g. `no checkpoint to recover from; the running state is gone`,
+`recovery from checkpoint <build> failed: <err>`, or `root disk
+unreadable (I/O errors)` when the rootfs probe found the disk dead) and
+stamps the same text as `lost_reason` (persisted, migration 0019).
+
+A lost lease's sandbox is gone for good and its quota is still charged.
+Every call that acts on it — exec, background exec, files, guest dial,
+stream, proxy, stat, resume, restart, suspend, keepalive, checkpoint,
+snapshot save, restore, crash-test, clone, fork, tag, comment, holder,
+checkpoint-policy, idle-policy, network, share — answers `409 Conflict`
+with the reason and the way out:
+
+```json
+{
+  "error": "the substrate lost this lease's sandbox: no checkpoint to recover from; the running state is gone; DELETE the lease to free its quota",
+  "code": "lease_lost"
+}
+```
+
+`GET /api/leases/{id}` returns `state: "lost"` and the `lost_reason`
+field, so a client can show the cause. `DELETE /api/leases/{id}` frees
+the lease's quota (the snapshot builds a kept build pinned follow the
+GC's normal grace period).
+
 ### `GET /api/names/{name}` — resolve by name
 
 `{"id": "<lease-id>", "name": …, "image": …}` for a friendly name set
@@ -463,8 +497,9 @@ Response `200 OK`:
 {"stdout": "…", "stderr": "…", "exit": 0}
 ```
 
-`409` if the lease is suspended (resume it first); `410` if it is
-`lost`, or if the sandbox no longer exists on the substrate; `429` when
+`409` if the lease is suspended (resume it first) or `lost` (see
+[Lost leases](#lost-leases)); `410` if the sandbox no longer exists on
+the substrate; `429` when
 the per-owner concurrent exec/stream cap is reached. (Exec does not wait for or take the lease's lifecycle lock; its concurrency
 guard is the per-owner cap, which yields `429`. A busy lease shows up only
 as the `409` below.)
@@ -481,7 +516,8 @@ checkpoint, a suspend or a restart), the orchestrator briefly reports
 its sandbox missing; for a large guest a checkpoint can take a couple of
 minutes. Exec, stat, guest dial and the file routes then answer `409`
 with `Retry-After: 5`, not `410`: retry. `410` means the sandbox is gone
-with nothing in flight.
+with nothing in flight (a lease marked `lost` answers the `409
+lease_lost` below instead).
 
 #### Background exec (2.6, #135)
 
@@ -497,7 +533,8 @@ Response `202 Accepted` as soon as the process has started:
 ```
 
 Without `background` nothing changes. A suspended lease still answers
-`409` and a `lost` one `410`. At most `MAX_RUNNING_JOBS_PER_LEASE`
+`409` and a `lost` one `409` with `code: lease_lost` (see [Lost
+leases](#lost-leases)). At most `MAX_RUNNING_JOBS_PER_LEASE`
 (default 16) jobs may run at once per lease; past it the request answers
 `429`.
 
@@ -597,7 +634,8 @@ file content, and anyone else gets the usual `404`. Every call counts
 as activity for the idle sweeper. A suspended lease answers `409` on
 every file route (resume it first), except one suspended by
 `idle_suspend`, which is resumed first and then served (see
-[Idle reclamation](#idle-reclamation)); a `lost` lease answers `410`. File
+[Idle reclamation](#idle-reclamation)); a `lost` lease answers `409`
+with `code: lease_lost` (see [Lost leases](#lost-leases)). File
 counts and sizes are capped at **256 MiB**: a bigger upload is refused
 with `413` before anything is written, and a bigger download with
 `413` instead of the bytes.
@@ -734,7 +772,9 @@ Errors: `400` port out of range or not a number, `403` port 49983 (envd,
 the guest's management port), `404` unknown lease or not the owner's,
 `409` suspended (resume it first — except a lease the idle sweep
 suspended, which is resumed first and then dialed; see
-[Idle reclamation](#idle-reclamation)), `410` lost, `429` when the owner's 16
+[Idle reclamation](#idle-reclamation)), `409` with `code: lease_lost`
+for a lost
+lease (see [Lost leases](#lost-leases)), `429` when the owner's 16
 concurrent dials are already open, `502` when the lease has no running
 sandbox or the guest port refuses the connection.
 
@@ -865,8 +905,9 @@ The build must be this lease's newest checkpoint or a build it pinned
 with `{"keep":true}`; another lease's checkpoint, another owner's build
 and pause builds all answer `404`, like a lease the caller cannot see.
 Works on a running or a suspended lease; a lease lost in a substrate
-crash answers `410` like every other route (restore does not resurrect
-it); `409` while another operation is in flight; a substrate capacity
+crash answers `409` with `code: lease_lost` like every other route
+(restore does not resurrect it; see [Lost leases](#lost-leases)); `409`
+while another operation is in flight; a substrate capacity
 failure maps to `503`. Restoring a suspended lease brings a running
 sandbox (and its hugepages) back, so it re-passes the owner's memory
 quota (#128): `429` when the charge would pass `max_mib` — the lease
@@ -984,14 +1025,16 @@ backend runs after a real crash (see [operations.md](operations.md#crash-recover
 with a checkpoint the lease comes back from its newest one (generation
 +1, state `recovered`, event `recovered`; files newer than the
 checkpoint are gone); without one it is marked `lost` (event `lost`)
-and answers `410` from then on. A `crash_test` event comes first, with
+and answers `409` with `code: lease_lost` from then on. A `crash_test`
+event comes first, with
 the detail `crashed by its owner` or `crashed by an admin`, so a reader
 of the event stream can tell a test from a real crash.
 
 It touches only that one lease: no other lease, no warm-pool sweep, no
 peer refresh and no release. The recovery runs to the end even if the
 client hangs up. `409` while another operation is in flight or while
-the lease is suspended (nothing is running to crash), `410` for a lease
+the lease is suspended (nothing is running to crash), `409` with `code:
+lease_lost` for a lease
 already lost, `404` for an unknown or released lease. Response `200`:
 
 ```json
@@ -1182,7 +1225,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
 | `snapshot_saved` | `POST /api/leases/{id}/snapshots` saved the lease as a named snapshot (2.7, #83) | `saved as <name>@<version> · <size> · <duration>`, e.g. `saved as spoond/warm@4 · 2.1 GiB · 820 ms` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
-| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume), or its root disk answered I/O errors (rootfs liveness probe) | the reason; `root disk unreadable (I/O errors)` for a probe-detected dead disk |
+| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume), or its root disk answered I/O errors (rootfs liveness probe) | the reason, e.g. `no checkpoint to recover from; the running state is gone`, `recovery from checkpoint <build> failed: <err>` or `root disk unreadable (I/O errors)`; the same text is stored as `lost_reason` and returned by `GET` and every `409 lease_lost` (see [Lost leases](#lost-leases)) |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
 | `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |

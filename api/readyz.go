@@ -25,7 +25,7 @@ const (
 	readyzCacheFor     = 5 * time.Second
 	// The dashboard's danger thresholds (cmd/spoond-dash/render.go):
 	// the snapshot disk is in danger at ≥ 90 % used and the hugepage
-	// pool at ≥ 92 % used. Readiness fails past them, like the banner.
+	// pool at ≥ 92 % used. Readiness fails past them, like the panel.
 	readyzDiskUsedDangerPct = 90.0
 	readyzHugeUsedDangerPct = 92.0
 )

@@ -51,7 +51,7 @@ func TestLeaseRoundTrip(t *testing.T) {
 		ExposedIP:   "10.42.0.9", Comment: "hello", State: "suspended",
 		ResumeBuildID: "b-2", LastCheckpointBuildID: "b-1",
 		LastCheckpointAt: base.Add(2 * time.Minute), RecoveredFrom: base,
-		LostAt: base.Add(3 * time.Minute), Drained: true,
+		LostAt: base.Add(3 * time.Minute), LostReason: "no checkpoint", Drained: true,
 		Holder: "ci-job-42", HolderUrl: "https://ci.example.com/jobs/42",
 		Class: "guaranteed",
 	}
@@ -83,6 +83,7 @@ func TestLeaseRoundTrip(t *testing.T) {
 	updated.RecoveredFrom = time.Time{}
 	updated.Drained = false
 	updated.LostAt = time.Time{} // leaving the lost state clears it
+	updated.LostReason = ""      // and so does the reason
 	updated.Holder = ""          // holder cleared: normal sweeping
 	updated.HolderUrl = ""
 	if err := db.UpsertLease(ctx, updated); err != nil {
@@ -306,7 +307,8 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -374,7 +376,8 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -450,7 +453,8 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
@@ -511,7 +515,8 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN idle_suspend`,
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -564,7 +569,8 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`DROP TABLE IF EXISTS named_snapshot_names`,
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18)`,
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -594,5 +600,67 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		Owner: "alice", Name: "warm", BuildID: "b1", CreatedAt: time.Now(),
 	}, 3); err != nil {
 		t.Fatalf("insert named snapshot after migration: %v", err)
+	}
+}
+
+// TestMigration19LostReasonOnV18Database builds a database at version 18
+// (one existing lease row) and opens it: migration 19 must apply, adding
+// the leases.lost_reason column defaulted empty, so a lease lost before
+// the column existed answers without naming a cause.
+func TestMigration19LostReasonOnV18Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v18.db")
+	{
+		db, err := Open(path) // applies every migration
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind to version 18: drop what migration 19 added and its row, so
+	// the next Open applies 0019 for real.
+	db18, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`DELETE FROM schema_migrations WHERE version = 19`,
+	} {
+		if _, err := db18.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	if _, err := db18.Exec(
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		 VALUES ('lease-v18', 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'lost')`); err != nil {
+		t.Fatalf("seed v18 lease: %v", err)
+	}
+	db18.Close()
+
+	db, err := Open(path) // migration 19 applies here
+	if err != nil {
+		t.Fatalf("open v18 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	row, err := db.GetLease(context.Background(), "lease-v18")
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if row.LostReason != "" {
+		t.Fatalf("lost_reason after migration = %q, want empty", row.LostReason)
+	}
+	// The column is writable through the upsert.
+	row.LostReason = "no checkpoint to recover from"
+	if err := db.UpsertLease(context.Background(), row); err != nil {
+		t.Fatalf("upsert with a reason: %v", err)
+	}
+	again, err := db.GetLease(context.Background(), "lease-v18")
+	if err != nil {
+		t.Fatalf("get lease after upsert: %v", err)
+	}
+	if again.LostReason != "no checkpoint to recover from" {
+		t.Fatalf("lost_reason after upsert = %q", again.LostReason)
 	}
 }

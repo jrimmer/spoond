@@ -764,18 +764,23 @@ func TestJobStartOnSuspendedLease(t *testing.T) {
 	}
 }
 
-// TestJobStartOnLostLease: a background exec on a lost lease is 410.
+// TestJobStartOnLostLease: a background exec on a lost lease is 409
+// lease_lost.
 func TestJobStartOnLostLease(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	id, lease, _ := createJobLease(t, ts, svc)
 	svc.store.mu.Lock()
 	lease.setState("lost")
+	lease.LostReason = "substrate crash"
 	svc.saveLeaseLocked(lease)
 	svc.store.mu.Unlock()
 
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
-	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("lost background exec = %d, want 410", resp.StatusCode)
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("lost background exec = %d, want 409", resp.StatusCode)
+	}
+	if body["code"] != "lease_lost" {
+		t.Fatalf("code = %v, want lease_lost", body["code"])
 	}
 }
 

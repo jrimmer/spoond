@@ -227,8 +227,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A lease lost in a substrate crash has no sandbox to proxy to (U10).
-	if lease.State == "lost" {
-		writeError(w, http.StatusGone, lostLeaseMessage)
+	// 409 lease_lost carries the reason and points at DELETE.
+	if !s.ensureLive(w, lease) {
 		return
 	}
 	// The target is the sandbox's host address; the orchestrator's

@@ -40,6 +40,19 @@ pre.grid > span.gr { display: block; white-space: pre; }
 .g-id    { color: var(--title); }
 .g-spark { color: var(--spark); }
 .g-link  { color: var(--link); text-decoration: underline; cursor: pointer; }
-.g-banner { color: var(--banner); font-weight: 700; }
 /* Links carry the holder text; keep them inside the row's flow. */
 a.g-link { display: inline; }
+
+/* The notifications panel's dismiss control: a × injected by
+   static/js/notifications.js at each message row's right edge. The row is
+   the positioning context so the control sits on the panel's right border
+   rather than after the text. The terminal draws the panel without it. */
+[data-notice-id] { position: relative; }
+[data-notice-id] [data-dismiss] {
+  position: absolute;
+  right: 1ch;
+  color: var(--dim);
+  cursor: pointer;
+}
+[data-notice-id] [data-dismiss]:hover,
+[data-notice-id] [data-dismiss]:focus { color: var(--bad); outline: none; }

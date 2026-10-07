@@ -26,7 +26,7 @@ var fixedNow = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 
 // sampleSnapshot is the frame the golden tests draw: every panel
 // populated, every branch of the layout exercised, nothing wrong (the
-// banner tests below add the triggers).
+// notice tests below add the triggers).
 func sampleSnapshot() Snapshot {
 	return Snapshot{
 		At: "12:00:00", Version: "0.4.2", BackendUp: 9 * time.Minute,
@@ -234,7 +234,8 @@ func healthySnapshot() Snapshot {
 
 // TestDownUnitFramePassesCheck: the ✗ the services panel draws for a
 // unit that is not active must be in the Check set, or every draw with
-// a down unit (exactly the condition that raises the banner) fails.
+// a down unit (exactly the condition that raises the notification)
+// fails.
 func TestDownUnitFramePassesCheck(t *testing.T) {
 	s := sampleSnapshot()
 	s.Services = append(s.Services, Service{Name: "spoond-runner", State: "failed"})
@@ -299,103 +300,162 @@ func TestVersionLabel(t *testing.T) {
 	}
 }
 
-// TestBannerAbsentWhenWell: nothing wrong, no banner rows — the frame
-// starts with the panels directly.
-func TestBannerAbsentWhenWell(t *testing.T) {
-	if rows := bannerRows(healthySnapshot(), fixedNow); len(rows) != 0 {
-		t.Fatalf("all is well, banner rows = %q", rows)
+// TestNoticesAbsentWhenWell: nothing wrong, no notification rows — the
+// panel is never drawn, so the frame starts with the panels directly.
+func TestNoticesAbsentWhenWell(t *testing.T) {
+	if rows := notices(healthySnapshot()); len(rows) != 0 {
+		t.Fatalf("all is well, notices = %+v", rows)
 	}
 }
 
-// TestBannerTriggers covers one trigger each: a unit not active, a lost
-// lease (named with its owner, or counted when the table lacks it), free
-// hugepages and snapshot disk past the danger level, and a held lease
-// whose lapsed hold got it suspended.
-func TestBannerTriggers(t *testing.T) {
+// TestNoticeTriggers covers one trigger each: a unit not active, free
+// hugepages and snapshot disk past the danger level, and kept
+// checkpoints past their warn share. Each carries a stable id from its
+// trigger and a severity.
+func TestNoticeTriggers(t *testing.T) {
 	cases := []struct {
 		name string
 		mut  func(*Snapshot)
+		id   string
+		sev  string
 		want string
 	}{
 		{"unit down", func(s *Snapshot) {
 			s.Services = []Service{{Name: "spoond-runner", State: "failed"}}
-		}, "unit spoond-runner is failed"},
-		{"lost lease", func(s *Snapshot) {
-			s.ByState = map[string]int{"lost": 1}
-			s.Rows = []LeaseRow{{ID: "e151d2653d", Owner: "honey", State: "lost"}}
-		}, "lost lease e151d2653d (honey)"},
-		{"lost lease not in the table", func(s *Snapshot) {
-			s.ByState = map[string]int{"lost": 2}
-		}, "2 lost lease(s)"},
+		}, "unit:spoond-runner", "bad", "unit spoond-runner is failed"},
 		{"hugepages danger", func(s *Snapshot) {
 			s.HugeUsedPct, s.HugeFreeGiB = 95.0, 1.2
-		}, "hugepages"},
+		}, "hugepages", "bad", "hugepages"},
 		{"snapshot disk danger", func(s *Snapshot) {
 			s.DiskUsedPct = 93.0
-		}, "snapshot disk"},
+		}, "disk", "bad", "snapshot disk"},
 		{"kept bytes past warn pct", func(s *Snapshot) {
 			s.KeptDiskPct = 41.0
-		}, "kept checkpoints use 41% of the snapshot disk"},
-		{"lapsed hold suspended", func(s *Snapshot) {
-			s.Rows = []LeaseRow{{ID: "abc123", Owner: "honey", State: "suspended", LastAction: "expiry/suspend_lapsed", LastActionAt: fixedNow.Add(-2 * time.Hour)}}
-		}, "held lease abc123 (honey): hold lapsed"},
-		{"preempted leases", func(s *Snapshot) {
-			s.Preempted = 3
-		}, "3 burst lease(s) preempted"},
+		}, "kept-disk", "warn", "kept checkpoints use 41% of the snapshot disk"},
 	}
 	for _, tc := range cases {
 		s := healthySnapshot()
 		tc.mut(&s)
-		rows := bannerRows(s, fixedNow)
+		rows := notices(s)
 		if len(rows) == 0 {
-			t.Errorf("%s: banner absent, want %q", tc.name, tc.want)
+			t.Errorf("%s: notices absent, want %q", tc.name, tc.want)
 			continue
 		}
 		found := false
-		for _, r := range rows {
-			if strings.Contains(r, tc.want) {
+		for _, n := range rows {
+			if strings.Contains(n.Text, tc.want) {
 				found = true
+				if n.ID != tc.id {
+					t.Errorf("%s: notice id = %q, want %q", tc.name, n.ID, tc.id)
+				}
+				if n.Severity != tc.sev {
+					t.Errorf("%s: severity = %q, want %q", tc.name, n.Severity, tc.sev)
+				}
 			}
 		}
 		if !found {
-			t.Errorf("%s: banner %q lacks %q", tc.name, rows, tc.want)
-		}
-		for _, s := range bannerSegs(rows) {
-			if s[0].Text != "▲ " {
-				t.Errorf("%s: attention row lacks the ▲ marker: %q", tc.name, s[0].Text)
-			}
+			t.Errorf("%s: notices %+v lack %q", tc.name, rows, tc.want)
 		}
 	}
 }
 
-// TestHeldActionOlderThan24hIsNoTrigger: the 24 h window is exclusive.
-func TestHeldActionOlderThan24hIsNoTrigger(t *testing.T) {
-	s := healthySnapshot()
-	s.Rows = []LeaseRow{{ID: "abc123", LastAction: "stale/release", LastActionAt: fixedNow.Add(-25 * time.Hour)}}
-	if rows := bannerRows(s, fixedNow); len(rows) != 0 {
-		t.Fatalf("25 h old action must not trigger: %q", rows)
-	}
-}
-
-// TestBannerKeptUnderWarnPctIsQuiet: kept checkpoints under
-// KEPT_DISK_WARN_PCT (default 40 %) draw no attention row, and 0 disables
-// the row entirely (#126).
-func TestBannerKeptUnderWarnPctIsQuiet(t *testing.T) {
+// TestKeptDiskWarnPctQuiet: kept checkpoints under KEPT_DISK_WARN_PCT
+// (default 40 %) draw no notification, and 0 disables the trigger
+// entirely while a custom pct raises it (#126).
+func TestKeptDiskWarnPctQuiet(t *testing.T) {
 	s := healthySnapshot()
 	s.KeptDiskPct = 39.9
-	if rows := bannerRows(s, fixedNow); len(rows) != 0 {
-		t.Fatalf("39.9%% kept must not trigger: %q", rows)
+	if rows := notices(s); len(rows) != 0 {
+		t.Fatalf("39.9%% kept must not trigger: %+v", rows)
 	}
 	t.Setenv("KEPT_DISK_WARN_PCT", "0")
 	s.KeptDiskPct = 99
-	if rows := bannerRows(s, fixedNow); len(rows) != 0 {
-		t.Fatalf("KEPT_DISK_WARN_PCT=0 must disable the kept row: %q", rows)
+	if rows := notices(s); len(rows) != 0 {
+		t.Fatalf("KEPT_DISK_WARN_PCT=0 must disable the kept notice: %+v", rows)
 	}
 	t.Setenv("KEPT_DISK_WARN_PCT", "10")
 	s.KeptDiskPct = 12
-	rows := bannerRows(s, fixedNow)
-	if len(rows) != 1 || !strings.Contains(rows[0], "kept checkpoints use 12% of the snapshot disk") {
-		t.Fatalf("custom warn pct 10: rows = %q", rows)
+	rows := notices(s)
+	if len(rows) != 1 || rows[0].ID != "kept-disk" || !strings.Contains(rows[0].Text, "kept checkpoints use 12% of the snapshot disk") {
+		t.Fatalf("custom warn pct 10: notices = %+v", rows)
+	}
+}
+
+// TestNoticeIDsAreStable: two snapshots with the same active trigger keep
+// the same id across refreshes, so a viewer's dismissal follows one
+// trigger.
+func TestNoticeIDsAreStable(t *testing.T) {
+	a, b := healthySnapshot(), healthySnapshot()
+	a.Services = []Service{{Name: "spoond-runner", State: "failed"}}
+	b.Services = []Service{{Name: "spoond-runner", State: "failed"}, {Name: "e2b-guard", State: "active"}}
+	na, nb := notices(a), notices(b)
+	if len(na) != 1 || len(nb) != 1 || na[0].ID != nb[0].ID || na[0].ID != "unit:spoond-runner" {
+		t.Fatalf("ids not stable: %+v vs %+v", na, nb)
+	}
+}
+
+// TestNoticePanelDrawn: the panel is a framed, full-width box titled
+// Notifications, drawn between the header and the first panel, with one
+// row per message and an element id on the panel and each message row.
+func TestNoticePanelDrawn(t *testing.T) {
+	s := healthySnapshot()
+	s.Services = []Service{{Name: "spoond-runner", State: "failed"}}
+	s.HugeUsedPct, s.HugeFreeGiB = 95.0, 1.2
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	plain := g.Plain()
+	if !strings.Contains(plain, "┌─ Notifications ") {
+		t.Fatalf("Notifications panel title missing:\n%s", plain)
+	}
+	// Placed directly under the header's two rows (headerRows == 2).
+	rows := strings.Split(plain, "\n")
+	if !strings.Contains(rows[headerRows()], "┌─ Notifications ") {
+		t.Fatalf("panel not the first thing under the header:\n%s", strings.Join(rows[:6], "\n"))
+	}
+	var panel, byUnit, huge bool
+	for _, r := range strings.Split(g.HTML(), "\n") {
+		if strings.Contains(r, `data-id="notifications"`) {
+			panel = true
+		}
+		if strings.Contains(r, `data-id="notice:unit:spoond-runner"`) {
+			byUnit = true
+		}
+		if strings.Contains(r, `data-id="notice:hugepages"`) {
+			huge = true
+		}
+	}
+	if !panel || !byUnit || !huge {
+		t.Fatalf("panel/row ids missing: panel=%v unit=%v huge=%v", panel, byUnit, huge)
+	}
+}
+
+// TestNoticePanelAbsentWhenNoMessages: with nothing wrong the panel is not
+// drawn at all — no border, no title.
+func TestNoticePanelAbsentWhenNoMessages(t *testing.T) {
+	p := Draw(healthySnapshot(), DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(p, "Notifications") {
+		t.Fatalf("empty panel drawn:\n%s", p)
+	}
+}
+
+// TestNoticesDropLeaseTriggers: a lost lease, a preempted burst count and
+// a lapsed-hold suspended lease are NOT system messages; they stay
+// visible in the leases table with their state (■ lost, ·p / preempted,
+// lapsed hold) and draw no notification row.
+func TestNoticesDropLeaseTriggers(t *testing.T) {
+	s := healthySnapshot()
+	s.ByState = map[string]int{"running": 1, "lost": 1}
+	s.Preempted = 3
+	s.Rows = []LeaseRow{
+		{ID: "lostlease01", Owner: "honey", State: "lost"},
+		{ID: "heldlease01", Owner: "agent", State: "suspended",
+			LastAction: "expiry/suspend_lapsed", LastActionAt: fixedNow.Add(-2 * time.Hour)},
+	}
+	if rows := notices(s); len(rows) != 0 {
+		t.Fatalf("per-lease triggers must not raise notifications: %+v", rows)
+	}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "lostlease0") || !strings.Contains(p, "■ lost") {
+		t.Fatalf("lost lease left the leases table:\n%s", p)
 	}
 }
 
@@ -1168,15 +1228,24 @@ func TestServicesFillTallerPanel(t *testing.T) {
 	}
 }
 
-// TestBannerQuietCases: what does not need a person stays off the
-// strip: a held lease running again after a rule suspended it, and suspensions that are not a
-// held-lease rule's (preemption has its own row while preempted; a
-// hand, drain or idle_suspend pause is expected).
-func TestBannerQuietCases(t *testing.T) {
+// TestNoticesDropLeaseStates: what is a lease's own business stays off the
+// panel: a rule-suspended lease running again, preempted leases, a
+// hand/drain/idle_suspend pause and a lapsed hold all raise nothing.
+func TestNoticesDropLeaseStates(t *testing.T) {
 	cases := []struct {
 		name string
 		mut  func(*Snapshot)
 	}{
+		{"lost lease", func(s *Snapshot) {
+			s.ByState = map[string]int{"lost": 1}
+			s.Rows = []LeaseRow{{ID: "abc123", Owner: "honey", State: "lost"}}
+		}},
+		{"preempted leases", func(s *Snapshot) {
+			s.Preempted = 3
+		}},
+		{"lapsed hold suspended", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "expiry/suspend_lapsed", LastActionAt: fixedNow.Add(-time.Hour)}}
+		}},
 		{"rule-suspended lease running again", func(s *Snapshot) {
 			s.Rows = []LeaseRow{{ID: "abc123", State: "running", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-time.Hour)}}
 		}},
@@ -1202,8 +1271,8 @@ func TestBannerQuietCases(t *testing.T) {
 	for _, c := range cases {
 		snap := healthySnapshot()
 		c.mut(&snap)
-		if rows := bannerRows(snap, fixedNow); len(rows) != 0 {
-			t.Errorf("%s: banner rows = %q, want none", c.name, rows)
+		if rows := notices(snap); len(rows) != 0 {
+			t.Errorf("%s: notices = %+v, want none", c.name, rows)
 		}
 	}
 }
@@ -1222,16 +1291,46 @@ func TestLeaseCellsNeverRunTogether(t *testing.T) {
 	}
 }
 
-// TestLostRowsCapped: past maxLostRows the remaining lost leases share
-// one counting row.
-func TestLostRowsCapped(t *testing.T) {
-	s := healthySnapshot()
-	s.ByState = map[string]int{"lost": 5}
-	for _, id := range []string{"a1", "a2", "a3", "a4", "a5"} {
-		s.Rows = append(s.Rows, LeaseRow{ID: id, Owner: "honey", State: "lost"})
+// TestReconcileDismissed: the pure core of the browser's dismissal
+// logic. A dismissed id stays hidden while active; a dismissal whose
+// trigger cleared is forgotten (so it shows again when the id fires
+// again), and only active undismissed ids are visible.
+func TestReconcileDismissed(t *testing.T) {
+	cases := []struct {
+		name              string
+		active, dismissed []string
+		wantKept          []string
+		wantVisible       []string
+	}{
+		{"all visible", []string{"hugepages", "disk"}, nil, nil, []string{"hugepages", "disk"}},
+		{"one dismissed", []string{"hugepages", "disk"}, []string{"hugepages"}, []string{"hugepages"}, []string{"disk"}},
+		{"all dismissed", []string{"hugepages"}, []string{"hugepages"}, []string{"hugepages"}, nil},
+		// The trigger cleared: the dismissal is forgotten and the id shows
+		// again if it fires later.
+		{"cleared trigger forgets", []string{"disk"}, []string{"hugepages"}, nil, []string{"disk"}},
+		{"stale dismissed ignored", []string{"disk"}, []string{"hugepages", "gone"}, nil, []string{"disk"}},
 	}
-	rows := lostRows(s)
-	if len(rows) != maxLostRows+1 || rows[maxLostRows] != "2 more lost lease(s)" {
-		t.Fatalf("lost rows = %q", rows)
+	for _, tc := range cases {
+		kept, visible := reconcileDismissed(tc.active, tc.dismissed)
+		if !equalStrings(kept, tc.wantKept) {
+			t.Errorf("%s: kept = %q, want %q", tc.name, kept, tc.wantKept)
+		}
+		if !equalStrings(visible, tc.wantVisible) {
+			t.Errorf("%s: visible = %q, want %q", tc.name, visible, tc.wantVisible)
+		}
 	}
+}
+
+// equalStrings compares two string slices order-sensitively, treating nil
+// and empty as equal.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

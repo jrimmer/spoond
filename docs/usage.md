@@ -139,8 +139,8 @@ true}` to pin it). spoond takes **no periodic checkpoints by default**
 `CHECKPOINT_INTERVAL_MINS` is `0` (never). Being held does not change
 that. Only kept checkpoints count against `MAX_KEPT_PER_LEASE`; a
 periodic checkpoint is never kept. The checkpoint response's `at` is
-the checkpoint's time. A lease lost with no checkpoint answers `410` —
-delete it and start again.
+the checkpoint's time. A lease lost with no checkpoint answers `409`
+`lease_lost` — delete it and start again, which frees its quota.
 
 ## Clones and forks (snapshot branching)
 

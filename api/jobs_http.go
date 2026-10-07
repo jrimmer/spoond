@@ -70,6 +70,10 @@ func (s *Server) jobsTarget(w http.ResponseWriter, r *http.Request) *Lease {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return nil
 	}
+	// Jobs live in the guest: a lost lease has none to list or reach.
+	if !s.ensureLive(w, lease) {
+		return nil
+	}
 	return lease
 }
 

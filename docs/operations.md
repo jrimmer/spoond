@@ -81,8 +81,8 @@ endpoints:
 ```
 
 `[CERTIFICATE_EXPIRATION] > 72h` pages while there is still time to
-renew — ahead of the 30-day expiry banner the dashboard draws for its
-own cert. If the gateway fronts a TLS listener of its own, give it the
+renew — ahead of the 30-day expiry the dashboard's own certificate
+counter shows. If the gateway fronts a TLS listener of its own, give it the
 same certificate condition on that endpoint.
 
 The dashboard listens on every interface by default (`DASH_ADDR`,
@@ -327,8 +327,8 @@ lease lives. Two caps keep pins from filling the disk (#126):
 `GET /api/leases/{id}` lists a lease's kept builds (id, size, kept_at);
 `spoond_kept_builds` and `spoond_kept_builds_bytes` report the totals
 over live leases. When kept bytes pass `KEPT_DISK_WARN_PCT` (default
-`40`) percent of the snapshot disk, the dashboard's attention strip says
-so and the notifier raises `disk.kept` (warn) — the held-lease
+`40`) percent of the snapshot disk, the dashboard's Notifications panel
+says so and the notifier raises `disk.kept` (warn) — the held-lease
 critical-disk rule never deletes a kept build, so unpinning stays with
 the owner.
 
@@ -504,8 +504,9 @@ allowances are refreshed.
 
 To the API and the gateway, `recovered` behaves exactly like `running`
 (`state` keeps showing it until the lease is suspended or restarted),
-while `lost` answers `410 {"error":"lease lost in a substrate crash;
-delete this lease"}` on exec, stream, proxy and SSH. `POST
+while `lost` answers `409` with `code: lease_lost`, the stored reason
+and the `DELETE` that frees the quota, on exec, stream, proxy and SSH
+(see [api.md](api.md#lost-leases)). `POST
 /api/admin/reconcile` runs the reconciliation on demand and returns
 `{"recovered":N,"lost":M}` (admin token).
 
@@ -528,8 +529,8 @@ Keeps are capped (`MAX_KEPT_PER_LEASE`, default `4`, `0` = no cap): a
 keep on a lease at the cap answers `409` and takes nothing — see
 [Kept checkpoints and their caps](#kept-checkpoints-and-their-caps) in
 the GC section. `KEPT_DISK_WARN_PCT` (default `40`, `0` = off) is when
-kept bytes alone start drawing attention: the dashboard's strip and the
-notifier's `disk.kept` both read it.
+kept bytes alone start drawing attention: the dashboard's Notifications
+panel and the notifier's `disk.kept` both read it.
 
 ### Crash test
 
@@ -713,7 +714,7 @@ each request's env.
 | `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
 | `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
 | lease shows `preempted` / `‖ preempted` on the dashboard | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
-| `410 lease lost in a substrate crash` | the lease had no checkpoint when the orchestrator died | delete the lease; nothing to resume |
+| `409 lease_lost` (`code: lease_lost`) | the lease's sandbox died with no checkpoint (or its recovery failed); the message names the reason | `DELETE` the lease to free its quota; nothing to resume |
 | `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
 | `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
 | `exec failed` / `agent unreachable` | envd in the guest is not answering (sandbox died under us, node overloaded) | `spoond doctor`; if the sandbox is really gone the next reconcile marks the lease |
@@ -990,12 +991,17 @@ uses, baked-at) beside the systemd units, a refusals-and-failures row
 (auth, quota, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and
 the events panel (the backend's lease event stream) — plus
-an attention strip above the panels (one ▲ row per trigger, only when
-something needs a person): a unit not active, a lost lease, free
-hugepages or snapshot disk past the danger level, kept checkpoints past
-`KEPT_DISK_WARN_PCT` of the snapshot disk (#126), preempted burst
-leases, or a held lease that a held-lease rule (idle, pressure, a lapsed
-hold) suspended and that is still suspended. TLS certificate expiry is
+a **Notifications** panel below the header (only when there is a
+message): spoond's own system messages, one row each — a unit not
+active, free hugepages or snapshot disk past the danger level, or kept
+checkpoints past `KEPT_DISK_WARN_PCT` of the snapshot disk (#126). Each
+message has a stable id from its trigger, a severity (warn/bad) and a
+`×` the viewer can dismiss for their own browser (`localStorage`, no
+server state; a dismissed message stays hidden while its trigger stays
+active and returns if the trigger clears and fires again). Per-lease
+trouble is not a dashboard message: the viewer cannot act on a lease,
+so spoond tells the lease's initiator itself (the lease event stream
+and the API's `409 lease_lost` with `lost_reason`). TLS certificate expiry is
 left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
 `kept N (X GiB)` when any build is pinned. A status line under the panels carries the headline numbers
 and the clock. The browser page is the grid in a `<pre>` (Datastar

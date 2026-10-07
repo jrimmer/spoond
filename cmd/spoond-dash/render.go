@@ -1,8 +1,9 @@
 // The dashboard on the character grid (#110): one fixed-width grid holds
-// the whole frame — header, legend, the attention strip when something
-// needs a person, then a column of panels. The same grid feeds Plain
-// (golden tests), ANSI (spoond top) and HTML (the page's <pre>), so the
-// terminal and the browser draw one picture from one snapshot.
+// the whole frame — header, the Notifications panel for spoond system
+// messages when any are active, then a column of panels. The same grid
+// feeds Plain (golden tests), ANSI (spoond top) and HTML (the page's
+// <pre>), so the terminal and the browser draw one picture from one
+// snapshot.
 //
 // Styles are names, not colours: Plain drops them, ANSI maps them (see
 // topStyles in top.go), HTML to g-<name> classes styled once in the
@@ -34,13 +35,15 @@ const (
 
 // Extra is every non-ASCII rune the dashboard draws beyond grid.Glyphs:
 // ✓ an active unit and ✗ one that is not, · separator, ═ the header's
-// rule, ▲ the attention strip's marker, ┄ the rules inside the capacity
-// and host panels, ■ a lost lease, ∞ a persistent lease's remaining
-// time, and the leases panel's marks — the run-state glyphs ▶ running,
-// ‖ suspended and ⭘ recovered, and the hold marks ◆ held and ◉ lapsed
-// hold. It is passed to grid.Check by every renderer, and every rune is
-// asserted to be in the shipped JetBrains Mono (TestExtraGlyphsInFont).
-const Extra = "✓✗·═▲┄■∞◉⭘" + stateGlyphs
+// rule, ┄ the rules inside the capacity and host panels, ■ a lost lease,
+// ∞ a persistent lease's remaining time, and the leases panel's marks —
+// the run-state glyphs ▶ running, ‖ suspended and ⭘ recovered, and the
+// hold marks ◆ held and ◉ lapsed hold. It is passed to grid.Check by
+// every renderer, and every rune is asserted to be in the shipped
+// JetBrains Mono (TestExtraGlyphsInFont). The Notifications panel's ×
+// dismiss control is injected by the page's JS, not drawn on the grid,
+// so it is not in this set.
+const Extra = "✓✗·═┄■∞◉⭘" + stateGlyphs
 
 // stateGlyphs are the leases panel's run-state and hold glyphs: ▶ ‖ for
 // the states with one of their own, ◆ ◉ for the hold marks that lead
@@ -109,107 +112,90 @@ func fitItems(segs []grid.Seg, w int) []grid.Seg {
 	return segs
 }
 
-// bannerRows returns the attention strip's rows — one per trigger, in
-// the banner style — or nil when nothing needs a person (the strip is
-// then never drawn; the frame just starts with the panels). The rows
-// carry the message only; the ▲ marker is prepended at draw time.
-// Triggers:
+// Notice is one spoond system message on the dashboard's notifications
+// panel: a stable ID drawn from its trigger, a severity ("warn" or
+// "bad") and the message text. The panel is for spoond's own system
+// messages only and is dismissable per viewer; it carries no per-lease
+// call to action, because the dashboard viewer cannot act on a lease. A
+// lost, preempted or lapsed-hold lease is the lease initiator's to deal
+// with, and spoond tells that initiator through the API and the lease
+// event stream, not through the dashboard.
+type Notice struct {
+	ID       string
+	Severity string // "warn" or "bad"
+	Text     string
+}
+
+// notices builds the notifications panel's messages from the snapshot,
+// in draw order, or nil when there are none (the panel is then never
+// drawn). Triggers:
 //
 //   - a systemd unit not active,
-//   - a lost lease,
 //   - free hugepages or snapshot disk past the danger level,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
-//     (#126),
-//   - a held lease whose hold lapsed and that the expiry rule
-//     suspended, still suspended (from last_action): it is released at
-//     the stale limit unless someone renews it. A held lease the idle
-//     or pressure rule suspended is not one — it resumes on its next
-//     use and the leases table shows it suspended — nor is a pause by
-//     hand, by the drain, by preemption (it has its own row while
-//     preempted) or by the lease's own idle_suspend. The row clears as
-//     soon as the lease runs again.
-func bannerRows(s Snapshot, now time.Time) []string {
-	var rows []string
+//     (#126).
+//
+// Each message's ID comes from its trigger ("unit:<name>", "hugepages",
+// "disk", "kept-disk"), so a viewer's dismissal can follow one trigger
+// across refreshes. The leases table still shows a lost lease (■ lost),
+// a preempted burst lease and a lapsed hold; those are not messages
+// here.
+func notices(s Snapshot) []Notice {
+	var out []Notice
 	for _, svc := range s.Services {
 		if svc.State != "active" {
-			rows = append(rows, fmt.Sprintf("unit %s is %s", svc.Name, svc.State))
+			out = append(out, Notice{ID: "unit:" + svc.Name, Severity: "bad",
+				Text: fmt.Sprintf("unit %s is %s", svc.Name, svc.State)})
 		}
-	}
-	rows = append(rows, lostRows(s)...)
-	if s.Preempted > 0 {
-		rows = append(rows, fmt.Sprintf("%d burst lease(s) preempted", s.Preempted))
 	}
 	if s.HugeFreeGiB > 0 && s.HugeUsedPct >= 92 {
-		rows = append(rows, fmt.Sprintf("hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB))
+		out = append(out, Notice{ID: "hugepages", Severity: "bad",
+			Text: fmt.Sprintf("hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB)})
 	}
 	if s.DiskUsedPct >= 90 {
-		rows = append(rows, fmt.Sprintf("snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct))
+		out = append(out, Notice{ID: "disk", Severity: "bad",
+			Text: fmt.Sprintf("snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct)})
 	}
 	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
-		rows = append(rows, fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct))
+		out = append(out, Notice{ID: "kept-disk", Severity: "warn",
+			Text: fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct)})
 	}
-	for _, r := range s.Rows {
-		if lapsedHoldSuspended(r) {
-			rows = append(rows, fmt.Sprintf("held lease %s (%s): hold lapsed %s ago - renew it", r.ID, r.Owner, dur(now.Sub(r.LastActionAt))))
-		}
-	}
-	return rows
+	return out
 }
 
-// maxLostRows caps the per-lease lost rows; past it the rest are
-// counted in one row, so a crash that drops many leases does not push
-// the panels off the screen.
-const maxLostRows = 3
-
-// lostRows names each lost lease and its owner — the owner has to
-// delete it (it still counts against their quota) — up to maxLostRows,
-// then one row for the rest. The count comes from ByState, so lost
-// leases the table does not list still count.
-func lostRows(s Snapshot) []string {
-	n := s.ByState["lost"]
-	if n == 0 {
-		return nil
+// reconcileDismissed is the pure core of the browser's dismissal logic
+// (static/js/notifications.js), kept here so the semantics are pinned by
+// a test: given the ids the server currently sends active and the ids the
+// viewer has dismissed, it returns the dismissals to keep (those still
+// active, in the order stored) and the ids that stay visible. A dismissal
+// whose id is no longer active is forgotten, so a trigger that clears and
+// fires again shows again. Keep this in step with the JS.
+func reconcileDismissed(active, dismissed []string) (kept, visible []string) {
+	activeSet := make(map[string]bool, len(active))
+	for _, id := range active {
+		activeSet[id] = true
 	}
-	var rows []string
-	for _, r := range s.Rows {
-		if r.State != "lost" || len(rows) == maxLostRows {
-			continue
-		}
-		rows = append(rows, fmt.Sprintf("lost lease %s (%s) - a substrate crash dropped it; its owner should delete it", r.ID, r.Owner))
-	}
-	if rest := n - len(rows); rest > 0 {
-		if len(rows) == 0 {
-			rows = append(rows, fmt.Sprintf("%d lost lease(s) - a substrate crash dropped them", n))
-		} else {
-			rows = append(rows, fmt.Sprintf("%d more lost lease(s)", rest))
+	keptSet := make(map[string]bool, len(dismissed))
+	for _, id := range dismissed {
+		if activeSet[id] && !keptSet[id] {
+			kept = append(kept, id)
+			keptSet[id] = true
 		}
 	}
-	return rows
-}
-
-// lapsedHoldSuspended reports whether r's hold lapsed and the expiry
-// rule (rule 3) suspended it or expired the hold of one already
-// suspended, and r is still suspended: it is released at the stale
-// limit unless someone renews the hold, so it waits on a person. The
-// idle and pressure rules (1 and 4) also suspend held leases, but those
-// resume on their next use and need nobody.
-func lapsedHoldSuspended(r LeaseRow) bool {
-	if r.State != "suspended" || r.LastActionAt.IsZero() {
-		return false
+	for _, id := range active {
+		if !keptSet[id] {
+			visible = append(visible, id)
+		}
 	}
-	switch r.LastAction {
-	case "expiry/suspend_lapsed", "expiry/expire":
-		return true
-	}
-	return false
+	return kept, visible
 }
 
 // DefaultKeptDiskWarnPct is the kept-checkpoint disk share (#126) past
-// which the attention strip warns, when KEPT_DISK_WARN_PCT is unset.
+// which the Notifications panel warns, when KEPT_DISK_WARN_PCT is unset.
 const DefaultKeptDiskWarnPct = 40.0
 
 // keptDiskWarnPct reads the kept-checkpoint disk-share warn level
-// (KEPT_DISK_WARN_PCT): a 0 disables the banner row; unset or an
+// (KEPT_DISK_WARN_PCT): a 0 disables the notification; unset or an
 // unparsable value means the default.
 func keptDiskWarnPct() float64 {
 	v := os.Getenv("KEPT_DISK_WARN_PCT")
@@ -223,9 +209,9 @@ func keptDiskWarnPct() float64 {
 	return p
 }
 
-// Draw renders the whole frame at width w. now timestamps the banner and
-// the ages; host names the node in the header. There is no history, so
-// the sparklines draw empty and the throughput title carries no window.
+// Draw renders the whole frame at width w. now timestamps the ages;
+// host names the node in the header. There is no history, so the
+// sparklines draw empty and the throughput title carries no window.
 // Goldens that need them call drawFrame directly.
 func Draw(s Snapshot, w int, now time.Time, host string) *grid.Grid {
 	g, err := drawFrame(s, nil, w, host, now, 0)
@@ -257,32 +243,17 @@ func (l *layout) histMinutes() int {
 	return int(math.Ceil(float64(l.histN) * l.interval.Minutes()))
 }
 
-// bannerSegs converts bannerRows' strings to the styled segments the
-// frame draws: one banner-styled row per trigger, each led by ▲.
-// Shared by Draw, the page/top renderers and the tests, so the strip is
-// styled one way.
-func bannerSegs(rows []string) [][]grid.Seg {
-	if len(rows) == 0 {
-		return nil
-	}
-	out := make([][]grid.Seg, len(rows))
-	for i, r := range rows {
-		out[i] = []grid.Seg{{Text: "▲ ", Style: "banner"}, {Text: r, Style: "banner"}}
-	}
-	return out
-}
-
 // drawFrame renders a snapshot plus history into the full frame at
 // width w: the shared entry point of Draw, the page, the stream and
 // spoond top. host names the node in the header; now timestamps the
-// banner and the ages; interval is the scrape interval the history
-// points are spaced by (the throughput title's window; 0 when there is
-// none). It fails only when grid.Check rejects the finished frame (a
-// rune no renderer can draw) — the terminal path reports it instead of
-// printing a broken frame.
+// ages; interval is the scrape interval the history points are spaced by
+// (the throughput title's window; 0 when there is none). It fails only
+// when grid.Check rejects the finished frame (a rune no renderer can
+// draw) — the terminal path reports it instead of printing a broken
+// frame.
 func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration) (*grid.Grid, error) {
 	l := &layout{w: clamp(w, minW, maxW), host: host, now: now, s: s,
-		banner:   bannerSegs(bannerRows(s, now)),
+		notices:  notices(s),
 		histFn:   func(k string) []float64 { return hist[k] },
 		histN:    len(hist["running"]),
 		interval: interval,
@@ -302,11 +273,11 @@ const dashInterval = 2 * time.Second
 
 // layout assembles the grid panel by panel.
 type layout struct {
-	w      int
-	banner [][]grid.Seg
-	host   string
-	now    time.Time
-	s      Snapshot
+	w       int
+	notices []Notice
+	host    string
+	now     time.Time
+	s       Snapshot
 	// histFn serves the sparkline series; Draw leaves it nil (the
 	// sparklines then draw empty) and the page/top fill it from the
 	// collector's history.
@@ -319,7 +290,8 @@ type layout struct {
 	histN int
 }
 
-// assemble draws the header, the banner and every panel into one grid.
+// assemble draws the header, the notifications panel and every panel
+// into one grid.
 // panelsH is the height of the capacity and host panels together: as
 // one side-by-side band (the taller panel's height) or as two stacked
 // panels.
@@ -346,7 +318,7 @@ func (l *layout) drawPanels(g *grid.Grid, y int) int {
 
 func (l *layout) assemble() *grid.Grid {
 	h := headerRows() +
-		len(l.banner) + boolInt(len(l.banner) > 0) + // banner rows + a blank row under them
+		l.noticesH() +
 		l.panelsH() + l.throughputH() + l.leasesH() +
 		l.imagesServicesH() + l.refusalsH() + l.eventsH() +
 		1 // the status line
@@ -355,19 +327,7 @@ func (l *layout) assemble() *grid.Grid {
 	l.header(g, 0)
 	y := headerRows()
 
-	// One attention strip row per trigger, painted full width in the
-	// banner style, then a blank row — only when something needs a
-	// person.
-	for _, segs := range l.banner {
-		g.Segs(0, y, segs, l.w)
-		g.Mark(0, y, l.w, 1, "banner")
-		g.PaintRow(y, "banner")
-		y++
-	}
-	if len(l.banner) > 0 {
-		y++
-	}
-
+	y = l.drawNotices(g, y)
 	y = l.drawPanels(g, y)
 	y = l.throughput(g, y)
 	y = l.leases(g, y)
@@ -388,8 +348,8 @@ type statusItem struct {
 
 // statusItems builds the status line's entries left to right: leases,
 // hugepages, snapshot disk, the certificate's remaining days and the
-// units. The styles reuse the thresholds the meters and the attention
-// strip already use. The certificate is left out when there is none.
+// units. The styles reuse the thresholds the meters and the other
+// panels already use. The certificate is left out when there is none.
 func statusItems(s Snapshot, now time.Time) []statusItem {
 	items := []statusItem{
 		{"leases", fmt.Sprintf("%d/%d", s.Running, s.Limit), "ok"},
@@ -539,6 +499,39 @@ func (l *layout) panel(g *grid.Grid, x, y, w, h int, title, id string) int {
 	return y + h
 }
 
+// noticesH is the notifications panel's height: a top border carrying
+// the title, one row per message and a bottom border. 0 when there are
+// no messages, so the panel is never drawn.
+func (l *layout) noticesH() int {
+	if len(l.notices) == 0 {
+		return 0
+	}
+	return len(l.notices) + 2
+}
+
+// drawNotices draws the full-width Notifications panel at y, in the same
+// frame and title style as the other panels, and returns the row past
+// its bottom edge. Every row of the panel carries the element id
+// "notifications" and each message row its own ID ("notice:<id>"), so
+// the page can hide a dismissed message or the whole panel without any
+// server state; the terminal draws the panel unchanged.
+func (l *layout) drawNotices(g *grid.Grid, y int) int {
+	if len(l.notices) == 0 {
+		return y
+	}
+	top := y
+	y = l.panel(g, 0, y, l.w, l.noticesH(), "Notifications", "notifications")
+	// panel marks only the interior; the page hides the whole panel when
+	// every message is dismissed, borders included.
+	g.Mark(0, top, l.w, l.noticesH(), "notifications")
+	for i, n := range l.notices {
+		row := top + 1 + i
+		g.Text(2, row, sanitize(n.Text), n.Severity, l.w-4)
+		g.Mark(0, row, l.w, 1, "notice:"+sanitize(n.ID))
+	}
+	return y
+}
+
 // wide reports whether the frame carries the capacity and host panels
 // side by side; below it they stack full width, capacity first.
 func (l *layout) wide() bool { return l.w >= sideBySideW }
@@ -593,12 +586,12 @@ func contains(list []string, s string) bool {
 // holderLinks maps each lease row's y to its holder_url: the page
 // renderer swaps the row's link-styled span for a real anchor. Only
 // leases with a URL appear here. The row math must match assemble:
-// header (headerRows) + banner rows (+ a blank under them) + the panels above
+// header (headerRows) + the notifications panel + the panels above
 // leases, then the panel's title row, then one row per lease.
 func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 	l := &layout{w: clamp(w, minW, maxW), s: s, now: now,
-		banner: bannerSegs(bannerRows(s, now))}
-	base := headerRows() + len(l.banner) + boolInt(len(l.banner) > 0) +
+		notices: notices(s)}
+	base := headerRows() + l.noticesH() +
 		l.panelsH() + l.throughputH()
 	leaseY := base + 1 // + the leases panel's title row
 	var out []linkAt

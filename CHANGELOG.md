@@ -10,6 +10,43 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **The dashboard's notifications panel for spoond system messages.**
+  The old attention strip drew per-lease rows (a lost lease, the
+  preempted burst count, a lapsed hold) that the dashboard viewer cannot
+  act on; those leases stay visible in the leases table with their state
+  (lost, preempted, suspended). In their place, a bordered full-width
+  **Notifications** panel below the header draws spoond's own system
+  messages — a systemd unit not active, hugepages or snapshot disk past
+  the danger level, kept checkpoints past `KEPT_DISK_WARN_PCT` — each
+  with a stable id from its trigger and a severity. The panel is not
+  drawn at all when there are no undismissed messages. Each row carries
+  a `×` dismiss control; the dismissal is per viewer in `localStorage`
+  (try/catch-wrapped, works without it) keyed by the message id, stays
+  hidden while the trigger stays active and returns if the trigger
+  clears and fires again. No server state; the dashboard stays
+  read-only.
+- **Lost leases tell their initiator why and what to do.** A lease whose
+  sandbox a substrate crash (or a failed recovery) lost now records the
+  reason (`leases.lost_reason`, migration 0019) and returns it: the
+  `lost` lease event's `detail` carries it, `GET` shows `lost_reason`
+  beside `state: lost`, and any call on a lost lease answers `409` with
+  `code: lease_lost` and a message naming the substrate, the reason and
+  that `DELETE` frees the quota. This replaces the old `410` that named
+  no cause.
+
+### Changed
+
+- **A lost lease answers `409 lease_lost`, not `410`.** The old `410`
+  named no cause and gave the initiator nothing to act on; a lost lease
+  now records why (`leases.lost_reason`, migration 0019) and every call
+  names the substrate, the reason and the `DELETE` that frees the quota.
+  Scripts and clients that branch on `410` for a lost lease should
+  branch on `409` with `code: lease_lost`; a `410` still means the
+  sandbox is gone with nothing in flight. The new `lost_reason` field on
+  the lease object is additive (`omitempty`).
+
 ### Fixed
 
 - **A lost lease is released automatically once its grace period

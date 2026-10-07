@@ -139,6 +139,9 @@ func (s *Service) setHolderWithTTL(owner, id, holder, holderURL string, holdTTL 
 	if l == nil || l.Owner != owner || l.released {
 		return nil, errNotFound
 	}
+	if err := lostErr(l); err != nil {
+		return nil, err
+	}
 	now := s.now()
 	if holder == "" {
 		clearHoldLocked(l)
@@ -164,6 +167,9 @@ func (s *Service) renewHolder(owner, id, holder, holderURL string, holdTTL time.
 	l := s.store.leases[id]
 	if l == nil || l.Owner != owner || l.released {
 		return nil, errNotFound
+	}
+	if err := lostErr(l); err != nil {
+		return nil, err
 	}
 	now := s.now()
 	if holder == "" {

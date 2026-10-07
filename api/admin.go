@@ -416,12 +416,14 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				s.log.Printf("undrain: resume %s deferred after %d attempt(s) (admission refused): %v", l.ID, attempts, err)
 				return
 			}
+			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
 			s.store.mu.Lock()
+			setLostReason(l, reason)
 			l.setState("lost")
 			l.Drained = false
 			s.saveLeaseLocked(l)
 			s.store.mu.Unlock()
-			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err))
+			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 			// A lease started from a named snapshot no longer protects it
 			// once lost (#83 S5).
 			s.rerunSnapshotRetention(ctx, l)

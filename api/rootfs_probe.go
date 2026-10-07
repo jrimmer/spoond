@@ -345,7 +345,13 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	ctx, cancel := context.WithTimeout(context.Background(), crashTestTimeout)
 	defer cancel()
 	// The marker goes first: a stream reader sees why the recovery
-	// happened before the recovered/lost event that follows.
+	// happened before the recovered/lost event that follows. The reason is
+	// stamped on the lease now, so a lost lease answers with the root-disk
+	// cause even though the recovery event below carries its own detail.
+	s.store.mu.Lock()
+	setLostReason(l, "root disk unreadable (I/O errors)")
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "root disk unreadable (I/O errors)")
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {

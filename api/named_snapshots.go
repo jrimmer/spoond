@@ -739,6 +739,10 @@ func (s *Server) handleLeaseSnapshotSave(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !lease.live() {
+		if lease.State == "lost" {
+			writeLeaseLost(w, lease)
+			return
+		}
 		errLeaseNotLive().write(w)
 		return
 	}

@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 )
 
 // Crash recovery (U10 R16/D4): an orchestrator crash kills every
@@ -12,9 +14,95 @@ import (
 // ReconcileOrphans), every 30 s in the background, and immediately when
 // NodeInfo goes from failing to succeeding.
 
-// lostLeaseMessage is the 410 error body for a lease whose sandbox died
-// in a substrate crash.
-const lostLeaseMessage = "lease lost in a substrate crash; delete this lease"
+// leaseLostMessage builds the body of a 409 code:lease_lost response:
+// it says the substrate lost the sandbox, the stored reason, and that a
+// DELETE frees the quota.
+func leaseLostMessage(l *Lease) string {
+	msg := "the substrate lost this lease's sandbox"
+	if l != nil && l.LostReason != "" {
+		msg += ": " + l.LostReason
+	}
+	return msg + "; DELETE the lease to free its quota"
+}
+
+// writeLeaseLost answers 409 lease_lost for a lost lease: the caller
+// learns the substrate lost it, why, and that DELETE frees the quota.
+func writeLeaseLost(w http.ResponseWriter, l *Lease) {
+	writeLeaseLostMessage(w, leaseLostMessage(l))
+}
+
+// writeLeaseLostMessage writes the one 409 lease_lost body: the error
+// message and its code. Both spellings of the response (a lease in hand,
+// a *leaseLostError in flight) go through it, so they never drift.
+func writeLeaseLostMessage(w http.ResponseWriter, msg string) {
+	writeJSON(w, http.StatusConflict, map[string]string{
+		"error": msg,
+		"code":  "lease_lost",
+	})
+}
+
+// lostErr returns the 409 lease_lost error for a lease already lost, or
+// nil when the call may proceed. It is shared by the service operations
+// that touch a lease, so a lost lease is refused the same way everywhere
+// (the handlers map *leaseLostError onto the response). Call with
+// s.store.mu held.
+func lostErr(l *Lease) error {
+	if l.State == "lost" {
+		return &leaseLostError{msg: leaseLostMessage(l)}
+	}
+	return nil
+}
+
+// leaseLostError is the error a lease operation returns for a lost
+// lease: its message is the 409 lease_lost body (the substrate lost the
+// sandbox, the stored reason, and that DELETE frees the quota).
+type leaseLostError struct{ msg string }
+
+func (e *leaseLostError) Error() string { return e.msg }
+
+// ensureLive answers 409 lease_lost for a lost lease and reports whether
+// the call may proceed. Every route that can act on a lease calls it (or
+// the service reports the lost state through lostErr), so a lost lease is
+// refused the same way everywhere with the reason its loss event carried.
+func (s *Server) ensureLive(w http.ResponseWriter, l *Lease) bool {
+	if l.State == "lost" {
+		writeLeaseLost(w, l)
+		return false
+	}
+	return true
+}
+
+// writeLeaseLostErr answers 409 lease_lost for a service operation that
+// refused a lost lease (a *leaseLostError), and reports whether it did.
+func writeLeaseLostErr(w http.ResponseWriter, err error) bool {
+	var lost *leaseLostError
+	if errors.As(err, &lost) {
+		writeLeaseLostMessage(w, lost.Error())
+		return true
+	}
+	return false
+}
+
+// markLost records that a lease was lost and why: it enters the lost
+// state (stamping lost_at once, as setState does), stores the reason the
+// lost event carries, and returns that reason. The caller holds a lease
+// whose sandbox is already gone.
+func (s *Service) markLost(l *Lease, reason string) string {
+	s.store.mu.Lock()
+	setLostReason(l, reason)
+	l.setState("lost")
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
+	return reason
+}
+
+// setLostReason stamps l's loss reason once. A lease that dips in and out
+// of the lost state keeps the reason it first lost for, like LostAt.
+func setLostReason(l *Lease, reason string) {
+	if l.LostReason == "" && reason != "" {
+		l.LostReason = reason
+	}
+}
 
 // recoverySummary is the reconcileCrash result and the
 // POST /api/admin/reconcile response.
@@ -108,12 +196,10 @@ type recoveryOutcome struct {
 func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome {
 	if l.LastCheckpointBuildID == "" {
 		// No checkpoint to recover from: the running state is gone.
-		s.store.mu.Lock()
-		l.setState("lost")
-		s.saveLeaseLocked(l)
-		s.store.mu.Unlock()
+		reason := "no checkpoint to recover from; the running state is gone"
+		s.markLost(l, reason)
 		s.deleteSandboxRow(l.SandboxID)
-		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "no checkpoint to recover from; the running state is gone")
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 		s.log.Printf("recovery: lease %s lost (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
 		s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost in a crash; the job did not survive")
 		// A version this lost lease started from is no longer in use:
@@ -122,11 +208,9 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 		return recoveryOutcome{Result: "lost", Generation: l.Generation, State: l.State}
 	}
 	if err := s.recoverFromCheckpoint(ctx, l); err != nil {
-		s.store.mu.Lock()
-		l.setState("lost")
-		s.saveLeaseLocked(l)
-		s.store.mu.Unlock()
-		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, fmt.Sprintf("recovery from checkpoint %s failed: %v", l.LastCheckpointBuildID, err))
+		reason := fmt.Sprintf("recovery from checkpoint %s failed: %v", l.LastCheckpointBuildID, err)
+		s.markLost(l, reason)
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 		s.log.Printf("recovery: lease %s lost (checkpoint %s): %v", l.ID, formatRFC3339(l.LastCheckpointAt), err)
 		s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost in a crash; the job did not survive")
 		s.rerunSnapshotRetention(ctx, l)

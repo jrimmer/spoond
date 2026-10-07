@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,19 +253,24 @@ func TestCrashTestBusy409(t *testing.T) {
 	}
 }
 
-// TestCrashTestAlreadyLost410: a lease already lost answers 410.
-func TestCrashTestAlreadyLost410(t *testing.T) {
+// TestCrashTestAlreadyLost409: a lease already lost answers 409
+// lease_lost with the reason.
+func TestCrashTestAlreadyLost409(t *testing.T) {
 	ts, svc, _, _ := newCrashServer(t, true)
 	l := grantCrash(t, svc, false)
 	svc.store.mu.Lock()
 	l.setState("lost")
+	l.LostReason = "no checkpoint to recover from"
 	svc.store.mu.Unlock()
 	resp, body := doReq(t, "POST", crashURL(ts, l.ID), "token-a", nil)
-	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("lost crash = %d (%v), want 410", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("lost crash = %d (%v), want 409", resp.StatusCode, body)
 	}
-	if body["error"] != lostLeaseMessage {
-		t.Fatalf("error = %v, want %q", body["error"], lostLeaseMessage)
+	if body["code"] != "lease_lost" {
+		t.Fatalf("code = %v, want lease_lost", body["code"])
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "no checkpoint to recover from") {
+		t.Fatalf("error = %q, want the lost reason", msg)
 	}
 }
 

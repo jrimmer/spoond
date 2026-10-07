@@ -20,9 +20,11 @@ import (
 )
 
 // gridLine is one grid row as HTML: its row number (the element id is
-// r<N>) and its rendered spans.
+// r<N>), the panel/notice id its cells carry (""/"notifications"/
+// "notice:<id>"), and its rendered spans.
 type gridLine struct {
 	N    int
+	ID   string
 	HTML string
 }
 
@@ -41,9 +43,21 @@ func pageLines(g *grid.Grid, links []linkAt) []gridLine {
 	rows := strings.Split(g.HTML(), "\n")
 	out := make([]gridLine, len(rows))
 	for i, r := range rows {
-		out[i] = gridLine{N: i, HTML: applyLinks(r, i, links)}
+		out[i] = gridLine{N: i, ID: rowID(g, i), HTML: applyLinks(r, i, links)}
 	}
 	return out
+}
+
+// rowID returns the first non-empty grid cell id on row y: the panel or
+// notice id the renderer marked the row with. "" for a drawn row with no
+// id (the header, the status line).
+func rowID(g *grid.Grid, y int) string {
+	for x := 0; x < g.Cols(); x++ {
+		if id := g.At(x, y).ID; id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // applyLinks swaps the row's link-styled span for a real anchor when the
@@ -85,11 +99,24 @@ func applyLinks(row string, y int, links []linkAt) string {
 // template puts them inside its <pre>). The rows are blocks, so nothing
 // goes between them: a newline text node there drew a blank line under
 // every row and broke the box borders.
+//
+// A row the renderer marked with a notice or panel id also carries it as
+// data-notice-id / data-notifications on the wrapper, so the dismissal
+// script (static/js/notifications.js) can hide a message row or the whole
+// panel across a Datastar patch. A row-level attribute avoids colliding
+// with the cell runs' own data-id.
 func pageGrid(g *grid.Grid, links []linkAt) string {
 	lines := pageLines(g, links)
 	parts := make([]string, len(lines))
 	for i, l := range lines {
-		parts[i] = fmt.Sprintf(`<span class="gr" id="r%d">%s</span>`, l.N, l.HTML)
+		attr := ""
+		switch {
+		case strings.HasPrefix(l.ID, "notice:"):
+			attr = ` data-notice-id="` + html.EscapeString(strings.TrimPrefix(l.ID, "notice:")) + `"`
+		case l.ID == "notifications":
+			attr = ` data-notifications`
+		}
+		parts[i] = fmt.Sprintf(`<span class="gr" id="r%d"%s>%s</span>`, l.N, attr, l.HTML)
 	}
 	return strings.Join(parts, "")
 }

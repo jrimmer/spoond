@@ -156,10 +156,15 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 
 // writeResumeRefusal maps a failed resume onto the response the resume
 // route would give: a quota or burst-reserve refusal is 429/503 with a
-// Retry-After, a busy lease is 409, a lost sandbox 410/500 as usual. It
-// is shared by the resume route and the idle auto-resume paths so the
-// two cannot drift.
+// Retry-After, a busy lease is 409, a lost sandbox 409 lease_lost with
+// the reason. It is shared by the resume route and the idle auto-resume
+// paths so the two cannot drift.
 func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error) {
+	if writeLeaseLostErr(w, err) {
+		// The reason already lives in the error message; writeLeaseLostErr
+		// keeps it verbatim under code lease_lost.
+		return
+	}
 	switch {
 	case errors.Is(err, errNotPersistent):
 		writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")

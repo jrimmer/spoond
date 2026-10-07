@@ -48,7 +48,7 @@ type crashResult struct {
 // unknown route). Owner or admin; 404 for anyone else and for an unknown
 // or released lease. Refuses what a crash test must not touch: a busy
 // lease (409), a suspended lease (409: nothing is running to crash) and
-// an already lost lease (410).
+// an already lost lease (409 lease_lost).
 func (s *Server) handleCrashTest(w http.ResponseWriter, r *http.Request) {
 	if !s.svc.cfg.CrashTest {
 		writeError(w, http.StatusNotFound, "not found")
@@ -82,7 +82,7 @@ func (s *Server) handleCrashTest(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errSuspended):
 		writeError(w, http.StatusConflict, "lease is suspended; nothing is running to crash")
 	case errors.Is(err, errLost):
-		writeError(w, http.StatusGone, lostLeaseMessage)
+		writeLeaseLost(w, lease)
 	default:
 		s.svc.log.Printf("crash-test: lease %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "crash test failed")

@@ -135,7 +135,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `SNAPSHOT_KEEP_VERSIONS` | `3` | default versions a named snapshot keeps (`1`–`20`); the first save may override it per name and `PUT /api/named-snapshots/{name}` changes it later (#83) |
 | `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background exec jobs per lease; past it a start answers `429` (#135) |
 | `JOB_RETENTION_SECS` | `604800` | exited background-job records older than this (seconds) are pruned by the sweeper; running and lost records are kept (#135) |
-| `KEPT_DISK_WARN_PCT` | `40` | kept-checkpoint share of the snapshot disk past which the notifier's `disk.kept` check warns and the dashboard's strip shows a row (`0` = off; #126) |
+| `KEPT_DISK_WARN_PCT` | `40` | kept-checkpoint share of the snapshot disk past which the notifier's `disk.kept` check warns and the dashboard's Notifications panel shows a message (`0` = off; #126) |
 | `GC_DELETE` | `0` | `1` = the snapshot catalog GC actually deletes; default dry-run only logs candidates (see [operations.md](operations.md)) |
 | `ORPHAN_REAP` | `dryrun` | what the GC does with orphan build directories: `off`, `dryrun` (log only), or `quarantine` (move aside, delete after `ORPHAN_QUARANTINE_SECS`; see [operations.md](operations.md)) |
 | `ORPHAN_MIN_AGE_SECS` | `3600` | don't reap a build directory modified more recently than this (it may still be written; see [operations.md](operations.md)) |

@@ -67,6 +67,13 @@ type Lease struct {
 	// omitted while unset; the GC's lost-lease grace period counts from
 	// it.
 	LostAt time.Time `json:"lost_at,omitempty"`
+	// LostReason is why the lease was lost — the detail of its lost
+	// event, e.g. "no checkpoint to recover from; the running state is
+	// gone" or "root disk unreadable (I/O errors)". It is returned by
+	// the lease API as "lost_reason" and carried in every 409
+	// lease_lost response, so the initiator learns the cause. "" for a
+	// lease lost before the column existed.
+	LostReason string `json:"lost_reason,omitempty"`
 	// Drained marks a lease the admin drain paused (U10): undrain
 	// resumes exactly the drained leases.
 	Drained bool
@@ -199,6 +206,7 @@ func (l *Lease) setState(state string) {
 		return
 	}
 	l.LostAt = time.Time{}
+	l.LostReason = ""
 }
 
 // ShareMode selects which surfaces a share covers.
@@ -1437,6 +1445,9 @@ func (s *Service) keepAlive(owner, id string, ttl time.Duration) (*Lease, error)
 	if !ok || l.Owner != owner || l.released {
 		return nil, errNotFound
 	}
+	if err := lostErr(l); err != nil {
+		return nil, err
+	}
 	if !l.Persistent {
 		return nil, errNotPersistent
 	}
@@ -2142,6 +2153,10 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
+	if err := lostErr(l); err != nil {
+		s.store.mu.Unlock()
+		return nil, err
+	}
 	if !l.Persistent {
 		s.store.mu.Unlock()
 		return nil, errNotPersistent
@@ -2318,6 +2333,13 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 		s.store.mu.Unlock()
 		return nil, errLeaseBusy
 	}
+	// A lost lease cannot be resumed: its sandbox is gone and the crash
+	// reconcile already gave up on it. Return the reason so the caller
+	// answers 409 lease_lost.
+	if err := lostErr(l); err != nil {
+		s.store.mu.Unlock()
+		return nil, err
+	}
 	// A running lease has nothing to resume. Restoring its pause build
 	// again would roll the guest's memory back to that snapshot, so the
 	// resume is a no-op that returns the lease as it is.
@@ -2424,6 +2446,10 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	if l == nil || l.Owner != owner || l.released {
 		s.store.mu.Unlock()
 		return nil, errNotFound
+	}
+	if err := lostErr(l); err != nil {
+		s.store.mu.Unlock()
+		return nil, err
 	}
 	if l.busy {
 		s.store.mu.Unlock()
@@ -2710,6 +2736,10 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		s.store.mu.Unlock()
 		return nil, "", errNotFound
 	}
+	if err := lostErr(src); err != nil {
+		s.store.mu.Unlock()
+		return nil, "", err
+	}
 	if src.busy {
 		s.store.mu.Unlock()
 		return nil, "", errLeaseBusy
@@ -2793,6 +2823,10 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	if src == nil || src.Owner != owner || src.released {
 		s.store.mu.Unlock()
 		return nil, "", errNotFound
+	}
+	if err := lostErr(src); err != nil {
+		s.store.mu.Unlock()
+		return nil, "", err
 	}
 	if src.Suspended {
 		s.store.mu.Unlock()
@@ -2993,6 +3027,10 @@ func (s *Service) effectiveIdleSuspend(l *Lease) int64 {
 // effective seconds. Call without s.store.mu.
 func (s *Service) setIdlePolicy(l *Lease, secs int64) (*Lease, error) {
 	s.store.mu.Lock()
+	if err := lostErr(l); err != nil {
+		s.store.mu.Unlock()
+		return nil, err
+	}
 	l.IdleSuspend = secs
 	s.saveLeaseLocked(l)
 	effective := s.effectiveIdleSuspend(l)
@@ -3017,6 +3055,10 @@ func (s *Service) effectiveCheckpointInterval(l *Lease) int64 {
 // effective seconds. Call without s.store.mu.
 func (s *Service) setCheckpointPolicy(l *Lease, secs int64) (*Lease, error) {
 	s.store.mu.Lock()
+	if err := lostErr(l); err != nil {
+		s.store.mu.Unlock()
+		return nil, err
+	}
 	l.CheckpointInterval = secs
 	s.saveLeaseLocked(l)
 	effective := s.effectiveCheckpointInterval(l)
@@ -3084,6 +3126,9 @@ func (s *Service) setName(owner, id, name string) (*Lease, error) {
 	if l == nil || l.Owner != owner || l.released {
 		return nil, errNotFound
 	}
+	if err := lostErr(l); err != nil {
+		return nil, err
+	}
 	for _, other := range s.store.leases {
 		if other != l && other.Owner == owner && !other.released && other.Name == name {
 			return nil, fmt.Errorf("name %q already in use by lease %s", name, other.ID)
@@ -3107,6 +3152,9 @@ func (s *Service) setComment(owner, id, comment string) (*Lease, error) {
 	if l == nil || l.Owner != owner || l.released {
 		return nil, errNotFound
 	}
+	if err := lostErr(l); err != nil {
+		return nil, err
+	}
 	l.Comment = comment
 	s.saveLeaseLocked(l)
 	return l, nil
@@ -3121,6 +3169,10 @@ func (s *Service) setNetwork(ctx context.Context, owner, id, policy string, allo
 	if l == nil || l.Owner != owner || l.released {
 		s.store.mu.Unlock()
 		return nil, errNotFound
+	}
+	if err := lostErr(l); err != nil {
+		s.store.mu.Unlock()
+		return nil, err
 	}
 	if l.Suspended {
 		s.store.mu.Unlock()
@@ -3195,6 +3247,9 @@ func (s *Service) GrantShare(owner, leaseID, grantee string, mode ShareMode, ttl
 	if l == nil {
 		return fmt.Errorf("lease not found")
 	}
+	if err := lostErr(l); err != nil {
+		return err
+	}
 	if grantee == "" || grantee == owner {
 		return fmt.Errorf("grantee must be a different user")
 	}
@@ -3229,6 +3284,9 @@ func (s *Service) RevokeShare(owner, leaseID, grantee string) error {
 	l := s.lookup(owner, leaseID)
 	if l == nil {
 		return fmt.Errorf("lease not found")
+	}
+	if err := lostErr(l); err != nil {
+		return err
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
@@ -3392,6 +3450,11 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
 	if !l.LostAt.IsZero() {
 		m["lost_at"] = formatRFC3339(l.LostAt)
+	}
+	// The reason the lease was lost, so a GET names the cause beside the
+	// state (the same text every 409 lease_lost response carries).
+	if l.State == "lost" && l.LostReason != "" {
+		m["lost_reason"] = l.LostReason
 	}
 	kept := []map[string]any{}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
@@ -3615,6 +3678,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LastCheckpointAt:      l.LastCheckpointAt,
 		RecoveredFrom:         l.RecoveredFrom,
 		LostAt:                l.LostAt,
+		LostReason:            l.LostReason,
 		Drained:               l.Drained,
 		Holder:                l.Holder,
 		HolderUrl:             l.HolderUrl,
@@ -3670,6 +3734,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LastCheckpointAt:      r.LastCheckpointAt,
 		RecoveredFrom:         r.RecoveredFrom,
 		LostAt:                r.LostAt,
+		LostReason:            r.LostReason,
 		Drained:               r.Drained,
 		Holder:                r.Holder,
 		HolderUrl:             r.HolderUrl,
