@@ -132,6 +132,12 @@ type BackendMetrics struct {
 	JobsRunning     prometheus.Gauge       // background exec jobs currently running
 	JobsExitedTotal *prometheus.CounterVec // {result}: ok, error, lost
 
+	// Rootfs liveness probe (spoond-5ca): a running lease whose root
+	// block device answers I/O errors on an uncached read has lost its
+	// disk and is recovered like a crash.
+	RootfsProbeFailuresTotal prometheus.Counter // probe failures (transport, timeout or EIO)
+	RootfsDeadTotal          prometheus.Counter // leases declared dead after consecutive probe failures
+
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
 	LeasesByImage     *prometheus.GaugeVec     // {image}: live leases per image
@@ -444,6 +450,15 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Background exec jobs that ended, by result: ok, error, lost.",
 	}, []string{"result"})
 
+	m.RootfsProbeFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "rootfs_probe_failures_total",
+		Help: "Rootfs liveness probe failures (transport, timeout or Input/output error).",
+	})
+	m.RootfsDeadTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "rootfs_dead_total",
+		Help: "Leases declared dead because their root disk was unreadable.",
+	})
+
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases",
@@ -502,6 +517,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
+		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)

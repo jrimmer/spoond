@@ -30,6 +30,13 @@ type testSub struct {
 	probeFailAll bool
 	execStdout   string // canned stdout for non-probe execs ("" = "ok\n")
 
+	// rootfsFail, keyed by sandbox id, makes the rootfs liveness probe
+	// answer the given stderr with exit code 1 ("Input/output error" for
+	// a dead disk). rootfsErr, keyed the same way, makes it a transport
+	// failure instead (spoond-5ca).
+	rootfsFail map[string]string
+	rootfsErr  map[string]bool
+
 	// checkpointFn/pauseFn, when set, replace the fake's Checkpoint and
 	// Pause: they mint the build id and may leave the fresh build's
 	// files on disk (the build-size-at-write-time tests, #125).
@@ -40,6 +47,11 @@ type testSub struct {
 	// pin the initial PTY size it carries).
 	startMu   sync.Mutex
 	lastStart substrate.StartRequest
+
+	// rootfsProbeMu guards rootfsProbes, the count of rootfs liveness
+	// probe execs the fake served (spoond-5ca).
+	rootfsProbeMu sync.Mutex
+	rootfsProbes  int
 }
 
 // LastStart returns the most recent Start request.
@@ -74,9 +86,40 @@ func (ts *testSub) Pause(ctx context.Context, sandboxID, templateID string) (str
 }
 
 func newTestSub() *testSub {
-	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}}
+	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}, rootfsFail: map[string]string{}, rootfsErr: map[string]bool{}}
 	ts.Fake.SetExecHandler(ts.exec)
 	return ts
+}
+
+// isRootfsProbeReq reports whether req is the rootfs liveness probe.
+func isRootfsProbeReq(req substrate.ExecRequest) bool {
+	return len(req.Args) == 3 && req.Args[2] == rootfsProbe
+}
+
+// Exec services the rootfs liveness probe's injectable outcomes and
+// delegates everything else to the fake.
+func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.ExecRequest) (substrate.ExecResult, error) {
+	if isRootfsProbeReq(req) {
+		ts.rootfsProbeMu.Lock()
+		ts.rootfsProbes++
+		ts.rootfsProbeMu.Unlock()
+		if ts.rootfsErr[sandboxID] {
+			return substrate.ExecResult{}, fmt.Errorf("exec %s: agent unreachable", sandboxID)
+		}
+		if msg, bad := ts.rootfsFail[sandboxID]; bad {
+			return substrate.ExecResult{Stderr: msg, ExitCode: 1}, nil
+		}
+		return substrate.ExecResult{ExitCode: 0}, nil
+	}
+	return ts.Fake.Exec(ctx, sandboxID, req)
+}
+
+// RootfsProbeCalls returns how many rootfs liveness probe execs the
+// fake has served.
+func (ts *testSub) RootfsProbeCalls() int {
+	ts.rootfsProbeMu.Lock()
+	defer ts.rootfsProbeMu.Unlock()
+	return ts.rootfsProbes
 }
 
 func (ts *testSub) exec(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {

@@ -362,6 +362,23 @@ type Service struct {
 	// pooled or handed to a lease. probeTimeout bounds that exec.
 	probeEnabled bool
 	probeTimeout time.Duration
+	// rootfsProbeSecs is how often the rootfs liveness probe runs against
+	// running leases (spoond-5ca). 0 disables it. rootfsProbeMu guards the
+	// last-success times and the consecutive-failure counters; both are
+	// keyed by lease id, the failures also by sandbox id so a replacement
+	// sandbox starts clean.
+	rootfsProbeSecs int
+	rootfsProbeMu   sync.Mutex
+	// rootfsProbeOK is the last successful exec time per lease: an exec
+	// that started within rootfsProbeSecs already proves the guest is
+	// alive, so the probe is skipped.
+	rootfsProbeOK map[string]time.Time
+	// rootfsProbeFails is the consecutive rootfs-probe failure count per
+	// lease, tracked against the sandbox it was counted on.
+	rootfsProbeFails map[string]*rootfsProbeFailure
+	// rootfsProbeAllFailedLogged suppresses the "every probe failed"
+	// line to once per outage rather than once per pass.
+	rootfsProbeAllFailedLogged bool
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
 	// now is the service clock. Tests replace it to age a lease's
@@ -463,24 +480,27 @@ type Service struct {
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
 	return &Service{
-		sub:            sub,
-		db:             db,
-		store:          newStore(),
-		tokens:         tokens,
-		cfg:            cfg,
-		sweepInterval:  5 * time.Second,
-		now:            time.Now,
-		diskCapacity:   statfsCapacity,
-		diskUsage:      store.BuildDiskUsage,
-		appliedEgress:  map[string]string{},
-		createSecrets:  map[string]map[string]string{},
-		log:            log.Default(),
-		probeEnabled:   true,
-		probeTimeout:   20 * time.Second,
-		bus:            newEventBus(),
-		gcErr:          newGCTracker(),
-		liveJobSecrets: map[string][]string{},
-		jobStarts:      map[string]*jobStartLock{},
+		sub:              sub,
+		db:               db,
+		store:            newStore(),
+		tokens:           tokens,
+		cfg:              cfg,
+		sweepInterval:    5 * time.Second,
+		now:              time.Now,
+		diskCapacity:     statfsCapacity,
+		diskUsage:        store.BuildDiskUsage,
+		appliedEgress:    map[string]string{},
+		createSecrets:    map[string]map[string]string{},
+		log:              log.Default(),
+		probeEnabled:     true,
+		probeTimeout:     20 * time.Second,
+		rootfsProbeSecs:  DefaultRootfsProbeSecs,
+		rootfsProbeOK:    map[string]time.Time{},
+		rootfsProbeFails: map[string]*rootfsProbeFailure{},
+		bus:              newEventBus(),
+		gcErr:            newGCTracker(),
+		liveJobSecrets:   map[string][]string{},
+		jobStarts:        map[string]*jobStartLock{},
 	}
 }
 
@@ -505,6 +525,15 @@ func (s *Service) SetSandboxProbe(enabled bool, timeout time.Duration) {
 	s.probeEnabled = enabled
 	if timeout > 0 {
 		s.probeTimeout = timeout
+	}
+}
+
+// SetRootfsProbe sets how often the rootfs liveness probe runs against
+// running leases (spoond-5ca). 0 disables it entirely. A negative value
+// leaves the default in place.
+func (s *Service) SetRootfsProbe(secs int) {
+	if secs >= 0 {
+		s.rootfsProbeSecs = secs
 	}
 }
 
@@ -974,6 +1003,10 @@ func (s *Service) Start(ctx context.Context) {
 	// records against the guest files (a backend restart or a broken
 	// envd stream left them unobserved).
 	go s.runJobReconcileLoop(ctx)
+	// Rootfs liveness probe (spoond-5ca): every rootfsProbeSecs check that
+	// each running lease's root block device still reads, and recover a
+	// guest whose disk died like a crash.
+	go s.runRootfsProbeLoop(ctx)
 	// Queued admission (#129 part 1): retry waiting creates every 5 s
 	// even when nothing signalled.
 	go s.runAdmitQueueLoop(ctx)
@@ -1250,6 +1283,8 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	// remembered secret names (the files went with the guest) and a
 	// job_lost event, so a watcher learns the job ended.
 	s.settleJobsOfReleasedLease(ctx, l)
+	// The rootfs probe's per-lease state goes with the lease.
+	s.forgetRootfs(l.ID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
