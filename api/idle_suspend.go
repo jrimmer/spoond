@@ -52,11 +52,17 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 
 	// Suspend in small, staggered batches, like the plain idle sweep:
 	// each suspension is a snapshot write on the node, and a backlog
-	// must not produce one big burst.
+	// must not produce one big burst. When the process-wide limiter is
+	// busy (a hand suspend, a checkpoint or the drain is writing), the
+	// sweep stands down for this tick and retries the next one instead
+	// of queueing its batch behind the running write.
 	const maxIdleSuspendPerTick = 3
 	suspended := 0
 	for _, l := range idle {
 		if suspended >= maxIdleSuspendPerTick {
+			break
+		}
+		if s.snapshotBusy() {
 			break
 		}
 		// Re-check under the lock just before pausing: activity (an exec,

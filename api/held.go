@@ -215,6 +215,14 @@ func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
 	}
 	s.store.mu.Unlock()
 	for _, l := range running {
+		// When the process-wide snapshot limiter is busy (another pause
+		// or a checkpoint is writing), stand down for this tick and
+		// retry the lease next tick instead of queueing a batch behind
+		// the running write (spoond-t1s). The hold stays lapsed either
+		// way; rule 1 suspends the lease once idle.
+		if s.snapshotBusy() {
+			break
+		}
 		if _, err := s.pauseLease(ctx, l, false); err != nil {
 			// Busy or failing: it stays held with no expiry, so rule 1
 			// suspends it once idle; nothing is released either way.
@@ -506,6 +514,13 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 	}
 	s.store.mu.Unlock()
 	for _, l := range idle {
+		// When the process-wide snapshot limiter is busy (another pause
+		// or a checkpoint is writing), stand down for this tick and
+		// retry the lease next tick instead of queueing a batch behind
+		// the running write (spoond-t1s).
+		if s.snapshotBusy() {
+			break
+		}
 		// Re-check under the lock just before pausing: activity (an exec,
 		// a heartbeat) can land between the collection pass above and this
 		// pause, and a lease that moved in the meantime must not be

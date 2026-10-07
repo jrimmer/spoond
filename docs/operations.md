@@ -352,7 +352,11 @@ it lossless. Do not stop the backend first.
    a pause build and marks it `drained`, deletes the warm pool, and waits
    (up to 180 s) until the node reports no running sandboxes and no
    outstanding work. Per-lease failures are recorded in the response and
-   the drain continues.
+   the drain continues. Drain pauses write snapshots through their own
+   process-wide limiter, `DRAIN_SNAPSHOT_CONCURRENCY` (default `2`),
+   separate from the default limiter `SNAPSHOT_WRITE_CONCURRENCY`
+   (default `1`) that paces every other snapshot write — see
+   [Snapshot write pacing](#snapshot-write-pacing).
 3. The orchestrator stops; on start, `ExecStartPost=/opt/spoond/spoond
    drain --start` waits for the node (up to 120 s), calls
    `POST /api/admin/undrain`, which clears draining and resumes exactly
@@ -360,6 +364,43 @@ it lossless. Do not stop the backend first.
 4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.
+
+The unit's `TimeoutStopSec` must cover the drain: the pause phase takes
+roughly `leases × per-pause time / DRAIN_SNAPSHOT_CONCURRENCY`, plus the
+up-to-180 s quiesce wait. The shipped unit's `TimeoutStopSec=330` is
+sized for the default width on this node; raising the lease count, the
+per-pause time (larger guests) or the default width's ratio needs the
+unit's timeout raised to match.
+
+## Snapshot write pacing
+
+A memory snapshot (`Pause` or `Checkpoint`) saturates the host's disk
+while it writes, and the orchestrator's NBD server must still answer
+every guest's rootfs requests inside the kernel ceiling. On 2026-10-06
+on vm2 a burst of snapshot writes stacked up, the NBD server missed
+that deadline, and every guest on the stalled devices lost its root
+disk (permanent EIO). spoond therefore runs every snapshot write
+through one process-wide limiter:
+
+- `SNAPSHOT_WRITE_CONCURRENCY` (default `1`) is its width. Every pause
+  and checkpoint — a hand suspend, the idle sweep, the held-lease
+  idle/pressure rules, preemption, restart's pause leg, a drain pause
+  (which has its own width), and every checkpoint (on demand, periodic,
+  clone, fork, keep) — waits its turn. `0` means unlimited, the
+  pre-fix behaviour.
+- `DRAIN_SNAPSHOT_CONCURRENCY` (default `2`) is the drain's own width,
+  used only for the pauses `POST /api/admin/drain` issues, so a planned
+  restart can pause a batch of leases inside the unit's stop window.
+
+Waiting is bounded by the caller's context: an API caller that waits
+longer than the limiter only sees added latency, never a different
+answer. A write that waited 5 s or more logs one line naming the wait
+and the backlog (`snapshot write waited 41s behind 1 other`). The
+gauges `spoond_snapshot_writes_in_flight` and
+`spoond_snapshot_write_wait_seconds` show the pressure. The idle sweep
+and the held-lease rules suspend at most one lease per tick while the
+limiter is busy, skipping the rest to retry on the next tick rather
+than queueing a batch.
 
 ## Network watchdog
 

@@ -84,6 +84,25 @@ summarised from README "Status".
 - **Dashboard header: no orchestrator version.** The title line reads
   `SPOOND · host · version · up …`; the substrate's version
   (`e2b 0.16.1`) is gone from it.
+- **Snapshot writes are paced, one at a time.** Every call that makes
+  the substrate write a memory snapshot — `Pause` (hand suspend, idle
+  sweep, held-lease idle/pressure rules, preemption, drain, restart's
+  pause leg) and `Checkpoint` (on demand, periodic, clone/fork, keep)
+  — now goes through one process-wide limiter. The 2026-10-06 incident
+  on vm2: a burst of pauses saturated the host disk, the orchestrator's
+  NBD server could not answer guests' rootfs requests inside the
+  kernel ceiling, and every guest on the stalled devices lost its root
+  disk (permanent EIO). `SNAPSHOT_WRITE_CONCURRENCY` (default `1`;
+  `0` = unlimited, the old behaviour) is the width. The admin drain
+  pauses through its own `DRAIN_SNAPSHOT_CONCURRENCY` (default `2`), so
+  a planned orchestrator restart can finish a batch inside the unit's
+  `TimeoutStopSec`. Waiting is bounded by the caller's context (an API
+  caller only sees added latency), a write that waits 5 s or more logs
+  one line (`snapshot write waited 41s behind 1 other`), and the new
+  `spoond_snapshot_writes_in_flight` gauge and
+  `spoond_snapshot_write_wait_seconds` histogram expose the pressure.
+  The idle sweep and the held-lease rules suspend at most one lease per
+  tick while the limiter is busy and retry the rest next tick.
 
 ## [2.6.6] - 2026-10-06
 
