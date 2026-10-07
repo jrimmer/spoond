@@ -52,7 +52,16 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 
 	var summary recoverySummary
 	for _, l := range targets {
-		if s.recoverOneLease(ctx, l).Result == "recovered" {
+		// Mark the lease busy for the recovery, as crashTest does: the
+		// rootfs liveness probe must not count transport failures against
+		// (and at its threshold recover) a lease that a crash reconcile
+		// is already recovering (spoond-5ca).
+		if !s.trySetBusy(l) {
+			continue
+		}
+		out := s.recoverOneLease(ctx, l)
+		s.endBusy(l)
+		if out.Result == "recovered" {
 			summary.Recovered++
 		} else {
 			summary.Lost++

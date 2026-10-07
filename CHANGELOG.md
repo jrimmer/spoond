@@ -24,6 +24,22 @@ summarised from README "Status".
   and warns within 14 days of expiry. This lets a host serve names that
   an ACME client issues as separate certificates (Caddy issues one per
   name).
+- **Rootfs liveness probe (spoond-5ca).** The kernel NBD connections
+  backing a guest's root disk can die (a host disk stall past the kernel
+  ceiling); the guest then answers `Input/output error` on every
+  uncached read while spoond keeps its lease `running` forever. Every
+  `ROOTFS_PROBE_SECS` (default `120`, `0` disables) each running lease
+  now runs a cheap exec that reads one block of its root block device
+  with `O_DIRECT` at a random offset. Three consecutive failures (an
+  I/O error, or the exec failing at the transport) treat the sandbox as
+  crashed: spoond emits a `lost` event with detail `root disk unreadable
+  (I/O errors)`, deletes the dead sandbox and runs the crash-recovery
+  path (from the last checkpoint, or `lost`). Busy leases are skipped,
+  a drain and a probe-triggered recovery are mutually exclusive, a
+  recent successful exec (exit `0`) skips the probe, and a pass in
+  which every probe fails at the transport is treated as the
+  orchestrator being unreachable (logged once, no action). New metrics
+  `spoond_rootfs_probe_failures_total` and `spoond_rootfs_dead_total`.
 ### Security
 
 - **Exec env no longer appears in the guest command line.** Per-request

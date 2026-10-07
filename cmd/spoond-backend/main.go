@@ -436,6 +436,11 @@ func Main(args []string) int {
 	// inside the guest before pooling or leasing it. SANDBOX_PROBE=0 disables.
 	svc.SetSandboxProbe(envBoolOr("SANDBOX_PROBE", true), time.Duration(envIntOr("SANDBOX_PROBE_TIMEOUT_SECS", 20))*time.Second)
 
+	// Rootfs liveness probe (spoond-5ca): every ROOTFS_PROBE_SECS read one
+	// block of each running lease's root device with O_DIRECT, and recover a
+	// guest whose disk answers I/O errors like a crash. 0 disables it.
+	svc.SetRootfsProbe(envIntOr("ROOTFS_PROBE_SECS", api.DefaultRootfsProbeSecs))
+
 	// LLM gateway model map: "exe.dev-id=upstream-id,exe.dev-id2=upstream2".
 	// Shelley sends exe.dev catalog ids; the gateway rewrites them to the
 	// configured upstream's models. Unmapped ids fall back to defaultModel.

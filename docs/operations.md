@@ -515,6 +515,61 @@ that run crash suites. It affects only the caller's own leases (an admin
 may crash any lease), and nothing else: no other lease, no pool, no
 release. Each run logs `crash-test: lease <id> crashed by <caller id>`.
 
+### Rootfs liveness probe
+
+The kernel NBD connections backing a guest's root disk can die when the
+host disk stalls past the kernel ceiling (incident 2026-10-06): the
+guest then answers I/O errors on every uncached read, execs return HTTP
+`500` `exec failed`, and the lease otherwise stays `running` forever.
+`ROOTFS_PROBE_SECS` (default `120`, `0` disables) makes the backend
+catch that: every interval it runs one cheap exec per running lease that
+reads a single 4096-byte block of the guest's root block device at a
+pseudo-random offset with `O_DIRECT` (`iflag=direct`), so the page cache
+cannot answer the read. The offset is drawn from `/dev/urandom` rather
+than `$RANDOM`, which dash does not provide. The script takes the device
+from `findmnt -no SOURCE /`, falling back to `/dev/vda` when that is not
+a block device.
+
+A probe is a failure when it answers an `Input/output error` or when
+the exec itself fails at the transport. A probe that hits the 10 s
+timeout (the substrate kills the hung exec and reports it the way the
+e2b backend does: exit `124` with a `timed out` line) is a slow disk,
+not a dead one: it is logged and counted in
+`spoond_rootfs_probe_failures_total`, but it never counts toward
+recovery. Since e2b-runtime P7 the kernel lets a stalled NBD request
+wait up to 360 s instead of failing it, and recovering a lease whose
+disk is only slow would discard its work since the last checkpoint; a
+disk that really dies past that ceiling answers `EIO`. A non-zero exit for any
+other reason is not a failure (the guest answered); the backend logs it
+so a probe that silently degraded to a no-op — a base image without
+`dd`, or a root device that rejects `O_DIRECT` — is visible. **Three
+consecutive
+failures** treat the sandbox as crashed:
+the backend logs the lease, emits a `lost` event with detail `root disk
+unreadable (I/O errors)`, deletes the dead sandbox through the substrate
+and runs the same per-lease recovery as the crash reconcile — from the
+last checkpoint (generation +1, state `recovered`) or `lost` when there
+is none. A success in between resets the count. A lease with a
+successful exec (exit `0`) in the last `ROOTFS_PROBE_SECS` is skipped
+(it has
+already proven it is alive), as are busy leases (checkpoint, restart,
+suspend in flight). The admin drain and a probe-triggered recovery are
+mutually exclusive: the drain's `SetDraining` waits for a recovery in
+flight, and a recovery that reaches the drain waits for it and then
+stands down, so no sandbox is deleted or recovered during the drain.
+
+If **every** lease's probe fails at the transport in one pass, the
+orchestrator is unreachable, not the guests: the pass logs once and
+changes nothing. (On a host with a single running lease, an
+all-transport pass is indistinguishable from that case, so a lone guest
+whose agent died is left to the crash reconcile rather than marked
+`lost` by the probe.) A probe that answers an I/O error or a timeout
+proves
+the orchestrator is reachable, so a mixed pass still recovers the
+affected leases. The counters are `spoond_rootfs_probe_failures_total`
+(failures, by probe) and `spoond_rootfs_dead_total` (leases declared
+dead). `ROOTFS_PROBE_SECS=0` disables the probe entirely.
+
 ## Restarting the backend
 
 A backend restart loses nothing: leases, shares, the pool and the catalog

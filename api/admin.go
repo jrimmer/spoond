@@ -104,10 +104,18 @@ const drainConcurrency = 4
 // finish a batch of pauses inside the unit's drain window. The unit's
 // TimeoutStopSec must cover leases × per-pause time / drain width.
 func (s *Service) drain(ctx context.Context) (drainResult, error) {
+	// Hold off the rootfs probe's recovery for the whole drain: a pass
+	// already past its draining check must not delete a sandbox and run
+	// a recovery once SetDraining has told the substrate to drain
+	// (spoond-5ca). SetDraining runs under the write side, so the probe
+	// sees one consistent ordering.
+	s.drainGate.Lock()
 	if err := s.sub.SetDraining(ctx, true); err != nil {
+		s.drainGate.Unlock()
 		return drainResult{}, err
 	}
 	s.draining.Store(true)
+	s.drainGate.Unlock()
 	res := drainResult{Failed: []drainFailure{}}
 
 	// Waiting creates are pointless on a draining node: answer them all
