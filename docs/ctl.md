@@ -113,7 +113,7 @@ spoondctl rm <id>
 spoondctl help
 ```
 
-Its verb set is `new`, `ls`, `rm`, `keepalive`, `suspend`, `resume`,
+Its verb set is `new`, `create`, `snapshot`, `ls`, `rm`, `keepalive`, `suspend`, `resume`,
 `restart`, `cp`/`clone`, `shelly`/`agent`, `tag`, `comment`, `whoami`,
 `prompt` and `ssh`. `stat`, `share` and `ssh-key` are gateway verbs
 only — use `ssh ctl@… "stat <id>"` for those.
