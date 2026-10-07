@@ -18,6 +18,11 @@
 //	spoondctl restart <id>           persistent: pause + resume (state kept); plain: fresh guest
 //	spoondctl restart <id> --cold    fresh guest from the image's current build, lease id kept
 //	spoondctl cp <id> [tag]          clone a lease
+//	spoondctl create [image] [--snapshot <name[@v]>]  create a lease, optionally from a named snapshot
+//	spoondctl snapshot save <lease> <name> [--key K] [--keep N]  save a lease as a named snapshot
+//	spoondctl snapshot ls [prefix]   list named snapshots
+//	spoondctl snapshot show <name[@v]>  show one named snapshot version
+//	spoondctl snapshot rm <name[@v]> [--force]  delete a named snapshot
 //	spoondctl shelly <id>            install + start the Shelley coding agent
 //	spoondctl tag <id> <name>        give the lease a friendly name
 //	spoondctl prompt <id> <message>  ask the agent in a lease something
@@ -145,6 +150,48 @@ func Main(args []string) int {
 		}
 		printJSON(runCtl(host, port, key, cmd))
 		return 0
+	case "create":
+		// create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: spoondctl create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]")
+			return 1
+		}
+		cmd := "create " + strings.Join(rest, " ")
+		printJSON(runCtl(host, port, key, cmd))
+		return 0
+	case "snapshot":
+		// snapshot save|ls|show|rm …
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: spoondctl snapshot save <lease> <name> [--key K] [--keep N] | snapshot ls [prefix] | snapshot show <name[@v]> | snapshot rm <name[@v]> [--force]")
+			return 1
+		}
+		switch rest[0] {
+		case "save":
+			if len(rest) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: spoondctl snapshot save <lease> <name> [--key K] [--keep N]")
+				return 1
+			}
+		case "ls", "list":
+			if len(rest) > 2 {
+				fmt.Fprintln(os.Stderr, "usage: spoondctl snapshot ls [prefix]")
+				return 1
+			}
+		case "show":
+			if len(rest) != 2 {
+				fmt.Fprintln(os.Stderr, "usage: spoondctl snapshot show <name[@v]>")
+				return 1
+			}
+		case "rm", "delete":
+			if len(rest) < 2 || len(rest) > 3 {
+				fmt.Fprintln(os.Stderr, "usage: spoondctl snapshot rm <name[@v]> [--force]")
+				return 1
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "usage: spoondctl snapshot save <lease> <name> [--key K] [--keep N] | snapshot ls [prefix] | snapshot show <name[@v]> | snapshot rm <name[@v]> [--force]\n")
+			return 1
+		}
+		printJSON(runCtl(host, port, key, "snapshot "+strings.Join(rest, " ")))
+		return 0
 	case "ls":
 		printJSON(runCtl(host, port, key, "ls"))
 		return 0
@@ -223,6 +270,13 @@ usage:
   spoondctl restart <id>           persistent: pause + resume (state kept); plain: fresh guest
   spoondctl restart <id> --cold    fresh guest from the image's current build, lease id kept
   spoondctl cp <id> [tag]          clone a lease
+  spoondctl create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]
+                                   create a lease, optionally from a named snapshot
+  spoondctl snapshot save <lease> <name> [--key K] [--keep N]
+                                   save a lease as a named snapshot
+  spoondctl snapshot ls [prefix]   list named snapshots
+  spoondctl snapshot show <name[@v]>  show one named snapshot version
+  spoondctl snapshot rm <name[@v]> [--force]  delete a named snapshot
   spoondctl shelly <id>            install + start the Shelley coding agent
   spoondctl tag <id> <name>        give the lease a friendly name
   spoondctl comment <id> [text]    set/clear a free-text annotation

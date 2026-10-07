@@ -601,7 +601,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id> [--cold], cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
+		return "commands: new [dev|go|py|elixir|llm], create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id> [--cold], cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, snapshot save <lease> <name> [--key K] [--keep N], snapshot ls [prefix], snapshot show <name[@v]>, snapshot rm <name[@v]> [--force], whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {
@@ -619,6 +619,80 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			return fmt.Sprintf(`{"user":"ctl","key":%q}`, keyID)
 		}
 		return fmt.Sprintf("user: ctl (key: %s)", keyID)
+	case "create":
+		body, errMsg := parseCreateArgs(fields[1:])
+		if errMsg != "" {
+			return fmt.Sprintf(`{"error":%q}`, errMsg)
+		}
+		payload, _ := json.Marshal(body)
+		b, err := backendJSONRetry(ctx, http.MethodPost, "/api/sandboxes", payload)
+		if err != nil {
+			return fmt.Sprintf(`{"error":%q}`, err.Error())
+		}
+		return strings.TrimSpace(string(b))
+	case "snapshot":
+		// Named snapshots (2.7, #83): save/ls/show/rm.
+		if len(fields) < 2 {
+			return `{"error":"usage: snapshot save <lease> <name> [--key K] [--keep N] | snapshot ls [prefix] | snapshot show <name[@v]> | snapshot rm <name[@v]> [--force]"}`
+		}
+		switch fields[1] {
+		case "save":
+			body, errMsg := snapshotSaveBody(fields[1:])
+			if errMsg != "" {
+				return fmt.Sprintf(`{"error":%q}`, errMsg)
+			}
+			payload, _ := json.Marshal(body)
+			// No transport retry for a save: a retried POST without an
+			// idempotency key would make a second version.
+			b, err := backendJSONOnce(ctx, http.MethodPost, "/api/sandboxes/"+fields[2]+"/snapshots", payload)
+			if err != nil {
+				return fmt.Sprintf(`{"error":%q}`, err.Error())
+			}
+			return strings.TrimSpace(string(b))
+		case "ls", "list":
+			prefix := ""
+			if len(fields) > 2 {
+				prefix = fields[2]
+			}
+			b, err := backendJSON(ctx, http.MethodGet, namedSnapshotsPath(prefix), nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":%q}`, err.Error())
+			}
+			if jsonMode {
+				return strings.TrimSpace(string(b))
+			}
+			return prettySnapshots(b)
+		case "show":
+			if len(fields) < 3 {
+				return `{"error":"usage: snapshot show <name[@v]>"}`
+			}
+			b, err := backendJSON(ctx, http.MethodGet, namedSnapshotPath(fields[2], false), nil)
+			if err != nil {
+				return fmt.Sprintf(`{"error":%q}`, err.Error())
+			}
+			if jsonMode {
+				return strings.TrimSpace(string(b))
+			}
+			return prettySnapshotDetail(b)
+		case "rm", "delete":
+			if len(fields) < 3 {
+				return `{"error":"usage: snapshot rm <name[@v]> [--force]"}`
+			}
+			force := false
+			for _, f := range fields[3:] {
+				if f == "--force" || f == "-f" {
+					force = true
+				} else {
+					return fmt.Sprintf(`{"error":%q}`, "unknown option "+f)
+				}
+			}
+			if err := backendJSONErr(ctx, http.MethodDelete, namedSnapshotPath(fields[2], force), nil); err != nil {
+				return fmt.Sprintf(`{"error":%q}`, err.Error())
+			}
+			return fmt.Sprintf(`{"ref":%q,"deleted":true}`, fields[2])
+		default:
+			return fmt.Sprintf(`{"error":%q}`, "usage: snapshot save|ls|show|rm")
+		}
 	case "new":
 		user := "new"
 		if len(fields) > 1 {
