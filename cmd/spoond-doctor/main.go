@@ -274,7 +274,8 @@ func checkDB() []checkResult {
 }
 
 // checkLeases reports every lease in the lost state (a lease whose
-// sandbox died in a substrate crash; it answers 410 until deleted).
+// sandbox died in a substrate crash; it answers 409 lease_lost until
+// deleted).
 // Purely informational — WARN with one line per lost lease naming when
 // its snapshots stop being kept by the GC's grace period (a lease lost
 // before lost_at was recorded has no such time until the GC stamps it)

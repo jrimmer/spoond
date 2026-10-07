@@ -28,8 +28,15 @@ func leaseLostMessage(l *Lease) string {
 // writeLeaseLost answers 409 lease_lost for a lost lease: the caller
 // learns the substrate lost it, why, and that DELETE frees the quota.
 func writeLeaseLost(w http.ResponseWriter, l *Lease) {
+	writeLeaseLostMessage(w, leaseLostMessage(l))
+}
+
+// writeLeaseLostMessage writes the one 409 lease_lost body: the error
+// message and its code. Both spellings of the response (a lease in hand,
+// a *leaseLostError in flight) go through it, so they never drift.
+func writeLeaseLostMessage(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusConflict, map[string]string{
-		"error": leaseLostMessage(l),
+		"error": msg,
 		"code":  "lease_lost",
 	})
 }
@@ -70,10 +77,7 @@ func (s *Server) ensureLive(w http.ResponseWriter, l *Lease) bool {
 func writeLeaseLostErr(w http.ResponseWriter, err error) bool {
 	var lost *leaseLostError
 	if errors.As(err, &lost) {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": lost.Error(),
-			"code":  "lease_lost",
-		})
+		writeLeaseLostMessage(w, lost.Error())
 		return true
 	}
 	return false
@@ -82,8 +86,7 @@ func writeLeaseLostErr(w http.ResponseWriter, err error) bool {
 // markLost records that a lease was lost and why: it enters the lost
 // state (stamping lost_at once, as setState does), stores the reason the
 // lost event carries, and returns that reason. The caller holds a lease
-// whose sandbox is already gone; persist reports whether to write the
-// row through (the in-memory paths do).
+// whose sandbox is already gone.
 func (s *Service) markLost(l *Lease, reason string) string {
 	s.store.mu.Lock()
 	setLostReason(l, reason)
