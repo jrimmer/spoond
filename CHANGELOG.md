@@ -118,6 +118,22 @@ since 2.6.7.
   which every probe fails at the transport is treated as the
   orchestrator being unreachable (logged once, no action). New metrics
   `spoond_rootfs_probe_failures_total` and `spoond_rootfs_dead_total`.
+### Fixed
+
+- **A lost lease is released automatically once its grace period
+  lapses, freeing its owner's quota.** A lease in state `lost` was never
+  released unless its owner deleted it: it kept holding the owner's
+  concurrent-lease slot forever, so
+  an owner who had moved on could not create a replacement. The GC pass
+  now releases a lost lease past its grace period — the same 7-day
+  persistent / 1-day otherwise window its snapshots already kept
+  (`GC_LOST_GRACE_PERSISTENT` / `GC_LOST_GRACE`) — through the normal
+  release path, so quota, the admission queue wake-up, snapshot
+  retention, job cleanup and events all happen; the release carries the
+  reason `lost_expired` on the lease's `released` event. It is idempotent
+  and logs the lease id, owner and age. `DELETE /api/leases/{id}` still
+  frees quota immediately for an owner who wants it sooner.
+
 
 ### Changed
 

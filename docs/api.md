@@ -358,6 +358,19 @@ resumed from a checkpoint, and keeps showing `recovered` until the lease
 is suspended or restarted. `lost` means the sandbox died with no
 checkpoint; those leases answer `410` and should be deleted.
 
+A lost lease keeps its resume and checkpoint snapshots for a grace
+period after the loss — 7 days for a persistent lease, 1 day otherwise
+(`GC_LOST_GRACE_PERSISTENT` / `GC_LOST_GRACE`) — so the owner can still
+reclaim them. Once that grace period lapses the GC releases the lease
+itself through the normal release path: the concurrent-lease slot it
+held comes back, its snapshots become ordinary
+GC candidates, its running jobs are settled and a `released` event with
+the reason `lost_expired` reaches the owner's event stream. The release
+is automatic and idempotent, so a `lost` lease the owner has moved on
+from does not hold their quota forever. Deleting a lost lease with
+`DELETE /api/leases/{id}` does the same thing immediately and frees the
+quota sooner.
+
 `build_id` is the E2B build the running sandbox was created from (`""`
 while suspended, where `resume_build_id` is the one to resume from).
 
@@ -1162,7 +1175,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `event` | emitted when | `detail` names |
 |---|---|---|
 | `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
-| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule` (or `lease released`) |
+| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule`, `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released` |
 | `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse) | the pause build id |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |

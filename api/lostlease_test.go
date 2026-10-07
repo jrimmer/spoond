@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -404,5 +405,139 @@ func TestGCLostGraceConfigured(t *testing.T) {
 	svc.cfg.LostGrace = 2 * time.Hour
 	if p, o := svc.lostGraces(); p != time.Hour || o != 2*time.Hour {
 		t.Fatalf("configured graces = %v/%v, want 1h/2h", p, o)
+	}
+}
+
+// seedLostLeaseInMemory loads a running lease into the service, marks it
+// lost with lostAt, and returns it. The lease is past its grace exactly
+// when now-lostAt exceeds its period, so a later GC pass is expected to
+// release it through the normal path.
+func seedLostLeaseInMemory(t *testing.T, svc *Service, db *store.DB, persistent bool, lostAt time.Time) *Lease {
+	t.Helper()
+	l, err := svc.grant(context.Background(), "consumer-a", "py-base", time.Minute, persistent, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.setState("lost")
+	l.LostAt = lostAt
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+	return l
+}
+
+// TestGCLostGraceReleasesPastGrace: a lost lease past its grace period
+// (24 h plain, 7 d persistent) is released by the GC pass through the
+// normal release path; one still inside its grace is kept.
+func TestGCLostGraceReleasesPastGrace(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name       string
+		persistent bool
+		age        time.Duration
+		wantGone   bool
+	}{
+		{"plain inside", false, 23 * time.Hour, false},
+		{"plain past", false, 25 * time.Hour, true},
+		{"persistent inside", true, 6 * 24 * time.Hour, false},
+		{"persistent past", true, 8 * 24 * time.Hour, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, db, _ := newTestService(t)
+			seedImage(t, db, "py-base", 2048)
+			l := seedLostLeaseInMemory(t, svc, db, tc.persistent, now.Add(-tc.age))
+			if err := svc.gcOnce(context.Background()); err != nil {
+				t.Fatalf("gc: %v", err)
+			}
+			svc.store.mu.Lock()
+			_, present := svc.store.leases[l.ID]
+			svc.store.mu.Unlock()
+			if present == tc.wantGone {
+				t.Fatalf("lease present=%v after GC, want gone=%v", present, tc.wantGone)
+			}
+		})
+	}
+}
+
+// TestGCLostGraceLeavesRecoveredLease: a lease that left the lost state
+// (recovered, so lost_at is cleared) is never touched by the release
+// sweep, however old the loss once was.
+func TestGCLostGraceLeavesRecoveredLease(t *testing.T) {
+	now := time.Now()
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	l := seedLostLeaseInMemory(t, svc, db, false, now.Add(-25*time.Hour))
+
+	// The lease is recovered: setState clears lost_at.
+	svc.store.mu.Lock()
+	l.setState("recovered")
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	svc.store.mu.Lock()
+	_, present := svc.store.leases[l.ID]
+	svc.store.mu.Unlock()
+	if !present {
+		t.Fatal("a recovered lease was released by the lost-grace sweep")
+	}
+}
+
+// TestGCLostGraceReleasesAndFreesQuota: a lost lease past its grace
+// still counted against its owner's lease cap, so a create was refused
+// 429; the GC pass releases it (emitting a released event with reason
+// lost_expired) and the next create succeeds.
+func TestGCLostGraceReleasesAndFreesQuota(t *testing.T) {
+	srv, h, tok, _ := newMemQuotaServer(t, map[string]int{"py-base": 2048}, `{"max_leases":1}`)
+	svc := srv.svc
+
+	rec, body := createSandboxAs(t, h, tok, "py-base")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first create = %d %s", rec.Code, rec.Body.String())
+	}
+	id, _ := body["id"].(string)
+	if id == "" {
+		t.Fatalf("no id in %v", body)
+	}
+
+	svc.store.mu.Lock()
+	l := svc.store.leases[id]
+	l.setState("lost")
+	l.LostAt = time.Now().Add(-25 * time.Hour)
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+
+	// The lost lease still holds the count quota.
+	rec, _ = createSandboxAs(t, h, tok, "py-base")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("create while lost lease held quota = %d, want 429", rec.Code)
+	}
+
+	// The GC pass releases it and says why on the event stream.
+	all := svc.Subscribe(EventFilter{LeaseID: id})
+	if err := svc.gcOnce(context.Background()); err != nil {
+		all.Close()
+		t.Fatalf("gc: %v", err)
+	}
+	all.Close()
+	released := false
+	for _, ev := range collectEvents(all.C) {
+		if ev.Type == LeaseReleased {
+			released = true
+			if ev.Detail != lostReleaseReason {
+				t.Errorf("released detail = %q, want %q", ev.Detail, lostReleaseReason)
+			}
+		}
+	}
+	if !released {
+		t.Fatal("no released event for the grace-expired lost lease")
+	}
+
+	// The quota is free now.
+	rec, _ = createSandboxAs(t, h, tok, "py-base")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create after the release = %d, want 201", rec.Code)
 	}
 }
