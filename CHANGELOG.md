@@ -18,8 +18,8 @@ summarised from README "Status".
   uncached read while spoond keeps its lease `running` forever. Every
   `ROOTFS_PROBE_SECS` (default `120`, `0` disables) each running lease
   now runs a cheap exec that reads one block of its root block device
-  with `O_DIRECT` at a random offset. Three consecutive failures
-  (transport failure, timeout, or an I/O error) treat the sandbox as
+  with `O_DIRECT` at a random offset. Three consecutive failures (an
+  I/O error, or the exec failing at the transport) treat the sandbox as
   crashed: spoond emits a `lost` event with detail `root disk unreadable
   (I/O errors)`, deletes the dead sandbox and runs the crash-recovery
   path (from the last checkpoint, or `lost`). Busy leases are skipped,

@@ -489,10 +489,16 @@ than `$RANDOM`, which dash does not provide. The script takes the device
 from `findmnt -no SOURCE /`, falling back to `/dev/vda` when that is not
 a block device.
 
-A probe is a failure when it answers an `Input/output error`, when it
-hits the 10 s timeout (the substrate kills the hung exec and reports it
-the way the e2b backend does: exit `124` with a `timed out` line), or
-when the exec itself fails at the transport. A non-zero exit for any
+A probe is a failure when it answers an `Input/output error` or when
+the exec itself fails at the transport. A probe that hits the 10 s
+timeout (the substrate kills the hung exec and reports it the way the
+e2b backend does: exit `124` with a `timed out` line) is a slow disk,
+not a dead one: it is logged and counted in
+`spoond_rootfs_probe_failures_total`, but it never counts toward
+recovery. Since e2b-runtime P7 the kernel lets a stalled NBD request
+wait up to 360 s instead of failing it, and recovering a lease whose
+disk is only slow would discard its work since the last checkpoint; a
+disk that really dies past that ceiling answers `EIO`. A non-zero exit for any
 other reason is not a failure (the guest answered); the backend logs it
 so a probe that silently degraded to a no-op — a base image without
 `dd`, or a root device that rejects `O_DIRECT` — is visible. **Three

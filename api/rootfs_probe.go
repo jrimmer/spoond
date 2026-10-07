@@ -71,8 +71,8 @@ const (
 	// rootfsProbeTimeout: the probe did not finish in time. The
 	// substrate answered (envd kills the hung process and returns exit
 	// 124) or the probe's context expired, but the guest did not read
-	// its root device: a failure, though not evidence that the
-	// orchestrator is unreachable.
+	// its root device in time: a slow disk, logged and metered but never
+	// counted toward recovery (see probeRootfsLeases).
 	rootfsProbeTimeout
 	// rootfsProbeTransport: the exec did not answer at all (transport
 	// failure). On its own across every lease it points at the
@@ -191,7 +191,19 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		case rootfsProbeOK:
 			s.recordRootfsAlive(l.ID)
 			s.resetRootfsFailures(l.ID)
-		case rootfsProbeEIO, rootfsProbeTimeout, rootfsProbeTransport:
+		case rootfsProbeTimeout:
+			// A slow disk is not a dead one. Since e2b-runtime P7 the
+			// kernel lets a stalled NBD request wait up to 360 s instead
+			// of failing it, so a probe can time out on a disk that will
+			// recover; recovering from the last checkpoint would throw
+			// away the lease's newer work. A disk that really dies past
+			// that ceiling answers EIO, which counts. Timeouts are logged
+			// and metered only, and they neither count nor reset.
+			s.log.Printf("rootfs probe: lease %s probe timed out (slow disk?); not counted toward recovery", l.ID)
+			if s.metrics != nil {
+				s.metrics.RootfsProbeFailuresTotal.Inc()
+			}
+		case rootfsProbeEIO, rootfsProbeTransport:
 			s.countRootfsFailure(ctx, l)
 		}
 	}
