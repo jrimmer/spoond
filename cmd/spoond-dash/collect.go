@@ -42,7 +42,8 @@ type Snapshot struct {
 	Burst int `json:"burst"`
 	// Preempted is the live leases suspended by preemption (#128 part
 	// 3), counted in the store: burst leases the resume queue will bring
-	// back when capacity allows. The attention strip names them.
+	// back when capacity allows, shown by the leases table's preempted
+	// mark.
 	Preempted int `json:"preempted"`
 	Queued    int `json:"queued"`
 	// QueuedOldest is the age in seconds of the oldest create waiting for
@@ -104,7 +105,7 @@ type Snapshot struct {
 	// leases and their disk bytes (#126, from spoond_kept_builds and
 	// spoond_kept_builds_bytes). The host panel's GC row appends them
 	// when N > 0; KeptDiskPct is kept bytes over the snapshot disk's
-	// size, for the attention strip.
+	// size, for the Notifications panel.
 	KeptBuilds      int     `json:"keptBuilds"`
 	KeptBuildsBytes int64   `json:"keptBuildsBytes"`
 	KeptDiskPct     float64 `json:"keptDiskPct"`
@@ -352,8 +353,9 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 		}
 	}
 	s.Events = c.eventLines(now)
-	// Kept bytes as a share of the snapshot disk (#126): the attention
-	// strip's "kept checkpoints use X% of the snapshot disk". The disk
+	// Kept bytes as a share of the snapshot disk (#126): the
+	// Notifications panel's "kept checkpoints use X% of the snapshot
+	// disk". The disk
 	// total comes from fromHost's statfs; with no total (statfs failed)
 	// the strip stays off.
 	if s.KeptBuildsBytes > 0 && c.diskTotal > 0 {
@@ -463,8 +465,8 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	// panel's lifetime count.
 	s.GCDeleted = int(value(fams["spoond_gc_deleted_total"]))
 	// Kept checkpoints (#126): the pin count and their disk bytes; the
-	// percentage of the snapshot disk they fill feeds the attention
-	// strip (disk total comes from fromHost's statfs).
+	// percentage of the snapshot disk they fill feeds the Notifications
+	// panel (disk total comes from fromHost's statfs).
 	s.KeptBuilds = int(g("spoond_kept_builds"))
 	s.KeptBuildsBytes = int64(g("spoond_kept_builds_bytes"))
 	if st := g("spoond_backend_start_time_seconds"); st > 0 {
@@ -860,7 +862,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		// A preempted lease shows the "·p" mark only while it is live
 		// (suspended, running or recovered). A lost row keeps its
 		// preempted_at in the store but must not claim to be waiting for
-		// a resume, and the attention strip already excludes lost rows.
+		// a resume, and the leases table marks lost rows on their own.
 		r.Preempted = preemptedAt != "" && (r.State == "suspended" || r.State == "running" || r.State == "recovered")
 		// An idle-suspended lease shows the "·i" mark while it is
 		// suspended and no preemption claims the row (2.5, #129 part 2).

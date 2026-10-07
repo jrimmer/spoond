@@ -189,7 +189,7 @@ func reconcileDismissed(active, dismissed []string) (kept, visible []string) {
 }
 
 // DefaultKeptDiskWarnPct is the kept-checkpoint disk share (#126) past
-// which the attention strip warns, when KEPT_DISK_WARN_PCT is unset.
+// which the Notifications panel warns, when KEPT_DISK_WARN_PCT is unset.
 const DefaultKeptDiskWarnPct = 40.0
 
 // keptDiskWarnPct reads the kept-checkpoint disk-share warn level
@@ -346,8 +346,8 @@ type statusItem struct {
 
 // statusItems builds the status line's entries left to right: leases,
 // hugepages, snapshot disk, the certificate's remaining days and the
-// units. The styles reuse the thresholds the meters and the attention
-// strip already use. The certificate is left out when there is none.
+// units. The styles reuse the thresholds the meters and the other
+// panels already use. The certificate is left out when there is none.
 func statusItems(s Snapshot, now time.Time) []statusItem {
 	items := []statusItem{
 		{"leases", fmt.Sprintf("%d/%d", s.Running, s.Limit), "ok"},

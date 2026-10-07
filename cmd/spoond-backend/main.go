@@ -104,8 +104,8 @@
 //	                  before the notifier warns (default 93600 = 26 h)
 //	KEPT_DISK_WARN_PCT  kept-checkpoint share of the snapshot disk past
 //	                  which the notifier's disk.kept check warns and the
-//	                  dashboard's attention strip shows a row (#126;
-//	                  default 40; 0 disables both)
+//	                  dashboard's Notifications panel shows a message
+//	                  (#126; default 40; 0 disables both)
 //	MAX_ADMIT_WAIT_SECS  how long a create may wait for admission when
 //	                  it sends "wait" (#129 part 1; default 600; 0
 //	                  disables waiting)
