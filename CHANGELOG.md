@@ -12,6 +12,29 @@ summarised from README "Status".
 
 ### Added
 
+- **The dashboard's notifications panel for spoond system messages.**
+  The old attention strip drew per-lease rows (a lost lease, the
+  preempted burst count, a lapsed hold) that the dashboard viewer cannot
+  act on; those leases stay visible in the leases table with their state
+  (lost, preempted, suspended). In their place, a bordered full-width
+  **Notifications** panel below the header draws spoond's own system
+  messages — a systemd unit not active, hugepages or snapshot disk past
+  the danger level, kept checkpoints past `KEPT_DISK_WARN_PCT` — each
+  with a stable id from its trigger and a severity. The panel is not
+  drawn at all when there are no undismissed messages. Each row carries
+  a `×` dismiss control; the dismissal is per viewer in `localStorage`
+  (try/catch-wrapped, works without it) keyed by the message id, stays
+  hidden while the trigger stays active and returns if the trigger
+  clears and fires again. No server state; the dashboard stays
+  read-only.
+- **Lost leases tell their initiator why and what to do.** A lease whose
+  sandbox a substrate crash (or a failed recovery) lost now records the
+  reason (`leases.lost_reason`, migration 0018) and returns it: the
+  `lost` lease event's `detail` carries it, `GET` shows `lost_reason`
+  beside `state: lost`, and any call on a lost lease answers `409` with
+  `code: lease_lost` and a message naming the substrate, the reason and
+  that `DELETE` frees the quota. This replaces the old `410` that named
+  no cause.
 - **Named snapshots (2.7, #83): save, list, show, delete.** A lease can
   be saved as a checkpoint build with a name and a version that outlives
   it: `POST /api/leases/{id}/snapshots` checkpoints the lease, scrubs the
@@ -73,6 +96,7 @@ summarised from README "Status".
   which every probe fails at the transport is treated as the
   orchestrator being unreachable (logged once, no action). New metrics
   `spoond_rootfs_probe_failures_total` and `spoond_rootfs_dead_total`.
+
 ### Security
 
 - **Exec env no longer appears in the guest command line.** Per-request

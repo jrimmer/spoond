@@ -158,22 +158,28 @@ through a read-only `EVENTS_TOKEN`), with a status line at the bottom.
 Its layout puts capacity and host side by side at 104 columns and
 stacks them below that. The palette gives each state a colour role on
 the black background — cyan for titles and lease ids, blue for run
-state, green ok, amber warn, red bad, violet owner, and amber banners —
-never alone: every coloured state keeps its glyph or word. Above the
-panels sits one
-attention banner, shown only when something needs a person: a unit not
-active, a lost lease, free hugepages or snapshot disk past the danger
-level, preempted burst leases, or a held lease that a held-lease rule suspended and that is
-still suspended. It refreshes every 2 seconds over
+state, green ok, amber warn, red bad, violet owner — never alone: every
+coloured state keeps its glyph or word. Above the panels sits a
+**Notifications** panel, drawn only when spoond has a system message to
+show: a systemd unit not active, free hugepages or snapshot disk past
+the danger level, or kept checkpoints past `KEPT_DISK_WARN_PCT` of the
+snapshot disk. Each message carries a stable id from its trigger and a
+severity, and each row has a `×` the viewer can click to dismiss it for
+their own browser (`localStorage`, no server state); the dismissal stays
+while the trigger stays active and returns if the trigger clears and
+fires again. Per-lease trouble is not a dashboard message — the
+dashboard viewer cannot act on a lease, so spoond tells the lease's
+initiator itself (the lease event stream and the API's `409
+lease_lost`/`lost_reason`). It refreshes every 2 seconds over
 one server-sent-event stream shared by all viewers; the page is the
 current grid in a `<pre>` with [WebTUI](https://webtui.ironclad.sh) for
 the chrome, and Datastar patches the rows that changed.
 
 `spoond top` draws the same grid with ANSI styles in the terminal, at
 the terminal's width (COLUMNS, else 104), redrawn every 2 seconds until
-interrupted — the same collector, the same banner, no browser. Both it
-and `spoond dash` are excluded from the binary by the `nodash` build
-tag.
+interrupted — the same collector, the same notifications panel without
+the dismiss control, no browser. Both it and `spoond dash` are excluded
+from the binary by the `nodash` build tag.
 
 On host it runs as the `spoond-dash` unit on **:8893** (HTTPS, basic
 auth). Its data access is read-only: `/metrics` through the scrape-only
