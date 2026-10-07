@@ -334,6 +334,20 @@ type ServiceConfig struct {
 	// default; when off the route answers 404 like an unknown route.
 	// CRASH_TEST ("1" or "true").
 	CrashTest bool
+	// SnapshotWriteConcurrency is the width of the process-wide
+	// snapshot-write limiter (SNAPSHOT_WRITE_CONCURRENCY): every
+	// substrate Pause and Checkpoint goes through it, so the node never
+	// sees a stack of memory snapshots at once (spoond-t1s). 0 =
+	// unlimited (the pre-fix behaviour); cmd maps an unset variable to
+	// DefaultSnapshotWriteConcurrency (1).
+	SnapshotWriteConcurrency int
+	// DrainSnapshotConcurrency is the width of the drain's own
+	// snapshot-write limiter (DRAIN_SNAPSHOT_CONCURRENCY), used only for
+	// the admin drain's pauses. It is separate so a planned orchestrator
+	// restart can pause a batch of live leases within the unit's drain
+	// window without widening the default limiter. 0 = unlimited; cmd
+	// maps an unset variable to DefaultDrainSnapshotConcurrency (2).
+	DrainSnapshotConcurrency int
 }
 
 // Service is the lease API backend.
@@ -456,13 +470,20 @@ type Service struct {
 	// wakeScheduled guards against piling up wake-up passes: at most one
 	// queued-admission retry runs at a time.
 	wakeScheduled atomic.Bool
+
+	// snapshotLimiters paces every substrate memory-snapshot write
+	// (Pause and Checkpoint) process-wide (spoond-t1s). The default
+	// limiter has width SNAPSHOT_WRITE_CONCURRENCY; the drain limiter has
+	// its own width DRAIN_SNAPSHOT_CONCURRENCY and is used only by the
+	// admin drain's pauses.
+	snapshotLimiters snapshotLimiters
 }
 
 // NewService builds the lease service on sub. db is required: every
 // mutation is persisted (U05). tokens maps legacy consumer tokens to
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
-	return &Service{
+	svc := &Service{
 		sub:            sub,
 		db:             db,
 		store:          newStore(),
@@ -482,6 +503,11 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		liveJobSecrets: map[string][]string{},
 		jobStarts:      map[string]*jobStartLock{},
 	}
+	svc.snapshotLimiters = snapshotLimiters{
+		def:   newSnapshotLimiter(cfg.SnapshotWriteConcurrency, svc.now, svc.log.Printf),
+		drain: newSnapshotLimiter(cfg.DrainSnapshotConcurrency, svc.now, svc.log.Printf),
+	}
+	return svc
 }
 
 // SetMetrics installs the Prometheus metrics collector (issue #20).
@@ -1107,11 +1133,17 @@ func (s *Service) sweepExpired(ctx context.Context) {
 	// snapshot write on the node; a large backlog (e.g. after a long test
 	// session) must not produce one big burst. Cap per tick and space
 	// them out — with the 5s sweep tick, 13 idle leases clear in ~25s
-	// instead of a single burst.
+	// instead of a single burst. When the process-wide snapshot limiter is
+	// busy (a hand suspend, a checkpoint or the drain is writing), stand
+	// down for this tick and retry next tick rather than queue the batch
+	// behind the running write (spoond-t1s).
 	const maxSuspendPerTick = 3
 	suspended := 0
 	for _, l := range idleSuspend {
 		if suspended >= maxSuspendPerTick {
+			break
+		}
+		if s.snapshotBusy() {
 			break
 		}
 		if _, err := s.suspend(ctx, l.Owner, l.ID); err != nil {
@@ -1746,8 +1778,16 @@ func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (strin
 }
 
 // pauseLeaseBody is the sub work of a pause. Callers own the busy
-// window; it must not be called with s.store.mu held.
+// window; it must not be called with s.store.mu held. drained selects
+// the drain limiter for the snapshot write (only the admin drain sets
+// it); every other pause uses the default limiter. The write waits for
+// a slot, bounded by ctx.
 func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (string, error) {
+	release, err := s.snapshotAcquire(ctx, drained)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	buildID, refs, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
 		return "", err
@@ -2157,6 +2197,11 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 // shows in /api/snapshots before the next hourly accounting pass. It
 // returns the new build row.
 func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildRow, error) {
+	release, err := s.snapshotAcquire(ctx, false)
+	if err != nil {
+		return store.BuildRow{}, err
+	}
+	defer release()
 	start := time.Now()
 	buildID, refs, err := s.sub.Checkpoint(ctx, src.SandboxID)
 	pause := time.Since(start)

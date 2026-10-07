@@ -97,6 +97,12 @@ type BackendMetrics struct {
 	// guest, in seconds, buckets 1..600.
 	CheckpointPause prometheus.Histogram
 
+	// Snapshot write pacing (spoond-t1s): every substrate Pause or
+	// Checkpoint goes through one process-wide limiter so the node never
+	// sees a stack of memory snapshots at once (incident 2026-10-06).
+	SnapshotWritesInFlight prometheus.Gauge     // substrate snapshot writes running now
+	SnapshotWriteWait      prometheus.Histogram // how long a write waited for a slot, seconds
+
 	// Snapshot catalog (U11)
 	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
 	StorageFree   prometheus.Gauge       // free bytes at the template storage path
@@ -369,6 +375,19 @@ func NewBackendMetrics() *BackendMetrics {
 		Buckets: []float64{1, 2, 5, 10, 30, 60, 120, 300, 600},
 	})
 
+	// Snapshot write pacing (spoond-t1s): the process-wide limiter that
+	// keeps substrate Pause/Checkpoint writes from stacking. Waits are
+	// bounded by the caller's context.
+	m.SnapshotWritesInFlight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "snapshot_writes_in_flight",
+		Help: "Snapshot writes (Pause/Checkpoint) running right now.",
+	})
+	m.SnapshotWriteWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "snapshot_write_wait_seconds",
+		Help:    "How long a snapshot write waited for a limiter slot, in seconds.",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600},
+	})
+
 	// Snapshot catalog (U11)
 	m.SnapshotBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "snapshot_bytes",
@@ -494,6 +513,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.Notifications, m.StartTime,
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur, m.CheckpointPause,
+		m.SnapshotWritesInFlight, m.SnapshotWriteWait,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 		m.GCOrphansReaped, m.GCOrphanBytesReaped,
 		m.KeptBuildsBytes, m.KeptBuilds,

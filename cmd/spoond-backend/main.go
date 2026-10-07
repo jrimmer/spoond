@@ -104,6 +104,14 @@
 //	MAX_ADMIT_WAIT_SECS  how long a create may wait for admission when
 //	                  it sends "wait" (#129 part 1; default 600; 0
 //	                  disables waiting)
+//	SNAPSHOT_WRITE_CONCURRENCY  how many memory-snapshot writes
+//	                  (substrate Pause/Checkpoint) may run at once,
+//	                  process-wide (spoond-t1s; default 1; 0 = unlimited,
+//	                  the pre-fix behaviour)
+//	DRAIN_SNAPSHOT_CONCURRENCY  how many of those writes the admin
+//	                  drain may run at once, so a planned orchestrator
+//	                  restart can pause a batch of leases inside the
+//	                  unit's drain window (default 2; 0 = unlimited)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
@@ -325,6 +333,13 @@ func Main(args []string) int {
 	// a create may wait for room. 0 disables waiting (the request's
 	// "wait" field is accepted and ignored).
 	maxAdmitWaitSecs := envIntOr("MAX_ADMIT_WAIT_SECS", api.DefaultMaxAdmitWaitSecs)
+	// Snapshot write pacing (spoond-t1s): every substrate Pause and
+	// Checkpoint goes through one process-wide limiter. 0 means
+	// unlimited (the old behaviour); an unset variable uses the
+	// documented default. DRAIN_SNAPSHOT_CONCURRENCY is the drain's own
+	// width, so the admin drain can pause a batch inside TimeoutStopSec.
+	snapshotWriteConcurrency := envIntOr("SNAPSHOT_WRITE_CONCURRENCY", api.DefaultSnapshotWriteConcurrency)
+	drainSnapshotConcurrency := envIntOr("DRAIN_SNAPSHOT_CONCURRENCY", api.DefaultDrainSnapshotConcurrency)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -405,10 +420,12 @@ func Main(args []string) int {
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
 		// Background exec jobs (2.6, #135): per-lease running cap and
 		// exited-record retention.
-		MaxRunningJobsPerLease: envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
-		JobRetentionSecs:       int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
-		MaxAdmitWaitSecs:       maxAdmitWaitSecs,
-		CrashTest:              os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		MaxRunningJobsPerLease:   envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
+		JobRetentionSecs:         int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
+		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
+		SnapshotWriteConcurrency: snapshotWriteConcurrency,
+		DrainSnapshotConcurrency: drainSnapshotConcurrency,
+		CrashTest:                os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
