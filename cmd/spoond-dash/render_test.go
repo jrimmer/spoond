@@ -41,6 +41,8 @@ func sampleSnapshot() Snapshot {
 		DiskUsedPct: 61.2, DiskFreeGiB: 121.5,
 		RootUsedPct: 41.0, RootFreeGiB: 30.2,
 		VCPUAlloc: 11, MemAllocGiB: 19.5,
+		IOAvail: true, IOSome10: 0.3, IOSome60: 0.2, IOFull10: 0.0, IOFull60: 0.0,
+		DiskDevice: "nvme0n1", DiskWriteMB: 12, DiskBusyPct: 18,
 		GCMode: "dry-run",
 		Services: []Service{
 			{Name: "spoond-backend", State: "active"},
@@ -1333,4 +1335,93 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestIOHostRowsDrawn: the host panel shows the PSI pressure and the
+// snapshot disk's throughput when the collector has them, and hides both
+// when the kernel has no PSI (a missing /proc/pressure), rather than
+// drawing a calm zero.
+func TestIOHostRowsDrawn(t *testing.T) {
+	s := healthySnapshot()
+	s.IOAvail = true
+	s.IOSome10, s.IOSome60 = 0.3, 0.2
+	s.DiskDevice, s.DiskWriteMB, s.DiskBusyPct = "nvme0n1", 12, 18
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "I/O pressure") || !strings.Contains(p, "some 0.2% / full 0.0% (60s)") {
+		t.Fatalf("pressure row missing:\n%s", p)
+	}
+	if !strings.Contains(p, "nvme0n1") || !strings.Contains(p, "12 MB/s w, 18% busy") {
+		t.Fatalf("device row missing:\n%s", p)
+	}
+
+	s.IOAvail = false
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(p, "I/O pressure") || strings.Contains(p, "nvme0n1") {
+		t.Fatalf("no PSI must hide the I/O rows:\n%s", p)
+	}
+}
+
+// TestIOMeterStyle: the disk I/O rows colour with the same ok/warn/bad
+// thresholds as the other meters, from the full 60 s average against
+// DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT (defaults 5 and 15), and
+// the device row from its busy share.
+func TestIOMeterStyle(t *testing.T) {
+	cases := []struct {
+		pct       float64
+		warn, bad float64
+		want      string
+	}{
+		{0, 5, 15, "ok"},
+		{4.9, 5, 15, "ok"},
+		{5, 5, 15, "warn"},
+		{14.9, 5, 15, "warn"},
+		{15, 5, 15, "bad"},
+		{40, 5, 15, "bad"},
+	}
+	for _, tc := range cases {
+		if got := meterStyle(tc.pct, tc.warn, tc.bad); got != tc.want {
+			t.Errorf("meterStyle(%v, %v, %v) = %q, want %q", tc.pct, tc.warn, tc.bad, got, tc.want)
+		}
+	}
+	// The environment raises the levels; an unparsable value keeps the
+	// default.
+	t.Setenv("DASH_IO_FULL_WARN_PCT", "10")
+	t.Setenv("DASH_IO_FULL_BAD_PCT", "30")
+	if ioFullWarnPct() != 10 || ioFullBadPct() != 30 {
+		t.Fatalf("env thresholds = %v / %v, want 10 / 30", ioFullWarnPct(), ioFullBadPct())
+	}
+	t.Setenv("DASH_IO_FULL_BAD_PCT", "nonsense")
+	if ioFullBadPct() != DefaultIOFullBadPct {
+		t.Fatalf("unparsable threshold = %v, want default %v", ioFullBadPct(), DefaultIOFullBadPct)
+	}
+}
+
+// TestIOPressureNotice: a sustained full stall (full avg60 at or above
+// DASH_IO_FULL_BAD_PCT) is a system message with the io-pressure id;
+// it clears when the pressure drops, and a kernel without PSI never
+// raises it.
+func TestIOPressureNotice(t *testing.T) {
+	s := healthySnapshot()
+	s.IOAvail = true
+	s.IOFull60 = 15
+	rows := notices(s)
+	if len(rows) != 1 || rows[0].ID != "io-pressure" || rows[0].Severity != "bad" ||
+		rows[0].Text != "disk I/O stalled: full pressure 15% over 60 s" {
+		t.Fatalf("notices = %+v", rows)
+	}
+	s.IOFull60 = 14.9
+	if rows := notices(s); len(rows) != 0 {
+		t.Fatalf("below the bad level must clear: %+v", rows)
+	}
+	s.IOFull60 = 99
+	s.IOAvail = false
+	if rows := notices(s); len(rows) != 0 {
+		t.Fatalf("no PSI must not raise the notice: %+v", rows)
+	}
+	t.Setenv("DASH_IO_FULL_BAD_PCT", "5")
+	s.IOAvail = true
+	s.IOFull60 = 6
+	if rows := notices(s); len(rows) != 1 || rows[0].ID != "io-pressure" {
+		t.Fatalf("custom bad level 5: notices = %+v", rows)
+	}
 }

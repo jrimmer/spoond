@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -351,5 +353,155 @@ func TestEventLinesNewDetails(t *testing.T) {
 	if !strings.Contains(lines[0].Text, "540 ms · build 9e1f2ab3") ||
 		strings.Contains(lines[0].Text, "9e1f2ab3-20dc") {
 		t.Fatalf("checkpointed line = %q, want the short build id", lines[0].Text)
+	}
+}
+
+// TestParsePressure: /proc/pressure/io's some and full lines carry their
+// avg10 and avg60 percentages; a malformed value is skipped, not
+// mistaken for a calm zero.
+func TestParsePressure(t *testing.T) {
+	some10, some60, full10, full60, ok := parsePressure([]byte(
+		"some avg10=0.30 avg60=0.21 avg300=0.10 total=1234\n" +
+			"full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"))
+	if !ok || some10 != 0.30 || some60 != 0.21 || full10 != 0 || full60 != 0 {
+		t.Fatalf("parse = %v %v %v %v ok=%v", some10, some60, full10, full60, ok)
+	}
+	// A full stall: the values the notification trips on.
+	if _, _, f10, f60, ok := parsePressure([]byte("some avg10=1.0 avg60=2.5\nfull avg10=20.0 avg60=15.5\n")); !ok || f10 != 20 || f60 != 15.5 {
+		t.Fatalf("full parse = %v %v ok=%v", f10, f60, ok)
+	}
+	// An empty or unrecognised file says "no PSI", not "no pressure".
+	if _, _, _, _, ok := parsePressure([]byte("# nothing\n")); ok {
+		t.Fatal("empty pressure file must report !ok")
+	}
+	// A malformed avg is not treated as zero.
+	if _, _, _, f60, _ := parsePressure([]byte("full avg10=1 avg60=oops\n")); f60 != 0 {
+		t.Fatalf("malformed avg60 = %v", f60)
+	}
+}
+
+// TestParseDiskstats: the device's write sectors and busy ms come from
+// fields 10 and 13; another device's line is ignored and an unknown
+// device reports !ok.
+func TestParseDiskstats(t *testing.T) {
+	sample := []byte(
+		"8 0 sda 1 2 3 4 5 6 7 8 9 10 11\n" +
+			"259 0 nvme0n1 1 2 3 4 5 6 3000 7 8 30 9\n")
+	got, ok := parseDiskstats(sample, "nvme0n1")
+	if !ok || got.writeSectors != 3000 || got.ioMs != 30 {
+		t.Fatalf("nvme0n1 = %+v ok=%v, want 3000 sectors and 30 ms", got, ok)
+	}
+	if _, ok := parseDiskstats(sample, "nvme9n9"); ok {
+		t.Fatal("unknown device must report !ok")
+	}
+	if _, ok := parseDiskstats([]byte("nonsense\n"), "sda"); ok {
+		t.Fatal("short line must report !ok")
+	}
+}
+
+// TestFromIODelta: the collector turns two /proc/diskstats samples into
+// a write rate and a busy share over the collection interval, and reads
+// the PSI gauges from the pressure file.
+func TestFromIODelta(t *testing.T) {
+	dir := t.TempDir()
+	pressure := filepath.Join(dir, "io")
+	diskstats := filepath.Join(dir, "diskstats")
+	if err := os.WriteFile(pressure, []byte("some avg10=0.30 avg60=0.20\nfull avg10=0.00 avg60=0.00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := "259 0 nvme0n1 0 0 0 0 0 0 1000 0 0 500 0\n"
+	if err := os.WriteFile(diskstats, []byte(first), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newCollector(Config{StoragePath: dir, DiskDevice: "nvme0n1"})
+	c.pressurePath, c.diskstatsPath = pressure, diskstats
+	t0 := time.Unix(1_800_000_000, 0)
+	c.now = func() time.Time { return t0 }
+
+	var s Snapshot
+	c.fromIO(&s, t0)
+	if !s.IOAvail || s.IOSome60 != 0.2 || s.IOFull60 != 0 || s.DiskDevice != "nvme0n1" {
+		t.Fatalf("first sample: %+v", s)
+	}
+	if s.DiskWriteMB != 0 || s.DiskBusyPct != 0 {
+		t.Fatalf("first sample has no delta: write=%v busy=%v", s.DiskWriteMB, s.DiskBusyPct)
+	}
+
+	// The next sample, 10 s later: 20000 more sectors (10 MiB) written
+	// and 3500 more ms busy (35% of the 10 s wall clock).
+	second := "259 0 nvme0n1 0 0 0 0 0 0 21000 0 0 4000 0\n"
+	if err := os.WriteFile(diskstats, []byte(second), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s = Snapshot{}
+	c.fromIO(&s, t0.Add(10*time.Second))
+	if want := 1.0; s.DiskWriteMB != want {
+		t.Fatalf("write MB/s = %v, want %v", s.DiskWriteMB, want)
+	}
+	if want := 35.0; s.DiskBusyPct != want {
+		t.Fatalf("busy pct = %v, want %v", s.DiskBusyPct, want)
+	}
+
+	// A missing PSI file (kernel without PSI) hides the item: no
+	// IOAvail, no error.
+	c.pressurePath = filepath.Join(dir, "missing")
+	var noPSI Snapshot
+	c.fromIO(&noPSI, t0)
+	if noPSI.IOAvail {
+		t.Fatal("missing /proc/pressure/io must leave IOAvail false")
+	}
+}
+
+// TestDevMajorMinor: the statfs dev_t encoding round-trips for typical
+// disk and partition numbers.
+func TestDevMajorMinor(t *testing.T) {
+	cases := []struct {
+		dev          uint64
+		major, minor uint32
+	}{
+		{0x0800, 8, 0},    // /dev/sda
+		{0x0801, 8, 1},    // /dev/sda1
+		{0x10300, 259, 0}, // /dev/nvme0n1: major 259 (0x103), minor 0
+	}
+	for _, tc := range cases {
+		maj, min := devMajorMinor(tc.dev)
+		if maj != tc.major || min != tc.minor {
+			t.Errorf("devMajorMinor(%#x) = %d:%d, want %d:%d", tc.dev, maj, min, tc.major, tc.minor)
+		}
+	}
+}
+
+// TestBlockDevicePartition: a partition resolves to its parent whole
+// disk (nvme0n1p1 -> nvme0n1), a whole disk stays itself, and an
+// unresolvable major:minor is empty.
+func TestBlockDevicePartition(t *testing.T) {
+	sys := t.TempDir()
+	// /sys/dev/block/259:0 -> ../../devices/.../nvme0n1 (whole disk)
+	// /sys/dev/block/259:1 -> .../nvme0n1/nvme0n1p1 (partition)
+	disk := filepath.Join(sys, "devices", "pci", "nvme0n1")
+	part := filepath.Join(disk, "nvme0n1p1")
+	if err := os.MkdirAll(part, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(part, "partition"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sys, "dev", "block"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(disk, filepath.Join(sys, "dev", "block", "259:0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(part, filepath.Join(sys, "dev", "block", "259:1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := blockDevice(sys, 259, 0); got != "nvme0n1" {
+		t.Errorf("whole disk = %q, want nvme0n1", got)
+	}
+	if got := blockDevice(sys, 259, 1); got != "nvme0n1" {
+		t.Errorf("partition = %q, want its parent nvme0n1", got)
+	}
+	if got := blockDevice(sys, 8, 0); got != "" {
+		t.Errorf("unresolvable = %q, want empty", got)
 	}
 }
