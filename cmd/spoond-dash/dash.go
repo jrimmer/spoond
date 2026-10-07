@@ -29,6 +29,8 @@
 //	SPOOND_DB_PATH       catalog database (default /var/lib/spoond/spoond.db)
 //	USERS_FILE           identity store (default /var/lib/spoond/users.json)
 //	E2B_TEMPLATE_STORAGE_PATH  disk to report (default /forkdcache/e2b/storage/templates)
+//	DASH_DISK_DEVICE     block device shown for I/O (default auto-detected
+//	                     from the storage path's mount)
 //	DASH_SERVICES        systemd units to show (comma-separated)
 //	DASH_INTERVAL        refresh interval (default 2s)
 //	DASH_HISTORY         sparkline points kept (default 150, i.e. 5 min at 2s; max 200)
@@ -98,11 +100,15 @@ type Config struct {
 	// so.
 	EventsToken                    string
 	DBPath, UsersFile, StoragePath string
-	Services                       []string
-	Interval                       time.Duration
-	History                        int
-	Width                          int    // grid width in cells (DASH_WIDTH, 72–104)
-	Host                           string // header label (DASH_HOST, else the hostname)
+	// DiskDevice is the block device (e.g. nvme0n1) whose write
+	// throughput and busy share the host panel shows (DASH_DISK_DEVICE);
+	// empty auto-detects it from the storage path's mount.
+	DiskDevice string
+	Services   []string
+	Interval   time.Duration
+	History    int
+	Width      int    // grid width in cells (DASH_WIDTH, 72–104)
+	Host       string // header label (DASH_HOST, else the hostname)
 }
 
 func configFromEnv() (Config, error) {
@@ -124,6 +130,7 @@ func configFromEnv() (Config, error) {
 		DBPath:            env("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"),
 		UsersFile:         env("USERS_FILE", "/var/lib/spoond/users.json"),
 		StoragePath:       env("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates"),
+		DiskDevice:        os.Getenv("DASH_DISK_DEVICE"),
 		Services: strings.Split(env("DASH_SERVICES",
 			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol"), ","),
 		EventsToken: os.Getenv("DASH_EVENTS_TOKEN"),

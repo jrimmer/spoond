@@ -132,14 +132,15 @@ type Notice struct {
 //
 //   - a systemd unit not active,
 //   - free hugepages or snapshot disk past the danger level,
+//   - the snapshot disk's I/O full pressure past DASH_IO_FULL_BAD_PCT,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
 //     (#126).
 //
 // Each message's ID comes from its trigger ("unit:<name>", "hugepages",
-// "disk", "kept-disk"), so a viewer's dismissal can follow one trigger
-// across refreshes. The leases table still shows a lost lease (■ lost),
-// a preempted burst lease and a lapsed hold; those are not messages
-// here.
+// "disk", "io-pressure", "kept-disk"), so a viewer's dismissal can
+// follow one trigger across refreshes. The leases table still shows a
+// lost lease (■ lost), a preempted burst lease and a lapsed hold; those
+// are not messages here.
 func notices(s Snapshot) []Notice {
 	var out []Notice
 	for _, svc := range s.Services {
@@ -155,6 +156,13 @@ func notices(s Snapshot) []Notice {
 	if s.DiskUsedPct >= 90 {
 		out = append(out, Notice{ID: "disk", Severity: "bad",
 			Text: fmt.Sprintf("snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct)})
+	}
+	// The disk I/O full pressure (PSI): a sustained stall, not a spike,
+	// is a system message. The bad level is configurable (default 15 %)
+	// and the text carries the 60 s average it tripped on.
+	if s.IOAvail && s.IOFull60 >= ioFullBadPct() {
+		out = append(out, Notice{ID: "io-pressure", Severity: "bad",
+			Text: fmt.Sprintf("disk I/O stalled: full pressure %.0f%% over 60 s", s.IOFull60)})
 	}
 	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
 		out = append(out, Notice{ID: "kept-disk", Severity: "warn",
@@ -194,6 +202,15 @@ func reconcileDismissed(active, dismissed []string) (kept, visible []string) {
 // which the Notifications panel warns, when KEPT_DISK_WARN_PCT is unset.
 const DefaultKeptDiskWarnPct = 40.0
 
+// DefaultIOFullWarnPct and DefaultIOFullBadPct are the disk I/O full
+// pressure (PSI) levels, in percent of the 60 s average, at which the
+// host meter turns warn and bad. The default levels are a first cut and
+// will be tuned from #136's measurements.
+const (
+	DefaultIOFullWarnPct = 5.0
+	DefaultIOFullBadPct  = 15.0
+)
+
 // keptDiskWarnPct reads the kept-checkpoint disk-share warn level
 // (KEPT_DISK_WARN_PCT): a 0 disables the notification; unset or an
 // unparsable value means the default.
@@ -205,6 +222,27 @@ func keptDiskWarnPct() float64 {
 	p, err := strconv.ParseFloat(v, 64)
 	if err != nil {
 		return DefaultKeptDiskWarnPct
+	}
+	return p
+}
+
+// ioFullWarnPct and ioFullBadPct read the I/O full-pressure warn and
+// bad levels (DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT, in percent
+// of the 60 s average). Unset or unparsable values mean the defaults.
+func ioFullWarnPct() float64 { return envPct("DASH_IO_FULL_WARN_PCT", DefaultIOFullWarnPct) }
+
+func ioFullBadPct() float64 { return envPct("DASH_IO_FULL_BAD_PCT", DefaultIOFullBadPct) }
+
+// envPct reads a percentage from the environment, falling back to def
+// when it is unset or unparsable.
+func envPct(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	p, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
 	}
 	return p
 }
@@ -1029,19 +1067,23 @@ type hostRow struct {
 	pct, warn float64
 	danger    float64
 	right     string
+	// text, when non-nil, replaces the meter bar: a plain line whose
+	// value carries the style from the same thresholds (the I/O rows,
+	// where a fill bar would say nothing useful).
+	text []grid.Seg
 }
 
 // hostPanelRows builds the host panel's rows: cpu, memory, hugepages,
 // snapshot disk, root disk — the meters and levels the old page already
-// showed — plus the allocated line.
+// showed — plus the disk I/O rows and the allocated line.
 func hostPanelRows(s Snapshot) []hostRow {
-	return []hostRow{
-		{"cpu", s.CPUPct, 75, 90, fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores)},
-		{"memory", s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB)},
-		{"hugepages", s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB)},
-		{"snapshot disk", s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB)},
-		{"root disk", s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", s.RootFreeGiB)},
-	}
+	return append([]hostRow{
+		{"cpu", s.CPUPct, 75, 90, fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores), nil},
+		{"memory", s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB), nil},
+		{"hugepages", s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), nil},
+		{"snapshot disk", s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), nil},
+		{"root disk", s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", s.RootFreeGiB), nil},
+	}, ioHostRows(s)...)
 }
 
 // hostH is the host panel's own height: title, meters, rule, the two
@@ -1053,14 +1095,72 @@ func (l *layout) hostH() int {
 
 // hostRows builds the host panel's meter rows: cpu, memory, hugepages,
 // snapshot disk, root disk — the meters and levels the old page already
-// showed. right is the value text at the row's end.
+// showed — then the disk I/O rows. right is the value text at the row's
+// end.
 func (l *layout) hostRows() []hostRow {
-	return []hostRow{
-		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1)},
-		{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB)},
-		{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB)},
-		{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB)},
-		{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB)},
+	return append([]hostRow{
+		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1), nil},
+		{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB), nil},
+		{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB), nil},
+		{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB), nil},
+		{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB), nil},
+	}, ioHostRows(l.s)...)
+}
+
+// ioHostRows builds the disk I/O rows: the PSI pressure line and the
+// device's write throughput and busy share. A kernel without PSI
+// (IOAvail false) hides both rather than drawing a calm zero; a device
+// the collector could not resolve leaves the second row off.
+//
+//	I/O pressure  some 0.3% / full 0.0% (60s)
+//	nvme0n1       12 MB/s w, 18% busy
+//
+// The pressure row's style follows the full 60 s average against the
+// configurable levels (DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT);
+// the device row's follows its busy share.
+func ioHostRows(s Snapshot) []hostRow {
+	if !s.IOAvail {
+		return nil
+	}
+	rows := []hostRow{ioPressureRow(s)}
+	if s.DiskDevice != "" {
+		rows = append(rows, ioDeviceRow(s))
+	}
+	return rows
+}
+
+func ioPressureRow(s Snapshot) hostRow {
+	return hostRow{
+		text: []grid.Seg{
+			{Text: fmt.Sprintf("%-*s", meterLabelW, "I/O pressure"), Style: "dim"},
+			{Text: " ", Style: "dim"},
+			{Text: fmt.Sprintf("some %.1f%% / full %.1f%% (60s)", s.IOSome60, s.IOFull60),
+				Style: meterStyle(s.IOFull60, ioFullWarnPct(), ioFullBadPct())},
+		},
+	}
+}
+
+func ioDeviceRow(s Snapshot) hostRow {
+	return hostRow{
+		text: []grid.Seg{
+			{Text: fmt.Sprintf("%-*s", meterLabelW, s.DiskDevice), Style: "dim"},
+			{Text: " ", Style: "dim"},
+			{Text: fmt.Sprintf("%.0f MB/s w, %.0f%% busy", s.DiskWriteMB, s.DiskBusyPct),
+				Style: meterStyle(s.DiskBusyPct, 80, 90)},
+		},
+	}
+}
+
+// meterStyle is the ok/warn/bad style a value takes at the same
+// thresholds the meter bars use.
+func meterStyle(pct, warnPct, dangerPct float64) string {
+	switch {
+	case pct >= dangerPct:
+		return "bad"
+	case pct >= warnPct:
+		return "warn"
+	default:
+		return "ok"
 	}
 }
 
@@ -1082,6 +1182,11 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 
 	row := top + 1
 	for _, r := range l.hostRows() {
+		if r.text != nil {
+			g.Segs(x+2, row, r.text, inner)
+			row++
+			continue
+		}
 		g.Segs(x+2, row, l.meterSegs(r.label, r.pct, r.warn, r.danger, meterBarW), inner)
 		g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
 		row++

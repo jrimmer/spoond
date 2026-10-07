@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -84,6 +85,19 @@ type Snapshot struct {
 	DiskFreeGiB float64 `json:"diskFreeGiB"`
 	VCPUAlloc   int     `json:"vcpuAlloc"`
 	MemAllocGiB float64 `json:"memAllocGiB"`
+
+	// I/O pressure (PSI, /proc/pressure/io) and the snapshot disk's
+	// write throughput and busy share (/proc/diskstats, a delta between
+	// collections). IOAvail is false on a kernel without PSI: the
+	// pressure item is then hidden rather than drawn as a calm zero.
+	IOAvail     bool    `json:"ioAvail"`
+	IOSome10    float64 `json:"ioSome10"`   // some, avg10 (%)
+	IOSome60    float64 `json:"ioSome60"`   // some, avg60 (%)
+	IOFull10    float64 `json:"ioFull10"`   // full, avg10 (%)
+	IOFull60    float64 `json:"ioFull60"`   // full, avg60 (%)
+	DiskDevice  string  `json:"diskDevice"` // the device the storage lives on ("" when unknown)
+	DiskWriteMB float64 `json:"diskWriteMB"`
+	DiskBusyPct float64 `json:"diskBusyPct"`
 	// BackendUp is how long the spoond backend has run (from
 	// spoond_backend_start_time_seconds); 0 when /metrics does not say.
 	BackendUp   time.Duration `json:"-"`
@@ -288,6 +302,17 @@ type collector struct {
 	// sources have run.
 	diskTotal uint64
 
+	// prevDisk is the snapshot disk's /proc/diskstats counters at the
+	// last collection, so the write rate and busy share are a delta; it
+	// is only valid (prevDiskOK) once a sample has been read.
+	prevDisk   diskSample
+	prevDiskAt time.Time
+	prevDiskOK bool
+
+	// pressurePath and diskstatsPath are the /proc files the I/O readout
+	// comes from; tests point them at fixtures.
+	pressurePath, diskstatsPath string
+
 	rowsMu  sync.Mutex
 	lastRow []LeaseRow // the lease table of the last collect tick
 }
@@ -307,9 +332,11 @@ func newCollector(cfg Config) *collector {
 		client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{ServerName: cfg.MetricsServerName},
 		}},
-		prevCounters: map[string]float64{},
-		now:          time.Now,
-		events:       &eventBuffer{},
+		prevCounters:  map[string]float64{},
+		now:           time.Now,
+		pressurePath:  "/proc/pressure/io",
+		diskstatsPath: "/proc/diskstats",
+		events:        &eventBuffer{},
 		eventsClient: &http.Client{Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{ServerName: cfg.MetricsServerName},
 		}},
@@ -559,6 +586,7 @@ func histBy(f *dto.MetricFamily, name, value string) (sum, count float64) {
 }
 
 func (c *collector) fromHost(s *Snapshot) error {
+	now := c.now()
 	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
 		if f := strings.Fields(string(b)); len(f) > 0 {
 			s.Load1, _ = strconv.ParseFloat(f[0], 64)
@@ -589,7 +617,165 @@ func (c *collector) fromHost(s *Snapshot) error {
 		s.RootFreeGiB = round1(float64(st.Bavail) * float64(st.Bsize) / (1 << 30))
 		s.RootUsedPct = round1(float64(st.Blocks-st.Bfree) / float64(st.Blocks) * 100)
 	}
+	c.fromIO(s, now)
 	return nil
+}
+
+// fromIO fills the I/O pressure and snapshot-disk throughput fields. A
+// kernel without PSI (no /proc/pressure/io) leaves IOAvail false; a
+// missing diskstats or an unknown device leaves the disk fields empty.
+// Neither is an error: the rows are simply not drawn.
+func (c *collector) fromIO(s *Snapshot, now time.Time) {
+	if b, err := os.ReadFile(c.pressurePath); err == nil {
+		if some10, some60, full10, full60, ok := parsePressure(b); ok {
+			s.IOSome10, s.IOSome60 = some10, some60
+			s.IOFull10, s.IOFull60 = full10, full60
+			s.IOAvail = true
+		}
+	}
+	device := c.diskDevice()
+	if device == "" {
+		return
+	}
+	b, err := os.ReadFile(c.diskstatsPath)
+	if err != nil {
+		return
+	}
+	smp, ok := parseDiskstats(b, device)
+	if !ok {
+		return
+	}
+	s.DiskDevice = device
+	if c.prevDiskOK {
+		if dt := now.Sub(c.prevDiskAt).Seconds(); dt > 0 {
+			s.DiskWriteMB = round1(float64(smp.writeSectors-c.prevDisk.writeSectors) * 512 / dt / 1e6)
+			s.DiskBusyPct = clampPct(round1(float64(smp.ioMs-c.prevDisk.ioMs) / (dt * 1000) * 100))
+		}
+	}
+	c.prevDisk, c.prevDiskAt, c.prevDiskOK = smp, now, true
+}
+
+// diskDevice is the block device the snapshot disk lives on:
+// DASH_DISK_DEVICE when set, else the device backing the storage path's
+// mount. The whole disk is named (nvme0n1), not a partition on it.
+func (c *collector) diskDevice() string {
+	if c.cfg.DiskDevice != "" {
+		return c.cfg.DiskDevice
+	}
+	return deviceForPath(c.cfg.StoragePath)
+}
+
+// parsePressure parses /proc/pressure/io: the `some` and `full` lines,
+// each carrying avg10 and avg60 as percentages. ok is false when no
+// recognised line was found (a kernel without PSI has no such file at
+// all, so the caller sees a read error instead).
+func parsePressure(b []byte) (some10, some60, full10, full60 float64, ok bool) {
+	var haveSome, haveFull bool
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		var avg10, avg60 float64
+		var bad bool
+		for _, kv := range f[1:] {
+			k, v, found := strings.Cut(kv, "=")
+			if !found {
+				continue
+			}
+			switch k {
+			case "avg10":
+				if x, err := strconv.ParseFloat(v, 64); err == nil {
+					avg10 = x
+				} else {
+					bad = true
+				}
+			case "avg60":
+				if x, err := strconv.ParseFloat(v, 64); err == nil {
+					avg60 = x
+				} else {
+					bad = true
+				}
+			}
+		}
+		if bad {
+			continue
+		}
+		switch f[0] {
+		case "some":
+			some10, some60, haveSome = avg10, avg60, true
+		case "full":
+			full10, full60, haveFull = avg10, avg60, true
+		}
+	}
+	return some10, some60, full10, full60, haveSome || haveFull
+}
+
+// parseDiskstats returns the device's cumulative write-sector and
+// busy-ms counters from /proc/diskstats (fields 10 and 13, 1-based:
+// sectors written, ms doing I/O). ok is false when the device is not on
+// the line or its counters do not parse.
+func parseDiskstats(b []byte, device string) (diskSample, bool) {
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 14 || f[2] != device {
+			continue
+		}
+		ws, err1 := strconv.ParseUint(f[9], 10, 64)  // sectors written
+		im, err2 := strconv.ParseUint(f[12], 10, 64) // ms doing I/O
+		if err1 != nil || err2 != nil {
+			return diskSample{}, false
+		}
+		return diskSample{writeSectors: ws, ioMs: im}, true
+	}
+	return diskSample{}, false
+}
+
+// diskSample is one device's cumulative /proc/diskstats counters.
+type diskSample struct {
+	writeSectors uint64
+	ioMs         uint64
+}
+
+// clampPct keeps a busy share inside 0..100 (the diskstats ticks can
+// outrun the wall clock on a multi-queue device, and a negative delta
+// across a counter reset must not draw as negative).
+func clampPct(v float64) float64 {
+	return min(max(v, 0), 100)
+}
+
+// deviceForPath names the whole block device backing path's filesystem
+// via sysfs, or "" when it cannot be resolved (a missing path, a
+// non-block mount such as tmpfs).
+func deviceForPath(path string) string {
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return ""
+	}
+	major, minor := devMajorMinor(uint64(st.Dev))
+	return blockDevice("/sys", major, minor)
+}
+
+// blockDevice resolves a major:minor under sysfs to its block device
+// name. A partition (one carrying a `partition` attribute) reports its
+// parent whole disk instead.
+func blockDevice(sysfs string, major, minor uint32) string {
+	p, err := filepath.EvalSymlinks(filepath.Join(sysfs, "dev", "block", fmt.Sprintf("%d:%d", major, minor)))
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(p, "partition")); err == nil {
+		return filepath.Base(filepath.Dir(p))
+	}
+	return filepath.Base(p)
+}
+
+// devMajorMinor unpacks a Linux dev_t into its major and minor numbers
+// (the glibc encoding the kernel hands back through statfs).
+func devMajorMinor(dev uint64) (major, minor uint32) {
+	major = uint32((dev>>8)&0xfff) | uint32((dev>>32)&0xfffff000)
+	minor = uint32(dev&0xff) | uint32((dev>>12)&0xffffff00)
+	return major, minor
 }
 
 // eventSubjectMax caps the events panel's subject column (holder,
