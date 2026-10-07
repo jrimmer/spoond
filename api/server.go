@@ -899,8 +899,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			serr.write(w)
 			return
 		}
-		// Snapshot starts never use the warm pool: the pool holds the
-		// image's current build, not the version's.
+		// The start holds its build against delete, retention and GC for
+		// the whole create, queued admission included (B1). Release it
+		// however the create ends.
+		defer s.svc.endStartingBuild(start.row.BuildID)
 	}
 	// Egress policy (security review #37 rescan F3): default restricted —
 	// NOT lan. The default must not let a guest reach other tenants'
@@ -1045,7 +1047,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 					// The client went away: nothing to write.
 					return
 				}
-				s.writeCreateRefusal(w, req.Image, err, waited)
+				s.writeCreateRefusal(w, req.Image, req.Snapshot, err, waited)
 				return
 			}
 			s.writeCreatedLease(w, r, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
@@ -1053,7 +1055,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		s.writeCreateRefusal(w, req.Image, err, 0)
+		s.writeCreateRefusal(w, req.Image, req.Snapshot, err, 0)
 		return
 	}
 	// A create that asked to wait but fit at once still reports how long
@@ -1068,8 +1070,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 // writeCreateRefusal writes the failure response for a refused create,
 // including waited_ms when a wait timed out. It carries the same status,
-// body and Retry-After as the immediate refusal.
-func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err error, waited time.Duration) {
+// body and Retry-After as the immediate refusal. image and snapshot are
+// the request's create source, for the log line.
+func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot string, err error, waited time.Duration) {
 	status := http.StatusInternalServerError
 	msg := "failed to grant lease"
 	retryAfter := 0
@@ -1102,7 +1105,11 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err err
 	case errors.Is(err, substrate.ErrCapacity):
 		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
 	default:
-		s.svc.log.Printf("create: grant %s: %v", image, err)
+		if snapshot != "" {
+			s.svc.log.Printf("create: grant snapshot %s: %v", snapshot, err)
+		} else {
+			s.svc.log.Printf("create: grant %s: %v", image, err)
+		}
 	}
 	if retryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))

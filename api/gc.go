@@ -366,6 +366,10 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 		}
 		keep(l.ResumeBuildID)
 		keep(l.LastCheckpointBuildID)
+		// A live lease that started from a named snapshot keeps its
+		// version's build even after a forced row delete (2.7, #83): the
+		// build "stays until the lease no longer needs it".
+		keep(l.SnapshotBuildID)
 		// The builds the lease pinned with {"keep":true} are roots while
 		// the lease lives (2.3, #121); releasing the lease drops its kept
 		// rows, and a lost lease's keeps lapse with its grace period.
@@ -375,12 +379,18 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 	}
 	// Named snapshots (2.7, #83): every version's build is a GC root,
 	// with its parent chain and refs like a kept build. Deleting the row
-	// makes the build an ordinary candidate after gcAge.
+	// makes the build an ordinary candidate after gcAge. A build whose
+	// version row is gone but that a lease start is using right now is
+	// still a root (B1): the start is not visible in the catalog until
+	// its lease row is written.
 	named, err := s.db.NamedSnapshotBuilds(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list named snapshot builds: %w", err)
 	}
 	for id := range named {
+		keep(id)
+	}
+	for id := range s.startingBuildSet() {
 		keep(id)
 	}
 	sbs, err := s.db.ListSandboxes(ctx)

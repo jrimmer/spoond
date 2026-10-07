@@ -326,6 +326,15 @@ func (db *DB) SetNamedSnapshotKeep(ctx context.Context, owner, name string, keep
 // It returns the build ids of the rows it deleted, so the caller can log
 // or account. keep <= 0 prunes nothing.
 func (db *DB) PruneNamedSnapshots(ctx context.Context, owner, name string, keep int) ([]string, error) {
+	return db.PruneNamedSnapshotsKeeping(ctx, owner, name, keep, nil)
+}
+
+// PruneNamedSnapshotsKeeping is PruneNamedSnapshots with extraInUse:
+// build ids a lease start holds in memory right now (B1). A start is
+// visible to this query only through extraInUse until its lease row is
+// written, so retention must treat those builds like a live lease and
+// spare their versions.
+func (db *DB) PruneNamedSnapshotsKeeping(ctx context.Context, owner, name string, keep int, extraInUse map[string]bool) ([]string, error) {
 	if keep <= 0 {
 		return nil, nil
 	}
@@ -373,7 +382,7 @@ func (db *DB) PruneNamedSnapshots(ctx context.Context, owner, name string, keep 
 			tx.Rollback()
 			return nil, fmt.Errorf("store: prune named snapshots %s/%s: %w", owner, name, err)
 		}
-		if live > 0 {
+		if live > 0 || extraInUse[c.build] {
 			continue
 		}
 		res, err := tx.ExecContext(ctx,
@@ -390,6 +399,19 @@ func (db *DB) PruneNamedSnapshots(ctx context.Context, owner, name string, keep 
 		return nil, fmt.Errorf("store: prune named snapshots %s/%s: %w", owner, name, err)
 	}
 	return deleted, nil
+}
+
+// SetNamedSnapshotVersions overwrites a version row's recorded envd,
+// firecracker and orchestrator versions. It exists for tests that need a
+// row as if saved on a differently-versioned host (2.7, #83 S2); the
+// save path always records the build's / host's real values.
+func (db *DB) SetNamedSnapshotVersions(ctx context.Context, buildID, envd, firecracker, orchestrator string) error {
+	if _, err := db.w.ExecContext(ctx, `UPDATE named_snapshots
+		SET envd_version = ?, firecracker_version = ?, orchestrator_version = ?
+		WHERE build_id = ?`, envd, firecracker, orchestrator, buildID); err != nil {
+		return fmt.Errorf("store: set named snapshot versions %s: %w", buildID, err)
+	}
+	return nil
 }
 
 // NamedSnapshotBuilds returns every named snapshot's build id as a set:

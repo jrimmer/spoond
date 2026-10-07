@@ -546,6 +546,14 @@ type Service struct {
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
 	saves namedSaveInFlight
+	// startingMu guards startingBuilds, the in-memory refcount of
+	// named-snapshot builds a lease start is using right now (B1). A
+	// start is invisible to the catalog between resolving the version
+	// and writing the lease row, so delete-in-use, retention and the GC
+	// read this set too: a version another start holds is never deleted
+	// or pruned, and its build is a GC root.
+	startingMu     sync.Mutex
+	startingBuilds map[string]int
 	// secretsGate serialises a named-snapshot save's secret scrub against
 	// exec and job secret staging on the same lease (2.7, #83 B2): a save
 	// holds it across the checkpoint, an exec/job staging takes it first
@@ -594,6 +602,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		stagedExecSecretNames: map[string][]string{},
 		pendingSecretRemovals: map[string][]string{},
 		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
+		startingBuilds:        map[string]int{},
 		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
 		jobStarts:             map[string]*jobStartLock{},
 	}
@@ -1667,6 +1676,56 @@ type snapshotStart struct {
 	row store.NamedSnapshotRow
 }
 
+// beginStartingBuild takes a reference on a named-snapshot build a lease
+// start is about to use (B1). From here until endStartingBuild the build
+// is visible to delete-in-use, retention and the GC as if a live lease
+// ran from it, so none of them can remove it out from under the start.
+func (s *Service) beginStartingBuild(buildID string) {
+	if buildID == "" {
+		return
+	}
+	s.startingMu.Lock()
+	s.startingBuilds[buildID]++
+	s.startingMu.Unlock()
+}
+
+// endStartingBuild releases the reference taken by beginStartingBuild.
+// It must run on every path that took one, success or failure.
+func (s *Service) endStartingBuild(buildID string) {
+	if buildID == "" {
+		return
+	}
+	s.startingMu.Lock()
+	if s.startingBuilds[buildID] <= 1 {
+		delete(s.startingBuilds, buildID)
+	} else {
+		s.startingBuilds[buildID]--
+	}
+	s.startingMu.Unlock()
+}
+
+// startingBuildSet returns a copy of the builds a start currently holds,
+// for the store's retention query and the GC's root walk.
+func (s *Service) startingBuildSet() map[string]bool {
+	s.startingMu.Lock()
+	defer s.startingMu.Unlock()
+	if len(s.startingBuilds) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(s.startingBuilds))
+	for id := range s.startingBuilds {
+		out[id] = true
+	}
+	return out
+}
+
+// startingBuild reports whether a start currently holds buildID.
+func (s *Service) startingBuild(buildID string) bool {
+	s.startingMu.Lock()
+	defer s.startingMu.Unlock()
+	return s.startingBuilds[buildID] > 0
+}
+
 // snapshotStartError is returned when a lease cannot start from a named
 // snapshot version on this host (2.7, #83): the build row or its files
 // are gone, or the substrate refuses the build. The API maps it to 409
@@ -1711,6 +1770,20 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		}
 		if err != nil {
 			return nil, fmt.Errorf("load snapshot build %s: %w", snap.row.BuildID, err)
+		}
+		// A build that is not ready (deleted, failed, or still being
+		// written) cannot be started: answer cannot_start rather than
+		// handing the substrate a build that will not run (B1).
+		if b.State != "ready" {
+			return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: "build is " + b.State}
+		}
+		// A version saved against a different host envd/firecracker or
+		// orchestrator cannot start here (S2): compare the row's recorded
+		// versions against the host's and name the component that
+		// differs. Only a known host version is compared; an unknown one
+		// ("") never refuses.
+		if cause, ok := s.snapshotHostMismatch(ctx, snap.row); ok {
+			return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: cause}
 		}
 		memoryMB = snap.row.MemoryMB
 	} else {
@@ -1864,10 +1937,14 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if lease.SandboxID == "" {
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
-			if snap != nil {
-				if cause, ok := snapshotCreateCannotStart(err); ok {
-					return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: cause}
-				}
+			// A create the orchestrator does not know (missing build
+			// files) cannot start here (2.7, #83 S2): map only the
+			// structural ErrNotFound. A capacity, draining or transport
+			// failure keeps its current retryable handling; an
+			// incompatible version is caught before the create by the
+			// host-version check above.
+			if snap != nil && errors.Is(err, substrate.ErrNotFound) {
+				return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: "build files missing"}
 			}
 			return nil, err
 		}
@@ -1880,11 +1957,31 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// A lease started from a snapshot gets its copy-side markers before
 	// any exec the API runs in it (A4/A7): /run/spoond/lease-id,
 	// /run/spoond/generation and /run/spoond/started-from exist before
-	// the integrity probe below. The snapshot's sandbox is fresh and
-	// never reused, so writing before the probe is safe.
+	// the integrity probe below. These are not best effort: if any write
+	// fails the sandbox is deleted and the create fails with no lease row
+	// (S3), because a copy that cannot tell source from copy is not safe
+	// to hand out.
 	if snap != nil {
-		s.writeGeneration(lease)
-		s.writeStartedFromMarker(lease)
+		if err := s.writeGeneration(lease); err != nil {
+			_ = s.sub.Delete(ctx, lease.SandboxID)
+			s.deleteSandboxRow(lease.SandboxID)
+			return nil, fmt.Errorf("write lease-id and generation markers: %w", err)
+		}
+		if err := s.writeStartedFromMarker(lease); err != nil {
+			_ = s.sub.Delete(ctx, lease.SandboxID)
+			s.deleteSandboxRow(lease.SandboxID)
+			return nil, fmt.Errorf("write started-from marker: %w", err)
+		}
+		// The snapshot's memory may still carry secret files (a save
+		// scrubs them before its checkpoint, but a copy must not trust
+		// that). Remove anything under /run/secrets before the new
+		// lease's own create-time secrets are staged below, so the copy
+		// holds only its own (A4/S4).
+		if _, err := s.scrubAllSecrets(ctx, lease.SandboxID, nil); err != nil {
+			_ = s.sub.Delete(ctx, lease.SandboxID)
+			s.deleteSandboxRow(lease.SandboxID)
+			return nil, fmt.Errorf("scrub secrets on snapshot start: %w", err)
+		}
 	}
 
 	// The integrity probe runs through exec before the sandbox is handed
@@ -3594,28 +3691,34 @@ const (
 // logged, never returned. Both files are written atomically (temp file,
 // then rename), so inotify on /run/spoond sees each whole write. Call
 // without s.store.mu.
-func (s *Service) writeGeneration(l *Lease) {
+func (s *Service) writeGeneration(l *Lease) error {
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	data := fmt.Sprintf("%d\n", l.Generation)
-	s.writeGuestFileAtomic(ctx, l, generationPath, []byte(data), generationMode)
-	s.writeGuestFileAtomic(ctx, l, leaseIDPath, []byte(l.ID+"\n"), leaseIDMode)
+	if err := s.writeGuestFileAtomic(ctx, l, generationPath, []byte(data), generationMode); err != nil {
+		return err
+	}
+	return s.writeGuestFileAtomic(ctx, l, leaseIDPath, []byte(l.ID+"\n"), leaseIDMode)
 }
 
 // writeGuestFileAtomic writes data to path in the lease's guest through
 // a sibling temp file plus a rename, so a reader (an inotify watcher
-// included) never sees a partially written file. A failed write or
-// rename is logged and otherwise ignored: these files are announcements,
-// not constraints. Call without s.store.mu.
-func (s *Service) writeGuestFileAtomic(ctx context.Context, l *Lease, path string, data []byte, mode os.FileMode) {
+// included) never sees a partially written file. It returns an error
+// when the write or the rename fails; callers that treat the file as an
+// announcement ignore it (and it is logged here), while a snapshot
+// start's copy-side markers must fail the create (A4/S3). Call without
+// s.store.mu.
+func (s *Service) writeGuestFileAtomic(ctx context.Context, l *Lease, path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
 	if err := s.sub.WriteFile(ctx, l.SandboxID, tmp, data, mode); err != nil {
 		s.log.Printf("guest file: write %s into %s: %v", tmp, l.ID, err)
-		return
+		return err
 	}
 	if err := s.sub.Rename(ctx, l.SandboxID, tmp, path); err != nil {
 		s.log.Printf("guest file: rename %s -> %s in %s: %v", tmp, path, l.ID, err)
+		return err
 	}
+	return nil
 }
 
 // bumpGenerationLocked moves the lease to the next generation and

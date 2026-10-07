@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -246,8 +247,11 @@ func TestSnapshotStartSecrets(t *testing.T) {
 }
 
 // TestSnapshotStartCannotStart: a substrate create failure that means the
-// snapshot's build cannot start on this host answers 409 cannot_start;
-// a capacity failure keeps its usual 503 and a generic failure its 500.
+// snapshot's build cannot start on this host (ErrNotFound, missing build
+// files) answers 409 cannot_start, as does a version whose saved
+// envd/firecracker/orchestrator differs from the host's (S2). Other
+// failures keep their usual handling, including an "envd not healthy"
+// string, which can just be a slow host.
 func TestSnapshotStartCannotStart(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
@@ -268,13 +272,14 @@ func TestSnapshotStartCannotStart(t *testing.T) {
 		t.Fatalf("cannot_start error = %q", msg)
 	}
 
-	// An incompatible envd also cannot start.
+	// An "envd not healthy" string is not structural: it can fire on a
+	// slow host, so it keeps its generic 500, not cannot_start.
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		return substrate.Sandbox{}, fmt.Errorf("e2b: create %s: envd not healthy within 30s: connect: connection refused", req.BuildID)
 	}
 	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
-	if resp.StatusCode != http.StatusConflict || body["code"] != "cannot_start" {
-		t.Fatalf("incompatible envd: status %d (%v), want 409 cannot_start", resp.StatusCode, body)
+	if resp.StatusCode == http.StatusConflict || body["code"] == "cannot_start" {
+		t.Fatalf("slow host misclassified as cannot_start: status %d (%v)", resp.StatusCode, body)
 	}
 
 	// Capacity keeps its current 503 handling, not cannot_start.
@@ -296,6 +301,67 @@ func TestSnapshotStartCannotStart(t *testing.T) {
 	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("generic failure: status %d, want 500", resp.StatusCode)
+	}
+}
+
+// TestSnapshotStartHostVersionMismatch: a version saved against a
+// different envd, firecracker or orchestrator cannot start on this host
+// and answers 409 cannot_start naming the component (S2). The check runs
+// before the substrate create.
+func TestSnapshotStartHostVersionMismatch(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	// The host reports version v-host for every component.
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20,
+		Version: "orch-host", EnvdVersion: "envd-host", FirecrackerVersion: "fc-host"}, nil)
+	src := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
+	row, err := db.GetNamedSnapshot(context.Background(), "consumer-a", "warm", 1)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// Pin the saved row's envd to a different version.
+	if err := db.SetNamedSnapshotVersions(context.Background(), row.BuildID, "envd-old", "fc-host", "orch-host"); err != nil {
+		t.Fatalf("set versions: %v", err)
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "cannot_start" {
+		t.Fatalf("envd mismatch: status %d (%v), want 409 cannot_start", resp.StatusCode, body)
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "envd") {
+		t.Fatalf("cannot_start should name envd: %q", msg)
+	}
+
+	// A matching host version starts fine.
+	if err := db.SetNamedSnapshotVersions(context.Background(), row.BuildID, "envd-host", "fc-host", "orch-host"); err != nil {
+		t.Fatalf("set versions: %v", err)
+	}
+	out := createFromSnapshot(t, ts.URL, "token-a", map[string]any{"snapshot": "warm"})
+	if out["id"] == "" {
+		t.Fatalf("matching versions did not start: %v", out)
+	}
+}
+
+// TestSnapshotStartNonReadyBuild: a version whose build row is not ready
+// answers cannot_start rather than handing the substrate a dead build
+// (B1).
+func TestSnapshotStartNonReadyBuild(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	src := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
+	row, err := db.GetNamedSnapshot(context.Background(), "consumer-a", "warm", 1)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if err := db.UpdateBuildState(context.Background(), row.BuildID, "failed", "gone", nil); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "cannot_start" {
+		t.Fatalf("non-ready build: status %d (%v), want 409 cannot_start", resp.StatusCode, body)
 	}
 }
 
@@ -487,6 +553,210 @@ func TestSnapshotStartCreateRefusalCodes(t *testing.T) {
 		sub.createFn = nil
 		if resp.StatusCode != c.wantStatus || body["code"] != c.wantCode {
 			t.Fatalf("%s: status %d (%v), want %d %s", c.name, resp.StatusCode, body, c.wantStatus, c.wantCode)
+		}
+	}
+}
+
+// TestSnapshotStartWindowProtected (B1): while a start is in flight,
+// delete-in-use answers 409, retention spares the version and the GC
+// keeps its build; after the start returns, the reference is released.
+// A hook in the fake create parks the start mid-flight.
+func TestSnapshotStartWindowProtected(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	src := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm", "keep": 1})
+
+	row, err := db.GetNamedSnapshot(context.Background(), "consumer-a", "warm", 1)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		close(entered)
+		<-release
+		sub.createFn = nil
+		return sub.Fake.Create(ctx, req)
+	}
+	done := make(chan map[string]any, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		body, err := rawCreate(t, ts.URL, "token-a", map[string]any{"snapshot": "warm@1"})
+		if err != nil {
+			errCh <- err
+			return
+		}
+		done <- body
+	}()
+	<-entered
+
+	// The start holds v1's build: delete-in-use is 409.
+	resp, body := doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warm@1", "token-a", nil)
+	if resp.StatusCode != http.StatusConflict || body["code"] != "snapshot_in_use" {
+		t.Fatalf("delete mid-start: status %d (%v), want 409 snapshot_in_use", resp.StatusCode, body)
+	}
+	// Retention spares it: a new save (keep 1) must not prune v1.
+	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
+	if _, err := db.GetNamedSnapshot(context.Background(), "consumer-a", "warm", 1); err != nil {
+		t.Fatalf("v1 pruned while a start held it: %v", err)
+	}
+	// A forced delete drops the row anyway. Now only the in-memory
+	// refcount can keep the build, so the GC and orphan reaper must
+	// still see it as a root.
+	resp, _ = doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warm@1?force=1", "token-a", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("forced delete mid-start: status %d, want 204", resp.StatusCode)
+	}
+	kept, err := svc.keptBuilds(context.Background())
+	if err != nil {
+		t.Fatalf("keptBuilds: %v", err)
+	}
+	if !kept[row.BuildID] {
+		t.Fatalf("GC dropped %s while a start held it", row.BuildID)
+	}
+	roots, err := svc.orphanRoots(context.Background())
+	if err != nil {
+		t.Fatalf("orphanRoots: %v", err)
+	}
+	if !roots[row.BuildID] {
+		t.Fatalf("orphan reaper dropped %s while a start held it", row.BuildID)
+	}
+
+	close(release)
+	select {
+	case err := <-errCh:
+		t.Fatalf("start after release: %v", err)
+	case out := <-done:
+		if out["id"] == nil {
+			t.Fatalf("start after release did not return a lease: %v", out)
+		}
+	}
+	// The reference is gone. The created lease is itself live and runs
+	// from the build, so the GC now keeps it through the lease, not the
+	// refcount.
+	if svc.startingBuild(row.BuildID) {
+		t.Fatal("starting-build reference leaked after the create returned")
+	}
+}
+
+// rawCreate posts a create body and returns the decoded response, safe to
+// call from a goroutine (no testing.T methods).
+func rawCreate(t *testing.T, ts, token string, body map[string]any) (map[string]any, error) {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", ts+"/api/sandboxes", &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("create status %d: %v", resp.StatusCode, out)
+	}
+	return out, nil
+}
+
+// TestSnapshotStartScrubsSourceSecrets (S4): a secret file seeded into
+// the created sandbox (as a checkpoint would carry it) is gone from the
+// copy, which holds only its own create-time secrets.
+func TestSnapshotStartScrubsSourceSecrets(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	src := createLiveLease(t, ts.URL, "token-a", map[string]any{
+		"image":   "py-base",
+		"secrets": map[string]string{"SOURCE": "s"},
+	})
+	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
+
+	// A hook seeds a source secret into every created sandbox, as a
+	// checkpoint restore would.
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		sb, err := sub.Fake.Create(ctx, req)
+		if err != nil {
+			return sb, err
+		}
+		_ = sub.Fake.WriteFile(ctx, sb.ID, "/run/secrets/SOURCE", []byte("s"), 0o600)
+		return sb, nil
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	out := createFromSnapshot(t, ts.URL, "token-a", map[string]any{
+		"snapshot": "warm",
+		"secrets":  map[string]string{"MINE": "m"},
+	})
+	newID := out["id"].(string)
+	sb, err := db.GetSandboxByLease(context.Background(), newID)
+	if err != nil {
+		t.Fatalf("new sandbox: %v", err)
+	}
+	if _, err := sub.Fake.ReadFile(t.Context(), sb.SandboxID, "/run/secrets/SOURCE", 1024); err == nil {
+		t.Fatal("the copy still holds the source's secret file")
+	}
+	data, err := sub.Fake.ReadFile(t.Context(), sb.SandboxID, "/run/secrets/MINE", 1024)
+	if err != nil || string(data) != "m" {
+		t.Fatalf("copy's own secret = %q (%v), want m", data, err)
+	}
+}
+
+// TestSnapshotStartCrossOwnerNotFound: another owner's snapshot is 404,
+// the same as an unknown name.
+func TestSnapshotStartCrossOwnerNotFound(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	src := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-b", map[string]any{"snapshot": "warm"})
+	if resp.StatusCode != http.StatusNotFound || body["code"] != "not_found" {
+		t.Fatalf("cross-owner start: status %d (%v), want 404 not_found", resp.StatusCode, body)
+	}
+}
+
+// TestSnapshotStartMarkerWriteFailure (S3): a failing copy-side marker
+// write deletes the sandbox and fails the create with 500 and no lease
+// row.
+func TestSnapshotStartMarkerWriteFailure(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	src := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
+
+	before := len(sub.sandboxesLive(t))
+	// Every WriteFile fails: the started-from marker cannot land.
+	sub.FailCall("WriteFile", 0, fmt.Errorf("disk gone"))
+	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"snapshot": "warm"})
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("marker write failure: status %d, want 500", resp.StatusCode)
+	}
+	if after := len(sub.sandboxesLive(t)); after != before {
+		t.Fatalf("sandboxes after a failed marker write = %d, want %d (deleted)", after, before)
+	}
+	// No lease row was written.
+	ctx := context.Background()
+	leases, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list leases: %v", err)
+	}
+	for _, l := range leases {
+		if l.SnapshotBuildID != "" {
+			t.Fatalf("a lease row was written despite the failed marker: %s", l.ID)
 		}
 	}
 }
