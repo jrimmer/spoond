@@ -530,10 +530,19 @@ type Service struct {
 	// and its version-row insert to simulate a backend that stops
 	// mid-save (A7). Nil in production.
 	saveInterrupt func(ctx context.Context, l *Lease, buildID string) error
+	// saveAfterClaim, when set by a test, runs after a save claims its
+	// idempotency key in memory and before it re-checks the catalog for a
+	// committed replay (S3). Nil in production.
+	saveAfterClaim func(owner, name, key string)
 	// saves tracks in-flight and recently failed named-snapshot saves in
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
 	saves namedSaveInFlight
+	// secretsGate serialises a named-snapshot save's secret scrub against
+	// exec and job secret staging on the same lease (2.7, #83 B2): a save
+	// holds it across the checkpoint, an exec/job staging takes it first
+	// and answers 409 lease_busy while a save holds it.
+	secretsGate secretsGate
 	// admitQ holds creates waiting for admission (#129 part 1) and
 	// serialises their admissions.
 	admitQ admissionQueue
@@ -578,6 +587,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		stagedJobSecrets:      map[string][]string{},
 		jobSecretLeases:       map[string]string{},
 		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
+		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
 		jobStarts:             map[string]*jobStartLock{},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))

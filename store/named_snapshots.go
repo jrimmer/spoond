@@ -61,13 +61,21 @@ func (db *DB) InsertNamedSnapshot(ctx context.Context, r NamedSnapshotRow, keep 
 // insertNamedSnapshotTx does the work of InsertNamedSnapshot on an open
 // transaction.
 func insertNamedSnapshotTx(ctx context.Context, tx *sql.Tx, r *NamedSnapshotRow, keep int) error {
-	var maxVersion sql.NullInt64
+	var maxVersion, highWater sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT MAX(version) FROM named_snapshots WHERE owner = ? AND name = ?`,
 		r.Owner, r.Name).Scan(&maxVersion); err != nil {
 		return fmt.Errorf("store: named snapshot max version %s/%s: %w", r.Owner, r.Name, err)
 	}
-	r.Version = maxVersion.Int64 + 1
+	if err := tx.QueryRowContext(ctx,
+		`SELECT last_version FROM named_snapshot_names WHERE owner = ? AND name = ?`,
+		r.Owner, r.Name).Scan(&highWater); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("store: named snapshot high-water %s/%s: %w", r.Owner, r.Name, err)
+	}
+	// The high-water mark is the larger of the surviving max version and
+	// the last version ever assigned, so deleting the latest version and
+	// saving again never reuses its number (S4).
+	r.Version = max(maxVersion.Int64, highWater.Int64) + 1
 	if _, err := tx.ExecContext(ctx, `INSERT INTO named_snapshots (`+namedSnapshotColumns+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Owner, r.Name, r.Version, r.BuildID, r.IdempotencyKey,
@@ -75,14 +83,15 @@ func insertNamedSnapshotTx(ctx context.Context, tx *sql.Tx, r *NamedSnapshotRow,
 		r.EnvdVersion, r.FirecrackerVersion, r.OrchestratorVersion, formatTime(r.CreatedAt)); err != nil {
 		return fmt.Errorf("store: insert named snapshot %s/%s@%d: %w", r.Owner, r.Name, r.Version, err)
 	}
-	// The name's retention is a first-save setting: only insert it when
-	// the name has no row yet.
-	if keep > 0 {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO named_snapshot_names (owner, name, keep, created_at) VALUES (?, ?, ?, ?)`,
-			r.Owner, r.Name, keep, formatTime(r.CreatedAt)); err != nil {
-			return fmt.Errorf("store: insert named snapshot name %s/%s: %w", r.Owner, r.Name, err)
-		}
+	// The name's retention is a first-save setting: keep is stored only
+	// when the name has no settings row yet, while last_version always
+	// advances (S4).
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO named_snapshot_names (owner, name, keep, last_version, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(owner, name) DO UPDATE SET last_version = excluded.last_version`,
+		r.Owner, r.Name, keep, r.Version, formatTime(r.CreatedAt)); err != nil {
+		return fmt.Errorf("store: insert named snapshot name %s/%s: %w", r.Owner, r.Name, err)
 	}
 	return nil
 }

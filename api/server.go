@@ -1902,16 +1902,25 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	if len(execSecrets) > 0 {
+		// The per-lease secrets gate (2.7, #83 B2): take it before
+		// looking at the files, so a save that holds it makes this exec
+		// 409 lease_busy rather than letting it stage a secret into the
+		// checkpoint. Mark the names staged maximally before writing the
+		// files.
+		if !s.svc.secretsGate.beginStaging(lease.ID) {
+			w.Header().Set("Retry-After", "5")
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "a named snapshot save is in progress; retry", "code": "lease_busy"})
+			return
+		}
+		defer s.svc.secretsGate.endStaging(lease.ID)
+		s.svc.markExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
+		defer s.svc.unmarkExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
 		if err := s.svc.stageSecrets(r.Context(), lease.SandboxID, execSecrets); err != nil {
 			// The error names a secret file name at most, never a value.
 			s.svc.log.Printf("exec: stage secrets %s: %v", lease.SandboxID, err)
 			writeError(w, http.StatusInternalServerError, "failed to stage secrets")
 			return
 		}
-		// A named snapshot save refuses while these are staged (2.7,
-		// #83): the checkpoint would capture them.
-		s.svc.markExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
-		defer s.svc.unmarkExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
 	}
 	start := time.Now()
 	res, err := s.svc.sub.Exec(r.Context(), lease.SandboxID, substrate.ExecRequest{

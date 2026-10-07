@@ -6,6 +6,8 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jrimmer/spoond/v2/substrate"
@@ -60,6 +62,13 @@ var secretNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // user's) and is idempotent, so concurrent staging passes are safe.
 const secretMountScript = `grep -q ' /run/secrets tmpfs ' /proc/mounts || ` +
 	`{ mkdir -p /run/secrets && mount -t tmpfs -o mode=0700,uid=$(id -u),gid=$(id -g) tmpfs /run/secrets; }`
+
+// secretsScrubScript removes every entry under /run/secrets and then
+// lists what is left. It backs the named-snapshot save's pre-checkpoint
+// scrub (2.7, #83 B1): it touches the guest directly, so it removes
+// secret files a backend restart no longer remembers. The save aborts
+// when the listing is not empty. The wildcards cover dotfiles.
+const secretsScrubScript = `rm -f /run/secrets/* /run/secrets/.[!.]* 2>/dev/null; ls -A /run/secrets 2>/dev/null`
 
 // validateSecrets checks one request's secrets against the name,
 // count and total-size limits. It returns a copy (nil when the input
@@ -182,6 +191,98 @@ func (s *Service) clearCreateSecrets(leaseID string) {
 	delete(s.createSecrets, leaseID)
 }
 
+// scrubAllSecrets removes everything under /run/secrets through a
+// guest exec and verifies the directory is empty afterwards. Unlike the
+// in-memory name lists, it does not rely on what this backend process
+// remembers, so a secret staged before a backend restart is still
+// removed (2.7, #83 B1). A non-empty listing (or a failed exec) is an
+// error: the caller must abort the save rather than checkpoint a
+// captured secret.
+func (s *Service) scrubAllSecrets(ctx context.Context, sandboxID string) error {
+	ctx, cancel := context.WithTimeout(ctx, secretsStageTimeout)
+	defer cancel()
+	res, err := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{
+		Args:    []string{"/bin/bash", "-c", secretsScrubScript},
+		Timeout: secretsStageTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("scrub %s: %w", secretsDir, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("scrub %s: exit %d: %s", secretsDir, res.ExitCode, tailStr(res.Stderr, 200))
+	}
+	if left := strings.TrimSpace(res.Stdout); left != "" {
+		// Names only: the listing is file names, never values.
+		return fmt.Errorf("scrub %s: %s remains", secretsDir, left)
+	}
+	return nil
+}
+
+// secretsGate serialises a named-snapshot save's secret scrub against
+// exec and background-job secret staging on the same lease (2.7, #83
+// B2). A save holds it from its secrets check through the checkpoint
+// and the create-time re-stage; while a save holds it an exec or job
+// that wants to stage answers 409 lease_busy. While a staging runs, a
+// save refuses (secrets_in_use). It is memory-only, like the secrets
+// themselves.
+type secretsGate struct {
+	mu      sync.Mutex
+	saving  map[string]int
+	staging map[string]int
+}
+
+// beginSave claims the lease for a save. It returns false when a save
+// or a secret staging already holds the lease.
+func (g *secretsGate) beginSave(leaseID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.saving == nil {
+		g.saving = map[string]int{}
+		g.staging = map[string]int{}
+	}
+	if g.saving[leaseID] > 0 || g.staging[leaseID] > 0 {
+		return false
+	}
+	g.saving[leaseID]++
+	return true
+}
+
+func (g *secretsGate) endSave(leaseID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.saving[leaseID] <= 1 {
+		delete(g.saving, leaseID)
+	} else {
+		g.saving[leaseID]--
+	}
+}
+
+// beginStaging records an exec or job about to stage secrets. It returns
+// false while a save holds the lease.
+func (g *secretsGate) beginStaging(leaseID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.saving == nil {
+		g.saving = map[string]int{}
+		g.staging = map[string]int{}
+	}
+	if g.saving[leaseID] > 0 {
+		return false
+	}
+	g.staging[leaseID]++
+	return true
+}
+
+func (g *secretsGate) endStaging(leaseID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.staging[leaseID] <= 1 {
+		delete(g.staging, leaseID)
+	} else {
+		g.staging[leaseID]--
+	}
+}
+
 // markExecSecretsStaged records that a synchronous exec has exec-time
 // secrets staged on the lease right now (2.7, #83). A named snapshot
 // save refuses while the count is positive, and scrubs the names even if
@@ -230,16 +331,6 @@ func (s *Service) hasStagedExecSecrets(leaseID string) bool {
 	return s.stagedExecSecrets[leaseID] > 0
 }
 
-// stagedExecSecretNamesFor returns the names of synchronous exec-time
-// secrets staged on the lease right now. A save that raced the refuse
-// check scrubs them before its checkpoint.
-func (s *Service) stagedExecSecretNamesFor(leaseID string) []string {
-	s.secretsMu.Lock()
-	defer s.secretsMu.Unlock()
-	out := append([]string(nil), s.stagedExecSecretNames[leaseID]...)
-	return out
-}
-
 // hasRunningJobWithSecrets reports whether a lease has a live background
 // job that staged exec-time secrets (2.7, #83): such a job's files are
 // under /run/secrets while it runs, so a save would capture them.
@@ -271,54 +362,6 @@ func (s *Service) hasRunningJobWithSecrets(leaseID string) bool {
 		}
 	}
 	return false
-}
-
-// jobSecretNamesFor returns the secret file names every job of a lease
-// was given, running or not. A save scrubs them too: a job whose wrapper
-// never cleaned up would otherwise leave its files to be captured.
-func (s *Service) jobSecretNamesFor(leaseID string) []string {
-	s.secretsMu.Lock()
-	defer s.secretsMu.Unlock()
-	var out []string
-	seen := map[string]bool{}
-	for jobID, jobLease := range s.jobSecretLeases {
-		if jobLease != leaseID {
-			continue
-		}
-		for _, n := range s.stagedJobSecrets[jobID] {
-			if !seen[n] {
-				seen[n] = true
-				out = append(out, n)
-			}
-		}
-	}
-	return out
-}
-
-// sortedSecretNamesFromSet returns a set's members in sorted order, so
-// staging and cleanup are deterministic.
-func sortedSecretNamesFromSet(set map[string]bool) []string {
-	out := make([]string, 0, len(set))
-	for name := range set {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// removeAllSecrets removes every file spoond staged under /run/secrets
-// for a lease: the create-time files and any exec-time files still
-// present. Best effort per file: a missing file is not an error. Used by
-// the named-snapshot save to scrub secrets before the checkpoint (2.7,
-// #83). The secrets tmpfs itself stays mounted.
-func (s *Service) removeAllSecrets(sandboxID string, names []string) {
-	ctx, cancel := context.WithTimeout(context.Background(), secretsStageTimeout)
-	defer cancel()
-	for _, name := range names {
-		if err := s.sub.Remove(ctx, sandboxID, secretPath(name), false); err != nil {
-			s.log.Printf("snapshot: remove secret %s: %v", name, err)
-		}
-	}
 }
 
 // restageCreateSecrets re-writes a lease's create-time secrets after

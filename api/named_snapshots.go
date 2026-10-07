@@ -89,6 +89,12 @@ func errSnapshotInUse(msg string) *namedSnapshotError {
 func errNamedNotFound() *namedSnapshotError {
 	return &namedSnapshotError{status: http.StatusNotFound, code: "not_found", msg: "snapshot not found"}
 }
+func errLeaseNotFound() *namedSnapshotError {
+	return &namedSnapshotError{status: http.StatusNotFound, code: "not_found", msg: "lease not found"}
+}
+func errLeaseNotLive() *namedSnapshotError {
+	return &namedSnapshotError{status: http.StatusConflict, code: "lease_not_live", msg: "lease is not running"}
+}
 
 // namedSaveState is the in-memory state of one (owner, name,
 // idempotency_key) save: in flight, or failed for 24 h with its error.
@@ -237,32 +243,14 @@ func (s *Service) orchestratorVersion(ctx context.Context) string {
 	return info.Version
 }
 
-// scrubSecretsForSnapshot removes the secret files spoond staged under
-// /run/secrets on the lease's sandbox. It removes the create-time secret
-// names plus the exec-time names of any job whose files are still
-// present (its wrapper normally cleaned them; a save must not capture a
-// lingering one). Called right before the checkpoint so none are
-// captured. Callers have already refused the save when a synchronous or
-// background job with secrets is still running, so those names are
-// mostly defensive.
-func (s *Service) scrubSecretsForSnapshot(ctx context.Context, l *Lease) {
-	names := map[string]bool{}
-	for _, n := range sortedSecretNames(s.createSecretsFor(l.ID)) {
-		names[n] = true
-	}
-	// The secret names of every job tracked on this lease, running or
-	// not: a stale file left by a wrapper that never cleaned up would
-	// otherwise be captured by the checkpoint.
-	for _, n := range s.jobSecretNamesFor(l.ID) {
-		names[n] = true
-	}
-	// A synchronous exec that staged secrets after the refuse check but
-	// before this scrub (the check does not take the lease's busy flag)
-	// would otherwise be captured.
-	for _, n := range s.stagedExecSecretNamesFor(l.ID) {
-		names[n] = true
-	}
-	s.removeAllSecrets(l.SandboxID, sortedSecretNamesFromSet(names))
+// scrubSecretsForSnapshot removes every file under /run/secrets on the
+// lease's sandbox through a guest exec, independent of what this
+// backend process remembers (2.7, #83 B1): after a restart the in-memory
+// create-time and exec-time names are gone while the guest's tmpfs still
+// holds the files. It aborts with an error when the directory is not
+// empty afterwards, so the caller never checkpoints a captured secret.
+func (s *Service) scrubSecretsForSnapshot(ctx context.Context, l *Lease) error {
+	return s.scrubAllSecrets(ctx, l.SandboxID)
 }
 
 // saveNamedSnapshot performs one save of a lease into a named snapshot:
@@ -270,32 +258,51 @@ func (s *Service) scrubSecretsForSnapshot(ctx context.Context, l *Lease) {
 // retention, emits the event and writes the source-side marker. Callers
 // own the busy window and the idempotency bookkeeping. Returns the
 // inserted row.
-func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key string, keep int) (store.NamedSnapshotRow, *namedSnapshotError) {
+func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key string, keep int) (store.NamedSnapshotRow, bool, *namedSnapshotError) {
 	if keep <= 0 {
 		keep = s.snapshotKeepVersions()
 	}
+	// The per-lease secrets gate: hold it from the secrets check through
+	// the checkpoint and the create-time re-stage, so an exec or job that
+	// stages secrets cannot slip its files into the checkpoint (B2). A
+	// staging already in progress means there are secrets to capture:
+	// refuse with secrets_in_use.
+	if !s.secretsGate.beginSave(l.ID) {
+		return store.NamedSnapshotRow{}, false, errSecretsInUse()
+	}
+	defer s.secretsGate.endSave(l.ID)
 	saveStart := s.now()
 	// A running background job with exec-time secrets staged makes the
 	// save 409: those files would be captured.
 	if s.hasRunningJobWithSecrets(l.ID) || s.hasStagedExecSecrets(l.ID) {
-		return store.NamedSnapshotRow{}, errSecretsInUse()
+		return store.NamedSnapshotRow{}, false, errSecretsInUse()
 	}
 	// The per-owner names cap: a save that would add a new name past it
 	// answers 409. An existing name is always allowed. Checked before the
 	// secret scrub so a refused save changes nothing on the guest.
 	if err := s.checkNamedSnapshotLimit(ctx, l.Owner, name); err != nil {
-		return store.NamedSnapshotRow{}, err
+		return store.NamedSnapshotRow{}, false, err
 	}
 	// Remove the create-time (and any lingering exec-time) secret files
 	// before the checkpoint; re-stage the create-time ones after,
-	// whatever happens.
+	// whatever happens. The scrub goes through the guest, so it removes
+	// files a backend restart no longer remembers (B1).
 	create := s.createSecretsFor(l.ID)
-	s.scrubSecretsForSnapshot(ctx, l)
+	if err := s.scrubSecretsForSnapshot(ctx, l); err != nil {
+		s.log.Printf("snapshot: scrub secrets on %s: %v", l.ID, err)
+		return store.NamedSnapshotRow{}, false, &namedSnapshotError{status: http.StatusInternalServerError, code: "scrub_failed", msg: "failed to remove secrets before the checkpoint"}
+	}
+	// The re-stage must not run on the request context: a client that
+	// disconnects mid-checkpoint would leave the source without its
+	// create-time secrets (S1). Give it its own bounded context.
 	defer func() {
-		if len(create) > 0 {
-			if err := s.stageSecrets(ctx, l.SandboxID, create); err != nil {
-				s.log.Printf("snapshot: re-stage secrets on %s: %v", l.ID, err)
-			}
+		if len(create) == 0 {
+			return
+		}
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), secretsStageTimeout)
+		defer cancel()
+		if err := s.stageSecrets(rctx, l.SandboxID, create); err != nil {
+			s.log.Printf("snapshot: re-stage secrets on %s: %v", l.ID, err)
 		}
 	}()
 
@@ -304,7 +311,7 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	// checkpoint, so the budget is enforced below.
 	b, err := s.checkpointLease(ctx, l)
 	if err != nil {
-		return store.NamedSnapshotRow{}, s.mapSnapshotCheckpointError(err)
+		return store.NamedSnapshotRow{}, false, s.mapSnapshotCheckpointError(err)
 	}
 	// Walk to the template build at the root for the image_build_id and
 	// the versions.
@@ -317,7 +324,7 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	// Enforce the owner's byte budget against the named snapshot's size,
 	// alongside kept checkpoints.
 	if berr := s.enforceNamedSnapshotBudget(ctx, l.Owner, b.SizeBytes); berr != nil {
-		return store.NamedSnapshotRow{}, berr
+		return store.NamedSnapshotRow{}, false, berr
 	}
 	// The save point that simulates a backend stopping between the
 	// checkpoint and the row insert (A7): the build is written but never
@@ -325,7 +332,7 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	if s.saveInterrupt != nil {
 		if err := s.saveInterrupt(ctx, l, b.BuildID); err != nil {
 			s.log.Printf("snapshot: save of %s/%s interrupted: %v", l.Owner, name, err)
-			return store.NamedSnapshotRow{}, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "save interrupted"}
+			return store.NamedSnapshotRow{}, false, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "save interrupted"}
 		}
 	}
 	row := store.NamedSnapshotRow{
@@ -345,13 +352,24 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	}
 	saved, err := s.db.InsertNamedSnapshot(ctx, row, keep)
 	if err != nil {
-		failed := &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "failed to save snapshot"}
+		// An insert that hits the (owner, name, idempotency_key) unique
+		// index lost a replay race: another save of the same key
+		// committed first. Answer its row with 200, never 500 (S3).
+		if key != "" {
+			if existing, gerr := s.db.GetNamedSnapshotByKey(ctx, l.Owner, name, key); gerr == nil {
+				return existing, true, nil
+			}
+		}
 		s.log.Printf("snapshot: insert %s/%s: %v", l.Owner, name, err)
-		return store.NamedSnapshotRow{}, failed
+		return store.NamedSnapshotRow{}, false, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "failed to save snapshot"}
 	}
 	// The source-side marker: written after the checkpoint and the row,
-	// before the save answers (A4). Best effort.
-	s.writeLastSaveMarker(ctx, l, saved)
+	// before the save answers (A4). Best effort, and not on the request
+	// context: a disconnect mid-checkpoint must still leave the marker
+	// (S1).
+	mctx, mcancel := context.WithTimeout(context.WithoutCancel(ctx), secretsStageTimeout)
+	s.writeLastSaveMarker(mctx, l, saved)
+	mcancel()
 	checkpointDur := time.Since(saveStart)
 	// Retention: keep the last keep versions, never dropping one a live
 	// lease started from.
@@ -365,7 +383,7 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	s.UpdateKeptMetrics(ctx)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseSnapshotSaved,
 		fmt.Sprintf("saved as %s@%d · %s · %s", name, saved.Version, formatEventBytes(saved.SizeBytes), eventDuration(checkpointDur)))
-	return saved, nil
+	return saved, false, nil
 }
 
 // effectiveKeep returns the retention for a name: its stored setting, or
@@ -534,16 +552,9 @@ func (s *Server) handleLeaseSnapshotSave(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	lease := s.svc.lookup(owner, id)
-	if lease == nil {
-		errNamedNotFound().write(w)
-		return
-	}
-	if !lease.live() {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "lease is not running", "code": "lease_busy"})
-		return
-	}
-	// Idempotent replay: a version with this key already exists (any
-	// lease, A1). No checkpoint.
+	// Idempotent replay first (N2): a save whose key already committed
+	// answers 200 with that version even when the source lease is gone,
+	// and before the live check. Any lease may replay the key (A1).
 	if req.IdempotencyKey != "" {
 		if row, err := s.svc.db.GetNamedSnapshotByKey(r.Context(), owner, req.Name, req.IdempotencyKey); err == nil {
 			s.writeSavedSnapshot(w, http.StatusOK, row)
@@ -553,10 +564,36 @@ func (s *Server) handleLeaseSnapshotSave(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save snapshot", "code": "internal"})
 			return
 		}
+	}
+	if lease == nil {
+		errLeaseNotFound().write(w)
+		return
+	}
+	if !lease.live() {
+		errLeaseNotLive().write(w)
+		return
+	}
+	if req.IdempotencyKey != "" {
 		// Claim the key in memory: a concurrent save with it gets 409. A
 		// failed prior attempt does not poison the key (begin resets it).
 		if !s.svc.saves.begin(owner, req.Name, req.IdempotencyKey) {
 			errSaveInProgress().write(w)
+			return
+		}
+		// Re-check the catalog now that the key is claimed: another save
+		// may have committed between the first lookup and begin. Answer
+		// that row with 200 and release the claim, no checkpoint (S3).
+		if s.svc.saveAfterClaim != nil {
+			s.svc.saveAfterClaim(owner, req.Name, req.IdempotencyKey)
+		}
+		if row, err := s.svc.db.GetNamedSnapshotByKey(r.Context(), owner, req.Name, req.IdempotencyKey); err == nil {
+			s.svc.saves.done(owner, req.Name, req.IdempotencyKey)
+			s.writeSavedSnapshot(w, http.StatusOK, row)
+			return
+		} else if !errors.Is(err, store.ErrNotFound) {
+			s.svc.saves.done(owner, req.Name, req.IdempotencyKey)
+			s.svc.log.Printf("snapshot: lookup key %s/%s: %v", owner, req.Name, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save snapshot", "code": "internal"})
 			return
 		}
 	}
@@ -564,7 +601,7 @@ func (s *Server) handleLeaseSnapshotSave(w http.ResponseWriter, r *http.Request)
 	if req.Keep != nil {
 		keep = *req.Keep
 	}
-	row, serr := s.svc.saveLeaseSnapshot(r.Context(), lease, req.Name, req.IdempotencyKey, keep)
+	row, replayed, serr := s.svc.saveLeaseSnapshot(r.Context(), lease, req.Name, req.IdempotencyKey, keep)
 	if serr != nil {
 		if req.IdempotencyKey != "" {
 			if serr.code == "lease_busy" {
@@ -581,15 +618,19 @@ func (s *Server) handleLeaseSnapshotSave(w http.ResponseWriter, r *http.Request)
 	if req.IdempotencyKey != "" {
 		s.svc.saves.done(owner, req.Name, req.IdempotencyKey)
 	}
+	if replayed {
+		s.writeSavedSnapshot(w, http.StatusOK, row)
+		return
+	}
 	s.writeSavedSnapshot(w, http.StatusCreated, row)
 }
 
 // saveLeaseSnapshot takes the lease's busy flag and runs saveNamedSnapshot.
-func (s *Service) saveLeaseSnapshot(ctx context.Context, l *Lease, name, key string, keep int) (store.NamedSnapshotRow, *namedSnapshotError) {
+func (s *Service) saveLeaseSnapshot(ctx context.Context, l *Lease, name, key string, keep int) (store.NamedSnapshotRow, bool, *namedSnapshotError) {
 	s.store.mu.Lock()
 	if l.busy {
 		s.store.mu.Unlock()
-		return store.NamedSnapshotRow{}, errLeaseBusyNamed()
+		return store.NamedSnapshotRow{}, false, errLeaseBusyNamed()
 	}
 	l.busy = true
 	s.store.mu.Unlock()
@@ -840,9 +881,15 @@ func (s *Server) handleNamedSnapshotDelete(w http.ResponseWriter, r *http.Reques
 // name's retention and apply it at once (the live-lease rule holds).
 func (s *Server) handleNamedSnapshotKeep(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
-	name, _, err := parseSnapshotRef(r.PathValue("name"))
+	ref := r.PathValue("name")
+	name, version, err := parseSnapshotRef(ref)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error(), "code": "bad_request"})
+		return
+	}
+	// keep is a per-name setting (A6): a @version is a bad request (N3).
+	if version > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keep is set per name; drop the @version", "code": "bad_request"})
 		return
 	}
 	var req struct {

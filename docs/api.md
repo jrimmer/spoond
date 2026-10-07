@@ -1358,8 +1358,10 @@ leases from it (task 2) and manage it under `/api/named-snapshots`.
 - **Name:** `<project>/<name>` or a bare `<name>`; each part matches
   `[a-z0-9][a-z0-9._-]{0,62}`. Names are unique per owner (the prefix is
   a convention, not a project concept).
-- **Version:** an integer per (owner, name), starting at `1` and never
-  reused. `name` means the latest version; `name@3` pins one.
+- **Version:** an integer per (owner, name), starting at `1`. A version
+  number is never reused: deleting a version and saving again gives the
+  next number, not the deleted one (the name's high-water mark). `name`
+  means the latest version; `name@3` pins one.
 - A version row is inserted only after its checkpoint build is `ready`,
   in one transaction that computes `max(version)+1`, so a failed or
   in-flight save is never visible and `latest` moves atomically.
@@ -1370,8 +1372,11 @@ carry a machine-readable `code` beside `error`.
 
 ### `POST /api/leases/{id}/snapshots` — save a lease as a named snapshot
 
-Owner only; live leases only (`409 lease_busy` when the lease is
-suspended, lost, or busy with another operation).
+Owner only; live leases only. An unknown lease answers `404 not_found`
+with `"lease not found"`; a released or lost lease answers `409
+lease_not_live` (a lease busy with another operation answers `409
+lease_busy`). A replay whose key already committed answers `200` before
+the live check, so it works even after the source lease is gone.
 
 ```json
 {"name": "spoond/warm", "idempotency_key": "fl-81c2/steps/warm", "keep": 3}
@@ -1392,11 +1397,17 @@ and inserts the version. Response `201`:
   the same key while the first runs answers `409 save_in_progress` with
   `Retry-After: 5`. Without a key, every save makes a new version.
 - **Secrets are not captured.** Before the checkpoint spoond removes
-  every file it staged under `/run/secrets` (create-time secrets and any
-  exec-time ones), then re-stages the create-time secrets on the source
+  **everything** under `/run/secrets` through a guest exec and verifies
+  the directory is empty (so a secret staged before a backend restart is
+  removed even though the process no longer remembers it; a directory
+  that is not empty aborts the save with `500 scrub_failed` and no
+  checkpoint), then re-stages the create-time secrets on the source
   after. A running background job that staged exec-time secrets makes
-  the save `409 secrets_in_use`. Anything else in guest memory or on
-  disk is the caller's to scrub.
+  the save `409 secrets_in_use`. A save and an exec/job that stages
+  secrets are serialised by a per-lease gate: while a save runs an exec
+  or job with secrets answers `409 lease_busy` with `Retry-After: 5`
+  (it did not start, so retrying is safe). Anything else in guest memory
+  or on disk is the caller's to scrub.
 - **Limits.** Named snapshot bytes count toward the owner's
   `max_kept_bytes` alongside kept checkpoints (`409 kept_budget`), and a
   save that would add a name past `MAX_NAMED_SNAPSHOTS` (`0` = no cap)
@@ -1465,7 +1476,8 @@ name's last version deletes its retention setting too.
 `keep` is required and `1`–`20`. Changes the name's retention and
 applies it at once (the live-lease rule still holds). Response `200
 {"name":"…","keep":3,"ok":true}`; `404 not_found` for an unknown
-name.
+name. `keep` is set per name, so a `@version` in the path is `400
+bad_request` (`"keep is set per name; drop the @version"`).
 
 ### Identity in a restored guest
 

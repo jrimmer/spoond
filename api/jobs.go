@@ -69,6 +69,11 @@ const (
 // errJobCap is returned when a lease is at its running-job cap.
 var errJobCap = errors.New("too many running background jobs for this lease")
 
+// errLeaseBusySave is returned when a named-snapshot save holds a
+// lease's secrets gate, so a background job that wants to stage secrets
+// must wait and answer 409 lease_busy (2.7, #83 B2).
+var errLeaseBusySave = errors.New("a named snapshot save is in progress; retry")
+
 // jobWrapperScript is the guest-side wrapper. It starts the command
 // with setsid, so the command is its own process group and is detached
 // from the envd Start stream's lifetime: a backend restart does not
@@ -270,13 +275,27 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	// recorded, in the job directory and in memory.
 	secretNames := sortedSecretNames(secrets)
 	if len(secrets) > 0 {
+		// The per-lease secrets gate (2.7, #83 B2): take it before
+		// staging, so a named-snapshot save that holds it makes this job
+		// 409 lease_busy instead of letting it write a secret into the
+		// checkpoint. Hold the gate across the staging. The names are
+		// marked staged before the files are written, so a save that
+		// somehow overlapped scrubs them.
+		if !s.secretsGate.beginStaging(lease.ID) {
+			return "", time.Time{}, nil, errLeaseBusySave
+		}
+		defer s.secretsGate.endStaging(lease.ID)
+		s.recordJobSecrets(lease.ID, jobID, secretNames)
 		if err := s.stageSecrets(ctx, lease.SandboxID, secrets); err != nil {
+			s.forgetJobSecrets(jobID)
 			return "", time.Time{}, nil, fmt.Errorf("stage secrets: %w", err)
 		}
 		// A names-only list the wrapper reads to clean up. Values are
 		// never written here.
 		if err := s.sub.WriteFile(ctx, lease.SandboxID, jobPath(jobID, "secrets"),
 			[]byte(strings.Join(secretNames, "\n")+"\n"), 0o600); err != nil {
+			s.removeSecrets(lease.SandboxID, secretNames)
+			s.forgetJobSecrets(jobID)
 			return "", time.Time{}, nil, fmt.Errorf("write job secrets list: %w", err)
 		}
 	}
@@ -297,6 +316,7 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	if err != nil {
 		if len(secretNames) > 0 {
 			s.removeSecrets(lease.SandboxID, secretNames)
+			s.forgetJobSecrets(jobID)
 		}
 		return "", time.Time{}, nil, fmt.Errorf("start: %w", err)
 	}
@@ -317,11 +337,9 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 		_ = proc.Close()
 		if len(secretNames) > 0 {
 			s.removeSecrets(lease.SandboxID, secretNames)
+			s.forgetJobSecrets(jobID)
 		}
 		return "", time.Time{}, nil, err
-	}
-	if len(secretNames) > 0 {
-		s.recordJobSecrets(lease.ID, jobID, secretNames)
 	}
 	s.touch(lease.ID)
 	if s.metrics != nil {
@@ -394,7 +412,9 @@ func (s *Service) cleanupJobFiles(ctx context.Context, sandboxID, jobID string) 
 }
 
 // recordJobSecrets remembers the secret names staged for a running job,
-// keyed by job id and by lease so a save can scrub a lingering file.
+// keyed by job id and by lease. takeJobSecrets clears liveJobSecrets at
+// exit; stagedJobSecrets and jobSecretLeases survive for as long as the
+// record does, for a save that scrubs a lingering file.
 func (s *Service) recordJobSecrets(leaseID, jobID string, names []string) {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
@@ -429,6 +449,14 @@ func (s *Service) takeJobSecrets(jobID string) []string {
 	names := s.liveJobSecrets[jobID]
 	delete(s.liveJobSecrets, jobID)
 	return names
+}
+
+// forgetJobSecrets drops every in-memory trace of a job that never
+// started (a staging or Start failure): the live names and the staged
+// names/lease map a save reads.
+func (s *Service) forgetJobSecrets(jobID string) {
+	s.takeJobSecrets(jobID)
+	s.takeJobSecretNames(jobID)
 }
 
 // removeJobSecrets deletes a job's staged secret files and, for names

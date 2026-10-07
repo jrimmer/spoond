@@ -26,7 +26,15 @@ summarised from README "Status".
   (`save_in_progress`, `secrets_in_use`, `lease_busy`, `kept_budget`,
   `snapshot_limit`, `snapshot_in_use`, `not_found`). Limits: `MAX_NAMED_SNAPSHOTS` names per owner and the
   owner's `max_kept_bytes`; `SNAPSHOT_KEEP_VERSIONS` versions per name
-  (never dropping one a live lease started from). Named builds are GC
+  (never dropping one a live lease started from). The pre-checkpoint
+  scrub clears the whole `/run/secrets` directory through the guest, so
+  a secret staged before a backend restart is removed too and a
+  directory that is not empty aborts the save with `scrub_failed`; a
+  per-lease secrets gate serialises a save against exec and job secret
+  staging. A version number is never reused after a delete, a replay
+  reaches a committed key from any lease (even a released one), and the
+  `/run/spoond/last-save` marker and create-time re-stage survive a
+  client disconnect. Named builds are GC
   roots, and two gauges (`spoond_named_snapshots`,
   `spoond_named_snapshot_bytes`) report the catalog. Every path that
   (re)creates a guest now writes `/run/spoond/lease-id` (`0644`) beside

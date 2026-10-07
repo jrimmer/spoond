@@ -163,6 +163,30 @@ func TestNamedSnapshotListPrefix(t *testing.T) {
 	}
 }
 
+// TestNamedSnapshotVersionNeverReused: deleting the latest version and
+// saving again gives latest+1, not the deleted number, via the
+// named_snapshot_names last_version high-water mark (S4).
+func TestNamedSnapshotVersionNeverReused(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	for _, b := range []string{"b1", "b2"} {
+		if _, err := db.InsertNamedSnapshot(ctx, namedRow("alice", "warm", b), 3); err != nil {
+			t.Fatalf("insert %s: %v", b, err)
+		}
+	}
+	// Delete the latest version, then save again: the next version is 3.
+	if err := db.DeleteNamedSnapshot(ctx, "alice", "warm", 2); err != nil {
+		t.Fatalf("delete v2: %v", err)
+	}
+	r3, err := db.InsertNamedSnapshot(ctx, namedRow("alice", "warm", "b3"), 0)
+	if err != nil {
+		t.Fatalf("insert after delete: %v", err)
+	}
+	if r3.Version != 3 {
+		t.Fatalf("version after deleting v2 = %d, want 3", r3.Version)
+	}
+}
+
 // TestMarkUnnamedCheckpointsFailed: a building checkpoint with no named
 // row is marked failed; a named one is left alone.
 func TestMarkUnnamedCheckpointsFailed(t *testing.T) {

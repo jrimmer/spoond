@@ -29,6 +29,11 @@ CREATE TABLE named_snapshot_names (
   owner      TEXT NOT NULL,
   name       TEXT NOT NULL,
   keep       INTEGER NOT NULL,
+  -- last_version is the high-water mark: the largest version ever
+  -- assigned to (owner, name). The next version is max(last_version,
+  -- max(version)) + 1, so deleting the latest version and saving again
+  -- never reuses its number.
+  last_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   PRIMARY KEY (owner, name)
 );

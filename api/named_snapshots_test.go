@@ -912,3 +912,292 @@ func TestNamedSnapshotLingeringExecSecretScrubbed(t *testing.T) {
 		t.Fatal("lingering exec-time secret was still present at checkpoint time; want it scrubbed")
 	}
 }
+
+// TestNamedSnapshotScrubAllSecretsAfterRestart: the scrub removes a
+// create-time secret the backend no longer remembers (B1). A secret file
+// is planted directly in the guest with no in-memory record, exactly as
+// after a backend restart.
+func TestNamedSnapshotScrubAllSecretsAfterRestart(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	sandbox := svc.store.leases[id].SandboxID
+
+	// A create-time secret staged before a restart: the tmpfs holds it,
+	// the backend has no memory of its name.
+	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/FORGOTTEN", []byte("v"), 0o600); err != nil {
+		t.Fatalf("plant secret: %v", err)
+	}
+	var atCheckpoint error
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		_, atCheckpoint = sub.Fake.ReadFile(ctx, sandboxID, "/run/secrets/FORGOTTEN", 1024)
+		return e2b.NewUUID(), substrate.BuildRefs{}, nil
+	}
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if atCheckpoint == nil {
+		t.Fatal("unremembered secret was present at checkpoint time; the scrub must clear the whole directory")
+	}
+}
+
+// TestNamedSnapshotScrubFailedAborts: a directory not empty after the
+// scrub aborts the save with 500 scrub_failed and takes no checkpoint
+// (B1/S2).
+func TestNamedSnapshotScrubFailedAborts(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	sub.scrubLeftover = "STUCK"
+
+	checkpoints := calls(sub.Fake, "Checkpoint")
+	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if resp.StatusCode != http.StatusInternalServerError || body["code"] != "scrub_failed" {
+		t.Fatalf("save with a failing scrub: status %d (%v), want 500 scrub_failed", resp.StatusCode, body)
+	}
+	if got := calls(sub.Fake, "Checkpoint"); got != checkpoints {
+		t.Fatalf("checkpoint ran despite a failed scrub: %d -> %d", checkpoints, got)
+	}
+	if _, err := db.GetNamedSnapshotLatest(context.Background(), "consumer-a", "warm"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("failed scrub left a version row: %v", err)
+	}
+}
+
+// TestNamedSnapshotExecBlockedBySave: while a save holds the secrets
+// gate, a synchronous exec that wants to stage secrets answers 409
+// lease_busy with Retry-After (B2).
+func TestNamedSnapshotExecBlockedBySave(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	// Hold the gate as a save would.
+	if !svc.secretsGate.beginSave(id) {
+		t.Fatal("beginSave should claim a fresh lease")
+	}
+	defer svc.secretsGate.endSave(id)
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a",
+		map[string]any{"cmd": "echo hi", "secrets": map[string]string{"TOKEN": "v"}})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "lease_busy" {
+		t.Fatalf("exec during save: status %d (%v), want 409 lease_busy", resp.StatusCode, body)
+	}
+	if resp.Header.Get("Retry-After") != "5" {
+		t.Fatalf("Retry-After = %q, want 5", resp.Header.Get("Retry-After"))
+	}
+}
+
+// TestNamedSnapshotJobBlockedBySave: while a save holds the secrets
+// gate, a background job with secrets answers 409 lease_busy (B2).
+func TestNamedSnapshotJobBlockedBySave(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	if !svc.secretsGate.beginSave(id) {
+		t.Fatal("beginSave should claim a fresh lease")
+	}
+	defer svc.secretsGate.endSave(id)
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/exec", "token-a",
+		map[string]any{"cmd": "echo hi", "background": true, "secrets": map[string]string{"TOKEN": "v"}})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "lease_busy" {
+		t.Fatalf("job during save: status %d (%v), want 409 lease_busy", resp.StatusCode, body)
+	}
+	if resp.Header.Get("Retry-After") != "5" {
+		t.Fatalf("Retry-After = %q, want 5", resp.Header.Get("Retry-After"))
+	}
+}
+
+// TestNamedSnapshotSaveRefusedWhileStaging: while an exec stages
+// secrets, a save answers 409 secrets_in_use and takes no checkpoint
+// (B2, reverse direction).
+func TestNamedSnapshotSaveRefusedWhileStaging(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	if !svc.secretsGate.beginStaging(id) {
+		t.Fatal("beginStaging should claim a fresh lease")
+	}
+	defer svc.secretsGate.endStaging(id)
+
+	checkpoints := calls(sub.Fake, "Checkpoint")
+	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "secrets_in_use" {
+		t.Fatalf("save during staging: status %d (%v), want 409 secrets_in_use", resp.StatusCode, body)
+	}
+	if got := calls(sub.Fake, "Checkpoint"); got != checkpoints {
+		t.Fatalf("checkpoint ran despite staged secrets: %d -> %d", checkpoints, got)
+	}
+}
+
+// TestNamedSnapshotReplayRace: a save that loses the in-memory claim
+// race and finds a committed row answers 200 with it, never 500 (S3).
+func TestNamedSnapshotReplayRace(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	// Another save commits the key while this save is between its first
+	// lookup and the claim. The first save is made directly.
+	interrupted := false
+	svc.saveAfterClaim = func(owner, name, key string) {
+		if interrupted {
+			return
+		}
+		interrupted = true
+		l := svc.lookup("consumer-a", id)
+		if _, _, err := svc.saveNamedSnapshot(context.Background(), l, name, key, 0); err != nil {
+			t.Errorf("racing save: %v", err)
+		}
+	}
+	defer func() { svc.saveAfterClaim = nil }()
+
+	checkpoints := calls(sub.Fake, "Checkpoint")
+	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm", "idempotency_key": "k1"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("replay-race save: status %d (%v), want 200", resp.StatusCode, body)
+	}
+	if body["version"].(float64) != 1 {
+		t.Fatalf("replay-race version = %v, want 1", body["version"])
+	}
+	// The racing save checkpointed once; the replay took none.
+	if got := calls(sub.Fake, "Checkpoint"); got != checkpoints+1 {
+		t.Fatalf("checkpoint calls = %d, want the racing save's one", got-checkpoints)
+	}
+}
+
+// TestNamedSnapshotVersionNotReused: deleting the latest version and
+// saving again gives the next number, not the deleted one (S4).
+func TestNamedSnapshotVersionNotReused(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	if v := saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"}); v != 1 {
+		t.Fatalf("v1 = %d", v)
+	}
+	if v := saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"}); v != 2 {
+		t.Fatalf("v2 = %d", v)
+	}
+	resp, _ := doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warm@2", "token-a", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete @2: status %d, want 204", resp.StatusCode)
+	}
+	if v := saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"}); v != 3 {
+		t.Fatalf("version after deleting v2 = %d, want 3", v)
+	}
+}
+
+// TestNamedSnapshotSaveErrors: N2 codes. An unknown lease is 404
+// not_found "lease not found"; a non-live lease is 409 lease_not_live;
+// a replay with a ready key answers 200 even when the lease is gone.
+func TestNamedSnapshotSaveErrors(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+
+	// Unknown lease: 404 not_found with "lease not found".
+	resp, body := saveSnapshot(t, ts.URL, "token-a", "nope", map[string]any{"name": "warm"})
+	if resp.StatusCode != http.StatusNotFound || body["code"] != "not_found" {
+		t.Fatalf("unknown lease: status %d (%v), want 404 not_found", resp.StatusCode, body)
+	}
+	if body["error"] != "lease not found" {
+		t.Fatalf("unknown lease error = %v, want 'lease not found'", body["error"])
+	}
+
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	// Make the lease non-live directly.
+	svc.store.mu.Lock()
+	svc.store.leases[id].State = "suspended"
+	svc.store.mu.Unlock()
+	resp, body = saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "lease_not_live" {
+		t.Fatalf("non-live lease: status %d (%v), want 409 lease_not_live", resp.StatusCode, body)
+	}
+
+	// Save once while live, then release/remove the lease: a replay with
+	// the key still answers 200.
+	svc.store.mu.Lock()
+	svc.store.leases[id].State = "running"
+	svc.store.mu.Unlock()
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm", "idempotency_key": "k-replay"})
+	svc.store.mu.Lock()
+	delete(svc.store.leases, id)
+	svc.store.mu.Unlock()
+	resp, body = saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm", "idempotency_key": "k-replay"})
+	if resp.StatusCode != http.StatusOK || body["version"].(float64) != 1 {
+		t.Fatalf("replay after lease gone: status %d (%v), want 200 v1", resp.StatusCode, body)
+	}
+}
+
+// TestNamedSnapshotPutWithVersion: PUT with @v is 400 bad_request (N3).
+func TestNamedSnapshotPutWithVersion(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+
+	resp, body := doReq(t, "PUT", ts.URL+"/api/named-snapshots/warm@1", "token-a", map[string]any{"keep": 2})
+	if resp.StatusCode != http.StatusBadRequest || body["code"] != "bad_request" {
+		t.Fatalf("PUT @1: status %d (%v), want 400 bad_request", resp.StatusCode, body)
+	}
+}
+
+// TestNamedSnapshotLastSaveMarkerNotOnRequestContext: the marker is
+// written even when the request context is already canceled, so a client
+// disconnect mid-checkpoint does not lose it (S1/A4).
+func TestNamedSnapshotLastSaveMarkerNotOnRequestContext(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	sandbox := svc.store.leases[id].SandboxID
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	l := svc.lookup("consumer-a", id)
+	svc.writeLastSaveMarker(ctx, l, store.NamedSnapshotRow{
+		Name: "warm", Version: 1, BuildID: "b1", IdempotencyKey: "k",
+	})
+	if _, err := sub.Fake.ReadFile(t.Context(), sandbox, lastSavePath, 4096); err != nil {
+		t.Fatalf("last-save missing after a canceled request context: %v", err)
+	}
+}
+
+// TestNamedSnapshotRestageNotOnRequestContext: the create-time secrets
+// are re-staged even when the context is canceled after the scrub (S1).
+func TestNamedSnapshotRestageNotOnRequestContext(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "secrets": map[string]string{"TOKEN": "s3cr3t"},
+	})
+	sandbox := svc.store.leases[id].SandboxID
+
+	// The checkpoint cancels the context and fails: the scrub already
+	// ran. The deferred re-stage must still restore the secret, because
+	// it runs on a context detached from the canceled request.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sub.checkpointFn = func(cctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		cancel()
+		return "", substrate.BuildRefs{}, errors.New("orchestrator exploded")
+	}
+	l := svc.lookup("consumer-a", id)
+	if _, _, err := svc.saveNamedSnapshot(ctx, l, "warm", "", 0); err == nil {
+		t.Fatal("save with a canceled mid-checkpoint context should fail")
+	}
+	got, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024)
+	if err != nil || string(got) != "s3cr3t" {
+		t.Fatalf("create-time secret after a canceled save = %q (%v), want re-staged", got, err)
+	}
+}
