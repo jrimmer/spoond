@@ -15,7 +15,8 @@
 // Environment:
 //
 //	DASH_ADDR            listen address (default 0.0.0.0:8893)
-//	DASH_TLS_CERT, DASH_TLS_KEY  serve HTTPS with this pair (basic auth
+//	DASH_TLS_CERT, DASH_TLS_KEY  serve HTTPS with this pair, or comma-separated
+//	                             lists chosen by SNI, reloaded on change (basic auth
 //	                     sends the password, so use TLS beyond localhost)
 //	DASH_USER            basic-auth user (required)
 //	DASH_PASSWORD_HASH   bcrypt hash of the password (required)
@@ -59,6 +60,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v2/grid"
+	"github.com/jrimmer/spoond/v2/internal/tlsfiles"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -145,8 +147,8 @@ func configFromEnv() (Config, error) {
 	if c.Host == "" {
 		c.Host = "host"
 	}
-	if (c.TLSCert == "") != (c.TLSKey == "") {
-		return c, fmt.Errorf("set both DASH_TLS_CERT and DASH_TLS_KEY, or neither")
+	if _, err := tlsfiles.Parse(c.TLSCert, c.TLSKey); err != nil {
+		return c, fmt.Errorf("DASH_TLS_CERT/DASH_TLS_KEY: %v", err)
 	}
 	if c.MetricsToken == "" {
 		return c, fmt.Errorf("METRICS_TOKEN is required")
@@ -207,7 +209,15 @@ func Main(args []string) int {
 	log.Printf("spoond dash listening on %s (tls %v, refresh %s, history %d)", cfg.Addr, cfg.TLSCert != "", cfg.Interval, cfg.History)
 	serve := srv.ListenAndServe
 	if cfg.TLSCert != "" {
-		serve = func() error { return srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey) }
+		pairs, _ := tlsfiles.Parse(cfg.TLSCert, cfg.TLSKey) // validated when the config was read
+		certs, err := tlsfiles.New(pairs, log.Printf)
+		if err != nil {
+			log.Printf("spoond dash: tls: %v", err)
+			return 1
+		}
+		go certs.Watch(ctx, time.Minute)
+		srv.TLSConfig = certs.Config()
+		serve = func() error { return srv.ListenAndServeTLS("", "") }
 	}
 	if err := serve(); err != nil && err != http.ErrServerClosed {
 		log.Printf("spoond dash: %v", err)

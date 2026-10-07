@@ -10,7 +10,8 @@
 //	BIND_ADDR         listen address (default 127.0.0.1:8890)
 //	PROXY_ADDR        public proxy listener (e.g. 0.0.0.0:8891)
 //	SPOOND_DB_PATH    SQLite database path (default /var/lib/spoond/spoond.db)
-//	TLS_CERT, TLS_KEY  serve HTTPS when both are set
+//	TLS_CERT, TLS_KEY  serve HTTPS when both are set; comma-separated lists
+//	                   serve several pairs by SNI and reload on change
 //	CONSUMER_TOKENS   comma-separated token=consumer pairs (e.g. "abc=forgejo,def=pi")
 //	POOL_SIZE         warm-pool size per image (default 0 = disabled)
 //	DEFAULT_TTL_SECS  default lease TTL (default 300)
@@ -121,6 +122,7 @@ import (
 
 	"github.com/jrimmer/spoond/v2/api"
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/internal/tlsfiles"
 	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/notify"
 	"github.com/jrimmer/spoond/v2/store"
@@ -267,8 +269,12 @@ func (s metricsSink) Notification(webhook, severity, result string) {
 func Main(args []string) int {
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
 	proxyAddr := envOr("PROXY_ADDR", "") // e.g. 0.0.0.0:8891 (Caddy wildcard front)
-	tlsCert := os.Getenv("TLS_CERT")
-	tlsKey := os.Getenv("TLS_KEY")
+	// TLS_CERT and TLS_KEY may list several pairs (comma-separated, paired by
+	// position), chosen by SNI; the first is the default (internal/tlsfiles).
+	tlsPairs, err := tlsfiles.Parse(os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY"))
+	if err != nil {
+		log.Fatalf("TLS_CERT/TLS_KEY: %v", err)
+	}
 	poolSize := envIntOr("POOL_SIZE", 0)
 	idleTimeoutSecs := envIntOr("IDLE_TIMEOUT_SECS", 0) // persistent-lease auto-suspend
 	idleTimeout := time.Duration(idleTimeoutSecs) * time.Second
@@ -583,8 +589,15 @@ func Main(args []string) int {
 	}()
 
 	log.Printf("spoond-backend listening on %s (substrate %s, %d consumer(s), pool=%d)", bindAddr, cfg.GRPCAddr, len(tokens), poolSize)
-	if tlsCert != "" && tlsKey != "" {
-		err = httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
+	if tlsPairs != nil {
+		certs, cerr := tlsfiles.New(tlsPairs, log.Printf)
+		if cerr != nil {
+			log.Fatalf("tls: %v", cerr)
+		}
+		log.Printf("tls: serving %s (first is the default; files re-read every minute)", strings.Join(certs.Names(), " | "))
+		go certs.Watch(ctx, time.Minute)
+		httpSrv.TLSConfig = certs.Config()
+		err = httpSrv.ListenAndServeTLS("", "")
 	} else {
 		err = httpSrv.ListenAndServe()
 	}

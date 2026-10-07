@@ -138,7 +138,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `HOST_GUEST_SERVICE_ADDR` | *(empty)* | host address guests use to reach host services (the proxy/LLM gateway) |
 | `HOST_GUEST_SERVICE_PORT` | `8891` | host TCP port granted to guests with the above |
 | `HOST_API_PORT` | `BIND_ADDR`'s port | lease API port `lan`/`internet` guests may reach on `HOST_GUEST_SERVICE_ADDR` (`0` = none) |
-| `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set |
+| `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set. Comma-separated lists of equal length serve several certificates, chosen by the client's SNI and paired by position; the first is the default (no SNI, a connection by IP, or a name none covers). The files are re-read every minute, so a renewal needs no restart; a pair caught half-written keeps serving the old certificate until it is complete |
 | `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |
 | `MAX_TTL_SECS` | `3600` | maximum TTL a consumer may request |
 | `IDLE_TIMEOUT_SECS` | `0` | legacy plain-sweep auto-suspend: suspend a persistent lease idle for this long when its effective `idle_suspend` is `0` (`0` disables; new deployments should use `IDLE_SUSPEND_DEFAULT_SECS` and per-lease `idle_suspend`) |

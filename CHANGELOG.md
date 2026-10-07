@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+
+### Added
+
+- **Several TLS certificates per listener, reloaded on change.**
+  `TLS_CERT`/`TLS_KEY` (lease API) and `DASH_TLS_CERT`/`DASH_TLS_KEY`
+  (dashboard) accept comma-separated lists of equal length, paired by
+  position; the client's SNI picks the certificate (exact or one-label
+  wildcard) and the first pair is the default. The files are re-read
+  every minute, so a renewed certificate is served without a restart; a
+  pair caught half-written (new certificate, old key) keeps serving the
+  previous one until both files match. `spoond doctor` checks every pair
+  and warns within 14 days of expiry. This lets a host serve names that
+  an ACME client issues as separate certificates (Caddy issues one per
+  name).
 ### Security
 
 - **Exec env no longer appears in the guest command line.** Per-request
