@@ -58,21 +58,22 @@ summarised from README "Status".
   quota. The reason is stored (`leases.lost_reason`, migration 0019) and
   shown as `lost_reason` on the lease object (additive, `omitempty`).
   `409` keeps meaning "busy, retry".
-- **The dashboard's footer names the project, and the header centres
-  `SPOOND · <host>`.** The footer status line's readouts were already
-  elsewhere: leases in the capacity and leases panels, hugepages and
-  snapshot disk in the host panel, units in the services panel. The
-  footer is now one dim, centred line —
-  `spoond · github.com/jrimmer/spoond · v2.7.0 (2026-10-07)` — with the
-  project name, `DASH_PROJECT_URL` (default the module's home, shown
-  without scheme), the dashboard binary's version (`debug.ReadBuildInfo`,
-  shortened like the header did) and the build's `vcs.time` release date
-  as `YYYY-MM-DD` (omitted for a dev build with no VCS stamp). On a
-  narrow frame the URL drops first, then the date. The header keeps its
-  centred title as `SPOOND · host` and right-aligns spoond's own uptime
-  and the frame's clock as `up <dur>, <time>`; the uptime drops before
-  the clock, and neither overlaps the title. `DASH_SERVICES` now
-  includes `spoond-netwatch` by default.
+- **The dashboard's header title sits at the left margin and its
+  footer links the project's GitHub repository.** The header's left edge
+  reads `SPOOND · <host>` at the same inset as the panels' frames (the
+  version is not there); the right side keeps spoond's own uptime and
+  the frame's clock as `up <dur>, <time>`, dropping the uptime before
+  the clock and never overlapping the title. The footer is one dim,
+  centred line — `Spoond v2.7.1 (2026-10-07) · GitHub` — with the
+  dashboard binary's version (`debug.ReadBuildInfo`, shortened like the
+  header used to), its release date (the build's `vcs.time` as
+  `YYYY-MM-DD`, omitted for a dev build), and the GitHub mark linking to
+  `DASH_PROJECT_URL` (default the module's home); the URL text is no
+  longer shown. On a narrow frame the date drops first, keeping the
+  version and the mark. In the browser the mark is the standard GitHub
+  octocat inline SVG (16px, `currentColor`), so it follows the dim
+  footer colour and the light/dark theme; in the terminal it is the dim
+  word `GitHub`.
 
 ### Fixed
 

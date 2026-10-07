@@ -24,20 +24,20 @@ func topStyles() map[string]string {
 		return map[string]string{} // no escapes when piped or redirected
 	}
 	return map[string]string{
-		"head":    "\x1b[1;97m",
-		"frame":   "\x1b[2;37m",
-		"title":   "\x1b[1;96m",
-		"dim":     "\x1b[2;90m",
-		"linkdim": "\x1b[2;90m",
-		"text":    "\x1b[0;97m",
-		"ok":      "\x1b[0;92m",
-		"warn":    "\x1b[0;93m",
-		"bad":     "\x1b[0;91m",
-		"state":   "\x1b[0;94m",
-		"owner":   "\x1b[0;95m",
-		"id":      "\x1b[0;96m",
-		"spark":   "\x1b[0;96m",
-		"link":    "\x1b[0;96m",
+		"head":   "\x1b[1;97m",
+		"frame":  "\x1b[2;37m",
+		"title":  "\x1b[1;96m",
+		"dim":    "\x1b[2;90m",
+		"ghmark": "\x1b[2;90m",
+		"text":   "\x1b[0;97m",
+		"ok":     "\x1b[0;92m",
+		"warn":   "\x1b[0;93m",
+		"bad":    "\x1b[0;91m",
+		"state":  "\x1b[0;94m",
+		"owner":  "\x1b[0;95m",
+		"id":     "\x1b[0;96m",
+		"spark":  "\x1b[0;96m",
+		"link":   "\x1b[0;96m",
 	}
 }
 

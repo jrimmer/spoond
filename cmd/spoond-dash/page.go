@@ -48,13 +48,19 @@ func pageLines(g *grid.Grid, links []linkAt) []gridLine {
 	return out
 }
 
-// applyProjectLink swaps the footer's project-URL span (the linkdim
-// style) for a real anchor. The page already draws holder links as
-// anchors, so the footer's own URL is one too; the href takes the scheme
-// the display text leaves off. A row without the span (every other row)
-// is returned unchanged.
+// githubMarkSVG is the standard GitHub mark (octocat) as a small inline
+// SVG: 16px, currentColor, so it follows the dim footer colour and the
+// light/dark theme. It replaces the footer's plain "GitHub" text on the
+// page; the terminal keeps the text.
+const githubMarkSVG = `<svg class="gh-mark" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>`
+
+// applyProjectLink swaps the footer's GitHub-mark span (the ghmark
+// style) for a real anchor carrying the mark's inline SVG. The page
+// already draws holder links as anchors, so the project link is one too;
+// the target takes the scheme the grid's plain text leaves off. A row
+// without the span (every other row) is returned unchanged.
 func applyProjectLink(row string) string {
-	open := strings.Index(row, `<span class="g-linkdim"`)
+	open := strings.Index(row, `<span class="g-ghmark"`)
 	if open < 0 {
 		return row
 	}
@@ -63,11 +69,9 @@ func applyProjectLink(row string) string {
 		return row
 	}
 	end := open + close
-	start := open + strings.Index(row[open:], `>`) + 1
-	if start <= open || start > end {
-		return row
-	}
-	anchor := `<a class="g-linkdim" href="` + html.EscapeString(projectHref()) + `" target="_blank" rel="noopener">` + row[start:end] + `</a>`
+	anchor := `<a class="g-ghmark" href="` + html.EscapeString(projectHref()) +
+		`" title="spoond on GitHub" aria-label="spoond on GitHub" rel="noopener" target="_blank">` +
+		githubMarkSVG + `</a>`
 	return row[:open] + anchor + row[end+len(`</span>`):]
 }
 

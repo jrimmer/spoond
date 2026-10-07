@@ -381,8 +381,9 @@ func (l *layout) assemble() *grid.Grid {
 // the module's home.
 const defaultProjectURL = "github.com/jrimmer/spoond"
 
-// projectHref is the URL the footer links to: DASH_PROJECT_URL, else the
-// module's home, with an https scheme when none is given.
+// projectHref is the URL the footer's GitHub mark links to:
+// DASH_PROJECT_URL, else the module's home, with an https scheme when
+// none is given.
 func projectHref() string {
 	u := os.Getenv("DASH_PROJECT_URL")
 	if u == "" {
@@ -392,17 +393,6 @@ func projectHref() string {
 		u = "https://" + u
 	}
 	return u
-}
-
-// projectURL is the footer's display text: the href shown without its
-// scheme, trailing slash trimmed. The line is plain text in the terminal
-// grid; in the page the same span becomes an anchor (applyProjectLink).
-func projectURL() string {
-	u := projectHref()
-	if i := strings.Index(u, "://"); i >= 0 {
-		u = u[i+3:]
-	}
-	return strings.TrimSuffix(u, "/")
 }
 
 // releaseDate is the build's release date: the vcs.time build setting of
@@ -430,54 +420,41 @@ func releaseDateFrom(settings []debug.BuildSetting) string {
 	return ""
 }
 
-// footerParts is the footer line's three parts: the project name, the
-// URL and the version plus its release date in parentheses. The date is
-// part of the last part so that dropping the URL first and then the date
-// keeps the name and version intact.
+// footerParts is the footer line's parts: the dashboard binary's version
+// and its release date (empty for a dev build).
 type footerParts struct {
-	name, url, version string
+	version, date string
 }
 
-// footer builds the line's parts from the dashboard build. The release
-// date is omitted when the build has no vcs.time.
+// footerPartsFor builds the line's parts from the dashboard build. The
+// release date is omitted when the build has no vcs.time.
 func footerPartsFor() footerParts {
-	f := footerParts{name: "spoond", url: projectURL(), version: versionLabel(dashVersion)}
-	if d := releaseDate(); d != "" {
-		f.version += " (" + d + ")"
-	}
-	return f
+	return footerParts{version: versionLabel(dashVersion), date: releaseDate()}
 }
 
-// footerSegs renders the footer parts as one dim line, dropping the URL
-// first and the date second (by way of the version part) when the line
-// does not fit w. The name and version always stay.
+// footerSegs renders the footer parts as one dim, centred line:
+// "Spoond <version> (<date>) · GitHub". The GitHub mark is plain text in
+// the terminal grid; the page swaps the span for the mark's SVG
+// (applyProjectLink). On a frame too narrow for the whole line the date
+// is dropped first; the version and the mark always stay.
 func footerSegs(f footerParts, w int) []grid.Seg {
 	sep := grid.Seg{Text: " · ", Style: "dim"}
-	name := grid.Seg{Text: f.name, Style: "dim"}
-	url := grid.Seg{Text: f.url, Style: "linkdim"}
-	ver := grid.Seg{Text: f.version, Style: "dim"}
-	full := []grid.Seg{name, sep, url, sep, ver}
-	if segWidth(full) <= w {
-		return full
-	}
-	withVer := []grid.Seg{name, sep, ver}
-	if segWidth(withVer) <= w {
-		return withVer
-	}
-	// The version's release date is the last thing to go.
-	if i := strings.Index(f.version, " ("); i > 0 {
-		if noDate := []grid.Seg{name, sep, {Text: f.version[:i], Style: "dim"}}; segWidth(noDate) <= w {
-			return noDate
+	ver := grid.Seg{Text: "Spoond " + f.version, Style: "dim"}
+	logo := grid.Seg{Text: "GitHub", Style: "ghmark"}
+	if f.date != "" {
+		full := []grid.Seg{ver, {Text: " (" + f.date + ")", Style: "dim"}, sep, logo}
+		if segWidth(full) <= w {
+			return full
 		}
 	}
-	return []grid.Seg{name}
+	return []grid.Seg{ver, sep, logo}
 }
 
-// footer draws the frame's last row: one dim line about the project —
-// name, URL, version and release date. It is centred like the header's
-// title. On a narrow frame the URL drops first, then the date. The URL
-// span carries the linkdim style: dim like the rest of the line in the
-// terminal, and swapped for an anchor by the page (applyProjectLink).
+// footer draws the frame's last row: one dim, centred line naming the
+// project — "Spoond <version> (<date>) · GitHub". On a narrow frame the
+// date drops first. The GitHub mark span carries the ghmark style: dim
+// text in the terminal, swapped for the mark's SVG by the page
+// (applyProjectLink).
 func (l *layout) footer(g *grid.Grid, y int) {
 	g.Center(l.w/2, y, footerSegs(footerPartsFor(), l.w))
 }
@@ -488,16 +465,17 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// header: the title line centred — SPOOND · host — with a blank row
-// under it as the gutter before the panels (headerRows). The version is
-// not here: it lives on the footer with the project's name, URL and
-// release date, so it never shows twice. The holder column's header
-// explains its two marks; every other state is spelled out where it is
-// shown. Right-aligned on the same row is spoond's own uptime (the
-// backend process, not the host's, which would read as spoond's right
-// after a deploy) and the frame's clock: "up 35m, 12:41:07". On a frame
-// too narrow for both, the uptime is dropped before the time, and the
-// time is dropped rather than overlap the centred title.
+// header: the title line at the left margin — SPOOND · host — with a
+// blank row under it as the gutter before the panels (headerRows). The
+// left inset matches the panels' frames (column 0). The version is not
+// here: it lives on the footer with the project, so it never shows
+// twice. The holder column's header explains its two marks; every other
+// state is spelled out where it is shown. Right-aligned on the same row
+// is spoond's own uptime (the backend process, not the host's, which
+// would read as spoond's right after a deploy) and the frame's clock:
+// "up 35m, 12:41:07". On a frame too narrow for both, the uptime is
+// dropped before the time, and the time is dropped rather than overlap
+// the title.
 func (l *layout) header(g *grid.Grid, y int) {
 	title := []grid.Seg{
 		{Text: "SPOOND", Style: "head"},
@@ -505,9 +483,9 @@ func (l *layout) header(g *grid.Grid, y int) {
 		{Text: l.host, Style: "text"},
 	}
 	// The right side keeps the clock always and the uptime only when it
-	// fits clear of the centred title. titleEnd is one past the title's
-	// last cell; the right text must start a column beyond it.
-	titleEnd := l.w/2 - segWidth(title)/2 + segWidth(title)
+	// fits clear of the left-aligned title. titleEnd is one past the
+	// title's last cell; the right text must start a column beyond it.
+	titleEnd := segWidth(title)
 	right := l.s.At
 	if l.s.BackendUp > 0 {
 		if with := "up " + dur(l.s.BackendUp) + ", " + l.s.At; l.w-segWidth([]grid.Seg{{Text: with}}) > titleEnd {
@@ -517,7 +495,7 @@ func (l *layout) header(g *grid.Grid, y int) {
 	if l.w-segWidth([]grid.Seg{{Text: right}}) > titleEnd {
 		g.Right(l.w-1, y, []grid.Seg{{Text: right, Style: "dim"}})
 	}
-	g.Center(l.w/2, y, title)
+	g.Segs(0, y, title, -1)
 }
 
 // versionLabel is a version for the header: "?" when the scrape had
