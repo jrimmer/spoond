@@ -979,7 +979,9 @@ for watching rather than triage. It draws the whole frame as one
 character grid at a fixed width — capacity (running/limit meter, leases
 by state, queued, granted, swept, and one row per image with live
 leases) beside the host meters (CPU, memory, hugepages, snapshot and
-root disk) at a wide frame, stacked below it at a narrow one — then a
+root disk, and the disk I/O readout — PSI pressure `some`/`full` over
+60 s and the snapshot device's write throughput and busy share) at a
+wide frame, stacked below it at a narrow one — then a
 full-width throughput panel (running leases, requests per second,
 creates per minute and egress connections, each with its current value
 and a sparkline over the history, titled with the window the history
@@ -993,8 +995,11 @@ counts highlighted — with the mean create and resume latencies), and
 the events panel (the backend's lease event stream) — plus
 a **Notifications** panel below the header (only when there is a
 message): spoond's own system messages, one row each — a unit not
-active, free hugepages or snapshot disk past the danger level, or kept
-checkpoints past `KEPT_DISK_WARN_PCT` of the snapshot disk (#126). Each
+active, free hugepages or snapshot disk past the danger level, kept
+checkpoints past `KEPT_DISK_WARN_PCT` of the snapshot disk (#126), or
+the snapshot disk's I/O full pressure past `DASH_IO_FULL_BAD_PCT`
+(`disk I/O stalled: full pressure N% over 60 s`, cleared when the
+pressure drops). Each
 message has a stable id from its trigger, a severity (warn/bad) and a
 `×` the viewer can dismiss for their own browser (`localStorage`, no
 server state; a dismissed message stays hidden while its trigger stays
@@ -1019,7 +1024,14 @@ from spoond's `/metrics` using the scrape-only `METRICS_TOKEN`, the
 SQLite catalog opened read-only, user names from the identity store,
 `/proc` and systemd. Every viewer shares that loop through a single
 server-sent-event stream, and `DASH_HISTORY` (default 150) points of
-history are kept so a new page starts with trends. With
+history are kept so a new page starts with trends. The host I/O readout
+comes from `/proc/pressure/io` (PSI: `some` and `full` over 60 s, not
+`iowait`, which drops when CPUs are busy even if the disk is saturated)
+and `/proc/diskstats` (the snapshot device's write MB/s and busy share,
+a delta between collections). A kernel without PSI (no
+`/proc/pressure`) simply hides the pressure row instead of erroring;
+`DASH_DISK_DEVICE` names the block device to watch, defaulting to the
+one the storage path's mount sits on. With
 `DASH_EVENTS_TOKEN` set, the collector also holds one subscription to
 the backend's lease event stream (`/api/leases/events`, resuming by
 `Last-Event-ID` and backing off when the backend refuses it) and keeps
@@ -1042,11 +1054,19 @@ variables:
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
+| `DASH_DISK_DEVICE` | *(auto from the storage mount)* | block device for the write-throughput and busy readout |
+| `DASH_IO_FULL_WARN_PCT` | `5` | PSI full avg60 at which the pressure meter turns warn |
+| `DASH_IO_FULL_BAD_PCT` | `15` | PSI full avg60 at which it turns bad and the notification fires |
 | `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol` | systemd units to show |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |
 | `DASH_HOST` | *(the hostname)* | header label |
+
+The I/O thresholds are a first cut, to be tuned from #136's
+measurements. `iowait` is deliberately not used: it is CPU idle time
+with I/O outstanding, so it falls when the CPUs are busy even while the
+disk is saturated — PSI's `full` line measures the stall itself.
 
 The dashboard can only read: it has no write path to the backend, the
 database or the orchestrator, and the tokens it holds are refused

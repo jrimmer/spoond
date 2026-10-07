@@ -12,6 +12,20 @@ summarised from README "Status".
 
 ### Added
 
+- **The dashboard's host panel shows disk I/O pressure and the snapshot
+  disk's throughput.** A new pair of rows beside the CPU and memory
+  meters: `I/O pressure some 0.3% / full 0.0% (60s)` from
+  `/proc/pressure/io` and `nvme0n1 12 MB/s w, 18% busy` from
+  `/proc/diskstats` (a delta between collections). PSI rather than
+  `iowait`, which falls when CPUs are busy even if the disk is
+  saturated. The pressure meter warns at `DASH_IO_FULL_WARN_PCT`
+  (default 5) and turns bad at `DASH_IO_FULL_BAD_PCT` (default 15) of
+  the full 60 s average, where the Notifications panel also raises
+  `disk I/O stalled: full pressure N% over 60 s` (id `io-pressure`,
+  cleared when the pressure drops). The device is auto-detected from
+  the storage path's mount or set with `DASH_DISK_DEVICE`; a kernel
+  without PSI hides the pressure row instead of erroring. The
+  thresholds are a first cut, to be tuned from #136's measurements.
 - **The dashboard's notifications panel for spoond system messages.**
   The old attention strip drew per-lease rows (a lost lease, the
   preempted burst count, a lapsed hold) that the dashboard viewer cannot
