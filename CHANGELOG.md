@@ -89,7 +89,7 @@ summarised from README "Status".
 - **A lost lease is released automatically once its grace period
   lapses, freeing its owner's quota.** A lease in state `lost` was never
   released unless its owner deleted it: it kept holding the owner's
-  concurrent-lease slot (and, while live, its memory charge) forever, so
+  concurrent-lease slot forever, so
   an owner who had moved on could not create a replacement. The GC pass
   now releases a lost lease past its grace period — the same 7-day
   persistent / 1-day otherwise window its snapshots already kept

@@ -349,8 +349,8 @@ A lost lease keeps its resume and checkpoint snapshots for a grace
 period after the loss — 7 days for a persistent lease, 1 day otherwise
 (`GC_LOST_GRACE_PERSISTENT` / `GC_LOST_GRACE`) — so the owner can still
 reclaim them. Once that grace period lapses the GC releases the lease
-itself through the normal release path: its quota (the concurrent-lease
-count and its memory charge) comes back, its snapshots become ordinary
+itself through the normal release path: the concurrent-lease slot it
+held comes back, its snapshots become ordinary
 GC candidates, its running jobs are settled and a `released` event with
 the reason `lost_expired` reaches the owner's event stream. The release
 is automatic and idempotent, so a `lost` lease the owner has moved on
