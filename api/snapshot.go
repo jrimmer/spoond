@@ -138,14 +138,26 @@ func (s *Service) snapshotAcquire(ctx context.Context, drain bool) (func(), erro
 	}
 	if s.metrics != nil {
 		s.metrics.SnapshotWriteWait.Observe(waited.Seconds())
-		s.metrics.SnapshotWritesInFlight.Set(float64(lim.inFlight.Load()))
+		s.metrics.SnapshotWritesInFlight.Set(float64(s.snapshotInFlight()))
 	}
 	return func() {
 		release()
 		if s.metrics != nil {
-			s.metrics.SnapshotWritesInFlight.Set(float64(lim.inFlight.Load()))
+			s.metrics.SnapshotWritesInFlight.Set(float64(s.snapshotInFlight()))
 		}
 	}, nil
+}
+
+// snapshotInFlight is the number of snapshot writes in flight across both
+// limiters, so the gauge is exact while a drain and ordinary writes overlap.
+func (s *Service) snapshotInFlight() int64 {
+	var n int64
+	for _, l := range []*snapshotLimiter{s.snapshotLimiters.def, s.snapshotLimiters.drain} {
+		if l != nil {
+			n += l.inFlight.Load()
+		}
+	}
+	return n
 }
 
 // snapshotBusy reports whether the default snapshot-write limiter has
