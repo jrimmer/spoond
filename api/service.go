@@ -490,6 +490,12 @@ type Service struct {
 	// draining is true while the admin drain is running (U10): pool
 	// refill, idle sweep, GC and the crash reconcile skip until undrain.
 	draining atomic.Bool
+	// drainClearPending is true after an undrain's SetDraining(false)
+	// failed: the node's drain could not be cleared, so spoond keeps its
+	// own draining state and the self-heal loop retries the clear (not
+	// gated on DRAIN_MAX_SECS, and even when no drained lease remains)
+	// until it succeeds (spoond-52c R1).
+	drainClearPending atomic.Bool
 	// undraining is true while an undrain is resuming the drained
 	// leases, so the self-heal loop does not race it with a second pass.
 	undraining atomic.Bool

@@ -373,6 +373,18 @@ it lossless. Do not stop the backend first.
    owner's memory cap, without burst room, unable to preempt, refused
    for capacity, or hit by a cancelled/bounded call stays `drained` for
    a later undrain.
+4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
+   crashed or was killed), the drain is skipped — there is nothing to
+   pause — and the backend's crash reconcile handles recovery.
+
+The unit's `TimeoutStopSec` must cover the drain: the pause phase takes
+roughly `leases × per-pause time / DRAIN_SNAPSHOT_CONCURRENCY`, plus the
+up-to-180 s quiesce wait. The shipped unit's `TimeoutStopSec=330` is
+sized for the default width on this node; raising the lease count, the
+per-pause time (larger guests) or the default width's ratio needs the
+unit's timeout raised to match. `DRAIN_MAX_SECS` is independent: it
+bounds a drain whose undrain never arrives, not the drain hook's own
+window.
 
 Drain and undrain run on a context **detached from the HTTP request**
 and bounded by spoond itself (`DRAIN`/undrain timeouts), so a hook that
@@ -390,28 +402,25 @@ error keeps the lease `drained` for a retry rather than marking it
   `UNDRAIN_CONCURRENCY` bound and retry policy. A deferred attempt logs
   a line and emits a `drain_deferred` event naming the lease and the
   refusal.
+- A lease the drain could not pause is logged and emits a
+  `drain_failed` event naming the lease and the pause error, so a lease
+  left running into the stop is visible outside the HTTP response.
 - A drain older than `DRAIN_MAX_SECS` (default `900`) while the node is
   healthy is lifted automatically: the backend logs it, emits a
   `drain_healed` event and resumes the drained leases. A drain that has
   outlived its orchestrator restart therefore cannot refuse every
   create with 503 forever. An unhealthy node's drain is left in place
   (it may be waiting for the node to come back).
+- A `SetDraining(false)` that fails during an undrain does not clear
+  spoond's own draining state: the node still refuses creates, so the
+  leases stay `drained` and the self-heal loop retries the clear on
+  every pass while the node is healthy — even when no drained lease
+  remains — logging each retry and emitting a `drain_healed` event when
+  it finally clears.
 - Draining is visible: `/healthz` carries `"draining":true` while a
   drain is in effect, `/readyz` lists a `draining` check (it never fails
   readiness — the create route's 503 is the refusal), and the notifier
   warns on `node.draining` until the drain clears.
-4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
-   crashed or was killed), the drain is skipped — there is nothing to
-   pause — and the backend's crash reconcile handles recovery.
-
-The unit's `TimeoutStopSec` must cover the drain: the pause phase takes
-roughly `leases × per-pause time / DRAIN_SNAPSHOT_CONCURRENCY`, plus the
-up-to-180 s quiesce wait. The shipped unit's `TimeoutStopSec=330` is
-sized for the default width on this node; raising the lease count, the
-per-pause time (larger guests) or the default width's ratio needs the
-unit's timeout raised to match. `DRAIN_MAX_SECS` is independent: it
-bounds a drain whose undrain never arrives, not the drain hook's own
-window.
 
 ## Snapshot write pacing
 

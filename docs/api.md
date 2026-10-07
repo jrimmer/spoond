@@ -1240,6 +1240,9 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `promoted` | a running burst lease moved to guaranteed: its owner's guarantee has room again | `to guaranteed: the owner's guarantee has room` |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
 | `gc` | a catalog GC pass deleted builds (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed` |
+| `drain_failed` | the admin drain could not pause the lease: it ran on into the orchestrator stop (spoond-52c) | the pause error |
+| `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer or a bounded context (spoond-52c) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
+| `drain_healed` | the drain self-heal loop lifted a drain that outlived `DRAIN_MAX_SECS` on a healthy node, or cleared a node drain a failed undrain left set (spoond-52c) | `drain lasted <duration>` or `node draining cleared after a failed undrain` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 
 A `gc` event is lease-less: its `lease_id` and `owner` are empty, it
@@ -1247,6 +1250,9 @@ reaches the all-leases stream (and the events-only `EVENTS_TOKEN`) but
 never `GET /api/leases/{id}/events` or a per-lease in-process
 subscription, and the dashboard shows its subject as `spoond`. A GC
 pass that deletes nothing (the default dry run included) emits none.
+`drain_healed` is lease-less the same way. `drain_failed` and
+`drain_deferred` name their lease (and owner), so they reach the
+per-lease stream too.
 
 ### Resume and gaps
 
@@ -1666,8 +1672,8 @@ wrong or missing token answers `401`.
 
 | Route | Effect |
 |---|---|
-| `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Runs on a context detached from the request (a client disconnect does not cancel the pauses) bounded by 6 min. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. A drain older than `DRAIN_MAX_SECS` (default 900) on a healthy node is lifted automatically (see `POST /api/admin/undrain`). |
-| `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases `UNDRAIN_CONCURRENCY` (default 2) at a time (a resume that fails with a retryable envd/start error is retried `UNDRAIN_RESUME_RETRIES` (default 2) times before the lease becomes `lost`; `failed` entries carry `attempts`; one over its owner's memory cap, without burst room, unable to preempt, refused for capacity, or hit by a cancelled/bounded call stays drained for the next undrain or the self-heal loop). Runs on a context detached from the request bounded by 5 min. Response `{"resumed":N,"failed":[{"id","error","attempts"}]}`. |
+| `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Runs on a context detached from the request (a client disconnect does not cancel the pauses) bounded by 6 min. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`; each failure is logged and emits a `drain_failed` event. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. A drain older than `DRAIN_MAX_SECS` (default 900) on a healthy node is lifted automatically (see `POST /api/admin/undrain`). |
+| `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases `UNDRAIN_CONCURRENCY` (default 2) at a time (a resume that fails with a retryable envd/start error is retried `UNDRAIN_RESUME_RETRIES` (default 2) times before the lease becomes `lost`; `failed` entries carry `attempts`; one over its owner's memory cap, without burst room, unable to preempt, refused for capacity, or hit by a cancelled/bounded call stays drained for the next undrain or the self-heal loop). A failed clear keeps the node draining and the leases drained so the self-heal loop retries the clear. Runs on a context detached from the request bounded by 5 min. Response `{"resumed":N,"failed":[{"id","error","attempts"}]}`. |
 | `POST /api/admin/reconcile` | Run the crash reconciliation now. Response `{"recovered":N,"lost":M}`. |
 
 These are what `spoond drain --stop|--start` calls from the orchestrator

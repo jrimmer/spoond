@@ -103,6 +103,10 @@ const (
 	// spoond's own maintenance, not a lease's, so it carries no lease id
 	// and no owner; the detail names how long the drain lasted.
 	LeaseDrainHealed LeaseEventType = "drain_healed"
+	// LeaseDrainFailed marks a drain that could not pause a lease: the
+	// lease ran on into the orchestrator stop. The detail names the
+	// pause error (spoond-52c R2).
+	LeaseDrainFailed LeaseEventType = "drain_failed"
 )
 
 // LeaseEvent is one lease lifecycle change.

@@ -76,11 +76,13 @@ summarised from README "Status".
   event on a deferred attempt), so a missed undrain — a backend restart
   between drain and undrain, or an `ExecStartPost` that exited 0 — no
   longer strands the lease. A drain that outlives `DRAIN_MAX_SECS`
-  (default 900, `DRAIN_MAX_SECS`) on a healthy node now undrains itself,
+  (default 900) on a healthy node now undrains itself,
   logs it and emits a `drain_healed` event instead of refusing every
-  create with 503 forever; draining is reported in `/healthz`
-  (`"draining":true`) and `/readyz`, and the notifier adds a
-  `node.draining` key. An owner's own resume finally clears `drained`,
+  create with 503 forever; a lease the drain could not pause is logged
+  and emits a `drain_failed` event, and a failed node-drain clear keeps
+  spoond draining so the self-heal loop retries it. Draining is reported
+  in `/healthz` (`"draining":true`) and `/readyz`, and the notifier adds
+  a `node.draining` key. An owner's own resume finally clears `drained`,
   so resume-on-next-call keeps working and a later undrain cannot resume
   a lease the owner is running.
 
