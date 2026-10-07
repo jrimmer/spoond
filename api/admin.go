@@ -538,8 +538,24 @@ func (s *Service) healDrain(ctx context.Context) {
 	if s.undraining.Load() {
 		return
 	}
+	// With nothing draining and no drained lease there is nothing to do:
+	// skip the substrate call entirely.
+	if !s.draining.Load() && !s.hasDrainedLeases() {
+		return
+	}
+	// Resolve the node once, up front: the self-heal loop never waits on
+	// an unreachable node for 120 s (the admin undrain does) and must not
+	// lose leases to transport errors while the node is down. An
+	// unreachable or unhealthy node leaves every drain and Drained lease
+	// exactly as it is, for the next pass.
+	info, err := s.sub.NodeInfo(ctx)
+	if err != nil {
+		s.log.Printf("drain self-heal: node info: %v", err)
+		return
+	}
+	healthy := info.Status == "healthy" || info.Status == "draining"
 	if s.draining.Load() {
-		if !s.drainStale(ctx) {
+		if !healthy || !s.drainStale(info) {
 			return
 		}
 		started := time.Unix(0, s.drainStartedAt.Load())
@@ -547,10 +563,7 @@ func (s *Service) healDrain(ctx context.Context) {
 			time.Since(started).Round(time.Second), s.drainMaxSecs())
 		s.emitLeaseEvent("", "", LeaseDrainHealed, fmt.Sprintf("drain lasted %s", time.Since(started).Round(time.Second)))
 	}
-	// Undrain (which also lifts a stale drain's SetDraining) or resume
-	// what the last undrain left drained. With nothing draining and no
-	// drained lease there is nothing to do: skip the substrate calls.
-	if !s.draining.Load() && !s.hasDrainedLeases() {
+	if !healthy {
 		return
 	}
 	s.undrain(ctx)
@@ -570,15 +583,9 @@ func (s *Service) hasDrainedLeases() bool {
 }
 
 // drainStale reports whether the current drain has outlived
-// DRAIN_MAX_SECS and the node is healthy: the condition for the
-// automatic undrain. A disabled limit (0), an absent start time or an
-// unhealthy node all answer false (an unhealthy node's drain may be
-// waiting for it to come back, and taking the drain off an unhealthy
-// node is not this loop's call). "healthy" accepts the orchestrator's
-// own "draining" status too: spoond set it with SetDraining(true), so a
-// reachable node reporting draining is the expected state of a drain
-// that is merely stale, not a node in trouble.
-func (s *Service) drainStale(ctx context.Context) bool {
+// DRAIN_MAX_SECS, given an already-fetched healthy node. A disabled
+// limit (0) or an absent start time answers false.
+func (s *Service) drainStale(info substrate.NodeInfo) bool {
 	max := s.drainMaxSecs()
 	if max <= 0 {
 		return false
@@ -588,11 +595,6 @@ func (s *Service) drainStale(ctx context.Context) bool {
 		return false
 	}
 	if time.Since(time.Unix(0, started)) <= time.Duration(max)*time.Second {
-		return false
-	}
-	info, err := s.sub.NodeInfo(ctx)
-	if err != nil {
-		s.log.Printf("drain self-heal: node info: %v", err)
 		return false
 	}
 	return info.Status == "healthy" || info.Status == "draining"
