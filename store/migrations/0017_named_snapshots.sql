@@ -22,9 +22,11 @@ CREATE TABLE named_snapshots (
 );
 CREATE UNIQUE INDEX named_snapshots_key ON named_snapshots(owner, name, idempotency_key) WHERE idempotency_key <> '';
 
--- Per-name retention (2.7, #83): how many versions a name keeps. Written
--- by the first save, changed by PUT /api/named-snapshots/{name}; deleted
--- with the name's last version.
+-- Per-name retention (2.7, #83): how many versions a name keeps, written
+-- by the first save and changed by PUT /api/named-snapshots/{name}. The
+-- row (with its last_version high-water mark) is never deleted, even when
+-- the name has no versions left, so a later save never reuses a deleted
+-- version number.
 CREATE TABLE named_snapshot_names (
   owner      TEXT NOT NULL,
   name       TEXT NOT NULL,

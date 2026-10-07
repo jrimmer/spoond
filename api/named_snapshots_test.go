@@ -1034,11 +1034,10 @@ func TestNamedSnapshotSaveRefusedWhileStaging(t *testing.T) {
 	}
 }
 
-// TestNamedSnapshotSyncExecShadowedRestageSkippedDuringSave (R2): while
-// a save holds the secrets gate, a finishing synchronous exec removes its
-// shadowing secret files but skips the create-time re-stage, so a
-// shadowed secret cannot land after the save's scrub.
-func TestNamedSnapshotSyncExecShadowedRestageSkippedDuringSave(t *testing.T) {
+// TestNamedSnapshotFailedScrubKeepsCreateSecret (Q2): a save aborted by
+// a failed scrub still leaves the source with its create-time secret,
+// because the re-stage runs on every early return.
+func TestNamedSnapshotFailedScrubKeepsCreateSecret(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
@@ -1046,30 +1045,48 @@ func TestNamedSnapshotSyncExecShadowedRestageSkippedDuringSave(t *testing.T) {
 		"image": "py-base", "ttl": 300, "secrets": map[string]string{"TOKEN": "s3cr3t"},
 	})
 	sandbox := svc.store.leases[id].SandboxID
+	sub.scrubLeftover = "STUCK"
 
-	// The exec staged TOKEN, shadowing the create-time secret.
-	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/TOKEN", []byte("exec-value"), 0o600); err != nil {
-		t.Fatalf("seed exec secret: %v", err)
+	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if resp.StatusCode != http.StatusInternalServerError || body["code"] != "scrub_failed" {
+		t.Fatalf("save with a failing scrub: status %d (%v), want 500 scrub_failed", resp.StatusCode, body)
 	}
-	l := svc.lookup("consumer-a", id)
-
-	// The save holds the gate; the exec finishes now.
-	if !svc.secretsGate.beginSave(id) {
-		t.Fatal("beginSave should claim a fresh lease")
-	}
-	svc.cleanupExecSecrets(l, map[string]string{"TOKEN": "exec-value"})
-	svc.secretsGate.endSave(id)
-
-	if _, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024); err == nil {
-		t.Fatal("shadowed secret was re-staged while a save held the gate")
+	got, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024)
+	if err != nil || string(got) != "s3cr3t" {
+		t.Fatalf("create-time secret after a failed scrub = %q (%v), want re-staged", got, err)
 	}
 }
 
-// TestNamedSnapshotJobShadowedRestageSkippedDuringSave (R2): while a
-// save holds the secrets gate, a finishing job removes its shadowing
-// secret files but skips the create-time re-stage, so a shadowed secret
-// cannot land after the save's scrub and before its checkpoint.
-func TestNamedSnapshotJobShadowedRestageSkippedDuringSave(t *testing.T) {
+// TestNamedSnapshotNameLimitKeepsCreateSecret (Q2): a save refused by the
+// per-owner names cap still leaves the source with its create-time
+// secret.
+func TestNamedSnapshotNameLimitKeepsCreateSecret(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	svc.cfg.MaxNamedSnapshots = 1
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "secrets": map[string]string{"TOKEN": "s3cr3t"},
+	})
+	sandbox := svc.store.leases[id].SandboxID
+
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "one"})
+	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "two"})
+	if resp.StatusCode != http.StatusConflict || body["code"] != "snapshot_limit" {
+		t.Fatalf("save past the name cap: status %d (%v), want 409 snapshot_limit", resp.StatusCode, body)
+	}
+	got, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024)
+	if err != nil || string(got) != "s3cr3t" {
+		t.Fatalf("create-time secret after a name-cap refusal = %q (%v), want present", got, err)
+	}
+}
+
+// TestNamedSnapshotShadowedSecretsRace is the end-to-end Q2 race: a
+// create-time TOKEN, a job and a synchronous exec that both shadow it and
+// finish while a real save runs. The save's checkpoint must never contain
+// TOKEN, and after both the save and the cleanup finish the lease holds
+// the create-time value again.
+func TestNamedSnapshotShadowedSecretsRace(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
@@ -1079,24 +1096,35 @@ func TestNamedSnapshotJobShadowedRestageSkippedDuringSave(t *testing.T) {
 	sandbox := svc.store.leases[id].SandboxID
 	gen := svc.store.leases[id].Generation
 
-	// A running job staged TOKEN, shadowing the create-time secret.
+	// A job and an exec have each staged TOKEN, shadowing the
+	// create-time value.
 	svc.recordJobSecrets(id, "job-1", []string{"TOKEN"})
-	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/TOKEN", []byte("job-value"), 0o600); err != nil {
-		t.Fatalf("seed job secret: %v", err)
+	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/TOKEN", []byte("exec-value"), 0o600); err != nil {
+		t.Fatalf("seed exec secret: %v", err)
+	}
+	l := svc.lookup("consumer-a", id)
+
+	var atCheckpoint error
+	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
+		// The scrub already ran: the checkpoint must not see TOKEN.
+		_, atCheckpoint = sub.Fake.ReadFile(ctx, sandboxID, "/run/secrets/TOKEN", 1024)
+		// Both cleanups race the save while it holds the secrets gate.
+		// The job defers its removal; the exec removes its file and
+		// skips the re-stage. Neither may restore the file here.
+		svc.removeJobSecrets(id, "job-1", sandbox, gen)
+		svc.cleanupExecSecrets(l, map[string]string{"TOKEN": "exec-value"})
+		return e2b.NewUUID(), substrate.BuildRefs{}, nil
 	}
 
-	// The save holds the gate; the job finishes now.
-	if !svc.secretsGate.beginSave(id) {
-		t.Fatal("beginSave should claim a fresh lease")
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if atCheckpoint == nil {
+		t.Fatal("TOKEN was present at checkpoint time; the scrub must clear it")
 	}
-	svc.removeJobSecrets(id, "job-1", sandbox, gen)
-	svc.secretsGate.endSave(id)
-
-	// The job's file is removed, and the create-time value was not
-	// re-staged while the save held the gate: the checkpoint never sees
-	// TOKEN.
-	if _, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024); err == nil {
-		t.Fatal("shadowed secret was re-staged while a save held the gate")
+	// The save's own deferred path drains the job's deferred removal and
+	// restores every create-time secret, so the source ends whole.
+	got, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024)
+	if err != nil || string(got) != "s3cr3t" {
+		t.Fatalf("create-time TOKEN after the race = %q (%v), want s3cr3t", got, err)
 	}
 }
 

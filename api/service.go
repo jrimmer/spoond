@@ -516,6 +516,13 @@ type Service struct {
 	// exec-time secrets, so a save that raced the refuse check scrubs
 	// them before its checkpoint. Guarded by secretsMu.
 	stagedExecSecretNames map[string][]string
+	// pendingSecretRemovals records the exec-time secret names a
+	// finishing job could not remove because a named-snapshot save held
+	// the lease's secrets gate. The save drains it before its
+	// create-time re-stage, so the source ends with its create-time
+	// values and no exec-time file survives the save (Q1). Guarded by
+	// secretsMu.
+	pendingSecretRemovals map[string][]string
 	// saveInterrupt, when set by a test, runs between a save's checkpoint
 	// and its version-row insert to simulate a backend that stops
 	// mid-save (A7). Nil in production.
@@ -579,6 +586,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		liveJobSecrets:        map[string][]string{},
 		stagedExecSecrets:     map[string]int{},
 		stagedExecSecretNames: map[string][]string{},
+		pendingSecretRemovals: map[string][]string{},
 		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
 		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
 		jobStarts:             map[string]*jobStartLock{},

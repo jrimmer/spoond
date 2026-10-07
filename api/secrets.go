@@ -441,3 +441,50 @@ func (s *Service) restageSecrets(sandboxID string, names []string, create map[st
 		}
 	}
 }
+
+// knownSecretNames is the set of secret file names this backend knows
+// on a lease: its create-time names plus any exec-time or job names
+// currently staged. A scrub that removes a file outside this set is one
+// this backend lost track of (R4); the union keeps a still-known
+// exec/job file from being miscounted as forgotten (Q3).
+func (s *Service) knownSecretNames(leaseID string, create map[string]string) map[string]bool {
+	known := make(map[string]bool, len(create))
+	for name := range create {
+		known[name] = true
+	}
+	s.secretsMu.Lock()
+	for _, name := range s.stagedExecSecretNames[leaseID] {
+		known[name] = true
+	}
+	for _, names := range s.liveJobSecrets {
+		for _, name := range names {
+			known[name] = true
+		}
+	}
+	s.secretsMu.Unlock()
+	return known
+}
+
+// deferSecretRemoval records exec-time secret names a finishing job
+// could not remove because a named-snapshot save held the lease's
+// secrets gate. The save drains them (drainDeferredSecretRemovals)
+// before its create-time re-stage, so the final source state is exactly
+// the create-time secret set and no exec-time file remains (Q1).
+func (s *Service) deferSecretRemoval(leaseID string, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	s.pendingSecretRemovals[leaseID] = append(s.pendingSecretRemovals[leaseID], names...)
+}
+
+// drainDeferredSecretRemovals removes and returns the exec-time secret
+// names a finishing job deferred while a save held the gate (Q1).
+func (s *Service) drainDeferredSecretRemovals(leaseID string) []string {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	names := s.pendingSecretRemovals[leaseID]
+	delete(s.pendingSecretRemovals, leaseID)
+	return names
+}

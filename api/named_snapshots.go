@@ -273,6 +273,30 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 		return store.NamedSnapshotRow{}, false, errSecretsInUse()
 	}
 	defer s.secretsGate.endSave(l.ID)
+	// The create-time re-stage is registered right after the save claims
+	// the gate and before any early return below (Q1a): every early return
+	// — the names-cap 409, a scrub failure — must not leave the source
+	// without its create-time secrets. The re-stage is idempotent and runs
+	// before endSave (defers run LIFO), so it is the last thing the save
+	// does under the gate.
+	create := s.createSecretsFor(l.ID)
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), secretsStageTimeout)
+		defer cancel()
+		// A finishing job could not remove its exec-time files while this
+		// save held the gate; remove them now, before restoring the
+		// create-time secrets (Q1b). Any deferred name that is also a
+		// create-time name is restored by the stage below.
+		if pending := s.drainDeferredSecretRemovals(l.ID); len(pending) > 0 {
+			s.removeSecrets(l.SandboxID, pending)
+		}
+		if len(create) == 0 {
+			return
+		}
+		if err := s.stageSecrets(rctx, l.SandboxID, create); err != nil {
+			s.log.Printf("snapshot: re-stage secrets on %s: %v", l.ID, err)
+		}
+	}()
 	saveStart := s.now()
 	// A running background job with exec-time secrets staged makes the
 	// save 409: those files would be captured.
@@ -292,11 +316,7 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	// this process remembers, so it can warn about a removed file it no
 	// longer knows (R4): after a backend restart the create-time secrets
 	// are lost and this save drops them from the source.
-	create := s.createSecretsFor(l.ID)
-	known := make(map[string]bool, len(create))
-	for name := range create {
-		known[name] = true
-	}
+	known := s.knownSecretNames(l.ID, create)
 	unknown, err := s.scrubSecretsForSnapshot(ctx, l, known)
 	if err != nil {
 		s.log.Printf("snapshot: scrub secrets on %s: %v", l.ID, err)
@@ -305,19 +325,6 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	if unknown > 0 {
 		s.log.Printf("snapshot: %s: scrub removed %d secret file(s) this backend no longer knew; their create-time values are lost for this lease (a backend restart drops them)", l.ID, unknown)
 	}
-	// The re-stage must not run on the request context: a client that
-	// disconnects mid-checkpoint would leave the source without its
-	// create-time secrets (S1). Give it its own bounded context.
-	defer func() {
-		if len(create) == 0 {
-			return
-		}
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), secretsStageTimeout)
-		defer cancel()
-		if err := s.stageSecrets(rctx, l.SandboxID, create); err != nil {
-			s.log.Printf("snapshot: re-stage secrets on %s: %v", l.ID, err)
-		}
-	}()
 
 	// The per-owner kept-bytes budget counts named snapshot bytes
 	// alongside kept checkpoints. The size is only known after the
@@ -373,7 +380,10 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	if err != nil {
 		// An insert that hits the (owner, name, idempotency_key) unique
 		// index lost a replay race: another save of the same key
-		// committed first. Answer its row with 200, never 500 (S3).
+		// committed first. Answer its row with 200, never 500 (S3). The
+		// losing save's checkpoint build stays unnamed, so the GC reclaims
+		// it as an ordinary candidate (a catalog row) or the orphan reaper
+		// does.
 		if key != "" {
 			if existing, gerr := s.db.GetNamedSnapshotByKey(ctx, l.Owner, name, key); gerr == nil {
 				return existing, true, nil

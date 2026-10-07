@@ -444,6 +444,15 @@ func (s *Service) forgetJobSecrets(jobID string) {
 // only a sandbox still on the job's continuity generation: after a cold
 // restart the job's secrets are gone with the old guest, and removing
 // them from a different sandbox would be wrong.
+//
+// The removal and the shadowed re-stage run together under the per-lease
+// secrets gate (Q1). While a save holds the gate, neither may run: a
+// re-stage would land between the save's scrub and its checkpoint, and a
+// removal would leave the source without the create-time value the
+// save's own re-stage is about to restore. So the names are recorded and
+// the save removes them (drainDeferredSecretRemovals) before it
+// re-stages every create-time secret. When the gate is free this path
+// removes and re-stages as before.
 func (s *Service) removeJobSecrets(leaseID, jobID, sandboxID string, generation int64) {
 	names := s.takeJobSecrets(jobID)
 	if len(names) == 0 {
@@ -452,8 +461,30 @@ func (s *Service) removeJobSecrets(leaseID, jobID, sandboxID string, generation 
 	if !s.leaseOnGeneration(leaseID, sandboxID, generation) {
 		return
 	}
+	create := s.createSecretsFor(leaseID)
+	shadowed := shadowedNames(create, names)
+	if !s.secretsGate.beginStaging(leaseID) {
+		s.deferSecretRemoval(leaseID, names)
+		return
+	}
+	defer s.secretsGate.endStaging(leaseID)
 	s.removeSecrets(sandboxID, names)
-	s.restageShadowedSecrets(leaseID, sandboxID, names)
+	s.restageSecrets(sandboxID, shadowed, create)
+}
+
+// shadowedNames returns the names that also exist as create-time
+// secrets, i.e. the ones whose removal must be followed by a re-stage.
+func shadowedNames(create map[string]string, names []string) []string {
+	if len(create) == 0 {
+		return nil
+	}
+	var shadowed []string
+	for _, name := range names {
+		if _, ok := create[name]; ok {
+			shadowed = append(shadowed, name)
+		}
+	}
+	return shadowed
 }
 
 // cleanupExecSecrets removes a finished synchronous exec's secret files
@@ -477,15 +508,7 @@ func (s *Service) cleanupExecSecrets(l *Lease, execSecrets map[string]string) {
 // checkpoint (R2). The caller has already removed the exec-time files.
 func (s *Service) restageShadowedSecrets(leaseID, sandboxID string, names []string) {
 	create := s.createSecretsFor(leaseID)
-	if len(create) == 0 {
-		return
-	}
-	var shadowed []string
-	for _, name := range names {
-		if _, ok := create[name]; ok {
-			shadowed = append(shadowed, name)
-		}
-	}
+	shadowed := shadowedNames(create, names)
 	if len(shadowed) == 0 {
 		return
 	}
