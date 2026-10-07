@@ -86,6 +86,19 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A lost lease is released automatically once its grace period
+  lapses, freeing its owner's quota.** A lease in state `lost` was never
+  released unless its owner deleted it: it kept holding the owner's
+  concurrent-lease slot (and, while live, its memory charge) forever, so
+  an owner who had moved on could not create a replacement. The GC pass
+  now releases a lost lease past its grace period — the same 7-day
+  persistent / 1-day otherwise window its snapshots already kept
+  (`GC_LOST_GRACE_PERSISTENT` / `GC_LOST_GRACE`) — through the normal
+  release path, so quota, the admission queue wake-up, snapshot
+  retention, job cleanup and events all happen; the release carries the
+  reason `lost_expired` on the lease's `released` event. It is idempotent
+  and logs the lease id, owner and age. `DELETE /api/leases/{id}` still
+  frees quota immediately for an owner who wants it sooner.
 - **A restricted allowlist that mixes an IP and a domain keeps the IP
   reachable.** The guest's `allowed_cidrs` gained the DNS fallback as a
   bare `8.8.8.8` whenever the allowlist named any domain; the

@@ -68,8 +68,14 @@ func (s *Service) lostGraces() (persistent, other time.Duration) {
 // lostGrace returns one lease's grace period: 7 days for a persistent
 // lease, 1 day for any other, from the configured (or default) values.
 func (s *Service) lostGrace(l store.LeaseRow) time.Duration {
+	return s.lostGraceFor(l.Persistent)
+}
+
+// lostGraceFor is the grace period by persistence alone, for callers
+// holding an in-memory lease rather than a stored row.
+func (s *Service) lostGraceFor(persistent bool) time.Duration {
 	p, o := s.lostGraces()
-	if l.Persistent {
+	if persistent {
 		return p
 	}
 	return o
@@ -156,8 +162,55 @@ func (s *Service) gcOnce(ctx context.Context) error {
 	return err
 }
 
+// lostReleaseReason is the released event's reason when the GC releases
+// a lost lease whose grace period has lapsed.
+const lostReleaseReason = "lost_expired"
+
+// releaseExpiredLostLeases releases every in-memory lost lease whose
+// grace period has lapsed through the normal release path, so the
+// owner's quota (at least the concurrent-lease count) comes back and a
+// create that was refused can be admitted. A lease in lost is never
+// released by its owner, so before this it held its quota forever; the
+// GC's snapshot grace period is the same clock. A lease with no lost_at
+// (lost before the column was recorded) is stamped now, like keptBuilds
+// does, so its grace runs from this pass rather than expiring at once.
+// Idempotent: releaseBecause ignores an already-released lease and the
+// lease leaves the store. The log line names the id, the owner and the
+// age of the loss.
+func (s *Service) releaseExpiredLostLeases(ctx context.Context) {
+	now := s.now()
+	s.store.mu.Lock()
+	var victims []*Lease
+	for _, l := range s.store.leases {
+		if l.released || l.State != "lost" {
+			continue
+		}
+		lostAt := l.LostAt
+		if lostAt.IsZero() {
+			lostAt = now
+			l.LostAt = now
+			s.saveLeaseLocked(l)
+		}
+		if now.Before(lostAt.Add(s.lostGraceFor(l.Persistent))) {
+			continue
+		}
+		victims = append(victims, l)
+	}
+	s.store.mu.Unlock()
+	for _, l := range victims {
+		s.log.Printf("gc: releasing lost lease %s owner=%s age=%s (grace expired)",
+			l.ID, l.Owner, now.Sub(l.LostAt).Round(time.Second))
+		s.releaseBecause(ctx, l, lostReleaseReason)
+	}
+}
+
 // gcPass is gcOnce's body: one full pass.
 func (s *Service) gcPass(ctx context.Context) error {
+	// Release lost leases whose grace period has lapsed first: their
+	// builds then leave the kept set (release drops the lease row) and
+	// become ordinary candidates in this same pass, and their quota
+	// comes back at once.
+	s.releaseExpiredLostLeases(ctx)
 	kept, err := s.keptBuilds(ctx)
 	if err != nil {
 		return err
@@ -352,9 +405,10 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 			// A lost lease keeps its snapshots for a grace period after
 			// the loss, so the owner can still reclaim them; past it the
 			// builds are candidates like any other unreferenced build.
-			// The lease's kept-builds rows go with the grace period too:
-			// only a release deletes them otherwise, and a lease stuck in
-			// lost is never released by its owner.
+			// The lease itself is released by releaseExpiredLostLeases at
+			// this same point, which drops its kept rows with it; this
+			// arm covers a stored-only row (a direct keptBuilds call) that
+			// the release sweep has not walked.
 			if !now.Before(s.lostKeepUntil(l, now)) {
 				if len(keptBy[l.ID]) > 0 {
 					if err := s.db.DeleteKeptBuilds(ctx, l.ID); err != nil {
