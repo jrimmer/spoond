@@ -25,6 +25,27 @@ summarised from README "Status".
   reason `lost_expired` on the lease's `released` event. It is idempotent
   and logs the lease id, owner and age. `DELETE /api/leases/{id}` still
   frees quota immediately for an owner who wants it sooner.
+- **Every orchestrator gRPC call is bounded, with gRPC keepalive.** The
+  E2B client had no per-call deadline and no HTTP/2 keepalive, and the
+  background sweeper called `Create`/`Pause`/`NodeInfo` on the
+  service-lifetime context. One hung RPC wedged the sweep goroutine —
+  TTL release, held rules, pool refill and `pruneJobs` all ran
+  serially behind it — held the lease's busy flag (so every operation on
+  it answered `409`) and the snapshot limiter. Each RPC now runs under
+  its own timeout: create/resume, pause and checkpoint default to 5 min,
+  delete to 2 min, `NodeInfo`/exec-control to 10–30 s, and everything
+  else (`List`, `Update`, `SetDraining`, template builds) to 30 s. Exec
+  keeps its own per-request timeout. The defaults are configurable via
+  `E2B_CREATE_TIMEOUT`, `E2B_PAUSE_TIMEOUT`,
+  `E2B_CHECKPOINT_TIMEOUT`, `E2B_DELETE_TIMEOUT`,
+  `E2B_NODEINFO_TIMEOUT` and `E2B_CONTROL_TIMEOUT` (a Go duration or
+  seconds). The client sends HTTP/2 keepalive pings (5 min, 20 s ack
+  timeout) so a dead connection is retired. On the service side,
+  every background sweep stage runs under `SWEEP_TIMEOUT` (default
+  15 min), so a substrate that ignores its context still frees the loop
+  and the lease's busy flag. A test with a fake that blocks forever
+  pins that the per-call bounds release the caller, the sweep moves on,
+  the busy flag clears and the limiter is not stuck (spoond-j3a).
 
 ## [2.7.0] - 2026-10-07
 

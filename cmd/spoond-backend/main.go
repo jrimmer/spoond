@@ -455,7 +455,10 @@ func Main(args []string) int {
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,
 		UndrainConcurrency:       undrainConcurrency,
 		UndrainResumeRetries:     undrainResumeRetries,
-		CrashTest:                os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		// spoond-j3a: bound one background sweep stage so a hung
+		// substrate RPC frees the loop and the lease's busy flag.
+		SweepTimeout: envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
+		CrashTest:    os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
