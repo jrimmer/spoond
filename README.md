@@ -220,6 +220,11 @@ stack does not exist yet.
 
 ## Status
 
+**v2.6.7: certificates by name, renewed in place.** The lease API and the
+dashboard serve several TLS certificates, chosen by the name the client
+asks for, and re-read them when they change, so renewals need no
+restart. Exec env no longer shows in the guest's command line.
+
 **v2.6: background jobs and crash testing.** A long command runs as a
 tracked background job in its lease, with its exit, output and a
 `job_exited` event spoond keeps even across backend restarts. A host

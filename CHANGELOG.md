@@ -10,6 +10,13 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.6.7] - 2026-10-07
+
+Several TLS certificates per listener with hot reload, so the host can
+serve the names its ACME client issues one certificate each (Caddy) and
+pick up renewals without a restart; exec env out of the guest command
+line; a quieter dashboard. No schema change; the `grid` package is
+unchanged since 2.4.0.
 
 ### Added
 
