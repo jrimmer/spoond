@@ -20,6 +20,12 @@ func (s *Service) SetNotifier(n NotifySink) {
 	s.notifier = n
 }
 
+// Draining reports whether an admin drain is in effect. It is the
+// source of the notifier's node.draining check (spoond-52c H3): a drain
+// refuses every create, so a person is told about it and told again when
+// it clears.
+func (s *Service) Draining() bool { return s.draining.Load() }
+
 // NotifySink is what the service feeds events that need a person
 // into. notify.Notifier implements it; tests use their own sink.
 type NotifySink interface {

@@ -23,6 +23,7 @@ const (
 	KeyGCFailed        = "gc.failed"
 	KeyBackupStale     = "backup.stale"
 	KeyDiskKept        = "disk.kept"
+	KeyNodeDraining    = "node.draining"
 )
 
 // Warn/danger levels for the snapshot disk and the hugepage pool: the
@@ -82,7 +83,14 @@ type GCLastError func() error
 // KeptDisk reports the bytes kept checkpoints hold and the snapshot
 // disk's total size (#126). Replaced in tests. A nil probe (or one that
 // errors) disables the disk.kept check.
+//
+// Draining reports whether the admin drain is in effect: the node
+// refuses every create with 503 draining while it is, so a person must
+// hear about it (spoond-52c H3). A nil probe disables the check.
 type KeptDisk func() (keptBytes, diskTotal uint64, err error)
+
+// Draining reports the admin drain state (service.draining).
+type Draining func() bool
 
 // CheckSources carries the probes the periodic checks read. Every
 // field is optional: a nil source disables its checks (no backup
@@ -98,6 +106,7 @@ type CheckSources struct {
 	GCFailed     GCLastError
 	KeptDisk     KeptDisk      // kept checkpoints vs the snapshot disk (#126); nil = no check
 	KeptWarnPct  float64       // disk.kept warn level, % of the disk; 0 = DefaultKeptDiskWarnPct
+	Draining     Draining      // admin drain state (spoond-52c); nil = no check
 	BackupMaxAge time.Duration // 0 = DefaultBackupMaxAge
 }
 
@@ -211,6 +220,12 @@ func (src *CheckSources) Checks() []Check {
 		keptDisk := src.KeptDisk
 		out = append(out, func(_ context.Context, now time.Time) []Event {
 			return keptDiskCheck(keptDisk, warn, now)
+		})
+	}
+	if src.Draining != nil {
+		draining := src.Draining
+		out = append(out, func(_ context.Context, now time.Time) []Event {
+			return drainingCheck(draining, now)
 		})
 	}
 	return out
@@ -344,6 +359,24 @@ func hugepagesCheck(usage HugepageUsage, now time.Time) []Event {
 	default:
 		return []Event{resolved(KeyHugepagesWarn, Warn, now), resolved(KeyHugepagesDanger, Critical, now)}
 	}
+}
+
+// drainingCheck warns while the admin drain is in effect: the node
+// refuses every create with 503 draining, and a drain nobody lifted is
+// an incident a person must hear about (spoond-52c H3; DRAIN_MAX_SECS
+// bounds a healthy node's drain, so this alert is for a longer one or a
+// node whose orchestrator is unwell).
+func drainingCheck(draining Draining, now time.Time) []Event {
+	if draining() {
+		return []Event{{
+			Key:      KeyNodeDraining,
+			Severity: Warn,
+			Title:    "Node is draining",
+			Body:     "the admin drain is in effect: creates answer 503 draining until it is lifted",
+			At:       now,
+		}}
+	}
+	return []Event{resolved(KeyNodeDraining, Warn, now)}
 }
 
 // backupCheck warns when the newest database backup is older than

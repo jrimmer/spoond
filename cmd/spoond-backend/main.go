@@ -366,6 +366,10 @@ func Main(args []string) int {
 	// busy node does not lose 4 GiB leases to "syncing took too long".
 	undrainConcurrency := envIntOr("UNDRAIN_CONCURRENCY", api.DefaultUndrainConcurrency)
 	undrainResumeRetries := envIntOr("UNDRAIN_RESUME_RETRIES", api.DefaultUndrainResumeRetries)
+	// Drain self-heal (spoond-52c): a drain that outlives DRAIN_MAX_SECS
+	// while the node is healthy undrains itself rather than refusing
+	// every create forever. 0 means the default; a negative disables it.
+	drainMaxSecs := envIntOr("DRAIN_MAX_SECS", api.DefaultDrainMaxSecs)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -455,6 +459,7 @@ func Main(args []string) int {
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,
 		UndrainConcurrency:       undrainConcurrency,
 		UndrainResumeRetries:     undrainResumeRetries,
+		DrainMaxSecs:             drainMaxSecs,
 		CrashTest:                os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
@@ -551,12 +556,16 @@ func Main(args []string) int {
 	} else if len(hooks) > 0 {
 		notifier := newNotifier(hooks, dbPath, sub, srv.Metrics())
 		svc.SetNotifier(notifier)
-		for _, c := range notify.ProductionSources(
+		src := notify.ProductionSources(
 			notifyUnits(),
 			storagePath, backupDir, backupPrefix,
 			notifyBackupMaxAge(),
 			svc.GCLastError(),
-		).Checks() {
+		)
+		// The admin drain state (spoond-52c H3): node.draining warns while
+		// the drain is in effect and resolves when it clears.
+		src.Draining = svc.Draining
+		for _, c := range src.Checks() {
 			notifier.AddCheck(c)
 		}
 		// Kept checkpoints vs the snapshot disk (#126): disk.kept warns

@@ -134,6 +134,7 @@ What arrives, with its key and severity:
 | `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
+| `node.draining` | warn | an admin drain is in effect: creates answer `503 draining` until it is lifted. `DRAIN_MAX_SECS` (default 900) bounds a healthy node's drain, so this alert reaches a person when a drain outlives its limit or the node is unwell |
 | `backup.stale` | warn | the newest database backup older than its age limit — `BACKUP_MAX_AGE_SECS`, default 93600 (26 h: the 03:00 daily run plus one missed day) |
 
 Delivery rules:
@@ -369,8 +370,36 @@ it lossless. Do not stop the backend first.
    response's `failed` entry and the log line name how many attempts
    were made. A lease that fails permanently (its build is gone, or the
    node keeps refusing the resume) still becomes `lost`; one over its
-   owner's memory cap, without burst room, or unable to preempt stays
-   `drained` for a later undrain.
+   owner's memory cap, without burst room, unable to preempt, refused
+   for capacity, or hit by a cancelled/bounded call stays `drained` for
+   a later undrain.
+
+Drain and undrain run on a context **detached from the HTTP request**
+and bounded by spoond itself (`DRAIN`/undrain timeouts), so a hook that
+gives up waiting (the `--start` call's 300 s) cannot cancel the remaining
+pauses or resumes: a cancelled pause cannot leave a lease running into
+the stop, and a cancelled resume cannot lose the leases it had not
+reached. A resume that fails with a context, capacity or admission
+error keeps the lease `drained` for a retry rather than marking it
+`lost`.
+
+**Self-heal.** A drain or a drained lease never waits on a person:
+
+- Every 15 s the backend resumes any lease still `drained` (an undrain
+  that failed, or one whose resume was deferred), with the same
+  `UNDRAIN_CONCURRENCY` bound and retry policy. A deferred attempt logs
+  a line and emits a `drain_deferred` event naming the lease and the
+  refusal.
+- A drain older than `DRAIN_MAX_SECS` (default `900`) while the node is
+  healthy is lifted automatically: the backend logs it, emits a
+  `drain_healed` event and resumes the drained leases. A drain that has
+  outlived its orchestrator restart therefore cannot refuse every
+  create with 503 forever. An unhealthy node's drain is left in place
+  (it may be waiting for the node to come back).
+- Draining is visible: `/healthz` carries `"draining":true` while a
+  drain is in effect, `/readyz` lists a `draining` check (it never fails
+  readiness — the create route's 503 is the refusal), and the notifier
+  warns on `node.draining` until the drain clears.
 4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.
@@ -380,7 +409,9 @@ roughly `leases × per-pause time / DRAIN_SNAPSHOT_CONCURRENCY`, plus the
 up-to-180 s quiesce wait. The shipped unit's `TimeoutStopSec=330` is
 sized for the default width on this node; raising the lease count, the
 per-pause time (larger guests) or the default width's ratio needs the
-unit's timeout raised to match.
+unit's timeout raised to match. `DRAIN_MAX_SECS` is independent: it
+bounds a drain whose undrain never arrives, not the drain hook's own
+window.
 
 ## Snapshot write pacing
 

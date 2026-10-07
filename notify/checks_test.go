@@ -347,3 +347,27 @@ func TestProductionSourcesBackupMaxAge(t *testing.T) {
 		t.Fatalf("5 min old with the default = %+v, want resolved", evs)
 	}
 }
+
+// TestDrainingCheck: node.draining warns while a drain is in effect and
+// resolves when it clears; a nil probe yields no check (spoond-52c H3).
+func TestDrainingCheck(t *testing.T) {
+	draining := false
+	evs := drainingCheck(func() bool { return draining }, checkNow)
+	if len(evs) != 1 || !evs[0].Resolved || evs[0].Key != KeyNodeDraining || evs[0].Severity != Warn {
+		t.Fatalf("undrained = %+v, want a resolved node.draining", evs)
+	}
+	draining = true
+	evs = drainingCheck(func() bool { return draining }, checkNow)
+	if len(evs) != 1 || evs[0].Resolved || evs[0].Key != KeyNodeDraining || evs[0].Severity != Warn {
+		t.Fatalf("draining = %+v, want a warn node.draining", evs)
+	}
+
+	// The source reaches Checks, and a nil Draining adds no check.
+	src := &CheckSources{Draining: func() bool { return true }}
+	if got := len(src.Checks()); got != 1 {
+		t.Fatalf("Draining source checks = %d, want 1", got)
+	}
+	if got := len((&CheckSources{}).Checks()); got != 0 {
+		t.Fatalf("nil Draining checks = %d, want 0", got)
+	}
+}

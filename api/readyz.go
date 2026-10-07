@@ -146,7 +146,7 @@ func (s *Service) runReadyz() readyzResult {
 		go func() { defer wg.Done(); run() }()
 	}
 	wg.Wait()
-	checks := []readyCheck{node, db, disk, hp}
+	checks := []readyCheck{node, db, disk, hp, s.drainingCheck()}
 	status := "ok"
 	for _, c := range checks {
 		if !c.OK {
@@ -154,6 +154,19 @@ func (s *Service) runReadyz() readyzResult {
 		}
 	}
 	return readyzResult{Status: status, Checks: checks}
+}
+
+// drainingCheck reports the admin drain state. It never fails readiness:
+// a draining node is a node doing what it was told, and the create
+// route's 503 draining already tells clients what to do. It is here so a
+// monitor sees the state at all — and so does a person reading /readyz —
+// instead of a drain looking indistinguishable from a healthy backend.
+func (s *Service) drainingCheck() readyCheck {
+	c := readyCheck{Name: "draining"}
+	if s.draining.Load() {
+		return passCheck(c, "admin drain in effect")
+	}
+	return passCheck(c, "off")
 }
 
 // nodeCheck reports the orchestrator's health from one NodeInfo fetch:

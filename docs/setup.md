@@ -161,6 +161,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `DRAIN_SNAPSHOT_CONCURRENCY` | `2` | how many of those writes the admin drain may run at once, so a planned orchestrator restart can pause a batch of leases inside the unit's `TimeoutStopSec` (`0` = unlimited; see [operations.md](operations.md#restarting-the-orchestrator-planned)) |
 | `UNDRAIN_CONCURRENCY` | `2` | how many drained leases the admin undrain may resume at once, so restoring a batch of large memory snapshots does not stack the node's I/O and memory (`0` = unlimited; spoond-urm) |
 | `UNDRAIN_RESUME_RETRIES` | `2` | how many extra attempts a resume the admin undrain failed with a retryable envd/start error gets before the lease is marked `lost` (with a short backoff; `0` disables retries; spoond-urm) |
+| `DRAIN_MAX_SECS` | `900` | how long a drain may stay in effect while the node is healthy before spoond undrains itself and resumes the drained leases (`0` means the default; a negative value disables the automatic undrain; spoond-52c) |
 | `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
 | `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |

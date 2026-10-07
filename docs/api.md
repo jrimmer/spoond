@@ -1585,9 +1585,11 @@ of 2.7.
 
 ### `GET /healthz`
 
-No auth. `200 {"status":"ok","orchestrator":"<status>"}` when the
-orchestrator answers, `503 {"status":"degraded","orchestrator":"unreachable"}`
-when it does not — for Gatus/load balancers.
+No auth. `200 {"status":"ok","orchestrator":"<status>","draining":bool}`
+when the orchestrator answers, `503 {"status":"degraded","orchestrator":"unreachable"}`
+when it does not — for Gatus/load balancers. `"draining":true` while
+an admin drain is in effect, so a monitor can tell a draining node from
+a healthy one.
 
 ### `GET /readyz`
 
@@ -1597,9 +1599,11 @@ node info reports the node healthy, the catalog answers a trivial
 query, and the snapshot disk and hugepage pool sit below the
 dashboard's danger levels (90 % / 92 % used). Otherwise `503` with
 `{"status":"fail","checks":[{"name","ok","detail"}…]}` naming each
-failing check. Every check is bounded to 2 s and the answer is cached
-for 5 s. See [operations.md](operations.md) for a Gatus example; the
-dashboard listener serves a `/readyz` over its own sources too.
+failing check. A `draining` check names the admin drain state; it never
+fails readiness (the create route's 503 draining is the refusal).
+Every check is bounded to 2 s and the answer is cached for 5 s. See
+[operations.md](operations.md) for a Gatus example; the dashboard
+listener serves a `/readyz` over its own sources too.
 
 ### `GET /metrics`
 
@@ -1619,8 +1623,8 @@ wrong or missing token answers `401`.
 
 | Route | Effect |
 |---|---|
-| `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. |
-| `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases `UNDRAIN_CONCURRENCY` (default 2) at a time (a resume that fails with a retryable envd/start error is retried `UNDRAIN_RESUME_RETRIES` (default 2) times before the lease becomes `lost`; `failed` entries carry `attempts`; one over its owner's memory cap, without burst room or unable to preempt stays drained for the next undrain). Response `{"resumed":N,"failed":[{"id","error","attempts"}]}`. |
+| `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Runs on a context detached from the request (a client disconnect does not cancel the pauses) bounded by 6 min. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. A drain older than `DRAIN_MAX_SECS` (default 900) on a healthy node is lifted automatically (see `POST /api/admin/undrain`). |
+| `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases `UNDRAIN_CONCURRENCY` (default 2) at a time (a resume that fails with a retryable envd/start error is retried `UNDRAIN_RESUME_RETRIES` (default 2) times before the lease becomes `lost`; `failed` entries carry `attempts`; one over its owner's memory cap, without burst room, unable to preempt, refused for capacity, or hit by a cancelled/bounded call stays drained for the next undrain or the self-heal loop). Runs on a context detached from the request bounded by 5 min. Response `{"resumed":N,"failed":[{"id","error","attempts"}]}`. |
 | `POST /api/admin/reconcile` | Run the crash reconciliation now. Response `{"recovered":N,"lost":M}`. |
 
 These are what `spoond drain --stop|--start` calls from the orchestrator
