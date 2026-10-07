@@ -281,7 +281,7 @@ func bannerSegs(rows []string) [][]grid.Seg {
 // rune no renderer can draw) — the terminal path reports it instead of
 // printing a broken frame.
 func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration) (*grid.Grid, error) {
-	l := &layout{w: clamp(w, minW, maxW), host: host, now: now, s: s,
+	l := &layout{w: clamp(w, minW, maxW), host: host, s: s,
 		banner:   bannerSegs(bannerRows(s, now)),
 		histFn:   func(k string) []float64 { return hist[k] },
 		histN:    len(hist["running"]),
@@ -305,7 +305,6 @@ type layout struct {
 	w      int
 	banner [][]grid.Seg
 	host   string
-	now    time.Time
 	s      Snapshot
 	// histFn serves the sparkline series; Draw leaves it nil (the
 	// sparklines then draw empty) and the page/top fill it from the
@@ -348,8 +347,7 @@ func (l *layout) assemble() *grid.Grid {
 	h := headerRows() +
 		len(l.banner) + boolInt(len(l.banner) > 0) + // banner rows + a blank row under them
 		l.panelsH() + l.throughputH() + l.leasesH() +
-		l.imagesServicesH() + l.refusalsH() + l.eventsH() +
-		1 // the status line
+		l.imagesServicesH() + l.refusalsH() + l.eventsH()
 
 	g := grid.New(l.w, h)
 	l.header(g, 0)
@@ -374,109 +372,7 @@ func (l *layout) assemble() *grid.Grid {
 	y = l.imagesServices(g, y)
 	y = l.refusals(g, y)
 	y = l.events(g, y)
-	l.statusLine(g, y, l.s.At)
 	return g
-}
-
-// statusItem is one status-line entry: label, the value shown in
-// brackets and whether it is healthy (ok style) or not (warn/bad).
-type statusItem struct {
-	label string
-	value string
-	style string
-}
-
-// statusItems builds the status line's entries left to right: leases,
-// hugepages, snapshot disk, the certificate's remaining days and the
-// units. The styles reuse the thresholds the meters and the attention
-// strip already use. The certificate is left out when there is none.
-func statusItems(s Snapshot, now time.Time) []statusItem {
-	items := []statusItem{
-		{"leases", fmt.Sprintf("%d/%d", s.Running, s.Limit), "ok"},
-	}
-	if s.Limit > 0 {
-		if pct := float64(s.Running) / float64(s.Limit) * 100; pct >= 90 {
-			items[0].style = "bad"
-		} else if pct >= 75 {
-			items[0].style = "warn"
-		}
-	}
-	switch {
-	case s.HugeUsedPct >= 92:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "bad"})
-	case s.HugeUsedPct >= 80:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "warn"})
-	default:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "ok"})
-	}
-	switch {
-	case s.DiskUsedPct >= 90:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "bad"})
-	case s.DiskUsedPct >= 80:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "warn"})
-	default:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "ok"})
-	}
-	units, down := 0, 0
-	for _, svc := range s.Services {
-		units++
-		if svc.State != "active" {
-			down++
-		}
-	}
-	if units > 0 {
-		st := "ok"
-		if down > 0 {
-			st = "bad"
-		}
-		items = append(items, statusItem{"units", fmt.Sprintf("%d/%d", units-down, units), st})
-	}
-	return items
-}
-
-// statusLine draws the frame's last row, outside any box: label
-// [value] entries left to right, the clock right-aligned on the same
-// row. At narrow widths entries are dropped from the right (units
-// first) until the line fits.
-func (l *layout) statusLine(g *grid.Grid, y int, at string) {
-	items := statusItems(l.s, l.now)
-	// Drop from the right until what remains fits, the clock always
-	// kept.
-	for len(items) > 0 && statusW(items)+clockW(at, l.w) > l.w {
-		items = items[:len(items)-1]
-	}
-	segs := []grid.Seg{}
-	for _, it := range items {
-		segs = append(segs,
-			grid.Seg{Text: it.label + " ", Style: "dim"},
-			grid.Seg{Text: "[", Style: "dim"},
-			grid.Seg{Text: it.value, Style: it.style},
-			grid.Seg{Text: "]  ", Style: "dim"})
-	}
-	g.Segs(0, y, segs, l.w)
-	g.Right(l.w-1, y, []grid.Seg{{Text: at, Style: "dim"}})
-}
-
-// statusW is the width the items draw at: label, brackets and two
-// trailing spaces each (the last pair included, so the math ignores
-// where the line ends).
-func statusW(items []statusItem) int {
-	n := 0
-	for _, it := range items {
-		n += len(it.label) + len(it.value) + 5
-	}
-	return n
-}
-
-// clockW is the clock's footprint: its cells plus the gap that keeps
-// it clear of the items (at least two columns, on the narrowest frame
-// just its own width).
-func clockW(at string, w int) int {
-	gap := 2
-	if w <= minW {
-		gap = 1
-	}
-	return len(at) + gap
 }
 
 func boolInt(b bool) int {
@@ -486,24 +382,37 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// header: the title line centred — SPOOND · host · version · uptime —
-// with a blank row under it as the gutter before the panels (headerRows).
-// The holder column's header explains its two marks; every other state
-// is spelled out where it is shown. The frame time is gone: the status line's clock replaced it.
+// header: the title line centred — SPOOND · host · version — with a
+// blank row under it as the gutter before the panels (headerRows). The
+// holder column's header explains its two marks; every other state is
+// spelled out where it is shown. Right-aligned on the same row is
+// spoond's own uptime (the backend process, not the host's, which would
+// read as spoond's right after a deploy) and the frame's clock: "up 35m,
+// 12:41:07". On a frame too narrow for both, the uptime is dropped
+// before the time, and the time is dropped rather than overlap the
+// centred title.
 func (l *layout) header(g *grid.Grid, y int) {
-	segs := []grid.Seg{
+	title := []grid.Seg{
 		{Text: "SPOOND", Style: "head"},
 		{Text: " · ", Style: "dim"},
 		{Text: l.host, Style: "text"},
 		{Text: " · ", Style: "dim"},
 		{Text: versionLabel(dashVersion), Style: "text"},
 	}
-	// spoond's own uptime (the backend process), not the host's: the
-	// host's read as spoond's right after a deploy.
+	// The right side keeps the clock always and the uptime only when it
+	// fits clear of the centred title. titleEnd is one past the title's
+	// last cell; the right text must start a column beyond it.
+	titleEnd := l.w/2 - segWidth(title)/2 + segWidth(title)
+	right := l.s.At
 	if l.s.BackendUp > 0 {
-		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"}, grid.Seg{Text: "up " + dur(l.s.BackendUp), Style: "text"})
+		if with := "up " + dur(l.s.BackendUp) + ", " + l.s.At; l.w-segWidth([]grid.Seg{{Text: with}}) > titleEnd {
+			right = with
+		}
 	}
-	g.Center(l.w/2, y, segs)
+	if l.w-segWidth([]grid.Seg{{Text: right}}) > titleEnd {
+		g.Right(l.w-1, y, []grid.Seg{{Text: right, Style: "dim"}})
+	}
+	g.Center(l.w/2, y, title)
 }
 
 // versionLabel is a version for the header: "?" when the scrape had
@@ -596,7 +505,7 @@ func contains(list []string, s string) bool {
 // header (headerRows) + banner rows (+ a blank under them) + the panels above
 // leases, then the panel's title row, then one row per lease.
 func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
-	l := &layout{w: clamp(w, minW, maxW), s: s, now: now,
+	l := &layout{w: clamp(w, minW, maxW), s: s,
 		banner: bannerSegs(bannerRows(s, now))}
 	base := headerRows() + len(l.banner) + boolInt(len(l.banner) > 0) +
 		l.panelsH() + l.throughputH()
@@ -614,8 +523,8 @@ func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 	return out
 }
 
-// headerRows is the header's row count: the centred title line, the
-// ═ rule under it and the legend.
+// headerRows is the header's row count: the title line (with the
+// right-aligned uptime and clock) and a blank gutter row.
 func headerRows() int { return 2 } // the title and a blank gutter row
 
 // capacity panel: the running meter, the leases line, queued, granted,

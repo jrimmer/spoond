@@ -632,7 +632,7 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 	}
 	subjW = min(subjW, eventSubjectMax)
 	for _, ev := range evs {
-		// Local time, like the status line's clock on the same frame.
+		// Local time, like the header's clock on the same frame.
 		at := ev.At.In(now.Location()).Format("15:04:05")
 		if ev.Type == "gap" {
 			// The stream skipped events (a reconnect past the backend's

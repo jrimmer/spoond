@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **The dashboard drops its footer status line; the header's right side
+  now shows `up <dur>, <time>`.** The footer's readouts were already
+  elsewhere: leases in the leases panel, hugepages and disk in the
+  capacity and host panels, units in the services panel, and the clock
+  moves to the header next to spoond's uptime. On a narrow frame the
+  uptime drops before the clock, and neither overlaps the centred
+  `SPOOND · host · version` title. `DASH_SERVICES` now includes
+  `spoond-netwatch` by default.
+
 ### Fixed
 
 - **A lost lease is released automatically once its grace period
