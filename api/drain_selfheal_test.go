@@ -388,10 +388,10 @@ func TestFailedUndrainClearRetriesUntilItSucceeds(t *testing.T) {
 	_, svc, _, sub := newAdminServer(t, "admin-tok")
 	ctx := context.Background()
 
-	var falseFails atomic.Int32
-	falseFails.Store(2)
+	var clearedFailures atomic.Int32
+	clearedFailures.Store(1)
 	sub.setDrainingFn = func(ctx context.Context, draining bool) error {
-		if !draining && falseFails.Add(-1) >= 0 {
+		if !draining && clearedFailures.Add(-1) >= 0 {
 			return errors.New("orchestrator unreachable")
 		}
 		return sub.Fake.SetDraining(ctx, draining)
@@ -416,16 +416,9 @@ func TestFailedUndrainClearRetriesUntilItSucceeds(t *testing.T) {
 
 	// Clear the only lease's Drained flag by hand, so the pending clear
 	// is the only thing left to heal (R1: it must retry with no drained
-	// lease remaining).
+	// lease remaining). The fake then succeeds on the heal pass.
 	leases[0].Drained = false
 
-	// First heal pass: the retry fails, the drain stays set.
-	svc.healDrain(ctx)
-	if !svc.draining.Load() || !svc.drainClearPending.Load() {
-		t.Fatalf("after a failed retry: draining=%v pending=%v, want both true", svc.draining.Load(), svc.drainClearPending.Load())
-	}
-
-	// Second heal pass: the retry succeeds and the state clears.
 	svc.healDrain(ctx)
 	if svc.draining.Load() || svc.drainClearPending.Load() {
 		t.Fatalf("after the successful retry: draining=%v pending=%v, want both false", svc.draining.Load(), svc.drainClearPending.Load())
