@@ -221,6 +221,10 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
+	// The hive's routes (C11): the guide renders this table and this
+	// table registers the routes, so the guide cannot teach a route that
+	// is not served (or stop teaching one that is).
+	s.registerHiveRoutes()
 	// Lease event streams (2.2, #115): Server-Sent Events of every lease
 	// lifecycle change, the caller's leases (admins see all) or one
 	// lease. The /api/leases alias covers both via rewriteLeasePath; the
@@ -602,14 +606,17 @@ func isHexPath(p string) bool {
 
 // authMiddleware authenticates the bearer token and injects the
 // consumer id into the request context. /healthz and /readyz are
-// exempt (liveness and readiness, issue #81); the /llm/ prefix is
+// exempt (liveness and readiness, issue #81); GET /hive/guide is
+// exempt too (C11: the guide is the documentation, and an agent with
+// no token yet is exactly who it is for — only the guide; everything
+// else under /hive/ needs a token as usual); the /llm/ prefix is
 // exempt — the lease id in the path is the capability, and sandboxes
 // hold no consumer token.
 // /api/admin/ is exempt because ADMIN_TOKEN is not a user/consumer
 // token; api/admin.go authenticates those routes itself.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == hiveGuidePath ||
 			strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
 			return
