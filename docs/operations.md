@@ -502,6 +502,27 @@ cannot be read — a transient failure never destroys lease state. Orphan
 sandboxes no lease or pool entry claims are deleted, and peer egress
 allowances are refreshed.
 
+Recovery is retried, not given up on at the first error: a `recoverFromCheckpoint`
+failure keeps the lease with no sandbox and the next reconcile pass tries
+it again. A **transient** failure (the busy node's envd start "syncing
+took too long", a deadline) is bounded by `RECOVERY_RETRY_ATTEMPTS`
+(default 3) attempts and `RECOVERY_RETRY_WINDOW` (default 30m) since the
+first failure; a **capacity** refusal (over quota, under the burst
+reserve, no preemption room) waits for capacity under the same window
+without counting an attempt, so a node that cannot host the lease right
+now is not mistaken for a broken one. A missing checkpoint build or image
+is permanent and loses the lease at once. When the budget is spent the
+lease is marked `lost` with a reason naming the attempts and the error,
+and a `lost` event is emitted.
+
+Preemption's resume queue (`resumePreempted`, every 15 s) is bounded the
+same way: a preempted lease whose resume keeps failing with a
+non-admission error gets `PREEMPT_RESUME_RETRIES` (default 3) attempts
+before it is marked `lost` with the reason and a `lost` event; an
+admission/capacity refusal keeps it waiting under `RECOVERY_RETRY_WINDOW`.
+So a permanently failing resume cannot create a new orchestrator sandbox
+every 15 s for ever.
+
 To the API and the gateway, `recovered` behaves exactly like `running`
 (`state` keeps showing it until the lease is suspended or restarted),
 while `lost` answers `410` with `code: lease_lost`, the stored reason

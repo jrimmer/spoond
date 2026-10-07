@@ -130,6 +130,15 @@
 //	                  undrain failed with a retryable envd/start error
 //	                  gets before the lease is marked lost (spoond-urm;
 //	                  default 2; 0 disables retries)
+//	RECOVERY_RETRY_ATTEMPTS  how many failed crash-recovery attempts a
+//	                  lease gets before it is marked lost (spoond-dxq;
+//	                  default 3)
+//	RECOVERY_RETRY_WINDOW  how long a lease may stay in recovery since
+//	                  its first failed attempt, whatever the failure kind
+//	                  (spoond-dxq; default 30m; a Go duration or seconds)
+//	PREEMPT_RESUME_RETRIES  how many failed resume attempts a preempted
+//	                  lease gets from the resume queue before it is marked
+//	                  lost (spoond-dxq; default 3)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
@@ -366,6 +375,12 @@ func Main(args []string) int {
 	// busy node does not lose 4 GiB leases to "syncing took too long".
 	undrainConcurrency := envIntOr("UNDRAIN_CONCURRENCY", api.DefaultUndrainConcurrency)
 	undrainResumeRetries := envIntOr("UNDRAIN_RESUME_RETRIES", api.DefaultUndrainResumeRetries)
+	// Bounded recovery and preempt-resume retries (spoond-dxq): a
+	// transient failure keeps the lease recovering instead of losing it,
+	// and a permanently failing one gives up after a bounded budget.
+	recoveryRetryAttempts := envIntOr("RECOVERY_RETRY_ATTEMPTS", api.DefaultRecoveryRetryAttempts)
+	recoveryRetryWindow := envDurationOr("RECOVERY_RETRY_WINDOW", api.DefaultRecoveryRetryWindow)
+	preemptResumeRetries := envIntOr("PREEMPT_RESUME_RETRIES", api.DefaultPreemptResumeRetries)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -455,6 +470,9 @@ func Main(args []string) int {
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,
 		UndrainConcurrency:       undrainConcurrency,
 		UndrainResumeRetries:     undrainResumeRetries,
+		RecoveryRetryAttempts:    recoveryRetryAttempts,
+		RecoveryRetryWindow:      recoveryRetryWindow,
+		PreemptResumeRetries:     preemptResumeRetries,
 		// spoond-j3a: bound one background sweep stage so a hung
 		// substrate RPC frees the loop and the lease's busy flag.
 		SweepTimeout: envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
