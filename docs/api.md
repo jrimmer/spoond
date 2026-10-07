@@ -1407,7 +1407,12 @@ and inserts the version. Response `201`:
   secrets are serialised by a per-lease gate: while a save runs an exec
   or job with secrets answers `409 lease_busy` with `Retry-After: 5`
   (it did not start, so retrying is safe). Anything else in guest memory
-  or on disk is the caller's to scrub.
+  or on disk is the caller's to scrub. Because the scrub touches the
+  guest rather than this process's memory, **a save after a backend
+  restart drops the source lease's create-time secrets**: the backend no
+  longer knows their values, so it cannot re-stage them. It logs the
+  lease id and how many removed files it no longer knew about (R4);
+  re-send the secrets on the next exec.
 - **Limits.** Named snapshot bytes count toward the owner's
   `max_kept_bytes` alongside kept checkpoints (`409 kept_budget`), and a
   save that would add a name past `MAX_NAMED_SNAPSHOTS` (`0` = no cap)
@@ -1464,8 +1469,9 @@ unknown name or version.
 `{name}` deletes every version, `{name}@{v}` one version. `409
 snapshot_in_use` when a live lease started from it; `?force=1` drops the
 row anyway (the build stays until the lease no longer needs it).
-Responds `204`; a second delete answers `404 not_found`. Deleting a
-name's last version deletes its retention setting too.
+Responds `204`; a second delete answers `404 not_found`. The name's
+retention setting (and its version high-water mark) is kept, so a later
+save gets the next number, not a deleted one.
 
 ### `PUT /api/named-snapshots/{name}` — set retention
 

@@ -31,10 +31,13 @@ summarised from README "Status".
   a secret staged before a backend restart is removed too and a
   directory that is not empty aborts the save with `scrub_failed`; a
   per-lease secrets gate serialises a save against exec and job secret
-  staging. A version number is never reused after a delete, a replay
+  staging. A version number is never reused after a delete — the name's
+  high-water mark survives even deleting the whole name — a replay
   reaches a committed key from any lease (even a released one), and the
   `/run/spoond/last-save` marker and create-time re-stage survive a
-  client disconnect. Named builds are GC
+  client disconnect. A save after a backend restart drops the source
+  lease's create-time secrets (the guest files go, and the backend no
+  longer knows the values) and logs it. Named builds are GC
   roots, and two gauges (`spoond_named_snapshots`,
   `spoond_named_snapshot_bytes`) report the catalog. Every path that
   (re)creates a guest now writes `/run/spoond/lease-id` (`0644`) beside
@@ -43,9 +46,6 @@ summarised from README "Status".
   `leases.snapshot_build_id` column (migration 0017) is in place for
   start-from-snapshot in the next task. See [docs/api.md](docs/api.md).
   Start-from-snapshot, `spoondctl` and the conformance case follow.
-
-### Added
-
 - **Several TLS certificates per listener, reloaded on change.**
   `TLS_CERT`/`TLS_KEY` (lease API) and `DASH_TLS_CERT`/`DASH_TLS_KEY`
   (dashboard) accept comma-separated lists of equal length, paired by

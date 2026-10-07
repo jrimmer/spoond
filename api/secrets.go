@@ -67,8 +67,43 @@ const secretMountScript = `grep -q ' /run/secrets tmpfs ' /proc/mounts || ` +
 // lists what is left. It backs the named-snapshot save's pre-checkpoint
 // scrub (2.7, #83 B1): it touches the guest directly, so it removes
 // secret files a backend restart no longer remembers. The save aborts
-// when the listing is not empty. The wildcards cover dotfiles.
-const secretsScrubScript = `rm -f /run/secrets/* /run/secrets/.[!.]* 2>/dev/null; ls -A /run/secrets 2>/dev/null`
+// when the listing after =LEFT= is not empty. A missing directory is not
+// an error: a lease that never had secrets must save (R1). The wildcards
+// cover dotfiles and dotdot-prefixed names (`..x`). The listing before
+// =LEFT= lets the backend report how many files it removed that it did
+// not know about (R4).
+const secretsScrubScript = `[ -d /run/secrets ] || exit 0
+ls -A /run/secrets 2>/dev/null
+rm -f /run/secrets/* /run/secrets/.[!.]* /run/secrets/..?* 2>/dev/null
+echo =LEFT=
+ls -A /run/secrets 2>/dev/null`
+
+// scrubSeparator splits the scrub script's stdout: the removed entries
+// before it, the entries left after it.
+const scrubSeparator = "=LEFT="
+
+// parseScrubOutput splits a scrub script's stdout into the entries it
+// saw before the removal and those left afterwards. A missing marker
+// (and any output before it) is treated as a removed list.
+func parseScrubOutput(out string) (removed, left []string) {
+	lines := strings.Split(out, "\n")
+	i := 0
+	for ; i < len(lines); i++ {
+		if lines[i] == scrubSeparator {
+			i++
+			break
+		}
+		if lines[i] != "" {
+			removed = append(removed, lines[i])
+		}
+	}
+	for ; i < len(lines); i++ {
+		if lines[i] != "" {
+			left = append(left, lines[i])
+		}
+	}
+	return removed, left
+}
 
 // validateSecrets checks one request's secrets against the name,
 // count and total-size limits. It returns a copy (nil when the input
@@ -197,8 +232,10 @@ func (s *Service) clearCreateSecrets(leaseID string) {
 // remembers, so a secret staged before a backend restart is still
 // removed (2.7, #83 B1). A non-empty listing (or a failed exec) is an
 // error: the caller must abort the save rather than checkpoint a
-// captured secret.
-func (s *Service) scrubAllSecrets(ctx context.Context, sandboxID string) error {
+// captured secret. It returns how many removed entries were not in
+// known, so the caller can warn about secrets this backend lost track of
+// (R4).
+func (s *Service) scrubAllSecrets(ctx context.Context, sandboxID string, known map[string]bool) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, secretsStageTimeout)
 	defer cancel()
 	res, err := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{
@@ -206,16 +243,23 @@ func (s *Service) scrubAllSecrets(ctx context.Context, sandboxID string) error {
 		Timeout: secretsStageTimeout,
 	})
 	if err != nil {
-		return fmt.Errorf("scrub %s: %w", secretsDir, err)
+		return 0, fmt.Errorf("scrub %s: %w", secretsDir, err)
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("scrub %s: exit %d: %s", secretsDir, res.ExitCode, tailStr(res.Stderr, 200))
+		return 0, fmt.Errorf("scrub %s: exit %d: %s", secretsDir, res.ExitCode, tailStr(res.Stderr, 200))
 	}
-	if left := strings.TrimSpace(res.Stdout); left != "" {
+	removed, left := parseScrubOutput(res.Stdout)
+	if len(left) > 0 {
 		// Names only: the listing is file names, never values.
-		return fmt.Errorf("scrub %s: %s remains", secretsDir, left)
+		return 0, fmt.Errorf("scrub %s: %s remains", secretsDir, strings.Join(left, " "))
 	}
-	return nil
+	unknown := 0
+	for _, name := range removed {
+		if !known[name] {
+			unknown++
+		}
+	}
+	return unknown, nil
 }
 
 // secretsGate serialises a named-snapshot save's secret scrub against

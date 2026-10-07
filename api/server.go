@@ -1878,29 +1878,6 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	args := buildShellArgs(req.Cmd, req.Cwd)
 	execEnv := requestEnv(lease, req.Env)
-	// Stage this request's secrets (#80) before the command runs. The
-	// cleanup below runs on every exit path — including a half-failed
-	// staging — so nothing exec-time outlives the request.
-	defer func() {
-		if len(execSecrets) > 0 {
-			// The command is done: its secrets go. A name that shadows a
-			// create-time secret gets the lease's value re-written, so the
-			// shadowed file outlives the command like every other
-			// create-time secret.
-			s.svc.removeSecrets(lease.SandboxID, sortedSecretNames(execSecrets))
-			if create := s.svc.createSecretsFor(lease.ID); len(create) > 0 {
-				var shadowed []string
-				for name := range execSecrets {
-					if _, ok := create[name]; ok {
-						shadowed = append(shadowed, name)
-					}
-				}
-				if len(shadowed) > 0 {
-					s.svc.restageSecrets(lease.SandboxID, shadowed, create)
-				}
-			}
-		}
-	}()
 	if len(execSecrets) > 0 {
 		// The per-lease secrets gate (2.7, #83 B2): take it before
 		// looking at the files, so a save that holds it makes this exec
@@ -1913,6 +1890,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer s.svc.secretsGate.endStaging(lease.ID)
+		// The cleanup runs inside the gate: it is registered after
+		// beginStaging, and its re-stage of shadowed create-time secrets
+		// takes the gate itself, so it cannot race a save's scrub (R2). The
+		// cleanup runs on every exit path — including a half-failed
+		// staging — so nothing exec-time outlives the request.
+		defer s.svc.cleanupExecSecrets(lease, execSecrets)
 		s.svc.markExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
 		defer s.svc.unmarkExecSecretsStaged(lease.ID, sortedSecretNames(execSecrets))
 		if err := s.svc.stageSecrets(r.Context(), lease.SandboxID, execSecrets); err != nil {

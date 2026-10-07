@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -892,15 +894,12 @@ func TestNamedSnapshotLingeringExecSecretScrubbed(t *testing.T) {
 	id := createLiveLease(t, ts.URL, "token-a", nil)
 	sandbox := svc.store.leases[id].SandboxID
 
-	// A job staged an exec-time secret and never cleaned it up.
+	// A job staged an exec-time secret and never cleaned it up. The
+	// scrub's guest-side listing finds it even though this backend has no
+	// in-memory record of it.
 	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/EXECTOK", []byte("v"), 0o600); err != nil {
 		t.Fatalf("write lingering secret: %v", err)
 	}
-	svc.secretsMu.Lock()
-	svc.stagedJobSecrets["job-1"] = []string{"EXECTOK"}
-	svc.jobSecretLeases["job-1"] = id
-	svc.secretsMu.Unlock()
-	defer svc.takeJobSecretNames("job-1")
 
 	var atCheckpoint error
 	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
@@ -1035,6 +1034,72 @@ func TestNamedSnapshotSaveRefusedWhileStaging(t *testing.T) {
 	}
 }
 
+// TestNamedSnapshotSyncExecShadowedRestageSkippedDuringSave (R2): while
+// a save holds the secrets gate, a finishing synchronous exec removes its
+// shadowing secret files but skips the create-time re-stage, so a
+// shadowed secret cannot land after the save's scrub.
+func TestNamedSnapshotSyncExecShadowedRestageSkippedDuringSave(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "secrets": map[string]string{"TOKEN": "s3cr3t"},
+	})
+	sandbox := svc.store.leases[id].SandboxID
+
+	// The exec staged TOKEN, shadowing the create-time secret.
+	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/TOKEN", []byte("exec-value"), 0o600); err != nil {
+		t.Fatalf("seed exec secret: %v", err)
+	}
+	l := svc.lookup("consumer-a", id)
+
+	// The save holds the gate; the exec finishes now.
+	if !svc.secretsGate.beginSave(id) {
+		t.Fatal("beginSave should claim a fresh lease")
+	}
+	svc.cleanupExecSecrets(l, map[string]string{"TOKEN": "exec-value"})
+	svc.secretsGate.endSave(id)
+
+	if _, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024); err == nil {
+		t.Fatal("shadowed secret was re-staged while a save held the gate")
+	}
+}
+
+// TestNamedSnapshotJobShadowedRestageSkippedDuringSave (R2): while a
+// save holds the secrets gate, a finishing job removes its shadowing
+// secret files but skips the create-time re-stage, so a shadowed secret
+// cannot land after the save's scrub and before its checkpoint.
+func TestNamedSnapshotJobShadowedRestageSkippedDuringSave(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "secrets": map[string]string{"TOKEN": "s3cr3t"},
+	})
+	sandbox := svc.store.leases[id].SandboxID
+	gen := svc.store.leases[id].Generation
+
+	// A running job staged TOKEN, shadowing the create-time secret.
+	svc.recordJobSecrets(id, "job-1", []string{"TOKEN"})
+	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/TOKEN", []byte("job-value"), 0o600); err != nil {
+		t.Fatalf("seed job secret: %v", err)
+	}
+
+	// The save holds the gate; the job finishes now.
+	if !svc.secretsGate.beginSave(id) {
+		t.Fatal("beginSave should claim a fresh lease")
+	}
+	svc.removeJobSecrets(id, "job-1", sandbox, gen)
+	svc.secretsGate.endSave(id)
+
+	// The job's file is removed, and the create-time value was not
+	// re-staged while the save held the gate: the checkpoint never sees
+	// TOKEN.
+	if _, err := sub.Fake.ReadFile(t.Context(), sandbox, "/run/secrets/TOKEN", 1024); err == nil {
+		t.Fatal("shadowed secret was re-staged while a save held the gate")
+	}
+}
+
 // TestNamedSnapshotReplayRace: a save that loses the in-memory claim
 // race and finds a committed row answers 200 with it, never 500 (S3).
 func TestNamedSnapshotReplayRace(t *testing.T) {
@@ -1072,6 +1137,48 @@ func TestNamedSnapshotReplayRace(t *testing.T) {
 	}
 }
 
+// TestNamedSnapshotInsertConflictReplay (R5): a save that loses the
+// unique-key index race at the row insert answers the existing row with
+// 200, never 500.
+func TestNamedSnapshotInsertConflictReplay(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	// Another save commits the same key between this save's checkpoint
+	// and its insert. The first row goes in directly; the losing save's
+	// build is left for the GC (an orphan or a catalog candidate).
+	interrupted := false
+	svc.saveBeforeInsert = func(owner, name, key string) {
+		if interrupted || key == "" {
+			return
+		}
+		interrupted = true
+		winning := store.NamedSnapshotRow{
+			Owner: owner, Name: name, BuildID: e2b.NewUUID(), IdempotencyKey: key,
+			SourceLeaseID: id, Image: "py-base", ImageBuildID: "img-build",
+			MemoryMB: 2048, SizeBytes: 1, CreatedAt: time.Now(),
+		}
+		if _, err := db.InsertNamedSnapshot(context.Background(), winning, 0); err != nil {
+			t.Errorf("racing insert: %v", err)
+		}
+	}
+	defer func() { svc.saveBeforeInsert = nil }()
+
+	checkpoints := calls(sub.Fake, "Checkpoint")
+	resp, body := saveSnapshot(t, ts.URL, "token-a", id, map[string]any{"name": "warm", "idempotency_key": "k1"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("insert-conflict save: status %d (%v), want 200", resp.StatusCode, body)
+	}
+	if body["version"].(float64) != 1 {
+		t.Fatalf("insert-conflict version = %v, want 1", body["version"])
+	}
+	if got := calls(sub.Fake, "Checkpoint"); got != checkpoints+1 {
+		t.Fatalf("checkpoint calls = %d, want one", got-checkpoints)
+	}
+}
+
 // TestNamedSnapshotVersionNotReused: deleting the latest version and
 // saving again gives the next number, not the deleted one (S4).
 func TestNamedSnapshotVersionNotReused(t *testing.T) {
@@ -1092,6 +1199,70 @@ func TestNamedSnapshotVersionNotReused(t *testing.T) {
 	}
 	if v := saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"}); v != 3 {
 		t.Fatalf("version after deleting v2 = %d, want 3", v)
+	}
+}
+
+// TestNamedSnapshotVersionNotReusedAfterLastDelete (R3): deleting a
+// name's only version and saving again gives 2, not 1.
+func TestNamedSnapshotVersionNotReusedAfterLastDelete(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	if v := saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"}); v != 1 {
+		t.Fatalf("v1 = %d", v)
+	}
+	resp, _ := doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warm@1", "token-a", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete @1: status %d, want 204", resp.StatusCode)
+	}
+	if v := saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"}); v != 2 {
+		t.Fatalf("version after deleting the only version = %d, want 2", v)
+	}
+}
+
+// TestNamedSnapshotVersionNotReusedAfterWholeNameDelete (R3): deleting
+// every version of a name and saving again gives 3, not 1.
+func TestNamedSnapshotVersionNotReusedAfterWholeNameDelete(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	resp, _ := doReq(t, "DELETE", ts.URL+"/api/named-snapshots/warm", "token-a", nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete whole name: status %d, want 204", resp.StatusCode)
+	}
+	if v := saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"}); v != 3 {
+		t.Fatalf("version after deleting the whole name = %d, want 3", v)
+	}
+}
+
+// TestNamedSnapshotRestartScrubLogsUnknown (R4): a save after a backend
+// restart drops a create-time secret the process no longer knows and
+// logs it.
+func TestNamedSnapshotRestartScrubLogsUnknown(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	id := createLiveLease(t, ts.URL, "token-a", nil)
+	sandbox := svc.store.leases[id].SandboxID
+
+	// A secret staged before a restart: the tmpfs holds it, the backend
+	// has no memory of it (clear the in-memory set).
+	if err := sub.Fake.WriteFile(t.Context(), sandbox, "/run/secrets/OLDTOK", []byte("v"), 0o600); err != nil {
+		t.Fatalf("plant secret: %v", err)
+	}
+	svc.clearCreateSecrets(id)
+
+	var logs bytes.Buffer
+	svc.log = log.New(&logs, "", 0)
+	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
+	if got := logs.String(); !strings.Contains(got, "OLDTOK") && !strings.Contains(got, "no longer knew") {
+		t.Fatalf("scrub did not log the forgotten secret: %q", got)
 	}
 }
 

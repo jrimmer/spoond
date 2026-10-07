@@ -412,9 +412,7 @@ func (s *Service) cleanupJobFiles(ctx context.Context, sandboxID, jobID string) 
 }
 
 // recordJobSecrets remembers the secret names staged for a running job,
-// keyed by job id and by lease. takeJobSecrets clears liveJobSecrets at
-// exit; stagedJobSecrets and jobSecretLeases survive for as long as the
-// record does, for a save that scrubs a lingering file.
+// keyed by job id. takeJobSecrets clears them at exit.
 func (s *Service) recordJobSecrets(leaseID, jobID string, names []string) {
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
@@ -422,23 +420,6 @@ func (s *Service) recordJobSecrets(leaseID, jobID string, names []string) {
 		s.liveJobSecrets = map[string][]string{}
 	}
 	s.liveJobSecrets[jobID] = append([]string(nil), names...)
-	if s.stagedJobSecrets == nil {
-		s.stagedJobSecrets = map[string][]string{}
-	}
-	s.stagedJobSecrets[jobID] = append([]string(nil), names...)
-	if s.jobSecretLeases == nil {
-		s.jobSecretLeases = map[string]string{}
-	}
-	s.jobSecretLeases[jobID] = leaseID
-}
-
-// takeJobSecretNames drops a pruned job's remembered names (the row and
-// the files they guarded are gone).
-func (s *Service) takeJobSecretNames(jobID string) {
-	s.secretsMu.Lock()
-	defer s.secretsMu.Unlock()
-	delete(s.stagedJobSecrets, jobID)
-	delete(s.jobSecretLeases, jobID)
 }
 
 // takeJobSecrets removes and returns the secret names remembered for a
@@ -451,12 +432,10 @@ func (s *Service) takeJobSecrets(jobID string) []string {
 	return names
 }
 
-// forgetJobSecrets drops every in-memory trace of a job that never
-// started (a staging or Start failure): the live names and the staged
-// names/lease map a save reads.
+// forgetJobSecrets drops a job's remembered secret names when it never
+// started (a staging or Start failure).
 func (s *Service) forgetJobSecrets(jobID string) {
 	s.takeJobSecrets(jobID)
-	s.takeJobSecretNames(jobID)
 }
 
 // removeJobSecrets deletes a job's staged secret files and, for names
@@ -474,17 +453,47 @@ func (s *Service) removeJobSecrets(leaseID, jobID, sandboxID string, generation 
 		return
 	}
 	s.removeSecrets(sandboxID, names)
-	if create := s.createSecretsFor(leaseID); len(create) > 0 {
-		var shadowed []string
-		for _, name := range names {
-			if _, ok := create[name]; ok {
-				shadowed = append(shadowed, name)
-			}
-		}
-		if len(shadowed) > 0 {
-			s.restageSecrets(sandboxID, shadowed, create)
+	s.restageShadowedSecrets(leaseID, sandboxID, names)
+}
+
+// cleanupExecSecrets removes a finished synchronous exec's secret files
+// and restores any that shadowed a create-time secret. It is the
+// deferred cleanup of exec: it must run while the exec still holds the
+// per-lease secrets gate, so a save that is scrubbing cannot see a
+// re-staged shadowed file (R2).
+func (s *Service) cleanupExecSecrets(l *Lease, execSecrets map[string]string) {
+	if len(execSecrets) == 0 {
+		return
+	}
+	s.removeSecrets(l.SandboxID, sortedSecretNames(execSecrets))
+	s.restageShadowedSecrets(l.ID, l.SandboxID, sortedSecretNames(execSecrets))
+}
+
+// restageShadowedSecrets re-writes the create-time secrets whose names
+// a just-removed exec-time or job secret shadowed. Re-staging takes the
+// per-lease secrets gate; while a save holds it the re-stage is skipped
+// — the save restores every create-time secret after its checkpoint —
+// so a shadowed file can never land between the save's scrub and its
+// checkpoint (R2). The caller has already removed the exec-time files.
+func (s *Service) restageShadowedSecrets(leaseID, sandboxID string, names []string) {
+	create := s.createSecretsFor(leaseID)
+	if len(create) == 0 {
+		return
+	}
+	var shadowed []string
+	for _, name := range names {
+		if _, ok := create[name]; ok {
+			shadowed = append(shadowed, name)
 		}
 	}
+	if len(shadowed) == 0 {
+		return
+	}
+	if !s.secretsGate.beginStaging(leaseID) {
+		return
+	}
+	defer s.secretsGate.endStaging(leaseID)
+	s.restageSecrets(sandboxID, shadowed, create)
 }
 
 // leaseOnGeneration reports whether a live lease's current sandbox is
@@ -768,7 +777,6 @@ func (s *Service) pruneJobs(ctx context.Context) {
 		return
 	}
 	for _, job := range expired {
-		s.takeJobSecretNames(job.JobID)
 		if sandboxID, _, ok := s.leaseContinuity(job.LeaseID); ok {
 			s.cleanupJobFiles(ctx, sandboxID, job.JobID)
 		}

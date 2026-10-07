@@ -187,8 +187,9 @@ func likePrefix(prefix string) string {
 }
 
 // DeleteNamedSnapshot removes one version row. It returns ErrNotFound
-// when the row does not exist. Deleting a name's last version also
-// deletes its settings row.
+// when the row does not exist. The name's settings row (and its
+// last_version high-water mark) is kept even when this was the last
+// version, so a later save never reuses the deleted number (R3).
 func (db *DB) DeleteNamedSnapshot(ctx context.Context, owner, name string, version int64) error {
 	tx, err := db.w.BeginTx(ctx, nil)
 	if err != nil {
@@ -209,18 +210,15 @@ func (db *DB) DeleteNamedSnapshot(ctx context.Context, owner, name string, versi
 		tx.Rollback()
 		return ErrNotFound
 	}
-	if err := deleteNameSettingsIfEmpty(ctx, tx, owner, name); err != nil {
-		tx.Rollback()
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: delete named snapshot %s/%s@%d: %w", owner, name, version, err)
 	}
 	return nil
 }
 
-// DeleteNamedSnapshotName removes every version of one name and its
-// settings row. It returns how many versions were deleted.
+// DeleteNamedSnapshotName removes every version of one name. It returns
+// how many versions were deleted. The settings row is kept so the
+// last_version high-water mark survives a later save (R3).
 func (db *DB) DeleteNamedSnapshotName(ctx context.Context, owner, name string) (int64, error) {
 	tx, err := db.w.BeginTx(ctx, nil)
 	if err != nil {
@@ -237,32 +235,10 @@ func (db *DB) DeleteNamedSnapshotName(ctx context.Context, owner, name string) (
 		tx.Rollback()
 		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM named_snapshot_names WHERE owner = ? AND name = ?`, owner, name); err != nil {
-		tx.Rollback()
-		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)
-	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)
 	}
 	return n, nil
-}
-
-// deleteNameSettingsIfEmpty drops a name's settings row when it holds no
-// version left. Call with tx open.
-func deleteNameSettingsIfEmpty(ctx context.Context, tx *sql.Tx, owner, name string) error {
-	var n int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM named_snapshots WHERE owner = ? AND name = ?`, owner, name).Scan(&n); err != nil {
-		return fmt.Errorf("store: count named snapshots %s/%s: %w", owner, name, err)
-	}
-	if n == 0 {
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM named_snapshot_names WHERE owner = ? AND name = ?`, owner, name); err != nil {
-			return fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)
-		}
-	}
-	return nil
 }
 
 // CountNamedSnapshotNames returns how many distinct names owner has. The
@@ -393,10 +369,6 @@ func (db *DB) PruneNamedSnapshots(ctx context.Context, owner, name string, keep 
 		if n, _ := res.RowsAffected(); n > 0 {
 			deleted = append(deleted, c.build)
 		}
-	}
-	if err := deleteNameSettingsIfEmpty(ctx, tx, owner, name); err != nil {
-		tx.Rollback()
-		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("store: prune named snapshots %s/%s: %w", owner, name, err)

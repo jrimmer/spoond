@@ -249,8 +249,10 @@ func (s *Service) orchestratorVersion(ctx context.Context) string {
 // create-time and exec-time names are gone while the guest's tmpfs still
 // holds the files. It aborts with an error when the directory is not
 // empty afterwards, so the caller never checkpoints a captured secret.
-func (s *Service) scrubSecretsForSnapshot(ctx context.Context, l *Lease) error {
-	return s.scrubAllSecrets(ctx, l.SandboxID)
+// It returns how many removed entries were not among known, so the
+// caller can warn that this backend lost track of them (R4).
+func (s *Service) scrubSecretsForSnapshot(ctx context.Context, l *Lease, known map[string]bool) (int, error) {
+	return s.scrubAllSecrets(ctx, l.SandboxID, known)
 }
 
 // saveNamedSnapshot performs one save of a lease into a named snapshot:
@@ -286,11 +288,22 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	// Remove the create-time (and any lingering exec-time) secret files
 	// before the checkpoint; re-stage the create-time ones after,
 	// whatever happens. The scrub goes through the guest, so it removes
-	// files a backend restart no longer remembers (B1).
+	// files a backend restart no longer remembers (B1). known is what
+	// this process remembers, so it can warn about a removed file it no
+	// longer knows (R4): after a backend restart the create-time secrets
+	// are lost and this save drops them from the source.
 	create := s.createSecretsFor(l.ID)
-	if err := s.scrubSecretsForSnapshot(ctx, l); err != nil {
+	known := make(map[string]bool, len(create))
+	for name := range create {
+		known[name] = true
+	}
+	unknown, err := s.scrubSecretsForSnapshot(ctx, l, known)
+	if err != nil {
 		s.log.Printf("snapshot: scrub secrets on %s: %v", l.ID, err)
 		return store.NamedSnapshotRow{}, false, &namedSnapshotError{status: http.StatusInternalServerError, code: "scrub_failed", msg: "failed to remove secrets before the checkpoint"}
+	}
+	if unknown > 0 {
+		s.log.Printf("snapshot: %s: scrub removed %d secret file(s) this backend no longer knew; their create-time values are lost for this lease (a backend restart drops them)", l.ID, unknown)
 	}
 	// The re-stage must not run on the request context: a client that
 	// disconnects mid-checkpoint would leave the source without its
@@ -334,6 +347,12 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 			s.log.Printf("snapshot: save of %s/%s interrupted: %v", l.Owner, name, err)
 			return store.NamedSnapshotRow{}, false, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "save interrupted"}
 		}
+	}
+	// A test hook: another save may have committed the same key between
+	// the checkpoint and the insert. The insert then hits the unique key
+	// index and answers that row with 200 (R5).
+	if s.saveBeforeInsert != nil {
+		s.saveBeforeInsert(l.Owner, name, key)
 	}
 	row := store.NamedSnapshotRow{
 		Owner:               l.Owner,

@@ -123,9 +123,10 @@ func TestNamedSnapshotPruneLiveLease(t *testing.T) {
 	}
 }
 
-// TestNamedSnapshotDeleteNameSettings: deleting a name's last version
-// drops its settings row.
-func TestNamedSnapshotDeleteNameSettings(t *testing.T) {
+// TestNamedSnapshotDeleteNameKeepsHighWater: deleting a name's last
+// version keeps its settings row's last_version, so a later save gets
+// the next number, not the deleted one (R3).
+func TestNamedSnapshotDeleteNameKeepsHighWater(t *testing.T) {
 	db, _ := openTestDB(t)
 	ctx := context.Background()
 	if _, err := db.InsertNamedSnapshot(ctx, namedRow("alice", "warm", "b1"), 5); err != nil {
@@ -134,8 +135,39 @@ func TestNamedSnapshotDeleteNameSettings(t *testing.T) {
 	if err := db.DeleteNamedSnapshot(ctx, "alice", "warm", 1); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, err := db.NamedSnapshotKeep(ctx, "alice", "warm"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("settings row survived the last version: %v", err)
+	// Keep the settings row (and its high-water mark) after the delete.
+	if _, err := db.NamedSnapshotKeep(ctx, "alice", "warm"); err != nil {
+		t.Fatalf("settings row gone after the last version: %v", err)
+	}
+	r2, err := db.InsertNamedSnapshot(ctx, namedRow("alice", "warm", "b2"), 0)
+	if err != nil {
+		t.Fatalf("insert after delete: %v", err)
+	}
+	if r2.Version != 2 {
+		t.Fatalf("version after deleting the only version = %d, want 2", r2.Version)
+	}
+}
+
+// TestNamedSnapshotDeleteNameKeepsHighWaterWholeName: deleting every
+// version of a name keeps its high-water mark too (R3).
+func TestNamedSnapshotDeleteNameKeepsHighWaterWholeName(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	for _, b := range []string{"b1", "b2"} {
+		if _, err := db.InsertNamedSnapshot(ctx, namedRow("alice", "warm", b), 3); err != nil {
+			t.Fatalf("insert %s: %v", b, err)
+		}
+	}
+	n, err := db.DeleteNamedSnapshotName(ctx, "alice", "warm")
+	if err != nil || n != 2 {
+		t.Fatalf("delete name = %d (%v), want 2", n, err)
+	}
+	r3, err := db.InsertNamedSnapshot(ctx, namedRow("alice", "warm", "b3"), 0)
+	if err != nil {
+		t.Fatalf("insert after whole-name delete: %v", err)
+	}
+	if r3.Version != 3 {
+		t.Fatalf("version after deleting the whole name = %d, want 3", r3.Version)
 	}
 }
 

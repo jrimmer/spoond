@@ -516,16 +516,6 @@ type Service struct {
 	// exec-time secrets, so a save that raced the refuse check scrubs
 	// them before its checkpoint. Guarded by secretsMu.
 	stagedExecSecretNames map[string][]string
-	// stagedJobSecrets maps a job id to the secret names its wrapper was
-	// given (a superset of liveJobSecrets: it survives the job's exit for
-	// as long as the record does). A snapshot save reads it to scrub a
-	// file an exited job's wrapper failed to clean up. Guarded by
-	// secretsMu.
-	stagedJobSecrets map[string][]string
-	// jobSecretLeases maps a job id to the lease it ran on, so a save can
-	// find the lease's jobs without reading the catalog for every one.
-	// Guarded by secretsMu.
-	jobSecretLeases map[string]string
 	// saveInterrupt, when set by a test, runs between a save's checkpoint
 	// and its version-row insert to simulate a backend that stops
 	// mid-save (A7). Nil in production.
@@ -534,6 +524,11 @@ type Service struct {
 	// idempotency key in memory and before it re-checks the catalog for a
 	// committed replay (S3). Nil in production.
 	saveAfterClaim func(owner, name, key string)
+	// saveBeforeInsert, when set by a test, runs after a save's
+	// checkpoint and before it inserts its version row, so a test can
+	// commit a conflicting row and exercise the insert-conflict replay
+	// (R5). Nil in production.
+	saveBeforeInsert func(owner, name, key string)
 	// saves tracks in-flight and recently failed named-snapshot saves in
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
@@ -584,8 +579,6 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		liveJobSecrets:        map[string][]string{},
 		stagedExecSecrets:     map[string]int{},
 		stagedExecSecretNames: map[string][]string{},
-		stagedJobSecrets:      map[string][]string{},
-		jobSecretLeases:       map[string]string{},
 		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
 		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
 		jobStarts:             map[string]*jobStartLock{},

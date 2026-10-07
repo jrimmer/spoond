@@ -156,7 +156,7 @@ func (ts *testSub) RootfsProbeCalls() int {
 func (ts *testSub) exec(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {
 	args := req.Args
 	if len(args) == 3 && args[0] == "/bin/bash" && args[2] == secretsScrubScript {
-		left, err := ts.Fake.ScrubSecrets(sandboxID)
+		removed, left, err := ts.Fake.ScrubSecrets(sandboxID)
 		if err != nil {
 			return substrate.ExecResult{Stderr: err.Error(), ExitCode: 1}
 		}
@@ -166,7 +166,11 @@ func (ts *testSub) exec(sandboxID string, req substrate.ExecRequest) substrate.E
 			_ = ts.Fake.WriteFile(context.Background(), sandboxID, secretsDir+"/"+ts.scrubLeftover, []byte("x"), 0o600)
 			left = append(left, ts.scrubLeftover)
 		}
-		return substrate.ExecResult{Stdout: strings.Join(left, "\n") + "\n", ExitCode: 0}
+		out := strings.Join(removed, "\n") + "\n" + scrubSeparator + "\n" + strings.Join(left, "\n")
+		if len(left) > 0 {
+			out += "\n"
+		}
+		return substrate.ExecResult{Stdout: out, ExitCode: 0}
 	}
 	if len(args) == 3 && args[0] == "sh" && args[2] == integrityProbe {
 		if reason, bad := ts.probeFail[sandboxID]; bad || ts.probeFailAll {

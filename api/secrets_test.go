@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -370,5 +373,63 @@ func TestValidateSecretsUnit(t *testing.T) {
 	}
 	if _, err := validateSecrets(map[string]string{"ok": strings.Repeat("v", 64<<10+1)}); err == nil {
 		t.Fatal("over-limit total accepted")
+	}
+}
+
+// runScrubScript runs the real pre-checkpoint scrub shell against a temp
+// directory standing in for /run/secrets, and returns the script's
+// stdout. It exercises the script as the guest's shell would (R1): the
+// fake substrate's exec handler matches the script by string and never
+// runs it, so a broken script would otherwise go unnoticed.
+func runScrubScript(t *testing.T, dir string) string {
+	t.Helper()
+	script := strings.ReplaceAll(secretsScrubScript, "/run/secrets", dir)
+	cmd := exec.Command("/bin/bash", "-c", script)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("scrub script: %v", err)
+	}
+	return string(out)
+}
+
+// TestSecretsScrubScriptRealShell runs the real scrub script (R1).
+func TestSecretsScrubScriptRealShell(t *testing.T) {
+	// A missing directory is not an error and reports nothing.
+	missing := filepath.Join(t.TempDir(), "nope")
+	if got := runScrubScript(t, missing); strings.TrimSpace(got) != "" {
+		t.Fatalf("missing dir script output = %q, want empty", got)
+	}
+
+	// Files, dotfiles and dotdot-prefixed names are all removed.
+	dir := t.TempDir()
+	for _, name := range []string{"TOKEN", ".hidden", "..x", "a.b"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("v"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	removed, left := parseScrubOutput(runScrubScript(t, dir))
+	if len(left) != 0 {
+		t.Fatalf("left = %v, want empty after removing every entry", left)
+	}
+	if len(removed) != 4 {
+		t.Fatalf("removed = %v, want the four seeded names", removed)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries left = %v, want none", entries)
+	}
+
+	// A subdirectory is not removed by rm -f and is reported: the save
+	// must abort with scrub_failed.
+	sub := t.TempDir()
+	if err := os.Mkdir(filepath.Join(sub, "nested"), 0o700); err != nil {
+		t.Fatalf("seed subdir: %v", err)
+	}
+	_, left = parseScrubOutput(runScrubScript(t, sub))
+	if len(left) != 1 || left[0] != "nested" {
+		t.Fatalf("subdir left = %v, want [nested]", left)
 	}
 }
