@@ -2335,7 +2335,7 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	}
 	// A lost lease cannot be resumed: its sandbox is gone and the crash
 	// reconcile already gave up on it. Return the reason so the caller
-	// answers 409 lease_lost.
+	// answers 410 lease_lost.
 	if err := lostErr(l); err != nil {
 		s.store.mu.Unlock()
 		return nil, err
@@ -3452,7 +3452,7 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		m["lost_at"] = formatRFC3339(l.LostAt)
 	}
 	// The reason the lease was lost, so a GET names the cause beside the
-	// state (the same text every 409 lease_lost response carries).
+	// state (the same text every 410 lease_lost response carries).
 	if l.State == "lost" && l.LostReason != "" {
 		m["lost_reason"] = l.LostReason
 	}

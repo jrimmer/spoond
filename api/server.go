@@ -1236,7 +1236,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	// A lease lost in a substrate crash has no sandbox to attach to; the
 	// SSH gateway relays sessions through this route, so it covers SSH
-	// too (U10). 409 lease_lost carries the reason the lease was lost.
+	// too (U10). 410 lease_lost carries the reason the lease was lost.
 	if !s.ensureLive(w, lease) {
 		return
 	}
@@ -1911,7 +1911,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A lease lost in a substrate crash has nothing to exec into (U10).
-	// 409 lease_lost carries the reason and points at DELETE.
+	// 410 lease_lost carries the reason and points at DELETE.
 	if !s.ensureLive(w, lease) {
 		return
 	}

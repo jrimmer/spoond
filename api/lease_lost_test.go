@@ -20,12 +20,12 @@ func setLost(t *testing.T, svc *Service, id, reason string) {
 	svc.store.mu.Unlock()
 }
 
-// lostBody asserts the 409 code lease_lost shape and that the message
+// lostBody asserts the 410 code lease_lost shape and that the message
 // names the substrate, the reason and DELETE.
 func lostBody(t *testing.T, resp *http.Response, body map[string]any, reason string) {
 	t.Helper()
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d (%v), want 409", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d (%v), want 410", resp.StatusCode, body)
 	}
 	if body["code"] != "lease_lost" {
 		t.Fatalf("code = %v, want lease_lost", body["code"])
@@ -38,10 +38,10 @@ func lostBody(t *testing.T, resp *http.Response, body map[string]any, reason str
 	}
 }
 
-// TestLostLeaseEveryCallAnswers409: any call that acts on a lost lease
-// answers 409 code lease_lost with the reason, not a 500 or a stale
+// TestLostLeaseEveryCallAnswers410: any call that acts on a lost lease
+// answers 410 code lease_lost with the reason, not a 500 or a stale
 // state. This covers routes that do not go through ensureLive.
-func TestLostLeaseEveryCallAnswers409(t *testing.T) {
+func TestLostLeaseEveryCallAnswers410(t *testing.T) {
 	cases := []struct {
 		name, method, path string
 		body               map[string]any
@@ -79,9 +79,9 @@ func TestLostLeaseEveryCallAnswers409(t *testing.T) {
 	}
 }
 
-// TestLostLeaseFilesAndDialAnswer409: the file routes and guest dial
-// answer 409 lease_lost too.
-func TestLostLeaseFilesAndDialAnswer409(t *testing.T) {
+// TestLostLeaseFilesAndDialAnswer410: the file routes and guest dial
+// answer 410 lease_lost too.
+func TestLostLeaseFilesAndDialAnswer410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
@@ -110,9 +110,9 @@ func TestLostLeaseGetNamesReason(t *testing.T) {
 	}
 }
 
-// TestLostLeaseResume409: the resume route answers 409 lease_lost with
+// TestLostLeaseResume410: the resume route answers 410 lease_lost with
 // the reason for a lost lease.
-func TestLostLeaseResume409(t *testing.T) {
+func TestLostLeaseResume410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
@@ -122,10 +122,10 @@ func TestLostLeaseResume409(t *testing.T) {
 	lostBody(t, resp, body, "resume failed after orchestrator restart: boom")
 }
 
-// TestLostIdleSuspendedExec409: a lease that was idle-suspended when the
+// TestLostIdleSuspendedExec410: a lease that was idle-suspended when the
 // orchestrator crashed is marked lost without clearing Suspended, so its
-// next exec auto-resumes and must answer 409 lease_lost, not 500.
-func TestLostIdleSuspendedExec409(t *testing.T) {
+// next exec auto-resumes and must answer 410 lease_lost, not 500.
+func TestLostIdleSuspendedExec410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)

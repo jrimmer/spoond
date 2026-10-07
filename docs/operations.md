@@ -504,7 +504,7 @@ allowances are refreshed.
 
 To the API and the gateway, `recovered` behaves exactly like `running`
 (`state` keeps showing it until the lease is suspended or restarted),
-while `lost` answers `409` with `code: lease_lost`, the stored reason
+while `lost` answers `410` with `code: lease_lost`, the stored reason
 and the `DELETE` that frees the quota, on exec, stream, proxy and SSH
 (see [api.md](api.md#lost-leases)). `POST
 /api/admin/reconcile` runs the reconciliation on demand and returns
@@ -714,7 +714,7 @@ each request's env.
 | `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
 | `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
 | lease shows `preempted` / `‖ preempted` on the dashboard | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
-| `409 lease_lost` (`code: lease_lost`) | the lease's sandbox died with no checkpoint (or its recovery failed); the message names the reason | `DELETE` the lease to free its quota; nothing to resume |
+| `410 lease_lost` (`code: lease_lost`) | the lease's sandbox died with no checkpoint (or its recovery failed); the message names the reason | `DELETE` the lease to free its quota; nothing to resume |
 | `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
 | `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
 | `exec failed` / `agent unreachable` | envd in the guest is not answering (sandbox died under us, node overloaded) | `spoond doctor`; if the sandbox is really gone the next reconcile marks the lease |
@@ -1006,7 +1006,7 @@ server state; a dismissed message stays hidden while its trigger stays
 active and returns if the trigger clears and fires again). Per-lease
 trouble is not a dashboard message: the viewer cannot act on a lease,
 so spoond tells the lease's initiator itself (the lease event stream
-and the API's `409 lease_lost` with `lost_reason`). TLS certificate expiry is
+and the API's `410 lease_lost` with `lost_reason`). TLS certificate expiry is
 left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
 `kept N (X GiB)` when any build is pinned. The header centres
 `SPOOND · <host>` and right-aligns spoond's uptime and the frame's clock

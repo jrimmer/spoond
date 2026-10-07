@@ -45,21 +45,19 @@ summarised from README "Status".
   sandbox a substrate crash (or a failed recovery) lost now records the
   reason (`leases.lost_reason`, migration 0019) and returns it: the
   `lost` lease event's `detail` carries it, `GET` shows `lost_reason`
-  beside `state: lost`, and any call on a lost lease answers `409` with
+  beside `state: lost`, and any call on a lost lease answers `410` with
   `code: lease_lost` and a message naming the substrate, the reason and
-  that `DELETE` frees the quota. This replaces the old `410` that named
+  that `DELETE` frees the quota. This replaces the old bare `410` that named
   no cause.
 
 ### Changed
 
-- **A lost lease answers `409 lease_lost`, not `410`.** The old `410`
-  named no cause and gave the initiator nothing to act on; a lost lease
-  now records why (`leases.lost_reason`, migration 0019) and every call
-  names the substrate, the reason and the `DELETE` that frees the quota.
-  Scripts and clients that branch on `410` for a lost lease should
-  branch on `409` with `code: lease_lost`; a `410` still means the
-  sandbox is gone with nothing in flight. The new `lost_reason` field on
-  the lease object is additive (`omitempty`).
+- **A lost lease says why.** A call on a lost lease still answers
+  `410 Gone`, and the body now carries `code: lease_lost` and a message
+  naming the substrate, the reason and the `DELETE` that frees the
+  quota. The reason is stored (`leases.lost_reason`, migration 0019) and
+  shown as `lost_reason` on the lease object (additive, `omitempty`).
+  `409` keeps meaning "busy, retry".
 - **The dashboard's footer names the project, and the header centres
   `SPOOND · <host>`.** The footer status line's readouts were already
   elsewhere: leases in the capacity and leases panels, hugepages and

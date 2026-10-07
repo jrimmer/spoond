@@ -149,7 +149,7 @@ func (s *Service) restoreBusy(ctx context.Context, l *Lease, b store.BuildRow) e
 
 // handleRestore restores a lease in place to one of its own kept
 // checkpoints (2.3, #121). Owner or admin, others 404; a live or
-// suspended lease (a lost lease answers 409 lease_lost like every other
+// suspended lease (a lost lease answers 410 lease_lost like every other
 // route — restore must not resurrect it); the build must be one of the
 // lease's own checkpoints or kept builds (else 404); 409 while busy.
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {

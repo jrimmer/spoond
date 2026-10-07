@@ -14,7 +14,7 @@ import (
 // ReconcileOrphans), every 30 s in the background, and immediately when
 // NodeInfo goes from failing to succeeding.
 
-// leaseLostMessage builds the body of a 409 code:lease_lost response:
+// leaseLostMessage builds the body of a 410 code:lease_lost response:
 // it says the substrate lost the sandbox, the stored reason, and that a
 // DELETE frees the quota.
 func leaseLostMessage(l *Lease) string {
@@ -25,23 +25,23 @@ func leaseLostMessage(l *Lease) string {
 	return msg + "; DELETE the lease to free its quota"
 }
 
-// writeLeaseLost answers 409 lease_lost for a lost lease: the caller
+// writeLeaseLost answers 410 lease_lost for a lost lease: the caller
 // learns the substrate lost it, why, and that DELETE frees the quota.
 func writeLeaseLost(w http.ResponseWriter, l *Lease) {
 	writeLeaseLostMessage(w, leaseLostMessage(l))
 }
 
-// writeLeaseLostMessage writes the one 409 lease_lost body: the error
+// writeLeaseLostMessage writes the one 410 lease_lost body: the error
 // message and its code. Both spellings of the response (a lease in hand,
 // a *leaseLostError in flight) go through it, so they never drift.
 func writeLeaseLostMessage(w http.ResponseWriter, msg string) {
-	writeJSON(w, http.StatusConflict, map[string]string{
+	writeJSON(w, http.StatusGone, map[string]string{
 		"error": msg,
 		"code":  "lease_lost",
 	})
 }
 
-// lostErr returns the 409 lease_lost error for a lease already lost, or
+// lostErr returns the 410 lease_lost error for a lease already lost, or
 // nil when the call may proceed. It is shared by the service operations
 // that touch a lease, so a lost lease is refused the same way everywhere
 // (the handlers map *leaseLostError onto the response). Call with
@@ -54,13 +54,13 @@ func lostErr(l *Lease) error {
 }
 
 // leaseLostError is the error a lease operation returns for a lost
-// lease: its message is the 409 lease_lost body (the substrate lost the
+// lease: its message is the 410 lease_lost body (the substrate lost the
 // sandbox, the stored reason, and that DELETE frees the quota).
 type leaseLostError struct{ msg string }
 
 func (e *leaseLostError) Error() string { return e.msg }
 
-// ensureLive answers 409 lease_lost for a lost lease and reports whether
+// ensureLive answers 410 lease_lost for a lost lease and reports whether
 // the call may proceed. Every route that can act on a lease calls it (or
 // the service reports the lost state through lostErr), so a lost lease is
 // refused the same way everywhere with the reason its loss event carried.
@@ -72,7 +72,7 @@ func (s *Server) ensureLive(w http.ResponseWriter, l *Lease) bool {
 	return true
 }
 
-// writeLeaseLostErr answers 409 lease_lost for a service operation that
+// writeLeaseLostErr answers 410 lease_lost for a service operation that
 // refused a lost lease (a *leaseLostError), and reports whether it did.
 func writeLeaseLostErr(w http.ResponseWriter, err error) bool {
 	var lost *leaseLostError
