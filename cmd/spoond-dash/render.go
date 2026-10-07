@@ -1061,23 +1061,22 @@ type hostRow struct {
 	pct, warn float64
 	danger    float64
 	right     string
-	// text, when non-nil, replaces the meter bar: a plain line whose
-	// value carries the style from the same thresholds (the I/O rows,
-	// where a fill bar would say nothing useful).
-	text []grid.Seg
 }
 
-// hostPanelRows builds the host panel's rows: cpu, memory, hugepages,
-// snapshot disk, root disk — the meters and levels the old page already
-// showed — plus the disk I/O rows and the allocated line.
+// hostPanelRows builds the host panel's rows: cpu, the disk I/O meters,
+// then memory, hugepages, snapshot disk and root disk — the meters and
+// levels the panel draws, with the CPU's core count in its value text.
 func hostPanelRows(s Snapshot) []hostRow {
-	return append([]hostRow{
-		{"cpu", s.CPUPct, 75, 90, fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores), nil},
-		{"memory", s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB), nil},
-		{"hugepages", s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), nil},
-		{"snapshot disk", s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), nil},
-		{"root disk", s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", s.RootFreeGiB), nil},
-	}, ioHostRows(s)...)
+	rows := []hostRow{
+		{"cpu", s.CPUPct, 75, 90, fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores)},
+	}
+	rows = append(rows, ioHostRows(s)...)
+	return append(rows,
+		hostRow{"memory", s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB)},
+		hostRow{"hugepages", s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB)},
+		hostRow{"snapshot disk", s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB)},
+		hostRow{"root disk", s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", s.RootFreeGiB)},
+	)
 }
 
 // hostH is the host panel's own height: title, meters, rule, the two
@@ -1087,75 +1086,64 @@ func (l *layout) hostH() int {
 	return 1 + len(hostPanelRows(l.s)) + 1 + 2 + 1
 }
 
-// hostRows builds the host panel's meter rows: cpu, memory, hugepages,
-// snapshot disk, root disk — the meters and levels the old page already
-// showed — then the disk I/O rows. right is the value text at the row's
-// end.
+// hostRows builds the host panel's meter rows: cpu, the disk I/O meters,
+// then memory, hugepages, snapshot disk and root disk. right is the
+// value text at the row's end.
 func (l *layout) hostRows() []hostRow {
-	return append([]hostRow{
-		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1), nil},
-		{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB), nil},
-		{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB), nil},
-		{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB), nil},
-		{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB), nil},
-	}, ioHostRows(l.s)...)
+	rows := []hostRow{
+		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1)},
+	}
+	rows = append(rows, ioHostRows(l.s)...)
+	return append(rows,
+		hostRow{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB)},
+		hostRow{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB)},
+		hostRow{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB)},
+		hostRow{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB)},
+	)
 }
 
-// ioHostRows builds the disk I/O rows: the PSI pressure line and the
-// device's write throughput and busy share. A kernel without PSI
-// (IOAvail false) hides both rather than drawing a calm zero; a device
-// the collector could not resolve leaves the second row off.
+// ioHostRows builds the disk I/O meters drawn directly under the CPU
+// meter: the PSI stall meter and the snapshot device's busy meter. A
+// kernel without PSI (IOAvail false) hides the stall meter only; a
+// device the collector could not resolve (DiskDevice "") hides the busy
+// meter only.
 //
-//	I/O pressure  some 0.3% / full 0.0% (60s)
-//	nvme0n1       12 MB/s w, 18% busy
+//	i/o stall      ░░░░░░░░░░░░░░░░      0.4% (some 2.1%)
+//	nvme0n1 busy   ██░░░░░░░░░░░░░░     18% · 12 MB/s w
 //
-// The pressure row's style follows the full 60 s average against the
+// The stall meter's value is the PSI io full 60 s average against the
 // configurable levels (DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT);
-// the device row's follows its busy share.
+// the busy meter's is the device's busy share (warn 80, bad 90).
 func ioHostRows(s Snapshot) []hostRow {
-	if !s.IOAvail {
-		return nil
+	var rows []hostRow
+	if s.IOAvail {
+		rows = append(rows, hostRow{
+			label:  "i/o stall",
+			pct:    s.IOFull60,
+			warn:   ioFullWarnPct(),
+			danger: ioFullBadPct(),
+			right:  fmt.Sprintf("%.1f%% (some %.1f%%)", s.IOFull60, s.IOSome60),
+		})
 	}
-	rows := []hostRow{ioPressureRow(s)}
 	if s.DiskDevice != "" {
-		rows = append(rows, ioDeviceRow(s))
+		rows = append(rows, hostRow{
+			label:  diskBusyLabel(s.DiskDevice),
+			pct:    s.DiskBusyPct,
+			warn:   80,
+			danger: 90,
+			right:  fmt.Sprintf("%.0f%% · %.0f MB/s w", s.DiskBusyPct, s.DiskWriteMB),
+		})
 	}
 	return rows
 }
 
-func ioPressureRow(s Snapshot) hostRow {
-	return hostRow{
-		text: []grid.Seg{
-			{Text: fmt.Sprintf("%-*s", meterLabelW, "I/O pressure"), Style: "dim"},
-			{Text: " ", Style: "dim"},
-			{Text: fmt.Sprintf("some %.1f%% / full %.1f%% (60s)", s.IOSome60, s.IOFull60),
-				Style: meterStyle(s.IOFull60, ioFullWarnPct(), ioFullBadPct())},
-		},
+// diskBusyLabel names the busy meter's row: the device plus " busy"
+// when that fits the shared label column, else the generic "disk busy".
+func diskBusyLabel(device string) string {
+	if label := device + " busy"; len([]rune(label)) <= meterLabelW {
+		return label
 	}
-}
-
-func ioDeviceRow(s Snapshot) hostRow {
-	return hostRow{
-		text: []grid.Seg{
-			{Text: fmt.Sprintf("%-*s", meterLabelW, s.DiskDevice), Style: "dim"},
-			{Text: " ", Style: "dim"},
-			{Text: fmt.Sprintf("%.0f MB/s w, %.0f%% busy", s.DiskWriteMB, s.DiskBusyPct),
-				Style: meterStyle(s.DiskBusyPct, 80, 90)},
-		},
-	}
-}
-
-// meterStyle is the ok/warn/bad style a value takes at the same
-// thresholds the meter bars use.
-func meterStyle(pct, warnPct, dangerPct float64) string {
-	switch {
-	case pct >= dangerPct:
-		return "bad"
-	case pct >= warnPct:
-		return "warn"
-	default:
-		return "ok"
-	}
+	return "disk busy"
 }
 
 // rule draws a ┄ line across a panel's inner width: from x+2 to
@@ -1176,11 +1164,6 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 
 	row := top + 1
 	for _, r := range l.hostRows() {
-		if r.text != nil {
-			g.Segs(x+2, row, r.text, inner)
-			row++
-			continue
-		}
 		g.Segs(x+2, row, l.meterSegs(r.label, r.pct, r.warn, r.danger, meterBarW), inner)
 		g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
 		row++

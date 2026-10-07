@@ -2,12 +2,12 @@ SPOOND · spoond.example.com                                                    
                                                                                                         
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
-│ 3 leases · 2 running (2 burst) · 1 susp · 0 lost│  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
-│ queued 1 · granted 1,234 · swept 17             │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │
-│ shares 2 · users 7 · builds busy 1              │  │ snapshot disk █████████░░░╎░░░  121.5 GiB free  │
-│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ root disk     ██████░░░░░░╎░░░   30.2 GiB free  │
-│ go-base        ███······             1 running  │  │ I/O pressure  some 0.2% / full 0.0% (60s)       │
-│ py-base        ███······             1 running  │  │ nvme0n1       12 MB/s w, 18% busy               │
+│ 3 leases · 2 running (2 burst) · 1 susp · 0 lost│  │ i/o stall     ╎░░░░░░░░░░░░░░░0.0% (some 0.2%)  │
+│ queued 1 · granted 1,234 · swept 17             │  │ nvme0n1 busy  ██░░░░░░░░░░╎░░░ 18% · 12 MB/s w  │
+│ shares 2 · users 7 · builds busy 1              │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │
+│ go-base        ███······             1 running  │  │ snapshot disk █████████░░░╎░░░  121.5 GiB free  │
+│ py-base        ███······             1 running  │  │ root disk     ██████░░░░░░╎░░░   30.2 GiB free  │
 │                                                 │  │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
 │                                                 │  │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB         │
 │                                                 │  │ gc dry-run                                      │
