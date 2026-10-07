@@ -42,6 +42,10 @@ pre.grid > span.gr { display: block; white-space: pre; }
 .g-link  { color: var(--link); text-decoration: underline; cursor: pointer; }
 /* Links carry the holder text; keep them inside the row's flow. */
 a.g-link { display: inline; }
+/* The footer's project URL: dim in the terminal, a dim link in the page
+   (the line is a quiet aside, not a call to action). */
+.g-linkdim { color: var(--dim); }
+a.g-linkdim { color: var(--dim); text-decoration: underline; cursor: pointer; display: inline; }
 
 /* The notifications panel's dismiss control: a × injected by
    static/js/notifications.js at each message row's right edge. The row is

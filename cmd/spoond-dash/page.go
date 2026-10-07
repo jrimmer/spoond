@@ -43,14 +43,37 @@ func pageLines(g *grid.Grid, links []linkAt) []gridLine {
 	rows := strings.Split(g.HTML(), "\n")
 	out := make([]gridLine, len(rows))
 	for i, r := range rows {
-		out[i] = gridLine{N: i, ID: rowID(g, i), HTML: applyLinks(r, i, links)}
+		out[i] = gridLine{N: i, ID: rowID(g, i), HTML: applyProjectLink(applyLinks(r, i, links))}
 	}
 	return out
 }
 
+// applyProjectLink swaps the footer's project-URL span (the linkdim
+// style) for a real anchor. The page already draws holder links as
+// anchors, so the footer's own URL is one too; the href takes the scheme
+// the display text leaves off. A row without the span (every other row)
+// is returned unchanged.
+func applyProjectLink(row string) string {
+	open := strings.Index(row, `<span class="g-linkdim"`)
+	if open < 0 {
+		return row
+	}
+	close := strings.Index(row[open:], `</span>`)
+	if close < 0 {
+		return row
+	}
+	end := open + close
+	start := open + strings.Index(row[open:], `>`) + 1
+	if start <= open || start > end {
+		return row
+	}
+	anchor := `<a class="g-linkdim" href="` + html.EscapeString(projectHref()) + `" target="_blank" rel="noopener">` + row[start:end] + `</a>`
+	return row[:open] + anchor + row[end+len(`</span>`):]
+}
+
 // rowID returns the first non-empty grid cell id on row y: the panel or
 // notice id the renderer marked the row with. "" for a drawn row with no
-// id (the header, the status line).
+// id (the header, the footer).
 func rowID(g *grid.Grid, y int) string {
 	for x := 0; x < g.Cols(); x++ {
 		if id := g.At(x, y).ID; id != "" {

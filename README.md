@@ -167,9 +167,14 @@ left, holder — on the page the holder is a link; a hold marks the
 holder ◆, or ◉ once lapsed), the image catalog beside the systemd
 units, a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
-through a read-only `EVENTS_TOKEN`). The header's right side carries
-spoond's uptime and the frame's clock as `up <dur>, <time>`;
-`DASH_SERVICES` includes `spoond-netwatch` by default.
+through a read-only `EVENTS_TOKEN`). The header centres `SPOOND ·
+<host>` and right-aligns spoond's uptime and the frame's clock as `up
+<dur>, <time>`; the footer is one dim line naming the project —
+`spoond · github.com/jrimmer/spoond · v2.7.0 (2026-10-07)` — with the
+project URL (`DASH_PROJECT_URL`, shown without its scheme), the
+dashboard binary's version and its release date, dropping the URL first
+and then the date on a narrow frame. `DASH_SERVICES` includes
+`spoond-netwatch` by default.
 Its layout puts capacity and host side by side at 104 columns and
 stacks them below that. The palette gives each state a colour role on
 the black background — cyan for titles and lease ids, blue for run

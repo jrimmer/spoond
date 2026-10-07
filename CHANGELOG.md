@@ -46,14 +46,21 @@ summarised from README "Status".
   branch on `409` with `code: lease_lost`; a `410` still means the
   sandbox is gone with nothing in flight. The new `lost_reason` field on
   the lease object is additive (`omitempty`).
-- **The dashboard drops its footer status line; the header's right side
-  now shows `up <dur>, <time>`.** The footer's readouts were already
-  elsewhere: leases in the leases panel, hugepages and disk in the
-  capacity and host panels, units in the services panel, and the clock
-  moves to the header next to spoond's uptime. On a narrow frame the
-  uptime drops before the clock, and neither overlaps the centred
-  `SPOOND · host · version` title. `DASH_SERVICES` now includes
-  `spoond-netwatch` by default.
+- **The dashboard's footer names the project, and the header centres
+  `SPOOND · <host>`.** The footer status line's readouts were already
+  elsewhere: leases in the capacity and leases panels, hugepages and
+  snapshot disk in the host panel, units in the services panel. The
+  footer is now one dim, centred line —
+  `spoond · github.com/jrimmer/spoond · v2.7.0 (2026-10-07)` — with the
+  project name, `DASH_PROJECT_URL` (default the module's home, shown
+  without scheme), the dashboard binary's version (`debug.ReadBuildInfo`,
+  shortened like the header did) and the build's `vcs.time` release date
+  as `YYYY-MM-DD` (omitted for a dev build with no VCS stamp). On a
+  narrow frame the URL drops first, then the date. The header keeps its
+  centred title as `SPOOND · host` and right-aligns spoond's own uptime
+  and the frame's clock as `up <dur>, <time>`; the uptime drops before
+  the clock, and neither overlaps the title. `DASH_SERVICES` now
+  includes `spoond-netwatch` by default.
 
 ### Fixed
 

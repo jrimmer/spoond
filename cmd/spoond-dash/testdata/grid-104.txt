@@ -1,4 +1,4 @@
-                                    SPOOND · spoond.example.com · dev                    up 9m, 12:00:00
+                                       SPOOND · spoond.example.com                       up 9m, 12:00:00
                                                                                                         
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
@@ -36,3 +36,4 @@
 │ 07:19:02  held_action  fedcba0987  nightly                                                           │
 │ 07:18:44  released    abcdef0123  jason                                                              │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                spoond · github.com/jrimmer/spoond · dev                                
