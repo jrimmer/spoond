@@ -25,6 +25,10 @@ pre.grid {
 pre.grid::-webkit-scrollbar { display: none; }
 /* One row element per grid row: the unit Datastar patches. */
 pre.grid > span.gr { display: block; white-space: pre; }
+/* Row 1 is the blank gutter under the header (headerRows() = 2): draw it
+   at about half height in the page, so the first box sits a little closer
+   to the header. The terminal grid keeps the whole blank row. */
+pre.grid > span.gr#r1 { height: 0.55lh; overflow: hidden; }
 
 /* The grid styles, one class each. */
 .g-head  { color: var(--head, inherit); font-weight: 700; }
@@ -48,6 +52,9 @@ a.g-link { display: inline; }
 .g-ghmark { color: var(--dim); }
 a.g-ghmark { color: var(--dim); cursor: pointer; display: inline; }
 a.g-ghmark svg { width: 16px; height: 16px; vertical-align: text-bottom; }
+/* Footer links (the GitHub mark included, via currentColor) turn bright
+   white on mouseover and keyboard focus. */
+a.g-ghmark:hover, a.g-ghmark:focus-visible { color: #fff; }
 
 /* The notifications panel's dismiss control: a × injected by
    static/js/notifications.js at each message row's right edge. The row is

@@ -998,7 +998,7 @@ message): spoond's own system messages, one row each — a unit not
 active, free hugepages or snapshot disk past the danger level, kept
 checkpoints past `KEPT_DISK_WARN_PCT` of the snapshot disk (#126), or
 the snapshot disk's I/O full pressure past `DASH_IO_FULL_BAD_PCT`
-(`disk I/O stalled: full pressure N% over 60 s`, cleared when the
+(`disk i/o stalled: full pressure N% over 60 s`, cleared when the
 pressure drops). Each
 message has a stable id from its trigger, a severity (warn/bad) and a
 `×` the viewer can dismiss for their own browser (`localStorage`, no

@@ -163,7 +163,7 @@ func notices(s Snapshot) []Notice {
 	// and the text carries the 60 s average it tripped on.
 	if s.IOAvail && s.IOFull60 >= ioFullBadPct() {
 		out = append(out, Notice{ID: "io-pressure", Severity: "bad",
-			Text: fmt.Sprintf("disk I/O stalled: full pressure %.0f%% over 60 s", s.IOFull60)})
+			Text: fmt.Sprintf("disk i/o stalled: full pressure %.0f%% over 60 s", s.IOFull60)})
 	}
 	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
 		out = append(out, Notice{ID: "kept-disk", Severity: "warn",

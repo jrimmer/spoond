@@ -21,7 +21,7 @@ summarised from README "Status".
   saturated. The pressure meter warns at `DASH_IO_FULL_WARN_PCT`
   (default 5) and turns bad at `DASH_IO_FULL_BAD_PCT` (default 15) of
   the full 60 s average, where the Notifications panel also raises
-  `disk I/O stalled: full pressure N% over 60 s` (id `io-pressure`,
+  `disk i/o stalled: full pressure N% over 60 s` (id `io-pressure`,
   cleared when the pressure drops). The device is auto-detected from
   the storage path's mount or set with `DASH_DISK_DEVICE`; a kernel
   without PSI hides the pressure row instead of erroring. The

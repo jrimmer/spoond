@@ -1609,7 +1609,7 @@ func TestIOPressureNotice(t *testing.T) {
 	s.IOFull60 = 15
 	rows := notices(s)
 	if len(rows) != 1 || rows[0].ID != "io-pressure" || rows[0].Severity != "bad" ||
-		rows[0].Text != "disk I/O stalled: full pressure 15% over 60 s" {
+		rows[0].Text != "disk i/o stalled: full pressure 15% over 60 s" {
 		t.Fatalf("notices = %+v", rows)
 	}
 	s.IOFull60 = 14.9
