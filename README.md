@@ -233,6 +233,20 @@ stack does not exist yet.
 
 ## Status
 
+**v2.7: named snapshots.** A lease can be saved as a named, versioned
+snapshot, and a new lease can start from it (`"snapshot": "name@v"`,
+or `spoondctl create --snapshot`); `spoondctl snapshot save|ls|show|rm`
+manages them. A restricted allowlist that lists domains keeps its LAN
+IPs reachable. Snapshot writes are paced, a lease whose root disk dies
+is recovered, and an undrain retries a resume that fails for a moment.
+Built-in defaults are generic, so a deployment sets its own hosts and
+addresses (see [PRODUCTION-ENV-2.7.md](deploy/PRODUCTION-ENV-2.7.md)).
+
+**v2.6.7: certificates by name, renewed in place.** The lease API and the
+dashboard serve several TLS certificates, chosen by the name the client
+asks for, and re-read them when they change, so renewals need no
+restart. Exec env no longer shows in the guest's command line.
+
 **v2.6: background jobs and crash testing.** A long command runs as a
 tracked background job in its lease, with its exit, output and a
 `job_exited` event spoond keeps even across backend restarts. A host
@@ -326,9 +340,12 @@ any check fails.
 
 ## Configuration knobs
 
-The repo targets a homelab by default (addresses like `10.0.0.11`,
-hostnames like `sandbox.example.com` appear as *defaults only*); every
-knob is overridable. The fixed addresses, ports and paths of the E2B
+Built-in defaults are generic (`localhost`, `sandbox.example.com`);
+a deployment sets its own hosts and addresses, such as
+`SPOOND_GUEST_DNS_ADDR`, `SPOOND_PROXY_HOST_SUFFIX` and `NODE_ID` (the
+full list is in
+[PRODUCTION-ENV-2.7.md](deploy/PRODUCTION-ENV-2.7.md)). Every knob is
+overridable. The fixed addresses, ports and paths of the E2B
 deployment are listed in
 [01-architecture.md](docs/plans/2026-09-30-e2b-substrate/01-architecture.md).
 Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
@@ -338,7 +355,8 @@ may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`,
 `IDLE_SUSPEND_DEFAULT_SECS`, `SNAPSHOT_WRITE_CONCURRENCY`,
 `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_CONCURRENCY`,
-`UNDRAIN_RESUME_RETRIES`), background jobs
+`UNDRAIN_RESUME_RETRIES`, `ROOTFS_PROBE_SECS`), named snapshots
+(`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
 (`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`), `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
 the held-lease

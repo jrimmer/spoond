@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-10-07
+
+Named snapshots (#83): save a lease as a named, versioned snapshot,
+start new leases from it, and manage the catalog with `spoondctl
+snapshot` and `spoondctl create --snapshot`. A restricted allowlist
+that lists domains keeps its LAN IPs reachable, an undrain retries
+transient resume failures, snapshot writes are paced, and a lease whose
+root disk dies is detected and recovered. Built-in defaults are now
+generic: deployment-specific hosts and addresses come from the
+environment, and operators must set them (see
+[`deploy/PRODUCTION-ENV-2.7.md`](deploy/PRODUCTION-ENV-2.7.md)). Store
+migrations 0017 and 0018 are additive; the grid package is unchanged
+since 2.6.7.
+
 ### Added
 
 - **Named snapshots (2.7, #83): save, list, show, delete.** A lease can
@@ -88,17 +102,6 @@ summarised from README "Status".
   starts from a scrubbed `/run/secrets`, so it holds only its own
   create-time secrets. See
   [docs/api.md](docs/api.md).
-- **Several TLS certificates per listener, reloaded on change.**
-  `TLS_CERT`/`TLS_KEY` (lease API) and `DASH_TLS_CERT`/`DASH_TLS_KEY`
-  (dashboard) accept comma-separated lists of equal length, paired by
-  position; the client's SNI picks the certificate (exact or one-label
-  wildcard) and the first pair is the default. The files are re-read
-  every minute, so a renewed certificate is served without a restart; a
-  pair caught half-written (new certificate, old key) keeps serving the
-  previous one until both files match. `spoond doctor` checks every pair
-  and warns within 14 days of expiry. This lets a host serve names that
-  an ACME client issues as separate certificates (Caddy issues one per
-  name).
 - **Rootfs liveness probe (spoond-5ca).** The kernel NBD connections
   backing a guest's root disk can die (a host disk stall past the kernel
   ceiling); the guest then answers `Input/output error` on every
@@ -115,52 +118,6 @@ summarised from README "Status".
   which every probe fails at the transport is treated as the
   orchestrator being unreachable (logged once, no action). New metrics
   `spoond_rootfs_probe_failures_total` and `spoond_rootfs_dead_total`.
-### Security
-
-- **Exec env no longer appears in the guest command line.** Per-request
-  env values (tokens, deploy keys) used to be inlined as `export
-  'K'='V';` into the `bash -c` argv, where any process in the guest
-  could read them from `/proc/<pid>/cmdline`. They now travel in
-  `ExecRequest.Env` and are set in the process environment by envd; the
-  argv carries only the command and any `cd <cwd> &&` prefix. The CI
-  runner's checkout likewise passes its `GITHUB_TOKEN` header in the
-  exec env instead of prefixing `git clone` with it.
-
-### Fixed
-
-- **A restricted allowlist that mixes an IP and a domain keeps the IP
-  reachable.** The guest's `allowed_cidrs` gained the DNS fallback as a
-  bare `8.8.8.8` whenever the allowlist named any domain; the
-  orchestrator's layer-2 egress decision parses `allowed_cidrs` with
-  `net.ParseCIDR`, so that one entry made every connection that reached
-  the loop — including an allow-listed private IP with no matching SNI —
-  fail with a TLS EOF (`curl` 000; `--resolve` did not help). The
-  fallback is now `8.8.8.8/32`. On the orchestrator side (fork patch
-  `fix/private-allowance-domain-path`), a domain that resolves to an
-  allow-listed private address is accepted on the SNI path, so an
-  allow-listed LAN name works together with an allow-listed LAN IP;
-  everything not explicitly allowed is still refused. The fallback is a
-  **public** resolver, so with a private guest resolver configured
-  (`SPOOND_GUEST_DNS_ADDR`, production) it is dropped entirely rather
-  than added on every port; a deployment without one keeps it. The
-  substrate no longer appends into the caller's `allowed_cidrs` slice,
-  and a bare IPv6 address in an allowlist gets `/128` instead of `/32`.
-- **A create refused while the node drains says when to retry.** The
-  `503 draining` answer (during a planned orchestrator restart) now
-  carries `Retry-After: 30`, like the burst-reserve and preemption 503s.
-- **An undrain no longer loses leases to a transient envd start/sync
-  timeout.** After the 2026-10-07 orchestrator swap, undrain resumed
-  five of eight drained leases and marked the other three `lost` with
-  `syncing took too long`: it resumed all of them at once (an I/O and
-  memory spike restoring 8 × 4 GiB snapshots) and made a single resume
-  attempt before giving up. `POST /api/admin/undrain` now resumes at most
-  `UNDRAIN_CONCURRENCY` leases at a time (default `2`), and a resume that
-  fails with a retryable envd/start error ("syncing took too long", a
-  context deadline, envd init) is retried `UNDRAIN_RESUME_RETRIES`
-  (default `2`) times with a short backoff before the lease is marked
-  `lost`; a permanent failure (a missing image or build) is not retried.
-  The response's `failed` entries and the per-lease log lines report how
-  many attempts were made (spoond-urm).
 
 ### Changed
 
@@ -197,6 +154,99 @@ summarised from README "Status".
   The exact values a deployment needs to keep its pre-2.7 behaviour are
   listed in
   [`deploy/PRODUCTION-ENV-2.7.md`](deploy/PRODUCTION-ENV-2.7.md).
+- **Snapshot writes are paced, one at a time.** Every call that makes
+  the substrate write a memory snapshot — `Pause` (hand suspend, idle
+  sweep, held-lease idle/pressure rules, preemption, drain, restart's
+  pause leg) and `Checkpoint` (on demand, periodic, clone/fork, keep)
+  — now goes through one process-wide limiter. The 2026-10-06 incident:
+  a burst of pauses saturated the host disk, the orchestrator's
+  NBD server could not answer guests' rootfs requests inside the
+  kernel ceiling, and every guest on the stalled devices lost its root
+  disk (permanent EIO). `SNAPSHOT_WRITE_CONCURRENCY` (default `1`;
+  `0` = unlimited, the old behaviour) is the width. The admin drain
+  pauses through its own `DRAIN_SNAPSHOT_CONCURRENCY` (default `2`), so
+  a planned orchestrator restart can finish a batch inside the unit's
+  `TimeoutStopSec`. Waiting is bounded by the caller's context (an API
+  caller only sees added latency), a write that waits 5 s or more logs
+  one line (`snapshot write waited 41s behind 1 other`), and the new
+  `spoond_snapshot_writes_in_flight` gauge and
+  `spoond_snapshot_write_wait_seconds` histogram expose the pressure.
+  The idle sweep and the held-lease rules suspend at most one lease per
+  tick while the limiter is busy and retry the rest next tick.
+
+### Fixed
+
+- **A restricted allowlist that mixes an IP and a domain keeps the IP
+  reachable.** The guest's `allowed_cidrs` gained the DNS fallback as a
+  bare `8.8.8.8` whenever the allowlist named any domain; the
+  orchestrator's layer-2 egress decision parses `allowed_cidrs` with
+  `net.ParseCIDR`, so that one entry made every connection that reached
+  the loop — including an allow-listed private IP with no matching SNI —
+  fail with a TLS EOF (`curl` 000; `--resolve` did not help). The
+  fallback is now `8.8.8.8/32`. On the orchestrator side (fork patch
+  `fix/private-allowance-domain-path`), a domain that resolves to an
+  allow-listed private address is accepted on the SNI path, so an
+  allow-listed LAN name works together with an allow-listed LAN IP;
+  everything not explicitly allowed is still refused. The fallback is a
+  **public** resolver, so with a private guest resolver configured
+  (`SPOOND_GUEST_DNS_ADDR`) it is dropped entirely rather
+  than added on every port; a deployment without one keeps it. The
+  substrate no longer appends into the caller's `allowed_cidrs` slice,
+  and a bare IPv6 address in an allowlist gets `/128` instead of `/32`.
+- **An undrain no longer loses leases to a transient envd start/sync
+  timeout.** After an orchestrator restart, undrain resumed
+  five of eight drained leases and marked the other three `lost` with
+  `syncing took too long`: it resumed all of them at once (an I/O and
+  memory spike restoring 8 × 4 GiB snapshots) and made a single resume
+  attempt before giving up. `POST /api/admin/undrain` now resumes at most
+  `UNDRAIN_CONCURRENCY` leases at a time (default `2`), and a resume that
+  fails with a retryable envd/start error ("syncing took too long", a
+  context deadline, envd init) is retried `UNDRAIN_RESUME_RETRIES`
+  (default `2`) times with a short backoff before the lease is marked
+  `lost`; a permanent failure (a missing image or build) is not retried.
+  The response's `failed` entries and the per-lease log lines report how
+  many attempts were made (spoond-urm).
+
+## [2.6.7] - 2026-10-07
+
+Several TLS certificates per listener with hot reload, so the host can
+serve the names its ACME client issues one certificate each (Caddy) and
+pick up renewals without a restart; exec env out of the guest command
+line; a quieter dashboard. No schema change; the `grid` package is
+unchanged since 2.4.0.
+
+### Added
+
+- **Several TLS certificates per listener, reloaded on change.**
+  `TLS_CERT`/`TLS_KEY` (lease API) and `DASH_TLS_CERT`/`DASH_TLS_KEY`
+  (dashboard) accept comma-separated lists of equal length, paired by
+  position; the client's SNI picks the certificate (exact or one-label
+  wildcard) and the first pair is the default. The files are re-read
+  every minute, so a renewed certificate is served without a restart; a
+  pair caught half-written (new certificate, old key) keeps serving the
+  previous one until both files match. `spoond doctor` checks every pair
+  and warns within 14 days of expiry. This lets a host serve names that
+  an ACME client issues as separate certificates (Caddy issues one per
+  name).
+### Security
+
+- **Exec env no longer appears in the guest command line.** Per-request
+  env values (tokens, deploy keys) used to be inlined as `export
+  'K'='V';` into the `bash -c` argv, where any process in the guest
+  could read them from `/proc/<pid>/cmdline`. They now travel in
+  `ExecRequest.Env` and are set in the process environment by envd; the
+  argv carries only the command and any `cd <cwd> &&` prefix. The CI
+  runner's checkout likewise passes its `GITHUB_TOKEN` header in the
+  exec env instead of prefixing `git clone` with it.
+
+### Fixed
+
+- **A create refused while the node drains says when to retry.** The
+  `503 draining` answer (during a planned orchestrator restart) now
+  carries `Retry-After: 30`, like the burst-reserve and preemption 503s.
+
+### Changed
+
 - **Dashboard attention strip: only what needs a person.** A held
   lease the idle or pressure rule suspended no longer raises a row: it
   resumes on its next use, and the leases table already shows it
@@ -219,25 +269,6 @@ summarised from README "Status".
 - **Dashboard header: no orchestrator version.** The title line reads
   `SPOOND · host · version · up …`; the substrate's version
   (`e2b 0.16.1`) is gone from it.
-- **Snapshot writes are paced, one at a time.** Every call that makes
-  the substrate write a memory snapshot — `Pause` (hand suspend, idle
-  sweep, held-lease idle/pressure rules, preemption, drain, restart's
-  pause leg) and `Checkpoint` (on demand, periodic, clone/fork, keep)
-  — now goes through one process-wide limiter. The 2026-10-06 incident
-  on vm2: a burst of pauses saturated the host disk, the orchestrator's
-  NBD server could not answer guests' rootfs requests inside the
-  kernel ceiling, and every guest on the stalled devices lost its root
-  disk (permanent EIO). `SNAPSHOT_WRITE_CONCURRENCY` (default `1`;
-  `0` = unlimited, the old behaviour) is the width. The admin drain
-  pauses through its own `DRAIN_SNAPSHOT_CONCURRENCY` (default `2`), so
-  a planned orchestrator restart can finish a batch inside the unit's
-  `TimeoutStopSec`. Waiting is bounded by the caller's context (an API
-  caller only sees added latency), a write that waits 5 s or more logs
-  one line (`snapshot write waited 41s behind 1 other`), and the new
-  `spoond_snapshot_writes_in_flight` gauge and
-  `spoond_snapshot_write_wait_seconds` histogram expose the pressure.
-  The idle sweep and the held-lease rules suspend at most one lease per
-  tick while the limiter is busy and retry the rest next tick.
 
 ## [2.6.6] - 2026-10-06
 
