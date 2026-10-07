@@ -52,6 +52,16 @@ The crash-test case X1 (`TestX1_CrashTestRecovers`) runs only with
 conformance token: it crashes and recovers only leases it created
 itself, so no admin token is needed.
 
+The named-snapshot case S7 (`TestS7_NamedSnapshots`, 2.7, #83) is always
+on and non-destructive: it creates and deletes only the leases and the
+snapshot name it uses. It saves a lease that wrote a marker file,
+replays the save, starts a lease from the snapshot (checking the marker,
+the new `/run/spoond/lease-id`, that `/run/secrets` holds only the new
+lease's create-time secrets, and that the guest clock is within 1 s of
+the host), then checks retention with `keep: 1`, the in-use delete
+`409`, and the `204` delete. Every lease and the name are cleaned up,
+also on failure.
+
 ## Configuration
 
 See `U02-conformance-suite.md` §Configuration for the full table. Required:
