@@ -63,18 +63,25 @@ func TestEgressConfig(t *testing.T) {
 	}
 	cfg := egressConfig(eg)
 
-	// 8.8.8.8 is added to allowed CIDRs when domains are present.
+	// 8.8.8.8/32 is added to allowed CIDRs when domains are present. It
+	// must be a parseable CIDR: the fork's layer-2 decision uses
+	// net.ParseCIDR, which rejects a bare address.
 	var hasDNS bool
 	for _, c := range cfg.GetAllowedCidrs() {
-		if c == "8.8.8.8" {
+		if c == "8.8.8.8/32" {
 			hasDNS = true
 		}
 	}
 	if !hasDNS {
-		t.Fatalf("allowed_cidrs %v missing 8.8.8.8", cfg.GetAllowedCidrs())
+		t.Fatalf("allowed_cidrs %v missing 8.8.8.8/32", cfg.GetAllowedCidrs())
 	}
 	if got := cfg.GetAllowedCidrs()[0]; got != "0.0.0.0/0" {
 		t.Fatalf("allowed_cidrs[0] = %q", got)
+	}
+	// The fallback is appended to a copy: the caller's slice keeps its
+	// length and backing storage.
+	if got := eg.AllowedCIDRs; len(got) != 1 || got[0] != "0.0.0.0/0" {
+		t.Fatalf("egressConfig aliased the caller's AllowedCIDRs: %v", got)
 	}
 	if got := cfg.GetDeniedCidrs(); len(got) != 1 || got[0] != "192.0.2.0/24" {
 		t.Fatalf("denied_cidrs = %v", got)
@@ -94,15 +101,31 @@ func TestEgressConfig(t *testing.T) {
 		t.Fatalf("allowed_private[1] = %+v", p1)
 	}
 
-	// No domains: no 8.8.8.8.
+	// No domains: no 8.8.8.8 fallback.
 	plain := egressConfig(substrate.Egress{AllowedCIDRs: []string{"0.0.0.0/0"}})
 	for _, c := range plain.GetAllowedCidrs() {
-		if c == "8.8.8.8" {
-			t.Fatalf("allowed_cidrs %v must not contain 8.8.8.8 without domains", plain.GetAllowedCidrs())
+		if c == "8.8.8.8/32" {
+			t.Fatalf("allowed_cidrs %v must not contain 8.8.8.8/32 without domains", plain.GetAllowedCidrs())
 		}
 	}
 	if len(plain.GetAllowedPrivate()) != 0 {
 		t.Fatalf("allowed_private = %v", plain.GetAllowedPrivate())
+	}
+
+	// A configured private guest resolver replaces the public fallback: no
+	// 8.8.8.8, and the resolver allowance is left to api/service.go.
+	resolved := egressConfig(substrate.Egress{
+		AllowedCIDRs:   []string{"0.0.0.0/0"},
+		AllowedDomains: []string{"example.com"},
+		GuestDNS:       true,
+	})
+	for _, c := range resolved.GetAllowedCidrs() {
+		if c == "8.8.8.8/32" {
+			t.Fatalf("allowed_cidrs %v must not contain 8.8.8.8/32 when a guest resolver is configured", resolved.GetAllowedCidrs())
+		}
+	}
+	if len(resolved.GetAllowedCidrs()) != 1 || resolved.GetAllowedCidrs()[0] != "0.0.0.0/0" {
+		t.Fatalf("allowed_cidrs = %v", resolved.GetAllowedCidrs())
 	}
 }
 

@@ -80,6 +80,89 @@ func TestN1_Policies(t *testing.T) {
 	}
 }
 
+// TestN9_MixedRestrictedAllowlist pins the mixed IP/domain allowlist: a
+// restricted lease that names a private (LAN) address and a public domain
+// must reach both, and must still block a public host and a private
+// address it does not name. Regression test for spoond-4pa: before the
+// fix, adding any domain to a restricted allowlist made the private IPs
+// unreachable (the guest's allowed_cidrs carried the DNS fallback as a
+// bare "8.8.8.8", which the fork's layer-2 decision rejected as an
+// invalid CIDR for every connection, and a domain that resolved to an
+// allow-listed LAN IP was refused on the SNI path).
+//
+// Environment variables (all read by harness_test.go):
+//
+//	CONFORMANCE_MIXED_PRIVATE          private IP the lease allowlists
+//	                                   (no default; vm2 must set it, or
+//	                                   the case skips)
+//	CONFORMANCE_MIXED_PRIVATE_PORT     its TLS port, default 443
+//	CONFORMANCE_MIXED_DOMAIN           public domain the lease allowlists,
+//	                                   default example.com
+//	CONFORMANCE_MIXED_PRIVATE_DOMAIN    domain resolving to
+//	                                   CONFORMANCE_MIXED_PRIVATE, added to
+//	                                   the allowlist and probed with SNI
+//	                                   (no default; probe skips when unset)
+//	CONFORMANCE_MIXED_SSH_PORT         non-TLS port on
+//	                                   CONFORMANCE_MIXED_PRIVATE probed
+//	                                   with a plain TCP connect, default 22
+//	                                   (0 skips the probe)
+//	CONFORMANCE_MIXED_BLOCKED_PRIVATE  private IP the lease does not
+//	                                   allowlist, expected blocked (no
+//	                                   default; skips when unset)
+func TestN9_MixedRestrictedAllowlist(t *testing.T) {
+	begin(t)
+
+	// No LAN is assumed: without the vm2-provided private addresses the
+	// reachable/blocked checks would be vacuous or spuriously failing.
+	if cfg.MixedPrivate == "" || cfg.MixedBlockedPrivate == "" {
+		skipf(t, "CONFORMANCE_MIXED_PRIVATE and CONFORMANCE_MIXED_BLOCKED_PRIVATE are unset; set them (vm2 does) to exercise the mixed allowlist")
+	}
+
+	allow := []string{cfg.MixedPrivate, cfg.MixedDomain}
+	if cfg.MixedPrivateDomain != "" {
+		allow = append(allow, cfg.MixedPrivateDomain)
+	}
+	l := createLease(t, map[string]any{
+		"image":            "py-base",
+		"ttl":              900,
+		"network_policy":   "restricted",
+		"egress_allowlist": allow,
+	})
+
+	// The allow-listed private (LAN) address is reachable over its TLS
+	// port, even though the same allowlist names a domain.
+	if !canTCP(t, l.ID, cfg.MixedPrivate, cfg.MixedPrivatePort) {
+		failf(t, "mixed allowlist: private %s:%d blocked, want reachable", cfg.MixedPrivate, cfg.MixedPrivatePort)
+	}
+
+	// A non-443 destination on the same private IP: the IP path, not the
+	// port-443 SNI path.
+	if cfg.MixedSSHPort > 0 && !canTCP(t, l.ID, cfg.MixedPrivate, cfg.MixedSSHPort) {
+		failf(t, "mixed allowlist: private %s:%d blocked, want reachable", cfg.MixedPrivate, cfg.MixedSSHPort)
+	}
+
+	// The allow-listed public domain is reachable.
+	if !canTCP(t, l.ID, cfg.MixedDomain, 443) {
+		failf(t, "mixed allowlist: domain %s blocked, want reachable", cfg.MixedDomain)
+	}
+
+	// A domain that resolves to the allow-listed private IP, sent with
+	// SNI: the fork's domain path must admit it (spoond-4pa).
+	if cfg.MixedPrivateDomain != "" && !canTCPWithSNI(t, l.ID, cfg.MixedPrivate, cfg.MixedPrivatePort, cfg.MixedPrivateDomain) {
+		failf(t, "mixed allowlist: %s (resolving to private %s) blocked with SNI, want reachable", cfg.MixedPrivateDomain, cfg.MixedPrivate)
+	}
+
+	// A public host that is not named is still blocked.
+	if canTCP(t, l.ID, "www.google.com", 443) {
+		failf(t, "mixed allowlist: unlisted public www.google.com reachable, want blocked")
+	}
+
+	// A private address that is not named is still blocked.
+	if canTCP(t, l.ID, cfg.MixedBlockedPrivate, 443) {
+		failf(t, "mixed allowlist: unlisted private %s reachable, want blocked", cfg.MixedBlockedPrivate)
+	}
+}
+
 // TestN2_LivePolicyChange switches a lease from none to internet while it
 // runs. Requires the U09 network route.
 func TestN2_LivePolicyChange(t *testing.T) {

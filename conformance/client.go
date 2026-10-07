@@ -42,6 +42,30 @@ type config struct {
 	ProxySecret  string
 	ProxySuffix  string
 	GuestService string
+	// MixedPrivate is a private (LAN) IP reachable from a restricted lease
+	// that allowlists it together with a public domain (TestN9). It has no
+	// default: vm2 sets CONFORMANCE_MIXED_PRIVATE and the case skips when
+	// it is unset, so a non-vm2 run never probes an assumed LAN address.
+	// MixedPrivatePort is its TLS port (default 443).
+	MixedPrivate     string
+	MixedPrivatePort int
+	// MixedDomain is a public domain reachable from the same restricted
+	// lease (TestN9). Defaults to example.com when unset.
+	MixedDomain string
+	// MixedBlockedPrivate is a private IP that the same lease does not
+	// allowlist; connections to it must be blocked (TestN9). It has no
+	// default and skips with MixedPrivate when unset.
+	MixedBlockedPrivate string
+	// MixedPrivateDomain is a domain that resolves to MixedPrivate. It is
+	// added to the same restricted allowlist and probed with SNI
+	// (TestN9), covering the fork's domain path. It has no default; unset
+	// skips only this probe.
+	MixedPrivateDomain string
+	// MixedSSHPort is a non-TLS port on MixedPrivate, probed with a plain
+	// TCP connect under the same restricted allowlist (TestN9), covering
+	// the IP path for a non-443 destination. Default 22; 0 skips the
+	// probe.
+	MixedSSHPort int
 	// SecondToken is the token of a second, non-admin identity user
 	// (CONFORMANCE_SECOND_TOKEN). Group C uses it as the owner of the
 	// guaranteed lease: the production conformance user is not admin and

@@ -62,7 +62,7 @@ func TestEgressForEachPolicy(t *testing.T) {
 
 	t.Run("internet", func(t *testing.T) {
 		got := svc.egressFor(&Lease{NetPolicy: "internet"})
-		want := substrate.Egress{Private: lanPrivateWant}
+		want := substrate.Egress{Private: lanPrivateWant, GuestDNS: true}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
 		}
@@ -73,6 +73,7 @@ func TestEgressForEachPolicy(t *testing.T) {
 		want := substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
 			Private:     lanPrivateWant,
+			GuestDNS:    true,
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
@@ -93,6 +94,24 @@ func TestEgressForEachPolicy(t *testing.T) {
 				{CIDR: "10.0.0.0/8"},
 				{CIDR: "172.20.1.0/24"},
 			},
+			GuestDNS: true,
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	// An allowlisted bare IPv6 address also gets its full-length prefix.
+	t.Run("restricted IPv6 allowlist", func(t *testing.T) {
+		got := svc.egressFor(&Lease{
+			NetPolicy: "restricted",
+			NetAllow:  []string{"2001:db8::5"},
+		})
+		want := substrate.Egress{
+			DeniedCIDRs:  []string{"0.0.0.0/0"},
+			AllowedCIDRs: []string{"2001:db8::5/128"},
+			Private:      []substrate.PrivateAllowance{hostSvc, dns},
+			GuestDNS:     true,
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
@@ -105,6 +124,7 @@ func TestEgressForEachPolicy(t *testing.T) {
 		want := substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
 			Private:     []substrate.PrivateAllowance{hostSvc, dns},
+			GuestDNS:    true,
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
@@ -124,8 +144,9 @@ func TestDNSAllowance(t *testing.T) {
 	}{
 		{"", substrate.PrivateAllowance{}, false, "empty = no allowance"},
 		{"   ", substrate.PrivateAllowance{}, false, "blank = no allowance"},
-		{"10.0.0.2", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "bare IP gets /32"},
+		{"10.0.0.2", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "bare IPv4 gets /32"},
 		{"  10.0.0.2\t", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "trimmed"},
+		{"fd00::2", substrate.PrivateAllowance{CIDR: "fd00::2/128", TCPPorts: []uint32{53}}, true, "bare IPv6 gets /128, not /32"},
 		{"192.0.2.0/24", substrate.PrivateAllowance{CIDR: "192.0.2.0/24", TCPPorts: []uint32{53}}, true, "explicit prefix kept"},
 	}
 	for _, tc := range cases {
@@ -133,6 +154,35 @@ func TestDNSAllowance(t *testing.T) {
 		if ok != tc.wantOK || !reflect.DeepEqual(got, tc.want) {
 			t.Fatalf("dnsAllowance(%q) = (%+v, %v), want (%+v, %v): %s", tc.in, got, ok, tc.want, tc.wantOK, tc.comment)
 		}
+	}
+}
+
+// TestEgressForWithoutGuestDNS pins the public-DNS-fallback switch:
+// with no configured guest resolver the restricted egress reports
+// GuestDNS=false, so the substrate keeps the public fallback; with one
+// configured it reports true, so no public fallback is sent.
+func TestEgressForWithoutGuestDNS(t *testing.T) {
+	svc, _ := newLifecycleService(t)
+	svc.cfg.GuestDNSAddr = ""
+	svc.cfg.HostAPIPort = 0
+
+	got := svc.egressFor(&Lease{NetPolicy: "restricted", NetAllow: []string{"example.com"}})
+	if got.GuestDNS {
+		t.Fatalf("GuestDNS = true without a configured resolver: %+v", got)
+	}
+	if len(got.Private) != 1 || got.Private[0].CIDR != "10.0.0.11/32" {
+		t.Fatalf("private allowances = %+v, want only the host service", got.Private)
+	}
+
+	// A configured resolver turns the fallback off and adds the port-53
+	// allowance.
+	svc.cfg.GuestDNSAddr = "10.1.0.2"
+	got = svc.egressFor(&Lease{NetPolicy: "restricted", NetAllow: []string{"example.com"}})
+	if !got.GuestDNS {
+		t.Fatalf("GuestDNS = false with a configured resolver: %+v", got)
+	}
+	if !containsAllowance(got.Private, substrate.PrivateAllowance{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}}) {
+		t.Fatalf("resolver allowance missing: %+v", got.Private)
 	}
 }
 
