@@ -83,13 +83,11 @@ type GCLastError func() error
 // KeptDisk reports the bytes kept checkpoints hold and the snapshot
 // disk's total size (#126). Replaced in tests. A nil probe (or one that
 // errors) disables the disk.kept check.
-//
+type KeptDisk func() (keptBytes, diskTotal uint64, err error)
+
 // Draining reports whether the admin drain is in effect: the node
 // refuses every create with 503 draining while it is, so a person must
 // hear about it (spoond-52c H3). A nil probe disables the check.
-type KeptDisk func() (keptBytes, diskTotal uint64, err error)
-
-// Draining reports the admin drain state (service.draining).
 type Draining func() bool
 
 // CheckSources carries the probes the periodic checks read. Every
