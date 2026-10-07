@@ -364,6 +364,18 @@ type ServiceConfig struct {
 	// window without widening the default limiter. 0 = unlimited; cmd
 	// maps an unset variable to DefaultDrainSnapshotConcurrency (2).
 	DrainSnapshotConcurrency int
+	// UndrainConcurrency is how many drained leases the admin undrain
+	// resumes at once (UNDRAIN_CONCURRENCY): bounded so restoring a batch
+	// of large memory snapshots does not stack the whole node's I/O and
+	// memory. 0 = unlimited; cmd maps an unset variable to
+	// DefaultUndrainConcurrency (2). spoond-urm.
+	UndrainConcurrency int
+	// UndrainResumeRetries is how many extra attempts a resume the admin
+	// undrain failed with a retryable envd/start error gets before the
+	// lease is marked lost (UNDRAIN_RESUME_RETRIES). 0 disables retries;
+	// cmd maps an unset variable to DefaultUndrainResumeRetries (2).
+	// spoond-urm.
+	UndrainResumeRetries int
 }
 
 // Service is the lease API backend.

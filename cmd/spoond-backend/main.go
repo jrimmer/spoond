@@ -117,6 +117,14 @@
 //	                  drain may run at once, so a planned orchestrator
 //	                  restart can pause a batch of leases inside the
 //	                  unit's drain window (default 2; 0 = unlimited)
+//	UNDRAIN_CONCURRENCY  how many drained leases the admin undrain may
+//	                  resume at once, so restoring a batch of large
+//	                  memory snapshots does not stack the node's I/O and
+//	                  memory (spoond-urm; default 2; 0 = unlimited)
+//	UNDRAIN_RESUME_RETRIES  how many extra attempts a resume the admin
+//	                  undrain failed with a retryable envd/start error
+//	                  gets before the lease is marked lost (spoond-urm;
+//	                  default 2; 0 disables retries)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
@@ -348,6 +356,11 @@ func Main(args []string) int {
 	// width, so the admin drain can pause a batch inside TimeoutStopSec.
 	snapshotWriteConcurrency := envIntOr("SNAPSHOT_WRITE_CONCURRENCY", api.DefaultSnapshotWriteConcurrency)
 	drainSnapshotConcurrency := envIntOr("DRAIN_SNAPSHOT_CONCURRENCY", api.DefaultDrainSnapshotConcurrency)
+	// Undrain resume pacing (spoond-urm): a bounded resume width and a
+	// couple of retries for a transient envd start/sync failure, so a
+	// busy node does not lose 4 GiB leases to "syncing took too long".
+	undrainConcurrency := envIntOr("UNDRAIN_CONCURRENCY", api.DefaultUndrainConcurrency)
+	undrainResumeRetries := envIntOr("UNDRAIN_RESUME_RETRIES", api.DefaultUndrainResumeRetries)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -435,6 +448,8 @@ func Main(args []string) int {
 		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
 		SnapshotWriteConcurrency: snapshotWriteConcurrency,
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,
+		UndrainConcurrency:       undrainConcurrency,
+		UndrainResumeRetries:     undrainResumeRetries,
 		CrashTest:                os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
