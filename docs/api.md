@@ -40,7 +40,7 @@ Request:
 | `snapshot` | string | *(none)* | start the lease from a named snapshot version instead of the image's current build: `name` (latest) or `name@v`. The version must exist for the caller (`404 not_found`). The lease is never served from the warm pool, its memory is the snapshot's `memory_mb` for quota and admission, and it is stamped with the version so retention never drops it — see [Start from a snapshot](#start-from-a-snapshot). A version that cannot run on this host answers `409 cannot_start` |
 | `ttl` | int | `DEFAULT_TTL_SECS` | seconds; capped at `MAX_TTL_SECS` and at the user's `max_ttl` |
 | `persistent` | bool | `false` | not TTL-swept; supports keepalive, suspend/resume, checkpoint |
-| `memory_mib` | int | `0` | **must be `0` or exactly the image's `memory_mb`** — memory is fixed per image (a snapshot restores with its build's RAM). Any other value is `400`. |
+| `memory_mib` | int | `0` | **must be `0` or exactly the image's `memory_mb`** — memory is fixed per image (a snapshot restores with its build's RAM). For a create with `snapshot`, memory is fixed by the snapshot: `0` or exactly the snapshot's `memory_mb`, else `400`. Any other value is `400`. |
 | `network` | string | *(ignored)* | accepted for compatibility |
 | `init_cmd` | string | *(ignored)* | accepted for compatibility |
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
@@ -1493,7 +1493,7 @@ alike.
 - The lease gets a **new lease id and generation `1`**. Its create
   response and `GET /api/leases/{id}` carry
   `"snapshot":{"name":"spoond/warm","version":3,"build_id":"…"}` —
-  the resolved version (A3).
+  the resolved version.
 - Its `created` event says
   `started from snapshot spoond/warm@3 in 410 ms`.
 - The lease is **never served from the warm pool**, and it is stamped

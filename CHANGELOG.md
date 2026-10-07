@@ -60,15 +60,23 @@ summarised from README "Status".
   `GET /api/leases/{id}` carry
   `"snapshot":{"name","version","build_id"}`, and the `created` event
   says `started from snapshot <name>@<v> in <dur>`. A build that cannot
-  start on this host (missing files or an incompatible
-  envd/firecracker/orchestrator) answers `409 cannot_start` with
+  start on this host (missing files, or a saved
+  envd/firecracker/orchestrator that differs from the host's) answers
+  `409 cannot_start` with
   `snapshot <name>@<v> cannot start on this host (<cause>); save it
-  again` and no retry loop. Retention and delete now see real live
-  leases through `leases.snapshot_build_id`: a version spared because a
+  again` and no retry loop. A start holds its build in an in-memory
+  refcount from resolve to the lease row, so delete-in-use, retention
+  and the GC treat it as live while the create is in flight. Retention
+  and delete now see real live leases through
+  `leases.snapshot_build_id`: a version spared because a
   live lease ran from it is dropped once that lease is released. The
   copy-side `/run/spoond/lease-id`, `/run/spoond/generation` and
   `/run/spoond/started-from` markers are written atomically before the
-  create answers and before any exec the API runs in it. See
+  create answers and before any exec the API runs in it; a failed
+  copy-side write deletes the sandbox and fails the create rather than
+  handing out a copy that cannot tell source from copy. The copy
+  starts from a scrubbed `/run/secrets`, so it holds only its own
+  create-time secrets. See
   [docs/api.md](docs/api.md).
 - **Several TLS certificates per listener, reloaded on change.**
   `TLS_CERT`/`TLS_KEY` (lease API) and `DASH_TLS_CERT`/`DASH_TLS_KEY`
