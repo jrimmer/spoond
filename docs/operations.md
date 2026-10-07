@@ -198,7 +198,7 @@ set -a; . /etc/spoond/backend.env; set +a
 | `catalog: baked images` | every manifest image with `baked: true` has a `current_build_id` in `ready` state (WARN when the manifest has none) |
 | `artifacts: sha256` | Firecracker, the guest kernel and busybox match their pins, **and** prints the distinct Firecracker/kernel versions non-deleted builds still use — never delete a `/fc-versions/<v>` or `/fc-kernels/<v>` directory while it appears there |
 | `storage: free space` | WARN below 20 GiB free at `E2B_TEMPLATE_STORAGE_PATH` |
-| `lease API: listener` + `/healthz` | the backend listener is up and healthy. The `/healthz` probe over TLS trusts the backend's own cert chain loaded from `TLS_CERT` and picks the hostname from the cert's DNS SAN (a wildcard bind will not validate) — a separate `lease API: TLS trust` check FAILs when the cert cannot be read, and verification is never skipped |
+| `lease API: listener` + `/healthz` | the backend listener is up and healthy. The `/healthz` probe over TLS trusts the backend's own cert chain loaded from `TLS_CERT` and picks the hostname from the cert's DNS SAN (a wildcard bind will not validate) — a separate `lease API: TLS trust` check FAILs when the cert cannot be read, and verification is never skipped. With several pairs it probes with the first. `tls: <file>` checks each pair: loadable, and WARN within 14 days of expiry |
 | `ssh gateway: listener` | the gateway port (`GATEWAY_ADDR`, default `127.0.0.1:2222`) answers |
 | `llm gateway: upstream` / `key` / `/models` | upstream configured, key present, key accepted |
 | `tls: cert/key` | WARN when unconfigured (plain HTTP), FAIL when the pair does not load |
@@ -352,7 +352,11 @@ it lossless. Do not stop the backend first.
    a pause build and marks it `drained`, deletes the warm pool, and waits
    (up to 180 s) until the node reports no running sandboxes and no
    outstanding work. Per-lease failures are recorded in the response and
-   the drain continues.
+   the drain continues. Drain pauses write snapshots through their own
+   process-wide limiter, `DRAIN_SNAPSHOT_CONCURRENCY` (default `2`),
+   separate from the default limiter `SNAPSHOT_WRITE_CONCURRENCY`
+   (default `1`) that paces every other snapshot write — see
+   [Snapshot write pacing](#snapshot-write-pacing).
 3. The orchestrator stops; on start, `ExecStartPost=/opt/spoond/spoond
    drain --start` waits for the node (up to 120 s), calls
    `POST /api/admin/undrain`, which clears draining and resumes exactly
@@ -360,6 +364,43 @@ it lossless. Do not stop the backend first.
 4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.
+
+The unit's `TimeoutStopSec` must cover the drain: the pause phase takes
+roughly `leases × per-pause time / DRAIN_SNAPSHOT_CONCURRENCY`, plus the
+up-to-180 s quiesce wait. The shipped unit's `TimeoutStopSec=330` is
+sized for the default width on this node; raising the lease count, the
+per-pause time (larger guests) or the default width's ratio needs the
+unit's timeout raised to match.
+
+## Snapshot write pacing
+
+A memory snapshot (`Pause` or `Checkpoint`) saturates the host's disk
+while it writes, and the orchestrator's NBD server must still answer
+every guest's rootfs requests inside the kernel ceiling. On 2026-10-06
+on vm2 a burst of snapshot writes stacked up, the NBD server missed
+that deadline, and every guest on the stalled devices lost its root
+disk (permanent EIO). spoond therefore runs every snapshot write
+through one process-wide limiter:
+
+- `SNAPSHOT_WRITE_CONCURRENCY` (default `1`) is its width. Every pause
+  and checkpoint — a hand suspend, the idle sweep, the held-lease
+  idle/pressure rules, preemption, restart's pause leg, a drain pause
+  (which has its own width), and every checkpoint (on demand, periodic,
+  clone, fork, keep) — waits its turn. `0` means unlimited, the
+  pre-fix behaviour.
+- `DRAIN_SNAPSHOT_CONCURRENCY` (default `2`) is the drain's own width,
+  used only for the pauses `POST /api/admin/drain` issues, so a planned
+  restart can pause a batch of leases inside the unit's stop window.
+
+Waiting is bounded by the caller's context: an API caller that waits
+longer than the limiter only sees added latency, never a different
+answer. A write that waited 5 s or more logs one line naming the wait
+and the backlog (`snapshot write waited 41s behind 1 other`). The
+gauges `spoond_snapshot_writes_in_flight` and
+`spoond_snapshot_write_wait_seconds` show the pressure. The idle sweep
+and the held-lease rules suspend at most one lease per tick while the
+limiter is busy, skipping the rest to retry on the next tick rather
+than queueing a batch.
 
 ## Network watchdog
 
@@ -473,6 +514,61 @@ the route then answers `404` like an unknown route; set it only on hosts
 that run crash suites. It affects only the caller's own leases (an admin
 may crash any lease), and nothing else: no other lease, no pool, no
 release. Each run logs `crash-test: lease <id> crashed by <caller id>`.
+
+### Rootfs liveness probe
+
+The kernel NBD connections backing a guest's root disk can die when the
+host disk stalls past the kernel ceiling (incident 2026-10-06): the
+guest then answers I/O errors on every uncached read, execs return HTTP
+`500` `exec failed`, and the lease otherwise stays `running` forever.
+`ROOTFS_PROBE_SECS` (default `120`, `0` disables) makes the backend
+catch that: every interval it runs one cheap exec per running lease that
+reads a single 4096-byte block of the guest's root block device at a
+pseudo-random offset with `O_DIRECT` (`iflag=direct`), so the page cache
+cannot answer the read. The offset is drawn from `/dev/urandom` rather
+than `$RANDOM`, which dash does not provide. The script takes the device
+from `findmnt -no SOURCE /`, falling back to `/dev/vda` when that is not
+a block device.
+
+A probe is a failure when it answers an `Input/output error` or when
+the exec itself fails at the transport. A probe that hits the 10 s
+timeout (the substrate kills the hung exec and reports it the way the
+e2b backend does: exit `124` with a `timed out` line) is a slow disk,
+not a dead one: it is logged and counted in
+`spoond_rootfs_probe_failures_total`, but it never counts toward
+recovery. Since e2b-runtime P7 the kernel lets a stalled NBD request
+wait up to 360 s instead of failing it, and recovering a lease whose
+disk is only slow would discard its work since the last checkpoint; a
+disk that really dies past that ceiling answers `EIO`. A non-zero exit for any
+other reason is not a failure (the guest answered); the backend logs it
+so a probe that silently degraded to a no-op — a base image without
+`dd`, or a root device that rejects `O_DIRECT` — is visible. **Three
+consecutive
+failures** treat the sandbox as crashed:
+the backend logs the lease, emits a `lost` event with detail `root disk
+unreadable (I/O errors)`, deletes the dead sandbox through the substrate
+and runs the same per-lease recovery as the crash reconcile — from the
+last checkpoint (generation +1, state `recovered`) or `lost` when there
+is none. A success in between resets the count. A lease with a
+successful exec (exit `0`) in the last `ROOTFS_PROBE_SECS` is skipped
+(it has
+already proven it is alive), as are busy leases (checkpoint, restart,
+suspend in flight). The admin drain and a probe-triggered recovery are
+mutually exclusive: the drain's `SetDraining` waits for a recovery in
+flight, and a recovery that reaches the drain waits for it and then
+stands down, so no sandbox is deleted or recovered during the drain.
+
+If **every** lease's probe fails at the transport in one pass, the
+orchestrator is unreachable, not the guests: the pass logs once and
+changes nothing. (On a host with a single running lease, an
+all-transport pass is indistinguishable from that case, so a lone guest
+whose agent died is left to the crash reconcile rather than marked
+`lost` by the probe.) A probe that answers an I/O error or a timeout
+proves
+the orchestrator is reachable, so a mixed pass still recovers the
+affected leases. The counters are `spoond_rootfs_probe_failures_total`
+(failures, by probe) and `spoond_rootfs_dead_total` (leases declared
+dead). `ROOTFS_PROBE_SECS=0` disables the probe entirely.
 
 ## Restarting the backend
 
@@ -905,7 +1001,7 @@ variables:
 |---|---|---|
 | `DASH_ADDR` | `0.0.0.0:8893` | listen address |
 | `DASH_USER`, `DASH_PASSWORD_HASH` | *(required)* | basic auth (`spoond dash hash PASS` makes the hash) |
-| `DASH_TLS_CERT`, `DASH_TLS_KEY` | *(unset)* | serve HTTPS (set both or neither) |
+| `DASH_TLS_CERT`, `DASH_TLS_KEY` | *(unset)* | serve HTTPS (set both or neither); comma-separated lists serve several certificates by SNI and reload on change, as `TLS_CERT`/`TLS_KEY` do |
 | `METRICS_URL` | `https://127.0.0.1:8890/metrics` | spoond's `/metrics` |
 | `METRICS_SERVER_NAME` | *(METRICS_URL host)* | TLS server name for that URL |
 | `METRICS_TOKEN` | *(required)* | the backend's scrape-only token |

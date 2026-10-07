@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // TestReconcileCrashRecoversFromCheckpoint: after the orchestrator dies
@@ -182,5 +184,56 @@ func TestRecoveredLeaseStillServed(t *testing.T) {
 	}
 	if l.State != "running" {
 		t.Fatalf("state after suspend+resume = %q, want running", l.State)
+	}
+}
+
+// TestReconcileCrashRootfsProbeDoesNotRace: while a crash reconcile is
+// recreating a lease's sandbox (a multi-minute recovery in production),
+// a rootfs probe pass must not count transport failures against it or
+// recover it a second time. The reconcile marks the lease busy, and the
+// probe's recovery takes the busy flag before acting.
+func TestReconcileCrashRootfsProbeDoesNotRace(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.checkpointLease(ctx, l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	// The crash: the sandbox vanishes, so reconcileCrash recovers it.
+	sub.Fake.Kill(l.SandboxID)
+	// Its recovery create fails on first use, while the probe pass runs
+	// from inside that create: the lease is mid-recovery and busy.
+	sub.rootfsErr[l.SandboxID] = true
+	svc.rootfsProbeMu.Lock()
+	svc.rootfsProbeFails[l.ID] = &rootfsProbeFailure{sandboxID: l.SandboxID, count: rootfsProbeFailuresThreshold - 1}
+	svc.rootfsProbeMu.Unlock()
+
+	probed := false
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.SandboxID == l.SandboxID && !probed {
+			probed = true
+			svc.probeRootfsLeases(ctx)
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	summary := svc.reconcileCrash(ctx)
+	if summary.Recovered != 1 || summary.Lost != 0 {
+		t.Fatalf("summary = %+v, want {Recovered:1, Lost:0}", summary)
+	}
+	if l.State != "recovered" || l.Generation != 2 {
+		t.Fatalf("lease = %s gen %d, want recovered gen 2", l.State, l.Generation)
+	}
+	// The probe count was dropped when it found the lease busy; it did
+	// not fire a second recovery (which would bump the generation again
+	// and create a third sandbox).
+	if got := calls(sub.Fake, "Create "+l.SandboxID); got != 2 {
+		t.Fatalf("Create calls = %d, want 2 (grant + the reconcile's recovery)", got)
 	}
 }

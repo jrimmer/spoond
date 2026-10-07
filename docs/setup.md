@@ -143,7 +143,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `SPOOND_PROXY_HOST_SUFFIX` | `.sandbox.example.com` | wildcard hostname suffix the HTTP proxy routes (`<id>.<suffix>`, `<id>-<port>.<suffix>`) |
 | `SPOOND_SSH_CONNECTION_ADDR` | `HOST_GUEST_SERVICE_ADDR` | gateway: server address reported in `SSH_CONNECTION` (single-host deploys need not set it) |
 | `HOST_API_PORT` | `BIND_ADDR`'s port | lease API port `lan`/`internet` guests may reach on `HOST_GUEST_SERVICE_ADDR` (`0` = none) |
-| `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set |
+| `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set. Comma-separated lists of equal length serve several certificates, chosen by the client's SNI and paired by position; the first is the default (no SNI, a connection by IP, or a name none covers). The files are re-read every minute, so a renewal needs no restart; a pair caught half-written keeps serving the old certificate until it is complete |
 | `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |
 | `MAX_TTL_SECS` | `3600` | maximum TTL a consumer may request |
 | `IDLE_TIMEOUT_SECS` | `0` | legacy plain-sweep auto-suspend: suspend a persistent lease idle for this long when its effective `idle_suspend` is `0` (`0` disables; new deployments should use `IDLE_SUSPEND_DEFAULT_SECS` and per-lease `idle_suspend`) |
@@ -156,6 +156,9 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `PRESSURE_HELD_IDLE_SECS` | `1800` | rule 1's threshold under pressure (`0` disables rule 4) |
 | `CRITICAL_DISK_FREE_PCT` | `5` | snapshot-disk free percentage under which rule 5 releases rule-suspended held leases (needs `GC_DELETE=1`; `0` disables) |
 | `CRITICAL_DISK_RECOVER_PCT` | `10` | rule 5 stops releasing above this free percentage |
+| `MAX_ADMIT_WAIT_SECS` | `600` | how long a create may wait for admission when it sends `wait` (`0` disables waiting; #129 part 1) |
+| `SNAPSHOT_WRITE_CONCURRENCY` | `1` | how many memory-snapshot writes (substrate `Pause`/`Checkpoint`) may run at once process-wide; every pause and checkpoint goes through this limiter (`0` = unlimited, the pre-fix behaviour; spoond-t1s) |
+| `DRAIN_SNAPSHOT_CONCURRENCY` | `2` | how many of those writes the admin drain may run at once, so a planned orchestrator restart can pause a batch of leases inside the unit's `TimeoutStopSec` (`0` = unlimited; see [operations.md](operations.md#restarting-the-orchestrator-planned)) |
 | `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
 | `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |

@@ -30,16 +30,38 @@ type testSub struct {
 	probeFailAll bool
 	execStdout   string // canned stdout for non-probe execs ("" = "ok\n")
 
+	// rootfsFail, keyed by sandbox id, makes the rootfs liveness probe
+	// answer the given stderr with exit code 1 ("Input/output error" for
+	// a dead disk). rootfsErr, keyed the same way, makes it a transport
+	// failure instead; rootfsTimeout makes it the substrate's own timeout
+	// marker (exit 124, nil error) (spoond-5ca).
+	rootfsFail    map[string]string
+	rootfsErr     map[string]bool
+	rootfsTimeout map[string]bool
+
+	// onRootfsProbe, when set, runs while a rootfs probe exec is being
+	// served, before its outcome is decided. Tests use it to start an
+	// admin drain mid-pass (spoond-5ca).
+	onRootfsProbe func(sandboxID string)
+
 	// checkpointFn/pauseFn, when set, replace the fake's Checkpoint and
 	// Pause: they mint the build id and may leave the fresh build's
 	// files on disk (the build-size-at-write-time tests, #125).
 	checkpointFn func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error)
 	pauseFn      func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error)
+	// createFn, when set, replaces the fake's Create: it may run while a
+	// create is in flight (the crash-reconcile-rootfs-probe race test).
+	createFn func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error)
 
 	// lastStart records the most recent Start request (the stream tests
 	// pin the initial PTY size it carries).
 	startMu   sync.Mutex
 	lastStart substrate.StartRequest
+
+	// rootfsProbeMu guards rootfsProbes, the count of rootfs liveness
+	// probe execs the fake served (spoond-5ca).
+	rootfsProbeMu sync.Mutex
+	rootfsProbes  int
 }
 
 // LastStart returns the most recent Start request.
@@ -73,10 +95,57 @@ func (ts *testSub) Pause(ctx context.Context, sandboxID, templateID string) (str
 	return ts.Fake.Pause(ctx, sandboxID, templateID)
 }
 
+// Create delegates to createFn when set, the fake otherwise.
+func (ts *testSub) Create(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+	if ts.createFn != nil {
+		return ts.createFn(ctx, req)
+	}
+	return ts.Fake.Create(ctx, req)
+}
+
 func newTestSub() *testSub {
-	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}}
+	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}, rootfsFail: map[string]string{}, rootfsErr: map[string]bool{}, rootfsTimeout: map[string]bool{}}
 	ts.Fake.SetExecHandler(ts.exec)
 	return ts
+}
+
+// isRootfsProbeReq reports whether req is the rootfs liveness probe.
+func isRootfsProbeReq(req substrate.ExecRequest) bool {
+	return len(req.Args) == 3 && req.Args[2] == rootfsProbe
+}
+
+// Exec services the rootfs liveness probe's injectable outcomes and
+// delegates everything else to the fake.
+func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.ExecRequest) (substrate.ExecResult, error) {
+	if isRootfsProbeReq(req) {
+		ts.rootfsProbeMu.Lock()
+		ts.rootfsProbes++
+		ts.rootfsProbeMu.Unlock()
+		if ts.onRootfsProbe != nil {
+			ts.onRootfsProbe(sandboxID)
+		}
+		if ts.rootfsErr[sandboxID] {
+			return substrate.ExecResult{}, fmt.Errorf("exec %s: agent unreachable", sandboxID)
+		}
+		if ts.rootfsTimeout[sandboxID] {
+			// The e2b backend kills a probe that outlives its timer and
+			// returns exit 124 with a nil error rather than an error.
+			return substrate.ExecResult{Stderr: "[spoond] exec timed out after 10s", ExitCode: 124}, nil
+		}
+		if msg, bad := ts.rootfsFail[sandboxID]; bad {
+			return substrate.ExecResult{Stderr: msg, ExitCode: 1}, nil
+		}
+		return substrate.ExecResult{ExitCode: 0}, nil
+	}
+	return ts.Fake.Exec(ctx, sandboxID, req)
+}
+
+// RootfsProbeCalls returns how many rootfs liveness probe execs the
+// fake has served.
+func (ts *testSub) RootfsProbeCalls() int {
+	ts.rootfsProbeMu.Lock()
+	defer ts.rootfsProbeMu.Unlock()
+	return ts.rootfsProbes
 }
 
 func (ts *testSub) exec(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {

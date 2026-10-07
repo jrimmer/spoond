@@ -10,7 +10,8 @@
 //	BIND_ADDR         listen address (default 127.0.0.1:8890)
 //	PROXY_ADDR        public proxy listener (e.g. 0.0.0.0:8891)
 //	SPOOND_DB_PATH    SQLite database path (default /var/lib/spoond/spoond.db)
-//	TLS_CERT, TLS_KEY  serve HTTPS when both are set
+//	TLS_CERT, TLS_KEY  serve HTTPS when both are set; comma-separated lists
+//	                   serve several pairs by SNI and reload on change
 //	CONSUMER_TOKENS   comma-separated token=consumer pairs (e.g. "abc=forgejo,def=pi")
 //	POOL_SIZE         warm-pool size per image (default 0 = disabled)
 //	DEFAULT_TTL_SECS  default lease TTL (default 300)
@@ -108,6 +109,14 @@
 //	MAX_ADMIT_WAIT_SECS  how long a create may wait for admission when
 //	                  it sends "wait" (#129 part 1; default 600; 0
 //	                  disables waiting)
+//	SNAPSHOT_WRITE_CONCURRENCY  how many memory-snapshot writes
+//	                  (substrate Pause/Checkpoint) may run at once,
+//	                  process-wide (spoond-t1s; default 1; 0 = unlimited,
+//	                  the pre-fix behaviour)
+//	DRAIN_SNAPSHOT_CONCURRENCY  how many of those writes the admin
+//	                  drain may run at once, so a planned orchestrator
+//	                  restart can pause a batch of leases inside the
+//	                  unit's drain window (default 2; 0 = unlimited)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
@@ -130,6 +139,7 @@ import (
 
 	"github.com/jrimmer/spoond/v2/api"
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/internal/tlsfiles"
 	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/notify"
 	"github.com/jrimmer/spoond/v2/store"
@@ -276,8 +286,12 @@ func (s metricsSink) Notification(webhook, severity, result string) {
 func Main(args []string) int {
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
 	proxyAddr := envOr("PROXY_ADDR", "") // e.g. 0.0.0.0:8891 (Caddy wildcard front)
-	tlsCert := os.Getenv("TLS_CERT")
-	tlsKey := os.Getenv("TLS_KEY")
+	// TLS_CERT and TLS_KEY may list several pairs (comma-separated, paired by
+	// position), chosen by SNI; the first is the default (internal/tlsfiles).
+	tlsPairs, err := tlsfiles.Parse(os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY"))
+	if err != nil {
+		log.Fatalf("TLS_CERT/TLS_KEY: %v", err)
+	}
 	poolSize := envIntOr("POOL_SIZE", 0)
 	idleTimeoutSecs := envIntOr("IDLE_TIMEOUT_SECS", 0) // persistent-lease auto-suspend
 	idleTimeout := time.Duration(idleTimeoutSecs) * time.Second
@@ -324,6 +338,13 @@ func Main(args []string) int {
 	// a create may wait for room. 0 disables waiting (the request's
 	// "wait" field is accepted and ignored).
 	maxAdmitWaitSecs := envIntOr("MAX_ADMIT_WAIT_SECS", api.DefaultMaxAdmitWaitSecs)
+	// Snapshot write pacing (spoond-t1s): every substrate Pause and
+	// Checkpoint goes through one process-wide limiter. 0 means
+	// unlimited (the old behaviour); an unset variable uses the
+	// documented default. DRAIN_SNAPSHOT_CONCURRENCY is the drain's own
+	// width, so the admin drain can pause a batch inside TimeoutStopSec.
+	snapshotWriteConcurrency := envIntOr("SNAPSHOT_WRITE_CONCURRENCY", api.DefaultSnapshotWriteConcurrency)
+	drainSnapshotConcurrency := envIntOr("DRAIN_SNAPSHOT_CONCURRENCY", api.DefaultDrainSnapshotConcurrency)
 	// Lost-lease snapshot grace (owner decision 2026-10-02): the GC keeps
 	// a lost lease's resume/checkpoint builds for this long before they
 	// become candidates.
@@ -406,10 +427,12 @@ func Main(args []string) int {
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
 		// Background exec jobs (2.6, #135): per-lease running cap and
 		// exited-record retention.
-		MaxRunningJobsPerLease: envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
-		JobRetentionSecs:       int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
-		MaxAdmitWaitSecs:       maxAdmitWaitSecs,
-		CrashTest:              os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		MaxRunningJobsPerLease:   envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
+		JobRetentionSecs:         int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
+		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
+		SnapshotWriteConcurrency: snapshotWriteConcurrency,
+		DrainSnapshotConcurrency: drainSnapshotConcurrency,
+		CrashTest:                os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
@@ -419,6 +442,11 @@ func Main(args []string) int {
 	// a ping and then fails the job deep inside a build, so verify it from
 	// inside the guest before pooling or leasing it. SANDBOX_PROBE=0 disables.
 	svc.SetSandboxProbe(envBoolOr("SANDBOX_PROBE", true), time.Duration(envIntOr("SANDBOX_PROBE_TIMEOUT_SECS", 20))*time.Second)
+
+	// Rootfs liveness probe (spoond-5ca): every ROOTFS_PROBE_SECS read one
+	// block of each running lease's root device with O_DIRECT, and recover a
+	// guest whose disk answers I/O errors like a crash. 0 disables it.
+	svc.SetRootfsProbe(envIntOr("ROOTFS_PROBE_SECS", api.DefaultRootfsProbeSecs))
 
 	// LLM gateway model map: "exe.dev-id=upstream-id,exe.dev-id2=upstream2".
 	// Shelley sends exe.dev catalog ids; the gateway rewrites them to the
@@ -603,8 +631,15 @@ func Main(args []string) int {
 	}()
 
 	log.Printf("spoond-backend listening on %s (substrate %s, %d consumer(s), pool=%d)", bindAddr, cfg.GRPCAddr, len(tokens), poolSize)
-	if tlsCert != "" && tlsKey != "" {
-		err = httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
+	if tlsPairs != nil {
+		certs, cerr := tlsfiles.New(tlsPairs, log.Printf)
+		if cerr != nil {
+			log.Fatalf("tls: %v", cerr)
+		}
+		log.Printf("tls: serving %s (first is the default; files re-read every minute)", strings.Join(certs.Names(), " | "))
+		go certs.Watch(ctx, time.Minute)
+		httpSrv.TLSConfig = certs.Config()
+		err = httpSrv.ListenAndServeTLS("", "")
 	} else {
 		err = httpSrv.ListenAndServe()
 	}

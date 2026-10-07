@@ -38,6 +38,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/jrimmer/spoond/v2/internal/tlsfiles"
 	"github.com/jrimmer/spoond/v2/notify"
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate/e2b"
@@ -571,7 +572,7 @@ func checkBackend() []checkResult {
 	// probe via a DNS SAN from the leaf cert itself (e.g. a cert hostname).
 	probeHost := bind
 	if h, p, err := net.SplitHostPort(bind); err == nil && (h == "" || h == "0.0.0.0" || h == "::") {
-		if san := leafCertSAN(os.Getenv("TLS_CERT")); san != "" {
+		if san := leafCertSAN(firstTLSCert()); san != "" {
 			probeHost = net.JoinHostPort(san, p)
 		} else if hn, err := os.Hostname(); err == nil && hn != "" {
 			probeHost = net.JoinHostPort(hn, p)
@@ -579,7 +580,7 @@ func checkBackend() []checkResult {
 	}
 	scheme := "http"
 	client := &http.Client{Timeout: 3 * time.Second}
-	if cert, key := os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY"); cert != "" && key != "" {
+	if cert := firstTLSCert(); cert != "" {
 		scheme = "https"
 		roots, err := x509PoolFromCert(cert)
 		if err != nil {
@@ -660,19 +661,51 @@ func checkLLM() []checkResult {
 	return out
 }
 
-// checkTLS verifies TLS material is present and loadable when configured.
+// firstTLSCert is the default (first) certificate file of TLS_CERT, or ""
+// when TLS is off or misconfigured (checkTLS reports that).
+func firstTLSCert() string {
+	pairs, err := tlsfiles.Parse(os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY"))
+	if err != nil || len(pairs) == 0 {
+		return ""
+	}
+	return pairs[0].Cert
+}
+
+// checkTLS verifies every configured certificate/key pair (TLS_CERT and
+// TLS_KEY may list several, internal/tlsfiles) is present and loadable,
+// and warns when one expires within 14 days.
 func checkTLS() []checkResult {
-	cert, key := os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY")
-	if cert == "" && key == "" {
+	pairs, err := tlsfiles.Parse(os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY"))
+	if err != nil {
+		return []checkResult{{"tls: cert/key", "FAIL", err.Error()}}
+	}
+	if pairs == nil {
 		return []checkResult{{"tls: cert/key", "WARN", "not configured — API will serve plain HTTP"}}
 	}
-	if cert == "" || key == "" {
-		return []checkResult{{"tls: cert/key", "FAIL", "only one of TLS_CERT/TLS_KEY set"}}
+	var out []checkResult
+	for _, p := range pairs {
+		c, err := tls.LoadX509KeyPair(p.Cert, p.Key)
+		if err != nil {
+			out = append(out, checkResult{"tls: " + p.Cert, "FAIL", err.Error()})
+			continue
+		}
+		leaf, err := x509.ParseCertificate(c.Certificate[0])
+		if err != nil {
+			out = append(out, checkResult{"tls: " + p.Cert, "FAIL", err.Error()})
+			continue
+		}
+		left := time.Until(leaf.NotAfter)
+		detail := fmt.Sprintf("%s, expires %s", strings.Join(leaf.DNSNames, ","), leaf.NotAfter.UTC().Format("2006-01-02"))
+		switch {
+		case left <= 0:
+			out = append(out, checkResult{"tls: " + p.Cert, "FAIL", "expired: " + detail})
+		case left < 14*24*time.Hour:
+			out = append(out, checkResult{"tls: " + p.Cert, "WARN", "expires soon: " + detail})
+		default:
+			out = append(out, checkResult{"tls: " + p.Cert, "PASS", detail})
+		}
 	}
-	if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
-		return []checkResult{{"tls: cert/key", "FAIL", fmt.Sprintf("%v", err)}}
-	}
-	return []checkResult{{"tls: cert/key", "PASS", "loadable"}}
+	return out
 }
 
 // checkDisk reports the root filesystem fill level.

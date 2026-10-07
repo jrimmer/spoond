@@ -1156,7 +1156,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
 | `snapshot_saved` | `POST /api/leases/{id}/snapshots` saved the lease as a named snapshot (2.7, #83) | `saved as <name>@<version> · <size> · <duration>`, e.g. `saved as spoond/warm@4 · 2.1 GiB · 820 ms` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
-| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume) | the reason |
+| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume), or its root disk answered I/O errors (rootfs liveness probe) | the reason; `root disk unreadable (I/O errors)` for a probe-detected dead disk |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
 | `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |

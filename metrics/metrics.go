@@ -97,6 +97,12 @@ type BackendMetrics struct {
 	// guest, in seconds, buckets 1..600.
 	CheckpointPause prometheus.Histogram
 
+	// Snapshot write pacing (spoond-t1s): every substrate Pause or
+	// Checkpoint goes through one process-wide limiter so the node never
+	// sees a stack of memory snapshots at once (incident 2026-10-06).
+	SnapshotWritesInFlight prometheus.Gauge     // substrate snapshot writes running now
+	SnapshotWriteWait      prometheus.Histogram // how long a write waited for a slot, seconds
+
 	// Snapshot catalog (U11)
 	SnapshotBytes *prometheus.GaugeVec   // {kind}: measured build disk bytes
 	StorageFree   prometheus.Gauge       // free bytes at the template storage path
@@ -135,6 +141,12 @@ type BackendMetrics struct {
 	// Background exec jobs (2.6, #135): running jobs and their outcomes.
 	JobsRunning     prometheus.Gauge       // background exec jobs currently running
 	JobsExitedTotal *prometheus.CounterVec // {result}: ok, error, lost
+
+	// Rootfs liveness probe (spoond-5ca): a running lease whose root
+	// block device answers I/O errors on an uncached read has lost its
+	// disk and is recovered like a crash.
+	RootfsProbeFailuresTotal prometheus.Counter // probe failures (transport, timeout or EIO)
+	RootfsDeadTotal          prometheus.Counter // leases declared dead after consecutive probe failures
 
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
@@ -373,6 +385,19 @@ func NewBackendMetrics() *BackendMetrics {
 		Buckets: []float64{1, 2, 5, 10, 30, 60, 120, 300, 600},
 	})
 
+	// Snapshot write pacing (spoond-t1s): the process-wide limiter that
+	// keeps substrate Pause/Checkpoint writes from stacking. Waits are
+	// bounded by the caller's context.
+	m.SnapshotWritesInFlight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "snapshot_writes_in_flight",
+		Help: "Snapshot writes (Pause/Checkpoint) running right now.",
+	})
+	m.SnapshotWriteWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "snapshot_write_wait_seconds",
+		Help:    "How long a snapshot write waited for a limiter slot, in seconds.",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600},
+	})
+
 	// Snapshot catalog (U11)
 	m.SnapshotBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "snapshot_bytes",
@@ -456,6 +481,15 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Background exec jobs that ended, by result: ok, error, lost.",
 	}, []string{"result"})
 
+	m.RootfsProbeFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "rootfs_probe_failures_total",
+		Help: "Rootfs liveness probe failures (transport, timeout or Input/output error).",
+	})
+	m.RootfsDeadTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "rootfs_dead_total",
+		Help: "Leases declared dead because their root disk was unreadable.",
+	})
+
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases",
@@ -506,6 +540,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.Notifications, m.StartTime,
 		m.BuildsInFlight, m.BuildsFailed,
 		m.CheckpointDur, m.CheckpointPause,
+		m.SnapshotWritesInFlight, m.SnapshotWriteWait,
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 		m.GCOrphansReaped, m.GCOrphanBytesReaped,
 		m.KeptBuildsBytes, m.KeptBuilds,
@@ -515,6 +550,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
+		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)

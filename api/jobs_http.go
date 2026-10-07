@@ -334,6 +334,8 @@ func (s *Service) signalJob(ctx context.Context, lease *Lease, row store.JobRow,
 	if res.ExitCode != 0 {
 		return fmt.Errorf("kill exit %d: %s", res.ExitCode, res.Stderr)
 	}
+	// A successful signal exec proves the guest is alive (spoond-5ca).
+	s.recordRootfsAlive(lease.ID)
 	return nil
 }
 

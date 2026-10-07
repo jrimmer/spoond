@@ -1756,6 +1756,8 @@ echo "AGENT_TIMEOUT"`, msg64, mod64)
 		writeError(w, http.StatusBadGateway, "agent exec failed: "+tailStr(res.Stderr, 500))
 		return
 	}
+	// A successful agent exec proves the guest is alive (spoond-5ca).
+	s.svc.recordRootfsAlive(lease.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      id,
 		"message": req.Message,
@@ -1930,9 +1932,15 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "exec failed")
 		return
 	}
+	// A successful exec proves the guest is alive this instant; the
+	// rootfs liveness probe skips the lease while this stays recent
+	// (spoond-5ca). A non-zero exit is not a success and must not mask a
+	// dead root disk that fails every command with EIO.
 	s.svc.log.Printf("exec: %s: exit=%d stdout=%d stderr=%d dur=%s", lease.SandboxID, res.ExitCode, len(res.Stdout), len(res.Stderr), time.Since(start))
 	if res.ExitCode != 0 {
 		s.svc.log.Printf("exec: %s: stderr=%q", lease.SandboxID, tailStr(res.Stderr, 500))
+	} else {
+		s.svc.recordRootfsAlive(lease.ID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stdout": res.Stdout,
@@ -2002,6 +2010,8 @@ echo "== df =="; df -P /
 		writeError(w, http.StatusInternalServerError, "stat probe exited non-zero")
 		return
 	}
+	// A successful probe exec proves the guest is alive (spoond-5ca).
+	s.svc.recordRootfsAlive(lease.ID)
 	stat, perr := parseStatProbe(res.Stdout)
 	if perr != nil {
 		s.svc.log.Printf("stat: %s: parse: %v (stdout=%q)", lease.SandboxID, perr, tailStr(res.Stdout, 300))

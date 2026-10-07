@@ -350,6 +350,20 @@ type ServiceConfig struct {
 	// default; when off the route answers 404 like an unknown route.
 	// CRASH_TEST ("1" or "true").
 	CrashTest bool
+	// SnapshotWriteConcurrency is the width of the process-wide
+	// snapshot-write limiter (SNAPSHOT_WRITE_CONCURRENCY): every
+	// substrate Pause and Checkpoint goes through it, so the node never
+	// sees a stack of memory snapshots at once (spoond-t1s). 0 =
+	// unlimited (the pre-fix behaviour); cmd maps an unset variable to
+	// DefaultSnapshotWriteConcurrency (1).
+	SnapshotWriteConcurrency int
+	// DrainSnapshotConcurrency is the width of the drain's own
+	// snapshot-write limiter (DRAIN_SNAPSHOT_CONCURRENCY), used only for
+	// the admin drain's pauses. It is separate so a planned orchestrator
+	// restart can pause a batch of live leases within the unit's drain
+	// window without widening the default limiter. 0 = unlimited; cmd
+	// maps an unset variable to DefaultDrainSnapshotConcurrency (2).
+	DrainSnapshotConcurrency int
 }
 
 // Service is the lease API backend.
@@ -378,6 +392,25 @@ type Service struct {
 	// pooled or handed to a lease. probeTimeout bounds that exec.
 	probeEnabled bool
 	probeTimeout time.Duration
+	// rootfsProbeInterval is how often the rootfs liveness probe runs
+	// against running leases (spoond-5ca) as a duration; 0 disables it.
+	// It is atomic so the probe loop reads it without a lock even if
+	// SetRootfsProbe runs concurrently with a pass. rootfsProbeMu guards
+	// the last-success times and the consecutive-failure counters; both
+	// are keyed by lease id, the failures also by sandbox id so a
+	// replacement sandbox starts clean.
+	rootfsProbeInterval atomic.Int64
+	rootfsProbeMu       sync.Mutex
+	// rootfsProbeOK is the last successful exec time per lease: an exec
+	// that started within the probe interval already proves the guest is
+	// alive, so the probe is skipped.
+	rootfsProbeOK map[string]time.Time
+	// rootfsProbeFails is the consecutive rootfs-probe failure count per
+	// lease, tracked against the sandbox it was counted on.
+	rootfsProbeFails map[string]*rootfsProbeFailure
+	// rootfsProbeAllFailedLogged suppresses the "every probe failed"
+	// line to once per outage rather than once per pass.
+	rootfsProbeAllFailedLogged bool
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
 	// now is the service clock. Tests replace it to age a lease's
@@ -412,6 +445,14 @@ type Service struct {
 	// draining is true while the admin drain is running (U10): pool
 	// refill, idle sweep, GC and the crash reconcile skip until undrain.
 	draining atomic.Bool
+	// drainGate serialises the admin drain with the rootfs probe's
+	// recovery (spoond-5ca). drain takes the write side around
+	// SetDraining and draining.Store(true); recoverDeadRootfs holds the
+	// read side for the whole recovery, so a drain that begins mid-pass
+	// cannot overlap a recovery for a lease it has not paused yet. An
+	// RWMutex that is locked only by those two paths never blocks the
+	// rest of the service.
+	drainGate sync.RWMutex
 	// stopLoops cancels the background sweeper/refiller started by Start.
 	stopLoops context.CancelFunc
 
@@ -499,13 +540,20 @@ type Service struct {
 	// wakeScheduled guards against piling up wake-up passes: at most one
 	// queued-admission retry runs at a time.
 	wakeScheduled atomic.Bool
+
+	// snapshotLimiters paces every substrate memory-snapshot write
+	// (Pause and Checkpoint) process-wide (spoond-t1s). The default
+	// limiter has width SNAPSHOT_WRITE_CONCURRENCY; the drain limiter has
+	// its own width DRAIN_SNAPSHOT_CONCURRENCY and is used only by the
+	// admin drain's pauses.
+	snapshotLimiters snapshotLimiters
 }
 
 // NewService builds the lease service on sub. db is required: every
 // mutation is persisted (U05). tokens maps legacy consumer tokens to
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
-	return &Service{
+	svc := &Service{
 		sub:                   sub,
 		db:                    db,
 		store:                 newStore(),
@@ -520,6 +568,8 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		log:                   log.Default(),
 		probeEnabled:          true,
 		probeTimeout:          20 * time.Second,
+		rootfsProbeOK:         map[string]time.Time{},
+		rootfsProbeFails:      map[string]*rootfsProbeFailure{},
 		bus:                   newEventBus(),
 		gcErr:                 newGCTracker(),
 		liveJobSecrets:        map[string][]string{},
@@ -530,6 +580,12 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
 		jobStarts:             map[string]*jobStartLock{},
 	}
+	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
+	svc.snapshotLimiters = snapshotLimiters{
+		def:   newSnapshotLimiter(cfg.SnapshotWriteConcurrency, svc.now, svc.log.Printf),
+		drain: newSnapshotLimiter(cfg.DrainSnapshotConcurrency, svc.now, svc.log.Printf),
+	}
+	return svc
 }
 
 // SetMetrics installs the Prometheus metrics collector (issue #20).
@@ -554,6 +610,21 @@ func (s *Service) SetSandboxProbe(enabled bool, timeout time.Duration) {
 	if timeout > 0 {
 		s.probeTimeout = timeout
 	}
+}
+
+// SetRootfsProbe sets how often the rootfs liveness probe runs against
+// running leases (spoond-5ca). 0 disables it entirely. A negative value
+// leaves the default in place.
+func (s *Service) SetRootfsProbe(secs int) {
+	if secs >= 0 {
+		s.rootfsProbeInterval.Store(int64(time.Duration(secs) * time.Second))
+	}
+}
+
+// rootfsProbeEvery returns how often the rootfs liveness probe runs. It
+// is safe to call while SetRootfsProbe runs.
+func (s *Service) rootfsProbeEvery() time.Duration {
+	return time.Duration(s.rootfsProbeInterval.Load())
 }
 
 // SetIdentities installs the identity store used for token→user and
@@ -1022,6 +1093,10 @@ func (s *Service) Start(ctx context.Context) {
 	// records against the guest files (a backend restart or a broken
 	// envd stream left them unobserved).
 	go s.runJobReconcileLoop(ctx)
+	// Rootfs liveness probe (spoond-5ca): every probe interval check that
+	// each running lease's root block device still reads, and recover a
+	// guest whose disk died like a crash.
+	go s.runRootfsProbeLoop(ctx)
 	// Queued admission (#129 part 1): retry waiting creates every 5 s
 	// even when nothing signalled.
 	go s.runAdmitQueueLoop(ctx)
@@ -1155,11 +1230,17 @@ func (s *Service) sweepExpired(ctx context.Context) {
 	// snapshot write on the node; a large backlog (e.g. after a long test
 	// session) must not produce one big burst. Cap per tick and space
 	// them out — with the 5s sweep tick, 13 idle leases clear in ~25s
-	// instead of a single burst.
+	// instead of a single burst. When the process-wide snapshot limiter is
+	// busy (a hand suspend, a checkpoint or the drain is writing), stand
+	// down for this tick and retry next tick rather than queue the batch
+	// behind the running write (spoond-t1s).
 	const maxSuspendPerTick = 3
 	suspended := 0
 	for _, l := range idleSuspend {
 		if suspended >= maxSuspendPerTick {
+			break
+		}
+		if s.snapshotBusy() {
 			break
 		}
 		if _, err := s.suspend(ctx, l.Owner, l.ID); err != nil {
@@ -1306,6 +1387,8 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	// remembered secret names (the files went with the guest) and a
 	// job_lost event, so a watcher learns the job ended.
 	s.settleJobsOfReleasedLease(ctx, l)
+	// The rootfs probe's per-lease state goes with the lease.
+	s.forgetRootfs(l.ID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
@@ -1802,8 +1885,16 @@ func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (strin
 }
 
 // pauseLeaseBody is the sub work of a pause. Callers own the busy
-// window; it must not be called with s.store.mu held.
+// window; it must not be called with s.store.mu held. drained selects
+// the drain limiter for the snapshot write (only the admin drain sets
+// it); every other pause uses the default limiter. The write waits for
+// a slot, bounded by ctx.
 func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (string, error) {
+	release, err := s.snapshotAcquire(ctx, drained)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	buildID, refs, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
 		return "", err
@@ -2213,6 +2304,11 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 // shows in /api/snapshots before the next hourly accounting pass. It
 // returns the new build row.
 func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildRow, error) {
+	release, err := s.snapshotAcquire(ctx, false)
+	if err != nil {
+		return store.BuildRow{}, err
+	}
+	defer release()
 	start := time.Now()
 	buildID, refs, err := s.sub.Checkpoint(ctx, src.SandboxID)
 	pause := time.Since(start)
@@ -3318,6 +3414,20 @@ func (s *Service) endBusy(l *Lease) {
 	s.store.mu.Lock()
 	l.busy = false
 	s.store.mu.Unlock()
+}
+
+// trySetBusy marks a lease busy unless it is already busy, released or
+// no longer running. It returns false when another operation won the
+// race, in which case the caller must not run its own. The caller owns
+// the busy window and must pair a true result with endBusy.
+func (s *Service) trySetBusy(l *Lease) bool {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if l.busy || l.released || !l.live() {
+		return false
+	}
+	l.busy = true
+	return true
 }
 
 func (s *Service) saveLeaseLocked(l *Lease) {
