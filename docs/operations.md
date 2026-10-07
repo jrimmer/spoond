@@ -81,8 +81,8 @@ endpoints:
 ```
 
 `[CERTIFICATE_EXPIRATION] > 72h` pages while there is still time to
-renew — ahead of the 30-day expiry banner the dashboard draws for its
-own cert. If the gateway fronts a TLS listener of its own, give it the
+renew — ahead of the 30-day expiry the dashboard's own certificate
+counter shows. If the gateway fronts a TLS listener of its own, give it the
 same certificate condition on that endpoint.
 
 The dashboard listens on every interface by default (`DASH_ADDR`,

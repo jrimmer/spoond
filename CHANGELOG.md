@@ -133,6 +133,15 @@ summarised from README "Status".
 
 ### Changed
 
+- **A lost lease answers `409 lease_lost`, not `410`.** The old `410`
+  named no cause and gave the initiator nothing to act on; a lost lease
+  now records why (`leases.lost_reason`, migration 0018) and every call
+  names the substrate, the reason and the `DELETE` that frees the quota.
+  Scripts and clients that branch on `410` for a lost lease should
+  branch on `409` with `code: lease_lost`; a `410` still means the
+  sandbox is gone with nothing in flight. The new `lost_reason` field on
+  the lease object is additive (`omitempty`).
+
 - **Built-in defaults are generic; deployment-specific hosts and LAN
   addresses are settings.** No code carries a maintainer hostname or
   address any more. Operators must set the new variables (the generic
