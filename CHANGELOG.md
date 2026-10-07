@@ -63,6 +63,27 @@ summarised from README "Status".
 
 ### Fixed
 
+- **The admin drain and undrain heal themselves: a detached context, a
+  bounded drain, drained leases retried, and draining visible.** A
+  client that gave up (the `spoond drain --start` hook at 300 s) used to
+  cancel the undrain's remaining resumes, which then went lost, and a
+  cancelled pause left a lease running into the stop; drain and undrain
+  now run on a context detached from the request with their own bound,
+  and a context, admission or capacity error keeps the lease `drained`
+  for a retry instead of losing it. A lease the drain paused had no
+  automatic exit: a drain self-heal loop now resumes any `drained` lease
+  with the same bounded retries as undrain (emitting a `drain_deferred`
+  event on a deferred attempt), so a missed undrain — a backend restart
+  between drain and undrain, or an `ExecStartPost` that exited 0 — no
+  longer strands the lease. A drain that outlives `DRAIN_MAX_SECS`
+  (default 900, `DRAIN_MAX_SECS`) on a healthy node now undrains itself,
+  logs it and emits a `drain_healed` event instead of refusing every
+  create with 503 forever; draining is reported in `/healthz`
+  (`"draining":true`) and `/readyz`, and the notifier adds a
+  `node.draining` key. An owner's own resume finally clears `drained`,
+  so resume-on-next-call keeps working and a later undrain cannot resume
+  a lease the owner is running.
+
 - **A lost lease is released automatically once its grace period
   lapses, freeing its owner's quota.** A lease in state `lost` was never
   released unless its owner deleted it: it kept holding the owner's
