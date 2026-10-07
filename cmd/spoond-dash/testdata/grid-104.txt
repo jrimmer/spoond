@@ -1,7 +1,5 @@
                                 SPOOND · spoond.example.com · dev · up 9m                               
                                                                                                         
-▲ held lease fedcba0987 (agent): hold lapsed 3h00m ago - renew it                                       
-                                                                                                        
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
 │ 3 leases · 2 running (2 burst) · 1 susp · 0 lost│  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │

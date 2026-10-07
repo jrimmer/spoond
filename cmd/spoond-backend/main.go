@@ -203,9 +203,9 @@ func notifyBackupMaxAge() time.Duration {
 
 // keptDiskWarnPct is the kept-checkpoint disk share (#126) past which
 // the notifier's disk.kept check warns: KEPT_DISK_WARN_PCT, default 40.
-// A configured 0 disables the check (and the dashboard's banner row,
-// which reads the same knob) — the check is only registered when the
-// value is positive.
+// A configured 0 disables the check (and the dashboard's kept-disk
+// notification, which reads the same knob) — the check is only
+// registered when the value is positive.
 func keptDiskWarnPct() float64 {
 	// Parsed as a float, as the dashboard parses the same knob, so a
 	// fractional setting (40.5) means the same in both.
