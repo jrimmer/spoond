@@ -809,6 +809,10 @@ func isAdmin(r *http.Request) bool {
 // minute.
 const burstRetryAfterSecs = 30
 
+// drainRetryAfterSecs is the Retry-After on a create refused while the
+// node drains for a planned orchestrator restart.
+const drainRetryAfterSecs = 30
+
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -1044,7 +1048,10 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image string, err err
 		// error.
 		status, msg, retryAfter = http.StatusServiceUnavailable, err.Error(), burstRetryAfterSecs
 	case errors.Is(err, errDraining):
-		status, msg = http.StatusServiceUnavailable, "draining"
+		// A planned orchestrator restart drains the node for a minute or
+		// three; tell clients when to come back instead of letting them
+		// guess.
+		status, msg, retryAfter = http.StatusServiceUnavailable, "draining", drainRetryAfterSecs
 	case errors.Is(err, substrate.ErrCapacity):
 		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
 	default:

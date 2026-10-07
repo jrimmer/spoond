@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -468,6 +469,9 @@ func TestAdmitWaitDrainAnswersQueued(t *testing.T) {
 	}
 	if msg, _ := r.body["error"].(string); !strings.Contains(msg, "draining") {
 		t.Fatalf("drained body = %v, want draining", r.body)
+	}
+	if ra := r.hdr.Get("Retry-After"); ra != strconv.Itoa(drainRetryAfterSecs) {
+		t.Fatalf("drained Retry-After = %q, want %d", ra, drainRetryAfterSecs)
 	}
 }
 
