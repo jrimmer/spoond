@@ -1003,8 +1003,10 @@ trouble is not a dashboard message: the viewer cannot act on a lease,
 so spoond tells the lease's initiator itself (the lease event stream
 and the API's `409 lease_lost` with `lost_reason`). TLS certificate expiry is
 left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
-`kept N (X GiB)` when any build is pinned. A status line under the panels carries the headline numbers
-and the clock. The browser page is the grid in a `<pre>` (Datastar
+`kept N (X GiB)` when any build is pinned. The header's right side
+carries spoond's uptime and the frame's clock as `up <dur>, <time>`
+(the uptime drops before the clock on a narrow frame). The browser page
+is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
 styles in the terminal, at the terminal's width (COLUMNS, else 104),
 redrawn every 2 seconds until interrupted. It runs as its own service on **:8893** behind
@@ -1042,7 +1044,7 @@ variables:
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
-| `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol` | systemd units to show |
+| `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch` | systemd units to show |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |

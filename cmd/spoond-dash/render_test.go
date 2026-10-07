@@ -280,6 +280,47 @@ func TestServicesPanelOverflowRow(t *testing.T) {
 	}
 }
 
+// TestHeaderUptimeAndClock: the header keeps the title centred, draws
+// "up <dur>, <time>" right-aligned, drops the uptime before the time on
+// a frame too narrow for both, and never overlaps the centred title.
+func TestHeaderUptimeAndClock(t *testing.T) {
+	header := func(s Snapshot, w int, host string) string {
+		l := &layout{w: w, host: host, s: s}
+		rows := strings.Split(l.assemble().Plain(), "\n")
+		return rows[0]
+	}
+
+	s := sampleSnapshot()
+	// Full width: both the uptime and the clock, right-aligned.
+	if row := header(s, DefaultWidth, "spoond.example.com"); !strings.HasSuffix(row, "up 9m, 12:00:00") {
+		t.Fatalf("header lacks the right-aligned uptime and clock:\n%s", row)
+	}
+	// No backend uptime: the clock alone.
+	s.BackendUp = 0
+	if row := header(s, DefaultWidth, "spoond.example.com"); !strings.HasSuffix(row, "12:00:00") || strings.Contains(row, "up ") {
+		t.Fatalf("header without an uptime shows one:\n%s", row)
+	}
+
+	// A long title leaves no room for the uptime: it is dropped before
+	// the time, never overlapped by it.
+	s = sampleSnapshot()
+	row := header(s, minW, "a-very-long-hostname.example.internal")
+	title := "SPOOND · a-very-long-hostname.example.internal · dev"
+	if !strings.Contains(row, title) {
+		t.Fatalf("centred title missing or shifted:\n%s", row)
+	}
+	if strings.Contains(row, "up ") {
+		t.Fatalf("uptime kept though it does not fit clear of the title:\n%s", row)
+	}
+	if !strings.HasSuffix(row, "12:00:00") {
+		t.Fatalf("clock dropped though it fits:\n%s", row)
+	}
+	titleEnd := minW/2 - len([]rune(title))/2 + len([]rune(title))
+	if start := minW - len("12:00:00"); start < titleEnd {
+		t.Fatalf("clock overlaps the title: starts at %d, title ends at %d:\n%s", start, titleEnd, row)
+	}
+}
+
 // TestVersionLabel: the header's version is short — a tag as it is, a
 // Go pseudo-version base+7-char hash, "?" when there was none.
 func TestVersionLabel(t *testing.T) {
@@ -512,7 +553,7 @@ func TestSanitizeReplacesControlChars(t *testing.T) {
 	// The escapes must not survive into a drawn frame.
 	s := sampleSnapshot()
 	s.Rows[0].Name = "\x1b]0;owned\x07"
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
+	l := &layout{w: DefaultWidth, host: "h", s: s}
 	g := l.assemble()
 	if err := g.Check(glyphs()); err != nil {
 		t.Fatalf("frame with hostile lease name failed Check: %v", err)
@@ -656,7 +697,7 @@ func TestLeasesLeftShowsHoldExpiry(t *testing.T) {
 func TestLeaseNameShownWhenNoHolder(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Name: "jasons box", Age: "5m", Left: "10m"}}
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
+	l := &layout{w: DefaultWidth, host: "h", s: s}
 	p := l.assemble().Plain()
 	if !strings.Contains(p, "jasons box") {
 		t.Fatalf("lease name not shown in the holder column:\n%s", p)
@@ -670,7 +711,7 @@ func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Comment: "forgejo: example.com/site #218",
 		Age: "5m", Left: "10m"}}
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
+	l := &layout{w: DefaultWidth, host: "h", s: s}
 	p := l.assemble().Plain()
 	if !strings.Contains(p, "forgejo: example") || !strings.Contains(p, "…") {
 		t.Fatalf("lease comment not shown in the holder column:\n%s", p)
@@ -1036,7 +1077,7 @@ func TestEventsPanelLostAndCreatedColours(t *testing.T) {
 // ╎ at that level without changing the bar's width; a meter with no
 // warning level draws no tick.
 func TestMeterWarningTick(t *testing.T) {
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow}
+	l := &layout{w: DefaultWidth, host: "h"}
 	segs := l.meterSegs("cpu", 50, 75, 90, meterBarW)
 	tick := false
 	for _, s := range segs {

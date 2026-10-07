@@ -46,6 +46,14 @@ summarised from README "Status".
   branch on `409` with `code: lease_lost`; a `410` still means the
   sandbox is gone with nothing in flight. The new `lost_reason` field on
   the lease object is additive (`omitempty`).
+- **The dashboard drops its footer status line; the header's right side
+  now shows `up <dur>, <time>`.** The footer's readouts were already
+  elsewhere: leases in the leases panel, hugepages and disk in the
+  capacity and host panels, units in the services panel, and the clock
+  moves to the header next to spoond's uptime. On a narrow frame the
+  uptime drops before the clock, and neither overlaps the centred
+  `SPOOND · host · version` title. `DASH_SERVICES` now includes
+  `spoond-netwatch` by default.
 
 ### Fixed
 
