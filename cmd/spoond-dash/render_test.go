@@ -1519,52 +1519,112 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestIOHostRowsDrawn: the host panel shows the PSI pressure and the
-// snapshot disk's throughput when the collector has them, and hides both
-// when the kernel has no PSI (a missing /proc/pressure), rather than
-// drawing a calm zero.
+// TestIOHostRowsDrawn: the host panel draws the PSI stall meter and the
+// snapshot device's busy meter directly under the CPU meter; a missing
+// PSI hides the stall meter only and a missing device hides the busy
+// meter only, rather than drawing a calm zero.
 func TestIOHostRowsDrawn(t *testing.T) {
 	s := healthySnapshot()
 	s.IOAvail = true
 	s.IOSome10, s.IOSome60 = 0.3, 0.2
 	s.DiskDevice, s.DiskWriteMB, s.DiskBusyPct = "nvme0n1", 12, 18
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "I/O pressure") || !strings.Contains(p, "some 0.2% / full 0.0% (60s)") {
-		t.Fatalf("pressure row missing:\n%s", p)
+	if !strings.Contains(p, "I/O stall") || !strings.Contains(p, "0.0% (some 0.2%)") {
+		t.Fatalf("stall meter missing:\n%s", p)
 	}
-	if !strings.Contains(p, "nvme0n1") || !strings.Contains(p, "12 MB/s w, 18% busy") {
-		t.Fatalf("device row missing:\n%s", p)
+	if !strings.Contains(p, "nvme0n1 busy") || !strings.Contains(p, "18% · 12 MB/s w") {
+		t.Fatalf("busy meter missing:\n%s", p)
 	}
 
+	// No PSI: only the stall meter goes.
 	s.IOAvail = false
 	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if strings.Contains(p, "I/O pressure") || strings.Contains(p, "nvme0n1") {
-		t.Fatalf("no PSI must hide the I/O rows:\n%s", p)
+	if strings.Contains(p, "I/O stall") {
+		t.Fatalf("no PSI must hide the stall meter:\n%s", p)
+	}
+	if !strings.Contains(p, "nvme0n1 busy") {
+		t.Fatalf("no PSI must keep the busy meter:\n%s", p)
+	}
+
+	// No device: only the busy meter goes.
+	s.IOAvail = true
+	s.DiskDevice = ""
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(p, "disk busy") || strings.Contains(p, "MB/s w") {
+		t.Fatalf("no device must hide the busy meter:\n%s", p)
+	}
+	if !strings.Contains(p, "I/O stall") {
+		t.Fatalf("no device must keep the stall meter:\n%s", p)
 	}
 }
 
-// TestIOMeterStyle: the disk I/O rows colour with the same ok/warn/bad
-// thresholds as the other meters, from the full 60 s average against
-// DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT (defaults 5 and 15), and
-// the device row from its busy share.
-func TestIOMeterStyle(t *testing.T) {
-	cases := []struct {
-		pct       float64
-		warn, bad float64
-		want      string
-	}{
-		{0, 5, 15, "ok"},
-		{4.9, 5, 15, "ok"},
-		{5, 5, 15, "warn"},
-		{14.9, 5, 15, "warn"},
-		{15, 5, 15, "bad"},
-		{40, 5, 15, "bad"},
-	}
-	for _, tc := range cases {
-		if got := meterStyle(tc.pct, tc.warn, tc.bad); got != tc.want {
-			t.Errorf("meterStyle(%v, %v, %v) = %q, want %q", tc.pct, tc.warn, tc.bad, got, tc.want)
+// hostBarStyle finds the first bar cell on the row carrying label and
+// returns its style — the ok/warn/bad the meter drew.
+func hostBarStyle(t *testing.T, s Snapshot, label string) string {
+	t.Helper()
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	for y, row := range strings.Split(g.Plain(), "\n") {
+		if !strings.Contains(row, label) {
+			continue
+		}
+		for x := 0; x < g.Cols(); x++ {
+			if c := g.At(x, y); c.Rune == '█' || c.Rune == '░' {
+				return c.Style
+			}
 		}
 	}
+	t.Fatalf("row with %q not found", label)
+	return ""
+}
+
+// TestIOMeterStyle: the I/O stall meter colours from the full 60 s
+// average against DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT
+// (defaults 5 and 15); the busy meter colours from the device's busy
+// share (warn 80, bad 90).
+func TestIOMeterStyle(t *testing.T) {
+	s := healthySnapshot()
+	s.IOAvail = true
+	s.DiskDevice = "nvme0n1"
+	for _, tc := range []struct {
+		full float64
+		want string
+	}{
+		{0, "ok"},
+		{4.9, "ok"},
+		{5, "warn"},
+		{14.9, "warn"},
+		{15, "bad"},
+		{40, "bad"},
+	} {
+		s.IOFull60 = tc.full
+		if got := hostBarStyle(t, s, "I/O stall"); got != tc.want {
+			t.Errorf("stall full %v = %q, want %q", tc.full, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		busy float64
+		want string
+	}{
+		{0, "ok"},
+		{79.9, "ok"},
+		{80, "warn"},
+		{89.9, "warn"},
+		{90, "bad"},
+		{100, "bad"},
+	} {
+		s.DiskBusyPct = tc.busy
+		if got := hostBarStyle(t, s, "nvme0n1 busy"); got != tc.want {
+			t.Errorf("busy %v = %q, want %q", tc.busy, got, tc.want)
+		}
+	}
+
+	// A device whose name does not fit the label column falls back to the
+	// generic label.
+	s.DiskDevice = "a-very-long-device-name"
+	if p := Draw(s, DefaultWidth, fixedNow, "h").Plain(); !strings.Contains(p, "disk busy") || strings.Contains(p, "a-very-long-device-name") {
+		t.Fatalf("long device label not shortened:\n%s", p)
+	}
+
 	// The environment raises the levels; an unparsable value keeps the
 	// default.
 	t.Setenv("DASH_IO_FULL_WARN_PCT", "10")

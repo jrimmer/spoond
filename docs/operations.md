@@ -978,9 +978,9 @@ spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
 for watching rather than triage. It draws the whole frame as one
 character grid at a fixed width — capacity (running/limit meter, leases
 by state, queued, granted, swept, and one row per image with live
-leases) beside the host meters (CPU, memory, hugepages, snapshot and
-root disk, and the disk I/O readout — PSI pressure `some`/`full` over
-60 s and the snapshot device's write throughput and busy share) at a
+leases) beside the host meters (CPU, the two disk I/O meters directly
+under it — `I/O stall` from PSI and `<dev> busy` from the snapshot
+device — then memory, hugepages, snapshot and root disk) at a
 wide frame, stacked below it at a narrow one — then a
 full-width throughput panel (running leases, requests per second,
 creates per minute and egress connections, each with its current value
@@ -1037,8 +1037,13 @@ history are kept so a new page starts with trends. The host I/O readout
 comes from `/proc/pressure/io` (PSI: `some` and `full` over 60 s, not
 `iowait`, which drops when CPUs are busy even if the disk is saturated)
 and `/proc/diskstats` (the snapshot device's write MB/s and busy share,
-a delta between collections). A kernel without PSI (no
-`/proc/pressure`) simply hides the pressure row instead of erroring;
+a delta between collections). The I/O stall meter's value is the full
+60 s average, its value text names the 60 s `some` average too
+(`0.4% (some 2.1%)`); the busy meter's value text is
+`<busy>% · <N> MB/s w`, its label the device name (`nvme0n1 busy`)
+when that fits the meter label column, else `disk busy`. A kernel
+without PSI (no `/proc/pressure`) simply hides the stall meter;
+a device the collector could not resolve hides the busy meter only.
 `DASH_DISK_DEVICE` names the block device to watch, defaulting to the
 one the storage path's mount sits on. With
 `DASH_EVENTS_TOKEN` set, the collector also holds one subscription to
@@ -1064,7 +1069,7 @@ variables:
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
 | `DASH_DISK_DEVICE` | *(auto from the storage mount)* | block device for the write-throughput and busy readout |
-| `DASH_IO_FULL_WARN_PCT` | `5` | PSI full avg60 at which the pressure meter turns warn |
+| `DASH_IO_FULL_WARN_PCT` | `5` | PSI full avg60 at which the I/O stall meter turns warn |
 | `DASH_IO_FULL_BAD_PCT` | `15` | PSI full avg60 at which it turns bad and the notification fires |
 | `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch` | systemd units to show |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
