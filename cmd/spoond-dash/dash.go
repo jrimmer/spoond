@@ -38,8 +38,8 @@
 //	                     page and spoond top both draw at this width —
 //	                     top clamps the terminal's COLUMNS into it)
 //	DASH_HOST            header label (default the hostname)
-//	DASH_PROJECT_URL     footer project URL (default the module's home,
-//	                     github.com/jrimmer/spoond; shown without scheme)
+//	DASH_PROJECT_URL     the footer GitHub mark's target (default the
+//	                     module's home, github.com/jrimmer/spoond)
 package spoonddash
 
 import (

@@ -1008,15 +1008,18 @@ trouble is not a dashboard message: the viewer cannot act on a lease,
 so spoond tells the lease's initiator itself (the lease event stream
 and the API's `410 lease_lost` with `lost_reason`). TLS certificate expiry is
 left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
-`kept N (X GiB)` when any build is pinned. The header centres
-`SPOOND · <host>` and right-aligns spoond's uptime and the frame's clock
-as `up <dur>, <time>` (the uptime drops before the clock on a narrow
-frame). The footer is one dim, centred line naming the project —
-`spoond · github.com/jrimmer/spoond · v2.7.0 (2026-10-07)` — with
-`DASH_PROJECT_URL` (shown without its scheme), the dashboard binary's
-version (`debug.ReadBuildInfo`, shortened like the header used to) and
-the build's release date (`vcs.time` as `YYYY-MM-DD`, omitted for a dev
-build); on a narrow frame the URL drops first, then the date. The
+`kept N (X GiB)` when any build is pinned. The header draws
+`SPOOND · <host>` at the left margin and right-aligns spoond's uptime
+and the frame's clock as `up <dur>, <time>` (the uptime drops before the
+clock on a narrow frame). The footer is one dim, centred line —
+`Spoond v2.7.1 (2026-10-07) · GitHub` — with the dashboard binary's
+version (`debug.ReadBuildInfo`, shortened like the header used to), its
+release date (`vcs.time` as `YYYY-MM-DD`, omitted for a dev build) and
+the GitHub mark linking to `DASH_PROJECT_URL`; the URL text is no
+longer shown. On a narrow frame the date drops first, keeping the
+version and the mark. The mark is the standard GitHub octocat inline
+SVG (16px, `currentColor`) in the browser and the dim word `GitHub` in
+the terminal. The
 browser page
 is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
@@ -1071,7 +1074,7 @@ variables:
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |
 | `DASH_HOST` | *(the hostname)* | header label |
-| `DASH_PROJECT_URL` | `github.com/jrimmer/spoond` | the footer's project URL, shown without its scheme and linked in the page |
+| `DASH_PROJECT_URL` | `github.com/jrimmer/spoond` | the footer's GitHub mark links here |
 
 The I/O thresholds are a first cut, to be tuned from #136's
 measurements. `iowait` is deliberately not used: it is CPU idle time

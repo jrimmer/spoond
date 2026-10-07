@@ -283,10 +283,10 @@ func TestServicesPanelOverflowRow(t *testing.T) {
 	}
 }
 
-// TestHeaderUptimeAndClock: the header keeps the title centred as
-// SPOOND · host (the version lives on the footer, never shown twice),
-// draws "up <dur>, <time>" right-aligned, drops the uptime before the
-// time on a frame too narrow for both, and never overlaps the centred
+// TestHeaderUptimeAndClock: the header draws the title at the left
+// margin as SPOOND · host (the version lives on the footer, never shown
+// twice), draws "up <dur>, <time>" right-aligned, drops the uptime
+// before the time on a frame too narrow for both, and never overlaps the
 // title.
 func TestHeaderUptimeAndClock(t *testing.T) {
 	header := func(s Snapshot, w int, host string) string {
@@ -301,10 +301,10 @@ func TestHeaderUptimeAndClock(t *testing.T) {
 	if !strings.HasSuffix(row, "up 9m, 12:00:00") {
 		t.Fatalf("header lacks the right-aligned uptime and clock:\n%s", row)
 	}
-	// The title carries the host and no version.
+	// The title is at the left margin and carries the host, no version.
 	title := "SPOOND · spoond.example.com"
-	if !strings.Contains(row, title) {
-		t.Fatalf("centred title missing:\n%s", row)
+	if !strings.HasPrefix(row, title) {
+		t.Fatalf("left-aligned title missing:\n%s", row)
 	}
 	if strings.Contains(row, versionLabel(dashVersion)) {
 		t.Fatalf("header still shows the version:\n%s", row)
@@ -318,10 +318,11 @@ func TestHeaderUptimeAndClock(t *testing.T) {
 	// A long title leaves no room for the uptime: it is dropped before
 	// the time, never overlapped by it.
 	s = sampleSnapshot()
-	row = header(s, minW, "a-very-long-hostname.example.internal")
-	title = "SPOOND · a-very-long-hostname.example.internal"
-	if !strings.Contains(row, title) {
-		t.Fatalf("centred title missing or shifted:\n%s", row)
+	longHost := strings.Repeat("a", 48)
+	row = header(s, minW, longHost)
+	title = "SPOOND · " + longHost
+	if !strings.HasPrefix(row, title) {
+		t.Fatalf("left-aligned title missing or shifted:\n%s", row)
 	}
 	if strings.Contains(row, "up ") {
 		t.Fatalf("uptime kept though it does not fit clear of the title:\n%s", row)
@@ -329,17 +330,16 @@ func TestHeaderUptimeAndClock(t *testing.T) {
 	if !strings.HasSuffix(row, "12:00:00") {
 		t.Fatalf("clock dropped though it fits:\n%s", row)
 	}
-	titleEnd := minW/2 - len([]rune(title))/2 + len([]rune(title))
+	titleEnd := len([]rune(title))
 	if start := minW - len("12:00:00"); start < titleEnd {
 		t.Fatalf("clock overlaps the title: starts at %d, title ends at %d:\n%s", start, titleEnd, row)
 	}
 }
 
-// TestFooterProjectLine: the footer names the project — name, URL,
-// version and release date — dim and centred. The release date comes
-// from the build's vcs.time and is omitted without one; a narrow frame
-// drops the URL first, then the date. The version is the dashboard
-// binary's own (shortened by versionLabel).
+// TestFooterProjectLine: the footer reads "Spoond <version> (<date>) ·
+// GitHub" — capital-S, the version, the release date and the GitHub mark
+// in the terminal grid. The release date comes from the build's vcs.time
+// and is omitted without one. Dim and centred.
 func TestFooterProjectLine(t *testing.T) {
 	footer := func(w int) string {
 		l := &layout{w: w, host: "h", s: sampleSnapshot()}
@@ -350,13 +350,17 @@ func TestFooterProjectLine(t *testing.T) {
 	// No vcs.time in a test binary: the date is omitted.
 	t.Setenv("DASH_PROJECT_URL", "")
 	row := footer(DefaultWidth)
-	want := "spoond · github.com/jrimmer/spoond · " + versionLabel(dashVersion)
+	want := "Spoond " + versionLabel(dashVersion) + " · GitHub"
 	trimmed := strings.TrimSpace(row)
 	if trimmed != want {
 		t.Fatalf("footer = %q, want %q", trimmed, want)
 	}
 	if strings.Contains(trimmed, " (") {
 		t.Fatalf("footer shows a release date though the build has no vcs.time: %q", trimmed)
+	}
+	// The project URL is no longer shown as text.
+	if strings.Contains(trimmed, "github.com/jrimmer/spoond") {
+		t.Fatalf("footer still shows the project URL text: %q", trimmed)
 	}
 	// Centred: the left padding matches the right, to within a cell.
 	left := len(row) - len(strings.TrimLeft(row, " "))
@@ -366,47 +370,44 @@ func TestFooterProjectLine(t *testing.T) {
 	}
 }
 
-// TestFooterProjectURL: DASH_PROJECT_URL replaces the default home and
-// is shown without a scheme, trailing slash trimmed.
+// TestFooterProjectURL: DASH_PROJECT_URL sets the anchor's href (the
+// display text is the GitHub mark, so no URL is shown); the default is
+// the module's home with an https scheme.
 func TestFooterProjectURL(t *testing.T) {
+	t.Setenv("DASH_PROJECT_URL", "")
+	if got, want := projectHref(), "https://github.com/jrimmer/spoond"; got != want {
+		t.Fatalf("projectHref() = %q, want %q", got, want)
+	}
 	t.Setenv("DASH_PROJECT_URL", "https://example.com/spoond/")
-	if got, want := projectURL(), "example.com/spoond"; got != want {
-		t.Fatalf("projectURL() = %q, want %q", got, want)
+	if got, want := projectHref(), "https://example.com/spoond/"; got != want {
+		t.Fatalf("projectHref() = %q, want %q", got, want)
 	}
 	t.Setenv("DASH_PROJECT_URL", "example.com/spoond")
-	if got, want := projectURL(), "example.com/spoond"; got != want {
-		t.Fatalf("projectURL() = %q, want %q", got, want)
+	if got, want := projectHref(), "https://example.com/spoond"; got != want {
+		t.Fatalf("projectHref() = %q, want %q", got, want)
 	}
 }
 
-// TestFooterDropsNarrow: on a narrow frame the URL drops first, then
-// the release date; the name and version always stay.
+// TestFooterDropsNarrow: on a narrow frame the date drops first; the
+// version and the GitHub mark always stay.
 func TestFooterDropsNarrow(t *testing.T) {
-	f := footerParts{name: "spoond", url: "github.com/jrimmer/spoond", version: "v2.7.0 (2026-10-07)"}
+	f := footerParts{version: "v2.7.1", date: "2026-10-07"}
 	// Wide enough for the whole line.
-	if got := segsText(footerSegs(f, 104)); got != "spoond · github.com/jrimmer/spoond · v2.7.0 (2026-10-07)" {
+	if got := segsText(footerSegs(f, 104)); got != "Spoond v2.7.1 (2026-10-07) · GitHub" {
 		t.Fatalf("full footer = %q", got)
 	}
-	// Too narrow for the URL, still room for the date.
-	if got := segsText(footerSegs(f, 32)); got != "spoond · v2.7.0 (2026-10-07)" {
-		t.Fatalf("URL-dropped footer = %q", got)
-	}
-	// Too narrow for the date too: the version alone.
-	if got := segsText(footerSegs(f, 20)); got != "spoond · v2.7.0" {
+	// Too narrow for the date: version and mark stay.
+	if got := segsText(footerSegs(f, 20)); got != "Spoond v2.7.1 · GitHub" {
 		t.Fatalf("date-dropped footer = %q", got)
-	}
-	// Everything named keeps the name and version.
-	if got := segsText(footerSegs(f, 5)); got != "spoond" {
-		t.Fatalf("name-only footer = %q", got)
 	}
 }
 
-// TestFooterNoDateDropsToName: a dev build with no date and no room for
-// the URL keeps name and version, then the name alone.
-func TestFooterNoDateDropsToName(t *testing.T) {
-	f := footerParts{name: "spoond", url: "github.com/jrimmer/spoond", version: "dev"}
-	if got := segsText(footerSegs(f, 12)); got != "spoond · dev" {
-		t.Fatalf("footer = %q, want %q", got, "spoond · dev")
+// TestFooterNoDateKeepsMark: a dev build (no date) always keeps the
+// version and the GitHub mark.
+func TestFooterNoDateKeepsMark(t *testing.T) {
+	f := footerParts{version: "dev"}
+	if got := segsText(footerSegs(f, 104)); got != "Spoond dev · GitHub" {
+		t.Fatalf("footer = %q, want %q", got, "Spoond dev · GitHub")
 	}
 }
 
@@ -890,19 +891,39 @@ func TestPageLinksAreAnchors(t *testing.T) {
 	}
 }
 
-// TestPageFooterProjectLink: the footer's project URL is a real anchor
-// in the page (the page already draws holder links), pointing at the
-// href with the scheme the display text leaves off.
+// TestPageFooterProjectLink: the footer row's HTML carries the GitHub
+// mark's inline SVG inside an anchor with the project URL, title and
+// aria-label "spoond on GitHub", target=_blank and rel=noopener. The
+// URL text itself is not shown.
 func TestPageFooterProjectLink(t *testing.T) {
 	t.Setenv("DASH_PROJECT_URL", "github.com/jrimmer/spoond")
 	s := sampleSnapshot()
 	g := Draw(s, DefaultWidth, fixedNow, "h")
 	html := pageGrid(g, holderLinks(s, DefaultWidth, fixedNow))
-	if !strings.Contains(html, `<a class="g-linkdim" href="https://github.com/jrimmer/spoond"`) {
-		t.Fatalf("footer URL is not an anchor with an https href:\n%s", html)
+	if !strings.Contains(html, `<a class="g-ghmark" href="https://github.com/jrimmer/spoond"`) {
+		t.Fatalf("footer mark is not an anchor with the project URL:\n%s", html)
 	}
-	if !strings.Contains(html, `target="_blank" rel="noopener"`) {
+	if !strings.Contains(html, `<svg`) || !strings.Contains(html, `fill="currentColor"`) {
+		t.Fatalf("footer anchor lacks the GitHub mark SVG:\n%s", html)
+	}
+	if !strings.Contains(html, `title="spoond on GitHub"`) || !strings.Contains(html, `aria-label="spoond on GitHub"`) {
+		t.Fatalf("footer link missing title/aria-label:\n%s", html)
+	}
+	if !strings.Contains(html, `target="_blank"`) || !strings.Contains(html, `rel="noopener"`) {
 		t.Fatalf("footer link missing target/rel:\n%s", html)
+	}
+	// The URL is no longer shown as text in the footer row.
+	footerRow := ""
+	for _, line := range strings.Split(html, `<span class="gr"`) {
+		if strings.Contains(line, `class="g-ghmark"`) {
+			footerRow = line
+		}
+	}
+	if footerRow == "" {
+		t.Fatalf("no footer row with the GitHub mark:\n%s", html)
+	}
+	if strings.Contains(strings.ReplaceAll(footerRow, `href="https://github.com/jrimmer/spoond"`, ""), "github.com/jrimmer/spoond") {
+		t.Fatalf("footer row still shows the project URL as text:\n%s", footerRow)
 	}
 }
 
