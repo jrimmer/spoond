@@ -56,6 +56,16 @@ type config struct {
 	// allowlist; connections to it must be blocked (TestN9). It has no
 	// default and skips with MixedPrivate when unset.
 	MixedBlockedPrivate string
+	// MixedPrivateDomain is a domain that resolves to MixedPrivate. It is
+	// added to the same restricted allowlist and probed with SNI
+	// (TestN9), covering the fork's domain path. It has no default; unset
+	// skips only this probe.
+	MixedPrivateDomain string
+	// MixedSSHPort is a non-TLS port on MixedPrivate, probed with a plain
+	// TCP connect under the same restricted allowlist (TestN9), covering
+	// the IP path for a non-443 destination. Default 22; 0 skips the
+	// probe.
+	MixedSSHPort int
 	// SecondToken is the token of a second, non-admin identity user
 	// (CONFORMANCE_SECOND_TOKEN). Group C uses it as the owner of the
 	// guaranteed lease: the production conformance user is not admin and

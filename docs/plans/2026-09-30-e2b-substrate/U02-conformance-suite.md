@@ -87,6 +87,8 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 | `CONFORMANCE_MIXED_PRIVATE_PORT` | no | the TLS port of `CONFORMANCE_MIXED_PRIVATE` (N9). Default `443` |
 | `CONFORMANCE_MIXED_DOMAIN` | no | public domain the same restricted lease allowlists (N9). Default `example.com` |
 | `CONFORMANCE_MIXED_BLOCKED_PRIVATE` | vm2 | private IP the same restricted lease does **not** allowlist; a connection to it must be blocked (N9). **No default**: N9 skips with `CONFORMANCE_MIXED_PRIVATE` when unset |
+| `CONFORMANCE_MIXED_PRIVATE_DOMAIN` | vm2 | a domain that resolves to `CONFORMANCE_MIXED_PRIVATE`; N9 adds it to the same allowlist and probes it with SNI, covering the domain path. **No default**: only that probe skips when unset |
+| `CONFORMANCE_MIXED_SSH_PORT` | no | a non-TLS port on `CONFORMANCE_MIXED_PRIVATE` (N9) probed with a plain TCP connect. Default `22`; `0` skips the probe |
 
 ## Running
 
@@ -340,15 +342,22 @@ For every N test, a helper `canTCP(id, host, port) bool` runs:
   `CONFORMANCE_MIXED_PRIVATE` and `CONFORMANCE_MIXED_BLOCKED_PRIVATE` are
   set, so a run never probes an assumed LAN address): create `py-base` with
   `restricted` and `egress_allowlist: [CONFORMANCE_MIXED_PRIVATE,
-  CONFORMANCE_MIXED_DOMAIN]` (default domain `example.com`, port
-  `CONFORMANCE_MIXED_PRIVATE_PORT` default `443`).
+  CONFORMANCE_MIXED_DOMAIN, CONFORMANCE_MIXED_PRIVATE_DOMAIN]` (default
+  domain `example.com`, port `CONFORMANCE_MIXED_PRIVATE_PORT` default `443`).
   1. `canTCP(CONFORMANCE_MIXED_PRIVATE, CONFORMANCE_MIXED_PRIVATE_PORT) = yes`
      — a domain in the allowlist must not break the allow-listed private IP
      (spoond-4pa).
-  2. `canTCP(CONFORMANCE_MIXED_DOMAIN, 443) = yes`.
-  3. `canTCP(www.google.com, 443) = no` — an unlisted public host stays
+  2. `canTCP(CONFORMANCE_MIXED_PRIVATE, CONFORMANCE_MIXED_SSH_PORT) = yes`
+     (default port `22`, `0` skips) — the private IP works on a non-443
+     (non-SNI) port too.
+  3. `canTCP(CONFORMANCE_MIXED_DOMAIN, 443) = yes`.
+  4. when `CONFORMANCE_MIXED_PRIVATE_DOMAIN` is set,
+     `canTCPWithSNI(CONFORMANCE_MIXED_PRIVATE, CONFORMANCE_MIXED_PRIVATE_PORT,
+     CONFORMANCE_MIXED_PRIVATE_DOMAIN) = yes` — a domain that resolves to the
+     allow-listed LAN address is admitted on the fork's domain (SNI) path.
+  5. `canTCP(www.google.com, 443) = no` — an unlisted public host stays
      blocked.
-  4. `canTCP(CONFORMANCE_MIXED_BLOCKED_PRIVATE, 443) = no` — an unlisted
+  6. `canTCP(CONFORMANCE_MIXED_BLOCKED_PRIVATE, 443) = no` — an unlisted
      private address stays blocked.
 
 ### Group R — restarts and crashes (only with `CONFORMANCE_DESTRUCTIVE=1`)

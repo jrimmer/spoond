@@ -64,7 +64,12 @@ summarised from README "Status".
   `fix/private-allowance-domain-path`), a domain that resolves to an
   allow-listed private address is accepted on the SNI path, so an
   allow-listed LAN name works together with an allow-listed LAN IP;
-  everything not explicitly allowed is still refused.
+  everything not explicitly allowed is still refused. The fallback is a
+  **public** resolver, so with a private guest resolver configured
+  (`SPOOND_GUEST_DNS_ADDR`, production) it is dropped entirely rather
+  than added on every port; a deployment without one keeps it. The
+  substrate no longer appends into the caller's `allowed_cidrs` slice,
+  and a bare IPv6 address in an allowlist gets `/128` instead of `/32`.
 - **A create refused while the node drains says when to retry.** The
   `503 draining` answer (during a planned orchestrator restart) now
   carries `Retry-After: 30`, like the burst-reserve and preemption 503s.

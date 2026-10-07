@@ -78,6 +78,11 @@ func TestEgressConfig(t *testing.T) {
 	if got := cfg.GetAllowedCidrs()[0]; got != "0.0.0.0/0" {
 		t.Fatalf("allowed_cidrs[0] = %q", got)
 	}
+	// The fallback is appended to a copy: the caller's slice keeps its
+	// length and backing storage.
+	if got := eg.AllowedCIDRs; len(got) != 1 || got[0] != "0.0.0.0/0" {
+		t.Fatalf("egressConfig aliased the caller's AllowedCIDRs: %v", got)
+	}
 	if got := cfg.GetDeniedCidrs(); len(got) != 1 || got[0] != "192.0.2.0/24" {
 		t.Fatalf("denied_cidrs = %v", got)
 	}
@@ -105,6 +110,22 @@ func TestEgressConfig(t *testing.T) {
 	}
 	if len(plain.GetAllowedPrivate()) != 0 {
 		t.Fatalf("allowed_private = %v", plain.GetAllowedPrivate())
+	}
+
+	// A configured private guest resolver replaces the public fallback: no
+	// 8.8.8.8, and the resolver allowance is left to api/service.go.
+	resolved := egressConfig(substrate.Egress{
+		AllowedCIDRs:   []string{"0.0.0.0/0"},
+		AllowedDomains: []string{"example.com"},
+		GuestDNS:       true,
+	})
+	for _, c := range resolved.GetAllowedCidrs() {
+		if c == "8.8.8.8/32" {
+			t.Fatalf("allowed_cidrs %v must not contain 8.8.8.8/32 when a guest resolver is configured", resolved.GetAllowedCidrs())
+		}
+	}
+	if len(resolved.GetAllowedCidrs()) != 1 || resolved.GetAllowedCidrs()[0] != "0.0.0.0/0" {
+		t.Fatalf("allowed_cidrs = %v", resolved.GetAllowedCidrs())
 	}
 }
 

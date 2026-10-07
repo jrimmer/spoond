@@ -640,10 +640,13 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 	}
 	// Guests resolve through the configured resolver only
 	// (SPOOND_GUEST_DNS_ADDR, baked into the guest image by
-	// images/guest/spoond-guest-init). Empty = no allowance.
+	// images/guest/spoond-guest-init). Empty = no allowance, and the
+	// substrate then keeps the public DNS fallback for allow-listed domains.
 	var dns []substrate.PrivateAllowance
+	guestDNS := false
 	if a, ok := dnsAllowance(s.cfg.GuestDNSAddr); ok {
 		dns = []substrate.PrivateAllowance{a}
+		guestDNS = true
 	}
 	// The fork's host-address guard admits a destination on the host only
 	// when an allowance names both the IP and the port; the LAN ranges'
@@ -666,16 +669,18 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 	case PolicyInternet:
 		// Public destinations stay allowed; listing the LAN ranges as
 		// private allowances keeps private/LAN addresses reachable.
-		return substrate.Egress{Private: append(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.peerAllowances(l)...)}
+		return substrate.Egress{Private: append(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.peerAllowances(l)...), GuestDNS: guestDNS}
 	case PolicyLAN:
 		return substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
 			Private:     append(append(append(lanPrivate(l, hostSvc), dns...), hostAPI...), s.peerAllowances(l)...),
+			GuestDNS:    guestDNS,
 		}
 	default: // restricted: the default when empty
 		eg := substrate.Egress{
 			DeniedCIDRs: []string{"0.0.0.0/0"},
 			Private:     append([]substrate.PrivateAllowance{hostSvc}, dns...),
+			GuestDNS:    guestDNS,
 		}
 		for _, entry := range l.NetAllow {
 			entry = strings.TrimSpace(entry)
@@ -684,7 +689,11 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 			}
 			cidr := entry
 			if ip := net.ParseIP(entry); ip != nil {
-				cidr = ip.String() + "/32"
+				if ip.To4() == nil {
+					cidr = ip.String() + "/128"
+				} else {
+					cidr = ip.String() + "/32"
+				}
 			} else if _, n, err := net.ParseCIDR(entry); err == nil {
 				cidr = n.String()
 			} else {
@@ -722,8 +731,8 @@ func lanPrivate(l *Lease, hostSvc substrate.PrivateAllowance) []substrate.Privat
 }
 
 // dnsAllowance turns the configured guest DNS address into a port-53
-// allowance. A bare IP gets /32; an entry that already carries a prefix
-// is used as-is.
+// allowance. A bare IP gets a full-length prefix (/32 for IPv4, /128 for
+// IPv6); an entry that already carries a prefix is used as-is.
 func dnsAllowance(addr string) (substrate.PrivateAllowance, bool) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
@@ -731,7 +740,11 @@ func dnsAllowance(addr string) (substrate.PrivateAllowance, bool) {
 	}
 	cidr := addr
 	if !strings.Contains(addr, "/") {
-		cidr = addr + "/32"
+		if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+			cidr = addr + "/128"
+		} else {
+			cidr = addr + "/32"
+		}
 	}
 	return substrate.PrivateAllowance{CIDR: cidr, TCPPorts: []uint32{53}}, true
 }
