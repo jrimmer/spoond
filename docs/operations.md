@@ -412,6 +412,23 @@ and the held-lease rules suspend at most one lease per tick while the
 limiter is busy, skipping the rest to retry on the next tick rather
 than queueing a batch.
 
+## Bounded substrate calls
+
+Every orchestrator gRPC call runs under its own timeout, so a hung
+orchestrator cannot wedge a background loop, a lease's busy flag or the
+snapshot limiter (spoond-j3a). The defaults are create/resume, pause and
+checkpoint `5m`; delete `2m`; `NodeInfo` `15s`; list/update/drain-override
+and template builds `30s` — set `E2B_CREATE_TIMEOUT`, `E2B_PAUSE_TIMEOUT`,
+`E2B_CHECKPOINT_TIMEOUT`, `E2B_DELETE_TIMEOUT`, `E2B_NODEINFO_TIMEOUT`
+and `E2B_CONTROL_TIMEOUT` with a Go duration (`90s`, `5m`) or seconds to
+change them. Exec keeps its own request timeout. The client also sends
+HTTP/2 keepalive pings every 5 minutes (the gRPC server's default
+minimum) with a 20 s ack timeout. On the service
+side each sweep stage (TTL release, held rules, pool refill, job prune)
+is bounded by `SWEEP_TIMEOUT` (default `15m`): a stage that overruns is
+logged and abandoned, the lease's `busy` flag clears through its deferred
+release, and the next tick runs.
+
 ## Network watchdog
 
 `spoond-netwatch.service` (`deploy/e2b/spoond-netwatch.sh`, installed as

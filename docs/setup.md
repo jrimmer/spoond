@@ -109,6 +109,13 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `E2B_PROXY_URL` | `http://127.0.0.1:5007` | orchestrator sandbox proxy base URL |
 | `E2B_TEAM_ID` | `5b0f4e3a-8c1d-4f2e-9a6b-7d3c2e1f0a95` | fixed team UUID sent with every gRPC request |
 | `E2B_TOKEN_SEED_FILE` | `/etc/spoond/e2b-token-seed` | envd/traffic HMAC seed file (0600, ≥ 32 bytes; the backend exits without it) |
+| `E2B_CREATE_TIMEOUT` | `5m` | per-call bound for orchestrator create/resume; a Go duration or seconds (spoond-j3a) |
+| `E2B_PAUSE_TIMEOUT` | `5m` | per-call bound for orchestrator pause |
+| `E2B_CHECKPOINT_TIMEOUT` | `5m` | per-call bound for orchestrator checkpoint |
+| `E2B_DELETE_TIMEOUT` | `2m` | per-call bound for orchestrator delete |
+| `E2B_NODEINFO_TIMEOUT` | `15s` | per-call bound for `NodeInfo` |
+| `E2B_CONTROL_TIMEOUT` | `30s` | per-call bound for every other orchestrator call (list, update, drain override, template builds) |
+| `SWEEP_TIMEOUT` | `15m` | bound for one background sweep stage (TTL release, held rules, pool refill, job prune), so a hung substrate RPC frees the loop and the lease's busy flag |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | build store — where GC and disk accounting look |
 | `IMAGE_REGISTRY` | `localhost:5000` | registry `spoond images build` pushes to |
 | `CONSUMER_TOKENS` | *(required)* | comma-separated `token=consumer` pairs, e.g. `abc=forgejo,def=pi` — consumers authenticate with bearer tokens |

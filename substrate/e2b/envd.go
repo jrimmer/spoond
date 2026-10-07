@@ -106,9 +106,13 @@ func (c *Client) envdProcess(sandboxID, user string) processconnect.ProcessClien
 	return processconnect.NewProcessClient(hc, c.cfg.ProxyURL, connect.WithInterceptors(&h))
 }
 
-// Health checks envd's GET /health through the proxy.
+// Health checks envd's GET /health through the proxy. The call is
+// bounded by ControlTimeout so a hung health endpoint cannot block the
+// create poll loop indefinitely.
 func (c *Client) Health(ctx context.Context, sandboxID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.cfg.ProxyURL, "/")+"/health", nil)
+	callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, strings.TrimSuffix(c.cfg.ProxyURL, "/")+"/health", nil)
 	if err != nil {
 		return fmt.Errorf("e2b: health %s: %w", sandboxID, err)
 	}
@@ -169,14 +173,15 @@ func (c *Client) startProcess(ctx context.Context, sandboxID string, req substra
 		return nil, fmt.Errorf("e2b: start %s: %w", sandboxID, err)
 	}
 	p := &guestProcess{
-		client:    proc,
-		ctx:       pctx,
-		cancel:    cancel,
-		sandboxID: sandboxID,
-		pty:       req.PTY,
-		stream:    stream,
-		pidReady:  make(chan struct{}),
-		events:    make(chan substrate.ProcessEvent, 64),
+		client:         proc,
+		ctx:            pctx,
+		cancel:         cancel,
+		sandboxID:      sandboxID,
+		pty:            req.PTY,
+		stream:         stream,
+		pidReady:       make(chan struct{}),
+		events:         make(chan substrate.ProcessEvent, 64),
+		controlTimeout: c.cfg.ControlTimeout,
 	}
 	go p.readLoop()
 	return p, nil
@@ -188,12 +193,13 @@ func pidSelector(pid uint32) *process.ProcessSelector {
 
 // guestProcess implements substrate.Process over an envd Start stream.
 type guestProcess struct {
-	client    processconnect.ProcessClient
-	ctx       context.Context
-	cancel    context.CancelFunc
-	sandboxID string
-	pty       bool
-	stream    *connect.ServerStreamForClient[process.StartResponse]
+	client         processconnect.ProcessClient
+	ctx            context.Context
+	cancel         context.CancelFunc
+	sandboxID      string
+	pty            bool
+	stream         *connect.ServerStreamForClient[process.StartResponse]
+	controlTimeout time.Duration // per-call bound for unary control calls
 
 	mu       sync.Mutex
 	pid      uint32
@@ -256,7 +262,8 @@ func (p *guestProcess) waitPID(ctx context.Context) (uint32, error) {
 	}
 }
 
-// Write sends PTY input when started with PTY, else stdin.
+// Write sends PTY input when started with PTY, else stdin. The unary
+// control call is bounded so a hung envd cannot block the caller.
 func (p *guestProcess) Write(data []byte) error {
 	pid, err := p.waitPID(p.ctx)
 	if err != nil {
@@ -266,7 +273,9 @@ func (p *guestProcess) Write(data []byte) error {
 	if p.pty {
 		input = &process.ProcessInput{Input: &process.ProcessInput_Pty{Pty: data}}
 	}
-	if _, err := p.client.SendInput(p.ctx, connect.NewRequest(&process.SendInputRequest{
+	callCtx, cancel := p.bound()
+	defer cancel()
+	if _, err := p.client.SendInput(callCtx, connect.NewRequest(&process.SendInputRequest{
 		Process: pidSelector(pid),
 		Input:   input,
 	})); err != nil {
@@ -281,7 +290,9 @@ func (p *guestProcess) Resize(cols, rows uint32) error {
 	if err != nil {
 		return err
 	}
-	if _, err := p.client.Update(p.ctx, connect.NewRequest(&process.UpdateRequest{
+	callCtx, cancel := p.bound()
+	defer cancel()
+	if _, err := p.client.Update(callCtx, connect.NewRequest(&process.UpdateRequest{
 		Process: pidSelector(pid),
 		Pty:     &process.PTY{Size: &process.PTY_Size{Cols: cols, Rows: rows}},
 	})); err != nil {
@@ -300,7 +311,9 @@ func (p *guestProcess) Signal(kill bool) error {
 	if kill {
 		sig = process.Signal_SIGNAL_SIGKILL
 	}
-	if _, err := p.client.SendSignal(p.ctx, connect.NewRequest(&process.SendSignalRequest{
+	callCtx, cancel := p.bound()
+	defer cancel()
+	if _, err := p.client.SendSignal(callCtx, connect.NewRequest(&process.SendSignalRequest{
 		Process: pidSelector(pid),
 		Signal:  sig,
 	})); err != nil {
@@ -315,12 +328,21 @@ func (p *guestProcess) CloseStdin() error {
 	if err != nil {
 		return err
 	}
-	if _, err := p.client.CloseStdin(p.ctx, connect.NewRequest(&process.CloseStdinRequest{
+	callCtx, cancel := p.bound()
+	defer cancel()
+	if _, err := p.client.CloseStdin(callCtx, connect.NewRequest(&process.CloseStdinRequest{
 		Process: pidSelector(pid),
 	})); err != nil {
 		return fmt.Errorf("e2b: close stdin %s: %w", p.sandboxID, err)
 	}
 	return nil
+}
+
+// bound returns the process's control-call context: the process-lifetime
+// context under the client's control timeout. A unary exec-control call
+// (input, resize, signal, close-stdin) must not outlive it.
+func (p *guestProcess) bound() (context.Context, context.CancelFunc) {
+	return bound(p.ctx, p.controlTimeout)
 }
 
 // Close stops streaming; it does not kill the process.

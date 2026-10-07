@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -47,9 +48,28 @@ type Client struct {
 	http *http.Client
 }
 
-// New dials the orchestrator (plaintext gRPC) and returns a Client.
+// grpcKeepaliveParams keeps the client's HTTP/2 connection honest: a
+// ping every 5 minutes (the gRPC server's default minimum ping interval,
+// so the orchestrator never answers a client with GOAWAY
+// "too_many_pings") and a 20 s wait for the ack before the connection is
+// declared dead and its calls fail. A half-open connection is then
+// noticed even when no stream is in flight (PermitWithoutStream). The
+// per-call deadlines are the primary bound; keepalive is the backstop
+// that also retires a dead TCP connection.
+var grpcKeepaliveParams = keepalive.ClientParameters{
+	Time:                5 * time.Minute,
+	Timeout:             20 * time.Second,
+	PermitWithoutStream: true,
+}
+
+// New dials the orchestrator (plaintext gRPC) and returns a Client. Every
+// RPC the client makes runs under a per-call bound (Config's timeouts).
 func New(cfg Config) (*Client, error) {
-	conn, err := grpc.NewClient(cfg.GRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	cfg = cfg.withDefaults()
+	conn, err := grpc.NewClient(cfg.GRPCAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(grpcKeepaliveParams),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("e2b: dial %s: %w", cfg.GRPCAddr, err)
 	}
@@ -61,6 +81,15 @@ func New(cfg Config) (*Client, error) {
 		info:     info.NewInfoServiceClient(conn),
 		http:     &http.Client{},
 	}, nil
+}
+
+// bound returns a context that expires after d unless the parent already
+// has an earlier deadline. The caller must always call cancel.
+func bound(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= d {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, d)
 }
 
 // mapError converts orchestrator gRPC errors to substrate sentinel errors,
@@ -111,7 +140,9 @@ func (c *Client) Create(ctx context.Context, req substrate.CreateRequest) (subst
 			Ingress: &orchestrator.SandboxNetworkIngressConfig{TrafficAccessToken: proto.String(c.TrafficToken(id))},
 		},
 	}
-	resp, err := c.sandbox.Create(ctx, &orchestrator.SandboxCreateRequest{
+	callCtx, cancel := bound(ctx, c.cfg.CreateTimeout)
+	defer cancel()
+	resp, err := c.sandbox.Create(callCtx, &orchestrator.SandboxCreateRequest{
 		Sandbox:   config,
 		StartTime: start,
 		EndTime:   timestamppb.New(req.EndAt),
@@ -155,7 +186,9 @@ func (c *Client) Create(ctx context.Context, req substrate.CreateRequest) (subst
 
 // List returns every running sandbox.
 func (c *Client) List(ctx context.Context) ([]substrate.Sandbox, error) {
-	resp, err := c.sandbox.List(ctx, &emptypb.Empty{})
+	callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+	defer cancel()
+	resp, err := c.sandbox.List(callCtx, &emptypb.Empty{})
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -178,7 +211,9 @@ func (c *Client) List(ctx context.Context) ([]substrate.Sandbox, error) {
 
 // Delete stops a sandbox; nil when already gone.
 func (c *Client) Delete(ctx context.Context, sandboxID string) error {
-	_, err := c.sandbox.Delete(ctx, &orchestrator.SandboxDeleteRequest{SandboxId: sandboxID})
+	callCtx, cancel := bound(ctx, c.cfg.DeleteTimeout)
+	defer cancel()
+	_, err := c.sandbox.Delete(callCtx, &orchestrator.SandboxDeleteRequest{SandboxId: sandboxID})
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return nil
@@ -192,7 +227,9 @@ func (c *Client) Delete(ctx context.Context, sandboxID string) error {
 func (c *Client) Pause(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
 	before := c.outstandingLevel(ctx)
 	buildID := NewUUID()
-	resp, err := c.sandbox.Pause(ctx, &orchestrator.SandboxPauseRequest{
+	callCtx, cancel := bound(ctx, c.cfg.PauseTimeout)
+	defer cancel()
+	resp, err := c.sandbox.Pause(callCtx, &orchestrator.SandboxPauseRequest{
 		SandboxId:  sandboxID,
 		TemplateId: templateID,
 		BuildId:    buildID,
@@ -208,7 +245,9 @@ func (c *Client) Pause(ctx context.Context, sandboxID, templateID string) (strin
 func (c *Client) Checkpoint(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
 	before := c.outstandingLevel(ctx)
 	buildID := NewUUID()
-	resp, err := c.sandbox.Checkpoint(ctx, &orchestrator.SandboxCheckpointRequest{
+	callCtx, cancel := bound(ctx, c.cfg.CheckpointTimeout)
+	defer cancel()
+	resp, err := c.sandbox.Checkpoint(callCtx, &orchestrator.SandboxCheckpointRequest{
 		SandboxId: sandboxID,
 		BuildId:   buildID,
 	})
@@ -269,7 +308,9 @@ func waitOutstanding(ctx context.Context, sandboxID, method string, before int, 
 
 // UpdateEgress replaces a sandbox's egress policy.
 func (c *Client) UpdateEgress(ctx context.Context, sandboxID string, eg substrate.Egress) error {
-	_, err := c.sandbox.Update(ctx, &orchestrator.SandboxUpdateRequest{
+	callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+	defer cancel()
+	_, err := c.sandbox.Update(callCtx, &orchestrator.SandboxUpdateRequest{
 		SandboxId: sandboxID,
 		Egress:    egressConfig(eg),
 	})
@@ -278,7 +319,9 @@ func (c *Client) UpdateEgress(ctx context.Context, sandboxID string, eg substrat
 
 // UpdateEndAt extends or shortens a sandbox's lease expiry.
 func (c *Client) UpdateEndAt(ctx context.Context, sandboxID string, endAt time.Time) error {
-	_, err := c.sandbox.Update(ctx, &orchestrator.SandboxUpdateRequest{
+	callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+	defer cancel()
+	_, err := c.sandbox.Update(callCtx, &orchestrator.SandboxUpdateRequest{
 		SandboxId: sandboxID,
 		EndTime:   timestamppb.New(endAt),
 	})
@@ -287,7 +330,9 @@ func (c *Client) UpdateEndAt(ctx context.Context, sandboxID string, endAt time.T
 
 // NodeInfo returns the orchestrator node's status and metrics.
 func (c *Client) NodeInfo(ctx context.Context) (substrate.NodeInfo, error) {
-	resp, err := c.info.ServiceInfo(ctx, &emptypb.Empty{})
+	callCtx, cancel := bound(ctx, c.cfg.NodeInfoTimeout)
+	defer cancel()
+	resp, err := c.info.ServiceInfo(callCtx, &emptypb.Empty{})
 	if err != nil {
 		return substrate.NodeInfo{}, mapError(err)
 	}
@@ -328,13 +373,17 @@ func (c *Client) SetDraining(ctx context.Context, draining bool) error {
 	if draining {
 		s = info.ServiceInfoStatus_Draining
 	}
-	_, err := c.info.ServiceStatusOverride(ctx, &info.ServiceStatusChangeRequest{ServiceStatus: s})
+	callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+	defer cancel()
+	_, err := c.info.ServiceStatusOverride(callCtx, &info.ServiceStatusChangeRequest{ServiceStatus: s})
 	return mapError(err)
 }
 
 // BuildTemplate starts a template build and polls it to completion.
 func (c *Client) BuildTemplate(ctx context.Context, req substrate.BuildRequest) (substrate.BuildResult, error) {
-	_, err := c.template.TemplateCreate(ctx, &template.TemplateCreateRequest{
+	callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+	defer cancel()
+	_, err := c.template.TemplateCreate(callCtx, &template.TemplateCreateRequest{
 		Template: &template.TemplateConfig{
 			TemplateID:   req.TemplateID,
 			BuildID:      req.BuildID,
@@ -356,11 +405,13 @@ func (c *Client) BuildTemplate(ctx context.Context, req substrate.BuildRequest) 
 	var logs []string
 	offset := int32(0)
 	for {
-		resp, err := c.template.TemplateBuildStatus(ctx, &template.TemplateStatusRequest{
+		callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+		resp, err := c.template.TemplateBuildStatus(callCtx, &template.TemplateStatusRequest{
 			TemplateID: req.TemplateID,
 			BuildID:    req.BuildID,
 			Offset:     proto.Int32(offset),
 		})
+		cancel()
 		if err != nil {
 			return substrate.BuildResult{}, mapError(err)
 		}
@@ -395,7 +446,9 @@ func (c *Client) BuildTemplate(ctx context.Context, req substrate.BuildRequest) 
 
 // DeleteBuild deletes the files of a template build.
 func (c *Client) DeleteBuild(ctx context.Context, templateID, buildID string) error {
-	_, err := c.template.TemplateBuildDelete(ctx, &template.TemplateBuildDeleteRequest{
+	callCtx, cancel := bound(ctx, c.cfg.ControlTimeout)
+	defer cancel()
+	_, err := c.template.TemplateBuildDelete(callCtx, &template.TemplateBuildDeleteRequest{
 		BuildID:    buildID,
 		TemplateID: templateID,
 	})

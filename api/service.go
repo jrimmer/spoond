@@ -382,6 +382,13 @@ type ServiceConfig struct {
 	// cmd maps an unset variable to DefaultUndrainResumeRetries (2).
 	// spoond-urm.
 	UndrainResumeRetries int
+	// SweepTimeout bounds one background sweep stage (TTL release, held
+	// rules, pool refill, job prune) and each other background loop
+	// pass. The substrate bounds every individual RPC too (spoond-j3a);
+	// this is the belt-and-suspenders that frees the loop, and so a
+	// lease's busy flag, even if a substrate call ignores its context.
+	// 0 = DefaultSweepTimeout. SWEEP_TIMEOUT.
+	SweepTimeout time.Duration
 }
 
 // Service is the lease API backend.
@@ -431,6 +438,11 @@ type Service struct {
 	rootfsProbeAllFailedLogged bool
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
+	// sweepTimeout bounds one background sweep stage and each other
+	// background loop pass, so a substrate call that ignores its context
+	// cannot wedge the loop (spoond-j3a). DefaultSweepTimeout unless
+	// configured.
+	sweepTimeout time.Duration
 	// now is the service clock. Tests replace it to age a lease's
 	// lost_at without sleeping; the GC's grace periods read it.
 	now func() time.Time
@@ -597,6 +609,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		tokens:                tokens,
 		cfg:                   cfg,
 		sweepInterval:         5 * time.Second,
+		sweepTimeout:          sweepTimeoutOrDefault(cfg.SweepTimeout),
 		now:                   time.Now,
 		diskCapacity:          statfsCapacity,
 		diskUsage:             store.BuildDiskUsage,
@@ -1075,6 +1088,46 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 	return sb, nil
 }
 
+// DefaultSweepTimeout bounds one background sweep stage and each other
+// background loop pass. It is deliberately generous (larger than any
+// single bounded substrate RPC's default, so a whole pass of several
+// RPCs still fits) while still finite: a wedged call frees the loop and
+// the lease's busy flag within it.
+const DefaultSweepTimeout = 15 * time.Minute
+
+func sweepTimeoutOrDefault(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultSweepTimeout
+	}
+	return d
+}
+
+// sweepCtx returns a context bounded by the sweep timeout for one
+// background-loop stage.
+func (s *Service) sweepCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, s.sweepTimeout)
+}
+
+// runSweepStage runs one background sweep stage under the sweep bound
+// and logs when it is cut short, so a wedged stage is visible rather
+// than silent.
+func (s *Service) runSweepStage(ctx context.Context, name string, stage func(context.Context)) {
+	sctx, cancel := s.sweepCtx(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stage(sctx)
+	}()
+	select {
+	case <-done:
+	case <-sctx.Done():
+		if ctx.Err() == nil {
+			s.log.Printf("sweep: %s exceeded %s; abandoning this pass", name, s.sweepTimeout)
+		}
+	}
+}
+
 // Start begins the TTL sweeper and warm-pool refill. It runs until ctx
 // is cancelled or Shutdown stops it.
 func (s *Service) Start(ctx context.Context) {
@@ -1087,9 +1140,12 @@ func (s *Service) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.sweepExpired(ctx)
-				s.refillPool(ctx)
-				s.pruneJobs(ctx)
+				// Each stage runs under its own bound so a hung RPC wedges
+				// only that stage, never the following ones or the next tick
+				// (spoond-j3a).
+				s.runSweepStage(ctx, "sweepExpired", s.sweepExpired)
+				s.runSweepStage(ctx, "refillPool", s.refillPool)
+				s.runSweepStage(ctx, "pruneJobs", s.pruneJobs)
 			}
 		}
 	}()
