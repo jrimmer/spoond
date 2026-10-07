@@ -1683,7 +1683,6 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":              updated.ID,
 		"holder":          updated.Holder,
