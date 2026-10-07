@@ -298,6 +298,87 @@ func TestRootfsProbeDisabled(t *testing.T) {
 	}
 }
 
+// TestRootfsProbeDrainWaitsForRecovery: the drain's write side of
+// drainGate makes a probe recovery mutually exclusive with a drain. A
+// recovery that reaches the gate while the drain holds it waits, then
+// sees the drain and drops its failure count instead of deleting the
+// sandbox (spoond-5ca).
+func TestRootfsProbeDrainWaitsForRecovery(t *testing.T) {
+	svc, sub, l := newRootfsProbeService(t, true)
+	ctx := context.Background()
+	if _, err := svc.checkpointLease(ctx, l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	sb := l.SandboxID
+
+	// Hold the drain's write side, as a drain that began mid-pass does,
+	// then start the recovery in another goroutine: it must block on the
+	// gate, not run.
+	svc.drainGate.Lock()
+	svc.draining.Store(true)
+	defer func() {
+		svc.draining.Store(false)
+		svc.drainGate.Unlock()
+	}()
+
+	returned := make(chan struct{})
+	go func() {
+		svc.recoverDeadRootfs(ctx, l)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("rootfs recovery ran while the drain gate was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	svc.drainGate.Unlock()
+	<-returned
+
+	if got := calls(sub.Fake, "Delete "+sb); got != 0 {
+		t.Fatalf("Delete calls while draining = %d, want 0", got)
+	}
+	if l.State != "running" {
+		t.Fatalf("lease state = %q, want running", l.State)
+	}
+	// Re-acquire so the deferred unlock matches the initial lock.
+	svc.drainGate.Lock()
+}
+
+// TestRootfsProbeStopsMidPassOnDrain: a drain that begins after the
+// pass snapshotted its targets stops the remaining probes and the
+// counting, so no lease is acted on during the drain.
+func TestRootfsProbeStopsMidPassOnDrain(t *testing.T) {
+	svc, sub, l1 := newRootfsProbeService(t, false)
+	ctx := context.Background()
+	l2, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant second: %v", err)
+	}
+	// Both would be recovered if the pass ran to completion.
+	svc.rootfsProbeMu.Lock()
+	svc.rootfsProbeFails[l1.ID] = &rootfsProbeFailure{sandboxID: l1.SandboxID, count: rootfsProbeFailuresThreshold - 1}
+	svc.rootfsProbeFails[l2.ID] = &rootfsProbeFailure{sandboxID: l2.SandboxID, count: rootfsProbeFailuresThreshold - 1}
+	svc.rootfsProbeMu.Unlock()
+	sub.rootfsFail[l1.SandboxID] = "dd: error reading '/dev/vda': Input/output error"
+	sub.rootfsFail[l2.SandboxID] = "dd: error reading '/dev/vda': Input/output error"
+
+	// The first probe's exec starts the drain: the pass must stop there.
+	sub.onRootfsProbe = func(string) { svc.draining.Store(true) }
+	t.Cleanup(func() { svc.draining.Store(false) })
+
+	svc.probeRootfsLeases(ctx)
+
+	if got := sub.RootfsProbeCalls(); got != 1 {
+		t.Fatalf("probe calls = %d after the drain began mid-pass, want 1", got)
+	}
+	if l1.State != "running" || l2.State != "running" {
+		t.Fatalf("states = %s, %s, want running", l1.State, l2.State)
+	}
+	if got := calls(sub.Fake, "Delete "+l1.SandboxID); got != 0 {
+		t.Fatalf("Delete calls = %d, want 0", got)
+	}
+}
+
 // TestRootfsProbeScriptReadsRootDevice: the probe script bypasses the
 // page cache and falls back to /dev/vda.
 func TestRootfsProbeScriptReadsRootDevice(t *testing.T) {

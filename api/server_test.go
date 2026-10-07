@@ -39,11 +39,19 @@ type testSub struct {
 	rootfsErr     map[string]bool
 	rootfsTimeout map[string]bool
 
+	// onRootfsProbe, when set, runs while a rootfs probe exec is being
+	// served, before its outcome is decided. Tests use it to start an
+	// admin drain mid-pass (spoond-5ca).
+	onRootfsProbe func(sandboxID string)
+
 	// checkpointFn/pauseFn, when set, replace the fake's Checkpoint and
 	// Pause: they mint the build id and may leave the fresh build's
 	// files on disk (the build-size-at-write-time tests, #125).
 	checkpointFn func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error)
 	pauseFn      func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error)
+	// createFn, when set, replaces the fake's Create: it may run while a
+	// create is in flight (the crash-reconcile-rootfs-probe race test).
+	createFn func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error)
 
 	// lastStart records the most recent Start request (the stream tests
 	// pin the initial PTY size it carries).
@@ -87,6 +95,14 @@ func (ts *testSub) Pause(ctx context.Context, sandboxID, templateID string) (str
 	return ts.Fake.Pause(ctx, sandboxID, templateID)
 }
 
+// Create delegates to createFn when set, the fake otherwise.
+func (ts *testSub) Create(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+	if ts.createFn != nil {
+		return ts.createFn(ctx, req)
+	}
+	return ts.Fake.Create(ctx, req)
+}
+
 func newTestSub() *testSub {
 	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}, rootfsFail: map[string]string{}, rootfsErr: map[string]bool{}, rootfsTimeout: map[string]bool{}}
 	ts.Fake.SetExecHandler(ts.exec)
@@ -105,6 +121,9 @@ func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.Exe
 		ts.rootfsProbeMu.Lock()
 		ts.rootfsProbes++
 		ts.rootfsProbeMu.Unlock()
+		if ts.onRootfsProbe != nil {
+			ts.onRootfsProbe(sandboxID)
+		}
 		if ts.rootfsErr[sandboxID] {
 			return substrate.ExecResult{}, fmt.Errorf("exec %s: agent unreachable", sandboxID)
 		}

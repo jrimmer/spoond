@@ -415,6 +415,14 @@ type Service struct {
 	// draining is true while the admin drain is running (U10): pool
 	// refill, idle sweep, GC and the crash reconcile skip until undrain.
 	draining atomic.Bool
+	// drainGate serialises the admin drain with the rootfs probe's
+	// recovery (spoond-5ca). drain takes the write side around
+	// SetDraining and draining.Store(true); recoverDeadRootfs holds the
+	// read side for the whole recovery, so a drain that begins mid-pass
+	// cannot overlap a recovery for a lease it has not paused yet. An
+	// RWMutex that is locked only by those two paths never blocks the
+	// rest of the service.
+	drainGate sync.RWMutex
 	// stopLoops cancels the background sweeper/refiller started by Start.
 	stopLoops context.CancelFunc
 
@@ -3304,6 +3312,20 @@ func (s *Service) endBusy(l *Lease) {
 	s.store.mu.Lock()
 	l.busy = false
 	s.store.mu.Unlock()
+}
+
+// trySetBusy marks a lease busy unless it is already busy, released or
+// no longer running. It returns false when another operation won the
+// race, in which case the caller must not run its own. The caller owns
+// the busy window and must pair a true result with endBusy.
+func (s *Service) trySetBusy(l *Lease) bool {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if l.busy || l.released || !l.live() {
+		return false
+	}
+	l.busy = true
+	return true
 }
 
 func (s *Service) saveLeaseLocked(l *Lease) {

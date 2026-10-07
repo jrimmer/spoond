@@ -24,7 +24,7 @@ const (
 	// DefaultRootfsProbeSecs is how often the probe runs against running
 	// leases when ROOTFS_PROBE_SECS is unset. 0 disables it.
 	DefaultRootfsProbeSecs = 120
-	// rootfsProbeTimeout bounds one probe exec. A probe that does not
+	// rootfsProbeDuration bounds one probe exec. A probe that does not
 	// answer within it is a failure: the guest is the only vantage point
 	// from which a dead root disk is visible.
 	rootfsProbeDuration = 10 * time.Second
@@ -149,6 +149,13 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if s.draining.Load() {
+			// The drain began after this pass snapshotted its targets.
+			// Stop running probes (and, below, stop counting): the
+			// recovery takes the drain's write side, but there is no
+			// point spending a 10 s exec on a node that is going down.
+			return
+		}
 		outcomes[i] = s.probeRootfsOnce(ctx, l)
 	}
 
@@ -156,7 +163,10 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 	// unreachable, not the guests: log once and change nothing. A guest
 	// that answers with an I/O error or a timeout has proven the
 	// orchestrator is reachable, so a mixed pass still acts on the
-	// affected leases.
+	// affected leases. With a single running lease an all-transport
+	// pass is indistinguishable from an orchestrator outage, so a lone
+	// guest whose agent died is left to the crash reconcile and the
+	// exec route's own errors rather than being marked lost here.
 	allTransport := len(targets) > 0
 	for _, o := range outcomes {
 		if o != rootfsProbeTransport {
@@ -173,6 +183,10 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 	s.clearRootfsAllFailed()
 
 	for i, l := range targets {
+		if s.draining.Load() {
+			// The admin drain started mid-pass: stop touching leases.
+			return
+		}
 		switch outcomes[i] {
 		case rootfsProbeOK:
 			s.recordRootfsAlive(l.ID)
@@ -216,6 +230,11 @@ func (s *Service) probeRootfsOnce(parent context.Context, l *Lease) rootfsProbeO
 	}
 	// A non-zero exit for any other reason (dd missing, bad argv) says
 	// nothing about the root disk: the guest answered, so it is alive.
+	// Log it so a probe that silently degraded to a no-op (a base image
+	// without dd, or a device that rejects O_DIRECT) is visible rather
+	// than invisible.
+	s.log.Printf("rootfs probe: lease %s sandbox %s exit=%d without an I/O error; treating the guest as alive (stderr=%q)",
+		l.ID, l.SandboxID, res.ExitCode, tailStr(res.Stderr, 200))
 	return rootfsProbeOK
 }
 
@@ -270,9 +289,26 @@ func (s *Service) countRootfsFailure(ctx context.Context, l *Lease) {
 // takes the lease's busy flag so no other lifecycle operation races it,
 // and skips a lease that is no longer running or already busy.
 func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
+	// The admin drain and this recovery are mutually exclusive. Holding
+	// the read side across the whole recovery means a drain either
+	// completes before the recovery starts or waits for it, and the
+	// drain takes the write side around SetDraining and
+	// draining.Store(true). That closes the gap a pass-length check
+	// leaves open: a drain that begins mid-pass cannot overlap a
+	// recovery for a lease it has not paused yet (spoond-5ca).
+	s.drainGate.RLock()
+	if s.draining.Load() {
+		s.drainGate.RUnlock()
+		// The drain is pausing this lease (or about to): its own execs
+		// are the liveness evidence now. Drop the count rather than
+		// acting on it out of turn.
+		s.resetRootfsFailures(l.ID)
+		return
+	}
 	s.store.mu.Lock()
 	if l.busy || l.released || !l.live() {
 		s.store.mu.Unlock()
+		s.drainGate.RUnlock()
 		// The lease was already being checkpointed, restarted or
 		// recovered: that operation's own execs are live evidence that
 		// the sandbox is reachable, so the accumulated count is dropped
@@ -282,6 +318,10 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	}
 	l.busy = true
 	s.store.mu.Unlock()
+	// endBusy runs before the gate is released (defer LIFO), so a drain
+	// that acquires the write side next cannot see the lease busy for an
+	// operation that has already finished.
+	defer s.drainGate.RUnlock()
 	defer s.endBusy(l)
 
 	s.log.Printf("rootfs probe: lease %s root disk unreadable (I/O errors); recovering from the last checkpoint", l.ID)

@@ -22,8 +22,9 @@ summarised from README "Status".
   (transport failure, timeout, or an I/O error) treat the sandbox as
   crashed: spoond emits a `lost` event with detail `root disk unreadable
   (I/O errors)`, deletes the dead sandbox and runs the crash-recovery
-  path (from the last checkpoint, or `lost`). Busy and draining leases
-  are skipped, a recent successful exec skips the probe, and a pass in
+  path (from the last checkpoint, or `lost`). Busy leases are skipped,
+  a drain and a probe-triggered recovery are mutually exclusive, a
+  recent successful exec (exit `0`) skips the probe, and a pass in
   which every probe fails at the transport is treated as the
   orchestrator being unreachable (logged once, no action). New metrics
   `spoond_rootfs_probe_failures_total` and `spoond_rootfs_dead_total`.

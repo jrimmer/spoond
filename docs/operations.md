@@ -492,20 +492,32 @@ a block device.
 A probe is a failure when it answers an `Input/output error`, when it
 hits the 10 s timeout (the substrate kills the hung exec and reports it
 the way the e2b backend does: exit `124` with a `timed out` line), or
-when the exec itself fails at the transport. **Three consecutive
+when the exec itself fails at the transport. A non-zero exit for any
+other reason is not a failure (the guest answered); the backend logs it
+so a probe that silently degraded to a no-op — a base image without
+`dd`, or a root device that rejects `O_DIRECT` — is visible. **Three
+consecutive
 failures** treat the sandbox as crashed:
 the backend logs the lease, emits a `lost` event with detail `root disk
 unreadable (I/O errors)`, deletes the dead sandbox through the substrate
 and runs the same per-lease recovery as the crash reconcile — from the
 last checkpoint (generation +1, state `recovered`) or `lost` when there
 is none. A success in between resets the count. A lease with a
-successful exec in the last `ROOTFS_PROBE_SECS` is skipped (it has
+successful exec (exit `0`) in the last `ROOTFS_PROBE_SECS` is skipped
+(it has
 already proven it is alive), as are busy leases (checkpoint, restart,
-suspend in flight) and every pass during the admin drain.
+suspend in flight). The admin drain and a probe-triggered recovery are
+mutually exclusive: the drain's `SetDraining` waits for a recovery in
+flight, and a recovery that reaches the drain waits for it and then
+stands down, so no sandbox is deleted or recovered during the drain.
 
 If **every** lease's probe fails at the transport in one pass, the
 orchestrator is unreachable, not the guests: the pass logs once and
-changes nothing. A probe that answers an I/O error or a timeout proves
+changes nothing. (On a host with a single running lease, an
+all-transport pass is indistinguishable from that case, so a lone guest
+whose agent died is left to the crash reconcile rather than marked
+`lost` by the probe.) A probe that answers an I/O error or a timeout
+proves
 the orchestrator is reachable, so a mixed pass still recovers the
 affected leases. The counters are `spoond_rootfs_probe_failures_total`
 (failures, by probe) and `spoond_rootfs_dead_total` (leases declared
