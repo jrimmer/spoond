@@ -21,6 +21,12 @@ summarised from README "Status".
   runner's checkout likewise passes its `GITHUB_TOKEN` header in the
   exec env instead of prefixing `git clone` with it.
 
+### Fixed
+
+- **A create refused while the node drains says when to retry.** The
+  `503 draining` answer (during a planned orchestrator restart) now
+  carries `Retry-After: 30`, like the burst-reserve and preemption 503s.
+
 ### Changed
 
 - **Built-in defaults are generic; deployment-specific hosts and LAN
