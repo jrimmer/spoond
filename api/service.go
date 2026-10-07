@@ -138,6 +138,12 @@ type Lease struct {
 	// version whose build a live lease runs from is never dropped by
 	// retention. Start-from-snapshot (and its API field) is task 2.
 	SnapshotBuildID string `json:"-"`
+	// SnapshotName and SnapshotVersion name the named-snapshot version
+	// the lease started from, for the "snapshot" object in the API
+	// (A3). They are not persisted; a lease loaded from the store looks
+	// its version up by SnapshotBuildID when the API needs it.
+	SnapshotName    string `json:"-"`
+	SnapshotVersion int64  `json:"-"`
 	// Priority orders preemption within a class (#128 part 2): a lower
 	// number is preempted first. 0 = the default. Reported as
 	// "priority".
@@ -552,6 +558,14 @@ type Service struct {
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
 	saves namedSaveInFlight
+	// startingMu guards startingBuilds, the in-memory refcount of
+	// named-snapshot builds a lease start is using right now (B1). A
+	// start is invisible to the catalog between resolving the version
+	// and writing the lease row, so delete-in-use, retention and the GC
+	// read this set too: a version another start holds is never deleted
+	// or pruned, and its build is a GC root.
+	startingMu     sync.Mutex
+	startingBuilds map[string]int
 	// secretsGate serialises a named-snapshot save's secret scrub against
 	// exec and job secret staging on the same lease (2.7, #83 B2): a save
 	// holds it across the checkpoint, an exec/job staging takes it first
@@ -600,6 +614,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		stagedExecSecretNames: map[string][]string{},
 		pendingSecretRemovals: map[string][]string{},
 		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
+		startingBuilds:        map[string]int{},
 		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
 		jobStarts:             map[string]*jobStartLock{},
 	}
@@ -1433,6 +1448,10 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	delete(s.store.runningJobs, l.ID)
 	s.deleteLeaseLocked(l.ID)
 	s.store.mu.Unlock()
+	// A version that retention spared only because this lease ran from it
+	// is dropped once no live lease uses it (S5): re-run the name's
+	// retention now that the lease row is gone.
+	s.rerunSnapshotRetention(context.WithoutCancel(ctx), l)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -1661,11 +1680,89 @@ type leaseRequest struct {
 	exposePorts       []int
 	burst             bool
 	priority          int
+	// snapshot, when set, starts the lease from a named snapshot version
+	// (2.7, #83 task 2) instead of the image's current build. The image
+	// is the version's image and the memory charge is the version's
+	// memory_mb. The pool is bypassed and lease.snapshot_build_id is
+	// stamped, so retention never drops a version a live lease runs
+	// from.
+	snapshot *snapshotStart
 	// leaseID is the id the caller already allocated and announced —
 	// the queued-admission path (#129) reserves it when the create is
 	// queued so the `queued` and `created` events name the same lease.
 	// Empty allocates a fresh id at grant.
 	leaseID string
+}
+
+// snapshotStart is one resolved named-snapshot version a lease create
+// starts from. The row carries the name, version, build and memory_mb
+// the grant needs.
+type snapshotStart struct {
+	row store.NamedSnapshotRow
+}
+
+// beginStartingBuild takes a reference on a named-snapshot build a lease
+// start is about to use (B1). From here until endStartingBuild the build
+// is visible to delete-in-use, retention and the GC as if a live lease
+// ran from it, so none of them can remove it out from under the start.
+func (s *Service) beginStartingBuild(buildID string) {
+	if buildID == "" {
+		return
+	}
+	s.startingMu.Lock()
+	s.startingBuilds[buildID]++
+	s.startingMu.Unlock()
+}
+
+// endStartingBuild releases the reference taken by beginStartingBuild.
+// It must run on every path that took one, success or failure.
+func (s *Service) endStartingBuild(buildID string) {
+	if buildID == "" {
+		return
+	}
+	s.startingMu.Lock()
+	if s.startingBuilds[buildID] <= 1 {
+		delete(s.startingBuilds, buildID)
+	} else {
+		s.startingBuilds[buildID]--
+	}
+	s.startingMu.Unlock()
+}
+
+// startingBuildSet returns a copy of the builds a start currently holds,
+// for the store's retention query and the GC's root walk.
+func (s *Service) startingBuildSet() map[string]bool {
+	s.startingMu.Lock()
+	defer s.startingMu.Unlock()
+	if len(s.startingBuilds) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(s.startingBuilds))
+	for id := range s.startingBuilds {
+		out[id] = true
+	}
+	return out
+}
+
+// startingBuild reports whether a start currently holds buildID.
+func (s *Service) startingBuild(buildID string) bool {
+	s.startingMu.Lock()
+	defer s.startingMu.Unlock()
+	return s.startingBuilds[buildID] > 0
+}
+
+// snapshotStartError is returned when a lease cannot start from a named
+// snapshot version on this host (2.7, #83): the build row or its files
+// are gone, or the substrate refuses the build. The API maps it to 409
+// cannot_start; there is no retry loop.
+type snapshotStartError struct {
+	name    string
+	version int64
+	cause   string
+}
+
+func (e *snapshotStartError) Error() string {
+	return fmt.Sprintf("snapshot %s@%d cannot start on this host (%s); save it again", e.name, e.version, e.cause)
 }
 
 // grantLease is grant with the class admission (#128 part 2): the
@@ -1676,14 +1773,57 @@ type leaseRequest struct {
 func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, error) {
 	owner, image, ttl, persistent := req.owner, req.image, req.ttl, req.persistent
 	start := time.Now()
-	img, b, err := s.imageBuild(ctx, image)
-	if err != nil {
-		return nil, err
+	// A create from a named snapshot starts from the version's build, not
+	// the image's current build (2.7, #83): the image is the version's
+	// image and the memory charge is the version's memory_mb. The lease
+	// is never served from the warm pool. A version whose build row is
+	// gone answers cannot_start before admission.
+	snap := req.snapshot
+	var img store.ImageRow
+	var b store.BuildRow
+	memoryMB := 0
+	if snap != nil {
+		image = snap.row.Image
+		var err error
+		img, err = s.db.GetImage(ctx, image)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("load image %s: %w", image, err)
+		}
+		b, err = s.db.GetBuild(ctx, snap.row.BuildID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: "build files missing"}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load snapshot build %s: %w", snap.row.BuildID, err)
+		}
+		// A build that is not ready (deleted, failed, or still being
+		// written) cannot be started: answer cannot_start rather than
+		// handing the substrate a build that will not run (B1).
+		if b.State != "ready" {
+			return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: "build is " + b.State}
+		}
+		// A version saved against a different host envd/firecracker or
+		// orchestrator cannot start here (S2): compare the row's recorded
+		// versions against the host's and name the component that
+		// differs. Only a known host version is compared; an unknown one
+		// ("") never refuses.
+		if cause, ok := s.snapshotHostMismatch(ctx, snap.row); ok {
+			return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: cause}
+		}
+		memoryMB = snap.row.MemoryMB
+	} else {
+		var err error
+		img, b, err = s.imageBuild(ctx, image)
+		if err != nil {
+			return nil, err
+		}
+		memoryMB = img.MemoryMB
 	}
 	// The lease costs its image's memory_mb (#128): admission checks the
 	// user's running-lease memory before the sandbox is created, and the
-	// deferred release below drops the same number it reserved.
-	if err := s.reserveQuota(owner, 1, img.MemoryMB, true); err != nil {
+	// deferred release below drops the same number it reserved. A
+	// snapshot start charges the version's memory_mb.
+	if err := s.reserveQuota(owner, 1, memoryMB, true); err != nil {
 		return nil, err
 	}
 	// The reservation becomes the real lease when it's stored below;
@@ -1692,7 +1832,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// active so the pending reservation must be dropped (security
 	// review #37 H2). Both mutations take the same store lock, so a
 	// concurrent reserveQuota sees a consistent active+pending count.
-	defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
+	defer func() { s.releaseQuotaReservation(owner, 1, memoryMB) }()
 	if s.metrics != nil {
 		s.metrics.LeasesTotal.Inc()
 	}
@@ -1718,7 +1858,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// The lease's MiB charge (#128): the image's memory_mb, the very
 		// number reserveQuota admitted with, so accounting and release
 		// always agree and quota sums never re-read the catalog.
-		MemoryMB: img.MemoryMB,
+		MemoryMB: memoryMB,
 		// Every lease starts on generation 1 (2.2) and on the host's
 		// checkpoint and idle-suspend defaults (-1), unless the create
 		// request carries its own (the API stamps it after grant).
@@ -1731,11 +1871,26 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		Priority: req.priority,
 		Burst:    req.burst,
 	}
+	if lease.TemplateID == "" {
+		// A snapshot start does not need the image's current build, so a
+		// vanished image row is not fatal: the build row carries the
+		// template.
+		lease.TemplateID = b.TemplateID
+	}
+	if snap != nil {
+		// The named-snapshot version this lease starts from (2.7, #83):
+		// the build is persisted so retention never drops a version a
+		// live lease runs from, and the name/version ride the response
+		// and the lease detail (A3).
+		lease.SnapshotBuildID = snap.row.BuildID
+		lease.SnapshotName = snap.row.Name
+		lease.SnapshotVersion = snap.row.Version
+	}
 	// Class admission (#128 part 2): decides guaranteed vs burst (the
 	// charge above is the sum the guarantee is measured against) and
 	// holds a burst lease to the node's reserve. A refusal answers
 	// before any sandbox exists.
-	class, err := s.admitClass(ctx, owner, img.MemoryMB, req.burst, "")
+	class, err := s.admitClass(ctx, owner, memoryMB, req.burst, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1746,8 +1901,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// created for the "pool" placeholder lease, so its egress policy and
 	// EndAt are updated for the new lease, and its sandboxes row moves to
 	// it. Entries from another build, with no row, or unhealthy are
-	// discarded and the next one is tried.
-	if s.cfg.PoolSize > 0 {
+	// discarded and the next one is tried. A create from a named
+	// snapshot never uses the pool (the pooled sandbox is the image's
+	// current build, not the version's).
+	if s.cfg.PoolSize > 0 && snap == nil {
 		for {
 			s.store.mu.Lock()
 			pool := s.store.pool[image]
@@ -1805,12 +1962,51 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if lease.SandboxID == "" {
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
+			// A create the orchestrator does not know (missing build
+			// files) cannot start here (2.7, #83 S2): map only the
+			// structural ErrNotFound. A capacity, draining or transport
+			// failure keeps its current retryable handling; an
+			// incompatible version is caught before the create by the
+			// host-version check above.
+			if snap != nil && errors.Is(err, substrate.ErrNotFound) {
+				return nil, &snapshotStartError{name: snap.row.Name, version: snap.row.Version, cause: "build files missing"}
+			}
 			return nil, err
 		}
 		lease.SandboxID = sb.ID
 		lease.HostIP = sb.HostIP
 		lease.ExposedIP = sb.HostIP
 		lease.BuildID = b.BuildID
+	}
+
+	// A lease started from a snapshot gets its copy-side markers before
+	// any exec the API runs in it (A4/A7): /run/spoond/lease-id,
+	// /run/spoond/generation and /run/spoond/started-from exist before
+	// the integrity probe below. These are not best effort: if any write
+	// fails the sandbox is deleted and the create fails with no lease row
+	// (S3), because a copy that cannot tell source from copy is not safe
+	// to hand out.
+	if snap != nil {
+		if err := s.writeGeneration(lease); err != nil {
+			_ = s.sub.Delete(ctx, lease.SandboxID)
+			s.deleteSandboxRow(lease.SandboxID)
+			return nil, fmt.Errorf("write lease-id and generation markers: %w", err)
+		}
+		if err := s.writeStartedFromMarker(lease); err != nil {
+			_ = s.sub.Delete(ctx, lease.SandboxID)
+			s.deleteSandboxRow(lease.SandboxID)
+			return nil, fmt.Errorf("write started-from marker: %w", err)
+		}
+		// The snapshot's memory may still carry secret files (a save
+		// scrubs them before its checkpoint, but a copy must not trust
+		// that). Remove anything under /run/secrets before the new
+		// lease's own create-time secrets are staged below, so the copy
+		// holds only its own (A4/S4).
+		if _, err := s.scrubAllSecrets(ctx, lease.SandboxID, nil); err != nil {
+			_ = s.sub.Delete(ctx, lease.SandboxID)
+			s.deleteSandboxRow(lease.SandboxID)
+			return nil, fmt.Errorf("scrub secrets on snapshot start: %w", err)
+		}
 	}
 
 	// The integrity probe runs through exec before the sandbox is handed
@@ -1836,8 +2032,11 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 
 	// The guest's generation file always exists (2.2): generation 1 on a
 	// fresh lease. Best effort, after the probe so a recycled sandbox
-	// never sees it.
-	s.writeGeneration(lease)
+	// never sees it. A snapshot start already wrote it (and its
+	// started-from marker) before the probe.
+	if snap == nil {
+		s.writeGeneration(lease)
+	}
 
 	s.store.mu.Lock()
 	s.store.leases[lease.ID] = lease
@@ -1853,8 +2052,11 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if s.metrics != nil {
 		s.metrics.LeaseGrantDur.Observe(time.Since(start).Seconds())
 	}
-	s.emitLeaseEvent(lease.ID, owner, LeaseCreated,
-		fmt.Sprintf("granted from image %s in %s", image, eventDuration(time.Since(start))))
+	detail := fmt.Sprintf("granted from image %s in %s", image, eventDuration(time.Since(start)))
+	if snap != nil {
+		detail = fmt.Sprintf("started from snapshot %s@%d in %s", snap.row.Name, snap.row.Version, eventDuration(time.Since(start)))
+	}
+	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, detail)
 	return lease, nil
 }
 
@@ -3150,6 +3352,11 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		}
 	}
 	m["kept_builds"] = kept
+	// The named-snapshot version this lease started from (A3): the same
+	// object the create response carries.
+	if view := s.snapshotView(ctx, l); view != nil {
+		m["snapshot"] = view
+	}
 	// Background jobs (2.6, #135): how many of the lease's jobs run and
 	// its most recent exit, for the lease view.
 	m["jobs"] = s.leaseJobsView(ctx, l.ID)
@@ -3509,28 +3716,34 @@ const (
 // logged, never returned. Both files are written atomically (temp file,
 // then rename), so inotify on /run/spoond sees each whole write. Call
 // without s.store.mu.
-func (s *Service) writeGeneration(l *Lease) {
+func (s *Service) writeGeneration(l *Lease) error {
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	data := fmt.Sprintf("%d\n", l.Generation)
-	s.writeGuestFileAtomic(ctx, l, generationPath, []byte(data), generationMode)
-	s.writeGuestFileAtomic(ctx, l, leaseIDPath, []byte(l.ID+"\n"), leaseIDMode)
+	if err := s.writeGuestFileAtomic(ctx, l, generationPath, []byte(data), generationMode); err != nil {
+		return err
+	}
+	return s.writeGuestFileAtomic(ctx, l, leaseIDPath, []byte(l.ID+"\n"), leaseIDMode)
 }
 
 // writeGuestFileAtomic writes data to path in the lease's guest through
 // a sibling temp file plus a rename, so a reader (an inotify watcher
-// included) never sees a partially written file. A failed write or
-// rename is logged and otherwise ignored: these files are announcements,
-// not constraints. Call without s.store.mu.
-func (s *Service) writeGuestFileAtomic(ctx context.Context, l *Lease, path string, data []byte, mode os.FileMode) {
+// included) never sees a partially written file. It returns an error
+// when the write or the rename fails; callers that treat the file as an
+// announcement ignore it (and it is logged here), while a snapshot
+// start's copy-side markers must fail the create (A4/S3). Call without
+// s.store.mu.
+func (s *Service) writeGuestFileAtomic(ctx context.Context, l *Lease, path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
 	if err := s.sub.WriteFile(ctx, l.SandboxID, tmp, data, mode); err != nil {
 		s.log.Printf("guest file: write %s into %s: %v", tmp, l.ID, err)
-		return
+		return err
 	}
 	if err := s.sub.Rename(ctx, l.SandboxID, tmp, path); err != nil {
 		s.log.Printf("guest file: rename %s -> %s in %s: %v", tmp, path, l.ID, err)
+		return err
 	}
+	return nil
 }
 
 // bumpGenerationLocked moves the lease to the next generation and

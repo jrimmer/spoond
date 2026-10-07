@@ -292,14 +292,16 @@ func (c *Client) NodeInfo(ctx context.Context) (substrate.NodeInfo, error) {
 		return substrate.NodeInfo{}, mapError(err)
 	}
 	return substrate.NodeInfo{
-		Status:            statusString(resp.GetServiceStatus()),
-		Version:           resp.GetServiceVersion(),
-		RunningSandboxes:  int(resp.GetMetricSandboxesRunning()),
-		OutstandingWork:   int(resp.GetOutstandingWork()),
-		HugepagesTotal:    resp.GetMetricHugepagesTotal(),
-		HugepagesUsed:     resp.GetMetricHugepagesUsed(),
-		HugepagesReserved: resp.GetMetricHugepagesReserved(),
-		HugepageSizeBytes: resp.GetMetricHugepageSizeBytes(),
+		Status:             statusString(resp.GetServiceStatus()),
+		Version:            resp.GetServiceVersion(),
+		RunningSandboxes:   int(resp.GetMetricSandboxesRunning()),
+		OutstandingWork:    int(resp.GetOutstandingWork()),
+		HugepagesTotal:     resp.GetMetricHugepagesTotal(),
+		HugepagesUsed:      resp.GetMetricHugepagesUsed(),
+		HugepagesReserved:  resp.GetMetricHugepagesReserved(),
+		HugepageSizeBytes:  resp.GetMetricHugepageSizeBytes(),
+		EnvdVersion:        c.cfg.EnvdVersion,
+		FirecrackerVersion: c.cfg.FirecrackerVersion,
 	}, nil
 }
 

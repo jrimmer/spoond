@@ -81,6 +81,13 @@ type NodeInfo struct {
 	HugepagesUsed     uint64
 	HugepagesReserved uint64
 	HugepageSizeBytes uint64
+	// EnvdVersion and FirecrackerVersion are the host's envd and
+	// firecracker versions when the substrate can report them ("" when
+	// unknown). They gate a named-snapshot start: a version whose saved
+	// envd/firecracker differs from the host cannot run here (2.7, #83
+	// S2).
+	EnvdVersion        string
+	FirecrackerVersion string
 }
 
 // FreeHugepageBytes is the hugepage memory neither used nor reserved,

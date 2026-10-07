@@ -252,3 +252,50 @@ func TestMarkUnnamedCheckpointsFailed(t *testing.T) {
 		t.Fatalf("named build state = %q, want building (it has a version row)", named.State)
 	}
 }
+
+// TestGetNamedSnapshotByBuild: a lease's snapshot_build_id resolves to
+// its version row, owner-scoped; an empty or unknown build is
+// ErrNotFound.
+func TestGetNamedSnapshotByBuild(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	row, err := db.InsertNamedSnapshot(ctx, namedRow("alice", "warm", "b1"), 3)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	got, err := db.GetNamedSnapshotByBuild(ctx, "alice", "b1")
+	if err != nil || got.Version != row.Version || got.Name != "warm" {
+		t.Fatalf("by build = %+v (%v)", got, err)
+	}
+	if _, err := db.GetNamedSnapshotByBuild(ctx, "bob", "b1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other owner = %v, want ErrNotFound", err)
+	}
+	if _, err := db.GetNamedSnapshotByBuild(ctx, "alice", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty build = %v, want ErrNotFound", err)
+	}
+}
+
+// TestLiveLeaseCountsByBuild: the batch count matches the per-build
+// count and leaves lost leases out.
+func TestLiveLeaseCountsByBuild(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	seedNamedLease(t, db, "l1", "b1", "running")
+	seedNamedLease(t, db, "l2", "b1", "recovered")
+	seedNamedLease(t, db, "l3", "b2", "lost")
+	seedNamedLease(t, db, "l4", "b3", "running")
+	counts, err := db.LiveLeaseCountsByBuild(ctx, []string{"b1", "b2", "b3", "b4"})
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+	if counts["b1"] != 2 || counts["b2"] != 0 || counts["b3"] != 1 {
+		t.Fatalf("counts = %v, want b1=2 b2=0 b3=1", counts)
+	}
+	if _, ok := counts["b4"]; ok {
+		t.Fatalf("b4 should be absent, got %v", counts["b4"])
+	}
+	one, _ := db.LiveLeasesUsingBuild(ctx, "b1")
+	if one != counts["b1"] {
+		t.Fatalf("per-build count %d != batch %d", one, counts["b1"])
+	}
+}

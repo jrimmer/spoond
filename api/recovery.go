@@ -116,6 +116,9 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "no checkpoint to recover from; the running state is gone")
 		s.log.Printf("recovery: lease %s lost (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
 		s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost in a crash; the job did not survive")
+		// A version this lost lease started from is no longer in use:
+		// retention may drop it now (S5).
+		s.rerunSnapshotRetention(ctx, l)
 		return recoveryOutcome{Result: "lost", Generation: l.Generation, State: l.State}
 	}
 	if err := s.recoverFromCheckpoint(ctx, l); err != nil {
@@ -126,6 +129,7 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, fmt.Sprintf("recovery from checkpoint %s failed: %v", l.LastCheckpointBuildID, err))
 		s.log.Printf("recovery: lease %s lost (checkpoint %s): %v", l.ID, formatRFC3339(l.LastCheckpointAt), err)
 		s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost in a crash; the job did not survive")
+		s.rerunSnapshotRetention(ctx, l)
 		return recoveryOutcome{Result: "lost", Generation: l.Generation, State: l.State}
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseRecovered, fmt.Sprintf("recovered from checkpoint %s", l.LastCheckpointBuildID))

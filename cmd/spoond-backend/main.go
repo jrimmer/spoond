@@ -7,6 +7,11 @@
 //	E2B_PROXY_URL     orchestrator sandbox proxy (default http://127.0.0.1:5007)
 //	E2B_TOKEN_SEED_FILE  envd/traffic HMAC seed file (default /etc/spoond/e2b-token-seed)
 //	E2B_TEAM_ID       fixed team UUID sent on every request
+//	E2B_ENVD_VERSION  the host's envd version (empty = unknown). A named
+//	                  snapshot saved against a different envd cannot start
+//	                  here (2.7, #83).
+//	E2B_FIRECRACKER_VERSION  the host's firecracker version (empty =
+//	                  unknown); likewise gates a named-snapshot start.
 //	BIND_ADDR         listen address (default 127.0.0.1:8890)
 //	PROXY_ADDR        public proxy listener (e.g. 0.0.0.0:8891)
 //	SPOOND_DB_PATH    SQLite database path (default /var/lib/spoond/spoond.db)

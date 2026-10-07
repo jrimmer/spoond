@@ -353,6 +353,11 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	}
 	s.deleteSandboxRow(l.SandboxID)
 	s.recoverOneLease(ctx, l)
+	// If the recovery marked the lease lost, a version it started from is
+	// no longer in use and retention may drop it now (S5).
+	if l.State == "lost" {
+		s.rerunSnapshotRetention(ctx, l)
+	}
 	s.forgetRootfs(l.ID)
 }
 

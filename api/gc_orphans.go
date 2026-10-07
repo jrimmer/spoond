@@ -188,6 +188,9 @@ func (s *Service) orphanRoots(ctx context.Context) (map[string]bool, error) {
 	for _, l := range leases {
 		needed[l.ResumeBuildID] = true
 		needed[l.LastCheckpointBuildID] = true
+		// A live lease started from a named snapshot needs its version's
+		// build even after a forced row delete (2.7, #83).
+		needed[l.SnapshotBuildID] = true
 	}
 	keptBy, err := s.db.ListKeptBuilds(ctx)
 	if err != nil {
@@ -198,12 +201,16 @@ func (s *Service) orphanRoots(ctx context.Context) (map[string]bool, error) {
 			needed[id] = true
 		}
 	}
-	// Named snapshots (2.7, #83): every version's build is an orphan root.
+	// Named snapshots (2.7, #83): every version's build is an orphan root,
+	// plus any build a lease start is using right now (B1).
 	named, err := s.db.NamedSnapshotBuilds(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list named snapshot builds: %w", err)
 	}
 	for id := range named {
+		needed[id] = true
+	}
+	for id := range s.startingBuildSet() {
 		needed[id] = true
 	}
 	sbs, err := s.db.ListSandboxes(ctx)

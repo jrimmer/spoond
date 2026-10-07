@@ -403,7 +403,7 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	// Retention: keep the last keep versions, never dropping one a live
 	// lease started from.
 	keepEff := s.effectiveKeep(ctx, l.Owner, name)
-	if deleted, perr := s.db.PruneNamedSnapshots(ctx, l.Owner, name, keepEff); perr != nil {
+	if deleted, perr := s.db.PruneNamedSnapshotsKeeping(ctx, l.Owner, name, keepEff, s.startingBuildSet()); perr != nil {
 		s.log.Printf("snapshot: prune %s/%s: %v", l.Owner, name, perr)
 	} else if len(deleted) > 0 {
 		s.unkeepBuilds(ctx, deleted)
@@ -558,6 +558,146 @@ func (s *Service) resolveNamedSnapshot(ctx context.Context, owner, name string, 
 	return s.db.GetNamedSnapshotLatest(ctx, owner, name)
 }
 
+// snapshotView renders the "snapshot" object a create response and the
+// lease detail carry (A3): the name, version and build the lease started
+// from, or nil when it did not start from a named snapshot. A lease
+// loaded from the store has no name/version in memory, so they are
+// looked up by build id.
+func (s *Service) snapshotView(ctx context.Context, l *Lease) map[string]any {
+	if l.SnapshotBuildID == "" {
+		return nil
+	}
+	name, version := l.SnapshotName, l.SnapshotVersion
+	if name == "" || version == 0 {
+		if row, err := s.db.GetNamedSnapshotByBuild(ctx, l.Owner, l.SnapshotBuildID); err == nil {
+			name, version = row.Name, row.Version
+		}
+	}
+	return map[string]any{
+		"name":     name,
+		"version":  version,
+		"build_id": l.SnapshotBuildID,
+	}
+}
+
+// snapshotStartFromRequest resolves a create body's "snapshot" field into
+// the leaseRequest override. An unknown name or version answers 404
+// not_found; an explicit image that is not the snapshot's image answers
+// 400 image_mismatch. The lease's image always comes from the snapshot.
+// It takes a reference on the resolved build (B1) so the version and its
+// build cannot be deleted or pruned while the create is in flight; the
+// caller releases it with endStartingBuild once the create finishes.
+func (s *Service) snapshotStartFromRequest(ctx context.Context, owner, ref, image string) (*snapshotStart, *namedSnapshotError) {
+	name, version, err := parseSnapshotRef(ref)
+	if err != nil {
+		return nil, &namedSnapshotError{status: http.StatusBadRequest, code: "bad_request", msg: err.Error()}
+	}
+	row, err := s.resolveNamedSnapshot(ctx, owner, name, version)
+	if errors.Is(err, store.ErrNotFound) {
+		if version > 0 {
+			return nil, &namedSnapshotError{status: http.StatusNotFound, code: "not_found", msg: fmt.Sprintf("snapshot %s@%d not found", name, version)}
+		}
+		return nil, errNamedNotFound()
+	}
+	if err != nil {
+		s.log.Printf("create: resolve snapshot %s: %v", ref, err)
+		return nil, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "failed to read snapshot"}
+	}
+	// The version is real: hold its build against delete, retention and
+	// GC for the whole create. Re-read the row afterwards, so a start
+	// that lost a race with a forced delete answers cannot_start rather
+	// than starting from a version that no longer exists (B1).
+	s.beginStartingBuild(row.BuildID)
+	if _, rerr := s.db.GetNamedSnapshot(ctx, owner, row.Name, row.Version); errors.Is(rerr, store.ErrNotFound) {
+		s.endStartingBuild(row.BuildID)
+		return nil, &namedSnapshotError{status: http.StatusNotFound, code: "not_found",
+			msg: fmt.Sprintf("snapshot %s@%d not found", row.Name, row.Version)}
+	} else if rerr != nil {
+		s.endStartingBuild(row.BuildID)
+		s.log.Printf("create: re-check snapshot %s: %v", ref, rerr)
+		return nil, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "failed to read snapshot"}
+	}
+	if image != "" && image != row.Image {
+		s.endStartingBuild(row.BuildID)
+		return nil, &namedSnapshotError{status: http.StatusBadRequest, code: "image_mismatch",
+			msg: fmt.Sprintf("image %s does not match snapshot %s@%d (image %s)", image, row.Name, row.Version, row.Image)}
+	}
+	return &snapshotStart{row: row}, nil
+}
+
+// writeStartedFromMarker writes /run/spoond/started-from on a lease
+// started from a named snapshot (A4): JSON {name, version, build_id}.
+// It returns an error so the create can fail the lease rather than hand
+// out a copy that cannot name its origin (S3).
+func (s *Service) writeStartedFromMarker(l *Lease) error {
+	payload, err := json.Marshal(map[string]any{
+		"name":     l.SnapshotName,
+		"version":  l.SnapshotVersion,
+		"build_id": l.SnapshotBuildID,
+	})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
+	defer cancel()
+	return s.writeGuestFileAtomic(ctx, l, startedFromPath, payload, 0o644)
+}
+
+// snapshotHostMismatch reports whether a saved version cannot start on
+// this host because the host's envd, firecracker or orchestrator
+// versions differ from the ones the version was saved with (2.7, #83
+// S2). It compares only versions both sides know: an unknown host
+// version ("") never refuses, and an empty saved version never matches
+// anything. The returned cause names the differing component.
+func (s *Service) snapshotHostMismatch(ctx context.Context, row store.NamedSnapshotRow) (string, bool) {
+	info, err := s.sub.NodeInfo(ctx)
+	if err != nil {
+		// Without the host's versions there is nothing to compare; the
+		// create proceeds and a real incompatibility surfaces from the
+		// substrate or the guest.
+		return "", false
+	}
+	if row.EnvdVersion != "" && info.EnvdVersion != "" && row.EnvdVersion != info.EnvdVersion {
+		return fmt.Sprintf("envd %s, host has %s", row.EnvdVersion, info.EnvdVersion), true
+	}
+	if row.FirecrackerVersion != "" && info.FirecrackerVersion != "" && row.FirecrackerVersion != info.FirecrackerVersion {
+		return fmt.Sprintf("firecracker %s, host has %s", row.FirecrackerVersion, info.FirecrackerVersion), true
+	}
+	if row.OrchestratorVersion != "" && info.Version != "" && row.OrchestratorVersion != info.Version {
+		return fmt.Sprintf("orchestrator %s, host has %s", row.OrchestratorVersion, info.Version), true
+	}
+	return "", false
+}
+
+// rerunSnapshotRetention re-applies a name's retention after a lease that
+// started from one of its versions is released (S5): a version that was
+// spared only because this lease ran from it is dropped once no live
+// lease uses it. It reads the name from the build id; a forced delete
+// leaves no row, in which case there is nothing to prune.
+func (s *Service) rerunSnapshotRetention(ctx context.Context, l *Lease) {
+	if l.SnapshotBuildID == "" {
+		return
+	}
+	row, err := s.db.GetNamedSnapshotByBuild(ctx, l.Owner, l.SnapshotBuildID)
+	if errors.Is(err, store.ErrNotFound) {
+		return
+	}
+	if err != nil {
+		s.log.Printf("snapshot retention: build %s of %s: %v", l.SnapshotBuildID, l.ID, err)
+		return
+	}
+	keep := s.effectiveKeep(ctx, l.Owner, row.Name)
+	deleted, err := s.db.PruneNamedSnapshotsKeeping(ctx, l.Owner, row.Name, keep, s.startingBuildSet())
+	if err != nil {
+		s.log.Printf("snapshot retention: prune %s/%s after release of %s: %v", l.Owner, row.Name, l.ID, err)
+		return
+	}
+	if len(deleted) > 0 {
+		s.unkeepBuilds(ctx, deleted)
+		s.UpdateNamedSnapshotMetrics(ctx)
+	}
+}
+
 // handleLeaseSnapshotSave is POST /api/leases/{id}/snapshots: save the
 // lease as a named snapshot. Owner only, live leases only.
 func (s *Server) handleLeaseSnapshotSave(w http.ResponseWriter, r *http.Request) {
@@ -700,7 +840,13 @@ func (s *Server) handleNamedSnapshotsList(w http.ResponseWriter, r *http.Request
 			currentImageBuild[img.Name] = img.CurrentBuildID
 		}
 	}
-	// Group by name, newest version first.
+	// Group by name, newest version first. One query counts the live
+	// leases per build, rather than one query per version (N5).
+	buildIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		buildIDs = append(buildIDs, row.BuildID)
+	}
+	inUseByBuild, _ := s.svc.db.LiveLeaseCountsByBuild(r.Context(), buildIDs)
 	type nameGroup struct {
 		name     string
 		latest   int64
@@ -718,7 +864,6 @@ func (s *Server) handleNamedSnapshotsList(w http.ResponseWriter, r *http.Request
 		if row.Version > g.latest {
 			g.latest = row.Version
 		}
-		inUse, _ := s.svc.db.LiveLeasesUsingBuild(r.Context(), row.BuildID)
 		stale := currentImageBuild[row.Image] != "" && currentImageBuild[row.Image] != row.ImageBuildID
 		g.versions = append(g.versions, map[string]any{
 			"version":    row.Version,
@@ -727,7 +872,7 @@ func (s *Server) handleNamedSnapshotsList(w http.ResponseWriter, r *http.Request
 			"memory_mb":  row.MemoryMB,
 			"size_bytes": row.SizeBytes,
 			"created_at": formatRFC3339(row.CreatedAt),
-			"in_use":     inUse,
+			"in_use":     inUseByBuild[row.BuildID],
 			"stale":      stale,
 		})
 	}
@@ -859,7 +1004,7 @@ func (s *Server) handleNamedSnapshotDelete(w http.ResponseWriter, r *http.Reques
 		}
 		if !force {
 			n, _ := s.svc.db.LiveLeasesUsingBuild(r.Context(), row.BuildID)
-			if n > 0 {
+			if n > 0 || s.svc.startingBuild(row.BuildID) {
 				errSnapshotInUse(fmt.Sprintf("snapshot is in use by %d live lease(s); retry with ?force=1 to drop the row", n)).write(w)
 				return
 			}
@@ -891,7 +1036,7 @@ func (s *Server) handleNamedSnapshotDelete(w http.ResponseWriter, r *http.Reques
 	if !force {
 		for _, row := range rows {
 			n, _ := s.svc.db.LiveLeasesUsingBuild(r.Context(), row.BuildID)
-			if n > 0 {
+			if n > 0 || s.svc.startingBuild(row.BuildID) {
 				errSnapshotInUse(fmt.Sprintf("snapshot %s@%d is in use by %d live lease(s); retry with ?force=1 to drop the row", name, row.Version, n)).write(w)
 				return
 			}
@@ -943,7 +1088,7 @@ func (s *Server) handleNamedSnapshotKeep(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update snapshot", "code": "internal"})
 		return
 	}
-	if deleted, err := s.svc.db.PruneNamedSnapshots(r.Context(), owner, name, *req.Keep); err != nil {
+	if deleted, err := s.svc.db.PruneNamedSnapshotsKeeping(r.Context(), owner, name, *req.Keep, s.svc.startingBuildSet()); err != nil {
 		s.svc.log.Printf("snapshot: prune %s: %v", name, err)
 	} else {
 		s.svc.unkeepBuilds(r.Context(), deleted)

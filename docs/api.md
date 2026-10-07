@@ -36,10 +36,11 @@ Request:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `image` | string | *(required)* | image name; must have a current build in the catalog (`GET /api/images`) |
+| `image` | string | *(required unless `snapshot`)* | image name; must have a current build in the catalog (`GET /api/images`). With `snapshot` it may be omitted; when given it must equal the snapshot's image (`400 image_mismatch`) |
+| `snapshot` | string | *(none)* | start the lease from a named snapshot version instead of the image's current build: `name` (latest) or `name@v`. The version must exist for the caller (`404 not_found`). The lease is never served from the warm pool, its memory is the snapshot's `memory_mb` for quota and admission, and it is stamped with the version so retention never drops it — see [Start from a snapshot](#start-from-a-snapshot). A version that cannot run on this host answers `409 cannot_start` |
 | `ttl` | int | `DEFAULT_TTL_SECS` | seconds; capped at `MAX_TTL_SECS` and at the user's `max_ttl` |
 | `persistent` | bool | `false` | not TTL-swept; supports keepalive, suspend/resume, checkpoint |
-| `memory_mib` | int | `0` | **must be `0` or exactly the image's `memory_mb`** — memory is fixed per image (a snapshot restores with its build's RAM). Any other value is `400`. |
+| `memory_mib` | int | `0` | **must be `0` or exactly the image's `memory_mb`** — memory is fixed per image (a snapshot restores with its build's RAM). For a create with `snapshot`, memory is fixed by the snapshot: `0` or exactly the snapshot's `memory_mb`, else `400`. Any other value is `400`. |
 | `network` | string | *(ignored)* | accepted for compatibility |
 | `init_cmd` | string | *(ignored)* | accepted for compatibility |
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
@@ -109,7 +110,19 @@ each published port to `<address>:<port>` — reachable from peers whose
 egress policy permits it (see [Network policy](#network-policy)), never
 from the LAN. The same map appears in `GET /api/leases`.
 
-Errors: `400` bad policy/ports/memory/holder/secret fields, `404` unknown image,
+A create with `snapshot` answers with a `snapshot` object carrying what
+it used, and `GET /api/leases/{id}` shows the same object:
+
+```json
+"snapshot": {"name": "spoond/warm", "version": 3, "build_id": "…"}
+```
+
+Errors: `400` bad policy/ports/memory/holder/secret fields, `400
+image_mismatch` when an explicit `image` differs from the snapshot's,
+`404` unknown image or unknown snapshot (`not_found`), `409
+cannot_start` when the snapshot's build cannot start on this host (the
+body is `snapshot <name>@<v> cannot start on this host (<cause>); save
+it again`, and there is no retry loop),
 `429` quota — the user's concurrent-lease cap or their memory cap
 (#128, see `POST /api/users/{id}/quota`), `503` capacity (not enough
 free hugepage memory for the image, or the node is not healthy), and
@@ -1148,7 +1161,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 
 | `event` | emitted when | `detail` names |
 |---|---|---|
-| `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build) |
+| `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
 | `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule` (or `lease released`) |
 | `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse) | the pause build id |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
@@ -1353,7 +1366,8 @@ that call, and the next one deletes).
 A **named snapshot** is a checkpoint build that has a name and a
 version. It is owned by an identity and outlives the lease it was saved
 from. Save one with `POST /api/leases/{id}/snapshots`, then start new
-leases from it (task 2) and manage it under `/api/named-snapshots`.
+leases from it (see [Start from a snapshot](#start-from-a-snapshot)) and
+manage it under `/api/named-snapshots`.
 
 - **Name:** `<project>/<name>` or a bare `<name>`; each part matches
   `[a-z0-9][a-z0-9._-]{0,62}`. Names are unique per owner (the prefix is
@@ -1463,6 +1477,40 @@ save — and is informational only.
 in the name is allowed in the path. Response `200` is one version object
 as in the list, with `in_use` and `stale`. `404 not_found` for an
 unknown name or version.
+
+### Start from a snapshot
+
+A lease create accepts `"snapshot": "spoond/warm"` (the latest version)
+or `"snapshot": "spoond/warm@3"` (a pinned one) in place of a fresh
+lease from the image's current build. `image` may be omitted; when given
+it must equal the snapshot's image (`400 image_mismatch`). Everything
+else is a normal create — TTL, persistence, network policy and
+allowlist, holder, create-time `secrets`, `wait`, quotas and class all
+come from the request, not the source lease.
+
+- **Memory** is the snapshot's `memory_mb`, for quota and admission
+alike.
+- The lease gets a **new lease id and generation `1`**. Its create
+  response and `GET /api/leases/{id}` carry
+  `"snapshot":{"name":"spoond/warm","version":3,"build_id":"…"}` —
+  the resolved version.
+- Its `created` event says
+  `started from snapshot spoond/warm@3 in 410 ms`.
+- The lease is **never served from the warm pool**, and it is stamped
+  with the version's build (`leases.snapshot_build_id`), so retention
+  never drops a version a live lease runs from.
+- **Errors:** an unknown name or version is `404` `{"code":"not_found"}`;
+  a snapshot that cannot start on this host — for example after an
+  orchestrator or envd upgrade — is `409`
+  `{"error":"snapshot spoond/warm@3 cannot start on this host (…); save
+  it again","code":"cannot_start"}` with no retry loop. Only failures
+  that mean the build cannot run (missing build files, an incompatible
+  envd/firecracker/orchestrator) become `cannot_start`; capacity and
+  transient failures keep their usual handling.
+
+A version spared by retention only because a lease ran from it is
+dropped once that lease is released (delete, TTL, lost cleanup):
+releasing the lease re-runs the name's retention.
 
 ### `DELETE /api/named-snapshots/{name}[@v]` — delete
 

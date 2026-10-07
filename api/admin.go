@@ -422,6 +422,9 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			s.saveLeaseLocked(l)
 			s.store.mu.Unlock()
 			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err))
+			// A lease started from a named snapshot no longer protects it
+			// once lost (#83 S5).
+			s.rerunSnapshotRetention(ctx, l)
 			mu.Lock()
 			res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 			mu.Unlock()
