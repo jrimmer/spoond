@@ -390,6 +390,25 @@ type ServiceConfig struct {
 	// cmd maps an unset variable to DefaultUndrainResumeRetries (2).
 	// spoond-urm.
 	UndrainResumeRetries int
+	// RecoveryRetryAttempts is how many failed crash-recovery attempts
+	// (a transient failure of recoverFromCheckpoint) a lease gets before
+	// it is marked lost (RECOVERY_RETRY_ATTEMPTS). <=0 uses
+	// DefaultRecoveryRetryAttempts. Capacity refusals (over quota, no
+	// burst room, no preemption room, a busy node) wait for capacity and
+	// are bounded by RecoveryRetryWindow instead. spoond-dxq.
+	RecoveryRetryAttempts int
+	// RecoveryRetryWindow bounds how long a lease may stay in recovery
+	// since its first failed attempt, whatever the failure kind
+	// (RECOVERY_RETRY_WINDOW). It is the backstop that stops a capacity
+	// refusal from waiting forever. <=0 uses DefaultRecoveryRetryWindow.
+	// spoond-dxq.
+	RecoveryRetryWindow time.Duration
+	// PreemptResumeRetries is how many failed resume attempts a preempted
+	// lease gets from the preemption resume queue before it is marked
+	// lost (PREEMPT_RESUME_RETRIES). Admission/capacity refusals do not
+	// count and wait for capacity. <=0 uses DefaultPreemptResumeRetries.
+	// spoond-dxq.
+	PreemptResumeRetries int
 	// SweepTimeout bounds one background sweep stage (TTL release, held
 	// rules, pool refill, job prune) and each other background loop
 	// pass. The substrate bounds every individual RPC too (spoond-j3a);
@@ -444,6 +463,14 @@ type Service struct {
 	// rootfsProbeAllFailedLogged suppresses the "every probe failed"
 	// line to once per outage rather than once per pass.
 	rootfsProbeAllFailedLogged bool
+	// retryMu guards the per-lease retry budgets below. recoveryRetries
+	// counts the failed crash-recovery attempts of a lease still in
+	// recovery; preemptRetries counts the failed resume attempts of a
+	// preempted lease (spoond-dxq). Both are in memory: a lease that
+	// recovers, is lost or is released has its entry dropped.
+	retryMu         sync.Mutex
+	recoveryRetries map[string]*retryBudget
+	preemptRetries  map[string]*retryBudget
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
 	// sweepTimeout bounds one background sweep stage and each other
@@ -628,6 +655,8 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		probeTimeout:          20 * time.Second,
 		rootfsProbeOK:         map[string]time.Time{},
 		rootfsProbeFails:      map[string]*rootfsProbeFailure{},
+		recoveryRetries:       map[string]*retryBudget{},
+		preemptRetries:        map[string]*retryBudget{},
 		bus:                   newEventBus(),
 		gcErr:                 newGCTracker(),
 		liveJobSecrets:        map[string][]string{},

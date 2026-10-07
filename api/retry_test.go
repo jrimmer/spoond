@@ -1,0 +1,365 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
+)
+
+// Recovery and preempt-resume retries (spoond-dxq): a transient failure
+// keeps a lease recovering under a bounded budget, a permanent one loses
+// it at once, and a capacity refusal waits for capacity (still bounded).
+
+// recoverTargetCheckpoint grants a checkpointed lease and kills its
+// sandbox, leaving it for the crash reconcile.
+func recoverTargetCheckpoint(t *testing.T, svc *Service, sub *testSub, ctx context.Context) *Lease {
+	t.Helper()
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.checkpointLease(ctx, l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	sub.Fake.Kill(l.SandboxID)
+	return l
+}
+
+// TestRecoveryRetriesTransientThenSucceeds: a recovery that fails twice
+// with a transient error keeps the lease recovering, and the third
+// reconcile pass succeeds — the lease is not lost on a transient failure.
+func TestRecoveryRetriesTransientThenSucceeds(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 3
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+
+	var attempts int
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			attempts++
+			if attempts <= 2 {
+				return substrate.Sandbox{}, errors.New("failed to init envd: syncing took too long")
+			}
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	// First pass: transient failure, lease stays recovering.
+	out := svc.reconcileCrash(ctx)
+	if out.Recovered != 0 || out.Lost != 0 {
+		t.Fatalf("first pass summary = %+v, want no counts (recovering)", out)
+	}
+	if l.State != "running" || !l.live() {
+		t.Fatalf("after 1 failure state = %q, want running (still live) and not lost", l.State)
+	}
+	if !l.LostAt.IsZero() {
+		t.Fatal("a transient failure must not stamp the lease lost")
+	}
+
+	// Second pass: still recovering.
+	if out := svc.reconcileCrash(ctx); out.Lost != 0 {
+		t.Fatalf("second pass summary = %+v, want no loss", out)
+	}
+	if l.State != "running" {
+		t.Fatalf("after 2 failures state = %q, want running", l.State)
+	}
+
+	// Third pass: the resume succeeds.
+	out = svc.reconcileCrash(ctx)
+	if out.Recovered != 1 || out.Lost != 0 {
+		t.Fatalf("third pass summary = %+v, want one recovery and no loss", out)
+	}
+	if l.State != "recovered" || !l.live() {
+		t.Fatalf("after success state = %q, want live recovered", l.State)
+	}
+	if attempts != 3 {
+		t.Fatalf("resume attempts = %d, want 3", attempts)
+	}
+}
+
+// TestRecoveryPermanentTransientGivesUp: a recovery that always fails
+// transiently loses the lease once its attempt budget is spent, with the
+// attempts named in the reason.
+func TestRecoveryPermanentTransientGivesUp(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 3
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			return substrate.Sandbox{}, errors.New("failed to init envd: syncing took too long")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	esub := svc.Subscribe(EventFilter{LeaseID: l.ID})
+	defer esub.Close()
+
+	for i := 0; i < 3; i++ {
+		out := svc.reconcileCrash(ctx)
+		if i < 2 && out.Lost != 0 {
+			t.Fatalf("pass %d summary = %+v, want no loss yet", i, out)
+		}
+	}
+	if l.State != "lost" {
+		t.Fatalf("state after 3 failures = %q, want lost", l.State)
+	}
+	if !strings.Contains(l.LostReason, "after 3 attempt(s)") {
+		t.Fatalf("lost reason = %q, want it to name 3 attempts", l.LostReason)
+	}
+	if l.LostAt.IsZero() {
+		t.Fatal("a permanently failing recovery must stamp the lease lost")
+	}
+	esub.Close()
+	events := collectEvents(esub.C)
+	var lost LeaseEvent
+	for _, ev := range events {
+		if ev.Type == LeaseLost {
+			lost = ev
+		}
+	}
+	if lost.Type != LeaseLost {
+		t.Fatalf("no lost event in %v", eventTypes(events))
+	}
+	if !strings.Contains(lost.Detail, "after 3 attempt(s)") {
+		t.Fatalf("lost event detail = %q, want the attempt count", lost.Detail)
+	}
+}
+
+// TestRecoveryNonRetryableLostAtOnce: a missing checkpoint build is
+// permanent, so the lease is lost on the first pass, not retried.
+func TestRecoveryNonRetryableLostAtOnce(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 3
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// A checkpoint build id that has no row: the recovery cannot load it.
+	svc.store.mu.Lock()
+	l.LastCheckpointBuildID = "b-does-not-exist"
+	l.LastCheckpointAt = time.Now()
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+	sub.Fake.Kill(l.SandboxID)
+
+	out := svc.reconcileCrash(ctx)
+	if out.Lost != 1 || out.Recovered != 0 {
+		t.Fatalf("summary = %+v, want one loss", out)
+	}
+	if l.State != "lost" {
+		t.Fatalf("state = %q, want lost", l.State)
+	}
+	if !recoveryFailurePermanent(store.ErrNotFound) {
+		t.Fatal("store.ErrNotFound must be classified permanent")
+	}
+}
+
+// TestRecoveryCapacityRefusalWaits: an admission refusal keeps the lease
+// recovering without counting an attempt, and does not lose it while the
+// window lasts.
+func TestRecoveryCapacityRefusalWaits(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 2 // small attempt budget
+	svc.cfg.RecoveryRetryWindow = time.Hour
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			return substrate.Sandbox{}, errBurstReserve
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	// Many passes: an admission refusal is a wait, not a failure count,
+	// so the small attempt budget never runs out.
+	for i := 0; i < 5; i++ {
+		out := svc.reconcileCrash(ctx)
+		if out.Lost != 0 {
+			t.Fatalf("pass %d lost a lease waiting for capacity: %+v", i, out)
+		}
+		if l.State != "running" {
+			t.Fatalf("pass %d state = %q, want running (still recovering)", i, l.State)
+		}
+	}
+	if l.LostReason != "" {
+		t.Fatalf("a waiting lease carries a loss reason %q", l.LostReason)
+	}
+}
+
+// TestRecoveryWindowBoundsCapacityWait: a capacity refusal that never
+// resolves still gives up once the recovery window has passed, so no
+// state waits for ever.
+func TestRecoveryWindowBoundsCapacityWait(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 100
+	svc.cfg.RecoveryRetryWindow = time.Minute
+
+	now := time.Now()
+	svc.now = func() time.Time { return now }
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			return substrate.Sandbox{}, errBurstReserve
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	if out := svc.reconcileCrash(ctx); out.Lost != 0 || l.State != "running" {
+		t.Fatalf("first pass = %+v state %q, want running (still recovering)", out, l.State)
+	}
+	// Advance beyond the window and retry: now it gives up.
+	now = now.Add(2 * time.Minute)
+	if out := svc.reconcileCrash(ctx); out.Lost != 1 {
+		t.Fatalf("after the window summary = %+v, want one loss", out)
+	}
+	if l.State != "lost" {
+		t.Fatalf("state after the window = %q, want lost", l.State)
+	}
+}
+
+// TestRecoveryRetryBudgetClearedOnSuccess: a successful recovery drops
+// the lease's retry budget, so a later failure starts fresh.
+func TestRecoveryRetryBudgetClearedOnSuccess(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 2
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+	var fail bool
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb && fail {
+			return substrate.Sandbox{}, errors.New("syncing took too long")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	fail = true
+	if out := svc.reconcileCrash(ctx); out.Lost != 0 {
+		t.Fatalf("first failure lost the lease: %+v", out)
+	}
+	fail = false
+	if out := svc.reconcileCrash(ctx); out.Recovered != 1 {
+		t.Fatalf("successful recovery summary = %+v, want one recovery", out)
+	}
+	svc.retryMu.Lock()
+	_, present := svc.recoveryRetries[l.ID]
+	svc.retryMu.Unlock()
+	if present {
+		t.Fatal("the retry budget survived a successful recovery")
+	}
+}
+
+// TestPreemptResumeGivesUpAfterBudget: a preempted lease whose resume
+// keeps failing with a non-admission error is marked lost once its
+// budget is spent, with a lost event and the reason.
+func TestPreemptResumeGivesUpAfterBudget(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	svc.cfg.PreemptResumeRetries = 3
+	victim := preemptOne(t, svc, sub, ctx)
+	sb := victim.SandboxID
+
+	esub := svc.Subscribe(EventFilter{LeaseID: victim.ID})
+	defer esub.Close()
+
+	// Room returns, but the resume create keeps failing.
+	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
+	var attempts int
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			attempts++
+			return substrate.Sandbox{}, errors.New("failed to create sandbox: failed to init envd")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	for i := 0; i < 3; i++ {
+		svc.resumePreempted(ctx)
+	}
+	if victim.State != "lost" {
+		t.Fatalf("state after 3 failed resumes = %q, want lost", victim.State)
+	}
+	if attempts != 3 {
+		t.Fatalf("resume attempts = %d, want 3", attempts)
+	}
+	if !strings.Contains(victim.LostReason, "after 3 attempt(s)") {
+		t.Fatalf("lost reason = %q, want the attempt count", victim.LostReason)
+	}
+	esub.Close()
+	events := collectEvents(esub.C)
+	var lost LeaseEvent
+	for _, ev := range events {
+		if ev.Type == LeaseLost {
+			lost = ev
+		}
+	}
+	if lost.Type != LeaseLost {
+		t.Fatalf("no lost event in %v", eventTypes(events))
+	}
+	if !strings.Contains(lost.Detail, "after 3 attempt(s)") {
+		t.Fatalf("lost event detail = %q, want the attempt count", lost.Detail)
+	}
+}
+
+// TestPreemptResumeCapacityRefusalWaits: a resume refused for capacity
+// is not counted against the retry budget and keeps the lease suspended
+// for a later tick.
+func TestPreemptResumeCapacityRefusalWaits(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	svc.cfg.PreemptResumeRetries = 2
+	victim := preemptOne(t, svc, sub, ctx)
+	sb := victim.SandboxID
+
+	// The node has no room for the 1024 MiB burst lease: the reserve
+	// check refuses before any create, so the resume waits.
+	svc.cfg.BurstReserveMiB = 1 << 20
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	var attempts int
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			attempts++
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	for i := 0; i < 5; i++ {
+		svc.resumePreempted(ctx)
+	}
+	if victim.State != "suspended" || victim.PreemptedAt.IsZero() {
+		t.Fatalf("state = %q preempted = %v, want still suspended and preempted", victim.State, !victim.PreemptedAt.IsZero())
+	}
+	if attempts != 0 {
+		t.Fatalf("a capacity-refused resume reached the substrate %d times, want 0", attempts)
+	}
+}

@@ -358,7 +358,7 @@ scoped to this lease's owner.
 behaves exactly like `running` — it marks a lease the crash reconcile
 resumed from a checkpoint, and keeps showing `recovered` until the lease
 is suspended or restarted. `lost` means the sandbox died with no
-checkpoint (or its recovery failed); the detail carries `lost_reason`,
+checkpoint (or its recovery or preempt-resume retries ran out); the detail carries `lost_reason`,
 the cause the `lost` event reported, and every call on the lease answers
 `410` with `code: lease_lost` (see [Lost leases](#lost-leases)); the
 lease should be deleted to free its quota.
@@ -1043,7 +1043,10 @@ already lost, `404` for an unknown or released lease. Response `200`:
 ```
 
 `result` and `state` are `lost` (and `generation` unchanged) when there
-was no checkpoint.
+was no checkpoint. A recovery that fails transiently answers
+`result: "recovering"` with the lease's current state: the crash test is
+single-shot, while the background reconcile keeps retrying under its
+bounded budget (spoond-dxq).
 
 ### `POST /api/leases/{id}/clone` — branch to a new lease
 

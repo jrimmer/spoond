@@ -358,12 +358,10 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 		s.log.Printf("rootfs probe: lease %s delete sandbox %s: %v", l.ID, l.SandboxID, err)
 	}
 	s.deleteSandboxRow(l.SandboxID)
+	// recoverOneLease stores the loss reason and runs snapshot retention
+	// on a loss; a transient failure leaves the lease for the crash
+	// reconcile to retry (spoond-dxq).
 	s.recoverOneLease(ctx, l)
-	// If the recovery marked the lease lost, a version it started from is
-	// no longer in use and retention may drop it now (S5).
-	if l.State == "lost" {
-		s.rerunSnapshotRetention(ctx, l)
-	}
 	s.forgetRootfs(l.ID)
 }
 

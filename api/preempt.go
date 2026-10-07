@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 )
@@ -346,6 +347,13 @@ func (s *Service) runPreemptResumeLoop(ctx context.Context) {
 // owner is still above the guarantee. A lease that does not fit yet is
 // left for a later tick.
 //
+// A resume that keeps failing with a non-admission error is retried a
+// bounded number of times (PREEMPT_RESUME_RETRIES); once the budget is
+// spent the lease is marked lost with the reason and a lost event, so a
+// permanently failing lease does not create for ever (spoond-dxq). An
+// admission/capacity refusal is not a failure — the lease is waiting for
+// capacity — and is bounded by the recovery window instead.
+//
 // A preempted lease that comes back classified guaranteed may itself
 // preempt other burst leases (normal admission does that). The cascade
 // is bounded — each tick only brings back preempted leases — and is the
@@ -367,14 +375,42 @@ func (s *Service) resumePreempted(ctx context.Context) {
 	sort.SliceStable(victims, func(i, j int) bool { return victims[i].at.Before(victims[j].at) })
 
 	for _, v := range victims {
-		if _, err := s.resumeLease(ctx, v.l); err != nil {
-			if !errors.Is(err, errLeaseBusy) {
-				s.log.Printf("preempt: resume %s: %v", v.l.ID, err)
-			}
+		_, err := s.resumeLease(ctx, v.l)
+		if err == nil {
+			s.clearRetry(s.preemptRetries, v.l.ID)
+			s.log.Printf("preempt: resumed %s (preempted %s ago)", v.l.ID, s.now().Sub(v.at).Round(time.Second))
 			continue
 		}
-		s.log.Printf("preempt: resumed %s (preempted %s ago)", v.l.ID, s.now().Sub(v.at).Round(time.Second))
+		if errors.Is(err, errLeaseBusy) {
+			continue
+		}
+		// An admission/capacity refusal is a lease waiting for capacity,
+		// not a resume that keeps failing: it is bounded by the window
+		// rather than the attempt count.
+		countIt := !recoveryRefusalPending(err)
+		attempts, spent := s.noteRetryFailure(s.preemptRetries, v.l.ID, countIt, s.preemptResumeLimit(), s.recoveryRetryWindow())
+		if !spent {
+			s.log.Printf("preempt: resume %s failed (attempt %d/%d), will retry: %v",
+				v.l.ID, attempts, s.preemptResumeLimit(), err)
+			continue
+		}
+		reason := fmt.Sprintf("preempted resume failed after %d attempt(s) within %s: %v",
+			attempts, s.recoveryRetryWindow(), err)
+		s.losePreempted(ctx, v.l, reason, err.Error())
 	}
+}
+
+// losePreempted marks a preempted lease lost after its resume budget ran
+// out: the reason is stored and carried by a lost event, its running jobs
+// (none, a suspended lease has no live guest) are settled and snapshot
+// retention runs. The caller has already given up on the resume.
+func (s *Service) losePreempted(ctx context.Context, l *Lease, reason, cause string) {
+	s.clearRetry(s.preemptRetries, l.ID)
+	s.markLost(l, reason)
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
+	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost after preemption; the job did not survive")
+	s.rerunSnapshotRetention(ctx, l)
+	s.log.Printf("preempt: lease %s lost after failing to resume: %s", l.ID, cause)
 }
 
 // preemptedCountLocked reports how many live leases are currently

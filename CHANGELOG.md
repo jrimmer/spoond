@@ -83,6 +83,25 @@ summarised from README "Status".
 
 ### Fixed
 
+- **Recovery and preempt-resume retry transient failures and give up on
+  permanent ones.** A lease whose crash recovery failed was marked `lost`
+  on the first error, including a capacity/quota/burst-reserve refusal or
+  an envd timeout that a retry would clear, and the rootfs-probe recovery
+  took the same path. Recovery now classifies the failure: a transient
+  error (`syncing took too long`, a deadline, envd init) leaves the lease
+  in a new `recovering` state and the next reconcile pass retries it,
+  bounded by `RECOVERY_RETRY_ATTEMPTS` (default 3) and
+  `RECOVERY_RETRY_WINDOW` (default 30m) since the first failure; a
+  capacity refusal (over quota, under the burst reserve, no preemption
+  room) waits for capacity under the same window without counting an
+  attempt; a missing checkpoint build or image is permanent and loses the
+  lease at once. The lease is marked `lost` with a reason naming the
+  attempts and the error when the budget is spent. Separately, the
+  preemption resume queue retried a permanently failing resume every 15 s
+  for ever, each a real orchestrator `Create`; it now counts
+  non-admission failures and, after `PREEMPT_RESUME_RETRIES` (default 3),
+  marks the lease `lost` with the reason and emits a `lost` event
+  (`spoond-dxq`).
 - **A lost lease is released automatically once its grace period
   lapses, freeing its owner's quota.** A lease in state `lost` was never
   released unless its owner deleted it: it kept holding the owner's
