@@ -305,6 +305,9 @@ func Main(args []string) int {
 	// every lease's egress policy and baked into the guest image for
 	// spoond-guest-init. Empty = no resolver allowance.
 	guestDNSAddr := os.Getenv("SPOOND_GUEST_DNS_ADDR")
+	if guestDNSAddr != "" && net.ParseIP(guestDNSAddr) == nil {
+		log.Fatalf("SPOOND_GUEST_DNS_ADDR %q is not an IP address", guestDNSAddr)
+	}
 	// The wildcard hostname suffix the HTTP proxy routes
 	// (SPOOND_PROXY_HOST_SUFFIX). Empty = the generic default.
 	proxyHostSuffix := os.Getenv("SPOOND_PROXY_HOST_SUFFIX")

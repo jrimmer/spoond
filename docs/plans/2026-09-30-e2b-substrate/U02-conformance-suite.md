@@ -88,7 +88,7 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 | `CONFORMANCE_MIXED_DOMAIN` | no | public domain the same restricted lease allowlists (N9). Default `example.com` |
 | `CONFORMANCE_MIXED_BLOCKED_PRIVATE` | vm2 | private IP the same restricted lease does **not** allowlist; a connection to it must be blocked (N9). **No default**: N9 skips with `CONFORMANCE_MIXED_PRIVATE` when unset |
 | `CONFORMANCE_MIXED_PRIVATE_DOMAIN` | vm2 | a domain that resolves to `CONFORMANCE_MIXED_PRIVATE`; N9 adds it to the same allowlist and probes it with SNI, covering the domain path. **No default**: only that probe skips when unset |
-| `CONFORMANCE_MIXED_SSH_PORT` | no | a non-TLS port on `CONFORMANCE_MIXED_PRIVATE` (N9) probed with a plain TCP connect. Default `22`; `0` skips the probe |
+| `CONFORMANCE_MIXED_SSH_PORT` | no | a non-TLS port on `CONFORMANCE_MIXED_PRIVATE` (N9) probed with a plain TCP connect, e.g. `22`. Unset skips the probe |
 
 ## Running
 

@@ -106,7 +106,6 @@ func loadConfig() bool {
 			cfg.MixedPrivatePort = n
 		}
 	}
-	cfg.MixedSSHPort = 22
 	if p := os.Getenv("CONFORMANCE_MIXED_SSH_PORT"); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 0 || n > 65535 {
@@ -391,8 +390,9 @@ func canTCP(t *testing.T, id, host string, port int) bool {
 // probeCmdSNI renders the TLS probe with an explicit SNI name,
 // independent of the destination port. It covers a domain that resolves to
 // an allow-listed private IP: the egress decision matches the domain from
-// the ClientHello SNI (the host's port-443 path), so the probe must send
-// one even when the destination port is not 443.
+// the ClientHello SNI, which the host inspects on port 443 only. Probe
+// port 443: on any other port the connection takes the CIDR-only path and
+// the domain path goes untested.
 func probeCmdSNI(host string, port int, sni string) string {
 	return fmt.Sprintf(e2bTLSProbeCmd, host, port, sni)
 }

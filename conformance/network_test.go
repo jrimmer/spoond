@@ -100,12 +100,14 @@ func TestN1_Policies(t *testing.T) {
 //	                                   default example.com
 //	CONFORMANCE_MIXED_PRIVATE_DOMAIN    domain resolving to
 //	                                   CONFORMANCE_MIXED_PRIVATE, added to
-//	                                   the allowlist and probed with SNI
-//	                                   (no default; probe skips when unset)
+//	                                   the allowlist and probed with SNI on
+//	                                   port 443; it must resolve to that IP
+//	                                   from the orchestrator host (no
+//	                                   default; probe skips when unset)
 //	CONFORMANCE_MIXED_SSH_PORT         non-TLS port on
 //	                                   CONFORMANCE_MIXED_PRIVATE probed
-//	                                   with a plain TCP connect, default 22
-//	                                   (0 skips the probe)
+//	                                   with a plain TCP connect, e.g. 22
+//	                                   (no default; probe skips when unset)
 //	CONFORMANCE_MIXED_BLOCKED_PRIVATE  private IP the lease does not
 //	                                   allowlist, expected blocked (no
 //	                                   default; skips when unset)
@@ -148,7 +150,7 @@ func TestN9_MixedRestrictedAllowlist(t *testing.T) {
 
 	// A domain that resolves to the allow-listed private IP, sent with
 	// SNI: the fork's domain path must admit it (spoond-4pa).
-	if cfg.MixedPrivateDomain != "" && !canTCPWithSNI(t, l.ID, cfg.MixedPrivate, cfg.MixedPrivatePort, cfg.MixedPrivateDomain) {
+	if cfg.MixedPrivateDomain != "" && !canTCPWithSNI(t, l.ID, cfg.MixedPrivate, 443, cfg.MixedPrivateDomain) {
 		failf(t, "mixed allowlist: %s (resolving to private %s) blocked with SNI, want reachable", cfg.MixedPrivateDomain, cfg.MixedPrivate)
 	}
 
