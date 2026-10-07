@@ -35,13 +35,15 @@ const (
 
 // Extra is every non-ASCII rune the dashboard draws beyond grid.Glyphs:
 // ✓ an active unit and ✗ one that is not, · separator, ═ the header's
-// rule, × a dismiss control, ┄ the rules inside the capacity and host
-// panels, ■ a lost lease, ∞ a persistent lease's remaining time, and the
-// leases panel's marks — the run-state glyphs ▶ running, ‖ suspended and
-// ⭘ recovered, and the hold marks ◆ held and ◉ lapsed hold. It is passed
-// to grid.Check by every renderer, and every rune is asserted to be in
-// the shipped JetBrains Mono (TestExtraGlyphsInFont).
-const Extra = "✓✗·═×┄■∞◉⭘" + stateGlyphs
+// rule, ┄ the rules inside the capacity and host panels, ■ a lost lease,
+// ∞ a persistent lease's remaining time, and the leases panel's marks —
+// the run-state glyphs ▶ running, ‖ suspended and ⭘ recovered, and the
+// hold marks ◆ held and ◉ lapsed hold. It is passed to grid.Check by
+// every renderer, and every rune is asserted to be in the shipped
+// JetBrains Mono (TestExtraGlyphsInFont). The Notifications panel's ×
+// dismiss control is injected by the page's JS, not drawn on the grid,
+// so it is not in this set.
+const Extra = "✓✗·═┄■∞◉⭘" + stateGlyphs
 
 // stateGlyphs are the leases panel's run-state and hold glyphs: ▶ ‖ for
 // the states with one of their own, ◆ ◉ for the hold marks that lead
@@ -525,7 +527,7 @@ func (l *layout) drawNotices(g *grid.Grid, y int) int {
 	for i, n := range l.notices {
 		row := top + 1 + i
 		g.Text(2, row, sanitize(n.Text), n.Severity, l.w-4)
-		g.Mark(0, row, l.w, 1, "notice:"+n.ID)
+		g.Mark(0, row, l.w, 1, "notice:"+sanitize(n.ID))
 	}
 	return y
 }
