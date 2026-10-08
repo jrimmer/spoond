@@ -4390,6 +4390,10 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 	if deleted > 0 {
 		s.log.Printf("reconcile: deleted %d orphaned sandbox(es) from a previous incarnation", deleted)
 	}
+	// A zombie row a late save wrote back before the save guard existed
+	// was loaded into memory by LoadState; drop it before the recovery
+	// pass so it is never recovered as a phantom (spoond-775).
+	s.pruneResurrectedLeaseRows(ctx, present)
 	s.reconcileCrash(ctx)
 }
 

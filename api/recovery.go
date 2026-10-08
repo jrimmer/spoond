@@ -116,14 +116,16 @@ type recoverySummary struct {
 }
 
 // pruneStaleLeaseRows drops lease rows with no in-memory twin whose
-// sandbox is gone. A checkpoint or pause that finished after its lease was
-// released once wrote such a zombie `state=running` row back (spoond-775);
-// the save guard stops new ones, and this reconcile sweep clears the ones
-// an older binary left behind while it runs. A row with an in-memory twin
-// is left for reconcileCrash (a live lease whose sandbox vanished is
-// recovered or lost), and a row whose sandbox still exists is left for
-// ReconcileOrphans. Runs before the recovery pass so a phantom is never
-// recovered.
+// sandbox is gone. A checkpoint or pause that finished after its lease
+// was released once wrote such a zombie `state=running` row back
+// (spoond-775); the save guard stops new ones, and this reconcile sweep
+// clears the ones an older binary left behind while it runs. A row with
+// an in-memory twin is left for reconcileCrash (a live lease whose sandbox
+// vanished is recovered or lost), and a row whose sandbox still exists is
+// left for ReconcileOrphans. Runs before the recovery pass so a phantom is
+// never recovered. The startup pass additionally runs
+// pruneResurrectedLeaseRows, which handles the same row after LoadState
+// gave it an in-memory twin.
 func (s *Service) pruneStaleLeaseRows(ctx context.Context, present map[string]bool) {
 	rows, err := s.db.ListLeases(ctx)
 	if err != nil {
@@ -142,14 +144,83 @@ func (s *Service) pruneStaleLeaseRows(ctx context.Context, present map[string]bo
 		stale = append(stale, r.ID)
 	}
 	s.store.mu.Unlock()
+	s.dropStaleLeaseRows(ctx, stale)
+}
+
+// pruneResurrectedLeaseRows drops a zombie row that LoadState loaded into
+// memory at a backend start, so the normal no-twin prune passes it over
+// and reconcileCrash would otherwise recover or lose it as a live lease
+// (spoond-775). A live lease always owns a sandboxes row and a substrate
+// sandbox; a row whose in-memory twin is running/recovered but which has
+// neither is the released-lease signature an older binary's late save
+// left behind. A suspended lease (no sandbox by design), a busy lease (an
+// operation owns its rows) and a genuine crash (its sandboxes row and
+// recovery retry are still there, so reconcileCrash acts) are all left
+// alone. Called once, from ReconcileOrphans before reconcileCrash, so no
+// in-flight operation can be mistaken for it.
+func (s *Service) pruneResurrectedLeaseRows(ctx context.Context, present map[string]bool) {
+	rows, err := s.db.ListLeases(ctx)
+	if err != nil {
+		s.log.Printf("reconcile: list lease rows: %v", err)
+		return
+	}
+	s.store.mu.Lock()
+	type twin struct {
+		sandboxID string
+		live      bool
+	}
+	twins := make(map[string]twin, len(rows))
+	for _, r := range rows {
+		l, ok := s.store.leases[r.ID]
+		if !ok {
+			continue // the normal prune handles a row with no twin
+		}
+		twins[r.ID] = twin{sandboxID: l.SandboxID, live: l.live() && !l.busy}
+	}
+	s.store.mu.Unlock()
+	var stale []string
+	for _, r := range rows {
+		t, ok := twins[r.ID]
+		if !ok || !t.live {
+			continue
+		}
+		if r.SandboxID != "" && present[r.SandboxID] {
+			continue // its sandbox survives; ReconcileOrphans reclaims it
+		}
+		if s.recoveryPending(t.sandboxID) {
+			continue // a failed recovery attempt will retry this lease
+		}
+		if _, err := s.db.GetSandboxByLease(ctx, r.ID); err == nil {
+			continue // it still owns a sandboxes row: a real crash
+		}
+		stale = append(stale, r.ID)
+	}
+	s.dropStaleLeaseRows(ctx, stale)
+}
+
+// dropStaleLeaseRows deletes the given lease ids and everything that
+// hangs off them in memory, as release does: a phantom left its kept
+// builds, shares, job counts and per-lease bookkeeping behind when it was
+// written back (spoond-775). Call without s.store.mu.
+func (s *Service) dropStaleLeaseRows(ctx context.Context, stale []string) {
 	for _, id := range stale {
-		s.log.Printf("reconcile: dropping stale lease row %s (no in-memory lease, sandbox gone)", id)
+		s.log.Printf("reconcile: dropping stale lease row %s (released lease with no in-memory lease or no live sandbox)", id)
 		if err := s.db.DeleteKeptBuilds(ctx, id); err != nil {
 			s.log.Printf("reconcile: delete kept builds of stale lease %s: %v", id, err)
 		}
 		s.store.mu.Lock()
+		delete(s.store.leases, id)
+		delete(s.store.shares, id)
+		delete(s.store.runningJobs, id)
 		s.deleteLeaseLocked(id)
 		s.store.mu.Unlock()
+		// Drop the released lease's per-lease bookkeeping too, as release
+		// does; a phantom left these behind when it was written back.
+		s.clearCreateSecrets(id)
+		s.forgetRootfs(id)
+		s.clearRecoveryRetriesByID(id)
+		s.clearRetry(s.preemptRetries, id)
+		s.clearPreemptCapLog(id)
 	}
 }
 
@@ -291,10 +362,13 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 			// A failed attempt can leave a half-started sandbox behind;
 			// remove it (best effort) so the next reconcile sees the
 			// lease again and the retry can reuse the same sandbox id.
+			// The sandboxes row stays: a live lease always owns one, so
+			// the startup sweep can tell a recovering lease (keep it)
+			// from a phantom row written back after a release (drop it)
+			// (spoond-775).
 			if dErr := s.sub.Delete(context.WithoutCancel(ctx), l.SandboxID); dErr != nil {
 				s.log.Printf("recovery: lease %s cleanup before retry: %v", l.ID, dErr)
 			}
-			s.deleteSandboxRow(l.SandboxID)
 			// The owner sees the retry rather than a silent wait: the
 			// event names the attempt and the cause (S3). A capacity wait
 			// is not an attempt, so its text names only the wait.

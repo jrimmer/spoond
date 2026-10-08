@@ -368,7 +368,10 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("rootfs probe: lease %s delete sandbox %s: %v", l.ID, l.SandboxID, err)
 	}
-	s.deleteSandboxRow(l.SandboxID)
+	// The sandboxes row stays until recoverOneLease resolves the lease
+	// (recoverFromCheckpoint upserts it, loseRecovery drops it): a live
+	// lease always owns a row, so the startup sweep can tell a recovering
+	// lease from a phantom written back after a release (spoond-775).
 	// recoverOneLease stores the loss reason and runs snapshot retention
 	// on a loss; a transient failure leaves the lease for the crash
 	// reconcile to retry (spoond-dxq).

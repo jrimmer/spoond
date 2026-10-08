@@ -257,6 +257,140 @@ func TestRecoveryReleaseRaceNoZombie(t *testing.T) {
 	}
 }
 
+// TestStartupZombieRowDroppedNotRecovered: a zombie state=running row
+// written back by the race and loaded at a backend start (LoadState
+// gives it an in-memory twin) is dropped by the startup reconcile, not
+// recovered into a phantom lease. A genuinely crashed lease (its
+// sandboxes row survives) is still recovered.
+func TestStartupZombieRowDroppedNotRecovered(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	// A genuine crashed lease: checkpointed, so its survival is visible.
+	real, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.checkpointLease(ctx, real); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	sub.Fake.Kill(real.SandboxID)
+
+	// The zombie: a late save, no sandboxes row, checkpoint build set so
+	// a recovery would succeed if the row were trusted.
+	now := time.Now()
+	if err := db.UpsertLease(ctx, store.LeaseRow{
+		ID: "zombie", Owner: "c", Image: "py-base", SandboxID: "sb-old",
+		LastCheckpointBuildID: real.LastCheckpointBuildID,
+		CreatedAt:             now, ExpiresAt: now.Add(time.Minute), LastActive: now,
+		State: "running", Class: ClassGuaranteed,
+	}); err != nil {
+		t.Fatalf("plant zombie: %v", err)
+	}
+
+	// A restart into a fresh service on the same store: LoadState loads
+	// the zombie into memory, so the prune must recognise it there.
+	svc2 := NewService(sub, db, svc.tokens, svc.cfg)
+	svc2.log = svc.log
+	if err := svc2.LoadState(ctx); err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := svc2.lookupAny("zombie"); got == nil {
+		t.Fatal("zombie not loaded into memory (test premise)")
+	}
+
+	// The startup reconcile runs the resurrected-row prune before the
+	// recovery pass, so the zombie is dropped rather than recovered.
+	svc2.ReconcileOrphans(ctx)
+	if _, err := db.GetLease(ctx, "zombie"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("zombie row survived startup reconcile: %v", err)
+	}
+	if got := svc2.lookupAny("zombie"); got != nil {
+		t.Fatal("zombie still in memory after reconcile")
+	}
+	// The genuine crash is unaffected: recovered from its checkpoint.
+	if _, err := db.GetLease(ctx, real.ID); err != nil {
+		t.Fatalf("genuine lease row dropped: %v", err)
+	}
+	if got := svc2.lookupAny(real.ID); got == nil || got.State != "recovered" {
+		t.Fatalf("genuine lease after reconcile = %+v, want recovered", got)
+	}
+}
+
+// TestStartupZombieWithLiveSandboxKept: a stale row whose sandbox still
+// exists on the node is left for ReconcileOrphans even when it has an
+// in-memory twin.
+func TestStartupZombieWithLiveSandboxKept(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	now := time.Now()
+	if err := db.UpsertLease(ctx, store.LeaseRow{
+		ID: "present", Owner: "c", Image: "py-base", SandboxID: "sb-alive",
+		CreatedAt: now, ExpiresAt: now.Add(time.Minute), LastActive: now,
+		State: "running", Class: ClassGuaranteed,
+	}); err != nil {
+		t.Fatalf("plant present: %v", err)
+	}
+	if err := svc.LoadState(ctx); err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+
+	svc.pruneResurrectedLeaseRows(ctx, map[string]bool{"sb-alive": true})
+	if _, err := db.GetLease(ctx, "present"); err != nil {
+		t.Fatalf("a stale row whose sandbox survives was dropped: %v", err)
+	}
+}
+
+// TestStartupKeepsRecoveringLease: a lease mid-recovery-retry keeps its
+// sandboxes row (the retry cleanup no longer deletes it), so the startup
+// prune does not mistake it for a released-lease zombie.
+func TestStartupKeepsRecoveringLease(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 3
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.checkpointLease(ctx, l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	sb := l.SandboxID
+	sub.Fake.Kill(sb)
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			return substrate.Sandbox{}, errors.New("failed to init envd: syncing took too long")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	// One failed attempt leaves it recovering with no substrate sandbox.
+	if out := svc.reconcileCrash(ctx); out.Lost != 0 {
+		t.Fatalf("first pass = %+v, want still recovering", out)
+	}
+	if _, err := db.GetSandboxByLease(ctx, l.ID); err != nil {
+		t.Fatalf("a recovering lease lost its sandboxes row: %v", err)
+	}
+
+	// A restart: the in-memory retry budget is gone, but the lease's
+	// sandboxes row marks it as a real crash, not a zombie.
+	svc2 := NewService(sub, db, svc.tokens, svc.cfg)
+	svc2.log = svc.log
+	if err := svc2.LoadState(ctx); err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	svc2.ReconcileOrphans(ctx)
+	if _, err := db.GetLease(ctx, l.ID); errors.Is(err, store.ErrNotFound) {
+		t.Fatal("a recovering lease was dropped as a zombie at startup")
+	}
+}
+
 // TestPruneStaleLeaseRows: a lease row with no in-memory twin whose
 // sandbox is gone is dropped; a row whose sandbox survives, or that has a
 // live twin, is left for the recovery/orphan passes.

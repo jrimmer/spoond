@@ -127,7 +127,10 @@ func (s *Service) crashTest(ctx context.Context, l *Lease, caller string) (recov
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("crash-test: lease %s delete sandbox %s: %v", l.ID, l.SandboxID, err)
 	}
-	s.deleteSandboxRow(l.SandboxID)
+	// The sandboxes row stays until recoverOneLease resolves the lease
+	// (recoverFromCheckpoint upserts it, loseRecovery drops it): a live
+	// lease always owns a row, so the startup sweep can tell a recovering
+	// lease from a phantom written back after a release (spoond-775).
 
 	// The marker goes first: a stream reader sees crash_test, then
 	// recovered/lost.

@@ -259,6 +259,19 @@ func (s *Service) clearRecoveryRetries(l *Lease) {
 	s.retryMu.Unlock()
 }
 
+// clearRecoveryRetriesByID drops every recovery budget belonging to a
+// lease id, when no in-memory *Lease is at hand (a stale row swept from
+// the store). See clearRecoveryRetries.
+func (s *Service) clearRecoveryRetriesByID(leaseID string) {
+	s.retryMu.Lock()
+	for key, b := range s.recoveryRetries {
+		if b.leaseID == leaseID {
+			delete(s.recoveryRetries, key)
+		}
+	}
+	s.retryMu.Unlock()
+}
+
 // recoveryWaitForCapacity reports whether a recovery failure is a
 // substrate capacity refusal — the only recovery error that waits for
 // capacity instead of counting an attempt. Admission refusals
