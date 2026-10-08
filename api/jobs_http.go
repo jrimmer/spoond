@@ -350,10 +350,14 @@ func (s *Service) signalJob(ctx context.Context, leaseID, sandboxID string, row 
 	return nil
 }
 
+// jobPIDWait bounds how long jobPID retries for a pid file the wrapper
+// has not written yet (the 202 can beat the wrapper).
+var jobPIDWait = 2 * time.Second
+
 // jobPID reads and validates a running job's pid file, retrying briefly
 // while the wrapper has not written it yet.
 func (s *Service) jobPID(ctx context.Context, sandboxID, jobID string) (int, error) {
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(jobPIDWait)
 	for {
 		data, err := s.sub.ReadFile(ctx, sandboxID, jobPath(jobID, "pid"), 64)
 		if err == nil {
@@ -367,7 +371,7 @@ func (s *Service) jobPID(ctx context.Context, sandboxID, jobID string) (int, err
 			return 0, err
 		}
 		if !time.Now().Before(deadline) {
-			return 0, err
+			return 0, fmt.Errorf("%w: %w", errJobPIDMissing, substrate.ErrNotFound)
 		}
 		select {
 		case <-ctx.Done():

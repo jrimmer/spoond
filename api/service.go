@@ -670,6 +670,12 @@ type Service struct {
 	// one.
 	timingOutMu sync.Mutex
 	timingOut   map[string]struct{}
+	// jobKillNotBefore caps how often the reconcile's max-runtime kill
+	// retries a job whose pid file has not appeared yet. jobPID waits
+	// briefly for the wrapper's pid write; a job whose file never appears
+	// would otherwise spend that wait on every pass. Guarded by
+	// timingOutMu.
+	jobKillNotBefore map[string]time.Time
 	// stagedExecSecrets counts leases with synchronous exec-time secrets
 	// staged right now (between stageSecrets and its deferred cleanup). A
 	// named snapshot save refuses while any is staged (2.7, #83): the
@@ -776,6 +782,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		gcErr:                     newGCTracker(),
 		liveJobSecrets:            map[string][]string{},
 		timingOut:                 map[string]struct{}{},
+		jobKillNotBefore:          map[string]time.Time{},
 		stagedExecSecrets:         map[string]int{},
 		stagedExecSecretNames:     map[string][]string{},
 		pendingSecretRemovals:     map[string][]string{},

@@ -1976,16 +1976,19 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cmd is required")
 		return
 	}
+	// max_runtime_secs only applies to a background job, but a negative
+	// value is rejected for both, so a client that sends it cannot believe
+	// it shortened a synchronous exec's timeout (spoond-wb5 NIT).
+	if req.MaxRuntimeSecs < 0 {
+		writeError(w, http.StatusBadRequest, "max_runtime_secs must be non-negative")
+		return
+	}
 	execSecrets, err := validateSecrets(req.Secrets)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.Background {
-		if req.MaxRuntimeSecs < 0 {
-			writeError(w, http.StatusBadRequest, "max_runtime_secs must be non-negative")
-			return
-		}
 		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs)
 		return
 	}

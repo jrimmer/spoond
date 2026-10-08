@@ -581,7 +581,10 @@ their meaning (`cmd`, `cwd`, `env`, `secrets`); `timeout` is ignored —
 a background job runs until it exits, is signalled, or the lease does.
 The optional `max_runtime_secs` shortens the host's `JOB_MAX_RUNTIME`
 (default 24 h) for this job only; it can never make a job run longer
-than the host cap and a negative value is `400`.
+than the host cap and a negative value is `400`. It applies to a
+background job; a synchronous exec ignores a non-negative value, but a
+negative value is still `400` so a client cannot think it changed the
+exec's timeout.
 
 Response `202 Accepted` as soon as the process has started:
 
@@ -608,17 +611,25 @@ exited with reason `timed_out` and exit code `124`, and a `job_exited`
 event names the cap, so a `sleep infinity` cannot pin the lease's memory
 and hugepages forever. If the kill fails (a transient substrate error)
 the record stays running and the next reconcile retries, so a job that
-cannot be signalled is still tracked and counted. The cap is wall-clock
+cannot be signalled is still tracked and counted. If the kill succeeds
+but the store write that marks it timed out fails, the in-memory intent
+is kept and the next reconcile records the outcome without signalling a
+gone process; a job whose `pid` file never appears is retried on a
+backoff rather than spending the pid wait on every pass. The cap is wall-clock
 from the job's start; while the lease is suspended — or busy with an
 in-flight pause, resume, restart or restore — reconcile leaves the job
 running (the guest cannot be signalled), and the first reconcile after a
 resume kills a job whose cap was spent in the meantime. A record written
 before the cap existed (`max_runtime_secs` 0) is still capped by the
 current host value once the backend is upgraded. `JOB_MAX_RUNTIME=0`
-(unset) is the 24 h default and a negative value disables the cap; a
-negative value smaller than one second is rejected at startup, since
-truncating it to whole seconds would silently mean the default rather
-than "off". Per-exec `secrets` stay staged under
+(unset) is the 24 h default and a negative value disables the cap; the
+cap is held as whole seconds, so a positive fractional duration rounds
+up to the next whole second (`500ms` is 1 s, not a 0 that reads as the
+default, and `1500ms` is 2 s, not a truncated 1 s) and a negative value
+under one second is rejected at startup because it would round to 0 and
+mean the default rather than "off". A bare integer too large to
+represent as a duration is clamped at startup rather than wrapping.
+Per-exec `secrets` stay staged under
 `/run/secrets` for the job's life and are removed when it exits (the
 guest wrapper removes them; the backend also removes them on
 reconcile). Neither `env` nor secret values are ever stored in the job
@@ -646,8 +657,8 @@ continue — a cold restart, restore, crash recovery or generation bump).
 `exit_code` is `null` while running. `stderr_tail` is the last 4 KiB of
 stderr. `reason` is `timed_out` when the max runtime, not the command,
 ended the job, and omits otherwise. `max_runtime_secs` is the effective
-cap the job runs under (0 when the host cap is disabled). Owner, admins
-and `http` shares as exec has them.
+cap the job runs under, in whole seconds, and is omitted when 0 (the
+host cap is disabled). Owner, admins and `http` shares as exec has them.
 
 ### `GET /api/leases/{id}/jobs/{job}` — read one job
 
