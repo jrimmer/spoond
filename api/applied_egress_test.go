@@ -8,7 +8,7 @@ import (
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
-// appliedEgressCount returns how many memo entries a lease id has.
+// appliedEgressHas reports whether a lease id has a memo entry.
 func appliedEgressHas(svc *Service, leaseID string) bool {
 	svc.appliedMu.Lock()
 	defer svc.appliedMu.Unlock()
@@ -43,6 +43,29 @@ func TestRefreshPeersDropsMemoForNonLiveLease(t *testing.T) {
 	_ = sub
 }
 
+// TestRefreshPeersKeepsInFlightMemo: a lease whose egress memo was
+// recorded but whose lease row is not in the store yet (a create in
+// progress) must keep its memo through a refresh. Dropping it would
+// force one redundant UpdateEgress once the create finishes (spoond-ob18).
+func TestRefreshPeersKeepsInFlightMemo(t *testing.T) {
+	svc, _ := newLifecycleService(t)
+	svc.beginAppliedEgress("creating")
+	svc.recordAppliedEgress("creating", substrate.Egress{DeniedCIDRs: []string{"0.0.0.0/0"}})
+
+	svc.runRefreshPeers(context.Background())
+	if !appliedEgressHas(svc, "creating") {
+		t.Errorf("refresh dropped the memo of a lease mid-create")
+	}
+
+	// Once the create registers the lease and clears the hold, a refresh
+	// that still does not see the lease may reap the memo again.
+	svc.endAppliedEgress("creating")
+	svc.runRefreshPeers(context.Background())
+	if appliedEgressHas(svc, "creating") {
+		t.Errorf("refresh kept a stale memo after the in-flight hold cleared")
+	}
+}
+
 // TestRefreshPeersKeepsPoolMemo: the "pool" placeholder is never in the
 // live store, so the reap must spare it.
 func TestRefreshPeersKeepsPoolMemo(t *testing.T) {
@@ -64,6 +87,45 @@ func TestRefreshPeersReapsReAddedReleasedMemo(t *testing.T) {
 	svc.runRefreshPeers(context.Background())
 	if appliedEgressHas(svc, "deadbeef") {
 		t.Errorf("refresh kept a stale memo with no live lease")
+	}
+}
+
+// TestGrantMidCreateRefreshKeepsMemo drives the race directly: a
+// refreshPeers runs while a grant is between recording the egress memo
+// and inserting the lease. The memo must survive, so the finished grant
+// still skips a redundant UpdateEgress (spoond-ob18).
+func TestGrantMidCreateRefreshKeepsMemo(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+
+	ran := false
+	sub.execBefore = func(sandboxID string, req substrate.ExecRequest) {
+		if ran || len(req.Args) != 3 || req.Args[2] != integrityProbe {
+			return
+		}
+		ran = true
+		// Mid-create: the memo is recorded, the lease is not yet in the
+		// store, and the refresh must not reap the memo.
+		svc.runRefreshPeers(context.Background())
+	}
+	t.Cleanup(func() { sub.execBefore = nil })
+
+	l, err := svc.grant(context.Background(), "c", "py-base", time.Minute, true, "lan", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if !ran {
+		t.Fatal("the integrity probe never ran; the test did not exercise the window")
+	}
+	if !appliedEgressHas(svc, l.ID) {
+		t.Fatalf("mid-create refresh dropped the memo")
+	}
+	// The memo matches the applied egress, so a later refresh applies
+	// nothing extra.
+	before := calls(sub.Fake, "UpdateEgress")
+	svc.runRefreshPeers(context.Background())
+	if got := calls(sub.Fake, "UpdateEgress"); got != before {
+		t.Errorf("post-grant refresh re-applied egress: %d calls, want %d: %v", got, before, sub.Fake.CallLog())
 	}
 }
 
