@@ -133,8 +133,9 @@ func TestEgressForEachPolicy(t *testing.T) {
 }
 
 // TestDNSAllowance pins the guest-DNS allowance conversion: empty means
-// no allowance, a bare IP gets /32 and port 53, an explicit prefix is
-// kept, and surrounding whitespace is trimmed.
+// no allowance, a bare IP gets /32 (or /128 for IPv6) and port 53, and
+// surrounding whitespace is trimmed. An entry carrying a prefix is
+// rejected — a resolver is an exact host, not a range.
 func TestDNSAllowance(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -147,7 +148,9 @@ func TestDNSAllowance(t *testing.T) {
 		{"10.0.0.2", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "bare IPv4 gets /32"},
 		{"  10.0.0.2\t", substrate.PrivateAllowance{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}, true, "trimmed"},
 		{"fd00::2", substrate.PrivateAllowance{CIDR: "fd00::2/128", TCPPorts: []uint32{53}}, true, "bare IPv6 gets /128, not /32"},
-		{"192.0.2.0/24", substrate.PrivateAllowance{CIDR: "192.0.2.0/24", TCPPorts: []uint32{53}}, true, "explicit prefix kept"},
+		{"192.0.2.0/24", substrate.PrivateAllowance{}, false, "CIDR rejected: exact host only"},
+		{"10.0.0.2/32", substrate.PrivateAllowance{}, false, "host prefix still rejected"},
+		{"fd00::2/128", substrate.PrivateAllowance{}, false, "host IPv6 prefix rejected"},
 	}
 	for _, tc := range cases {
 		got, ok := dnsAllowance(tc.in)
@@ -185,24 +188,36 @@ func TestDNSAllowances(t *testing.T) {
 }
 
 // TestEgressForTwoResolvers: a comma-separated SPOOND_GUEST_DNS_ADDR
-// grants every address a port-53 allowance and reports GuestDNS, so the
-// substrate sends no public DNS fallback.
+// grants every address a port-53 allowance and reports GuestDNS for
+// every policy that carries an egress config, so the substrate sends no
+// public DNS fallback.
 func TestEgressForTwoResolvers(t *testing.T) {
 	svc, _ := newLifecycleService(t)
 	svc.cfg.GuestDNSAddr = "10.1.0.2,10.1.0.3"
 	svc.cfg.HostAPIPort = 0
 
-	got := svc.egressFor(&Lease{NetPolicy: "restricted", NetAllow: []string{"example.com"}})
-	if !got.GuestDNS {
-		t.Fatalf("GuestDNS = false with configured resolvers: %+v", got)
-	}
-	for _, want := range []substrate.PrivateAllowance{
+	resolvers := []substrate.PrivateAllowance{
 		{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}},
 		{CIDR: "10.1.0.3/32", TCPPorts: []uint32{53}},
-	} {
-		if !containsAllowance(got.Private, want) {
-			t.Fatalf("resolver allowance %+v missing: %+v", want, got.Private)
-		}
+	}
+
+	// none denies everything and carries no allowances by design.
+	for _, policy := range []string{"internet", "lan", "restricted"} {
+		t.Run(policy, func(t *testing.T) {
+			l := &Lease{NetPolicy: policy}
+			if policy == "restricted" {
+				l.NetAllow = []string{"example.com"}
+			}
+			got := svc.egressFor(l)
+			if !got.GuestDNS {
+				t.Fatalf("GuestDNS = false with configured resolvers: %+v", got)
+			}
+			for _, want := range resolvers {
+				if !containsAllowance(got.Private, want) {
+					t.Fatalf("resolver allowance %+v missing: %+v", want, got.Private)
+				}
+			}
+		})
 	}
 }
 
