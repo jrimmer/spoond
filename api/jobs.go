@@ -280,18 +280,9 @@ func hasSpentRuntime(job store.JobRow, now time.Time, hostMax time.Duration) boo
 // StartRequest.Env, so nothing is written to the guest's job directory
 // and no value reaches argv.
 func buildJobWrapperArgs(jobID, cmd, cwd string) []string {
-	body := jobCommandBody(cmd, cwd)
+	body := shellCommandBody(cmd, cwd)
 	args := []string{"/bin/bash", "-c", jobWrapperScript, "spoond-job", jobID}
 	return append(args, "/bin/bash", "-c", body)
-}
-
-// jobCommandBody renders the command as a bash -c body: change
-// directory when cwd is set, then run cmd.
-func jobCommandBody(cmd, cwd string) string {
-	if cwd == "" {
-		return cmd
-	}
-	return "cd " + shellQuote(cwd) + " && " + cmd
 }
 
 // jobStartLock is one lease's start lock with a waiter count, so the

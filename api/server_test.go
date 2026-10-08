@@ -837,6 +837,56 @@ func TestBuildShellArgsNoEnvInArgv(t *testing.T) {
 	}
 }
 
+// TestExecCmdSizeLimit pins the exec command-size guard: a command body
+// at maxExecCmdBytes runs, one byte over is refused with 413 before the
+// substrate is called, and the same cap covers the `cd <cwd> &&` prefix
+// and background exec. The limit keeps a command under the guest's
+// MAX_ARG_STRLEN, past which envd's /bin/sh fails with E2BIG and the
+// process stream can hang the call instead of failing fast.
+func TestExecCmdSizeLimit(t *testing.T) {
+	ts, _, _, sub := newTestServerWithService(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id, _ := create["id"].(string)
+	if id == "" {
+		t.Fatalf("create lease: no id in %v", create)
+	}
+
+	// Exactly at the limit is accepted and reaches the substrate.
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
+		map[string]any{"cmd": strings.Repeat("a", maxExecCmdBytes)})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("at-limit exec status %d: %v", resp.StatusCode, body)
+	}
+
+	// One byte over is 413 and never reaches the substrate.
+	before := calls(sub.Fake, "Exec")
+	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
+		map[string]any{"cmd": strings.Repeat("a", maxExecCmdBytes+1)})
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over-limit exec status %d, want 413: %v", resp.StatusCode, body)
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "MAX_EXEC_CMD_BYTES") {
+		t.Fatalf("413 error should name the limit, got %q", msg)
+	}
+	if got := calls(sub.Fake, "Exec"); got != before {
+		t.Fatalf("over-limit exec reached the substrate: %d -> %d", before, got)
+	}
+
+	// The cwd prefix counts toward the same cap.
+	resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
+		map[string]any{"cmd": strings.Repeat("a", maxExecCmdBytes), "cwd": "/tmp"})
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("cwd-prefixed over-limit exec status %d, want 413", resp.StatusCode)
+	}
+
+	// Background exec is refused before a job is started.
+	resp, body = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
+		map[string]any{"cmd": strings.Repeat("a", maxExecCmdBytes+1), "background": true})
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over-limit background exec status %d, want 413: %v", resp.StatusCode, body)
+	}
+}
+
 // TestExecEnvNotInArgvAndVisibleToCommand drives an exec with env through
 // the API and pins both halves of the fix: the request carries the env
 // where the process environment can see it, and its argv holds neither

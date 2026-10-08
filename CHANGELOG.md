@@ -129,6 +129,19 @@ summarised from README "Status".
   that, and an expired quarantine waits for a pass in a mode allowed to
   purge it (spoond-ob18).
 
+- **An over-size exec command is refused with `413` instead of hanging
+  the call (spoond-gyw).** The guest kernel caps a single `argv` string
+  at `MAX_ARG_STRLEN` (128 KiB); a command body past that makes envd's
+  `/bin/sh` fail with `E2BIG` (`argument list too long`), which the envd
+  process stream can report late or not at all, so an exec around that
+  size appeared to hang. The backend now measures the resolved command
+  (`cmd` plus any `cd <cwd> &&` prefix) against `MAX_EXEC_CMD_BYTES`
+  (default `65536`, 64 KiB) and answers `413` with an error naming the
+  size and the limit before any substrate call; background exec is
+  capped the same way. A command at or under the limit is unchanged.
+  This is a new status code on the exec route (Honey's client must know
+  it): `413 Request Entity Too Large`.
+
 ## [2.8.0] - 2026-10-08
 
 spoond cleans up after itself under every race it has met so far. A

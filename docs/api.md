@@ -537,7 +537,7 @@ through the `/api/sandboxes` alias.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `cmd` | string | *(required)* | shell command (run via `bash -c`) |
+| `cmd` | string | *(required)* | shell command (run via `bash -c`); the resolved command (after the `cwd` prefix) is at most `MAX_EXEC_CMD_BYTES` (default 64 KiB) — bigger is `413` |
 | `cwd` | string | *(none)* | working directory |
 | `env` | object | *(none)* | extra environment variables |
 | `timeout` | int | `30` | seconds; capped at `MAX_EXEC_TIMEOUT_SECS` (default 300) |
@@ -548,6 +548,27 @@ Response `200 OK`:
 ```json
 {"stdout": "…", "stderr": "…", "exit": 0}
 ```
+
+#### exec command size limit
+
+The guest kernel caps a single `argv` string at `MAX_ARG_STRLEN`
+(128 KiB). A command body past that bound makes envd's `/bin/sh` fail
+with `E2BIG` (`argument list too long`), which the envd process stream
+can report late or not at all — the exec call appears to hang instead
+of failing fast. To keep callers from hitting that, the backend bounds
+the resolved command: the `cmd` string plus any `cd <cwd> &&` prefix it
+folds in must be at most `MAX_EXEC_CMD_BYTES` (default `65536`, 64 KiB).
+The limit is measured in bytes of the `bash -c` body envd receives, and
+the same cap applies to background exec. A command over the limit is
+refused before any substrate call:
+
+```json
+{"error": "cmd is 91234 bytes; the exec command limit is 65536 bytes (MAX_EXEC_CMD_BYTES)"}
+```
+
+with `413 Request Entity Too Large`. A command at or under the limit
+behaves as before. `MAX_EXEC_CMD_BYTES` is the operator override; a
+value that is unparseable or non-positive keeps the default.
 
 `409` if the lease is suspended (`code: lease_suspended`, resume it
 first); `410` if it is

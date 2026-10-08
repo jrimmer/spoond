@@ -833,6 +833,25 @@ var maxExecTimeout = func() int {
 	return 300 // seconds
 }()
 
+// maxExecCmdBytes caps the shell command body one exec may run, counted
+// in bytes of the `bash -c` argument after the `cd <cwd> &&` prefix is
+// folded in. The guest kernel limits a single argv string to
+// MAX_ARG_STRLEN (128 KiB); a command past that makes envd's /bin/sh
+// fail with E2BIG, which the envd process stream reports late or not at
+// all, hanging the call. The limit below stays under that kernel bound
+// (and under the request size the orchestrator's proxy forwards
+// reliably), so an over-size command is refused at once with 413
+// instead. Overridable via MAX_EXEC_CMD_BYTES; the same cap applies to
+// a background exec's command.
+var maxExecCmdBytes = func() int {
+	if v := os.Getenv("MAX_EXEC_CMD_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 64 << 10 // 64 KiB
+}()
+
 // ownerFrom extracts the authenticated owner from the request context.
 func ownerFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxOwnerKey{}).(string)
@@ -1988,6 +2007,16 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// A command body past the guest argv bound cannot start: envd's
+	// /bin/sh fails with E2BIG, which the process stream may report late
+	// or never, hanging the call. Refuse it up front with 413 instead.
+	// The cap covers the `cd <cwd> &&` prefix too, so it measures exactly
+	// the string envd runs. It applies to background exec as well.
+	if body := shellCommandBody(req.Cmd, req.Cwd); len(body) > maxExecCmdBytes {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("cmd is %d bytes; the exec command limit is %d bytes (MAX_EXEC_CMD_BYTES)", len(body), maxExecCmdBytes))
+		return
+	}
 	if req.Background {
 		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs)
 		return
@@ -2473,20 +2502,26 @@ func requestEnv(lease *Lease, env map[string]string) map[string]string {
 // single shell invocation. The cwd is applied with `cd` so a bad
 // directory fails the command exactly as it did before; env travels in
 // ExecRequest.Env, never argv, so no value is visible in the guest's
-// command line.
+// command line. The body it builds is what maxExecCmdBytes bounds.
 func buildShellArgs(cmd, cwd string) []string {
-	var parts []string
-	if cwd != "" {
-		parts = append(parts, "cd "+shellQuote(cwd)+" &&")
-	}
-	parts = append(parts, cmd)
 	// Use bash, not sh. GitHub Actions / Forgejo wrap `run:` steps with
 	// `set -euo pipefail`; /bin/sh on Debian is dash, which rejects
 	// `-o pipefail` (dash only accepts `-o` options in POSIX form), so
 	// steps that contain a pipe fail with "set: Illegal option -o
 	// pipefail". Bash is present in all base images and is the GitHub
 	// Actions default shell.
-	return []string{"/bin/bash", "-c", strings.Join(parts, " ")}
+	return []string{"/bin/bash", "-c", shellCommandBody(cmd, cwd)}
+}
+
+// shellCommandBody renders the `bash -c` body for a command: change
+// directory when cwd is set, then run cmd. Exec and background jobs
+// share it so the cwd prefix and the body are identical on both paths
+// (and so the exec size check measures exactly what envd receives).
+func shellCommandBody(cmd, cwd string) string {
+	if cwd == "" {
+		return cmd
+	}
+	return "cd " + shellQuote(cwd) + " && " + cmd
 }
 
 // shellQuote wraps s in single quotes, escaping embedded single quotes.

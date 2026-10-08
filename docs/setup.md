@@ -176,6 +176,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `RECOVERY_RETRY_WINDOW` | `30m` | how long a lease may stay in recovery since its first failed attempt, whatever the failure kind, including a substrate capacity refusal waiting for room (a Go duration or seconds; spoond-dxq) |
 | `PREEMPT_RESUME_RETRIES` | `3` | how many failed resume attempts a preempted lease gets from the resume queue (every 15 s) before it is marked `lost`; an admission/capacity refusal does not count and the lease keeps waiting for room (`0` means the default; spoond-dxq) |
 | `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
+| `MAX_EXEC_CMD_BYTES` | `65536` | ceiling on one exec command's resolved `bash -c` body (the `cmd` plus any `cd <cwd> &&` prefix); bigger answers `413` before the substrate is called, so a command past the guest's `MAX_ARG_STRLEN` cannot hang the call (spoond-gyw) |
 | `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |
 | `LLM_UPSTREAM_KEY` | *(empty)* | server-side key for that upstream (never sent into sandboxes) |

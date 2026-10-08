@@ -41,6 +41,28 @@ OUT=$(api POST "/api/sandboxes/$L1/exec" "{\"cmd\":\"echo EXEC_OK; echo $EXEC_TA
 assert_contains "exec returns command output" "$OUT" "EXEC_OK"
 assert_contains "exec reaches the guest (envd exec)" "$OUT" "$EXEC_TAG"
 
+# Exec command size (spoond-gyw): 60 KiB runs, 90 KiB and 200 KiB answer
+# 413 at once instead of hanging on the guest's MAX_ARG_STRLEN. The
+# bodies are built in python so the shell never has to hold them.
+for size_kb in 60 90 200; do
+  body=$(python3 - "$size_kb" <<'PY'
+import json, sys
+kb = int(sys.argv[1])
+# 60 KiB stays under MAX_EXEC_CMD_BYTES (64 KiB) and must run; the
+# bigger two must be refused before the guest.
+cmd = "printf SIZE%sOK >/dev/null #" % kb + "a" * (kb * 1024)
+print(json.dumps({"cmd": cmd}))
+PY
+)
+  code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/sandboxes/$L1/exec" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data-binary "$body")
+  if [ "$size_kb" = "60" ]; then
+    assert_eq "exec 60 KiB command runs" "$code" "200"
+  else
+    assert_eq "exec $size_kb KiB command is 413" "$code" "413"
+  fi
+done
+
 echo
 echo "== lease API: endpoint =="
 EP=$(api GET "/api/sandboxes/$L1/endpoint")
