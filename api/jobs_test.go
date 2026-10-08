@@ -952,6 +952,8 @@ func TestJobMaxRuntimeKillsJob(t *testing.T) {
 
 	p := fake.NewProcess(1021)
 	installJobProcess(t, sub, p)
+	jobs := svc.Subscribe(EventFilter{})
+	defer jobs.Close()
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
 	writeJobFile(t, sub, sandbox, jobID, "stderr", "still here\n")
@@ -988,6 +990,23 @@ func TestJobMaxRuntimeKillsJob(t *testing.T) {
 	}
 	if svc.hasRunningJob(id) {
 		t.Fatalf("running-job count not cleared")
+	}
+
+	// A job_exited event names the cap. job_started precedes it.
+	var exited []string
+	deadline := time.After(2 * time.Second)
+	for len(exited) == 0 {
+		select {
+		case ev := <-jobs.C:
+			if ev.LeaseID == id && ev.Type == LeaseJobExited {
+				exited = append(exited, ev.Detail)
+			}
+		case <-deadline:
+			t.Fatalf("no job_exited event for the timed-out job")
+		}
+	}
+	if !strings.HasPrefix(exited[0], "timed out: exit 124") {
+		t.Fatalf("job_exited detail = %q, want it to name the cap", exited[0])
 	}
 }
 
