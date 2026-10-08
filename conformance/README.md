@@ -73,6 +73,8 @@ See `U02-conformance-suite.md` §Configuration for the full table. Required:
 `CONFORMANCE_GUEST_SERVICE`. Optional: `CONFORMANCE_DESTRUCTIVE`,
 `CONFORMANCE_CAPACITY`, `CONFORMANCE_SECOND_TOKEN`,
 `CONFORMANCE_CRASH_TEST`,
+`CONFORMANCE_LAN_TARGET` (a private `host:port` N1 probes under the
+`internet` and `lan` policies; **no default**, so N1 skips when unset),
 `CONFORMANCE_IMAGES` (default
 `py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla`).
 

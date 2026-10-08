@@ -12,6 +12,16 @@ summarised from README "Status".
 
 ### Fixed
 
+- **Conformance N1 probes a configurable LAN target, and I3 no longer
+  depends on a stale apt index.** N1 hardcoded `10.0.0.203:443` as the
+  private destination for the `internet` and `lan` policies; that box was
+  gone, so the case failed even though the substrate was correct. The
+  target is now `CONFORMANCE_LAN_TARGET` (a private `host:port`, no
+  default): sb sets it in `/etc/spoond/conformance.env` and N1 skips with
+  a clear message when it is unset, like the N9 `CONFORMANCE_MIXED_*`
+  knobs. I3 installs `docker.io` into `dev-base` after `apt-get update`,
+  so it no longer 404s on a package version the Ubuntu archive dropped.
+
 - **`spoond_builds_in_flight` reports the catalog's in-flight template
   builds, and a stale-build failure is now announced.** The gauge was
   only written during a `/metrics` scrape, so the dashboard's "builds

@@ -164,8 +164,12 @@ host:port for the policy probes. `SSHHOST` is the remote-runner host
 used by `run.sh`; the ctl tests dial `ctl@127.0.0.1 -p 2222` directly.
 
 Conformance (`conformance/README.md`) already uses `CONFORMANCE_*`
-environment values; LAN probe addresses in `network_test.go` are now
-`10.0.0.203`/`10.0.0.11` placeholders.
+environment values. N1's LAN probe is now `CONFORMANCE_LAN_TARGET`
+(a private `host:port`, no default): the old hardcoded `10.0.0.203`
+placeholder no longer answers, so sb sets it in
+`/etc/spoond/conformance.env` (e.g. `10.1.0.203:443`, Caddy) and N1
+skips with a clear message when it is unset. The host-address check
+uses `CONFORMANCE_GUEST_SERVICE` rather than a LAN literal.
 
 ## Deprecated-name fallbacks
 

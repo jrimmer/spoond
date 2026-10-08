@@ -89,6 +89,20 @@ func loadConfig() bool {
 	}
 	cfg.Destructive = os.Getenv("CONFORMANCE_DESTRUCTIVE") == "1"
 	cfg.SecondToken = os.Getenv("CONFORMANCE_SECOND_TOKEN")
+	// The N1 LAN target has no default: an unset value makes the case
+	// skip, so a run never probes an assumed LAN address (same rule as
+	// the N9 mixed-allowlist knobs below).
+	cfg.LANTarget = os.Getenv("CONFORMANCE_LAN_TARGET")
+	if cfg.LANTarget != "" {
+		host, port, err := parseLANTarget(cfg.LANTarget)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "conformance: bad CONFORMANCE_LAN_TARGET %q: %v\n", cfg.LANTarget, err)
+			ok = false
+		} else {
+			cfg.LANTargetHost = host
+			cfg.LANTargetPort = port
+		}
+	}
 	// The mixed-allowlist case has no LAN-independent defaults: an
 	// unset private address means the case skips (vm2 sets all of these).
 	// MixedDomain keeps a public default, which needs no LAN.
@@ -446,6 +460,22 @@ func splitHostPort(addr string) (string, int, error) {
 		return "", 0, fmt.Errorf("bad port in %q: %v", addr, err)
 	}
 	return addr[:i], port, nil
+}
+
+// parseLANTarget parses CONFORMANCE_LAN_TARGET, a `host:port` whose host
+// must be non-empty and whose port must be in 1..65535.
+func parseLANTarget(addr string) (string, int, error) {
+	host, port, err := splitHostPort(addr)
+	if err != nil {
+		return "", 0, err
+	}
+	if host == "" {
+		return "", 0, fmt.Errorf("empty host in %q", addr)
+	}
+	if port <= 0 || port > 65535 {
+		return "", 0, fmt.Errorf("port %d out of range in %q", port, addr)
+	}
+	return host, port, nil
 }
 
 // track registers a lease for deletion in t.Cleanup. 404 on delete is

@@ -81,6 +81,9 @@ CONFORMANCE_PROXY_URL=http://127.0.0.1:8891
 CONFORMANCE_PROXY_SECRET=<production PROXY_AUTH_SECRET, may be empty>
 CONFORMANCE_PROXY_SUFFIX=.sandbox.example.com
 CONFORMANCE_BACKEND_UNIT=spoond-backend
+# A private host:port that answers on the host; N1 probes it under the
+# internet and lan policies (e.g. Caddy).
+CONFORMANCE_LAN_TARGET=10.1.0.203:443
 ```
 
 Every production conformance run and every production smoke test loads it
