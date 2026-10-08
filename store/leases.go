@@ -78,6 +78,16 @@ type LeaseRow struct {
 	// version whose build a live lease runs from is never dropped by
 	// retention.
 	SnapshotBuildID string
+	// SuspendReason, SuspendPolicyStep, SuspendBuildID and SuspendedAt
+	// record why and how an automatic suspend happened (#145 D6): the
+	// reason is idle|idle_suspend|hold_lapsed|pressure|preempt, the policy
+	// step is the pressure order's step name or "", the build is the
+	// pause build, and suspended_at is when. They are cleared on resume;
+	// a hand or drain suspend leaves them empty (no automatic reason).
+	SuspendReason     string
+	SuspendPolicyStep string
+	SuspendBuildID    string
+	SuspendedAt       time.Time
 }
 
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
@@ -87,7 +97,8 @@ const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires
 	lost_reason,
 	holder, holder_url, hold_set_at, hold_expires_at, hold_ttl,
 	last_action, last_action_at, generation, checkpoint_interval, idle_suspend,
-	memory_mb, class, priority, preempted_at, snapshot_build_id`
+	memory_mb, class, priority, preempted_at, snapshot_build_id,
+	suspend_reason, suspend_policy_step, suspend_build_id, suspended_at`
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -104,7 +115,7 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 INSERT INTO leases (`+leaseColumns+`) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?
+  ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -145,7 +156,11 @@ ON CONFLICT(id) DO UPDATE SET
   class=excluded.class,
   priority=excluded.priority,
   preempted_at=excluded.preempted_at,
-  snapshot_build_id=excluded.snapshot_build_id`,
+  snapshot_build_id=excluded.snapshot_build_id,
+  suspend_reason=excluded.suspend_reason,
+  suspend_policy_step=excluded.suspend_policy_step,
+  suspend_build_id=excluded.suspend_build_id,
+  suspended_at=excluded.suspended_at`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
@@ -156,7 +171,9 @@ ON CONFLICT(id) DO UPDATE SET
 		formatTime(l.HoldSetAt), formatTime(l.HoldExpiresAt), l.HoldTTL,
 		l.LastAction, formatTime(l.LastActionAt), l.Generation,
 		l.CheckpointInterval, l.IdleSuspend, l.MemoryMB, l.Class, l.Priority,
-		formatTime(l.PreemptedAt), l.SnapshotBuildID)
+		formatTime(l.PreemptedAt), l.SnapshotBuildID,
+		l.SuspendReason, l.SuspendPolicyStep, l.SuspendBuildID,
+		formatTime(l.SuspendedAt))
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -249,6 +266,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	var r LeaseRow
 	var createdAt, expiresAt, lastActive, lastCheckpointAt, recoveredFrom, lostAt string
 	var holdSetAt, holdExpiresAt, lastActionAt, preemptedAt string
+	var suspendedAt string
 	var netAllow, exposePorts string
 	err := scan(&r.ID, &r.Owner, &r.Image, &r.SandboxID, &r.Address,
 		&createdAt, &expiresAt, &r.Persistent, &lastActive, &r.Workspace,
@@ -259,7 +277,8 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&holdSetAt, &holdExpiresAt, &r.HoldTTL,
 		&r.LastAction, &lastActionAt, &r.Generation, &r.CheckpointInterval,
 		&r.IdleSuspend, &r.MemoryMB, &r.Class, &r.Priority, &preemptedAt,
-		&r.SnapshotBuildID)
+		&r.SnapshotBuildID, &r.SuspendReason, &r.SuspendPolicyStep,
+		&r.SuspendBuildID, &suspendedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}
@@ -276,6 +295,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	r.HoldExpiresAt = parseTime(holdExpiresAt)
 	r.LastActionAt = parseTime(lastActionAt)
 	r.PreemptedAt = parseTime(preemptedAt)
+	r.SuspendedAt = parseTime(suspendedAt)
 	if err := json.Unmarshal([]byte(netAllow), &r.NetAllow); err != nil {
 		return LeaseRow{}, fmt.Errorf("store: lease %s: net_allow: %w", r.ID, err)
 	}

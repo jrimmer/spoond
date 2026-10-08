@@ -53,7 +53,9 @@ func TestLeaseRoundTrip(t *testing.T) {
 		LastCheckpointAt: base.Add(2 * time.Minute), RecoveredFrom: base,
 		LostAt: base.Add(3 * time.Minute), LostReason: "no checkpoint", Drained: true,
 		Holder: "ci-job-42", HolderUrl: "https://ci.example.com/jobs/42",
-		Class: "guaranteed",
+		Class:         "guaranteed",
+		SuspendReason: "idle", SuspendPolicyStep: "pressure/hugepages",
+		SuspendBuildID: "b-3", SuspendedAt: base.Add(4 * time.Minute),
 	}
 	// Zero times, nil slices and empty strings everywhere they can be.
 	minimal := LeaseRow{
@@ -86,6 +88,11 @@ func TestLeaseRoundTrip(t *testing.T) {
 	updated.LostReason = ""      // and so does the reason
 	updated.Holder = ""          // holder cleared: normal sweeping
 	updated.HolderUrl = ""
+	// Resuming clears the suspension facts too.
+	updated.SuspendReason = ""
+	updated.SuspendPolicyStep = ""
+	updated.SuspendBuildID = ""
+	updated.SuspendedAt = time.Time{}
 	if err := db.UpsertLease(ctx, updated); err != nil {
 		t.Fatalf("upsert update: %v", err)
 	}
@@ -308,7 +315,11 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)`,
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -377,7 +388,11 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)`,
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -454,7 +469,11 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20)`,
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
@@ -516,7 +535,11 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20)`,
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -570,9 +593,13 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
 		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
 		`ALTER TABLE lease_jobs DROP COLUMN reason`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20)`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -628,9 +655,13 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 	}
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
 		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
 		`ALTER TABLE lease_jobs DROP COLUMN reason`,
-		`DELETE FROM schema_migrations WHERE version IN (19, 20)`,
+		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21)`,
 	} {
 		if _, err := db18.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -694,7 +725,11 @@ func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
 		`ALTER TABLE lease_jobs DROP COLUMN reason`,
-		`DELETE FROM schema_migrations WHERE version = 20`,
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
+		`DELETE FROM schema_migrations WHERE version IN (20, 21)`,
 	} {
 		if _, err := db19.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -735,5 +770,76 @@ func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
 	}
 	if again.Reason != "timed_out" || again.ExitCode == nil || *again.ExitCode != 124 {
 		t.Fatalf("timed-out job = %+v", again)
+	}
+}
+
+// TestMigration21SuspendFactsOnV20Database builds a database at version
+// 20 (one existing lease row) and opens it: migration 21 must apply,
+// adding the structured suspension facts defaulted empty, so a lease
+// suspended before the columns existed reads as a suspension with no
+// automatic reason (#145 D6).
+func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v20.db")
+	{
+		db, err := Open(path) // applies every migration
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind to version 20: drop what migration 21 added and its row, so
+	// the next Open applies 0021 for real.
+	db20, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db20.Close()
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN suspend_reason`,
+		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
+		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
+		`ALTER TABLE leases DROP COLUMN suspended_at`,
+		`DELETE FROM schema_migrations WHERE version = 21`,
+	} {
+		if _, err := db20.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	if _, err := db20.Exec(
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		 VALUES ('lease-v20', 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'suspended')`); err != nil {
+		t.Fatalf("seed v20 lease: %v", err)
+	}
+	db20.Close()
+
+	db, err := Open(path) // migration 21 applies here
+	if err != nil {
+		t.Fatalf("open v20 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	row, err := db.GetLease(context.Background(), "lease-v20")
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if row.SuspendReason != "" || row.SuspendPolicyStep != "" || row.SuspendBuildID != "" || !row.SuspendedAt.IsZero() {
+		t.Fatalf("suspend facts after migration = %q/%q/%q/%v, want empty",
+			row.SuspendReason, row.SuspendPolicyStep, row.SuspendBuildID, row.SuspendedAt)
+	}
+	// The columns are writable through the upsert.
+	row.SuspendReason = "idle"
+	row.SuspendPolicyStep = "pressure/disk"
+	row.SuspendBuildID = "b-1"
+	row.SuspendedAt = time.Now().UTC().Truncate(time.Second)
+	if err := db.UpsertLease(context.Background(), row); err != nil {
+		t.Fatalf("upsert with suspension facts: %v", err)
+	}
+	again, err := db.GetLease(context.Background(), "lease-v20")
+	if err != nil {
+		t.Fatalf("get lease after upsert: %v", err)
+	}
+	if again.SuspendReason != "idle" || again.SuspendPolicyStep != "pressure/disk" || again.SuspendBuildID != "b-1" || !again.SuspendedAt.Equal(row.SuspendedAt) {
+		t.Fatalf("suspend facts after upsert = %+v", again)
 	}
 }
