@@ -218,6 +218,22 @@ func calls(f *fake.Fake, method string) int {
 	return n
 }
 
+// sandboxOnFake reports whether the fake still holds a sandbox with the
+// given id, i.e. the substrate still has the guest running.
+func sandboxOnFake(t *testing.T, sub *testSub, sandboxID string) bool {
+	t.Helper()
+	sbs, err := sub.List(context.Background())
+	if err != nil {
+		t.Fatalf("list sandboxes: %v", err)
+	}
+	for _, sb := range sbs {
+		if sb.ID == sandboxID {
+			return true
+		}
+	}
+	return false
+}
+
 // newTestDB opens a SQLite store in a temp directory.
 func newTestDB(t *testing.T) *store.DB {
 	t.Helper()

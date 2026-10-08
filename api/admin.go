@@ -418,11 +418,24 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			}
 			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
 			s.store.mu.Lock()
-			setLostReason(l, reason)
-			l.setState("lost")
 			l.Drained = false
 			s.saveLeaseLocked(l)
+			released := l.released
 			s.store.mu.Unlock()
+			if released {
+				// The lease was released while this resume was in flight:
+				// the release already stopped its sandbox and emitted the
+				// released event, so a loss must not resurrect it.
+				mu.Lock()
+				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
+				mu.Unlock()
+				return
+			}
+			// markLost stops the half-started sandbox a failed resume left
+			// behind (the retry loop cleans it between attempts, but the
+			// last failure must stop it too), so lost means stopped
+			// (spoond-63a).
+			s.markLost(l, reason)
 			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 			// A lease started from a named snapshot no longer protects it
 			// once lost (#83 S5).

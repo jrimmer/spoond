@@ -10,6 +10,24 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **A lost lease's guest is stopped.** Every path that marks a lease
+  `lost` — crash recovery, the admin undrain and the rootfs probe — now
+  deletes the lease's sandbox through the substrate, retrying a few
+  times with a log line and dropping the sandbox row. Before this, a
+  create or resume that failed after its VM had started could leave a
+  guest running while the lease answered `410` and looked stopped: the
+  crash reconcile's recover-from-checkpoint failure never deleted it,
+  undrain cleaned up between attempts but not after the last, and the
+  rootfs probe's delete was best effort. A delete that still fails after
+  the retries is left to the periodic orphan sandbox sweep, which now
+  treats a sandbox whose lease is lost or released as an orphan (and
+  never touches a live or busy one); the startup `ReconcileOrphans` runs
+  the same rule in a second pass after its crash reconcile. `docs/api.md`
+  states it under [Lost leases]: a lost lease's guest is stopped, and
+  `DELETE` frees the quota.
+
 ## [2.7.1] - 2026-10-07
 
 spoond looks after more of itself and says less on the dashboard about

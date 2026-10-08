@@ -86,8 +86,14 @@ func TestRootfsProbeLostWithoutCheckpoint(t *testing.T) {
 	if _, err := svc.db.GetSandbox(ctx, oldSandbox); err == nil {
 		t.Fatal("the lost lease's stale sandbox row survived")
 	}
-	if got := calls(sub.Fake, "Delete "+oldSandbox); got != 1 {
-		t.Fatalf("Delete calls = %d, want 1", got)
+	// The dead sandbox is deleted before the recovery, and the lost
+	// transition deletes whatever sandbox still holds the id (stopping a
+	// half-started replacement); both hit the same id.
+	if got := calls(sub.Fake, "Delete "+oldSandbox); got < 1 {
+		t.Fatalf("Delete calls = %d, want at least 1", got)
+	}
+	if sandboxOnFake(t, sub, oldSandbox) {
+		t.Fatalf("the lost lease's sandbox %s still runs on the fake", oldSandbox)
 	}
 	events := collectEvents(esub.C)
 	var lostDetails []string
