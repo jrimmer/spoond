@@ -278,10 +278,10 @@ type ServiceConfig struct {
 	DefaultTTL, MaxTTL, IdleTimeout time.Duration
 	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
 	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
-	// GuestDNSAddr is the guest's DNS resolver address (SPOOND_GUEST_DNS_ADDR).
-	// It is granted to every lease's egress policy on port 53. Empty =
-	// no resolver allowance (the deployment relies on the guest's own
-	// resolv.conf).
+	// GuestDNSAddr is the guest's DNS resolver address or addresses
+	// (SPOOND_GUEST_DNS_ADDR, comma-separated). Each is granted to every
+	// lease's egress policy on port 53. Empty = no resolver allowance
+	// (the deployment relies on the guest's own resolv.conf).
 	GuestDNSAddr string
 	// ProxyHostSuffix is the wildcard hostname suffix the HTTP proxy
 	// routes (SPOOND_PROXY_HOST_SUFFIX), e.g. ".sandbox.example.com":
@@ -825,16 +825,12 @@ func (s *Service) egressForLocked(l *Lease) substrate.Egress {
 		CIDR:     s.cfg.HostGuestAddr + "/32",
 		TCPPorts: []uint32{uint32(s.cfg.HostGuestPort)},
 	}
-	// Guests resolve through the configured resolver only
-	// (SPOOND_GUEST_DNS_ADDR, baked into the guest image by
-	// images/guest/spoond-guest-init). Empty = no allowance, and the
+	// Guests resolve through the configured resolvers only
+	// (SPOOND_GUEST_DNS_ADDR, comma-separated, baked into the guest image
+	// by images/guest/spoond-guest-init). Empty = no allowance, and the
 	// substrate then keeps the public DNS fallback for allow-listed domains.
-	var dns []substrate.PrivateAllowance
-	guestDNS := false
-	if a, ok := dnsAllowance(s.cfg.GuestDNSAddr); ok {
-		dns = []substrate.PrivateAllowance{a}
-		guestDNS = true
-	}
+	dns := dnsAllowances(s.cfg.GuestDNSAddr)
+	guestDNS := len(dns) > 0
 	// The fork's host-address guard admits a destination on the host only
 	// when an allowance names both the IP and the port; the LAN ranges'
 	// any-port allowances do not count. So lan and internet name the lease
@@ -917,9 +913,28 @@ func lanPrivate(l *Lease, hostSvc substrate.PrivateAllowance) []substrate.Privat
 	return out
 }
 
-// dnsAllowance turns the configured guest DNS address into a port-53
+// dnsAllowances turns the configured guest DNS addresses
+// (SPOOND_GUEST_DNS_ADDR, comma-separated) into one allowance per
+// address. Blank entries and surrounding whitespace are ignored, so a
+// single address keeps working. An entry may be a bare IP or a CIDR.
+//
+// Each allowance names port 53 for TCP (layer 2's tcpfirewall); the
+// private CIDR itself is exempted in the sandbox's netns firewall
+// (layer 1), so UDP 53 to the same address is granted as well.
+func dnsAllowances(addrs string) []substrate.PrivateAllowance {
+	var out []substrate.PrivateAllowance
+	for _, addr := range strings.Split(addrs, ",") {
+		if a, ok := dnsAllowance(addr); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// dnsAllowance turns one configured guest DNS address into a port-53
 // allowance. A bare IP gets a full-length prefix (/32 for IPv4, /128 for
-// IPv6); an entry that already carries a prefix is used as-is.
+// IPv6); an entry that already carries a prefix is used as-is. A blank
+// entry yields no allowance.
 func dnsAllowance(addr string) (substrate.PrivateAllowance, bool) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {

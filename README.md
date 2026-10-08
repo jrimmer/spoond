@@ -360,7 +360,8 @@ any check fails.
 
 Built-in defaults are generic (`localhost`, `sandbox.example.com`);
 a deployment sets its own hosts and addresses, such as
-`SPOOND_GUEST_DNS_ADDR`, `SPOOND_PROXY_HOST_SUFFIX` and `NODE_ID` (the
+`SPOOND_GUEST_DNS_ADDR` (comma-separated for several resolvers),
+`SPOOND_PROXY_HOST_SUFFIX` and `NODE_ID` (the
 full list is in
 [PRODUCTION-ENV-2.7.md](deploy/PRODUCTION-ENV-2.7.md)). Every knob is
 overridable. The fixed addresses, ports and paths of the E2B
