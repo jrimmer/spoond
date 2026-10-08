@@ -51,6 +51,26 @@ const envdPort = 49983
 // authenticated user from Remote-User, then owner-scopes every lookup.
 func (s *Server) ProxyHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Decide by Host first (#144): a request whose Host names a
+		// lease goes to the guest with its path untouched, so a guest
+		// app's own /assets/, /lease/ or /llm/ routes are never shadowed
+		// by the host-service routes below. This pre-check uses the same
+		// parser as handleProxy.
+		if _, _, _, ok := parseProxyHost2(r.Host, s.svc.proxySuffix()); ok {
+			// Forward-auth gate (U7/T7): off/"" = capability model.
+			if s.proxyAuthMode == "forward-auth" {
+				if !s.proxyAuthOK(w, r) {
+					return
+				}
+			}
+			s.handleProxy(w, r)
+			return
+		}
+
+		// Everything below rides the guest-service listener
+		// (http://<HOST_GUEST_SERVICE_ADDR>:8891/...), whose Host is not a
+		// lease hostname.
+		//
 		// The LLM gateway also lives on the plain-HTTP proxy listener:
 		// guests reach it at http://<HOST_GUEST_SERVICE_ADDR>:8891/llm/<lease-id>/...,
 		// avoiding TLS validation of the backend's self-signed cert.
@@ -82,12 +102,8 @@ func (s *Server) ProxyHandler() http.Handler {
 			http.ServeFile(w, r, p)
 			return
 		}
-		// Forward-auth gate (U7/T7): off/"") = capability model.
-		if s.proxyAuthMode == "forward-auth" {
-			if !s.proxyAuthOK(w, r) {
-				return
-			}
-		}
+		// Not a lease hostname and no guest-service route: handleProxy
+		// answers the same 404 as before.
 		s.handleProxy(w, r)
 	})
 }

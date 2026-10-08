@@ -26,6 +26,18 @@ summarised from README "Status".
 
 ### Fixed
 
+- **The web proxy decides by Host first, so guest-service routes no
+  longer shadow lease hostnames.** `/assets/`, `/lease/` and `/llm/`
+  were matched before lease-hostname routing whatever the Host, so a
+  request to `https://<lease>-<port>.<domain>/assets/x.js` answered the
+  host's 404 (or a host file) instead of proxying to the guest: Vite/SPA
+  bundles under `/assets/` loaded blank, and a guest app's own `/lease/`
+  or `/llm/` routes were shadowed. A request whose Host parses as a
+  lease hostname now goes straight to the forward-auth gate and the
+  guest proxy with its path untouched; only non-lease hosts (guests
+  calling `http://<HOST_GUEST_SERVICE_ADDR>:8891/...`) reach the
+  internal handlers. The assets containment check is unchanged. #144
+
 - **The admin drain and undrain heal themselves: a detached context, a
   bounded drain, drained leases retried, and draining visible.** A
   client that gave up (the `spoond drain --start` hook at 300 s) used to

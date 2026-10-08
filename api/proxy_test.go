@@ -1,8 +1,11 @@
 package api
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -142,6 +145,92 @@ func TestProxyDirectorHeaders(t *testing.T) {
 	}
 	if v := h.Get("E2b-Sandbox-Port"); v != "3000" {
 		t.Fatalf("E2b-Sandbox-Port = %q, want the default 3000", v)
+	}
+}
+
+// TestProxyLeaseHostRoutesBeforeGuestService pins #144: a request whose
+// Host parses as a lease hostname reaches the guest with its path
+// untouched, even when the path starts with /assets/, /lease/ or /llm/
+// (guest-service routes). A request to the guest-service listener (a
+// non-lease Host) still gets those internal handlers.
+func TestProxyLeaseHostRoutesBeforeGuestService(t *testing.T) {
+	// The upstream records the request URI it was asked for; the proxy
+	// (guest forwarding) leaves the path untouched, while the LLM gateway
+	// strips its /llm/<id> prefix.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.URL.RequestURI())
+	}))
+	t.Cleanup(upstream.Close)
+
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.ProxyURL = upstream.URL
+	l, err := svc.grant(t.Context(), "consumer-a", "py-base", time.Minute, true, "restricted", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.HostIP = "10.11.0.5"
+	svc.store.mu.Unlock()
+
+	// Static assets dir: a lease-hostname /assets/ request must NOT be
+	// served from here; a guest-service-host one must.
+	assetsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(assetsDir, "x.js"), []byte("host-file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServerWithLLM(svc, NewImageRegistry(db), upstream.URL, "host-key", "", nil)
+	srv.SetAssetsDir(assetsDir)
+	ph := srv.ProxyHandler()
+
+	// guest-service host: 10.0.0.11:8891 (a literal IP, never a lease).
+	guestHost := "http://10.0.0.11:8891"
+	leaseHost := "http://" + l.ID + "-4001.sandbox.example.com"
+
+	do := func(method, base, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, base+path, nil)
+		rec := httptest.NewRecorder()
+		ph.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Lease hostname: /assets/, /lease/ and /llm/ all go to the guest
+	// with the path intact, not to the host-service handlers.
+	for _, p := range []string{"/assets/x.js", "/lease/" + l.ID + "/active", "/llm/" + l.ID + "/openai/chat/completions"} {
+		rec := do("GET", leaseHost, p)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("lease host %s: status %d, want 200 (proxied), body=%q", p, rec.Code, rec.Body.String())
+		}
+		if got := rec.Body.String(); got != p {
+			t.Fatalf("lease host %s: guest saw %q, want the path untouched", p, got)
+		}
+	}
+
+	// 2. Guest-service host: the same paths hit the internal handlers.
+	// /assets/ is served from the assets dir, not proxied.
+	rec := do("GET", guestHost, "/assets/x.js")
+	if rec.Code != http.StatusOK || rec.Body.String() != "host-file" {
+		t.Fatalf("guest-service /assets/x.js: status %d body %q, want the host file", rec.Code, rec.Body.String())
+	}
+
+	// /lease/<id>/active is the heartbeat handler (POST -> 204).
+	hb := httptest.NewRequest("POST", guestHost+"/lease/"+l.ID+"/active", nil)
+	hbRec := httptest.NewRecorder()
+	ph.ServeHTTP(hbRec, hb)
+	if hbRec.Code != http.StatusNoContent {
+		t.Fatalf("guest-service heartbeat: status %d, want 204: %s", hbRec.Code, hbRec.Body.String())
+	}
+
+	// /llm/ is the LLM gateway: it forwards the path with the /llm/<id>
+	// prefix stripped, unlike the guest proxy above.
+	llm := do("POST", guestHost, "/llm/"+l.ID+"/openai/chat/completions")
+	if llm.Code != http.StatusOK {
+		t.Fatalf("guest-service /llm/: status %d, want 200: %s", llm.Code, llm.Body.String())
+	}
+	if got := llm.Body.String(); got != "/chat/completions" {
+		t.Fatalf("guest-service /llm/: upstream saw %q, want the gateway rewrite", got)
 	}
 }
 
