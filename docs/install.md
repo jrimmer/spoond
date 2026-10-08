@@ -211,8 +211,9 @@ Two lines to edit by hand: `HOST_GUEST_SERVICE_ADDR` (the host's primary
 IP — required, what guests use to reach host services; the backend exits
 without it) and the consumer name in `CONSUMER_TOKENS` (required; the
 backend exits without it too). `SPOOND_GUEST_DNS_ADDR` is the guest's DNS
-resolver (granted on port 53 and baked into the guest image; empty
-leaves no resolver allowance), and `SPOOND_PROXY_HOST_SUFFIX` is the
+resolver(s) (comma-separated; granted on port 53 and baked into the guest
+image as one `nameserver` line each; empty leaves no resolver
+allowance), and `SPOOND_PROXY_HOST_SUFFIX` is the
 wildcard hostname suffix the HTTP proxy routes (default
 `.sandbox.example.com`). `USERS_FILE` is the identity store that
 turns on multi-user tenancy; `BOOTSTRAP_TOKEN` gates the first (admin)
@@ -271,15 +272,18 @@ systemd's default 90 s, a slow undrain would fail the start and
 
 Every image the platform may grant must exist as an E2B template build
 recorded in the catalog before the backend can grant it. The image build
-must be given the same guest DNS resolver as the backend: the backend
-grants the resolver a port-53 egress allowance and
-`images/guest/spoond-guest-init` writes it to `/etc/resolv.conf`, so if
-`SPOOND_GUEST_DNS_ADDR` is set in `/etc/spoond/backend.env` it must also
-be exported for the build (or set per entry in `images/manifest.yaml`):
+must be given the same guest DNS resolver(s) as the backend: the backend
+grants each a port-53 egress allowance and
+`images/guest/spoond-guest-init` writes one `nameserver` line per address
+to `/etc/resolv.conf`, so if `SPOOND_GUEST_DNS_ADDR` is set in
+`/etc/spoond/backend.env` it must also be exported for the build (or set
+per entry in `images/manifest.yaml`). The value is comma-separated; the
+LAN's two resolvers (`10.1.0.2,10.1.0.3`) let a guest survive one slow
+answer:
 
 ```bash
 cd /root/src/spoond
-SPOOND_GUEST_DNS_ADDR=<guest resolver IP> \
+SPOOND_GUEST_DNS_ADDR=<guest resolver IP>[,<second IP>] \
 /opt/spoond/spoond images build --all \
   --manifest images/manifest.yaml --context images
 /opt/spoond/spoond images list

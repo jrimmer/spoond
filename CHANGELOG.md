@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Guests get both LAN resolvers, with retries.** `SPOOND_GUEST_DNS_ADDR`
+  now takes a comma-separated list (`10.1.0.2,10.1.0.3`); a single value
+  keeps working. The backend grants each address a port-53 egress
+  allowance and validates each as an IP at startup, and sends no public
+  DNS fallback once any resolver is configured. `spoond-guest-init`
+  writes one `nameserver` line per address plus
+  `options timeout:2 attempts:3 rotate`, so a guest survives one slow
+  or dead resolver — the 2026-10-07 incident where a Honey worker's
+  first lookup at boot failed after a disk-saturation spike. The value
+  is baked at image build; `deploy/PRODUCTION-ENV-2.7.md` records the
+  sb and agent-hub build-worker change and the image rebuild.
+
 ## [2.7.1] - 2026-10-07
 
 spoond looks after more of itself and says less on the dashboard about

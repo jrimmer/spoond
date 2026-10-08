@@ -60,7 +60,7 @@ cat > /etc/spoond/backend.env <<'EOF'
 CONSUMER_TOKENS=<token>=<consumer>,<token2>=<consumer2>
 E2B_TOKEN_SEED_FILE=/etc/spoond/e2b-token-seed
 HOST_GUEST_SERVICE_ADDR=10.0.0.11
-SPOOND_GUEST_DNS_ADDR=10.0.0.2
+SPOOND_GUEST_DNS_ADDR=10.0.0.2,10.0.0.3
 SPOOND_PROXY_HOST_SUFFIX=.sandbox.example.com
 TLS_CERT=/etc/spoond/tls/fullchain.pem
 TLS_KEY=/etc/spoond/tls/privkey.pem
@@ -74,6 +74,9 @@ chmod 600 /etc/spoond/backend.env
   (envd/traffic tokens derive from it)
 - `HOST_GUEST_SERVICE_ADDR` — the host address guests use to reach the
   proxy/LLM gateway and the lease API
+- `SPOOND_GUEST_DNS_ADDR` — the guest resolver(s), comma-separated;
+  each is granted port 53 and baked into the image for
+  `spoond-guest-init`
 - `TLS_CERT`/`TLS_KEY` — serve HTTPS on :8890. On host this uses the
   Let's Encrypt cert for `sandbox.example.com` (see TLS below)
 

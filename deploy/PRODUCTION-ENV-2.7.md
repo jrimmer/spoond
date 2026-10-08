@@ -95,6 +95,27 @@ SPOOND_GUEST_DNS_ADDR=10.1.0.2 spoond images build --all
 Without it, `spoond-guest-init` leaves the image's own `resolv.conf`
 alone (generic, no pinned resolver).
 
+## Guest DNS list (ships with the next release)
+
+The next release lets `SPOOND_GUEST_DNS_ADDR` name several resolvers
+(comma-separated) so a guest survives one slow or dead DNS server. On
+that release set the LAN's two resolvers in the backend and on the build
+host:
+
+- **sb** (backend) — `/etc/spoond/backend.env`:
+  `SPOOND_GUEST_DNS_ADDR=10.1.0.2,10.1.0.3`
+- **agent-hub build-worker** — the image build environment must export
+  the same value before `spoond images build --all`, so every rebuilt
+  image bakes both resolvers and the `options timeout:2 attempts:3
+  rotate` line:
+  `SPOOND_GUEST_DNS_ADDR=10.1.0.2,10.1.0.3 spoond images build --all`
+
+The backend grants each address a port-53 allowance and sends no public
+DNS fallback. The sb env change and the image rebuilds happen together
+in that release's window (owner + Honey). Images built with `10.1.0.2`
+alone keep working — they simply carry one resolver — until they are
+rebuilt.
+
 ## /etc/e2b/orchestrator.env (E2B orchestrator unit)
 
 The repo's `deploy/e2b/orchestrator.env` now ships the generic
