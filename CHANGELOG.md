@@ -74,6 +74,20 @@ summarised from README "Status".
 
 ### Fixed
 
+- **User-delete cleanup follow-ups (spoond-q4j).** A create of a deleted
+  user that was parked on a quota cap (`max_leases` or memory) answered
+  the cap's `429` when the delete refused it, because the queued-create
+  refusal wrapped the original error and the quota checks were tested
+  first; it now answers `403 owner deleted`. A ticket parked after the
+  delete's queue cancel already ran is refused at its next admission
+  pass instead of waiting out its deadline. Deleting a real user twice
+  now answers `200` with empty removed lists, matching the documented
+  idempotence (the second call had answered `404` once the identity was
+  gone); an id that was never a user still answers `404`. Restoring a
+  suspended lease whose owner was deleted answers `403 owner deleted`
+  instead of `500`. The owner-deleted grant refusal also drops the
+  lease's remembered egress config, like every other failed create.
+
 - **The exec and stream request bodies are bounded (spoond-mrbr).**
   `POST /api/leases/{id}/exec` decoded its JSON body with no size bound,
   so one authenticated caller could send a multi-GB `cmd` or `secrets`

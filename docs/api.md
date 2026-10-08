@@ -1026,7 +1026,9 @@ quota (#128): `429` when the charge would pass `max_mib` — the lease
 stays suspended, untouched. The restore re-decides the lease's class
 (#128 part 2), so a burst lease restored into a full burst reserve
 answers `503` `no burst capacity` with `Retry-After: 30`, and the
-lease stays as it was.
+lease stays as it was. An `owner deleted` (`403`) refuses the restore
+when the owner's identity was removed while it was in flight
+(spoond-q4j): the user is gone, so the restore is not run ownerless.
 
 The lease keeps its id, owner, holder, name, network policy, exposed
 ports and `checkpoint_interval`. Everything else about the guest starts
