@@ -12,6 +12,16 @@ summarised from README "Status".
 
 ### Added
 
+- **A suspended-lease refusal now carries `code: lease_suspended`.**
+  Every "lease is suspended; resume it first" answer is the same `409`
+  as before, but its JSON body now includes
+  `"code":"lease_suspended"` (additive). A client can tell it apart
+  from the other `409` — a busy lease, which carries
+  `code: lease_busy` — without matching the message text. The
+  plain-text `http.Error` sites (guest heartbeat, LLM gateway, HTTP
+  proxy) answer the same JSON shape as the rest. See the error-code
+  table in [docs/api.md](docs/api.md).
+
 - **Guests get both LAN resolvers, with retries.** `SPOOND_GUEST_DNS_ADDR`
   now takes a comma-separated list (`10.1.0.2,10.1.0.3`); a single value
   keeps working. The backend grants each address a port-53 egress
@@ -67,8 +77,26 @@ summarised from README "Status".
   until the lost-lease grace lapsed (spoond-775). `saveLeaseLocked` now
   refuses a released lease, and each async path drops its late sandbox,
   build and lease writes and stops the sandbox it created; the
-  checkpoint/pause build is left unreferenced for the GC, and a startup/
-  reconcile sweep drops any such row an older binary left behind.
+  checkpoint/pause build is left unreferenced for the GC. A backend
+  start reloads every stored lease, so a phantom row such a race left
+  behind is not dropped by the reconcile sweep — it is loaded as an
+  ordinary live lease whose sandbox is gone and goes through the
+  lost/grace path (spoond-d76).
+
+- **A release racing a pause, a checkpoint or a drain is now handled
+  under the same lock that marks the lease suspended.** The pause's
+  released re-check ran outside the lock that set `Suspended`, so a
+  release in that window returned a successful pause, emitted a
+  `suspended` event after `released`, credited the lease's memory twice
+  and let preemption/idle bookkeeping count a released lease. The
+  re-check now runs inside the lock, and preemption's own re-check
+  skips a released lease (spoond-d76). A checkpoint whose resume-fresh
+  started a sandbox after the release's delete now stops that sandbox
+  (detached context, bounded retries) and drops its row, so a resumed
+  guest cannot run on holding hugepages. The GC stamps a stored-only
+  lost row with an `UPDATE` rather than an upsert, so a concurrent
+  release is not undone by re-inserting the row, and the admin drain
+  skips (rather than lists as failed) a lease released mid-drain.
 
 - **The web proxy decides by Host first, so guest-service routes no
   longer shadow lease hostnames.** `/assets/`, `/lease/` and `/llm/`

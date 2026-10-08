@@ -299,13 +299,15 @@ func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string
 	}
 
 	s.store.mu.Lock()
-	if !l.Suspended || l.busy {
+	if !l.Suspended || l.busy || l.released {
 		// A concurrent resume won the race: pauseLease cleared busy as
 		// it returned, so a resume may have taken it and still be in
 		// its sub calls with Suspended true. Testing busy as well stops
 		// us stamping (and crediting memory for) a lease that is coming
 		// back, and keeps a spurious preempted event/counter off the
-		// stream.
+		// stream. A release between the pause and this re-check is
+		// skipped too: a released lease must not gain a preemption
+		// stamp, counter or event (spoond-d76).
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}

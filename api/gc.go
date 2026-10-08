@@ -104,10 +104,11 @@ func (s *Service) lostKeepUntil(l store.LeaseRow, now time.Time) time.Time {
 // pass that sees it counts as the moment of loss, so the grace period
 // has a fixed start instead of moving forward on every pass and
 // holding the snapshots forever. It takes the same path setState uses
-// when the lease is in memory and falls back to the stored row
-// otherwise; an existing stamp is never overwritten, and a lease that
-// has since left the lost state is left alone (leaving "lost" clears
-// the stamp).
+// when the lease is in memory and an UPDATE of just lost_at when it is
+// not, so a concurrent release that deleted the row is not undone by
+// re-inserting it; an existing stamp is never overwritten, and a lease
+// that has since left the lost state is left alone (leaving "lost"
+// clears the stamp).
 func (s *Service) stampLostAt(ctx context.Context, l store.LeaseRow, now time.Time) {
 	s.store.mu.Lock()
 	if mem, ok := s.store.leases[l.ID]; ok {
@@ -123,9 +124,8 @@ func (s *Service) stampLostAt(ctx context.Context, l store.LeaseRow, now time.Ti
 		return
 	}
 	s.store.mu.Unlock()
-	l.LostAt = now
-	if err := s.db.UpsertLease(ctx, l); err != nil {
-		s.storeError("upsert_lease", l.ID, err)
+	if err := s.db.UpdateLeaseLostAt(ctx, l.ID, now); err != nil {
+		s.storeError("update_lost_at", l.ID, err)
 	}
 }
 

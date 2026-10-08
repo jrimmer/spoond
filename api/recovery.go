@@ -41,6 +41,20 @@ func writeLeaseLostMessage(w http.ResponseWriter, msg string) {
 	})
 }
 
+// leaseSuspendedMessage is the single 409 body for a lease that is
+// suspended and must be resumed first. It carries code lease_suspended
+// so a client can tell it apart from the other 409 (busy, code
+// lease_busy) without matching the message text.
+const leaseSuspendedMessage = "lease is suspended; resume it first"
+
+// writeLeaseSuspended answers 409 lease_suspended for a suspended lease.
+func writeLeaseSuspended(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, map[string]string{
+		"error": leaseSuspendedMessage,
+		"code":  "lease_suspended",
+	})
+}
+
 // lostErr returns the 410 lease_lost error for a lease already lost, or
 // nil when the call may proceed. It is shared by the service operations
 // that touch a lease, so a lost lease is refused the same way everywhere
@@ -116,13 +130,16 @@ type recoverySummary struct {
 }
 
 // pruneStaleLeaseRows drops lease rows with no in-memory twin whose
-// sandbox is gone. A checkpoint or pause that finished after its lease was
-// released once wrote such a zombie `state=running` row back (spoond-775);
-// the save guard stops new ones, and this reconcile sweep clears the ones
-// an older binary left behind while it runs. A row with an in-memory twin
-// is left for reconcileCrash (a live lease whose sandbox vanished is
-// recovered or lost), and a row whose sandbox still exists is left for
-// ReconcileOrphans. Runs before the recovery pass so a phantom is never
+// sandbox is gone. It clears a row a checkpoint or pause that finished
+// after its lease was released once wrote back (spoond-775): the save
+// guard stops new ones, and this reconcile sweep clears any such row
+// whose sandbox is gone. A row with an in-memory twin is left for
+// reconcileCrash (a live lease whose sandbox vanished is recovered or
+// lost), and a row whose sandbox still exists is left for
+// ReconcileOrphans. A backend start loads every stored lease into
+// memory, so a row an older binary left behind is not dropped here — it
+// is loaded as a live lease and goes through the ordinary lost/grace
+// path instead. Runs before the recovery pass so a phantom is never
 // recovered.
 func (s *Service) pruneStaleLeaseRows(ctx context.Context, present map[string]bool) {
 	rows, err := s.db.ListLeases(ctx)
