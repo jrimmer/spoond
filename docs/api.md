@@ -1415,7 +1415,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |
 | `holder_set` | a hold is set or renewed on `PUT /api/leases/{id}/holder` | the holder and the new `hold_expires_at` |
 | `holder_cleared` | the hold is cleared | the clear |
-| `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
+| `held_action` | an automatic held-lease rule acted (idle suspend; stale/pressure/critical release; lapse), or the memory-pressure reclaim (rule 4) suspended a lease | the rule, the action and the numbers that triggered it |
 | `job_started` | a background exec job started (2.6, #135) | the command, cut to 120 chars |
 | `job_exited` | a background exec job ended (2.6, #135) | `exit <code>` and the last 10 stderr lines (at most 1 KiB); for a job killed by the max runtime, `timed out: exit 124` and the stderr excerpt (spoond-wb5) |
 | `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |

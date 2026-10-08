@@ -966,8 +966,9 @@ plain TTL and idle sweeps — that is the point — but it must never be
 able to keep memory or disk forever, and nobody watches the dashboard.
 So the limits act on their own: they run in the existing sweep loop
 (every `sweepInterval`, 5 s) and skip while the node is draining. Every
-automatic action is logged as one line naming the lease, the holder,
-the rule and the numbers that triggered it, counted in
+automatic action is logged as one line naming the lease, its holder (if
+any) and the
+rule and the numbers that triggered it, counted in
 `spoond_held_actions_total{rule,action}`, and recorded on the lease
 (`last_action`, `last_action_at`, returned by the lease API with
 `hold_expires_at` and `hold_state`). A hold also lapses on its own: it
