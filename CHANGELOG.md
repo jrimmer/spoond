@@ -10,6 +10,31 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **A cap on background job runtime (spoond-wb5).** A background exec job
+  may no longer run forever: `JOB_MAX_RUNTIME` (default 24 h, a Go
+  duration or seconds) is the host cap, the exec body's new optional
+  `max_runtime_secs` can ask for a shorter one — never a longer one, and
+  a negative value is `400`. Past its effective cap the record is closed
+  as exited with reason `timed_out` and exit code `124` and the job's
+  process group is killed (the same path as
+  `POST …/jobs/{job}/signal`); a `job_exited` event whose detail starts
+  `timed out: exit 124` tells the owner the cap, not the command, ended
+  it (`reason` is also on the job record, and `spoond_jobs_exited_total`
+  gains the `timed_out` result). The cap is wall-clock from the job's
+  start: while the lease is suspended reconcile leaves the job running
+  (the paused guest cannot be signalled), and the first reconcile after
+  a resume kills a job whose cap was spent in the meantime — so a `sleep
+  infinity` can no longer pin a lease's memory and hugepages forever.
+  An oversized `max_runtime_secs` is clamped to the host cap rather
+  than overflowing the seconds conversion into "uncapped".
+  Migration **0020** adds `lease_jobs.max_runtime_secs` and
+  `lease_jobs.reason`. A job on a suspended lease also no longer keeps
+  that lease active: `reconcileJobs` stopped calling `markActive` on a
+  suspended lease, so the held-lease rules' untouched test still sees
+  the suspension. A negative `JOB_MAX_RUNTIME` disables the cap entirely.
+
 ### Fixed
 
 - **`spoond_builds_in_flight` reports the catalog's in-flight template
@@ -42,29 +67,6 @@ instead of succeeding. No store migration; the grid package is
 unchanged since 2.7.0.
 
 ### Added
-
-- **A cap on background job runtime (spoond-wb5).** A background exec job
-  may no longer run forever: `JOB_MAX_RUNTIME` (default 24 h, a Go
-  duration or seconds) is the host cap, the exec body's new optional
-  `max_runtime_secs` can ask for a shorter one — never a longer one, and
-  a negative value is `400`. Past its effective cap the record is closed
-  as exited with reason `timed_out` and exit code `124` and the job's
-  process group is killed (the same path as
-  `POST …/jobs/{job}/signal`); a `job_exited` event whose detail starts
-  `timed out: exit 124` tells the owner the cap, not the command, ended
-  it (`reason` is also on the job record, and `spoond_jobs_exited_total`
-  gains the `timed_out` result). The cap is wall-clock from the job's
-  start: while the lease is suspended reconcile leaves the job running
-  (the paused guest cannot be signalled), and the first reconcile after
-  a resume kills a job whose cap was spent in the meantime — so a `sleep
-  infinity` can no longer pin a lease's memory and hugepages forever.
-  An oversized `max_runtime_secs` is clamped to the host cap rather
-  than overflowing the seconds conversion into "uncapped".
-  Migration **0020** adds `lease_jobs.max_runtime_secs` and
-  `lease_jobs.reason`. A job on a suspended lease also no longer keeps
-  that lease active: `reconcileJobs` stopped calling `markActive` on a
-  suspended lease, so the held-lease rules' untouched test still sees
-  the suspension. A negative `JOB_MAX_RUNTIME` disables the cap entirely.
 
 - **A suspended-lease refusal now carries `code: lease_suspended`.**
   Every "lease is suspended; resume it first" answer is the same `409`
