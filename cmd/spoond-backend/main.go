@@ -70,9 +70,10 @@
 //	                  kept after the lease is lost (Go duration;
 //	                  default 24h = 1 d)
 //	ORPHAN_REAP   what the GC does with an orphan build directory
-//	                  under E2B_TEMPLATE_STORAGE_PATH: off (leave it),
-//	                  dryrun (log it; default), or quarantine (move it
-//	                  to <storage path>/../quarantine/<id> and delete it
+//	                  under E2B_TEMPLATE_STORAGE_PATH: off (hard stop,
+//	                  change nothing), dryrun (log it; default), or
+//	                  quarantine (move it to
+//	                  <storage path>/../quarantine/<id> and delete it
 //	                  only after ORPHAN_QUARANTINE_SECS)
 //	ORPHAN_MIN_AGE_SECS  don't reap a build directory under
 //	                  E2B_TEMPLATE_STORAGE_PATH modified more recently
