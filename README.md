@@ -170,7 +170,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v2.7.1 (2026-10-07) · GitHub` — with the
+line — `Spoond v2.8.0 (2026-10-08) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -244,6 +244,13 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v2.8: no loose ends.** A lost lease's guest is always stopped, and
+spoond sweeps away sandboxes nothing claims. A late checkpoint, pause or
+restore can no longer bring a released lease back, and drain and
+undrain recover on their own. Guests resolve through both LAN resolvers,
+lease web hostnames reach the guest's own `/assets/` (#144), and a
+suspended lease's `409` says `lease_suspended`.
 
 **v2.7.1: a utility that tidies up after itself.** A lost lease says
 why (`410` with `code: lease_lost`) and is released after its grace period, every
