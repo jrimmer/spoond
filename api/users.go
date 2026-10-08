@@ -3,7 +3,6 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -257,23 +256,6 @@ func (s *Server) handleUsersLLMKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }
 
-// handleUsersDelete removes a user (admin only).
-func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(w, http.StatusBadRequest, "user id required")
-		return
-	}
-	if u := userFrom(r.Context()); u != nil && u.ID == id {
-		writeError(w, http.StatusBadRequest, "cannot delete yourself")
-		return
-	}
-	if err := s.svc.identities.RemoveUser(id); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("remove: %v", err))
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
+// handleUsersDelete lives in api/userdelete.go: it removes the identity
+// and then cleans up the leases, jobs, snapshots and kept builds that
+// would otherwise outlive it (spoond-q4j).

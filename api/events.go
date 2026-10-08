@@ -124,6 +124,13 @@ const (
 	// The lease is left suspended (not lost: its snapshot is intact) for
 	// the owner or the idle rules to exit (spoond-52c B2).
 	LeaseDrainGaveUp LeaseEventType = "drain_gave_up"
+	// LeaseUserDeleted marks the cleanup that follows DELETE
+	// /api/users/{id} (spoond-q4j): every lease of the removed identity
+	// was released (each with its own `released` event and reason
+	// `user_deleted`), its named snapshots were dropped, its kept builds
+	// unpinned and its running jobs cancelled. The detail summarises the
+	// counts; the event carries the removed owner and no lease id.
+	LeaseUserDeleted LeaseEventType = "user_deleted"
 )
 
 // LeaseEvent is one lease lifecycle change.

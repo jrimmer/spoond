@@ -287,7 +287,9 @@ place in the fair-share order at that moment, e.g. `memory cap; position
 2 of 3`; the lease id is allocated when the create is queued and the
 created lease keeps it. On admission a `created` event follows as usual;
 a wait that ends without a lease emits `timed_out` with detail `waited
-Ns`, `client gone` or `draining`.
+Ns`, `client gone`, `draining` or `owner deleted` (the owner's identity
+was removed while the create waited; the create is refused `403 owner
+deleted`).
 
 The create holds its HTTP request open for the whole wait. spoond sets
 no server write timeout, but the client's own timeout must be longer
@@ -915,7 +917,9 @@ same way; on success `preempted` is cleared and the `resumed` event's
 detail is `after preemption`. Resuming a lease that is
 already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
-restored the pause build again, rolling the guest's memory back.)
+restored the pause build again, rolling the guest's memory back.) An
+`owner deleted` (`403`) refuses the resume when the owner's identity was
+removed while the resume was in flight (spoond-q4j).
 
 ### `POST /api/leases/{id}/restart` — pause and resume, or a fresh guest
 
@@ -960,6 +964,9 @@ into a full burst reserve answers `503` `no burst capacity` with
 A substrate failure on the fresh-guest path (which does create a sandbox) surfaces
 as `500`, not `503` — unlike create, fork and clone, restart does not
 map capacity errors to `503`.
+
+An `owner deleted` (`403`) refuses the restart when the owner's identity
+was removed while the restart was in flight (spoond-q4j).
 
 ### `POST /api/leases/{id}/checkpoint` — snapshot a running lease
 
@@ -1019,7 +1026,9 @@ quota (#128): `429` when the charge would pass `max_mib` — the lease
 stays suspended, untouched. The restore re-decides the lease's class
 (#128 part 2), so a burst lease restored into a full burst reserve
 answers `503` `no burst capacity` with `Retry-After: 30`, and the
-lease stays as it was.
+lease stays as it was. An `owner deleted` (`403`) refuses the restore
+when the owner's identity was removed while it was in flight
+(spoond-q4j): the user is gone, so the restore is not run ownerless.
 
 The lease keeps its id, owner, holder, name, network policy, exposed
 ports and `checkpoint_interval`. Everything else about the guest starts
@@ -1177,6 +1186,10 @@ The clone costs the source image's `memory_mb` against the owner's
 memory quota like any create (#128); `429` when it would pass
 `max_mib`. The clone is classified and held to the burst reserve like
 any create (#128 part 2); a refusal answers `503` `no burst capacity`.
+An `owner deleted` (`403`) refuses the clone when the owner's identity
+was removed while the clone's checkpoint was in flight (spoond-q4j): the
+fresh sandbox is stopped and no lease is committed, so a deleted owner
+cannot acquire an ownerless, uncapped copy.
 
 ### `POST /api/leases/{id}/fork` — N copies of a running lease
 
@@ -1202,6 +1215,11 @@ all or nothing — `503` capacity. Every child is classified at
 admission (#128 part 2): with the whole batch's charge pending, all
 children of a fork past the guarantee burst together, and a burst child
 refused on the reserve fails the call with `503` `no burst capacity`.
+An `owner deleted` (`403`) refuses a fork whose owner's identity was
+removed while the fork's checkpoint was in flight (spoond-q4j): every
+child created so far is rolled back (its sandbox stopped once) and the
+rest are refused, so a deleted owner cannot acquire ownerless, uncapped
+copies.
 
 ### `POST /api/leases/{id}/network` — change egress policy live
 
@@ -1364,6 +1382,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer or a bounded context (spoond-52c) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
 | `drain_healed` | the drain self-heal loop lifted a drain that outlived `DRAIN_MAX_SECS` on a healthy node, or cleared a node drain a failed undrain left set (spoond-52c) | `drain lasted <duration>` |
 | `drain_gave_up` | the drain self-heal loop stopped retrying the lease's resume after `DRAIN_RESUME_MAX_AGE`; the lease stays suspended with its snapshot intact, for the owner or the idle rules to exit (spoond-52c) | `resume deferred for over <duration>; leaving the lease suspended for the owner` |
+| `user_deleted` | `DELETE /api/users/{id}` removed a user and cleaned up their state (spoond-q4j); every one of the user's leases emitted its own `released` event with reason `user_deleted` | `removed user <id>: N lease(s), N job(s), N snapshot(s), N kept build(s)` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 
 A `gc` event is lease-less: its `lease_id` and `owner` are empty, it
@@ -1374,9 +1393,9 @@ pass that deletes nothing (the default dry run included) emits none, but
 the stale-building sweep does emit one per row it fails even in dry-run
 mode, because a template build has no owner and never appears in
 `/api/snapshots`, so the event is where its failure is visible.
-`drain_healed` is lease-less the same way. `drain_failed` and
-`drain_deferred` name their lease (and owner), so they reach the
-per-lease stream too.
+`drain_healed` is lease-less the same way, and so is `user_deleted`
+(it carries the removed owner); `drain_failed` and `drain_deferred`
+name their lease (and owner), so they reach the per-lease stream too.
 
 ### Resume and gaps
 
@@ -1943,9 +1962,41 @@ resolution.
 
 ### `DELETE /api/users/{id}` — remove a user (admin only)
 
-Removes the identity and its keys. **This is what actually revokes SSH
-access** — the gateway treats the identity store as authoritative when
-present, so removing the user invalidates all their keys immediately.
+Removes the identity and its keys, then cleans up the state that would
+otherwise outlive it: every lease of the removed user is released (each
+`released` event carries reason `user_deleted`), every running job is
+signalled and settled, every named snapshot version and its settings
+row are dropped, every kept build is unpinned and every share held on
+the user's leases goes with the releases. The cleanup runs on a context
+detached from the request (a client disconnect cannot leave it half
+done) bounded by 5 min.
+
+The answer is `200` with what was removed:
+
+```json
+{"removed": {"user": "u-…", "leases": ["…"], "jobs": ["…"],
+            "snapshots": ["warm@1"], "kept_builds": ["…"]}}
+```
+
+The lists are always present (empty when there was nothing to remove).
+A create of the deleted user that is still waiting in the admission
+queue (or that raced the delete) is refused with `403 owner deleted`
+rather than granted: an owner with no identity row has no quota, so
+granting it would recreate exactly the uncapped state the delete
+removes. Removing the identity is what actually revokes SSH access —
+the gateway treats the identity store as authoritative when present, so
+removing the user invalidates all their keys immediately. Before
+spoond-q4j the delete answered `204` and left the leases, snapshots,
+kept builds and jobs behind, uncapped (an owner with no user has no
+quota).
+
+An id that is neither a known identity nor has any remaining state
+answers `404 user not found`; deleting the same real user twice is
+idempotent and answers `200` the second time. An id that is the owner of
+a legacy consumer token (a single-user deployment's token map) answers
+`409` and is left untouched: it has no identity row but still
+authenticates, so marking it deleted would permanently refuse its
+creates.
 
 ### `POST /api/users/{id}/quota` — set lease quota (admin only)
 

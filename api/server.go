@@ -1152,6 +1152,14 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// (2.7, #83): 409 with a machine-readable code and no retry
 		// loop.
 		status, msg, code = http.StatusConflict, err.Error(), "cannot_start"
+	case errors.Is(err, errOwnerGone):
+		// The owner's identity was removed while the create was in
+		// flight (spoond-q4j): the user is gone, so the create is refused
+		// rather than granted ownerless and uncapped. Checked before the
+		// quota and capacity refusals because cancelQueuedForOwner wraps
+		// the refusal that queued the ticket, which would otherwise match
+		// (and answer) as if the owner were still there (N1).
+		status, msg = http.StatusForbidden, "owner deleted"
 	case errors.Is(err, errQuotaExceeded):
 		status, msg = http.StatusTooManyRequests, err.Error()
 	case errors.Is(err, errUnknownImage):
@@ -1672,6 +1680,11 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// with a retry hint too (#128 part 2); the lease stays
 			// suspended.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
+		case errors.Is(err, errOwnerGone):
+			// The owner's identity was removed while the restart was in
+			// flight (spoond-q4j): the user is gone, so the restart is
+			// refused rather than run ownerless.
+			writeError(w, http.StatusForbidden, "owner deleted")
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")
@@ -2340,6 +2353,11 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		case errors.Is(err, errOwnerGone):
+			// The owner's identity was removed while the clone was in
+			// flight (spoond-q4j): the user is gone, so the clone is
+			// refused rather than granted ownerless and uncapped.
+			writeError(w, http.StatusForbidden, "owner deleted")
 		default:
 			s.svc.log.Printf("clone %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "failed to clone lease")
@@ -2408,6 +2426,12 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		case errors.Is(err, errOwnerGone):
+			// The owner's identity was removed while the fork was in
+			// flight (spoond-q4j): the user is gone, so the fork is
+			// refused and every child rolled back rather than granted
+			// ownerless and uncapped.
+			writeError(w, http.StatusForbidden, "owner deleted")
 		default:
 			s.svc.log.Printf("fork %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "failed to fork lease")

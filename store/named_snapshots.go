@@ -257,6 +257,33 @@ func (db *DB) DeleteNamedSnapshotName(ctx context.Context, owner, name string) (
 	return n, nil
 }
 
+// DeleteNamedSnapshotsOfOwner removes every named-snapshot version and
+// settings row of one owner, returning the versions it deleted. Deleting
+// a user calls it: the versions are gone for good and there is nobody
+// left to keep the high-water mark for, so the settings rows go too.
+func (db *DB) DeleteNamedSnapshotsOfOwner(ctx context.Context, owner string) ([]NamedSnapshotRow, error) {
+	rows, err := db.ListNamedSnapshots(ctx, owner, "")
+	if err != nil {
+		return nil, err
+	}
+	tx, err := db.w.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: delete named snapshots of owner %s: %w", owner, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM named_snapshots WHERE owner = ?`, owner); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("store: delete named snapshots of owner %s: %w", owner, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM named_snapshot_names WHERE owner = ?`, owner); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("store: delete named snapshot names of owner %s: %w", owner, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: delete named snapshots of owner %s: %w", owner, err)
+	}
+	return rows, nil
+}
+
 // CountNamedSnapshotNames returns how many distinct names owner has. The
 // per-owner names cap (MAX_NAMED_SNAPSHOTS) reads it before a first
 // save.

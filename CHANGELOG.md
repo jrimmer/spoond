@@ -57,7 +57,36 @@ summarised from README "Status".
   a negative value under one second is rejected at startup rather than
   truncating to the default.
 
+- **Deleting a user now releases their leases and drops their named
+  snapshots and kept builds.** `DELETE /api/users/{id}` used to remove
+  only the identity, leaving the user's leases running, their named
+  snapshots and kept builds pinning disk and their jobs with nobody to
+  charge (an owner with no user has no quota). It now releases every
+  lease (reason `user_deleted`), cancels every running job, drops every
+  named snapshot and unpins every kept build, logs each step and emits
+  one `user_deleted` event naming the counts. A create of that user
+  still waiting in the admission queue, or one that raced the delete, is
+  refused (`403 owner deleted`) instead of granted, since an owner with
+  no identity row has no quota. The response changed from
+  `204` to `200` with `{"removed": {user, leases, jobs, snapshots,
+  kept_builds}}`, so a caller can see exactly what was cleaned up
+  (spoond-q4j).
+
 ### Fixed
+
+- **User-delete cleanup follow-ups (spoond-q4j).** A create of a deleted
+  user that was parked on a quota cap (`max_leases` or memory) answered
+  the cap's `429` when the delete refused it, because the queued-create
+  refusal wrapped the original error and the quota checks were tested
+  first; it now answers `403 owner deleted`. A ticket parked after the
+  delete's queue cancel already ran is refused at its next admission
+  pass instead of waiting out its deadline. Deleting a real user twice
+  now answers `200` with empty removed lists, matching the documented
+  idempotence (the second call had answered `404` once the identity was
+  gone); an id that was never a user still answers `404`. Restoring a
+  suspended lease whose owner was deleted answers `403 owner deleted`
+  instead of `500`. The owner-deleted grant refusal also drops the
+  lease's remembered egress config, like every other failed create.
 
 - **The exec and stream request bodies are bounded (spoond-mrbr).**
   `POST /api/leases/{id}/exec` decoded its JSON body with no size bound,
@@ -159,6 +188,24 @@ summarised from README "Status".
   operator who set `off` to keep the GC's hands off the disk now gets
   that, and an expired quarantine waits for a pass in a mode allowed to
   purge it (spoond-ob18).
+
+- **A clone or fork of a deleted user can no longer commit an
+  ownerless lease.** A clone (or a fork child) reserves quota and then
+  spends seconds checkpointing; a `DELETE /api/users/{id}` racing that
+  window released the source and finished, after which the clone or
+  fork committed an ownerless, uncapped lease. Both now re-check the
+  owner-delete mark under the store lock at the commit: a deleted
+  owner's clone is refused and its fresh sandbox stopped, and a fork
+  rolls back every child (each sandbox stopped exactly once). A named
+  snapshot save that reached its row insert after the owner's snapshots
+  were dropped is refused the same way, so no row outlives the user as
+  a GC root. A user delete of an id that is neither a known identity
+  nor still owns any state now answers `404` (it used to silently
+  succeed); an id that is a legacy token-map owner answers `409` and is
+  left untouched (`RemoveUser` is idempotent, so retrying a partial
+  cleanup still works). Clone, fork, restart and resume now map the
+  refusal onto `403 owner deleted` instead of a `500`, and the refused
+  grant drops its staged create-time secrets.
 
 ## [2.8.0] - 2026-10-08
 

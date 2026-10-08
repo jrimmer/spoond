@@ -35,6 +35,28 @@ const admitQueueTick = 5 * time.Second
 // waiting for room is pointless.
 var errDraining = errors.New("draining")
 
+// errOwnerGone is the refusal a create (queued or not) is answered with
+// when its owner's identity was removed (spoond-q4j). It is final: once
+// an owner has no identity row they would be admitted uncapped, so a
+// create must never be granted. It is checked in reserveQuota under the
+// owner-delete guard, so a grant that raced DELETE /api/users/{id} is
+// refused.
+var errOwnerGone = errors.New("owner deleted")
+
+// markOwnerDeleted records that owner's identity is gone (spoond-q4j).
+// handleUsersDelete calls it after removing the identity and before the
+// cleanup: every admission path that still consults the identity store
+// for that owner must now refuse, so a queued or freshly-parked create
+// cannot recreate an ownerless (uncapped) lease. reserveQuota consults
+// it while it holds the store lock, so a grant either sees the owner
+// alive (and cancelQueuedForOwner then refuses any ticket it parked) or
+// sees the deletion and refuses.
+func (s *Service) markOwnerDeleted(owner string) {
+	s.ownerDeleteMu.Lock()
+	s.deletedOwners[owner] = true
+	s.ownerDeleteMu.Unlock()
+}
+
 // waitRefusal reports whether err is one a create may wait out (#129):
 // substrate capacity (hugepages full and preemption could not help), the
 // burst reserve, a failed preemption, and the owner's quota caps — the
@@ -88,7 +110,10 @@ type admissionTicket struct {
 	queuedAt time.Time
 	deadline time.Time
 	seq      uint64
-	done     bool
+	// done is guarded by admissionQueue.mu, like the tickets list: it is
+	// written by finishTicket (and drainQueue) and read by the admission
+	// pass and by cancelQueuedForOwner, always under that lock.
+	done bool
 }
 
 // admissionOutcome is what the waiting create's HTTP handler receives:
@@ -210,6 +235,46 @@ func (s *Service) finishTicket(t *admissionTicket) bool {
 	return true
 }
 
+// cancelQueuedForOwner refuses every ticket the removed owner has
+// waiting: the delete's cleanup calls this after removing the identity,
+// and grantLease's owner-deleted guard stops a ticket that raced the
+// delete and reached admission. Each refused ticket is settled (its
+// channel gets errOwnerGone) and announced with a `timed_out` event
+// whose detail is "owner deleted".
+func (s *Service) cancelQueuedForOwner(owner string) {
+	s.admitQ.mu.Lock()
+	pending := s.admitQ.tickets
+	var kept []*admissionTicket
+	for _, t := range pending {
+		if t.owner != owner {
+			kept = append(kept, t)
+		}
+	}
+	s.admitQ.tickets = kept
+	s.admitQ.mu.Unlock()
+	for _, t := range pending {
+		if t.owner != owner {
+			continue
+		}
+		// Only the winner of finishTicket answers the ticket: if a
+		// concurrent admission pass already granted it, that pass owns the
+		// outcome (and the cleanup's release re-scan releases the lease).
+		// finishTicket reads t.done under admitQ.mu, so this path never
+		// races a pass writing it.
+		if !s.finishTicket(t) {
+			continue
+		}
+		if s.metrics != nil {
+			s.metrics.AdmitTimeouts.Inc()
+		}
+		s.bus.emit(t.id, t.owner, LeaseTimedOut, "owner deleted")
+		t.send(admissionOutcome{err: fmt.Errorf("%w: %w", errOwnerGone, t.refusal)})
+	}
+	if s.metrics != nil {
+		s.metrics.LeasesQueued.Set(float64(s.queueDepth()))
+	}
+}
+
 // waitForAdmission serves the waiting half of a create: it retries the
 // queue, then blocks until the ticket is admitted, times out, the client
 // goes away or the backend drains. It returns the granted lease (already
@@ -306,6 +371,21 @@ func (s *Service) tryAdmitQueued(ctx context.Context) {
 				s.drainQueue()
 				return
 			}
+			if errors.Is(err, errOwnerGone) {
+				// The owner was deleted while the ticket waited: the
+				// refusal is final, so answer it now instead of leaving
+				// the ticket to time out at its deadline (N1b). A ticket
+				// queued after cancelQueuedForOwner ran reaches here on
+				// the pass its own wake-up starts.
+				if s.finishTicket(t) {
+					if s.metrics != nil {
+						s.metrics.AdmitTimeouts.Inc()
+					}
+					s.bus.emit(t.id, t.owner, LeaseTimedOut, "owner deleted")
+					t.send(admissionOutcome{err: err})
+				}
+				continue
+			}
 			// Still no room (or another refusal): leave the ticket for
 			// the next wake-up.
 			refused = true
@@ -327,7 +407,9 @@ func (s *Service) tryAdmitQueued(ctx context.Context) {
 // grantQueued retries one queued create through the normal admission
 // path, so classes, the burst reserve, quotas and preemption apply
 // unchanged. It re-checks the drain first: a drain starting answers
-// queued creates at once.
+// queued creates at once. A removed owner is refused the same way
+// (spoond-q4j): without the identity row the lease would be uncapped,
+// which is exactly what deleting the user is meant to prevent.
 func (s *Service) grantQueued(ctx context.Context, t *admissionTicket) (*Lease, error) {
 	if s.draining.Load() {
 		return nil, fmt.Errorf("draining: %w", errDraining)
