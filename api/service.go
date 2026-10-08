@@ -1439,6 +1439,8 @@ func (s *Service) Start(ctx context.Context) {
 	// after the backend starts, then once an hour.
 	go s.runGCCatalogLoop(ctx)
 	// Node gauges (U11): refreshed every 15 s.
+	// Template-bake gauge (spoond-rzz): refresh spoond_builds_in_flight
+	// on the metrics tick, not only when /metrics is scraped.
 	go s.runNodeMetricsLoop(ctx)
 	// Preemption resume queue (#128 part 3): every 15 s, resume preempted
 	// leases that fit again.
@@ -1451,9 +1453,6 @@ func (s *Service) Start(ctx context.Context) {
 	// each running lease's root block device still reads, and recover a
 	// guest whose disk died like a crash.
 	go s.runRootfsProbeLoop(ctx)
-	// Template-bake gauge (spoond-rzz): refresh spoond_builds_in_flight
-	// on its own tick, not only when /metrics is scraped.
-	go s.runBuildMetricsLoop(ctx)
 	// Queued admission (#129 part 1): retry waiting creates every 5 s
 	// even when nothing signalled.
 	go s.runAdmitQueueLoop(ctx)
@@ -1468,7 +1467,8 @@ func (s *Service) Start(ctx context.Context) {
 	}
 }
 
-// runNodeMetricsLoop refreshes the NodeInfo-derived gauges every 15 s.
+// runNodeMetricsLoop refreshes the NodeInfo-derived gauges and the
+// catalog-derived template-bake gauge every 15 s.
 func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -1478,31 +1478,17 @@ func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			s.updateNodeMetrics(ctx)
-		}
-	}
-}
-
-// runBuildMetricsLoop refreshes the template-bake gauge on its own tick,
-// independently of a /metrics scrape, so spoond_builds_in_flight is live
-// for any reader. The value is the catalog's still-`building` template
-// builds (the same count bakesRunning returns and the orphan sweep
-// guards on). A catalog read failure leaves the gauge at its last value.
-func (s *Service) runBuildMetricsLoop(ctx context.Context) {
-	t := time.NewTicker(15 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
 			s.updateBuildMetrics(ctx)
 		}
 	}
 }
 
 // updateBuildMetrics sets spoond_builds_in_flight from the catalog's
-// template builds still `building`. It is a no-op without a metrics
-// collector or a store, and a read failure leaves the gauge unchanged.
+// template builds still `building`. The image pipeline runs in a separate
+// process, so the backend sees its bakes only through the shared catalog;
+// the value is the same count bakesRunning returns and the orphan sweep
+// guards on. It is a no-op without a metrics collector or a store, and a
+// read failure leaves the gauge at its last value.
 func (s *Service) updateBuildMetrics(ctx context.Context) {
 	if s.metrics == nil {
 		return
