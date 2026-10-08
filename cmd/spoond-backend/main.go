@@ -442,8 +442,9 @@ func Main(args []string) int {
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 	// Template build timeout (spoond-4yl): the GC fails a build still
 	// `building` for longer than twice this. SPOOND_BUILD_TIMEOUT (a Go
-	// duration or seconds) is the same knob `spoond images build` reads,
-	// so the pipeline and the GC agree.
+	// duration or seconds) is read here from the backend's own
+	// environment; `spoond images build` reads the same variable in its
+	// environment, so both must be set (spoond-rzz).
 	buildTimeout := substrate.BuildTimeoutFromEnv()
 	// The burst lease reserve (#128 part 2): BURST_RESERVE_MIB keeps
 	// this much hugepage memory free of burst leases, so guaranteed
@@ -800,6 +801,7 @@ func Main(args []string) int {
 	}()
 
 	log.Printf("spoond-backend listening on %s (substrate %s, %d consumer(s), pool=%d)", bindAddr, cfg.GRPCAddr, len(tokens), poolSize)
+	log.Printf("template build timeout: %s (SPOOND_BUILD_TIMEOUT; the GC fails a `building` row older than %s)", buildTimeout, 2*buildTimeout)
 	if tlsPairs != nil {
 		certs, cerr := tlsfiles.New(tlsPairs, log.Printf)
 		if cerr != nil {

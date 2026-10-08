@@ -117,7 +117,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `E2B_CONTROL_TIMEOUT` | `30s` | per-call bound for every other orchestrator call (list, update, drain override, template builds) |
 | `SWEEP_TIMEOUT` | `15m` | bound for one background sweep stage (TTL release, held rules, pool refill, job prune), so a hung substrate RPC frees the loop and the lease's busy flag |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | build store — where GC and disk accounting look |
-| `SPOOND_BUILD_TIMEOUT` | `1h` | how long a template build may run before the GC fails a still-`building` row as stale (twice this); a Go duration or seconds. The same variable bounds `spoond images build` (spoond-4yl) |
+| `SPOOND_BUILD_TIMEOUT` | `1h` | how long a template build may run before the GC fails a still-`building` row as stale (twice this); a Go duration or seconds. The backend reads it from its own environment; `spoond images build` reads it separately, so set it for both (spoond-4yl, spoond-rzz) |
 | `IMAGE_REGISTRY` | `localhost:5000` | registry `spoond images build` pushes to |
 | `CONSUMER_TOKENS` | *(required)* | comma-separated `token=consumer` pairs, e.g. `abc=forgejo,def=pi` — consumers authenticate with bearer tokens |
 | `USERS_FILE` | *(empty)* | identity store path (JSON, chmod 600). Set for multi-user tenancy: per-user keys, tokens, quotas, sharing |
@@ -202,6 +202,14 @@ See `deploy/spoond-backend.service`. The shipped unit reads
 repoints it at `/etc/spoond/backend.env` (`chmod 600`) — that is the
 file the backend sources and the operator snippets in
 [install.md](install.md) and [operations.md](operations.md) read.
+
+`SPOOND_BUILD_TIMEOUT` is read by two processes from two environments:
+the backend (for the GC's stale-row sweep) and `spoond images build`
+(for the `BuildTemplate` bound). Setting it only in the backend's env
+file leaves the image pipeline on the default, and vice versa; set the
+same value in both (the backend logs the effective value and its stale
+threshold at start, and `spoond images build` prints its bound). See
+[operations.md](operations.md#snapshot-catalog-gc) for the sweep.
 
 ## 2. spoond-sshd-gateway (SSH + ctl plane)
 

@@ -306,8 +306,9 @@ type ServiceConfig struct {
 	// treats a row still `building` as stale and fails it (spoond-4yl).
 	// The GC fails a building row older than twice this, logged. Zero
 	// falls back to substrate.DefaultBuildTimeout. The backend sets it
-	// from SPOOND_BUILD_TIMEOUT, the same variable `spoond images build`
-	// reads for its own BuildTemplate bound, so the two sides agree.
+	// from SPOOND_BUILD_TIMEOUT, but `spoond images build` reads that
+	// variable in its own process, so a deployment must set it for both
+	// (spoond-rzz).
 	BuildTimeout time.Duration
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
@@ -804,10 +805,10 @@ func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 // bakes only through the shared catalog; a stale row a killed build left
 // is failed by the GC (spoond-4yl). The orphan sweep skips while this is
 // non-zero (spoond-63a G3), and a catalog read failure is returned so the
-// sweep can skip rather than delete blind (spoond-63a N1). The metrics
-// loop and CollectMetrics publish the same count as
-// spoond_builds_in_flight, so the dashboard's "builds busy" cell and the
-// sweep guard read one number.
+// sweep can skip rather than delete blind (spoond-63a N1). CollectMetrics
+// publishes the same count as spoond_builds_in_flight on every /metrics
+// scrape, which is how the dashboard's "builds busy" cell reads it; the
+// sweep guard and the gauge therefore share one number (spoond-rzz).
 func (s *Service) bakesRunning(ctx context.Context) (int64, error) {
 	if s.db == nil {
 		return 0, nil
@@ -1462,9 +1463,9 @@ func (s *Service) Start(ctx context.Context) {
 	// Snapshot catalog GC + disk accounting (U11): once 10 minutes
 	// after the backend starts, then once an hour.
 	go s.runGCCatalogLoop(ctx)
-	// Node gauges (U11): refreshed every 15 s.
-	// Template-bake gauge (spoond-rzz): refresh spoond_builds_in_flight
-	// on the metrics tick, not only when /metrics is scraped.
+	// Node gauges (U11): refreshed every 15 s. CollectMetrics refreshes
+	// the catalog-derived template-bake gauge on each /metrics scrape,
+	// which is when the dashboard reads it (spoond-rzz).
 	go s.runNodeMetricsLoop(ctx)
 	// Preemption resume queue (#128 part 3): every 15 s, resume preempted
 	// leases that fit again.
@@ -1491,8 +1492,7 @@ func (s *Service) Start(ctx context.Context) {
 	}
 }
 
-// runNodeMetricsLoop refreshes the NodeInfo-derived gauges and the
-// catalog-derived template-bake gauge every 15 s.
+// runNodeMetricsLoop refreshes the NodeInfo-derived gauges every 15 s.
 func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -1502,26 +1502,8 @@ func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			s.updateNodeMetrics(ctx)
-			s.updateBuildMetrics(ctx)
 		}
 	}
-}
-
-// updateBuildMetrics sets spoond_builds_in_flight from the catalog's
-// template builds still `building`. The image pipeline runs in a separate
-// process, so the backend sees its bakes only through the shared catalog;
-// the value is the same count bakesRunning returns and the orphan sweep
-// guards on. It is a no-op without a metrics collector or a store, and a
-// read failure leaves the gauge at its last value.
-func (s *Service) updateBuildMetrics(ctx context.Context) {
-	if s.metrics == nil {
-		return
-	}
-	n, err := s.bakesRunning(ctx)
-	if err != nil {
-		return
-	}
-	s.metrics.BuildsInFlight.Set(float64(n))
 }
 
 // updateNodeMetrics sets the node gauges from NodeInfo; on error the
@@ -4460,9 +4442,8 @@ const sandboxDeleteBackoff = 500 * time.Millisecond
 // deleteSandboxBounded stops a sandbox a late operation created, on a
 // context detached from the request that none of its callers can cancel
 // and with bounded retries, so a transient substrate error does not leak
-// the guest. A delete that keeps failing is logged; until the periodic
-// orphan sweep lands (spoond-63a) nothing else retries it, so the guest
-// may survive until a later reconcile.
+// the guest. A delete that keeps failing is logged and remembered as an
+// orphan, so the periodic orphan sandbox sweep retries it (spoond-63a).
 func (s *Service) deleteSandboxBounded(ctx context.Context, sandboxID string) {
 	dctx := context.WithoutCancel(ctx)
 	var err error
