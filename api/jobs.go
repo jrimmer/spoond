@@ -692,12 +692,6 @@ func (s *Service) markLeaseJobsLost(ctx context.Context, leaseID, owner, why str
 	}
 }
 
-// isJobTimedOut reports whether a record was ended by the max runtime
-// rather than by its command. It reads the stored reason.
-func isJobTimedOut(job store.JobRow) bool {
-	return job.Reason == jobTimedOutReason
-}
-
 // killJobTimeout kills a job that has spent its effective max runtime and
 // marks the record exited with reason timed_out. It is the one place the
 // cap acts, so it shares the manual signal path's process-group kill. The
