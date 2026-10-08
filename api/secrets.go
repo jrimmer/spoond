@@ -476,6 +476,19 @@ func (s *Service) deferSecretRemoval(leaseID string, names []string) {
 	}
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
+	// A release clears the lease's pending removals; a finishing job that
+	// deferred after that would re-add an entry the lease can never drain
+	// (its sandbox is gone), leaking one per released lease. Drop it here
+	// instead of resurrecting the key (spoond-966 follow-up). releaseBecause
+	// marks the lease released under the store lock before it clears the
+	// pending list under this same secretsMu, so a defer that observes the
+	// release, or wins the lock first and is then cleared, can never leave
+	// a stale key behind. The guard needs the lease only to be present,
+	// not live: a suspended lease still has a sandbox-less secret set that
+	// drains on resume (spoond-ob18).
+	if s.lookupPresent(leaseID) == nil {
+		return
+	}
 	s.pendingSecretRemovals[leaseID] = append(s.pendingSecretRemovals[leaseID], names...)
 }
 

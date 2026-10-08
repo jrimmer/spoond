@@ -300,10 +300,10 @@ func TestGCStaleBuildingEmitsEvent(t *testing.T) {
 	}
 }
 
-// TestBuildMetricsGauge: updateBuildMetrics publishes the catalog's
+// TestBuildMetricsGauge: CollectMetrics publishes the catalog's
 // still-`building` template builds as spoond_builds_in_flight, the same
-// count bakesRunning returns, so the dashboard's "builds busy" cell is
-// no longer always 0.
+// count bakesRunning returns and the orphan sweep guards on, so the
+// dashboard's "builds busy" cell is no longer always 0.
 func TestBuildMetricsGauge(t *testing.T) {
 	svc, _, db, _ := gcTestService(t)
 	ctx := context.Background()
@@ -329,7 +329,7 @@ func TestBuildMetricsGauge(t *testing.T) {
 		t.Fatalf("seed building checkpoint: %v", err)
 	}
 
-	svc.updateBuildMetrics(ctx)
+	svc.CollectMetrics(svc.metrics)
 	if got := gaugeValue(t, svc, "spoond_builds_in_flight"); got != 3 {
 		t.Fatalf("spoond_builds_in_flight = %v, want 3", got)
 	}
@@ -339,10 +339,6 @@ func TestBuildMetricsGauge(t *testing.T) {
 	if err != nil || n != 3 {
 		t.Fatalf("bakesRunning = %d, %v, want 3", n, err)
 	}
-
-	// No metrics collector: the refresh is a no-op, not a panic.
-	svc.metrics = nil
-	svc.updateBuildMetrics(ctx)
 }
 
 // TestGCDeleteEnabledDeletesAndCounts: GC_DELETE=1 deletes candidates

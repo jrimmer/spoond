@@ -146,6 +146,42 @@ func TestReapOrphansQuarantinesDeletedAndUnknown(t *testing.T) {
 	}
 }
 
+// TestReapOrphansDryRunLogsRestore: dryrun logs that it would restore a
+// needed quarantined directory but leaves it in quarantine (spoond-ob18).
+func TestReapOrphansDryRunLogsRestore(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	t.Setenv("ORPHAN_REAP", "dryrun")
+	// Keep the root set non-empty with an unrelated live build.
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	id := e2b.NewUUID()
+	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, id)
+	ageDir(t, dir)
+
+	// Quarantine it first (in quarantine mode), then run a dryrun pass
+	// with a catalog row that needs it again.
+	t.Setenv("ORPHAN_REAP", "quarantine")
+	if _, _ = svc.reapOrphans(context.Background()); dirExists(dir) {
+		t.Fatalf("orphan was not quarantined")
+	}
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	if !dirExists(qdir) {
+		t.Fatalf("orphan not found in quarantine")
+	}
+	seedGCBuild(t, db, id, "pause", "", "consumer-a", "ready", e2b.NewTemplateID())
+
+	t.Setenv("ORPHAN_REAP", "dryrun")
+	buf.Reset()
+	if _, _ = svc.reapOrphans(context.Background()); !dirExists(qdir) {
+		t.Errorf("dryrun moved a quarantined directory back")
+	}
+	if dirExists(dir) {
+		t.Errorf("dryrun restored the needed directory")
+	}
+	if !strings.Contains(buf.String(), "gc: would restore quarantined build "+id) {
+		t.Errorf("dryrun did not log the restore:\n%s", buf.String())
+	}
+}
+
 // TestReapOrphansQuarantineRestore: a quarantined directory that a later
 // pass needs again is moved back into the storage path and its marker
 // dropped.
@@ -420,38 +456,94 @@ func TestReapOrphansLiveReferences(t *testing.T) {
 	}
 }
 
-// TestReapOrphansPurgesQuarantineAfterModeChange pins the L5 fix:
-// switching ORPHAN_REAP from quarantine to off or dryrun must not strand
-// an expired quarantined directory for ever. off still moves nothing new
-// but still purges; dryrun purges too (and no longer merely logs).
-func TestReapOrphansPurgesQuarantineAfterModeChange(t *testing.T) {
-	for _, mode := range []string{"off", "dryrun"} {
-		t.Run(mode, func(t *testing.T) {
-			svc, _, db, _ := gcTestService(t)
-			seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+// TestReapOrphansOffLeavesQuarantine: ORPHAN_REAP=off is a hard stop —
+// even an expired quarantined directory is left alone (spoond-ob18).
+func TestReapOrphansOffLeavesQuarantine(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
 
-			// Seed a quarantined directory dated well past the period.
-			id := e2b.NewUUID()
-			qdir := filepath.Join(svc.quarantineDir(), id)
-			if err := os.MkdirAll(qdir, 0o755); err != nil {
-				t.Fatalf("mkdir quarantine: %v", err)
-			}
-			if err := os.WriteFile(filepath.Join(qdir, "memfile"), make([]byte, 4096), 0o644); err != nil {
-				t.Fatalf("write memfile: %v", err)
-			}
-			if err := writeQuarantineMarker(qdir, time.Now().Add(-48*time.Hour)); err != nil {
-				t.Fatalf("write marker: %v", err)
-			}
+	// Seed a quarantined directory dated well past the period.
+	id := e2b.NewUUID()
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	if err := os.MkdirAll(qdir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(qdir, "memfile"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("write memfile: %v", err)
+	}
+	if err := writeQuarantineMarker(qdir, time.Now().Add(-48*time.Hour)); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
 
-			t.Setenv("ORPHAN_REAP", mode)
-			reaped, freed := svc.reapOrphans(context.Background())
-			if dirExists(qdir) {
-				t.Errorf("ORPHAN_REAP=%s left the expired quarantine in place", mode)
-			}
-			if reaped != 1 || freed <= 0 {
-				t.Errorf("ORPHAN_REAP=%s reaped=%d freed=%d, want 1 and >0", mode, reaped, freed)
-			}
-		})
+	t.Setenv("ORPHAN_REAP", "off")
+	reaped, freed := svc.reapOrphans(context.Background())
+	if !dirExists(qdir) {
+		t.Errorf("ORPHAN_REAP=off purged the expired quarantine")
+	}
+	if reaped != 0 || freed != 0 {
+		t.Errorf("ORPHAN_REAP=off reaped=%d freed=%d, want 0 and 0", reaped, freed)
+	}
+	if strings.Contains(buf.String(), id) {
+		t.Errorf("ORPHAN_REAP=off logged the quarantined orphan:\n%s", buf.String())
+	}
+}
+
+// TestReapOrphansDryRunLogsQuarantine: dryrun logs what it would purge
+// from quarantine but deletes nothing (spoond-ob18).
+func TestReapOrphansDryRunLogsQuarantine(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+
+	id := e2b.NewUUID()
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	if err := os.MkdirAll(qdir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(qdir, "memfile"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("write memfile: %v", err)
+	}
+	if err := writeQuarantineMarker(qdir, time.Now().Add(-48*time.Hour)); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	t.Setenv("ORPHAN_REAP", "dryrun")
+	reaped, freed := svc.reapOrphans(context.Background())
+	if !dirExists(qdir) {
+		t.Errorf("dryrun purged the expired quarantine")
+	}
+	if reaped != 0 || freed != 0 {
+		t.Errorf("dryrun reaped=%d freed=%d, want 0 and 0", reaped, freed)
+	}
+	if !strings.Contains(buf.String(), "gc: would reap quarantined orphan "+id) {
+		t.Errorf("dryrun did not log the quarantined orphan:\n%s", buf.String())
+	}
+}
+
+// TestReapOrphansQuarantinePurgesExpired: only quarantine mode purges an
+// expired quarantined directory (spoond-ob18).
+func TestReapOrphansQuarantinePurgesExpired(t *testing.T) {
+	svc, _, db, _ := gcTestService(t)
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+
+	id := e2b.NewUUID()
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	if err := os.MkdirAll(qdir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(qdir, "memfile"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("write memfile: %v", err)
+	}
+	if err := writeQuarantineMarker(qdir, time.Now().Add(-48*time.Hour)); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	t.Setenv("ORPHAN_REAP", "quarantine")
+	reaped, freed := svc.reapOrphans(context.Background())
+	if dirExists(qdir) {
+		t.Errorf("quarantine mode left the expired quarantine in place")
+	}
+	if reaped != 1 || freed <= 0 {
+		t.Errorf("quarantine mode reaped=%d freed=%d, want 1 and >0", reaped, freed)
 	}
 }
 

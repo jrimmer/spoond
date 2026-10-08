@@ -12,6 +12,49 @@ summarised from README "Status".
 
 ### Added
 
+- **Pause-chain size is measured before any compaction (spoond-p9j).** A
+  pause build's parent is the build it resumed from and the GC keeps
+  every ancestor of a live lease's resume build, so a persistent lease
+  that suspends repeatedly accumulates one memory snapshot per pause
+  until a cold restart (or the lease's release) breaks the chain.
+  `GET /api/leases/{id}` now reports `chain_depth` (builds in the
+  lease's chain) and `chain_bytes` (their summed recorded `size_bytes`),
+  and every pause observes the same two numbers as the unlabeled
+  `spoond_pause_chain_depth` and `spoond_pause_chain_bytes` histograms —
+  bounded cardinality, so the per-lease figures stay on the lease API.
+  No compaction happens yet; a follow-up decides on automatic compaction
+  after measuring on the deployment.
+
+- **A cap on background job runtime (spoond-wb5).** A background exec job
+  may no longer run forever: `JOB_MAX_RUNTIME` (default 24 h, a Go
+  duration or seconds) is the host cap, the exec body's new optional
+  `max_runtime_secs` can ask for a shorter one — never a longer one, and
+  a negative value is `400`. Past its effective cap the job's process
+  group is killed first (the same path as
+  `POST …/jobs/{job}/signal`) and only then is the record marked exited
+  with reason `timed_out` and exit code `124`; a failed kill leaves the
+  record running so the next reconcile retries, rather than orphaning a
+  live process the counts no longer see. A `job_exited` event whose
+  detail starts `timed out: exit 124` tells the owner the cap, not the
+  command, ended it (`reason` is also on the job record, and
+  `spoond_jobs_exited_total` gains the `timed_out` result). The cap is
+  wall-clock from the job's start: while the lease is suspended — or
+  busy with an in-flight pause, resume, restart or restore — reconcile
+  leaves the job running (the guest cannot be signalled), and the first
+  reconcile after a resume kills a job whose cap was spent in the
+  meantime — so a `sleep infinity` can no longer pin a lease's memory
+  and hugepages forever. A running record written before the cap existed
+  (`max_runtime_secs` 0) is capped by the current host value. An
+  oversized `max_runtime_secs` is clamped to the host cap rather than
+  overflowing the seconds conversion into "uncapped".
+  Migration **0020** adds `lease_jobs.max_runtime_secs` and
+  `lease_jobs.reason`. A job on a suspended lease also no longer keeps
+  that lease active: `reconcileJobs` stopped calling `markActive` on a
+  suspended lease, so the held-lease rules' untouched test still sees
+  the suspension. A negative `JOB_MAX_RUNTIME` disables the cap entirely;
+  a negative value under one second is rejected at startup rather than
+  truncating to the default.
+
 - **Deleting a user now releases their leases and drops their named
   snapshots and kept builds.** `DELETE /api/users/{id}` used to remove
   only the identity, leaving the user's leases running, their named
@@ -28,6 +71,92 @@ summarised from README "Status".
   (spoond-q4j).
 
 ### Fixed
+
+- **Background-job max-runtime follow-ups (spoond-wb5).** A kill that
+  succeeds but whose store write that marks the job `timed_out` fails no
+  longer leaves the record running: the in-memory timed-out intent is
+  kept, so the next reconcile records the outcome without signalling a
+  process that is already gone. `JOB_MAX_RUNTIME` is held as whole
+  seconds, so a positive fractional duration rounds up (`500ms` is 1 s,
+  not a 0 that reads as the default, and `1500ms` is 2 s, not a
+  truncated 1 s) and a bare integer too large to represent is clamped
+  instead of overflowing the seconds conversion. A synchronous exec with
+  a negative `max_runtime_secs` now answers `400` (it was accepted and
+  ignored), while a non-negative value on a synchronous exec is still
+  ignored. A job whose `pid` file never appears is retried on a backoff,
+  so it no longer costs the pid wait on every reconcile pass.
+
+- **Conformance N1 probes a configurable LAN target, and I3 no longer
+  depends on a stale apt index.** N1 hardcoded `10.0.0.203:443` as the
+  private destination for the `internet` and `lan` policies; that box was
+  gone, so the case failed even though the substrate was correct. The
+  target is now `CONFORMANCE_LAN_TARGET` (a private `host:port`, no
+  default): sb sets it in `/etc/spoond/conformance.env` and N1 skips with
+  a clear message when it is unset, like the N9 `CONFORMANCE_MIXED_*`
+  knobs. I3 installs `docker.io` into `dev-base` after `apt-get update`,
+  so it no longer 404s on a package version the Ubuntu archive dropped.
+
+- **A stale template build's failure is now announced.** The GC's
+  stale-building sweep emits a lease-less `gc` event per row it fails
+  (in dry-run too), naming the build and the timeout, because a template
+  build has no owner and never appears in `/api/snapshots`; the sweep
+  still logs it and moves the row on to an ordinary candidate. It relies
+  on the `spoond_builds_in_flight` gauge (2.8.0) and the sweep guard
+  reading the same catalog count. `SPOOND_BUILD_TIMEOUT` now wires
+  `ServiceConfig.BuildTimeout` from the environment instead of being
+  hardcoded, so the backend's stale-row sweep can be tuned to match
+  `spoond images build`; both processes read the variable from their own
+  environment and must each be given the same value (see
+  `docs/setup.md` and `deploy/PRODUCTION-ENV-2.7.md`).
+
+- **A release that lands around an idle or held suspension no longer
+  counts or announces it.** `recordIdleSuspend` and the held rules
+  re-check the released flag under the store lock before bumping
+  `spoond_idle_suspends_total` / `spoond_held_actions_total`, saving
+  `last_action` or emitting `idle_suspended` / `held_action`, and the
+  idle event is emitted inside that critical section, so a release in
+  the window cannot leave a suspension event on the stream for a lease
+  that is gone. A release that raced the pause itself is no longer
+  logged as an idle-suspend or held-rule error, and the checkpoint
+  cleanup log keeps the lease and the unreferenced build. A checkpoint
+  whose `List` returns nothing — a cancelled request, a failing node —
+  now deletes the source sandbox id directly instead of trusting the
+  list, so a released lease's resumed guest is stopped rather than left
+  running (spoond-15i).
+
+- **Per-lease memory maps no longer leak, and the response to a leaked
+  auth IP is bounded.** Releasing a lease now drops its applied-egress
+  memo, its deferred exec-time secret removals and the queued auth
+  failures of an IP an attacker never retries; `DeleteBuildsPermanently`
+  only removes a build's refs while the build row is still `deleted`;
+  and `refreshPeers` reaps any memo whose lease is no longer live and
+  unreleased, so a refresh or network-policy update that races a release
+  cannot re-add one (spoond-966, follow-ups). The same release also
+  bounds long-deleted `builds` rows and lost job records. No API change;
+  no store migration.
+
+- **A refresh mid-create no longer drops a lease's egress memo.**
+  `createSandbox` records the applied-egress memo before the lease
+  enters the store, so a `refreshPeers` landing in that gap pruned it as
+  a memo with no live lease, and the next pass re-applied egress once
+  needlessly (idempotent, never a wrong skip). The lease ids of creates
+  in progress are now tracked from before the memo is written until the
+  lease is registered or the create has cleaned up, and the prune skips
+  them (spoond-ob18). `DeleteBuildsPermanently` removes a build row and
+  its `build_refs` in one transaction guarded on the row still being
+  `deleted`; the deferred secret-removal and applied-egress guards now
+  test lease presence rather than liveness, so a suspended lease's
+  bookkeeping is not discarded; and the orphan reap's dry run logs the
+  quarantine restore it would do (spoond-ob18 NITs).
+
+- **`ORPHAN_REAP` modes now mean exactly what the docs say.** `off` is a
+  hard stop: instead of still purging expired quarantined directories,
+  it leaves the snapshot disk entirely alone. `dryrun` logs what it
+  would reap — including what it would purge from quarantine — and
+  changes nothing. Only `quarantine` moves, restores and deletes. An
+  operator who set `off` to keep the GC's hands off the disk now gets
+  that, and an expired quarantine waits for a pass in a mode allowed to
+  purge it (spoond-ob18).
 
 - **A clone or fork of a deleted user can no longer commit an
   ownerless lease.** A clone (or a fork child) reserves quota and then
@@ -47,17 +176,6 @@ summarised from README "Status".
   refusal onto `403 owner deleted` instead of a `500`, and the refused
   grant drops its staged create-time secrets.
 
-- **`spoond_builds_in_flight` reports the catalog's in-flight template
-  builds, and a stale-build failure is now announced.** The gauge was
-  only written during a `/metrics` scrape, so the dashboard's "builds
-  busy" cell could read 0 while `spoond images build` was baking; the
-  metrics tick now refreshes it from the catalog's template builds still
-  `building`, the same count the orphan sweep skips on (spoond-63a G3).
-  The GC's stale-building sweep emits a lease-less `gc` event per row it
-  fails (in dry-run too), because a template build has no owner and never
-  appears in `/api/snapshots`. `SPOOND_BUILD_TIMEOUT` now wires
-  `ServiceConfig.BuildTimeout` from the environment and is shared with
-  the image pipeline, so the two sides cannot drift.
 
 ## [2.8.0] - 2026-10-08
 

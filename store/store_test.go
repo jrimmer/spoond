@@ -308,7 +308,7 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -377,7 +377,7 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -454,7 +454,7 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19)`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
@@ -516,7 +516,7 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19)`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -570,7 +570,9 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`DROP INDEX IF EXISTS leases_snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN snapshot_build_id`,
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19)`,
+		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN reason`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -618,15 +620,17 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 			t.Fatalf("close: %v", err)
 		}
 	}
-	// Rewind to version 18: drop what migration 19 added and its row, so
-	// the next Open applies 0019 for real.
+	// Rewind to version 18: drop what migrations 19 and 20 added and
+	// their rows, so the next Open applies 0019 (and 0020) for real.
 	db18, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN lost_reason`,
-		`DELETE FROM schema_migrations WHERE version = 19`,
+		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN reason`,
+		`DELETE FROM schema_migrations WHERE version IN (19, 20)`,
 	} {
 		if _, err := db18.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -662,5 +666,74 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 	}
 	if again.LostReason != "no checkpoint to recover from" {
 		t.Fatalf("lost_reason after upsert = %q", again.LostReason)
+	}
+}
+
+// TestMigration20JobMaxRuntimeOnV19Database builds a database at version
+// 19 (one existing lease and one running job row) and opens it: migration
+// 20 must apply, adding lease_jobs.max_runtime_secs and lease_jobs.reason
+// defaulted to 0 and ” — an unchanged, uncapped record for jobs written
+// before the column existed (spoond-wb5).
+func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v19.db")
+	{
+		db, err := Open(path) // applies every migration
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind to version 19: drop what migration 20 added and its row, so
+	// the next Open applies 0020 for real.
+	db19, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
+		`ALTER TABLE lease_jobs DROP COLUMN reason`,
+		`DELETE FROM schema_migrations WHERE version = 20`,
+	} {
+		if _, err := db19.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	if _, err := db19.Exec(
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		 VALUES ('lease-v19', 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'running')`); err != nil {
+		t.Fatalf("seed v19 lease: %v", err)
+	}
+	if _, err := db19.Exec(
+		`INSERT INTO lease_jobs (job_id, lease_id, owner, cmd, cwd, state, started_at, ended_at, generation)
+		 VALUES ('job-v19', 'lease-v19', 'alice', 'sleep 1', '', 'running', '2026-01-01T00:30:00Z', '', 1)`); err != nil {
+		t.Fatalf("seed v19 job: %v", err)
+	}
+	db19.Close()
+
+	db, err := Open(path) // migration 20 applies here
+	if err != nil {
+		t.Fatalf("open v19 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	row, err := db.GetJob(context.Background(), "job-v19")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.MaxRuntimeSecs != 0 || row.Reason != "" {
+		t.Fatalf("job after migration = max_runtime_secs %d reason %q, want 0 and empty",
+			row.MaxRuntimeSecs, row.Reason)
+	}
+	// The columns are writable through the timeout path.
+	if _, err := db.MarkJobTimedOut(context.Background(), "job-v19", 124, time.Now(), "bye"); err != nil {
+		t.Fatalf("mark timed out: %v", err)
+	}
+	again, err := db.GetJob(context.Background(), "job-v19")
+	if err != nil {
+		t.Fatalf("get job after timeout: %v", err)
+	}
+	if again.Reason != "timed_out" || again.ExitCode == nil || *again.ExitCode != 124 {
+		t.Fatalf("timed-out job = %+v", again)
 	}
 }

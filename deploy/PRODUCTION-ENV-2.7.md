@@ -95,6 +95,14 @@ SPOOND_GUEST_DNS_ADDR=10.1.0.2 spoond images build --all
 Without it, `spoond-guest-init` leaves the image's own `resolv.conf`
 alone (generic, no pinned resolver).
 
+If you set `SPOOND_BUILD_TIMEOUT`, set it in **both** environments: the
+backend's env file (for the GC's stale-`building` sweep) and the agent-hub
+build-worker's environment (for `spoond images build`'s own
+`BuildTemplate` bound). The variable is read separately by each process
+and there is no shared config file (spoond-rzz). The backend logs the
+effective bound and stale threshold at start; `spoond images build`
+prints its bound.
+
 ## Guest DNS list (ships with the next release)
 
 The next release lets `SPOOND_GUEST_DNS_ADDR` name several resolvers
@@ -164,8 +172,12 @@ host:port for the policy probes. `SSHHOST` is the remote-runner host
 used by `run.sh`; the ctl tests dial `ctl@127.0.0.1 -p 2222` directly.
 
 Conformance (`conformance/README.md`) already uses `CONFORMANCE_*`
-environment values; LAN probe addresses in `network_test.go` are now
-`10.0.0.203`/`10.0.0.11` placeholders.
+environment values. N1's LAN probe is now `CONFORMANCE_LAN_TARGET`
+(a private `host:port`, no default): the old hardcoded `10.0.0.203`
+placeholder no longer answers, so sb sets it in
+`/etc/spoond/conformance.env` (e.g. `10.1.0.203:443`, Caddy) and N1
+skips with a clear message when it is unset. The host-address check
+uses `CONFORMANCE_GUEST_SERVICE` rather than a LAN literal.
 
 ## Deprecated-name fallbacks
 

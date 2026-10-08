@@ -42,6 +42,14 @@ type config struct {
 	ProxySecret  string
 	ProxySuffix  string
 	GuestService string
+	// LANTarget is a private (LAN) host:port that answers on the host
+	// from a lease under the internet and lan policies (TestN1). It has
+	// no default: CONFORMANCE_LAN_TARGET sets it and N1 skips when it is
+	// unset, so a run never assumes a LAN address. LANTargetHost and
+	// LANTargetPort are its parsed halves.
+	LANTarget     string
+	LANTargetHost string
+	LANTargetPort int
 	// MixedPrivate is a private (LAN) IP reachable from a restricted lease
 	// that allowlists it together with a public domain (TestN9). It has no
 	// default: vm2 sets CONFORMANCE_MIXED_PRIVATE and the case skips when
@@ -380,13 +388,15 @@ func urlQueryEscape(s string) string {
 }
 
 // execReq is the exec body: {"cmd","cwd","env","timeout"} (A1 §5).
-// Background (2.6, #135) starts the command as a tracked job.
+// Background (2.6, #135) starts the command as a tracked job;
+// max_runtime_secs (spoond-wb5) shortens the host cap for that job.
 type execReq struct {
-	Cmd        string            `json:"cmd"`
-	Cwd        string            `json:"cwd,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	Timeout    int               `json:"timeout,omitempty"`
-	Background bool              `json:"background,omitempty"`
+	Cmd            string            `json:"cmd"`
+	Cwd            string            `json:"cwd,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Timeout        int               `json:"timeout,omitempty"`
+	Background     bool              `json:"background,omitempty"`
+	MaxRuntimeSecs int64             `json:"max_runtime_secs,omitempty"`
 }
 
 // jobInfo is the background-job record shape (2.6, #135).
@@ -399,6 +409,7 @@ type jobInfo struct {
 	StartedAt  string `json:"started_at"`
 	EndedAt    string `json:"ended_at"`
 	StderrTail string `json:"stderr_tail"`
+	Reason     string `json:"reason"`
 }
 
 // jobStart is the POST .../exec "background": true answer.

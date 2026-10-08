@@ -70,9 +70,10 @@
 //	                  kept after the lease is lost (Go duration;
 //	                  default 24h = 1 d)
 //	ORPHAN_REAP   what the GC does with an orphan build directory
-//	                  under E2B_TEMPLATE_STORAGE_PATH: off (leave it),
-//	                  dryrun (log it; default), or quarantine (move it
-//	                  to <storage path>/../quarantine/<id> and delete it
+//	                  under E2B_TEMPLATE_STORAGE_PATH: off (hard stop,
+//	                  change nothing), dryrun (log it; default), or
+//	                  quarantine (move it to
+//	                  <storage path>/../quarantine/<id> and delete it
 //	                  only after ORPHAN_QUARANTINE_SECS)
 //	ORPHAN_MIN_AGE_SECS  don't reap a build directory under
 //	                  E2B_TEMPLATE_STORAGE_PATH modified more recently
@@ -144,6 +145,20 @@
 //	PREEMPT_RESUME_RETRIES  how many failed resume attempts a preempted
 //	                  lease gets from the resume queue before it is marked
 //	                  lost (spoond-dxq; default 3)
+//	MAX_RUNNING_JOBS_PER_LEASE  the per-lease background-job cap; a
+//	                  start past it answers 429 (2.6, #135)
+//	JOB_RETENTION_SECS  how long an exited background-job record is kept
+//	                  before pruning (2.6, #135; default 604800 = 7 d)
+//	JOB_MAX_RUNTIME  how long a background exec job may run before the
+//	                  reconcile pass kills it and marks it exited with
+//	                  reason timed_out (spoond-wb5; default 24h = 86400;
+//	                  a Go duration or seconds; a job may ask for a
+//	                  shorter max_runtime_secs, never a longer one; a
+//	                  negative value disables the cap; the cap is held as
+//	                  whole seconds, so a positive fractional duration
+//	                  rounds up and a negative value under one second is
+//	                  rejected, and a bare integer too large to represent
+//	                  is clamped)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
@@ -290,6 +305,70 @@ func parseGuestDNS(v string) ([]string, error) {
 	return addrs, nil
 }
 
+// parseJobMaxRuntime parses JOB_MAX_RUNTIME: a Go duration or a whole
+// number of seconds (like envDurationOrZero). An empty or malformed
+// value is 0, the 24 h default; a negative value disables the cap. The
+// cap is held as whole seconds, so a fractional Go duration is rounded
+// up to the next whole second when it is stored (see jobMaxRuntimeSecs):
+// 1500ms is 2 s, not a truncated 1 s, and 500ms is 1 s, not a 0 that
+// reads as the default. A negative value smaller than one second is
+// rejected: it would round to 0 and mean the default rather than "off"
+// (spoond-wb5). A bare integer too large to convert is clamped to the
+// largest representable magnitude rather than wrapping.
+func parseJobMaxRuntime(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	var d time.Duration
+	if n, err := strconv.Atoi(v); err == nil {
+		d = secondsToDurationClamped(int64(n))
+	} else if parsed, err := time.ParseDuration(v); err == nil {
+		d = parsed
+	} else {
+		return 0, nil
+	}
+	if d < 0 && d > -time.Second {
+		return 0, fmt.Errorf("%s is less than a second; a negative value disables the cap", v)
+	}
+	return d, nil
+}
+
+// jobMaxRuntimeSecs converts a parsed JOB_MAX_RUNTIME duration to the
+// whole seconds the service config holds. A positive fractional duration
+// rounds up to the next whole second, so a sub-second cap never truncates
+// to 0 (= the 24 h default) and a cap between whole seconds never grants
+// less than asked; zero stays 0 (the default) and a negative disables the
+// cap.
+func jobMaxRuntimeSecs(d time.Duration) int64 {
+	if d <= 0 {
+		return int64(d / time.Second)
+	}
+	secs := int64(d / time.Second)
+	if d%time.Second != 0 {
+		secs++
+	}
+	return secs
+}
+
+// secondsToDurationClamped converts a whole number of seconds to a
+// Duration, clamping at the largest representable magnitude in both
+// directions. time.Duration counts nanoseconds, so a bare integer above
+// ~9.2e9 would otherwise overflow the multiplication and wrap (a large
+// cap could silently become a small one, or a large negative "off" could
+// wrap positive and enable a cap); the same clamp the service applies to
+// JOB_MAX_RUNTIME seconds (spoond-wb5).
+func secondsToDurationClamped(secs int64) time.Duration {
+	const maxSecs = (1<<63 - 1) / int64(time.Second)
+	if secs > maxSecs {
+		return time.Duration(maxSecs) * time.Second
+	}
+	if secs < -maxSecs {
+		return -time.Duration(maxSecs) * time.Second
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
 // anything else as true, so a typo fails open to the default rather than
 // silently disabling a check.
@@ -406,8 +485,9 @@ func Main(args []string) int {
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
 	// Template build timeout (spoond-4yl): the GC fails a build still
 	// `building` for longer than twice this. SPOOND_BUILD_TIMEOUT (a Go
-	// duration or seconds) is the same knob `spoond images build` reads,
-	// so the pipeline and the GC agree.
+	// duration or seconds) is read here from the backend's own
+	// environment; `spoond images build` reads the same variable in its
+	// environment, so both must be set (spoond-rzz).
 	buildTimeout := substrate.BuildTimeoutFromEnv()
 	// The burst lease reserve (#128 part 2): BURST_RESERVE_MIB keeps
 	// this much hugepage memory free of burst leases, so guaranteed
@@ -497,6 +577,17 @@ func Main(args []string) int {
 		log.Fatalf("store: %v", err)
 	}
 
+	// Background jobs (spoond-wb5): JOB_MAX_RUNTIME is a Go duration or a
+	// whole number of seconds; 0 is the 24 h default and a negative value
+	// disables the cap. The cap is held as whole seconds, so a positive
+	// fractional duration rounds up (jobMaxRuntimeSecs) and a negative
+	// value under one second is rejected here rather than rounding to 0,
+	// which would silently mean the default rather than "off".
+	jobMaxRuntime, err := parseJobMaxRuntime(os.Getenv("JOB_MAX_RUNTIME"))
+	if err != nil {
+		log.Fatalf("JOB_MAX_RUNTIME: %v", err)
+	}
+
 	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
 		PoolSize:                  poolSize,
 		DefaultTTL:                defaultTTL,
@@ -530,9 +621,14 @@ func Main(args []string) int {
 		BurstReserveMiB:           burstReserveMiB,
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
 		// Background exec jobs (2.6, #135): per-lease running cap and
-		// exited-record retention.
+		// exited-record retention. JOB_MAX_RUNTIME (spoond-wb5) caps how
+		// long a job may run; it takes a Go duration or a number of
+		// seconds, a job may ask for a shorter max_runtime_secs but never a
+		// longer one, and 0 (unset) is the 24 h default while a negative
+		// value disables the cap.
 		MaxRunningJobsPerLease:   envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:         int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
+		JobMaxRuntimeSecs:        jobMaxRuntimeSecs(jobMaxRuntime),
 		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
 		SnapshotWriteConcurrency: snapshotWriteConcurrency,
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,
@@ -750,6 +846,7 @@ func Main(args []string) int {
 	}()
 
 	log.Printf("spoond-backend listening on %s (substrate %s, %d consumer(s), pool=%d)", bindAddr, cfg.GRPCAddr, len(tokens), poolSize)
+	log.Printf("template build timeout: %s (SPOOND_BUILD_TIMEOUT; the GC fails a `building` row older than %s)", buildTimeout, 2*buildTimeout)
 	if tlsPairs != nil {
 		certs, cerr := tlsfiles.New(tlsPairs, log.Printf)
 		if cerr != nil {

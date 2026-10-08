@@ -52,6 +52,11 @@ func waitSandboxGone(t *testing.T, sub *testSub, id string) {
 // source sandbox id. List reports nothing, so afterCheckpoint must
 // delete the id directly rather than silently leaving the guest
 // running (spoond-15i).
+//
+// The release's own delete runs first and would delete the pre-checkpoint
+// sandbox; to pin the afterCheckpoint cleanup rather than that one, the
+// checkpoint re-creates the sandbox in the fake after the release, as the
+// resume-fresh path does, and only the deletes after the release count.
 func TestCheckpointReleaseRaceListFailsStillDeletes(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -68,6 +73,15 @@ func TestCheckpointReleaseRaceListFailsStillDeletes(t *testing.T) {
 	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
 		close(started)
 		<-unblock
+		// The checkpoint's resume-fresh path brings the guest back under
+		// the source id after the release already deleted the old
+		// sandbox. Re-create it here so the release's delete cannot be
+		// mistaken for the cleanup this test pins.
+		if _, err := sub.Fake.Create(context.Background(), substrate.CreateRequest{
+			SandboxID: sandboxID, TemplateID: l.TemplateID, BuildID: l.BuildID,
+		}); err != nil {
+			t.Errorf("re-create resumed sandbox: %v", err)
+		}
 		return "b-ckpt-listfail", substrate.BuildRefs{}, nil
 	}
 	sub.listFn = func(ctx context.Context) ([]substrate.Sandbox, error) {
@@ -95,6 +109,9 @@ func TestCheckpointReleaseRaceListFailsStillDeletes(t *testing.T) {
 	<-started
 
 	svc.releaseBecause(ctx, l, "released through the API")
+	mu.Lock()
+	beforeRelease := len(deletes)
+	mu.Unlock()
 	close(unblock)
 
 	if err := <-done; !errors.Is(err, errLeaseReleased) {
@@ -104,8 +121,8 @@ func TestCheckpointReleaseRaceListFailsStillDeletes(t *testing.T) {
 	mu.Lock()
 	got := len(deletes)
 	mu.Unlock()
-	if got == 0 {
-		t.Fatalf("sandbox %s was never deleted after List failed", sbID)
+	if got <= beforeRelease {
+		t.Fatalf("sandbox %s was not deleted after the release and a failed List (deletes %d, before %d)", sbID, got, beforeRelease)
 	}
 	if _, err := db.GetSandboxByLease(ctx, l.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("released lease still has a sandboxes row: %v", err)

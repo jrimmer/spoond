@@ -29,18 +29,32 @@ type JobRow struct {
 	// started: a reconcile that finds the lease on a newer generation
 	// marks the job lost.
 	Generation int64
+	// MaxRuntimeSecs is the effective max runtime recorded at start,
+	// in seconds, 0 meaning "no cap". A job is killed and marked
+	// exited with Reason timed_out once it has run this long.
+	MaxRuntimeSecs int64
+	// Reason records why a record left 'running' outside the guest's own
+	// rc file: "" for a normal exit, "timed_out" when the max runtime
+	// was spent.
+	Reason string
 }
 
 const jobColumns = `job_id, lease_id, owner, cmd, cwd, state, exit_code,
-	started_at, ended_at, stderr_tail, generation`
+	started_at, ended_at, stderr_tail, generation, max_runtime_secs, reason`
+
+// JobReasonTimedOut is the lease_jobs.reason recorded when the max
+// runtime, not the command, ended a job. It is also the label the API
+// and the job_exited event use (spoond-wb5).
+const JobReasonTimedOut = "timed_out"
 
 // InsertJob records a newly started background job. state must be
 // "running" and exit_code nil.
 func (db *DB) InsertJob(ctx context.Context, j JobRow) error {
 	_, err := db.w.ExecContext(ctx, `
-INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO lease_jobs (`+jobColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.JobID, j.LeaseID, j.Owner, j.Cmd, j.Cwd, j.State, j.ExitCode,
-		formatTime(j.StartedAt), formatTime(j.EndedAt), j.StderrTail, j.Generation)
+		formatTime(j.StartedAt), formatTime(j.EndedAt), j.StderrTail, j.Generation,
+		j.MaxRuntimeSecs, j.Reason)
 	if err != nil {
 		return fmt.Errorf("store: insert job %s: %w", j.JobID, err)
 	}
@@ -70,6 +84,22 @@ WHERE job_id=? AND state='running'`,
 		formatTime(endedAt), jobID)
 	if err != nil {
 		return false, fmt.Errorf("store: mark job lost %s: %w", jobID, err)
+	}
+	return rowsChanged(res), nil
+}
+
+// MarkJobTimedOut marks a running job exited because its max runtime was
+// spent: the exit code and stderr tail the kill produced, and Reason
+// 'timed_out' so the API and the events can say the cap, not the command,
+// ended it. changed is false when the row was already exited or lost (a
+// job that ended on its own just before the cap won the race).
+func (db *DB) MarkJobTimedOut(ctx context.Context, jobID string, exitCode int, endedAt time.Time, stderrTail string) (bool, error) {
+	res, err := db.w.ExecContext(ctx, `
+UPDATE lease_jobs SET state='exited', exit_code=?, ended_at=?, stderr_tail=?, reason=?
+WHERE job_id=? AND state='running'`,
+		exitCode, formatTime(endedAt), stderrTail, JobReasonTimedOut, jobID)
+	if err != nil {
+		return false, fmt.Errorf("store: mark job timed out %s: %w", jobID, err)
 	}
 	return rowsChanged(res), nil
 }
@@ -341,7 +371,8 @@ func scanJob(scan func(dest ...any) error) (JobRow, error) {
 	var exitCode sql.NullInt64
 	var startedAt, endedAt string
 	err := scan(&r.JobID, &r.LeaseID, &r.Owner, &r.Cmd, &r.Cwd, &r.State,
-		&exitCode, &startedAt, &endedAt, &r.StderrTail, &r.Generation)
+		&exitCode, &startedAt, &endedAt, &r.StderrTail, &r.Generation,
+		&r.MaxRuntimeSecs, &r.Reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobRow{}, ErrNotFound
 	}

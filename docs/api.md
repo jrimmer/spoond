@@ -373,6 +373,15 @@ cause the `lost` event reported; see [Lost leases](#lost-leases)):
 list shows what unpinning would free. Requires the owner or an `http`
 share.
 
+The detail also carries the lease's **pause-chain size** (spoond-p9j):
+`chain_depth` is how many builds its chain holds (the pause build it
+would resume from, or the build it runs from, plus its ancestors up to
+the template root) and `chain_bytes` is their summed recorded
+`size_bytes`. A persistent lease that suspends repeatedly keeps one
+memory snapshot per pause until a cold restart breaks the chain; these
+fields show what that chain costs. A lease with no build yet omits both
+fields.
+
 A lease with an identity-store owner also carries its owner's memory
 quota (#128): `charged_mib` (the owner's current running-lease charge —
 what this lease contributes to while it runs), `guaranteed_mib` and
@@ -572,6 +581,12 @@ Add `"background": true` to the exec body and the command runs as a
 tracked job instead of holding the request open. The other fields keep
 their meaning (`cmd`, `cwd`, `env`, `secrets`); `timeout` is ignored —
 a background job runs until it exits, is signalled, or the lease does.
+The optional `max_runtime_secs` shortens the host's `JOB_MAX_RUNTIME`
+(default 24 h) for this job only; it can never make a job run longer
+than the host cap and a negative value is `400`. It applies to a
+background job; a synchronous exec ignores a non-negative value, but a
+negative value is still `400` so a client cannot think it changed the
+exec's timeout.
 
 Response `202 Accepted` as soon as the process has started:
 
@@ -591,7 +606,32 @@ outcome itself under `/var/lib/spoond/jobs/<job_id>/`: `stdout`,
 `stderr`, `pid`, and `rc` (written atomically when the command ends).
 Those files, not the stream, are the source of truth, and they are kept
 as long as the record — they are removed when the exited record is
-pruned (`JOB_RETENTION_SECS`). Per-exec `secrets` stay staged under
+pruned (`JOB_RETENTION_SECS`). The `reconcile` pass also enforces the
+max runtime: a job that has run for its effective cap is killed first
+(the job's process group, like `POST .../signal`) and only then marked
+exited with reason `timed_out` and exit code `124`, and a `job_exited`
+event names the cap, so a `sleep infinity` cannot pin the lease's memory
+and hugepages forever. If the kill fails (a transient substrate error)
+the record stays running and the next reconcile retries, so a job that
+cannot be signalled is still tracked and counted. If the kill succeeds
+but the store write that marks it timed out fails, the in-memory intent
+is kept and the next reconcile records the outcome without signalling a
+gone process; a job whose `pid` file never appears is retried on a
+backoff rather than spending the pid wait on every pass. The cap is wall-clock
+from the job's start; while the lease is suspended — or busy with an
+in-flight pause, resume, restart or restore — reconcile leaves the job
+running (the guest cannot be signalled), and the first reconcile after a
+resume kills a job whose cap was spent in the meantime. A record written
+before the cap existed (`max_runtime_secs` 0) is still capped by the
+current host value once the backend is upgraded. `JOB_MAX_RUNTIME=0`
+(unset) is the 24 h default and a negative value disables the cap; the
+cap is held as whole seconds, so a positive fractional duration rounds
+up to the next whole second (`500ms` is 1 s, not a 0 that reads as the
+default, and `1500ms` is 2 s, not a truncated 1 s) and a negative value
+under one second is rejected at startup because it would round to 0 and
+mean the default rather than "off". A bare integer too large to
+represent as a duration is clamped at startup rather than wrapping.
+Per-exec `secrets` stay staged under
 `/run/secrets` for the job's life and are removed when it exits (the
 guest wrapper removes them; the backend also removes them on
 reconcile). Neither `env` nor secret values are ever stored in the job
@@ -617,7 +657,10 @@ Lists the lease's background jobs, newest first:
 `state` is `running`, `exited` or `lost` (the guest's memory did not
 continue — a cold restart, restore, crash recovery or generation bump).
 `exit_code` is `null` while running. `stderr_tail` is the last 4 KiB of
-stderr. Owner, admins and `http` shares as exec has them.
+stderr. `reason` is `timed_out` when the max runtime, not the command,
+ended the job, and omits otherwise. `max_runtime_secs` is the effective
+cap the job runs under, in whole seconds, and is omitted when 0 (the
+host cap is disabled). Owner, admins and `http` shares as exec has them.
 
 ### `GET /api/leases/{id}/jobs/{job}` — read one job
 
@@ -657,7 +700,9 @@ Returns raw bytes from one stream so a client can follow output:
 
 Background jobs emit `job_started` (detail: the command, cut to 120
 chars), `job_exited` (detail: `exit <code>` and the last 10 stderr
-lines, at most 1 KiB) and `job_lost` on the lease's event stream. The
+lines, at most 1 KiB; for a job killed by the max runtime the detail
+starts `timed out: exit 124`), and `job_lost` on the lease's event
+stream. The
 lease object (`GET /api/leases/{id}` and every list row) carries a
 `jobs` field:
 
@@ -1311,7 +1356,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `holder_cleared` | the hold is cleared | the clear |
 | `held_action` | an automatic held-lease rule acted (idle suspend, stale/pressure/critical release, lapse) | the rule, the action and the numbers that triggered it |
 | `job_started` | a background exec job started (2.6, #135) | the command, cut to 120 chars |
-| `job_exited` | a background exec job ended | `exit <code>` and the last 10 stderr lines (at most 1 KiB) |
+| `job_exited` | a background exec job ended (2.6, #135) | `exit <code>` and the last 10 stderr lines (at most 1 KiB); for a job killed by the max runtime, `timed out: exit 124` and the stderr excerpt (spoond-wb5) |
 | `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |

@@ -83,6 +83,7 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 | `CONFORMANCE_PROXY_SECRET` | yes (may be empty) | the backend's `PROXY_AUTH_SECRET`; empty when the backend runs without forward-auth |
 | `CONFORMANCE_PROXY_SUFFIX` | yes | `.sandbox.example.com` |
 | `CONFORMANCE_GUEST_SERVICE` | yes | host service address guests use (see N6) |
+| `CONFORMANCE_LAN_TARGET` | sb | a private (LAN) `host:port` that answers on the host; N1 probes it under the `none`, `internet` and `lan` policies. **No default**: when unset N1 skips, so a run never probes an assumed LAN address. sb sets it (e.g. `10.1.0.203:443`, Caddy) |
 | `CONFORMANCE_MIXED_PRIVATE` | vm2 | private (LAN) IP a restricted lease allowlists together with a public domain (N9). **No default**: when unset (or `CONFORMANCE_MIXED_BLOCKED_PRIVATE` unset), N9 skips so a run never probes an assumed LAN address |
 | `CONFORMANCE_MIXED_PRIVATE_PORT` | no | the TLS port of `CONFORMANCE_MIXED_PRIVATE` (N9). Default `443` |
 | `CONFORMANCE_MIXED_DOMAIN` | no | public domain the same restricted lease allowlists (N9). Default `example.com` |
@@ -284,12 +285,15 @@ For every N test, a helper `canTCP(id, host, port) bool` runs:
 `py-base` has bash.
 
 - **`TestN1_Policies`**:
-  `10.0.0.203:443` is `git.example.com` on the LAN: a known-open private
-  TCP service that is not host itself.
-  1. `none`: `canTCP(1.1.1.1,443)=no` and `canTCP(10.0.0.203,443)=no`.
-  2. `internet`: `canTCP(1.1.1.1,443)=yes` and `canTCP(10.0.0.203,443)=yes`
+  probes `CONFORMANCE_LAN_TARGET`, a known-open private TCP service that
+  is not the host itself (`10.0.0.203:443` is `git.example.com` on the
+  old LAN; sb sets `10.1.0.203:443`, Caddy). **No default**: when the
+  variable is unset the case skips, so a run never probes an assumed LAN
+  address.
+  1. `none`: `canTCP(1.1.1.1,443)=no` and `canTCP(LAN_TARGET)=no`.
+  2. `internet`: `canTCP(1.1.1.1,443)=yes` and `canTCP(LAN_TARGET)=yes`
      (E2B `internet` allows public plus the LAN ranges, as forkd does).
-  3. `lan`: `canTCP(10.0.0.203,443)=yes` and `canTCP(1.1.1.1,443)=no`.
+  3. `lan`: `canTCP(LAN_TARGET)=yes` and `canTCP(1.1.1.1,443)=no`.
      Also `canTCP(10.0.0.11,22)=no`: the host's own addresses are refused
      except the granted service port (`e2b` only; skip on forkd).
   4. `restricted` with `egress_allowlist:["example.com"]`:

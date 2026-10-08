@@ -1969,6 +1969,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// as it is running, instead of holding the request until it exits.
 		// timeout is ignored.
 		Background bool `json:"background"`
+		// MaxRuntimeSecs (spoond-wb5) shortens the host's JOB_MAX_RUNTIME
+		// for this job. It can never lengthen it; 0 or omitted uses the
+		// host cap. A negative value is rejected.
+		MaxRuntimeSecs int64 `json:"max_runtime_secs"`
 		// Secrets (#80) are staged as /run/secrets/<name> files for this
 		// command only and removed afterwards. Values are kept in memory
 		// only, never stored, logged or returned.
@@ -1982,13 +1986,20 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cmd is required")
 		return
 	}
+	// max_runtime_secs only applies to a background job, but a negative
+	// value is rejected for both, so a client that sends it cannot believe
+	// it shortened a synchronous exec's timeout (spoond-wb5 NIT).
+	if req.MaxRuntimeSecs < 0 {
+		writeError(w, http.StatusBadRequest, "max_runtime_secs must be non-negative")
+		return
+	}
 	execSecrets, err := validateSecrets(req.Secrets)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.Background {
-		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets)
+		s.handleBackgroundExec(w, r, lease, owner, req.Cmd, req.Cwd, req.Env, execSecrets, req.MaxRuntimeSecs)
 		return
 	}
 	timeout := req.Timeout

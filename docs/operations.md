@@ -259,9 +259,17 @@ outside it that have been idle for an hour.
   `deleted` and counting `spoond_gc_deleted_total{kind}`. Only enable it
   after reading a week of dry-run logs.
 - A build left in state `building` past twice the build timeout (the
-  pipeline's `buildTimeout`, one hour) is failed by the pass and logged
+  pipeline's `buildTimeout`, one hour by default) is failed by the pass
+  and logged
   (`gc: marked stale building build failed ...`), then counted as an
-  ordinary candidate once it has been idle an hour. It also emits one
+  ordinary candidate once it has been idle an hour. The backend reads
+  its own `SPOOND_BUILD_TIMEOUT` (`ServiceConfig.BuildTimeout`) for
+  this; `spoond images build` reads the same variable in its own
+  environment for its `BuildTemplate` bound, so set it in both (the
+  backend logs both the bound and the stale threshold at start, and
+  `spoond images build` prints its bound). If the two differ, a build
+  may be failed while still running, or allowed to run past its sweep.
+  It also emits one
   lease-less `gc` event naming the build (`stale build <id> failed ·
   build timed out`). A template build has no owner and never appears in
   `/api/snapshots`, so that event is where its failure is visible. A
@@ -300,16 +308,23 @@ A directory is **needed**, and never touched, when it is:
 
 Everything else is an orphan. `ORPHAN_REAP` selects what happens to one:
 
-- `dryrun` (the default) logs
-  `gc: would reap orphan <id> (<size>)` and changes nothing;
+- `off` is a hard stop: the reap lists nothing and changes nothing — no
+  orphan is quarantined, no quarantined directory is restored, and none
+  is purged;
+- `dryrun` (the default) logs what it would do —
+  `gc: would reap orphan <id> (<size>)` or
+  `gc: would reap quarantined orphan <id> (<size>)` — and changes
+  nothing;
 - `quarantine` moves the directory to
   `<storage path>/../quarantine/<id>`, dropping a `.spoond-quarantine`
   marker that dates the move; every later pass moves a quarantined
   directory back if a catalog build, lease, kept build, sandbox or image
   needs it again, and deletes it only once it has sat there for
   `ORPHAN_QUARANTINE_SECS` (default `86400`) — so a misclassification is
-  recoverable for a day, across backend restarts;
-- `off` disables the reap entirely.
+  recoverable for a day, across backend restarts.
+
+Only `quarantine` deletes a quarantined directory; `off` and `dryrun`
+leave one in place until a pass runs in `quarantine` mode.
 
 `GC_DELETE` does not control the orphan reap. When a quarantined
 orphan is finally deleted, it is removed with `os.RemoveAll`, and the
@@ -355,6 +370,29 @@ which takes the GC age (1 h) and `GC_DELETE=1`. Under the dry-run
 default the critical rule therefore releases nothing (it logs, at most
 once an hour, that the dry-run GC stops it); a full snapshot disk on a
 node with held leases is a reason to turn the GC out of dry-run.
+
+### Pause chains
+
+A **pause** (suspend, drain, idle rule, preemption) writes a new build
+whose `parent_build_id` is the build the lease was running from, and the
+GC keeps every ancestor of a live lease's resume build. A persistent
+lease that suspends repeatedly therefore accumulates a chain —
+pause → pause → … → template — that holds one memory snapshot per pause
+until a cold restart or the lease's release breaks it (spoond-p9j).
+
+This is measured, not yet compacted:
+
+- `GET /api/leases/{id}` carries `chain_depth` (builds in the lease's
+  chain, counted from its resume or running build) and `chain_bytes`
+  (their summed recorded `size_bytes`) — what the chain would free if it
+  were compacted. A lease with no build yet omits both.
+- every pause observes the same two numbers as
+  `spoond_pause_chain_depth` and `spoond_pause_chain_bytes` histograms.
+  Both are unlabeled, so the cardinality stays bounded no matter how
+  many leases suspend; the per-lease figures stay on the lease API.
+
+A follow-up decides on automatic compaction after these numbers have
+been read on the deployment.
 
 ## Restarting the orchestrator (planned)
 
@@ -988,17 +1026,38 @@ stored in the job record, logged, emitted in an event or written to the
 guest's job directory — `env` rides the substrate's start request — and
 `cmd` is stored as given.
 
+A job cannot run forever: the reconcile pass kills a job that has spent
+its effective max runtime and marks the record exited with reason
+`timed_out`. The host cap is `JOB_MAX_RUNTIME` (default 24 h); a start
+may ask for a shorter `max_runtime_secs`, never a longer one. The cap is
+wall-clock from the start; while the lease is suspended — or busy with
+an in-flight pause, resume, restart or restore — the reconcile leaves
+the job alone (the guest cannot be signalled, and a suspended lease's
+memory is already freed), and the first reconcile after a resume kills a
+job whose cap was spent in the meantime — so a `sleep infinity` can no
+longer pin hugepages indefinitely. A job running on a suspended lease
+also no longer keeps that lease active: `reconcileJobs` stopped calling
+`markActive` on a suspended lease, so the held-lease rules' untouched
+test still sees the suspension. The record is marked `timed_out` only
+after the kill succeeds; a failed kill leaves it running so the next
+reconcile retries, and when the kill succeeds but the store write fails
+the in-memory timed-out intent is kept so the next pass records the
+outcome without a second kill. A record written before the cap existed
+(`max_runtime_secs` 0) is capped by the current host value.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background jobs per lease; past it a start answers `429` |
 | `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept) |
+| `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`. A start may ask for a shorter `max_runtime_secs`, never a longer one. Takes a Go duration (`24h`) or seconds; `0` is the default and a negative value disables the cap (the cap is held as whole seconds: a positive fractional duration rounds up, and a negative value under one second is rejected at startup) (spoond-wb5) |
 
-The job record lives in the `lease_jobs` table (migration 0016) and is
-deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
-`spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`). Events:
-`job_started`, `job_exited`, `job_lost`; the dashboard events panel
-shows `job_exited` lines, non-zero exits in the warning colour. The
-endpoints, the events and the lease's `jobs` summary are in
+The job record lives in the `lease_jobs` table (migration 0016, with
+migration 0020 adding the max-runtime cap and reason) and is deleted
+with its lease. Metrics: `spoond_jobs_running` (gauge) and
+`spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`/`timed_out`).
+Events: `job_started`, `job_exited` and `job_lost`; the dashboard events
+panel shows `job_exited` lines, non-zero exits in the warning colour.
+The endpoints, the events and the lease's `jobs` summary are in
 [api.md](api.md).
 
 ## Idle reclamation
@@ -1274,6 +1333,8 @@ marker. The substrate-specific series:
 | `spoond_gc_deleted_total{kind}` | builds deleted by the GC |
 | `spoond_kept_builds` | kept checkpoints of live leases (pins; #126) |
 | `spoond_kept_builds_bytes` | disk bytes held by kept checkpoints of live leases (recorded `size_bytes`; #126) |
+| `spoond_pause_chain_depth` | histogram of a lease's build-chain depth at each pause (the pause build and its ancestors to the template root; spoond-p9j) |
+| `spoond_pause_chain_bytes` | histogram of the recorded `size_bytes` summed over a lease's build chain at each pause (spoond-p9j) |
 | `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |

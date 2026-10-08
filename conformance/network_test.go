@@ -18,16 +18,27 @@ import (
 
 // TestN1_Policies checks the none, internet, lan and restricted egress
 // policies.
+//
+// The internet and lan cases probe a private (LAN) service the host can
+// reach, named by CONFORMANCE_LAN_TARGET (host:port, read by
+// harness_test.go). It has no default: when unset the case skips, so a
+// run never probes an assumed LAN address. sb sets it in
+// /etc/spoond/conformance.env.
 func TestN1_Policies(t *testing.T) {
 	begin(t)
+
+	if cfg.LANTarget == "" {
+		skipf(t, "CONFORMANCE_LAN_TARGET is unset; set it to a private host:port that answers on the host (sb does) to exercise the internet and lan policies")
+	}
+	lanHost, lanPort := cfg.LANTargetHost, cfg.LANTargetPort
 
 	// none: nothing goes out.
 	l := createLease(t, map[string]any{"image": "py-base", "ttl": 600, "network_policy": "none"})
 	if canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "none: 1.1.1.1:443 reachable, want blocked")
 	}
-	if canTCP(t, l.ID, "10.0.0.203", 443) {
-		failf(t, "none: 10.0.0.203:443 reachable, want blocked")
+	if canTCP(t, l.ID, lanHost, lanPort) {
+		failf(t, "none: %s reachable, want blocked", cfg.LANTarget)
 	}
 
 	// internet: public and LAN reachable (internet maps to public plus the
@@ -36,21 +47,22 @@ func TestN1_Policies(t *testing.T) {
 	if !canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "internet: 1.1.1.1:443 blocked, want reachable")
 	}
-	if !canTCP(t, l.ID, "10.0.0.203", 443) {
-		failf(t, "internet: 10.0.0.203:443 blocked, want reachable")
+	if !canTCP(t, l.ID, lanHost, lanPort) {
+		failf(t, "internet: %s blocked, want reachable", cfg.LANTarget)
 	}
 
 	// lan: private yes, public no; the host's own addresses are refused
-	// except the granted service port (e2b only).
+	// except the granted service port (e2b only). The host address is the
+	// one guests use for host services, so no LAN literal is assumed.
 	l = createLease(t, map[string]any{"image": "py-base", "ttl": 600, "network_policy": "lan"})
-	if !canTCP(t, l.ID, "10.0.0.203", 443) {
-		failf(t, "lan: 10.0.0.203:443 blocked, want reachable")
+	if !canTCP(t, l.ID, lanHost, lanPort) {
+		failf(t, "lan: %s blocked, want reachable", cfg.LANTarget)
 	}
 	if canTCP(t, l.ID, "1.1.1.1", 443) {
 		failf(t, "lan: 1.1.1.1:443 reachable, want blocked")
 	}
-	if cfg.Substrate == "e2b" && canTCP(t, l.ID, "10.0.0.11", 22) {
-		failf(t, "lan: host 10.0.0.11:22 reachable, want refused")
+	if host, _, err := splitHostPort(cfg.GuestService); err == nil && cfg.Substrate == "e2b" && canTCP(t, l.ID, host, 22) {
+		failf(t, "lan: host %s:22 reachable, want refused", host)
 	}
 
 	// restricted with an allowlist: example.com answers, google fails.

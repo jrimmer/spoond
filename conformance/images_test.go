@@ -58,14 +58,16 @@ func TestI2_RealWorkloads(t *testing.T) {
 }
 
 // TestI3_DockerInDocker runs Docker inside dev-base. e2b only; a failure
-// caused by guest kernel features is recorded and decided in U12.
+// caused by guest kernel features is recorded and decided in U12. The
+// setup refreshes the apt index first: the image ships without lists and a
+// stale index 404s on a package version Ubuntu has since dropped.
 func TestI3_DockerInDocker(t *testing.T) {
 	begin(t)
 	requireE2B(t)
 
 	l := createLease(t, map[string]any{"image": "dev-base", "ttl": 600, "network_policy": "internet"})
 	st, body, err := cl.exec(l.ID, execReq{
-		Cmd:     "apt-get install -y docker.io && (dockerd >/tmp/d.log 2>&1 &) && sleep 8 && docker run --rm hello-world",
+		Cmd:     "apt-get update -qq && apt-get install -y docker.io && (dockerd >/tmp/d.log 2>&1 &) && sleep 8 && docker run --rm hello-world",
 		Timeout: 300,
 	})
 	if err != nil {

@@ -306,8 +306,9 @@ type ServiceConfig struct {
 	// treats a row still `building` as stale and fails it (spoond-4yl).
 	// The GC fails a building row older than twice this, logged. Zero
 	// falls back to substrate.DefaultBuildTimeout. The backend sets it
-	// from SPOOND_BUILD_TIMEOUT, the same variable `spoond images build`
-	// reads for its own BuildTemplate bound, so the two sides agree.
+	// from SPOOND_BUILD_TIMEOUT, but `spoond images build` reads that
+	// variable in its own process, so a deployment must set it for both
+	// (spoond-rzz).
 	BuildTimeout time.Duration
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
@@ -362,6 +363,11 @@ type ServiceConfig struct {
 	// JobRetentionSecs is how long an exited background job record is
 	// kept before pruning (2.6, #135). 0 = DefaultJobRetentionSecs.
 	JobRetentionSecs int64
+	// JobMaxRuntimeSecs caps how long a background job may run before it
+	// is killed and marked exited with reason timed_out (spoond-wb5). A
+	// job may ask for a shorter max_runtime_secs, never a longer one. 0
+	// = DefaultJobMaxRuntimeSecs; a negative value disables the cap.
+	JobMaxRuntimeSecs int64
 	// MaxAdmitWaitSecs caps how long a create may wait for admission
 	// (#129 part 1). MAX_ADMIT_WAIT_SECS, default DefaultMaxAdmitWaitSecs;
 	// 0 disables waiting (the request field is accepted and ignored).
@@ -571,9 +577,16 @@ type Service struct {
 	// appliedEgress remembers the canonical JSON of the egress config
 	// last applied to each lease's sandbox, keyed by lease id, so
 	// refreshPeers only calls UpdateEgress on change.
+	// appliedMu guards appliedEgress and appliedInFlight.
 	appliedMu     sync.Mutex
 	appliedEgress map[string]string
-	log           *log.Logger
+	// appliedInFlight holds the ids of leases whose egress memo was just
+	// applied but whose lease is not yet in store.leases (a create records
+	// the memo before it registers the lease). refreshPeers' prune must
+	// not drop those memos in the gap, or the next pass re-applies egress
+	// once needlessly (spoond-ob18).
+	appliedInFlight map[string]struct{}
+	log             *log.Logger
 	// metrics (issue #20): service-level Prometheus metrics.
 	metrics *metrics.BackendMetrics
 	// draining is true while the admin drain is running (U10): pool
@@ -668,6 +681,21 @@ type Service struct {
 	// exactly those files if the guest wrapper did not. Lost on restart,
 	// when the wrapper's own cleanup is the only one left.
 	liveJobSecrets map[string][]string
+	// timingOutMu guards timingOut, the job ids the max-runtime cap is
+	// killing right now. The cap adds an id just before the kill and
+	// removes it once the record is closed, so the live watcher cannot
+	// record the kill's signal exit as a normal exit in that window. In
+	// memory only: a lost entry after a restart leaves the cap to close
+	// the record, and the watcher reads the guest rc if anything writes
+	// one.
+	timingOutMu sync.Mutex
+	timingOut   map[string]struct{}
+	// jobKillNotBefore caps how often the reconcile's max-runtime kill
+	// retries a job whose pid file has not appeared yet. jobPID waits
+	// briefly for the wrapper's pid write; a job whose file never appears
+	// would otherwise spend that wait on every pass. Guarded by
+	// timingOutMu.
+	jobKillNotBefore map[string]time.Time
 	// stagedExecSecrets counts leases with synchronous exec-time secrets
 	// staged right now (between stageSecrets and its deferred cleanup). A
 	// named snapshot save refuses while any is staged (2.7, #83): the
@@ -755,6 +783,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		diskCapacity:              statfsCapacity,
 		diskUsage:                 store.BuildDiskUsage,
 		appliedEgress:             map[string]string{},
+		appliedInFlight:           map[string]struct{}{},
 		createSecrets:             map[string]map[string]string{},
 		log:                       log.Default(),
 		probeEnabled:              true,
@@ -773,6 +802,8 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		bus:                       newEventBus(),
 		gcErr:                     newGCTracker(),
 		liveJobSecrets:            map[string][]string{},
+		timingOut:                 map[string]struct{}{},
+		jobKillNotBefore:          map[string]time.Time{},
 		stagedExecSecrets:         map[string]int{},
 		stagedExecSecretNames:     map[string][]string{},
 		pendingSecretRemovals:     map[string][]string{},
@@ -803,10 +834,10 @@ func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 // bakes only through the shared catalog; a stale row a killed build left
 // is failed by the GC (spoond-4yl). The orphan sweep skips while this is
 // non-zero (spoond-63a G3), and a catalog read failure is returned so the
-// sweep can skip rather than delete blind (spoond-63a N1). The metrics
-// loop and CollectMetrics publish the same count as
-// spoond_builds_in_flight, so the dashboard's "builds busy" cell and the
-// sweep guard read one number.
+// sweep can skip rather than delete blind (spoond-63a N1). CollectMetrics
+// publishes the same count as spoond_builds_in_flight on every /metrics
+// scrape, which is how the dashboard's "builds busy" cell reads it; the
+// sweep guard and the gauge therefore share one number (spoond-rzz).
 func (s *Service) bakesRunning(ctx context.Context) (int64, error) {
 	if s.db == nil {
 		return 0, nil
@@ -1165,6 +1196,26 @@ func (s *Service) forgetAppliedEgress(leaseID string) {
 	delete(s.appliedEgress, leaseID)
 }
 
+// beginAppliedEgress marks a lease as mid-create before createSandbox
+// records its egress memo. refreshPeers' prune skips in-flight ids, so a
+// refresh that lands in the gap between the egress record and the
+// store.leases insert does not drop the memo and force one redundant
+// UpdateEgress (spoond-ob18). endAppliedEgress clears the mark once the
+// lease is registered or the create has cleaned up.
+func (s *Service) beginAppliedEgress(leaseID string) {
+	s.appliedMu.Lock()
+	defer s.appliedMu.Unlock()
+	s.appliedInFlight[leaseID] = struct{}{}
+}
+
+// endAppliedEgress clears an in-flight egress hold. It is safe to call
+// more than once and on a lease that was never marked.
+func (s *Service) endAppliedEgress(leaseID string) {
+	s.appliedMu.Lock()
+	defer s.appliedMu.Unlock()
+	delete(s.appliedInFlight, leaseID)
+}
+
 // refreshPeers re-applies every live lease's egress config whose value
 // changed (U09): peer allowances move when leases expose ports, go live,
 // or are released, and each affected sandbox needs an UpdateEgress. The
@@ -1182,7 +1233,7 @@ func (s *Service) refreshPeers(ctx context.Context) {
 		if policy == "" {
 			policy = string(PolicyRestricted)
 		}
-		if !l.live() || NetworkPolicy(policy) == PolicyNone || l.SandboxID == "" {
+		if l.released || !l.live() || NetworkPolicy(policy) == PolicyNone || l.SandboxID == "" {
 			continue
 		}
 		eg := s.egressForLocked(l)
@@ -1201,10 +1252,43 @@ func (s *Service) refreshPeers(ctx context.Context) {
 			s.log.Printf("refreshPeers: update egress for %s: %v", u.leaseID, err)
 			continue
 		}
+		// Re-check the lease under the store lock before writing the memo:
+		// a release that landed while UpdateEgress ran cleared the entry,
+		// and writing it here would resurrect it (spoond-966 follow-up).
 		s.appliedMu.Lock()
-		s.appliedEgress[u.leaseID] = u.canon
+		s.store.mu.Lock()
+		if l := s.store.leases[u.leaseID]; l != nil && !l.released {
+			s.appliedEgress[u.leaseID] = u.canon
+		} else {
+			delete(s.appliedEgress, u.leaseID)
+		}
+		s.store.mu.Unlock()
 		s.appliedMu.Unlock()
 	}
+
+	// Drop any memo whose lease is no longer live and unreleased. A
+	// release clears its own entry, but a refresh that raced it (or a
+	// network-policy update that landed after the release) can have
+	// re-added one; this pass reaps it. The pool placeholder is kept:
+	// it never appears in the live store (spoond-966 follow-up), and a
+	// lease mid-create keeps its memo: it is recorded before the lease
+	// enters the store, and dropping it here would force one redundant
+	// UpdateEgress (spoond-ob18).
+	s.appliedMu.Lock()
+	s.store.mu.Lock()
+	for id := range s.appliedEgress {
+		if id == "pool" {
+			continue
+		}
+		if _, inflight := s.appliedInFlight[id]; inflight {
+			continue
+		}
+		if l := s.store.leases[id]; l == nil || l.released || !l.live() {
+			delete(s.appliedEgress, id)
+		}
+	}
+	s.store.mu.Unlock()
+	s.appliedMu.Unlock()
 }
 
 // refreshPeersAsync schedules one refreshPeers run on a goroutine. Runs
@@ -1461,9 +1545,9 @@ func (s *Service) Start(ctx context.Context) {
 	// Snapshot catalog GC + disk accounting (U11): once 10 minutes
 	// after the backend starts, then once an hour.
 	go s.runGCCatalogLoop(ctx)
-	// Node gauges (U11): refreshed every 15 s.
-	// Template-bake gauge (spoond-rzz): refresh spoond_builds_in_flight
-	// on the metrics tick, not only when /metrics is scraped.
+	// Node gauges (U11): refreshed every 15 s. CollectMetrics refreshes
+	// the catalog-derived template-bake gauge on each /metrics scrape,
+	// which is when the dashboard reads it (spoond-rzz).
 	go s.runNodeMetricsLoop(ctx)
 	// Preemption resume queue (#128 part 3): every 15 s, resume preempted
 	// leases that fit again.
@@ -1490,8 +1574,7 @@ func (s *Service) Start(ctx context.Context) {
 	}
 }
 
-// runNodeMetricsLoop refreshes the NodeInfo-derived gauges and the
-// catalog-derived template-bake gauge every 15 s.
+// runNodeMetricsLoop refreshes the NodeInfo-derived gauges every 15 s.
 func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -1501,26 +1584,8 @@ func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			s.updateNodeMetrics(ctx)
-			s.updateBuildMetrics(ctx)
 		}
 	}
-}
-
-// updateBuildMetrics sets spoond_builds_in_flight from the catalog's
-// template builds still `building`. The image pipeline runs in a separate
-// process, so the backend sees its bakes only through the shared catalog;
-// the value is the same count bakesRunning returns and the orphan sweep
-// guards on. It is a no-op without a metrics collector or a store, and a
-// read failure leaves the gauge at its last value.
-func (s *Service) updateBuildMetrics(ctx context.Context) {
-	if s.metrics == nil {
-		return
-	}
-	n, err := s.bakesRunning(ctx)
-	if err != nil {
-		return
-	}
-	s.metrics.BuildsInFlight.Set(float64(n))
 }
 
 // updateNodeMetrics sets the node gauges from NodeInfo; on error the
@@ -2279,6 +2344,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		return nil, err
 	}
 	lease.Class = class
+	// Hold the lease's egress memo in flight from before any sandbox is
+	// created until it is registered in the store (or the grant fails and
+	// cleans up). createSandbox records the memo before the lease row
+	// exists, and a refreshPeers landing in that gap must not prune it as
+	// a memo with no live lease (spoond-ob18).
+	s.beginAppliedEgress(lease.ID)
+	defer s.endAppliedEgress(lease.ID)
 
 	// Pool: pop the oldest entry for the image. The pool serves
 	// persistent and non-persistent grants alike. A pooled sandbox was
@@ -2341,6 +2413,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			if err := s.sub.UpdateEndAt(ctx, id, lease.ExpiresAt); err != nil {
 				s.discardPoolSandbox(ctx, id)
 				s.endCreatingSandbox(id)
+				// The egress was recorded before the EndAt update failed: drop
+				// it with the discarded sandbox so a failed pooled grant leaves
+				// no memo behind (spoond-966 follow-up).
+				s.forgetAppliedEgress(lease.ID)
 				return nil, fmt.Errorf("update end at on pooled sandbox: %w", err)
 			}
 			row.LeaseID = lease.ID
@@ -2388,12 +2464,14 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("write lease-id and generation markers: %w", err)
 		}
 		if err := s.writeStartedFromMarker(lease); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("write started-from marker: %w", err)
 		}
 		// The snapshot's memory may still carry secret files (a save
@@ -2405,6 +2483,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("scrub secrets on snapshot start: %w", err)
 		}
 	}
@@ -2416,6 +2495,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		_ = s.sub.Delete(ctx, lease.SandboxID)
 		s.deleteSandboxRow(lease.SandboxID)
 		s.endCreatingSandbox(lease.SandboxID)
+		s.forgetAppliedEgress(lease.ID)
 		return nil, err
 	}
 	// Create-time secrets (#80) are staged after the integrity probe so
@@ -2427,6 +2507,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("stage lease secrets: %w", err)
 		}
 		s.setCreateSecrets(lease.ID, req.createSecrets)
@@ -2603,6 +2684,10 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
 		return "", fmt.Errorf("store pause build refs: %w", err)
 	}
+	// Measure the chain this pause extends (spoond-p9j): its depth and
+	// recorded bytes, before any follow-up decides on compaction. The
+	// observation must not fail the pause.
+	s.observePauseChain(ctx, buildID)
 	if s.pauseBeforeSuspend != nil {
 		s.pauseBeforeSuspend(l)
 	}
@@ -3299,6 +3384,10 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		return nil, "", err
 	}
 	lease.Class = class
+	// Hold the clone's egress memo in flight until it is in the store,
+	// so a refresh mid-create does not prune it (spoond-ob18).
+	s.beginAppliedEgress(lease.ID)
+	defer s.endAppliedEgress(lease.ID)
 	sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 	if err != nil {
 		return nil, "", err
@@ -3407,6 +3496,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			_ = s.sub.Delete(ctx, l.SandboxID)
 			s.deleteSandboxRow(l.SandboxID)
 			s.endCreatingSandbox(l.SandboxID)
+			// The child's egress memo goes with its deleted sandbox, so a
+			// rolled-back fork leaves none behind (spoond-966 follow-up).
+			s.forgetAppliedEgress(l.ID)
 			s.store.mu.Lock()
 			delete(s.store.leases, l.ID)
 			s.deleteLeaseLocked(l.ID)
@@ -3459,8 +3551,13 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			return rollback(err)
 		}
 		lease.Class = class
+		// Hold this child's egress memo in flight until it is in the store
+		// (or rolled back), so a refresh mid-create does not prune it
+		// (spoond-ob18).
+		s.beginAppliedEgress(lease.ID)
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
+			s.endAppliedEgress(lease.ID)
 			return rollback(err)
 		}
 		lease.SandboxID = sb.ID
@@ -3490,6 +3587,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
+		s.endAppliedEgress(lease.ID)
 		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
 		created = append(created, lease)
 	}
@@ -3732,7 +3830,17 @@ func (s *Service) setNetwork(ctx context.Context, owner, id, policy string, allo
 	if err := s.sub.UpdateEgress(ctx, l.SandboxID, eg); err != nil {
 		return nil, fmt.Errorf("update egress: %w", err)
 	}
-	s.recordAppliedEgress(l.ID, eg)
+	// The UpdateEgress ran without the store lock; a release can have
+	// landed meanwhile. Do not re-add the memo for a lease that is gone:
+	// that would resurrect the entry the release cleared (spoond-966
+	// follow-up). The lease itself is still returned (the caller set the
+	// policy before the release), but a released lease gets no memo. A
+	// suspended lease still gets one: its memo is re-checked when it
+	// resumes, and present (not live) is the bookkeeping guard
+	// (spoond-ob18).
+	if s.lookupPresent(l.ID) != nil {
+		s.recordAppliedEgress(l.ID, eg)
+	}
 	s.refreshPeersAsync(ctx)
 	return l, nil
 }
@@ -3899,6 +4007,23 @@ func (s *Service) lookup(owner, id string) *Lease {
 	return l
 }
 
+// lookupPresent returns a lease by id when it is still in the store and
+// unreleased, regardless of whether its sandbox is live. Paths that
+// guard per-lease bookkeeping (the egress memo, deferred secret
+// removals) only need presence: release clears that bookkeeping under
+// the same lock that marks the lease released, so a lease that is gone
+// can never have stale state re-added, and a suspended lease still owns
+// the bookkeeping that resumes with it (spoond-ob18).
+func (s *Service) lookupPresent(id string) *Lease {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.released {
+		return nil
+	}
+	return l
+}
+
 // lookupAny returns a live lease by id regardless of owner. Used by the
 // public HTTP proxy where the lease id in the hostname is the capability
 // (same model as the SSH gateway).
@@ -4026,6 +4151,18 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		}
 	}
 	m["kept_builds"] = kept
+	// Pause-chain size (spoond-p9j): how many builds the lease's chain
+	// holds and their summed recorded size_bytes. A persistent lease that
+	// suspends daily keeps every pause build (GC keeps the chain's
+	// ancestors) until a cold restart, so this shows what such a chain
+	// costs before any compaction decision. Best effort: a catalog hiccup
+	// leaves the fields off rather than failing the read.
+	if depth, bytes, err := s.leaseChainStats(ctx, l); err != nil {
+		s.log.Printf("lease detail: chain stats of %s: %v", l.ID, err)
+	} else if depth > 0 {
+		m["chain_depth"] = depth
+		m["chain_bytes"] = bytes
+	}
 	// The named-snapshot version this lease started from (A3): the same
 	// object the create response carries.
 	if view := s.snapshotView(ctx, l); view != nil {
@@ -4531,9 +4668,8 @@ const sandboxDeleteBackoff = 500 * time.Millisecond
 // deleteSandboxBounded stops a sandbox a late operation created, on a
 // context detached from the request that none of its callers can cancel
 // and with bounded retries, so a transient substrate error does not leak
-// the guest. A delete that keeps failing is logged; until the periodic
-// orphan sweep lands (spoond-63a) nothing else retries it, so the guest
-// may survive until a later reconcile.
+// the guest. A delete that keeps failing is logged and remembered as an
+// orphan, so the periodic orphan sandbox sweep retries it (spoond-63a).
 func (s *Service) deleteSandboxBounded(ctx context.Context, sandboxID string) {
 	dctx := context.WithoutCancel(ctx)
 	var err error

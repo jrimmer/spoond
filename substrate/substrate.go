@@ -14,9 +14,10 @@ import (
 // and the GC fails any build still in state building for more than twice
 // it, so a SIGKILL or reboot mid-build can never leave a permanent GC
 // root. Override it with SPOOND_BUILD_TIMEOUT (a Go duration or a number
-// of seconds); the image pipeline and the backend's ServiceConfig
-// BuildTimeout both read that variable, so the two sides stay on one
-// knob.
+// of seconds). The image pipeline and the backend's ServiceConfig
+// BuildTimeout each read that variable from their own process
+// environment, so a deployment must set it for both (spoond-rzz); an
+// unset side falls back to this default.
 const DefaultBuildTimeout = 60 * time.Minute
 
 // BuildTimeoutFromEnv resolves the template build timeout from
