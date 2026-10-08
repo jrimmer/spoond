@@ -119,8 +119,11 @@ func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
 	l.LastActionAt = now
 	s.saveLeaseLocked(l)
-	s.store.mu.Unlock()
+	// Emit under the lock: the bus never takes the store lock, and a
+	// release landing after this check must not leave an idle_suspended
+	// event for a released lease on the stream (spoond-15i).
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseIdleSuspended, "idle for "+idleFor.String())
+	s.store.mu.Unlock()
 }
 
 // idleSuspended reports whether l is suspended by the idle_suspend rule
