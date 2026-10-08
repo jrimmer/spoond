@@ -25,6 +25,26 @@ unchanged since 2.7.0.
 
 ### Added
 
+- **The worker harness rebases before verifying and bounds the
+  verifier.** The loop in `images/worker-start.sh` (the `go-base-worker`
+  image) now fetches the task's `Base:` and rebases the task branch onto
+  it before the verify (and again before a `DONE` is pushed), so a
+  branch can no longer land on an older base; a conflicted rebase is
+  handed to the implementer as an extra implement round and every gate
+  is rerun. After the rebase a migration guard fails the gate when two
+  files under `store/migrations` share a version number, or when a
+  migration the branch adds is not numbered above the base's highest.
+  The verifier reviews only `git diff <base>...HEAD` and has a
+  per-round wall-clock limit (`VERIFY_TIMEOUT`, default 20 min, or a
+  task's `Verify-Timeout:` line); a diff under ~200 changed lines gets
+  one verify round and a larger one up to `SWARM_MAX_ROUNDS`, a timeout
+  reports `BLOCKED` at once with the partial notes, and findings are
+  asked for before gates. `DONE` names the base commit it was verified
+  on; `DONE` and `BLOCKED` both carry implement/rebase/gates/verify
+  durations. The git and migration rules live in `images/worker-git.sh`
+  with their own tests, and the loop's exit paths are covered end to end
+  in `images/worker-start_test.sh`.
+
 - **The dashboard's host panel shows disk I/O pressure and the snapshot
   disk's throughput as meters under the CPU meter.** Two new meter rows
   directly under `cpu`: `i/o stall`, whose value is the PSI `full` 60 s

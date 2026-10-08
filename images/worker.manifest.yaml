@@ -1,0 +1,19 @@
+# Worker images (the hive's <base>-worker layer, images/worker.dockerfile),
+# kept apart from manifest.yaml so building them never touches the shared
+# catalog definitions. Same schema as manifest.yaml plus `from` and
+# `build_args`. Shape and env come from the base unless set here.
+images:
+  - name: go-base-worker
+    capability: worker
+    labels: []
+    description: "Bee for Go projects: go-base + Pi + git + amail; module cache warmed from spoond"
+    baked: true
+    dockerfile: worker.dockerfile
+    from: go-base
+    memory_mb: 4096
+    disk_mb: 8192
+    env:
+      HOME: /root
+    build_args:
+      WARM: "go mod download"
+    notes: "Replaces agent-worker. 4 GiB for Go builds plus the agent. The warm step needs the project snapshot (go.mod, go.sum) in project/."

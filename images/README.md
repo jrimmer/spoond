@@ -112,3 +112,70 @@ detailed notes. Key requirements:
 
 After building, run `rustup default stable` inside the sandbox before
 the snapshot so the stable toolchain is pre-installed.
+
+## Worker images (`<base>-worker`)
+
+A **worker image** is a base image plus the agent loop: Pi, Agent Mail,
+and `images/worker-start.sh`. `images/worker.dockerfile` builds one from
+any catalog image, and `images/worker.manifest.yaml` declares the entries
+(the `go-base-worker` image used for Go projects). The manifest entry
+inherits the base's shape and env and can add a warm step, so the
+project's dependencies are cached into the image before the snapshot.
+
+When a worker takes a task it now:
+
+1. **Rebases onto the task's `Base:` before verifying** (default
+   `origin/main`), fetching it first. A conflicted rebase is handed to
+   the implementer as an extra implement round: it sees the conflict and
+   the base's new commits, resolves them, finishes the rebase, and every
+   gate is rerun. The [`worker-git.sh`](worker-git.sh) helper holds this
+   logic (`worker_fetch`, `worker_rebase`, `worker_rebase_in_progress`)
+   so it can be tested without a model.
+2. **Guards migrations after the rebase.** `worker_migration_guard`
+   fails the gate when two files under `store/migrations` share a
+   version number, or when a migration the branch adds is not numbered
+   above the base's highest. This is what a rebase before verify is for:
+   a branch that started from an older base can no longer land a
+   migration that collides with one already merged.
+3. **Verifies with a scope and a bound.** The verifier reviews only
+   `git diff <base>...HEAD` plus the task text — never the whole repo
+   history. Each verify round has a wall-clock limit (`VERIFY_TIMEOUT`,
+   default 20 minutes, or a task's `Verify-Timeout:` line in minutes),
+   and the number of rounds is sized from the diff: under ~200 changed
+   lines gets one verify round, larger diffs up to `SWARM_MAX_ROUNDS`.
+   On timeout the worker reports `BLOCKED` at once with the partial
+   notes instead of spending a second identical try. The verifier's
+   prompt asks for findings first, gates second.
+4. **Reports the base and the timings.** A `[DONE]` names the base
+   commit it was verified on (`verified on base: <sha> (<base ref>)`);
+   `[DONE]` and `[BLOCKED]` both carry `timings: implement …, rebase …,
+   gates …, verify …` so the next optimisation is measured. If the base
+   moved again before the push, the worker rebases and re-gates once
+   more.
+
+### Testing the worker loop
+
+`images/worker-git_test.sh` covers the rebase and migration rules in
+throwaway local repos (no model, no Agent Mail, no network):
+
+```bash
+bash images/worker-git_test.sh
+```
+
+`images/worker-start_test.sh` runs the whole worker for real inside a
+mount namespace (`/work` and `/root` private tmpfs, `pi` and `amail`
+stubs on `PATH`, a local bare origin) and asserts on what lands on origin
+and in the mail: the PASS/BLOCKED/cancelled exit paths, the `-wip`
+branches for rewritten history, `Base:`, rebase-before-verify with a
+moving base, the one-round/two-round sizing, verify timeouts, conflict
+resolution, and the migration guard.
+
+```bash
+bash images/worker-start_test.sh
+```
+
+The scripts are expected to be `shellcheck`-clean:
+
+```bash
+shellcheck images/worker-start.sh images/worker-git.sh
+```
