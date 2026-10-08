@@ -264,11 +264,13 @@ func (db *DB) DeleteJobsOfLease(ctx context.Context, leaseID string) error {
 // rows went. Lost rows have no owner-facing cleanup left (their guest
 // files went with the lost sandbox) and are invisible to the API's
 // exited-job views, so unlike exited records nothing else ever removes
-// them: without this they accumulate for ever (spoond-966 L3). The
-// comparison is in Go for the same RFC3339 fraction reason as PruneJobs.
+// them: without this they accumulate for ever (spoond-966 L3). A lost
+// row with no ended_at (lost before markJobLost stamped it) ages from
+// its started_at instead, so it cannot leak either. The comparison is in
+// Go for the same RFC3339 fraction reason as PruneJobs.
 func (db *DB) PruneLostJobs(ctx context.Context, cutoff time.Time) (int64, error) {
 	rows, err := db.r.QueryContext(ctx,
-		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='lost' AND ended_at IS NOT NULL AND ended_at != ''`)
+		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='lost'`)
 	if err != nil {
 		return 0, fmt.Errorf("store: list lost jobs: %w", err)
 	}
@@ -279,7 +281,11 @@ func (db *DB) PruneLostJobs(ctx context.Context, cutoff time.Time) (int64, error
 		if err != nil {
 			return 0, err
 		}
-		if r.EndedAt.Before(cutoff) {
+		agedAt := r.EndedAt
+		if agedAt.IsZero() {
+			agedAt = r.StartedAt
+		}
+		if agedAt.Before(cutoff) {
 			ids = append(ids, r.JobID)
 		}
 	}

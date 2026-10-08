@@ -180,16 +180,26 @@ func TestPruneLostJobs(t *testing.T) {
 	insert("j-lost-recent", "lost", base.Add(48*time.Hour))
 	insert("j-exited-old", "exited", base)
 	insert("j-run", "running", time.Time{})
+	// A lost row with no ended_at (lost before markJobLost stamped it)
+	// ages from its started_at.
+	if err := db.InsertJob(ctx, JobRow{
+		JobID: "j-lost-noend", LeaseID: "l-1", Owner: "alice", Cmd: "echo x",
+		State: "lost", StartedAt: base,
+	}); err != nil {
+		t.Fatalf("insert j-lost-noend: %v", err)
+	}
 
 	n, err := db.PruneLostJobs(ctx, base.Add(24*time.Hour))
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("pruned = %d, want 1", n)
+	if n != 2 {
+		t.Fatalf("pruned = %d, want 2", n)
 	}
-	if _, err := db.GetJob(ctx, "j-lost-old"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("old lost job survived: %v", err)
+	for _, id := range []string{"j-lost-old", "j-lost-noend"} {
+		if _, err := db.GetJob(ctx, id); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s survived: %v", id, err)
+		}
 	}
 	for _, id := range []string{"j-lost-recent", "j-exited-old", "j-run"} {
 		if _, err := db.GetJob(ctx, id); err != nil {
