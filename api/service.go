@@ -731,10 +731,6 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		cfg:                       cfg,
 		sweepInterval:             5 * time.Second,
 		sweepTimeout:              sweepTimeoutOrDefault(cfg.SweepTimeout),
-		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
-		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
-		orphanSweepInterval:       defaultOrphanSweepInterval,
-		orphanSandboxIDs:          map[string]struct{}{},
 		now:                       time.Now,
 		diskCapacity:              statfsCapacity,
 		diskUsage:                 store.BuildDiskUsage,
@@ -753,6 +749,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		orphanSweepInterval:       defaultOrphanSweepInterval,
 		orphanSandboxIDs:          map[string]struct{}{},
 		orphanSweep:               newOrphanSweepState(),
+		drainHeal:                 map[string]*drainHealState{},
 		bus:                       newEventBus(),
 		gcErr:                     newGCTracker(),
 		liveJobSecrets:            map[string][]string{},
@@ -2703,7 +2700,8 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	}
 	// A release that landed just after the create returned must not be
 	// undone by the save below: stop the fresh guest and leave the lease
-	// released (spoond-775, spoond-63a).
+	// released (spoond-775, spoond-63a). The store lock below re-checks
+	// the race.
 	if s.leaseReleased(l) {
 		s.log.Printf("resume: lease %s was released during its resume; stopping sandbox %s", l.ID, sb.ID)
 		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
@@ -2713,7 +2711,11 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	}
 	s.store.mu.Lock()
 	if l.released {
+		// Released while the resume started: stop the fresh sandbox
+		// (bounded retries, spoond-63a) and leave no lease or sandbox row
+		// behind (spoond-775, spoond-52c S4).
 		s.store.mu.Unlock()
+		s.log.Printf("resume: lease %s was released during its resume; stopping sandbox %s", l.ID, sb.ID)
 		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
 		s.endCreatingSandbox(sb.ID)
@@ -2855,7 +2857,8 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	// A release that landed while the create ran must not be undone by the
 	// save below: createSandbox's own released check can miss a release
 	// whose Delete ran before the fresh guest was registered, so stop it
-	// here too and skip the save (spoond-775, spoond-63a).
+	// here too and skip the save (spoond-775, spoond-63a). Re-check under
+	// the store lock, as the release can land after the first check.
 	if s.leaseReleased(l) {
 		s.log.Printf("restart: lease %s was released during its restart; stopping sandbox %s", l.ID, sb.ID)
 		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
@@ -2868,14 +2871,14 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	}
 	s.store.mu.Lock()
 	if l.released {
-		// Released while the fresh guest started: stop it and write no
-		// lease or sandbox row back (spoond-775).
+		// Released while the fresh guest started: stop it (bounded
+		// retries, spoond-63a) and write no lease or sandbox row back
+		// (spoond-775).
 		s.store.mu.Unlock()
 		s.log.Printf("restart: lease %s was released during its restart; stopping sandbox %s", l.ID, sb.ID)
-		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
-			s.log.Printf("restart: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
-		}
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
 		return nil, errLeaseReleased
 	}
 	l.SandboxID = sb.ID
@@ -2950,7 +2953,8 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		return nil, err
 	}
 	// A release that landed just after the create returned must not be
-	// undone by the save below (spoond-775, spoond-63a).
+	// undone by the save below (spoond-775, spoond-63a). Re-check under
+	// the store lock, as the release can land after the first check.
 	if s.leaseReleased(l) {
 		s.log.Printf("restart: lease %s was released during its cold restart; stopping sandbox %s", l.ID, sb.ID)
 		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
@@ -2964,7 +2968,11 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	}
 	s.store.mu.Lock()
 	if l.released {
+		// Released while the fresh guest started: stop it (bounded
+		// retries, spoond-63a) and write no lease or sandbox row back
+		// (spoond-775).
 		s.store.mu.Unlock()
+		s.log.Printf("restart: lease %s was released during its cold restart; stopping sandbox %s", l.ID, sb.ID)
 		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
 		s.endCreatingSandbox(sb.ID)
@@ -4245,7 +4253,11 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 }
 
 // leaseReleased reports whether l was released, under the store lock.
+// A nil lease is not released.
 func (s *Service) leaseReleased(l *Lease) bool {
+	if l == nil {
+		return false
+	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	return l.released
@@ -4646,7 +4658,6 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 
 var (
 	errNotFound       = &leaseError{"lease not found"}
-	errLeaseReleased  = &leaseError{"lease was released"}
 	errNotPersistent  = &leaseError{"lease is not a persistent lease"}
 	errUnknownImage   = &leaseError{"unknown image"}
 	errSuspended      = &leaseError{"lease is suspended"}

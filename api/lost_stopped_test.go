@@ -38,6 +38,10 @@ func TestReconcileLostDeletesHalfStartedSandbox(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
+	// One attempt: the failed create spends the recovery budget
+	// (spoond-dxq), so the lease goes lost through loseRecovery — the
+	// budget-spent path that must still stop the half-started guest.
+	svc.cfg.RecoveryRetryAttempts = 1
 
 	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
@@ -95,6 +99,10 @@ func TestLostSandboxDeleteRetried(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
+	// One attempt: the failed create spends the recovery budget
+	// (spoond-dxq), so the lease goes lost through loseRecovery — the
+	// budget-spent path that must still stop the half-started guest.
+	svc.cfg.RecoveryRetryAttempts = 1
 	// Shrink the retry pause; keep the default attempt count.
 	svc.lostSandboxDeleteBackoff = time.Millisecond
 
@@ -151,6 +159,10 @@ func TestOrphanSweepStopsLostSandbox(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
+	// One attempt: the failed create spends the recovery budget
+	// (spoond-dxq), so the lease goes lost through loseRecovery — the
+	// budget-spent path that must still stop the half-started guest.
+	svc.cfg.RecoveryRetryAttempts = 1
 	// Shrink the retry pause and give up after one attempt, as a
 	// substrate that is down would force.
 	svc.lostSandboxDeleteBackoff = time.Millisecond
@@ -200,7 +212,9 @@ func TestMarkLostDoesNotResurrectReleased(t *testing.T) {
 	svc.release(ctx, l)
 	deletesBefore := calls(sub.Fake, "Delete")
 
+	svc.store.mu.Lock()
 	svc.markLost(l, "lost after release")
+	svc.store.mu.Unlock()
 
 	if l.State == "lost" {
 		t.Fatalf("a released lease was marked lost")

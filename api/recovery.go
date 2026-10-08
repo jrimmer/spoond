@@ -127,18 +127,6 @@ func (s *Service) stopLostSandbox(sandboxID, leaseID string) {
 	s.deleteSandboxRow(sandboxID)
 }
 
-// leaseReleased reports whether l has been released, under the store
-// lock. A released lease's row may already be gone, in which case l
-// itself carries the flag. Used to detect a release that raced a create.
-func (s *Service) leaseReleased(l *Lease) bool {
-	if l == nil {
-		return false
-	}
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	return l.released
-}
-
 // defaultLostSandboxDeleteAttempts and defaultLostSandboxDeleteBackoff
 // bound the substrate Delete when a lease becomes lost: a few attempts
 // with a short pause, so a transient substrate blip does not leave a
@@ -379,6 +367,7 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 		// create's fresh one was stopped too (spoond-775, spoond-63a).
 		// Nothing to lose and nothing to save.
 		if errors.Is(err, errLeaseReleased) {
+			s.clearRecoveryRetries(l)
 			s.log.Printf("recovery: lease %s was released during its recovery; recovery stops", l.ID)
 			return recoveryOutcome{Result: "released", Generation: l.Generation, State: l.State}
 		}
@@ -529,7 +518,11 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	}
 	s.store.mu.Lock()
 	if l.released {
+		// Released while the recovery created its sandbox: stop the fresh
+		// sandbox (bounded retries, spoond-63a) and leave no lease or
+		// sandbox row behind (spoond-775).
 		s.store.mu.Unlock()
+		s.log.Printf("recovery: lease %s was released during its recovery; stopping sandbox %s", l.ID, sb.ID)
 		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
 		s.endCreatingSandbox(sb.ID)

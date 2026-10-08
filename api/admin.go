@@ -553,64 +553,6 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				// to resume and nothing failed (spoond-775).
 				return
 			}
-			if errors.Is(err, errLeaseBusy) {
-				// Another operation holds the lease (an owner resume, a
-				// suspend): leave its guest alone and let a later undrain
-				// retry it. Losing a lease an operation is bringing back
-				// would delete an intact guest (B1).
-				mu.Lock()
-				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
-				mu.Unlock()
-				s.log.Printf("undrain: resume %s skipped (busy): %v", l.ID, err)
-				return
-			}
-			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
-			s.store.mu.Lock()
-			released, alreadyLost, canLose := undrainLossAllowed(l)
-			busy, state := l.busy, l.State
-			if canLose {
-				// markLost saves the row, Drained=false with it.
-				l.Drained = false
-				s.markLost(l, reason)
-			} else if alreadyLost && !released {
-				// Another loss already recorded this lease: clear Drained so
-				// a later undrain does not re-target it (no save on a
-				// released lease, spoond-775).
-				l.Drained = false
-				s.saveLeaseLocked(l)
-			}
-			s.store.mu.Unlock()
-			if released {
-				// The lease was released while this resume was in flight:
-				// the release already stopped its sandbox and emitted the
-				// released event, so a loss must not resurrect it. The
-				// resume body stops any fresh sandbox a late create left
-				// (spoond-775, spoond-63a).
-				mu.Lock()
-				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
-				mu.Unlock()
-				return
-			}
-			if !canLose {
-				// A concurrent loss already recorded this lease (no
-				// duplicate event, no double delete), or an owner
-				// operation now holds it (busy) or resumed it (running):
-				// leave its guest alone and let a later undrain retry.
-				mu.Lock()
-				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
-				mu.Unlock()
-				s.log.Printf("undrain: not losing lease %s (state %s, busy=%v, alreadyLost=%v)", l.ID, state, busy, alreadyLost)
-				return
-			}
-			// Stop the half-started sandbox a failed resume left behind
-			// (the retry loop cleans it between attempts, but the last
-			// failure must stop it too), so lost means stopped
-			// (spoond-63a).
-			s.stopLostSandbox(l.SandboxID, l.ID)
-			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
-			// A lease started from a named snapshot no longer protects it
-			// once lost (#83 S5).
-			s.rerunSnapshotRetention(ctx, l)
 			mu.Lock()
 			res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 			mu.Unlock()
@@ -683,14 +625,23 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 		s.store.mu.Unlock()
 		return err, attempts, false
 	}
-	setLostReason(l, reason)
-	l.setState("lost")
+	// Only a suspended, non-busy lease may be lost (B1/G1): an owner
+	// resume (busy) or one that already completed (state running) is
+	// bringing the guest back, and losing it would delete an intact
+	// lease. Anything else is a logged skip: no markLost, no
+	// stopLostSandbox, no lost event.
+	busy, state := l.busy, l.State
+	if busy || state != "suspended" {
+		s.store.mu.Unlock()
+		s.log.Printf("undrain: not losing lease %s (state %s, busy=%v)", l.ID, state, busy)
+		return err, attempts, false
+	}
 	l.Drained = false
-	s.saveLeaseLocked(l)
+	s.markLost(l, reason)
 	s.store.mu.Unlock()
-	// Stop the half-started sandbox a failed resume left behind (the
-	// retry loop cleans it between attempts, but the last failure must
-	// stop it too), so lost means stopped (spoond-63a).
+	// Lost means stopped (spoond-63a): stop the half-started sandbox a
+	// failed resume left behind (the retry loop cleans it between
+	// attempts, but the last failure must stop it too).
 	s.stopLostSandbox(l.SandboxID, l.ID)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 	// A lease started from a named snapshot no longer protects it once

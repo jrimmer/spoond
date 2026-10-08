@@ -455,6 +455,9 @@ func (s *Service) losePreempted(ctx context.Context, l *Lease, reason, cause str
 		s.log.Printf("preempt: not losing lease %s (state %s, busy=%v, preempted=%v)", l.ID, state, busy, preempted)
 		return
 	}
+	// Lost means stopped (spoond-63a): a failed resume can leave a
+	// half-started sandbox under the lease's id.
+	s.stopLostSandbox(l.SandboxID, l.ID)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease lost after preemption; the job did not survive")
 	s.rerunSnapshotRetention(ctx, l)
