@@ -115,11 +115,8 @@ unchanged since 2.7.0.
   still recorded as failed; and each GC pass fails any build left
   `building` for longer than twice the shared build timeout (one hour),
   logging the id, kind and age (`gc: marked stale building build failed
-  ...`) and emitting a lease-less `gc` event naming the build, so the row
-  becomes an ordinary candidate once it has been idle an hour
-  (spoond-4yl). A template build has no owner and never appears in
-  `/api/snapshots`, so the event is where its failure is visible; the
-  sweep emits it in dry-run mode too (spoond-rzz).
+  ...`), so the row becomes an ordinary candidate once it has been idle
+  an hour (spoond-4yl).
 
 - **Drain self-heal follow-ups: the half-sandbox cleanup only runs after
   a real Create, a wedged heal retry no longer holds off a drain, and an
