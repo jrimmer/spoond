@@ -148,6 +148,12 @@
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
 //	                  then answers 404). For hosts that run crash suites.
+//	JOB_MAX_RUNTIME  how long a background exec job may run before the
+//	                  reconcile pass kills it and marks it exited with
+//	                  reason timed_out (spoond-wb5; default 24h = 86400;
+//	                  a Go duration or seconds; a job may ask for a
+//	                  shorter max_runtime_secs, never a longer one; a
+//	                  negative value disables the cap)
 package spoondbackend
 
 import (

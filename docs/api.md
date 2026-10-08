@@ -597,9 +597,11 @@ max runtime: a job that has run for its effective cap is killed (the
 job's process group, like `POST .../signal`) and marked exited with
 reason `timed_out` and exit code `124`, and a `job_exited` event names
 the cap, so a `sleep infinity` cannot pin the lease's memory and
-hugepages forever. The cap is wall-clock from the job's start and
-applies while the lease is suspended too; `JOB_MAX_RUNTIME=0` (unset)
-is the 24 h default and a negative value disables the cap. Per-exec `secrets` stay staged under
+hugepages forever. The cap is wall-clock from the job's start; while the
+lease is suspended reconcile leaves the job running (the paused guest
+cannot be signalled) and the first reconcile after a resume kills a job
+whose cap was spent in the meantime. `JOB_MAX_RUNTIME=0` (unset) is the
+24 h default and a negative value disables the cap. Per-exec `secrets` stay staged under
 `/run/secrets` for the job's life and are removed when it exits (the
 guest wrapper removes them; the backend also removes them on
 reconcile). Neither `env` nor secret values are ever stored in the job

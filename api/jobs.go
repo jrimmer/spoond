@@ -700,37 +700,26 @@ func isJobTimedOut(job store.JobRow) bool {
 
 // killJobTimeout kills a job that has spent its effective max runtime and
 // marks the record exited with reason timed_out. It is the one place the
-// cap acts, so the manual signal path and the cap share signalJob's
-// process-group kill. Best effort: a kill that fails (the job already
-// died, the sandbox is gone) still writes the record, so a job that
-// cannot be signalled does not stay running forever. The stderr tail is
-// read after the kill so a command's dying words are kept.
+// cap acts, so it shares the manual signal path's process-group kill. The
+// record is marked first (a CAS on state='running') so the live watcher,
+// which sees the kill's signal exit, cannot win the race and record a
+// normal exit for a job the cap ended; the kill is then best effort, so a
+// job that cannot be signalled does not stay running forever. The stderr
+// tail is read before the kill so the command's output is kept.
 func (s *Service) killJobTimeout(ctx context.Context, job store.JobRow, sandboxID string, generation int64) {
-	lease := s.lookupAny(job.LeaseID)
-	if lease == nil || lease.SandboxID != sandboxID || lease.Generation != generation {
-		lease = nil // a cold restart moved the job's guest; do not signal the new one
-	}
-	if lease != nil {
-		if err := s.signalJob(ctx, lease, job, "KILL"); err != nil {
-			s.log.Printf("jobs: %s: max runtime spent; kill: %v", job.JobID, err)
-		}
-	}
 	tail, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes)
-	code, done, err := s.readJobRC(ctx, sandboxID, job.JobID)
-	if err != nil || !done {
-		// The wrapper never wrote rc: the job is gone and the rc file is
-		// not coming. Record the conventional timeout exit code (124, as
-		// exec's own timeout uses) so the record closes.
-		code = 124
-	}
-	s.finishJobTimedOut(ctx, job, code, tail, sandboxID, generation)
+	// 124 is the conventional timeout exit code, the same exec's own
+	// timeout uses; the wrapper may not write rc for a KILL, and the cap,
+	// not the command's own status, is what the record reports.
+	s.finishJobTimedOut(ctx, job, 124, tail, sandboxID, generation)
 }
 
 // finishJobTimedOut marks a running job exited because its max runtime
-// was spent, emits the job_exited event with a detail naming the cap and
-// releases the job's bookkeeping. Like finishJob it is idempotent: an
-// already-finished record is left alone, so the watcher and the reconcile
-// cannot both count it.
+// was spent, emits the job_exited event with a detail naming the cap,
+// releases the job's bookkeeping and then kills the job's process group
+// (best effort — the record is already closed). Like finishJob it is
+// idempotent: an already-finished record is left alone, so the watcher
+// and the reconcile cannot both count it.
 func (s *Service) finishJobTimedOut(ctx context.Context, job store.JobRow, exitCode int, stderrTail, sandboxID string, generation int64) error {
 	changed, err := s.db.MarkJobTimedOut(ctx, job.JobID, exitCode, time.Now().UTC(), stderrTail)
 	if err != nil {
@@ -742,6 +731,14 @@ func (s *Service) finishJobTimedOut(ctx context.Context, job store.JobRow, exitC
 	s.emitLeaseEvent(job.LeaseID, job.Owner, LeaseJobExited, jobTimedOutDetail(exitCode, stderrTail))
 	s.jobFinishedMetrics("timed_out")
 	s.decRunningJob(job.LeaseID)
+	// The record is closed; now stop the process itself. Signal the
+	// sandbox the job ran in, never a new one after a cold restart
+	// (leaseContinuity already checked the generation upstream).
+	if lease := s.lookupAny(job.LeaseID); lease != nil && lease.SandboxID == sandboxID && lease.Generation == generation {
+		if err := s.signalJob(ctx, lease, job, "KILL"); err != nil {
+			s.log.Printf("jobs: %s: max runtime spent; kill: %v", job.JobID, err)
+		}
+	}
 	s.removeJobSecrets(job.LeaseID, job.JobID, sandboxID, generation)
 	return nil
 }
