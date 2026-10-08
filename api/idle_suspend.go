@@ -170,6 +170,8 @@ func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error)
 		writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
 	case errors.Is(err, errLeaseBusy):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errLeaseReleased):
+		writeError(w, http.StatusNotFound, "lease not found")
 	case errors.Is(err, errQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, err.Error())
 	case errors.Is(err, errPreemptCannot):

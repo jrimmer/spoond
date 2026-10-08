@@ -865,8 +865,8 @@ func TestResumeOfReleasedLeaseDeletesSandbox(t *testing.T) {
 	t.Cleanup(func() { sub.createFn = nil })
 
 	before := calls(sub.Fake, "Delete")
-	if _, err := svc.resumeLease(ctx, l); !errors.Is(err, errNotFound) {
-		t.Fatalf("resume of a released lease = %v, want errNotFound", err)
+	if _, err := svc.resumeLease(ctx, l); !errors.Is(err, errLeaseReleased) {
+		t.Fatalf("resume of a released lease = %v, want errLeaseReleased", err)
 	}
 	if l.State != "suspended" || !l.Suspended {
 		t.Fatalf("lease = state=%s suspended=%v, want it left suspended", l.State, l.Suspended)

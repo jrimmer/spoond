@@ -506,6 +506,11 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				}
 				return
 			}
+			if errors.Is(err, errLeaseReleased) {
+				// The lease was released while its resume started: nothing
+				// to resume and nothing failed (spoond-775).
+				return
+			}
 			mu.Lock()
 			res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 			mu.Unlock()

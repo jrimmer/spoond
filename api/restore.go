@@ -93,11 +93,22 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	if err != nil {
 		return err
 	}
+	s.store.mu.Lock()
+	if l.released {
+		// Released while the restore created a fresh sandbox: stop it and
+		// write no lease or sandbox row back (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("restore: lease %s was released during its restore; stopping sandbox %s", l.ID, sb.ID)
+		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
+			s.log.Printf("restore: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
+		}
+		s.deleteSandboxRow(sb.ID)
+		return errLeaseReleased
+	}
 	if old := l.SandboxID; old != "" && old != sb.ID {
 		_ = s.sub.Delete(ctx, old)
 		s.deleteSandboxRow(old)
 	}
-	s.store.mu.Lock()
 	l.SandboxID = sb.ID
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
@@ -188,6 +199,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errLeaseReleased):
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errPreemptCannot):
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.

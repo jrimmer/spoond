@@ -333,6 +333,14 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	if err != nil {
 		return store.NamedSnapshotRow{}, false, s.mapSnapshotCheckpointError(err)
 	}
+	// The lease was released while the checkpoint ran: do not insert a
+	// named-snapshot row that would keep pointing at the build of a lease
+	// that no longer exists (spoond-775). The build itself is left for the
+	// GC as an ordinary candidate.
+	if s.leaseReleased(l) {
+		s.log.Printf("snapshot: lease %s was released during its save; build %s left unreferenced", l.ID, b.BuildID)
+		return store.NamedSnapshotRow{}, false, errLeaseNotFound()
+	}
 	// Walk to the template build at the root for the image_build_id and
 	// the versions.
 	imageBuildID, rootBuild, err := s.namedSnapshotBuildRoot(ctx, b.BuildID)
@@ -481,6 +489,10 @@ func (s *Service) mapSnapshotCheckpointError(err error) *namedSnapshotError {
 	var capErr *keptCapError
 	var budgetErr *keptBudgetError
 	switch {
+	case errors.Is(err, errLeaseReleased):
+		// The lease was released while the checkpoint ran: to the caller
+		// it is gone (spoond-775).
+		return errLeaseNotFound()
 	case errors.As(err, &capErr), errors.As(err, &budgetErr):
 		return errKeptBudget(err.Error())
 	default:

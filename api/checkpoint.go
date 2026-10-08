@@ -151,6 +151,15 @@ func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease, keep bool) 
 	}
 	b, err := s.checkpointLease(ctx, l)
 	if err == nil && keep {
+		// A lease released while the checkpoint ran must not gain a kept
+		// build: release dropped its pins, and a late insert would either
+		// fail the FK or leave a row pointing at a build of a lease that
+		// no longer exists (spoond-775). The checkpoint build stands as an
+		// ordinary, GC-able candidate.
+		if s.leaseReleased(l) {
+			s.log.Printf("checkpoint: lease %s was released during its checkpoint; not keeping build %s", l.ID, b.BuildID)
+			return b, errLeaseReleased
+		}
 		// The owner's byte budget (#126) runs before the pin: the build's
 		// size is only known now that it is written. Over budget, the pin
 		// is refused and the error names the build — the checkpoint stays
@@ -396,6 +405,10 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errLeaseReleased):
+			// The lease was released while the checkpoint ran: to the
+			// caller it is gone, so 404 like every unknown lease.
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.As(err, &capErr):
 			// At the per-lease cap (#126): nothing was taken, nothing
 			// evicted; the caller unpins a build to free a slot.
