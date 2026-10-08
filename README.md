@@ -386,7 +386,7 @@ may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `SWEEP_TIMEOUT`), the
 per-call E2B RPC bounds (`E2B_CREATE_TIMEOUT` and friends), named
 snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
-(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`), `CRASH_TEST`, the
+(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`), `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
 the held-lease
 limits (`HOLD_TTL_SECS` and the rest, in
