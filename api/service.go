@@ -1177,6 +1177,15 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		s.metrics.CreateDur.WithLabelValues(strconv.FormatBool(resume)).Observe(time.Since(start).Seconds())
 	}
 	if err != nil {
+		// A failed resume Create can leave a half-started sandbox behind;
+		// remove it (best effort) so the retry can reuse the same sandbox
+		// id. Only a resume reuses an existing id, so only it needs the
+		// cleanup; a refusal before the Create (admission, node status)
+		// never reached the orchestrator and must not delete or log
+		// (spoond-52c S2/NIT).
+		if resume {
+			s.deleteHalfSandbox(ctx, l, sandboxID)
+		}
 		return substrate.Sandbox{}, err
 	}
 	s.recordAppliedEgress(l.ID, eg)
@@ -2549,15 +2558,11 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	}
 	sb, err := s.createSandbox(ctx, img, b, true, l.SandboxID, l)
 	if err != nil {
-		// A failed Create can leave a half-started sandbox behind; remove
-		// it (best effort) so the retry can reuse the same sandbox id.
-		// This runs inside the caller's busy window and only on a
-		// createSandbox error, not on a refusal before the Create
-		// (spoond-52c S2/NIT). A create refused because the lease was
-		// released has already stopped its sandbox (spoond-775).
-		if !errors.Is(err, errLeaseReleased) {
-			s.deleteHalfSandbox(ctx, l)
-		}
+		// createSandbox already removed any half-started sandbox after a
+		// failed Create, inside the busy window, so the retry can reuse
+		// the same sandbox id (spoond-52c S2/NIT). A create refused because
+		// the lease was released has already stopped its fresh sandbox
+		// there too (spoond-775), so nothing is deleted twice.
 		return nil, err
 	}
 	s.store.mu.Lock()

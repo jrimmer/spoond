@@ -26,6 +26,22 @@ summarised from README "Status".
 
 ### Fixed
 
+- **Drain self-heal follow-ups: the half-sandbox cleanup only runs after
+  a real Create, a wedged heal retry no longer holds off a drain, and an
+  admin undrain gives the new deferral a fresh budget.** A resume refused
+  before the orchestrator (admission, node status) no longer issues a
+  Delete for the still-paused sandbox or logs a bogus cleanup line; the
+  delete runs only when a Create actually reached the orchestrator. The
+  heal releases its `drainGate` read side for each retry backoff, so an
+  admin drain waiting on the write side gets in between attempts instead
+  of after the whole retry budget (a wedged Create can run the full
+  `E2B_CREATE_TIMEOUT` each time), and re-checks draining before the next
+  attempt. An admin undrain that defers a lease drops any earlier
+  drain-heal entry, so a give-up from a previous restart does not silently
+  skip the new deferral or spend its budget early. `DRAIN_RESUME_MAX_AGE`
+  also accepts a plain integer of seconds (matching `E2B_*_TIMEOUT`) as
+  setup.md already claimed, rather than reading it as the default.
+
 - **A checkpoint, pause, resume or restore that finishes after its lease
   was released no longer writes the lease row back.** A release running
   while one of those operations was in flight removed the lease from

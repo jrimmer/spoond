@@ -189,13 +189,20 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 // envDurationOrZero is envDurationOr but accepts a zero or negative value
 // too. DrainResumeMaxAge reads 0 as "use the default" and a negative value
 // as "disable the bound", so the variable can express a negative one from
-// the environment (spoond-52c NIT). A missing or malformed value returns
-// def.
+// the environment (spoond-52c NIT). Like envDuration, a plain integer is
+// read as a number of seconds, so a bare "3600" is an hour rather than a
+// silently ignored value that falls back to the default (spoond-52c NIT).
+// A missing or malformed value returns def.
 func envDurationOrZero(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return time.Duration(n) * time.Second
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
 	}
 	return def
 }
