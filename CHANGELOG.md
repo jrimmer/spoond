@@ -126,6 +126,40 @@ unchanged since 2.7.0.
 
 ### Fixed
 
+- **Recovery and preempt-resume retry transient failures and give up on
+  permanent ones.** A lease whose crash recovery failed was marked `lost`
+  on the first error, including a busy node's envd timeout, a deadline or
+  a capacity refusal that a retry would clear, and the rootfs-probe
+  recovery took the same path. Recovery now classifies the failure and
+  retries anything that is not permanent — the deliberate inverse of
+  `resumeRetryable` — leaving the lease live with no sandbox for the next
+  reconcile pass (there is no new state: a recovering lease keeps its
+  `running`/`recovered` state). A counted failure is bounded by
+  `RECOVERY_RETRY_ATTEMPTS` (default 3) and `RECOVERY_RETRY_WINDOW`
+  (default 30m) since the first failure; a substrate capacity refusal is
+  a wait for room, so it does not count an attempt (admission refusals
+  cannot reach a live lease's recovery, which skips admission) but is
+  still bounded by the window; a missing checkpoint build or image is
+  permanent and loses the lease at once. Every transient failure emits a
+  `recovery_retry` event naming the attempt and the cause, and `GET`
+  exposes the pending retry as `recovery: {attempt, of, since}`. The
+  lease is marked `lost` with a reason naming the attempts and the error
+  when the budget is spent. The recovery budget is keyed by the sandbox
+  that failed and dropped whenever the lease gets a new one (restart,
+  restore, resume), on recovery success, loss and release, so a stale
+  budget can never make reconcile roll a healthy lease back to an old
+  checkpoint. Separately, the preemption resume queue retried a
+  permanently failing resume every 15 s for ever, each a real
+  orchestrator `Create`; it now counts non-admission failures and, after
+  `PREEMPT_RESUME_RETRIES` (default 3), marks the lease `lost` with the
+  reason and emits a `lost` event. A preempted lease parked for room is
+  different: its admission/capacity refusal neither counts nor starts the
+  window, and a wait also resets the window origin of any budget a
+  counted failure already started, so a long wait for room between two
+  counted failures cannot age an intact lease out; it waits for room
+  indefinitely and resumes when room appears. A recovery or preempt loss
+  that races a release no longer resurrects the released lease or emits a
+  late `lost` event (`spoond-dxq`).
 - **A lost lease is released automatically once its grace period
   lapses, freeing its owner's quota.** A lease in state `lost` was never
   released unless its owner deleted it: it kept holding the owner's

@@ -61,6 +61,16 @@ const (
 	// because its owner's guarantee has room again (#128): bookkeeping
 	// only, the VM is untouched.
 	LeasePromoted LeaseEventType = "promoted"
+	// LeaseRetry marks a transient crash-recovery failure that keeps the
+	// lease recovering for another pass (spoond-dxq): the detail names the
+	// attempt and the cause, so an owner sees the retry rather than a
+	// silent wait.
+	LeaseRetry LeaseEventType = "recovery_retry"
+	// LeaseRootfsDead marks a lease whose root disk answered I/O errors
+	// (the rootfs liveness probe): the sandbox is treated as crashed and
+	// the shared recovery runs. It is not a `lost` event — the recovery
+	// may still recover the lease or leave it retrying (spoond-dxq).
+	LeaseRootfsDead LeaseEventType = "rootfs_dead"
 	// LeaseJobStarted, LeaseJobExited and LeaseJobLost mark a background
 	// exec job's life (2.6, #135): started carries the command (cut to
 	// 120 chars), exited the exit code and a short stderr tail, lost a

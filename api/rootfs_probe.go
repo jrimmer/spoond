@@ -124,11 +124,19 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 	// countRootfsFailure takes rootfsProbeMu and then the store lock, so
 	// this path must never hold the store lock while taking rootfsProbeMu.
 	aliveAt := s.rootfsAliveSnapshot()
+	// A lease already waiting for a recovery retry must not be probed: its
+	// sandbox was deleted (or its create failed) and a probe would only
+	// fail, bump a stale count and stamp a spurious rootfs_dead / the wrong
+	// lost_reason ahead of the retry (spoond-dxq SH2).
+	recoveryPending := s.recoveryPendingSandboxes()
 
 	s.store.mu.Lock()
 	var targets []*Lease
 	for _, l := range s.store.leases {
 		if l.released || !l.live() || l.busy {
+			continue
+		}
+		if recoveryPending[l.SandboxID] {
 			continue
 		}
 		if ok, seen := aliveAt[l.ID]; seen && now.Sub(ok) < every {
@@ -345,25 +353,26 @@ func (s *Service) recoverDeadRootfs(parent context.Context, l *Lease) {
 	ctx, cancel := context.WithTimeout(context.Background(), crashTestTimeout)
 	defer cancel()
 	// The marker goes first: a stream reader sees why the recovery
-	// happened before the recovered/lost event that follows. The reason is
-	// stamped on the lease now, so a lost lease answers with the root-disk
-	// cause even though the recovery event below carries its own detail.
+	// happened before the recovered/lost/retry event that follows. The
+	// reason is stamped on the lease now, so a lease the recovery finally
+	// loses answers with the root-disk cause even though the recovery
+	// event below carries its own detail. It is not a `lost` event: a
+	// transient failure leaves the lease recovering, and a lost event here
+	// would announce a loss that has not happened (spoond-dxq).
 	s.store.mu.Lock()
 	setLostReason(l, "root disk unreadable (I/O errors)")
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, "root disk unreadable (I/O errors)")
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseRootfsDead, "root disk unreadable (I/O errors)")
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("rootfs probe: lease %s delete sandbox %s: %v", l.ID, l.SandboxID, err)
 	}
 	s.deleteSandboxRow(l.SandboxID)
+	// recoverOneLease stores the loss reason and runs snapshot retention
+	// on a loss; a transient failure leaves the lease for the crash
+	// reconcile to retry (spoond-dxq).
 	s.recoverOneLease(ctx, l)
-	// If the recovery marked the lease lost, a version it started from is
-	// no longer in use and retention may drop it now (S5).
-	if l.State == "lost" {
-		s.rerunSnapshotRetention(ctx, l)
-	}
 	s.forgetRootfs(l.ID)
 }
 

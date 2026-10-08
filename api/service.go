@@ -390,6 +390,26 @@ type ServiceConfig struct {
 	// cmd maps an unset variable to DefaultUndrainResumeRetries (2).
 	// spoond-urm.
 	UndrainResumeRetries int
+	// RecoveryRetryAttempts is how many failed crash-recovery attempts
+	// (a transient failure of recoverFromCheckpoint) a lease gets before
+	// it is marked lost (RECOVERY_RETRY_ATTEMPTS). <=0 uses
+	// DefaultRecoveryRetryAttempts. Recovery counts anything not
+	// permanent; only a substrate capacity refusal waits for room
+	// without counting (admission is skipped for a live lease).
+	// spoond-dxq.
+	RecoveryRetryAttempts int
+	// RecoveryRetryWindow bounds how long a lease may stay in recovery
+	// since its first failed attempt, whatever the failure kind
+	// (RECOVERY_RETRY_WINDOW). It is the backstop that stops a capacity
+	// refusal from waiting forever. <=0 uses DefaultRecoveryRetryWindow.
+	// spoond-dxq.
+	RecoveryRetryWindow time.Duration
+	// PreemptResumeRetries is how many failed resume attempts a preempted
+	// lease gets from the preemption resume queue before it is marked
+	// lost (PREEMPT_RESUME_RETRIES). Admission/capacity refusals do not
+	// count and wait for capacity. <=0 uses DefaultPreemptResumeRetries.
+	// spoond-dxq.
+	PreemptResumeRetries int
 	// SweepTimeout bounds one background sweep stage (TTL release, held
 	// rules, pool refill, job prune) and each other background loop
 	// pass. The substrate bounds every individual RPC too (spoond-j3a);
@@ -444,6 +464,20 @@ type Service struct {
 	// rootfsProbeAllFailedLogged suppresses the "every probe failed"
 	// line to once per outage rather than once per pass.
 	rootfsProbeAllFailedLogged bool
+	// retryMu guards the per-lease retry budgets below. recoveryRetries
+	// counts the failed crash-recovery attempts of a lease, keyed by the
+	// sandbox id that failed (so a lease given a new sandbox is never
+	// rolled back to an old checkpoint by a stale budget); preemptRetries
+	// counts the failed resume attempts of a preempted lease, keyed by its
+	// lease id (spoond-dxq). Both are in memory: a lease that recovers, is
+	// lost or is released has its entry dropped.
+	retryMu         sync.Mutex
+	recoveryRetries map[string]*retryBudget
+	preemptRetries  map[string]*retryBudget
+	// preemptCapLogAt is when the per-lease "deferred (waiting for
+	// capacity)" line was last logged, so a lease parked for a long time
+	// does not repeat it every resume tick. Guarded by retryMu.
+	preemptCapLogAt map[string]time.Time
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
 	// sweepTimeout bounds one background sweep stage and each other
@@ -639,10 +673,6 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		cfg:                       cfg,
 		sweepInterval:             5 * time.Second,
 		sweepTimeout:              sweepTimeoutOrDefault(cfg.SweepTimeout),
-		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
-		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
-		orphanSweepInterval:       defaultOrphanSweepInterval,
-		orphanSandboxIDs:          map[string]struct{}{},
 		now:                       time.Now,
 		diskCapacity:              statfsCapacity,
 		diskUsage:                 store.BuildDiskUsage,
@@ -653,6 +683,13 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		probeTimeout:              20 * time.Second,
 		rootfsProbeOK:             map[string]time.Time{},
 		rootfsProbeFails:          map[string]*rootfsProbeFailure{},
+		recoveryRetries:           map[string]*retryBudget{},
+		preemptRetries:            map[string]*retryBudget{},
+		preemptCapLogAt:           map[string]time.Time{},
+		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
+		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
+		orphanSweepInterval:       defaultOrphanSweepInterval,
+		orphanSandboxIDs:          map[string]struct{}{},
 		bus:                       newEventBus(),
 		gcErr:                     newGCTracker(),
 		liveJobSecrets:            map[string][]string{},
@@ -1551,6 +1588,12 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	s.settleJobsOfReleasedLease(ctx, l)
 	// The rootfs probe's per-lease state goes with the lease.
 	s.forgetRootfs(l.ID)
+	// A released lease has no in-flight recovery or resume: drop both
+	// retry budgets (spoond-dxq S2), so a later release or sandbox reuse
+	// cannot trip a stale budget.
+	s.clearRecoveryRetries(l)
+	s.clearRetry(s.preemptRetries, l.ID)
+	s.clearPreemptCapLog(l.ID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
@@ -2463,6 +2506,13 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	} else {
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "resumed from build "+resumeBuild)
 	}
+	// The lease is running again from its sandbox: any crash-recovery
+	// budget keyed by that sandbox is stale (spoond-dxq B2).
+	s.clearRecoveryRetries(l)
+	// A successful resume ends any pending preempt-resume budget too, so
+	// a later preemption starts fresh.
+	s.clearRetry(s.preemptRetries, l.ID)
+	s.clearPreemptCapLog(l.ID)
 	// A resume frees its prior preemption and can move capacity: retry
 	// waiting creates (#129).
 	s.wakeAdmissionQueue()
@@ -2568,6 +2618,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// The fresh sandbox has no crash-recovery budget: a stale one must not
+	// bypass reconcile's 'present' check (spoond-dxq B2).
+	s.clearRecoveryRetries(l)
 	// The fresh guest runs none of the old jobs: every running one is
 	// lost (2.6, #135).
 	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease restarted; the job did not survive")
@@ -2647,6 +2700,8 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// The fresh sandbox has no crash-recovery budget (spoond-dxq B2).
+	s.clearRecoveryRetries(l)
 	// The fresh guest runs none of the old jobs: every running one is
 	// lost (2.6, #135).
 	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease restarted; the job did not survive")
@@ -3499,6 +3554,16 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	// state (the same text every 410 lease_lost response carries).
 	if l.State == "lost" && l.LostReason != "" {
 		m["lost_reason"] = l.LostReason
+	}
+	// A pending crash-recovery retry (spoond-dxq): the owner sees the
+	// attempt, the limit and since when, rather than a silent wait for the
+	// next reconcile pass.
+	if attempt, of, since, ok := s.recoveryStatus(l); ok {
+		m["recovery"] = map[string]any{
+			"attempt": attempt,
+			"of":      of,
+			"since":   formatRFC3339(since),
+		}
 	}
 	kept := []map[string]any{}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)

@@ -9,9 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Admin endpoints (U10): POST /api/admin/drain pauses every running
@@ -262,7 +259,7 @@ func resumeRetryable(err error) bool {
 	}
 	// Permanent: the image or build the resume needs is gone. A retry
 	// cannot bring it back, so the lease goes lost at once.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, substrate.ErrNotFound) || errors.Is(err, errNotFound) {
+	if permanentNotFound(err) {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -418,24 +415,28 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			}
 			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
 			s.store.mu.Lock()
-			l.Drained = false
-			s.saveLeaseLocked(l)
 			released := l.released
+			if !released {
+				// markLost saves the row, Drained=false with it.
+				l.Drained = false
+				s.markLost(l, reason)
+			}
 			s.store.mu.Unlock()
 			if released {
 				// The lease was released while this resume was in flight:
 				// the release already stopped its sandbox and emitted the
-				// released event, so a loss must not resurrect it.
+				// released event, so a loss must not resurrect it (no
+				// save, spoond-775).
 				mu.Lock()
 				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 				mu.Unlock()
 				return
 			}
-			// markLost stops the half-started sandbox a failed resume left
-			// behind (the retry loop cleans it between attempts, but the
-			// last failure must stop it too), so lost means stopped
+			// Stop the half-started sandbox a failed resume left behind
+			// (the retry loop cleans it between attempts, but the last
+			// failure must stop it too), so lost means stopped
 			// (spoond-63a).
-			s.markLost(l, reason)
+			s.stopLostSandbox(l.SandboxID, l.ID)
 			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 			// A lease started from a named snapshot no longer protects it
 			// once lost (#83 S5).
