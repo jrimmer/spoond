@@ -52,6 +52,9 @@ type testSub struct {
 	// createFn, when set, replaces the fake's Create: it may run while a
 	// create is in flight (the crash-reconcile-rootfs-probe race test).
 	createFn func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error)
+	// setDrainingFn, when set, replaces the fake's SetDraining: a test
+	// makes SetDraining(false) fail once and then succeed (spoond-52c R1).
+	setDrainingFn func(ctx context.Context, draining bool) error
 
 	// lastStart records the most recent Start request (the stream tests
 	// pin the initial PTY size it carries).
@@ -103,6 +106,14 @@ func (ts *testSub) Pause(ctx context.Context, sandboxID, templateID string) (str
 		return ts.pauseFn(ctx, sandboxID, templateID)
 	}
 	return ts.Fake.Pause(ctx, sandboxID, templateID)
+}
+
+// SetDraining delegates to setDrainingFn when set, the fake otherwise.
+func (ts *testSub) SetDraining(ctx context.Context, draining bool) error {
+	if ts.setDrainingFn != nil {
+		return ts.setDrainingFn(ctx, draining)
+	}
+	return ts.Fake.SetDraining(ctx, draining)
 }
 
 // Create delegates to createFn when set, the fake otherwise.

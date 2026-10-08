@@ -119,6 +119,10 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	// The restored lease is no longer drained, so a stale self-heal
+	// backoff must not skip a later planned restart's deferral
+	// (spoond-52c B3).
+	s.clearDrainHeal(l.ID)
 	s.writeGeneration(l)
 	// The restored sandbox has no crash-recovery budget (spoond-dxq B2).
 	s.clearRecoveryRetries(l)

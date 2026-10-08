@@ -417,6 +417,21 @@ type ServiceConfig struct {
 	// lease's busy flag, even if a substrate call ignores its context.
 	// 0 = DefaultSweepTimeout. SWEEP_TIMEOUT.
 	SweepTimeout time.Duration
+	// DrainMaxSecs bounds how long a drain may stay in effect while the
+	// node is healthy before spoond undrains itself, logs it and emits
+	// an event (DRAIN_MAX_SECS, default DefaultDrainMaxSecs = 900). A
+	// drain outliving its orchestrator restart must not keep refusing
+	// creates forever. 0 means the default; a negative value (tests
+	// only) disables the automatic undrain.
+	DrainMaxSecs int
+	// DrainResumeMaxAge bounds how long the drain self-heal loop keeps
+	// retrying a lease whose resume is deferred (DRAIN_RESUME_MAX_AGE,
+	// default DefaultDrainResumeMaxAge = 24h). Past it the loop stops,
+	// keeps the lease suspended (its snapshot is intact) and emits a
+	// drain_gave_up event, leaving the exit to the owner or the idle
+	// rules. 0 means the default; a negative value (tests only) disables
+	// the bound.
+	DrainResumeMaxAge time.Duration
 }
 
 // Service is the lease API backend.
@@ -517,6 +532,33 @@ type Service struct {
 	// draining is true while the admin drain is running (U10): pool
 	// refill, idle sweep, GC and the crash reconcile skip until undrain.
 	draining atomic.Bool
+	// drainClearPending is true after an undrain's SetDraining(false)
+	// failed: the node's drain could not be cleared, so spoond keeps its
+	// own draining state and the self-heal loop retries the clear (not
+	// gated on DRAIN_MAX_SECS, and even when no drained lease remains)
+	// until it succeeds (spoond-52c R1).
+	drainClearPending atomic.Bool
+	// undraining is true while an undrain is resuming the drained
+	// leases, so the self-heal loop does not race it with a second pass.
+	undraining atomic.Bool
+	// drainStartedAt is when the current drain began (unix nanos; 0 =
+	// not draining). The self-heal loop undrains a drain older than
+	// DRAIN_MAX_SECS while the node is healthy, and the notifier warns
+	// once it passes half that age.
+	drainStartedAt atomic.Int64
+	// drainHealMu guards the per-lease drain self-heal backoff (a
+	// deferred resume is retried with exponential backoff
+	// drainHealBackoffMin doubling to drainHealBackoffMax, rather than
+	// every pass, and gives up at DRAIN_RESUME_MAX_AGE, spoond-52c B2)
+	// and the rate limiter for the loop's "node info" log while the
+	// orchestrator is down. Keyed by lease id.
+	drainHealMu sync.Mutex
+	drainHeal   map[string]*drainHealState
+	// drainNodeInfoLogAt is when the self-heal loop last logged a node-info
+	// failure; a down orchestrator logs at most once per
+	// drainHealBackoffMax rather than every pass (spoond-52c NIT). Guarded
+	// by drainHealMu.
+	drainNodeInfoLogAt time.Time
 	// drainGate serialises the admin drain with the rootfs probe's
 	// recovery (spoond-5ca). drain takes the write side around
 	// SetDraining and draining.Store(true); recoverDeadRootfs holds the
@@ -665,6 +707,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		recoveryRetries:       map[string]*retryBudget{},
 		preemptRetries:        map[string]*retryBudget{},
 		preemptCapLogAt:       map[string]time.Time{},
+		drainHeal:             map[string]*drainHealState{},
 		bus:                   newEventBus(),
 		gcErr:                 newGCTracker(),
 		liveJobSecrets:        map[string][]string{},
@@ -1192,6 +1235,14 @@ func (s *Service) runSweepStage(ctx context.Context, name string, stage func(con
 // is cancelled or Shutdown stops it.
 func (s *Service) Start(ctx context.Context) {
 	ctx, s.stopLoops = context.WithCancel(ctx)
+	// Adopt a node another process left draining (a backend restart
+	// between drain and undrain), so the self-heal loop does not believe
+	// a draining node is healthy and undrain it mid-planned-stop
+	// (spoond-52c B1). Best effort: an unreachable node leaves the state
+	// to the self-heal loop.
+	adoptCtx, cancelAdopt := context.WithTimeout(ctx, s.sweepTimeout)
+	s.adoptDrainState(adoptCtx)
+	cancelAdopt()
 	go func() {
 		t := time.NewTicker(s.sweepInterval)
 		defer t.Stop()
@@ -1267,6 +1318,10 @@ func (s *Service) Start(ctx context.Context) {
 	// Queued admission (#129 part 1): retry waiting creates every 5 s
 	// even when nothing signalled.
 	go s.runAdmitQueueLoop(ctx)
+	// Drain self-heal (spoond-52c): undrain a drain that outlived
+	// DRAIN_MAX_SECS on a healthy node, and resume any lease left
+	// Drained by a failed or deferred undrain.
+	go s.startDrainHealLoop(ctx)
 	// Webhook notifications (2.2, #117): forward the bus's
 	// person-relevant events. Only when a notifier is installed.
 	if s.notifier != nil {
@@ -1565,6 +1620,9 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	s.clearRecoveryRetries(l)
 	s.clearRetry(s.preemptRetries, l.ID)
 	s.clearPreemptCapLog(l.ID)
+	// A release drops any drain self-heal backoff the lease carried, so a
+	// later planned restart's deferral starts fresh (spoond-52c B3).
+	s.clearDrainHeal(l.ID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
@@ -2452,9 +2510,28 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	}
 	sb, err := s.createSandbox(ctx, img, b, true, l.SandboxID, l)
 	if err != nil {
+		// A failed Create can leave a half-started sandbox behind; remove
+		// it (best effort) so the retry can reuse the same sandbox id.
+		// This runs inside the caller's busy window and only on a
+		// createSandbox error, not on a refusal before the Create
+		// (spoond-52c S2/NIT).
+		s.deleteHalfSandbox(ctx, l)
 		return nil, err
 	}
 	s.store.mu.Lock()
+	if l.released {
+		// A release raced the resume's Create: the lease row is gone and
+		// the sandbox we just created belongs to nobody. Do not save the
+		// released lease back and remove the sandbox (spoond-775 class,
+		// spoond-52c S4).
+		s.store.mu.Unlock()
+		s.log.Printf("resume: lease %s released during resume; deleting its new sandbox %s", l.ID, sb.ID)
+		if dErr := s.sub.Delete(context.WithoutCancel(ctx), sb.ID); dErr != nil {
+			s.log.Printf("resume: delete sandbox of released lease %s: %v", l.ID, dErr)
+		}
+		s.deleteSandboxRow(sb.ID)
+		return nil, errNotFound
+	}
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = resumeBuild
@@ -2463,12 +2540,22 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	preempted := !l.PreemptedAt.IsZero()
 	l.setState("running")
 	l.Suspended = false
+	// The drain paused this lease into its pause build; an owner's own
+	// resume (or any other resume) brings it back running, so the flag
+	// must not linger — otherwise it stays disabled for resume-on-next-
+	// call and a later undrain would resume a lease the owner suspended
+	// by hand (spoond-52c L4).
+	l.Drained = false
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	// The secrets tmpfs does not survive a snapshot cycle: re-write the
 	// lease's create-time secrets after the sandbox is back (#80).
 	s.restageCreateSecrets(ctx, l, "resume")
+	// The lease is no longer drained, so its self-heal backoff must not
+	// outlive the flag: a later planned restart's deferral starts fresh
+	// (spoond-52c B3).
+	s.clearDrainHeal(l.ID)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
