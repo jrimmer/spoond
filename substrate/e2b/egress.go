@@ -19,7 +19,7 @@ import (
 // port scope (only allowed_private carries TcpPorts), so the fallback cannot
 // be limited to port 53; it is dropped entirely when the deployment configures
 // a private guest resolver (substrate.Egress.GuestDNS). Production does
-// (SPOOND_GUEST_DNS_ADDR=10.1.0.2, already granted port 53 by
+// (SPOOND_GUEST_DNS_ADDR=10.1.0.2,10.1.0.3, each already granted port 53 by
 // api/service.go's dnsAllowance), so production sends no public fallback and a
 // domain-bearing restricted lease gains no route to 8.8.8.8. A deployment
 // without a configured resolver keeps the fallback, because the guest then has

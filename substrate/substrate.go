@@ -19,11 +19,11 @@ type Egress struct {
 	DeniedCIDRs    []string
 	AllowedDomains []string
 	Private        []PrivateAllowance
-	// GuestDNS reports that the deployment configures a private guest
-	// resolver (SPOOND_GUEST_DNS_ADDR) and grants it port 53, so domains
-	// resolve without the public DNS fallback and none is added. False
-	// means the guest relies on a public resolver and the fallback is
-	// needed.
+	// GuestDNS reports that the deployment configures one or more private
+	// guest resolvers (SPOOND_GUEST_DNS_ADDR, comma-separated) and grants
+	// them port 53, so domains resolve without the public DNS fallback and
+	// none is added. False means the guest relies on a public resolver and
+	// the fallback is needed.
 	GuestDNS bool
 }
 
