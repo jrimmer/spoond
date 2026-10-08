@@ -1724,7 +1724,7 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		if s.snapshotBusy() {
 			break
 		}
-		if _, err := s.suspend(ctx, l.Owner, l.ID); err != nil {
+		if _, err := s.suspendWith(ctx, l.Owner, l.ID, suspendPolicy{reason: suspendReasonIdle}); err != nil {
 			s.log.Printf("idle sweep: suspend %s: %v", l.ID, err)
 			continue
 		}
@@ -2565,6 +2565,13 @@ func (s *Service) discardPoolSandbox(ctx context.Context, id string) {
 // suspend pauses a persistent lease's sandbox into a new build and stops
 // it. The lease stays; resume restores it with the same sandbox id.
 func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error) {
+	return s.suspendWith(ctx, owner, id, suspendPolicy{})
+}
+
+// suspendWith is suspend with the structured suspension facts an
+// automatic caller records (#145 D6): the plain IDLE_TIMEOUT_SECS sweep
+// passes reason idle. A hand suspend passes the zero policy.
+func (s *Service) suspendWith(ctx context.Context, owner, id string, pol suspendPolicy) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
 	if l == nil || l.Owner != owner || l.released {
@@ -2581,7 +2588,7 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 	}
 	s.store.mu.Unlock()
 
-	if _, err := s.pauseLease(ctx, l, false); err != nil {
+	if _, err := s.pauseLeaseWith(ctx, l, false, pol); err != nil {
 		return nil, err
 	}
 	return l, nil
@@ -2732,18 +2739,18 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		l.LastAction = pauseActionDrain
 	}
 	l.LastActionAt = s.now()
-	// The structured suspension facts (#145 D6) describe this suspend:
-	// the automatic reason and pressure step (empty for a hand or drain
-	// pause) plus the pause build and when. They are cleared on resume.
-	l.SuspendReason = pol.reason
-	l.SuspendPolicyStep = pol.policyStep
+	// The structured suspension facts (#145 D6): the pause build and when
+	// describe every suspend; the reason and pressure step describe an
+	// automatic one (idle|idle_suspend|hold_lapsed|pressure|preempt). A
+	// hand or drain pause has no automatic reason, so those two stay
+	// empty and the fields are omitted. Stale facts from an earlier
+	// suspension are dropped first; all four are cleared on resume.
+	clearSuspendFactsLocked(l)
 	l.SuspendBuildID = buildID
 	l.SuspendedAt = l.LastActionAt
-	if pol.reason == "" {
-		// A hand or drain suspend carries no automatic reason: keep the
-		// lease's fields empty rather than a stale earlier suspension's.
-		l.SuspendReason = ""
-		l.SuspendPolicyStep = ""
+	if pol.reason != "" {
+		l.SuspendReason = pol.reason
+		l.SuspendPolicyStep = pol.policyStep
 	}
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
