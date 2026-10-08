@@ -181,15 +181,20 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 }
 
 // eventStyle is the grid style an event is drawn with: warn for lost,
-// held-lease actions and idle suspensions, and for a release whose
-// reason names a failure (the CI runner's "✗"); ok for a gc pass that
-// deleted something (spoond's own maintenance); dim for releases, text
-// for the rest.
+// held-lease actions and idle suspensions, and for a release or gc pass
+// whose detail names a failure (the CI runner's "✗", the GC's stale-build
+// failure); ok for a gc pass that deleted something (spoond's own
+// maintenance); dim for releases, text for the rest.
 func eventStyle(ev dashEvent) string {
 	switch ev.Type {
 	case "lost", "held_action", "job_lost", "idle_suspended":
 		return "warn"
 	case "gc":
+		// A pass that failed a stale building row is maintenance that
+		// went wrong, not a successful reclaim (spoond-rzz).
+		if strings.Contains(ev.Detail, "failed") {
+			return "warn"
+		}
 		return "ok"
 	case "released":
 		if strings.Contains(ev.Detail, "✗") {
