@@ -143,9 +143,11 @@ When a worker takes a task it now:
    default 20 minutes, or a task's `Verify-Timeout:` line in minutes),
    and the number of rounds is sized from the diff: under ~200 changed
    lines gets one verify round, larger diffs up to `SWARM_MAX_ROUNDS`.
-   On timeout the worker reports `BLOCKED` at once with the partial
-   notes instead of spending a second identical try. The verifier's
-   prompt asks for findings first, gates second.
+   The cap counts verifies, not loop iterations: an implement round whose
+   gates fail goes straight to another implement pass without spending a
+   verify round. On timeout the worker reports `BLOCKED` at once with the
+   partial notes instead of spending a second identical try. The
+   verifier's prompt asks for findings first, gates second.
 4. **Reports the base and the timings.** A `[DONE]` names the base
    commit it was verified on (`verified on base: <sha> (<base ref>)`);
    `[DONE]` and `[BLOCKED]` both carry `timings: implement …, rebase …,

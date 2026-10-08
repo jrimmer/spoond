@@ -9,6 +9,9 @@
 # rewrites the base: the worker only ever moves the task branch.
 #
 # Callers source this file; it defines functions and sets no shell options.
+# Do not add `set -e` (or any option) here: the loop already runs under
+# `set -uo pipefail` and changing that would silently change its error
+# semantics.
 
 # worker_migrations WT REV: the numeric version and file name of every
 # store/migrations/*.sql file at REV, as "<version> <file>" lines sorted

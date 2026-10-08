@@ -38,9 +38,17 @@
 # count and the push decision are all measured against it. Before the
 # branch is verified (and again before a DONE is pushed) it is rebased onto
 # the fetched base; a conflicted rebase is resolved by the implementer and
-# every gate is rerun. Verify-Timeout: caps one verify round in minutes
-# (default 20).
+# every gate is rerun, consuming an extra implement pass out of the same
+# round budget (worth knowing when MAX_ROUNDS is small). A round whose
+# gates fail (including the migration guard) does not spend a verify round:
+# it goes straight to another implement pass. Verify-Timeout: caps one
+# verify round in minutes (default 20).
 set -uo pipefail
+# Mail is read through a few pipelines whose last stage is a sed/grep;
+# lastpipe keeps that stage in the current shell so the intent is explicit
+# (the loops here do not need to mutate the parent, so behaviour does not
+# depend on it). Bash-only, like the pipefail above.
+shopt -s lastpipe
 
 : "${SWARM_NAME:?}" "${AMAIL_URL:?}" "${AMAIL_PROJECT:?}" "${SWARM_IMPL_MODEL:?}" \
   "${SWARM_VERIFY_MODEL:?}" "${AMAIL_TOKEN:?}" "${SWARM_DEPLOY_KEY_B64:?}"
@@ -62,10 +70,10 @@ if [ -r "$WGIT" ]; then
 else
   echo "worker-git.sh not found beside $0" >&2
 fi
-mkdir -p $W/repos $W/tasks
-exec >>$W/worker.log 2>&1
+mkdir -p "$W/repos" "$W/tasks"
+exec >>"$W/worker.log" 2>&1
 echo "worker-start $SWARM_NAME $(date -Is)"
-status() { echo "$1" > $W/status; echo "status: $1"; }
+status() { echo "$1" > "$W/status"; echo "status: $1"; }
 status starting
 
 export HOME=/root AMAIL_AS=$SWARM_NAME AMAIL_URL AMAIL_PROJECT
@@ -91,9 +99,9 @@ export GIT_SSH_COMMAND="ssh -i /root/.ssh/swarm_key -o IdentitiesOnly=yes -o Str
 git config --global user.name jrimmer
 git config --global user.email jason@rimmer.net
 
-export PI_CODING_AGENT_DIR=$W/pi
-mkdir -p $PI_CODING_AGENT_DIR
-python3 - "$SWARM_NAME" "$SWARM_IMPL_MODEL" "$SWARM_VERIFY_MODEL" > $PI_CODING_AGENT_DIR/models.json <<'PY'
+export PI_CODING_AGENT_DIR="$W/pi"
+mkdir -p "$PI_CODING_AGENT_DIR"
+python3 - "$SWARM_NAME" "$SWARM_IMPL_MODEL" "$SWARM_VERIFY_MODEL" > "$PI_CODING_AGENT_DIR/models.json" <<'PY'
 import json, sys
 name, *models = sys.argv[1:]
 print(json.dumps({"providers": {"llm": {
@@ -128,7 +136,7 @@ next_task_msg() {
         echo "$id"; return ;;
       *"from $ORCH"*"[WAIT "*)
         local mins; mins=$(sed -nE 's/.*\[WAIT ([0-9]+)\].*/\1/p' <<<"$line")
-        [ -n "$mins" ] && echo $(( $(date +%s) + mins * 60 )) > $W/wait_until
+        [ -n "$mins" ] && echo $(( $(date +%s) + mins * 60 )) > "$W/wait_until"
         amail read "$id" >/dev/null ;;
       *) amail read "$id" >/dev/null ;;  # mark read; nothing else to do between tasks
     esac
@@ -393,7 +401,7 @@ run_task() {
   [ -n "$vt_min" ] && VERIFY_LIMIT=$(( vt_min * 60 ))
   amail ack "$msg" >/dev/null 2>&1 || true
   status "task $id"
-  printf '%s\n' "$body" > $W/tasks/$id.md
+  printf '%s\n' "$body" > "$W/tasks/$id.md"
 
   if [ -z "$repo" ]; then
     echo "The task names no Repo: line." | say "$id" "[BLOCKED $id] permanent: no repo given"
@@ -439,11 +447,17 @@ $(printf '%s\n' "$SWARM_GATES" | sed 's/^/    /')"
 
   findings="" verdict="" rounds_allowed=$MAX_ROUNDS verified_base=""
   IMPL_SECS=0 REBASE_SECS=0 GATE_SECS=0 VERIFY_SECS=0
-  for round in $(seq 1 "$MAX_ROUNDS"); do
-    if [ "$round" -gt "$rounds_allowed" ]; then
-      echo "task $id: round $round past the $rounds_allowed allowed verify round(s); stopping"
-      break
-    fi
+  # The budget is spent on verifies, not loop iterations: an implement
+  # round whose gates fail (including the migration guard) restarts the
+  # implement pass without using a verify round, so the size-based cap
+  # counts only rounds that actually reach the verifier. The cap is
+  # recomputed from the diff at each verify, so a diff that grows is
+  # still bounded. A separate iteration bound keeps a persistently
+  # failing gate from looping forever.
+  local round=0 iters=0 vround=0 vlimit=$MAX_ROUNDS
+  while [ "$vround" -lt "$vlimit" ] && [ "$iters" -lt $(( MAX_ROUNDS * 2 )) ]; do
+    round=$(( round + 1 ))
+    iters=$(( iters + 1 ))
     if cancelled "$id"; then
       git -C "$wt" add -A && git -C "$wt" commit -q -m "wip: $id" || true
       push_and_report "$wt" "$branch" "$id" "[CANCELLED $id]" <<EOF
@@ -457,7 +471,7 @@ EOF
     if [ "$round" -eq 1 ]; then
       pass "$wt" "$id-implement-$round" "$SWARM_IMPL_MODEL" "Implement this task completely.
 
-$(cat $W/tasks/$id.md)
+$(cat "$W/tasks/$id.md")
 
 $rules
 When finished, reply with a short summary of what you changed." || break
@@ -465,7 +479,7 @@ When finished, reply with a short summary of what you changed." || break
       pass "$wt" "$id-implement-$round" "$SWARM_IMPL_MODEL" "You are continuing a task. A reviewer found problems with the current branch. Fix every finding, then re-run the gates.
 
 TASK:
-$(cat $W/tasks/$id.md)
+$(cat "$W/tasks/$id.md")
 
 REVIEWER FINDINGS:
 $findings
@@ -489,7 +503,7 @@ $rules" || break
       pass "$wt" "$id-rebase-$round" "$SWARM_IMPL_MODEL" "A rebase of this branch onto the latest $BASE_REF stopped on conflicts. Resolve them now, keeping both the base's intent and this branch's work, then complete the rebase.
 
 TASK:
-$(cat $W/tasks/$id.md)
+$(cat "$W/tasks/$id.md")
 
 Conflicted files: $cfl
 Finish with `git rebase --continue` (set GIT_EDITOR=true) so no rebase is left in progress, then run every gate again.
@@ -511,24 +525,28 @@ $rules" || { git -C "$wt" rebase --abort >/dev/null 2>&1 || true; break; }
       return
     fi
 
-    # Migration guard and the project's gates, on the rebased HEAD.
+    # Migration guard and the project's gates, on the rebased HEAD. A
+    # gate failure does not consume a verify round: it goes straight to
+    # another implement pass (bounded by the iteration cap above).
     run_gates "$wt"
     if [ "$GATE_FAILED" = 1 ]; then
-      echo "task $id round $round: gates failed after rebase; next implement round"
+      echo "task $id round $round: gates failed after rebase; next implement round (no verify round used)"
       findings="$GATE_OUT"
       continue
     fi
 
     # Size-based round count: a small diff gets a single verify round,
-    # a large one up to MAX_ROUNDS. Recomputed each round so a diff that
-    # grows is still bounded.
+    # a large one up to MAX_ROUNDS. Recomputed at each verify so a diff
+    # that grows is still bounded; only verifies consume the count.
     dl=$(diff_lines "$wt")
-    if [ "$dl" -lt 200 ]; then rounds_allowed=1; else rounds_allowed=$MAX_ROUNDS; fi
-    echo "task $id: diff is $dl changed line(s); $rounds_allowed verify round(s)"
-    if [ "$round" -gt "$rounds_allowed" ]; then
-      echo "task $id: round $round past the $rounds_allowed allowed verify round(s); stopping"
+    if [ "$dl" -lt 200 ]; then vlimit=1; else vlimit=$MAX_ROUNDS; fi
+    rounds_allowed=$vlimit
+    echo "task $id: diff is $dl changed line(s); $vlimit verify round(s)"
+    if [ "$vround" -ge "$vlimit" ]; then
+      echo "task $id: round $round past the $vlimit allowed verify round(s); stopping"
       break
     fi
+    vround=$(( vround + 1 ))
     verified_base=$(worker_base_sha "$wt" "$BASE_REF")
 
     # One verify pass per round. Findings first, gates second; the
@@ -538,12 +556,12 @@ $rules" || { git -C "$wt" rebase --abort >/dev/null 2>&1 || true; break; }
     echo "Round $round implement pass finished; verifying with $SWARM_VERIFY_MODEL." \
       | say "$id" "[PROGRESS $id] round $round: verifying"
     status "task $id: verifying (round $round)"
-    rm -f $W/verdict.md
+    rm -f "$W/verdict.md"
     t0=$(date +%s)
     pass "$wt" "$id-verify-$round" "$SWARM_VERIFY_MODEL" "You are an independent reviewer with fresh eyes. Review the change on branch $branch against its task.
 
 TASK:
-$(cat $W/tasks/$id.md)
+$(cat "$W/tasks/$id.md")
 
 You have $(( VERIFY_LIMIT / 60 )) minutes. Keep your notes in $W/verdict.md as you go, so nothing is lost if you run out of time. Review only git diff $BASE_REF...HEAD (plus the task text); never the whole repository history.
 
@@ -560,8 +578,8 @@ Steps:
 
 $rules" "$VERIFY_LIMIT" || break
     t1=$(date +%s); add_verify_secs $(( t1 - t0 ))
-    verdict=$(head -1 $W/verdict.md 2>/dev/null | tr -d '[:space:]')
-    findings=$(tail -n +2 $W/verdict.md 2>/dev/null)
+    verdict=$(head -1 "$W/verdict.md" 2>/dev/null | tr -d '[:space:]')
+    findings=$(tail -n +2 "$W/verdict.md" 2>/dev/null)
     # A PASS that lists a blocker is a FAIL: the findings go to the next
     # implement round instead of out as [DONE].
     if [ "$verdict" = PASS ] && grep -qiE '^[[:space:]*-]*BLOCKER:' <<<"$findings"; then
@@ -573,6 +591,7 @@ $rules" "$VERIFY_LIMIT" || break
     [ "$verdict" = PASS ] && break
     [ "$verdict" = TIMEOUT ] && break
   done
+  [ "$round" -gt 0 ] || round=1
 
   commits=$(git -C "$wt" log --format='%h %s' "$BASE_REF"..HEAD)
   if [ "$verdict" = PASS ] && [ -n "$commits" ]; then
@@ -600,7 +619,7 @@ commits:
 $(echo "$commits" | sed 's/^/  /')
 verified on base: $verified_base ($BASE_REF)
 verifier: PASS in round $round ($SWARM_VERIFY_MODEL)
-$(cat $W/verdict.md)
+$(cat "$W/verdict.md")
 $(timing_line)
 EOF
     return
@@ -659,15 +678,15 @@ while true; do
   status idle
   echo "Ready for a task." | amail send --to "$ORCH" --subject "[READY] $SWARM_NAME" || true
   deadline=$(( $(date +%s) + IDLE_TIMEOUT ))
-  rm -f $W/wait_until
+  rm -f "$W/wait_until"
   msg=""
   while [ -z "$msg" ] && [ "$(date +%s)" -lt "$deadline" ]; do
     left=$(( deadline - $(date +%s) )); [ "$left" -gt 600 ] && left=600
     amail wait --timeout "$left" --interval 20 >/dev/null || sleep 20
     heartbeat
     msg=$(next_task_msg)
-    if [ -f $W/wait_until ]; then
-      deadline=$(cat $W/wait_until); rm -f $W/wait_until
+    if [ -f "$W/wait_until" ]; then
+      deadline=$(cat "$W/wait_until"); rm -f "$W/wait_until"
       status "idle (holding until $(date -d @$deadline -Is))"
     fi
   done
