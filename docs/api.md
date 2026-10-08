@@ -36,7 +36,7 @@ particular means two different things depending on the code:
 | `400` | `image_mismatch` | a create `image` does not match the `snapshot`'s image |
 | `404` | `not_found` | unknown lease, name, snapshot or image |
 | `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight; retry |
-| `409` | `lease_suspended` | the lease is suspended; `resume` it first |
+| `409` | `lease_suspended` | the lease is suspended; `resume` it first. The body adds `"reason"` (`idle`|`idle_suspend`|`hold_lapsed`|`pressure`|`preempt`) when the suspension was automatic |
 | `409` | `lease_not_live` | a released lease where a live one is required |
 | `409` | `cannot_start` | a snapshot build cannot run on this host; save it again |
 | `409` | `save_in_progress` | a named-snapshot save with the same idempotency key is running |
@@ -323,7 +323,9 @@ Activity is what the sweep counts: exec, stream, proxy, keepalive, guest
 heartbeat, files API and guest port dial all move `LastActive`. An idle
 suspension records `last_action` `idle_suspend/suspend_idle` with
 `last_action_at` (persisted, like the held rules) and emits an
-`idle_suspended` event whose detail is `idle for <duration>`. Because it
+`idle_suspended` event whose detail is `idle for <duration>`; the
+`suspended` event and the lease carry `suspend_reason` `idle_suspend`
+beside the pause build and time (#145 D6). Because it
 is a rule suspension, the stale-release (rule 2) and critical-disk
 (rule 5) held-lease rules may later release the lease if it stays
 idle-suspended and untouched; a preempted lease stays excluded.
@@ -355,6 +357,19 @@ expires and normal sweeping resumes) and — after the first automatic
 held-lease action — `last_action` (`"rule/action"`, e.g.
 `"idle/suspend_idle"`) with `last_action_at` (RFC 3339); see
 [operations.md](operations.md) for the rules behind them.
+
+A suspended lease whose suspension was automatic also carries its
+structured suspension facts (#145 D6): `suspend_reason` (`idle` =
+the plain `IDLE_TIMEOUT_SECS` sweep, `idle_suspend` = the lease's own
+threshold, `hold_lapsed`, `pressure` = held rule 1 shortened under
+pressure, `preempt`), `suspend_policy_step` (the pressure order's step
+name, omitted until that order names steps), `suspend_build_id` (the
+pause build) and `suspended_at` (RFC 3339). A hand or drain suspend has
+no automatic reason and carries none of the four; the pause build is
+still `resume_build_id` and `last_action`/`last_action_at` name the
+suspension. All four fields are additive and omitted while unset, and
+are cleared on resume, restore, cold restart and crash recovery.
+`lease.held_action` is unchanged.
 
 ### `GET /api/leases/{id}` — lease detail
 The same object as a list row plus `state`, `recovered_from` (RFC 3339 or
@@ -1345,6 +1360,27 @@ data: {"seq":42,"epoch":"9f1c2a4b8d3e5f60","at":"2026-10-04T12:00:00.123456789Z"
   backend restarted (and the sequence may have restarted with it).
 - `at` is the emit time (UTC, RFC3339 with nanoseconds).
 - `detail` is a short human-readable note (empty is possible).
+- `reason`, `policy_step` and `build_id` are the structured fields of a
+  `suspended` event (see below); they are omitted on every other event
+  type and on a hand or drain suspend, which has no automatic reason.
+
+A `suspended` event carries the structured suspension facts (#145 D6)
+beside its human detail:
+
+```
+event: suspended
+data: {"seq":43,…,"type":"suspended","detail":"paused into build 9e1f2ab3…","reason":"idle_suspend","build_id":"9e1f2ab3…"}
+
+```
+
+`reason` is one of `idle` (the plain `IDLE_TIMEOUT_SECS` sweep),
+`idle_suspend` (the lease's own threshold), `hold_lapsed`, `pressure`
+(held rule 1 shortened under pressure; from the pressure order on, its
+steps) or `preempt`. `policy_step` is the pressure order's step name,
+empty until that order names steps. `build_id` is the pause build the
+suspend wrote. A suspend taken by hand or by the drain carries no
+`reason`, `policy_step` or `build_id` — it has no automatic reason, so
+the human `detail` still names the pause build.
 
 The stream opens with a `retry: 3000` hint and a `: keepalive` comment
 every 15 s thereafter, so proxies do not close an idle stream.
@@ -1355,7 +1391,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 |---|---|---|
 | `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
 | `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule`, `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released` |
-| `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse) | the pause build id |
+| `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse, preemption) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |

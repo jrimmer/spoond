@@ -286,7 +286,7 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 	// running in its paused guest, but the substrate cannot be reached
 	// until the lease resumes. Answer 409 without calling the substrate.
 	if s.svc.leaseSuspended(lease.ID) {
-		writeLeaseSuspended(w)
+		writeLeaseSuspended(w, s.svc.leaseSuspendReason(lease.ID))
 		return
 	}
 	var req struct {

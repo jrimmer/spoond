@@ -83,7 +83,7 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 				l.ID, s.preemptDiskFloorPct())
 			continue
 		}
-		if _, err := s.pauseLease(ctx, l, false); err != nil {
+		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdleSuspend}); err != nil {
 			// A release that raced the pause is not an idle-suspend error:
 			// the lease is gone and nothing was suspended (spoond-15i).
 			if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
@@ -156,7 +156,7 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 		return true
 	}
 	if !s.svc.isIdleSuspended(l) {
-		writeLeaseSuspended(w)
+		writeLeaseSuspended(w, s.svc.leaseSuspendReason(l.ID))
 		return false
 	}
 	if _, err := s.svc.resumeLease(r.Context(), l); err != nil {

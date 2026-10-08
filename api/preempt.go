@@ -294,7 +294,7 @@ func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string
 	}
 	s.store.mu.Unlock()
 
-	if _, err := s.pauseLease(ctx, l, false); err != nil {
+	if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonPreempt}); err != nil {
 		return err
 	}
 

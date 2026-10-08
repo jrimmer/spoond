@@ -145,6 +145,18 @@ type Lease struct {
 	// version whose build a live lease runs from is never dropped by
 	// retention. Start-from-snapshot (and its API field) is task 2.
 	SnapshotBuildID string `json:"-"`
+	// SuspendReason, SuspendPolicyStep, SuspendBuildID and SuspendedAt
+	// record an automatic suspend (#145 D6): reason is one of
+	// idle|idle_suspend|hold_lapsed|pressure|preempt, policy step is the
+	// pressure order's step name ("" until it names steps), the build is
+	// the pause build written and suspended_at is when. A hand or drain
+	// suspend carries none of them. Reported by the lease API as
+	// suspend_reason, suspend_policy_step, suspend_build_id and
+	// suspended_at; cleared on resume. Persisted (migration 0021).
+	SuspendReason     string    `json:"-"`
+	SuspendPolicyStep string    `json:"-"`
+	SuspendBuildID    string    `json:"-"`
+	SuspendedAt       time.Time `json:"-"`
 	// SnapshotName and SnapshotVersion name the named-snapshot version
 	// the lease started from, for the "snapshot" object in the API
 	// (A3). They are not persisted; a lease loaded from the store looks
@@ -198,6 +210,10 @@ func (l *Lease) setState(state string) {
 	// flag before this call for its event detail.
 	if state != "suspended" {
 		l.PreemptedAt = time.Time{}
+		// Leaving the suspended state ends its structured facts (#145
+		// D6): a resume, restore, restart or loss must not leave a stale
+		// reason, policy step, build or time behind.
+		clearSuspendFactsLocked(l)
 	}
 	if state == "lost" {
 		if l.LostAt.IsZero() {
@@ -207,6 +223,18 @@ func (l *Lease) setState(state string) {
 	}
 	l.LostAt = time.Time{}
 	l.LostReason = ""
+}
+
+// clearSuspendFactsLocked drops a lease's structured suspension facts
+// (#145 D6): every path that brings the guest back — resume, restore,
+// cold restart, crash recovery — runs it, so a stale reason never
+// describes a later, different suspend and the lease API omits the
+// fields once the lease runs again. Call with s.store.mu held.
+func clearSuspendFactsLocked(l *Lease) {
+	l.SuspendReason = ""
+	l.SuspendPolicyStep = ""
+	l.SuspendBuildID = ""
+	l.SuspendedAt = time.Time{}
 }
 
 // ShareMode selects which surfaces a share covers.
@@ -1710,7 +1738,7 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		if s.snapshotBusy() {
 			break
 		}
-		if _, err := s.suspend(ctx, l.Owner, l.ID); err != nil {
+		if _, err := s.suspendWith(ctx, l.Owner, l.ID, suspendPolicy{reason: suspendReasonIdle}); err != nil {
 			s.log.Printf("idle sweep: suspend %s: %v", l.ID, err)
 			continue
 		}
@@ -2592,6 +2620,13 @@ func (s *Service) discardPoolSandbox(ctx context.Context, id string) {
 // suspend pauses a persistent lease's sandbox into a new build and stops
 // it. The lease stays; resume restores it with the same sandbox id.
 func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error) {
+	return s.suspendWith(ctx, owner, id, suspendPolicy{})
+}
+
+// suspendWith is suspend with the structured suspension facts an
+// automatic caller records (#145 D6): the plain IDLE_TIMEOUT_SECS sweep
+// passes reason idle. A hand suspend passes the zero policy.
+func (s *Service) suspendWith(ctx context.Context, owner, id string, pol suspendPolicy) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
 	if l == nil || l.Owner != owner || l.released {
@@ -2608,7 +2643,7 @@ func (s *Service) suspend(ctx context.Context, owner, id string) (*Lease, error)
 	}
 	s.store.mu.Unlock()
 
-	if _, err := s.pauseLease(ctx, l, false); err != nil {
+	if _, err := s.pauseLeaseWith(ctx, l, false, pol); err != nil {
 		return nil, err
 	}
 	return l, nil
@@ -2626,7 +2661,40 @@ const (
 	pauseActionPreempt = "preempt/suspend"
 )
 
+// Suspend reasons (#145 D6): the "reason" field of an automatic
+// lease.suspended event, the lease's suspend_reason and the 409
+// lease_suspended body. idle is the plain IDLE_TIMEOUT_SECS sweep;
+// idle_suspend is the per-lease idle_suspend threshold; hold_lapsed is a
+// hold that expired; pressure is held rule 1 shortened under pressure
+// (rule 4) and, from the pressure order on, its eviction steps; preempt
+// is the resume queue reclaiming hugepages for a guaranteed admission.
+// A hand or drain suspend has no reason ("").
+const (
+	suspendReasonIdle        = "idle"
+	suspendReasonIdleSuspend = "idle_suspend"
+	suspendReasonHoldLapsed  = "hold_lapsed"
+	suspendReasonPressure    = "pressure"
+	suspendReasonPreempt     = "preempt"
+)
+
+// suspendPolicy carries the structured suspension facts a pause stamps on
+// the lease and its suspended event (#145 D6): reason names why ("" for
+// a hand or drain suspend), policyStep the pressure order's step (""
+// until that order names steps).
+type suspendPolicy struct {
+	reason     string
+	policyStep string
+}
+
 func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (string, error) {
+	return s.pauseLeaseWith(ctx, l, drained, suspendPolicy{})
+}
+
+// pauseLeaseWith is pauseLease with the structured suspension facts an
+// automatic caller records (#145 D6): the reason and pressure policy step
+// are stamped on the lease (persisted) and carried by the suspended
+// event. A hand or drain pause passes the zero policy.
+func (s *Service) pauseLeaseWith(ctx context.Context, l *Lease, drained bool, pol suspendPolicy) (string, error) {
 	s.store.mu.Lock()
 	if l.busy {
 		s.store.mu.Unlock()
@@ -2635,15 +2703,16 @@ func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (strin
 	l.busy = true
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
-	return s.pauseLeaseBody(ctx, l, drained)
+	return s.pauseLeaseBody(ctx, l, drained, pol)
 }
 
 // pauseLeaseBody is the sub work of a pause. Callers own the busy
 // window; it must not be called with s.store.mu held. drained selects
 // the drain limiter for the snapshot write (only the admin drain sets
 // it); every other pause uses the default limiter. The write waits for
-// a slot, bounded by ctx.
-func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (string, error) {
+// a slot, bounded by ctx. pol carries the automatic suspension facts
+// (#145 D6); it is stamped on the lease before the suspended event.
+func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, pol suspendPolicy) (string, error) {
 	release, err := s.snapshotAcquire(ctx, drained)
 	if err != nil {
 		return "", err
@@ -2725,10 +2794,25 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 		l.LastAction = pauseActionDrain
 	}
 	l.LastActionAt = s.now()
+	// The structured suspension facts (#145 D6): the reason
+	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
+	// order's step, the pause build it wrote and when describe an
+	// automatic suspend. A hand or drain pause has no automatic reason,
+	// so all four stay empty and the GET omits them; the lease still
+	// names the pause build in last_action/resume_build_id. Stale facts
+	// from an earlier suspension are dropped first, and all four are
+	// cleared on resume.
+	clearSuspendFactsLocked(l)
+	if pol.reason != "" {
+		l.SuspendReason = pol.reason
+		l.SuspendPolicyStep = pol.policyStep
+		l.SuspendBuildID = buildID
+		l.SuspendedAt = l.LastActionAt
+	}
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.deleteSandboxRow(l.SandboxID)
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseSuspended, "paused into build "+buildID)
+	s.emitSuspendEvent(l.ID, l.Owner, buildID, pol.reason, pol.policyStep)
 	// A pause frees the lease's hugepages and quota: retry waiting
 	// creates (#129).
 	// The pause freed the lease's hugepages: the next admission inside
@@ -2994,7 +3078,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 
 	if persistent {
 		if !suspended {
-			if _, err := s.pauseLeaseBody(ctx, l, false); err != nil {
+			if _, err := s.pauseLeaseBody(ctx, l, false, suspendPolicy{}); err != nil {
 				return nil, err
 			}
 		}
@@ -4045,6 +4129,22 @@ func (s *Service) lookupAny(id string) *Lease {
 	return l
 }
 
+// leaseSuspendReason returns a live lease's structured suspension reason
+// ("" for a hand or drain suspend, or an unknown/released lease) with
+// the store lock held. The 409 lease_suspended writers call it instead
+// of reading Lease.SuspendReason after a lock-free lookup, so a
+// concurrent resume that clears the field under the lock never races
+// (#145 D6).
+func (s *Service) leaseSuspendReason(id string) string {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.released {
+		return ""
+	}
+	return l.SuspendReason
+}
+
 // holdState is "active" while a hold runs until hold_expires_at,
 // "lapsed" once it ran out unrenewed (the lease was suspended and is
 // released by the stale rule unless renewed or used), and "" for an
@@ -4110,6 +4210,24 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 	if l.LastAction != "" {
 		m["last_action"] = l.LastAction
 		m["last_action_at"] = formatRFC3339(l.LastActionAt)
+	}
+	// Structured suspension facts (#145 D6), additive and omitted while
+	// the lease is not suspended: why an automatic suspend happened
+	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
+	// order's step ("" until it names steps), the pause build and when.
+	// A hand or drain suspend carries none of them and the fields stay
+	// off.
+	if l.SuspendReason != "" {
+		m["suspend_reason"] = l.SuspendReason
+	}
+	if l.SuspendPolicyStep != "" {
+		m["suspend_policy_step"] = l.SuspendPolicyStep
+	}
+	if l.SuspendBuildID != "" {
+		m["suspend_build_id"] = l.SuspendBuildID
+	}
+	if !l.SuspendedAt.IsZero() {
+		m["suspended_at"] = formatRFC3339(l.SuspendedAt)
 	}
 	return m
 }
@@ -4397,6 +4515,10 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		Priority:              l.Priority,
 		PreemptedAt:           l.PreemptedAt,
 		SnapshotBuildID:       l.SnapshotBuildID,
+		SuspendReason:         l.SuspendReason,
+		SuspendPolicyStep:     l.SuspendPolicyStep,
+		SuspendBuildID:        l.SuspendBuildID,
+		SuspendedAt:           l.SuspendedAt,
 	}
 }
 
@@ -4453,6 +4575,10 @@ func rowToLease(r store.LeaseRow) *Lease {
 		Priority:              r.Priority,
 		PreemptedAt:           r.PreemptedAt,
 		SnapshotBuildID:       r.SnapshotBuildID,
+		SuspendReason:         r.SuspendReason,
+		SuspendPolicyStep:     r.SuspendPolicyStep,
+		SuspendBuildID:        r.SuspendBuildID,
+		SuspendedAt:           r.SuspendedAt,
 	}
 }
 

@@ -235,7 +235,7 @@ func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
 		if s.snapshotBusy() {
 			break
 		}
-		if _, err := s.pauseLease(ctx, l, false); err != nil {
+		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonHoldLapsed}); err != nil {
 			// Busy or failing: it stays held with no expiry, so rule 1
 			// suspends it once idle; nothing is released either way. A
 			// release that raced the pause is not a failure to report
@@ -553,10 +553,12 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 			detail += "; pressure: " + pressure
 		}
 		rule := heldRuleIdle
+		reason := suspendReasonIdle
 		if pressure != "" {
 			rule = heldRulePressure
+			reason = suspendReasonPressure
 		}
-		if _, err := s.pauseLease(ctx, l, false); err != nil {
+		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: reason}); err != nil {
 			// A release that raced the pause is not a held-rule error:
 			// the lease is gone and nothing was suspended (spoond-15i).
 			if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {

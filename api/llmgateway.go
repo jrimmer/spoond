@@ -41,14 +41,18 @@ const llmGatewayPrefix = "/llm/"
 // All OpenAI-compatible providers are routed to the same configured
 // upstream (OpenRouter, ollama.com, llama.cpp, ...).
 type llmGateway struct {
-	log          *log.Logger
-	lookup       func(leaseID string) *Lease
-	users        *identity.Store // per-user LLM keys (U8/T8); nil = legacy open mode
-	upstreamURL  *url.URL
-	key          string
-	providers    []string          // ordered longest-first provider prefixes
-	modelMap     map[string]string // exe.dev catalog id -> upstream model
-	defaultModel string            // fallback when the requested id isn't mapped
+	log    *log.Logger
+	lookup func(leaseID string) *Lease
+	// suspendReason returns a live lease's structured suspension reason
+	// ("" for a hand or drain suspend) under the store lock, so the 409
+	// body never races a concurrent resume clearing the field (#145 D6).
+	suspendReason func(leaseID string) string
+	users         *identity.Store // per-user LLM keys (U8/T8); nil = legacy open mode
+	upstreamURL   *url.URL
+	key           string
+	providers     []string          // ordered longest-first provider prefixes
+	modelMap      map[string]string // exe.dev catalog id -> upstream model
+	defaultModel  string            // fallback when the requested id isn't mapped
 	// Per-user concurrent request cap (U8/T8): maxConcurrent 0 =
 	// unlimited. inflight counts in-flight forwarded requests per lease
 	// owner (the authenticated user after the key check).
@@ -73,22 +77,24 @@ type llmGateway struct {
 // neither mapped nor known to the upstream (Shelley also probes
 // gpt-5.x/claude ids for slug generation etc.). users is the identity
 // store consulted for per-user LLM keys; nil keeps the gateway open for
-// every lease (legacy single-user behavior).
-func newLLMGateway(log *log.Logger, lookup func(string) *Lease, users *identity.Store, upstreamURL, key, defaultModel string, modelMap map[string]string) *llmGateway {
+// every lease (legacy single-user behavior). suspendReason reads a live
+// lease's structured suspension reason under the store lock.
+func newLLMGateway(log *log.Logger, lookup func(string) *Lease, suspendReason func(string) string, users *identity.Store, upstreamURL, key, defaultModel string, modelMap map[string]string) *llmGateway {
 	u, err := url.Parse(strings.TrimSuffix(upstreamURL, "/"))
 	if err != nil {
 		panic("llm gateway: bad upstream URL: " + err.Error())
 	}
 	return &llmGateway{
-		log:          log,
-		lookup:       lookup,
-		users:        users,
-		upstreamURL:  u,
-		key:          key,
-		providers:    []string{"/fireworks/inference", "/openai", "/xai"},
-		modelMap:     modelMap,
-		defaultModel: defaultModel,
-		inflight:     map[string]int{},
+		log:           log,
+		lookup:        lookup,
+		suspendReason: suspendReason,
+		users:         users,
+		upstreamURL:   u,
+		key:           key,
+		providers:     []string{"/fireworks/inference", "/openai", "/xai"},
+		modelMap:      modelMap,
+		defaultModel:  defaultModel,
+		inflight:      map[string]int{},
 	}
 }
 
@@ -150,7 +156,7 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease.Suspended {
-		writeLeaseSuspended(w)
+		writeLeaseSuspended(w, g.suspendReason(leaseID))
 		return
 	}
 

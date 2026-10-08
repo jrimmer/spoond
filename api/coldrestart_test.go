@@ -29,7 +29,7 @@ func TestColdRestartPersistent(t *testing.T) {
 	oldSandbox := l.SandboxID
 
 	// Give the lease a resume point the cold restart must clear.
-	if _, err := svc.pauseLeaseBody(ctx, l, false); err != nil {
+	if _, err := svc.pauseLeaseBody(ctx, l, false, suspendPolicy{}); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	if _, err := svc.resumeLease(ctx, l); err != nil {

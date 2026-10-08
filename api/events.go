@@ -133,7 +133,12 @@ const (
 	LeaseUserDeleted LeaseEventType = "user_deleted"
 )
 
-// LeaseEvent is one lease lifecycle change.
+// LeaseEvent is one lease lifecycle change. Reason, PolicyStep and
+// BuildID carry the structured fields of a suspension (#145 D6): a
+// `suspended` event names why it happened, the pressure order's step
+// ("" until that order names steps) and the pause build it wrote. They
+// are empty on every other event type and on a hand or drain suspend,
+// which has no automatic reason.
 type LeaseEvent struct {
 	Seq     uint64         `json:"seq"`
 	Epoch   string         `json:"epoch"`
@@ -142,6 +147,14 @@ type LeaseEvent struct {
 	Owner   string         `json:"owner"`
 	Type    LeaseEventType `json:"type"`
 	Detail  string         `json:"detail,omitempty"`
+	// Reason is one of idle|idle_suspend|hold_lapsed|pressure|preempt
+	// on a suspended event; "" elsewhere.
+	Reason string `json:"reason,omitempty"`
+	// PolicyStep is the pressure order's step name that ordered the
+	// suspend, or "" when none did.
+	PolicyStep string `json:"policy_step,omitempty"`
+	// BuildID is the pause build a suspended event wrote.
+	BuildID string `json:"build_id,omitempty"`
 }
 
 const (
@@ -197,17 +210,26 @@ func (b *eventBus) Epoch() string { return b.epoch }
 // non-blocking; a full subscriber channel counts as a drop and is
 // announced to that subscriber with a gap event.
 func (b *eventBus) emit(leaseID, owner string, typ LeaseEventType, detail string) LeaseEvent {
+	return b.emitStructured(leaseID, owner, typ, detail, "", "", "")
+}
+
+// emitStructured is emit with the structured suspension fields a
+// `suspended` event carries (#145 D6).
+func (b *eventBus) emitStructured(leaseID, owner string, typ LeaseEventType, detail, reason, policyStep, buildID string) LeaseEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.seq++
 	ev := LeaseEvent{
-		Seq:     b.seq,
-		Epoch:   b.epoch,
-		At:      time.Now().UTC(),
-		LeaseID: leaseID,
-		Owner:   owner,
-		Type:    typ,
-		Detail:  detail,
+		Seq:        b.seq,
+		Epoch:      b.epoch,
+		At:         time.Now().UTC(),
+		LeaseID:    leaseID,
+		Owner:      owner,
+		Type:       typ,
+		Detail:     detail,
+		Reason:     reason,
+		PolicyStep: policyStep,
+		BuildID:    buildID,
 	}
 	if len(b.ring) < leaseEventRingSize {
 		b.ring = append(b.ring, ev)
@@ -414,6 +436,21 @@ func (s *Service) Subscribe(f EventFilter) *EventSubscription {
 // streams and in-process subscribers are fed from here.
 func (s *Service) emitLeaseEvent(leaseID, owner string, typ LeaseEventType, detail string) {
 	s.bus.emit(leaseID, owner, typ, detail)
+}
+
+// emitSuspendEvent records a `suspended` event with its structured
+// fields (#145 D6): reason names why an automatic suspend happened, and
+// policyStep the pressure order's step. The event carries build_id too
+// and the human detail keeps the existing "paused into build <id>"
+// text. For a hand or drain suspend reason is empty: the structured
+// fields are all left off, so the event matches the lease, which omits
+// its suspension facts for a suspension with no automatic reason.
+func (s *Service) emitSuspendEvent(leaseID, owner, buildID, reason, policyStep string) {
+	evBuild := ""
+	if reason != "" {
+		evBuild = buildID
+	}
+	s.bus.emitStructured(leaseID, owner, LeaseSuspended, "paused into build "+buildID, reason, policyStep, evBuild)
 }
 
 // emitGCEvent records one catalog GC maintenance event: a pass that
