@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,6 +239,48 @@ func TestUserDeleteDataIdempotent(t *testing.T) {
 		if len(r.Leases) != 0 || len(r.Jobs) != 0 || len(r.Snapshots) != 0 || len(r.KeptBuilds) != 0 {
 			t.Fatalf("cleanup of an absent owner = %+v, want all empty", r)
 		}
+	}
+}
+
+// TestUserDeleteCancelQueuedRace runs a concurrent admission pass and the
+// user-delete queue cancel over the same tickets: ticket.done is written
+// by finishTicket/drainQueue under admitQ.mu, so cancelQueuedForOwner must
+// read it under that lock too (spoond-q4j). Run under -race; before the
+// fix this reports a data race on t.done.
+func TestUserDeleteCancelQueuedRace(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	const owner = "u-race"
+	const rounds = 200
+	const per = 16
+	for r := 0; r < rounds; r++ {
+		tickets := make([]*admissionTicket, 0, per)
+		for i := 0; i < per; i++ {
+			tk := &admissionTicket{ch: make(chan admissionOutcome, 1), id: newID(), owner: owner}
+			tickets = append(tickets, tk)
+			svc.admitQ.tickets = append(svc.admitQ.tickets, tk)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			for _, tk := range tickets {
+				if svc.finishTicket(tk) {
+					tk.send(admissionOutcome{err: errDraining})
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			svc.cancelQueuedForOwner(owner)
+		}()
+		close(start)
+		wg.Wait()
+	}
+	if d := svc.queueDepth(); d != 0 {
+		t.Fatalf("queue depth = %d, want 0", d)
 	}
 }
 

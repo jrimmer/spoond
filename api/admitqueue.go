@@ -110,7 +110,10 @@ type admissionTicket struct {
 	queuedAt time.Time
 	deadline time.Time
 	seq      uint64
-	done     bool
+	// done is guarded by admissionQueue.mu, like the tickets list: it is
+	// written by finishTicket (and drainQueue) and read by the admission
+	// pass and by cancelQueuedForOwner, always under that lock.
+	done bool
 }
 
 // admissionOutcome is what the waiting create's HTTP handler receives:
@@ -250,12 +253,14 @@ func (s *Service) cancelQueuedForOwner(owner string) {
 	s.admitQ.tickets = kept
 	s.admitQ.mu.Unlock()
 	for _, t := range pending {
-		if t.owner != owner || t.done {
+		if t.owner != owner {
 			continue
 		}
 		// Only the winner of finishTicket answers the ticket: if a
 		// concurrent admission pass already granted it, that pass owns the
 		// outcome (and the cleanup's release re-scan releases the lease).
+		// finishTicket reads t.done under admitQ.mu, so this path never
+		// races a pass writing it.
 		if !s.finishTicket(t) {
 			continue
 		}

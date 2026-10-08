@@ -79,7 +79,10 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	// in flight when the identity was removed can appear between passes,
 	// so re-scan a bounded number of times. releaseBecause is idempotent,
 	// and it removes the lease from the in-memory set, so a pass that
-	// finds nothing ends the loop.
+	// finds nothing ends the loop. Three passes are enough: markOwnerDeleted
+	// runs before this loop and reserveQuota/grantLease refuse a create
+	// once the owner is marked, so a create admitted between passes cannot
+	// become a visible lease after the last scan.
 	seen := map[string]bool{}
 	for pass := 0; pass < 3; pass++ {
 		ls := s.leasesOfOwner(owner)
@@ -110,7 +113,13 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	}
 
 	// Named snapshots are dropped outright, forced: their leases are
-	// already released, so no live lease can be running from a version.
+	// already released, so no live lease can be running from a version. A
+	// save already inside its checkpoint (holding secretsGate.beginSave)
+	// can still insert a row after this delete; saveNamedSnapshot's
+	// leaseReleased check drops most of that window, and a row that slips
+	// through has no live lease, so the next retention or GC pass prunes
+	// it. Waiting on the per-lease gate here would serialise the cleanup
+	// behind an in-flight checkpoint for no lasting gain.
 	rows, err := s.db.DeleteNamedSnapshotsOfOwner(ctx, owner)
 	if err != nil {
 		s.log.Printf("user delete: drop named snapshots of %s: %v", owner, err)
