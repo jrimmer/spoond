@@ -807,6 +807,29 @@ func (s *Service) deferJobKill(jobID string) {
 	s.timingOutMu.Unlock()
 }
 
+// pruneJobKillState drops the in-memory timing-out intent and pid
+// backoff of jobs that are no longer running (a released lease's jobs
+// are deleted with it), so an error path cannot leak entries for the
+// life of the process. rows is the current set of running jobs.
+func (s *Service) pruneJobKillState(rows []store.JobRow) {
+	running := make(map[string]struct{}, len(rows))
+	for _, job := range rows {
+		running[job.JobID] = struct{}{}
+	}
+	s.timingOutMu.Lock()
+	for id := range s.timingOut {
+		if _, ok := running[id]; !ok {
+			delete(s.timingOut, id)
+		}
+	}
+	for id := range s.jobKillNotBefore {
+		if _, ok := running[id]; !ok {
+			delete(s.jobKillNotBefore, id)
+		}
+	}
+	s.timingOutMu.Unlock()
+}
+
 // jobIsTimingOut reports whether the cap is killing a job right now, so
 // the watcher does not record the kill's signal exit as a normal one.
 func (s *Service) jobIsTimingOut(jobID string) bool {
@@ -1029,6 +1052,7 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 		s.storeError("list_running_jobs", "", err)
 		return
 	}
+	s.pruneJobKillState(rows)
 	now := s.now()
 	for _, job := range rows {
 		sandboxID, generation, ok := s.leaseContinuity(job.LeaseID)
