@@ -29,6 +29,25 @@ unchanged since 2.7.0.
 
 ### Added
 
+- **A cap on background job runtime (spoond-wb5).** A background exec job
+  may no longer run forever: `JOB_MAX_RUNTIME` (default 24 h, a Go
+  duration or seconds) is the host cap, the exec body's new optional
+  `max_runtime_secs` can ask for a shorter one — never a longer one, and
+  a negative value is `400`. Past its effective cap the job's process
+  group is killed (the same path as `POST …/jobs/{job}/signal`), the
+  record is marked exited with reason `timed_out` and exit code `124`,
+  and a `job_exited` event whose detail starts `timed out: exit 124`
+  tells the owner the cap, not the command, ended it (`reason` is also
+  on the job record; `spoond_jobs_exited_total` gains the
+  `timed_out` result). The cap is wall-clock from the job's start and
+  applies even while the lease is suspended, so a `sleep infinity` can
+  no longer pin a lease's memory and hugepages forever. Migration
+  **0020** adds `lease_jobs.max_runtime_secs` and `lease_jobs.reason`.
+  A job on a suspended lease also no longer keeps that lease active:
+  `reconcileJobs` stopped calling `markActive` on a suspended lease, so
+  the held-lease rules' untouched test still sees the suspension. A
+  negative `JOB_MAX_RUNTIME` disables the cap entirely.
+
 - **A suspended-lease refusal now carries `code: lease_suspended`.**
   Every "lease is suspended; resume it first" answer is the same `409`
   as before, but its JSON body now includes

@@ -28,6 +28,7 @@ func TestJobRoundTripAndTieBreak(t *testing.T) {
 		if err := db.InsertJob(ctx, JobRow{
 			JobID: id, LeaseID: lease, Owner: "alice", Cmd: "echo " + id,
 			State: state, StartedAt: started, Generation: 3,
+			MaxRuntimeSecs: 86400,
 		}); err != nil {
 			t.Fatalf("insert job %s: %v", id, err)
 		}
@@ -42,6 +43,9 @@ func TestJobRoundTripAndTieBreak(t *testing.T) {
 	}
 	if len(rows) != 2 || rows[0].JobID != "j-new" || rows[1].JobID != "j-old" {
 		t.Fatalf("list jobs = %+v, want newest first", rows)
+	}
+	if rows[0].MaxRuntimeSecs != 86400 || rows[0].Reason != "" {
+		t.Fatalf("round-tripped job = max_runtime_secs %d reason %q", rows[0].MaxRuntimeSecs, rows[0].Reason)
 	}
 	if n, err := db.CountRunningJobs(ctx, "l-1"); err != nil || n != 2 {
 		t.Fatalf("count l-1 = %d (%v), want 2", n, err)
@@ -78,6 +82,26 @@ func TestJobRoundTripAndTieBreak(t *testing.T) {
 	}
 	if changed, err := db.MarkJobLost(ctx, "j-old", base.Add(6*time.Minute)); err != nil || changed {
 		t.Fatalf("lost after exit = %v (%v), want no change", changed, err)
+	}
+	if changed, err := db.MarkJobTimedOut(ctx, "j-old", 124, base.Add(6*time.Minute), ""); err != nil || changed {
+		t.Fatalf("timed out after exit = %v (%v), want no change", changed, err)
+	}
+
+	// MarkJobTimedOut is the max-runtime path: it stamps the reason and
+	// the exit code, and is idempotent like the other outcomes.
+	insert("j-timeout", "l-1", "running", base.Add(8*time.Minute))
+	if changed, err := db.MarkJobTimedOut(ctx, "j-timeout", 124, base.Add(9*time.Minute), "bye"); err != nil || !changed {
+		t.Fatalf("mark timed out = %v (%v), want change", changed, err)
+	}
+	timedOut, err := db.GetJob(ctx, "j-timeout")
+	if err != nil {
+		t.Fatalf("get timed-out job: %v", err)
+	}
+	if timedOut.State != "exited" || timedOut.Reason != "timed_out" || timedOut.ExitCode == nil || *timedOut.ExitCode != 124 {
+		t.Fatalf("timed-out job = %+v", timedOut)
+	}
+	if changed, err := db.MarkJobTimedOut(ctx, "j-timeout", 124, base, "again"); err != nil || changed {
+		t.Fatalf("second timed out = %v (%v), want no change", changed, err)
 	}
 
 	// Pruning removes only exited rows older than the cutoff; running and

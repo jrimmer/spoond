@@ -519,9 +519,14 @@ func Main(args []string) int {
 		BurstReserveMiB:           burstReserveMiB,
 		PreemptDiskFloorPct:       preemptDiskFloorPct,
 		// Background exec jobs (2.6, #135): per-lease running cap and
-		// exited-record retention.
+		// exited-record retention. JOB_MAX_RUNTIME (spoond-wb5) caps how
+		// long a job may run; it takes a Go duration or a number of
+		// seconds, a job may ask for a shorter max_runtime_secs but never a
+		// longer one, and 0 (unset) is the 24 h default while a negative
+		// value disables the cap.
 		MaxRunningJobsPerLease:   envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:         int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
+		JobMaxRuntimeSecs:        int64(envDurationOrZero("JOB_MAX_RUNTIME", 0) / time.Second),
 		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
 		SnapshotWriteConcurrency: snapshotWriteConcurrency,
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,

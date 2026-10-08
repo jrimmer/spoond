@@ -983,17 +983,30 @@ stored in the job record, logged, emitted in an event or written to the
 guest's job directory — `env` rides the substrate's start request — and
 `cmd` is stored as given.
 
+A job cannot run forever: the reconcile pass kills a job that has spent
+its effective max runtime and marks the record exited with reason
+`timed_out`. The host cap is `JOB_MAX_RUNTIME` (default 24 h); a start
+may ask for a shorter `max_runtime_secs`, never a longer one, and the
+cap is wall-clock from the start, so it applies while the lease is
+suspended too — a `sleep infinity` can no longer pin hugepages
+indefinitely. A job running on a suspended lease does not keep that
+lease active: `reconcileJobs` no longer calls `markActive` on a
+suspended lease, so the held-lease rules' untouched test still sees the
+suspension.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background jobs per lease; past it a start answers `429` |
 | `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept) |
+| `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`. A start may ask for a shorter `max_runtime_secs`, never a longer one. Takes a Go duration (`24h`) or seconds; `0` is the default and a negative value disables the cap (spoond-wb5) |
 
-The job record lives in the `lease_jobs` table (migration 0016) and is
-deleted with its lease. Metrics: `spoond_jobs_running` (gauge) and
-`spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`). Events:
-`job_started`, `job_exited`, `job_lost`; the dashboard events panel
-shows `job_exited` lines, non-zero exits in the warning colour. The
-endpoints, the events and the lease's `jobs` summary are in
+The job record lives in the `lease_jobs` table (migration 0016, with
+migration 0020 adding the max-runtime cap and reason) and is deleted
+with its lease. Metrics: `spoond_jobs_running` (gauge) and
+`spoond_jobs_exited_total{result}` (`ok`/`error`/`lost`/`timed_out`).
+Events: `job_started`, `job_exited` and `job_lost`; the dashboard events
+panel shows `job_exited` lines, non-zero exits in the warning colour.
+The endpoints, the events and the lease's `jobs` summary are in
 [api.md](api.md).
 
 ## Idle reclamation
