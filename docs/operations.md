@@ -256,6 +256,16 @@ outside it that have been idle for an hour.
 - `GC_DELETE=1` makes the GC actually delete candidates, marking them
   `deleted` and counting `spoond_gc_deleted_total{kind}`. Only enable it
   after reading a week of dry-run logs.
+- A build left in state `building` past twice the build timeout (the
+  pipeline's `buildTimeout`, one hour) is failed by the pass and logged
+  (`gc: marked stale building build failed ...`), then counted as an
+  ordinary candidate once it has been idle an hour. A build is written
+  `building` before the orchestrator is asked to build it, and a SIGKILL
+  or reboot in between would otherwise leave the row building forever —
+  and every building row is a GC root, so it would pin its whole
+  ancestor chain. The image pipeline also writes its failure on a
+  context detached from the build's own deadline, so a timed-out build
+  never stays `building`.
 - Users manage their own snapshots through the API:
   `GET /api/snapshots` lists the caller's builds with `in_use` flags, and
   `DELETE /api/snapshots/{build_id}` removes one (`409` while anything

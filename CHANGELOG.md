@@ -36,6 +36,22 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A stale `building` template build no longer stays a GC root forever.**
+  `spoond images build` wrote the build row in state `building` before it
+  asked the orchestrator to build the template, and on failure it wrote
+  the `failed` state through the build's own (possibly already cancelled)
+  context. A SIGKILL or reboot between the two writes left the row
+  `building` with nothing to move it on; every `building` row is a kept
+  root, together with its whole ancestor chain, so the catalog — and the
+  snapshot disk — grew without bound. The failure update now runs on a
+  context detached from the build's deadline, so a timed-out build is
+  still recorded as failed; and each GC pass fails any build left
+  `building` for longer than twice the shared build timeout (one hour),
+  logging the id, kind and age (`gc: marked stale building build failed
+  ...`), so the row becomes an ordinary candidate once it has been idle
+  an hour and the owner sees it as a failed build through the
+  API/events (spoond-4yl).
+
 - **Drain self-heal follow-ups: the half-sandbox cleanup only runs after
   a real Create, a wedged heal retry no longer holds off a drain, and an
   admin undrain gives the new deferral a fresh budget.** A resume refused

@@ -190,6 +190,61 @@ func (db *DB) ListBuilds(ctx context.Context) ([]BuildRow, error) {
 	return out, nil
 }
 
+// MarkStaleBuildingFailed marks every build still `building` whose
+// updated_at is older than cutoff as `failed` (spoond-4yl). A build is
+// written in state building before the orchestrator is asked to build
+// it; a SIGKILL or reboot between those two writes leaves the row
+// building forever, and every building row is a GC root (with its whole
+// ancestor chain), so it pins the catalog indefinitely. The GC fails
+// such rows, and the owner sees the state through the API/events like
+// any other failed build. It returns the rows it changed so the caller
+// can log each one.
+func (db *DB) MarkStaleBuildingFailed(ctx context.Context, cutoff time.Time, reason string) ([]BuildRow, error) {
+	rows, err := db.r.QueryContext(ctx, `SELECT
+		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, owner, state,
+		kernel_version, firecracker_version, envd_version,
+		vcpu, memory_mb, disk_mb, size_bytes, error, created_at, updated_at
+		FROM builds WHERE state = 'building'`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list building builds: %w", err)
+	}
+	var stale []BuildRow
+	for rows.Next() {
+		r, err := scanBuild(rows.Scan)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: list building builds: %w", err)
+		}
+		// Compare in Go: updated_at is RFC 3339 with trailing-zero
+		// trimming, so a plain string comparison misorders the
+		// sub-second forms ("...00Z" sorts after "...00.5Z").
+		if r.UpdatedAt.Before(cutoff) {
+			stale = append(stale, r)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("store: list building builds: %w", err)
+	}
+	rows.Close()
+	var marked []BuildRow
+	for _, b := range stale {
+		res, err := db.w.ExecContext(ctx,
+			`UPDATE builds SET state = 'failed', error = ?, updated_at = ? WHERE build_id = ? AND state = 'building'`,
+			reason, formatTime(time.Now()), b.BuildID)
+		if err != nil {
+			return marked, fmt.Errorf("store: mark stale building build %s failed: %w", b.BuildID, err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			continue // a racing writer moved it on already
+		}
+		b.State = "failed"
+		b.Error = reason
+		marked = append(marked, b)
+	}
+	return marked, nil
+}
+
 // ChildBuilds returns the builds with parent_build_id = parentID
 // (pause/checkpoint builds of one sandbox lineage), ordered by
 // created_at.

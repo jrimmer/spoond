@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// DefaultBuildTimeout is how long a template build may run before the
+// image pipeline gives up on it and the GC treats the row as stale. The
+// two share it (spoond-4yl): the pipeline bounds BuildTemplate with it,
+// and the GC fails any build still in state building for more than twice
+// it, so a SIGKILL or reboot mid-build can never leave a permanent GC
+// root. The GC's value is overridable through ServiceConfig.BuildTimeout.
+const DefaultBuildTimeout = 60 * time.Minute
+
 // PrivateAllowance permits egress into an otherwise-denied private range (patch P4).
 type PrivateAllowance struct {
 	CIDR     string   // e.g. "10.0.0.11/32"
