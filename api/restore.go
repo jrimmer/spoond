@@ -93,21 +93,31 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	if err != nil {
 		return err
 	}
-	s.store.mu.Lock()
-	if l.released {
-		// Released while the restore created a fresh sandbox: stop it and
-		// write no lease or sandbox row back (spoond-775).
-		s.store.mu.Unlock()
+	// A release that landed while the restore create ran must not be
+	// undone by the save below (spoond-775, spoond-63a). Re-check under
+	// the store lock, as the release can land after the first check.
+	if s.leaseReleased(l) {
 		s.log.Printf("restore: lease %s was released during its restore; stopping sandbox %s", l.ID, sb.ID)
-		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
-			s.log.Printf("restore: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
-		}
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
 		return errLeaseReleased
 	}
 	if old := l.SandboxID; old != "" && old != sb.ID {
 		_ = s.sub.Delete(ctx, old)
 		s.deleteSandboxRow(old)
+	}
+	s.store.mu.Lock()
+	if l.released {
+		// Released while the restore created a fresh sandbox: stop it
+		// (bounded retries, spoond-63a) and write no lease or sandbox
+		// row back (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("restore: lease %s was released during its restore; stopping sandbox %s", l.ID, sb.ID)
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return errLeaseReleased
 	}
 	l.SandboxID = sb.ID
 	l.HostIP = sb.HostIP
@@ -130,6 +140,7 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.endCreatingSandbox(sb.ID)
 	// The restored lease is no longer drained, so a stale self-heal
 	// backoff must not skip a later planned restart's deferral
 	// (spoond-52c B3).

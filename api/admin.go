@@ -434,6 +434,20 @@ func (s *Service) deleteHalfSandbox(ctx context.Context, l *Lease, sandboxID str
 	s.deleteSandboxRow(sandboxID)
 }
 
+// undrainLossAllowed decides whether a failed undrain resume may lose its
+// lease. Only a suspended, non-busy lease may be lost (B1): an owner
+// resume (busy) or one that already completed (state running) is bringing
+// the guest back, and losing it would delete an intact lease. A released
+// lease is left alone (no save, spoond-775); an already-lost one is
+// reported so the caller can skip the duplicate event and delete. Call
+// with s.store.mu held.
+func undrainLossAllowed(l *Lease) (released, alreadyLost, canLose bool) {
+	released = l.released
+	alreadyLost = l.State == "lost"
+	canLose = !released && !alreadyLost && !l.busy && l.State == "suspended"
+	return released, alreadyLost, canLose
+}
+
 // undrain waits (up to 120 s) for the orchestrator to answer NodeInfo,
 // clears the draining state, then resumes exactly the drained leases,
 // UNDRAIN_CONCURRENCY (default 2) at a time. A resume that fails with a
@@ -599,23 +613,37 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 	reason := fmt.Sprintf("drain resume failed after %d attempt(s): %v", attempts, err)
 	s.clearDrainHeal(l.ID)
 	s.store.mu.Lock()
-	if l.released || l.State == "lost" {
+	released, alreadyLost, canLose := undrainLossAllowed(l)
+	if released || alreadyLost {
 		// A lease released or already lost while the resume was in flight
 		// is not lost again: clear its Drained flag if it still carries it
 		// and save nothing else, so no second lost event follows
 		// (spoond-775 class, spoond-52c NIT).
-		if !l.released && l.Drained {
+		if !released && l.Drained {
 			l.Drained = false
 			s.saveLeaseLocked(l)
 		}
 		s.store.mu.Unlock()
 		return err, attempts, false
 	}
-	setLostReason(l, reason)
-	l.setState("lost")
+	// Only a suspended, non-busy lease may be lost (B1/G1): an owner
+	// resume (busy) or one that already completed (state running) is
+	// bringing the guest back, and losing it would delete an intact
+	// lease. Anything else is a logged skip: no markLost, no
+	// stopLostSandbox, no lost event.
+	if !canLose {
+		busy, state := l.busy, l.State
+		s.store.mu.Unlock()
+		s.log.Printf("undrain: not losing lease %s (state %s, busy=%v)", l.ID, state, busy)
+		return err, attempts, false
+	}
 	l.Drained = false
-	s.saveLeaseLocked(l)
+	s.markLost(l, reason)
 	s.store.mu.Unlock()
+	// Lost means stopped (spoond-63a): stop the half-started sandbox a
+	// failed resume left behind (the retry loop cleans it between
+	// attempts, but the last failure must stop it too).
+	s.stopLostSandbox(l.SandboxID, l.ID)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 	// A lease started from a named snapshot no longer protects it once
 	// lost (#83 S5).

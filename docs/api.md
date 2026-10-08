@@ -468,7 +468,21 @@ failed. The reconcile emits a `lost` event whose `detail` is the reason
 unreadable (I/O errors)` when the rootfs probe found the disk dead) and
 stamps the same text as `lost_reason` (persisted, migration 0019).
 
-A lost lease's sandbox is gone for good and its quota is still charged.
+A lost lease's guest is stopped; `DELETE` frees the quota. Every path
+that marks a lease `lost` (crash recovery, undrain, the rootfs probe)
+deletes the lease's sandbox through the substrate, retrying a few times
+so a create or resume that failed after its VM started cannot leave a
+guest running. The sandbox is gone for good and the lease's quota is
+still charged. A delete that still fails is left to the periodic orphan
+sweep, which treats a sandbox whose lease is `lost` or released as an
+orphan, and also deletes any substrate sandbox no lease and no pool
+entry claims once it has been seen unclaimed on two consecutive passes;
+a creation's sandbox is never swept while the creation is in flight.
+Only a lease still suspended and not busy is lost by the preempt-resume
+and undrain paths: a resume an owner has in flight saves its guest. A
+create that finishes after its lease was released stops the fresh guest
+and saves nothing, so a release is never undone by a late recovery,
+resume, restart or restore.
 Every call that acts on it — exec, background exec, files, guest dial,
 stream, proxy, stat, resume, restart, suspend, keepalive, checkpoint,
 snapshot save, restore, crash-test, clone, fork, tag, comment, holder,
@@ -486,7 +500,9 @@ with `code: lease_lost`, the reason and the way out (`409` keeps meaning
 `GET /api/leases/{id}` returns `state: "lost"` and the `lost_reason`
 field, so a client can show the cause. `DELETE /api/leases/{id}` frees
 the lease's quota (the snapshot builds a kept build pinned follow the
-GC's normal grace period).
+GC's normal grace period). A lost lease's guest is stopped when it
+becomes lost, so `DELETE` only has to release the lease's quota; it
+does not have to stop a running sandbox.
 
 ### `GET /api/names/{name}` — resolve by name
 

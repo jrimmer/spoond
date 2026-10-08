@@ -190,6 +190,25 @@ func (db *DB) ListBuilds(ctx context.Context) ([]BuildRow, error) {
 	return out, nil
 }
 
+// CountBuildingTemplateBuilds returns how many template builds are in
+// state building. The catalog is shared with the separate `spoond images
+// build` process, so this is how the backend sees that process's bakes:
+// it inserts the row `building` before it asks the orchestrator for the
+// build and moves it on when the build ends. A row a killed build left
+// `building` is failed by the GC after twice the build timeout
+// (spoond-4yl), so it cannot hold the count up for ever. Used by the
+// periodic orphan sweep, which must not delete a build sandbox it cannot
+// tell from an orphan (spoond-63a N1).
+func (db *DB) CountBuildingTemplateBuilds(ctx context.Context) (int, error) {
+	row := db.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM builds
+		WHERE state = 'building' AND kind = 'template'`)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count building template builds: %w", err)
+	}
+	return n, nil
+}
+
 // MarkStaleBuildingFailed marks every build still `building` whose
 // updated_at is older than cutoff as `failed` (spoond-4yl). A build is
 // written in state building before the orchestrator is asked to build

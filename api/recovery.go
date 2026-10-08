@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // Crash recovery (U10 R16/D4): an orchestrator crash kills every
@@ -99,11 +100,14 @@ func writeLeaseLostErr(w http.ResponseWriter, err error) bool {
 
 // markLost records that a lease was lost and why: it enters the lost
 // state (stamping lost_at once, as setState does), stores the reason the
-// lost event carries, and returns that reason. The caller holds a lease
-// whose sandbox is already gone. A released lease is left alone: a
-// release and a recovery race, and losing an already-released lease
-// would resurrect it with a stale row and a spurious lost event
-// (spoond-775). Call with s.store.mu held.
+// lost event carries, and returns that reason. A released lease is left
+// alone: a release and a recovery race, and losing an already-released
+// lease would resurrect it with a stale row and a spurious lost event
+// (spoond-775). Call with s.store.mu held. A lost lease must mean a
+// stopped guest (spoond-63a): after dropping the lock, every caller that
+// did mark the lease lost calls stopLostSandbox, which deletes the
+// lease's sandbox (and the half-started one a failed create or resume
+// left under the same id).
 func (s *Service) markLost(l *Lease, reason string) string {
 	if l.released {
 		return reason
@@ -112,6 +116,84 @@ func (s *Service) markLost(l *Lease, reason string) string {
 	l.setState("lost")
 	s.saveLeaseLocked(l)
 	return reason
+}
+
+// stopLostSandbox stops a lease that markLost just lost: it deletes the
+// sandbox through the substrate (bounded retries, a log line; a delete
+// that still fails is left to the periodic orphan sweep) and drops the
+// sandbox row. Call without s.store.mu held.
+func (s *Service) stopLostSandbox(sandboxID, leaseID string) {
+	s.deleteSandboxWithRetries(sandboxID, leaseID, "lost")
+	s.deleteSandboxRow(sandboxID)
+}
+
+// defaultLostSandboxDeleteAttempts and defaultLostSandboxDeleteBackoff
+// bound the substrate Delete when a lease becomes lost: a few attempts
+// with a short pause, so a transient substrate blip does not leave a
+// guest running; a delete that still fails is retried by the periodic
+// orphan sweep. Fields on Service let tests shrink the pause.
+const (
+	defaultLostSandboxDeleteAttempts = 3
+	defaultLostSandboxDeleteBackoff  = 500 * time.Millisecond
+	// lostSandboxDeleteTimeout bounds one Delete attempt. It is detached
+	// from the caller's context (a cancelled reconcile must still stop the
+	// guest) but still finite so the retry loop cannot hang forever.
+	lostSandboxDeleteTimeout = 30 * time.Second
+)
+
+// deleteSandboxWithRetries stops a sandbox through the substrate with
+// bounded retries, logging each failure. A nil or empty sandbox id is a
+// no-op. reason names why the guest is being stopped ("lost" or
+// "released") for the log lines. A delete that still fails after every
+// attempt is logged and recorded so the periodic orphan sweep retries
+// it (a released lease's row is gone by then, so the sweep cannot
+// rediscover it).
+func (s *Service) deleteSandboxWithRetries(sandboxID, leaseID, reason string) {
+	if sandboxID == "" {
+		return
+	}
+	attempts := s.lostSandboxDeleteAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), lostSandboxDeleteTimeout)
+		err = s.sub.Delete(ctx, sandboxID)
+		cancel()
+		if err == nil {
+			s.log.Printf("%s: lease %s stopped sandbox %s", reason, leaseID, sandboxID)
+			return
+		}
+		if attempt < attempts {
+			s.log.Printf("%s: lease %s delete sandbox %s attempt %d/%d failed (retrying): %v", reason, leaseID, sandboxID, attempt, attempts, err)
+			time.Sleep(s.lostSandboxDeleteBackoff)
+		}
+	}
+	s.log.Printf("%s: lease %s delete sandbox %s failed after %d attempt(s); leaving it to the orphan sweep: %v", reason, leaseID, sandboxID, attempts, err)
+	s.rememberOrphanSandbox(sandboxID)
+}
+
+// rememberOrphanSandbox records a sandbox id whose Delete failed so the
+// periodic orphan sweep retries it.
+func (s *Service) rememberOrphanSandbox(sandboxID string) {
+	if sandboxID == "" {
+		return
+	}
+	s.orphanMu.Lock()
+	s.orphanSandboxIDs[sandboxID] = struct{}{}
+	s.orphanMu.Unlock()
+}
+
+// orphanSandboxSnapshot copies the pending orphan sandbox ids.
+func (s *Service) orphanSandboxSnapshot() []string {
+	s.orphanMu.Lock()
+	defer s.orphanMu.Unlock()
+	out := make([]string, 0, len(s.orphanSandboxIDs))
+	for id := range s.orphanSandboxIDs {
+		out = append(out, id)
+	}
+	return out
 }
 
 // setLostReason stamps l's loss reason once. A lease that dips in and out
@@ -248,9 +330,11 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 
 // recoveryOutcome is what recoverOneLease did with one lease: "recovered"
 // (it came back from its checkpoint), "lost" (it had none, or its retry
-// budget ran out) or "recovering" (a transient failure left it for the
-// next reconcile pass). Generation and State are the lease's values after
-// the call. The crash test reports it; the reconcile loop counts it.
+// budget ran out), "recovering" (a transient failure left it for the
+// next reconcile pass) or "released" (the lease was released while the
+// recovery ran, so it was left released and nothing was saved).
+// Generation and State are the lease's values after the call. The crash
+// test reports it; the reconcile loop counts it.
 type recoveryOutcome struct {
 	Result     string `json:"result"`
 	Generation int64  `json:"generation"`
@@ -278,11 +362,13 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 		return s.loseRecovery(ctx, l, "no checkpoint to recover from; the running state is gone", "")
 	}
 	if err := s.recoverFromCheckpoint(ctx, l); err != nil {
-		// The lease was released while its recovery created the sandbox:
-		// the create path already stopped the sandbox, and a released
-		// lease must not be lost, retried or resurrected (spoond-775).
+		// The lease was released while its recovery create ran: the
+		// release already stopped the guest it knew about and the
+		// create's fresh one was stopped too (spoond-775, spoond-63a).
+		// Nothing to lose and nothing to save.
 		if errors.Is(err, errLeaseReleased) {
 			s.clearRecoveryRetries(l)
+			s.log.Printf("recovery: lease %s was released during its recovery; recovery stops", l.ID)
 			return recoveryOutcome{Result: "released", Generation: l.Generation, State: l.State}
 		}
 		// A missing image or build can never succeed on a retry: give up
@@ -356,7 +442,10 @@ func (s *Service) loseRecovery(ctx context.Context, l *Lease, reason, cause stri
 	if released {
 		return recoveryOutcome{Result: "lost", Generation: l.Generation, State: l.State}
 	}
-	s.deleteSandboxRow(l.SandboxID)
+	// Lost means stopped (spoond-63a): delete whatever sandbox still holds
+	// the lease's id — the half-started guest a failed recovery create
+	// left behind, also when the retry budget is spent — and its row.
+	s.stopLostSandbox(l.SandboxID, l.ID)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 	if cause != "" {
 		s.log.Printf("recovery: lease %s lost (checkpoint %s): %s", l.ID, formatRFC3339(l.LastCheckpointAt), cause)
@@ -414,16 +503,29 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	if err != nil {
 		return err
 	}
+	// A release that landed while the recovery create ran must not be
+	// undone by the saves below: stop the fresh guest and leave the
+	// lease released (spoond-775, spoond-63a). Do not rely on
+	// createSandbox's own released check: the release that cleaned up
+	// while the create was still in flight deleted a not-yet-registered
+	// guest (a no-op), so the fresh sandbox is still here.
+	if s.leaseReleased(l) {
+		s.log.Printf("recovery: lease %s was released during its recovery create; stopping sandbox %s", l.ID, sb.ID)
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return errLeaseReleased
+	}
 	s.store.mu.Lock()
 	if l.released {
 		// Released while the recovery created its sandbox: stop the fresh
-		// sandbox and leave no lease or sandbox row behind (spoond-775).
+		// sandbox (bounded retries, spoond-63a) and leave no lease or
+		// sandbox row behind (spoond-775).
 		s.store.mu.Unlock()
 		s.log.Printf("recovery: lease %s was released during its recovery; stopping sandbox %s", l.ID, sb.ID)
-		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
-			s.log.Printf("recovery: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
-		}
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
 		return errLeaseReleased
 	}
 	l.setState("recovered")
@@ -438,6 +540,7 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.endCreatingSandbox(sb.ID)
 	s.writeGeneration(l)
 	// Crash recovery rebuilt the guest from a checkpoint: its memory did
 	// not continue, so every running job is lost (2.6, #135).

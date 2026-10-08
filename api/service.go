@@ -506,6 +506,33 @@ type Service struct {
 	// cannot wedge the loop (spoond-j3a). DefaultSweepTimeout unless
 	// configured.
 	sweepTimeout time.Duration
+	// lostSandboxDeleteAttempts and lostSandboxDeleteBackoff bound the
+	// substrate Delete retries when a lease becomes lost (api/recovery.go
+	// markLost): the sandbox a failed create or resume left behind is
+	// deleted with these, and a delete that still fails is left to the
+	// orphan sweep. Fields so tests can shrink the pause.
+	lostSandboxDeleteAttempts int
+	lostSandboxDeleteBackoff  time.Duration
+	// orphanSweepInterval is how often the periodic orphan sandbox sweep
+	// runs (spoond-abc): it deletes substrate sandboxes whose lease is
+	// lost or released, catching a lost path's bounded delete that still
+	// failed. Defaults to defaultOrphanSweepInterval; tests shorten it.
+	orphanSweepInterval time.Duration
+	// orphanMu guards orphanSandboxIDs: sandbox ids a lost or released
+	// lease's substrate Delete could not stop, kept so the periodic orphan
+	// sweep retries them. A released lease's row and in-memory entry are
+	// gone, so the sweep cannot rediscover them from the lease set alone;
+	// this set is what "a Delete that still fails is left to the orphan
+	// sweep" means. It is in-memory only (a backend restart drops it, and
+	// the startup ReconcileOrphans sweeps the substrate then).
+	orphanMu         sync.Mutex
+	orphanSandboxIDs map[string]struct{}
+	// orphanSweep is the periodic orphan sandbox sweep's in-memory state
+	// (spoond-abc): the sandbox ids a creation currently holds, from the
+	// moment its id is chosen until its lease or pool entry claims it,
+	// and the unclaimed sandboxes seen on the previous pass. See
+	// api/orphan_sweep.go.
+	orphanSweep orphanSweepState
 	// now is the service clock. Tests replace it to age a lease's
 	// lost_at without sleeping; the GC's grace periods read it.
 	now func() time.Time
@@ -661,6 +688,11 @@ type Service struct {
 	// suspended. It lets a test land a release in that window to pin the
 	// re-check under the lock (spoond-d76). Nil in production.
 	pauseBeforeSuspend func(l *Lease)
+	// restartBeforeRecheck, when set by a test, runs after restart has
+	// re-checked the lease is not released and just before it takes the
+	// store lock for the save, so a test can land a release in that
+	// window (G2). Nil in production.
+	restartBeforeRecheck func()
 	// saves tracks in-flight and recently failed named-snapshot saves in
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
@@ -698,37 +730,42 @@ type Service struct {
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
 	svc := &Service{
-		sub:                   sub,
-		db:                    db,
-		store:                 newStore(),
-		tokens:                tokens,
-		cfg:                   cfg,
-		sweepInterval:         5 * time.Second,
-		sweepTimeout:          sweepTimeoutOrDefault(cfg.SweepTimeout),
-		now:                   time.Now,
-		diskCapacity:          statfsCapacity,
-		diskUsage:             store.BuildDiskUsage,
-		appliedEgress:         map[string]string{},
-		createSecrets:         map[string]map[string]string{},
-		log:                   log.Default(),
-		probeEnabled:          true,
-		probeTimeout:          20 * time.Second,
-		rootfsProbeOK:         map[string]time.Time{},
-		rootfsProbeFails:      map[string]*rootfsProbeFailure{},
-		recoveryRetries:       map[string]*retryBudget{},
-		preemptRetries:        map[string]*retryBudget{},
-		preemptCapLogAt:       map[string]time.Time{},
-		drainHeal:             map[string]*drainHealState{},
-		bus:                   newEventBus(),
-		gcErr:                 newGCTracker(),
-		liveJobSecrets:        map[string][]string{},
-		stagedExecSecrets:     map[string]int{},
-		stagedExecSecretNames: map[string][]string{},
-		pendingSecretRemovals: map[string][]string{},
-		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
-		startingBuilds:        map[string]int{},
-		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
-		jobStarts:             map[string]*jobStartLock{},
+		sub:                       sub,
+		db:                        db,
+		store:                     newStore(),
+		tokens:                    tokens,
+		cfg:                       cfg,
+		sweepInterval:             5 * time.Second,
+		sweepTimeout:              sweepTimeoutOrDefault(cfg.SweepTimeout),
+		now:                       time.Now,
+		diskCapacity:              statfsCapacity,
+		diskUsage:                 store.BuildDiskUsage,
+		appliedEgress:             map[string]string{},
+		createSecrets:             map[string]map[string]string{},
+		log:                       log.Default(),
+		probeEnabled:              true,
+		probeTimeout:              20 * time.Second,
+		rootfsProbeOK:             map[string]time.Time{},
+		rootfsProbeFails:          map[string]*rootfsProbeFailure{},
+		recoveryRetries:           map[string]*retryBudget{},
+		preemptRetries:            map[string]*retryBudget{},
+		preemptCapLogAt:           map[string]time.Time{},
+		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
+		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
+		orphanSweepInterval:       defaultOrphanSweepInterval,
+		orphanSandboxIDs:          map[string]struct{}{},
+		orphanSweep:               newOrphanSweepState(),
+		drainHeal:                 map[string]*drainHealState{},
+		bus:                       newEventBus(),
+		gcErr:                     newGCTracker(),
+		liveJobSecrets:            map[string][]string{},
+		stagedExecSecrets:         map[string]int{},
+		stagedExecSecretNames:     map[string][]string{},
+		pendingSecretRemovals:     map[string][]string{},
+		saves:                     namedSaveInFlight{saves: map[string]*namedSaveState{}},
+		startingBuilds:            map[string]int{},
+		secretsGate:               secretsGate{saving: map[string]int{}, staging: map[string]int{}},
+		jobStarts:                 map[string]*jobStartLock{},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
 	svc.snapshotLimiters = snapshotLimiters{
@@ -743,6 +780,25 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 // record pool, lease and quota events.
 func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 	s.metrics = m
+}
+
+// bakesRunning reports how many template bakes are in flight: the
+// catalog's template builds still `building`. The image pipeline runs in
+// the separate `spoond images build` process, so the backend sees its
+// bakes only through the shared catalog; a stale row a killed build left
+// is failed by the GC (spoond-4yl). The orphan sweep skips while this is
+// non-zero, and a catalog read failure is returned so the sweep can skip
+// rather than delete blind (spoond-63a N1). CollectMetrics publishes the
+// count as spoond_builds_in_flight.
+func (s *Service) bakesRunning(ctx context.Context) (int64, error) {
+	if s.db == nil {
+		return 0, nil
+	}
+	c, err := s.db.CountBuildingTemplateBuilds(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return int64(c), nil
 }
 
 // SetGatewayToken marks the SSH gateway's service token, enabling
@@ -1148,13 +1204,26 @@ func (s *Service) runRefreshPeers(ctx context.Context) {
 // here for every cold create and resume — the class decision (#128
 // part 2) happened earlier on the path that owns the lease, and the
 // plain capacity check stays with the sandbox it sizes.
-func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store.BuildRow, resume bool, sandboxID string, l *Lease) (substrate.Sandbox, error) {
+func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store.BuildRow, resume bool, sandboxID string, l *Lease) (sb substrate.Sandbox, err error) {
 	if err := s.admit(ctx, b.MemoryMB); err != nil {
 		return substrate.Sandbox{}, err
 	}
 	if sandboxID == "" {
 		sandboxID = e2b.NewSandboxID()
 	}
+	// From the moment the id is chosen until the caller claims the
+	// sandbox (the lease or pool entry is recorded), the orphan sweep
+	// must not touch it: a create can leave its lease row for a while
+	// (the integrity probe) or never, if it fails. A create that fails
+	// here ends the window itself; on success the caller must call
+	// endCreatingSandbox once it has claimed the sandbox or cleaned it
+	// up. spoond-abc.
+	s.beginCreatingSandbox(sandboxID)
+	defer func() {
+		if err != nil {
+			s.endCreatingSandbox(sandboxID)
+		}
+	}()
 	env := make(map[string]string, len(img.Env)+2)
 	for k, v := range img.Env {
 		env[k] = v
@@ -1163,7 +1232,7 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 	env["SPOOND_GATEWAY_URL"] = "http://" + s.cfg.HostGuestAddr + ":" + strconv.Itoa(s.cfg.HostGuestPort)
 	eg := s.egressFor(l)
 	start := time.Now()
-	sb, err := s.sub.Create(ctx, substrate.CreateRequest{
+	sb, err = s.sub.Create(ctx, substrate.CreateRequest{
 		TemplateID:         b.TemplateID,
 		BuildID:            b.BuildID,
 		SandboxID:          sandboxID,
@@ -1194,21 +1263,30 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		}
 		return substrate.Sandbox{}, err
 	}
-	s.recordAppliedEgress(l.ID, eg)
+	// A substrate may mint the id rather than honour the requested one;
+	// track the returned id from here on so the caller's endCreatingSandbox
+	// matches and the sweep keys on the id the substrate reports.
+	if sb.ID != "" && sb.ID != sandboxID {
+		s.endCreatingSandbox(sandboxID)
+		sandboxID = sb.ID
+		s.beginCreatingSandbox(sandboxID)
+	}
 	// The create can take minutes on a saturated host. If the lease was
 	// released while this one was starting, the sandbox must not become
-	// the lease's again: release already deleted the previous sandbox and
-	// dropped the row, and no path may re-add one or save the lease back
-	// (spoond-775). Stop the fresh sandbox here; the caller's own released
-	// checks and saveLeaseLocked's guard cover the rest.
+	// the lease's again: release already deleted the sandbox id it knew
+	// about before this guest existed and dropped the row, and no path
+	// may re-add one or save the lease back (spoond-775). Stop the fresh
+	// sandbox here (bounded retries, spoond-63a) and tell the caller not
+	// to save; the caller's own released checks and saveLeaseLocked's
+	// guard cover a release that lands later. The deferred
+	// endCreatingSandbox ends the in-flight mark.
 	if s.leaseReleased(l) {
-		s.log.Printf("create: lease %s was released while its sandbox %s started; stopping it", l.ID, sb.ID)
-		if err := s.sub.Delete(ctx, sb.ID); err != nil {
-			s.log.Printf("create: lease %s stop sandbox %s: %v", l.ID, sb.ID, err)
-		}
-		s.deleteSandboxRow(sb.ID)
+		s.log.Printf("create: lease %s was released while its sandbox %s started; stopping it", l.ID, sandboxID)
+		s.deleteSandboxWithRetries(sandboxID, l.ID, "released")
+		s.deleteSandboxRow(sandboxID)
 		return substrate.Sandbox{}, errLeaseReleased
 	}
+	s.recordAppliedEgress(l.ID, eg)
 	leaseID := l.ID
 	if leaseID == "pool" {
 		leaseID = "" // pool placeholder: pool sandboxes have no lease
@@ -1328,6 +1406,25 @@ func (s *Service) Start(ctx context.Context) {
 					s.reconcileCrash(ctx)
 					continue
 				}
+			}
+		}
+	}()
+	// Periodic orphan sandbox sweep (spoond-abc, spoond-63a): every
+	// orphanSweepInterval, delete substrate sandboxes a lost lease owns,
+	// an unclaimed sandbox seen unclaimed twice, and any id a failed
+	// delete remembered. It is the backstop for a lost path's bounded
+	// delete and for a guest a previous incarnation left, and it never
+	// touches a live, busy, in-flight or pool sandbox. The startup pass
+	// is ReconcileOrphans, so this loop is purely periodic.
+	go func() {
+		t := time.NewTicker(s.orphanSweepInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.runSweepStage(ctx, "sweepOrphanSandboxes", s.sweepOrphanSandboxes)
 			}
 		}
 	}()
@@ -1635,6 +1732,7 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
+		s.rememberOrphanSandbox(l.SandboxID)
 	}
 	s.deleteSandboxRow(l.SandboxID)
 	// The lease's kept builds stop being GC roots (2.3, #121): the next
@@ -2132,6 +2230,11 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				id = pool[0]
 				s.store.pool[image] = pool[1:]
 				s.removePoolLocked(id)
+				// The pool entry is gone before the lease row names the
+				// sandbox: hold it in flight, in the same critical
+				// section, so the orphan sweep never sees it unclaimed
+				// in the gap (spoond-abc).
+				s.beginCreatingSandbox(id)
 			}
 			s.store.mu.Unlock()
 			if id == "" {
@@ -2141,30 +2244,36 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			if errors.Is(err, store.ErrNotFound) {
 				s.log.Printf("grant: pooled %s (%s) has no sandboxes row, discarding", id, image)
 				s.discardPoolSandbox(ctx, id)
+				s.endCreatingSandbox(id)
 				continue
 			}
 			if err != nil {
 				s.discardPoolSandbox(ctx, id)
+				s.endCreatingSandbox(id)
 				return nil, fmt.Errorf("load pooled sandbox %s: %w", id, err)
 			}
 			if row.BuildID != img.CurrentBuildID {
 				s.log.Printf("grant: pooled %s (%s) was built from %s, want %s, discarding", id, image, row.BuildID, img.CurrentBuildID)
 				s.discardPoolSandbox(ctx, id)
+				s.endCreatingSandbox(id)
 				continue
 			}
 			if err := s.sub.Health(ctx, id); err != nil {
 				s.log.Printf("grant: pooled %s (%s) is unhealthy, discarding: %v", id, image, err)
 				s.discardPoolSandbox(ctx, id)
+				s.endCreatingSandbox(id)
 				continue
 			}
 			eg := s.egressFor(lease)
 			if err := s.sub.UpdateEgress(ctx, id, eg); err != nil {
 				s.discardPoolSandbox(ctx, id)
+				s.endCreatingSandbox(id)
 				return nil, fmt.Errorf("update egress on pooled sandbox: %w", err)
 			}
 			s.recordAppliedEgress(lease.ID, eg)
 			if err := s.sub.UpdateEndAt(ctx, id, lease.ExpiresAt); err != nil {
 				s.discardPoolSandbox(ctx, id)
+				s.endCreatingSandbox(id)
 				return nil, fmt.Errorf("update end at on pooled sandbox: %w", err)
 			}
 			row.LeaseID = lease.ID
@@ -2174,6 +2283,8 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			lease.ExposedIP = row.HostIP
 			lease.BuildID = row.BuildID
 			lease.pooled = true
+			// The lease row will claim the sandbox below; keep it safe
+			// until then, then release the in-flight hold.
 			break
 		}
 	}
@@ -2209,11 +2320,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		if err := s.writeGeneration(lease); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
+			s.endCreatingSandbox(lease.SandboxID)
 			return nil, fmt.Errorf("write lease-id and generation markers: %w", err)
 		}
 		if err := s.writeStartedFromMarker(lease); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
+			s.endCreatingSandbox(lease.SandboxID)
 			return nil, fmt.Errorf("write started-from marker: %w", err)
 		}
 		// The snapshot's memory may still carry secret files (a save
@@ -2224,6 +2337,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		if _, err := s.scrubAllSecrets(ctx, lease.SandboxID, nil); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
+			s.endCreatingSandbox(lease.SandboxID)
 			return nil, fmt.Errorf("scrub secrets on snapshot start: %w", err)
 		}
 	}
@@ -2234,6 +2348,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if err := s.probeSandbox(ctx, lease.SandboxID); err != nil {
 		_ = s.sub.Delete(ctx, lease.SandboxID)
 		s.deleteSandboxRow(lease.SandboxID)
+		s.endCreatingSandbox(lease.SandboxID)
 		return nil, err
 	}
 	// Create-time secrets (#80) are staged after the integrity probe so
@@ -2244,6 +2359,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		if err := s.stageSecrets(ctx, lease.SandboxID, req.createSecrets); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
+			s.endCreatingSandbox(lease.SandboxID)
 			return nil, fmt.Errorf("stage lease secrets: %w", err)
 		}
 		s.setCreateSecrets(lease.ID, req.createSecrets)
@@ -2261,6 +2377,9 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
+	// The lease now claims the sandbox: the orphan sweep may see it as
+	// owned even before the next List. spoond-abc.
+	s.endCreatingSandbox(lease.SandboxID)
 	s.countImageUse(image)
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
@@ -2571,16 +2690,27 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 		// there too (spoond-775), so nothing is deleted twice.
 		return nil, err
 	}
+	// A release that landed just after the create returned must not be
+	// undone by the save below: stop the fresh guest and leave the lease
+	// released (spoond-775, spoond-63a). The store lock below re-checks
+	// the race.
+	if s.leaseReleased(l) {
+		s.log.Printf("resume: lease %s was released during its resume; stopping sandbox %s", l.ID, sb.ID)
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return nil, errLeaseReleased
+	}
 	s.store.mu.Lock()
 	if l.released {
-		// Released while the resume started: stop the fresh sandbox and
-		// leave no lease or sandbox row behind (spoond-775, spoond-52c S4).
+		// Released while the resume started: stop the fresh sandbox
+		// (bounded retries, spoond-63a) and leave no lease or sandbox row
+		// behind (spoond-775, spoond-52c S4).
 		s.store.mu.Unlock()
 		s.log.Printf("resume: lease %s was released during its resume; stopping sandbox %s", l.ID, sb.ID)
-		if derr := s.sub.Delete(context.WithoutCancel(ctx), sb.ID); derr != nil {
-			s.log.Printf("resume: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
-		}
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
 		return nil, errLeaseReleased
 	}
 	l.HostIP = sb.HostIP
@@ -2600,6 +2730,7 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	l.LastActive = time.Now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.endCreatingSandbox(sb.ID)
 	// The secrets tmpfs does not survive a snapshot cycle: re-write the
 	// lease's create-time secrets after the sandbox is back (#80).
 	s.restageCreateSecrets(ctx, l, "resume")
@@ -2715,16 +2846,31 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	if err != nil {
 		return nil, err
 	}
+	// A release that landed while the create ran must not be undone by the
+	// save below: createSandbox's own released check can miss a release
+	// whose Delete ran before the fresh guest was registered, so stop it
+	// here too and skip the save (spoond-775, spoond-63a). Re-check under
+	// the store lock, as the release can land after the first check.
+	if s.leaseReleased(l) {
+		s.log.Printf("restart: lease %s was released during its restart; stopping sandbox %s", l.ID, sb.ID)
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return nil, errLeaseReleased
+	}
+	if s.restartBeforeRecheck != nil {
+		s.restartBeforeRecheck()
+	}
 	s.store.mu.Lock()
 	if l.released {
-		// Released while the fresh guest started: stop it and write no
-		// lease or sandbox row back (spoond-775).
+		// Released while the fresh guest started: stop it (bounded
+		// retries, spoond-63a) and write no lease or sandbox row back
+		// (spoond-775).
 		s.store.mu.Unlock()
 		s.log.Printf("restart: lease %s was released during its restart; stopping sandbox %s", l.ID, sb.ID)
-		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
-			s.log.Printf("restart: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
-		}
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
 		return nil, errLeaseReleased
 	}
 	l.SandboxID = sb.ID
@@ -2737,6 +2883,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.endCreatingSandbox(sb.ID)
 	s.writeGeneration(l)
 	// The fresh sandbox has no crash-recovery budget: a stale one must not
 	// bypass reconcile's 'present' check (spoond-dxq B2).
@@ -2797,21 +2944,31 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	if err != nil {
 		return nil, err
 	}
-	s.store.mu.Lock()
-	if l.released {
-		// Released while the fresh guest started: stop it and write no
-		// lease or sandbox row back (spoond-775).
-		s.store.mu.Unlock()
+	// A release that landed just after the create returned must not be
+	// undone by the save below (spoond-775, spoond-63a). Re-check under
+	// the store lock, as the release can land after the first check.
+	if s.leaseReleased(l) {
 		s.log.Printf("restart: lease %s was released during its cold restart; stopping sandbox %s", l.ID, sb.ID)
-		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
-			s.log.Printf("restart: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
-		}
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
 		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
 		return nil, errLeaseReleased
 	}
 	if old := l.SandboxID; old != "" && old != sb.ID {
 		_ = s.sub.Delete(ctx, old)
 		s.deleteSandboxRow(old)
+	}
+	s.store.mu.Lock()
+	if l.released {
+		// Released while the fresh guest started: stop it (bounded
+		// retries, spoond-63a) and write no lease or sandbox row back
+		// (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("restart: lease %s was released during its cold restart; stopping sandbox %s", l.ID, sb.ID)
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return nil, errLeaseReleased
 	}
 	l.SandboxID = sb.ID
 	l.HostIP = sb.HostIP
@@ -2830,6 +2987,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.endCreatingSandbox(sb.ID)
 	s.writeGeneration(l)
 	// The fresh sandbox has no crash-recovery budget (spoond-dxq B2).
 	s.clearRecoveryRetries(l)
@@ -3063,6 +3221,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
+	s.endCreatingSandbox(sb.ID)
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -3138,6 +3297,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		for _, l := range created {
 			_ = s.sub.Delete(ctx, l.SandboxID)
 			s.deleteSandboxRow(l.SandboxID)
+			s.endCreatingSandbox(l.SandboxID)
 			s.store.mu.Lock()
 			delete(s.store.leases, l.ID)
 			s.deleteLeaseLocked(l.ID)
@@ -3203,6 +3363,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.store.leases[lease.ID] = lease
 		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
+		s.endCreatingSandbox(sb.ID)
 		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
 		created = append(created, lease)
 	}
@@ -3901,12 +4062,14 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 			s.log.Printf("warmPool: %s sandbox %s failed the integrity probe, recycling: %v", img.Name, sb.ID, err)
 			_ = s.sub.Delete(ctx, sb.ID)
 			s.deleteSandboxRow(sb.ID)
+			s.endCreatingSandbox(sb.ID)
 			return
 		}
 		s.store.mu.Lock()
 		s.store.pool[img.Name] = append(s.store.pool[img.Name], sb.ID)
 		s.addPoolLocked(sb.ID, img.Name)
 		s.store.mu.Unlock()
+		s.endCreatingSandbox(sb.ID)
 	}
 }
 
@@ -4082,7 +4245,11 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 }
 
 // leaseReleased reports whether l was released, under the store lock.
+// A nil lease is not released.
 func (s *Service) leaseReleased(l *Lease) bool {
+	if l == nil {
+		return false
+	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	return l.released
@@ -4257,6 +4424,7 @@ func (s *Service) deleteSandboxBounded(ctx context.Context, sandboxID string) {
 		}
 	}
 	s.log.Printf("delete sandbox %s failed after %d attempt(s): %v", sandboxID, sandboxDeleteRetries, err)
+	s.rememberOrphanSandbox(sandboxID)
 }
 
 // flushLastActiveLocked writes the batched touch() updates in one
@@ -4467,6 +4635,12 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 		oldest = s.now().Sub(oldestQueued).Seconds()
 	}
 	m.LeasesQueuedOldest.Set(oldest)
+	// Template bakes in flight (N1): the catalog's still-`building`
+	// template builds, the same count the orphan sweep guards on. A read
+	// failure leaves the gauge at its last value.
+	if n, err := s.bakesRunning(context.Background()); err == nil {
+		m.BuildsInFlight.Set(float64(n))
+	}
 	// Kept checkpoints (#126): pins of live leases and their recorded
 	// bytes, refreshed on every scrape. CollectMetrics holds the store
 	// lock only for the lease set it needs; the kept rows live in the
@@ -4474,70 +4648,6 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	s.UpdateKeptMetrics(context.Background())
 	s.UpdateNamedSnapshotMetrics(context.Background())
 	s.store.mu.Lock()
-}
-
-// ReconcileOrphans aligns the substrate with the state loaded from the
-// store. If the sandbox list fails, nothing changes (leases are never
-// marked lost on a list failure). Substrate sandboxes that no lease
-// (by sandbox id) or pool entry claims are deleted. The per-lease
-// crash handling (lost/recovered marking, U10) runs afterwards via
-// reconcileCrash.
-func (s *Service) ReconcileOrphans(ctx context.Context) {
-	sbs, err := s.sub.List(ctx)
-	if err != nil {
-		s.log.Printf("reconcile: list sandboxes failed: %v", err)
-		return
-	}
-	present := make(map[string]bool, len(sbs))
-	for _, sb := range sbs {
-		present[sb.ID] = true
-	}
-	s.store.mu.Lock()
-	mine := make(map[string]bool)
-	for _, l := range s.store.leases {
-		if l.SandboxID != "" {
-			mine[l.SandboxID] = true
-		}
-	}
-	for _, ids := range s.store.pool {
-		for _, id := range ids {
-			mine[id] = true
-		}
-	}
-	var orphans []string
-	for _, sb := range sbs {
-		if !mine[sb.ID] {
-			orphans = append(orphans, sb.ID)
-		}
-	}
-	for img, ids := range s.store.pool {
-		kept := ids[:0]
-		for _, id := range ids {
-			if present[id] {
-				kept = append(kept, id)
-			} else {
-				s.removePoolLocked(id)
-			}
-		}
-		s.store.pool[img] = kept
-	}
-	s.store.mu.Unlock()
-
-	deleted := 0
-	for _, id := range orphans {
-		if err := s.sub.Delete(ctx, id); err != nil {
-			s.log.Printf("reconcile: delete orphan %s failed: %v", id, err)
-			continue
-		}
-		deleted++
-		if s.metrics != nil {
-			s.metrics.LeaseOrphaned.Inc()
-		}
-	}
-	if deleted > 0 {
-		s.log.Printf("reconcile: deleted %d orphaned sandbox(es) from a previous incarnation", deleted)
-	}
-	s.reconcileCrash(ctx)
 }
 
 var (
