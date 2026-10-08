@@ -23,8 +23,9 @@
 //	MAX_TTL_SECS      max lease TTL (default 3600)
 //	HOST_GUEST_SERVICE_ADDR  address guests use to reach host services (required)
 //	HOST_GUEST_SERVICE_PORT  host port guests use (default 8891)
-//	SPOOND_GUEST_DNS_ADDR  guest DNS resolver granted on port 53 and baked
-//	                  into the guest image (empty = no resolver allowance)
+//	SPOOND_GUEST_DNS_ADDR  guest DNS resolver(s) granted on port 53 and baked
+//	                  into the guest image; comma-separated (empty = no
+//	                  resolver allowance)
 //	SPOOND_PROXY_HOST_SUFFIX  wildcard hostname suffix the HTTP proxy
 //	                  routes (default .sandbox.example.com)
 //	METRICS_TOKEN     bearer that may read /metrics and nothing else
@@ -323,12 +324,16 @@ func Main(args []string) int {
 	if hostGuestAddr == "" {
 		log.Fatal("HOST_GUEST_SERVICE_ADDR is required (the address guests use to reach host services)")
 	}
-	// The guest's DNS resolver (SPOOND_GUEST_DNS_ADDR). It is granted to
-	// every lease's egress policy and baked into the guest image for
-	// spoond-guest-init. Empty = no resolver allowance.
+	// The guest's DNS resolver(s) (SPOOND_GUEST_DNS_ADDR,
+	// comma-separated). Each is granted to every lease's egress policy
+	// and baked into the guest image for spoond-guest-init. Empty = no
+	// resolver allowance.
 	guestDNSAddr := os.Getenv("SPOOND_GUEST_DNS_ADDR")
-	if guestDNSAddr != "" && net.ParseIP(guestDNSAddr) == nil {
-		log.Fatalf("SPOOND_GUEST_DNS_ADDR %q is not an IP address", guestDNSAddr)
+	for _, addr := range strings.Split(guestDNSAddr, ",") {
+		addr = strings.TrimSpace(addr)
+		if addr != "" && net.ParseIP(addr) == nil {
+			log.Fatalf("SPOOND_GUEST_DNS_ADDR %q is not an IP address", addr)
+		}
 	}
 	// The wildcard hostname suffix the HTTP proxy routes
 	// (SPOOND_PROXY_HOST_SUFFIX). Empty = the generic default.

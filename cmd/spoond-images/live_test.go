@@ -7,9 +7,9 @@
 // from /root/src/spoond, with the E2B_* environment set (FromEnv
 // defaults). For every baked manifest image it creates a sandbox from
 // the image's current_build_id with the manifest env, runs `cat
-// /etc/resolv.conf`, checks the first line is `nameserver
-// $SPOOND_GUEST_DNS_ADDR` (skipped when that is unset), and deletes the
-// sandbox.
+// /etc/resolv.conf`, checks every comma-separated address in
+// $SPOOND_GUEST_DNS_ADDR has a `nameserver` line (skipped when that is
+// unset), and deletes the sandbox.
 package spoondimages
 
 import (
@@ -101,14 +101,21 @@ func TestLiveImages(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Exec cat /etc/resolv.conf: %v", err)
 			}
-			firstLine := strings.SplitN(r.Stdout, "\n", 2)[0]
+			stdout := r.Stdout
 			want := envOr("SPOOND_GUEST_DNS_ADDR", "")
 			if want == "" {
 				t.Skip("SPOOND_GUEST_DNS_ADDR not set; resolver check skipped")
 			}
-			if firstLine != "nameserver "+want {
-				t.Fatalf("/etc/resolv.conf first line = %q, want %q (stdout=%q stderr=%q exit=%d)",
-					firstLine, "nameserver "+want, r.Stdout, r.Stderr, r.ExitCode)
+			for _, addr := range strings.Split(want, ",") {
+				addr = strings.TrimSpace(addr)
+				if addr == "" {
+					continue
+				}
+				line := "nameserver " + addr
+				if !strings.Contains(stdout, line+"\n") {
+					t.Fatalf("/etc/resolv.conf lacks %q (stdout=%q stderr=%q exit=%d)",
+						line, stdout, r.Stderr, r.ExitCode)
+				}
 			}
 
 			dctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

@@ -157,6 +157,55 @@ func TestDNSAllowance(t *testing.T) {
 	}
 }
 
+// TestDNSAllowances pins the comma-separated list form: one allowance
+// per address, whitespace and blank entries tolerated, and a single
+// value unchanged from dnsAllowance.
+func TestDNSAllowances(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []substrate.PrivateAllowance
+	}{
+		{"", nil},
+		{"   ", nil},
+		{"10.0.0.2", []substrate.PrivateAllowance{{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}}}},
+		{"10.0.0.2,10.0.0.3", []substrate.PrivateAllowance{
+			{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}},
+			{CIDR: "10.0.0.3/32", TCPPorts: []uint32{53}},
+		}},
+		{"10.0.0.2, 10.0.0.3 ,", []substrate.PrivateAllowance{
+			{CIDR: "10.0.0.2/32", TCPPorts: []uint32{53}},
+			{CIDR: "10.0.0.3/32", TCPPorts: []uint32{53}},
+		}},
+	}
+	for _, tc := range cases {
+		if got := dnsAllowances(tc.in); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("dnsAllowances(%q) = %+v, want %+v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestEgressForTwoResolvers: a comma-separated SPOOND_GUEST_DNS_ADDR
+// grants every address a port-53 allowance and reports GuestDNS, so the
+// substrate sends no public DNS fallback.
+func TestEgressForTwoResolvers(t *testing.T) {
+	svc, _ := newLifecycleService(t)
+	svc.cfg.GuestDNSAddr = "10.1.0.2,10.1.0.3"
+	svc.cfg.HostAPIPort = 0
+
+	got := svc.egressFor(&Lease{NetPolicy: "restricted", NetAllow: []string{"example.com"}})
+	if !got.GuestDNS {
+		t.Fatalf("GuestDNS = false with configured resolvers: %+v", got)
+	}
+	for _, want := range []substrate.PrivateAllowance{
+		{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}},
+		{CIDR: "10.1.0.3/32", TCPPorts: []uint32{53}},
+	} {
+		if !containsAllowance(got.Private, want) {
+			t.Fatalf("resolver allowance %+v missing: %+v", want, got.Private)
+		}
+	}
+}
+
 // TestEgressForWithoutGuestDNS pins the public-DNS-fallback switch:
 // with no configured guest resolver the restricted egress reports
 // GuestDNS=false, so the substrate keeps the public fallback; with one
