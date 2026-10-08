@@ -214,6 +214,12 @@ func (s *Service) drain(ctx context.Context) (drainResult, error) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if _, err := s.pauseLease(ctx, l, true); err != nil {
+				if errors.Is(err, errLeaseReleased) {
+					// The lease was released while its pause ran: there is
+					// nothing left to drain, so it is skipped rather than
+					// reported as a failure (spoond-d76).
+					return
+				}
 				// A lease left running into the orchestrator stop must be
 				// visible outside the HTTP response, which a hook that has
 				// already given up never reads (spoond-52c R2).

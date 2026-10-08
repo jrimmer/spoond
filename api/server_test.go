@@ -52,6 +52,11 @@ type testSub struct {
 	// createFn, when set, replaces the fake's Create: it may run while a
 	// create is in flight (the crash-reconcile-rootfs-probe race test).
 	createFn func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error)
+	// listFn/deleteFn, when set, replace the fake's List and Delete: a
+	// test parks a List (so a release lands mid-operation) or fails a
+	// Delete to exercise the bounded cleanup retries (spoond-d76).
+	listFn   func(ctx context.Context) ([]substrate.Sandbox, error)
+	deleteFn func(ctx context.Context, sandboxID string) error
 	// setDrainingFn, when set, replaces the fake's SetDraining: a test
 	// makes SetDraining(false) fail once and then succeed (spoond-52c R1).
 	setDrainingFn func(ctx context.Context, draining bool) error
@@ -122,6 +127,22 @@ func (ts *testSub) Create(ctx context.Context, req substrate.CreateRequest) (sub
 		return ts.createFn(ctx, req)
 	}
 	return ts.Fake.Create(ctx, req)
+}
+
+// List delegates to listFn when set, the fake otherwise.
+func (ts *testSub) List(ctx context.Context) ([]substrate.Sandbox, error) {
+	if ts.listFn != nil {
+		return ts.listFn(ctx)
+	}
+	return ts.Fake.List(ctx)
+}
+
+// Delete delegates to deleteFn when set, the fake otherwise.
+func (ts *testSub) Delete(ctx context.Context, sandboxID string) error {
+	if ts.deleteFn != nil {
+		return ts.deleteFn(ctx, sandboxID)
+	}
+	return ts.Fake.Delete(ctx, sandboxID)
 }
 
 func newTestSub() *testSub {
