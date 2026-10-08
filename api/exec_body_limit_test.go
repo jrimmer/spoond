@@ -166,9 +166,7 @@ func TestStreamFirstFrameLimit(t *testing.T) {
 // rejected at the default. This pins the cap's headroom: a 120 KiB cmd
 // plus 64 KiB of secrets is a few hundred KiB, far under the default.
 func TestExecBodyLimitDefaultAcceptsLargeLegalBody(t *testing.T) {
-	if maxExecBodyBytes != defaultMaxExecBodyBytes {
-		t.Fatalf("precondition: default cap = %d, want %d", maxExecBodyBytes, defaultMaxExecBodyBytes)
-	}
+	withExecBodyLimit(t, defaultMaxExecBodyBytes)
 	ts, _, _, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
