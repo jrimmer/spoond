@@ -1535,6 +1535,10 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
 		case errLeaseBusy:
 			writeError(w, http.StatusConflict, err.Error())
+		case errLeaseReleased:
+			// The lease was released while the pause ran: to the caller it
+			// is gone, so 404 like every unknown lease.
+			writeError(w, http.StatusNotFound, "lease not found")
 		default:
 			s.svc.log.Printf("suspend %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "suspend failed")
@@ -1577,6 +1581,8 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "lease is not a persistent lease")
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errLeaseReleased):
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errBadRestartMode):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, errQuotaExceeded):
@@ -2230,6 +2236,8 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errLeaseReleased):
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errQuotaExceeded):
 			// Quota enforcement (security review #37 rescan F1): clone
 			// surfaces the same 429 as create, not a generic 500.
@@ -2298,6 +2306,8 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "lease is suspended; resume it first")
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, errLeaseReleased):
+			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
 		case errors.Is(err, errPreemptCannot):

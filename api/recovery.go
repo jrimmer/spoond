@@ -115,6 +115,44 @@ type recoverySummary struct {
 	Lost      int `json:"lost"`
 }
 
+// pruneStaleLeaseRows drops lease rows with no in-memory twin whose
+// sandbox is gone. A checkpoint or pause that finished after its lease was
+// released once wrote such a zombie `state=running` row back (spoond-775);
+// the save guard stops new ones, and this reconcile sweep clears the ones
+// an older binary left behind while it runs. A row with an in-memory twin
+// is left for reconcileCrash (a live lease whose sandbox vanished is
+// recovered or lost), and a row whose sandbox still exists is left for
+// ReconcileOrphans. Runs before the recovery pass so a phantom is never
+// recovered.
+func (s *Service) pruneStaleLeaseRows(ctx context.Context, present map[string]bool) {
+	rows, err := s.db.ListLeases(ctx)
+	if err != nil {
+		s.log.Printf("reconcile: list lease rows: %v", err)
+		return
+	}
+	s.store.mu.Lock()
+	var stale []string
+	for _, r := range rows {
+		if _, ok := s.store.leases[r.ID]; ok {
+			continue // a live twin: reconcileCrash owns it
+		}
+		if r.SandboxID != "" && present[r.SandboxID] {
+			continue // its sandbox survives; ReconcileOrphans reclaims it
+		}
+		stale = append(stale, r.ID)
+	}
+	s.store.mu.Unlock()
+	for _, id := range stale {
+		s.log.Printf("reconcile: dropping stale lease row %s (no in-memory lease, sandbox gone)", id)
+		if err := s.db.DeleteKeptBuilds(ctx, id); err != nil {
+			s.log.Printf("reconcile: delete kept builds of stale lease %s: %v", id, err)
+		}
+		s.store.mu.Lock()
+		s.deleteLeaseLocked(id)
+		s.store.mu.Unlock()
+	}
+}
+
 // reconcileCrash reconciles the lease state with the sandboxes that
 // survived on the node. If List fails, nothing changes: leases are
 // never marked lost on a list failure.
@@ -128,6 +166,7 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 	for _, sb := range sbs {
 		present[sb.ID] = true
 	}
+	s.pruneStaleLeaseRows(ctx, present)
 
 	s.store.mu.Lock()
 	var targets []*Lease
@@ -222,6 +261,13 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 		return s.loseRecovery(ctx, l, "no checkpoint to recover from; the running state is gone", "")
 	}
 	if err := s.recoverFromCheckpoint(ctx, l); err != nil {
+		// The lease was released while its recovery created the sandbox:
+		// the create path already stopped the sandbox, and a released
+		// lease must not be lost, retried or resurrected (spoond-775).
+		if errors.Is(err, errLeaseReleased) {
+			s.clearRecoveryRetries(l)
+			return recoveryOutcome{Result: "released", Generation: l.Generation, State: l.State}
+		}
 		// A missing image or build can never succeed on a retry: give up
 		// now with the cause.
 		if recoveryFailurePermanent(err) {
@@ -352,6 +398,17 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		return err
 	}
 	s.store.mu.Lock()
+	if l.released {
+		// Released while the recovery created its sandbox: stop the fresh
+		// sandbox and leave no lease or sandbox row behind (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("recovery: lease %s was released during its recovery; stopping sandbox %s", l.ID, sb.ID)
+		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
+			s.log.Printf("recovery: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
+		}
+		s.deleteSandboxRow(sb.ID)
+		return errLeaseReleased
+	}
 	l.setState("recovered")
 	l.RecoveredFrom = l.LastCheckpointAt
 	l.BuildID = l.LastCheckpointBuildID

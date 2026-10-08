@@ -413,6 +413,12 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				s.log.Printf("undrain: resume %s deferred after %d attempt(s) (admission refused): %v", l.ID, attempts, err)
 				return
 			}
+			if errors.Is(err, errLeaseReleased) {
+				// The lease was released while its resume started: do not
+				// mark it lost or keep it drained, and write no row back
+				// (spoond-775).
+				return
+			}
 			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
 			s.store.mu.Lock()
 			setLostReason(l, reason)

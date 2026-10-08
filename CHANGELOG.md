@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **A checkpoint, pause, resume or restore that finishes after its lease
+  was released no longer writes the lease row back.** A release running
+  while one of those operations was in flight removed the lease from
+  memory and deleted its row, but the operation's late save wrote a
+  `state=running` row back with no in-memory lease — a phantom lease
+  that reappeared on the next backend start and held its owner's quota
+  until the lost-lease grace lapsed (spoond-775). `saveLeaseLocked` now
+  refuses a released lease, and each async path drops its late sandbox,
+  build and lease writes and stops the sandbox it created; the
+  checkpoint/pause build is left unreferenced for the GC, and a startup/
+  reconcile sweep drops any such row an older binary left behind.
+
 ### Added
 
 - **Guests get both LAN resolvers, with retries.** `SPOOND_GUEST_DNS_ADDR`

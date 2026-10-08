@@ -394,6 +394,11 @@ func (s *Service) resumePreempted(ctx context.Context) {
 		if errors.Is(err, errLeaseBusy) {
 			continue
 		}
+		// The lease was released while its resume started: nothing to
+		// resume and nothing to lose (spoond-775).
+		if errors.Is(err, errLeaseReleased) {
+			continue
+		}
 		// An admission/capacity refusal is room the preemption was meant
 		// to free: the lease keeps waiting without touching its budget
 		// count, so a long capacity wait never loses an intact preempted

@@ -1130,6 +1130,20 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		return substrate.Sandbox{}, err
 	}
 	s.recordAppliedEgress(l.ID, eg)
+	// The create can take minutes on a saturated host. If the lease was
+	// released while this one was starting, the sandbox must not become
+	// the lease's again: release already deleted the previous sandbox and
+	// dropped the row, and no path may re-add one or save the lease back
+	// (spoond-775). Stop the fresh sandbox here; the caller's own released
+	// checks and saveLeaseLocked's guard cover the rest.
+	if s.leaseReleased(l) {
+		s.log.Printf("create: lease %s was released while its sandbox %s started; stopping it", l.ID, sb.ID)
+		if err := s.sub.Delete(ctx, sb.ID); err != nil {
+			s.log.Printf("create: lease %s stop sandbox %s: %v", l.ID, sb.ID, err)
+		}
+		s.deleteSandboxRow(sb.ID)
+		return substrate.Sandbox{}, errLeaseReleased
+	}
 	leaseID := l.ID
 	if leaseID == "pool" {
 		leaseID = "" // pool placeholder: pool sandboxes have no lease
@@ -2301,6 +2315,14 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
 		return "", fmt.Errorf("store pause build refs: %w", err)
 	}
+	if s.leaseReleased(l) {
+		// The lease was released while the pause was in flight: do not
+		// mark it suspended, delete its (already gone) sandbox row or
+		// credit its memory a second time. The pause build stays as an
+		// ordinary, GC-able candidate (spoond-775).
+		s.log.Printf("pause: lease %s was released during its pause; build %s left unreferenced", l.ID, buildID)
+		return "", errLeaseReleased
+	}
 	s.deleteSandboxRow(l.SandboxID)
 	s.store.mu.Lock()
 	l.setState("suspended")
@@ -2455,6 +2477,17 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 		return nil, err
 	}
 	s.store.mu.Lock()
+	if l.released {
+		// Released while the resume started: stop the fresh sandbox and
+		// leave no lease or sandbox row behind (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("resume: lease %s was released during its resume; stopping sandbox %s", l.ID, sb.ID)
+		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
+			s.log.Printf("resume: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
+		}
+		s.deleteSandboxRow(sb.ID)
+		return nil, errLeaseReleased
+	}
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = resumeBuild
@@ -2578,6 +2611,17 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		return nil, err
 	}
 	s.store.mu.Lock()
+	if l.released {
+		// Released while the fresh guest started: stop it and write no
+		// lease or sandbox row back (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("restart: lease %s was released during its restart; stopping sandbox %s", l.ID, sb.ID)
+		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
+			s.log.Printf("restart: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
+		}
+		s.deleteSandboxRow(sb.ID)
+		return nil, errLeaseReleased
+	}
 	l.SandboxID = sb.ID
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
@@ -2648,11 +2692,22 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	if err != nil {
 		return nil, err
 	}
+	s.store.mu.Lock()
+	if l.released {
+		// Released while the fresh guest started: stop it and write no
+		// lease or sandbox row back (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("restart: lease %s was released during its cold restart; stopping sandbox %s", l.ID, sb.ID)
+		if derr := s.sub.Delete(ctx, sb.ID); derr != nil {
+			s.log.Printf("restart: lease %s stop sandbox %s: %v", l.ID, sb.ID, derr)
+		}
+		s.deleteSandboxRow(sb.ID)
+		return nil, errLeaseReleased
+	}
 	if old := l.SandboxID; old != "" && old != sb.ID {
 		_ = s.sub.Delete(ctx, old)
 		s.deleteSandboxRow(old)
 	}
-	s.store.mu.Lock()
 	l.SandboxID = sb.ID
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
@@ -2748,9 +2803,14 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		return store.BuildRow{}, fmt.Errorf("store checkpoint build refs: %w", err)
 	}
 	// The source keeps running from the new build (A2 §3.5, §3.6, the
-	// "resume-fresh" path), so its build id and — possibly changed — host
-	// IP are re-recorded (item 18).
-	s.afterCheckpoint(ctx, src, buildID, start)
+	// "resume-fresh" path), so its build id — and possibly changed — host
+	// IP are re-recorded (item 18). If the lease was released while the
+	// checkpoint ran, afterCheckpoint leaves the build unreferenced and
+	// reports it: the caller must not use the build as a new lease's
+	// source (spoond-775).
+	if !s.afterCheckpoint(ctx, src, buildID, start) {
+		return b, errLeaseReleased
+	}
 	return b, nil
 }
 
@@ -2758,13 +2818,24 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 // from the checkpoint build; its host IP is re-read from the substrate
 // because the resume-fresh path may move it. start is when
 // checkpointLease began, so the checkpointed event carries how long the
-// checkpoint took (2.5, #132 part 2). Call without s.store.mu.
-func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID string, start time.Time) {
+// checkpoint took (2.5, #132 part 2). Call without s.store.mu. It reports
+// false when the lease was released while the checkpoint ran: nothing is
+// saved and the build is left unreferenced (spoond-775).
+func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID string, start time.Time) bool {
 	sbs, err := s.sub.List(ctx)
 	if err != nil {
 		s.log.Printf("checkpoint: list sandboxes: %v", err)
 	}
 	s.store.mu.Lock()
+	if src.released {
+		// The lease was released while the checkpoint was in flight: the
+		// build the checkpoint just wrote is left unreferenced for the GC
+		// and neither the lease nor a sandboxes row is written back
+		// (spoond-775).
+		s.store.mu.Unlock()
+		s.log.Printf("checkpoint: lease %s was released during its checkpoint; build %s left unreferenced", src.ID, buildID)
+		return false
+	}
 	src.BuildID = buildID
 	src.LastCheckpointBuildID = buildID
 	src.LastCheckpointAt = time.Now()
@@ -2792,6 +2863,7 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 	}
 	s.emitLeaseEvent(src.ID, src.Owner, LeaseCheckpointed,
 		fmt.Sprintf("%s · build %s", eventDuration(time.Since(start)), shortEventBuildID(buildID)))
+	return true
 }
 
 // clone checkpoints a running sandbox into a new build and grants a new
@@ -3875,11 +3947,29 @@ func (s *Service) trySetBusy(l *Lease) bool {
 }
 
 func (s *Service) saveLeaseLocked(l *Lease) {
+	// A lease released while an asynchronous operation (checkpoint, pause,
+	// resume, restore, recovery, reconcile) was in flight must never be
+	// written back: the release removed the in-memory entry and the lease
+	// row, and a late save would resurrect it as a phantom lease that
+	// holds the owner's quota until the lost-lease grace lapses
+	// (spoond-775). The operation's own cleanup is the caller's job; this
+	// guard is the last line of defence for every path.
+	if l.released {
+		s.log.Printf("store: upsert_lease %s: dropped, lease was released", l.ID)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.UpsertLease(ctx, leaseToRow(l)); err != nil {
 		s.storeError("upsert_lease", l.ID, err)
 	}
+}
+
+// leaseReleased reports whether l was released, under the store lock.
+func (s *Service) leaseReleased(l *Lease) bool {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	return l.released
 }
 
 // The guest's generation file (2.2): /run/spoond/generation, one line
@@ -4310,6 +4400,7 @@ var (
 	errSuspended      = &leaseError{"lease is suspended"}
 	errBadForkCount   = &leaseError{"count must be 1..20"}
 	errLeaseBusy      = &leaseError{"lease is busy; retry"}
+	errLeaseReleased  = &leaseError{"lease was released"}
 	errHolderMismatch = &leaseError{"holder does not match the lease's current holder"}
 	errBadRestartMode = &leaseError{"mode must be warm or cold"}
 )
