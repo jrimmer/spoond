@@ -550,7 +550,13 @@ resumed from that build with the same sandbox id and becomes `recovered`
 one it becomes `lost`. Nothing is marked lost when the sandbox list itself
 cannot be read — a transient failure never destroys lease state. Orphan
 sandboxes no lease or pool entry claims are deleted, and peer egress
-allowances are refreshed.
+allowances are refreshed. Marking a lease lost deletes its sandbox
+through the substrate with a few bounded retries, so a recovery whose
+create failed after the VM had started cannot leave a guest running; a
+delete that still fails is retried by the periodic orphan sandbox sweep
+(every minute), which deletes any sandbox whose lease is lost or released
+and never touches a live or busy one. The startup pass runs the same
+orphan rule again after its crash reconcile.
 
 Recovery is retried, not given up on at the first error: a `recoverFromCheckpoint`
 failure keeps the lease live with no sandbox and the next reconcile pass tries

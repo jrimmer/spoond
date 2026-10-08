@@ -500,6 +500,27 @@ type Service struct {
 	// cannot wedge the loop (spoond-j3a). DefaultSweepTimeout unless
 	// configured.
 	sweepTimeout time.Duration
+	// lostSandboxDeleteAttempts and lostSandboxDeleteBackoff bound the
+	// substrate Delete retries when a lease becomes lost (api/recovery.go
+	// markLost): the sandbox a failed create or resume left behind is
+	// deleted with these, and a delete that still fails is left to the
+	// orphan sweep. Fields so tests can shrink the pause.
+	lostSandboxDeleteAttempts int
+	lostSandboxDeleteBackoff  time.Duration
+	// orphanSweepInterval is how often the periodic orphan sandbox sweep
+	// runs (spoond-abc): it deletes substrate sandboxes whose lease is
+	// lost or released, catching a lost path's bounded delete that still
+	// failed. Defaults to defaultOrphanSweepInterval; tests shorten it.
+	orphanSweepInterval time.Duration
+	// orphanMu guards orphanSandboxIDs: sandbox ids a lost or released
+	// lease's substrate Delete could not stop, kept so the periodic orphan
+	// sweep retries them. A released lease's row and in-memory entry are
+	// gone, so the sweep cannot rediscover them from the lease set alone;
+	// this set is what "a Delete that still fails is left to the orphan
+	// sweep" means. It is in-memory only (a backend restart drops it, and
+	// the startup ReconcileOrphans sweeps the substrate then).
+	orphanMu         sync.Mutex
+	orphanSandboxIDs map[string]struct{}
 	// now is the service clock. Tests replace it to age a lease's
 	// lost_at without sleeping; the GC's grace periods read it.
 	now func() time.Time
@@ -692,37 +713,41 @@ type Service struct {
 // consumer ids.
 func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string, cfg ServiceConfig) *Service {
 	svc := &Service{
-		sub:                   sub,
-		db:                    db,
-		store:                 newStore(),
-		tokens:                tokens,
-		cfg:                   cfg,
-		sweepInterval:         5 * time.Second,
-		sweepTimeout:          sweepTimeoutOrDefault(cfg.SweepTimeout),
-		now:                   time.Now,
-		diskCapacity:          statfsCapacity,
-		diskUsage:             store.BuildDiskUsage,
-		appliedEgress:         map[string]string{},
-		createSecrets:         map[string]map[string]string{},
-		log:                   log.Default(),
-		probeEnabled:          true,
-		probeTimeout:          20 * time.Second,
-		rootfsProbeOK:         map[string]time.Time{},
-		rootfsProbeFails:      map[string]*rootfsProbeFailure{},
-		recoveryRetries:       map[string]*retryBudget{},
-		preemptRetries:        map[string]*retryBudget{},
-		preemptCapLogAt:       map[string]time.Time{},
-		drainHeal:             map[string]*drainHealState{},
-		bus:                   newEventBus(),
-		gcErr:                 newGCTracker(),
-		liveJobSecrets:        map[string][]string{},
-		stagedExecSecrets:     map[string]int{},
-		stagedExecSecretNames: map[string][]string{},
-		pendingSecretRemovals: map[string][]string{},
-		saves:                 namedSaveInFlight{saves: map[string]*namedSaveState{}},
-		startingBuilds:        map[string]int{},
-		secretsGate:           secretsGate{saving: map[string]int{}, staging: map[string]int{}},
-		jobStarts:             map[string]*jobStartLock{},
+		sub:                       sub,
+		db:                        db,
+		store:                     newStore(),
+		tokens:                    tokens,
+		cfg:                       cfg,
+		sweepInterval:             5 * time.Second,
+		sweepTimeout:              sweepTimeoutOrDefault(cfg.SweepTimeout),
+		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
+		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
+		orphanSweepInterval:       defaultOrphanSweepInterval,
+		orphanSandboxIDs:          map[string]struct{}{},
+		now:                       time.Now,
+		diskCapacity:              statfsCapacity,
+		diskUsage:                 store.BuildDiskUsage,
+		appliedEgress:             map[string]string{},
+		createSecrets:             map[string]map[string]string{},
+		log:                       log.Default(),
+		probeEnabled:              true,
+		probeTimeout:              20 * time.Second,
+		rootfsProbeOK:             map[string]time.Time{},
+		rootfsProbeFails:          map[string]*rootfsProbeFailure{},
+		recoveryRetries:           map[string]*retryBudget{},
+		preemptRetries:            map[string]*retryBudget{},
+		preemptCapLogAt:           map[string]time.Time{},
+		drainHeal:                 map[string]*drainHealState{},
+		bus:                       newEventBus(),
+		gcErr:                     newGCTracker(),
+		liveJobSecrets:            map[string][]string{},
+		stagedExecSecrets:         map[string]int{},
+		stagedExecSecretNames:     map[string][]string{},
+		pendingSecretRemovals:     map[string][]string{},
+		saves:                     namedSaveInFlight{saves: map[string]*namedSaveState{}},
+		startingBuilds:            map[string]int{},
+		secretsGate:               secretsGate{saving: map[string]int{}, staging: map[string]int{}},
+		jobStarts:                 map[string]*jobStartLock{},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
 	svc.snapshotLimiters = snapshotLimiters{
@@ -1325,6 +1350,24 @@ func (s *Service) Start(ctx context.Context) {
 			}
 		}
 	}()
+	// Periodic orphan sandbox sweep (spoond-abc): every
+	// orphanSweepInterval, delete substrate sandboxes whose lease is lost
+	// or released but whose guest still runs. It is the backstop for a
+	// lost path's bounded delete that failed, and it never touches a live
+	// lease. The startup pass is ReconcileOrphans, so this loop is purely
+	// periodic.
+	go func() {
+		t := time.NewTicker(s.orphanSweepInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.runSweepStage(ctx, "sweepOrphanSandboxes", s.sweepOrphanSandboxes)
+			}
+		}
+	}()
 	// Periodic checkpoints (U10, 2.3 #122): leases whose effective
 	// interval says so and that saw activity since their last snapshot,
 	// one at a time, spaced 2 s apart. The loop ticks every minute.
@@ -1629,6 +1672,7 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
+		s.rememberOrphanSandbox(l.SandboxID)
 	}
 	s.deleteSandboxRow(l.SandboxID)
 	// The lease's kept builds stop being GC roots (2.3, #121): the next
@@ -4470,37 +4514,137 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	s.store.mu.Lock()
 }
 
+// defaultOrphanSweepInterval is how often the periodic orphan sandbox
+// sweep runs when Start launches it (spoond-abc). It is frequent enough
+// that a lost path's failed delete is retried within a sweep tick, and
+// rare enough that the substrate List is not spammed. Tests shorten the
+// Service field directly.
+const defaultOrphanSweepInterval = 60 * time.Second
+
+// sweepOrphanSandboxes is the periodic backstop for a lost path's
+// bounded delete that still failed: it deletes every substrate sandbox
+// whose lease is lost or released (and every sandbox no lease or pool
+// entry claims at all). A live, suspended or busy lease's sandbox is
+// never touched. It also retries the sandbox ids a lost or released
+// lease's own Delete could not stop, which a released lease's gone row
+// would otherwise hide. spoond-abc.
+func (s *Service) sweepOrphanSandboxes(ctx context.Context) {
+	deleted := s.sweepUnclaimedSandboxes(ctx, orphanIsLostOrReleased)
+	// Retry the ids a failed delete recorded. A successful delete drops
+	// the id from the set; a failed one keeps it for the next tick.
+	for _, id := range s.orphanSandboxSnapshot() {
+		if err := s.sub.Delete(ctx, id); err != nil {
+			s.log.Printf("orphan sweep: retry delete of %s failed: %v", id, err)
+			continue
+		}
+		s.orphanMu.Lock()
+		delete(s.orphanSandboxIDs, id)
+		s.orphanMu.Unlock()
+		deleted++
+		if s.metrics != nil {
+			s.metrics.LeaseOrphaned.Inc()
+		}
+	}
+	if deleted > 0 {
+		s.log.Printf("orphan sweep: deleted %d sandbox(es) left by lost or released lease(s)", deleted)
+	}
+}
+
 // ReconcileOrphans aligns the substrate with the state loaded from the
 // store. If the sandbox list fails, nothing changes (leases are never
-// marked lost on a list failure). Substrate sandboxes that no lease
-// (by sandbox id) or pool entry claims are deleted. The per-lease
-// crash handling (lost/recovered marking, U10) runs afterwards via
+// marked lost on a list failure). Substrate sandboxes that no live lease
+// (by sandbox id) or pool entry claims are deleted. The per-lease crash
+// handling (lost/recovered marking, U10) runs afterwards via
 // reconcileCrash.
+//
+// The sweep runs in two passes (spoond-63a). The first pass only
+// deletes sandboxes no lease row names at all — a foreign leftover from
+// a previous incarnation. The second pass, after reconcileCrash has run,
+// deletes the sandboxes of leases whose reconcile just failed and left
+// them lost or released: a failed create or resume can leave a
+// half-started guest behind under the lease's own sandbox id, and
+// reconcileCrash's own bounded delete may have given up on it. A
+// sandbox whose lease is still live or busy is left alone, so a lease
+// mid-recovery is never touched. On the next startup pass the two-pass
+// split collapses into one: reconcileCrash returns before the second
+// pass lists nothing new, and any leftover is already an orphan.
 func (s *Service) ReconcileOrphans(ctx context.Context) {
+	// First pass: delete what no lease row names. mine is recomputed from
+	// the in-memory lease set, which includes lost leases.
+	if n := s.sweepUnclaimedSandboxes(ctx, orphanIsUnclaimed); n > 0 {
+		s.log.Printf("reconcile: deleted %d orphaned sandbox(es) from a previous incarnation", n)
+	}
+
+	s.reconcileCrash(ctx)
+
+	// Second pass: a lost or released lease's sandbox is an orphan, and
+	// reconcileCrash may have left one running (its own delete is bounded
+	// and best effort). Sweep those now, before the next tick, plus any
+	// id a prior failed delete recorded.
+	s.sweepOrphanSandboxes(ctx)
+}
+
+// orphanRule decides whether a sandbox is an orphan. It sees the lease
+// the sandbox id belongs to, or nil when no lease names it.
+type orphanRule func(lease *Lease) bool
+
+// orphanIsUnclaimed reports a sandbox no lease row names as an orphan —
+// the startup first pass's rule. A pool sandbox is handled separately and
+// never reaches the rule.
+func orphanIsUnclaimed(l *Lease) bool { return l == nil }
+
+// orphanIsLostOrReleased reports a sandbox whose lease is lost or
+// released as an orphan — the periodic sweep's and the startup second
+// pass's rule. A live, suspended or busy lease's sandbox is not an
+// orphan: a busy lost lease is one a recovery is bringing back right
+// now, and sweeping the sandbox its recovery just created would corrupt
+// it. A sandbox no lease names (nil) is left to the startup first pass,
+// so a create in flight — its sandbox exists before its lease row — is
+// never swept. Only a lease that has given up its guest (lost) with no
+// recovery in flight, or been released, owns a stopped one.
+func orphanIsLostOrReleased(l *Lease) bool {
+	if l == nil || l.busy {
+		return false
+	}
+	return l.released || l.State == "lost"
+}
+
+// sweepUnclaimedSandboxes lists the substrate sandboxes and deletes the
+// ones no pool entry claims and that rule marks as orphans. It also
+// drops pool entries whose sandbox is gone. It returns how many
+// sandboxes it deleted. A List failure logs and deletes nothing (leases
+// are never marked lost on a list failure).
+func (s *Service) sweepUnclaimedSandboxes(ctx context.Context, rule orphanRule) int {
 	sbs, err := s.sub.List(ctx)
 	if err != nil {
 		s.log.Printf("reconcile: list sandboxes failed: %v", err)
-		return
+		return 0
 	}
 	present := make(map[string]bool, len(sbs))
 	for _, sb := range sbs {
 		present[sb.ID] = true
 	}
 	s.store.mu.Lock()
-	mine := make(map[string]bool)
+	// byID maps a sandbox id to the lease that owns it; a sandbox with no
+	// entry (and not in the pool) is unclaimed and reaches rule(nil).
+	byID := make(map[string]*Lease)
 	for _, l := range s.store.leases {
 		if l.SandboxID != "" {
-			mine[l.SandboxID] = true
+			byID[l.SandboxID] = l
 		}
 	}
+	poolIDs := make(map[string]bool)
 	for _, ids := range s.store.pool {
 		for _, id := range ids {
-			mine[id] = true
+			poolIDs[id] = true
 		}
 	}
 	var orphans []string
 	for _, sb := range sbs {
-		if !mine[sb.ID] {
+		if poolIDs[sb.ID] {
+			continue
+		}
+		if rule(byID[sb.ID]) {
 			orphans = append(orphans, sb.ID)
 		}
 	}
@@ -4528,10 +4672,7 @@ func (s *Service) ReconcileOrphans(ctx context.Context) {
 			s.metrics.LeaseOrphaned.Inc()
 		}
 	}
-	if deleted > 0 {
-		s.log.Printf("reconcile: deleted %d orphaned sandbox(es) from a previous incarnation", deleted)
-	}
-	s.reconcileCrash(ctx)
+	return deleted
 }
 
 var (

@@ -616,6 +616,10 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 	l.Drained = false
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	// Stop the half-started sandbox a failed resume left behind (the
+	// retry loop cleans it between attempts, but the last failure must
+	// stop it too), so lost means stopped (spoond-63a).
+	s.stopLostSandbox(l.SandboxID, l.ID)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 	// A lease started from a named snapshot no longer protects it once
 	// lost (#83 S5).
