@@ -190,6 +190,57 @@ func (db *DB) ListBuilds(ctx context.Context) ([]BuildRow, error) {
 	return out, nil
 }
 
+// MaxBuildChainDepth bounds the ancestor walk in BuildChain. A correct
+// chain is one build per pause (plus the template root), so no real
+// lease comes close; the cap only stops a corrupt catalog cycle (or a
+// catalog a bug made a chain into) from walking for ever.
+const MaxBuildChainDepth = 10000
+
+// BuildChain walks head's non-deleted parent chain and returns how many
+// builds it holds and their summed recorded size_bytes. The walk follows
+// parent_build_id until a missing build, a deleted build, an empty
+// parent, a cycle or the depth cap, exactly the closure the GC keeps a
+// live resume build under: a deleted build's files are gone, so it and
+// its ancestors are no longer part of the live chain. It reads one row
+// per ancestor through the recursive CTE (indexed by the primary key and
+// builds_parent) instead of scanning the whole builds table. A missing
+// or empty head is an empty chain, not an error.
+func (db *DB) BuildChain(ctx context.Context, head string) (depth int, bytes int64, err error) {
+	if head == "" {
+		return 0, 0, nil
+	}
+	rows, err := db.r.QueryContext(ctx, `WITH RECURSIVE chain(build_id, parent_build_id, size_bytes, state, depth, path) AS (
+		SELECT build_id, parent_build_id, size_bytes, state, 1, ',' || build_id || ','
+			FROM builds WHERE build_id = ?
+		UNION ALL
+		SELECT b.build_id, b.parent_build_id, b.size_bytes, b.state, chain.depth + 1,
+				chain.path || b.build_id || ','
+			FROM builds b JOIN chain ON b.build_id = chain.parent_build_id
+			WHERE chain.state <> 'deleted' AND chain.depth < ?
+				AND instr(chain.path, ',' || b.build_id || ',') = 0
+	)
+	SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM chain WHERE state <> 'deleted'`,
+		head, MaxBuildChainDepth)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: build chain %s: %w", head, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, 0, fmt.Errorf("store: build chain %s: %w", head, err)
+		}
+		return 0, 0, nil
+	}
+	var n int64
+	if err := rows.Scan(&n, &bytes); err != nil {
+		return 0, 0, fmt.Errorf("store: build chain %s: %w", head, err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("store: build chain %s: %w", head, err)
+	}
+	return int(n), bytes, nil
+}
+
 // CountBuildingTemplateBuilds returns how many template builds are in
 // state building. The catalog is shared with the separate `spoond images
 // build` process, so this is how the backend sees that process's bakes:

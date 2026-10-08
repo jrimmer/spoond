@@ -384,12 +384,17 @@ This is measured, not yet compacted:
 
 - `GET /api/leases/{id}` carries `chain_depth` (builds in the lease's
   chain, counted from its resume or running build) and `chain_bytes`
-  (their summed recorded `size_bytes`) — what the chain would free if it
-  were compacted. A lease with no build yet omits both.
+  (the lease's parent chain's summed recorded `size_bytes`, including
+  shared ancestors — the template root and any build shared with other
+  leases — and not counting `build_refs`). It is the chain's recorded
+  size, not what a compaction would free. A lease with no build yet
+  omits both.
 - every pause observes the same two numbers as
-  `spoond_pause_chain_depth` and `spoond_pause_chain_bytes` histograms.
-  Both are unlabeled, so the cardinality stays bounded no matter how
-  many leases suspend; the per-lease figures stay on the lease API.
+  `spoond_pause_chain_depth` and `spoond_pause_chain_bytes` histograms
+  once its pause build has settled (so the newest snapshot's bytes are
+  included). Both are unlabeled, so the cardinality stays bounded no
+  matter how many leases suspend; the per-lease figures stay on the
+  lease API.
 
 A follow-up decides on automatic compaction after these numbers have
 been read on the deployment.
@@ -1334,7 +1339,7 @@ marker. The substrate-specific series:
 | `spoond_kept_builds` | kept checkpoints of live leases (pins; #126) |
 | `spoond_kept_builds_bytes` | disk bytes held by kept checkpoints of live leases (recorded `size_bytes`; #126) |
 | `spoond_pause_chain_depth` | histogram of a lease's build-chain depth at each pause (the pause build and its ancestors to the template root; spoond-p9j) |
-| `spoond_pause_chain_bytes` | histogram of the recorded `size_bytes` summed over a lease's build chain at each pause (spoond-p9j) |
+| `spoond_pause_chain_bytes` | histogram of the lease's parent chain's recorded `size_bytes` summed at each pause, including shared ancestors (spoond-p9j) |
 | `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
