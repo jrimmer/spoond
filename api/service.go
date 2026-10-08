@@ -2822,6 +2822,17 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	if err != nil {
 		return nil, err
 	}
+	// A release that landed while the create ran must not be undone by the
+	// save below: createSandbox's own released check can miss a release
+	// whose Delete ran before the fresh guest was registered, so stop it
+	// here too and skip the save (spoond-775, spoond-63a).
+	if s.leaseReleased(l) {
+		s.log.Printf("restart: lease %s was released during its restart; stopping sandbox %s", l.ID, sb.ID)
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return nil, errLeaseReleased
+	}
 	s.store.mu.Lock()
 	if l.released {
 		// Released while the fresh guest started: stop it and write no

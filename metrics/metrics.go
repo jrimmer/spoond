@@ -37,7 +37,7 @@ type BackendMetrics struct {
 	LeaseGrantDur      prometheus.Histogram   // time from request to ready
 	LeaseOps           *prometheus.CounterVec // {op}: suspend, resume, restart, clone, keepalive
 	LeaseSwept         prometheus.Counter     // TTL-expired leases swept
-	LeaseOrphaned      prometheus.Counter     // orphans detected on startup
+	LeaseOrphaned      prometheus.Counter     // orphans swept (startup and periodic)
 	LeaseHeartbeats    prometheus.Counter     // guest-service lease heartbeats accepted
 
 	// Queued admission (#129 part 1): creates that could not be admitted
@@ -234,7 +234,7 @@ func NewBackendMetrics() *BackendMetrics {
 	})
 	m.LeaseOrphaned = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "lease_orphaned_total",
-		Help: "Orphaned leases detected on startup reconciliation.",
+		Help: "Orphaned sandboxes swept by the startup and periodic passes.",
 	})
 	m.LeaseHeartbeats = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "lease_heartbeats_total",

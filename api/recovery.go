@@ -515,11 +515,15 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		return err
 	}
 	// A release that landed while the recovery create ran must not be
-	// undone by the saves below: createSandbox stopped the fresh guest,
-	// so skip every save and leave the lease released (spoond-775,
-	// spoond-63a).
+	// undone by the saves below: stop the fresh guest and leave the
+	// lease released (spoond-775, spoond-63a). Do not rely on
+	// createSandbox's own released check: the release that cleaned up
+	// while the create was still in flight deleted a not-yet-registered
+	// guest (a no-op), so the fresh sandbox is still here.
 	if s.leaseReleased(l) {
-		s.log.Printf("recovery: lease %s was released during its recovery create; not saving", l.ID)
+		s.log.Printf("recovery: lease %s was released during its recovery create; stopping sandbox %s", l.ID, sb.ID)
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
 		s.endCreatingSandbox(sb.ID)
 		return errLeaseReleased
 	}

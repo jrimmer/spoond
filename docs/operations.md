@@ -553,9 +553,8 @@ sandboxes no lease or pool entry claims are deleted, and peer egress
 allowances are refreshed. Marking a lease lost deletes its sandbox
 through the substrate with a few bounded retries, so a recovery whose
 create failed after the VM had started cannot leave a guest running; a
-delete that still fails is retried by the periodic orphan sandbox sweep
-(every minute). The startup pass runs the same orphan rule again after
-its crash reconcile.
+delete that still fails is retried by the periodic orphan sandbox sweep.
+The startup pass runs the same orphan rule again after its crash reconcile.
 
 The periodic sweep (every minute) is the backstop
 for a failed delete and for any guest a previous incarnation left. It is
