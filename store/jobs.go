@@ -260,6 +260,54 @@ func (db *DB) DeleteJobsOfLease(ctx context.Context, leaseID string) error {
 	return nil
 }
 
+// PruneLostJobs deletes lost jobs older than cutoff, returning how many
+// rows went. Lost rows have no owner-facing cleanup left (their guest
+// files went with the lost sandbox) and are invisible to the API's
+// exited-job views, so unlike exited records nothing else ever removes
+// them: without this they accumulate for ever (spoond-966 L3). A lost
+// row with no ended_at (lost before markJobLost stamped it) ages from
+// its started_at instead, so it cannot leak either. The comparison is in
+// Go for the same RFC3339 fraction reason as PruneJobs.
+func (db *DB) PruneLostJobs(ctx context.Context, cutoff time.Time) (int64, error) {
+	rows, err := db.r.QueryContext(ctx,
+		`SELECT `+jobColumns+` FROM lease_jobs WHERE state='lost'`)
+	if err != nil {
+		return 0, fmt.Errorf("store: list lost jobs: %w", err)
+	}
+	defer rows.Close()
+	var ids []any
+	for rows.Next() {
+		r, err := scanJob(rows.Scan)
+		if err != nil {
+			return 0, err
+		}
+		agedAt := r.EndedAt
+		if agedAt.IsZero() {
+			agedAt = r.StartedAt
+		}
+		if agedAt.Before(cutoff) {
+			ids = append(ids, r.JobID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: list lost jobs: %w", err)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	res, err := db.w.ExecContext(ctx,
+		`DELETE FROM lease_jobs WHERE state='lost' AND job_id IN (`+placeholders+`)`, ids...)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune lost jobs: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: prune lost jobs: %w", err)
+	}
+	return n, nil
+}
+
 func scanJobs(rows *sql.Rows) ([]JobRow, error) {
 	var out []JobRow
 	for rows.Next() {

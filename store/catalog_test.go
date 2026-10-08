@@ -333,3 +333,59 @@ func TestImageUses(t *testing.T) {
 		t.Fatalf("uses = %v, want %v", got, want)
 	}
 }
+
+// TestDeleteBuildsPermanently covers the L3 prune: a build row in state
+// deleted older than the cutoff goes, with its build_refs rows; a recent
+// deleted row and any non-deleted row stay.
+func TestDeleteBuildsPermanently(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	insert := func(id, state string, updated time.Time) {
+		t.Helper()
+		if err := db.InsertBuild(ctx, BuildRow{
+			BuildID: id, Kind: "pause", TemplateID: "tpl0123456789abcdefgh",
+			Image: "py-base", State: state, CreatedAt: base, UpdatedAt: updated,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("b-old", "deleted", base)
+	insert("b-recent", "deleted", base.Add(48*time.Hour))
+	insert("b-ready", "ready", base)
+	// A ref from the old deleted build and one from a live one: only the
+	// deleted build's refs may go.
+	if err := db.AddBuildRefs(ctx, "b-old", []string{"b-dep-old"}); err != nil {
+		t.Fatalf("refs b-old: %v", err)
+	}
+	if err := db.AddBuildRefs(ctx, "b-ready", []string{"b-dep-live"}); err != nil {
+		t.Fatalf("refs b-ready: %v", err)
+	}
+
+	cutoff := base.Add(24 * time.Hour)
+	removed, err := db.DeleteBuildsPermanently(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "b-old" {
+		t.Fatalf("removed = %v, want [b-old]", removed)
+	}
+	if _, err := db.GetBuild(ctx, "b-old"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("b-old survived: %v", err)
+	}
+	for _, id := range []string{"b-recent", "b-ready"} {
+		if _, err := db.GetBuild(ctx, id); err != nil {
+			t.Fatalf("%s wrongly pruned: %v", id, err)
+		}
+	}
+	refs, err := db.ListBuildRefs(ctx)
+	if err != nil {
+		t.Fatalf("list refs: %v", err)
+	}
+	if _, ok := refs["b-old"]; ok {
+		t.Errorf("deleted build's refs survived: %v", refs)
+	}
+	if len(refs["b-ready"]) != 1 || refs["b-ready"][0] != "b-dep-live" {
+		t.Errorf("live build's refs = %v, want [b-dep-live]", refs["b-ready"])
+	}
+}

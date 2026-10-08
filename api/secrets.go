@@ -488,3 +488,13 @@ func (s *Service) drainDeferredSecretRemovals(leaseID string) []string {
 	delete(s.pendingSecretRemovals, leaseID)
 	return names
 }
+
+// clearPendingSecretRemovals drops a lease's deferred secret-removal
+// list. A released lease's sandbox and its secret files are gone, so the
+// list can never be drained and would otherwise leak one entry per
+// released lease (spoond-966 L1).
+func (s *Service) clearPendingSecretRemovals(leaseID string) {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	delete(s.pendingSecretRemovals, leaseID)
+}

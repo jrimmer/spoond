@@ -349,6 +349,55 @@ func (db *DB) ListBuildRefs(ctx context.Context) (map[string][]string, error) {
 	return out, nil
 }
 
+// DeleteBuildsPermanently removes already-deleted build rows whose
+// updated_at is older than cutoff, together with each row's build_refs
+// rows. A build in state deleted has had its files removed and protects
+// nothing; its catalog row and refs are pure leak, scanned by every GC
+// pass and orphan-root walk for ever (spoond-966 L3). The comparison is
+// in Go because updated_at is RFC 3339 with a variable-width fraction
+// (see PruneJobs). It returns the ids it removed, so the caller can log
+// them.
+func (db *DB) DeleteBuildsPermanently(ctx context.Context, cutoff time.Time) ([]string, error) {
+	rows, err := db.r.QueryContext(ctx, `SELECT build_id, updated_at FROM builds WHERE state = 'deleted'`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list deleted builds: %w", err)
+	}
+	var stale []string
+	for rows.Next() {
+		var id, updatedAt string
+		if err := rows.Scan(&id, &updatedAt); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: list deleted builds: %w", err)
+		}
+		// Compare in Go: updated_at is RFC 3339 with a variable-width
+		// fraction, so a plain string comparison misorders sub-second
+		// forms (see PruneJobs).
+		if parseTime(updatedAt).Before(cutoff) {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("store: list deleted builds: %w", err)
+	}
+	rows.Close()
+
+	var removed []string
+	for _, id := range stale {
+		if _, err := db.w.ExecContext(ctx, `DELETE FROM build_refs WHERE build_id = ?`, id); err != nil {
+			return removed, fmt.Errorf("store: delete build refs %s: %w", id, err)
+		}
+		res, err := db.w.ExecContext(ctx, `DELETE FROM builds WHERE build_id = ? AND state = 'deleted'`, id)
+		if err != nil {
+			return removed, fmt.Errorf("store: delete build %s: %w", id, err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			removed = append(removed, id)
+		}
+	}
+	return removed, nil
+}
+
 // UpdateBuildSize records a build's measured disk size (U11 disk
 // accounting). It leaves updated_at alone: the GC's one-hour age rule
 // keys on it.

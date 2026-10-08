@@ -217,6 +217,24 @@ func (s *Service) buildTimeoutOrDefault() time.Duration {
 	return substrate.DefaultBuildTimeout
 }
 
+// pruneDeletedBuilds removes build rows that have been in state deleted
+// for longer than deletedBuildRetention, each with its build_refs rows
+// (spoond-966 L3). A deleted row is not a candidate for gcCandidates
+// (which only moves ready/failed rows to deleted) and is not a GC root,
+// so nothing else ever removes it; it is read by every ListBuilds scan
+// for ever. It never fails the GC pass: a read or delete error logs.
+func (s *Service) pruneDeletedBuilds(ctx context.Context) {
+	cutoff := s.now().Add(-deletedBuildRetention)
+	removed, err := s.db.DeleteBuildsPermanently(ctx, cutoff)
+	if err != nil {
+		s.log.Printf("gc: prune deleted builds: %v", err)
+		return
+	}
+	for _, id := range removed {
+		s.log.Printf("gc: pruned deleted build row %s", id)
+	}
+}
+
 // failStaleBuildingBuilds fails every build still in state building for
 // longer than twice the template build timeout (spoond-4yl). A build is
 // written building before the orchestrator is asked to build it; a
@@ -243,12 +261,23 @@ func (s *Service) failStaleBuildingBuilds(ctx context.Context) {
 	}
 }
 
+// deletedBuildRetention is how long a build row in state deleted is kept
+// before the GC removes it and its build_refs rows. Deleting the files is
+// the owner's or GC's act; the row itself is no longer a root, is hidden
+// from every API view, but is still read by ListBuilds on every pass
+// (spoond-966 L3). Thirty days is long enough for any forensic need while
+// bounding the catalog.
+const deletedBuildRetention = 30 * 24 * time.Hour
+
 // gcPass is gcOnce's body: one full pass.
 func (s *Service) gcPass(ctx context.Context) error {
 	// Fail stale building rows before the kept set is computed: a building
 	// row is a root, so a SIGKILL or reboot mid-build would otherwise pin
 	// its whole ancestor chain forever (spoond-4yl).
 	s.failStaleBuildingBuilds(ctx)
+	// Drop long-deleted build rows and their refs before the kept set is
+	// computed, so neither pins memory nor a pass's scan (spoond-966 L3).
+	s.pruneDeletedBuilds(ctx)
 	// Release lost leases whose grace period has lapsed first: their
 	// builds then leave the kept set (release drops the lease row) and
 	// become ordinary candidates in this same pass, and their quota

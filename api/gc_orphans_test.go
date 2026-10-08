@@ -419,3 +419,63 @@ func TestReapOrphansLiveReferences(t *testing.T) {
 		t.Errorf("reaped = %d, want 0: a live-referenced directory was removed", reaped)
 	}
 }
+
+// TestReapOrphansPurgesQuarantineAfterModeChange pins the L5 fix:
+// switching ORPHAN_REAP from quarantine to off or dryrun must not strand
+// an expired quarantined directory for ever. off still moves nothing new
+// but still purges; dryrun purges too (and no longer merely logs).
+func TestReapOrphansPurgesQuarantineAfterModeChange(t *testing.T) {
+	for _, mode := range []string{"off", "dryrun"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, _, db, _ := gcTestService(t)
+			seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+
+			// Seed a quarantined directory dated well past the period.
+			id := e2b.NewUUID()
+			qdir := filepath.Join(svc.quarantineDir(), id)
+			if err := os.MkdirAll(qdir, 0o755); err != nil {
+				t.Fatalf("mkdir quarantine: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(qdir, "memfile"), make([]byte, 4096), 0o644); err != nil {
+				t.Fatalf("write memfile: %v", err)
+			}
+			if err := writeQuarantineMarker(qdir, time.Now().Add(-48*time.Hour)); err != nil {
+				t.Fatalf("write marker: %v", err)
+			}
+
+			t.Setenv("ORPHAN_REAP", mode)
+			reaped, freed := svc.reapOrphans(context.Background())
+			if dirExists(qdir) {
+				t.Errorf("ORPHAN_REAP=%s left the expired quarantine in place", mode)
+			}
+			if reaped != 1 || freed <= 0 {
+				t.Errorf("ORPHAN_REAP=%s reaped=%d freed=%d, want 1 and >0", mode, reaped, freed)
+			}
+		})
+	}
+}
+
+// TestReapOrphansOffStillMovesNothingNew: ORPHAN_REAP=off must not
+// quarantine a live orphan directory just because the purge path now
+// runs; only an existing quarantine is purged.
+func TestReapOrphansOffStillMovesNothingNew(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	t.Setenv("ORPHAN_REAP", "off")
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	orphan := e2b.NewUUID()
+	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, orphan)
+	ageDir(t, dir)
+
+	if reaped, _ := svc.reapOrphans(context.Background()); reaped != 0 {
+		t.Errorf("reaped = %d, want 0 with ORPHAN_REAP=off", reaped)
+	}
+	if !dirExists(dir) {
+		t.Errorf("ORPHAN_REAP=off removed the orphan")
+	}
+	if dirExists(filepath.Join(svc.quarantineDir(), orphan)) {
+		t.Errorf("ORPHAN_REAP=off quarantined the orphan")
+	}
+	if strings.Contains(buf.String(), orphan) {
+		t.Errorf("ORPHAN_REAP=off logged the orphan:\n%s", buf.String())
+	}
+}
