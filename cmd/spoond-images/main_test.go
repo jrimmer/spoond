@@ -27,9 +27,18 @@ type stubSubstrate struct {
 	res         substrate.BuildResult
 	err         error
 	storageRoot string
+	// beforeBuild runs at the top of BuildTemplate; tests use it to
+	// cancel the caller's context mid-build (a SIGKILL/reboot stand-in).
+	beforeBuild func()
 }
 
 func (s *stubSubstrate) BuildTemplate(ctx context.Context, req substrate.BuildRequest) (substrate.BuildResult, error) {
+	if s.beforeBuild != nil {
+		s.beforeBuild()
+	}
+	if err := ctx.Err(); err != nil {
+		return substrate.BuildResult{}, err
+	}
 	s.req = req
 	if s.storageRoot != "" {
 		dir := filepath.Join(s.storageRoot, req.BuildID)
@@ -230,6 +239,38 @@ func TestBuildOneFailureKeepsImageRow(t *testing.T) {
 	if builds[0].State != "failed" ||
 		!strings.Contains(builds[0].Error, "template build failed") {
 		t.Fatalf("failed build row = %+v", builds[0])
+	}
+}
+
+// TestBuildOneFailureUpdateDetached: when BuildTemplate fails because
+// the build context is already done (a timeout, or the caller gave up),
+// the failure still reaches the store. A failure written through the
+// cancelled context would be lost, leaving the row building forever and
+// pinning its whole ancestor chain as a GC root (spoond-4yl).
+func TestBuildOneFailureUpdateDetached(t *testing.T) {
+	sub := &stubSubstrate{}
+	// Cancel the build context between the building insert and the
+	// BuildTemplate call, standing in for a timeout that fires exactly
+	// when the orchestrator would have answered.
+	var cancel context.CancelFunc
+	sub.beforeBuild = func() { cancel() }
+	db := setup(t, sub)
+	ctx, c := context.WithCancel(context.Background())
+	cancel = c
+
+	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err == nil {
+		t.Fatal("buildOne succeeded, want a cancelled build to fail")
+	}
+
+	builds, err := db.ListBuilds(context.Background())
+	if err != nil || len(builds) != 1 {
+		t.Fatalf("ListBuilds = %+v, %v", builds, err)
+	}
+	if builds[0].State != "failed" {
+		t.Fatalf("cancelled build state = %q, want failed", builds[0].State)
+	}
+	if !strings.Contains(builds[0].Error, "context canceled") {
+		t.Fatalf("cancelled build error = %q", builds[0].Error)
 	}
 }
 

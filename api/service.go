@@ -302,6 +302,12 @@ type ServiceConfig struct {
 	// IDLE_SUSPEND_DEFAULT_SECS.
 	IdleSuspendDefault  int64
 	TemplateStoragePath string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
+	// BuildTimeout is how long a template build may run before the GC
+	// treats a row still `building` as stale and fails it (spoond-4yl).
+	// The GC fails a building row older than twice this, logged; the
+	// image pipeline bounds its BuildTemplate with the same value. Zero
+	// falls back to substrate.DefaultBuildTimeout.
+	BuildTimeout time.Duration
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
 	// lost_at — 7 days for persistent leases, 1 day for the rest, so a

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Snapshot catalog GC, disk accounting and the snapshot API (U11).
@@ -23,6 +24,9 @@ import (
 // #121), every live sandbox's build, every in-flight build — keeps the
 // closure of that set, and deletes (dry-run by default) ready/failed
 // builds older than an hour that fall outside it.
+// A building row older than twice the build timeout is failed before the
+// root set is computed (spoond-4yl), so a build interrupted by a SIGKILL
+// or reboot cannot pin its ancestors forever.
 // A lease lost in a substrate crash keeps its resume/checkpoint builds
 // for a grace period after the loss (7 d persistent, 1 d otherwise)
 // before they may be reclaimed (owner decision 2026-10-02). A lease
@@ -204,8 +208,45 @@ func (s *Service) releaseExpiredLostLeases(ctx context.Context) {
 	}
 }
 
+// buildTimeoutOrDefault resolves the configured template build timeout,
+// substituting substrate.DefaultBuildTimeout for zero values.
+func (s *Service) buildTimeoutOrDefault() time.Duration {
+	if s.cfg.BuildTimeout > 0 {
+		return s.cfg.BuildTimeout
+	}
+	return substrate.DefaultBuildTimeout
+}
+
+// failStaleBuildingBuilds fails every build still in state building for
+// longer than twice the template build timeout (spoond-4yl). A build is
+// written building before the orchestrator is asked to build it; a
+// SIGKILL or reboot in between leaves the row building forever, and
+// keptBuilds makes every building row — and its whole ancestor chain — a
+// permanent GC root. The pipeline's own context bounds a normal failure,
+// but nothing runs when the process dies. Failing the row makes it an
+// ordinary candidate after gcAge and keeps the catalog honest; each row
+// is logged, and the owner sees it through the API/events as a failed
+// build. A read or write failure logs and is skipped: a GC pass never
+// fails over the sweep.
+func (s *Service) failStaleBuildingBuilds(ctx context.Context) {
+	cutoff := s.now().Add(-2 * s.buildTimeoutOrDefault())
+	rows, err := s.db.MarkStaleBuildingFailed(ctx, cutoff, "build timed out (stale building row)")
+	if err != nil {
+		s.log.Printf("gc: mark stale building builds failed: %v", err)
+		return
+	}
+	for _, b := range rows {
+		s.log.Printf("gc: marked stale building build failed id=%s kind=%s image=%s age=%s",
+			b.BuildID, b.Kind, b.Image, s.now().Sub(b.UpdatedAt).Round(time.Second))
+	}
+}
+
 // gcPass is gcOnce's body: one full pass.
 func (s *Service) gcPass(ctx context.Context) error {
+	// Fail stale building rows before the kept set is computed: a building
+	// row is a root, so a SIGKILL or reboot mid-build would otherwise pin
+	// its whole ancestor chain forever (spoond-4yl).
+	s.failStaleBuildingBuilds(ctx)
 	// Release lost leases whose grace period has lapsed first: their
 	// builds then leave the kept set (release drops the lease row) and
 	// become ordinary candidates in this same pass, and their quota

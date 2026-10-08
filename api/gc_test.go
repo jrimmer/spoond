@@ -169,14 +169,22 @@ func TestGCCandidatesAfterLeaseGone(t *testing.T) {
 	}
 }
 
-// TestGCBuildingNeverDeleted: a building build is a root and survives
-// even with GC_DELETE=1.
+// TestGCBuildingNeverDeleted: a fresh building build is a root and
+// survives even with GC_DELETE=1 — it is inside the stale-building
+// window, so the GC leaves it alone.
 func TestGCBuildingNeverDeleted(t *testing.T) {
 	svc, buf, db, _ := gcTestService(t)
 	t.Setenv("GC_DELETE", "1")
 	seedGCChain(t, db, "py-base")
 	building := e2b.NewUUID()
-	seedGCBuild(t, db, building, "template", "", "consumer-a", "building", "tplb0123456789abcdef")
+	fresh := time.Now()
+	if err := db.InsertBuild(context.Background(), store.BuildRow{
+		BuildID: building, Kind: "template", TemplateID: "tplb0123456789abcdef",
+		Image: "py-base", Owner: "consumer-a", State: "building",
+		CreatedAt: fresh, UpdatedAt: fresh,
+	}); err != nil {
+		t.Fatalf("seed building build: %v", err)
+	}
 
 	if err := svc.gcOnce(context.Background()); err != nil {
 		t.Fatalf("gc: %v", err)
@@ -190,6 +198,63 @@ func TestGCBuildingNeverDeleted(t *testing.T) {
 	}
 	if lines := buf.String(); strings.Contains(lines, building) {
 		t.Errorf("building build logged as deletable:\n%s", lines)
+	}
+}
+
+// TestGCStaleBuildingFailed: a build left in state building past twice
+// the build timeout (a SIGKILL or reboot mid-build) is failed by the GC
+// and logged; it is no longer a GC root. The row's ancestors then unwind
+// as ordinary candidates in later passes.
+func TestGCStaleBuildingFailed(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	svc.cfg.BuildTimeout = 30 * time.Minute
+	stale := e2b.NewUUID()
+	// Dated past 2x the configured timeout (and comfortably past the
+	// one-hour gcAge) but not a full day, so the age arithmetic matters.
+	old := time.Now().Add(-2 * time.Hour)
+	if err := db.InsertBuild(context.Background(), store.BuildRow{
+		BuildID: stale, Kind: "template", TemplateID: "tplb0123456789abcdef",
+		Image: "py-base", Owner: "consumer-a", State: "building",
+		CreatedAt: old, UpdatedAt: old,
+	}); err != nil {
+		t.Fatalf("seed stale build: %v", err)
+	}
+
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	b, err := db.GetBuild(context.Background(), stale)
+	if err != nil {
+		t.Fatalf("get stale build: %v", err)
+	}
+	if b.State != "failed" {
+		t.Fatalf("stale building build = %q, want failed", b.State)
+	}
+	if !strings.Contains(b.Error, "stale building") {
+		t.Errorf("stale build error = %q", b.Error)
+	}
+	if !strings.Contains(buf.String(), "marked stale building build failed id="+stale) {
+		t.Errorf("stale build not logged:\n%s", buf.String())
+	}
+
+	// A building row younger than 2x the timeout stays building.
+	recent := e2b.NewUUID()
+	if err := db.InsertBuild(context.Background(), store.BuildRow{
+		BuildID: recent, Kind: "template", TemplateID: "tplb0123456789abcdef",
+		Image: "py-base", Owner: "consumer-a", State: "building",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed recent build: %v", err)
+	}
+	buf.Reset()
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc 2: %v", err)
+	}
+	if got, _ := db.GetBuild(context.Background(), recent); got.State != "building" {
+		t.Errorf("recent building build = %q, want building", got.State)
+	}
+	if strings.Contains(buf.String(), recent) {
+		t.Errorf("recent building build was touched:\n%s", buf.String())
 	}
 }
 

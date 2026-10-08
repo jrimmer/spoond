@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -257,6 +258,58 @@ func TestSandboxPoolAndDelete(t *testing.T) {
 	}
 	if _, err := db.GetSandbox(ctx, pool.SandboxID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get after delete = %v, want ErrNotFound", err)
+	}
+}
+
+// TestMarkStaleBuildingFailed: only a building row older than the
+// cutoff is failed; a fresh building row, a ready row and a deleted row
+// are left as they were.
+func TestMarkStaleBuildingFailed(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	old := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	cutoff := old.Add(time.Hour)
+	fresh := cutoff.Add(time.Minute)
+	seed := func(id, state string, updated time.Time) {
+		t.Helper()
+		if err := db.InsertBuild(ctx, BuildRow{
+			BuildID: id, Kind: "template", TemplateID: "t", Image: "py-base",
+			State: state, CreatedAt: old, UpdatedAt: updated,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	seed("stale", "building", old)
+	seed("active", "building", fresh)
+	seed("done", "ready", old)
+	seed("gone", "deleted", old)
+
+	marked, err := db.MarkStaleBuildingFailed(ctx, cutoff, "build timed out")
+	if err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if len(marked) != 1 || marked[0].BuildID != "stale" {
+		t.Fatalf("marked = %+v, want only stale", marked)
+	}
+	got, _ := db.GetBuild(ctx, "stale")
+	if got.State != "failed" || !strings.Contains(got.Error, "timed out") {
+		t.Fatalf("stale after mark = %+v", got)
+	}
+	for id, want := range map[string]string{"active": "building", "done": "ready", "gone": "deleted"} {
+		b, err := db.GetBuild(ctx, id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if b.State != want {
+			t.Errorf("%s state = %q, want %q", id, b.State, want)
+		}
+	}
+
+	// A second pass has nothing left to mark: the failed row is not
+	// building any more.
+	marked, err = db.MarkStaleBuildingFailed(ctx, cutoff, "build timed out")
+	if err != nil || len(marked) != 0 {
+		t.Fatalf("second mark = %+v, %v, want none", marked, err)
 	}
 }
 
