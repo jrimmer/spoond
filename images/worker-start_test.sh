@@ -131,9 +131,16 @@ case $key in
     i=1; while [ "$i" -le "$lines" ]; do printf 'change %s line %s\n' "$n" "$i" >> "$wt/change-$n.txt"; i=$((i + 1)); done
     [ -n "${TEST_CONFLICT_FILE:-}" ] && printf 'branch side\n' > "$wt/conflict.txt"
     # TEST_MIGRATION=dup|below plants a bad migration for the guard.
+    # TEST_MIGRATION_ONCE=1 plants it only in round 1 and removes it in
+    # later rounds, so a retry can fix the guard and reach a verify.
     case ${TEST_MIGRATION:-} in
       dup)   mkdir -p "$wt/store/migrations"; printf 'dup\n' > "$wt/store/migrations/0002_dup.sql" ;;
-      below) mkdir -p "$wt/store/migrations"; printf 'below\n' > "$wt/store/migrations/0001_below.sql" ;;
+      below)
+        if [ "${TEST_MIGRATION_ONCE:-0}" = "1" ] && [ "$n" -ge 2 ]; then
+          rm -f "$wt/store/migrations/0001_below.sql"
+        else
+          mkdir -p "$wt/store/migrations"; printf 'below\n' > "$wt/store/migrations/0001_below.sql"
+        fi ;;
     esac
     git -C "$wt" add -A
     git -C "$wt" commit -q -m "work round $n"
@@ -231,6 +238,7 @@ run_worker() {
     TEST_LINES=${TEST_LINES:-300} TEST_VERDICT_SEQ=${TEST_VERDICT_SEQ:-} \
     TEST_MOVE_BASE=${TEST_MOVE_BASE:-} TEST_MOVE_FILE=${TEST_MOVE_FILE:-} \
     TEST_CONFLICT_FILE=${TEST_CONFLICT_FILE:-} TEST_MIGRATION=${TEST_MIGRATION:-} \
+    TEST_MIGRATION_ONCE=${TEST_MIGRATION_ONCE:-} \
     TEST_VERIFY_TIMEOUT_LINE=${TEST_VERIFY_TIMEOUT_LINE:-} \
     TEST_VERIFY_SLEEP=${TEST_VERIFY_SLEEP:-2} \
     TEST_IMPL_MODEL=test-impl TEST_VERIFY_MODEL=test-verif \
@@ -433,7 +441,10 @@ check "no rebase is left in progress in the final report" \
   bash -c '! grep -q "rebase --abort" "$1"' _ "$T/mail/outbox.log"
 
 # --- MIGRATION GUARD: a branch that adds a migration below the base's
-# highest fails the gate after the rebase, so no verify pass runs. ----------
+# highest fails the gate after the rebase; a gate failure does not consume
+# a verify round, so the implement pass reruns. With MAX_ROUNDS=1 the
+# iteration bound stops after two guard failures, and no verify pass runs.
+# ---------------------------------------------------------------------------
 o=$T/o-mig.git
 make_origin_migrations "$o"
 TEST_MIGRATION=below
@@ -441,7 +452,26 @@ run_worker "$o" swarm/tmig tmig 1 PASS 0 0
 TEST_MIGRATION=
 check "worker exits cleanly" expect_eq "$?" "0"
 check "the migration guard failed the gate" grep -q 'is not numbered above the base highest' "$T/last-worker.log"
-check "no verify pass ran" expect_eq "$(grep -c 'tmig-verify' "$T/last-worker.log")" "0"
+check "the guard failure did not consume a verify round" \
+  expect_eq "$(grep -c 'tmig-verify' "$T/last-worker.log")" "0"
+check "report is [BLOCKED with no verdict" grep -q 'BLOCKED tmig\] retryable: verifier did not pass' "$T/mail/outbox.log"
+check "no DONE was reported" bash -c '! grep -q "\[DONE tmig\]" "$1"' _ "$T/mail/outbox.log"
+
+# --- MIGRATION GUARD RETAKE: round 1 fails the guard, round 2 fixes the
+# migration, and the verifier does run and pass — DONE is reachable after a
+# gate failure. This is the regression the old counting defect blocked.
+# ---------------------------------------------------------------------------
+o=$T/o-mig-retry.git
+make_origin_migrations "$o"
+TEST_MIGRATION=below TEST_MIGRATION_ONCE=1 TEST_LINES=20
+scenario_prologue MIGRATION-GUARD-RETRY "$o" swarm/tmigr tmigr 3 PASS 0 0
+TEST_MIGRATION= TEST_MIGRATION_ONCE= TEST_LINES=
+check "the guard failed once" grep -q 'is not numbered above the base highest' "$T/last-worker.log"
+check "the verifier ran once after the retry" \
+  expect_eq "$(grep -c 'pass tmigr-verify-.*attempt' "$T/last-worker.log")" "1"
+check "no verify round was spent on the guard failure" \
+  expect_eq "$(grep -c 'next implement round (no verify round used)' "$T/last-worker.log")" "1"
+check "report is [DONE" grep -q '\[DONE tmigr\]' "$T/mail/outbox.log"
 
 if [ "$fails" -eq 0 ]; then
   echo "all scenarios passed"

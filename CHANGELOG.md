@@ -26,7 +26,11 @@ summarised from README "Status".
   task's `Verify-Timeout:` line); a diff under ~200 changed lines gets
   one verify round and a larger one up to `SWARM_MAX_ROUNDS`, a timeout
   reports `BLOCKED` at once with the partial notes, and findings are
-  asked for before gates. `DONE` names the base commit it was verified
+  asked for before gates. The cap counts verifies, not loop iterations:
+  an implement round whose gates fail (including the migration guard)
+  goes straight to another implement pass without spending a verify
+  round, so a repaired small diff can still reach its one verify. `DONE`
+  names the base commit it was verified
   on; `DONE` and `BLOCKED` both carry implement/rebase/gates/verify
   durations. The git and migration rules live in `images/worker-git.sh`
   with their own tests, and the loop's exit paths are covered end to end
