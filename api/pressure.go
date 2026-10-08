@@ -129,9 +129,11 @@ func (s *Service) pressureActive(ctx context.Context) (bool, string) {
 // pressureStepLocked classifies a reclaimable lease into its step, or
 // reports that no step covers it. A released, busy, suspended or
 // non-live lease is never a candidate; a guaranteed held lease is
-// protected; a guaranteed lease with its own idle_suspend is reclaimed
-// on its own threshold, and one with a running background job is active.
-// Call with s.store.mu held.
+// protected. A burst lease is reclaimable by a burst step whatever its
+// holder (matching preemption, which may also pause one with a running
+// job); a guaranteed unheld lease only once it has been idle for
+// PressureIdle, and not if its own idle_suspend reclaims it or a
+// background job is running. Call with s.store.mu held.
 func (s *Service) pressureStepLocked(l *Lease, now time.Time) (PressureStep, bool) {
 	if l.released || l.busy || l.Suspended || !l.live() {
 		return "", false
