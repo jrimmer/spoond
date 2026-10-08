@@ -176,6 +176,58 @@ func TestBuildLifecycle(t *testing.T) {
 	}
 }
 
+// TestBuildChain walks the non-deleted parent chain with the recursive
+// CTE: it sums recorded sizes, stops at a missing or deleted build, is
+// cycle-safe and treats an empty or missing head as an empty chain.
+func TestBuildChain(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 10, 8, 10, 0, 0, 0, time.UTC)
+	insert := func(id, parent, state string, size int64) {
+		t.Helper()
+		if err := db.InsertBuild(ctx, BuildRow{
+			BuildID: id, Kind: "pause", TemplateID: "tpl0123456789abcdefgh",
+			Image: "py-base", ParentBuildID: parent, State: state, SizeBytes: size,
+			CreatedAt: base, UpdatedAt: base,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("t", "", "ready", 10)
+	insert("c1", "t", "ready", 20)
+	insert("c2", "c1", "ready", 30)
+
+	if depth, bytes, err := db.BuildChain(ctx, "c2"); err != nil || depth != 3 || bytes != 60 {
+		t.Fatalf("ready chain: depth=%d bytes=%d err=%v, want 3, 60, nil", depth, bytes, err)
+	}
+	// An empty or missing head is an empty chain, not an error.
+	for _, head := range []string{"", "gone"} {
+		if depth, bytes, err := db.BuildChain(ctx, head); err != nil || depth != 0 || bytes != 0 {
+			t.Fatalf("head %q: depth=%d bytes=%d err=%v, want 0, 0, nil", head, depth, bytes, err)
+		}
+	}
+
+	// A deleted build and its ancestors are no longer part of the live
+	// chain: the GC would have removed their files, so the walk stops.
+	if _, err := db.w.ExecContext(ctx, `UPDATE builds SET state = 'deleted' WHERE build_id = 'c1'`); err != nil {
+		t.Fatal(err)
+	}
+	if depth, bytes, err := db.BuildChain(ctx, "c2"); err != nil || depth != 1 || bytes != 30 {
+		t.Fatalf("deleted middle: depth=%d bytes=%d err=%v, want 1, 30, nil", depth, bytes, err)
+	}
+
+	// A cycle terminates instead of looping for ever.
+	if _, err := db.w.ExecContext(ctx, `UPDATE builds SET state = 'ready' WHERE build_id = 'c1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.w.ExecContext(ctx, `UPDATE builds SET parent_build_id = 'c2' WHERE build_id = 'c1'`); err != nil {
+		t.Fatal(err)
+	}
+	if depth, bytes, err := db.BuildChain(ctx, "c2"); err != nil || depth != 2 || bytes != 50 {
+		t.Fatalf("cycle: depth=%d bytes=%d err=%v, want 2, 50, nil", depth, bytes, err)
+	}
+}
+
 // TestSandboxUpsertTwice upserts the same sandbox id twice (resume
 // reuses the id) and reads back the latest row.
 func TestSandboxUpsertTwice(t *testing.T) {

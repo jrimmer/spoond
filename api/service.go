@@ -2586,16 +2586,12 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	}); err != nil {
 		return "", fmt.Errorf("insert pause build: %w", err)
 	}
-	s.settleBuildSize(buildID)
+	s.settleBuildSize(buildID, s.pauseChainObserver(buildID))
 	// The new build's headers reference the blocks of other builds
 	// (A3 C3); GC keeps them (U11).
 	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
 		return "", fmt.Errorf("store pause build refs: %w", err)
 	}
-	// Measure the chain this pause extends (spoond-p9j): its depth and
-	// recorded bytes, before any follow-up decides on compaction. The
-	// observation must not fail the pause.
-	s.observePauseChain(ctx, buildID)
 	if s.pauseBeforeSuspend != nil {
 		s.pauseBeforeSuspend(l)
 	}

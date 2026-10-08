@@ -18,9 +18,11 @@ summarised from README "Status".
   that suspends repeatedly accumulates one memory snapshot per pause
   until a cold restart (or the lease's release) breaks the chain.
   `GET /api/leases/{id}` now reports `chain_depth` (builds in the
-  lease's chain) and `chain_bytes` (their summed recorded `size_bytes`),
-  and every pause observes the same two numbers as the unlabeled
-  `spoond_pause_chain_depth` and `spoond_pause_chain_bytes` histograms —
+  lease's chain) and `chain_bytes` (the lease's parent chain's summed
+  recorded `size_bytes`, including shared ancestors such as the template
+  root, and ignoring `build_refs`), and every pause observes the same
+  two numbers as the unlabeled `spoond_pause_chain_depth` and
+  `spoond_pause_chain_bytes` histograms once its build has settled —
   bounded cardinality, so the per-lease figures stay on the lease API.
   No compaction happens yet; a follow-up decides on automatic compaction
   after measuring on the deployment.

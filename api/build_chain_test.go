@@ -4,52 +4,20 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
 	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
-// Pause-chain measurement (spoond-p9j): buildChainStats walks a lease's
+// Pause-chain measurement (spoond-p9j): store.BuildChain walks a lease's
 // chain, GET /api/leases/{id} reports its depth and bytes, and each
 // pause observes them in the bounded-cardinality histograms.
-
-// TestBuildChainStats pins the walk: it follows parent_build_id from the
-// head, stops at a missing or deleted build, sums size_bytes and is
-// cycle-safe.
-func TestBuildChainStats(t *testing.T) {
-	builds := map[string]store.BuildRow{
-		"c2": {BuildID: "c2", ParentBuildID: "c1", State: "ready", SizeBytes: 30},
-		"c1": {BuildID: "c1", ParentBuildID: "t", State: "ready", SizeBytes: 20},
-		"t":  {BuildID: "t", ParentBuildID: "", State: "ready", SizeBytes: 10},
-	}
-	if depth, bytes := buildChainStats(builds, "c2"); depth != 3 || bytes != 60 {
-		t.Fatalf("ready chain: depth=%d bytes=%d, want 3, 60", depth, bytes)
-	}
-	// An empty head is an empty chain.
-	if depth, bytes := buildChainStats(builds, ""); depth != 0 || bytes != 0 {
-		t.Fatalf("empty head: depth=%d bytes=%d, want 0, 0", depth, bytes)
-	}
-	// A missing head is an empty chain (nothing to measure).
-	if depth, bytes := buildChainStats(builds, "gone"); depth != 0 || bytes != 0 {
-		t.Fatalf("missing head: depth=%d bytes=%d, want 0, 0", depth, bytes)
-	}
-
-	// A deleted build and its ancestors are no longer part of the live
-	// chain: the GC would have removed their files, so the walk stops.
-	builds["c1"] = store.BuildRow{BuildID: "c1", ParentBuildID: "t", State: "deleted", SizeBytes: 20}
-	if depth, bytes := buildChainStats(builds, "c2"); depth != 1 || bytes != 30 {
-		t.Fatalf("deleted middle: depth=%d bytes=%d, want 1, 30", depth, bytes)
-	}
-
-	// A cycle terminates instead of looping forever.
-	builds["c1"] = store.BuildRow{BuildID: "c1", ParentBuildID: "c2", State: "ready", SizeBytes: 20}
-	if depth, bytes := buildChainStats(builds, "c2"); depth != 2 || bytes != 50 {
-		t.Fatalf("cycle: depth=%d bytes=%d, want 2, 50", depth, bytes)
-	}
-}
 
 // chainTestServer returns a server whose pauses leave real build files
 // under a temp storage root, so the chain's recorded bytes are nonzero.
@@ -191,5 +159,91 @@ func TestLeaseDetailChainOmitsWhenUnmeasurable(t *testing.T) {
 	}
 	if _, ok := detail["chain_bytes"]; ok {
 		t.Fatalf("chain_bytes = %v, want the field omitted for a lease with no build", detail["chain_bytes"])
+	}
+}
+
+// histogramCountAndSum reads one histogram family's sample count and sum
+// from the service's metrics registry.
+func histogramCountAndSum(t *testing.T, svc *Service, name string) (uint64, float64) {
+	t.Helper()
+	mfs, err := svc.metrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		if len(mf.GetMetric()) == 0 {
+			break
+		}
+		h := mf.GetMetric()[0].GetHistogram()
+		return h.GetSampleCount(), h.GetSampleSum()
+	}
+	t.Fatalf("histogram %s not found", name)
+	return 0, 0
+}
+
+// TestPauseChainObservedAfterSettle: the pause-chain bytes histogram is
+// observed from the settle path, not at insert time, so it includes the
+// pause build's memory snapshot when that lands (and commits on ZFS)
+// only after Pause returns. Here the memfile is written after the build
+// row is inserted; the observation must carry the settled size, not the
+// header-only reading taken at insert.
+func TestPauseChainObservedAfterSettle(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	root := t.TempDir()
+	svc.cfg.TemplateStoragePath = root
+	svc.SetBuildSizeSettle(5*time.Millisecond, 3*time.Second)
+	svc.sizeSettleQuiet = 30 * time.Millisecond
+
+	var dir string
+	sub.pauseFn = func(ctx context.Context, sandboxID, templateID string) (string, substrate.BuildRefs, error) {
+		id := e2b.NewUUID()
+		d := filepath.Join(root, id)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		// Headers only: the memory file has not landed when Pause returns.
+		if err := os.WriteFile(filepath.Join(d, "headers"), make([]byte, 64000), 0o644); err != nil {
+			return "", substrate.BuildRefs{}, err
+		}
+		dir = d
+		// The snapshot write finishes after the row is inserted.
+		time.AfterFunc(30*time.Millisecond, func() {
+			_ = os.WriteFile(filepath.Join(d, "memfile"), make([]byte, 1<<20), 0o644)
+		})
+		return id, substrate.BuildRefs{}, nil
+	}
+	t.Cleanup(func() { sub.pauseFn = nil })
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "consumer-a", "py-base", 0, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n, sum := histogramCountAndSum(t, svc, "spoond_pause_chain_bytes")
+		if n == 1 {
+			want, err := store.BuildDiskUsage(dir)
+			if err != nil {
+				t.Fatalf("measure settled dir: %v", err)
+			}
+			if int64(sum) != want {
+				t.Fatalf("pause_chain_bytes observed %d, want the settled chain size %d", int64(sum), want)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pause_chain_bytes sample count = %d, want 1", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

@@ -437,13 +437,15 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Kept checkpoints of live leases (pins; a build pinned twice counts once per lease).",
 	})
 	// Pause-chain size (spoond-p9j): observed once per pause. Depth
-	// buckets cover 1..30 builds linearly; byte buckets span 1 MiB to
-	// ~256 GiB exponentially (each build's memory file grows with the
-	// guest, and a long-lived chain accumulates many of them).
+	// buckets double from 1, so a chain past the old 30-build ceiling is
+	// still bucketed exactly instead of piling into +Inf; the byte
+	// buckets span 1 MiB to ~256 GiB exponentially (each build's memory
+	// file grows with the guest, and a long-lived chain accumulates many
+	// of them).
 	m.PauseChainDepth = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "spoond", Name: "pause_chain_depth",
 		Help:    "Builds in a lease's chain at each pause (the pause build and its ancestors to the template root).",
-		Buckets: prometheus.LinearBuckets(1, 1, 30),
+		Buckets: prometheus.ExponentialBuckets(1, 2, 8),
 	})
 	m.PauseChainBytes = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "spoond", Name: "pause_chain_bytes",
