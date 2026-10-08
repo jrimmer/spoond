@@ -168,9 +168,11 @@ ON CONFLICT(id) DO UPDATE SET
 // in-memory twin), where an UpsertLease would rewrite every column and
 // could re-insert a row a concurrent release had just deleted
 // (spoond-d76). A missing row is not an error: the release won the race.
+// The AND lost_at = '' guard means an existing stamp is never
+// overwritten either (spoond-15i).
 func (db *DB) UpdateLeaseLostAt(ctx context.Context, id string, lostAt time.Time) error {
 	_, err := db.w.ExecContext(ctx,
-		`UPDATE leases SET lost_at = ? WHERE id = ?`, formatTime(lostAt), id)
+		`UPDATE leases SET lost_at = ? WHERE id = ? AND lost_at = ''`, formatTime(lostAt), id)
 	if err != nil {
 		return fmt.Errorf("store: update lost_at %s: %w", id, err)
 	}
