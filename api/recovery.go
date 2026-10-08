@@ -86,13 +86,17 @@ func writeLeaseLostErr(w http.ResponseWriter, err error) bool {
 // markLost records that a lease was lost and why: it enters the lost
 // state (stamping lost_at once, as setState does), stores the reason the
 // lost event carries, and returns that reason. The caller holds a lease
-// whose sandbox is already gone.
+// whose sandbox is already gone. A released lease is left alone: a
+// release and a recovery race, and losing an already-released lease
+// would resurrect it with a stale row and a spurious lost event
+// (spoond-775). Call with s.store.mu held.
 func (s *Service) markLost(l *Lease, reason string) string {
-	s.store.mu.Lock()
+	if l.released {
+		return reason
+	}
 	setLostReason(l, reason)
 	l.setState("lost")
 	s.saveLeaseLocked(l)
-	s.store.mu.Unlock()
 	return reason
 }
 
@@ -131,11 +135,13 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 		if l.released || !l.live() || l.busy {
 			continue
 		}
-		// A lease with a pending recovery retry is re-targeted even when a
-		// sandbox with its id is present: a previous attempt's cleanup
-		// delete can have failed, and the retry would otherwise skip the
-		// lease for ever.
-		if present[l.SandboxID] && !s.recoveryPending(l.ID) {
+		// A lease with a pending recovery retry for its current sandbox is
+		// re-targeted even when that sandbox is present: a previous
+		// attempt's cleanup delete can have failed, and the retry would
+		// otherwise skip the lease for ever. A budget from a sandbox the
+		// lease has since left must not bypass the check: the lease is
+		// healthy and would be rolled back to an old checkpoint (B2).
+		if present[l.SandboxID] && !s.recoveryPending(l.SandboxID) {
 			continue
 		}
 		targets = append(targets, l)
@@ -206,9 +212,10 @@ type recoveryOutcome struct {
 // A recovery that fails with a transient error does not lose the lease:
 // it keeps its running/recovered state (with no sandbox) and the next
 // reconcile pass retries, bounded by RECOVERY_RETRY_ATTEMPTS and
-// RECOVERY_RETRY_WINDOW. An admission/capacity refusal waits for capacity
-// under the same window. A missing image or build is permanent and loses
-// the lease at once (spoond-dxq).
+// RECOVERY_RETRY_WINDOW. A substrate capacity refusal waits for room
+// under the same window without counting an attempt (admission refusals
+// cannot reach a live lease's recovery, which skips admission). A missing
+// image or build is permanent and loses the lease at once (spoond-dxq).
 func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome {
 	if l.LastCheckpointBuildID == "" {
 		// No checkpoint to recover from: the running state is gone.
@@ -221,13 +228,19 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 			reason := fmt.Sprintf("recovery from checkpoint %s failed: %v", l.LastCheckpointBuildID, err)
 			return s.loseRecovery(ctx, l, reason, err.Error())
 		}
-		// Transient: a busy node's envd start, a deadline, or an
-		// admission refusal that is waiting for capacity. Count the
-		// attempt (except an admission refusal, which is waiting, not
-		// failing) and keep the lease for the next pass unless the
+		// Transient: a busy node's envd start, a deadline, or a capacity
+		// refusal that is waiting for room. A capacity refusal does not
+		// count an attempt (the node may host the lease later) but starts
+		// the window; anything else counts. Either way the lease keeps its
+		// state with no sandbox and the next pass retries it, unless the
 		// budget is spent.
-		countIt := !recoveryRefusalPending(err)
-		attempts, spent := s.noteRetryFailure(s.recoveryRetries, l.ID, countIt, s.recoveryRetryLimit(), s.recoveryRetryWindow())
+		var attempts int
+		var spent bool
+		if recoveryWaitForCapacity(err) {
+			attempts, spent = s.noteRetryWait(s.recoveryRetries, l.SandboxID, l.ID, s.recoveryRetryWindow())
+		} else {
+			attempts, spent = s.noteRetryFailure(s.recoveryRetries, l.SandboxID, l.ID, s.recoveryRetryLimit(), s.recoveryRetryWindow())
+		}
 		if !spent {
 			// A failed attempt can leave a half-started sandbox behind;
 			// remove it (best effort) so the next reconcile sees the
@@ -236,6 +249,15 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 				s.log.Printf("recovery: lease %s cleanup before retry: %v", l.ID, dErr)
 			}
 			s.deleteSandboxRow(l.SandboxID)
+			// The owner sees the retry rather than a silent wait: the
+			// event names the attempt and the cause (S3).
+			if recoveryWaitForCapacity(err) {
+				s.emitLeaseEvent(l.ID, l.Owner, LeaseRetry, fmt.Sprintf("recovering from checkpoint %s: waiting for capacity (attempt %d/%d): %v",
+					shortEventBuildID(l.LastCheckpointBuildID), attempts, s.recoveryRetryLimit(), err))
+			} else {
+				s.emitLeaseEvent(l.ID, l.Owner, LeaseRetry, fmt.Sprintf("recovering from checkpoint %s: attempt %d/%d failed: %v",
+					shortEventBuildID(l.LastCheckpointBuildID), attempts, s.recoveryRetryLimit(), err))
+			}
 			s.log.Printf("recovery: lease %s still recovering (attempt %d/%d, checkpoint %s): %v",
 				l.ID, attempts, s.recoveryRetryLimit(), formatRFC3339(l.LastCheckpointAt), err)
 			return recoveryOutcome{Result: "recovering", Generation: l.Generation, State: l.State}
@@ -244,7 +266,7 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 			l.LastCheckpointBuildID, attempts, s.recoveryRetryWindow(), err)
 		return s.loseRecovery(ctx, l, reason, err.Error())
 	}
-	s.clearRetry(s.recoveryRetries, l.ID)
+	s.clearRecoveryRetries(l)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseRecovered, fmt.Sprintf("recovered from checkpoint %s", l.LastCheckpointBuildID))
 	s.log.Printf("recovery: lease %s recovered (checkpoint %s)", l.ID, formatRFC3339(l.LastCheckpointAt))
 	return recoveryOutcome{Result: "recovered", Generation: l.Generation, State: l.State}
@@ -252,12 +274,22 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 
 // loseRecovery is the one path that ends a lease's recovery in the lost
 // state: reason is stored as its loss reason and carried by the lost
-// event; cause, when non-empty, is appended to the log. It clears the
-// lease's retry budget, drops any stale sandbox row, marks its running
-// jobs lost and lets snapshot retention run.
+// event; cause, when non-empty, is appended to the log. It clears every
+// recovery budget of the lease, drops any stale sandbox row, marks its
+// running jobs lost and lets snapshot retention run. A lease released
+// while the loss was in flight is left alone: no save, no lost event, no
+// job marking (spoond-775).
 func (s *Service) loseRecovery(ctx context.Context, l *Lease, reason, cause string) recoveryOutcome {
-	s.clearRetry(s.recoveryRetries, l.ID)
-	s.markLost(l, reason)
+	s.clearRecoveryRetries(l)
+	s.store.mu.Lock()
+	released := l.released
+	if !released {
+		s.markLost(l, reason)
+	}
+	s.store.mu.Unlock()
+	if released {
+		return recoveryOutcome{Result: "lost", Generation: l.Generation, State: l.State}
+	}
 	s.deleteSandboxRow(l.SandboxID)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 	if cause != "" {

@@ -393,9 +393,10 @@ type ServiceConfig struct {
 	// RecoveryRetryAttempts is how many failed crash-recovery attempts
 	// (a transient failure of recoverFromCheckpoint) a lease gets before
 	// it is marked lost (RECOVERY_RETRY_ATTEMPTS). <=0 uses
-	// DefaultRecoveryRetryAttempts. Capacity refusals (over quota, no
-	// burst room, no preemption room, a busy node) wait for capacity and
-	// are bounded by RecoveryRetryWindow instead. spoond-dxq.
+	// DefaultRecoveryRetryAttempts. Recovery counts anything not
+	// permanent; only a substrate capacity refusal waits for room
+	// without counting (admission is skipped for a live lease).
+	// spoond-dxq.
 	RecoveryRetryAttempts int
 	// RecoveryRetryWindow bounds how long a lease may stay in recovery
 	// since its first failed attempt, whatever the failure kind
@@ -464,10 +465,12 @@ type Service struct {
 	// line to once per outage rather than once per pass.
 	rootfsProbeAllFailedLogged bool
 	// retryMu guards the per-lease retry budgets below. recoveryRetries
-	// counts the failed crash-recovery attempts of a lease still in
-	// recovery; preemptRetries counts the failed resume attempts of a
-	// preempted lease (spoond-dxq). Both are in memory: a lease that
-	// recovers, is lost or is released has its entry dropped.
+	// counts the failed crash-recovery attempts of a lease, keyed by the
+	// sandbox id that failed (so a lease given a new sandbox is never
+	// rolled back to an old checkpoint by a stale budget); preemptRetries
+	// counts the failed resume attempts of a preempted lease, keyed by its
+	// lease id (spoond-dxq). Both are in memory: a lease that recovers, is
+	// lost or is released has its entry dropped.
 	retryMu         sync.Mutex
 	recoveryRetries map[string]*retryBudget
 	preemptRetries  map[string]*retryBudget
@@ -1536,6 +1539,11 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	s.settleJobsOfReleasedLease(ctx, l)
 	// The rootfs probe's per-lease state goes with the lease.
 	s.forgetRootfs(l.ID)
+	// A released lease has no in-flight recovery or resume: drop both
+	// retry budgets (spoond-dxq S2), so a later release or sandbox reuse
+	// cannot trip a stale budget.
+	s.clearRecoveryRetries(l)
+	s.clearRetry(s.preemptRetries, l.ID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
@@ -2448,6 +2456,12 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	} else {
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "resumed from build "+resumeBuild)
 	}
+	// The lease is running again from its sandbox: any crash-recovery
+	// budget keyed by that sandbox is stale (spoond-dxq B2).
+	s.clearRecoveryRetries(l)
+	// A successful resume ends any pending preempt-resume budget too, so
+	// a later preemption starts fresh.
+	s.clearRetry(s.preemptRetries, l.ID)
 	// A resume frees its prior preemption and can move capacity: retry
 	// waiting creates (#129).
 	s.wakeAdmissionQueue()
@@ -2553,6 +2567,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// The fresh sandbox has no crash-recovery budget: a stale one must not
+	// bypass reconcile's 'present' check (spoond-dxq B2).
+	s.clearRecoveryRetries(l)
 	// The fresh guest runs none of the old jobs: every running one is
 	// lost (2.6, #135).
 	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease restarted; the job did not survive")
@@ -2632,6 +2649,8 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// The fresh sandbox has no crash-recovery budget (spoond-dxq B2).
+	s.clearRecoveryRetries(l)
 	// The fresh guest runs none of the old jobs: every running one is
 	// lost (2.6, #135).
 	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease restarted; the job did not survive")
@@ -3484,6 +3503,16 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	// state (the same text every 410 lease_lost response carries).
 	if l.State == "lost" && l.LostReason != "" {
 		m["lost_reason"] = l.LostReason
+	}
+	// A pending crash-recovery retry (spoond-dxq): the owner sees the
+	// attempt, the limit and since when, rather than a silent wait for the
+	// next reconcile pass.
+	if attempt, of, since, ok := s.recoveryStatus(l); ok {
+		m["recovery"] = map[string]any{
+			"attempt": attempt,
+			"of":      of,
+			"since":   formatRFC3339(since),
+		}
 	}
 	kept := []map[string]any{}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)

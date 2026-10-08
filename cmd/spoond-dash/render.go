@@ -1825,13 +1825,14 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 // eventTypeStyle is the colour the events panel's type word takes: the
 // title cyan for the lease lifecycle (created, released, resumed,
 // restarted, restored, checkpointed, recovered), warn for a lease put
-// aside (suspended, preempted, idle_suspended, queued), bad for one lost
-// or timed out, ok for spoond's own catalog gc, dim for anything else.
+// aside or retried (suspended, preempted, idle_suspended, queued,
+// recovery_retry, rootfs_dead), bad for one lost or timed out, ok for
+// spoond's own catalog gc, dim for anything else.
 func eventTypeStyle(t string) string {
 	switch t {
 	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
 		return "title"
-	case "suspended", "preempted", "idle_suspended", "queued":
+	case "suspended", "preempted", "idle_suspended", "queued", "recovery_retry", "rootfs_dead":
 		return "warn"
 	case "lost", "timed_out":
 		return "bad"
