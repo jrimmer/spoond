@@ -153,7 +153,8 @@
 //	                  reason timed_out (spoond-wb5; default 24h = 86400;
 //	                  a Go duration or seconds; a job may ask for a
 //	                  shorter max_runtime_secs, never a longer one; a
-//	                  negative value disables the cap)
+//	                  negative value disables the cap, and a negative
+//	                  value under one second is rejected)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route

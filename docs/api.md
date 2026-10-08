@@ -593,16 +593,23 @@ outcome itself under `/var/lib/spoond/jobs/<job_id>/`: `stdout`,
 Those files, not the stream, are the source of truth, and they are kept
 as long as the record — they are removed when the exited record is
 pruned (`JOB_RETENTION_SECS`). The `reconcile` pass also enforces the
-max runtime: a job that has run for its effective cap is killed (the
-job's process group, like `POST .../signal`) and marked exited with
-reason `timed_out` and exit code `124`, and a `job_exited` event names
-the cap, so a `sleep infinity` cannot pin the lease's memory and
-hugepages forever. The cap is wall-clock from the job's start; while the
-lease is suspended reconcile leaves the job running (the paused guest
-cannot be signalled) and the first reconcile after a resume kills a job
-whose cap was spent in the meantime. `JOB_MAX_RUNTIME=0` (unset) is the
-24 h default and a negative value disables the cap. Per-exec `secrets`
-stay staged under
+max runtime: a job that has run for its effective cap is killed first
+(the job's process group, like `POST .../signal`) and only then marked
+exited with reason `timed_out` and exit code `124`, and a `job_exited`
+event names the cap, so a `sleep infinity` cannot pin the lease's memory
+and hugepages forever. If the kill fails (a transient substrate error)
+the record stays running and the next reconcile retries, so a job that
+cannot be signalled is still tracked and counted. The cap is wall-clock
+from the job's start; while the lease is suspended — or busy with an
+in-flight pause, resume, restart or restore — reconcile leaves the job
+running (the guest cannot be signalled), and the first reconcile after a
+resume kills a job whose cap was spent in the meantime. A record written
+before the cap existed (`max_runtime_secs` 0) is still capped by the
+current host value once the backend is upgraded. `JOB_MAX_RUNTIME=0`
+(unset) is the 24 h default and a negative value disables the cap; a
+negative value smaller than one second is rejected at startup, since
+truncating it to whole seconds would silently mean the default rather
+than "off". Per-exec `secrets` stay staged under
 `/run/secrets` for the job's life and are removed when it exits (the
 guest wrapper removes them; the backend also removes them on
 reconcile). Neither `env` nor secret values are ever stored in the job
