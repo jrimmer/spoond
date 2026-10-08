@@ -2592,6 +2592,10 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
 		return "", fmt.Errorf("store pause build refs: %w", err)
 	}
+	// Measure the chain this pause extends (spoond-p9j): its depth and
+	// recorded bytes, before any follow-up decides on compaction. The
+	// observation must not fail the pause.
+	s.observePauseChain(ctx, buildID)
 	if s.pauseBeforeSuspend != nil {
 		s.pauseBeforeSuspend(l)
 	}
@@ -4003,6 +4007,18 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 		}
 	}
 	m["kept_builds"] = kept
+	// Pause-chain size (spoond-p9j): how many builds the lease's chain
+	// holds and their summed recorded size_bytes. A persistent lease that
+	// suspends daily keeps every pause build (GC keeps the chain's
+	// ancestors) until a cold restart, so this shows what such a chain
+	// costs before any compaction decision. Best effort: a catalog hiccup
+	// leaves the fields off rather than failing the read.
+	if depth, bytes, err := s.leaseChainStats(ctx, l); err != nil {
+		s.log.Printf("lease detail: chain stats of %s: %v", l.ID, err)
+	} else if depth > 0 {
+		m["chain_depth"] = depth
+		m["chain_bytes"] = bytes
+	}
 	// The named-snapshot version this lease started from (A3): the same
 	// object the create response carries.
 	if view := s.snapshotView(ctx, l); view != nil {

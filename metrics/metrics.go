@@ -118,6 +118,14 @@ type BackendMetrics struct {
 	KeptBuildsBytes prometheus.Gauge // summed size_bytes over kept builds of live leases
 	KeptBuilds      prometheus.Gauge // pin count over live leases
 
+	// Pause-chain size (spoond-p9j): the build depth and total recorded
+	// bytes of a lease's chain, measured from the build it just paused
+	// into. Histograms without labels, so the cardinality stays bounded
+	// no matter how many leases suspend; a single lease's exact numbers
+	// are in GET /api/leases/{id}.
+	PauseChainDepth prometheus.Histogram // builds in the chain at a pause
+	PauseChainBytes prometheus.Histogram // recorded size_bytes summed over the chain at a pause
+
 	// Named snapshots (2.7, #83): versions and their recorded disk bytes.
 	NamedSnapshots     prometheus.Gauge // named snapshot version rows
 	NamedSnapshotBytes prometheus.Gauge // summed size_bytes over named snapshot versions
@@ -428,6 +436,20 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "kept_builds",
 		Help: "Kept checkpoints of live leases (pins; a build pinned twice counts once per lease).",
 	})
+	// Pause-chain size (spoond-p9j): observed once per pause. Depth
+	// buckets cover 1..30 builds linearly; byte buckets span 1 MiB to
+	// ~256 GiB exponentially (each build's memory file grows with the
+	// guest, and a long-lived chain accumulates many of them).
+	m.PauseChainDepth = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "pause_chain_depth",
+		Help:    "Builds in a lease's chain at each pause (the pause build and its ancestors to the template root).",
+		Buckets: prometheus.LinearBuckets(1, 1, 30),
+	})
+	m.PauseChainBytes = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "spoond", Name: "pause_chain_bytes",
+		Help:    "Recorded size_bytes summed over a lease's chain at each pause.",
+		Buckets: prometheus.ExponentialBuckets(1<<20, 4, 10),
+	})
 	m.NamedSnapshots = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "named_snapshots",
 		Help: "Named snapshot versions stored (2.7, #83).",
@@ -544,6 +566,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.SnapshotBytes, m.StorageFree, m.GCDeleted,
 		m.GCOrphansReaped, m.GCOrphanBytesReaped,
 		m.KeptBuildsBytes, m.KeptBuilds,
+		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
 		m.HeldActions,
 		m.PreemptionsTotal, m.PreemptedLeases,
