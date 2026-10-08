@@ -178,6 +178,43 @@ func TestNamedSnapshotRefusesDeletedOwner(t *testing.T) {
 	}
 }
 
+// TestGrantRefusesDeletedOwnerDropsSecrets: a create that staged its
+// create-time secrets and then met the owner-delete mark at the commit
+// must refuse and drop the in-memory secret copy, which would otherwise
+// outlive the sandbox that never became a lease (spoond-q4j NIT).
+func TestGrantRefusesDeletedOwnerDropsSecrets(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	const owner = "u-grant-gone"
+	const leaseID = "l-grant-gone"
+
+	// The delete lands while the sandbox is being created, before
+	// grantLease stages the secrets and reaches its commit guard.
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		svc.markOwnerDeleted(owner)
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	_, err := svc.grantLease(ctx, leaseRequest{
+		owner: owner, image: "py-base", ttl: time.Minute, persistent: true,
+		leaseID:       leaseID,
+		createSecrets: map[string]string{"TOK": "grant-value"},
+	})
+	if !errors.Is(err, errOwnerGone) {
+		t.Fatalf("grant error = %v, want errOwnerGone", err)
+	}
+	if got := svc.createSecretsFor(leaseID); got != nil {
+		t.Fatalf("create-time secrets survived the refused grant: %v", got)
+	}
+	if sbs, lerr := sub.List(ctx); lerr != nil {
+		t.Fatalf("list sandboxes: %v", lerr)
+	} else if len(sbs) != 0 {
+		t.Fatalf("refused grant left %d sandbox(es): %v", len(sbs), sbs)
+	}
+}
+
 // TestUsersDeleteUnknownAndLegacy: an id that is neither a known identity
 // nor has any remaining state answers 404, and a legacy token-map owner
 // answers 409 and is left untouched (spoond-q4j S2).
