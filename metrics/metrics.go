@@ -140,7 +140,7 @@ type BackendMetrics struct {
 
 	// Background exec jobs (2.6, #135): running jobs and their outcomes.
 	JobsRunning     prometheus.Gauge       // background exec jobs currently running
-	JobsExitedTotal *prometheus.CounterVec // {result}: ok, error, lost
+	JobsExitedTotal *prometheus.CounterVec // {result}: ok, error, lost, timed_out
 
 	// Rootfs liveness probe (spoond-5ca): a running lease whose root
 	// block device answers I/O errors on an uncached read has lost its
@@ -478,7 +478,7 @@ func NewBackendMetrics() *BackendMetrics {
 	})
 	m.JobsExitedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "jobs_exited_total",
-		Help: "Background exec jobs that ended, by result: ok, error, lost.",
+		Help: "Background exec jobs that ended, by result: ok, error, lost, timed_out.",
 	}, []string{"result"})
 
 	m.RootfsProbeFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{

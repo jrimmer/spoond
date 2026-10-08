@@ -23,8 +23,8 @@ import (
 
 // handleBackgroundExec answers the exec request with "background": true:
 // start the job and 202 as soon as it is running.
-func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string) {
-	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets)
+func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, maxRuntimeSecs int64) {
+	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets, maxRuntimeSecs)
 	if err != nil {
 		switch {
 		case errors.Is(err, errJobCap):

@@ -362,6 +362,11 @@ type ServiceConfig struct {
 	// JobRetentionSecs is how long an exited background job record is
 	// kept before pruning (2.6, #135). 0 = DefaultJobRetentionSecs.
 	JobRetentionSecs int64
+	// JobMaxRuntimeSecs caps how long a background job may run before it
+	// is killed and marked exited with reason timed_out (spoond-wb5). A
+	// job may ask for a shorter max_runtime_secs, never a longer one. 0
+	// = DefaultJobMaxRuntimeSecs; a negative value disables the cap.
+	JobMaxRuntimeSecs int64
 	// MaxAdmitWaitSecs caps how long a create may wait for admission
 	// (#129 part 1). MAX_ADMIT_WAIT_SECS, default DefaultMaxAdmitWaitSecs;
 	// 0 disables waiting (the request field is accepted and ignored).
