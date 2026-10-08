@@ -148,6 +148,7 @@ package spoondbackend
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -254,6 +255,29 @@ func keptDiskWarnPct() float64 {
 	return notify.DefaultKeptDiskWarnPct
 }
 
+// parseGuestDNS validates SPOOND_GUEST_DNS_ADDR: a comma-separated list
+// of bare IP addresses. An empty value means "no resolver allowance"
+// (allowed); a non-empty value that yields no address (separators or
+// whitespace only) is an error, so a typo fails startup rather than
+// silently restoring the public DNS fallback.
+func parseGuestDNS(v string) ([]string, error) {
+	var addrs []string
+	for _, addr := range strings.Split(v, ",") {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		if net.ParseIP(addr) == nil {
+			return nil, fmt.Errorf("%q is not an IP address", addr)
+		}
+		addrs = append(addrs, addr)
+	}
+	if v != "" && len(addrs) == 0 {
+		return nil, fmt.Errorf("%q names no resolver address", v)
+	}
+	return addrs, nil
+}
+
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
 // anything else as true, so a typo fails open to the default rather than
 // silently disabling a check.
@@ -341,13 +365,12 @@ func Main(args []string) int {
 	// The guest's DNS resolver(s) (SPOOND_GUEST_DNS_ADDR,
 	// comma-separated). Each is granted to every lease's egress policy
 	// and baked into the guest image for spoond-guest-init. Empty = no
-	// resolver allowance.
+	// resolver allowance; a non-empty value that names no address
+	// (spaces or commas only) is fatal, so a typo cannot silently
+	// restore the public DNS fallback.
 	guestDNSAddr := os.Getenv("SPOOND_GUEST_DNS_ADDR")
-	for _, addr := range strings.Split(guestDNSAddr, ",") {
-		addr = strings.TrimSpace(addr)
-		if addr != "" && net.ParseIP(addr) == nil {
-			log.Fatalf("SPOOND_GUEST_DNS_ADDR %q is not an IP address", addr)
-		}
+	if _, err := parseGuestDNS(guestDNSAddr); err != nil {
+		log.Fatalf("SPOOND_GUEST_DNS_ADDR: %v", err)
 	}
 	// The wildcard hostname suffix the HTTP proxy routes
 	// (SPOOND_PROXY_HOST_SUFFIX). Empty = the generic default.
