@@ -994,10 +994,12 @@ the drain is never released by them.
 | 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage and `GC_DELETE=1`, held leases a rule suspended (1, 3 or 4), untouched since, are **released** oldest suspension first, at most one per sweep tick, until free space is above the recovery percentage; the GC runs first, at most every 5 minutes. A running lease is never released. With the dry-run GC the rule releases nothing, since nothing would be freed |
 | 6 | Scheduling | — | — | the rules run in the existing sweep loop and skip while the node is draining |
 
-Set `HELD_IDLE_TIMEOUT_SECS`, `HELD_SUSPENDED_RELEASE_SECS`,
-`PRESSURE_IDLE_SECS` or `CRITICAL_DISK_FREE_PCT` to `0` to disable that
-rule. `PRESSURE_ORDER` cannot be disabled; an unknown step is a fatal
-configuration error at startup. `HOLD_TTL_SECS`
+Set `HELD_IDLE_TIMEOUT_SECS`, `HELD_SUSPENDED_RELEASE_SECS` or
+`CRITICAL_DISK_FREE_PCT` to `0` to disable that
+rule. `PRESSURE_ORDER` and `PRESSURE_IDLE_SECS` cannot be disabled: an
+unknown `PRESSURE_ORDER` step is a fatal
+configuration error at startup and `PRESSURE_IDLE_SECS` `0` means its
+default. `HOLD_TTL_SECS`
 and `HOLD_TTL_MAX_SECS` cannot be disabled: `0` means their default, so
 every hold lapses eventually. Watch the rules with `journalctl -u spoond-backend | grep 'held
 lease'` and `spoond_held_actions_total` — a rising `critical{release}`
