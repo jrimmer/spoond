@@ -391,13 +391,12 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 			attempts, spent = s.noteRetryFailure(s.recoveryRetries, l.SandboxID, l.ID, s.recoveryRetryLimit(), s.recoveryRetryWindow())
 		}
 		if !spent {
-			// A failed attempt can leave a half-started sandbox behind;
-			// remove it (best effort) so the next reconcile sees the
-			// lease again and the retry can reuse the same sandbox id.
-			if dErr := s.sub.Delete(context.WithoutCancel(ctx), l.SandboxID); dErr != nil {
-				s.log.Printf("recovery: lease %s cleanup before retry: %v", l.ID, dErr)
-			}
-			s.deleteSandboxRow(l.SandboxID)
+			// A failed attempt needs no cleanup here: createSandbox
+			// already removed any half-started sandbox after a failed
+			// Create (spoond-52c S2) and deletes nothing when the create
+			// was refused before reaching the orchestrator, so a delete
+			// here would double-delete and falsely name a resume cleanup
+			// during a recovery (spoond-15i).
 			// The owner sees the retry rather than a silent wait: the
 			// event names the attempt and the cause (S3). A capacity wait
 			// is not an attempt, so its text names only the wait.

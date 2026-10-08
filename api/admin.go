@@ -429,7 +429,7 @@ func (s *Service) deleteHalfSandbox(ctx context.Context, l *Lease, sandboxID str
 		return
 	}
 	if err := s.sub.Delete(context.WithoutCancel(ctx), sandboxID); err != nil {
-		s.log.Printf("resume: lease %s cleanup of half-started sandbox %s: %v", l.ID, sandboxID, err)
+		s.log.Printf("cleanup: lease %s removed half-started sandbox %s: %v", l.ID, sandboxID, err)
 	}
 	s.deleteSandboxRow(sandboxID)
 }

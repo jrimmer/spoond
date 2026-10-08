@@ -196,9 +196,10 @@ func (db *DB) ListBuilds(ctx context.Context) ([]BuildRow, error) {
 // it inserts the row `building` before it asks the orchestrator for the
 // build and moves it on when the build ends. A row a killed build left
 // `building` is failed by the GC after twice the build timeout
-// (spoond-4yl), so it cannot hold the count up for ever. Used by the
-// periodic orphan sweep, which must not delete a build sandbox it cannot
-// tell from an orphan (spoond-63a N1).
+// (spoond-4yl), so it cannot hold the count up for ever. The count backs
+// the periodic orphan sweep's skip guard (a build sandbox has no spoond
+// row and would look unclaimed, spoond-63a G3) and the
+// spoond_builds_in_flight gauge.
 func (db *DB) CountBuildingTemplateBuilds(ctx context.Context) (int, error) {
 	row := db.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM builds
 		WHERE state = 'building' AND kind = 'template'`)
@@ -215,9 +216,10 @@ func (db *DB) CountBuildingTemplateBuilds(ctx context.Context) (int, error) {
 // it; a SIGKILL or reboot between those two writes leaves the row
 // building forever, and every building row is a GC root (with its whole
 // ancestor chain), so it pins the catalog indefinitely. The GC fails
-// such rows, and the owner sees the state through the API/events like
-// any other failed build. It returns the rows it changed so the caller
-// can log each one.
+// such rows; a template build has no owner and never appears in
+// /api/snapshots, so the caller emits a lease-less `gc` event for each
+// one. It returns the rows it changed so the caller can log and announce
+// each one.
 func (db *DB) MarkStaleBuildingFailed(ctx context.Context, cutoff time.Time, reason string) ([]BuildRow, error) {
 	rows, err := db.r.QueryContext(ctx, `SELECT
 		build_id, kind, template_id, image, parent_build_id, source_sandbox_id, owner, state,

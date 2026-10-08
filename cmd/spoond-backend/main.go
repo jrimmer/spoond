@@ -48,6 +48,10 @@
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
 //	                  (default /forkdcache/e2b/storage/templates)
+//	SPOOND_BUILD_TIMEOUT  how long a template build may run before the
+//	                  GC treats a still-`building` row as stale and fails
+//	                  it; a Go duration or seconds (spoond-4yl). The same
+//	                  variable bounds `spoond images build`. Default 1h.
 //	SPOOND_BACKUP_DIR directory for daily SQLite backups (U11; default
 //	                  /var/lib/spoond/backups; VACUUM INTO daily at 03:00
 //	                  local, plus at start when the newest is older than 24 h)
@@ -167,6 +171,7 @@ import (
 	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/notify"
 	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
 	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
@@ -399,6 +404,11 @@ func Main(args []string) int {
 	// overrides it. Kept in seconds (not a duration) like the lease field.
 	idleSuspendDefault := int64(envIntOr("IDLE_SUSPEND_DEFAULT_SECS", 0))
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
+	// Template build timeout (spoond-4yl): the GC fails a build still
+	// `building` for longer than twice this. SPOOND_BUILD_TIMEOUT (a Go
+	// duration or seconds) is the same knob `spoond images build` reads,
+	// so the pipeline and the GC agree.
+	buildTimeout := substrate.BuildTimeoutFromEnv()
 	// The burst lease reserve (#128 part 2): BURST_RESERVE_MIB keeps
 	// this much hugepage memory free of burst leases, so guaranteed
 	// work always has room to land; 0 disables the reserve.
@@ -503,6 +513,7 @@ func Main(args []string) int {
 		CheckpointIntervalDefault: int64(checkpointDefault / time.Second),
 		IdleSuspendDefault:        idleSuspendDefault,
 		TemplateStoragePath:       storagePath,
+		BuildTimeout:              buildTimeout,
 		LostGracePersistent:       lostGracePersistent,
 		LostGrace:                 lostGrace,
 		HeldIdleTimeout:           heldIdle,

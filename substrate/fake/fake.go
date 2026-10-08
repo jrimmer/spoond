@@ -415,10 +415,14 @@ func (f *Fake) NodeInfo(ctx context.Context) (substrate.NodeInfo, error) {
 	f.mu.Lock()
 	if f.nodeInfoFn != nil {
 		fn := f.nodeInfoFn
-		f.mu.Unlock()
+		// Record while the lock is still held: record appends f.Calls and
+		// must not run unlocked next to Fake.Delete's locked record
+		// (spoond-15i).
 		if err := f.record("NodeInfo", ""); err != nil {
+			f.mu.Unlock()
 			return substrate.NodeInfo{}, err
 		}
+		f.mu.Unlock()
 		return fn(ctx)
 	}
 	defer f.mu.Unlock()
