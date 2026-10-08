@@ -161,7 +161,7 @@ func (s *Service) cancelUserJobs(ctx context.Context, owner string) []string {
 		if l := s.lookupAny(j.LeaseID); l != nil {
 			sandboxID = l.SandboxID
 			if l.live() {
-				if err := s.signalJob(ctx, l, j, "TERM"); err != nil {
+				if err := s.signalJob(ctx, l.ID, sandboxID, j, "TERM"); err != nil {
 					s.log.Printf("user delete: cancel job %s of %s: %v", j.JobID, owner, err)
 				}
 			}

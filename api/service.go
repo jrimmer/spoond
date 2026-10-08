@@ -3414,6 +3414,10 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		_ = s.sub.Delete(ctx, sb.ID)
 		s.deleteSandboxRow(sb.ID)
 		s.endCreatingSandbox(sb.ID)
+		// The sandbox is gone, so its applied-egress memo must not
+		// linger for the life of the process (spoond-966); the deferred
+		// endAppliedEgress clears the in-flight mark.
+		s.forgetAppliedEgress(lease.ID)
 		return nil, "", errOwnerGone
 	}
 	s.store.leases[lease.ID] = lease
@@ -3581,6 +3585,10 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			_ = s.sub.Delete(ctx, sb.ID)
 			s.deleteSandboxRow(sb.ID)
 			s.endCreatingSandbox(sb.ID)
+			// The child's egress memo goes with its deleted sandbox, so
+			// the refused fork leaves none behind (spoond-966).
+			s.forgetAppliedEgress(lease.ID)
+			s.endAppliedEgress(lease.ID)
 			return rollback(errOwnerGone)
 		}
 		s.store.leases[lease.ID] = lease
