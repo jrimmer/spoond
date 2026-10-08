@@ -1351,7 +1351,7 @@ beside its human detail:
 
 ```
 event: suspended
-data: {"seq":43,…,"type":"suspended","detail":"paused into build 9e1f2ab3…","reason":"idle_suspend","policy_step":"pressure/disk","build_id":"9e1f2ab3…"}
+data: {"seq":43,…,"type":"suspended","detail":"paused into build 9e1f2ab3…","reason":"idle_suspend","build_id":"9e1f2ab3…"}
 
 ```
 

@@ -10,10 +10,105 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jrimmer/spoond/v2/store"
 )
+
+// TestSuspendFactsPersistedAcrossServiceRestart: the structured facts
+// survive a backend restart (a fresh Service and Server over the same
+// store), so GET on the restarted process serves them. This fails if
+// rowToLease drops SuspendReason (or the other three).
+func TestSuspendFactsPersistedAcrossServiceRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "spoond.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sub := newTestSub()
+	seedImage(t, db, "py-base", 2048)
+	svc := NewService(sub, db, map[string]string{"token-a": "consumer-a"},
+		ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
+	svc.log = log.New(io.Discard, "", 0)
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	build, err := svc.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdleSuspend, policyStep: "pressure/disk"})
+	if err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	at := time.Now().UTC().Truncate(time.Second)
+	svc.store.mu.Lock()
+	svc.store.leases[l.ID].SuspendedAt = at
+	svc.saveLeaseLocked(svc.store.leases[l.ID])
+	svc.store.mu.Unlock()
+	svc.Shutdown(ctx)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	db2, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { db2.Close() })
+	svc2 := NewService(sub, db2, map[string]string{"token-a": "consumer-a"},
+		ServiceConfig{DefaultTTL: time.Minute, MaxTTL: 10 * time.Minute})
+	svc2.log = log.New(io.Discard, "", 0)
+	if err := svc2.LoadState(ctx); err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	srv := NewServer(svc2, NewImageRegistry(db2))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, body := doReq(t, "GET", ts.URL+"/api/leases/"+l.ID, "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET after restart status %d: %v", resp.StatusCode, body)
+	}
+	if body["suspend_reason"] != suspendReasonIdleSuspend ||
+		body["suspend_policy_step"] != "pressure/disk" ||
+		body["suspend_build_id"] != build || body["suspended_at"] == nil {
+		t.Fatalf("GET after restart = %v, want the suspension facts persisted", body)
+	}
+}
+
+// TestAdminDrainCarriesNoReason: an admin drain pause is not an
+// automatic suspend, so the lease and the 409 body carry no reason. This
+// fails if the drain pause is given one.
+func TestAdminDrainCarriesNoReason(t *testing.T) {
+	ts, svc, _, _ := newTestServerWithService(t)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.drain(ctx); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if reason, step, build, at := suspendFactsOf(t, svc, l.ID); reason != "" || step != "" || build != "" || !at.IsZero() {
+		t.Fatalf("drain suspend facts = %q/%q/%q/%v, want all empty", reason, step, build, at)
+	}
+
+	// The 409 the suspended lease answers omits the reason.
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/network", "token-a",
+		map[string]any{"network_policy": "lan"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("network status = %d, want 409: %v", resp.StatusCode, body)
+	}
+	if _, ok := body["reason"]; ok {
+		t.Fatalf("409 body = %v, want no reason for a drain suspend", body)
+	}
+}
 
 // suspendFactsOf reads a lease's structured suspension fields under the
 // store lock.
