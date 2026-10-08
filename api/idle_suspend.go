@@ -156,7 +156,7 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 		return true
 	}
 	if !s.svc.isIdleSuspended(l) {
-		writeLeaseSuspended(w, l)
+		writeLeaseSuspended(w, s.svc.leaseSuspendReason(l.ID))
 		return false
 	}
 	if _, err := s.svc.resumeLease(r.Context(), l); err != nil {

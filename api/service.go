@@ -2757,7 +2757,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.deleteSandboxRow(l.SandboxID)
-	s.emitSuspendEvent(l.ID, l.Owner, buildID, l.SuspendReason, l.SuspendPolicyStep)
+	s.emitSuspendEvent(l.ID, l.Owner, buildID, pol.reason, pol.policyStep)
 	// A pause frees the lease's hugepages and quota: retry waiting
 	// creates (#129).
 	// The pause freed the lease's hugepages: the next admission inside
@@ -4029,6 +4029,22 @@ func (s *Service) lookupAny(id string) *Lease {
 		return nil
 	}
 	return l
+}
+
+// leaseSuspendReason returns a live lease's structured suspension reason
+// ("" for a hand or drain suspend, or an unknown/released lease) with
+// the store lock held. The 409 lease_suspended writers call it instead
+// of reading Lease.SuspendReason after a lock-free lookup, so a
+// concurrent resume that clears the field under the lock never races
+// (#145 D6).
+func (s *Service) leaseSuspendReason(id string) string {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.released {
+		return ""
+	}
+	return l.SuspendReason
 }
 
 // holdState is "active" while a hold runs until hold_expires_at,
