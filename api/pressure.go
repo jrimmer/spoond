@@ -189,16 +189,11 @@ type pressureCandidate struct {
 	step PressureStep
 }
 
-// pressureCandidates returns the reclaimable leases in pressure order:
-// the configured steps in order, each holding its leases sorted by
-// pressureBefore. It snapshots the store; each candidate is re-checked
-// just before it is paused. Uses the service clock for the idle step.
-func (s *Service) pressureCandidates() []pressureCandidate {
-	return s.pressureCandidatesAt(s.now())
-}
-
-// pressureCandidatesAt is pressureCandidates at an explicit instant (the
-// sweep passes its tick's now).
+// pressureCandidatesAt returns the reclaimable leases in pressure
+// order at an instant: the configured steps in order, each holding its
+// leases sorted by pressureBefore. It snapshots the store; each
+// candidate is re-checked just before it is paused. The sweep passes
+// its tick's now.
 func (s *Service) pressureCandidatesAt(now time.Time) []pressureCandidate {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()

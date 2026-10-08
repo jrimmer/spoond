@@ -243,7 +243,7 @@ func hugepagesCheck(info substrate.NodeInfo, err error) readyCheck {
 	case err != nil:
 		return failCheck(c, "unreachable: "+err.Error())
 	case info.HugepagesTotal == 0:
-		// The same guard pressureShortensIdle applies: without the
+		// The same guard the pressure check applies: without the
 		// counts the pool state is unknown, and a monitor must say so
 		// rather than divide by zero.
 		return failCheck(c, "node reports no hugepage pool")
