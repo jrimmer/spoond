@@ -66,12 +66,26 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 		res.KeptBuilds = append(res.KeptBuilds, kept...)
 	}
 
-	// Release every lease of the owner. releaseBecause is idempotent, so
-	// a lease already gone between the snapshot and the call is a no-op.
-	for _, l := range s.leasesOfOwner(owner) {
-		s.log.Printf("user delete: releasing lease %s of %s", l.ID, owner)
-		s.releaseBecause(ctx, l, userDeleteReason)
-		res.Leases = append(res.Leases, l.ID)
+	// Release every lease of the owner. A lease created by a request still
+	// in flight when the identity was removed can appear between passes,
+	// so re-scan a bounded number of times. releaseBecause is idempotent,
+	// and it removes the lease from the in-memory set, so a pass that
+	// finds nothing ends the loop.
+	seen := map[string]bool{}
+	for pass := 0; pass < 3; pass++ {
+		ls := s.leasesOfOwner(owner)
+		if len(ls) == 0 {
+			break
+		}
+		for _, l := range ls {
+			if seen[l.ID] {
+				continue
+			}
+			seen[l.ID] = true
+			s.log.Printf("user delete: releasing lease %s of %s", l.ID, owner)
+			s.releaseBecause(ctx, l, userDeleteReason)
+			res.Leases = append(res.Leases, l.ID)
+		}
 	}
 
 	// Safety net: a kept-builds row whose lease row lagged the in-memory
@@ -80,6 +94,9 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	if extra, err := s.db.DeleteKeptBuildsOfOwner(ctx, owner); err != nil {
 		s.log.Printf("user delete: unpin kept builds of %s: %v", owner, err)
 	} else {
+		for _, id := range extra {
+			s.log.Printf("user delete: unpinned build %s of %s", id, owner)
+		}
 		res.KeptBuilds = mergeUnique(res.KeptBuilds, extra)
 	}
 
