@@ -725,9 +725,9 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 	var held, lapsed, plain string
 	for _, r := range lines {
 		switch {
-		case strings.Contains(r, "forgejo/job-42"):
+		case strings.Contains(r, "◆ forgejo/job-42"):
 			held = r
-		case strings.Contains(r, "◉"):
+		case strings.Contains(r, "◉ nightly"):
 			lapsed = r
 		case strings.Contains(r, "abcdef0123"):
 			plain = r
@@ -747,6 +747,21 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 	}
 	if !strings.Contains(held, "▶ running") || !strings.Contains(lapsed, "‖ suspended") {
 		t.Errorf("state column must always show the run state:\n%s\n%s", held, lapsed)
+	}
+
+	// A holder without a hold draws unmarked (holder set, HoldState
+	// ""), and its plain name is still visible in the holder column.
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running",
+		Holder: "someone", Age: "5m", Left: "10m"}}
+	p2 := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p2, "someone") {
+		t.Fatalf("unheld holder missing:\n%s", p2)
+	}
+	for _, r := range strings.Split(p2, "\n") {
+		if strings.Contains(r, "someone") && (strings.Contains(r, "◆") || strings.Contains(r, "◉")) {
+			t.Errorf("unheld holder marked held:\n%s", r)
+		}
 	}
 }
 
@@ -833,18 +848,28 @@ func TestLeaseNameShownWhenNoHolder(t *testing.T) {
 
 // TestLeaseCommentShownWhenNoHolderOrName: a holder-less, name-less
 // lease (a CI job) shows its comment in the holder column, dim. With a
-// holder or a name present the comment stays hidden.
+// holder or a name present the comment stays hidden. The holder column
+// gets the width the narrow columns free, so a short comment shows whole
+// and only a longer one is cut.
 func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Comment: "forgejo: example.com/site #218",
 		Age: "5m", Left: "10m"}}
 	l := &layout{w: DefaultWidth, host: "h", s: s}
 	p := l.assemble().Plain()
-	if !strings.Contains(p, "forgejo: example") || !strings.Contains(p, "…") {
+	if !strings.Contains(p, "forgejo: example.com/site #218") {
 		t.Fatalf("lease comment not shown in the holder column:\n%s", p)
 	}
 
+	// A comment longer than the holder column is cut with ….
+	s.Rows[0].Comment = "forgejo: example.com/site #218 " + strings.Repeat("x", 80)
+	p = l.assemble().Plain()
+	if !strings.Contains(p, "forgejo: example.com") || !strings.Contains(p, "…") {
+		t.Fatalf("long lease comment not cut in the holder column:\n%s", p)
+	}
+
 	// A holder wins; the comment is not drawn anywhere.
+	s.Rows[0].Comment = "forgejo: example.com/site #218"
 	s.Rows[0].Holder = "forgejo/job-42"
 	p = l.assemble().Plain()
 	if !strings.Contains(p, "forgejo/job-42") || strings.Contains(p, "example.com/site") {
@@ -1482,18 +1507,240 @@ func TestNoticesDropLeaseStates(t *testing.T) {
 	}
 }
 
-// TestLeaseCellsNeverRunTogether: a long owner ends in … and leaves a
-// space before the state cell, and a long age ("10h37m") shows whole.
+// TestLeaseCellsNeverRunTogether: a fixed-width column whose values are
+// short gives its slack to the owner and holder, so a long owner shows
+// more before it is cut, and an over-long owner still ends in … with a
+// space before the state. A long age ("10h37m") always shows whole.
 func TestLeaseCellsNeverRunTogether(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "038f2ef4c5", Image: "go-base", Owner: "test-consumer", State: "running", Policy: "internet", Age: "10h37m", Left: "2h29m"}}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "test-con… ▶ running") {
-		t.Errorf("long owner should end in … with a space before the state:\n%s", p)
+	// The short columns hand their slack to the owner, so this one fits
+	// whole instead of being cut at the old fixed width.
+	if !strings.Contains(p, "test-consumer ▶ running") {
+		t.Errorf("short columns did not free the owner its width:\n%s", p)
 	}
 	if !strings.Contains(p, "10h37m") {
 		t.Errorf("age 10h37m cut:\n%s", p)
 	}
+
+	// An owner wider than even the freed room is cut with … and keeps a
+	// space before the state cell.
+	s.Rows[0].Owner = strings.Repeat("long-owner", 8)
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "… ▶ running") {
+		t.Errorf("over-long owner should end in … with a space before the state:\n%s", p)
+	}
+}
+
+// TestLeasesAccessIsolated: a lease whose API network policy is "none"
+// shows the access value "isolated"; the stored policy is not changed.
+func TestLeasesAccessIsolated(t *testing.T) {
+	if forms := policyWords("none"); len(forms) == 0 || forms[0] != "isolated" {
+		t.Fatalf("policyWords(\"none\") = %q", forms)
+	}
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running",
+		Policy: "none", Age: "5m", Left: "10m"}}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "isolated") {
+		t.Errorf("access value for policy none is not isolated:\n%s", p)
+	}
+	// The column header is "access" (not "policy").
+	if h := leaseHeaderLine(strings.Split(p, "\n")); !strings.Contains(h, "access") {
+		t.Errorf("leases header is not named access: %q", h)
+	}
+	if s.Rows[0].Policy != "none" {
+		t.Errorf("rendering changed the stored policy to %q", s.Rows[0].Policy)
+	}
+	// The other policies keep their labels.
+	if forms := policyWords("restricted"); forms[0] != "restricted" {
+		t.Errorf("restricted = %q", forms[0])
+	}
+	if forms := policyWords("lan"); forms[0] != "lan" {
+		t.Errorf("lan = %q", forms[0])
+	}
+	if forms := policyWords("internet"); forms[0] != "internet" {
+		t.Errorf("internet = %q", forms[0])
+	}
+}
+
+// TestLeaseColumnsFitContent: the fixed non-holder columns shrink to the
+// widest value actually shown (never below their header), so short
+// states leave no blank run and the freed width goes to the owner and
+// holder. A longer state widens the state column again.
+func TestLeaseColumnsFitContent(t *testing.T) {
+	short := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Age: "5m", Left: "10m"}}
+	cShort := leaseLayout(DefaultWidth, short)
+	// "▶ running" (9) plus its trailing separator, and no wider than the
+	// header floor would force anyway.
+	if cShort.stW != 10 {
+		t.Errorf("short state column = %d, not content-fit (10)", cShort.stW)
+	}
+	// The state column is narrower than the wide base (19), so short
+	// states leave no blank run.
+	if cShort.stW >= 19 {
+		t.Errorf("short state column kept the base width %d", cShort.stW)
+	}
+	// No column drops below its header.
+	empty := leaseLayout(DefaultWidth, nil)
+	for _, tc := range []struct {
+		name       string
+		got, floor int
+	}{
+		{"id", empty.idW, 3}, {"image", empty.imgW, 6}, {"owner", empty.ownW, 6},
+		{"state", empty.stW, 6}, {"access", empty.polW, 7}, {"left", empty.leftW, 5},
+	} {
+		if tc.got < tc.floor {
+			t.Errorf("empty %s column = %d, below its header %d", tc.name, tc.got, tc.floor)
+		}
+	}
+
+	// A long state widens the state column at a wide frame, where the base
+	// has room above the short value; at the narrow minimum the base clamps
+	// to ten and both fit there already.
+	long := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "suspended",
+		Burst: true, Age: "5m", Left: "10m"}}
+	for _, w := range []int{DefaultWidth, minW} {
+		cs := leaseLayout(w, short)
+		if cs.stW >= 19 {
+			t.Errorf("width %d: short state column kept the base width %d", w, cs.stW)
+		}
+	}
+	if leaseLayout(DefaultWidth, long).stW <= cShort.stW {
+		t.Errorf("long state column = %d, not wider than short %d",
+			leaseLayout(DefaultWidth, long).stW, cShort.stW)
+	}
+}
+
+// TestLeaseColumnsStayInPanel: at every width, and for short and long
+// rows alike, the computed columns never overlap and the last one ends
+// one cell before the panel's right border, so a header or value cannot
+// run into its neighbour; a header form never fills the whole column
+// without leaving the separator cell.
+func TestLeaseColumnsStayInPanel(t *testing.T) {
+	sets := map[string][]LeaseRow{
+		"sample": {
+			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet", Age: "5m", Left: "10m"},
+			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "suspended", Burst: true, Policy: "none", Age: "2h31m", Left: "∞"},
+		},
+		"long owner": {{ID: "x", Owner: strings.Repeat("long", 20), State: "running", Age: "1m", Left: "1m"}},
+		"empty":      nil,
+	}
+	for name, rows := range sets {
+		for w := minW; w <= maxW; w++ {
+			c := leaseLayout(w, rows)
+			cols := []struct {
+				name string
+				x, w int
+			}{{"id", c.id, c.idW}, {"image", c.img, c.imgW}, {"owner", c.own, c.ownW},
+				{"state", c.st, c.stW}, {"access", c.pol, c.polW}, {"age", c.age, ageW},
+				{"left", c.left, c.leftW}, {"holder", c.hold, c.holdW}}
+			for i, col := range cols {
+				if col.w < 1 {
+					t.Fatalf("%s w=%d: %s column width %d", name, w, col.name, col.w)
+				}
+				if i > 0 && cols[i-1].x+cols[i-1].w > col.x {
+					t.Fatalf("%s w=%d: %s at %d overlaps the previous column ending at %d",
+						name, w, col.name, col.x, cols[i-1].x+cols[i-1].w)
+				}
+			}
+			if got, want := c.hold+c.holdW, w-2; got != want {
+				t.Errorf("%s w=%d: holder column ends at %d, want %d", name, w, got, want)
+			}
+			for _, hc := range []struct {
+				hdr string
+				w   int
+			}{{"access", c.polW}, {"holder", c.holdW}} {
+				if got := cutHeaders(hc.hdr, hc.w); len([]rune(got)) >= hc.w {
+					t.Errorf("%s w=%d: %s header %q fills all %d cells, no separator", name, w, hc.hdr, got, hc.w)
+				}
+			}
+		}
+	}
+}
+
+// TestLeaseColumnsGiveFreedWidthToOwner: with short values the slack the
+// fixed columns free widens the owner up to its own longest value before
+// the holder gets the rest.
+func TestLeaseColumnsGiveFreedWidthToOwner(t *testing.T) {
+	rows := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "test-consumer",
+		State: "running", Policy: "internet", Age: "10h37m", Left: "2h29m"}}
+	c := leaseLayout(DefaultWidth, rows)
+	// "test-consumer" (13) plus its trailing separator fits whole: the
+	// owner grew past its 10-cell base into the freed room.
+	if c.ownW < len("test-consumer")+1 {
+		t.Errorf("owner column = %d, too narrow for the visible owner", c.ownW)
+	}
+	// The holder still gets whatever is left, and the columns stay inside
+	// the panel.
+	if c.holdW <= 0 {
+		t.Errorf("holder column = %d, no room left", c.holdW)
+	}
+}
+
+// TestLeaseHolderHeaderAndLegend: the holder column's header is plain
+// "holder"; the ◆/◉ legend is one dim line directly under the table's
+// last row, and only when a shown row carries a hold.
+func TestLeaseHolderHeaderAndLegend(t *testing.T) {
+	p := drawSample(DefaultWidth).Plain()
+	lines := strings.Split(p, "\n")
+	header, legendAt := -1, -1
+	for i, r := range lines {
+		if strings.HasPrefix(r, "┌─ leases ") {
+			header = i + 1
+		}
+		if strings.Contains(r, leaseLegend) {
+			legendAt = i
+		}
+	}
+	if header < 0 {
+		t.Fatalf("leases panel not found:\n%s", p)
+	}
+	if !strings.Contains(lines[header], "holder") || strings.Contains(lines[header], "◆") {
+		t.Errorf("holder header = %q", lines[header])
+	}
+	if legendAt < 0 {
+		t.Fatalf("legend line missing with held/lapsed rows:\n%s", p)
+	}
+	// The legend sits on the row directly under the last lease row: the
+	// sample's last row holds the last lease id.
+	if !strings.Contains(lines[legendAt-1], "fedcba0987") {
+		t.Errorf("legend is not directly under the last lease row:\n%s", p)
+	}
+
+	// The legend line is dim on the grid.
+	g := drawSample(DefaultWidth)
+	for x := 2; x < 2+len([]rune(leaseLegend)); x++ {
+		if got := g.At(x, legendAt).Style; got != "dim" {
+			t.Errorf("legend cell %d style = %q, not dim", x, got)
+			break
+		}
+	}
+
+	// No held or lapsed row: no legend line, and the panel is one row
+	// shorter.
+	s := sampleSnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m"}}
+	without := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(without, leaseLegend) {
+		t.Errorf("legend drawn without a held or lapsed row:\n%s", without)
+	}
+	l := &layout{w: DefaultWidth, s: s}
+	if l.leasesH() != 4 {
+		t.Errorf("one-row table without holds = %d rows, not 4", l.leasesH())
+	}
+}
+
+// leaseHeaderLine returns the leases table's header row, or the whole
+// frame when the panel is not there (so a failure names it).
+func leaseHeaderLine(lines []string) string {
+	for i, r := range lines {
+		if strings.HasPrefix(r, "┌─ leases ") && i+1 < len(lines) {
+			return lines[i+1]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // TestReconcileDismissed: the pure core of the browser's dismissal
