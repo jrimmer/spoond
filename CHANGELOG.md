@@ -12,6 +12,16 @@ summarised from README "Status".
 
 ### Added
 
+- **A suspended-lease refusal now carries `code: lease_suspended`.**
+  Every "lease is suspended; resume it first" answer is the same `409`
+  as before, but its JSON body now includes
+  `"code":"lease_suspended"` (additive). A client can tell it apart
+  from the other `409` — a busy lease, which carries
+  `code: lease_busy` — without matching the message text. The
+  plain-text `http.Error` sites (guest heartbeat, LLM gateway, HTTP
+  proxy) answer the same JSON shape as the rest. See the error-code
+  table in [docs/api.md](docs/api.md).
+
 - **Guests get both LAN resolvers, with retries.** `SPOOND_GUEST_DNS_ADDR`
   now takes a comma-separated list (`10.1.0.2,10.1.0.3`); a single value
   keeps working. The backend grants each address a port-53 egress
