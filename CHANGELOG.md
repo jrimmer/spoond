@@ -18,9 +18,11 @@ summarised from README "Status".
   that suspends repeatedly accumulates one memory snapshot per pause
   until a cold restart (or the lease's release) breaks the chain.
   `GET /api/leases/{id}` now reports `chain_depth` (builds in the
-  lease's chain) and `chain_bytes` (their summed recorded `size_bytes`),
-  and every pause observes the same two numbers as the unlabeled
-  `spoond_pause_chain_depth` and `spoond_pause_chain_bytes` histograms —
+  lease's chain) and `chain_bytes` (the lease's parent chain's summed
+  recorded `size_bytes`, including shared ancestors such as the template
+  root, and ignoring `build_refs`), and every pause observes the same
+  two numbers as the unlabeled `spoond_pause_chain_depth` and
+  `spoond_pause_chain_bytes` histograms once its build has settled —
   bounded cardinality, so the per-lease figures stay on the lease API.
   No compaction happens yet; a follow-up decides on automatic compaction
   after measuring on the deployment.
@@ -71,6 +73,21 @@ summarised from README "Status".
   (spoond-q4j).
 
 ### Fixed
+
+- **The exec and stream request bodies are bounded (spoond-mrbr).**
+  `POST /api/leases/{id}/exec` decoded its JSON body with no size bound,
+  so one authenticated caller could send a multi-GB `cmd` or `secrets`
+  object and the server held it all in memory; the stream WebSocket's
+  first frame had the same gap. The exec body is now wrapped in
+  `http.MaxBytesReader` and the stream sets a read limit, both under
+  `MAX_EXEC_BODY_BYTES` (default 8 MiB, which leaves room for a large
+  `cmd` and `env` next to the 64 KiB secrets cap). A bigger exec body
+  answers `413` with a JSON error; a bigger stream first frame closes
+  the socket with code `1009`. The body is read before `ensureRunning`,
+  so an oversize request no longer resumes an idle-suspended lease.
+  This bounds host memory only: the guest's own argv limit is about
+  128 KiB per string, so a larger `cmd` still fails with `Argument list
+  too long` from the guest shell.
 
 - **Background-job max-runtime follow-ups (spoond-wb5).** A kill that
   succeeds but whose store write that marks the job `timed_out` fails no

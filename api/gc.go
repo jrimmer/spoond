@@ -607,9 +607,20 @@ func (s *Service) SetBuildSizeSettle(every, limit time.Duration) {
 // counts as settled when its size has not changed for sizeSettleQuiet
 // (15 s, several commit intervals). It gives up after sizeSettleFor and
 // leaves the rest to the hourly pass.
-func (s *Service) settleBuildSize(buildID string) {
+//
+// Any onSettled callbacks run after the last recorded reading — the
+// settled size when the memfile landed, the last known size otherwise —
+// on the settle goroutine, so a caller can measure the finished build
+// (e.g. the pause-chain histogram) without holding a snapshot slot for
+// the write. When settling is disabled the callbacks run in line.
+func (s *Service) settleBuildSize(buildID string, onSettled ...func()) {
 	every, limit, quiet := s.sizeSettleEvery, s.sizeSettleFor, s.sizeSettleQuiet
 	if every <= 0 || limit <= 0 {
+		for _, f := range onSettled {
+			if f != nil {
+				f()
+			}
+		}
 		return
 	}
 	if quiet <= 0 {
@@ -646,7 +657,12 @@ func (s *Service) settleBuildSize(buildID string) {
 				continue
 			}
 			if time.Since(changed) >= quiet {
-				return // unchanged across ZFS's commit interval: settled
+				break // unchanged across ZFS's commit interval: settled
+			}
+		}
+		for _, f := range onSettled {
+			if f != nil {
+				f()
 			}
 		}
 	}()

@@ -176,6 +176,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `RECOVERY_RETRY_WINDOW` | `30m` | how long a lease may stay in recovery since its first failed attempt, whatever the failure kind, including a substrate capacity refusal waiting for room (a Go duration or seconds; spoond-dxq) |
 | `PREEMPT_RESUME_RETRIES` | `3` | how many failed resume attempts a preempted lease gets from the resume queue (every 15 s) before it is marked `lost`; an admission/capacity refusal does not count and the lease keeps waiting for room (`0` means the default; spoond-dxq) |
 | `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
+| `MAX_EXEC_BODY_BYTES` | `8388608` (8 MiB) | cap on the JSON body of a POST exec and on every message of a `/stream` WebSocket; a bigger body is `413` (and a bigger stream frame closes with code `1009`). The guest's own argv limit is ~128 KiB per string |
 | `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |
 | `LLM_UPSTREAM_KEY` | *(empty)* | server-side key for that upstream (never sent into sandboxes) |
@@ -198,9 +199,8 @@ export TLS_CERT=/etc/spoond/tls/fullchain.pem TLS_KEY=/etc/spoond/tls/privkey.pe
 ### systemd unit
 
 See `deploy/spoond-backend.service`. The shipped unit reads
-`EnvironmentFile=-/etc/spoond-backend.env`; the install procedure
-repoints it at `/etc/spoond/backend.env` (`chmod 600`) — that is the
-file the backend sources and the operator snippets in
+`EnvironmentFile=-/etc/spoond/backend.env` (`chmod 600`), the same file
+the backend sources and the operator snippets in
 [install.md](install.md) and [operations.md](operations.md) read.
 
 `SPOOND_BUILD_TIMEOUT` is read by two processes from two environments:
