@@ -95,6 +95,14 @@ SPOOND_GUEST_DNS_ADDR=10.1.0.2 spoond images build --all
 Without it, `spoond-guest-init` leaves the image's own `resolv.conf`
 alone (generic, no pinned resolver).
 
+If you set `SPOOND_BUILD_TIMEOUT`, set it in **both** environments: the
+backend's env file (for the GC's stale-`building` sweep) and the agent-hub
+build-worker's environment (for `spoond images build`'s own
+`BuildTemplate` bound). The variable is read separately by each process
+and there is no shared config file (spoond-rzz). The backend logs the
+effective bound and stale threshold at start; `spoond images build`
+prints its bound.
+
 ## Guest DNS list (ships with the next release)
 
 The next release lets `SPOOND_GUEST_DNS_ADDR` name several resolvers

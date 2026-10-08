@@ -259,9 +259,17 @@ outside it that have been idle for an hour.
   `deleted` and counting `spoond_gc_deleted_total{kind}`. Only enable it
   after reading a week of dry-run logs.
 - A build left in state `building` past twice the build timeout (the
-  pipeline's `buildTimeout`, one hour) is failed by the pass and logged
+  pipeline's `buildTimeout`, one hour by default) is failed by the pass
+  and logged
   (`gc: marked stale building build failed ...`), then counted as an
-  ordinary candidate once it has been idle an hour. It also emits one
+  ordinary candidate once it has been idle an hour. The backend reads
+  its own `SPOOND_BUILD_TIMEOUT` (`ServiceConfig.BuildTimeout`) for
+  this; `spoond images build` reads the same variable in its own
+  environment for its `BuildTemplate` bound, so set it in both (the
+  backend logs both the bound and the stale threshold at start, and
+  `spoond images build` prints its bound). If the two differ, a build
+  may be failed while still running, or allowed to run past its sweep.
+  It also emits one
   lease-less `gc` event naming the build (`stale build <id> failed ·
   build timed out`). A template build has no owner and never appears in
   `/api/snapshots`, so that event is where its failure is visible. A

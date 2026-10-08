@@ -306,8 +306,9 @@ type ServiceConfig struct {
 	// treats a row still `building` as stale and fails it (spoond-4yl).
 	// The GC fails a building row older than twice this, logged. Zero
 	// falls back to substrate.DefaultBuildTimeout. The backend sets it
-	// from SPOOND_BUILD_TIMEOUT, the same variable `spoond images build`
-	// reads for its own BuildTemplate bound, so the two sides agree.
+	// from SPOOND_BUILD_TIMEOUT, but `spoond images build` reads that
+	// variable in its own process, so a deployment must set it for both
+	// (spoond-rzz).
 	BuildTimeout time.Duration
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
