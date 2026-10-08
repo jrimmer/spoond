@@ -315,6 +315,20 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int)
 	return err, maxAttempts
 }
 
+// undrainLossAllowed decides whether a failed undrain resume may lose its
+// lease. Only a suspended, non-busy lease may be lost (B1): an owner
+// resume (busy) or one that already completed (state running) is bringing
+// the guest back, and losing it would delete an intact lease. A released
+// lease is left alone (no save, spoond-775); an already-lost one is
+// reported so the caller can skip the duplicate event and delete. Call
+// with s.store.mu held.
+func undrainLossAllowed(l *Lease) (released, alreadyLost, canLose bool) {
+	released = l.released
+	alreadyLost = l.State == "lost"
+	canLose = !released && !alreadyLost && !l.busy && l.State == "suspended"
+	return released, alreadyLost, canLose
+}
+
 // undrain waits (up to 120 s) for the orchestrator to answer NodeInfo,
 // clears the draining state, then resumes exactly the drained leases,
 // UNDRAIN_CONCURRENCY (default 2) at a time. A resume that fails with a
@@ -426,31 +440,40 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			}
 			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
 			s.store.mu.Lock()
-			released := l.released
-			alreadyLost := l.State == "lost"
-			if !released && !alreadyLost {
+			released, alreadyLost, canLose := undrainLossAllowed(l)
+			busy, state := l.busy, l.State
+			if canLose {
 				// markLost saves the row, Drained=false with it.
 				l.Drained = false
 				s.markLost(l, reason)
+			} else if alreadyLost && !released {
+				// Another loss already recorded this lease: clear Drained so
+				// a later undrain does not re-target it (no save on a
+				// released lease, spoond-775).
+				l.Drained = false
+				s.saveLeaseLocked(l)
 			}
 			s.store.mu.Unlock()
 			if released {
 				// The lease was released while this resume was in flight:
 				// the release already stopped its sandbox and emitted the
-				// released event, so a loss must not resurrect it (no
-				// save, spoond-775).
+				// released event, so a loss must not resurrect it. The
+				// resume body stops any fresh sandbox a late create left
+				// (spoond-775, spoond-63a).
 				mu.Lock()
 				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 				mu.Unlock()
 				return
 			}
-			if alreadyLost {
-				// Another loss already recorded this lease (a concurrent
-				// resume gave up): do not emit a duplicate lost event or
-				// delete the guest twice.
+			if !canLose {
+				// A concurrent loss already recorded this lease (no
+				// duplicate event, no double delete), or an owner
+				// operation now holds it (busy) or resumed it (running):
+				// leave its guest alone and let a later undrain retry.
 				mu.Lock()
 				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 				mu.Unlock()
+				s.log.Printf("undrain: not losing lease %s (state %s, busy=%v, alreadyLost=%v)", l.ID, state, busy, alreadyLost)
 				return
 			}
 			// Stop the half-started sandbox a failed resume left behind

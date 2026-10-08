@@ -47,8 +47,9 @@ func TestLosePreemptedSkipsBusyResume(t *testing.T) {
 	}
 }
 
-// TestLosePreemptedSkipsRunningResume: a preempted lease already resumed
-// by its owner (state running) is not lost.
+// TestLosePreemptedSkipsRunningResume: a lease whose resume already
+// completed (state running) is not lost: the state half of the preempt
+// guard alone blocks the loss, even with a stale preemption flag set.
 func TestLosePreemptedSkipsRunningResume(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -58,8 +59,15 @@ func TestLosePreemptedSkipsRunningResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	// A resume that completed just before the loss: preempted flag gone,
-	// state running.
+	// A resume that completed just before the loss: a running lease still
+	// carrying the preemption flag (setState clears it on a real resume;
+	// setting it here isolates the State=="suspended" half of the guard).
+	svc.store.mu.Lock()
+	l.setState("running")
+	l.PreemptedAt = time.Now()
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+
 	svc.losePreempted(ctx, l, "preempted resume failed", "boom")
 	if l.State == "lost" {
 		t.Fatal("a running lease was marked lost by a stale preempt loss")
@@ -96,9 +104,42 @@ func TestLosePreemptedSuspendsWhenIdle(t *testing.T) {
 	}
 }
 
+// TestUndrainLossAllowed is the direct rule test for the undrain loss
+// block (B1): only a suspended, non-busy, non-released, not-already-lost
+// lease may be lost there.
+func TestUndrainLossAllowed(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name     string
+		shape    func(*Lease)
+		canLose  bool
+		released bool
+		wasLost  bool
+	}{
+		{"suspended idle", func(l *Lease) { l.setState("suspended") }, true, false, false},
+		{"busy", func(l *Lease) { l.setState("suspended"); l.busy = true }, false, false, false},
+		{"running", func(l *Lease) { l.setState("running") }, false, false, false},
+		{"released", func(l *Lease) { l.setState("suspended"); l.released = true }, false, true, false},
+		{"already lost", func(l *Lease) { l.setState("lost"); l.LostAt = now }, false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &Lease{}
+			tc.shape(l)
+			released, alreadyLost, canLose := undrainLossAllowed(l)
+			if canLose != tc.canLose || released != tc.released || alreadyLost != tc.wasLost {
+				t.Fatalf("undrainLossAllowed = (released=%v, alreadyLost=%v, canLose=%v), want (%v, %v, %v)",
+					released, alreadyLost, canLose, tc.released, tc.wasLost, tc.canLose)
+			}
+		})
+	}
+}
+
 // TestUndrainSkipsBusyLease: a drained lease another operation holds
 // (busy) is not lost by the undrain, so its guest is not deleted out from
-// under the operation.
+// under the operation. The errLeaseBusy skip and the loss block's own
+// busy check (TestUndrainLossAllowed) together keep an owner resume from
+// being lost (B1).
 func TestUndrainSkipsBusyLease(t *testing.T) {
 	_, svc, _, sub := newAdminServer(t, "admin-tok")
 	ctx := context.Background()
