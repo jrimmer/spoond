@@ -205,7 +205,9 @@ func (s *Service) jobRetention() time.Duration {
 }
 
 // jobMaxRuntime returns the host's effective JOB_MAX_RUNTIME. 0 uses the
-// 24 h default; a negative value disables the cap.
+// 24 h default; a negative value disables the cap. It returns the raw
+// duration, so a fractional Go duration is honoured to the second when
+// it is stored on the record.
 func (s *Service) jobMaxRuntime() time.Duration {
 	secs := s.cfg.JobMaxRuntimeSecs
 	if secs == 0 {
@@ -325,7 +327,9 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	maxRuntime := s.effectiveJobRuntime(requestedMaxRuntimeSecs)
 	var maxRuntimeSecs int64
 	if maxRuntime > 0 {
-		maxRuntimeSecs = int64(maxRuntime / time.Second)
+		// Round up, so a sub-second cap never stores 0 (which reads as
+		// uncapped) and never grants a little more than asked.
+		maxRuntimeSecs = int64((maxRuntime + time.Second - 1) / time.Second)
 	}
 
 	// Stage the job's secrets before the wrapper runs. The guest wrapper
@@ -860,10 +864,11 @@ func (s *Service) runJobReconcileLoop(ctx context.Context) {
 // reconcileJobs reads each running job's rc through the guest files and
 // marks finished ones exited. A job whose lease is gone or whose guest
 // files vanished is left running until a generation change or the
-// lease's own deletion loses it. A job that has run past its effective
-// max runtime is killed and marked exited with reason timed_out first
-// (spoond-wb5), so a `sleep infinity` cannot pin a lease's memory and
-// hugepages forever.
+// lease's own deletion loses it. On a running lease, a job that has
+// spent its effective max runtime is killed and marked exited with
+// reason timed_out first (spoond-wb5), so a `sleep infinity` cannot pin
+// a lease's memory and hugepages forever; a suspended lease's job is
+// left for the first reconcile after its resume.
 func (s *Service) reconcileJobs(ctx context.Context) {
 	rows, err := s.db.ListRunningJobs(ctx)
 	if err != nil {
