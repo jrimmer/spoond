@@ -554,9 +554,21 @@ allowances are refreshed. Marking a lease lost deletes its sandbox
 through the substrate with a few bounded retries, so a recovery whose
 create failed after the VM had started cannot leave a guest running; a
 delete that still fails is retried by the periodic orphan sandbox sweep
-(every minute), which deletes any sandbox whose lease is lost or released
-and never touches a live or busy one. The startup pass runs the same
-orphan rule again after its crash reconcile.
+(every minute). The startup pass runs the same orphan rule again after
+its crash reconcile.
+
+The periodic sweep (every minute) is the backstop
+for a failed delete and for any guest a previous incarnation left. It is
+skipped entirely while the node is draining, and it never deletes a
+sandbox a pool entry claims, a lease owns in any state other than `lost`
+(a running, suspended or busy lease), or a creation currently holds in
+flight. A sandbox with no lease and no pool entry (a released lease's
+row is gone by then) is deleted only after two consecutive passes report
+it unclaimed, keyed by sandbox id and `StartedAt`, so a create whose
+lease row lands a moment later is never swept. The pool and lease claims
+are re-checked under the store lock right before each delete. The
+startup first pass is stricter: a foreign sandbox no lease and no pool
+entry claims is deleted at once.
 
 Recovery is retried, not given up on at the first error: a `recoverFromCheckpoint`
 failure keeps the lease live with no sandbox and the next reconcile pass tries

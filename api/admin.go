@@ -539,6 +539,55 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				// to resume and nothing failed (spoond-775).
 				return
 			}
+			if errors.Is(err, errLeaseBusy) {
+				// Another operation holds the lease (an owner resume, a
+				// suspend): leave its guest alone and let a later undrain
+				// retry it. Losing a lease an operation is bringing back
+				// would delete an intact guest (B1).
+				mu.Lock()
+				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
+				mu.Unlock()
+				s.log.Printf("undrain: resume %s skipped (busy): %v", l.ID, err)
+				return
+			}
+			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
+			s.store.mu.Lock()
+			released := l.released
+			alreadyLost := l.State == "lost"
+			if !released && !alreadyLost {
+				// markLost saves the row, Drained=false with it.
+				l.Drained = false
+				s.markLost(l, reason)
+			}
+			s.store.mu.Unlock()
+			if released {
+				// The lease was released while this resume was in flight:
+				// the release already stopped its sandbox and emitted the
+				// released event, so a loss must not resurrect it (no
+				// save, spoond-775).
+				mu.Lock()
+				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
+				mu.Unlock()
+				return
+			}
+			if alreadyLost {
+				// Another loss already recorded this lease (a concurrent
+				// resume gave up): do not emit a duplicate lost event or
+				// delete the guest twice.
+				mu.Lock()
+				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
+				mu.Unlock()
+				return
+			}
+			// Stop the half-started sandbox a failed resume left behind
+			// (the retry loop cleans it between attempts, but the last
+			// failure must stop it too), so lost means stopped
+			// (spoond-63a).
+			s.stopLostSandbox(l.SandboxID, l.ID)
+			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
+			// A lease started from a named snapshot no longer protects it
+			// once lost (#83 S5).
+			s.rerunSnapshotRetention(ctx, l)
 			mu.Lock()
 			res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 			mu.Unlock()
