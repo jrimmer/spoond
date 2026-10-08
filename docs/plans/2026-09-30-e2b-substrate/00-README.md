@@ -81,6 +81,9 @@ CONFORMANCE_PROXY_URL=http://127.0.0.1:8891
 CONFORMANCE_PROXY_SECRET=<production PROXY_AUTH_SECRET, may be empty>
 CONFORMANCE_PROXY_SUFFIX=.sandbox.example.com
 CONFORMANCE_BACKEND_UNIT=spoond-backend
+# A private host:port that answers on the host; N1 probes it under the
+# internet and lan policies (e.g. Caddy).
+CONFORMANCE_LAN_TARGET=10.1.0.203:443
 ```
 
 Every production conformance run and every production smoke test loads it
@@ -88,6 +91,16 @@ with `set -a; . /etc/spoond/conformance.env; set +a`. Per-run variables
 (`CONFORMANCE_SUBSTRATE`, `CONFORMANCE_GUEST_SERVICE`,
 `CONFORMANCE_DESTRUCTIVE`) are set by the run. The staging equivalent,
 `/etc/spoond-staging/conformance.env`, is created by the Ops runner in U08.
+
+`CONFORMANCE_LAN_TARGET` was added after N1's old hardcoded `10.0.0.203`
+land target stopped answering. It is provisioned on sb (root, 0600) by
+appending the one line, then the suite is run (U12 step 14):
+
+```bash
+ssh root@spoond.example.com 'set -e; grep -qxF CONFORMANCE_LAN_TARGET=10.1.0.203:443 \
+  /etc/spoond/conformance.env || echo CONFORMANCE_LAN_TARGET=10.1.0.203:443 \
+  >> /etc/spoond/conformance.env'
+```
 
 ## Autonomous window protocol
 
