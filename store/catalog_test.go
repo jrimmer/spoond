@@ -389,3 +389,55 @@ func TestDeleteBuildsPermanently(t *testing.T) {
 		t.Errorf("live build's refs = %v, want [b-dep-live]", refs["b-ready"])
 	}
 }
+
+// TestDeleteBuildPermanentlyStateGuard covers the state='deleted' guard
+// directly: a build that is not deleted is left with its refs, even when
+// the delete is asked for it, so a build un-deleted between a scan and
+// the delete cannot lose its catalog row or refs (spoond-ob18).
+func TestDeleteBuildPermanentlyStateGuard(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	insert := func(id, state string) {
+		t.Helper()
+		if err := db.InsertBuild(ctx, BuildRow{
+			BuildID: id, Kind: "pause", TemplateID: "tpl0123456789abcdefgh",
+			Image: "py-base", State: state, CreatedAt: base, UpdatedAt: base,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("b-ready", "ready")
+	insert("b-deleted", "deleted")
+	if err := db.AddBuildRefs(ctx, "b-ready", []string{"b-dep-ready"}); err != nil {
+		t.Fatalf("refs b-ready: %v", err)
+	}
+	if err := db.AddBuildRefs(ctx, "b-deleted", []string{"b-dep-deleted"}); err != nil {
+		t.Fatalf("refs b-deleted: %v", err)
+	}
+
+	if removed, err := db.deleteBuildPermanently(ctx, "b-ready"); err != nil || removed {
+		t.Fatalf("deleting a ready build: removed=%v err=%v, want false, nil", removed, err)
+	}
+	if _, err := db.GetBuild(ctx, "b-ready"); err != nil {
+		t.Fatalf("ready build was removed: %v", err)
+	}
+
+	if removed, err := db.deleteBuildPermanently(ctx, "b-deleted"); err != nil || !removed {
+		t.Fatalf("deleting a deleted build: removed=%v err=%v, want true, nil", removed, err)
+	}
+	if _, err := db.GetBuild(ctx, "b-deleted"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted build survived: %v", err)
+	}
+
+	refs, err := db.ListBuildRefs(ctx)
+	if err != nil {
+		t.Fatalf("list refs: %v", err)
+	}
+	if len(refs["b-ready"]) != 1 || refs["b-ready"][0] != "b-dep-ready" {
+		t.Errorf("ready build's refs = %v, want [b-dep-ready]", refs["b-ready"])
+	}
+	if _, ok := refs["b-deleted"]; ok {
+		t.Errorf("deleted build's refs survived: %v", refs)
+	}
+}
