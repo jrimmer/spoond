@@ -157,10 +157,11 @@ When a worker takes a task it now:
 5. **Waits out the model gateway without spending the verify clock.**
    The gateway serves 4 concurrent committed requests and bursts to 8
    from an as-available queue (slower). While the gateway answers
-   `429`/`503` — queueing rather than serving — the pass's wall-clock
-   limit does not run down (`run_pass` samples `SWARM_LLM_HEALTH_URL`,
-   default the gateway's `/v1/models`), and the waited time is reported
-   as its own `llm wait` bucket. `SWARM_LLM_MAX_WAIT` (seconds, default
+   `429`/`503` — queueing rather than serving — or Pi reports an
+   automatic retry in flight (its `auto_retry_start` event), the pass's
+   wall-clock limit does not run down (`run_pass` samples
+   `SWARM_LLM_HEALTH_URL`, default the gateway's `/v1/models`), and the
+   waited time is reported as its own `llm wait` bucket. `SWARM_LLM_MAX_WAIT` (seconds, default
    3600, 0 = unbounded) caps the total queue wait so a stuck gateway
    cannot hang a pass forever. Per-request model timeouts are generous
    (`SWARM_LLM_REQUEST_TIMEOUT`, default 600 s) and transient

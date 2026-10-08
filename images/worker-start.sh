@@ -80,7 +80,7 @@ LLM_REQUEST_TIMEOUT=${SWARM_LLM_REQUEST_TIMEOUT:-600}
 # The gateway health probe used to tell "waiting in its queue" from model
 # work, and how often run_pass samples it. Overridable for tests.
 LLM_HEALTH_URL=${SWARM_LLM_HEALTH_URL-https://llm.lacy.casa/v1/models}
-LLM_POLL=${SWARM_LLM_POLL:-2}
+LLM_POLL=${SWARM_LLM_POLL:-15}
 REGISTER_BACKOFF=${SWARM_REGISTER_BACKOFF:-15}
 # How long the model-service retry waits for the gateway to come back
 # before trying anyway (bounded so a wrong health URL cannot hang the loop).
@@ -275,6 +275,26 @@ llm_gateway_busy() {
   case $code in 429|503) return 0 ;; *) return 1 ;; esac
 }
 
+# llm_retrying LOG: true while Pi's own log shows an automatic retry in
+# flight (an auto_retry_start with no matching auto_retry_end), i.e. it hit
+# a 429/503/overload and is waiting to try again. This is the direct
+# signal that the gateway (4 committed + 8 burst) is queueing us, and it
+# does not depend on the health endpoint reporting queue state.
+llm_retrying() {
+  local last
+  last=$(tail -c 40000 "$1" 2>/dev/null \
+    | grep -oE '"type":"auto_retry_(start|end)"' | tail -1) || return 1
+  [ "$last" = '"type":"auto_retry_start"' ]
+}
+
+# pass_waiting LOG: true when the pass is waiting on the model rather than
+# doing work — the gateway is queueing (llm_gateway_busy) or Pi is between
+# retries (llm_retrying).
+pass_waiting() {
+  llm_gateway_busy && return 0
+  llm_retrying "$1"
+}
+
 # llm_error LOG: the model service's error message if the pass ended on one
 # (Pi exits 0 even then; its JSON log records stopReason "error").
 llm_error() {
@@ -306,7 +326,10 @@ run_pass() {
   while kill -0 "$pid" 2>/dev/null; do
     sleep "$LLM_POLL"
     now=$(date +%s); dt=$(( now - last )); last=$now
-    if llm_gateway_busy; then waited=$(( waited + dt )); else work=$(( work + dt )); fi
+    # A gateway queueing us or a Pi retry in flight is model-busy time,
+    # not model work: charge it to the wait bucket. Each sample is
+    # attributed wholly to one bucket so every wall second lands once.
+    if pass_waiting "$W/logs-$name.jsonl"; then waited=$(( waited + dt )); else work=$(( work + dt )); fi
     if [ "$work" -ge "$limit" ] || { [ "$LLM_MAX_WAIT" -gt 0 ] && [ "$waited" -ge "$LLM_MAX_WAIT" ]; }; then
       PASS_TIMED_OUT=1
       kill "$pid" 2>/dev/null || true

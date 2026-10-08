@@ -224,6 +224,11 @@ case $key in
         sleep "${TEST_VERIFY_SLEEP:-2}" ;;
       PASS_BLOCKER)                                  # PASS that still lists a blocker
         printf 'PASS\nBLOCKER: the task is not met exactly\n' > "$W/verdict.md" ;;
+      RETRY_PASS)                                    # Pi retries, then passes
+        printf '{"type":"auto_retry_start","attempt":1,"maxAttempts":6,"delayMs":3000,"errorMessage":"429"}\n'
+        sleep "${TEST_VERIFY_SLEEP:-5}"
+        printf 'PASS\nfinding one\n' > "$W/verdict.md"
+        printf '{"type":"auto_retry_end","success":true,"attempt":2}\n' ;;
       "") : > "$W/verdict.md" ;;                    # no verdict at all
       *) printf '%s\nfinding one\nfinding two\n' "$verdict" > "$W/verdict.md" ;;
     esac
@@ -653,6 +658,19 @@ check "the queue wait was charged to llm wait, not verify" \
   bash -c 'grep -q "llm wait [1-9][0-9]*s" "$1"' _ "$T/mail/outbox.log"
 check "no verify-timeout block for the queued pass" \
   bash -c '! grep -q "verifier gave no verdict" "$1"' _ "$T/mail/outbox.log"
+
+# --- LLM RETRY WAIT: the direct signal. The health probe is disabled, so
+# only Pi's own auto_retry_start in the log marks the pass as waiting on the
+# model; the verify clock must not run during it. --------------------------
+o=$T/o-llmretry.git
+make_origin "$o" ""
+TEST_SWARM_VERIFY_TIMEOUT=3 TEST_VERIFY_SLEEP=6 TEST_LLM_HEALTH_URL=""
+scenario_prologue LLM-RETRY-WAIT "$o" swarm/tlr22 tlr22 1 RETRY_PASS 0 0
+TEST_SWARM_VERIFY_TIMEOUT= TEST_VERIFY_SLEEP= TEST_LLM_HEALTH_URL=
+check "a verify that retried the model still passes" \
+  grep -q '\[DONE tlr22\]' "$T/mail/outbox.log"
+check "the model retry was charged to llm wait" \
+  bash -c 'grep -q "llm wait [3-9][0-9]*s" "$1"' _ "$T/mail/outbox.log"
 
 # --- WIP-BEFORE-REBASE (B2, end to end): the implement pass leaves an
 # untracked tail that the worker commits before rebasing, so the tail is in
