@@ -77,7 +77,8 @@ type llmGateway struct {
 // neither mapped nor known to the upstream (Shelley also probes
 // gpt-5.x/claude ids for slug generation etc.). users is the identity
 // store consulted for per-user LLM keys; nil keeps the gateway open for
-// every lease (legacy single-user behavior).
+// every lease (legacy single-user behavior). suspendReason reads a live
+// lease's structured suspension reason under the store lock.
 func newLLMGateway(log *log.Logger, lookup func(string) *Lease, suspendReason func(string) string, users *identity.Store, upstreamURL, key, defaultModel string, modelMap map[string]string) *llmGateway {
 	u, err := url.Parse(strings.TrimSuffix(upstreamURL, "/"))
 	if err != nil {
