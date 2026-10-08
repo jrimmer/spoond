@@ -29,7 +29,10 @@ summarised from README "Status".
   restart between drain and undrain, or an `ExecStartPost` that exited
   0) no longer strands the lease. A deferred attempt logs a line and
   emits a `drain_deferred` event on the first deferral or a cause
-  change. A drain that outlives `DRAIN_MAX_SECS` (default 900) on a
+  change; the per-lease backoff state is dropped as soon as the lease
+  is no longer drained (owner resume, restore or release), so a later
+  planned restart's deferral is not skipped or given up on early. A
+  drain that outlives `DRAIN_MAX_SECS` (default 900) on a
   healthy node now undrains itself, logs it and emits a `drain_healed`
   event instead of refusing every create with 503 forever; a lease the
   drain could not pause is logged and emits a `drain_failed` event, and

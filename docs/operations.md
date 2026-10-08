@@ -414,10 +414,13 @@ error keeps the lease `drained` for a retry rather than marking it
   whose orchestrator is healthy is lifted automatically: the backend
   logs it, emits a `drain_healed` event and resumes the drained leases,
   so a drain nobody undrained cannot refuse every create with 503 for
-  ever. A node that is not healthy (or reports `draining` when spoond
-  itself is not draining — another process's planned stop) is left in
-  place, and a backend that starts while the node reports `draining`
-  adopts that drain so its own `DRAIN_MAX_SECS` clock applies.
+  ever. A node that is not healthy (or that reports `draining` when
+  spoond itself is not draining — another process's planned stop) is
+  left in place until it reports healthy again; a backend that starts
+  while the node reports `draining` adopts that drain (its own
+  `DRAIN_MAX_SECS` clock starts then), so the node found draining at
+  Start is not left alone: the self-heal loop lifts it after
+  `DRAIN_MAX_SECS` and resumes the leases.
 - A `SetDraining(false)` that fails during an undrain does not clear
   spoond's own draining state: the node still refuses creates, so the
   leases stay `drained` and the self-heal loop retries the clear on

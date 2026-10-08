@@ -635,13 +635,13 @@ func TestStartAdoptsNodeDraining(t *testing.T) {
 	}
 
 	// A heal pass before the limit must not clear it (the node reports
-	// draining, not healthy).
+	// draining, not healthy): the lease is still drained and suspended.
 	svc.healDrain(ctx)
 	if !svc.draining.Load() {
 		t.Fatal("the adopted drain was cleared before DRAIN_MAX_SECS")
 	}
-	if leases[0].Drained && leases[0].State == "running" {
-		t.Fatal("a lease resumed mid-planned-stop")
+	if !leases[0].Drained || leases[0].State == "running" {
+		t.Fatalf("lease = state=%s drained=%v, want suspended and drained mid-planned-stop", leases[0].State, leases[0].Drained)
 	}
 
 	// Past the limit the heal clears it and resumes the lease.
@@ -878,5 +878,170 @@ func TestResumeOfReleasedLeaseDeletesSandbox(t *testing.T) {
 		if id == l.SandboxID {
 			t.Fatalf("the released lease's new sandbox %s is still live", id)
 		}
+	}
+}
+
+// TestHealStateDoesNotLeakAcrossRestarts is spoond-52c B3: the per-lease
+// heal backoff must not survive a lease being resumed, restored or
+// released (a give-up entry from one drain must not silently skip a
+// later planned restart's deferral, or give up on its first pass).
+func TestHealStateDoesNotLeakAcrossRestarts(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	base := time.Now()
+	now := base
+	svc.now = func() time.Time { return now }
+	svc.cfg.UndrainResumeRetries = 0
+	// A short bound so the first drain's deferral gives up.
+	svc.cfg.DrainResumeMaxAge = 30 * time.Second
+	ctx := context.Background()
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	// Heal only: spoond is not draining and the node is healthy.
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	var refuse atomic.Bool
+	refuse.Store(true)
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && refuse.Load() {
+			return substrate.Sandbox{}, errQuotaExceeded
+		}
+		return sub.Fake.Create(cctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	// First pass defers; age past the bound and the heal gives up.
+	svc.healDrain(ctx)
+	now = now.Add(31 * time.Second)
+	svc.healDrain(ctx)
+	if !target.Drained {
+		t.Fatal("a given-up lease keeps its Drained flag")
+	}
+	if _, ok := svc.drainHeal[target.ID]; !ok {
+		t.Fatal("the heal state should still be present after give-up")
+	}
+
+	// The owner resumes by hand: Drained and the heal state must clear.
+	refuse.Store(false)
+	svc.drainStartedAt.Store(0)
+	if _, err := svc.resume(ctx, "c", target.ID); err != nil {
+		t.Fatalf("owner resume: %v", err)
+	}
+	if target.Drained {
+		t.Fatal("the owner resume must clear Drained")
+	}
+	if _, ok := svc.drainHeal[target.ID]; ok {
+		t.Fatal("the owner resume must clear the stale heal state (B3)")
+	}
+
+	// A later planned restart: drain again and defer the undrain. The
+	// stale gave-up state must not skip or immediately give up on it.
+	if _, err := svc.drain(ctx); err != nil {
+		t.Fatalf("second drain: %v", err)
+	}
+	refuse.Store(true)
+	res := svc.undrain(ctx)
+	if res.Resumed != 0 || len(res.Failed) != 1 {
+		t.Fatalf("second undrain = +%v, want it deferred", res)
+	}
+	if !target.Drained {
+		t.Fatal("the deferred lease must stay drained")
+	}
+	// The heal (fresh state, well inside the bound) retries and resumes.
+	refuse.Store(false)
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+	svc.healDrain(ctx)
+	if target.Drained || target.State != "running" {
+		t.Fatalf("after the second heal: state=%s drained=%v, want running and undrained", target.State, target.Drained)
+	}
+}
+
+// TestHealPrunesStaleState: a heal pass drops the backoff entry of a
+// lease that is no longer a drained target (released, lost or resumed
+// elsewhere), so it cannot skip a later deferral (spoond-52c B3).
+func TestHealPrunesStaleState(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	leases := grantAndDrain(t, svc, 2)
+	target := leases[0]
+	keep := leases[1]
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	// Seed a stale entry as if a prior deferral left one, then clear the
+	// lease's Drained flag (the owner resumed it). keep stays a drained
+	// target so the pass runs and reaches the pruning step.
+	_ = svc.drainHealFor(target.ID)
+	svc.store.mu.Lock()
+	target.Drained = false
+	svc.store.mu.Unlock()
+
+	// Do not let the pass resume keep yet (a deferral), so the test only
+	// observes the prune.
+	svc.cfg.DrainResumeMaxAge = -1
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume {
+			return substrate.Sandbox{}, errQuotaExceeded
+		}
+		return sub.Fake.Create(cctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	svc.healDrain(ctx)
+	if _, ok := svc.drainHeal[target.ID]; ok {
+		t.Fatal("a pass must prune the heal state of a lease that is not a drained target")
+	}
+	if !keep.Drained {
+		t.Fatal("the other lease must still be drained")
+	}
+}
+
+// TestHealHoldsDrainGate: the heal pass holds the read side of drainGate
+// across a resume, so an admin drain that takes the write side cannot
+// start a Create into the stop (spoond-52c S1).
+func TestHealHoldsDrainGate(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	// While the heal's resume Create runs, an admin drain must not be able
+	// to take the write side. The heal took the read side, so TryLock fails.
+	var tried atomic.Bool
+	var blocked atomic.Bool
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume {
+			tried.Store(true)
+			if svc.drainGate.TryLock() {
+				svc.drainGate.Unlock()
+			} else {
+				blocked.Store(true)
+			}
+		}
+		return sub.Fake.Create(cctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	svc.healDrain(ctx)
+	if target.Drained || target.State != "running" {
+		t.Fatalf("heal did not resume: state=%s drained=%v", target.State, target.Drained)
+	}
+	if !tried.Load() {
+		t.Fatal("the resume Create did not run")
+	}
+	if !blocked.Load() {
+		t.Fatal("the heal did not hold drainGate.RLock across the resume (S1)")
 	}
 }

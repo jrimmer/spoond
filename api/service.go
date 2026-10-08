@@ -546,13 +546,19 @@ type Service struct {
 	// DRAIN_MAX_SECS while the node is healthy, and the notifier warns
 	// once it passes half that age.
 	drainStartedAt atomic.Int64
-	// drainHealMu guards the per-lease drain self-heal backoff: a
+	// drainHealMu guards the per-lease drain self-heal backoff (a
 	// deferred resume is retried with exponential backoff
-	// (drainHealBackoffMin doubling to drainHealBackoffMax) rather than
-	// every pass, and gives up at DRAIN_RESUME_MAX_AGE (spoond-52c B2).
-	// Keyed by lease id.
+	// drainHealBackoffMin doubling to drainHealBackoffMax, rather than
+	// every pass, and gives up at DRAIN_RESUME_MAX_AGE, spoond-52c B2)
+	// and the rate limiter for the loop's "node info" log while the
+	// orchestrator is down. Keyed by lease id.
 	drainHealMu sync.Mutex
 	drainHeal   map[string]*drainHealState
+	// drainNodeInfoLogAt is when the self-heal loop last logged a node-info
+	// failure; a down orchestrator logs at most once per
+	// drainHealBackoffMax rather than every pass (spoond-52c NIT). Guarded
+	// by drainHealMu.
+	drainNodeInfoLogAt time.Time
 	// drainGate serialises the admin drain with the rootfs probe's
 	// recovery (spoond-5ca). drain takes the write side around
 	// SetDraining and draining.Store(true); recoverDeadRootfs holds the
@@ -1599,6 +1605,9 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	s.clearRecoveryRetries(l)
 	s.clearRetry(s.preemptRetries, l.ID)
 	s.clearPreemptCapLog(l.ID)
+	// A release drops any drain self-heal backoff the lease carried, so a
+	// later planned restart's deferral starts fresh (spoond-52c B3).
+	s.clearDrainHeal(l.ID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
@@ -2486,6 +2495,12 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	}
 	sb, err := s.createSandbox(ctx, img, b, true, l.SandboxID, l)
 	if err != nil {
+		// A failed Create can leave a half-started sandbox behind; remove
+		// it (best effort) so the retry can reuse the same sandbox id.
+		// This runs inside the caller's busy window and only on a
+		// createSandbox error, not on a refusal before the Create
+		// (spoond-52c S2/NIT).
+		s.deleteHalfSandbox(ctx, l)
 		return nil, err
 	}
 	s.store.mu.Lock()
@@ -2522,6 +2537,10 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	// The secrets tmpfs does not survive a snapshot cycle: re-write the
 	// lease's create-time secrets after the sandbox is back (#80).
 	s.restageCreateSecrets(ctx, l, "resume")
+	// The lease is no longer drained, so its self-heal backoff must not
+	// outlive the flag: a later planned restart's deferral starts fresh
+	// (spoond-52c B3).
+	s.clearDrainHeal(l.ID)
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}

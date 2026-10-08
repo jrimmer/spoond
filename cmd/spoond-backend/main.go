@@ -184,6 +184,20 @@ func envDurationOr(key string, def time.Duration) time.Duration {
 	return def
 }
 
+// envDurationOrZero is envDurationOr but accepts a zero or negative value
+// too. DrainResumeMaxAge reads 0 as "use the default" and a negative value
+// as "disable the bound", so the variable can express a negative one from
+// the environment (spoond-52c NIT). A missing or malformed value returns
+// def.
+func envDurationOrZero(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
 func envFloatOr(key string, def float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -382,7 +396,7 @@ func Main(args []string) int {
 	// DRAIN_RESUME_MAX_AGE bounds how long the self-heal loop retries a
 	// lease whose resume stays deferred before leaving it suspended for
 	// the owner. 0 means the default; a negative disables the bound.
-	drainResumeMaxAge := envDurationOr("DRAIN_RESUME_MAX_AGE", api.DefaultDrainResumeMaxAge)
+	drainResumeMaxAge := envDurationOrZero("DRAIN_RESUME_MAX_AGE", api.DefaultDrainResumeMaxAge)
 	// Bounded recovery and preempt-resume retries (spoond-dxq): a
 	// transient failure keeps the lease recovering instead of losing it,
 	// and a permanently failing one gives up after a bounded budget.

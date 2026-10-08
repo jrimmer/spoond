@@ -381,9 +381,9 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int)
 			return err, attempt
 		}
 		s.log.Printf("undrain: resume %s attempt %d/%d failed (retrying): %v", l.ID, attempt, maxAttempts, err)
-		// A failed resume can leave a half-started sandbox behind; remove
-		// it (best effort) so the retry can reuse the same sandbox id.
-		s.deleteHalfSandbox(ctx, l)
+		// resumeLeaseBody's createSandbox error path already deleted any
+		// half-started sandbox inside the busy window, so the retry can
+		// reuse the same id; just space the attempts out.
 		select {
 		case <-ctx.Done():
 			return err, attempt
@@ -541,12 +541,9 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease) (error, int,
 	}
 	if undrainDeferred(err) || ctx.Err() != nil {
 		// A failed or cut-off resume can leave a half-started sandbox
-		// behind; remove it (best effort) so a retry reuses the same id
-		// (S2). Not for a busy lease, whose sandbox another operation is
-		// using.
-		if !errors.Is(err, errLeaseBusy) {
-			s.deleteHalfSandbox(ctx, l)
-		}
+		// behind; resumeLease's createSandbox error path already deletes it
+		// inside the busy window, before a retry can reuse the id
+		// (spoond-52c S2/NIT). Only the lease's row needs saving here.
 		s.store.mu.Lock()
 		if !l.released {
 			s.saveLeaseLocked(l)
@@ -574,7 +571,6 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease) (error, int,
 	l.Drained = false
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
-	s.deleteHalfSandbox(ctx, l)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
 	// A lease started from a named snapshot no longer protects it once
 	// lost (#83 S5).
@@ -655,16 +651,65 @@ func (s *Service) clearDrainHeal(id string) {
 	s.drainHealMu.Unlock()
 }
 
+// pruneDrainHeal drops the heal backoff state of every lease that is not
+// one of the current drained targets (kept is the set of lease ids the
+// pass is about to consider). Without it an entry survives the lease
+// being resumed, restored or released elsewhere and makes a later
+// planned restart's deferral skip silently or give up on the first pass
+// (spoond-52c B3).
+func (s *Service) pruneDrainHeal(kept []*Lease) {
+	live := make(map[string]struct{}, len(kept))
+	for _, l := range kept {
+		live[l.ID] = struct{}{}
+	}
+	s.drainHealMu.Lock()
+	for id := range s.drainHeal {
+		if _, ok := live[id]; !ok {
+			delete(s.drainHeal, id)
+		}
+	}
+	s.drainHealMu.Unlock()
+}
+
+// drainHealStatus snapshots a state's gaveUp flag and firstAt under the
+// mutex, so the heal pass reads them consistently while another goroutine
+// may clear the entry.
+func (s *Service) drainHealStatus(h *drainHealState) (gaveUp bool, firstAt time.Time) {
+	s.drainHealMu.Lock()
+	defer s.drainHealMu.Unlock()
+	return h.gaveUp, h.firstAt
+}
+
+// markDrainHealGaveUp marks a state as given up under the mutex.
+func (s *Service) markDrainHealGaveUp(h *drainHealState) {
+	s.drainHealMu.Lock()
+	h.gaveUp = true
+	s.drainHealMu.Unlock()
+}
+
+// setDrainHealCause records the last deferral cause and reports whether it
+// changed from the previous one (the first deferral has no previous
+// cause, so it reports true). It is the state the drain_deferred event is
+// gated on (spoond-52c B2).
+func (s *Service) setDrainHealCause(h *drainHealState, cause string) bool {
+	s.drainHealMu.Lock()
+	defer s.drainHealMu.Unlock()
+	changed := h.cause != cause
+	h.cause = cause
+	return changed
+}
+
 // healDue reports whether a lease's next self-heal resume attempt is due
 // and, when it is, consumes the slot (advancing the backoff) so one pass
-// does not retry the same lease twice. It is false while the lease is
-// inside its backoff window.
-func (s *Service) healDue(h *drainHealState) bool {
+// does not retry the same lease twice. It returns the attempt number and
+// the backoff now in effect (for the log line). It is false while the
+// lease is inside its backoff window.
+func (s *Service) healDue(h *drainHealState) (bool, int, time.Duration) {
 	s.drainHealMu.Lock()
 	defer s.drainHealMu.Unlock()
 	now := s.now()
 	if !h.nextAt.IsZero() && now.Before(h.nextAt) {
-		return false
+		return false, h.tries, h.backoff
 	}
 	h.tries++
 	if h.backoff == 0 {
@@ -676,6 +721,20 @@ func (s *Service) healDue(h *drainHealState) bool {
 		}
 	}
 	h.nextAt = now.Add(h.backoff)
+	return true, h.tries, h.backoff
+}
+
+// drainNodeInfoLogDue rate-limits the self-heal loop's "node info" log
+// while the orchestrator is down: at most once per drainHealBackoffMax
+// rather than every pass (spoond-52c NIT).
+func (s *Service) drainNodeInfoLogDue() bool {
+	s.drainHealMu.Lock()
+	defer s.drainHealMu.Unlock()
+	now := s.now()
+	if !s.drainNodeInfoLogAt.IsZero() && now.Sub(s.drainNodeInfoLogAt) < drainHealBackoffMax {
+		return false
+	}
+	s.drainNodeInfoLogAt = now
 	return true
 }
 
@@ -720,7 +779,12 @@ func (s *Service) healDrain(ctx context.Context) {
 	// is, for the next pass.
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
-		s.log.Printf("drain self-heal: node info: %v", err)
+		// A down orchestrator must not log every 15 s; the rate limiter
+		// keeps it to at most one line per drainHealBackoffMax
+		// (spoond-52c NIT).
+		if s.drainNodeInfoLogDue() {
+			s.log.Printf("drain self-heal: node info: %v", err)
+		}
 		return
 	}
 	healthy := info.Status == "healthy"
@@ -778,29 +842,41 @@ func (s *Service) healDrain(ctx context.Context) {
 		}
 	}
 	s.store.mu.Unlock()
+	// Drop the backoff state of leases that are no longer drained targets:
+	// an owner resume, restore or release clears them elsewhere, but a
+	// lease lost or given up by another path must not leave a stale
+	// entry that silently skips a later planned restart (spoond-52c B3).
+	s.pruneDrainHeal(targets)
 	for _, l := range targets {
 		h := s.drainHealFor(l.ID)
+		gaveUp, firstAt := s.drainHealStatus(h)
 		maxAge := s.drainResumeMaxAge()
-		if maxAge > 0 && !h.gaveUp && s.now().Sub(h.firstAt) >= maxAge {
+		if maxAge > 0 && !gaveUp && s.now().Sub(firstAt) >= maxAge {
 			// The bound is spent: stop retrying, keep the lease suspended
 			// (its snapshot is intact - not lost) and tell the owner
 			// (spoond-52c B2). Mark the state so the log and event fire
 			// once, not every pass; an admin undrain can still retry it.
-			s.drainHealMu.Lock()
-			h.gaveUp = true
-			s.drainHealMu.Unlock()
+			s.markDrainHealGaveUp(h)
 			reason := fmt.Sprintf("resume deferred for over %s; leaving the lease suspended for the owner", maxAge)
-			s.log.Printf("drain self-heal: giving up on %s after %s: %s", l.ID, s.now().Sub(h.firstAt).Round(time.Second), reason)
+			s.log.Printf("drain self-heal: giving up on %s after %s: %s", l.ID, s.now().Sub(firstAt).Round(time.Second), reason)
 			s.emitLeaseEvent(l.ID, l.Owner, LeaseDrainGaveUp, reason)
 			continue
 		}
-		if h.gaveUp {
+		if gaveUp {
 			continue
 		}
-		if !s.healDue(h) {
+		due, tries, backoff := s.healDue(h)
+		if !due {
 			continue
 		}
+		// Hold the read side of drainGate across the resume, as
+		// recoverDeadRootfs does, so an admin drain cannot take the write
+		// side and set draining while a heal-started Create is in flight
+		// (spoond-52c S1). resumeDrainedLease re-checks draining before
+		// each attempt for the gap after the flag is set.
+		s.drainGate.RLock()
 		err, attempts, deferred := s.drainResumeOutcome(ctx, l)
+		s.drainGate.RUnlock()
 		if err == nil {
 			s.log.Printf("drain self-heal: resumed %s", l.ID)
 			continue
@@ -808,15 +884,13 @@ func (s *Service) healDrain(ctx context.Context) {
 		if !deferred {
 			continue // drainResumeOutcome logged and emitted the loss
 		}
-		cause := err.Error()
-		if cause != h.cause {
+		if s.setDrainHealCause(h, err.Error()) {
 			// Only on a state change (first deferral, cause change): a
 			// permanently deferred lease does not emit a drain_deferred
 			// per lease per pass (spoond-52c B2).
-			h.cause = cause
 			s.emitLeaseEvent(l.ID, l.Owner, LeaseDrainDeferred, fmt.Sprintf("after %d attempt(s): %v", attempts, err))
 		}
-		s.log.Printf("drain self-heal: resume %s deferred (attempt %d, next in %s): %v", l.ID, h.tries, h.backoff, err)
+		s.log.Printf("drain self-heal: resume %s deferred (attempt %d, next in %s): %v", l.ID, tries, backoff, err)
 	}
 }
 
