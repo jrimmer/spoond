@@ -2739,18 +2739,20 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		l.LastAction = pauseActionDrain
 	}
 	l.LastActionAt = s.now()
-	// The structured suspension facts (#145 D6): the pause build and when
-	// describe every suspend; the reason and pressure step describe an
-	// automatic one (idle|idle_suspend|hold_lapsed|pressure|preempt). A
-	// hand or drain pause has no automatic reason, so those two stay
-	// empty and the fields are omitted. Stale facts from an earlier
-	// suspension are dropped first; all four are cleared on resume.
+	// The structured suspension facts (#145 D6): the reason
+	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
+	// order's step, the pause build it wrote and when describe an
+	// automatic suspend. A hand or drain pause has no automatic reason,
+	// so all four stay empty and the GET omits them; the lease still
+	// names the pause build in last_action/resume_build_id. Stale facts
+	// from an earlier suspension are dropped first, and all four are
+	// cleared on resume.
 	clearSuspendFactsLocked(l)
-	l.SuspendBuildID = buildID
-	l.SuspendedAt = l.LastActionAt
 	if pol.reason != "" {
 		l.SuspendReason = pol.reason
 		l.SuspendPolicyStep = pol.policyStep
+		l.SuspendBuildID = buildID
+		l.SuspendedAt = l.LastActionAt
 	}
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()

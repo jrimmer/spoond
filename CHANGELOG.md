@@ -12,6 +12,25 @@ summarised from README "Status".
 
 ### Added
 
+- **Every automatic suspend names its reason, policy step and build
+  (spoond-9gm2).** A `suspended` event now carries structured fields
+  beside its human detail — `reason`
+  (`idle`|`idle_suspend`|`hold_lapsed`|`pressure`|`preempt`),
+  `policy_step` (the pressure order's step name, empty until that order
+  names steps) and `build_id` (the pause build) — and the lease object
+  gains `suspend_reason`, `suspend_policy_step`, `suspend_build_id` and
+  `suspended_at` (additive, omitted while unset). Every automatic
+  suspend names it: the plain `IDLE_TIMEOUT_SECS` sweep (`idle`), a
+  lease's own `idle_suspend` (`idle_suspend`), a lapsed hold
+  (`hold_lapsed`), held rule 1 shortened under pressure (`pressure`) and
+  preemption (`preempt`). A hand or drain suspend carries none of the
+  four — it has no automatic reason. A `409`
+  `lease_suspended` body adds `"reason"` when the suspension was
+  automatic. All four fields are cleared on resume, restore, cold restart
+  and crash recovery; `lease.held_action` is unchanged. Migration
+  **0021** adds the four `leases` columns. See
+  [docs/api.md](docs/api.md).
+
 - **Pause-chain size is measured before any compaction (spoond-p9j).** A
   pause build's parent is the build it resumed from and the GC keeps
   every ancestor of a live lease's resume build, so a persistent lease

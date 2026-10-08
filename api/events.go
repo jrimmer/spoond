@@ -432,12 +432,18 @@ func (s *Service) emitLeaseEvent(leaseID, owner string, typ LeaseEventType, deta
 }
 
 // emitSuspendEvent records a `suspended` event with its structured
-// fields (#145 D6): reason names why an automatic suspend happened
-// ("" for a hand or drain suspend), policyStep the pressure order's
-// step and buildID the pause build it wrote. The human detail keeps the
-// existing "paused into build <id>" text.
+// fields (#145 D6): reason names why an automatic suspend happened, and
+// policyStep the pressure order's step. The event carries build_id too
+// and the human detail keeps the existing "paused into build <id>"
+// text. For a hand or drain suspend reason is empty: the structured
+// fields are all left off, so the event matches the lease, which omits
+// its suspension facts for a suspension with no automatic reason.
 func (s *Service) emitSuspendEvent(leaseID, owner, buildID, reason, policyStep string) {
-	s.bus.emitStructured(leaseID, owner, LeaseSuspended, "paused into build "+buildID, reason, policyStep, buildID)
+	evBuild := ""
+	if reason != "" {
+		evBuild = buildID
+	}
+	s.bus.emitStructured(leaseID, owner, LeaseSuspended, "paused into build "+buildID, reason, policyStep, evBuild)
 }
 
 // emitGCEvent records one catalog GC maintenance event: a pass that

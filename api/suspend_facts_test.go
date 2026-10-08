@@ -250,7 +250,7 @@ func TestSuspendFactsClearedOnResume(t *testing.T) {
 }
 
 // TestSuspendFactsHandAndDrainNoReason: a hand suspend and a drain
-// pause carry no automatic reason (only the build and time).
+// pause carry no structured facts (no automatic reason).
 func TestSuspendFactsHandAndDrainNoReason(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -264,11 +264,8 @@ func TestSuspendFactsHandAndDrainNoReason(t *testing.T) {
 		t.Fatalf("suspend: %v", err)
 	}
 	reason, step, build, at := suspendFactsOf(t, svc, l.ID)
-	if reason != "" || step != "" {
-		t.Fatalf("hand suspend reason/step = %q/%q, want empty", reason, step)
-	}
-	if build == "" || at.IsZero() {
-		t.Fatalf("hand suspend build/time = %q/%v, want the pause build and time", build, at)
+	if reason != "" || step != "" || build != "" || !at.IsZero() {
+		t.Fatalf("hand suspend facts = %q/%q/%q/%v, want empty", reason, step, build, at)
 	}
 }
 
