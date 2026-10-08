@@ -296,7 +296,9 @@ func TestEventLinesDetail(t *testing.T) {
 
 // TestEventLinesGC: a lease-less gc event draws with the ok colour, a
 // "spoond" subject and its count-and-freed detail; a per-lease panel
-// never sees it because the collector's subscription is all-leases.
+// never sees it because the collector's subscription is all-leases. A
+// gc pass whose detail names a stale-build failure draws warn instead
+// (spoond-rzz).
 func TestEventLinesGC(t *testing.T) {
 	c := newCollector(Config{EventsToken: "t"})
 	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
@@ -316,6 +318,17 @@ func TestEventLinesGC(t *testing.T) {
 	// The lease id column is empty for a lease-less event.
 	if strings.Contains(l.Text, "  ") && !strings.HasPrefix(l.Text, "04:15:59  gc") {
 		t.Fatalf("gc line does not start with the time and type: %q", l.Text)
+	}
+
+	// A stale-build failure is a gc pass that went wrong: warn.
+	c.events.add(dashEvent{At: at.Add(time.Second), Type: "gc",
+		Detail: "stale build 1ede0933 failed · build timed out"})
+	failed := c.eventLines(at.Add(time.Second))[0]
+	if failed.Style != "warn" {
+		t.Fatalf("stale-build gc line style = %q, want warn", failed.Style)
+	}
+	if !strings.Contains(failed.Text, "stale build 1ede0933") {
+		t.Fatalf("stale-build gc line = %+v", failed)
 	}
 }
 

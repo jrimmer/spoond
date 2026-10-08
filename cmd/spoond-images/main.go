@@ -48,9 +48,10 @@ const (
 )
 
 // buildTimeout bounds one template build. It reads SPOOND_BUILD_TIMEOUT
-// through substrate.BuildTimeoutFromEnv, the same knob
-// ServiceConfig.BuildTimeout reads on the backend, so the pipeline and the
-// GC's stale-row sweep agree (spoond-4yl).
+// through substrate.BuildTimeoutFromEnv from this process's own
+// environment; the backend reads the same variable in its environment to
+// tune the GC's stale-row sweep, so a deployment must set it for both
+// (spoond-rzz).
 var buildTimeout = substrate.BuildTimeoutFromEnv()
 
 // runCmd streams a command's stdout (docker build, docker push).
@@ -226,6 +227,7 @@ func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, conte
 		return 1
 	}
 
+	fmt.Fprintf(os.Stderr, "spoond images: build timeout is %s (SPOOND_BUILD_TIMEOUT)\n", buildTimeout)
 	for _, img := range targets {
 		if err := buildOne(ctx, db, sub, img, registry, contextDir, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "spoond images: %s: %v\n", img.Name, err)
