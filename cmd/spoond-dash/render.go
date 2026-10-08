@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/grid"
 )
@@ -1484,8 +1485,14 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(2, top+2, "no live leases", "dim", l.w-4)
 	} else if l.hasLeaseLegend() {
 		// The holder marks, spelled out directly under the table's last
-		// row rather than crammed into the header.
-		g.Text(2, top+2+len(rows), leaseLegend, "dim", l.w-4)
+		// row rather than crammed into the header, starting under the
+		// holder column it explains (pulled left only when the frame is
+		// too narrow to fit it there).
+		x := c.hold
+		if lw := utf8.RuneCountInString(leaseLegend); x+lw > l.w-2 {
+			x = max(2, l.w-2-lw)
+		}
+		g.Text(x, top+2+len(rows), leaseLegend, "dim", l.w-2-x)
 	}
 	return y
 }

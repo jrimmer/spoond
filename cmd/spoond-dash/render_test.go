@@ -1709,9 +1709,17 @@ func TestLeaseHolderHeaderAndLegend(t *testing.T) {
 		t.Errorf("legend is not directly under the last lease row:\n%s", p)
 	}
 
+	// The legend starts under the holder column it explains.
+	hx := strings.Index(lines[header], "holder")
+	lx := strings.Index(lines[legendAt], leaseLegend)
+	if len([]rune(lines[header][:hx])) != len([]rune(lines[legendAt][:lx])) {
+		t.Errorf("legend is not under the holder column:\n%s\n%s", lines[header], lines[legendAt])
+	}
+
 	// The legend line is dim on the grid.
 	g := drawSample(DefaultWidth)
-	for x := 2; x < 2+len([]rune(leaseLegend)); x++ {
+	x0 := len([]rune(lines[legendAt][:lx]))
+	for x := x0; x < x0+len([]rune(leaseLegend)); x++ {
 		if got := g.At(x, legendAt).Style; got != "dim" {
 			t.Errorf("legend cell %d style = %q, not dim", x, got)
 			break

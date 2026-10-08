@@ -33,7 +33,7 @@ SPOOND · spoond.example.com                              up 9m, 12:00:00
 │ abcdef go-base jason ▶ running inet   5m     10m  -                  │
 │ 123456 py-base ci    ▶ running rstr   2h31m  ∞    ◆ forgejo/job-42   │
 │ fedcba go-base agent ‖ susp    lan    1d     due  ◉ nightly          │
-│ ◆ held · ◉ lapsed                                                    │
+│                                                   ◆ held · ◉ lapsed  │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ images ─────────────────────────────────────────────────────────────┐
 │ image            vcpu  mem      live  uses   baked                   │
