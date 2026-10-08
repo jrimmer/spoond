@@ -291,12 +291,28 @@ func (s *Service) reclaimUnderPressure(ctx context.Context, now time.Time) {
 }
 
 // recordPressureSuspend records one pressure-order pause like the held
-// rules do: a log line, the spoond_held_actions_total{pressure,
-// suspend_idle} counter, the lease's last_action/last_action_at
-// (persisted, so rule 2 may later release a held victim) and a
-// held_action event naming the policy step. Call with s.store.mu NOT
-// held (heldActionLocked takes it).
+// rules do: a log line naming the lease, owner and step, the
+// spoond_held_actions_total{pressure,suspend_idle} counter, the lease's
+// last_action/last_action_at (persisted, so rule 2 may later release a
+// held victim) and a held_action event naming the policy step. Call
+// with s.store.mu NOT held.
 func (s *Service) recordPressureSuspend(ctx context.Context, l *Lease, step PressureStep, why string, now time.Time) {
 	detail := fmt.Sprintf("step %s: %s", step, why)
-	s.heldActionLocked(ctx, l, heldRulePressure, heldActionSuspendIdle, detail, now)
+	s.store.mu.Lock()
+	if l.released {
+		// A release after the pause returned success but before this
+		// record must not save or emit for a released lease (spoond-15i).
+		s.store.mu.Unlock()
+		return
+	}
+	s.log.Printf("pressure reclaim: lease %s (owner %s, class %s): step %s: %s",
+		l.ID, l.Owner, leaseClassRow(l), step, why)
+	if s.metrics != nil {
+		s.metrics.HeldActions.WithLabelValues(heldRulePressure, heldActionSuspendIdle).Inc()
+	}
+	l.LastAction = heldRulePressure + "/" + heldActionSuspendIdle
+	l.LastActionAt = now
+	s.saveLeaseLocked(l)
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseHeldAction, heldRulePressure+"/"+heldActionSuspendIdle+": "+detail)
+	s.store.mu.Unlock()
 }
