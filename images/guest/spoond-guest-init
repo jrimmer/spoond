@@ -14,8 +14,12 @@ set -u
 # keep the image's resolv.conf.
 GUEST_DNS="$(cat /etc/spoond/guest-dns 2>/dev/null || true)"
 if [ -n "$GUEST_DNS" ]; then
-  rm -f /etc/resolv.conf
-  {
+  # Build the nameserver lines first, with IFS scoped to the subshell and
+  # globbing off around the unquoted loop, then swap resolv.conf only when a
+  # real nameserver was produced. A value of only separators leaves the
+  # image's resolv.conf alone rather than blanking it.
+  nameservers=$(
+    set -f
     IFS=','
     for addr in $GUEST_DNS; do
       # Trim surrounding whitespace without external tools.
@@ -23,8 +27,13 @@ if [ -n "$GUEST_DNS" ]; then
       addr="${addr%"${addr##*[![:space:]]}"}"
       [ -n "$addr" ] && printf 'nameserver %s\n' "$addr"
     done
-  } > /etc/resolv.conf
-  printf 'options timeout:2 attempts:3 rotate\n' >> /etc/resolv.conf
+  )
+  if [ -n "$nameservers" ]; then
+    printf '%s\n' "$nameservers" > /etc/resolv.conf
+    printf 'options timeout:2 attempts:3 rotate\n' >> /etc/resolv.conf
+  else
+    echo "spoond-guest-init: GUEST_DNS has no usable nameserver; leaving /etc/resolv.conf alone" >&2
+  fi
 fi
 # Empty dpkg's statoverride. Tools that unpack a base image over the live
 # root (kaniko) keep this file while replacing /etc/group, so any override
