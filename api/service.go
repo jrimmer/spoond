@@ -451,11 +451,16 @@ type Service struct {
 	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
 	// ownerDeleteMu guards deletedOwners (spoond-q4j): the owners whose
-	// identity was removed while a create of theirs could still be in
-	// flight. reserveQuota and grantQueued consult it so no admission
-	// revives an ownerless (uncapped) lease recreated by a create that
-	// raced DELETE /api/users/{id}. The set is in-memory: a backend
-	// restart drops the parked tickets with it.
+	// identity was removed while a create, clone or fork of theirs could
+	// still be in flight. reserveQuota and the grant/clone/fork commits
+	// consult it so no admission revives an ownerless (uncapped) lease
+	// recreated by a create that raced DELETE /api/users/{id}. Entries
+	// are never pruned: deleting a user is permanent, and a request that
+	// passed auth before the removal could still reach a commit, so the
+	// mark must outlive the cleanup. The set is in-memory and bounded by
+	// the number of users deleted in one process's life (a few small
+	// strings); a backend restart drops both the parked tickets and the
+	// set, which is safe because no racing request survives it either.
 	ownerDeleteMu sync.Mutex
 	deletedOwners map[string]bool
 	// identities is the user/identity store (epic #26 T1). When set,
@@ -2452,6 +2457,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		_ = s.sub.Delete(ctx, lease.SandboxID)
 		s.deleteSandboxRow(lease.SandboxID)
 		s.endCreatingSandbox(lease.SandboxID)
+		// The create-time secrets were staged into this sandbox; its
+		// files go with the delete, so drop the in-memory copy too or it
+		// would outlive the sandbox that never became a lease.
+		s.clearCreateSecrets(lease.ID)
 		return nil, errOwnerGone
 	}
 	s.store.leases[lease.ID] = lease
@@ -3300,6 +3309,24 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	lease.BuildID = b.BuildID
 	s.writeGeneration(lease)
 	s.store.mu.Lock()
+	// Final guard against a delete that raced this clone (spoond-q4j B1).
+	// The clone reserved quota before the owner could be marked and then
+	// spent seconds in checkpointLease, which never checks that its
+	// source was released. deleteUserData sets the mark before its lease
+	// re-scan and this commit holds the store lock across the check, so
+	// either this guard sees the mark and refuses the ownerless lease, or
+	// the commit lands first and the cleanup's re-scan releases it. Stop
+	// the fresh sandbox here so no guest is left running.
+	s.ownerDeleteMu.Lock()
+	deleted := s.deletedOwners[owner]
+	s.ownerDeleteMu.Unlock()
+	if deleted {
+		s.store.mu.Unlock()
+		_ = s.sub.Delete(ctx, sb.ID)
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return nil, "", errOwnerGone
+	}
 	s.store.leases[lease.ID] = lease
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
@@ -3442,6 +3469,23 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		lease.BuildID = b.BuildID
 		s.writeGeneration(lease)
 		s.store.mu.Lock()
+		// Final guard against a delete that raced this fork (spoond-q4j
+		// B1): each child commits under the store lock, so either the
+		// mark is set and this child is refused (and every already
+		// committed child is rolled back), or the commit lands before
+		// the cleanup's re-scan and the cleanup releases it. Stop this
+		// child's sandbox exactly once; rollback stops the earlier
+		// ones.
+		s.ownerDeleteMu.Lock()
+		deleted := s.deletedOwners[owner]
+		s.ownerDeleteMu.Unlock()
+		if deleted {
+			s.store.mu.Unlock()
+			_ = s.sub.Delete(ctx, sb.ID)
+			s.deleteSandboxRow(sb.ID)
+			s.endCreatingSandbox(sb.ID)
+			return rollback(errOwnerGone)
+		}
 		s.store.leases[lease.ID] = lease
 		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()

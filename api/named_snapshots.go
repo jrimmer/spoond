@@ -384,7 +384,22 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 		OrchestratorVersion: s.orchestratorVersion(ctx),
 		CreatedAt:           s.now(),
 	}
+	// A user delete that ran after the leaseReleased check above must not
+	// leave this row behind (spoond-q4j S1): retention keeps the newest
+	// versions and the GC treats named_snapshots rows as roots, so a row
+	// inserted after DeleteNamedSnapshotsOfOwner ran would live forever.
+	// Hold the owner-delete lock across the check and the insert, the same
+	// lock markOwnerDeleted takes: either this insert commits before the
+	// mark (and the cleanup's drop, which runs after the mark, removes the
+	// row) or the mark is already set here and the save refuses.
+	s.ownerDeleteMu.Lock()
+	if s.deletedOwners[l.Owner] {
+		s.ownerDeleteMu.Unlock()
+		s.log.Printf("snapshot: save of %s/%s: owner was deleted", l.Owner, name)
+		return store.NamedSnapshotRow{}, false, errLeaseNotFound()
+	}
 	saved, err := s.db.InsertNamedSnapshot(ctx, row, keep)
+	s.ownerDeleteMu.Unlock()
 	if err != nil {
 		// An insert that hits the (owner, name, idempotency_key) unique
 		// index lost a replay race: another save of the same key

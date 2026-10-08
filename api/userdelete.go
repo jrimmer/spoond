@@ -113,13 +113,15 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	}
 
 	// Named snapshots are dropped outright, forced: their leases are
-	// already released, so no live lease can be running from a version. A
-	// save already inside its checkpoint (holding secretsGate.beginSave)
-	// can still insert a row after this delete; saveNamedSnapshot's
-	// leaseReleased check drops most of that window, and a row that slips
-	// through has no live lease, so the next retention or GC pass prunes
-	// it. Waiting on the per-lease gate here would serialise the cleanup
-	// behind an in-flight checkpoint for no lasting gain.
+	// already released, so no live lease can be running from a version.
+	// The owner was marked deleted before this drop, and saveNamedSnapshot
+	// checks that mark under the owner-delete lock while it holds the same
+	// lock across its insert. So a save that reached its insert has either
+	// landed before the mark (and this drop removes its row) or found the
+	// mark and answered not_found (spoond-q4j S1). Without that check a
+	// row could be inserted after this drop and survive: retention keeps
+	// the newest versions and the GC treats named_snapshots rows as GC
+	// roots, so it would never be reclaimed.
 	rows, err := s.db.DeleteNamedSnapshotsOfOwner(ctx, owner)
 	if err != nil {
 		s.log.Printf("user delete: drop named snapshots of %s: %v", owner, err)
@@ -201,12 +203,73 @@ func mergeUnique(base, extra []string) []string {
 	return base
 }
 
+// ownerHasState reports whether an owner id still has state that a
+// user-delete would clean up: a lease, a job, a named snapshot or a
+// kept build. handleUsersDelete uses it to tell a real (or half-cleaned)
+// user from an id that never existed, so an unknown id answers 404
+// instead of silently succeeding (spoond-q4j S2).
+func (s *Service) ownerHasState(ctx context.Context, owner string) bool {
+	s.store.mu.Lock()
+	for _, l := range s.store.leases {
+		if l.Owner == owner && !l.released {
+			s.store.mu.Unlock()
+			return true
+		}
+	}
+	s.store.mu.Unlock()
+	if rows, err := s.db.ListLeases(ctx); err != nil {
+		s.log.Printf("user delete: list leases of %s: %v", owner, err)
+	} else {
+		for _, r := range rows {
+			if r.Owner == owner {
+				return true
+			}
+		}
+	}
+	if rows, err := s.db.ListRunningJobsOfOwner(ctx, owner); err != nil {
+		s.log.Printf("user delete: list jobs of %s: %v", owner, err)
+	} else if len(rows) > 0 {
+		return true
+	}
+	if n, err := s.db.CountNamedSnapshotNames(ctx, owner); err != nil {
+		s.log.Printf("user delete: count snapshots of %s: %v", owner, err)
+	} else if n > 0 {
+		return true
+	}
+	if kept, err := s.db.ListKeptBuildsOfOwner(ctx, owner); err != nil {
+		s.log.Printf("user delete: list kept builds of %s: %v", owner, err)
+	} else if len(kept) > 0 {
+		return true
+	}
+	return false
+}
+
+// legacyTokenOwner reports whether id is the owner of a legacy consumer
+// token (the token map single-user deployments use). Such an owner has
+// no identity row but still authenticates through the token fallback, so
+// markOwnerDeleted would refuse every one of their future creates for
+// the life of the process. handleUsersDelete refuses to delete them
+// (spoond-q4j S2).
+func (s *Service) legacyTokenOwner(id string) bool {
+	for _, owner := range s.tokens {
+		if owner == id {
+			return true
+		}
+	}
+	return false
+}
+
 // handleUsersDelete removes a user (admin only) and cleans up the state
 // that would otherwise outlive the identity (spoond-q4j): it releases
 // the user's leases (reason user_deleted), cancels their running jobs,
 // drops their named snapshots, unpins their kept builds and answers 200
 // with what it removed. Before this cleanup an owner with no user had no
 // quota, so their leases, snapshots and builds stayed and were uncapped.
+//
+// An id that is neither a known identity nor has any remaining state
+// answers 404: it never existed, so there is nothing to remove. A
+// legacy token-map owner answers 409 and is left untouched: it has no
+// identity row but still authenticates.
 func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -220,6 +283,24 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cannot delete yourself")
 		return
 	}
+	// A legacy token-map owner has no identity row but still resolves
+	// through the token fallback; marking it deleted would permanently
+	// refuse its creates. Refuse the delete instead.
+	if s.svc.legacyTokenOwner(id) {
+		writeError(w, http.StatusConflict, "cannot delete a legacy token owner; remove its token instead")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), userDeleteTimeout)
+	defer cancel()
+	// An unknown id with no state left is a 404, not a silent success
+	// (spoond-q4j S2). A known identity, or an id whose cleanup was
+	// interrupted and still has state, proceeds; RemoveUser is idempotent
+	// so a retry after a partial cleanup works.
+	known := s.svc.identities != nil && s.svc.identities.UserByID(id) != nil
+	if !known && !s.svc.ownerHasState(ctx, id) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
 	// Remove the identity first: once its token no longer resolves, no
 	// new lease can be attributed to the owner while the cleanup runs.
 	if err := s.svc.identities.RemoveUser(id); err != nil {
@@ -231,8 +312,6 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 	// cleans up, so reserveQuota and grantLease refuse a create that
 	// raced the identity removal, and the cleanup releases any lease that
 	// slipped through before the mark.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), userDeleteTimeout)
-	defer cancel()
 	res := s.svc.deleteUserData(ctx, id)
 	writeJSON(w, http.StatusOK, map[string]any{"removed": res})
 }

@@ -187,6 +187,11 @@ func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error)
 		writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 	case errors.Is(err, errBurstReserve):
 		writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
+	case errors.Is(err, errOwnerGone):
+		// The owner's identity was removed while the resume was in
+		// flight (spoond-q4j): the user is gone, so the resume is
+		// refused rather than run ownerless.
+		writeError(w, http.StatusForbidden, "owner deleted")
 	case errors.Is(err, substrate.ErrCapacity):
 		writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 	default:

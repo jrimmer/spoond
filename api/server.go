@@ -1634,6 +1634,11 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// with a retry hint too (#128 part 2); the lease stays
 			// suspended.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
+		case errors.Is(err, errOwnerGone):
+			// The owner's identity was removed while the restart was in
+			// flight (spoond-q4j): the user is gone, so the restart is
+			// refused rather than run ownerless.
+			writeError(w, http.StatusForbidden, "owner deleted")
 		default:
 			s.svc.log.Printf("restart %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restart failed")
@@ -2284,6 +2289,11 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		case errors.Is(err, errOwnerGone):
+			// The owner's identity was removed while the clone was in
+			// flight (spoond-q4j): the user is gone, so the clone is
+			// refused rather than granted ownerless and uncapped.
+			writeError(w, http.StatusForbidden, "owner deleted")
 		default:
 			s.svc.log.Printf("clone %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "failed to clone lease")
@@ -2352,6 +2362,12 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		case errors.Is(err, errOwnerGone):
+			// The owner's identity was removed while the fork was in
+			// flight (spoond-q4j): the user is gone, so the fork is
+			// refused and every child rolled back rather than granted
+			// ownerless and uncapped.
+			writeError(w, http.StatusForbidden, "owner deleted")
 		default:
 			s.svc.log.Printf("fork %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "failed to fork lease")

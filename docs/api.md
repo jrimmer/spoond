@@ -859,7 +859,9 @@ same way; on success `preempted` is cleared and the `resumed` event's
 detail is `after preemption`. Resuming a lease that is
 already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
-restored the pause build again, rolling the guest's memory back.)
+restored the pause build again, rolling the guest's memory back.) An
+`owner deleted` (`403`) refuses the resume when the owner's identity was
+removed while the resume was in flight (spoond-q4j).
 
 ### `POST /api/leases/{id}/restart` — pause and resume, or a fresh guest
 
@@ -904,6 +906,9 @@ into a full burst reserve answers `503` `no burst capacity` with
 A substrate failure on the fresh-guest path (which does create a sandbox) surfaces
 as `500`, not `503` — unlike create, fork and clone, restart does not
 map capacity errors to `503`.
+
+An `owner deleted` (`403`) refuses the restart when the owner's identity
+was removed while the restart was in flight (spoond-q4j).
 
 ### `POST /api/leases/{id}/checkpoint` — snapshot a running lease
 
@@ -1121,6 +1126,10 @@ The clone costs the source image's `memory_mb` against the owner's
 memory quota like any create (#128); `429` when it would pass
 `max_mib`. The clone is classified and held to the burst reserve like
 any create (#128 part 2); a refusal answers `503` `no burst capacity`.
+An `owner deleted` (`403`) refuses the clone when the owner's identity
+was removed while the clone's checkpoint was in flight (spoond-q4j): the
+fresh sandbox is stopped and no lease is committed, so a deleted owner
+cannot acquire an ownerless, uncapped copy.
 
 ### `POST /api/leases/{id}/fork` — N copies of a running lease
 
@@ -1146,6 +1155,11 @@ all or nothing — `503` capacity. Every child is classified at
 admission (#128 part 2): with the whole batch's charge pending, all
 children of a fork past the guarantee burst together, and a burst child
 refused on the reserve fails the call with `503` `no burst capacity`.
+An `owner deleted` (`403`) refuses a fork whose owner's identity was
+removed while the fork's checkpoint was in flight (spoond-q4j): every
+child created so far is rolled back (its sandbox stopped once) and the
+rest are refused, so a deleted owner cannot acquire ownerless, uncapped
+copies.
 
 ### `POST /api/leases/{id}/network` — change egress policy live
 
@@ -1910,11 +1924,19 @@ queue (or that raced the delete) is refused with `403 owner deleted`
 rather than granted: an owner with no identity row has no quota, so
 granting it would recreate exactly the uncapped state the delete
 removes. Removing the identity is what actually revokes SSH access —
-the gateway
-treats the identity store as authoritative when present, so removing
+the gateway treats the identity store as authoritative when present, so
+removing
 the user invalidates all their keys immediately. Before spoond-q4j the
 delete answered `204` and left the leases, snapshots, kept builds and
 jobs behind, uncapped (an owner with no user has no quota).
+
+An id that is neither a known identity nor has any remaining state
+answers `404 user not found`; deleting the same real user twice is
+idempotent and answers `200` the second time. An id that is the owner of
+a legacy consumer token (a single-user deployment's token map) answers
+`409` and is left untouched: it has no identity row but still
+authenticates, so marking it deleted would permanently refuse its
+creates.
 
 ### `POST /api/users/{id}/quota` — set lease quota (admin only)
 

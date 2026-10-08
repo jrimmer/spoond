@@ -29,6 +29,24 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A clone or fork of a deleted user can no longer commit an
+  ownerless lease.** A clone (or a fork child) reserves quota and then
+  spends seconds checkpointing; a `DELETE /api/users/{id}` racing that
+  window released the source and finished, after which the clone or
+  fork committed an ownerless, uncapped lease. Both now re-check the
+  owner-delete mark under the store lock at the commit: a deleted
+  owner's clone is refused and its fresh sandbox stopped, and a fork
+  rolls back every child (each sandbox stopped exactly once). A named
+  snapshot save that reached its row insert after the owner's snapshots
+  were dropped is refused the same way, so no row outlives the user as
+  a GC root. A user delete of an id that is neither a known identity
+  nor still owns any state now answers `404` (it used to silently
+  succeed); an id that is a legacy token-map owner answers `409` and is
+  left untouched (`RemoveUser` is idempotent, so retrying a partial
+  cleanup still works). Clone, fork, restart and resume now map the
+  refusal onto `403 owner deleted` instead of a `500`, and the refused
+  grant drops its staged create-time secrets.
+
 - **`spoond_builds_in_flight` reports the catalog's in-flight template
   builds, and a stale-build failure is now announced.** The gauge was
   only written during a `/metrics` scrape, so the dashboard's "builds
