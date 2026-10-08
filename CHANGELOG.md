@@ -58,6 +58,8 @@ unchanged since 2.7.0.
   (the paused guest cannot be signalled), and the first reconcile after
   a resume kills a job whose cap was spent in the meantime — so a `sleep
   infinity` can no longer pin a lease's memory and hugepages forever.
+  An oversized `max_runtime_secs` is clamped to the host cap rather
+  than overflowing the seconds conversion into "uncapped".
   Migration **0020** adds `lease_jobs.max_runtime_secs` and
   `lease_jobs.reason`. A job on a suspended lease also no longer keeps
   that lease active: `reconcileJobs` stopped calling `markActive` on a

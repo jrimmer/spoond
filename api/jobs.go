@@ -73,7 +73,7 @@ const DefaultJobMaxRuntimeSecs = 24 * 60 * 60 // 24 hours
 // jobTimedOutReason is stored in lease_jobs.reason and named in the
 // job_exited event and the API record when the max runtime, not the
 // command, ended a job.
-const jobTimedOutReason = "timed_out"
+const jobTimedOutReason = store.JobReasonTimedOut
 
 // errJobCap is returned when a lease is at its running-job cap.
 var errJobCap = errors.New("too many running background jobs for this lease")
@@ -204,28 +204,49 @@ func (s *Service) jobRetention() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+// maxJobRuntimeDuration is the largest representable time.Duration; a
+// request at or below it cannot overflow the seconds conversion.
+const maxJobRuntimeDuration = time.Duration(1<<63 - 1)
+
+// secondsDuration converts a whole number of seconds to a duration,
+// clamping at the maximum representable duration. A value that does not
+// fit would otherwise overflow the multiplication and wrap negative,
+// which reads as "uncapped" and silently defeats the cap (spoond-wb5).
+// A non-positive value yields 0.
+func secondsDuration(secs int64) time.Duration {
+	if secs <= 0 {
+		return 0
+	}
+	if secs > int64(maxJobRuntimeDuration/time.Second) {
+		return maxJobRuntimeDuration
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // jobMaxRuntime returns the host's effective JOB_MAX_RUNTIME. 0 uses the
 // 24 h default; a negative value disables the cap. It returns the raw
 // duration, so a fractional Go duration is honoured to the second when
-// it is stored on the record.
+// it is stored on the record, and clamps an oversized value instead of
+// letting it wrap negative.
 func (s *Service) jobMaxRuntime() time.Duration {
 	secs := s.cfg.JobMaxRuntimeSecs
 	if secs == 0 {
 		secs = DefaultJobMaxRuntimeSecs
 	}
-	return time.Duration(secs) * time.Second
+	return secondsDuration(secs)
 }
 
 // effectiveJobRuntime returns the max runtime a new job may run: the
 // host's JOB_MAX_RUNTIME (0 = uncapped), shortened by the job's own
 // max_runtime_secs when it asked for one. A requested value never
-// extends the host cap.
+// extends the host cap, and a request too large to represent is clamped
+// rather than allowed to wrap into "uncapped".
 func (s *Service) effectiveJobRuntime(requested int64) time.Duration {
 	max := s.jobMaxRuntime()
 	if requested <= 0 {
 		return max
 	}
-	req := time.Duration(requested) * time.Second
+	req := secondsDuration(requested)
 	if max > 0 && max < req {
 		return max
 	}
@@ -240,7 +261,7 @@ func hasSpentRuntime(job store.JobRow, now time.Time) bool {
 	if job.MaxRuntimeSecs <= 0 {
 		return false
 	}
-	return now.Sub(job.StartedAt) >= time.Duration(job.MaxRuntimeSecs)*time.Second
+	return now.Sub(job.StartedAt) >= secondsDuration(job.MaxRuntimeSecs)
 }
 
 // buildJobWrapperArgs builds the argv handed to substrate.Start: the
@@ -328,8 +349,17 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	var maxRuntimeSecs int64
 	if maxRuntime > 0 {
 		// Round up, so a sub-second cap never stores 0 (which reads as
-		// uncapped) and never grants a little more than asked.
-		maxRuntimeSecs = int64((maxRuntime + time.Second - 1) / time.Second)
+		// uncapped) and never grants a little more than asked. Divide
+		// before adding one so a duration near the maximum does not
+		// overflow, then clamp back under the largest representable
+		// whole-second value so reading it back cannot overflow.
+		maxRuntimeSecs = int64(maxRuntime / time.Second)
+		if maxRuntime%time.Second != 0 {
+			maxRuntimeSecs++
+		}
+		if lim := int64(maxJobRuntimeDuration / time.Second); maxRuntimeSecs > lim {
+			maxRuntimeSecs = lim
+		}
 	}
 
 	// Stage the job's secrets before the wrapper runs. The guest wrapper
@@ -727,7 +757,7 @@ func (s *Service) finishJobTimedOut(ctx context.Context, job store.JobRow, exitC
 		return nil // another path already finished it
 	}
 	s.emitLeaseEvent(job.LeaseID, job.Owner, LeaseJobExited, jobTimedOutDetail(exitCode, stderrTail))
-	s.jobFinishedMetrics("timed_out")
+	s.jobFinishedMetrics(jobTimedOutReason)
 	s.decRunningJob(job.LeaseID)
 	// The record is closed; now stop the process itself. Signal the
 	// sandbox the job ran in, never a new one after a cold restart
