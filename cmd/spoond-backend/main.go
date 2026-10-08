@@ -148,6 +148,7 @@ package spoondbackend
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -179,6 +180,20 @@ func envOr(key, def string) string {
 func envDurationOr(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// envDurationOrZero is envDurationOr but accepts a zero or negative value
+// too. DrainResumeMaxAge reads 0 as "use the default" and a negative value
+// as "disable the bound", so the variable can express a negative one from
+// the environment (spoond-52c NIT). A missing or malformed value returns
+// def.
+func envDurationOrZero(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
 			return d
 		}
 	}
@@ -238,6 +253,29 @@ func keptDiskWarnPct() float64 {
 		}
 	}
 	return notify.DefaultKeptDiskWarnPct
+}
+
+// parseGuestDNS validates SPOOND_GUEST_DNS_ADDR: a comma-separated list
+// of bare IP addresses. An empty value means "no resolver allowance"
+// (allowed); a non-empty value that yields no address (separators or
+// whitespace only) is an error, so a typo fails startup rather than
+// silently restoring the public DNS fallback.
+func parseGuestDNS(v string) ([]string, error) {
+	var addrs []string
+	for _, addr := range strings.Split(v, ",") {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		if net.ParseIP(addr) == nil {
+			return nil, fmt.Errorf("%q is not an IP address", addr)
+		}
+		addrs = append(addrs, addr)
+	}
+	if v != "" && len(addrs) == 0 {
+		return nil, fmt.Errorf("%q names no resolver address", v)
+	}
+	return addrs, nil
 }
 
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
@@ -327,13 +365,12 @@ func Main(args []string) int {
 	// The guest's DNS resolver(s) (SPOOND_GUEST_DNS_ADDR,
 	// comma-separated). Each is granted to every lease's egress policy
 	// and baked into the guest image for spoond-guest-init. Empty = no
-	// resolver allowance.
+	// resolver allowance; a non-empty value that names no address
+	// (spaces or commas only) is fatal, so a typo cannot silently
+	// restore the public DNS fallback.
 	guestDNSAddr := os.Getenv("SPOOND_GUEST_DNS_ADDR")
-	for _, addr := range strings.Split(guestDNSAddr, ",") {
-		addr = strings.TrimSpace(addr)
-		if addr != "" && net.ParseIP(addr) == nil {
-			log.Fatalf("SPOOND_GUEST_DNS_ADDR %q is not an IP address", addr)
-		}
+	if _, err := parseGuestDNS(guestDNSAddr); err != nil {
+		log.Fatalf("SPOOND_GUEST_DNS_ADDR: %v", err)
 	}
 	// The wildcard hostname suffix the HTTP proxy routes
 	// (SPOOND_PROXY_HOST_SUFFIX). Empty = the generic default.
@@ -380,6 +417,14 @@ func Main(args []string) int {
 	// busy node does not lose 4 GiB leases to "syncing took too long".
 	undrainConcurrency := envIntOr("UNDRAIN_CONCURRENCY", api.DefaultUndrainConcurrency)
 	undrainResumeRetries := envIntOr("UNDRAIN_RESUME_RETRIES", api.DefaultUndrainResumeRetries)
+	// Drain self-heal (spoond-52c): a drain that outlives DRAIN_MAX_SECS
+	// while the node is healthy undrains itself rather than refusing
+	// every create forever. 0 means the default; a negative disables it.
+	drainMaxSecs := envIntOr("DRAIN_MAX_SECS", api.DefaultDrainMaxSecs)
+	// DRAIN_RESUME_MAX_AGE bounds how long the self-heal loop retries a
+	// lease whose resume stays deferred before leaving it suspended for
+	// the owner. 0 means the default; a negative disables the bound.
+	drainResumeMaxAge := envDurationOrZero("DRAIN_RESUME_MAX_AGE", api.DefaultDrainResumeMaxAge)
 	// Bounded recovery and preempt-resume retries (spoond-dxq): a
 	// transient failure keeps the lease recovering instead of losing it,
 	// and a permanently failing one gives up after a bounded budget.
@@ -480,8 +525,10 @@ func Main(args []string) int {
 		PreemptResumeRetries:     preemptResumeRetries,
 		// spoond-j3a: bound one background sweep stage so a hung
 		// substrate RPC frees the loop and the lease's busy flag.
-		SweepTimeout: envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
-		CrashTest:    os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		SweepTimeout:      envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
+		DrainMaxSecs:      drainMaxSecs,
+		DrainResumeMaxAge: drainResumeMaxAge,
+		CrashTest:         os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
@@ -577,12 +624,17 @@ func Main(args []string) int {
 	} else if len(hooks) > 0 {
 		notifier := newNotifier(hooks, dbPath, sub, srv.Metrics())
 		svc.SetNotifier(notifier)
-		for _, c := range notify.ProductionSources(
+		src := notify.ProductionSources(
 			notifyUnits(),
 			storagePath, backupDir, backupPrefix,
 			notifyBackupMaxAge(),
 			svc.GCLastError(),
-		).Checks() {
+		)
+		// The admin drain state (spoond-52c H3): node.draining warns while
+		// the drain is in effect and resolves when it clears.
+		src.Draining = svc.Draining
+		src.DrainWarnAfter = svc.DrainWarnAfter()
+		for _, c := range src.Checks() {
 			notifier.AddCheck(c)
 		}
 		// Kept checkpoints vs the snapshot disk (#126): disk.kept warns

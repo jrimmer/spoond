@@ -104,3 +104,19 @@ func TestProxyAuthOwnerScopesLookup(t *testing.T) {
 		t.Fatalf("owner lease should resolve (502 dial), got %d", rec.Code)
 	}
 }
+
+// TestProxyAuthGatesLeaseHostServicePaths pins #144 with forward-auth:
+// a lease hostname no longer reaches the internal /assets/, /lease/ or
+// /llm/ handlers without passing the gate first. Missing auth is 403
+// even though the guest-service route would otherwise match.
+func TestProxyAuthGatesLeaseHostServicePaths(t *testing.T) {
+	ph, _, _ := newProxyAuthServer(t)
+	for _, p := range []string{"/assets/x.js", "/lease/abc/active", "/llm/abc/openai/chat/completions"} {
+		req := httptest.NewRequest("GET", "http://deadbeef.sandbox.example.com"+p, nil)
+		rec := httptest.NewRecorder()
+		ph.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("lease host %s without auth: status %d, want 403", p, rec.Code)
+		}
+	}
+}

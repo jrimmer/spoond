@@ -37,6 +37,11 @@ func buildRoot(t *testing.T, dir string) {
 	if err := os.WriteFile(filepath.Join(dir, "dev", "null"), nil, 0o666); err != nil {
 		t.Fatalf("create dev/null: %v", err)
 	}
+	// A sentinel resolv.conf distinguishes "the script rewrote it" from
+	// "the script left it alone".
+	if err := os.WriteFile(filepath.Join(dir, "etc", "resolv.conf"), []byte(resolvSentinel), 0o644); err != nil {
+		t.Fatalf("seed resolv.conf: %v", err)
+	}
 
 	// Copy each host binary into /bin and every shared object ldd names
 	// for it. The script calls cat/rm/touch/chmod by bare name, so they
@@ -119,6 +124,10 @@ func copyFile(dst, src string) error {
 	return os.WriteFile(dst, data, info.Mode().Perm())
 }
 
+// resolvSentinel seeds /etc/resolv.conf in the test root so a test can
+// prove the script did or did not overwrite it.
+const resolvSentinel = "nameserver 192.0.2.53\nsearch example.invalid\n"
+
 // runGuestInit runs the real script in a fresh temp root with the given
 // /etc/spoond/guest-dns contents and returns the resulting
 // /etc/resolv.conf.
@@ -186,5 +195,15 @@ func TestGuestInitTrimsAndSkipsBlank(t *testing.T) {
 	want := "nameserver 10.1.0.2\nnameserver 10.1.0.3\noptions timeout:2 attempts:3 rotate\n"
 	if got != want {
 		t.Fatalf("resolv.conf =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestGuestInitSeparatorOnlyLeavesResolvConf pins the hygiene fix: a
+// non-empty guest-dns that yields no nameserver (separators only) must
+// leave the image's resolv.conf untouched rather than blank it.
+func TestGuestInitSeparatorOnlyLeavesResolvConf(t *testing.T) {
+	got := runGuestInit(t, " , ")
+	if got != resolvSentinel {
+		t.Fatalf("resolv.conf =\n%q\nwant the untouched sentinel\n%q", got, resolvSentinel)
 	}
 }

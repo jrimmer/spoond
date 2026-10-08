@@ -98,21 +98,24 @@ alone (generic, no pinned resolver).
 ## Guest DNS list (ships with the next release)
 
 The next release lets `SPOOND_GUEST_DNS_ADDR` name several resolvers
-(comma-separated) so a guest survives one slow or dead DNS server. On
-that release set the LAN's two resolvers in the backend and on the build
-host:
+(comma-separated) so a guest survives one slow or dead DNS server. The
+backend env change and restart come **first**, then the images are
+rebuilt:
 
-- **sb** (backend) — `/etc/spoond/backend.env`:
-  `SPOOND_GUEST_DNS_ADDR=10.1.0.2,10.1.0.3`
-- **agent-hub build-worker** — the image build environment must export
-  the same value before `spoond images build --all`, so every rebuilt
-  image bakes both resolvers and the `options timeout:2 attempts:3
-  rotate` line:
-  `SPOOND_GUEST_DNS_ADDR=10.1.0.2,10.1.0.3 spoond images build --all`
+1. **sb** (backend) — `/etc/spoond/backend.env`:
+   `SPOOND_GUEST_DNS_ADDR=10.1.0.2,10.1.0.3`, then restart the backend
+   unit. The backend grants each address a port-53 allowance and sends
+   no public DNS fallback; existing images keep their one baked
+   resolver and keep working.
+2. **agent-hub build-worker** — with the backend already serving the
+   new value, export the same value before `spoond images build --all`,
+   so every rebuilt image bakes both resolvers and the `options
+timeout:2 attempts:3 rotate` line:
+   `SPOOND_GUEST_DNS_ADDR=10.1.0.2,10.1.0.3 spoond images build --all`.
 
-The backend grants each address a port-53 allowance and sends no public
-DNS fallback. The sb env change and the image rebuilds happen together
-in that release's window (owner + Honey). Images built with `10.1.0.2`
+Do not rebuild before the backend env is live: an image that bakes both
+resolvers while the backend still grants only one would leave the
+second resolver without an egress allowance. Images built with `10.1.0.2`
 alone keep working — they simply carry one resolver — until they are
 rebuilt.
 

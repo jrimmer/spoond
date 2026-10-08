@@ -325,15 +325,16 @@ func (s *Server) SetLLMRequireKey(v bool) {
 
 // handleHealthz reports liveness and orchestrator reachability without
 // auth, for Gatus/load-balancer checks (U11): 200
-// {"status":"ok","orchestrator":"<NodeInfo.Status>"} when NodeInfo
-// succeeds, 503 {"status":"degraded","orchestrator":"unreachable"} when
-// it fails.
+// {"status":"ok","orchestrator":"<NodeInfo.Status>","draining":bool}
+// when NodeInfo succeeds, 503 {"status":"degraded","orchestrator":
+// "unreachable"} when it fails. The draining flag makes an admin drain
+// visible to monitors instead of having it look like health.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	body := `{"status":"degraded","orchestrator":"unreachable"}`
 	code := http.StatusServiceUnavailable
 	if info, err := s.svc.sub.NodeInfo(r.Context()); err == nil {
 		code = http.StatusOK
-		body = fmt.Sprintf(`{"status":"ok","orchestrator":%q}`, info.Status)
+		body = fmt.Sprintf(`{"status":"ok","orchestrator":%q,"draining":%t}`, info.Status, s.svc.draining.Load())
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

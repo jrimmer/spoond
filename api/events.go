@@ -103,6 +103,25 @@ const (
 	// #83): the detail names the name@version, the size and how long the
 	// checkpoint took.
 	LeaseSnapshotSaved LeaseEventType = "snapshot_saved"
+	// LeaseDrainDeferred marks an undrain (or the drain self-heal loop)
+	// that could not resume a drained lease yet: an admission refusal, a
+	// capacity answer or a bounded context. The lease stays drained and
+	// is retried; the detail names the refusal.
+	LeaseDrainDeferred LeaseEventType = "drain_deferred"
+	// LeaseDrainHealed marks the drain self-heal loop clearing a drain
+	// that outlived DRAIN_MAX_SECS while the node was healthy. It is
+	// spoond's own maintenance, not a lease's, so it carries no lease id
+	// and no owner; the detail names how long the drain lasted.
+	LeaseDrainHealed LeaseEventType = "drain_healed"
+	// LeaseDrainFailed marks a drain that could not pause a lease: the
+	// lease ran on into the orchestrator stop. The detail names the
+	// pause error (spoond-52c R2).
+	LeaseDrainFailed LeaseEventType = "drain_failed"
+	// LeaseDrainGaveUp marks the drain self-heal loop giving up on a
+	// drained lease whose resume stayed deferred past DRAIN_RESUME_MAX_AGE.
+	// The lease is left suspended (not lost: its snapshot is intact) for
+	// the owner or the idle rules to exit (spoond-52c B2).
+	LeaseDrainGaveUp LeaseEventType = "drain_gave_up"
 )
 
 // LeaseEvent is one lease lifecycle change.

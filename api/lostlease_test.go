@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -105,8 +106,10 @@ func TestUndrainFailureStampsLostAt(t *testing.T) {
 		t.Fatalf("drain = %d", resp.StatusCode)
 	}
 	// The pool refills between the drain and the undrain, so fail every
-	// Create: the resume cannot succeed.
-	sub.FailCall("Create", 0, context.DeadlineExceeded)
+	// Create with a permanent error: the resume cannot succeed and the
+	// lease becomes lost (a context or capacity error keeps it drained
+	// for a retry instead).
+	sub.FailCall("Create", 0, errors.New("sandbox would not come back"))
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/admin/undrain", "admin-tok", nil)
 	if resp.StatusCode != 200 {

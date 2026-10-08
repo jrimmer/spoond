@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Guests get both LAN resolvers, with retries.** `SPOOND_GUEST_DNS_ADDR`
+  now takes a comma-separated list (`10.1.0.2,10.1.0.3`); a single value
+  keeps working. The backend grants each address a port-53 egress
+  allowance and validates each as an IP at startup, and sends no public
+  DNS fallback once any resolver is configured. `spoond-guest-init`
+  writes one `nameserver` line per address plus
+  `options timeout:2 attempts:3 rotate`, so a guest survives one slow
+  or dead resolver — the 2026-10-07 incident where a Honey worker's
+  first lookup at boot failed after a disk-saturation spike. The value
+  is baked at image build; `deploy/PRODUCTION-ENV-2.7.md` records the
+  sb and agent-hub build-worker change and the image rebuild.
+
 ### Fixed
 
 - **A checkpoint, pause, resume or restore that finishes after its lease
@@ -24,19 +38,53 @@ summarised from README "Status".
   checkpoint/pause build is left unreferenced for the GC, and a startup/
   reconcile sweep drops any such row an older binary left behind.
 
-### Added
+- **The web proxy decides by Host first, so guest-service routes no
+  longer shadow lease hostnames.** `/assets/`, `/lease/` and `/llm/`
+  were matched before lease-hostname routing whatever the Host, so a
+  request to `https://<lease>-<port>.<domain>/assets/x.js` answered the
+  host's 404 (or a host file) instead of proxying to the guest: Vite/SPA
+  bundles under `/assets/` loaded blank, and a guest app's own `/lease/`
+  or `/llm/` routes were shadowed. A request whose Host parses as a
+  lease hostname now goes straight to the forward-auth gate and the
+  guest proxy with its path untouched; only non-lease hosts (guests
+  calling `http://<HOST_GUEST_SERVICE_ADDR>:8891/...`) reach the
+  internal handlers. The assets containment check is unchanged. #144
 
-- **Guests get both LAN resolvers, with retries.** `SPOOND_GUEST_DNS_ADDR`
-  now takes a comma-separated list (`10.1.0.2,10.1.0.3`); a single value
-  keeps working. The backend grants each address a port-53 egress
-  allowance and validates each as an IP at startup, and sends no public
-  DNS fallback once any resolver is configured. `spoond-guest-init`
-  writes one `nameserver` line per address plus
-  `options timeout:2 attempts:3 rotate`, so a guest survives one slow
-  or dead resolver — the 2026-10-07 incident where a Honey worker's
-  first lookup at boot failed after a disk-saturation spike. The value
-  is baked at image build; `deploy/PRODUCTION-ENV-2.7.md` records the
-  sb and agent-hub build-worker change and the image rebuild.
+- **The admin drain and undrain heal themselves: a detached context, a
+  bounded drain, drained leases retried, and draining visible.** A
+  client that gave up (the `spoond drain --start` hook at 300 s) used to
+  cancel the undrain's remaining resumes, which then went lost, and a
+  cancelled pause left a lease running into the stop; drain and undrain
+  now run on a context detached from the request with their own bound,
+  and a context, admission or capacity error keeps the lease `drained`
+  for a retry instead of losing it. A lease the drain paused had no
+  automatic exit: a drain self-heal loop now resumes any `drained` lease
+  with the same bounded retries as undrain, each on its own doubling
+  backoff (15 s to 10 min, so a permanently deferred lease is not
+  resumed every pass) and giving up after `DRAIN_RESUME_MAX_AGE`
+  (default 24 h) with the lease left suspended — its snapshot intact,
+  not lost — and a `drain_gave_up` event, so a missed undrain (a backend
+  restart between drain and undrain, or an `ExecStartPost` that exited
+  0) no longer strands the lease. A deferred attempt logs a line and
+  emits a `drain_deferred` event on the first deferral or a cause
+  change; the per-lease backoff state is dropped as soon as the lease
+  is no longer drained (owner resume, restore or release), so a later
+  planned restart's deferral is not skipped or given up on early. A
+  drain that outlives `DRAIN_MAX_SECS` (default 900) on a
+  healthy node now undrains itself, logs it and emits a `drain_healed`
+  event instead of refusing every create with 503 forever; a lease the
+  drain could not pause is logged and emits a `drain_failed` event, and
+  a failed node-drain clear keeps spoond draining so the self-heal loop
+  retries it. A backend that starts while the node reports `draining`
+  adopts that drain, so it does not undrain a node another process left
+  mid-planned-stop. A release that races a resume no longer resurrects
+  a released lease, and the sandbox the resume created is deleted. An
+  owner's own resume finally clears `drained`, so resume-on-next-call
+  keeps working and a later undrain cannot resume a lease the owner is
+  running. Draining is reported in `/healthz` (`"draining":true`) and
+  `/readyz`, and the notifier warns on a `node.draining` key only once a
+  healthy node's drain passes half the self-heal limit or the node is
+  unhealthy, so a planned restart under a minute stays silent.
 
 ## [2.7.1] - 2026-10-07
 

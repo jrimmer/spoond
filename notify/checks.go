@@ -23,6 +23,7 @@ const (
 	KeyGCFailed        = "gc.failed"
 	KeyBackupStale     = "backup.stale"
 	KeyDiskKept        = "disk.kept"
+	KeyNodeDraining    = "node.draining"
 )
 
 // Warn/danger levels for the snapshot disk and the hugepage pool: the
@@ -84,21 +85,42 @@ type GCLastError func() error
 // errors) disables the disk.kept check.
 type KeptDisk func() (keptBytes, diskTotal uint64, err error)
 
+// Draining reports the admin drain state: whether a drain is in
+// effect, how long it has lasted, and whether the orchestrator is
+// healthy. The node.draining check warns only while a drain is older
+// than DrainWarnAfter or the node is unhealthy, so a planned restart
+// under a minute stays silent (spoond-52c H3/S3). A nil probe disables
+// the check.
+type Draining func() DrainState
+
+// DrainState is one sample of the admin drain state for the node.draining
+// check.
+type DrainState struct {
+	Draining    bool
+	For         time.Duration
+	NodeHealthy bool
+}
+
 // CheckSources carries the probes the periodic checks read. Every
 // field is optional: a nil source disables its checks (no backup
 // directory disables the backup check) — absence of configuration is
 // not an incident. TLS certificate expiry is not watched here: that is
 // for the host's own IT tooling.
 type CheckSources struct {
-	Unit         SystemdUnit
-	Units        []string // systemd units to watch (e.g. spoond-backend)
-	Disk         DiskUsage
-	Hugepages    HugepageUsage
-	LastBackup   LastBackup
-	GCFailed     GCLastError
-	KeptDisk     KeptDisk      // kept checkpoints vs the snapshot disk (#126); nil = no check
-	KeptWarnPct  float64       // disk.kept warn level, % of the disk; 0 = DefaultKeptDiskWarnPct
-	BackupMaxAge time.Duration // 0 = DefaultBackupMaxAge
+	Unit        SystemdUnit
+	Units       []string // systemd units to watch (e.g. spoond-backend)
+	Disk        DiskUsage
+	Hugepages   HugepageUsage
+	LastBackup  LastBackup
+	GCFailed    GCLastError
+	KeptDisk    KeptDisk // kept checkpoints vs the snapshot disk (#126); nil = no check
+	KeptWarnPct float64  // disk.kept warn level, % of the disk; 0 = DefaultKeptDiskWarnPct
+	Draining    Draining // admin drain state (spoond-52c); nil = no check
+	// DrainWarnAfter is how old a drain must be before node.draining
+	// warns while the node is healthy (DRAIN_MAX_SECS/2 from the
+	// backend). 0 warns on any drain.
+	DrainWarnAfter time.Duration
+	BackupMaxAge   time.Duration // 0 = DefaultBackupMaxAge
 }
 
 // ProductionSources builds the checks the backend runs: systemd units
@@ -211,6 +233,13 @@ func (src *CheckSources) Checks() []Check {
 		keptDisk := src.KeptDisk
 		out = append(out, func(_ context.Context, now time.Time) []Event {
 			return keptDiskCheck(keptDisk, warn, now)
+		})
+	}
+	if src.Draining != nil {
+		draining := src.Draining
+		warnAfter := src.DrainWarnAfter
+		out = append(out, func(_ context.Context, now time.Time) []Event {
+			return drainingCheck(draining, warnAfter, now)
 		})
 	}
 	return out
@@ -344,6 +373,27 @@ func hugepagesCheck(usage HugepageUsage, now time.Time) []Event {
 	default:
 		return []Event{resolved(KeyHugepagesWarn, Warn, now), resolved(KeyHugepagesDanger, Critical, now)}
 	}
+}
+
+// drainingCheck warns while an admin drain is in effect and either has
+// lasted longer than warnAfter with a healthy node or the node is
+// unhealthy: a node that refuses every create with 503 draining is an
+// incident a person must hear about, but a planned restart under a
+// minute is not (spoond-52c H3/S3; DRAIN_MAX_SECS bounds a healthy
+// node's drain, so a drain past half that limit is already suspicious).
+// A non-positive warnAfter warns on any drain.
+func drainingCheck(draining Draining, warnAfter time.Duration, now time.Time) []Event {
+	st := draining()
+	if st.Draining && (!st.NodeHealthy || warnAfter <= 0 || st.For >= warnAfter) {
+		return []Event{{
+			Key:      KeyNodeDraining,
+			Severity: Warn,
+			Title:    "Node is draining",
+			Body:     "the admin drain is in effect: creates answer 503 draining until it is lifted",
+			At:       now,
+		}}
+	}
+	return []Event{resolved(KeyNodeDraining, Warn, now)}
 }
 
 // backupCheck warns when the newest database backup is older than

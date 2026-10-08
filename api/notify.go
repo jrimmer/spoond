@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v2/notify"
@@ -18,6 +19,52 @@ import (
 // notify loop is only started when a notifier is set.
 func (s *Service) SetNotifier(n NotifySink) {
 	s.notifier = n
+}
+
+// Draining reports the admin drain state for the notifier's
+// node.draining check (spoond-52c H3/S3): whether a drain is in effect,
+// how long it has lasted (from drainStartedAt), and whether the last
+// cached NodeInfo says the node is healthy. The check warns only while
+// a healthy node's drain is old enough (half DRAIN_MAX_SECS) or the
+// node is unhealthy, so a planned restart under a minute stays silent.
+func (s *Service) Draining() notify.DrainState {
+	st := notify.DrainState{Draining: s.draining.Load()}
+	if !st.Draining {
+		return st
+	}
+	if started := s.drainStartedAt.Load(); started != 0 {
+		st.For = s.now().Sub(time.Unix(0, started))
+	}
+	st.NodeHealthy = s.nodeHealthyCached()
+	return st
+}
+
+// nodeHealthyCached reports whether the last NodeInfo sample said the
+// node was healthy, treating 'draining' as reachable (it is doing what it
+// was told) and a stale or absent sample as unknown rather than
+// unhealthy. Only a sample naming some other status counts as unhealthy,
+// so a planned drain's brief alert depends on age, not a cache that has
+// not been refreshed yet (spoond-52c S3).
+func (s *Service) nodeHealthyCached() bool {
+	s.nodeInfoMu.Lock()
+	info, at := s.nodeInfoCache, s.nodeInfoAt
+	s.nodeInfoMu.Unlock()
+	if at.IsZero() || s.now().Sub(at) >= nodeInfoCacheTTL {
+		return true
+	}
+	return info.Status == "healthy" || info.Status == "draining"
+}
+
+// DrainWarnAfter is the age past which node.draining warns while the
+// node is healthy: half the effective DRAIN_MAX_SECS, so a planned
+// restart's brief drain stays silent but a drain approaching its
+// self-heal limit is announced (spoond-52c S3).
+func (s *Service) DrainWarnAfter() time.Duration {
+	max := s.drainMaxSecs()
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(max) * time.Second / 2
 }
 
 // NotifySink is what the service feeds events that need a person

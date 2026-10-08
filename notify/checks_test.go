@@ -347,3 +347,48 @@ func TestProductionSourcesBackupMaxAge(t *testing.T) {
 		t.Fatalf("5 min old with the default = %+v, want resolved", evs)
 	}
 }
+
+// TestDrainingCheck: node.draining warns while a healthy node's drain is
+// older than the threshold or the node is unhealthy, and resolves when
+// it clears; a nil probe yields no check (spoond-52c H3/S3).
+func TestDrainingCheck(t *testing.T) {
+	healthy := func(forDur time.Duration) func() DrainState {
+		return func() DrainState {
+			return DrainState{Draining: true, For: forDur, NodeHealthy: true}
+		}
+	}
+	// A healthy node draining under the threshold stays silent (a planned
+	// restart under a minute).
+	ev := drainingCheck(func() DrainState {
+		return DrainState{Draining: true, For: 10 * time.Second, NodeHealthy: true}
+	}, time.Minute, checkNow)
+	if len(ev) != 1 || !ev[0].Resolved || ev[0].Key != KeyNodeDraining {
+		t.Fatalf("healthy brief drain = %+v, want a resolved node.draining", ev)
+	}
+	// Past the threshold it warns.
+	ev = drainingCheck(healthy(2*time.Minute), time.Minute, checkNow)
+	if len(ev) != 1 || ev[0].Resolved || ev[0].Key != KeyNodeDraining || ev[0].Severity != Warn {
+		t.Fatalf("healthy long drain = %+v, want a warn node.draining", ev)
+	}
+	// An unhealthy node warns however brief.
+	ev = drainingCheck(func() DrainState {
+		return DrainState{Draining: true, For: time.Second, NodeHealthy: false}
+	}, time.Minute, checkNow)
+	if len(ev) != 1 || ev[0].Resolved || ev[0].Key != KeyNodeDraining {
+		t.Fatalf("unhealthy node = %+v, want a warn node.draining", ev)
+	}
+	// Not draining resolves.
+	ev = drainingCheck(func() DrainState { return DrainState{} }, time.Minute, checkNow)
+	if len(ev) != 1 || !ev[0].Resolved || ev[0].Key != KeyNodeDraining {
+		t.Fatalf("undrained = %+v, want a resolved node.draining", ev)
+	}
+
+	// The source reaches Checks, and a nil Draining adds no check.
+	src := &CheckSources{Draining: healthy(time.Minute)}
+	if got := len(src.Checks()); got != 1 {
+		t.Fatalf("Draining source checks = %d, want 1", got)
+	}
+	if got := len((&CheckSources{}).Checks()); got != 0 {
+		t.Fatalf("nil Draining checks = %d, want 0", got)
+	}
+}
