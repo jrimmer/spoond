@@ -358,10 +358,13 @@ scoped to this lease's owner.
 behaves exactly like `running` — it marks a lease the crash reconcile
 resumed from a checkpoint, and keeps showing `recovered` until the lease
 is suspended or restarted. `lost` means the sandbox died with no
-checkpoint (or its recovery failed); the detail carries `lost_reason`,
+checkpoint (or its recovery or preempt-resume retries ran out); the detail carries `lost_reason`,
 the cause the `lost` event reported, and every call on the lease answers
 `410` with `code: lease_lost` (see [Lost leases](#lost-leases)); the
-lease should be deleted to free its quota.
+lease should be deleted to free its quota. While a crash recovery is
+retrying after a transient failure, the detail also carries
+`recovery: {"attempt": N, "of": K, "since": "<RFC 3339>"}` — the
+counted attempts so far, the limit and when the first failure happened.
 
 A lost lease keeps its resume and checkpoint snapshots for a grace
 period after the loss — 7 days for a persistent lease, 1 day otherwise
@@ -1043,7 +1046,10 @@ already lost, `404` for an unknown or released lease. Response `200`:
 ```
 
 `result` and `state` are `lost` (and `generation` unchanged) when there
-was no checkpoint.
+was no checkpoint. A recovery that fails transiently answers
+`result: "recovering"` with the lease's current state: the crash test is
+single-shot, while the background reconcile keeps retrying under its
+bounded budget (spoond-dxq).
 
 ### `POST /api/leases/{id}/clone` — branch to a new lease
 
@@ -1226,7 +1232,9 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
 | `snapshot_saved` | `POST /api/leases/{id}/snapshots` saved the lease as a named snapshot (2.7, #83) | `saved as <name>@<version> · <size> · <duration>`, e.g. `saved as spoond/warm@4 · 2.1 GiB · 820 ms` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
-| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume), or its root disk answered I/O errors (rootfs liveness probe) | the reason, e.g. `no checkpoint to recover from; the running state is gone`, `recovery from checkpoint <build> failed: <err>` or `root disk unreadable (I/O errors)`; the same text is stored as `lost_reason` and returned by `GET` and every `410 lease_lost` (see [Lost leases](#lost-leases)) |
+| `recovery_retry` | a crash recovery failed transiently and the lease will be retried (spoond-dxq) | `recovering from checkpoint <build>: attempt N/K failed: <err>`, or `recovering from checkpoint <build>: waiting for capacity: <err>` (a capacity wait is not an attempt) |
+| `rootfs_dead` | the rootfs liveness probe found the lease's root disk unreadable (I/O errors) and started the shared recovery | `root disk unreadable (I/O errors)` (before the `recovered`/`lost`/`recovery_retry` event that follows) |
+| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume, or a recovery/preempt-resume retry budget spent), or its root disk answered I/O errors (rootfs liveness probe) | the reason, e.g. `no checkpoint to recover from; the running state is gone`, `recovery from checkpoint <build> failed after N attempt(s) within <window>: <err>` or `root disk unreadable (I/O errors)`; the same text is stored as `lost_reason` and returned by `GET` and every `410 lease_lost` (see [Lost leases](#lost-leases)) |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
 | `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |

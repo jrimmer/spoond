@@ -9,9 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Admin endpoints (U10): POST /api/admin/drain pauses every running
@@ -262,7 +259,7 @@ func resumeRetryable(err error) bool {
 	}
 	// Permanent: the image or build the resume needs is gone. A retry
 	// cannot bring it back, so the lease goes lost at once.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, substrate.ErrNotFound) || errors.Is(err, errNotFound) {
+	if permanentNotFound(err) {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

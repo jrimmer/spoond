@@ -120,6 +120,8 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.writeGeneration(l)
+	// The restored sandbox has no crash-recovery budget (spoond-dxq B2).
+	s.clearRecoveryRetries(l)
 	// The restored guest does not continue the memory the jobs ran in:
 	// every running job is lost (2.6, #135).
 	s.markLeaseJobsLost(ctx, l.ID, l.Owner, "lease restored to a checkpoint; the job did not survive")

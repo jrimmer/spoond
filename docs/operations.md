@@ -502,6 +502,46 @@ cannot be read — a transient failure never destroys lease state. Orphan
 sandboxes no lease or pool entry claims are deleted, and peer egress
 allowances are refreshed.
 
+Recovery is retried, not given up on at the first error: a `recoverFromCheckpoint`
+failure keeps the lease live with no sandbox and the next reconcile pass tries
+it again. Recovery retries anything that is not permanent — deliberately
+the inverse of `resumeRetryable` — so a busy node's envd start, a
+deadline or any other retryable error counts against
+`RECOVERY_RETRY_ATTEMPTS` (default 3) and is bounded by
+`RECOVERY_RETRY_WINDOW` (default 30m) since the first failure. The only
+recovery failure that waits for room instead of counting is a substrate
+`ErrCapacity` (the node is full or draining); admission refusals (over
+quota, under the burst reserve, no preemption room) cannot reach a live
+lease's recovery, which skips admission, so they are not in this path. A
+missing checkpoint build or image is permanent and loses the lease at
+once. Every transient failure emits a `recovery_retry` event naming the
+attempt and the cause, and `GET /api/leases/{id}` exposes the pending
+retry as `recovery: {attempt, of, since}`. When the budget is spent the
+lease is marked `lost` with a reason naming the attempts and the error,
+and a `lost` event is emitted.
+
+Preemption's resume queue (`resumePreempted`, every 15 s) is bounded
+differently: a preempted lease whose resume keeps failing with a
+non-admission error gets `PREEMPT_RESUME_RETRIES` (default 3) attempts
+before it is marked `lost` with the reason and a `lost` event. An
+admission/capacity refusal is not a failure — the preemption parked the
+lease to free the very room it now waits for — so it neither counts nor
+starts the window, and it also resets the window origin of any budget a
+counted failure already started: the window measures only an unbroken run
+of counted failures, so a long wait for room between two of them cannot
+age an intact lease out. The lease waits for room indefinitely, resuming
+when room appears. The per-lease deferred log line is rate-limited to
+once per 10 minutes. So a permanently failing resume cannot create a new
+orchestrator sandbox every 15 s for ever, while a lease merely waiting
+for capacity is never lost.
+
+The recovery budget is keyed by the sandbox that failed and dropped
+whenever the lease gets a new sandbox (restart, restore, resume), on
+recovery success, loss and release, so a stale budget can never make the
+next reconcile roll a healthy lease back to an old checkpoint. A
+recovery or preemption loss that races a release leaves the released
+lease alone: no resurrection, no late `lost` event.
+
 To the API and the gateway, `recovered` behaves exactly like `running`
 (`state` keeps showing it until the lease is suspended or restarted),
 while `lost` answers `410` with `code: lease_lost`, the stored reason
