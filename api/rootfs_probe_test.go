@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // newRootfsProbeService builds a Service with py-base seeded and the
@@ -96,14 +99,22 @@ func TestRootfsProbeLostWithoutCheckpoint(t *testing.T) {
 			lostDetails = append(lostDetails, ev.Detail)
 		}
 	}
-	if len(lostDetails) < 2 {
-		t.Fatalf("lost event details = %v, want the root-disk marker and the recovery reason", lostDetails)
+	if len(lostDetails) != 1 {
+		t.Fatalf("lost event details = %v, want the one recovery reason", lostDetails)
 	}
-	if lostDetails[0] != "root disk unreadable (I/O errors)" {
-		t.Fatalf("first lost detail = %q, want the root-disk marker", lostDetails[0])
+	if lostDetails[0] != "no checkpoint to recover from; the running state is gone" {
+		t.Fatalf("lost detail = %q, want the recovery reason", lostDetails[0])
 	}
-	if lostDetails[1] != "no checkpoint to recover from; the running state is gone" {
-		t.Fatalf("second lost detail = %q, want the recovery reason", lostDetails[1])
+	// The root-disk cause goes first as its own marker, never as a lost
+	// event that would announce a loss before the recovery ran.
+	var rootfsDetail string
+	for _, ev := range events {
+		if ev.LeaseID == l.ID && ev.Type == LeaseRootfsDead {
+			rootfsDetail = ev.Detail
+		}
+	}
+	if rootfsDetail != "root disk unreadable (I/O errors)" {
+		t.Fatalf("rootfs_dead marker = %q, want the root-disk cause", rootfsDetail)
 	}
 }
 
@@ -362,5 +373,161 @@ func TestRootfsProbeScriptReadsRootDevice(t *testing.T) {
 		if !strings.Contains(rootfsProbe, want) {
 			t.Errorf("probe script does not contain %q:\n%s", want, rootfsProbe)
 		}
+	}
+}
+
+// TestRootfsProbeSkipsRecoveryRetry: the rootfs probe must not target a
+// lease already waiting for a recovery retry. Its sandbox was deleted by
+// the failed recovery, so a probe would fail and stamp a spurious
+// rootfs_dead / the wrong lost_reason ahead of the retry (spoond-dxq SH2).
+func TestRootfsProbeSkipsRecoveryRetry(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 3
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			return substrate.Sandbox{}, errors.New("failed to init envd")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	// A transient failure leaves a pending retry keyed by the dead sandbox.
+	if out := svc.reconcileCrash(ctx); out.Lost != 0 {
+		t.Fatalf("first failure lost the lease: %+v", out)
+	}
+	if !svc.recoveryPending(sb) {
+		t.Fatal("setup: no pending recovery retry")
+	}
+	// A dead disk on the old sandbox would otherwise be probed.
+	sub.rootfsFail[sb] = "dd: error reading '/dev/vda': Input/output error"
+
+	for i := 0; i < rootfsProbeFailuresThreshold+1; i++ {
+		svc.probeRootfsLeases(ctx)
+	}
+	if got := sub.RootfsProbeCalls(); got != 0 {
+		t.Fatalf("probe calls for a lease awaiting a recovery retry = %d, want 0", got)
+	}
+	if l.State == "lost" {
+		t.Fatal("the probe lost a lease that was waiting for a recovery retry")
+	}
+
+	// The retry then recovers it; the rootfs probe picking it up again is
+	// fine (the fresh sandbox is healthy).
+	sub.createFn = nil
+	if out := svc.reconcileCrash(ctx); out.Recovered != 1 {
+		t.Fatalf("reconcile after the retry = %+v, want one recovery", out)
+	}
+	if l.State != "recovered" {
+		t.Fatalf("state = %q, want recovered", l.State)
+	}
+}
+
+// TestRootfsProbeTransientRecoveryRetries: a rootfs-dead recovery that
+// fails transiently does not lose the lease; it emits a recovery_retry
+// event and the next reconcile retries it (spoond-dxq NIT).
+func TestRootfsProbeTransientRecoveryRetries(t *testing.T) {
+	svc, sub, l := newRootfsProbeService(t, true)
+	ctx := context.Background()
+	if _, err := svc.checkpointLease(ctx, l); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	oldSandbox := l.SandboxID
+	sub.rootfsFail[oldSandbox] = "dd: error reading '/dev/vda': Input/output error"
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == oldSandbox {
+			return substrate.Sandbox{}, errors.New("failed to init envd")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	esub := svc.Subscribe(EventFilter{LeaseID: l.ID})
+	defer esub.Close()
+
+	// Three EIO failures trigger the rootfs recovery: a transient create
+	// failure leaves the lease recovering, not lost.
+	svc.probeRootfsLeases(ctx)
+	svc.probeRootfsLeases(ctx)
+	svc.probeRootfsLeases(ctx)
+
+	if l.State == "lost" || !l.live() {
+		t.Fatalf("transient rootfs recovery left the lease %q, want it still live/recovering", l.State)
+	}
+	if l.LostReason != "root disk unreadable (I/O errors)" {
+		t.Fatalf("lost reason = %q, want the root-disk cause stamped", l.LostReason)
+	}
+
+	esub.Close()
+	events := collectEvents(esub.C)
+	var sawRetry, sawLost bool
+	for _, ev := range events {
+		switch ev.Type {
+		case LeaseRetry:
+			sawRetry = true
+		case LeaseLost:
+			sawLost = true
+		}
+	}
+	if !sawRetry {
+		t.Fatalf("no recovery_retry event: %v", eventTypes(events))
+	}
+	if sawLost {
+		t.Fatalf("a lost event followed a transient rootfs recovery: %v", eventTypes(events))
+	}
+
+	// The next reconcile recovers it from the checkpoint.
+	sub.createFn = nil
+	if out := svc.reconcileCrash(ctx); out.Recovered != 1 {
+		t.Fatalf("reconcile after transient rootfs failure = %+v, want one recovery", out)
+	}
+	if l.State != "recovered" {
+		t.Fatalf("state = %q, want recovered", l.State)
+	}
+}
+
+// TestRecoveryReleaseDuringPendingRetry: a lease released while a
+// recovery retry is pending is not re-targeted or resurrected by the next
+// reconcile (spoond-dxq NIT).
+func TestRecoveryReleaseDuringPendingRetry(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 3
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			return substrate.Sandbox{}, errors.New("syncing took too long")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	if out := svc.reconcileCrash(ctx); out.Lost != 0 {
+		t.Fatalf("first failure lost the lease: %+v", out)
+	}
+	if !svc.recoveryPending(sb) {
+		t.Fatal("setup: no pending recovery retry")
+	}
+
+	// The owner deletes the lease while the retry is pending.
+	svc.releaseBecause(ctx, l, "deleted through the API")
+	if _, ok := svc.store.leases[l.ID]; ok {
+		t.Fatal("the released lease row survived")
+	}
+
+	// The next reconcile must not touch (or resurrect) it.
+	sub.createFn = nil
+	if out := svc.reconcileCrash(ctx); out.Recovered != 0 || out.Lost != 0 {
+		t.Fatalf("reconcile after release = %+v, want no action", out)
+	}
+	if _, ok := svc.store.leases[l.ID]; ok {
+		t.Fatal("reconcile resurrected the released lease")
 	}
 }

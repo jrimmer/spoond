@@ -1,4 +1,4 @@
-                SPOOND · spoond.example.com · dev · up 9m               
+SPOOND · spoond.example.com                              up 9m, 12:00:00
                                                                         
 ┌─ capacity ───────────────────────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░                               3 / 64  │
@@ -12,12 +12,12 @@
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ host ───────────────────────────────────────────────────────────────┐
 │ cpu           ██████░░░░░░╎░░░                       38% · load 1.4  │
+│ i/o stall     ╎░░░░░░░░░░░░░░░                            0.0% full  │
+│ nvme0n1 busy  ██░░░░░░░░░░╎░░░                      18% · 12 MB/s w  │
 │ memory        ███████░░░░░╎░░░                      9.7 of 19.7 GiB  │
 │ hugepages     ███████░░░░░╎░░░                        23.9 GiB free  │
 │ snapshot disk █████████░░░╎░░░                       121.5 GiB free  │
 │ root disk     ██████░░░░░░╎░░░                        30.2 GiB free  │
-│ I/O pressure  some 0.2% / full 0.0% (60s)                            │
-│ nvme0n1       12 MB/s w, 18% busy                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
 │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB                              │
 │ gc dry-run                                                           │
@@ -29,10 +29,11 @@
 │ ▁▃▁▅██                   ▅▆█▇██                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ leases ─────────────────────────────────────────────────────────────┐
-│ id      image      owner  state      net   age    left   holder      │
-│ abcdef  go-base    jason  ▶ running  inet  5m     10m    -           │
-│ 123456  py-base    ci     ▶ running  rstr  2h31m  ∞      ◆ forgejo…  │
-│ fedcba  go-base    agent  ‖ susp     lan   1d     due    ◉ nightly   │
+│ id     image   owner state     access age    left holder             │
+│ abcdef go-base jason ▶ running inet   5m     10m  -                  │
+│ 123456 py-base ci    ▶ running rstr   2h31m  ∞    ◆ forgejo/job-42   │
+│ fedcba go-base agent ‖ susp    lan    1d     due  ◉ nightly          │
+│ ◆ held · ◉ lapsed                                                    │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ images ─────────────────────────────────────────────────────────────┐
 │ image            vcpu  mem      live  uses   baked                   │
@@ -56,4 +57,4 @@
 │ 07:19:02  held_action  fedcba0987  nightly                           │
 │ 07:18:44  released    abcdef0123  jason                              │
 └──────────────────────────────────────────────────────────────────────┘
-leases [3/64]  hugepages [23.9 GiB free]                        12:00:00
+                           Spoond dev · GitHub                          

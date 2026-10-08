@@ -542,9 +542,49 @@ cannot be read — a transient failure never destroys lease state. Orphan
 sandboxes no lease or pool entry claims are deleted, and peer egress
 allowances are refreshed.
 
+Recovery is retried, not given up on at the first error: a `recoverFromCheckpoint`
+failure keeps the lease live with no sandbox and the next reconcile pass tries
+it again. Recovery retries anything that is not permanent — deliberately
+the inverse of `resumeRetryable` — so a busy node's envd start, a
+deadline or any other retryable error counts against
+`RECOVERY_RETRY_ATTEMPTS` (default 3) and is bounded by
+`RECOVERY_RETRY_WINDOW` (default 30m) since the first failure. The only
+recovery failure that waits for room instead of counting is a substrate
+`ErrCapacity` (the node is full or draining); admission refusals (over
+quota, under the burst reserve, no preemption room) cannot reach a live
+lease's recovery, which skips admission, so they are not in this path. A
+missing checkpoint build or image is permanent and loses the lease at
+once. Every transient failure emits a `recovery_retry` event naming the
+attempt and the cause, and `GET /api/leases/{id}` exposes the pending
+retry as `recovery: {attempt, of, since}`. When the budget is spent the
+lease is marked `lost` with a reason naming the attempts and the error,
+and a `lost` event is emitted.
+
+Preemption's resume queue (`resumePreempted`, every 15 s) is bounded
+differently: a preempted lease whose resume keeps failing with a
+non-admission error gets `PREEMPT_RESUME_RETRIES` (default 3) attempts
+before it is marked `lost` with the reason and a `lost` event. An
+admission/capacity refusal is not a failure — the preemption parked the
+lease to free the very room it now waits for — so it neither counts nor
+starts the window, and it also resets the window origin of any budget a
+counted failure already started: the window measures only an unbroken run
+of counted failures, so a long wait for room between two of them cannot
+age an intact lease out. The lease waits for room indefinitely, resuming
+when room appears. The per-lease deferred log line is rate-limited to
+once per 10 minutes. So a permanently failing resume cannot create a new
+orchestrator sandbox every 15 s for ever, while a lease merely waiting
+for capacity is never lost.
+
+The recovery budget is keyed by the sandbox that failed and dropped
+whenever the lease gets a new sandbox (restart, restore, resume), on
+recovery success, loss and release, so a stale budget can never make the
+next reconcile roll a healthy lease back to an old checkpoint. A
+recovery or preemption loss that races a release leaves the released
+lease alone: no resurrection, no late `lost` event.
+
 To the API and the gateway, `recovered` behaves exactly like `running`
 (`state` keeps showing it until the lease is suspended or restarted),
-while `lost` answers `409` with `code: lease_lost`, the stored reason
+while `lost` answers `410` with `code: lease_lost`, the stored reason
 and the `DELETE` that frees the quota, on exec, stream, proxy and SSH
 (see [api.md](api.md#lost-leases)). `POST
 /api/admin/reconcile` runs the reconciliation on demand and returns
@@ -754,7 +794,7 @@ each request's env.
 | `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
 | `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
 | lease shows `preempted` / `‖ preempted` on the dashboard | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
-| `409 lease_lost` (`code: lease_lost`) | the lease's sandbox died with no checkpoint (or its recovery failed); the message names the reason | `DELETE` the lease to free its quota; nothing to resume |
+| `410 lease_lost` (`code: lease_lost`) | the lease's sandbox died with no checkpoint (or its recovery failed); the message names the reason | `DELETE` the lease to free its quota; nothing to resume |
 | `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
 | `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
 | `exec failed` / `agent unreachable` | envd in the guest is not answering (sandbox died under us, node overloaded) | `spoond doctor`; if the sandbox is really gone the next reconcile marks the lease |
@@ -1018,17 +1058,22 @@ spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
 for watching rather than triage. It draws the whole frame as one
 character grid at a fixed width — capacity (running/limit meter, leases
 by state, queued, granted, swept, and one row per image with live
-leases) beside the host meters (CPU, memory, hugepages, snapshot and
-root disk, and the disk I/O readout — PSI pressure `some`/`full` over
-60 s and the snapshot device's write throughput and busy share) at a
+leases) beside the host meters (CPU, the two disk I/O meters directly
+under it — `i/o stall` from PSI and `<dev> busy` from the snapshot
+device — then memory, hugepages, snapshot and root disk) at a
 wide frame, stacked below it at a narrow one — then a
 full-width throughput panel (running leases, requests per second,
 creates per minute and egress connections, each with its current value
 and a sparkline over the history, titled with the window the history
 covers), live leases (id, image, owner, the run state — ▶ running,
-‖ suspended, ■ lost, ⭘ recovered —, policy, age, time left and the
-holder, ◆ when a hold is active and ◉ once it has lapsed; on the page
-the holder is a link), the image catalog (shape, live leases, lifetime
+‖ suspended, ■ lost, ⭘ recovered —, the access policy (`isolated` when
+the API's `network_policy` is `none`, else `lan`/`restricted`/
+`internet`), age, time left and the holder, ◆ when a hold is active and
+◉ once it has lapsed; on the page the holder is a link; the table's
+fixed columns are sized to the values actually shown, so short states
+leave no blank run and the freed width goes to the owner then the
+holder, and the ◆ held · ◉ lapsed legend sits on one dim line under the
+table when a row carries a hold), the image catalog (shape, live leases, lifetime
 uses, baked-at) beside the systemd units, a refusals-and-failures row
 (auth, quota, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and
@@ -1038,7 +1083,7 @@ message): spoond's own system messages, one row each — a unit not
 active, free hugepages or snapshot disk past the danger level, kept
 checkpoints past `KEPT_DISK_WARN_PCT` of the snapshot disk (#126), or
 the snapshot disk's I/O full pressure past `DASH_IO_FULL_BAD_PCT`
-(`disk I/O stalled: full pressure N% over 60 s`, cleared when the
+(`disk i/o stalled: full pressure N% over 60 s`, cleared when the
 pressure drops). Each
 message has a stable id from its trigger, a severity (warn/bad) and a
 `×` the viewer can dismiss for their own browser (`localStorage`, no
@@ -1046,10 +1091,22 @@ server state; a dismissed message stays hidden while its trigger stays
 active and returns if the trigger clears and fires again). Per-lease
 trouble is not a dashboard message: the viewer cannot act on a lease,
 so spoond tells the lease's initiator itself (the lease event stream
-and the API's `409 lease_lost` with `lost_reason`). TLS certificate expiry is
+and the API's `410 lease_lost` with `lost_reason`). TLS certificate expiry is
 left to the host's own monitoring (see the Gatus example above). The host panel's GC row also shows the kept total —
-`kept N (X GiB)` when any build is pinned. A status line under the panels carries the headline numbers
-and the clock. The browser page is the grid in a `<pre>` (Datastar
+`kept N (X GiB)` when any build is pinned. The header draws
+`SPOOND · <host>` at the left margin and right-aligns spoond's uptime
+and the frame's clock as `up <dur>, <time>` (the uptime drops before the
+clock on a narrow frame). The footer is one dim, centred line —
+`Spoond v2.7.1 (2026-10-07) · GitHub` — with the dashboard binary's
+version (`debug.ReadBuildInfo`, shortened like the header used to), its
+release date (`vcs.time` as `YYYY-MM-DD`, omitted for a dev build) and
+the GitHub mark linking to `DASH_PROJECT_URL`; the URL text is no
+longer shown. On a narrow frame the date drops first, keeping the
+version and the mark. The mark is the standard GitHub octocat inline
+SVG (16px, `currentColor`) in the browser and the dim word `GitHub` in
+the terminal. The
+browser page
+is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
 styles in the terminal, at the terminal's width (COLUMNS, else 104),
 redrawn every 2 seconds until interrupted. It runs as its own service on **:8893** behind
@@ -1068,8 +1125,13 @@ history are kept so a new page starts with trends. The host I/O readout
 comes from `/proc/pressure/io` (PSI: `some` and `full` over 60 s, not
 `iowait`, which drops when CPUs are busy even if the disk is saturated)
 and `/proc/diskstats` (the snapshot device's write MB/s and busy share,
-a delta between collections). A kernel without PSI (no
-`/proc/pressure`) simply hides the pressure row instead of erroring;
+a delta between collections). The i/o stall meter's value is the full
+60 s average, shown as `0.4% full` (the 60 s `some` average stays in
+the metrics, not on the meter); the busy meter's value text is
+`<busy>% · <N> MB/s w`, its label the device name (`nvme0n1 busy`)
+when that fits the meter label column, else `disk busy`. A kernel
+without PSI (no `/proc/pressure`) simply hides the stall meter;
+a device the collector could not resolve hides the busy meter only.
 `DASH_DISK_DEVICE` names the block device to watch, defaulting to the
 one the storage path's mount sits on. With
 `DASH_EVENTS_TOKEN` set, the collector also holds one subscription to
@@ -1095,13 +1157,14 @@ variables:
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
 | `DASH_DISK_DEVICE` | *(auto from the storage mount)* | block device for the write-throughput and busy readout |
-| `DASH_IO_FULL_WARN_PCT` | `5` | PSI full avg60 at which the pressure meter turns warn |
+| `DASH_IO_FULL_WARN_PCT` | `5` | PSI full avg60 at which the i/o stall meter turns warn |
 | `DASH_IO_FULL_BAD_PCT` | `15` | PSI full avg60 at which it turns bad and the notification fires |
-| `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol` | systemd units to show |
+| `DASH_SERVICES` | `spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch` | systemd units to show |
 | `DASH_INTERVAL` | `2s` | refresh interval (minimum 1 s) |
 | `DASH_HISTORY` | `150` | sparkline points kept (10–200) |
 | `DASH_WIDTH` | `104` | frame width in cells (72–104) |
 | `DASH_HOST` | *(the hostname)* | header label |
+| `DASH_PROJECT_URL` | `github.com/jrimmer/spoond` | the footer's GitHub mark links here |
 
 The I/O thresholds are a first cut, to be tuned from #136's
 measurements. `iowait` is deliberately not used: it is CPU idle time

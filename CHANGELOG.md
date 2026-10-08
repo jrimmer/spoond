@@ -10,57 +10,6 @@ summarised from README "Status".
 
 ## [Unreleased]
 
-### Added
-
-- **The dashboard's host panel shows disk I/O pressure and the snapshot
-  disk's throughput.** A new pair of rows beside the CPU and memory
-  meters: `I/O pressure some 0.3% / full 0.0% (60s)` from
-  `/proc/pressure/io` and `nvme0n1 12 MB/s w, 18% busy` from
-  `/proc/diskstats` (a delta between collections). PSI rather than
-  `iowait`, which falls when CPUs are busy even if the disk is
-  saturated. The pressure meter warns at `DASH_IO_FULL_WARN_PCT`
-  (default 5) and turns bad at `DASH_IO_FULL_BAD_PCT` (default 15) of
-  the full 60 s average, where the Notifications panel also raises
-  `disk I/O stalled: full pressure N% over 60 s` (id `io-pressure`,
-  cleared when the pressure drops). The device is auto-detected from
-  the storage path's mount or set with `DASH_DISK_DEVICE`; a kernel
-  without PSI hides the pressure row instead of erroring. The
-  thresholds are a first cut, to be tuned from #136's measurements.
-- **The dashboard's notifications panel for spoond system messages.**
-  The old attention strip drew per-lease rows (a lost lease, the
-  preempted burst count, a lapsed hold) that the dashboard viewer cannot
-  act on; those leases stay visible in the leases table with their state
-  (lost, preempted, suspended). In their place, a bordered full-width
-  **Notifications** panel below the header draws spoond's own system
-  messages — a systemd unit not active, hugepages or snapshot disk past
-  the danger level, kept checkpoints past `KEPT_DISK_WARN_PCT` — each
-  with a stable id from its trigger and a severity. The panel is not
-  drawn at all when there are no undismissed messages. Each row carries
-  a `×` dismiss control; the dismissal is per viewer in `localStorage`
-  (try/catch-wrapped, works without it) keyed by the message id, stays
-  hidden while the trigger stays active and returns if the trigger
-  clears and fires again. No server state; the dashboard stays
-  read-only.
-- **Lost leases tell their initiator why and what to do.** A lease whose
-  sandbox a substrate crash (or a failed recovery) lost now records the
-  reason (`leases.lost_reason`, migration 0019) and returns it: the
-  `lost` lease event's `detail` carries it, `GET` shows `lost_reason`
-  beside `state: lost`, and any call on a lost lease answers `409` with
-  `code: lease_lost` and a message naming the substrate, the reason and
-  that `DELETE` frees the quota. This replaces the old `410` that named
-  no cause.
-
-### Changed
-
-- **A lost lease answers `409 lease_lost`, not `410`.** The old `410`
-  named no cause and gave the initiator nothing to act on; a lost lease
-  now records why (`leases.lost_reason`, migration 0019) and every call
-  names the substrate, the reason and the `DELETE` that frees the quota.
-  Scripts and clients that branch on `410` for a lost lease should
-  branch on `409` with `code: lease_lost`; a `410` still means the
-  sandbox is gone with nothing in flight. The new `lost_reason` field on
-  the lease object is additive (`omitempty`).
-
 ### Fixed
 
 - **The admin drain and undrain heal themselves: a detached context, a
@@ -76,16 +25,148 @@ summarised from README "Status".
   event on a deferred attempt), so a missed undrain — a backend restart
   between drain and undrain, or an `ExecStartPost` that exited 0 — no
   longer strands the lease. A drain that outlives `DRAIN_MAX_SECS`
-  (default 900) on a healthy node now undrains itself,
-  logs it and emits a `drain_healed` event instead of refusing every
-  create with 503 forever; a lease the drain could not pause is logged
-  and emits a `drain_failed` event, and a failed node-drain clear keeps
-  spoond draining so the self-heal loop retries it. Draining is reported
-  in `/healthz` (`"draining":true`) and `/readyz`, and the notifier adds
+  (default 900) on a healthy node now undrains itself, logs it and
+  emits a `drain_healed` event instead of refusing every create with
+  503 forever; a lease the drain could not pause is logged and emits a
+  `drain_failed` event, and a failed node-drain clear keeps spoond
+  draining so the self-heal loop retries it. Draining is reported in
+  `/healthz` (`"draining":true`) and `/readyz`, and the notifier adds
   a `node.draining` key. An owner's own resume finally clears `drained`,
   so resume-on-next-call keeps working and a later undrain cannot resume
   a lease the owner is running.
 
+## [2.7.1] - 2026-10-07
+
+spoond looks after more of itself and says less on the dashboard about
+things a viewer cannot act on. A lost lease now answers `410`
+with `code: lease_lost` and its reason, and is released once its grace period
+lapses, so its owner's quota comes back; every orchestrator call has a
+deadline. The dashboard gains a Notifications panel for spoond system
+messages only (dismissable per viewer), i/o stall and disk-busy meters,
+a left-aligned header with uptime and clock, a footer with the version,
+release date and a GitHub link, and a leases table whose access column
+says isolated for no network and whose columns fit their content. Store migration 0019 is additive; the grid package is
+unchanged since 2.7.0.
+
+### Added
+
+- **The dashboard's host panel shows disk I/O pressure and the snapshot
+  disk's throughput as meters under the CPU meter.** Two new meter rows
+  directly under `cpu`: `i/o stall`, whose value is the PSI `full` 60 s
+  average drawn on the same 0-100 scale as the other meters, its value
+  text `0.4% full`, and
+  `<dev> busy`, whose value is the snapshot device's busy share with
+  `<N> MB/s w` in its value text (`nvme0n1 busy ... 18% · 12 MB/s w`).
+  The stall meter reads `/proc/pressure/io` and warns at
+  `DASH_IO_FULL_WARN_PCT` (default 5), turning bad at
+  `DASH_IO_FULL_BAD_PCT` (default 15) of the full 60 s average, where
+  the Notifications panel also raises
+  `disk i/o stalled: full pressure N% over 60 s` (id `io-pressure`,
+  cleared when the pressure drops); PSI rather than `iowait`, which
+  falls when CPUs are busy even if the disk is saturated. The busy
+  meter reads `/proc/diskstats` (a delta between collections) and warns
+  at 80, turning bad at 90. A missing PSI hides the stall meter only;
+  a device the collector could not resolve hides the busy meter only.
+  The device is auto-detected from the storage path's mount or set with
+  `DASH_DISK_DEVICE`. The thresholds are a first cut, to be tuned from
+  #136's measurements.
+- **The dashboard's notifications panel for spoond system messages.**
+  The old attention strip drew per-lease rows (a lost lease, the
+  preempted burst count, a lapsed hold) that the dashboard viewer cannot
+  act on; those leases stay visible in the leases table with their state
+  (lost, preempted, suspended). In their place, a bordered full-width
+  **Notifications** panel below the header draws spoond's own system
+  messages — a systemd unit not active, hugepages or snapshot disk past
+  the danger level, kept checkpoints past `KEPT_DISK_WARN_PCT` — each
+  with a stable id from its trigger and a severity. The panel is not
+  drawn at all when there are no undismissed messages. Each row carries
+  a `×` dismiss control; the dismissal is per viewer in `localStorage`
+  (try/catch-wrapped, works without it) keyed by the message id, stays
+  hidden while the trigger stays active and returns if the trigger
+  clears and fires again. No server state; the dashboard stays
+  read-only.
+- **The dashboard's leases table sizes its columns to the content and
+  names its policy and holder columns.** The network-policy column's
+  header reads **access** (narrow fallback `acc` / `net`), and a lease
+  whose API `network_policy` is `none` shows `isolated`; the stored
+  value stays `none`. The fixed-width columns (state, image, owner,
+  access, left) are as wide as the widest value actually shown, never
+  below their header, so a table of short states leaves no blank run;
+  the width freed that way widens the owner first (up to its own longest
+  value) and then the last column. The holder column's header is plain
+  `holder`, and the `◆ held · ◉ lapsed` legend moves to one dim line
+  directly under the table's last row, drawn only when a row carries a
+  hold. Docs and goldens cover both frame widths.
+- **Lost leases tell their initiator why and what to do.** A lease whose
+  sandbox a substrate crash (or a failed recovery) lost now records the
+  reason (`leases.lost_reason`, migration 0019) and returns it: the
+  `lost` lease event's `detail` carries it, `GET` shows `lost_reason`
+  beside `state: lost`, and any call on a lost lease answers `410` with
+  `code: lease_lost` and a message naming the substrate, the reason and
+  that `DELETE` frees the quota. This replaces the old bare `410` that named
+  no cause.
+
+### Changed
+
+- **A lost lease says why.** A call on a lost lease still answers
+  `410 Gone`, and the body now carries `code: lease_lost` and a message
+  naming the substrate, the reason and the `DELETE` that frees the
+  quota. The reason is stored (`leases.lost_reason`, migration 0019) and
+  shown as `lost_reason` on the lease object (additive, `omitempty`).
+  `409` keeps meaning "busy, retry".
+- **The dashboard's header title sits at the left margin and its
+  footer links the project's GitHub repository.** The header's left edge
+  reads `SPOOND · <host>` at the same inset as the panels' frames (the
+  version is not there); the right side keeps spoond's own uptime and
+  the frame's clock as `up <dur>, <time>`, dropping the uptime before
+  the clock and never overlapping the title. The footer is one dim,
+  centred line — `Spoond v2.7.1 (2026-10-07) · GitHub` — with the
+  dashboard binary's version (`debug.ReadBuildInfo`, shortened like the
+  header used to), its release date (the build's `vcs.time` as
+  `YYYY-MM-DD`, omitted for a dev build), and the GitHub mark linking to
+  `DASH_PROJECT_URL` (default the module's home); the URL text is no
+  longer shown. On a narrow frame the date drops first, keeping the
+  version and the mark. In the browser the mark is the standard GitHub
+  octocat inline SVG (16px, `currentColor`), so it follows the dim
+  footer colour and the light/dark theme; in the terminal it is the dim
+  word `GitHub`.
+
+### Fixed
+
+- **Recovery and preempt-resume retry transient failures and give up on
+  permanent ones.** A lease whose crash recovery failed was marked `lost`
+  on the first error, including a busy node's envd timeout, a deadline or
+  a capacity refusal that a retry would clear, and the rootfs-probe
+  recovery took the same path. Recovery now classifies the failure and
+  retries anything that is not permanent — the deliberate inverse of
+  `resumeRetryable` — leaving the lease live with no sandbox for the next
+  reconcile pass (there is no new state: a recovering lease keeps its
+  `running`/`recovered` state). A counted failure is bounded by
+  `RECOVERY_RETRY_ATTEMPTS` (default 3) and `RECOVERY_RETRY_WINDOW`
+  (default 30m) since the first failure; a substrate capacity refusal is
+  a wait for room, so it does not count an attempt (admission refusals
+  cannot reach a live lease's recovery, which skips admission) but is
+  still bounded by the window; a missing checkpoint build or image is
+  permanent and loses the lease at once. Every transient failure emits a
+  `recovery_retry` event naming the attempt and the cause, and `GET`
+  exposes the pending retry as `recovery: {attempt, of, since}`. The
+  lease is marked `lost` with a reason naming the attempts and the error
+  when the budget is spent. The recovery budget is keyed by the sandbox
+  that failed and dropped whenever the lease gets a new one (restart,
+  restore, resume), on recovery success, loss and release, so a stale
+  budget can never make reconcile roll a healthy lease back to an old
+  checkpoint. Separately, the preemption resume queue retried a
+  permanently failing resume every 15 s for ever, each a real
+  orchestrator `Create`; it now counts non-admission failures and, after
+  `PREEMPT_RESUME_RETRIES` (default 3), marks the lease `lost` with the
+  reason and emits a `lost` event. A preempted lease parked for room is
+  different: its admission/capacity refusal neither counts nor starts the
+  window, and a wait also resets the window origin of any budget a
+  counted failure already started, so a long wait for room between two
+  counted failures cannot age an intact lease out; it waits for room
+  indefinitely and resumes when room appears. A recovery or preempt loss
+  that races a release no longer resurrects the released lease or emits a
+  late `lost` event (`spoond-dxq`).
 - **A lost lease is released automatically once its grace period
   lapses, freeing its owner's quota.** A lease in state `lost` was never
   released unless its owner deleted it: it kept holding the owner's

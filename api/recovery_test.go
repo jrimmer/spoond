@@ -106,9 +106,9 @@ func TestReconcileCrashListFailureChangesNothing(t *testing.T) {
 	}
 }
 
-// TestLostLeaseExec409: a lost lease answers exec with 409 code
+// TestLostLeaseExec410: a lost lease answers exec with 409 code
 // lease_lost and the reason, and GET names the reason.
-func TestLostLeaseExec409(t *testing.T) {
+func TestLostLeaseExec410(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
 	id := create["id"].(string)
@@ -119,8 +119,8 @@ func TestLostLeaseExec409(t *testing.T) {
 	svc.store.mu.Unlock()
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo hi"})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("exec on a lost lease = %d (%v), want 409", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("exec on a lost lease = %d (%v), want 410", resp.StatusCode, body)
 	}
 	if body["code"] != "lease_lost" {
 		t.Fatalf("code = %v, want lease_lost", body["code"])

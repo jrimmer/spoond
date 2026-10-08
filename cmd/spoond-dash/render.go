@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,7 +163,7 @@ func notices(s Snapshot) []Notice {
 	// and the text carries the 60 s average it tripped on.
 	if s.IOAvail && s.IOFull60 >= ioFullBadPct() {
 		out = append(out, Notice{ID: "io-pressure", Severity: "bad",
-			Text: fmt.Sprintf("disk I/O stalled: full pressure %.0f%% over 60 s", s.IOFull60)})
+			Text: fmt.Sprintf("disk i/o stalled: full pressure %.0f%% over 60 s", s.IOFull60)})
 	}
 	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
 		out = append(out, Notice{ID: "kept-disk", Severity: "warn",
@@ -283,14 +284,15 @@ func (l *layout) histMinutes() int {
 
 // drawFrame renders a snapshot plus history into the full frame at
 // width w: the shared entry point of Draw, the page, the stream and
-// spoond top. host names the node in the header; now timestamps the
-// ages; interval is the scrape interval the history points are spaced by
-// (the throughput title's window; 0 when there is none). It fails only
-// when grid.Check rejects the finished frame (a rune no renderer can
-// draw) — the terminal path reports it instead of printing a broken
-// frame.
+// spoond top. host names the node in the header; now is the frame's
+// timestamp, carried by the snapshot's own ages and clock rather than
+// read here; interval is the scrape interval the history points are
+// spaced by (the throughput title's window; 0 when there is none). It
+// fails only when grid.Check rejects the finished frame (a rune no
+// renderer can draw) — the terminal path reports it instead of printing
+// a broken frame.
 func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration) (*grid.Grid, error) {
-	l := &layout{w: clamp(w, minW, maxW), host: host, now: now, s: s,
+	l := &layout{w: clamp(w, minW, maxW), host: host, s: s,
 		notices:  notices(s),
 		histFn:   func(k string) []float64 { return hist[k] },
 		histN:    len(hist["running"]),
@@ -314,7 +316,6 @@ type layout struct {
 	w       int
 	notices []Notice
 	host    string
-	now     time.Time
 	s       Snapshot
 	// histFn serves the sparkline series; Draw leaves it nil (the
 	// sparklines then draw empty) and the page/top fill it from the
@@ -359,7 +360,7 @@ func (l *layout) assemble() *grid.Grid {
 		l.noticesH() +
 		l.panelsH() + l.throughputH() + l.leasesH() +
 		l.imagesServicesH() + l.refusalsH() + l.eventsH() +
-		1 // the status line
+		1 // the footer line
 
 	g := grid.New(l.w, h)
 	l.header(g, 0)
@@ -372,111 +373,91 @@ func (l *layout) assemble() *grid.Grid {
 	y = l.imagesServices(g, y)
 	y = l.refusals(g, y)
 	y = l.events(g, y)
-	l.statusLine(g, y, l.s.At)
+	l.footer(g, y)
 	return g
 }
 
-// statusItem is one status-line entry: label, the value shown in
-// brackets and whether it is healthy (ok style) or not (warn/bad).
-type statusItem struct {
-	label string
-	value string
-	style string
+// defaultProjectURL is the footer's URL when DASH_PROJECT_URL is unset:
+// the module's home.
+const defaultProjectURL = "github.com/jrimmer/spoond"
+
+// projectHref is the URL the footer's GitHub mark links to:
+// DASH_PROJECT_URL, else the module's home, with an https scheme when
+// none is given.
+func projectHref() string {
+	u := os.Getenv("DASH_PROJECT_URL")
+	if u == "" {
+		u = defaultProjectURL
+	}
+	if !strings.Contains(u, "://") {
+		u = "https://" + u
+	}
+	return u
 }
 
-// statusItems builds the status line's entries left to right: leases,
-// hugepages, snapshot disk, the certificate's remaining days and the
-// units. The styles reuse the thresholds the meters and the other
-// panels already use. The certificate is left out when there is none.
-func statusItems(s Snapshot, now time.Time) []statusItem {
-	items := []statusItem{
-		{"leases", fmt.Sprintf("%d/%d", s.Running, s.Limit), "ok"},
+// releaseDate is the build's release date: the vcs.time build setting of
+// the binary's own build (the release commit's date) as YYYY-MM-DD, or
+// "" for a dev build with no VCS stamp.
+func releaseDate() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
 	}
-	if s.Limit > 0 {
-		if pct := float64(s.Running) / float64(s.Limit) * 100; pct >= 90 {
-			items[0].style = "bad"
-		} else if pct >= 75 {
-			items[0].style = "warn"
+	return releaseDateFrom(bi.Settings)
+}
+
+// releaseDateFrom turns build settings into the footer's date: the
+// vcs.time stamp as YYYY-MM-DD, or "" when there is none (a dev build)
+// or it does not parse.
+func releaseDateFrom(settings []debug.BuildSetting) string {
+	for _, s := range settings {
+		if s.Key == "vcs.time" {
+			if t, err := time.Parse(time.RFC3339, s.Value); err == nil {
+				return t.Format("2006-01-02")
+			}
 		}
 	}
-	switch {
-	case s.HugeUsedPct >= 92:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "bad"})
-	case s.HugeUsedPct >= 80:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "warn"})
-	default:
-		items = append(items, statusItem{"hugepages", fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), "ok"})
-	}
-	switch {
-	case s.DiskUsedPct >= 90:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "bad"})
-	case s.DiskUsedPct >= 80:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "warn"})
-	default:
-		items = append(items, statusItem{"disk", fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), "ok"})
-	}
-	units, down := 0, 0
-	for _, svc := range s.Services {
-		units++
-		if svc.State != "active" {
-			down++
+	return ""
+}
+
+// footerParts is the footer line's parts: the dashboard binary's version
+// and its release date (empty for a dev build).
+type footerParts struct {
+	version, date string
+}
+
+// footerPartsFor builds the line's parts from the dashboard build. The
+// release date is omitted when the build has no vcs.time.
+func footerPartsFor() footerParts {
+	return footerParts{version: versionLabel(dashVersion), date: releaseDate()}
+}
+
+// footerSegs renders the footer parts as one dim, centred line:
+// "Spoond <version> (<date>) · GitHub". The GitHub mark is plain text in
+// the terminal grid; the page swaps the span for the mark's SVG
+// (applyProjectLink). On a frame too narrow for the whole line the date
+// is dropped first; the version and the mark always stay.
+func footerSegs(f footerParts, w int) []grid.Seg {
+	sep := grid.Seg{Text: " · ", Style: "dim"}
+	ver := grid.Seg{Text: "Spoond " + f.version, Style: "dim"}
+	logo := grid.Seg{Text: "GitHub", Style: "ghmark"}
+	if f.date != "" {
+		full := []grid.Seg{ver, {Text: " (" + f.date + ")", Style: "dim"}, sep, logo}
+		if segWidth(full) <= w {
+			return full
 		}
 	}
-	if units > 0 {
-		st := "ok"
-		if down > 0 {
-			st = "bad"
-		}
-		items = append(items, statusItem{"units", fmt.Sprintf("%d/%d", units-down, units), st})
-	}
-	return items
+	return []grid.Seg{ver, sep, logo}
 }
 
-// statusLine draws the frame's last row, outside any box: label
-// [value] entries left to right, the clock right-aligned on the same
-// row. At narrow widths entries are dropped from the right (units
-// first) until the line fits.
-func (l *layout) statusLine(g *grid.Grid, y int, at string) {
-	items := statusItems(l.s, l.now)
-	// Drop from the right until what remains fits, the clock always
-	// kept.
-	for len(items) > 0 && statusW(items)+clockW(at, l.w) > l.w {
-		items = items[:len(items)-1]
-	}
-	segs := []grid.Seg{}
-	for _, it := range items {
-		segs = append(segs,
-			grid.Seg{Text: it.label + " ", Style: "dim"},
-			grid.Seg{Text: "[", Style: "dim"},
-			grid.Seg{Text: it.value, Style: it.style},
-			grid.Seg{Text: "]  ", Style: "dim"})
-	}
-	g.Segs(0, y, segs, l.w)
-	g.Right(l.w-1, y, []grid.Seg{{Text: at, Style: "dim"}})
+// footer draws the frame's last row: one dim, centred line naming the
+// project — "Spoond <version> (<date>) · GitHub". On a narrow frame the
+// date drops first. The GitHub mark span carries the ghmark style: dim
+// text in the terminal, swapped for the mark's SVG by the page
+// (applyProjectLink).
+func (l *layout) footer(g *grid.Grid, y int) {
+	g.Center(l.w/2, y, footerSegs(footerPartsFor(), l.w))
 }
-
-// statusW is the width the items draw at: label, brackets and two
-// trailing spaces each (the last pair included, so the math ignores
-// where the line ends).
-func statusW(items []statusItem) int {
-	n := 0
-	for _, it := range items {
-		n += len(it.label) + len(it.value) + 5
-	}
-	return n
-}
-
-// clockW is the clock's footprint: its cells plus the gap that keeps
-// it clear of the items (at least two columns, on the narrowest frame
-// just its own width).
-func clockW(at string, w int) int {
-	gap := 2
-	if w <= minW {
-		gap = 1
-	}
-	return len(at) + gap
-}
-
 func boolInt(b bool) int {
 	if b {
 		return 1
@@ -484,24 +465,37 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// header: the title line centred — SPOOND · host · version · uptime —
-// with a blank row under it as the gutter before the panels (headerRows).
-// The holder column's header explains its two marks; every other state
-// is spelled out where it is shown. The frame time is gone: the status line's clock replaced it.
+// header: the title line at the left margin — SPOOND · host — with a
+// blank row under it as the gutter before the panels (headerRows). The
+// left inset matches the panels' frames (column 0). The version is not
+// here: it lives on the footer with the project, so it never shows
+// twice. The holder column's header explains its two marks; every other
+// state is spelled out where it is shown. Right-aligned on the same row
+// is spoond's own uptime (the backend process, not the host's, which
+// would read as spoond's right after a deploy) and the frame's clock:
+// "up 35m, 12:41:07". On a frame too narrow for both, the uptime is
+// dropped before the time, and the time is dropped rather than overlap
+// the title.
 func (l *layout) header(g *grid.Grid, y int) {
-	segs := []grid.Seg{
+	title := []grid.Seg{
 		{Text: "SPOOND", Style: "head"},
 		{Text: " · ", Style: "dim"},
 		{Text: l.host, Style: "text"},
-		{Text: " · ", Style: "dim"},
-		{Text: versionLabel(dashVersion), Style: "text"},
 	}
-	// spoond's own uptime (the backend process), not the host's: the
-	// host's read as spoond's right after a deploy.
+	// The right side keeps the clock always and the uptime only when it
+	// fits clear of the left-aligned title. titleEnd is one past the
+	// title's last cell; the right text must start a column beyond it.
+	titleEnd := segWidth(title)
+	right := l.s.At
 	if l.s.BackendUp > 0 {
-		segs = append(segs, grid.Seg{Text: " · ", Style: "dim"}, grid.Seg{Text: "up " + dur(l.s.BackendUp), Style: "text"})
+		if with := "up " + dur(l.s.BackendUp) + ", " + l.s.At; l.w-segWidth([]grid.Seg{{Text: with}}) > titleEnd {
+			right = with
+		}
 	}
-	g.Center(l.w/2, y, segs)
+	if l.w-segWidth([]grid.Seg{{Text: right}}) > titleEnd {
+		g.Right(l.w-1, y, []grid.Seg{{Text: right, Style: "dim"}})
+	}
+	g.Segs(0, y, title, -1)
 }
 
 // versionLabel is a version for the header: "?" when the scrape had
@@ -627,7 +621,7 @@ func contains(list []string, s string) bool {
 // header (headerRows) + the notifications panel + the panels above
 // leases, then the panel's title row, then one row per lease.
 func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
-	l := &layout{w: clamp(w, minW, maxW), s: s, now: now,
+	l := &layout{w: clamp(w, minW, maxW), s: s,
 		notices: notices(s)}
 	base := headerRows() + l.noticesH() +
 		l.panelsH() + l.throughputH()
@@ -1067,23 +1061,22 @@ type hostRow struct {
 	pct, warn float64
 	danger    float64
 	right     string
-	// text, when non-nil, replaces the meter bar: a plain line whose
-	// value carries the style from the same thresholds (the I/O rows,
-	// where a fill bar would say nothing useful).
-	text []grid.Seg
 }
 
-// hostPanelRows builds the host panel's rows: cpu, memory, hugepages,
-// snapshot disk, root disk — the meters and levels the old page already
-// showed — plus the disk I/O rows and the allocated line.
+// hostPanelRows builds the host panel's rows: cpu, the disk I/O meters,
+// then memory, hugepages, snapshot disk and root disk — the meters and
+// levels the panel draws, with the CPU's core count in its value text.
 func hostPanelRows(s Snapshot) []hostRow {
-	return append([]hostRow{
-		{"cpu", s.CPUPct, 75, 90, fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores), nil},
-		{"memory", s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB), nil},
-		{"hugepages", s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB), nil},
-		{"snapshot disk", s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB), nil},
-		{"root disk", s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", s.RootFreeGiB), nil},
-	}, ioHostRows(s)...)
+	rows := []hostRow{
+		{"cpu", s.CPUPct, 75, 90, fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores)},
+	}
+	rows = append(rows, ioHostRows(s)...)
+	return append(rows,
+		hostRow{"memory", s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB)},
+		hostRow{"hugepages", s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB)},
+		hostRow{"snapshot disk", s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB)},
+		hostRow{"root disk", s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", s.RootFreeGiB)},
+	)
 }
 
 // hostH is the host panel's own height: title, meters, rule, the two
@@ -1093,75 +1086,64 @@ func (l *layout) hostH() int {
 	return 1 + len(hostPanelRows(l.s)) + 1 + 2 + 1
 }
 
-// hostRows builds the host panel's meter rows: cpu, memory, hugepages,
-// snapshot disk, root disk — the meters and levels the old page already
-// showed — then the disk I/O rows. right is the value text at the row's
-// end.
+// hostRows builds the host panel's meter rows: cpu, the disk I/O meters,
+// then memory, hugepages, snapshot disk and root disk. right is the
+// value text at the row's end.
 func (l *layout) hostRows() []hostRow {
-	return append([]hostRow{
-		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1), nil},
-		{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB), nil},
-		{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB), nil},
-		{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB), nil},
-		{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB), nil},
-	}, ioHostRows(l.s)...)
+	rows := []hostRow{
+		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1)},
+	}
+	rows = append(rows, ioHostRows(l.s)...)
+	return append(rows,
+		hostRow{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB)},
+		hostRow{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB)},
+		hostRow{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB)},
+		hostRow{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB)},
+	)
 }
 
-// ioHostRows builds the disk I/O rows: the PSI pressure line and the
-// device's write throughput and busy share. A kernel without PSI
-// (IOAvail false) hides both rather than drawing a calm zero; a device
-// the collector could not resolve leaves the second row off.
+// ioHostRows builds the disk I/O meters drawn directly under the CPU
+// meter: the PSI stall meter and the snapshot device's busy meter. A
+// kernel without PSI (IOAvail false) hides the stall meter only; a
+// device the collector could not resolve (DiskDevice "") hides the busy
+// meter only.
 //
-//	I/O pressure  some 0.3% / full 0.0% (60s)
-//	nvme0n1       12 MB/s w, 18% busy
+//	i/o stall      ░░░░░░░░░░░░░░░░           0.4% full
+//	nvme0n1 busy   ██░░░░░░░░░░░░░░     18% · 12 MB/s w
 //
-// The pressure row's style follows the full 60 s average against the
+// The stall meter's value is the PSI io full 60 s average against the
 // configurable levels (DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT);
-// the device row's follows its busy share.
+// the busy meter's is the device's busy share (warn 80, bad 90).
 func ioHostRows(s Snapshot) []hostRow {
-	if !s.IOAvail {
-		return nil
+	var rows []hostRow
+	if s.IOAvail {
+		rows = append(rows, hostRow{
+			label:  "i/o stall",
+			pct:    s.IOFull60,
+			warn:   ioFullWarnPct(),
+			danger: ioFullBadPct(),
+			right:  fmt.Sprintf("%.1f%% full", s.IOFull60),
+		})
 	}
-	rows := []hostRow{ioPressureRow(s)}
 	if s.DiskDevice != "" {
-		rows = append(rows, ioDeviceRow(s))
+		rows = append(rows, hostRow{
+			label:  diskBusyLabel(s.DiskDevice),
+			pct:    s.DiskBusyPct,
+			warn:   80,
+			danger: 90,
+			right:  fmt.Sprintf("%.0f%% · %.0f MB/s w", s.DiskBusyPct, s.DiskWriteMB),
+		})
 	}
 	return rows
 }
 
-func ioPressureRow(s Snapshot) hostRow {
-	return hostRow{
-		text: []grid.Seg{
-			{Text: fmt.Sprintf("%-*s", meterLabelW, "I/O pressure"), Style: "dim"},
-			{Text: " ", Style: "dim"},
-			{Text: fmt.Sprintf("some %.1f%% / full %.1f%% (60s)", s.IOSome60, s.IOFull60),
-				Style: meterStyle(s.IOFull60, ioFullWarnPct(), ioFullBadPct())},
-		},
+// diskBusyLabel names the busy meter's row: the device plus " busy"
+// when that fits the shared label column, else the generic "disk busy".
+func diskBusyLabel(device string) string {
+	if label := device + " busy"; len([]rune(label)) <= meterLabelW {
+		return label
 	}
-}
-
-func ioDeviceRow(s Snapshot) hostRow {
-	return hostRow{
-		text: []grid.Seg{
-			{Text: fmt.Sprintf("%-*s", meterLabelW, s.DiskDevice), Style: "dim"},
-			{Text: " ", Style: "dim"},
-			{Text: fmt.Sprintf("%.0f MB/s w, %.0f%% busy", s.DiskWriteMB, s.DiskBusyPct),
-				Style: meterStyle(s.DiskBusyPct, 80, 90)},
-		},
-	}
-}
-
-// meterStyle is the ok/warn/bad style a value takes at the same
-// thresholds the meter bars use.
-func meterStyle(pct, warnPct, dangerPct float64) string {
-	switch {
-	case pct >= dangerPct:
-		return "bad"
-	case pct >= warnPct:
-		return "warn"
-	default:
-		return "ok"
-	}
+	return "disk busy"
 }
 
 // rule draws a ┄ line across a panel's inner width: from x+2 to
@@ -1182,11 +1164,6 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 
 	row := top + 1
 	for _, r := range l.hostRows() {
-		if r.text != nil {
-			g.Segs(x+2, row, r.text, inner)
-			row++
-			continue
-		}
 		g.Segs(x+2, row, l.meterSegs(r.label, r.pct, r.warn, r.danger, meterBarW), inner)
 		g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
 		row++
@@ -1306,57 +1283,128 @@ func (l *layout) imagesServices(g *grid.Grid, y int) int {
 	return l.drawImagesServices(g, y)
 }
 
-// leaseCols picks the leases panel's column layout for width w. At the
-// wide frame it is the mockup's: id(12) image(17) owner(10) state(13)
-// policy(11) age(6) left(9) holder — the columns start at 2, 14, 31,
-// 41, 55, 67, 73, 81 (state keeps a clear cell before policy, so the
-// burst marker can fill its column). Below 104 the flexible columns
-// give (headers cut, values never reach the next column) and nothing
-// overflows.
+// leaseCols is the leases panel's column layout for one frame. Each
+// width includes the separator cell before the next column; the last
+// (holder) column's width fills whatever the others leave. A non-holder
+// column is content-fit: as wide as the widest value the rows actually
+// show, but never narrower than its header, so a column of short values
+// leaves no blank run. The width freed that way goes to the owner first
+// (up to its own widest value), then to the holder, so more of the owner
+// and holder is visible before truncation.
 type leaseCols struct {
 	id, img, own, st, pol, age, left, hold int // column start cells
 	idW, imgW, ownW, stW, polW, leftW      int
+	holdW                                  int
 }
 
-func leaseLayout(w int) leaseCols {
+// leaseLayout picks the leases panel's column layout for width w and the
+// rows actually shown. At the wide frame the base widths are the
+// mockup's (id(11) image(16) owner(10) state(19) access(11) age(7)
+// left(7)); below 104 the flexible clamps give. Either way the columns
+// shrink to their visible content and the slack lands on owner and
+// holder.
+func leaseLayout(w int, rows []LeaseRow) leaseCols {
+	// Header widths (with the trailing separator cell): the least a
+	// column may shrink to, so a header always keeps a gap after it.
+	const (
+		hID, hImg, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 6, 6, 7, 5, 7
+	)
+	// Base widths before content fitting: the widest the non-owner
+	// columns ever get.
+	var idW, imgW, ownW, stW, polW, leftW int
 	if w >= maxW {
-		// The state column fits its longest word in full ("‖ suspended,
-		// burst": 18), taking slack from the id (10 shown), the image
-		// ("honey-go-worker" still fits) and left; the holder keeps 21.
-		return leaseCols{
-			id: 2, idW: 11,
-			img: 13, imgW: 16,
-			own: 29, ownW: 10,
-			st: 39, stW: 19,
-			pol: 58, polW: 11,
-			age:  69,
-			left: 76, leftW: 7,
-			hold: 83,
-		}
+		idW, imgW, ownW, stW, polW, leftW = 11, 16, 10, 19, 11, 7
+	} else {
+		idW = clamp(w/10, 6, 12)
+		imgW = clamp(w/7, 8, 17)
+		ownW = clamp(w/12, 5, 10)
+		stW = clamp(w/7, 6, 17)
+		polW = clamp(w/14, 5, 12)
+		leftW = clamp(w/12, 4, 9)
 	}
-	c := leaseCols{id: 2, idW: clamp(w/10, 6, 12)}
-	c.img = c.id + c.idW + 1
-	c.imgW = clamp(w/7, 8, 17)
-	c.own = c.img + c.imgW + 1
-	c.ownW = clamp(w/12, 5, 10)
-	c.st = c.own + c.ownW + 1
-	c.stW = clamp(w/7, 6, 17)
-	c.pol = c.st + c.stW + 1
-	c.polW = clamp(w/14, 5, 12)
-	c.age = c.pol + c.polW + 1
+	// Content-fit each column to what the rows show: never narrower than
+	// its header (so a header always keeps a gap after it), never wider
+	// than its base (a value longer than the base still truncates).
+	cID, cImg, cOwn, cSt, cPol, cLeft := leaseValueWidths(rows)
+	idW = max(hID, min(idW, cID))
+	imgW = max(hImg, min(imgW, cImg))
+	ownW = max(hOwn, min(ownW, cOwn))
+	stW = max(hSt, min(stW, cSt))
+	polW = max(hPol, min(polW, cPol))
+	leftW = max(hLeft, min(leftW, cLeft))
+
+	avail := w - 4
+	// The owner claims freed width first, up to its own widest value; the
+	// holder gets the rest and fills the row.
+	sum := idW + imgW + ownW + stW + polW + ageW + leftW
+	if room := avail - sum - hHold; room > 0 && ownW < max(hOwn, cOwn) {
+		grow := min(room, max(hOwn, cOwn)-ownW)
+		ownW += grow
+		sum += grow
+	}
+	c := leaseCols{
+		idW: idW, imgW: imgW, ownW: ownW, stW: stW, polW: polW,
+		leftW: leftW, holdW: avail - sum,
+	}
+	c.id = 2
+	c.img = c.id + c.idW
+	c.own = c.img + c.imgW
+	c.st = c.own + c.ownW
+	c.pol = c.st + c.stW
+	c.age = c.pol + c.polW
 	c.left = c.age + ageW
-	c.leftW = clamp(w/12, 4, 9)
-	c.hold = c.left + c.leftW + 1
+	c.hold = c.left + c.leftW
 	return c
 }
 
-func (l *layout) leasesH() int {
-	n := len(l.s.Rows)
-	if n > maxLeaseRows(l.w) {
-		n = maxLeaseRows(l.w)
+// leaseValueWidths is how wide each non-holder column must be to draw the
+// rows' values whole, each including its trailing separator cell. The
+// state adds cells for its glyph, the space and the trailing separator;
+// the access column uses the full policy label. A column's own header is
+// a floor, applied by the caller.
+func leaseValueWidths(rows []LeaseRow) (id, img, own, st, pol, left int) {
+	for _, r := range rows {
+		id = max(id, len([]rune(sanitize(r.ID)))+1)
+		img = max(img, len([]rune(sanitize(r.Image)))+1)
+		own = max(own, len([]rune(sanitize(r.Owner)))+1)
+		st = max(st, len([]rune(stateWords(r)[0]))+3)
+		pol = max(pol, len([]rune(policyWords(r.Policy)[0]))+1)
+		left = max(left, len([]rune(leaseLeft(r)))+1)
 	}
+	return id, img, own, st, pol, left
+}
+
+// leaseLegend is the dim line under the leases table that explains the
+// holder column's marks; it is drawn only when a shown row carries one.
+const leaseLegend = "◆ held · ◉ lapsed"
+
+// hasLeaseLegend reports whether any shown lease carries a hold mark, so
+// the legend line belongs under the table.
+func (l *layout) hasLeaseLegend() bool {
+	for _, r := range l.shownRows() {
+		if r.Holder != "" && (r.HoldState == "active" || r.HoldState == "lapsed") {
+			return true
+		}
+	}
+	return false
+}
+
+// shownRows is the leases table's rows after the row cap.
+func (l *layout) shownRows() []LeaseRow {
+	rows := l.s.Rows
+	if n := maxLeaseRows(l.w); len(rows) > n {
+		rows = rows[:n]
+	}
+	return rows
+}
+
+func (l *layout) leasesH() int {
+	n := len(l.shownRows())
 	if n == 0 {
 		return 4 // title + header + the "no live leases" row (+ frame)
+	}
+	if l.hasLeaseLegend() {
+		return 4 + n // title + header + rows + the legend line
 	}
 	return 3 + n // title + header + rows (+ frame handled by panel)
 }
@@ -1391,32 +1439,21 @@ func ellipsize(s string, n int) string {
 func (l *layout) leases(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, 0, y, l.w, l.leasesH(), "leases", "leases")
-	c := leaseLayout(l.w)
+	c := leaseLayout(l.w, l.shownRows())
 	// Each header at its column's start, cut to the column's width so a
 	// narrow frame cannot smear one header into the next.
 	headers := []struct {
 		x, w int
 		text string
 	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.own, c.ownW, "owner"},
-		{c.st, c.stW, "state"}, {c.pol, c.polW, "policy"}, {c.age, 5, "age"},
-		{c.left, c.leftW, "left"}, {c.hold, l.w - 2 - c.hold, "holder"}}
+		{c.st, c.stW, "state"}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
+		{c.left, c.leftW, "left"}, {c.hold, c.holdW, "holder"}}
 	for _, h := range headers {
-		text := h.text
-		switch text {
-		case "policy":
-			text = fitWord([]string{"policy", "net"}, h.w-1)
-		case "holder":
-			// The holder column's marks, spelled out where they are used.
-			text = fitWord([]string{"holder (◆ held · ◉ lapsed hold)", "holder ◆ held ◉ lapsed",
-				"◆ held · ◉ lapsed hold", "◆ held · ◉ lapsed", "holder"}, h.w)
-		}
-		g.Text(h.x, top+1, text, "dim", h.w)
+		draw := cutHeaders(h.text, h.w)
+		g.Text(h.x, top+1, draw, "dim", h.w)
 	}
 
-	rows := l.s.Rows
-	if n := maxLeaseRows(l.w); len(rows) > n {
-		rows = rows[:n]
-	}
+	rows := l.shownRows()
 	for i, r := range rows {
 		yy := top + 2 + i
 		// Every cell keeps one column of space before the next and ends
@@ -1445,6 +1482,10 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	}
 	if len(rows) == 0 {
 		g.Text(2, top+2, "no live leases", "dim", l.w-4)
+	} else if l.hasLeaseLegend() {
+		// The holder marks, spelled out directly under the table's last
+		// row rather than crammed into the header.
+		g.Text(2, top+2+len(rows), leaseLegend, "dim", l.w-4)
 	}
 	return y
 }
@@ -1475,16 +1516,36 @@ func stateWords(r LeaseRow) []string {
 	}
 }
 
-// policyWords is a network policy, longest form first.
+// policyWords is a network policy, longest form first. The API value
+// "none" is shown as "isolated" — no egress at all; the stored policy
+// stays "none".
 func policyWords(p string) []string {
 	switch p {
 	case "restricted":
 		return []string{"restricted", "rstr"}
 	case "internet":
 		return []string{"internet", "inet"}
+	case "none":
+		return []string{"isolated", "iso"}
 	default:
 		return []string{sanitize(p)}
 	}
+}
+
+// cutHeaders fits a column header into w cells: the forms step down
+// from the full word ("access" to "acc"/"net", "holder" to
+// "hold"/"hld") until one fits the w-1 content cells, and the chosen
+// form is cut to w-1 runes. The spare cell is the column's separator,
+// so a header never touches the next header even when it exactly fills
+// its column's content width.
+func cutHeaders(word string, w int) string {
+	switch word {
+	case "access":
+		return cell(fitWord([]string{"access", "acc", "net"}, w-1), w)
+	case "holder":
+		return cell(fitWord([]string{"holder", "hold", "hld"}, w-1), w)
+	}
+	return cell(word, w)
 }
 
 // fitWord is the first form that fits n cells, or the shortest form cut
@@ -1513,7 +1574,7 @@ func leaseLeft(r LeaseRow) string {
 // lease's comment — dim, a CI job lease usually — when there is neither;
 // a dash when nothing at all. Cut with … so nothing reaches the border.
 func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
-	room := l.w - c.hold - 3 // one column clear of the border
+	room := c.holdW - 1 // one column clear of the border
 	if r.Holder != "" {
 		mark, style := "", "link"
 		switch r.HoldState {
@@ -1848,13 +1909,14 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 // eventTypeStyle is the colour the events panel's type word takes: the
 // title cyan for the lease lifecycle (created, released, resumed,
 // restarted, restored, checkpointed, recovered), warn for a lease put
-// aside (suspended, preempted, idle_suspended, queued), bad for one lost
-// or timed out, ok for spoond's own catalog gc, dim for anything else.
+// aside or retried (suspended, preempted, idle_suspended, queued,
+// recovery_retry, rootfs_dead), bad for one lost or timed out, ok for
+// spoond's own catalog gc, dim for anything else.
 func eventTypeStyle(t string) string {
 	switch t {
 	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
 		return "title"
-	case "suspended", "preempted", "idle_suspended", "queued":
+	case "suspended", "preempted", "idle_suspended", "queued", "recovery_retry", "rootfs_dead":
 		return "warn"
 	case "lost", "timed_out":
 		return "bad"

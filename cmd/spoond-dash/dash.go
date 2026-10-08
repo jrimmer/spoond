@@ -38,6 +38,8 @@
 //	                     page and spoond top both draw at this width —
 //	                     top clamps the terminal's COLUMNS into it)
 //	DASH_HOST            header label (default the hostname)
+//	DASH_PROJECT_URL     the footer GitHub mark's target (default the
+//	                     module's home, github.com/jrimmer/spoond)
 package spoonddash
 
 import (
@@ -132,7 +134,7 @@ func configFromEnv() (Config, error) {
 		StoragePath:       env("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates"),
 		DiskDevice:        os.Getenv("DASH_DISK_DEVICE"),
 		Services: strings.Split(env("DASH_SERVICES",
-			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol"), ","),
+			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch"), ","),
 		EventsToken: os.Getenv("DASH_EVENTS_TOKEN"),
 	}
 	var err error
@@ -472,8 +474,8 @@ func (d *dash) basicAuth(next http.Handler) http.Handler {
 }
 
 // pageData is what the page renders: the latest snapshot, the history
-// and the grid's row elements (the frame carries the host, the version
-// and the clock in its own header and status line).
+// and the grid's row elements (the frame carries the host, the version,
+// the uptime and the clock in its own header).
 type pageData struct {
 	Snapshot
 	Hist  map[string][]float64

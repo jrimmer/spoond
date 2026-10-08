@@ -169,6 +169,9 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `UNDRAIN_CONCURRENCY` | `2` | how many drained leases the admin undrain may resume at once, so restoring a batch of large memory snapshots does not stack the node's I/O and memory (`0` = unlimited; spoond-urm) |
 | `UNDRAIN_RESUME_RETRIES` | `2` | how many extra attempts a resume the admin undrain failed with a retryable envd/start error gets before the lease is marked `lost` (with a short backoff; `0` disables retries; spoond-urm) |
 | `DRAIN_MAX_SECS` | `900` | how long a drain may stay in effect while the node is healthy before spoond undrains itself and resumes the drained leases (`0` means the default; a negative value disables the automatic undrain; spoond-52c) |
+| `RECOVERY_RETRY_ATTEMPTS` | `3` | how many failed crash-recovery attempts a lease gets before it is marked `lost`, so a transient busy-node failure does not lose a recoverable lease (`0` means the default; spoond-dxq) |
+| `RECOVERY_RETRY_WINDOW` | `30m` | how long a lease may stay in recovery since its first failed attempt, whatever the failure kind, including a substrate capacity refusal waiting for room (a Go duration or seconds; spoond-dxq) |
+| `PREEMPT_RESUME_RETRIES` | `3` | how many failed resume attempts a preempted lease gets from the resume queue (every 15 s) before it is marked `lost`; an admission/capacity refusal does not count and the lease keeps waiting for room (`0` means the default; spoond-dxq) |
 | `MAX_EXEC_TIMEOUT_SECS` | `300` | ceiling on one exec/stream call's `timeout` (raise it for compile-heavy CI steps) |
 | `ASSETS_DIR` | *(empty)* | serve static assets (the shelley binary) to guests at `/assets/<file>` on the proxy listener |
 | `LLM_UPSTREAM_URL` | *(empty)* | OpenAI-compatible LLM API base for the per-lease LLM gateway |

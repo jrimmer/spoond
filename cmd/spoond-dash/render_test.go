@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -282,6 +283,171 @@ func TestServicesPanelOverflowRow(t *testing.T) {
 	}
 }
 
+// TestHeaderUptimeAndClock: the header draws the title at the left
+// margin as SPOOND · host (the version lives on the footer, never shown
+// twice), draws "up <dur>, <time>" right-aligned, drops the uptime
+// before the time on a frame too narrow for both, and never overlaps the
+// title.
+func TestHeaderUptimeAndClock(t *testing.T) {
+	header := func(s Snapshot, w int, host string) string {
+		l := &layout{w: w, host: host, s: s}
+		rows := strings.Split(l.assemble().Plain(), "\n")
+		return rows[0]
+	}
+
+	s := sampleSnapshot()
+	// Full width: both the uptime and the clock, right-aligned.
+	row := header(s, DefaultWidth, "spoond.example.com")
+	if !strings.HasSuffix(row, "up 9m, 12:00:00") {
+		t.Fatalf("header lacks the right-aligned uptime and clock:\n%s", row)
+	}
+	// The title is at the left margin and carries the host, no version.
+	title := "SPOOND · spoond.example.com"
+	if !strings.HasPrefix(row, title) {
+		t.Fatalf("left-aligned title missing:\n%s", row)
+	}
+	if strings.Contains(row, versionLabel(dashVersion)) {
+		t.Fatalf("header still shows the version:\n%s", row)
+	}
+	// No backend uptime: the clock alone.
+	s.BackendUp = 0
+	if row := header(s, DefaultWidth, "spoond.example.com"); !strings.HasSuffix(row, "12:00:00") || strings.Contains(row, "up ") {
+		t.Fatalf("header without an uptime shows one:\n%s", row)
+	}
+
+	// A long title leaves no room for the uptime: it is dropped before
+	// the time, never overlapped by it.
+	s = sampleSnapshot()
+	longHost := strings.Repeat("a", 48)
+	row = header(s, minW, longHost)
+	title = "SPOOND · " + longHost
+	if !strings.HasPrefix(row, title) {
+		t.Fatalf("left-aligned title missing or shifted:\n%s", row)
+	}
+	if strings.Contains(row, "up ") {
+		t.Fatalf("uptime kept though it does not fit clear of the title:\n%s", row)
+	}
+	if !strings.HasSuffix(row, "12:00:00") {
+		t.Fatalf("clock dropped though it fits:\n%s", row)
+	}
+	titleEnd := len([]rune(title))
+	if start := minW - len("12:00:00"); start < titleEnd {
+		t.Fatalf("clock overlaps the title: starts at %d, title ends at %d:\n%s", start, titleEnd, row)
+	}
+}
+
+// TestFooterProjectLine: the footer reads "Spoond <version> (<date>) ·
+// GitHub" — capital-S, the version, the release date and the GitHub mark
+// in the terminal grid. The release date comes from the build's vcs.time
+// and is omitted without one. Dim and centred.
+func TestFooterProjectLine(t *testing.T) {
+	footer := func(w int) string {
+		l := &layout{w: w, host: "h", s: sampleSnapshot()}
+		rows := strings.Split(l.assemble().Plain(), "\n")
+		return rows[len(rows)-1]
+	}
+
+	// No vcs.time in a test binary: the date is omitted.
+	t.Setenv("DASH_PROJECT_URL", "")
+	row := footer(DefaultWidth)
+	want := "Spoond " + versionLabel(dashVersion) + " · GitHub"
+	trimmed := strings.TrimSpace(row)
+	if trimmed != want {
+		t.Fatalf("footer = %q, want %q", trimmed, want)
+	}
+	if strings.Contains(trimmed, " (") {
+		t.Fatalf("footer shows a release date though the build has no vcs.time: %q", trimmed)
+	}
+	// The project URL is no longer shown as text.
+	if strings.Contains(trimmed, "github.com/jrimmer/spoond") {
+		t.Fatalf("footer still shows the project URL text: %q", trimmed)
+	}
+	// Centred: the left padding matches the right, to within a cell.
+	left := len(row) - len(strings.TrimLeft(row, " "))
+	right := len(row) - len(strings.TrimRight(row, " "))
+	if left-right > 1 || right-left > 1 {
+		t.Fatalf("footer not centred: left %d, right %d:\n%s", left, right, row)
+	}
+}
+
+// TestFooterProjectURL: DASH_PROJECT_URL sets the anchor's href (the
+// display text is the GitHub mark, so no URL is shown); the default is
+// the module's home with an https scheme.
+func TestFooterProjectURL(t *testing.T) {
+	t.Setenv("DASH_PROJECT_URL", "")
+	if got, want := projectHref(), "https://github.com/jrimmer/spoond"; got != want {
+		t.Fatalf("projectHref() = %q, want %q", got, want)
+	}
+	t.Setenv("DASH_PROJECT_URL", "https://example.com/spoond/")
+	if got, want := projectHref(), "https://example.com/spoond/"; got != want {
+		t.Fatalf("projectHref() = %q, want %q", got, want)
+	}
+	t.Setenv("DASH_PROJECT_URL", "example.com/spoond")
+	if got, want := projectHref(), "https://example.com/spoond"; got != want {
+		t.Fatalf("projectHref() = %q, want %q", got, want)
+	}
+}
+
+// TestFooterDropsNarrow: on a narrow frame the date drops first; the
+// version and the GitHub mark always stay.
+func TestFooterDropsNarrow(t *testing.T) {
+	f := footerParts{version: "v2.7.1", date: "2026-10-07"}
+	// Wide enough for the whole line.
+	if got := segsText(footerSegs(f, 104)); got != "Spoond v2.7.1 (2026-10-07) · GitHub" {
+		t.Fatalf("full footer = %q", got)
+	}
+	// Too narrow for the date: version and mark stay.
+	if got := segsText(footerSegs(f, 20)); got != "Spoond v2.7.1 · GitHub" {
+		t.Fatalf("date-dropped footer = %q", got)
+	}
+}
+
+// TestFooterNoDateKeepsMark: a dev build (no date) always keeps the
+// version and the GitHub mark.
+func TestFooterNoDateKeepsMark(t *testing.T) {
+	f := footerParts{version: "dev"}
+	if got := segsText(footerSegs(f, 104)); got != "Spoond dev · GitHub" {
+		t.Fatalf("footer = %q, want %q", got, "Spoond dev · GitHub")
+	}
+}
+
+// TestReleaseDateFrom: the footer's date comes from the build's vcs.time
+// as YYYY-MM-DD; a build with no VCS stamp (a dev build) gets no date.
+func TestReleaseDateFrom(t *testing.T) {
+	mk := func(pairs ...string) []debug.BuildSetting {
+		var out []debug.BuildSetting
+		for i := 0; i+1 < len(pairs); i += 2 {
+			out = append(out, debug.BuildSetting{Key: pairs[i], Value: pairs[i+1]})
+		}
+		return out
+	}
+	cases := []struct {
+		name     string
+		settings []debug.BuildSetting
+		want     string
+	}{
+		{"release commit", mk("vcs.revision", "abc123", "vcs.time", "2026-10-07T19:48:31Z"), "2026-10-07"},
+		{"offset timestamp", mk("vcs.time", "2026-10-06T22:15:00-04:00"), "2026-10-06"},
+		{"no vcs.time", mk("vcs.revision", "abc123"), ""},
+		{"dev build", nil, ""},
+		{"unparsable", mk("vcs.time", "yesterday"), ""},
+	}
+	for _, tc := range cases {
+		if got := releaseDateFrom(tc.settings); got != tc.want {
+			t.Errorf("%s: releaseDateFrom = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// segsText joins segments into their plain text.
+func segsText(segs []grid.Seg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		b.WriteString(s.Text)
+	}
+	return b.String()
+}
+
 // TestVersionLabel: the header's version is short — a tag as it is, a
 // Go pseudo-version base+7-char hash, "?" when there was none.
 func TestVersionLabel(t *testing.T) {
@@ -514,7 +680,7 @@ func TestSanitizeReplacesControlChars(t *testing.T) {
 	// The escapes must not survive into a drawn frame.
 	s := sampleSnapshot()
 	s.Rows[0].Name = "\x1b]0;owned\x07"
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
+	l := &layout{w: DefaultWidth, host: "h", s: s}
 	g := l.assemble()
 	if err := g.Check(glyphs()); err != nil {
 		t.Fatalf("frame with hostile lease name failed Check: %v", err)
@@ -559,9 +725,9 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 	var held, lapsed, plain string
 	for _, r := range lines {
 		switch {
-		case strings.Contains(r, "forgejo/job-42"):
+		case strings.Contains(r, "◆ forgejo/job-42"):
 			held = r
-		case strings.Contains(r, "◉"):
+		case strings.Contains(r, "◉ nightly"):
 			lapsed = r
 		case strings.Contains(r, "abcdef0123"):
 			plain = r
@@ -581,6 +747,21 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 	}
 	if !strings.Contains(held, "▶ running") || !strings.Contains(lapsed, "‖ suspended") {
 		t.Errorf("state column must always show the run state:\n%s\n%s", held, lapsed)
+	}
+
+	// A holder without a hold draws unmarked (holder set, HoldState
+	// ""), and its plain name is still visible in the holder column.
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running",
+		Holder: "someone", Age: "5m", Left: "10m"}}
+	p2 := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p2, "someone") {
+		t.Fatalf("unheld holder missing:\n%s", p2)
+	}
+	for _, r := range strings.Split(p2, "\n") {
+		if strings.Contains(r, "someone") && (strings.Contains(r, "◆") || strings.Contains(r, "◉")) {
+			t.Errorf("unheld holder marked held:\n%s", r)
+		}
 	}
 }
 
@@ -658,7 +839,7 @@ func TestLeasesLeftShowsHoldExpiry(t *testing.T) {
 func TestLeaseNameShownWhenNoHolder(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Name: "jasons box", Age: "5m", Left: "10m"}}
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
+	l := &layout{w: DefaultWidth, host: "h", s: s}
 	p := l.assemble().Plain()
 	if !strings.Contains(p, "jasons box") {
 		t.Fatalf("lease name not shown in the holder column:\n%s", p)
@@ -667,18 +848,28 @@ func TestLeaseNameShownWhenNoHolder(t *testing.T) {
 
 // TestLeaseCommentShownWhenNoHolderOrName: a holder-less, name-less
 // lease (a CI job) shows its comment in the holder column, dim. With a
-// holder or a name present the comment stays hidden.
+// holder or a name present the comment stays hidden. The holder column
+// gets the width the narrow columns free, so a short comment shows whole
+// and only a longer one is cut.
 func TestLeaseCommentShownWhenNoHolderOrName(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Comment: "forgejo: example.com/site #218",
 		Age: "5m", Left: "10m"}}
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow, s: s}
+	l := &layout{w: DefaultWidth, host: "h", s: s}
 	p := l.assemble().Plain()
-	if !strings.Contains(p, "forgejo: example") || !strings.Contains(p, "…") {
+	if !strings.Contains(p, "forgejo: example.com/site #218") {
 		t.Fatalf("lease comment not shown in the holder column:\n%s", p)
 	}
 
+	// A comment longer than the holder column is cut with ….
+	s.Rows[0].Comment = "forgejo: example.com/site #218 " + strings.Repeat("x", 80)
+	p = l.assemble().Plain()
+	if !strings.Contains(p, "forgejo: example.com") || !strings.Contains(p, "…") {
+		t.Fatalf("long lease comment not cut in the holder column:\n%s", p)
+	}
+
 	// A holder wins; the comment is not drawn anywhere.
+	s.Rows[0].Comment = "forgejo: example.com/site #218"
 	s.Rows[0].Holder = "forgejo/job-42"
 	p = l.assemble().Plain()
 	if !strings.Contains(p, "forgejo/job-42") || strings.Contains(p, "example.com/site") {
@@ -719,8 +910,45 @@ func TestPageLinksAreAnchors(t *testing.T) {
 	if !strings.Contains(html, `rel="noopener"`) && !strings.Contains(html, `rel=noopener`) {
 		t.Fatalf("holder link missing rel=noopener:\n%s", html)
 	}
-	if n := strings.Count(html, "<a "); n != 1 {
-		t.Fatalf("want exactly one anchor in the page grid, got %d", n)
+	// Two anchors: the holder link and the footer's project URL.
+	if n := strings.Count(html, "<a "); n != 2 {
+		t.Fatalf("want exactly two anchors (holder, footer) in the page grid, got %d", n)
+	}
+}
+
+// TestPageFooterProjectLink: the footer row's HTML carries the GitHub
+// mark's inline SVG inside an anchor with the project URL, title and
+// aria-label "spoond on GitHub", target=_blank and rel=noopener. The
+// URL text itself is not shown.
+func TestPageFooterProjectLink(t *testing.T) {
+	t.Setenv("DASH_PROJECT_URL", "github.com/jrimmer/spoond")
+	s := sampleSnapshot()
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	html := pageGrid(g, holderLinks(s, DefaultWidth, fixedNow))
+	if !strings.Contains(html, `<a class="g-ghmark" href="https://github.com/jrimmer/spoond"`) {
+		t.Fatalf("footer mark is not an anchor with the project URL:\n%s", html)
+	}
+	if !strings.Contains(html, `<svg`) || !strings.Contains(html, `fill="currentColor"`) {
+		t.Fatalf("footer anchor lacks the GitHub mark SVG:\n%s", html)
+	}
+	if !strings.Contains(html, `title="spoond on GitHub"`) || !strings.Contains(html, `aria-label="spoond on GitHub"`) {
+		t.Fatalf("footer link missing title/aria-label:\n%s", html)
+	}
+	if !strings.Contains(html, `target="_blank"`) || !strings.Contains(html, `rel="noopener"`) {
+		t.Fatalf("footer link missing target/rel:\n%s", html)
+	}
+	// The URL is no longer shown as text in the footer row.
+	footerRow := ""
+	for _, line := range strings.Split(html, `<span class="gr"`) {
+		if strings.Contains(line, `class="g-ghmark"`) {
+			footerRow = line
+		}
+	}
+	if footerRow == "" {
+		t.Fatalf("no footer row with the GitHub mark:\n%s", html)
+	}
+	if strings.Contains(strings.ReplaceAll(footerRow, `href="https://github.com/jrimmer/spoond"`, ""), "github.com/jrimmer/spoond") {
+		t.Fatalf("footer row still shows the project URL as text:\n%s", footerRow)
 	}
 }
 
@@ -978,6 +1206,8 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		{"preempted", "warn"},
 		{"idle_suspended", "warn"},
 		{"queued", "warn"},
+		{"recovery_retry", "warn"},
+		{"rootfs_dead", "warn"},
 		{"gc", "ok"},
 		{"holder_set", "dim"},
 	}
@@ -1038,7 +1268,7 @@ func TestEventsPanelLostAndCreatedColours(t *testing.T) {
 // ╎ at that level without changing the bar's width; a meter with no
 // warning level draws no tick.
 func TestMeterWarningTick(t *testing.T) {
-	l := &layout{w: DefaultWidth, host: "h", now: fixedNow}
+	l := &layout{w: DefaultWidth, host: "h"}
 	segs := l.meterSegs("cpu", 50, 75, 90, meterBarW)
 	tick := false
 	for _, s := range segs {
@@ -1279,18 +1509,240 @@ func TestNoticesDropLeaseStates(t *testing.T) {
 	}
 }
 
-// TestLeaseCellsNeverRunTogether: a long owner ends in … and leaves a
-// space before the state cell, and a long age ("10h37m") shows whole.
+// TestLeaseCellsNeverRunTogether: a fixed-width column whose values are
+// short gives its slack to the owner and holder, so a long owner shows
+// more before it is cut, and an over-long owner still ends in … with a
+// space before the state. A long age ("10h37m") always shows whole.
 func TestLeaseCellsNeverRunTogether(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "038f2ef4c5", Image: "go-base", Owner: "test-consumer", State: "running", Policy: "internet", Age: "10h37m", Left: "2h29m"}}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "test-con… ▶ running") {
-		t.Errorf("long owner should end in … with a space before the state:\n%s", p)
+	// The short columns hand their slack to the owner, so this one fits
+	// whole instead of being cut at the old fixed width.
+	if !strings.Contains(p, "test-consumer ▶ running") {
+		t.Errorf("short columns did not free the owner its width:\n%s", p)
 	}
 	if !strings.Contains(p, "10h37m") {
 		t.Errorf("age 10h37m cut:\n%s", p)
 	}
+
+	// An owner wider than even the freed room is cut with … and keeps a
+	// space before the state cell.
+	s.Rows[0].Owner = strings.Repeat("long-owner", 8)
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "… ▶ running") {
+		t.Errorf("over-long owner should end in … with a space before the state:\n%s", p)
+	}
+}
+
+// TestLeasesAccessIsolated: a lease whose API network policy is "none"
+// shows the access value "isolated"; the stored policy is not changed.
+func TestLeasesAccessIsolated(t *testing.T) {
+	if forms := policyWords("none"); len(forms) == 0 || forms[0] != "isolated" {
+		t.Fatalf("policyWords(\"none\") = %q", forms)
+	}
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running",
+		Policy: "none", Age: "5m", Left: "10m"}}
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "isolated") {
+		t.Errorf("access value for policy none is not isolated:\n%s", p)
+	}
+	// The column header is "access" (not "policy").
+	if h := leaseHeaderLine(strings.Split(p, "\n")); !strings.Contains(h, "access") {
+		t.Errorf("leases header is not named access: %q", h)
+	}
+	if s.Rows[0].Policy != "none" {
+		t.Errorf("rendering changed the stored policy to %q", s.Rows[0].Policy)
+	}
+	// The other policies keep their labels.
+	if forms := policyWords("restricted"); forms[0] != "restricted" {
+		t.Errorf("restricted = %q", forms[0])
+	}
+	if forms := policyWords("lan"); forms[0] != "lan" {
+		t.Errorf("lan = %q", forms[0])
+	}
+	if forms := policyWords("internet"); forms[0] != "internet" {
+		t.Errorf("internet = %q", forms[0])
+	}
+}
+
+// TestLeaseColumnsFitContent: the fixed non-holder columns shrink to the
+// widest value actually shown (never below their header), so short
+// states leave no blank run and the freed width goes to the owner and
+// holder. A longer state widens the state column again.
+func TestLeaseColumnsFitContent(t *testing.T) {
+	short := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Age: "5m", Left: "10m"}}
+	cShort := leaseLayout(DefaultWidth, short)
+	// "▶ running" (9) plus its trailing separator, and no wider than the
+	// header floor would force anyway.
+	if cShort.stW != 10 {
+		t.Errorf("short state column = %d, not content-fit (10)", cShort.stW)
+	}
+	// The state column is narrower than the wide base (19), so short
+	// states leave no blank run.
+	if cShort.stW >= 19 {
+		t.Errorf("short state column kept the base width %d", cShort.stW)
+	}
+	// No column drops below its header.
+	empty := leaseLayout(DefaultWidth, nil)
+	for _, tc := range []struct {
+		name       string
+		got, floor int
+	}{
+		{"id", empty.idW, 3}, {"image", empty.imgW, 6}, {"owner", empty.ownW, 6},
+		{"state", empty.stW, 6}, {"access", empty.polW, 7}, {"left", empty.leftW, 5},
+	} {
+		if tc.got < tc.floor {
+			t.Errorf("empty %s column = %d, below its header %d", tc.name, tc.got, tc.floor)
+		}
+	}
+
+	// A long state widens the state column at a wide frame, where the base
+	// has room above the short value; at the narrow minimum the base clamps
+	// to ten and both fit there already.
+	long := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "suspended",
+		Burst: true, Age: "5m", Left: "10m"}}
+	for _, w := range []int{DefaultWidth, minW} {
+		cs := leaseLayout(w, short)
+		if cs.stW >= 19 {
+			t.Errorf("width %d: short state column kept the base width %d", w, cs.stW)
+		}
+	}
+	if leaseLayout(DefaultWidth, long).stW <= cShort.stW {
+		t.Errorf("long state column = %d, not wider than short %d",
+			leaseLayout(DefaultWidth, long).stW, cShort.stW)
+	}
+}
+
+// TestLeaseColumnsStayInPanel: at every width, and for short and long
+// rows alike, the computed columns never overlap and the last one ends
+// one cell before the panel's right border, so a header or value cannot
+// run into its neighbour; a header form never fills the whole column
+// without leaving the separator cell.
+func TestLeaseColumnsStayInPanel(t *testing.T) {
+	sets := map[string][]LeaseRow{
+		"sample": {
+			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet", Age: "5m", Left: "10m"},
+			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "suspended", Burst: true, Policy: "none", Age: "2h31m", Left: "∞"},
+		},
+		"long owner": {{ID: "x", Owner: strings.Repeat("long", 20), State: "running", Age: "1m", Left: "1m"}},
+		"empty":      nil,
+	}
+	for name, rows := range sets {
+		for w := minW; w <= maxW; w++ {
+			c := leaseLayout(w, rows)
+			cols := []struct {
+				name string
+				x, w int
+			}{{"id", c.id, c.idW}, {"image", c.img, c.imgW}, {"owner", c.own, c.ownW},
+				{"state", c.st, c.stW}, {"access", c.pol, c.polW}, {"age", c.age, ageW},
+				{"left", c.left, c.leftW}, {"holder", c.hold, c.holdW}}
+			for i, col := range cols {
+				if col.w < 1 {
+					t.Fatalf("%s w=%d: %s column width %d", name, w, col.name, col.w)
+				}
+				if i > 0 && cols[i-1].x+cols[i-1].w > col.x {
+					t.Fatalf("%s w=%d: %s at %d overlaps the previous column ending at %d",
+						name, w, col.name, col.x, cols[i-1].x+cols[i-1].w)
+				}
+			}
+			if got, want := c.hold+c.holdW, w-2; got != want {
+				t.Errorf("%s w=%d: holder column ends at %d, want %d", name, w, got, want)
+			}
+			for _, hc := range []struct {
+				hdr string
+				w   int
+			}{{"access", c.polW}, {"holder", c.holdW}} {
+				if got := cutHeaders(hc.hdr, hc.w); len([]rune(got)) >= hc.w {
+					t.Errorf("%s w=%d: %s header %q fills all %d cells, no separator", name, w, hc.hdr, got, hc.w)
+				}
+			}
+		}
+	}
+}
+
+// TestLeaseColumnsGiveFreedWidthToOwner: with short values the slack the
+// fixed columns free widens the owner up to its own longest value before
+// the holder gets the rest.
+func TestLeaseColumnsGiveFreedWidthToOwner(t *testing.T) {
+	rows := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "test-consumer",
+		State: "running", Policy: "internet", Age: "10h37m", Left: "2h29m"}}
+	c := leaseLayout(DefaultWidth, rows)
+	// "test-consumer" (13) plus its trailing separator fits whole: the
+	// owner grew past its 10-cell base into the freed room.
+	if c.ownW < len("test-consumer")+1 {
+		t.Errorf("owner column = %d, too narrow for the visible owner", c.ownW)
+	}
+	// The holder still gets whatever is left, and the columns stay inside
+	// the panel.
+	if c.holdW <= 0 {
+		t.Errorf("holder column = %d, no room left", c.holdW)
+	}
+}
+
+// TestLeaseHolderHeaderAndLegend: the holder column's header is plain
+// "holder"; the ◆/◉ legend is one dim line directly under the table's
+// last row, and only when a shown row carries a hold.
+func TestLeaseHolderHeaderAndLegend(t *testing.T) {
+	p := drawSample(DefaultWidth).Plain()
+	lines := strings.Split(p, "\n")
+	header, legendAt := -1, -1
+	for i, r := range lines {
+		if strings.HasPrefix(r, "┌─ leases ") {
+			header = i + 1
+		}
+		if strings.Contains(r, leaseLegend) {
+			legendAt = i
+		}
+	}
+	if header < 0 {
+		t.Fatalf("leases panel not found:\n%s", p)
+	}
+	if !strings.Contains(lines[header], "holder") || strings.Contains(lines[header], "◆") {
+		t.Errorf("holder header = %q", lines[header])
+	}
+	if legendAt < 0 {
+		t.Fatalf("legend line missing with held/lapsed rows:\n%s", p)
+	}
+	// The legend sits on the row directly under the last lease row: the
+	// sample's last row holds the last lease id.
+	if !strings.Contains(lines[legendAt-1], "fedcba0987") {
+		t.Errorf("legend is not directly under the last lease row:\n%s", p)
+	}
+
+	// The legend line is dim on the grid.
+	g := drawSample(DefaultWidth)
+	for x := 2; x < 2+len([]rune(leaseLegend)); x++ {
+		if got := g.At(x, legendAt).Style; got != "dim" {
+			t.Errorf("legend cell %d style = %q, not dim", x, got)
+			break
+		}
+	}
+
+	// No held or lapsed row: no legend line, and the panel is one row
+	// shorter.
+	s := sampleSnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m"}}
+	without := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(without, leaseLegend) {
+		t.Errorf("legend drawn without a held or lapsed row:\n%s", without)
+	}
+	l := &layout{w: DefaultWidth, s: s}
+	if l.leasesH() != 4 {
+		t.Errorf("one-row table without holds = %d rows, not 4", l.leasesH())
+	}
+}
+
+// leaseHeaderLine returns the leases table's header row, or the whole
+// frame when the panel is not there (so a failure names it).
+func leaseHeaderLine(lines []string) string {
+	for i, r := range lines {
+		if strings.HasPrefix(r, "┌─ leases ") && i+1 < len(lines) {
+			return lines[i+1]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // TestReconcileDismissed: the pure core of the browser's dismissal
@@ -1337,52 +1789,112 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestIOHostRowsDrawn: the host panel shows the PSI pressure and the
-// snapshot disk's throughput when the collector has them, and hides both
-// when the kernel has no PSI (a missing /proc/pressure), rather than
-// drawing a calm zero.
+// TestIOHostRowsDrawn: the host panel draws the PSI stall meter and the
+// snapshot device's busy meter directly under the CPU meter; a missing
+// PSI hides the stall meter only and a missing device hides the busy
+// meter only, rather than drawing a calm zero.
 func TestIOHostRowsDrawn(t *testing.T) {
 	s := healthySnapshot()
 	s.IOAvail = true
 	s.IOSome10, s.IOSome60 = 0.3, 0.2
 	s.DiskDevice, s.DiskWriteMB, s.DiskBusyPct = "nvme0n1", 12, 18
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "I/O pressure") || !strings.Contains(p, "some 0.2% / full 0.0% (60s)") {
-		t.Fatalf("pressure row missing:\n%s", p)
+	if !strings.Contains(p, "i/o stall") || !strings.Contains(p, "0.0% full") {
+		t.Fatalf("stall meter missing:\n%s", p)
 	}
-	if !strings.Contains(p, "nvme0n1") || !strings.Contains(p, "12 MB/s w, 18% busy") {
-		t.Fatalf("device row missing:\n%s", p)
+	if !strings.Contains(p, "nvme0n1 busy") || !strings.Contains(p, "18% · 12 MB/s w") {
+		t.Fatalf("busy meter missing:\n%s", p)
 	}
 
+	// No PSI: only the stall meter goes.
 	s.IOAvail = false
 	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if strings.Contains(p, "I/O pressure") || strings.Contains(p, "nvme0n1") {
-		t.Fatalf("no PSI must hide the I/O rows:\n%s", p)
+	if strings.Contains(p, "i/o stall") {
+		t.Fatalf("no PSI must hide the stall meter:\n%s", p)
+	}
+	if !strings.Contains(p, "nvme0n1 busy") {
+		t.Fatalf("no PSI must keep the busy meter:\n%s", p)
+	}
+
+	// No device: only the busy meter goes.
+	s.IOAvail = true
+	s.DiskDevice = ""
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(p, "disk busy") || strings.Contains(p, "MB/s w") {
+		t.Fatalf("no device must hide the busy meter:\n%s", p)
+	}
+	if !strings.Contains(p, "i/o stall") {
+		t.Fatalf("no device must keep the stall meter:\n%s", p)
 	}
 }
 
-// TestIOMeterStyle: the disk I/O rows colour with the same ok/warn/bad
-// thresholds as the other meters, from the full 60 s average against
-// DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT (defaults 5 and 15), and
-// the device row from its busy share.
-func TestIOMeterStyle(t *testing.T) {
-	cases := []struct {
-		pct       float64
-		warn, bad float64
-		want      string
-	}{
-		{0, 5, 15, "ok"},
-		{4.9, 5, 15, "ok"},
-		{5, 5, 15, "warn"},
-		{14.9, 5, 15, "warn"},
-		{15, 5, 15, "bad"},
-		{40, 5, 15, "bad"},
-	}
-	for _, tc := range cases {
-		if got := meterStyle(tc.pct, tc.warn, tc.bad); got != tc.want {
-			t.Errorf("meterStyle(%v, %v, %v) = %q, want %q", tc.pct, tc.warn, tc.bad, got, tc.want)
+// hostBarStyle finds the first bar cell on the row carrying label and
+// returns its style — the ok/warn/bad the meter drew.
+func hostBarStyle(t *testing.T, s Snapshot, label string) string {
+	t.Helper()
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	for y, row := range strings.Split(g.Plain(), "\n") {
+		if !strings.Contains(row, label) {
+			continue
+		}
+		for x := 0; x < g.Cols(); x++ {
+			if c := g.At(x, y); c.Rune == '█' || c.Rune == '░' {
+				return c.Style
+			}
 		}
 	}
+	t.Fatalf("row with %q not found", label)
+	return ""
+}
+
+// TestIOMeterStyle: the i/o stall meter colours from the full 60 s
+// average against DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT
+// (defaults 5 and 15); the busy meter colours from the device's busy
+// share (warn 80, bad 90).
+func TestIOMeterStyle(t *testing.T) {
+	s := healthySnapshot()
+	s.IOAvail = true
+	s.DiskDevice = "nvme0n1"
+	for _, tc := range []struct {
+		full float64
+		want string
+	}{
+		{0, "ok"},
+		{4.9, "ok"},
+		{5, "warn"},
+		{14.9, "warn"},
+		{15, "bad"},
+		{40, "bad"},
+	} {
+		s.IOFull60 = tc.full
+		if got := hostBarStyle(t, s, "i/o stall"); got != tc.want {
+			t.Errorf("stall full %v = %q, want %q", tc.full, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		busy float64
+		want string
+	}{
+		{0, "ok"},
+		{79.9, "ok"},
+		{80, "warn"},
+		{89.9, "warn"},
+		{90, "bad"},
+		{100, "bad"},
+	} {
+		s.DiskBusyPct = tc.busy
+		if got := hostBarStyle(t, s, "nvme0n1 busy"); got != tc.want {
+			t.Errorf("busy %v = %q, want %q", tc.busy, got, tc.want)
+		}
+	}
+
+	// A device whose name does not fit the label column falls back to the
+	// generic label.
+	s.DiskDevice = "a-very-long-device-name"
+	if p := Draw(s, DefaultWidth, fixedNow, "h").Plain(); !strings.Contains(p, "disk busy") || strings.Contains(p, "a-very-long-device-name") {
+		t.Fatalf("long device label not shortened:\n%s", p)
+	}
+
 	// The environment raises the levels; an unparsable value keeps the
 	// default.
 	t.Setenv("DASH_IO_FULL_WARN_PCT", "10")
@@ -1406,7 +1918,7 @@ func TestIOPressureNotice(t *testing.T) {
 	s.IOFull60 = 15
 	rows := notices(s)
 	if len(rows) != 1 || rows[0].ID != "io-pressure" || rows[0].Severity != "bad" ||
-		rows[0].Text != "disk I/O stalled: full pressure 15% over 60 s" {
+		rows[0].Text != "disk i/o stalled: full pressure 15% over 60 s" {
 		t.Fatalf("notices = %+v", rows)
 	}
 	s.IOFull60 = 14.9

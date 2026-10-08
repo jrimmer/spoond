@@ -776,8 +776,8 @@ func TestJobStartOnLostLease(t *testing.T) {
 	svc.store.mu.Unlock()
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("lost background exec = %d, want 409", resp.StatusCode)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("lost background exec = %d, want 410", resp.StatusCode)
 	}
 	if body["code"] != "lease_lost" {
 		t.Fatalf("code = %v, want lease_lost", body["code"])

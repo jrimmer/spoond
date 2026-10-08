@@ -167,7 +167,13 @@ left, holder — on the page the holder is a link; a hold marks the
 holder ◆, or ◉ once lapsed), the image catalog beside the systemd
 units, a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
-through a read-only `EVENTS_TOKEN`), with a status line at the bottom.
+through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
+<host>` at the left margin and right-aligns spoond's uptime and the
+frame's clock as `up <dur>, <time>`; the footer is one dim, centred
+line — `Spoond v2.7.1 (2026-10-07) · GitHub` — with the
+dashboard binary's version and its release date, and the GitHub mark
+linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
+narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
 Its layout puts capacity and host side by side at 104 columns and
 stacks them below that. The palette gives each state a colour role on
 the black background — cyan for titles and lease ids, blue for run
@@ -238,6 +244,12 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v2.7.1: a utility that tidies up after itself.** A lost lease says
+why (`410` with `code: lease_lost`) and is released after its grace period, every
+orchestrator call has a deadline, and the dashboard shows spoond system
+messages in a dismissable Notifications panel, i/o stall and disk-busy
+meters, and the version and a GitHub link in its footer.
 
 **v2.7: named snapshots.** A lease can be saved as a named, versioned
 snapshot, and a new lease can start from it (`"snapshot": "name@v"`,
@@ -361,7 +373,9 @@ may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`,
 `IDLE_SUSPEND_DEFAULT_SECS`, `SNAPSHOT_WRITE_CONCURRENCY`,
 `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_CONCURRENCY`,
-`UNDRAIN_RESUME_RETRIES`, `ROOTFS_PROBE_SECS`, `SWEEP_TIMEOUT`), the
+`UNDRAIN_RESUME_RETRIES`, `RECOVERY_RETRY_ATTEMPTS`,
+`RECOVERY_RETRY_WINDOW`, `PREEMPT_RESUME_RETRIES`, `ROOTFS_PROBE_SECS`,
+`SWEEP_TIMEOUT`), the
 per-call E2B RPC bounds (`E2B_CREATE_TIMEOUT` and friends), named
 snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
 (`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`), `CRASH_TEST`, the
