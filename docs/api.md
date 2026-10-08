@@ -1971,9 +1971,9 @@ granting it would recreate exactly the uncapped state the delete
 removes. Removing the identity is what actually revokes SSH access —
 the gateway treats the identity store as authoritative when present, so
 removing the user invalidates all their keys immediately. Before
-spoond-q4j the
-delete answered `204` and left the leases, snapshots, kept builds and
-jobs behind, uncapped (an owner with no user has no quota).
+spoond-q4j the delete answered `204` and left the leases, snapshots,
+kept builds and jobs behind, uncapped (an owner with no user has no
+quota).
 
 An id that is neither a known identity nor has any remaining state
 answers `404 user not found`; deleting the same real user twice is
