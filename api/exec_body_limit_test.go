@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -84,6 +87,9 @@ func TestExecBodyLimitDoesNotResumeIdleSuspended(t *testing.T) {
 	if !l.Suspended {
 		t.Fatal("precondition: lease not suspended")
 	}
+	svc.store.mu.Lock()
+	before := l.LastActive
+	svc.store.mu.Unlock()
 
 	oversize, err := json.Marshal(map[string]any{"cmd": strings.Repeat("a", 2<<10)})
 	if err != nil {
@@ -101,6 +107,14 @@ func TestExecBodyLimitDoesNotResumeIdleSuspended(t *testing.T) {
 	}
 	if !l.Suspended {
 		t.Fatal("an oversize exec body resumed the idle-suspended lease")
+	}
+	// An oversize request is refused before touch, so it must not count
+	// as activity for the idle sweeper.
+	svc.store.mu.Lock()
+	after := l.LastActive
+	svc.store.mu.Unlock()
+	if !after.Equal(before) {
+		t.Fatalf("oversize exec touched LastActive: %s -> %s", before, after)
 	}
 
 	// A normal exec still auto-resumes and serves.
@@ -143,5 +157,85 @@ func TestStreamFirstFrameLimit(t *testing.T) {
 	}
 	if closeErr.Code != websocket.CloseMessageTooBig {
 		t.Fatalf("close code = %d, want %d (message too big)", closeErr.Code, websocket.CloseMessageTooBig)
+	}
+}
+
+// TestExecBodyLimitDefaultAcceptsLargeLegalBody: the documented default
+// cap (8 MiB) leaves room for a large command and the full 64 KiB
+// secrets budget in one request, so a legitimately large exec is not
+// rejected at the default. This pins the cap's headroom: a 120 KiB cmd
+// plus 64 KiB of secrets is a few hundred KiB, far under the default.
+func TestExecBodyLimitDefaultAcceptsLargeLegalBody(t *testing.T) {
+	if maxExecBodyBytes != defaultMaxExecBodyBytes {
+		t.Fatalf("precondition: default cap = %d, want %d", maxExecBodyBytes, defaultMaxExecBodyBytes)
+	}
+	ts, _, _, _ := newTestServerWithService(t)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300})
+	id := create["id"].(string)
+
+	secrets := map[string]string{}
+	remaining := maxSecretsTotalBytes
+	for i := 0; remaining > 0; i++ {
+		n := remaining
+		if n > 8<<10 {
+			n = 8 << 10
+		}
+		secrets[fmt.Sprintf("s%02d", i)] = strings.Repeat("v", n)
+		remaining -= n
+	}
+	large := map[string]any{
+		"cmd":     strings.Repeat("a", 120<<10),
+		"secrets": secrets,
+	}
+	raw, err := json.Marshal(large)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if int64(len(raw)) >= maxExecBodyBytes {
+		t.Fatalf("test body is %d bytes, at or above the cap %d; it must be legal", len(raw), maxExecBodyBytes)
+	}
+	req, _ := http.NewRequest("POST", ts.URL+"/api/sandboxes/"+id+"/exec", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer token-a")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("large legal exec: %v", err)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("large legal exec = %d (%v), want 200", resp.StatusCode, body)
+	}
+}
+
+// TestInvalidMaxExecBodyBytesWarns: an unusable MAX_EXEC_BODY_BYTES is
+// reported once instead of silently falling back to the default cap.
+func TestInvalidMaxExecBodyBytesWarns(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter, oldFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	})
+	t.Setenv("MAX_EXEC_BODY_BYTES", "not-a-number")
+	logInvalidMaxExecBodyBytes()
+	if got := buf.String(); !strings.Contains(got, "MAX_EXEC_BODY_BYTES") || !strings.Contains(got, "invalid") {
+		t.Fatalf("invalid cap warning = %q, want it to name the variable and the problem", got)
+	}
+
+	// A valid value and an unset variable both stay quiet.
+	buf.Reset()
+	t.Setenv("MAX_EXEC_BODY_BYTES", "1048576")
+	logInvalidMaxExecBodyBytes()
+	if got := buf.String(); got != "" {
+		t.Fatalf("valid cap logged %q, want nothing", got)
+	}
+	buf.Reset()
+	t.Setenv("MAX_EXEC_BODY_BYTES", "")
+	logInvalidMaxExecBodyBytes()
+	if got := buf.String(); got != "" {
+		t.Fatalf("unset cap logged %q, want nothing", got)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -848,9 +849,37 @@ var maxExecBodyBytes int64 = func() int64 {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			return n
 		}
+		// An unusable value silently falls back to the default; the
+		// startup warning (logInvalidMaxExecBodyBytes) makes that visible.
 	}
-	return 8 << 20 // 8 MiB
+	return defaultMaxExecBodyBytes // 8 MiB
 }()
+
+// defaultMaxExecBodyBytes is the cap used when MAX_EXEC_BODY_BYTES is
+// unset or unusable.
+const defaultMaxExecBodyBytes int64 = 8 << 20
+
+// logInvalidMaxExecBodyBytes warns once at startup when
+// MAX_EXEC_BODY_BYTES is set to something unusable: the process falls
+// back to the default cap silently otherwise, so an operator who meant
+// to raise (or lower) it never learns the value was ignored. It logs
+// through the package logger first (eligible before a service exists)
+// and is otherwise a no-op when the variable is unset or valid.
+func logInvalidMaxExecBodyBytes() {
+	v := os.Getenv("MAX_EXEC_BODY_BYTES")
+	if v == "" {
+		return
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+		return
+	}
+	log.Printf("MAX_EXEC_BODY_BYTES=%q is invalid (need a positive integer); using the %d byte default", v, defaultMaxExecBodyBytes)
+}
+
+// init logs an unusable MAX_EXEC_BODY_BYTES once for a process that
+// wires the API through NewServer (the backend binary); the alternative
+// is a silent fallback to the default.
+func init() { logInvalidMaxExecBodyBytes() }
 
 // readExecBody reads a request body under maxExecBodyBytes, answering a
 // JSON 413 when the cap trips and a JSON 400 for any other read error.
@@ -1981,14 +2010,16 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	s.svc.touch(id) // exec is activity for the idle sweeper
-	// Bound and read the body before the lease is resumed: an oversize
-	// request must be refused with 413 without waking an idle-suspended
-	// lease, and the server must not hold an unbounded command in memory.
+	// Bound and read the body before the lease is resumed and before
+	// touch: an oversize request must be refused with 413 without waking
+	// an idle-suspended lease, the server must not hold an unbounded
+	// command in memory, and an oversize request is not activity for the
+	// idle sweeper (spoond-mrbr NIT).
 	body, ok := readExecBody(w, r)
 	if !ok {
 		return
 	}
+	s.svc.touch(id) // exec is activity for the idle sweeper
 	// A suspended workspace-backed lease has no running sandbox. One that
 	// idle_suspend suspended resumes first through the normal resume path
 	// (2.5, #129 part 2); any other suspension keeps the 409.
