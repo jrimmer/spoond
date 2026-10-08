@@ -558,7 +558,13 @@ The startup pass runs the same orphan rule again after its crash reconcile.
 
 The periodic sweep (every minute) is the backstop
 for a failed delete and for any guest a previous incarnation left. It is
-skipped entirely while the node is draining, and it never deletes a
+skipped entirely while the node is draining and while any image/template
+bake is in flight (`spoond_builds_in_flight`): a bake's sandbox has no
+spoond lease row, and spoond does not track build sandbox ids, so it
+would otherwise look unclaimed. That guard is safe today only because the
+pinned e2b orchestrator leaves build sandboxes out of `Server.List`; an
+orchestrator upgrade must keep build sandboxes out of `List` (or spoond
+must track build ids) before it ships. The sweep never deletes a
 sandbox a pool entry claims, a lease owns in any state other than `lost`
 (a running, suspended or busy lease), or a creation currently holds in
 flight. A sandbox with no lease and no pool entry (a released lease's

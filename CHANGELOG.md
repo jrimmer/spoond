@@ -152,7 +152,15 @@ summarised from README "Status".
   restore. The sweep also deletes any substrate sandbox no lease and no
   pool entry claims, but only once it has been seen unclaimed on two
   consecutive passes and never while a create holds that sandbox in
-  flight; the startup pass still deletes a foreign leftover at once.
+  flight; the startup pass still deletes a foreign leftover at once. A
+  cold restart re-checks the released flag after taking the store lock,
+  so a release landing between its early check and the lock cannot
+  resurrect the lease row or leave its fresh guest. The sweep also skips
+  entirely while any image/template bake is in flight (the counter
+  behind `spoond_builds_in_flight`), because a build sandbox has no
+  spoond row; that guard is safe today only because the pinned e2b
+  orchestrator leaves build sandboxes out of `Server.List`, so a future
+  orchestrator must keep them out (or spoond must track build ids).
   `docs/api.md` states it under [Lost leases]: a lost lease's guest is
   stopped, and `DELETE` frees the quota.
 

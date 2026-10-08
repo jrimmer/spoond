@@ -20,7 +20,12 @@ import (
 //     was already unclaimed on the previous pass, keyed by sandbox id and
 //     StartedAt, so a create whose lease row lands a moment later is
 //     never swept;
-//   - the whole sweep is skipped while the node is draining.
+//   - the whole sweep is skipped while the node is draining and while any
+//     image/template bake is in flight (the spoond_builds_in_flight
+//     counter). spoond does not track build sandbox ids, so a sandbox a
+//     bake started could otherwise look unclaimed; today the pinned e2b
+//     orchestrator leaves build sandboxes out of Server.List, which this
+//     guard does not rely on (N1).
 //
 // The pool and lease claims are re-checked under the store lock right
 // before each Delete, so a claim that lands mid-pass still wins.
@@ -92,10 +97,14 @@ func (s *Service) sandboxInFlight(sandboxID string) bool {
 // given up on: a lost lease's sandbox (its bounded delete on the lost
 // path may have failed), an unclaimed sandbox seen unclaimed twice, and
 // the sandbox ids a failed delete remembered. It is skipped entirely
-// while the node is draining, and never touches a pool, live, busy or
-// in-flight sandbox. spoond-abc, spoond-63a.
+// while the node is draining or while any image/template bake runs (a
+// bake's sandbox has no spoond row and would look unclaimed), and never
+// touches a pool, live, busy or in-flight sandbox. spoond-abc, spoond-63a.
 func (s *Service) sweepOrphanSandboxes(ctx context.Context) {
 	if s.draining.Load() {
+		return
+	}
+	if s.bakesRunning(ctx) > 0 {
 		return
 	}
 	s.sweepOrphanSandboxesNow(ctx)

@@ -165,9 +165,12 @@ func TestOrphanSweepStopsLostSandbox(t *testing.T) {
 	}
 	sub.Fake.Kill(l.SandboxID)
 	failCreateAfterStart(t, sub, l.SandboxID)
-	// Every attempt of the lost transition's delete fails; the sweep's
-	// later delete (a fresh call) succeeds.
+	// Every attempt of the lost transition's delete fails. The failed
+	// resume's own cleanup runs first (spoond-52c), then the lost path's
+	// bounded delete; both must fail so the sandbox is still running for
+	// the sweep's later delete (a fresh call) to find.
 	sub.FailCall("Delete", 1, errors.New("substrate unreachable"))
+	sub.FailCall("Delete", 2, errors.New("substrate unreachable"))
 
 	if summary := svc.reconcileCrash(ctx); summary.Lost != 1 {
 		t.Fatalf("summary = %+v, want one loss", summary)

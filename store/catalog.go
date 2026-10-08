@@ -190,6 +190,25 @@ func (db *DB) ListBuilds(ctx context.Context) ([]BuildRow, error) {
 	return out, nil
 }
 
+// CountBuildingTemplateBuilds returns how many image/template builds were
+// set building at or after notBefore. The catalog is shared with the
+// separate `spoond images build` process, so the backend can see its
+// bakes here; notBefore bounds the count to builds that could still be
+// running (the build timeout), so a killed build left `building` for ever
+// does not wedge the caller. Used by the periodic orphan sweep, which
+// must not risk deleting a build sandbox it cannot see in Server.List
+// (N1).
+func (db *DB) CountBuildingTemplateBuilds(ctx context.Context, notBefore time.Time) (int, error) {
+	row := db.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM builds
+		WHERE state = 'building' AND kind = 'template' AND created_at >= ?`,
+		formatTime(notBefore))
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count building template builds: %w", err)
+	}
+	return n, nil
+}
+
 // ChildBuilds returns the builds with parent_build_id = parentID
 // (pause/checkpoint builds of one sandbox lineage), ordered by
 // created_at.

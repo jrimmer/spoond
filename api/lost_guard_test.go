@@ -366,3 +366,40 @@ func TestRestartColdCreateAfterReleaseStopsSandbox(t *testing.T) {
 		t.Fatalf("sandboxes left running after the release: %v", ids)
 	}
 }
+
+// TestRestartRecheckAfterReleaseStopsSandbox (G2): a release that lands
+// between restart's early released check and its store lock still stops
+// the fresh sandbox and writes no lease row back. The hook fires exactly
+// in that window.
+func TestRestartRecheckAfterReleaseStopsSandbox(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	sandbox := l.SandboxID
+
+	svc.restartBeforeRecheck = func() {
+		// Land the release after restart's first released check, before
+		// the store lock. The fresh sandbox already exists.
+		svc.release(ctx, l)
+	}
+	t.Cleanup(func() { svc.restartBeforeRecheck = nil })
+
+	_, err = svc.restart(ctx, "c", l.ID, "")
+	if !errors.Is(err, errLeaseReleased) {
+		t.Fatalf("restart error = %v, want errLeaseReleased", err)
+	}
+	if _, ok := svc.store.leases[l.ID]; ok {
+		t.Fatal("the released lease was resurrected by restart's late save")
+	}
+	if sandboxOnFake(t, sub, sandbox) {
+		t.Fatalf("the fresh sandbox %s was left running after the release", sandbox)
+	}
+	if ids := sub.sandboxesLive(t); len(ids) != 0 {
+		t.Fatalf("sandboxes left running after the release: %v", ids)
+	}
+}

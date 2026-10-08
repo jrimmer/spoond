@@ -682,6 +682,11 @@ type Service struct {
 	// suspended. It lets a test land a release in that window to pin the
 	// re-check under the lock (spoond-d76). Nil in production.
 	pauseBeforeSuspend func(l *Lease)
+	// restartBeforeRecheck, when set by a test, runs after restart has
+	// re-checked the lease is not released and just before it takes the
+	// store lock for the save, so a test can land a release in that
+	// window (G2). Nil in production.
+	restartBeforeRecheck func()
 	// saves tracks in-flight and recently failed named-snapshot saves in
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
@@ -772,6 +777,31 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 // record pool, lease and quota events.
 func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 	s.metrics = m
+}
+
+// bakeCountBound is how long after a template build row was created the
+// sweep still treats it as a possible in-flight bake. It is the build
+// timeout (`spoond images build` runs a template build for up to an
+// hour), so a killed build left stuck in state `building` does not wedge
+// the sweep for ever.
+const bakeCountBound = time.Hour
+
+// bakesRunning reports how many image/template bakes may be in flight:
+// the catalog's template builds still `building` and created within
+// bakeCountBound. It is the counter behind the spoond_builds_in_flight
+// gauge (CollectMetrics publishes it). The image pipeline runs in the
+// separate `spoond images build` process, so the backend sees its bakes
+// only through the shared catalog (N1). A catalog read failure counts
+// zero bakes rather than blocking the sweep.
+func (s *Service) bakesRunning(ctx context.Context) int64 {
+	if s.db == nil {
+		return 0
+	}
+	c, err := s.db.CountBuildingTemplateBuilds(ctx, s.now().Add(-bakeCountBound))
+	if err != nil {
+		return 0
+	}
+	return int64(c)
 }
 
 // SetGatewayToken marks the SSH gateway's service token, enabling
@@ -2833,6 +2863,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		s.endCreatingSandbox(sb.ID)
 		return nil, errLeaseReleased
 	}
+	if s.restartBeforeRecheck != nil {
+		s.restartBeforeRecheck()
+	}
 	s.store.mu.Lock()
 	if l.released {
 		// Released while the fresh guest started: stop it and write no
@@ -4597,6 +4630,11 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 		oldest = s.now().Sub(oldestQueued).Seconds()
 	}
 	m.LeasesQueuedOldest.Set(oldest)
+	// Image/template bakes in flight (N1): the in-process counter plus the
+	// catalog's still-`building` template builds, so the gauge the sweep
+	// reads and the dashboard's "builds busy" cell agree with what the
+	// sweep guards on.
+	m.BuildsInFlight.Set(float64(s.bakesRunning(context.Background())))
 	// Kept checkpoints (#126): pins of live leases and their recorded
 	// bytes, refreshed on every scrape. CollectMetrics holds the store
 	// lock only for the lease set it needs; the kept rows live in the

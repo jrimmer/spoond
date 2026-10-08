@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v2/substrate/e2b"
 )
 
 // Orphan sweep tests (spoond-abc, spoond-63a): the periodic sweep deletes
@@ -274,5 +276,53 @@ func TestOrphanSweepDeletesUnclaimedAfterFailedDelete(t *testing.T) {
 	svc.sweepOrphanSandboxes(ctx)
 	if sandboxOnFake(t, sub, sb.ID) {
 		t.Fatalf("the remembered sandbox %s survived the retry", sb.ID)
+	}
+}
+
+// TestOrphanSweepSkipsWhileCatalogBake: a template build row still in
+// state building (a bake run by the separate `spoond images build`
+// process) makes the sweep skip, so a build sandbox that happens to be
+// in Server.List is not deleted. Once the build is ready, the two-pass
+// rule resumes.
+func TestOrphanSweepSkipsWhileCatalogBake(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	sb, err := sub.Create(ctx, substrate.CreateRequest{SandboxID: "bake-catalog-1"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := time.Now()
+	img, err := db.GetImage(ctx, "py-base")
+	if err != nil {
+		t.Fatalf("get image: %v", err)
+	}
+	buildID := e2b.NewUUID()
+	if err := db.InsertBuild(ctx, store.BuildRow{
+		BuildID: buildID, Kind: "template", TemplateID: img.TemplateID,
+		Image: "py-base", State: "building", VCPU: 2, MemoryMB: 2048, DiskMB: 10240,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert building build: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		svc.sweepOrphanSandboxes(ctx)
+	}
+	if !sandboxOnFake(t, sub, sb.ID) {
+		t.Fatalf("the sweep deleted %s while a catalog bake was in flight", sb.ID)
+	}
+
+	if err := db.UpdateBuildState(ctx, buildID, "ready", "", nil); err != nil {
+		t.Fatalf("mark ready: %v", err)
+	}
+	svc.sweepOrphanSandboxes(ctx)
+	if !sandboxOnFake(t, sub, sb.ID) {
+		t.Fatalf("the unclaimed sandbox %s was swept before its second pass", sb.ID)
+	}
+	svc.sweepOrphanSandboxes(ctx)
+	if sandboxOnFake(t, sub, sb.ID) {
+		t.Fatalf("the unclaimed sandbox %s survived the second pass after the bake", sb.ID)
 	}
 }
