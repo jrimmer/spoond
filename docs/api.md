@@ -287,7 +287,9 @@ place in the fair-share order at that moment, e.g. `memory cap; position
 2 of 3`; the lease id is allocated when the create is queued and the
 created lease keeps it. On admission a `created` event follows as usual;
 a wait that ends without a lease emits `timed_out` with detail `waited
-Ns`, `client gone` or `draining`.
+Ns`, `client gone`, `draining` or `owner deleted` (the owner's identity
+was removed while the create waited; the create is refused `403 owner
+deleted`).
 
 The create holds its HTTP request open for the whole wait. spoond sets
 no server write timeout, but the client's own timeout must be longer
@@ -1903,7 +1905,12 @@ The answer is `200` with what was removed:
 ```
 
 The lists are always present (empty when there was nothing to remove).
-Removing the identity is what actually revokes SSH access — the gateway
+A create of the deleted user that is still waiting in the admission
+queue (or that raced the delete) is refused with `403 owner deleted`
+rather than granted: an owner with no identity row has no quota, so
+granting it would recreate exactly the uncapped state the delete
+removes. Removing the identity is what actually revokes SSH access —
+the gateway
 treats the identity store as authoritative when present, so removing
 the user invalidates all their keys immediately. Before spoond-q4j the
 delete answered `204` and left the leases, snapshots, kept builds and

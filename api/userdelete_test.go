@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -237,6 +238,91 @@ func TestUserDeleteDataIdempotent(t *testing.T) {
 		if len(r.Leases) != 0 || len(r.Jobs) != 0 || len(r.Snapshots) != 0 || len(r.KeptBuilds) != 0 {
 			t.Fatalf("cleanup of an absent owner = %+v, want all empty", r)
 		}
+	}
+}
+
+// TestUserDeleteRefusesQueuedCreate: a create parked in the admission
+// queue when its owner is deleted is refused, not granted after the
+// delete. Granting it would recreate the ownerless, uncapped lease the
+// delete exists to remove (spoond-q4j).
+func TestUserDeleteRefusesQueuedCreate(t *testing.T) {
+	ts, svc, _, sub, _, victimID := newUserDeleteServer(t)
+	// A node with room for exactly one py-base (2048 MiB = 1024 pages),
+	// so the second create must wait for the first to go.
+	installDynamicNode(t, svc, sub, 1024, 0, 1024)
+	svc.cfg.MaxAdmitWaitSecs = 60
+	svc.admitQ.tick = 20 * time.Millisecond
+	h := ts.Config.Handler
+
+	if r := waitCreate(t, h, "victim-tok", `{"image":"py-base","ttl":60}`); r.code != http.StatusCreated {
+		t.Fatalf("filler create: %d %v", r.code, r.body)
+	}
+	// The victim's next create is refused for capacity and waits.
+	res := startCreate(t, h, context.Background(), "victim-tok", `{"image":"py-base","ttl":60,"wait":60}`)
+	waitDepth(t, svc, 1)
+
+	resp, removed := doReq(t, "DELETE", ts.URL+"/api/users/"+victimID, "admin-tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete user: %d %v", resp.StatusCode, removed)
+	}
+
+	// The waiting create must be answered, and refused: its owner is
+	// gone, so admitting it would be ownerless and uncapped.
+	out := waitResult(t, res)
+	if out.code != http.StatusForbidden {
+		t.Fatalf("queued create after user delete = %d, want 403 (%v)", out.code, out.body)
+	}
+	if msg, _ := out.body["error"].(string); msg != "owner deleted" {
+		t.Fatalf("refusal = %q, want %q", msg, "owner deleted")
+	}
+	if l := svc.leasesOfOwner(victimID); len(l) != 0 {
+		t.Fatalf("queued create recreated %d lease(s) for the deleted owner", len(l))
+	}
+	if svc.queueDepth() != 0 {
+		t.Fatalf("queue depth after delete = %d, want 0", svc.queueDepth())
+	}
+}
+
+// TestReserveQuotaRefusesDeletedOwner: once an owner is marked deleted,
+// the quota check refuses instead of falling through the uncapped
+// legacy-owner branch, so no admission path can grant them a lease
+// (spoond-q4j).
+func TestReserveQuotaRefusesDeletedOwner(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetIdentities(ids)
+	u, err := ids.AddUser("gone", identity.KindPerson, nil, "gone-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.reserveQuota(u.ID, 1, 0, true); err != nil {
+		t.Fatalf("reserve before delete: %v", err)
+	}
+	svc.releaseQuotaReservation(u.ID, 1, 0)
+	svc.markOwnerDeleted(u.ID)
+	if err := svc.reserveQuota(u.ID, 1, 0, true); !errors.Is(err, errOwnerGone) {
+		t.Fatalf("reserve after delete = %v, want errOwnerGone", err)
+	}
+}
+
+// TestUserDeleteJobsListNeverNull: when the running-jobs query fails the
+// response's jobs field is still an empty JSON array, never null, so a
+// client can iterate it unconditionally (spoond-q4j).
+func TestUserDeleteJobsListNeverNull(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	ctx := context.Background()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	res := svc.deleteUserData(ctx, "u-none")
+	if res.Jobs == nil {
+		t.Fatal("Jobs = nil, want an empty non-nil slice")
+	}
+	if len(res.Jobs) != 0 {
+		t.Fatalf("Jobs = %v, want empty", res.Jobs)
 	}
 }
 

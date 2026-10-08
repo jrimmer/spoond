@@ -19,7 +19,10 @@ summarised from README "Status".
   charge (an owner with no user has no quota). It now releases every
   lease (reason `user_deleted`), cancels every running job, drops every
   named snapshot and unpins every kept build, logs each step and emits
-  one `user_deleted` event naming the counts. The response changed from
+  one `user_deleted` event naming the counts. A create of that user
+  still waiting in the admission queue, or one that raced the delete, is
+  refused (`403 owner deleted`) instead of granted, since an owner with
+  no identity row has no quota. The response changed from
   `204` to `200` with `{"removed": {user, leases, jobs, snapshots,
   kept_builds}}`, so a caller can see exactly what was cleaned up
   (spoond-q4j).

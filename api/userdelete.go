@@ -52,11 +52,20 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 		KeptBuilds: []string{},
 	}
 
+	// Refuse any admission ticket the user parked before the identity was
+	// removed, and mark the owner deleted so an admission that raced the
+	// delete is refused rather than recreating an uncapped lease
+	// (spoond-q4j).
+	s.markOwnerDeleted(owner)
+	s.cancelQueuedForOwner(owner)
+
 	// Cancel running jobs first, while their leases (and sandboxes) still
 	// exist: a TERM reaches the guest's process group, and marking the job
 	// lost settles the running gauge, the secret bookkeeping and the
-	// event even if the signal could not be delivered.
-	res.Jobs = s.cancelUserJobs(ctx, owner)
+	// event even if the signal could not be delivered. Append, never
+	// overwrite, so the response's jobs list stays a JSON array even when
+	// the listing query fails.
+	res.Jobs = append(res.Jobs, s.cancelUserJobs(ctx, owner)...)
 
 	// Snapshot the pins before the releases drop them per lease, so the
 	// response can name every build that stopped being a GC root.
@@ -127,12 +136,13 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 // TERM and marks it lost with detail "user deleted", returning the job
 // ids it settled. A signal that cannot be delivered (the guest is gone)
 // is logged and the job is still settled, so no running count or secret
-// name survives the user.
+// name survives the user. It always returns a non-nil slice, so a caller
+// can append it into a JSON array without turning the field null.
 func (s *Service) cancelUserJobs(ctx context.Context, owner string) []string {
 	rows, err := s.db.ListRunningJobsOfOwner(ctx, owner)
 	if err != nil {
 		s.log.Printf("user delete: list running jobs of %s: %v", owner, err)
-		return nil
+		return []string{}
 	}
 	out := make([]string, 0, len(rows))
 	for _, j := range rows {
@@ -207,6 +217,11 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("remove: %v", err))
 		return
 	}
+	// Stop any create of this owner that is already admitted or waiting
+	// (spoond-q4j): deleteUserData marks the owner deleted before it
+	// cleans up, so reserveQuota and grantLease refuse a create that
+	// raced the identity removal, and the cleanup releases any lease that
+	// slipped through before the mark.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), userDeleteTimeout)
 	defer cancel()
 	res := s.svc.deleteUserData(ctx, id)

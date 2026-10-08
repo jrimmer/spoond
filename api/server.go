@@ -1131,6 +1131,11 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// three; tell clients when to come back instead of letting them
 		// guess.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "draining", drainRetryAfterSecs
+	case errors.Is(err, errOwnerGone):
+		// The owner's identity was removed while the create was in
+		// flight (spoond-q4j): the user is gone, so the create is refused
+		// rather than granted ownerless and uncapped.
+		status, msg = http.StatusForbidden, "owner deleted"
 	case errors.Is(err, substrate.ErrCapacity):
 		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
 	default:
