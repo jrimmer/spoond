@@ -986,13 +986,15 @@ guest's job directory — `env` rides the substrate's start request — and
 A job cannot run forever: the reconcile pass kills a job that has spent
 its effective max runtime and marks the record exited with reason
 `timed_out`. The host cap is `JOB_MAX_RUNTIME` (default 24 h); a start
-may ask for a shorter `max_runtime_secs`, never a longer one, and the
-cap is wall-clock from the start, so it applies while the lease is
-suspended too — a `sleep infinity` can no longer pin hugepages
-indefinitely. A job running on a suspended lease does not keep that
-lease active: `reconcileJobs` no longer calls `markActive` on a
-suspended lease, so the held-lease rules' untouched test still sees the
-suspension.
+may ask for a shorter `max_runtime_secs`, never a longer one. The cap is
+wall-clock from the start; while the lease is suspended the reconcile
+leaves the job alone (the paused guest cannot be signalled, and its
+memory is already freed), and the first reconcile after a resume kills a
+job whose cap was spent in the meantime — so a `sleep infinity` can no
+longer pin hugepages indefinitely. A job running on a suspended lease
+also no longer keeps that lease active: `reconcileJobs` stopped calling
+`markActive` on a suspended lease, so the held-lease rules' untouched
+test still sees the suspension.
 
 | Variable | Default | Meaning |
 |---|---|---|
