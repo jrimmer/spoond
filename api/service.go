@@ -302,6 +302,12 @@ type ServiceConfig struct {
 	// IDLE_SUSPEND_DEFAULT_SECS.
 	IdleSuspendDefault  int64
 	TemplateStoragePath string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
+	// BuildTimeout is how long a template build may run before the GC
+	// treats a row still `building` as stale and fails it (spoond-4yl).
+	// The GC fails a building row older than twice this, logged; the
+	// image pipeline bounds its BuildTemplate with the same value. Zero
+	// falls back to substrate.DefaultBuildTimeout.
+	BuildTimeout time.Duration
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
 	// lost_at — 7 days for persistent leases, 1 day for the rest, so a
@@ -776,29 +782,23 @@ func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 	s.metrics = m
 }
 
-// bakeCountBound is how long after a template build row was created the
-// sweep still treats it as a possible in-flight bake. It is the build
-// timeout (`spoond images build` runs a template build for up to an
-// hour), so a killed build left stuck in state `building` does not wedge
-// the sweep for ever.
-const bakeCountBound = time.Hour
-
-// bakesRunning reports how many image/template bakes may be in flight:
-// the catalog's template builds still `building` and created within
-// bakeCountBound. It is the counter behind the spoond_builds_in_flight
-// gauge (CollectMetrics publishes it). The image pipeline runs in the
-// separate `spoond images build` process, so the backend sees its bakes
-// only through the shared catalog (N1). A catalog read failure counts
-// zero bakes rather than blocking the sweep.
-func (s *Service) bakesRunning(ctx context.Context) int64 {
+// bakesRunning reports how many template bakes are in flight: the
+// catalog's template builds still `building`. The image pipeline runs in
+// the separate `spoond images build` process, so the backend sees its
+// bakes only through the shared catalog; a stale row a killed build left
+// is failed by the GC (spoond-4yl). The orphan sweep skips while this is
+// non-zero, and a catalog read failure is returned so the sweep can skip
+// rather than delete blind (spoond-63a N1). CollectMetrics publishes the
+// count as spoond_builds_in_flight.
+func (s *Service) bakesRunning(ctx context.Context) (int64, error) {
 	if s.db == nil {
-		return 0
+		return 0, nil
 	}
-	c, err := s.db.CountBuildingTemplateBuilds(ctx, s.now().Add(-bakeCountBound))
+	c, err := s.db.CountBuildingTemplateBuilds(ctx)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return int64(c)
+	return int64(c), nil
 }
 
 // SetGatewayToken marks the SSH gateway's service token, enabling
@@ -1271,10 +1271,15 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		sandboxID = sb.ID
 		s.beginCreatingSandbox(sandboxID)
 	}
-	// The lease can be released while the substrate create runs (a cold
-	// boot and its probe take minutes). The release deleted the sandbox
-	// id it knew about before this guest existed, so stop the fresh one
-	// here and tell the caller not to save (spoond-775, spoond-63a).
+	// The create can take minutes on a saturated host. If the lease was
+	// released while this one was starting, the sandbox must not become
+	// the lease's again: release already deleted the sandbox id it knew
+	// about before this guest existed and dropped the row, and no path
+	// may re-add one or save the lease back (spoond-775). Stop the fresh
+	// sandbox here (bounded retries, spoond-63a) and tell the caller not
+	// to save; the caller's own released checks and saveLeaseLocked's
+	// guard cover a release that lands later. The deferred
+	// endCreatingSandbox ends the in-flight mark.
 	if s.leaseReleased(l) {
 		s.log.Printf("create: lease %s was released while its sandbox %s started; stopping it", l.ID, sandboxID)
 		s.deleteSandboxWithRetries(sandboxID, l.ID, "released")
@@ -1282,20 +1287,6 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		return substrate.Sandbox{}, errLeaseReleased
 	}
 	s.recordAppliedEgress(l.ID, eg)
-	// The create can take minutes on a saturated host. If the lease was
-	// released while this one was starting, the sandbox must not become
-	// the lease's again: release already deleted the previous sandbox and
-	// dropped the row, and no path may re-add one or save the lease back
-	// (spoond-775). Stop the fresh sandbox here; the caller's own released
-	// checks and saveLeaseLocked's guard cover the rest.
-	if s.leaseReleased(l) {
-		s.log.Printf("create: lease %s was released while its sandbox %s started; stopping it", l.ID, sb.ID)
-		if err := s.sub.Delete(ctx, sb.ID); err != nil {
-			s.log.Printf("create: lease %s stop sandbox %s: %v", l.ID, sb.ID, err)
-		}
-		s.deleteSandboxRow(sb.ID)
-		return substrate.Sandbox{}, errLeaseReleased
-	}
 	leaseID := l.ID
 	if leaseID == "pool" {
 		leaseID = "" // pool placeholder: pool sandboxes have no lease
@@ -2239,15 +2230,16 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				id = pool[0]
 				s.store.pool[image] = pool[1:]
 				s.removePoolLocked(id)
+				// The pool entry is gone before the lease row names the
+				// sandbox: hold it in flight, in the same critical
+				// section, so the orphan sweep never sees it unclaimed
+				// in the gap (spoond-abc).
+				s.beginCreatingSandbox(id)
 			}
 			s.store.mu.Unlock()
 			if id == "" {
 				break
 			}
-			// The pool entry is gone before the lease row names the
-			// sandbox: hold it in flight so the orphan sweep cannot sweep
-			// it in the gap (spoond-abc).
-			s.beginCreatingSandbox(id)
 			row, err := s.db.GetSandbox(ctx, id)
 			if errors.Is(err, store.ErrNotFound) {
 				s.log.Printf("grant: pooled %s (%s) has no sandboxes row, discarding", id, image)
@@ -4432,6 +4424,7 @@ func (s *Service) deleteSandboxBounded(ctx context.Context, sandboxID string) {
 		}
 	}
 	s.log.Printf("delete sandbox %s failed after %d attempt(s): %v", sandboxID, sandboxDeleteRetries, err)
+	s.rememberOrphanSandbox(sandboxID)
 }
 
 // flushLastActiveLocked writes the batched touch() updates in one
@@ -4642,11 +4635,12 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 		oldest = s.now().Sub(oldestQueued).Seconds()
 	}
 	m.LeasesQueuedOldest.Set(oldest)
-	// Image/template bakes in flight (N1): the in-process counter plus the
-	// catalog's still-`building` template builds, so the gauge the sweep
-	// reads and the dashboard's "builds busy" cell agree with what the
-	// sweep guards on.
-	m.BuildsInFlight.Set(float64(s.bakesRunning(context.Background())))
+	// Template bakes in flight (N1): the catalog's still-`building`
+	// template builds, the same count the orphan sweep guards on. A read
+	// failure leaves the gauge at its last value.
+	if n, err := s.bakesRunning(context.Background()); err == nil {
+		m.BuildsInFlight.Set(float64(n))
+	}
 	// Kept checkpoints (#126): pins of live leases and their recorded
 	// bytes, refreshed on every scrape. CollectMetrics holds the store
 	// lock only for the lease set it needs; the kept rows live in the

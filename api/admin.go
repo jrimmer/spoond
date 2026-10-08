@@ -613,12 +613,13 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 	reason := fmt.Sprintf("drain resume failed after %d attempt(s): %v", attempts, err)
 	s.clearDrainHeal(l.ID)
 	s.store.mu.Lock()
-	if l.released || l.State == "lost" {
+	released, alreadyLost, canLose := undrainLossAllowed(l)
+	if released || alreadyLost {
 		// A lease released or already lost while the resume was in flight
 		// is not lost again: clear its Drained flag if it still carries it
 		// and save nothing else, so no second lost event follows
 		// (spoond-775 class, spoond-52c NIT).
-		if !l.released && l.Drained {
+		if !released && l.Drained {
 			l.Drained = false
 			s.saveLeaseLocked(l)
 		}
@@ -630,8 +631,8 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 	// bringing the guest back, and losing it would delete an intact
 	// lease. Anything else is a logged skip: no markLost, no
 	// stopLostSandbox, no lost event.
-	busy, state := l.busy, l.State
-	if busy || state != "suspended" {
+	if !canLose {
+		busy, state := l.busy, l.State
 		s.store.mu.Unlock()
 		s.log.Printf("undrain: not losing lease %s (state %s, busy=%v)", l.ID, state, busy)
 		return err, attempts, false

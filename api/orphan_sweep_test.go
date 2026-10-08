@@ -326,3 +326,26 @@ func TestOrphanSweepSkipsWhileCatalogBake(t *testing.T) {
 		t.Fatalf("the unclaimed sandbox %s survived the second pass after the bake", sb.ID)
 	}
 }
+
+// TestOrphanSweepSkipsOnCatalogReadError: when the sweep cannot read the
+// catalog's in-flight template builds it skips the pass rather than
+// deleting blind, so an unclaimed sandbox (possibly a bake's) survives
+// any number of passes (spoond-63a N1).
+func TestOrphanSweepSkipsOnCatalogReadError(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	ctx := context.Background()
+
+	sb, err := sub.Create(ctx, substrate.CreateRequest{SandboxID: "bake-unreadable-1"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		svc.sweepOrphanSandboxes(ctx)
+	}
+	if !sandboxOnFake(t, sub, sb.ID) {
+		t.Fatalf("the sweep deleted %s although it could not read the catalog", sb.ID)
+	}
+}

@@ -256,6 +256,16 @@ outside it that have been idle for an hour.
 - `GC_DELETE=1` makes the GC actually delete candidates, marking them
   `deleted` and counting `spoond_gc_deleted_total{kind}`. Only enable it
   after reading a week of dry-run logs.
+- A build left in state `building` past twice the build timeout (the
+  pipeline's `buildTimeout`, one hour) is failed by the pass and logged
+  (`gc: marked stale building build failed ...`), then counted as an
+  ordinary candidate once it has been idle an hour. A build is written
+  `building` before the orchestrator is asked to build it, and a SIGKILL
+  or reboot in between would otherwise leave the row building forever —
+  and every building row is a GC root, so it would pin its whole
+  ancestor chain. The image pipeline also writes its failure on a
+  context detached from the build's own deadline, so a timed-out build
+  never stays `building`.
 - Users manage their own snapshots through the API:
   `GET /api/snapshots` lists the caller's builds with `in_use` flags, and
   `DELETE /api/snapshots/{build_id}` removes one (`409` while anything
@@ -558,13 +568,16 @@ The startup pass runs the same orphan rule again after its crash reconcile.
 
 The periodic sweep (every minute) is the backstop
 for a failed delete and for any guest a previous incarnation left. It is
-skipped entirely while the node is draining and while any image/template
-bake is in flight (`spoond_builds_in_flight`): a bake's sandbox has no
-spoond lease row, and spoond does not track build sandbox ids, so it
-would otherwise look unclaimed. That guard is safe today only because the
-pinned e2b orchestrator leaves build sandboxes out of `Server.List`; an
-orchestrator upgrade must keep build sandboxes out of `List` (or spoond
-must track build ids) before it ships. The sweep never deletes a
+skipped entirely while the node is draining, while any template build
+in the catalog is still `building` (the count `spoond_builds_in_flight`
+reports), and when that catalog read fails. spoond does not track the
+sandbox ids a template build starts, so a build sandbox has no lease,
+pool or sandbox row and would look unclaimed. The sweep is safe because
+the pinned e2b orchestrator (`e473dd13`) leaves build sandboxes out of
+`Server.List` (it skips any sandbox without an `APIStoredConfig`, and
+only build sandboxes lack one); the `building` guard is a second line,
+not the fix. **An orchestrator upgrade must keep build sandboxes out of
+`List`, or spoond must track build sandbox ids, before it ships.** The sweep never deletes a
 sandbox a pool entry claims, a lease owns in any state other than `lost`
 (a running, suspended or busy lease), or a creation currently holds in
 flight. A sandbox with no lease and no pool entry (a released lease's

@@ -166,8 +166,6 @@ func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error)
 		return
 	}
 	switch {
-	case errors.Is(err, errLeaseReleased):
-		writeError(w, http.StatusNotFound, "lease not found")
 	case errors.Is(err, errNotPersistent):
 		writeError(w, http.StatusBadRequest, "lease is not a workspace-backed persistent lease")
 	case errors.Is(err, errLeaseBusy):

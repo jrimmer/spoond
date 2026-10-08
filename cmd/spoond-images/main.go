@@ -46,7 +46,10 @@ const (
 	startCmd = "/usr/local/bin/spoond-guest-init"
 	readyCmd = "test -f /run/spoond-guest-ready"
 
-	buildTimeout = 60 * time.Minute
+	// buildTimeout bounds one template build. The GC fails a row still
+	// `building` for longer than twice this (spoond-4yl); the shared
+	// constant keeps the two sides on the same knob.
+	buildTimeout = substrate.DefaultBuildTimeout
 )
 
 // runCmd streams a command's stdout (docker build, docker push).
@@ -412,7 +415,15 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		ReadyCmd:   readyCmd,
 	})
 	if err != nil {
-		if uerr := db.UpdateBuildState(ctx, buildID, "failed", err.Error(), nil); uerr != nil {
+		// Record the failure on a context detached from bctx's deadline:
+		// when the build timed out (or the caller cancelled) bctx is
+		// already done, and writing the failure through it would leave
+		// the row building forever — a permanent GC root (spoond-4yl).
+		// The detached context is still bounded, so an unhealthy store
+		// cannot hang the pipeline.
+		uctx, ucancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer ucancel()
+		if uerr := db.UpdateBuildState(uctx, buildID, "failed", err.Error(), nil); uerr != nil {
 			return errors.Join(err, uerr)
 		}
 		return err
