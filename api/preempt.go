@@ -277,6 +277,16 @@ func (s *Service) preemptLeaseStep(ctx context.Context, l *Lease, targetOwner, s
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
+	// A shared-policy candidate is re-checked against the order: a lease
+	// promoted to guaranteed, given its own idle_suspend or disabled
+	// since the candidate snapshot must not be paused for an admission.
+	if step != "" {
+		cur, ok := s.pressureStepLocked(l, s.now())
+		if !ok || string(cur) != step || !s.pressureOrdered(cur) {
+			s.store.mu.Unlock()
+			return errLeaseBusy
+		}
+	}
 	s.store.mu.Unlock()
 
 	if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonPreempt, policyStep: step}); err != nil {
