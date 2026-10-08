@@ -163,6 +163,20 @@ ON CONFLICT(id) DO UPDATE SET
 	return nil
 }
 
+// UpdateLeaseLostAt stamps one lease row's lost_at without touching any
+// other column. The GC uses it for a stored-only lost lease (no
+// in-memory twin), where an UpsertLease would rewrite every column and
+// could re-insert a row a concurrent release had just deleted
+// (spoond-d76). A missing row is not an error: the release won the race.
+func (db *DB) UpdateLeaseLostAt(ctx context.Context, id string, lostAt time.Time) error {
+	_, err := db.w.ExecContext(ctx,
+		`UPDATE leases SET lost_at = ? WHERE id = ?`, formatTime(lostAt), id)
+	if err != nil {
+		return fmt.Errorf("store: update lost_at %s: %w", id, err)
+	}
+	return nil
+}
+
 // DeleteLease removes the lease row; its shares cascade via foreign key.
 func (db *DB) DeleteLease(ctx context.Context, id string) error {
 	_, err := db.w.ExecContext(ctx, `DELETE FROM leases WHERE id = ?`, id)

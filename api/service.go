@@ -650,6 +650,11 @@ type Service struct {
 	// commit a conflicting row and exercise the insert-conflict replay
 	// (R5). Nil in production.
 	saveBeforeInsert func(owner, name, key string)
+	// pauseBeforeSuspend, when set by a test, runs after a pause's build
+	// and refs are written and before the store lock that marks the lease
+	// suspended. It lets a test land a release in that window to pin the
+	// re-check under the lock (spoond-d76). Nil in production.
+	pauseBeforeSuspend func(l *Lease)
 	// saves tracks in-flight and recently failed named-snapshot saves in
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.
@@ -2384,16 +2389,25 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	if err := s.db.AddBuildRefs(ctx, buildID, append(refs.RootfsBuildIDs, refs.MemfileBuildIDs...)); err != nil {
 		return "", fmt.Errorf("store pause build refs: %w", err)
 	}
-	if s.leaseReleased(l) {
+	if s.pauseBeforeSuspend != nil {
+		s.pauseBeforeSuspend(l)
+	}
+	s.store.mu.Lock()
+	if l.released {
 		// The lease was released while the pause was in flight: do not
 		// mark it suspended, delete its (already gone) sandbox row or
-		// credit its memory a second time. The pause build stays as an
-		// ordinary, GC-able candidate (spoond-775).
+		// credit its memory a second time. This check runs under the
+		// same lock that sets Suspended and saves, so a release that
+		// lands after the build and refs are written is seen here and
+		// the pause reports the release instead of returning success
+		// and letting its caller emit suspended, credit memory again or
+		// bump an idle/preempt metric for a released lease (spoond-d76).
+		// The pause build stays as an ordinary, GC-able candidate
+		// (spoond-775).
+		s.store.mu.Unlock()
 		s.log.Printf("pause: lease %s was released during its pause; build %s left unreferenced", l.ID, buildID)
 		return "", errLeaseReleased
 	}
-	s.deleteSandboxRow(l.SandboxID)
-	s.store.mu.Lock()
 	l.setState("suspended")
 	l.Suspended = true
 	l.ResumeBuildID = buildID
@@ -2414,6 +2428,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool) (s
 	l.LastActionAt = s.now()
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.deleteSandboxRow(l.SandboxID)
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseSuspended, "paused into build "+buildID)
 	// A pause frees the lease's hugepages and quota: retry waiting
 	// creates (#129).
@@ -2915,9 +2930,20 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 		// The lease was released while the checkpoint was in flight: the
 		// build the checkpoint just wrote is left unreferenced for the GC
 		// and neither the lease nor a sandboxes row is written back
-		// (spoond-775).
+		// (spoond-775). The checkpoint's resume-fresh may have started a
+		// new sandbox under the same id; if the release's own delete
+		// landed before that create, nothing is left to remove it and the
+		// resumed guest would run on, holding hugepages until a backend
+		// restart. Stop it here, detached from this request and with
+		// bounded retries, and drop its row (spoond-d76).
 		s.store.mu.Unlock()
 		s.log.Printf("checkpoint: lease %s was released during its checkpoint; build %s left unreferenced", src.ID, buildID)
+		for _, sb := range sbs {
+			if sb.ID == src.SandboxID {
+				s.deleteSandboxBounded(ctx, sb.ID)
+				s.deleteSandboxRow(sb.ID)
+			}
+		}
 		return false
 	}
 	src.BuildID = buildID
@@ -4194,6 +4220,37 @@ func (s *Service) deleteSandboxRow(sandboxID string) {
 	if err := s.db.DeleteSandbox(ctx, sandboxID); err != nil {
 		s.storeError("delete_sandbox", sandboxID, err)
 	}
+}
+
+// sandboxDeleteRetries is how many times a detached cleanup delete is
+// attempted before it is given up to the next orphan sweep.
+const sandboxDeleteRetries = 3
+
+// sandboxDeleteBackoff is the pause between those attempts.
+const sandboxDeleteBackoff = 500 * time.Millisecond
+
+// deleteSandboxBounded stops a sandbox a late operation created, on a
+// context detached from the request that none of its callers can cancel
+// and with bounded retries, so a transient substrate error does not leak
+// the guest. A delete that keeps failing is logged and left to the
+// periodic orphan sweep.
+func (s *Service) deleteSandboxBounded(ctx context.Context, sandboxID string) {
+	dctx := context.WithoutCancel(ctx)
+	var err error
+	for attempt := 1; attempt <= sandboxDeleteRetries; attempt++ {
+		if err = s.sub.Delete(dctx, sandboxID); err == nil {
+			return
+		}
+		if attempt == sandboxDeleteRetries {
+			break
+		}
+		select {
+		case <-dctx.Done():
+			return
+		case <-time.After(sandboxDeleteBackoff):
+		}
+	}
+	s.log.Printf("delete sandbox %s failed after %d attempt(s): %v", sandboxID, sandboxDeleteRetries, err)
 }
 
 // flushLastActiveLocked writes the batched touch() updates in one
