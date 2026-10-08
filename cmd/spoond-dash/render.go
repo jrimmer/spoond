@@ -1340,15 +1340,15 @@ func leaseLayout(w int, rows []LeaseRow) leaseCols {
 		leftW = clamp(w/12, 4, 9)
 	}
 	// Content-fit each column to what the rows show: never narrower than
-	// its header, never wider than its base (a value longer than the base
-	// still truncates).
+	// its header (so a header always keeps a gap after it), never wider
+	// than its base (a value longer than the base still truncates).
 	cID, cImg, cOwn, cSt, cPol, cLeft := leaseValueWidths(rows)
-	idW = min(idW, max(hID, cID))
-	imgW = min(imgW, max(hImg, cImg))
-	ownW = min(ownW, max(hOwn, cOwn))
-	stW = min(stW, max(hSt, cSt))
-	polW = min(polW, max(hPol, cPol))
-	leftW = min(leftW, max(hLeft, cLeft))
+	idW = max(hID, min(idW, cID))
+	imgW = max(hImg, min(imgW, cImg))
+	ownW = max(hOwn, min(ownW, cOwn))
+	stW = max(hSt, min(stW, cSt))
+	polW = max(hPol, min(polW, cPol))
+	leftW = max(hLeft, min(leftW, cLeft))
 
 	avail := w - 4
 	// The owner claims freed width first, up to its own widest value; the
@@ -1466,14 +1466,8 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		{c.st, c.stW, "state"}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
 		{c.left, c.leftW, "left"}, {c.hold, c.holdW, "holder"}}
 	for _, h := range headers {
-		text := h.text
-		switch text {
-		case "access":
-			text = fitWord([]string{"access", "acc", "net"}, h.w)
-		case "holder":
-			text = fitWord([]string{"holder", "hold", "hld"}, h.w)
-		}
-		g.Text(h.x, top+1, text, "dim", h.w)
+		draw := cutHeaders(h.text, h.w)
+		g.Text(h.x, top+1, draw, "dim", h.w)
 	}
 
 	rows := l.shownRows()
@@ -1555,6 +1549,22 @@ func policyWords(p string) []string {
 	}
 }
 
+// cutHeaders fits a column header into w cells: the forms step down
+// from the full word ("access" to "acc"/"net", "holder" to
+// "hold"/"hld") until one fits the w-1 content cells, and the chosen
+// form is cut to w-1 runes. The spare cell is the column's separator,
+// so a header never touches the next header even when it exactly fills
+// its column's content width.
+func cutHeaders(word string, w int) string {
+	switch word {
+	case "access":
+		return cell(fitWord([]string{"access", "acc", "net"}, w-1), w)
+	case "holder":
+		return cell(fitWord([]string{"holder", "hold", "hld"}, w-1), w)
+	}
+	return cell(word, w)
+}
+
 // fitWord is the first form that fits n cells, or the shortest form cut
 // to n as a last resort.
 func fitWord(forms []string, n int) string {
@@ -1581,7 +1591,7 @@ func leaseLeft(r LeaseRow) string {
 // lease's comment — dim, a CI job lease usually — when there is neither;
 // a dash when nothing at all. Cut with … so nothing reaches the border.
 func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
-	room := l.w - c.hold - 3 // one column clear of the border
+	room := c.holdW - 1 // one column clear of the border
 	if r.Holder != "" {
 		mark, style := "", "link"
 		switch r.HoldState {

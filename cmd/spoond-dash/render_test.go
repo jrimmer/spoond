@@ -748,6 +748,21 @@ func TestLeasesShowHoldMarks(t *testing.T) {
 	if !strings.Contains(held, "▶ running") || !strings.Contains(lapsed, "‖ suspended") {
 		t.Errorf("state column must always show the run state:\n%s\n%s", held, lapsed)
 	}
+
+	// A holder without a hold draws unmarked (holder set, HoldState
+	// ""), and its plain name is still visible in the holder column.
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running",
+		Holder: "someone", Age: "5m", Left: "10m"}}
+	p2 := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p2, "someone") {
+		t.Fatalf("unheld holder missing:\n%s", p2)
+	}
+	for _, r := range strings.Split(p2, "\n") {
+		if strings.Contains(r, "someone") && (strings.Contains(r, "◆") || strings.Contains(r, "◉")) {
+			t.Errorf("unheld holder marked held:\n%s", r)
+		}
+	}
 }
 
 // TestLeasesShowStateWords: the state cell spells out the run state and
@@ -1595,6 +1610,53 @@ func TestLeaseColumnsFitContent(t *testing.T) {
 	if leaseLayout(DefaultWidth, long).stW <= cShort.stW {
 		t.Errorf("long state column = %d, not wider than short %d",
 			leaseLayout(DefaultWidth, long).stW, cShort.stW)
+	}
+}
+
+// TestLeaseColumnsStayInPanel: at every width, and for short and long
+// rows alike, the computed columns never overlap and the last one ends
+// one cell before the panel's right border, so a header or value cannot
+// run into its neighbour; a header form never fills the whole column
+// without leaving the separator cell.
+func TestLeaseColumnsStayInPanel(t *testing.T) {
+	sets := map[string][]LeaseRow{
+		"sample": {
+			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet", Age: "5m", Left: "10m"},
+			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "suspended", Burst: true, Policy: "none", Age: "2h31m", Left: "∞"},
+		},
+		"long owner": {{ID: "x", Owner: strings.Repeat("long", 20), State: "running", Age: "1m", Left: "1m"}},
+		"empty":      nil,
+	}
+	for name, rows := range sets {
+		for w := minW; w <= maxW; w++ {
+			c := leaseLayout(w, rows)
+			cols := []struct {
+				name string
+				x, w int
+			}{{"id", c.id, c.idW}, {"image", c.img, c.imgW}, {"owner", c.own, c.ownW},
+				{"state", c.st, c.stW}, {"access", c.pol, c.polW}, {"age", c.age, ageW},
+				{"left", c.left, c.leftW}, {"holder", c.hold, c.holdW}}
+			for i, col := range cols {
+				if col.w < 1 {
+					t.Fatalf("%s w=%d: %s column width %d", name, w, col.name, col.w)
+				}
+				if i > 0 && cols[i-1].x+cols[i-1].w > col.x {
+					t.Fatalf("%s w=%d: %s at %d overlaps the previous column ending at %d",
+						name, w, col.name, col.x, cols[i-1].x+cols[i-1].w)
+				}
+			}
+			if got, want := c.hold+c.holdW, w-2; got != want {
+				t.Errorf("%s w=%d: holder column ends at %d, want %d", name, w, got, want)
+			}
+			for _, hc := range []struct {
+				hdr string
+				w   int
+			}{{"access", c.polW}, {"holder", c.holdW}} {
+				if got := cutHeaders(hc.hdr, hc.w); len([]rune(got)) >= hc.w {
+					t.Errorf("%s w=%d: %s header %q fills all %d cells, no separator", name, w, hc.hdr, got, hc.w)
+				}
+			}
+		}
 	}
 }
 
