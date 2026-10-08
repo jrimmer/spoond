@@ -22,6 +22,19 @@ summarised from README "Status".
   knobs. I3 installs `docker.io` into `dev-base` after `apt-get update`,
   so it no longer 404s on a package version the Ubuntu archive dropped.
 
+- **A stale template build's failure is now announced.** The GC's
+  stale-building sweep emits a lease-less `gc` event per row it fails
+  (in dry-run too), naming the build and the timeout, because a template
+  build has no owner and never appears in `/api/snapshots`; the sweep
+  still logs it and moves the row on to an ordinary candidate. It relies
+  on the `spoond_builds_in_flight` gauge (2.8.0) and the sweep guard
+  reading the same catalog count. `SPOOND_BUILD_TIMEOUT` now wires
+  `ServiceConfig.BuildTimeout` from the environment instead of being
+  hardcoded, so the backend's stale-row sweep can be tuned to match
+  `spoond images build`; both processes read the variable from their own
+  environment and must each be given the same value (see
+  `docs/setup.md` and `deploy/PRODUCTION-ENV-2.7.md`).
+
 - **A release that lands around an idle or held suspension no longer
   counts or announces it.** `recordIdleSuspend` and the held rules
   re-check the released flag under the store lock before bumping
@@ -37,18 +50,20 @@ summarised from README "Status".
   list, so a released lease's resumed guest is stopped rather than left
   running (spoond-15i).
 
-- **A stale template build's failure is now announced.** The GC's
-  stale-building sweep emits a lease-less `gc` event per row it fails
-  (in dry-run too), naming the build and the timeout, because a template
-  build has no owner and never appears in `/api/snapshots`; the sweep
-  still logs it and moves the row on to an ordinary candidate. It relies
-  on the `spoond_builds_in_flight` gauge (2.8.0) and the sweep guard
-  reading the same catalog count. `SPOOND_BUILD_TIMEOUT` now wires
-  `ServiceConfig.BuildTimeout` from the environment instead of being
-  hardcoded, so the backend's stale-row sweep can be tuned to match
-  `spoond images build`; both processes read the variable from their own
-  environment and must each be given the same value (see
-  `docs/setup.md` and `deploy/PRODUCTION-ENV-2.7.md`).
+- **A release that lands around an idle or held suspension no longer
+  counts or announces it.** `recordIdleSuspend` and the held rules
+  re-check the released flag under the store lock before bumping
+  `spoond_idle_suspends_total` / `spoond_held_actions_total`, saving
+  `last_action` or emitting `idle_suspended` / `held_action`, and the
+  idle event is emitted inside that critical section, so a release in
+  the window cannot leave a suspension event on the stream for a lease
+  that is gone. A release that raced the pause itself is no longer
+  logged as an idle-suspend or held-rule error, and the checkpoint
+  cleanup log keeps the lease and the unreferenced build. A checkpoint
+  whose `List` returns nothing — a cancelled request, a failing node —
+  now deletes the source sandbox id directly instead of trusting the
+  list, so a released lease's resumed guest is stopped rather than left
+  running (spoond-15i).
 
 ## [2.8.0] - 2026-10-08
 
