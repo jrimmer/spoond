@@ -4445,9 +4445,8 @@ const sandboxDeleteBackoff = 500 * time.Millisecond
 // deleteSandboxBounded stops a sandbox a late operation created, on a
 // context detached from the request that none of its callers can cancel
 // and with bounded retries, so a transient substrate error does not leak
-// the guest. A delete that keeps failing is logged; until the periodic
-// orphan sweep lands (spoond-63a) nothing else retries it, so the guest
-// may survive until a later reconcile.
+// the guest. A delete that keeps failing is logged and remembered as an
+// orphan, so the periodic orphan sandbox sweep retries it (spoond-63a).
 func (s *Service) deleteSandboxBounded(ctx context.Context, sandboxID string) {
 	dctx := context.WithoutCancel(ctx)
 	var err error
