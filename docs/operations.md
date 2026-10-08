@@ -252,20 +252,25 @@ outside it that have been idle for an hour.
 
 - **Dry-run is the default** (`GC_DELETE` unset or `0`): candidates are
   logged as `gc: would delete <build_id> kind=<k> image=<i>`. Nothing is
-  removed.
+  removed. The stale-building sweep below still marks rows `failed` in
+  dry-run, because it is a catalog correction, not a deletion:
+  `GC_DELETE` controls candidate deletion, not the stale-row failure.
 - `GC_DELETE=1` makes the GC actually delete candidates, marking them
   `deleted` and counting `spoond_gc_deleted_total{kind}`. Only enable it
   after reading a week of dry-run logs.
 - A build left in state `building` past twice the build timeout (the
   pipeline's `buildTimeout`, one hour) is failed by the pass and logged
   (`gc: marked stale building build failed ...`), then counted as an
-  ordinary candidate once it has been idle an hour. A build is written
-  `building` before the orchestrator is asked to build it, and a SIGKILL
-  or reboot in between would otherwise leave the row building forever —
-  and every building row is a GC root, so it would pin its whole
-  ancestor chain. The image pipeline also writes its failure on a
-  context detached from the build's own deadline, so a timed-out build
-  never stays `building`.
+  ordinary candidate once it has been idle an hour. It also emits one
+  lease-less `gc` event naming the build (`stale build <id> failed ·
+  build timed out`). A template build has no owner and never appears in
+  `/api/snapshots`, so that event is where its failure is visible. A
+  build is written `building` before the orchestrator is asked to build
+  it, and a SIGKILL or reboot in between would otherwise leave the row
+  building forever — and every building row is a GC root, so it would
+  pin its whole ancestor chain. The image pipeline also writes its
+  failure on a context detached from the build's own deadline, so a
+  timed-out build never stays `building`.
 - Users manage their own snapshots through the API:
   `GET /api/snapshots` lists the caller's builds with `in_use` flags, and
   `DELETE /api/snapshots/{build_id}` removes one (`409` while anything

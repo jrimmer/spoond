@@ -1301,7 +1301,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
 | `promoted` | a running burst lease moved to guaranteed: its owner's guarantee has room again | `to guaranteed: the owner's guarantee has room` |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
-| `gc` | a catalog GC pass deleted builds (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed` |
+| `gc` | a catalog GC pass deleted builds or failed a stale `building` row (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed`; or `stale build <id> failed · build timed out` |
 | `drain_failed` | the admin drain could not pause the lease: it ran on into the orchestrator stop (spoond-52c) | the pause error |
 | `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer or a bounded context (spoond-52c) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
 | `drain_healed` | the drain self-heal loop lifted a drain that outlived `DRAIN_MAX_SECS` on a healthy node, or cleared a node drain a failed undrain left set (spoond-52c) | `drain lasted <duration>` |
@@ -1312,7 +1312,10 @@ A `gc` event is lease-less: its `lease_id` and `owner` are empty, it
 reaches the all-leases stream (and the events-only `EVENTS_TOKEN`) but
 never `GET /api/leases/{id}/events` or a per-lease in-process
 subscription, and the dashboard shows its subject as `spoond`. A GC
-pass that deletes nothing (the default dry run included) emits none.
+pass that deletes nothing (the default dry run included) emits none, but
+the stale-building sweep does emit one per row it fails even in dry-run
+mode, because a template build has no owner and never appears in
+`/api/snapshots`, so the event is where its failure is visible.
 `drain_healed` is lease-less the same way. `drain_failed` and
 `drain_deferred` name their lease (and owner), so they reach the
 per-lease stream too.

@@ -304,9 +304,10 @@ type ServiceConfig struct {
 	TemplateStoragePath string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
 	// BuildTimeout is how long a template build may run before the GC
 	// treats a row still `building` as stale and fails it (spoond-4yl).
-	// The GC fails a building row older than twice this, logged; the
-	// image pipeline bounds its BuildTemplate with the same value. Zero
-	// falls back to substrate.DefaultBuildTimeout.
+	// The GC fails a building row older than twice this, logged. Zero
+	// falls back to substrate.DefaultBuildTimeout. The backend sets it
+	// from SPOOND_BUILD_TIMEOUT, the same variable `spoond images build`
+	// reads for its own BuildTemplate bound, so the two sides agree.
 	BuildTimeout time.Duration
 	// LostGracePersistent / LostGrace are how long a lost lease's
 	// resume_build_id and last_checkpoint_build_id stay kept roots after
@@ -787,9 +788,11 @@ func (s *Service) SetMetrics(m *metrics.BackendMetrics) {
 // the separate `spoond images build` process, so the backend sees its
 // bakes only through the shared catalog; a stale row a killed build left
 // is failed by the GC (spoond-4yl). The orphan sweep skips while this is
-// non-zero, and a catalog read failure is returned so the sweep can skip
-// rather than delete blind (spoond-63a N1). CollectMetrics publishes the
-// count as spoond_builds_in_flight.
+// non-zero (spoond-63a G3), and a catalog read failure is returned so the
+// sweep can skip rather than delete blind (spoond-63a N1). The metrics
+// loop and CollectMetrics publish the same count as
+// spoond_builds_in_flight, so the dashboard's "builds busy" cell and the
+// sweep guard read one number.
 func (s *Service) bakesRunning(ctx context.Context) (int64, error) {
 	if s.db == nil {
 		return 0, nil
@@ -1448,6 +1451,9 @@ func (s *Service) Start(ctx context.Context) {
 	// each running lease's root block device still reads, and recover a
 	// guest whose disk died like a crash.
 	go s.runRootfsProbeLoop(ctx)
+	// Template-bake gauge (spoond-rzz): refresh spoond_builds_in_flight
+	// on its own tick, not only when /metrics is scraped.
+	go s.runBuildMetricsLoop(ctx)
 	// Queued admission (#129 part 1): retry waiting creates every 5 s
 	// even when nothing signalled.
 	go s.runAdmitQueueLoop(ctx)
@@ -1474,6 +1480,38 @@ func (s *Service) runNodeMetricsLoop(ctx context.Context) {
 			s.updateNodeMetrics(ctx)
 		}
 	}
+}
+
+// runBuildMetricsLoop refreshes the template-bake gauge on its own tick,
+// independently of a /metrics scrape, so spoond_builds_in_flight is live
+// for any reader. The value is the catalog's still-`building` template
+// builds (the same count bakesRunning returns and the orphan sweep
+// guards on). A catalog read failure leaves the gauge at its last value.
+func (s *Service) runBuildMetricsLoop(ctx context.Context) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.updateBuildMetrics(ctx)
+		}
+	}
+}
+
+// updateBuildMetrics sets spoond_builds_in_flight from the catalog's
+// template builds still `building`. It is a no-op without a metrics
+// collector or a store, and a read failure leaves the gauge unchanged.
+func (s *Service) updateBuildMetrics(ctx context.Context) {
+	if s.metrics == nil {
+		return
+	}
+	n, err := s.bakesRunning(ctx)
+	if err != nil {
+		return
+	}
+	s.metrics.BuildsInFlight.Set(float64(n))
 }
 
 // updateNodeMetrics sets the node gauges from NodeInfo; on error the
