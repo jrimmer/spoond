@@ -986,9 +986,14 @@ full-width throughput panel (running leases, requests per second,
 creates per minute and egress connections, each with its current value
 and a sparkline over the history, titled with the window the history
 covers), live leases (id, image, owner, the run state — ▶ running,
-‖ suspended, ■ lost, ⭘ recovered —, policy, age, time left and the
-holder, ◆ when a hold is active and ◉ once it has lapsed; on the page
-the holder is a link), the image catalog (shape, live leases, lifetime
+‖ suspended, ■ lost, ⭘ recovered —, the access policy (`isolated` when
+the API's `network_policy` is `none`, else `lan`/`restricted`/
+`internet`), age, time left and the holder, ◆ when a hold is active and
+◉ once it has lapsed; on the page the holder is a link; the table's
+fixed columns are sized to the values actually shown, so short states
+leave no blank run and the freed width goes to the owner then the
+holder, and the ◆ held · ◉ lapsed legend sits on one dim line under the
+table when a row carries a hold), the image catalog (shape, live leases, lifetime
 uses, baked-at) beside the systemd units, a refusals-and-failures row
 (auth, quota, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and
