@@ -228,6 +228,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			// (#128): over max_mib answers 429 and the lease stays as it
 			// was.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errOwnerGone):
+			// The owner's identity was removed while the restore was in
+			// flight (spoond-q4j): the user is gone, so the restore is
+			// refused rather than run ownerless.
+			writeError(w, http.StatusForbidden, "owner deleted")
 		default:
 			s.svc.log.Printf("restore %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "restore failed")

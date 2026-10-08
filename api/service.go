@@ -2542,6 +2542,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// files go with the delete, so drop the in-memory copy too or it
 		// would outlive the sandbox that never became a lease.
 		s.clearCreateSecrets(lease.ID)
+		// The pooled grant recorded the lease's egress memo before this
+		// guard; drop it with the sandbox that never became a lease
+		// (spoond-q4j NIT), as every other failure path does.
+		s.forgetAppliedEgress(lease.ID)
 		return nil, errOwnerGone
 	}
 	s.store.leases[lease.ID] = lease
