@@ -3,8 +3,8 @@ package api
 // Limits on held leases that act automatically (2.1): every rule fires
 // at its threshold and not before, a heartbeat prevents the idle
 // suspend, renewal extends a hold and is capped at the maximum, a lapse
-// suspends and never releases, pressure
-// shortens the idle threshold, the critical rule releases
+// suspends and never releases, the ordered memory-pressure reclaim
+// pauses reclaimable leases, the critical rule releases
 // oldest-suspended first and stops at the recovery level, a running
 // held lease is never released, and every action is counted and
 // recorded. A lapsed hold suspends a running lease and never releases
