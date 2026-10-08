@@ -1269,6 +1269,7 @@ marker. The substrate-specific series:
 | `spoond_checkpoint_duration_seconds` | checkpoint latency |
 | `spoond_checkpoint_pause_seconds` | how long each checkpoint froze its guest (2.3, #122) |
 | `spoond_snapshot_bytes{kind}` | build disk per kind |
+| `spoond_builds_in_flight` | template builds in the shared catalog still in state `building` (image bakes run by the separate `spoond images build` process); the dashboard's "builds busy" cell and the orphan sweep's skip guard read this one count |
 | `spoond_storage_free_bytes` | free bytes at the build store |
 | `spoond_gc_deleted_total{kind}` | builds deleted by the GC |
 | `spoond_kept_builds` | kept checkpoints of live leases (pins; #126) |
