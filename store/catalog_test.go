@@ -215,6 +215,16 @@ func TestBuildChain(t *testing.T) {
 	if depth, bytes, err := db.BuildChain(ctx, "c2"); err != nil || depth != 1 || bytes != 30 {
 		t.Fatalf("deleted middle: depth=%d bytes=%d err=%v, want 1, 30, nil", depth, bytes, err)
 	}
+	// A deleted head is an empty chain too.
+	if _, err := db.w.ExecContext(ctx, `UPDATE builds SET state = 'deleted' WHERE build_id = 'c2'`); err != nil {
+		t.Fatal(err)
+	}
+	if depth, bytes, err := db.BuildChain(ctx, "c2"); err != nil || depth != 0 || bytes != 0 {
+		t.Fatalf("deleted head: depth=%d bytes=%d err=%v, want 0, 0, nil", depth, bytes, err)
+	}
+	if _, err := db.w.ExecContext(ctx, `UPDATE builds SET state = 'ready' WHERE build_id = 'c2'`); err != nil {
+		t.Fatal(err)
+	}
 
 	// A cycle terminates instead of looping for ever.
 	if _, err := db.w.ExecContext(ctx, `UPDATE builds SET state = 'ready' WHERE build_id = 'c1'`); err != nil {
