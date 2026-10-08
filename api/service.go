@@ -3102,12 +3102,14 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 		// bounded retries, and drop its row (spoond-d76).
 		s.store.mu.Unlock()
 		s.log.Printf("checkpoint: lease %s was released during its checkpoint; build %s left unreferenced", src.ID, buildID)
-		for _, sb := range sbs {
-			if sb.ID == src.SandboxID {
-				s.deleteSandboxBounded(ctx, sb.ID)
-				s.deleteSandboxRow(sb.ID)
-			}
-		}
+		// Stop the guest the checkpoint's resume-fresh may have started
+		// under the source id. List's answer is not trusted: it fails with
+		// the cancelled request context (the released check above runs
+		// before the list error is meaningful) or may not yet show a
+		// sandbox that started after it, and Delete is idempotent when
+		// the id is already gone (spoond-15i).
+		s.deleteSandboxBounded(ctx, src.SandboxID)
+		s.deleteSandboxRow(src.SandboxID)
 		return false
 	}
 	src.BuildID = buildID
@@ -4405,8 +4407,9 @@ const sandboxDeleteBackoff = 500 * time.Millisecond
 // deleteSandboxBounded stops a sandbox a late operation created, on a
 // context detached from the request that none of its callers can cancel
 // and with bounded retries, so a transient substrate error does not leak
-// the guest. A delete that keeps failing is logged and left to the
-// periodic orphan sweep.
+// the guest. A delete that keeps failing is logged; until the periodic
+// orphan sweep lands (spoond-63a) nothing else retries it, so the guest
+// may survive until a later reconcile.
 func (s *Service) deleteSandboxBounded(ctx context.Context, sandboxID string) {
 	dctx := context.WithoutCancel(ctx)
 	var err error

@@ -73,6 +73,12 @@ const (
 // now is the instant of the action; detail is the human-readable
 // numbers. Call with s.store.mu held (like setHoldLocked).
 func (s *Service) heldAction(ctx context.Context, l *Lease, rule, action, detail string, now time.Time) {
+	if l.released {
+		// A release after the rule's pause returned success but before
+		// this record must not bump a counter, save or emit an event for
+		// a released lease (spoond-15i).
+		return
+	}
 	if l.Holder != "" {
 		s.log.Printf("held lease %s (holder %q): %s %s: %s", l.ID, l.Holder, rule, action, detail)
 	} else {
@@ -231,8 +237,10 @@ func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
 		}
 		if _, err := s.pauseLease(ctx, l, false); err != nil {
 			// Busy or failing: it stays held with no expiry, so rule 1
-			// suspends it once idle; nothing is released either way.
-			if !errors.Is(err, errLeaseBusy) {
+			// suspends it once idle; nothing is released either way. A
+			// release that raced the pause is not a failure to report
+			// (spoond-15i).
+			if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
 				s.log.Printf("held lease %s: suspend after lapse: %v", l.ID, err)
 			}
 			continue
@@ -549,7 +557,9 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 			rule = heldRulePressure
 		}
 		if _, err := s.pauseLease(ctx, l, false); err != nil {
-			if !errors.Is(err, errLeaseBusy) {
+			// A release that raced the pause is not a held-rule error:
+			// the lease is gone and nothing was suspended (spoond-15i).
+			if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
 				s.log.Printf("held lease %s: idle suspend: %v", l.ID, err)
 			}
 			continue
