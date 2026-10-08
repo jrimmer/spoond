@@ -84,7 +84,9 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 			continue
 		}
 		if _, err := s.pauseLease(ctx, l, false); err != nil {
-			if !errors.Is(err, errLeaseBusy) {
+			// A release that raced the pause is not an idle-suspend error:
+			// the lease is gone and nothing was suspended (spoond-15i).
+			if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
 				s.log.Printf("idle suspend: lease %s: %v", l.ID, err)
 			}
 			continue
@@ -101,12 +103,19 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 // whose detail names how long the lease had been idle.
 func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 	idleFor := now.Sub(lastActive).Round(time.Second)
+	s.store.mu.Lock()
+	if l.released {
+		// The lease was released after pauseLease returned success but
+		// before this record: neither the counter nor the event may be
+		// bumped for a released lease (spoond-15i).
+		s.store.mu.Unlock()
+		return
+	}
 	s.log.Printf("idle suspend: lease %s idle since %s (%s), suspending",
 		l.ID, lastActive.Format(time.RFC3339), idleFor)
 	if s.metrics != nil {
 		s.metrics.IdleSuspendsTotal.Inc()
 	}
-	s.store.mu.Lock()
 	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
 	l.LastActionAt = now
 	s.saveLeaseLocked(l)
