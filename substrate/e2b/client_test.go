@@ -129,6 +129,31 @@ func TestEgressConfig(t *testing.T) {
 	}
 }
 
+// TestEgressConfigTwoResolversNoPublicDNS pins the two-resolver
+// deployment's public-DNS hygiene at the substrate boundary: with two
+// private guest resolvers configured (GuestDNS), a domain-bearing egress
+// carries both resolver allowances and never the public 8.8.8.8
+// fallback.
+func TestEgressConfigTwoResolversNoPublicDNS(t *testing.T) {
+	eg := substrate.Egress{
+		AllowedDomains: []string{"pg.example.com"},
+		Private: []substrate.PrivateAllowance{
+			{CIDR: "10.1.0.2/32", TCPPorts: []uint32{53}},
+			{CIDR: "10.1.0.3/32", TCPPorts: []uint32{53}},
+		},
+		GuestDNS: true,
+	}
+	cfg := egressConfig(eg)
+	for _, c := range cfg.GetAllowedCidrs() {
+		if c == "8.8.8.8/32" {
+			t.Fatalf("allowed_cidrs %v must not contain 8.8.8.8/32 with two private resolvers", cfg.GetAllowedCidrs())
+		}
+	}
+	if got := cfg.GetAllowedPrivate(); len(got) != 2 || got[0].GetCidr() != "10.1.0.2/32" || got[1].GetCidr() != "10.1.0.3/32" {
+		t.Fatalf("allowed_private = %v, want both resolvers", got)
+	}
+}
+
 type stubNodeInfo struct {
 	level int // outstanding work returned by every poll
 	err   error

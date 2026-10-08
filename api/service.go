@@ -916,7 +916,8 @@ func lanPrivate(l *Lease, hostSvc substrate.PrivateAllowance) []substrate.Privat
 // dnsAllowances turns the configured guest DNS addresses
 // (SPOOND_GUEST_DNS_ADDR, comma-separated) into one allowance per
 // address. Blank entries and surrounding whitespace are ignored, so a
-// single address keeps working. An entry may be a bare IP or a CIDR.
+// single address keeps working. Each entry must be an exact host
+// address, never a CIDR.
 //
 // Each allowance names port 53 for TCP (layer 2's tcpfirewall); the
 // private CIDR itself is exempted in the sandbox's netns firewall
@@ -932,21 +933,22 @@ func dnsAllowances(addrs string) []substrate.PrivateAllowance {
 }
 
 // dnsAllowance turns one configured guest DNS address into a port-53
-// allowance. A bare IP gets a full-length prefix (/32 for IPv4, /128 for
-// IPv6); an entry that already carries a prefix is used as-is. A blank
-// entry yields no allowance.
+// allowance. A bare IPv4 or IPv6 address gets a full-length prefix (/32
+// or /128); a blank entry yields no allowance. An entry carrying a
+// prefix is rejected: the resolver is an exact host, and a CIDR would
+// grant port 53 to a whole range.
 func dnsAllowance(addr string) (substrate.PrivateAllowance, bool) {
 	addr = strings.TrimSpace(addr)
-	if addr == "" {
+	if addr == "" || strings.Contains(addr, "/") {
 		return substrate.PrivateAllowance{}, false
 	}
-	cidr := addr
-	if !strings.Contains(addr, "/") {
-		if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
-			cidr = addr + "/128"
-		} else {
-			cidr = addr + "/32"
-		}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return substrate.PrivateAllowance{}, false
+	}
+	cidr := addr + "/32"
+	if ip.To4() == nil {
+		cidr = addr + "/128"
 	}
 	return substrate.PrivateAllowance{CIDR: cidr, TCPPorts: []uint32{53}}, true
 }

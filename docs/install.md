@@ -277,9 +277,8 @@ grants each a port-53 egress allowance and
 `images/guest/spoond-guest-init` writes one `nameserver` line per address
 to `/etc/resolv.conf`, so if `SPOOND_GUEST_DNS_ADDR` is set in
 `/etc/spoond/backend.env` it must also be exported for the build (or set
-per entry in `images/manifest.yaml`). The value is comma-separated; the
-LAN's two resolvers (`10.1.0.2,10.1.0.3`) let a guest survive one slow
-answer:
+per entry in `images/manifest.yaml`). The value is comma-separated; two
+resolvers (`10.0.0.2,10.0.0.3`) let a guest survive one slow answer:
 
 ```bash
 cd /root/src/spoond
