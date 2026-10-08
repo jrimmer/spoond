@@ -273,7 +273,7 @@ func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string
 // concurrent operation) skips it.
 func (s *Service) preemptLeaseStep(ctx context.Context, l *Lease, targetOwner, step string) error {
 	s.store.mu.Lock()
-	if l.released || l.busy || l.Suspended || !l.live() {
+	if l.released || l.busy || l.Suspended || !l.live() || (step == "" && l.Class != ClassBurst) {
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
