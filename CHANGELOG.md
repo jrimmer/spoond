@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Deleting a user now releases their leases and drops their named
+  snapshots and kept builds.** `DELETE /api/users/{id}` used to remove
+  only the identity, leaving the user's leases running, their named
+  snapshots and kept builds pinning disk and their jobs with nobody to
+  charge (an owner with no user has no quota). It now releases every
+  lease (reason `user_deleted`), cancels every running job, drops every
+  named snapshot and unpins every kept build, logs each step and emits
+  one `user_deleted` event naming the counts. The response changed from
+  `204` to `200` with `{"removed": {user, leases, jobs, snapshots,
+  kept_builds}}`, so a caller can see exactly what was cleaned up
+  (spoond-q4j).
+
 ### Fixed
 
 - **`spoond_builds_in_flight` reports the catalog's in-flight template

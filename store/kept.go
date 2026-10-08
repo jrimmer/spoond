@@ -53,6 +53,50 @@ func (db *DB) DeleteKeptBuilds(ctx context.Context, leaseID string) error {
 	return nil
 }
 
+// ListKeptBuildsOfOwner returns the build ids pinned by the leases of
+// one owner, ordered by build id. Deleting a user reads it before the
+// pins go, so the response can name what was unpinned.
+func (db *DB) ListKeptBuildsOfOwner(ctx context.Context, owner string) ([]string, error) {
+	rows, err := db.r.QueryContext(ctx, `
+		SELECT k.build_id FROM lease_kept_builds k
+		JOIN leases l ON l.id = k.lease_id
+		WHERE l.owner = ?
+		ORDER BY k.build_id`, owner)
+	if err != nil {
+		return nil, fmt.Errorf("store: list kept builds of owner %s: %w", owner, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: list kept builds of owner %s: %w", owner, err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list kept builds of owner %s: %w", owner, err)
+	}
+	return out, nil
+}
+
+// DeleteKeptBuildsOfOwner drops every kept-builds row pinned by one
+// owner's leases, returning the build ids it unpinned. Deleting a user
+// uses it after the leases are released, so a pin whose lease row lagged
+// (or that a release path missed) cannot outlive the user and pin the
+// build against GC.
+func (db *DB) DeleteKeptBuildsOfOwner(ctx context.Context, owner string) ([]string, error) {
+	ids, err := db.ListKeptBuildsOfOwner(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.w.ExecContext(ctx,
+		`DELETE FROM lease_kept_builds WHERE lease_id IN (SELECT id FROM leases WHERE owner = ?)`, owner); err != nil {
+		return nil, fmt.Errorf("store: delete kept builds of owner %s: %w", owner, err)
+	}
+	return ids, nil
+}
+
 // ListKeptBuilds returns every (lease_id, build_id) row as
 // lease id -> kept build ids.
 func (db *DB) ListKeptBuilds(ctx context.Context) (map[string][]string, error) {

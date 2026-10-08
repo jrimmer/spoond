@@ -1306,6 +1306,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer or a bounded context (spoond-52c) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
 | `drain_healed` | the drain self-heal loop lifted a drain that outlived `DRAIN_MAX_SECS` on a healthy node, or cleared a node drain a failed undrain left set (spoond-52c) | `drain lasted <duration>` |
 | `drain_gave_up` | the drain self-heal loop stopped retrying the lease's resume after `DRAIN_RESUME_MAX_AGE`; the lease stays suspended with its snapshot intact, for the owner or the idle rules to exit (spoond-52c) | `resume deferred for over <duration>; leaving the lease suspended for the owner` |
+| `user_deleted` | `DELETE /api/users/{id}` removed a user and cleaned up their state (spoond-q4j); every one of the user's leases emitted its own `released` event with reason `user_deleted` | `removed user <id>: N lease(s), N job(s), N snapshot(s), N kept build(s)` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 
 A `gc` event is lease-less: its `lease_id` and `owner` are empty, it
@@ -1316,9 +1317,9 @@ pass that deletes nothing (the default dry run included) emits none, but
 the stale-building sweep does emit one per row it fails even in dry-run
 mode, because a template build has no owner and never appears in
 `/api/snapshots`, so the event is where its failure is visible.
-`drain_healed` is lease-less the same way. `drain_failed` and
-`drain_deferred` name their lease (and owner), so they reach the
-per-lease stream too.
+`drain_healed` is lease-less the same way, and so is `user_deleted`
+(it carries the removed owner); `drain_failed` and `drain_deferred`
+name their lease (and owner), so they reach the per-lease stream too.
 
 ### Resume and gaps
 
@@ -1885,9 +1886,28 @@ resolution.
 
 ### `DELETE /api/users/{id}` — remove a user (admin only)
 
-Removes the identity and its keys. **This is what actually revokes SSH
-access** — the gateway treats the identity store as authoritative when
-present, so removing the user invalidates all their keys immediately.
+Removes the identity and its keys, then cleans up the state that would
+otherwise outlive it: every lease of the removed user is released (each
+`released` event carries reason `user_deleted`), every running job is
+signalled and settled, every named snapshot version and its settings
+row are dropped, every kept build is unpinned and every share held on
+the user's leases goes with the releases. The cleanup runs on a context
+detached from the request (a client disconnect cannot leave it half
+done) bounded by 5 min.
+
+The answer is `200` with what was removed:
+
+```json
+{"removed": {"user": "u-…", "leases": ["…"], "jobs": ["…"],
+            "snapshots": ["warm@1"], "kept_builds": ["…"]}}
+```
+
+The lists are always present (empty when there was nothing to remove).
+Removing the identity is what actually revokes SSH access — the gateway
+treats the identity store as authoritative when present, so removing
+the user invalidates all their keys immediately. Before spoond-q4j the
+delete answered `204` and left the leases, snapshots, kept builds and
+jobs behind, uncapped (an owner with no user has no quota).
 
 ### `POST /api/users/{id}/quota` — set lease quota (admin only)
 

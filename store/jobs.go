@@ -104,6 +104,19 @@ func (db *DB) ListJobs(ctx context.Context, leaseID string) ([]JobRow, error) {
 	return scanJobs(rows)
 }
 
+// ListRunningJobsOfOwner returns one owner's running jobs, newest
+// first. Deleting a user lists them before cancelling, so the response
+// can name what was cancelled.
+func (db *DB) ListRunningJobsOfOwner(ctx context.Context, owner string) ([]JobRow, error) {
+	rows, err := db.r.QueryContext(ctx,
+		`SELECT `+jobColumns+` FROM lease_jobs WHERE owner = ? AND state='running' ORDER BY started_at DESC, job_id DESC`, owner)
+	if err != nil {
+		return nil, fmt.Errorf("store: list running jobs of %s: %w", owner, err)
+	}
+	defer rows.Close()
+	return scanJobs(rows)
+}
+
 // ListRunningJobs returns every running job, oldest first (the
 // reconcile pass's work list).
 func (db *DB) ListRunningJobs(ctx context.Context) ([]JobRow, error) {

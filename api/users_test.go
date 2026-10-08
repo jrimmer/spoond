@@ -143,12 +143,13 @@ func TestUsersDeleteRequiresAdmin(t *testing.T) {
 	if rec3.Code != http.StatusForbidden {
 		t.Fatalf("non-admin delete should 403, got %d", rec3.Code)
 	}
-	// jason (admin) can delete alice
+	// jason (admin) can delete alice; the cleanup answer is 200 with what
+	// was removed (spoond-q4j).
 	rec4 := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/users/"+aliceID, nil)
 	req.Header.Set("Authorization", "Bearer t1")
 	h.ServeHTTP(rec4, req)
-	if rec4.Code != http.StatusNoContent {
+	if rec4.Code != http.StatusOK {
 		t.Fatalf("admin delete: %d %s", rec4.Code, rec4.Body.String())
 	}
 }

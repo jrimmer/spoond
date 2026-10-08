@@ -1208,6 +1208,7 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		{"queued", "warn"},
 		{"recovery_retry", "warn"},
 		{"rootfs_dead", "warn"},
+		{"user_deleted", "warn"},
 		{"gc", "ok"},
 		{"holder_set", "dim"},
 	}

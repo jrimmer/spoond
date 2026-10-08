@@ -187,7 +187,7 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 // for the rest.
 func eventStyle(ev dashEvent) string {
 	switch ev.Type {
-	case "lost", "held_action", "job_lost", "idle_suspended":
+	case "lost", "held_action", "job_lost", "idle_suspended", "user_deleted":
 		return "warn"
 	case "gc":
 		return "ok"
