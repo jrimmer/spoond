@@ -1139,6 +1139,15 @@ func (s *Service) recordAppliedEgress(leaseID string, eg substrate.Egress) {
 	s.appliedEgress[leaseID] = canonicalEgress(eg)
 }
 
+// forgetAppliedEgress drops a released lease's remembered egress config,
+// so appliedEgress does not grow one entry per lease for the life of the
+// process (spoond-966 L1).
+func (s *Service) forgetAppliedEgress(leaseID string) {
+	s.appliedMu.Lock()
+	defer s.appliedMu.Unlock()
+	delete(s.appliedEgress, leaseID)
+}
+
 // refreshPeers re-applies every live lease's egress config whose value
 // changed (U09): peer allowances move when leases expose ports, go live,
 // or are released, and each affected sandbox needs an UpdateEgress. The
@@ -1729,6 +1738,11 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	// Create-time secrets are memory-only bookkeeping; the sandbox they
 	// were staged into goes with the release (#80).
 	s.clearCreateSecrets(l.ID)
+	// The per-lease in-memory maps go too: the applied-egress memo
+	// (spoond-966 L1) and any deferred exec-time secret removals, whose
+	// files went with the sandbox (spoond-966 L1).
+	s.forgetAppliedEgress(l.ID)
+	s.clearPendingSecretRemovals(l.ID)
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)

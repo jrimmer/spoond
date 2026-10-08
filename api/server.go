@@ -718,6 +718,11 @@ type authFailLimiter struct {
 	fails   map[string][]time.Time // ip -> failure timestamps
 	window  time.Duration
 	maxHits int
+	// lastPrune is when the whole map was last swept of IPs whose
+	// failures have all aged out. Without it, the map keeps one entry
+	// per failing IP until a success from that IP, even after the IP
+	// never comes back (spoond-966 L2).
+	lastPrune time.Time
 }
 
 func newAuthFailLimiter() *authFailLimiter {
@@ -743,7 +748,30 @@ func (l *authFailLimiter) hit(ip string) bool {
 	}
 	kept = append(kept, now)
 	l.fails[ip] = kept
+	l.pruneLocked(now, cut)
 	return len(kept) > l.maxHits
+}
+
+// pruneLocked drops every IP whose failures have all aged out of the
+// window. At most one sweep runs per window, so a burst of failures
+// from many IPs does not turn each hit into a full-map walk.
+func (l *authFailLimiter) pruneLocked(now, cut time.Time) {
+	if !l.lastPrune.IsZero() && now.Sub(l.lastPrune) < l.window {
+		return
+	}
+	l.lastPrune = now
+	for ip, times := range l.fails {
+		stale := true
+		for _, t := range times {
+			if t.After(cut) {
+				stale = false
+				break
+			}
+		}
+		if stale {
+			delete(l.fails, ip)
+		}
+	}
 }
 
 // clear resets the failure window for ip after a successful auth.

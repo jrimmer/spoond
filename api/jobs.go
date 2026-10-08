@@ -787,7 +787,8 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 
 // pruneJobs removes exited job records past the retention window and
 // then their guest files, so /var/lib/spoond/jobs does not grow without
-// bound. Called from the sweeper.
+// bound. Lost records have no guest files left to clean, but their rows
+// are swept on the same window (spoond-966 L3). Called from the sweeper.
 func (s *Service) pruneJobs(ctx context.Context) {
 	cutoff := s.now().Add(-s.jobRetention())
 	expired, err := s.db.ListExpiredJobs(ctx, cutoff)
@@ -803,6 +804,9 @@ func (s *Service) pruneJobs(ctx context.Context) {
 		if sandboxID, _, ok := s.leaseContinuity(job.LeaseID); ok {
 			s.cleanupJobFiles(ctx, sandboxID, job.JobID)
 		}
+	}
+	if _, err := s.db.PruneLostJobs(ctx, cutoff); err != nil {
+		s.storeError("prune_lost_jobs", "", err)
 	}
 }
 

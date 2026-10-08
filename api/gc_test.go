@@ -410,3 +410,46 @@ func leaseRows(t *testing.T, m map[string]any) []map[string]any {
 	}
 	return out.Sandboxes
 }
+
+// TestGCPrunesLongDeletedBuildRow pins the L3 build-row prune: a row in
+// state deleted for longer than deletedBuildRetention goes with its
+// build_refs, while a recent deleted row and a non-deleted row stay.
+func TestGCPrunesLongDeletedBuildRow(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	insert := func(id string, updated time.Time) {
+		t.Helper()
+		if err := db.InsertBuild(ctx, store.BuildRow{
+			BuildID: id, Kind: "pause", TemplateID: e2b.NewTemplateID(),
+			Image: "py-base", State: "deleted", CreatedAt: updated, UpdatedAt: updated,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("b-old", now.Add(-deletedBuildRetention-time.Hour))
+	insert("b-recent", now.Add(-time.Hour))
+	// A kept, non-deleted root keeps the GC pass meaningful (and matches
+	// production, where the catalog is never empty).
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	if err := db.AddBuildRefs(ctx, "b-old", []string{e2b.NewUUID()}); err != nil {
+		t.Fatalf("refs: %v", err)
+	}
+
+	svc.gcPass(ctx)
+
+	if _, err := db.GetBuild(ctx, "b-old"); err == nil {
+		t.Errorf("long-deleted build row survived the GC; log:\n%s", buf.String())
+	}
+	if _, err := db.GetBuild(ctx, "b-recent"); err != nil {
+		t.Errorf("recent deleted build row was pruned: %v", err)
+	}
+	refs, err := db.ListBuildRefs(ctx)
+	if err != nil {
+		t.Fatalf("list refs: %v", err)
+	}
+	if _, ok := refs["b-old"]; ok {
+		t.Errorf("pruned build's refs survived: %v", refs)
+	}
+}

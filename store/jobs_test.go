@@ -153,3 +153,47 @@ func TestJobRetentionFractionBoundary(t *testing.T) {
 		t.Fatalf("j-later wrongly pruned: %v", err)
 	}
 }
+
+// TestPruneLostJobs covers the L3 lost-row sweep: only lost rows whose
+// ended_at is before the cutoff go; exited and running rows stay.
+func TestPruneLostJobs(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := db.UpsertLease(ctx, LeaseRow{
+		ID: "l-1", Owner: "alice", Image: "py-base",
+		CreatedAt: base, ExpiresAt: base.Add(time.Hour), LastActive: base,
+		State: "running", Class: "guaranteed",
+	}); err != nil {
+		t.Fatalf("upsert lease: %v", err)
+	}
+	insert := func(id, state string, ended time.Time) {
+		t.Helper()
+		if err := db.InsertJob(ctx, JobRow{
+			JobID: id, LeaseID: "l-1", Owner: "alice", Cmd: "echo " + id,
+			State: state, StartedAt: ended.Add(-time.Minute), EndedAt: ended,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("j-lost-old", "lost", base)
+	insert("j-lost-recent", "lost", base.Add(48*time.Hour))
+	insert("j-exited-old", "exited", base)
+	insert("j-run", "running", time.Time{})
+
+	n, err := db.PruneLostJobs(ctx, base.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned = %d, want 1", n)
+	}
+	if _, err := db.GetJob(ctx, "j-lost-old"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old lost job survived: %v", err)
+	}
+	for _, id := range []string{"j-lost-recent", "j-exited-old", "j-run"} {
+		if _, err := db.GetJob(ctx, id); err != nil {
+			t.Fatalf("%s wrongly pruned: %v", id, err)
+		}
+	}
+}
