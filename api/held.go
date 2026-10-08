@@ -23,9 +23,11 @@ import (
 // explicit hold_ttl). A lapsed hold suspends a running lease and never
 // releases one: the lease stays held (no expiry, so the TTL sweep never
 // touches it), rules 1 and 2 still apply, and renewing restores a
-// normal hold. Rule 4 shortens rule 1's idle threshold under pressure;
-// rule 5 releases leases a rule suspended when the snapshot disk runs
-// critical, oldest suspension first.
+// normal hold. Rule 4 is the ordered memory-pressure reclaim policy
+// (api/pressure.go, #145 D1): it is not a blanket shortening of rule 1
+// but a list of steps that pause reclaimable leases; rule 5 releases
+// leases a rule suspended when the snapshot disk runs critical, oldest
+// suspension first.
 //
 // Nothing running is ever released automatically: rules 2 and 5 only
 // take leases that a rule suspended (idle, pressure or a lapse) and
@@ -37,7 +39,7 @@ const (
 	heldRuleIdle     = "idle"     // rule 1: idle held lease suspended
 	heldRuleStale    = "stale"    // rule 2: suspended held lease released
 	heldRuleExpiry   = "expiry"   // rule 3: hold lapsed; a running lease is suspended
-	heldRulePressure = "pressure" // rule 4: pressure shortens rule 1
+	heldRulePressure = "pressure" // rule 4: the ordered memory-pressure reclaim
 	heldRuleCritical = "critical" // rule 5: critical disk releases suspended leases
 )
 
@@ -59,8 +61,6 @@ const (
 	DefaultHeldSuspendedRelease = 7 * 24 * time.Hour  // HELD_SUSPENDED_RELEASE_SECS (604800)
 	DefaultHoldTTL              = 7 * 24 * time.Hour  // HOLD_TTL_SECS (604800)
 	DefaultHoldTTLMax           = 30 * 24 * time.Hour // HOLD_TTL_MAX_SECS (2592000)
-	DefaultPressureDiskFreePct  = 15                  // PRESSURE_DISK_FREE_PCT
-	DefaultPressureHeldIdle     = 30 * time.Minute    // PRESSURE_HELD_IDLE_SECS (1800)
 	DefaultCriticalDiskFreePct  = 5                   // CRITICAL_DISK_FREE_PCT
 	DefaultCriticalRecoverPct   = 10                  // CRITICAL_DISK_RECOVER_PCT
 )
@@ -308,50 +308,12 @@ func (s *Service) freePercent(path string) (pct float64, ok bool) {
 	return float64(free) / float64(total) * 100, true
 }
 
-// pressureShortensIdle reports whether rule 4 is active: the
-// snapshot-disk free space is under PressureDiskFreePct, or free
-// hugepages would not admit a default-size lease. Either way rule 1
-// uses the shorter pressure threshold.
-func (s *Service) pressureShortensIdle(ctx context.Context) (bool, string) {
-	threshold := s.cfg.PressureDiskFreePct
-	if threshold > 0 {
-		if pct, ok := s.freePercent(s.cfg.TemplateStoragePath); ok && pct < threshold {
-			return true, fmt.Sprintf("disk %.1f%% free < %.0f%%", pct, threshold)
-		}
-	}
-	if s.cfg.PressureHeldIdle > 0 {
-		need := uint64(defaultAdmitMemoryMB) * 1024 * 1024
-		if info, err := s.sub.NodeInfo(ctx); err == nil {
-			free := info.FreeHugepageBytes()
-			if info.Status == "healthy" && free < need {
-				return true, fmt.Sprintf("hugepages %d bytes free < %d needed for a default lease", free, need)
-			}
-		}
-	}
-	return false, ""
-}
-
 // defaultAdmitMemoryMB is the memory a default-size lease needs
 // (admission refuses below it). No seeded image is smaller than 1 GiB
 // (images/manifest.yaml), so a node that cannot host that much cannot
 // host any default lease — using the minimum (not a typical size) keeps
 // the pressure rule from under-detecting.
 const defaultAdmitMemoryMB = 1024
-
-// heldIdleTimeout is rule 1's effective threshold for this sweep: the
-// configured HeldIdleTimeout, or PressureHeldIdle while rule 4 is
-// active. Zero disables rule 1 entirely.
-func (s *Service) heldIdleTimeout(ctx context.Context, now time.Time) (time.Duration, string) {
-	if s.cfg.HeldIdleTimeout <= 0 {
-		return 0, ""
-	}
-	if s.cfg.PressureHeldIdle > 0 {
-		if under, why := s.pressureShortensIdle(ctx); under {
-			return s.cfg.PressureHeldIdle, why
-		}
-	}
-	return s.cfg.HeldIdleTimeout, ""
-}
 
 // releaseHeld deletes a held lease's sandbox and row (the GC reclaims
 // its builds; see releaseSuspendedHeldUntil for how the reclaimed
@@ -482,12 +444,12 @@ func (s *Service) releaseStaleHeld(ctx context.Context, now time.Time) {
 
 // runHeldRules runs the held-lease rules for one sweep tick, in order:
 // hold lapse (3, suspending running leases, releasing none),
-// stale-release (2), then
-// idle-suspend (1, shortened by pressure (4)) — pressure is evaluated
-// once per tick — and critical-release (5) last, so a tick that both
-// suspends and frees leaves the disk check looking at the resulting
-// state. Skips while draining (the sweep already checked; this guards
-// direct callers).
+// stale-release (2), idle-suspend (1) and the ordered memory-pressure
+// reclaim (4, api/pressure.go) — pressure is evaluated once per tick and
+// stops as soon as it clears — and critical-release (5) last, so a tick
+// that both suspends and frees leaves the disk check looking at the
+// resulting state. Skips while draining (the sweep already checked; this
+// guards direct callers).
 func (s *Service) runHeldRules(ctx context.Context, now time.Time) {
 	if s.draining.Load() {
 		return
@@ -495,18 +457,19 @@ func (s *Service) runHeldRules(ctx context.Context, now time.Time) {
 	s.expireHolds(ctx, now)
 	s.releaseStaleHeld(ctx, now)
 
-	timeout, why := s.heldIdleTimeout(ctx, now)
-	if timeout > 0 {
-		s.suspendIdleHeld(ctx, now, timeout, why)
+	if s.cfg.HeldIdleTimeout > 0 {
+		s.suspendIdleHeld(ctx, now, s.cfg.HeldIdleTimeout)
 	}
+	s.reclaimUnderPressure(ctx, now)
 	s.releaseSuspendedHeldUntil(ctx, now)
 }
 
 // suspendIdleHeld suspends every held lease idle for at least timeout
 // (rule 1): memory and hugepages are freed into a pause build, nothing
-// is deleted, and the lease resumes on next use. pressure names rule
-// 4's reason when the timeout came from it ("" = the plain timeout).
-func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout time.Duration, pressure string) {
+// is deleted, and the lease resumes on next use. Rule 1 is the plain
+// hold idle limit; memory pressure reclaims through the ordered policy
+// in api/pressure.go (#145 D1), not by shortening this threshold.
+func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout time.Duration) {
 	var idle []*Lease
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
@@ -516,8 +479,8 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 		// A lease with a running background job is active (2.6, #135):
 		// no held rule may suspend it mid-job. A lease with its own
 		// effective idle_suspend is reclaimed on its own threshold by
-		// suspendIdleLeases (2.5, #129 part 2): rule 1 and rule 4's
-		// shortening do not apply to it.
+		// suspendIdleLeases (2.5, #129 part 2): rule 1 does not apply to
+		// it.
 		if s.hasRunningJobLocked(l.ID) || s.effectiveIdleSuspend(l) > 0 {
 			continue
 		}
@@ -549,16 +512,7 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 		}
 		detail := fmt.Sprintf("idle since %s, %s >= %s", lastActive.Format(time.RFC3339),
 			now.Sub(lastActive).Round(time.Second), timeout)
-		if pressure != "" {
-			detail += "; pressure: " + pressure
-		}
-		rule := heldRuleIdle
-		reason := suspendReasonIdle
-		if pressure != "" {
-			rule = heldRulePressure
-			reason = suspendReasonPressure
-		}
-		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: reason}); err != nil {
+		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdle}); err != nil {
 			// A release that raced the pause is not a held-rule error:
 			// the lease is gone and nothing was suspended (spoond-15i).
 			if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
@@ -566,6 +520,6 @@ func (s *Service) suspendIdleHeld(ctx context.Context, now time.Time, timeout ti
 			}
 			continue
 		}
-		s.heldActionLocked(ctx, l, rule, heldActionSuspendIdle, detail, now)
+		s.heldActionLocked(ctx, l, heldRuleIdle, heldActionSuspendIdle, detail, now)
 	}
 }

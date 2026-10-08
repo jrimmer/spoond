@@ -349,15 +349,21 @@ type ServiceConfig struct {
 	// held lease may sit idle before it is suspended (0 disables), how
 	// long it may stay suspended before it is released (0 disables),
 	// how long a hold lasts and how long an explicit hold_ttl may be,
-	// and the disk-free percentages that shorten the idle threshold
-	// (pressure) or release suspended held leases (critical). Zero
-	// falls back to the Default* constants in api/held.go.
-	HeldIdleTimeout        time.Duration
-	HeldSuspendedRelease   time.Duration
-	HoldTTL                time.Duration
-	HoldTTLMax             time.Duration
-	PressureDiskFreePct    float64
-	PressureHeldIdle       time.Duration
+	// and the disk-free percentages that release suspended held leases
+	// (critical) and the ordered reclaim policy memory pressure runs
+	// (#145 D1). Zero falls back to the Default* constants in
+	// api/held.go.
+	HeldIdleTimeout      time.Duration
+	HeldSuspendedRelease time.Duration
+	HoldTTL              time.Duration
+	HoldTTLMax           time.Duration
+	// PressureOrder is the reclaim order memory pressure uses (#145 D1):
+	// a comma-separated list of steps, validated by ParsePressureOrder.
+	// PRESSURE_ORDER; empty means DefaultPressureOrder.
+	PressureOrder string
+	// PressureIdle is the idle threshold the guaranteed-unheld-idle
+	// pressure step uses (PRESSURE_IDLE_SECS). 0 means DefaultPressureIdle.
+	PressureIdle           time.Duration
 	CriticalDiskFreePct    float64
 	CriticalDiskRecoverPct float64
 	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
@@ -694,6 +700,11 @@ type Service struct {
 	// the whole preempt-then-admit sequence (see admitClass).
 	preemptMu sync.Mutex
 
+	// pressureSteps is the validated reclaim order (#145 D1), parsed
+	// from cfg.PressureOrder at construction. Empty falls back to the
+	// default order in pressureOrderSteps.
+	pressureSteps []PressureStep
+
 	// jobStartMu guards the jobStarts map: one start lock per lease,
 	// held across the per-lease running-job cap check-then-insert (2.6,
 	// #135). A single global lock serialised every background start on
@@ -845,6 +856,12 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 	svc.snapshotLimiters = snapshotLimiters{
 		def:   newSnapshotLimiter(cfg.SnapshotWriteConcurrency, svc.now, svc.log.Printf),
 		drain: newSnapshotLimiter(cfg.DrainSnapshotConcurrency, svc.now, svc.log.Printf),
+	}
+	// The pressure order is validated at startup (cmd/spoond-backend);
+	// parsing it here keeps the two from drifting. A parse error leaves
+	// pressureSteps empty, which falls back to the default order.
+	if steps, err := ParsePressureOrder(cfg.PressureOrder); err == nil {
+		svc.pressureSteps = steps
 	}
 	return svc
 }

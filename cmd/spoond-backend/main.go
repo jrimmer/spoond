@@ -91,10 +91,13 @@
 //	                  renewed (default 604800 = 7 d; 0 uses the default)
 //	HOLD_TTL_MAX_SECS  the cap for an explicit hold_ttl on create or
 //	                  PUT /api/leases/{id}/holder (default 2592000 = 30 d)
-//	PRESSURE_DISK_FREE_PCT  snapshot-disk free percentage under which
-//	                  the idle threshold shortens (default 15; 0 disables)
-//	PRESSURE_HELD_IDLE_SECS  the shortened idle threshold under pressure
-//	                  (default 1800 = 30 min; 0 disables the shortening)
+//	PRESSURE_ORDER  the comma-separated reclaim order memory pressure
+//	                  runs (default burst-unheld,burst-held,
+//	                  guaranteed-unheld-idle); an unknown step is a
+//	                  fatal configuration error
+//	PRESSURE_IDLE_SECS  how long an unheld guaranteed lease must be idle
+//	                  before the guaranteed-unheld-idle pressure step
+//	                  reclaims it (default 1800 = 30 min)
 //	CRITICAL_DISK_FREE_PCT  snapshot-disk free percentage under which
 //	                  suspended held leases are released (default 5; 0
 //	                  disables)
@@ -540,7 +543,14 @@ func Main(args []string) int {
 	heldRelease := time.Duration(envIntOr("HELD_SUSPENDED_RELEASE_SECS", 604800)) * time.Second
 	holdTTL := time.Duration(envIntOr("HOLD_TTL_SECS", 604800)) * time.Second
 	holdTTLMax := time.Duration(envIntOr("HOLD_TTL_MAX_SECS", 2592000)) * time.Second
-	pressureIdle := time.Duration(envIntOr("PRESSURE_HELD_IDLE_SECS", 1800)) * time.Second
+	// The ordered reclaim policy memory pressure runs (#145 D1).
+	// PRESSURE_ORDER is validated here: an unknown step is a fatal
+	// configuration error, so a typo never silently disables reclaim.
+	pressureOrder := envOr("PRESSURE_ORDER", api.DefaultPressureOrder)
+	if _, err := api.ParsePressureOrder(pressureOrder); err != nil {
+		log.Fatalf("PRESSURE_ORDER %q: %v", pressureOrder, err)
+	}
+	pressureIdle := time.Duration(envIntOr("PRESSURE_IDLE_SECS", int(api.DefaultPressureIdle/time.Second))) * time.Second
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
@@ -611,8 +621,8 @@ func Main(args []string) int {
 		HeldSuspendedRelease:      heldRelease,
 		HoldTTL:                   holdTTL,
 		HoldTTLMax:                holdTTLMax,
-		PressureDiskFreePct:       float64(envIntOr("PRESSURE_DISK_FREE_PCT", api.DefaultPressureDiskFreePct)),
-		PressureHeldIdle:          pressureIdle,
+		PressureOrder:             pressureOrder,
+		PressureIdle:              pressureIdle,
 		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),

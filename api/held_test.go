@@ -307,10 +307,12 @@ func TestHoldRenewalExtendsAndCapped(t *testing.T) {
 	}
 }
 
-// TestPressureShortensHeldIdle (rule 4): under snapshot-disk pressure
-// or hugepage shortage rule 1 uses PRESSURE_HELD_IDLE instead of the
-// plain timeout.
-func TestPressureShortensHeldIdle(t *testing.T) {
+// TestPressureOrderReclaimsBurstNotGuaranteedHeld (#145 D1): the
+// 2026-10-07 incident shape — an idle guaranteed held lease and three
+// burst leases under zero free hugepages — takes only the burst leases,
+// never the guaranteed held one. Disk pressure no longer reclaims
+// anything (rule 5 owns disk).
+func TestPressureOrderReclaimsBurstNotGuaranteedHeld(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
@@ -318,60 +320,178 @@ func TestPressureShortensHeldIdle(t *testing.T) {
 
 	base := time.Now()
 	svc.cfg.HeldIdleTimeout = 4 * time.Hour
-	svc.cfg.PressureDiskFreePct = 15
-	svc.cfg.PressureHeldIdle = 30 * time.Minute
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	// No pressure to start with, whatever the test machine's own disk
-	// looks like (statfs on the real temp dir made this test depend on
-	// how full the host was).
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 90, nil }
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
+	svc.cfg.PressureIdle = 30 * time.Minute
+	svc.now = func() time.Time { return base }
+
+	// An idle guaranteed held lease: protected even though it is idle.
+	held, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
 	if err != nil {
-		t.Fatalf("grant: %v", err)
+		t.Fatalf("grant held: %v", err)
 	}
-	cur := base
-	svc.now = func() time.Time { return cur }
-
-	// No pressure: 31 min idle does not suspend (the plain timeout is 4 h).
-	svc.runHeldRules(ctx, base.Add(31*time.Minute))
-	if l.Suspended {
-		t.Fatal("held lease suspended without pressure")
-	}
-
-	// Disk pressure (10% free < 15%): the shortened threshold applies —
-	// not at 29 min, yes at 31 min.
-	var total, free uint64 = 100, 10
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return total, free, nil }
-	svc.runHeldRules(ctx, base.Add(29*time.Minute))
-	if l.Suspended {
-		t.Fatal("held lease suspended before the pressure threshold")
-	}
-	svc.runHeldRules(ctx, base.Add(31*time.Minute))
-	if !l.Suspended {
-		t.Fatal("held lease not suspended at the pressure threshold")
-	}
-	if n := heldCounter(t, svc, "pressure", "suspend_idle"); n != 1 {
-		t.Fatalf("held_actions_total{pressure,suspend_idle} = %g, want 1", n)
-	}
-
-	// Hugepage pressure instead of disk pressure: free hugepages cannot
-	// host even the smallest ready build's memory (2048 MiB here —
-	// admission would refuse it), so a fresh held lease is suspended at
-	// the shortened threshold too. The shortage is set after the grant —
-	// admission itself refuses when the hugepages are already short.
-	l2, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job-2", "", nil)
+	// Three burst leases: one held, two unheld.
+	burstHeld, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Minute,
+		persistent: true, burst: true, holder: "ci-job-2"})
 	if err != nil {
-		t.Fatalf("grant l2: %v", err)
+		t.Fatalf("grant burst held: %v", err)
 	}
+	burstA := burstLeaseForPressure(t, svc, ctx, "a")
+	burstB := burstLeaseForPressure(t, svc, ctx, "b")
+
+	svc.store.mu.Lock()
+	for _, l := range []*Lease{held, burstHeld, burstA, burstB} {
+		l.LastActive = base.Add(-2 * time.Hour)
+	}
+	svc.store.mu.Unlock()
+
+	// Zero free hugepages: the node cannot host a default 1 GiB lease.
 	sub.SetNodeInfo(substrate.NodeInfo{
 		Status: "healthy", HugepagesTotal: 2048, HugepagesUsed: 2048,
 		HugepageSizeBytes: 1024 * 1024,
 	}, nil)
-	svc.diskCapacity = statfsCapacity // back to the real reader (no disk pressure)
+
+	// Rule 1 alone does not fire (4 h), but the pressure order does: the
+	// burst leases are paused into builds; the guaranteed held lease is
+	// left running.
 	svc.runHeldRules(ctx, base.Add(31*time.Minute))
-	if !l2.Suspended {
-		t.Fatal("hugepage pressure did not shorten the idle threshold")
+	for name, l := range map[string]*Lease{"burst-held": burstHeld, "burst-a": burstA, "burst-b": burstB} {
+		if !l.Suspended {
+			t.Fatalf("%s lease not reclaimed under memory pressure", name)
+		}
 	}
+	if held.Suspended {
+		t.Fatal("guaranteed held lease was reclaimed under memory pressure")
+	}
+	if n := heldCounter(t, svc, "pressure", "suspend_idle"); n != 3 {
+		t.Fatalf("held_actions_total{pressure,suspend_idle} = %g, want 3", n)
+	}
+	// burst-unheld is ordered before burst-held, and its step is recorded.
+	if _, step, _, _ := suspendFactsOf(t, svc, burstA.ID); step != string(PressureStepBurstUnheld) {
+		t.Fatalf("burst-unheld policy step = %q, want %q", step, PressureStepBurstUnheld)
+	}
+	if _, step, _, _ := suspendFactsOf(t, svc, burstHeld.ID); step != string(PressureStepBurstHeld) {
+		t.Fatalf("burst-held policy step = %q, want %q", step, PressureStepBurstHeld)
+	}
+
+	// Disk pressure no longer reclaims anything: with the hugepages
+	// healthy but the disk low, the order stays off entirely.
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 5, nil }
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 4096, HugepagesUsed: 0,
+		HugepageSizeBytes: 1024 * 1024,
+	}, nil)
+	fresh, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Minute, persistent: true, burst: true})
+	if err != nil {
+		t.Fatalf("grant fresh burst: %v", err)
+	}
+	svc.runHeldRules(ctx, base.Add(32*time.Minute))
+	if fresh.Suspended {
+		t.Fatal("disk pressure reclaimed a lease, but disk is rule 5's business")
+	}
+}
+
+// TestPressureOrderWithinStep: within one step the lowest priority
+// goes first, then the newest lease.
+func TestPressureOrderWithinStep(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.PressureIdle = 30 * time.Minute
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 1 << 20, HugepagesUsed: 0,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+
+	base := time.Now()
+	old := burstLeaseForPressure(t, svc, ctx, "a")
+	newest := burstLeaseForPressure(t, svc, ctx, "b")
+	lowest := burstLeaseForPressure(t, svc, ctx, "c")
+	svc.store.mu.Lock()
+	old.CreatedAt = base.Add(-2 * time.Hour)
+	newest.CreatedAt = base.Add(-time.Minute)
+	lowest.CreatedAt = base.Add(-time.Hour)
+	old.Priority = 5
+	newest.Priority = 5
+	lowest.Priority = -1
+	for _, l := range []*Lease{old, newest, lowest} {
+		svc.saveLeaseLocked(l)
+	}
+	svc.store.mu.Unlock()
+
+	cands := svc.pressureCandidatesAt(base)
+	if len(cands) != 3 {
+		t.Fatalf("candidates = %d, want 3", len(cands))
+	}
+	if cands[0].l.ID != lowest.ID {
+		t.Fatalf("first candidate = %s, want lowest priority %s", cands[0].l.ID, lowest.ID)
+	}
+	if cands[1].l.ID != newest.ID {
+		t.Fatalf("second candidate = %s, want newest same-priority %s", cands[1].l.ID, newest.ID)
+	}
+	if cands[2].l.ID != old.ID {
+		t.Fatalf("third candidate = %s, want oldest %s", cands[2].l.ID, old.ID)
+	}
+}
+
+// TestPressureOrderStopsWhenPressureClears: the pass pauses one lease
+// at a time, re-measures, and stops as soon as the node can host a
+// default lease again.
+func TestPressureOrderStopsWhenPressureClears(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 1024)
+	ctx := context.Background()
+	svc.SetMetrics(metrics.NewBackendMetrics())
+
+	// Free hugepages track the fake's live sandboxes: pausing a lease
+	// frees its memory, so the pass sees the pressure clear.
+	const (
+		pagesPerLease = 1024 // 1 GiB at 1 MiB pages
+		totalPages    = 3584 // 3.5 GiB: three leases over-fill it
+	)
+	sub.SetNodeInfoFunc(func(ctx context.Context) (substrate.NodeInfo, error) {
+		sbs, err := sub.List(ctx)
+		if err != nil {
+			return substrate.NodeInfo{}, err
+		}
+		return substrate.NodeInfo{
+			Status:            "healthy",
+			HugepagesTotal:    totalPages,
+			HugepagesUsed:     uint64(len(sbs)) * pagesPerLease,
+			HugepageSizeBytes: 1024 * 1024,
+		}, nil
+	})
+	svc.cfg.PressureIdle = 30 * time.Minute
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+
+	// Three unheld burst leases: the first pause must clear the pressure
+	// (1 GiB free), so only one is taken.
+	var leases []*Lease
+	for _, name := range []string{"a", "b", "c"} {
+		leases = append(leases, burstLeaseForPressure(t, svc, ctx, name))
+	}
+
+	svc.reclaimUnderPressure(ctx, base)
+	taken := 0
+	for _, l := range leases {
+		if l.Suspended {
+			taken++
+		}
+	}
+	if taken != 1 {
+		t.Fatalf("pressure pass took %d leases, want exactly 1 (pressure cleared)", taken)
+	}
+}
+
+// burstLeaseForPressure grants a persistent burst lease named after
+// owner for the pressure tests.
+func burstLeaseForPressure(t *testing.T, svc *Service, ctx context.Context, owner string) *Lease {
+	t.Helper()
+	l, err := svc.grantLease(ctx, leaseRequest{owner: owner, image: "py-base", ttl: time.Minute, persistent: true, burst: true})
+	if err != nil {
+		t.Fatalf("grant burst %s: %v", owner, err)
+	}
+	return l
 }
 
 // reclaimSub simulates the GC reclaiming disk after each release: a

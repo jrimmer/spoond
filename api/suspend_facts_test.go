@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // TestSuspendFactsPersistedAcrossServiceRestart: the structured facts
@@ -214,7 +215,7 @@ func TestSuspendFactsIdleSuspend(t *testing.T) {
 // TestSuspendFactsHoldLapseAndPressure: a lapsed hold (reason
 // hold_lapsed) and rule 1 under pressure (reason pressure) are distinct.
 func TestSuspendFactsHoldLapseAndPressure(t *testing.T) {
-	svc, db, _ := newTestService(t)
+	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
@@ -242,23 +243,28 @@ func TestSuspendFactsHoldLapseAndPressure(t *testing.T) {
 		t.Fatalf("hold-lapse suspend facts = build %q at %v", build, at)
 	}
 
-	// Now a held lease suspended by rule 1 under disk pressure records
-	// pressure.
-	p, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "ci-job-2", "", nil)
+	// Now a burst held lease reclaimed by the pressure order records
+	// reason pressure and its policy step.
+	p, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Hour,
+		persistent: true, burst: true, holder: "ci-job-2"})
 	if err != nil {
 		t.Fatalf("grant pressured: %v", err)
 	}
-	svc.cfg.PressureDiskFreePct = 15
-	svc.cfg.PressureHeldIdle = 30 * time.Minute
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 10, nil }
+	svc.cfg.PressureIdle = 30 * time.Minute
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 2048, HugepagesUsed: 2048,
+		HugepageSizeBytes: 1024 * 1024,
+	}, nil)
 	svc.store.mu.Lock()
 	p.LastActive = cur
 	svc.store.mu.Unlock()
-	svc.suspendIdleHeld(ctx, cur.Add(31*time.Minute), 30*time.Minute, "disk 10.0% free")
-	reason, _, build, at = suspendFactsOf(t, svc, p.ID)
+	svc.reclaimUnderPressure(ctx, cur.Add(31*time.Minute))
+	reason, step, build, at := suspendFactsOf(t, svc, p.ID)
 	if reason != suspendReasonPressure {
 		t.Fatalf("pressure suspend_reason = %q, want %q", reason, suspendReasonPressure)
+	}
+	if step != string(PressureStepBurstHeld) {
+		t.Fatalf("pressure policy step = %q, want %q", step, PressureStepBurstHeld)
 	}
 	if build == "" || at.IsZero() {
 		t.Fatalf("pressure suspend facts = build %q at %v", build, at)

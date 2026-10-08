@@ -619,12 +619,11 @@ func TestIdleSuspendOverridesIdleTimeout(t *testing.T) {
 // idle_suspend is reclaimed on its own value, not rule 1's (shorter and
 // longer), and rule 4's pressure shortening does not reach it.
 func TestIdleSuspendOverridesHeldRule1(t *testing.T) {
-	svc, db, _ := newTestService(t)
+	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 	svc.cfg.HeldIdleTimeout = time.Hour
-	svc.cfg.PressureDiskFreePct = 15
-	svc.cfg.PressureHeldIdle = 10 * time.Minute
+	svc.cfg.PressureIdle = 10 * time.Minute
 
 	base := time.Now()
 	svc.now = func() time.Time { return base }
@@ -661,13 +660,16 @@ func TestIdleSuspendOverridesHeldRule1(t *testing.T) {
 	if long.Suspended {
 		t.Fatal("rule 1 suspended a held lease with its own longer idle_suspend")
 	}
-	// Rule 4 pressure would shorten rule 1 to 10 min; the lease's own 2 h
-	// wins, so a disk-pressure reading does not suspend it at 11 min.
-	var total, free uint64 = 100, 5
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return total, free, nil }
+	// The pressure order protects a held lease (and a lease with its own
+	// idle_suspend): a memory-pressure reading does not suspend it at
+	// 11 min however idle it looks.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status: "healthy", HugepagesTotal: 2048, HugepagesUsed: 2048,
+		HugepageSizeBytes: 1024 * 1024,
+	}, nil)
 	svc.runHeldRules(ctx, base.Add(11*time.Minute))
 	if long.Suspended {
-		t.Fatal("rule 4's pressure shortening reached a lease with its own idle_suspend")
+		t.Fatal("the pressure order reached a held lease with its own idle_suspend")
 	}
 	// Its own 2 h threshold still fires.
 	svc.suspendIdleLeases(ctx, base.Add(3*time.Hour))

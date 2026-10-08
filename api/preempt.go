@@ -121,39 +121,15 @@ func (s *Service) ownerOverGuaranteeLocked(owner string) int {
 	return over
 }
 
-// preemptionCandidates returns the running burst leases that may be
-// preempted, in preemption order: lowest priority first, then the
-// newest lease, then the owner furthest over its guarantee. It snapshots
-// the store; each candidate is re-checked just before it is paused.
-func (s *Service) preemptionCandidates() []*Lease {
-	s.store.mu.Lock()
-	var out []*Lease
-	for _, l := range s.store.leases {
-		if l.released || l.busy || l.Suspended || !l.live() || l.Class != ClassBurst {
-			continue
-		}
-		out = append(out, l)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		// Lowest priority first.
-		if a.Priority != b.Priority {
-			return a.Priority < b.Priority
-		}
-		// Then newest.
-		if !a.CreatedAt.Equal(b.CreatedAt) {
-			return a.CreatedAt.After(b.CreatedAt)
-		}
-		// Then the owner furthest over its guarantee.
-		ao, bo := s.ownerOverGuaranteeLocked(a.Owner), s.ownerOverGuaranteeLocked(b.Owner)
-		if ao != bo {
-			return ao > bo
-		}
-		// Deterministic tiebreak so the order is stable.
-		return a.ID < b.ID
-	})
-	s.store.mu.Unlock()
-	return out
+// preemptionCandidates returns the reclaimable leases that a guaranteed
+// admission may preempt, in the shared pressure order (#145 D1): the
+// PRESSURE_ORDER steps, each holding its leases sorted by lowest
+// priority, then newest, then the owner furthest over its guarantee,
+// then id. A guaranteed held lease is never a candidate; a guaranteed
+// unheld one only once idle for PRESSURE_IDLE_SECS. It snapshots the
+// store; each candidate is re-checked just before it is paused.
+func (s *Service) preemptionCandidates() []pressureCandidate {
+	return s.pressureCandidatesAt(s.now())
 }
 
 // preemptDiskOK reports whether pausing l (estimated at its memory_mb,
@@ -226,11 +202,11 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 	var freeable, blocked uint64
 	diskBlocked := false
 	for _, v := range candidates {
-		if s.preemptDiskOK(v) {
-			freeable += uint64(v.MemoryMB)
+		if s.preemptDiskOK(v.l) {
+			freeable += uint64(v.l.MemoryMB)
 		} else {
 			diskBlocked = true
-			blocked += uint64(v.MemoryMB)
+			blocked += uint64(v.l.MemoryMB)
 		}
 	}
 	freeMiB, err := s.cachedFreeHugepageMiB(ctx)
@@ -251,12 +227,12 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 	}
 
 	for _, v := range candidates {
-		if !s.preemptDiskOK(v) {
+		if !s.preemptDiskOK(v.l) {
 			continue
 		}
-		if err := s.preemptLease(ctx, v, owner); err != nil {
+		if err := s.preemptLeaseStep(ctx, v.l, owner, string(v.step)); err != nil {
 			if !errors.Is(err, errLeaseBusy) {
-				s.log.Printf("preempt: lease %s: %v", v.ID, err)
+				s.log.Printf("preempt: lease %s: %v", v.l.ID, err)
 			}
 			continue
 		}
@@ -280,21 +256,30 @@ func (s *Service) cachedFreeHugepageMiB(ctx context.Context) (uint64, error) {
 	return s.freeHugepageMiBLocked(ctx)
 }
 
-// preemptLease suspends one burst lease through the pause path and
-// records its preemption: preempted_at is stamped (persisted) and a
-// "preempted" event names the guaranteed lease's owner. The lease's
-// generation does not change — the pause/resume continues its memory.
-// The candidate is re-checked under the store lock first: activity since
-// the snapshot (a release, a resume, a concurrent operation) skips it.
+// preemptLease suspends one reclaimable lease through the pause path and
+// records its preemption for a direct caller (tests). preemptLeaseStep
+// carries the pressure-order step a shared-policy caller took it from.
 func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string) error {
+	return s.preemptLeaseStep(ctx, l, targetOwner, "")
+}
+
+// preemptLeaseStep suspends one lease through the pause path and records
+// its preemption: preempted_at is stamped (persisted) and a "preempted"
+// event names the guaranteed lease's owner. The lease's generation does
+// not change — the pause/resume continues its memory. step is the
+// pressure-order step the candidate came from (#145 D1), recorded as the
+// suspension's policy step. The candidate is re-checked under the store
+// lock first: activity since the snapshot (a release, a resume, a
+// concurrent operation) skips it.
+func (s *Service) preemptLeaseStep(ctx context.Context, l *Lease, targetOwner, step string) error {
 	s.store.mu.Lock()
-	if l.released || l.busy || l.Suspended || !l.live() || l.Class != ClassBurst {
+	if l.released || l.busy || l.Suspended || !l.live() {
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}
 	s.store.mu.Unlock()
 
-	if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonPreempt}); err != nil {
+	if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonPreempt, policyStep: step}); err != nil {
 		return err
 	}
 

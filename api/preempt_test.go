@@ -449,8 +449,8 @@ func TestPreemptionCandidateOrderOverGuarantee(t *testing.T) {
 	if len(cands) < 2 {
 		t.Fatalf("candidates = %d, want at least 2", len(cands))
 	}
-	if cands[0].ID != l2.ID {
-		t.Fatalf("first candidate = %s, want the owner furthest over its guarantee (%s)", cands[0].ID, l2.ID)
+	if cands[0].l.ID != l2.ID {
+		t.Fatalf("first candidate = %s, want the owner furthest over its guarantee (%s)", cands[0].l.ID, l2.ID)
 	}
 }
 
