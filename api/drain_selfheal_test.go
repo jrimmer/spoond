@@ -1045,3 +1045,186 @@ func TestHealHoldsDrainGate(t *testing.T) {
 		t.Fatal("the heal did not hold drainGate.RLock across the resume (S1)")
 	}
 }
+
+// TestAdmitRefusalHealDoesNotDelete is spoond-52c S2/NIT: a resume that
+// is refused before reaching the orchestrator (the node is not healthy,
+// so admit returns ErrCapacity) never created a sandbox, so the heal
+// must not issue a Delete for it (the id still names the paused
+// sandbox) nor log a cleanup line.
+func TestAdmitRefusalHealDoesNotDelete(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	// The heal's own NodeInfo up front sees a healthy node (so it proceeds
+	// to resume), but every later NodeInfo reports unhealthy: admit's
+	// capacity check refuses before Create, exactly the pre-Create
+	// refusal. The second read is the one admit makes; the heal's first
+	// read resolves the node.
+	var nodeCalls atomic.Int32
+	sub.SetNodeInfoFunc(func(context.Context) (substrate.NodeInfo, error) {
+		if nodeCalls.Add(1) == 1 {
+			return substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil
+		}
+		return substrate.NodeInfo{Status: "unhealthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil
+	})
+	t.Cleanup(func() { sub.SetNodeInfoFunc(nil) })
+
+	var creates atomic.Int32
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume {
+			creates.Add(1)
+		}
+		return sub.Fake.Create(cctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	before := calls(sub.Fake, "Delete")
+	svc.healDrain(ctx)
+	if creates.Load() != 0 {
+		t.Fatalf("Create ran for a refused admission: %d", creates.Load())
+	}
+	if got := calls(sub.Fake, "Delete") - before; got != 0 {
+		t.Fatalf("Delete calls after a pre-Create admit refusal = %d, want 0", got)
+	}
+	if !target.Drained {
+		t.Fatal("the refused lease must stay drained")
+	}
+}
+
+// TestHealReleasesDrainGateBetweenRetries is spoond-52c S1: a wedged
+// Create that the heal retries must not hold drainGate's read side for
+// the whole retry budget. An admin drain waiting on the write side gets
+// in between the first attempt's backoff and the second attempt, and the
+// heal then re-checks draining and defers instead of starting a second
+// Create into the stop.
+func TestHealReleasesDrainGateBetweenRetries(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 2
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	// Every resume Create fails with a retryable envd error, so the heal
+	// retries. Each attempt signals that it ran so the test can drive the
+	// waiting admin drain and count attempts at the moment it gets the
+	// gate.
+	var attemptCount atomic.Int32
+	attempted := make(chan struct{}, 8)
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume {
+			attemptCount.Add(1)
+			attempted <- struct{}{}
+			return substrate.Sandbox{}, errors.New("failed to init envd: syncing took too long")
+		}
+		return sub.Fake.Create(cctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	healDone := make(chan struct{})
+	go func() {
+		defer close(healDone)
+		svc.healDrain(ctx)
+	}()
+
+	// Wait for the first attempt, then start a drain that needs the write
+	// side. It must acquire the gate in the backoff gap before the heal's
+	// second attempt, so it observes exactly one attempt.
+	<-attempted
+	var attemptsAtAcquire atomic.Int32
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		svc.drainGate.Lock()
+		attemptsAtAcquire.Store(attemptCount.Load())
+		svc.draining.Store(true)
+		svc.drainGate.Unlock()
+	}()
+
+	select {
+	case <-drainDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a waiting drain did not get the write side between heal retries")
+	}
+	<-healDone
+
+	if got := attemptsAtAcquire.Load(); got != 1 {
+		t.Fatalf("the drain got the gate after %d heal attempts, want 1 (between attempts, not after the budget)", got)
+	}
+	// After the drain set draining, the heal must not have made another
+	// Create attempt, and the lease stays drained.
+	if got := attemptCount.Load(); got != 1 {
+		t.Fatalf("the heal attempted %d Creates across the drain, want 1 (no Create into the stop)", got)
+	}
+	if !target.Drained {
+		t.Fatal("the deferred lease must stay drained")
+	}
+}
+
+// TestAdminUndrainClearsStaleGiveUp is spoond-52c NIT: a give-up entry
+// left by an earlier restart must not survive an admin undrain that
+// defers the lease, so the new deferral starts a fresh heal budget and a
+// later heal tries again.
+func TestAdminUndrainClearsStaleGiveUp(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	base := time.Now()
+	now := base
+	svc.now = func() time.Time { return now }
+	svc.cfg.UndrainResumeRetries = 0
+	svc.cfg.DrainResumeMaxAge = 30 * time.Second
+	ctx := context.Background()
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	var refuse atomic.Bool
+	refuse.Store(true)
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && refuse.Load() {
+			return substrate.Sandbox{}, errQuotaExceeded
+		}
+		return sub.Fake.Create(cctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	// First deferral, then age past the bound so the heal gives up and
+	// leaves a stale gave-up entry.
+	svc.healDrain(ctx)
+	now = now.Add(31 * time.Second)
+	svc.healDrain(ctx)
+	if _, ok := svc.drainHeal[target.ID]; !ok {
+		t.Fatal("the heal state should be present after give-up")
+	}
+
+	// A later admin undrain defers the lease again: it must drop the old
+	// gave-up entry so the new deferral gets a fresh budget.
+	svc.draining.Store(true)
+	res := svc.undrain(ctx)
+	if res.Resumed != 0 || len(res.Failed) != 1 {
+		t.Fatalf("undrain = +%v, want it deferred", res)
+	}
+	if _, ok := svc.drainHeal[target.ID]; ok {
+		t.Fatal("a deferring admin undrain must clear the stale gave-up entry")
+	}
+
+	// Well inside the bound, the next heal retries and resumes.
+	refuse.Store(false)
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+	svc.healDrain(ctx)
+	if target.Drained || target.State != "running" {
+		t.Fatalf("after the fresh deferral: state=%s drained=%v, want running and undrained", target.State, target.Drained)
+	}
+}

@@ -363,9 +363,23 @@ func undrainDeferred(err error) bool {
 // spoond is draining the resume is deferred at once (the node would
 // refuse it), so a heal pass that begins before an admin drain clears the
 // state does not race a Create into the stop (spoond-52c S1).
-func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int) {
+//
+// acquire, when non-nil, is called before each attempt; release is called
+// for the backoff gap between attempts, so a caller's external lock (the
+// heal's drainGate read side) is held across each Create but not across
+// the wait, letting a waiting admin drain get in between attempts rather
+// than after the whole retry budget. On return exactly one acquire is
+// outstanding (re-taken if the backoff was cut short), so the caller
+// releases once after the call (spoond-52c S1).
+func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease, acquire, release func()) (error, int) {
 	maxAttempts := 1 + s.undrainResumeRetries()
+	take := func() {
+		if acquire != nil {
+			acquire()
+		}
+	}
 	var err error
+	take()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if s.draining.Load() {
 			return errDraining, attempt
@@ -381,29 +395,37 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int)
 			return err, attempt
 		}
 		s.log.Printf("undrain: resume %s attempt %d/%d failed (retrying): %v", l.ID, attempt, maxAttempts, err)
-		// resumeLeaseBody's createSandbox error path already deleted any
-		// half-started sandbox inside the busy window, so the retry can
-		// reuse the same id; just space the attempts out.
+		// Space the attempts out. resumeLeaseBody's createSandbox error
+		// path already deleted any half-started sandbox inside the busy
+		// window, so the retry can reuse the same id. The lock is dropped
+		// for the wait so a drain waiting on it gets in here.
+		if release != nil {
+			release()
+		}
 		select {
 		case <-ctx.Done():
+			take() // keep the one-outstanding invariant for the caller
 			return err, attempt
 		case <-time.After(undrainRetryBackoff):
 		}
+		take()
 	}
 	return err, maxAttempts
 }
 
 // deleteHalfSandbox removes a sandbox a failed or cut-off Create may have
 // left half-started, best effort, and drops its row so the next resume can
-// reuse the same sandbox id (spoond-52c S2).
-func (s *Service) deleteHalfSandbox(ctx context.Context, l *Lease) {
-	if l.SandboxID == "" {
+// reuse the same sandbox id (spoond-52c S2). It runs only when a Create
+// actually reached the orchestrator; a refusal before it (admission, node
+// status) leaves nothing behind and must not delete or log.
+func (s *Service) deleteHalfSandbox(ctx context.Context, l *Lease, sandboxID string) {
+	if sandboxID == "" {
 		return
 	}
-	if err := s.sub.Delete(context.WithoutCancel(ctx), l.SandboxID); err != nil {
-		s.log.Printf("undrain: resume %s cleanup: %v", l.ID, err)
+	if err := s.sub.Delete(context.WithoutCancel(ctx), sandboxID); err != nil {
+		s.log.Printf("resume: lease %s cleanup of half-started sandbox %s: %v", l.ID, sandboxID, err)
 	}
-	s.deleteSandboxRow(l.SandboxID)
+	s.deleteSandboxRow(sandboxID)
 }
 
 // undrain waits (up to 120 s) for the orchestrator to answer NodeInfo,
@@ -496,7 +518,7 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 		go func(l *Lease) {
 			defer wg.Done()
 			defer release()
-			err, attempts, deferred := s.drainResumeOutcome(ctx, l)
+			err, attempts, deferred := s.drainResumeOutcome(ctx, l, nil, nil)
 			if err == nil {
 				mu.Lock()
 				res.Resumed++
@@ -510,6 +532,13 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 			res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 			mu.Unlock()
 			if deferred {
+				// The admin undrain is the owner's fresh attempt: drop any
+				// drain-heal entry an earlier restart left (a gave-up state
+				// would otherwise skip this lease's retries in the new
+				// deferral and hide it behind the old budget). The heal
+				// starts a new budget keyed on the lease id from here
+				// (spoond-52c S2/NIT).
+				s.clearDrainHeal(l.ID)
 				s.emitLeaseEvent(l.ID, l.Owner, LeaseDrainDeferred, fmt.Sprintf("after %d attempt(s): %v", attempts, err))
 				s.log.Printf("undrain: resume %s deferred after %d attempt(s): %v", l.ID, attempts, err)
 			}
@@ -526,9 +555,14 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 // refusal (admission, capacity, busy, draining, a bounded context) leaves
 // Drained set and returns deferred=true; a permanent failure loses the
 // lease, emitting its lost event and dropping its heal backoff. It is safe
-// to call concurrently for different leases.
-func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease) (error, int, bool) {
-	err, attempts := s.resumeDrainedLease(ctx, l)
+// to call concurrently for different leases. acquire, when non-nil, is
+// called before each resume attempt and release for the backoff gap
+// between attempts; the heal uses them to hold its drainGate read side
+// across each attempt but not across the wait, so a waiting admin drain
+// gets the write side before the next attempt rather than after the whole
+// retry budget (spoond-52c S1).
+func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, release func()) (error, int, bool) {
+	err, attempts := s.resumeDrainedLease(ctx, l, acquire, release)
 	if err == nil {
 		s.clearDrainHeal(l.ID)
 		s.store.mu.Lock()
@@ -869,13 +903,17 @@ func (s *Service) healDrain(ctx context.Context) {
 		if !due {
 			continue
 		}
-		// Hold the read side of drainGate across the resume, as
+		// Hold the read side of drainGate across each resume attempt, as
 		// recoverDeadRootfs does, so an admin drain cannot take the write
 		// side and set draining while a heal-started Create is in flight
-		// (spoond-52c S1). resumeDrainedLease re-checks draining before
-		// each attempt for the gap after the flag is set.
-		s.drainGate.RLock()
-		err, attempts, deferred := s.drainResumeOutcome(ctx, l)
+		// (spoond-52c S1). The read side is released for the backoff between
+		// attempts, so a drain waiting on the write side gets in between
+		// attempts instead of after the whole retry budget (a wedged Create
+		// can run the full sub.Create bound each time); draining is
+		// re-checked before each attempt.
+		acquire := func() { s.drainGate.RLock() }
+		release := func() { s.drainGate.RUnlock() }
+		err, attempts, deferred := s.drainResumeOutcome(ctx, l, acquire, release)
 		s.drainGate.RUnlock()
 		if err == nil {
 			s.log.Printf("drain self-heal: resumed %s", l.ID)
