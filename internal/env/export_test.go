@@ -12,17 +12,11 @@ import (
 	"testing"
 )
 
-// ResetDeprecationWarnings clears the process-wide once-set so a test can
-// observe a deprecation warning that earlier reads already triggered.
-func ResetDeprecationWarnings() {
-	mu.Lock()
-	warned = map[string]bool{}
-	mu.Unlock()
-}
-
 // CaptureWarnings redirects the standard logger into a buffer for
 // the duration of fn and returns the non-empty lines logged. Use it
 // around the configuration read whose warning is under test.
+// The once-per-process warning set lives in production code; call
+// ResetDeprecationWarnings first to observe a fresh warning.
 func CaptureWarnings(t *testing.T, fn func()) []string {
 	t.Helper()
 	var buf bytes.Buffer

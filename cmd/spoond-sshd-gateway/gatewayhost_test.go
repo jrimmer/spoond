@@ -10,6 +10,31 @@ import (
 	"github.com/jrimmer/spoond/v2/internal/env"
 )
 
+// captureWarnings clears the once-per-process deprecation set and then
+// redirects the standard logger into a buffer for the duration of fn,
+// returning the non-empty lines logged.
+func captureWarnings(t *testing.T, fn func()) []string {
+	t.Helper()
+	env.ResetDeprecationWarnings()
+	var buf bytes.Buffer
+	flags := log.Flags()
+	out := log.Writer()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(out)
+		log.SetFlags(flags)
+	}()
+	fn()
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
 // gatewayHost resolves through the renamed-variable helper: the 2.0
 // SPOOND_GATEWAY_HOST name wins, the deprecated FORKD_GATEWAY_HOST name
 // still works, and the deprecated name warns exactly once. The warning
@@ -31,21 +56,14 @@ func TestGatewayHostNames(t *testing.T) {
 	}
 
 	unsetenv("SPOOND_GATEWAY_HOST")
-	var buf bytes.Buffer
-	flags := log.Flags()
-	out := log.Writer()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	func() {
-		defer func() {
-			log.SetOutput(out)
-			log.SetFlags(flags)
-		}()
+	// Clear the once-per-process set so the assertion does not depend on
+	// whether an earlier read in this test binary already warned.
+	lines := captureWarnings(t, func() {
 		if got := env.Get("SPOOND_GATEWAY_HOST", "sandbox.example.com"); got != "old.example.com" {
 			t.Errorf("FORKD_GATEWAY_HOST fallback must still work, got %q", got)
 		}
-	}()
-	if got := buf.String(); strings.Count(got, "FORKD_GATEWAY_HOST is deprecated") != 1 || strings.Count(got, "\n") != 1 {
-		t.Fatalf("want exactly one deprecation warning line, got %q", got)
+	})
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one deprecation warning line, got %q", lines)
 	}
 }

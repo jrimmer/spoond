@@ -15,10 +15,14 @@ import (
 // deprecated name warns exactly once. Each read goes through env.Get —
 // the same helper the command resolves through.
 
-// captureWarnings redirects the standard logger into a buffer for the
-// duration of fn and returns the non-empty lines logged.
+// captureWarnings clears the once-per-process deprecation set and then
+// redirects the standard logger into a buffer for the duration of fn,
+// returning the non-empty lines logged. Resetting first makes the
+// "warns exactly once" assertions independent of how many earlier reads
+// in this test binary already consumed a warning.
 func captureWarnings(t *testing.T, fn func()) []string {
 	t.Helper()
+	env.ResetDeprecationWarnings()
 	var buf bytes.Buffer
 	flags := log.Flags()
 	out := log.Writer()
@@ -88,6 +92,6 @@ func TestImageNames(t *testing.T) {
 		}
 	})
 	if len(warnings) != 1 {
-		t.Fatalf(" want exactly one deprecation warning, got %q", warnings)
+		t.Fatalf("want exactly one deprecation warning, got %q", warnings)
 	}
 }

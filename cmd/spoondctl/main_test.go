@@ -16,10 +16,14 @@ import (
 // name warns exactly once. Each test resolves through env.Get with the
 // same names and defaults Main uses.
 
-// captureWarnings redirects the standard logger into a buffer for the
-// duration of fn and returns the non-empty lines logged.
+// captureWarnings clears the once-per-process deprecation set and then
+// redirects the standard logger into a buffer for the duration of fn,
+// returning the non-empty lines logged. Resetting first makes the
+// "warns exactly once" assertions independent of how many earlier reads
+// in this test binary already consumed a warning.
 func captureWarnings(t *testing.T, fn func()) []string {
 	t.Helper()
+	env.ResetDeprecationWarnings()
 	var buf bytes.Buffer
 	flags := log.Flags()
 	out := log.Writer()

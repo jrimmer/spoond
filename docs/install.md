@@ -119,21 +119,18 @@ install -D -m 644 deploy/spoond-backend.service deploy/spoond-sshd-gateway.servi
   deploy/spoond-runner.service /etc/systemd/system/
 ```
 
-The backend unit needs one edit before use — it is installed as a
-starting point, not run verbatim. The shipped
-`deploy/spoond-backend.service` reads its environment from
-`EnvironmentFile=-/etc/spoond-backend.env` (a different path, with a
-leading `-` so the unit still starts when the file is absent). After
-installing the units, point `EnvironmentFile` in
-`/etc/systemd/system/spoond-backend.service` at
-`/etc/spoond/backend.env` (0600, created below — without it the backend
-finds no `CONSUMER_TOKENS` and exits on start; `spoond doctor` and the
-operator snippets below source the same file). The edited
+The shipped backend unit is usable as installed: `deploy/spoond-backend.service`
+reads its environment from `EnvironmentFile=-/etc/spoond/backend.env` (the
+leading `-` lets the unit start even when the file is absent) and orders
+after `e2b-orchestrator.service` (`After=`/`Wants=`) so the backend comes
+up with the orchestrator it depends on. Keep the leading `-` so a missing
+file cannot block unit startup; the backend itself refuses to serve
+without `CONSUMER_TOKENS`, which is the failure you want. The installed
 `[Unit]`/`[Service]` heads look like:
 
 ```ini
-After=network-online.target
-Wants=network-online.target
+After=network-online.target e2b-orchestrator.service
+Wants=network-online.target e2b-orchestrator.service
 
 [Service]
 Type=simple
@@ -142,9 +139,6 @@ Environment=BIND_ADDR=127.0.0.1:8890
 EnvironmentFile=-/etc/spoond/backend.env
 ```
 
-`EnvironmentFile=-/etc/spoond/backend.env`: keep the leading `-` so a
-missing file cannot block unit startup; the backend itself refuses to
-serve without `CONSUMER_TOKENS`, which is the failure you want.
 `BIND_ADDR` stays `127.0.0.1:8890` unless the gateway or runner needs
 the backend on another address (the env file can override it — entries
 in `EnvironmentFile` win over `Environment=`).
