@@ -154,8 +154,10 @@
 //	                  reason timed_out (spoond-wb5; default 24h = 86400;
 //	                  a Go duration or seconds; a job may ask for a
 //	                  shorter max_runtime_secs, never a longer one; a
-//	                  negative value disables the cap, and a negative
-//	                  value under one second is rejected)
+//	                  negative value disables the cap; the cap is held as
+//	                  whole seconds, so a value under one second is
+//	                  rejected in either direction, and a bare integer
+//	                  too large to represent is clamped)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
@@ -305,9 +307,13 @@ func parseGuestDNS(v string) ([]string, error) {
 // parseJobMaxRuntime parses JOB_MAX_RUNTIME: a Go duration or a whole
 // number of seconds (like envDurationOrZero). An empty or malformed
 // value is 0, the 24 h default; a negative value disables the cap. A
-// negative value smaller than one second is rejected: truncating it to
-// whole seconds would read as 0 = the default rather than "off"
-// (spoond-wb5).
+// positive value smaller than one second is rejected: the configured cap
+// is held as whole seconds, so truncating it to 0 would silently read as
+// the default rather than the short cap the operator asked for
+// (spoond-wb5). A negative value smaller than one second is rejected for
+// the same reason: it would read as 0 = the default rather than "off". A
+// bare integer too large to convert is clamped to the largest
+// representable duration instead of wrapping (spoond-wb5).
 func parseJobMaxRuntime(v string) (time.Duration, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -315,16 +321,37 @@ func parseJobMaxRuntime(v string) (time.Duration, error) {
 	}
 	var d time.Duration
 	if n, err := strconv.Atoi(v); err == nil {
-		d = time.Duration(n) * time.Second
+		d = secondsToDurationClamped(int64(n))
 	} else if parsed, err := time.ParseDuration(v); err == nil {
 		d = parsed
 	} else {
 		return 0, nil
 	}
+	if d > 0 && d < time.Second {
+		return 0, fmt.Errorf("%s is less than a second; the cap is held as whole seconds", v)
+	}
 	if d < 0 && d > -time.Second {
 		return 0, fmt.Errorf("%s is less than a second; a negative value disables the cap", v)
 	}
 	return d, nil
+}
+
+// secondsToDurationClamped converts a whole number of seconds to a
+// Duration, clamping at the largest representable magnitude in both
+// directions. time.Duration counts nanoseconds, so a bare integer above
+// ~9.2e9 would otherwise overflow the multiplication and wrap (a large
+// cap could silently become a small one, or a large negative "off" could
+// wrap positive and enable a cap); the same clamp the service applies to
+// JOB_MAX_RUNTIME seconds (spoond-wb5).
+func secondsToDurationClamped(secs int64) time.Duration {
+	const maxSecs = (1<<63 - 1) / int64(time.Second)
+	if secs > maxSecs {
+		return time.Duration(maxSecs) * time.Second
+	}
+	if secs < -maxSecs {
+		return -time.Duration(maxSecs) * time.Second
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
@@ -537,8 +564,9 @@ func Main(args []string) int {
 
 	// Background jobs (spoond-wb5): JOB_MAX_RUNTIME is a Go duration or a
 	// whole number of seconds; 0 is the 24 h default and a negative value
-	// disables the cap. Reject a sub-second negative here so it cannot
-	// truncate to 0 and silently mean the default.
+	// disables the cap. The cap is held as whole seconds, so a positive or
+	// negative value under one second is rejected here rather than
+	// truncating to 0 and silently meaning the default.
 	jobMaxRuntime, err := parseJobMaxRuntime(os.Getenv("JOB_MAX_RUNTIME"))
 	if err != nil {
 		log.Fatalf("JOB_MAX_RUNTIME: %v", err)

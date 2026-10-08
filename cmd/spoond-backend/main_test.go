@@ -80,9 +80,10 @@ func TestEnvDurationOrZero(t *testing.T) {
 
 // TestParseJobMaxRuntime pins JOB_MAX_RUNTIME parsing (spoond-wb5): empty
 // or malformed is 0 (the 24 h default), a negative value disables the
-// cap, a Go duration or whole seconds both work, and a negative value
-// under a second is rejected because truncating it to 0 would silently
-// mean the default rather than "off".
+// cap, a Go duration or whole seconds both work, a value under one second
+// is rejected in either direction (the cap is held as whole seconds, so it
+// would truncate to 0 = the default), and a bare integer too large to
+// represent is clamped rather than overflowing the seconds conversion.
 func TestParseJobMaxRuntime(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -96,7 +97,12 @@ func TestParseJobMaxRuntime(t *testing.T) {
 		{"-1", -time.Second, false},
 		{"-5m", -5 * time.Minute, false},
 		{"-500ms", 0, true},
+		{"500ms", 0, true},
+		{"1ms", 0, true},
 		{"not-a-duration", 0, false},
+		// A bare integer above the ~9.2e9 seconds a Duration can hold is
+		// clamped, not wrapped negative (which would read as off).
+		{"9223372036854775807", time.Duration(9223372036) * time.Second, false},
 	}
 	for _, tc := range cases {
 		got, err := parseJobMaxRuntime(tc.in)
@@ -105,6 +111,9 @@ func TestParseJobMaxRuntime(t *testing.T) {
 		}
 		if !tc.wantErr && got != tc.want {
 			t.Fatalf("parseJobMaxRuntime(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+		if tc.in == "9223372036854775807" && got < 0 {
+			t.Fatalf("parseJobMaxRuntime(%q) = %s, want a non-negative clamp", tc.in, got)
 		}
 	}
 }

@@ -1017,14 +1017,16 @@ also no longer keeps that lease active: `reconcileJobs` stopped calling
 `markActive` on a suspended lease, so the held-lease rules' untouched
 test still sees the suspension. The record is marked `timed_out` only
 after the kill succeeds; a failed kill leaves it running so the next
-reconcile retries, and a record written before the cap existed
+reconcile retries, and when the kill succeeds but the store write fails
+the in-memory timed-out intent is kept so the next pass records the
+outcome without a second kill. A record written before the cap existed
 (`max_runtime_secs` 0) is capped by the current host value.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background jobs per lease; past it a start answers `429` |
 | `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept) |
-| `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`. A start may ask for a shorter `max_runtime_secs`, never a longer one. Takes a Go duration (`24h`) or seconds; `0` is the default and a negative value disables the cap (a negative value under one second is rejected at startup) (spoond-wb5) |
+| `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`. A start may ask for a shorter `max_runtime_secs`, never a longer one. Takes a Go duration (`24h`) or seconds; `0` is the default and a negative value disables the cap (the cap is held as whole seconds, so a value under one second is rejected at startup) (spoond-wb5) |
 
 The job record lives in the `lease_jobs` table (migration 0016, with
 migration 0020 adding the max-runtime cap and reason) and is deleted

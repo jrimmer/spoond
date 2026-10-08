@@ -224,12 +224,13 @@ func secondsDuration(secs int64) time.Duration {
 }
 
 // jobMaxRuntime returns the host's effective JOB_MAX_RUNTIME. 0 uses the
-// 24 h default; a negative value disables the cap. It returns the raw
-// duration, so a fractional Go duration is honoured to the second when
-// it is stored on the record, and clamps an oversized value instead of
-// letting it wrap negative. The startup parser rejects a negative value
-// whose magnitude is under a second, which would otherwise truncate to 0
-// and silently mean the default rather than "off".
+// 24 h default; a negative value disables the cap. The configured cap is
+// held as whole seconds, and the startup parser rejects a positive value
+// under a second so a short cap can never truncate to 0 (= the default);
+// a fractional Go duration is therefore already rounded down to whole
+// seconds at startup. A sub-second effective cap is rounded up when it
+// is stored on the record, so it never reads as uncapped. An oversized
+// value is clamped instead of being allowed to wrap negative.
 func (s *Service) jobMaxRuntime() time.Duration {
 	secs := s.cfg.JobMaxRuntimeSecs
 	if secs == 0 {
@@ -716,7 +717,9 @@ func (s *Service) jobFinishedMetrics(result string) {
 
 // markJobLost marks a running job lost (generation bump, cold restart)
 // and emits the event. Idempotent: an already-finished record is left
-// alone. sandboxID/generation name the sandbox the job ran in.
+// alone. sandboxID/generation name the sandbox the job ran in. A job the
+// max-runtime cap was already killing loses its in-memory timed-out
+// intent: the lost record, not the cap, owns the outcome now.
 func (s *Service) markJobLost(ctx context.Context, job store.JobRow, sandboxID string, generation int64, detail string) {
 	changed, err := s.db.MarkJobLost(ctx, job.JobID, time.Now().UTC())
 	if err != nil {
@@ -724,8 +727,10 @@ func (s *Service) markJobLost(ctx context.Context, job store.JobRow, sandboxID s
 		return
 	}
 	if !changed {
+		s.clearJobTimingOut(job.JobID)
 		return
 	}
+	s.clearJobTimingOut(job.JobID)
 	s.emitLeaseEvent(job.LeaseID, job.Owner, LeaseJobLost, detail)
 	if s.metrics != nil {
 		s.metrics.JobsRunning.Dec()
@@ -757,6 +762,17 @@ func (s *Service) markLeaseJobsLost(ctx context.Context, leaseID, owner, why str
 	}
 }
 
+// jobKillPidBackoff bounds how often the max-runtime kill retries a
+// running job whose pid file has not appeared. jobPID waits for it on
+// each attempt (see signalJob), so without this a job whose file never
+// appears would spend that wait on every reconcile pass.
+const jobKillPidBackoff = 30 * time.Second
+
+// errJobPIDMissing marks a jobPID that ran out its wait for the pid file.
+// It wraps substrate.ErrNotFound (via jobPID) so callers keep answering
+// "job is not running".
+var errJobPIDMissing = errors.New("no pid file")
+
 // markJobTimingOut flags a job as being killed by the cap, so the live
 // watcher's finishJob leaves the record to the cap path.
 func (s *Service) markJobTimingOut(jobID string) {
@@ -769,6 +785,25 @@ func (s *Service) markJobTimingOut(jobID string) {
 func (s *Service) clearJobTimingOut(jobID string) {
 	s.timingOutMu.Lock()
 	delete(s.timingOut, jobID)
+	delete(s.jobKillNotBefore, jobID)
+	s.timingOutMu.Unlock()
+}
+
+// jobKillDue reports whether the max-runtime kill may retry a job now,
+// honouring the backoff a missing pid file set.
+func (s *Service) jobKillDue(jobID string) bool {
+	s.timingOutMu.Lock()
+	defer s.timingOutMu.Unlock()
+	at, ok := s.jobKillNotBefore[jobID]
+	return !ok || !s.now().Before(at)
+}
+
+// deferJobKill pushes the next max-runtime kill of a job out by the
+// backoff, so a pid file that never appears does not cost the pid wait
+// on every reconcile pass.
+func (s *Service) deferJobKill(jobID string) {
+	s.timingOutMu.Lock()
+	s.jobKillNotBefore[jobID] = s.now().Add(jobKillPidBackoff)
 	s.timingOutMu.Unlock()
 }
 
@@ -785,30 +820,52 @@ func (s *Service) jobIsTimingOut(jobID string) bool {
 // It flags the job in memory first, so the live watcher cannot record
 // the kill's signal exit as a normal exit in the window before the
 // record is closed, then signals the job's process group in the sandbox
-// the job ran in. Only once the kill succeeds is the record marked
-// exited with reason timed_out. A failed kill clears the flag and returns
-// false, leaving the record running so the next reconcile tries again;
-// a job that ended on its own in the meantime is then closed by the
-// normal rc path. The stderr tail is read before the kill so the
+// the job ran in. The record is marked exited with reason timed_out once
+// the process is gone; when the kill succeeds but the store write fails,
+// the in-memory timed-out intent is kept so the next pass records the
+// outcome without signalling a process that is already gone. A failed
+// kill clears the flag and returns false, leaving the record running so
+// the next reconcile tries again; a job that ended on its own in the
+// meantime is then closed by the normal rc path. A job whose pid file
+// never appears is retried on a backoff, so it does not spend the pid
+// wait on every pass. The stderr tail is read before the kill so the
 // command's output is kept.
 func (s *Service) killJobTimeout(ctx context.Context, job store.JobRow, sandboxID string, generation int64) bool {
 	if s.leaseBusyOrSuspended(job.LeaseID) {
 		return false
 	}
 	tail, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes)
-	s.markJobTimingOut(job.JobID)
-	// Signal the sandbox the job ran in, never a new one after a cold
-	// restart: sandboxID/generation were snapshotted by the caller while
-	// the lease was on the job's continuity generation.
-	if err := s.signalJob(ctx, job.LeaseID, sandboxID, job, "KILL"); err != nil {
-		s.clearJobTimingOut(job.JobID)
-		s.log.Printf("jobs: %s: max runtime spent; kill: %v", job.JobID, err)
-		return false
+	// A previous pass already killed the process but could not record the
+	// outcome: do not signal an already-gone process, just record again.
+	if !s.jobIsTimingOut(job.JobID) {
+		// Back off a job whose pid file never appeared: the wrapper
+		// writes it within a second, so a job long past its cap without
+		// one should not spend the wait on every reconcile pass.
+		if !s.jobKillDue(job.JobID) {
+			return false
+		}
+		s.markJobTimingOut(job.JobID)
+		// Signal the sandbox the job ran in, never a new one after a cold
+		// restart: sandboxID/generation were snapshotted by the caller while
+		// the lease was on the job's continuity generation.
+		if err := s.signalJob(ctx, job.LeaseID, sandboxID, job, "KILL"); err != nil {
+			s.clearJobTimingOut(job.JobID)
+			if errors.Is(err, errJobPIDMissing) {
+				s.deferJobKill(job.JobID)
+			}
+			s.log.Printf("jobs: %s: max runtime spent; kill: %v", job.JobID, err)
+			return false
+		}
 	}
 	// 124 is the conventional timeout exit code, the same exec's own
 	// timeout uses; the wrapper may not write rc for a KILL, and the cap,
 	// not the command's own status, is what the record reports.
-	s.finishJobTimedOut(ctx, job, 124, tail, sandboxID, generation)
+	if err := s.finishJobTimedOut(ctx, job, 124, tail, sandboxID, generation); err != nil {
+		// The kill succeeded, so the next pass must record the outcome,
+		// not try to signal a gone process. Keep the in-memory intent set
+		// and say so; finishJobTimedOut leaves it set on error.
+		s.storeError("mark_job_timed_out", job.JobID, err)
+	}
 	return true
 }
 
@@ -817,14 +874,17 @@ func (s *Service) killJobTimeout(ctx context.Context, job store.JobRow, sandboxI
 // The caller has already killed the process, so this only records the
 // outcome, releases the job's bookkeeping and cleans up its secrets.
 // Like finishJob it is idempotent: an already-finished record is left
-// alone, so the watcher and the reconcile cannot both count it, and the
-// in-memory timing-out flag is cleared on every path.
+// alone, so the watcher and the reconcile cannot both count it. The
+// in-memory timing-out flag is cleared once the store write succeeds (or
+// finds the record already finished); on a store error it is left set,
+// so a caller that has already killed the process can retry the mark on
+// the next pass without a second kill.
 func (s *Service) finishJobTimedOut(ctx context.Context, job store.JobRow, exitCode int, stderrTail, sandboxID string, generation int64) error {
-	defer s.clearJobTimingOut(job.JobID)
 	changed, err := s.db.MarkJobTimedOut(ctx, job.JobID, exitCode, time.Now().UTC(), stderrTail)
 	if err != nil {
 		return err
 	}
+	s.clearJobTimingOut(job.JobID)
 	if !changed {
 		return nil // another path already finished it
 	}
