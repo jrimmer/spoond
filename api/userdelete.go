@@ -268,6 +268,9 @@ func (s *Service) legacyTokenOwner(id string) bool {
 //
 // An id that is neither a known identity nor has any remaining state
 // answers 404: it never existed, so there is nothing to remove. A
+// repeated delete of the same real user answers 200 with empty lists
+// once the owner is marked deleted, so the documented idempotence holds
+// (spoond-q4j N2); an id that was never a user still answers 404. A
 // legacy token-map owner answers 409 and is left untouched: it has no
 // identity row but still authenticates.
 func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
@@ -293,13 +296,20 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), userDeleteTimeout)
 	defer cancel()
 	// An unknown id with no state left is a 404, not a silent success
-	// (spoond-q4j S2). A known identity, or an id whose cleanup was
-	// interrupted and still has state, proceeds; RemoveUser is idempotent
-	// so a retry after a partial cleanup works.
+	// (spoond-q4j S2). A known identity, an id that was already deleted
+	// (deletedOwners, so a repeated delete is idempotent and answers 200),
+	// or an id whose cleanup was interrupted and still has state
+	// proceeds; RemoveUser is idempotent so a retry after a partial
+	// cleanup works.
 	known := s.svc.identities != nil && s.svc.identities.UserByID(id) != nil
 	if !known && !s.svc.ownerHasState(ctx, id) {
-		writeError(w, http.StatusNotFound, "user not found")
-		return
+		s.svc.ownerDeleteMu.Lock()
+		deleted := s.svc.deletedOwners[id]
+		s.svc.ownerDeleteMu.Unlock()
+		if !deleted {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
 	}
 	// Remove the identity first: once its token no longer resolves, no
 	// new lease can be attributed to the owner while the cleanup runs.
