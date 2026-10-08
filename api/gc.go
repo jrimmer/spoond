@@ -225,9 +225,10 @@ func (s *Service) buildTimeoutOrDefault() time.Duration {
 // permanent GC root. The pipeline's own context bounds a normal failure,
 // but nothing runs when the process dies. Failing the row makes it an
 // ordinary candidate after gcAge and keeps the catalog honest; each row
-// is logged, and the owner sees it through the API/events as a failed
-// build. A read or write failure logs and is skipped: a GC pass never
-// fails over the sweep.
+// is logged and emits a lease-less `gc` event naming the build, because a
+// template build has no owner and never appears in /api/snapshots, so the
+// event is the only place its failure is visible. A read or write failure
+// logs and is skipped: a GC pass never fails over the sweep.
 func (s *Service) failStaleBuildingBuilds(ctx context.Context) {
 	cutoff := s.now().Add(-2 * s.buildTimeoutOrDefault())
 	rows, err := s.db.MarkStaleBuildingFailed(ctx, cutoff, "build timed out (stale building row)")
@@ -238,6 +239,7 @@ func (s *Service) failStaleBuildingBuilds(ctx context.Context) {
 	for _, b := range rows {
 		s.log.Printf("gc: marked stale building build failed id=%s kind=%s image=%s age=%s",
 			b.BuildID, b.Kind, b.Image, s.now().Sub(b.UpdatedAt).Round(time.Second))
+		s.emitGCEvent(fmt.Sprintf("stale build %s failed · build timed out", shortEventBuildID(b.BuildID)))
 	}
 }
 

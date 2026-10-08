@@ -45,12 +45,13 @@ import (
 const (
 	startCmd = "/usr/local/bin/spoond-guest-init"
 	readyCmd = "test -f /run/spoond-guest-ready"
-
-	// buildTimeout bounds one template build. The GC fails a row still
-	// `building` for longer than twice this (spoond-4yl); the shared
-	// constant keeps the two sides on the same knob.
-	buildTimeout = substrate.DefaultBuildTimeout
 )
+
+// buildTimeout bounds one template build. It reads SPOOND_BUILD_TIMEOUT
+// through substrate.BuildTimeoutFromEnv, the same knob
+// ServiceConfig.BuildTimeout reads on the backend, so the pipeline and the
+// GC's stale-row sweep agree (spoond-4yl).
+var buildTimeout = substrate.BuildTimeoutFromEnv()
 
 // runCmd streams a command's stdout (docker build, docker push).
 var runCmd = func(ctx context.Context, stdout io.Writer, name string, args ...string) error {
@@ -429,6 +430,13 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		return err
 	}
 
+	// The ready write deliberately uses the caller's ctx, unlike the
+	// failure write above: a finished build must be recorded, but if the
+	// operator Ctrl-C'd while BuildTemplate was returning, that ctx is
+	// already done and the row stays `building`; the GC's stale-building
+	// sweep (twice the build timeout) then fails it and emits a `gc`
+	// event (spoond-4yl, spoond-rzz). A detached context here would
+	// record a build the caller asked spoond to abandon.
 	if err := db.UpdateBuildState(ctx, buildID, "ready", "", &store.BuildRow{
 		KernelVersion:      res.KernelVersion,
 		FirecrackerVersion: res.FirecrackerVersion,

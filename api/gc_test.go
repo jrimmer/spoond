@@ -258,6 +258,93 @@ func TestGCStaleBuildingFailed(t *testing.T) {
 	}
 }
 
+// TestGCStaleBuildingEmitsEvent: failing a stale building row emits one
+// lease-less gc event naming the build, because a template build has no
+// owner and never appears in /api/snapshots, so the event is where its
+// failure is visible. The failure is announced even in dry-run mode.
+func TestGCStaleBuildingEmitsEvent(t *testing.T) {
+	svc, _, db, _ := gcTestService(t)
+	svc.cfg.BuildTimeout = 30 * time.Minute
+	stale := e2b.NewUUID()
+	old := time.Now().Add(-2 * time.Hour)
+	if err := db.InsertBuild(context.Background(), store.BuildRow{
+		BuildID: stale, Kind: "template", TemplateID: "tplb0123456789abcdef",
+		Image: "py-base", State: "building", CreatedAt: old, UpdatedAt: old,
+	}); err != nil {
+		t.Fatalf("seed stale build: %v", err)
+	}
+
+	all := svc.Subscribe(EventFilter{})
+	if err := svc.gcOnce(context.Background()); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	all.Close()
+
+	var gc []LeaseEvent
+	for _, ev := range collectEvents(all.C) {
+		if ev.Type == LeaseGC {
+			gc = append(gc, ev)
+		}
+	}
+	if len(gc) != 1 {
+		t.Fatalf("got %d gc events, want 1", len(gc))
+	}
+	if gc[0].LeaseID != "" || gc[0].Owner != "" {
+		t.Fatalf("gc event has a lease or owner: %+v", gc[0])
+	}
+	if !strings.Contains(gc[0].Detail, "stale build") || !strings.Contains(gc[0].Detail, "build timed out") {
+		t.Fatalf("gc detail = %q, want the stale build and reason", gc[0].Detail)
+	}
+	if !strings.Contains(gc[0].Detail, stale[:8]) {
+		t.Fatalf("gc detail = %q, want the short build id %s", gc[0].Detail, stale[:8])
+	}
+}
+
+// TestBuildMetricsGauge: updateBuildMetrics publishes the catalog's
+// still-`building` template builds as spoond_builds_in_flight, the same
+// count bakesRunning returns, so the dashboard's "builds busy" cell is
+// no longer always 0.
+func TestBuildMetricsGauge(t *testing.T) {
+	svc, _, db, _ := gcTestService(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := db.InsertBuild(ctx, store.BuildRow{
+			BuildID: e2b.NewUUID(), Kind: "template", TemplateID: "tplb0123456789abcdef",
+			Image: "py-base", State: "building", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("seed building build: %v", err)
+		}
+	}
+	// A ready template build and a building checkpoint must not count.
+	if err := db.InsertBuild(ctx, store.BuildRow{
+		BuildID: e2b.NewUUID(), Kind: "template", TemplateID: "tplb0123456789abcdef",
+		Image: "py-base", State: "ready", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed ready build: %v", err)
+	}
+	if err := db.InsertBuild(ctx, store.BuildRow{
+		BuildID: e2b.NewUUID(), Kind: "checkpoint", TemplateID: "tplb0123456789abcdef",
+		Image: "py-base", State: "building", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed building checkpoint: %v", err)
+	}
+
+	svc.updateBuildMetrics(ctx)
+	if got := gaugeValue(t, svc, "spoond_builds_in_flight"); got != 3 {
+		t.Fatalf("spoond_builds_in_flight = %v, want 3", got)
+	}
+
+	// The same count the sweep guards on.
+	n, err := svc.bakesRunning(ctx)
+	if err != nil || n != 3 {
+		t.Fatalf("bakesRunning = %d, %v, want 3", n, err)
+	}
+
+	// No metrics collector: the refresh is a no-op, not a panic.
+	svc.metrics = nil
+	svc.updateBuildMetrics(ctx)
+}
+
 // TestGCDeleteEnabledDeletesAndCounts: GC_DELETE=1 deletes candidates
 // via the substrate, marks them deleted and bumps the counter; the
 // leased chain and current templates stay. A chain unwinds from the

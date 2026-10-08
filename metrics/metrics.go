@@ -88,7 +88,7 @@ type BackendMetrics struct {
 	StartTime prometheus.Gauge
 
 	// Builds (image bake)
-	BuildsInFlight prometheus.Gauge   // active bakes
+	BuildsInFlight prometheus.Gauge   // catalog template builds still `building` (bakes in flight)
 	BuildsFailed   prometheus.Counter // cumulative bake failures
 
 	// Checkpoints (U10)
@@ -364,7 +364,7 @@ func NewBackendMetrics() *BackendMetrics {
 	// Builds
 	m.BuildsInFlight = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "builds_in_flight",
-		Help: "Active image bakes.",
+		Help: "Template builds in the shared catalog still in state building, i.e. image bakes in flight. The image pipeline runs in a separate process, so the backend counts its bakes through the catalog.",
 	})
 	m.BuildsFailed = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "builds_failed_total",

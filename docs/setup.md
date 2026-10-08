@@ -117,6 +117,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `E2B_CONTROL_TIMEOUT` | `30s` | per-call bound for every other orchestrator call (list, update, drain override, template builds) |
 | `SWEEP_TIMEOUT` | `15m` | bound for one background sweep stage (TTL release, held rules, pool refill, job prune), so a hung substrate RPC frees the loop and the lease's busy flag |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | build store — where GC and disk accounting look |
+| `SPOOND_BUILD_TIMEOUT` | `1h` | how long a template build may run before the GC fails a still-`building` row as stale (twice this); a Go duration or seconds. The same variable bounds `spoond images build` (spoond-4yl) |
 | `IMAGE_REGISTRY` | `localhost:5000` | registry `spoond images build` pushes to |
 | `CONSUMER_TOKENS` | *(required)* | comma-separated `token=consumer` pairs, e.g. `abc=forgejo,def=pi` — consumers authenticate with bearer tokens |
 | `USERS_FILE` | *(empty)* | identity store path (JSON, chmod 600). Set for multi-user tenancy: per-user keys, tokens, quotas, sharing |

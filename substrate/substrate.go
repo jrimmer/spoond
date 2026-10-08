@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -12,8 +13,31 @@ import (
 // two share it (spoond-4yl): the pipeline bounds BuildTemplate with it,
 // and the GC fails any build still in state building for more than twice
 // it, so a SIGKILL or reboot mid-build can never leave a permanent GC
-// root. The GC's value is overridable through ServiceConfig.BuildTimeout.
+// root. Override it with SPOOND_BUILD_TIMEOUT (a Go duration or a number
+// of seconds); the image pipeline and the backend's ServiceConfig
+// BuildTimeout both read that variable, so the two sides stay on one
+// knob.
 const DefaultBuildTimeout = 60 * time.Minute
+
+// BuildTimeoutFromEnv resolves the template build timeout from
+// SPOOND_BUILD_TIMEOUT, falling back to DefaultBuildTimeout when unset,
+// malformed or not positive. A plain integer is read as seconds.
+func BuildTimeoutFromEnv() time.Duration {
+	v := os.Getenv("SPOOND_BUILD_TIMEOUT")
+	if v == "" {
+		return DefaultBuildTimeout
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n > 0 {
+			return time.Duration(n) * time.Second
+		}
+		return DefaultBuildTimeout
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	return DefaultBuildTimeout
+}
 
 // PrivateAllowance permits egress into an otherwise-denied private range (patch P4).
 type PrivateAllowance struct {

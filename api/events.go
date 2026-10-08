@@ -93,11 +93,13 @@ const (
 	// elapsed (detail "waited Ns"), the client went away ("client
 	// gone") or a drain started ("draining").
 	LeaseTimedOut LeaseEventType = "timed_out"
-	// LeaseGC marks a catalog GC pass that deleted builds (2.5, #132
-	// part 2). It is spoond's own maintenance, not a lease's lifecycle:
-	// the lease id and owner are empty, so only the all-leases stream
-	// (and the events-only token) carries it, never a per-lease one.
-	// The detail names the count and the freed bytes.
+	// LeaseGC marks a catalog GC pass that deleted builds or failed a
+	// stale building row (2.5, #132 part 2). It is spoond's own
+	// maintenance, not a lease's lifecycle: the lease id and owner are
+	// empty, so only the all-leases stream (and the events-only token)
+	// carries it, never a per-lease one. The detail names the count and
+	// the freed bytes for a deletion, or the failed build for the stale
+	// sweep.
 	LeaseGC LeaseEventType = "gc"
 	// LeaseSnapshotSaved marks a lease saved as a named snapshot (2.7,
 	// #83): the detail names the name@version, the size and how long the
@@ -407,11 +409,11 @@ func (s *Service) emitLeaseEvent(leaseID, owner string, typ LeaseEventType, deta
 	s.bus.emit(leaseID, owner, typ, detail)
 }
 
-// emitGCEvent records one catalog GC pass that deleted something (2.5,
-// #132 part 2). It is spoond's own maintenance, not a lease's: the
-// event carries no lease id and no owner, so a per-lease subscription
-// never receives it while the all-leases stream (and the events-only
-// token) does.
+// emitGCEvent records one catalog GC maintenance event: a pass that
+// deleted builds or failed a stale building row (2.5, #132 part 2). It
+// is spoond's own maintenance, not a lease's: the event carries no lease
+// id and no owner, so a per-lease subscription never receives it while
+// the all-leases stream (and the events-only token) does.
 func (s *Service) emitGCEvent(detail string) {
 	s.bus.emit("", "", LeaseGC, detail)
 }
