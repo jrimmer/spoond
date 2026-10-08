@@ -10,23 +10,6 @@ summarised from README "Status".
 
 ## [Unreleased]
 
-## [2.8.0] - 2026-10-08
-
-spoond cleans up after itself under every race it has met so far. A
-lost lease's guest is now always stopped, and a periodic two-pass sweep
-deletes sandboxes no lease or pool entry claims (never while a create
-or a template build is in flight). A checkpoint, pause, resume,
-restart or restore that finishes after its lease was released no
-longer brings the lease back, and the admin drain and undrain heal
-themselves. Guests get both LAN resolvers with retries
-(`SPOOND_GUEST_DNS_ADDR` takes a list), the web proxy routes lease
-hostnames before its own `/assets/`, `/lease/` and `/llm/` paths (#144),
-a suspended-lease `409` carries `code: lease_suspended`, and a template
-build left `building` by a crash no longer pins the snapshot disk. An
-operation that races a `DELETE` of the same lease now answers `404`
-instead of succeeding. No store migration; the grid package is
-unchanged since 2.7.0.
-
 ### Added
 
 - **A cap on background job runtime (spoond-wb5).** A background exec job
@@ -51,6 +34,25 @@ unchanged since 2.7.0.
   that lease active: `reconcileJobs` stopped calling `markActive` on a
   suspended lease, so the held-lease rules' untouched test still sees
   the suspension. A negative `JOB_MAX_RUNTIME` disables the cap entirely.
+
+## [2.8.0] - 2026-10-08
+
+spoond cleans up after itself under every race it has met so far. A
+lost lease's guest is now always stopped, and a periodic two-pass sweep
+deletes sandboxes no lease or pool entry claims (never while a create
+or a template build is in flight). A checkpoint, pause, resume,
+restart or restore that finishes after its lease was released no
+longer brings the lease back, and the admin drain and undrain heal
+themselves. Guests get both LAN resolvers with retries
+(`SPOOND_GUEST_DNS_ADDR` takes a list), the web proxy routes lease
+hostnames before its own `/assets/`, `/lease/` and `/llm/` paths (#144),
+a suspended-lease `409` carries `code: lease_suspended`, and a template
+build left `building` by a crash no longer pins the snapshot disk. An
+operation that races a `DELETE` of the same lease now answers `404`
+instead of succeeding. No store migration; the grid package is
+unchanged since 2.7.0.
+
+### Added
 
 - **A suspended-lease refusal now carries `code: lease_suspended`.**
   Every "lease is suspended; resume it first" answer is the same `409`
