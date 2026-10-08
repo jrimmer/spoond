@@ -87,6 +87,32 @@ check "the conflicted file is named" bash -c 'grep -q README <<<"$1"' _ "$out"
 git -C "$w2" rebase --abort >/dev/null 2>&1 || true
 git -C "$w2" rebase --abort >/dev/null 2>&1 || true
 
+# --- dirty tree: worker_rebase commits uncommitted work first (B2) -----------
+# An implement round can leave the tail of its work uncommitted. A rebase must
+# not fail on a dirty tree, and the next attempt's reset/clean must not be able
+# to wipe it, so the work is committed as a wip commit before rebasing.
+o4=$T/o4.git; s6=$T/s6; seed "$s6"; make_bare "$o4"; git -C "$s6" push -q "$o4" main
+w4=$T/w4; clone_work "$o4" "$w4"
+git -C "$w4" switch -q -c feat
+printf 'committed\n' > "$w4/branch.txt"; git -C "$w4" add -A; git -C "$w4" commit -q -m work
+printf 'tracked base\n' > "$w4/tracked.txt"; git -C "$w4" add tracked.txt; git -C "$w4" commit -q -m "tracked file"
+printf 'uncommitted tail\n' > "$w4/tail.txt"         # untracked, never added
+printf 'tracked edit\n' >> "$w4/tracked.txt"          # tracked, unstaged
+s7=$T/s6b; rm -rf "$s7"; git clone -q "$o4" "$s7"
+git -C "$s7" config user.name test; git -C "$s7" config user.email test@example.com
+printf 'moved\n' >> "$s7/README.md"; git -C "$s7" commit -qam "main moved"; git -C "$s7" push -q origin main
+git -C "$w4" fetch -q origin
+v=$(worker_rebase "$w4" origin/main 2>/dev/null)
+check "dirty tree still rebases (REBASED)" expect_eq "$v" "REBASED"
+check "the uncommitted tail survived as a commit" \
+  git -C "$w4" cat-file -e HEAD:tail.txt
+check "the tracked edit survived too" \
+  bash -c 'git -C "$1" show HEAD:tracked.txt | grep -q "tracked edit"' _ "$w4"
+check "the tree is clean after the rebase" \
+  bash -c '[ -z "$(git -C "$1" status --porcelain)" ]' _ "$w4"
+if worker_rebase_in_progress "$w4"; then rp2=1; else rp2=0; fi
+check "no rebase is left in progress after a dirty rebase" expect_eq "$rp2" "0"
+
 # --- migration guard ---------------------------------------------------------
 o3=$T/o3.git; s5=$T/s5; seed "$s5"; make_bare "$o3"; git -C "$s5" push -q "$o3" main
 w3=$T/w3; clone_work "$o3" "$w3"

@@ -23,9 +23,22 @@
 #   SWARM_MAX_ROUNDS (3), SWARM_PASS_TIMEOUT seconds per Pi pass (3600),
 #   SWARM_VERIFY_TIMEOUT seconds per verify round (1200); a task's
 #                       'Verify-Timeout:' line (minutes) overrides it,
+#   SWARM_LLM_MAX_WAIT seconds a pass may wait in the gateway's queue before
+#                         the task blocks (default 3600; 0 = no bound),
+#   SWARM_LLM_REQUEST_TIMEOUT seconds for one model request inside Pi (600),
+#   SWARM_REGISTER_BACKOFF base seconds between boot registration retries (15),
 #   SWARM_IDLE_TIMEOUT seconds without a task before leaving (900),
 #   SWARM_GATES           the project's gates, one command per line (from
 #                         hive.yaml); every task must pass them
+#
+# LLM capacity is 4 concurrent committed requests with a burst to 8 from
+# an as-available queue (slower). A pass that spends its wall clock waiting
+# on a saturated gateway has not used the model, so the wait is measured
+# and charged to LLM_WAIT_SECS, not VERIFY_SECS; a pass may also be given a
+# longer wall clock while the gateway is queueing (SWARM_LLM_MAX_WAIT). A
+# single slow response never fails the task: per-request timeouts are
+# generous and transient 429/503/timeouts are retried with backoff inside
+# Pi (see the settings.json written below).
 #
 # A task is a mail whose subject starts "[TASK <id>]". Its body may begin with
 #   Repo: <git url>
@@ -58,6 +71,20 @@ MAX_ROUNDS=${SWARM_MAX_ROUNDS:-3}
 PASS_TIMEOUT=${SWARM_PASS_TIMEOUT:-3600}
 VERIFY_TIMEOUT=${SWARM_VERIFY_TIMEOUT:-1200}
 IDLE_TIMEOUT=${SWARM_IDLE_TIMEOUT:-900}
+# LLM capacity 4 committed + burst to 8 from a queue. Waiting on a
+# saturated gateway is not model work: bound how long a pass may wait
+# (0 = unbounded) and give each model request a generous timeout so a
+# slow response never fails the task.
+LLM_MAX_WAIT=${SWARM_LLM_MAX_WAIT:-3600}
+LLM_REQUEST_TIMEOUT=${SWARM_LLM_REQUEST_TIMEOUT:-600}
+# The gateway health probe used to tell "waiting in its queue" from model
+# work, and how often run_pass samples it. Overridable for tests.
+LLM_HEALTH_URL=${SWARM_LLM_HEALTH_URL-https://llm.lacy.casa/v1/models}
+LLM_POLL=${SWARM_LLM_POLL:-2}
+REGISTER_BACKOFF=${SWARM_REGISTER_BACKOFF:-15}
+# How long the model-service retry waits for the gateway to come back
+# before trying anyway (bounded so a wrong health URL cannot hang the loop).
+LLM_RECOVER_TRIES=${SWARM_LLM_RECOVER_TRIES:-20}
 
 # The git and migration rules (worker_rebase, worker_migration_guard) live
 # beside this script so they can be tested without a model or Agent Mail.
@@ -112,8 +139,40 @@ print(json.dumps({"providers": {"llm": {
 }}}, indent=1))
 PY
 
-amail register "$SWARM_NAME" --program pi --model "$SWARM_IMPL_MODEL" \
-  --task "project worker for $AMAIL_PROJECT" || { status failed; exit 1; }
+# Per-request timeout and retry live in Pi, not in this loop: one slow
+# response (the gateway queueing behind its 4 committed + 8 burst
+# capacity) must never fail the task, and a transient 429/503/timeout is
+# retried with backoff. A generous request timeout is paired with
+# Pi's own retries so a long generation is never cut off.
+python3 - "$LLM_REQUEST_TIMEOUT" > "$PI_CODING_AGENT_DIR/settings.json" <<'PY'
+import json, sys
+timeout_ms = int(sys.argv[1]) * 1000
+print(json.dumps({
+    "retry": {
+        "enabled": True,
+        "maxRetries": 6,
+        "baseDelayMs": 2000,
+        "maxAgentDelayMs": 60000,
+        "provider": {"timeoutMs": timeout_ms, "maxRetries": 3, "maxRetryDelayMs": 60000},
+    },
+}, indent=1))
+PY
+
+# The first registration call at boot retries with backoff: one DNS or
+# network blip must not fail the worker before it has done any work.
+register_worker() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if amail register "$SWARM_NAME" --program pi --model "$SWARM_IMPL_MODEL" \
+         --task "project worker for $AMAIL_PROJECT"; then
+      return 0
+    fi
+    echo "amail register attempt $attempt failed; retrying"
+    sleep $(( attempt * REGISTER_BACKOFF ))
+  done
+  return 1
+}
+register_worker || { status failed; exit 1; }
 printf 'model: implement %s, verify %s\nidle timeout: %ss\n' "$SWARM_IMPL_MODEL" "$SWARM_VERIFY_MODEL" "$IDLE_TIMEOUT" \
   | amail send --to "$ORCH" --cc "$CC" --subject "[HELLO] $SWARM_NAME"
 
@@ -203,6 +262,19 @@ watch_pass() {
   done
 }
 
+# llm_gateway_busy: true when the model gateway is queueing the request
+# (HTTP 429/503) rather than refusing or serving it. A 200 means the
+# request was accepted; any other or missing answer is *not* treated as
+# queueing, so a dead gateway cannot extend a pass forever (that case is
+# the model-service error path below). Overridable for tests via
+# SWARM_LLM_HEALTH_URL; an empty URL disables the probe.
+llm_gateway_busy() {
+  local code
+  [ -n "$LLM_HEALTH_URL" ] || return 1
+  code=$(curl -s -m 4 -o /dev/null -w '%{http_code}' "$LLM_HEALTH_URL" 2>/dev/null) || return 1
+  case $code in 429|503) return 0 ;; *) return 1 ;; esac
+}
+
 # llm_error LOG: the model service's error message if the pass ended on one
 # (Pi exits 0 even then; its JSON log records stopReason "error").
 llm_error() {
@@ -210,33 +282,76 @@ llm_error() {
   tail -c 4000 "$1" | grep -o '"errorMessage":"[^"]*"' | tail -1 | cut -d'"' -f4
 }
 
+# run_pass DIR LOGNAME MODEL PROMPT LIMIT: one Pi run under a wall-clock
+# limit. Time the gateway spends queueing the request (llm_gateway_busy) is
+# charged to LLM_WAIT_SECS and does not count against LIMIT, so a pass
+# waiting behind the gateway's 4 committed + 8 burst capacity is not cut
+# off as if it had used the model. Sets PASS_TIMED_OUT=1 and returns 124
+# when the non-waiting clock runs out. A generous hard ceiling (LIMIT plus
+# the queue allowance) is the backstop; the monitor kills at LIMIT of
+# non-waiting time.
+run_pass() {
+  local dir=$1 name=$2 model=$3 prompt=$4 limit=$5
+  local hard pid wpid rc now last dt work=0 waited=0
+  if [ "$LLM_MAX_WAIT" -gt 0 ]; then hard=$(( limit + LLM_MAX_WAIT )); else hard=$(( limit + 43200 )); fi
+  # exec so the background pid is `timeout` itself: killing it forwards the
+  # signal to Pi, and its own ceiling is only a backstop for the monitor.
+  ( cd "$dir" && exec timeout "$hard" pi -p "$prompt" --provider llm --model "$model" \
+      --thinking "$THINKING" --no-session --mode json </dev/null ) \
+      > "$W/logs-$name.jsonl" 2>&1 &
+  pid=$!
+  watch_pass "$pid" "$dir" "$name" &
+  wpid=$!
+  last=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$LLM_POLL"
+    now=$(date +%s); dt=$(( now - last )); last=$now
+    if llm_gateway_busy; then waited=$(( waited + dt )); else work=$(( work + dt )); fi
+    if [ "$work" -ge "$limit" ] || { [ "$LLM_MAX_WAIT" -gt 0 ] && [ "$waited" -ge "$LLM_MAX_WAIT" ]; }; then
+      PASS_TIMED_OUT=1
+      kill "$pid" 2>/dev/null || true
+      sleep 2
+      kill -9 "$pid" 2>/dev/null || true
+      break
+    fi
+  done
+  wait "$pid"; rc=$?
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+  add_llm_wait_secs "$waited"
+  [ "$PASS_TIMED_OUT" = 1 ] && rc=124
+  return "$rc"
+}
+
 pass() {  # pass DIR LOGNAME MODEL PROMPT [TIMEOUT]
-  # PASS_TIMED_OUT is 1 when the pass ran out of time (timeout exit 124):
-  # it ended normally as far as Pi knows, but did not finish. Callers read
-  # it right after the call (e.g. the verify round treats PASS_TIMED_OUT=1
-  # as a timeout even when the partial run managed to write PASS).
+  # PASS_TIMED_OUT is 1 when the pass ran out of time (exit 124): it ended
+  # normally as far as Pi knows, but did not finish. Callers read it right
+  # after the call (e.g. the verify round treats PASS_TIMED_OUT=1 as a
+  # timeout even when the partial run managed to write PASS).
   # A model-service failure (e.g. llm.lacy.casa 502 while its host is
-  # stalled) is retried here with backoff and does not use up a round; only
-  # after 6 failed attempts does the task fail, as an infrastructure block.
-  local attempt err limit=${5:-$PASS_TIMEOUT}
+  # stalled) is retried here with backoff and does not use up a round; the
+  # backoff time is charged to LLM_WAIT_SECS, since it is waiting on the
+  # model, not model work. Only after 6 failed attempts does the task fail,
+  # as an infrastructure block.
+  local attempt err limit=${5:-$PASS_TIMEOUT} rc t0 t1
   for attempt in 1 2 3 4 5 6; do
     echo "pass $2 ($3) attempt $attempt $(date -Is)"
     PASS_TIMED_OUT=0
-    ( cd "$1" && timeout "$limit" pi -p "$4" --provider llm --model "$3" \
-        --thinking "$THINKING" --no-session --mode json </dev/null > "$W/logs-$2.jsonl" 2>&1 ) &
-    local pid=$!
-    watch_pass "$pid" "$1" "$2" &
-    local wpid=$!
-    wait "$pid"; local rc=$?
-    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+    run_pass "$1" "$2" "$3" "$4" "$limit"; rc=$?
     echo "pass $2 exit=$rc $(date -Is)"
-    [ "$rc" -eq 124 ] && PASS_TIMED_OUT=1 && echo "pass $2: timed out after ${limit}s"
+    [ "$rc" -eq 124 ] && PASS_TIMED_OUT=1 && echo "pass $2: timed out after ${limit}s (excluding model wait)"
     err=$(llm_error "$W/logs-$2.jsonl") || return 0
     echo "pass $2: model service error: $err"
     [ "$attempt" -eq 1 ] && printf 'Model service error in %s: %s. Retrying with backoff.\n' "$2" "$err" \
       | say "$TASK_ID" "[PROGRESS $TASK_ID] waiting for llm.lacy.casa"
-    until curl -s -m 20 -o /dev/null -w '%{http_code}' https://llm.lacy.casa/v1/models | grep -q 200; do sleep 30; done
+    t0=$(date +%s)
+    local tries=0
+    until curl -s -m 20 -o /dev/null -w '%{http_code}' "$LLM_HEALTH_URL" 2>/dev/null | grep -q 200; do
+      tries=$(( tries + 1 ))
+      [ "$tries" -ge "$LLM_RECOVER_TRIES" ] && break
+      sleep 30
+    done
     sleep $(( attempt * 60 ))
+    t1=$(date +%s); add_llm_wait_secs $(( t1 - t0 ))
   done
   LLM_DOWN="$err"
   return 1
@@ -247,24 +362,54 @@ pass() {  # pass DIR LOGNAME MODEL PROMPT [TIMEOUT]
 # verify and again before a DONE is pushed, then reruns the gates. The
 # durations are accumulated here and reported in DONE/BLOCKED so the next
 # optimisation is measured.
-IMPL_SECS=0 REBASE_SECS=0 GATE_SECS=0 VERIFY_SECS=0
+IMPL_SECS=0 REBASE_SECS=0 GATE_SECS=0 VERIFY_SECS=0 LLM_WAIT_SECS=0
 
-# add_impl_secs / add_rebase_secs / add_gate_secs / add_verify_secs N:
-# accumulate a duration into its bucket. Named helpers rather than an
-# indirection so nothing has to be eval'd.
-add_impl_secs()   { IMPL_SECS=$(( IMPL_SECS + ${1:-0} )); }
-add_rebase_secs() { REBASE_SECS=$(( REBASE_SECS + ${1:-0} )); }
-add_gate_secs()   { GATE_SECS=$(( GATE_SECS + ${1:-0} )); }
-add_verify_secs() { VERIFY_SECS=$(( VERIFY_SECS + ${1:-0} )); }
+# add_impl_secs / add_rebase_secs / add_gate_secs / add_verify_secs /
+# add_llm_wait_secs N: accumulate a duration into its bucket. Named helpers
+# rather than an indirection so nothing has to be eval'd.
+add_impl_secs()     { IMPL_SECS=$(( IMPL_SECS + ${1:-0} )); }
+add_rebase_secs()   { REBASE_SECS=$(( REBASE_SECS + ${1:-0} )); }
+add_gate_secs()     { GATE_SECS=$(( GATE_SECS + ${1:-0} )); }
+add_verify_secs()   { VERIFY_SECS=$(( VERIFY_SECS + ${1:-0} )); }
+add_llm_wait_secs() { LLM_WAIT_SECS=$(( LLM_WAIT_SECS + ${1:-0} )); }
 
 timing_line() {
-  printf 'timings: implement %ss, rebase %ss, gates %ss, verify %ss' \
-    "$IMPL_SECS" "$REBASE_SECS" "$GATE_SECS" "$VERIFY_SECS"
+  printf 'timings: implement %ss, rebase %ss, gates %ss, verify %ss, llm wait %ss' \
+    "$IMPL_SECS" "$REBASE_SECS" "$GATE_SECS" "$VERIFY_SECS" "$LLM_WAIT_SECS"
 }
 
 # verify_minutes N: a seconds limit as whole minutes, rounded up, so a
 # limit that is not a multiple of 60 does not read as less than it is.
 verify_minutes() { echo $(( (${1:-0} + 59) / 60 )); }
+
+# no_pass_line VCOUNT ROUNDS_ALLOWED MAX: the BLOCKED headline for a task
+# that never reached PASS. When no verify actually ran (every round's gates
+# failed before the verifier was asked) it says so instead of claiming N
+# verify rounds.
+no_pass_line() {
+  if [ "${1:-0}" -eq 0 ]; then
+    printf 'no verify ran: gates failed'
+  else
+    printf 'No PASS after %s verify round(s) out of %s' "${2:-0}" "${3:-0}"
+  fi
+}
+
+# report_already_on_base WT ID ROUND: the honest DONE when a rebase dropped
+# every branch commit (the change is already on the base). Reports the base
+# and the verifier's verdict instead of the no-commit BLOCKED block.
+report_already_on_base() {
+  local wt=$1 id=$2 round=$3 base
+  base=$(worker_base_sha "$wt" "$BASE_REF")
+  { echo "The change is already on the base: the rebase onto $BASE_REF dropped every branch commit, so there is nothing to push."
+    echo "already on base: ${base:0:7} ($BASE_REF)"
+    [ -n "$regated_base" ] && echo "re-gated on $regated_base ($BASE_REF)"
+    echo "verifier: PASS in round $round ($SWARM_VERIFY_MODEL)"
+    echo
+    cat "$W/verdict.md"
+    echo
+    echo "$(timing_line)"; } \
+    | say "$id" "[DONE $id] already on base ${base:0:7}; nothing to push"
+}
 
 # diff_lines WT: added plus deleted lines in git diff BASE_REF...HEAD.
 # A binary file's "-" counts as zero so the total stays a number.
@@ -389,7 +534,7 @@ push_and_report() {  # push_and_report WT BRANCH ID SUBJECT  (report body on std
 # run_task MSGID: one complete task, reported in its own thread.
 run_task() {
   local msg=$1 raw subject id body repo branch slug wt base rules round verdict findings commits
-  local vt_min VERIFY_LIMIT rounds_allowed verified_base cfl dl t0 t1
+  local vt_min VERIFY_LIMIT rounds_allowed verified_base cfl dl t0 t1 regated_base=""
   LLM_DOWN=""
   raw=$(amail read "$msg")
   subject=$(head -1 <<<"$raw")
@@ -454,7 +599,7 @@ $(printf '%s\n' "$SWARM_GATES" | sed 's/^/    /')"
 - Do not touch production systems or other hosts."
 
   findings="" verdict="" rounds_allowed=$MAX_ROUNDS verified_base=""
-  IMPL_SECS=0 REBASE_SECS=0 GATE_SECS=0 VERIFY_SECS=0
+  IMPL_SECS=0 REBASE_SECS=0 GATE_SECS=0 VERIFY_SECS=0 LLM_WAIT_SECS=0
   # The budget is spent on verifies, not loop iterations: an implement
   # round whose gates fail (including the migration guard) restarts the
   # implement pass without using a verify round, so the size-based cap
@@ -591,7 +736,7 @@ $rules" "$VERIFY_LIMIT" || break
     findings=$(tail -n +2 "$W/verdict.md" 2>/dev/null)
     # A PASS that lists a blocker is a FAIL: the findings go to the next
     # implement round instead of out as [DONE].
-    if [ "$verdict" = PASS ] && grep -qiE '^[[:space:]*-]*BLOCKER:' <<<"$findings"; then
+    if [ "$verdict" = PASS ] && grep -qiE '^[[:space:]-]*BLOCKER:' <<<"$findings"; then
       echo "task $id round $round: verifier wrote PASS with blockers; treating as FAIL"
       verdict=FAIL
     fi
@@ -623,7 +768,12 @@ $rules" "$VERIFY_LIMIT" || break
         return
       fi
       verified_base=$(worker_base_sha "$wt" "$BASE_REF")
+      regated_base=$verified_base
       commits=$(git -C "$wt" log --format='%h %s' "$BASE_REF"..HEAD)
+      # The push-stage rebase can drop the commits too, when the moved
+      # base already carries the change. Report the honest DONE rather
+      # than pushing a branch with nothing on it.
+      if [ -z "$commits" ]; then report_already_on_base "$wt" "$id" "$round"; return; fi
     elif [ "$REBASE_STATE" = CONFLICT ]; then
       git -C "$wt" rebase --abort >/dev/null 2>&1 || true
       printf 'The base moved before the push and the rebase conflicted.\n%s\n' "$(timing_line)" \
@@ -642,13 +792,24 @@ $rules" "$VERIFY_LIMIT" || break
 commits:
 $(echo "$commits" | sed 's/^/  /')
 verified on base: $verified_base ($BASE_REF)
+$([ -n "$regated_base" ] && echo "re-gated on $regated_base ($BASE_REF) after the base moved before the push")
 verifier: PASS in round $round ($SWARM_VERIFY_MODEL)
 $(cat "$W/verdict.md")
+
 $(timing_line)
 EOF
     return
   fi
-  git -C "$wt" add -A && git -C "$wt" commit -q -m "wip: $id" || true
+  # EMPTY-AFTER-REBASE: a PASS whose rebase dropped every branch commit
+  # (the change is already on the base). That is an honest DONE, not the
+  # "verifier did not pass / nothing to push" block the generic path
+  # below would send; the verifier's verdict is reported as it was.
+  if [ "$verdict" = PASS ]; then
+    report_already_on_base "$wt" "$id" "$round"
+    return
+  fi
+  worker_commit_dirty "$wt" >/dev/null 2>&1 || true
+  git -C "$wt" add -A && git -C "$wt" commit -q -m "wip: $id" >/dev/null 2>&1 || true
   sha=$(git -C "$wt" rev-parse --short=7 HEAD)
   if [ -n "$(git -C "$wt" log --format=%h "$BASE_REF"..HEAD)" ]; then
     if [ -n "$LLM_DOWN" ]; then
@@ -672,7 +833,7 @@ EOF
       return
     fi
     push_and_report "$wt" "$branch" "$id" "[BLOCKED $id] retryable: verifier did not pass" <<EOF
-No PASS after $rounds_allowed verify round(s) out of $MAX_ROUNDS (last verdict: ${verdict:-none}).
+$(no_pass_line "$vround" "$rounds_allowed" "$MAX_ROUNDS") (last verdict: ${verdict:-none}).
 HEAD: $sha, pushed to $branch.
 
 Last findings:
@@ -691,7 +852,7 @@ EOF
         | say "$id" "[BLOCKED $id] retryable: verifier gave no verdict"
       return
     fi
-    { echo "No PASS after $rounds_allowed verify round(s) out of $MAX_ROUNDS (last verdict: ${verdict:-none}). Nothing was committed, so there is nothing to push."; echo
+    { echo "$(no_pass_line "$vround" "$rounds_allowed" "$MAX_ROUNDS") (last verdict: ${verdict:-none}). Nothing was committed, so there is nothing to push."; echo
       echo "Last findings:"; echo "${findings:-none recorded}"; echo "$(timing_line)"; } \
       | say "$id" "[BLOCKED $id] retryable: verifier did not pass"
   fi

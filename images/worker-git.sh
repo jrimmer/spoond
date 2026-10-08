@@ -39,7 +39,28 @@ worker_fetch() {
   git -C "$wt" rev-parse -q --verify "$base_ref^{commit}" >/dev/null 2>&1
 }
 
+# worker_commit_dirty WT: never lose uncommitted work. Stages and commits
+# everything on the checked-out branch as a wip commit, so a following
+# rebase cannot fail on a dirty tree and a later attempt's reset/clean
+# cannot wipe the tail of the implement round. Prints WIP-COMMITTED to
+# stderr when it commits; prints nothing and returns 0 when clean.
+worker_commit_dirty() {
+  local wt=$1
+  if git -C "$wt" diff --quiet 2>/dev/null \
+     && git -C "$wt" diff --cached --quiet 2>/dev/null \
+     && [ -z "$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null)" ]; then
+    return 0
+  fi
+  git -C "$wt" add -A >/dev/null 2>&1 || return 1
+  if git -C "$wt" commit -q -m "wip: uncommitted work before rebase" >/dev/null 2>&1; then
+    echo "WIP-COMMITTED" >&2
+  fi
+  return 0
+}
+
 # worker_rebase WT BASE_REF: bring the checked-out branch onto BASE_REF.
+# Uncommitted work is committed first (worker_commit_dirty) so a dirty tree
+# cannot fail the rebase and the branch's tail survives a reset/clean.
 # Prints one status line:
 #   UPTODATE               BASE_REF is already an ancestor of HEAD
 #   REBASED                the branch was rebased onto BASE_REF
@@ -51,6 +72,10 @@ worker_fetch() {
 # (which aborts the rebase).
 worker_rebase() {
   local wt=$1 base=$2 conflicts
+  # Never lose uncommitted work: commit it before rebasing (see
+  # worker_commit_dirty). The note goes to stderr so the single-line
+  # status on stdout stays a status.
+  worker_commit_dirty "$wt" >&2 || true
   if git -C "$wt" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
     echo "UPTODATE"
     return 0

@@ -124,20 +124,24 @@ project's dependencies are cached into the image before the snapshot.
 
 When a worker takes a task it now:
 
-1. **Rebases onto the task's `Base:` before verifying** (default
+1. **Never loses uncommitted work.** Before it rebases, `worker_rebase`
+   commits any dirty file as a wip commit (`worker_commit_dirty`), so a
+   rebase cannot fail on a dirty tree and a retried attempt's
+   `reset --hard`/`clean` cannot wipe the tail of the implement round.
+2. **Rebases onto the task's `Base:` before verifying** (default
    `origin/main`), fetching it first. A conflicted rebase is handed to
    the implementer as an extra implement round: it sees the conflict and
    the base's new commits, resolves them, finishes the rebase, and every
    gate is rerun. The [`worker-git.sh`](worker-git.sh) helper holds this
-   logic (`worker_fetch`, `worker_rebase`, `worker_rebase_in_progress`)
-   so it can be tested without a model.
-2. **Guards migrations after the rebase.** `worker_migration_guard`
+   logic (`worker_fetch`, `worker_rebase`, `worker_commit_dirty`,
+   `worker_rebase_in_progress`) so it can be tested without a model.
+3. **Guards migrations after the rebase.** `worker_migration_guard`
    fails the gate when two files under `store/migrations` share a
    version number, or when a migration the branch adds is not numbered
    above the base's highest. This is what a rebase before verify is for:
    a branch that started from an older base can no longer land a
    migration that collides with one already merged.
-3. **Verifies with a scope and a bound.** The verifier reviews only
+4. **Verifies with a scope and a bound.** The verifier reviews only
    `git diff <base>...HEAD` plus the task text — never the whole repo
    history. Each verify round has a wall-clock limit (`VERIFY_TIMEOUT`,
    default 20 minutes, or a task's `Verify-Timeout:` line in minutes),
@@ -147,13 +151,34 @@ When a worker takes a task it now:
    gates fail goes straight to another implement pass without spending a
    verify round. On timeout the worker reports `BLOCKED` at once with the
    partial notes instead of spending a second identical try. The
-   verifier's prompt asks for findings first, gates second.
-4. **Reports the base and the timings.** A `[DONE]` names the base
-   commit it was verified on (`verified on base: <sha> (<base ref>)`);
-   `[DONE]` and `[BLOCKED]` both carry `timings: implement …, rebase …,
-   gates …, verify …` so the next optimisation is measured. If the base
-   moved again before the push, the worker rebases and re-gates once
-   more.
+   verifier's prompt asks for findings first, gates second. A verdict of
+   `PASS` whose findings still list a `BLOCKER:` is downgraded to `FAIL`,
+   so it cannot leave the loop as a `DONE`.
+5. **Waits out the model gateway without spending the verify clock.**
+   The gateway serves 4 concurrent committed requests and bursts to 8
+   from an as-available queue (slower). While the gateway answers
+   `429`/`503` — queueing rather than serving — the pass's wall-clock
+   limit does not run down (`run_pass` samples `SWARM_LLM_HEALTH_URL`,
+   default the gateway's `/v1/models`), and the waited time is reported
+   as its own `llm wait` bucket. `SWARM_LLM_MAX_WAIT` (seconds, default
+   3600, 0 = unbounded) caps the total queue wait so a stuck gateway
+   cannot hang a pass forever. Per-request model timeouts are generous
+   (`SWARM_LLM_REQUEST_TIMEOUT`, default 600 s) and transient
+   `429`/`503`/timeouts are retried with backoff inside Pi, so a slow
+   response never fails the task. The first `amail register` at boot
+   retries with backoff (five tries, `SWARM_REGISTER_BACKOFF` base) so a
+   single DNS or network blip does not kill the worker.
+6. **Reports the base, the timings and an honest empty result.** A
+   `[DONE]` names the base commit it was verified on (`verified on base:
+   <sha> (<base ref>)`); when the push-stage rebase moved the base after
+   the verify it also says `re-gated on <new base>`. `[DONE]` and
+   `[BLOCKED]` both carry `timings: implement …, rebase …, gates …,
+   verify …, llm wait …` so the next optimisation is measured, and a
+   `[BLOCKED]` that never reached a verifier says `no verify ran: gates
+   failed` instead of claiming N verify rounds. When the rebase drops
+   every branch commit (the change is already on the base) the worker
+   reports an honest `[DONE] already on base <sha>; nothing to push` with
+   the verifier's verdict, not a `verifier did not pass` block.
 
 ### Testing the worker loop
 
@@ -171,15 +196,19 @@ and in the mail: the PASS/BLOCKED/cancelled exit paths, the `-wip`
 branches for rewritten history, `Base:`, rebase-before-verify with a
 moving base, the one-round/two-round sizing, verify timeouts (including
 one that writes PASS but runs out of clock), conflict resolution, the
-push-stage fetch failure, and the migration guard.
+push-stage fetch failure, the migration guard, an empty-after-rebase
+`DONE`, a `PASS` downgraded by a listed `BLOCKER:`, the re-gated `DONE`
+when the base moves during the verify, a queued gateway that does not
+spend the verify clock, a dirty tail committed before the rebase, and
+the boot-registration retry.
 
 ```bash
 bash images/worker-start_test.sh
 ```
 
-The scripts are expected to be `shellcheck`-clean:
+The scripts are expected to be `shellcheck`-clean, and the worker image
+installs `shellcheck` so the gate can run there:
 
 ```bash
-shellcheck images/worker-start.sh images/worker-git.sh \
-  images/worker-git_test.sh images/worker-start_test.sh
+bash images/shellcheck.sh          # runs shellcheck when installed
 ```

@@ -29,7 +29,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN command -v apt-get >/dev/null || { echo "worker layer: base has no apt-get" >&2; exit 1; } \
  && apt-get update -qq \
  && apt-get install -y --no-install-recommends \
-      git ca-certificates curl python3 jq openssh-client \
+      git ca-certificates curl python3 jq openssh-client shellcheck \
  && rm -rf /var/lib/apt/lists/*
 
 # Pi (standalone build; its assets must stay next to the binary).
@@ -55,7 +55,7 @@ RUN if [ -n "$WARM" ]; then eval "$WARM_ENV"; cd /tmp/project && sh -ec "$WARM";
  && rm -rf /tmp/project
 
 # Fail the build loudly if anything a bee needs is missing.
-RUN for b in git pi python3 amail worker-start ssh jq curl; do \
+RUN for b in git pi python3 amail worker-start ssh jq curl shellcheck; do \
       command -v "$b" >/dev/null || { echo "MISSING TOOL: $b" >&2; exit 1; }; \
     done \
  && test -r /usr/local/bin/worker-git.sh \

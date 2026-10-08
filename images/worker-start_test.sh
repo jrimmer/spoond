@@ -40,7 +40,16 @@ D=${TEST_MAIL:?}
 cmd=${1:-}; [ $# -gt 0 ] && shift
 mkdir -p "$D"
 case $cmd in
-  register|ack)
+  register)
+    # TEST_REGISTER_FAIL times: the first N registration calls at boot fail
+    # (one DNS/network blip), to exercise the retry-with-backoff path.
+    if [ "${TEST_REGISTER_FAIL:-0}" -gt 0 ]; then
+      n=$(( $(cat "$D/register-fails" 2>/dev/null || echo 0) + 1 ))
+      printf '%s\n' "$n" > "$D/register-fails"
+      if [ "$n" -le "$TEST_REGISTER_FAIL" ]; then exit 1; fi
+    fi
+    exit 0 ;;
+  ack)
     exit 0 ;;
   send)
     subj=""
@@ -132,6 +141,24 @@ case $key in
       git -C "$wt" reset -q --hard "$(git -C "$wt" merge-base HEAD "origin/${TEST_BASE:-main}")"
     fi
     lines=${TEST_LINES:-300}
+    # TEST_EMPTY_COMMIT=1: the branch's only change is a file the base also
+    # gains (TEST_MOVE_BASE=1, TEST_MOVE_FILE), so the rebase drops the
+    # commit (EMPTY-AFTER-REBASE).
+    if [ "${TEST_EMPTY_COMMIT:-0}" = "1" ]; then
+      printf 'main side\n' > "$wt/${TEST_MOVE_FILE:-empty.txt}"
+      git -C "$wt" add -A
+      git -C "$wt" commit -q -m "work round $n"
+      git -C "$wt" rev-parse HEAD >> "$D/heads.log"
+      if [ -n "${TEST_MOVE_BASE:-}" ] && [ "$n" = "$TEST_MOVE_BASE" ]; then
+        mb=$D/movebase; rm -rf "$mb"; git clone -q -b "${TEST_BASE:-main}" "$TEST_ORIGIN" "$mb"
+        git -C "$mb" config user.name test; git -C "$mb" config user.email test@example.com
+        printf 'main side\n' > "$mb/${TEST_MOVE_FILE:-empty.txt}"
+        git -C "$mb" add -A
+        git -C "$mb" commit -qm "main moved"
+        git -C "$mb" push -q origin "${TEST_BASE:-main}"
+      fi
+      printf '{}\n'; exit 0
+    fi
     : > "$wt/change-$n.txt"
     i=1; while [ "$i" -le "$lines" ]; do printf 'change %s line %s\n' "$n" "$i" >> "$wt/change-$n.txt"; i=$((i + 1)); done
     [ -n "${TEST_CONFLICT_FILE:-}" ] && printf 'branch side\n' > "$wt/conflict.txt"
@@ -150,6 +177,10 @@ case $key in
     git -C "$wt" add -A
     git -C "$wt" commit -q -m "work round $n"
     git -C "$wt" rev-parse HEAD >> "$D/heads.log"
+    # TEST_DIRTY_TAIL=1: leave an untracked file after the commit, as an
+    # implement round that was cut off would. The worker must commit it
+    # (worker_commit_dirty) before rebasing, so it lands in the DONE.
+    [ "${TEST_DIRTY_TAIL:-0}" = "1" ] && printf 'tail\n' > "$wt/tail-$n.txt"
     # TEST_MOVE_BASE=N: after the Nth implement round, advance
     # origin's base branch so the base moves before the rebase/push.
     if [ -n "${TEST_MOVE_BASE:-}" ] && [ "$n" = "$TEST_MOVE_BASE" ]; then
@@ -167,6 +198,14 @@ case $key in
     if [ "${TEST_BREAK_ORIGIN:-0}" = "1" ]; then
       mv "$TEST_ORIGIN" "$TEST_ORIGIN.gone" 2>/dev/null || true
     fi
+    if [ "${TEST_MOVE_BASE_ON_VERIFY:-0}" = "1" ]; then
+      mb=$D/movebase-verify; rm -rf "$mb"; git clone -q -b "${TEST_BASE:-main}" "$TEST_ORIGIN" "$mb"
+      git -C "$mb" config user.name test; git -C "$mb" config user.email test@example.com
+      printf 'verify side\n' >> "$mb/${TEST_MOVE_FILE:-VERIFY_MOVE.md}"
+      git -C "$mb" add -A
+      git -C "$mb" commit -qm "main moved during verify"
+      git -C "$mb" push -q origin "${TEST_BASE:-main}"
+    fi
     vn=$(( $(cat "$D/verify-round" 2>/dev/null || echo 0) + 1 )); printf '%s\n' "$vn" > "$D/verify-round"
     verdict=${TEST_VERDICT:-FAIL}
     # TEST_VERDICT_SEQ is a comma list chosen by verify call number, so a
@@ -174,11 +213,17 @@ case $key in
     if [ -n "${TEST_VERDICT_SEQ:-}" ]; then
       verdict=$(cut -d, -f"$vn" <<<"$TEST_VERDICT_SEQ")
     fi
+    # TEST_VERIFY_PRE_SLEEP: let the verify run for a while before writing
+    # its verdict, so a queueing gateway can be seen not to spend the
+    # verify clock.
+    [ -n "${TEST_VERIFY_PRE_SLEEP:-}" ] && sleep "$TEST_VERIFY_PRE_SLEEP"
     case $verdict in
       TIMEOUT) sleep "${TEST_VERIFY_SLEEP:-2}" ;;  # let the pass timeout
       TIMEOUT_PASS)                                  # PASS written, then run out of clock
         printf 'PASS\nfinding one\n' > "$W/verdict.md"
         sleep "${TEST_VERIFY_SLEEP:-2}" ;;
+      PASS_BLOCKER)                                  # PASS that still lists a blocker
+        printf 'PASS\nBLOCKER: the task is not met exactly\n' > "$W/verdict.md" ;;
       "") : > "$W/verdict.md" ;;                    # no verdict at all
       *) printf '%s\nfinding one\nfinding two\n' "$verdict" > "$W/verdict.md" ;;
     esac
@@ -250,6 +295,11 @@ run_worker() {
     TEST_TASK_ID=$tid TEST_VERDICT=$verdict TEST_AMEND=$amend TEST_CANCEL=$cancel \
     TEST_LINES=${TEST_LINES:-300} TEST_VERDICT_SEQ=${TEST_VERDICT_SEQ:-} \
     TEST_MOVE_BASE=${TEST_MOVE_BASE:-} TEST_MOVE_FILE=${TEST_MOVE_FILE:-} \
+    TEST_MOVE_BASE_ON_VERIFY=${TEST_MOVE_BASE_ON_VERIFY:-0} \
+    TEST_EMPTY_COMMIT=${TEST_EMPTY_COMMIT:-0} \
+    TEST_VERIFY_PRE_SLEEP=${TEST_VERIFY_PRE_SLEEP:-} \
+    TEST_REGISTER_FAIL=${TEST_REGISTER_FAIL:-0} \
+    TEST_DIRTY_TAIL=${TEST_DIRTY_TAIL:-0} \
     TEST_CONFLICT_FILE=${TEST_CONFLICT_FILE:-} TEST_MIGRATION=${TEST_MIGRATION:-} \
     TEST_MIGRATION_ONCE=${TEST_MIGRATION_ONCE:-} \
     TEST_VERIFY_TIMEOUT_LINE=${TEST_VERIFY_TIMEOUT_LINE:-} \
@@ -261,8 +311,11 @@ run_worker() {
     SWARM_IMPL_MODEL=test-impl SWARM_VERIFY_MODEL=test-verif \
     AMAIL_TOKEN=test-token SWARM_DEPLOY_KEY_B64=$(printf test-key | base64) \
     SWARM_MAX_ROUNDS=$rounds SWARM_PASS_TIMEOUT=60 SWARM_VERIFY_TIMEOUT=${TEST_SWARM_VERIFY_TIMEOUT:-60} \
+    SWARM_LLM_MAX_WAIT=${TEST_LLM_MAX_WAIT:-0} SWARM_LLM_HEALTH_URL=${TEST_LLM_HEALTH_URL-} \
+    SWARM_LLM_POLL=${TEST_LLM_POLL:-2} SWARM_LLM_REQUEST_TIMEOUT=600 \
+    SWARM_REGISTER_BACKOFF=${TEST_REGISTER_BACKOFF:-15} \
     SWARM_IDLE_TIMEOUT=2 SWARM_ORCH=orch-1 \
-    PATH=$T/bin:$PATH \
+    PATH=$T/qbin:$T/bin:$PATH \
     unshare -m bash "$T/runner.sh"
 }
 
@@ -351,7 +404,7 @@ check "pushed sha equals the worker's final HEAD" expect_eq "$tip" "$head"
 check "report names the pushed sha and branch" \
   grep -q "^pushed: $(short "$o" refs/heads/swarm/tc4) -> swarm/tc4 (succeeded" "$T/mail/outbox.log"
 check "report is [CANCELLED" grep -q "\[CANCELLED tc4\]" "$T/mail/outbox.log"
-check "cancelled report carries timings" grep -q '^timings: implement .*s, rebase .*s, gates .*s, verify .*s' "$T/mail/outbox.log"
+check "cancelled report carries timings" grep -q '^timings: implement .*s, rebase .*s, gates .*s, verify .*s, llm wait .*s' "$T/mail/outbox.log"
 
 echo
 # --- BASE: the task names Base: v3; the branch starts from origin/v3, and
@@ -412,7 +465,7 @@ base_tip=$(git -C "$o" rev-parse refs/heads/main)
 check "branch builds on the moved base" git -C "$o" merge-base --is-ancestor "$base_tip" "$tip"
 check "report names the verified base commit" \
   grep -q "^verified on base: $base_tip (origin/main)" "$T/mail/outbox.log"
-check "report includes timings" grep -q '^timings: implement .*s, rebase .*s, gates .*s, verify .*s' "$T/mail/outbox.log"
+check "report includes timings" grep -q '^timings: implement .*s, rebase .*s, gates .*s, verify .*s, llm wait .*s' "$T/mail/outbox.log"
 check "no task branch commit predates the moved base" \
   git -C "$o" merge-base --is-ancestor "$base_tip" "$tip"
 
@@ -500,6 +553,8 @@ check "the migration guard failed the gate" grep -q 'is not numbered above the b
 check "the guard failure did not consume a verify round" \
   expect_eq "$(grep -c 'tmig-verify' "$T/last-worker.log")" "0"
 check "report is [BLOCKED with no verdict" grep -q 'BLOCKED tmig\] retryable: verifier did not pass' "$T/mail/outbox.log"
+check "report says no verify ran, not N rounds" \
+  grep -q 'no verify ran: gates failed' "$T/mail/outbox.log"
 check "no DONE was reported" bash -c '! grep -q "\[DONE tmig\]" "$1"' _ "$T/mail/outbox.log"
 
 # --- MIGRATION GUARD RETAKE: round 1 fails the guard, round 2 fixes the
@@ -517,6 +572,112 @@ check "the verifier ran once after the retry" \
 check "no verify round was spent on the guard failure" \
   expect_eq "$(grep -c 'next implement round (no verify round used)' "$T/last-worker.log")" "1"
 check "report is [DONE" grep -q '\[DONE tmigr\]' "$T/mail/outbox.log"
+
+# --- EMPTY-AFTER-REBASE: the branch commit is already on the base (the
+# base gains the same file), so the rebase drops it. That is an honest DONE
+# with "already on base", never the "verifier did not pass / nothing to
+# push" block the generic no-commit path would send. ----------------------
+o=$T/o-empty.git
+make_origin "$o" ""
+TEST_EMPTY_COMMIT=1 TEST_MOVE_BASE=1 TEST_MOVE_FILE=empty.txt TEST_LINES=20
+scenario_prologue EMPTY-AFTER-REBASE "$o" swarm/te16 te16 1 PASS 0 0
+TEST_EMPTY_COMMIT= TEST_MOVE_BASE= TEST_MOVE_FILE= TEST_LINES=
+check "empty-after-rebase reports DONE already on base" \
+  grep -q '\[DONE te16\] already on base' "$T/mail/outbox.log"
+check "empty-after-rebase does not claim verifier did not pass" \
+  bash -c '! grep -q "verifier did not pass" "$1"' _ "$T/mail/outbox.log"
+check "empty-after-rebase names the base it is already on" \
+  grep -q '^already on base: ' "$T/mail/outbox.log"
+check "empty-after-rebase carries timings" \
+  grep -q '^timings: implement .*s, rebase .*s, gates .*s, verify .*s, llm wait .*s' "$T/mail/outbox.log"
+check "no empty branch was pushed to origin" \
+  bash -c '! git -C "$1" rev-parse -q --verify refs/heads/swarm/te16 >/dev/null' _ "$o"
+
+# --- BLOCKER-IN-PASS: a PASS whose findings still list a BLOCKER: is
+# downgraded to FAIL, so it goes back to the implementer rather than out as
+# DONE. ---------------------------------------------------------------------
+o=$T/o-passblocker.git
+make_origin "$o" ""
+TEST_VERDICT=PASS_BLOCKER TEST_LINES=20
+scenario_prologue BLOCKER-IN-PASS "$o" swarm/tpb17 tpb17 1 PASS_BLOCKER 0 0
+TEST_VERDICT= PASS_BLOCKER= TEST_LINES=
+check "a PASS with blockers is not DONE" \
+  bash -c '! grep -q "\[DONE tpb17\]" "$1"' _ "$T/mail/outbox.log"
+check "a PASS with blockers is reported did not pass" \
+  grep -q 'BLOCKED tpb17\] retryable: verifier did not pass' "$T/mail/outbox.log"
+check "the log says the PASS was treated as FAIL" \
+  grep -q 'verifier wrote PASS with blockers; treating as FAIL' "$T/last-worker.log"
+
+# --- PUSH-REBASE-MOVED: the base advances while the verify runs, so the
+# push-stage rebase moves it after the verify; the DONE says it was re-gated
+# on the new base. ----------------------------------------------------------
+o=$T/o-regate.git
+make_origin "$o" ""
+TEST_MOVE_BASE_ON_VERIFY=1 TEST_MOVE_FILE=VERIFY_MOVE.md TEST_LINES=20
+scenario_prologue RE-GATED "$o" swarm/trg18 trg18 1 PASS 0 0
+TEST_MOVE_BASE_ON_VERIFY= TEST_MOVE_FILE= TEST_LINES=
+check "DONE says it was re-gated on the new base" \
+  grep -q '^re-gated on .* (origin/main) after the base moved before the push' "$T/mail/outbox.log"
+check "DONE still names the verified base" \
+  grep -q '^verified on base: ' "$T/mail/outbox.log"
+
+# --- LLM QUEUE WAIT: while the gateway answers 429 (queueing), the verify
+# clock does not run, so a verify that would time out on its own passes once
+# the queue drains; the waited time is reported as `llm wait`. -------------
+o=$T/o-llmwait.git
+make_origin "$o" ""
+TEST_LLM_MAX_WAIT=30 TEST_LLM_POLL=2
+# The verify's own work (8 s) exceeds its 6 s clock; with the gateway
+# answering 429 the whole time none of it counts, so the verify completes
+# and the wait is reported as `llm wait` instead of a timeout.
+TEST_VERIFY_PRE_SLEEP=8 TEST_SWARM_VERIFY_TIMEOUT=6
+TEST_LLM_HEALTH_URL=https://llm.lacy.casa/v1/models
+# A curl shim on PATH answers 429 for the queue probe while the marker file
+# exists (a saturated gateway), passing every other call through.
+mkdir -p "$T/qbin"
+cat > "$T/qbin/curl" <<'CURL'
+#!/bin/bash
+q=
+for a in "$@"; do case $a in *llm.lacy.casa/v1/models*) q=1 ;; esac; done
+if [ -n "$q" ] && [ -f "${TEST_TMP}/queueing" ]; then echo 429; exit 0; fi
+exec /usr/bin/curl "$@"
+CURL
+chmod +x "$T/qbin/curl"
+: > "$T/queueing"
+scenario_prologue LLM-QUEUE-WAIT "$o" swarm/tq19 tq19 1 PASS 0 0
+rm -f "$T/queueing"
+TEST_LLM_MAX_WAIT= TEST_LLM_POLL= TEST_VERIFY_PRE_SLEEP= TEST_SWARM_VERIFY_TIMEOUT= TEST_LLM_HEALTH_URL=
+check "a queued verify still passes (the clock did not run)" \
+  grep -q '\[DONE tq19\]' "$T/mail/outbox.log"
+check "the queue wait was charged to llm wait, not verify" \
+  bash -c 'grep -q "llm wait [1-9][0-9]*s" "$1"' _ "$T/mail/outbox.log"
+check "no verify-timeout block for the queued pass" \
+  bash -c '! grep -q "verifier gave no verdict" "$1"' _ "$T/mail/outbox.log"
+
+# --- WIP-BEFORE-REBASE (B2, end to end): the implement pass leaves an
+# untracked tail that the worker commits before rebasing, so the tail is in
+# the DONE's commits rather than lost. -------------------------------------
+o=$T/o-dirty.git
+make_origin "$o" ""
+TEST_DIRTY_TAIL=1 TEST_LINES=20
+scenario_prologue WIP-BEFORE-REBASE "$o" swarm/twd21 twd21 1 PASS 0 0
+TEST_DIRTY_TAIL= TEST_LINES=
+check "the worker committed the dirty tail before rebasing" \
+  grep -q 'wip: uncommitted work before rebase' "$T/mail/outbox.log"
+check "the tail file landed on origin's branch" \
+  git -C "$o" cat-file -e refs/heads/swarm/twd21:tail-1.txt
+check "report is [DONE" grep -q '\[DONE twd21\]' "$T/mail/outbox.log"
+
+# --- REGISTER-RETRY: the first boot registration call fails (a DNS/network
+# blip); the worker retries with backoff and still takes the task. ---------
+o=$T/o-register.git
+make_origin "$o" ""
+TEST_REGISTER_FAIL=2 TEST_REGISTER_BACKOFF=0 TEST_LINES=20
+scenario_prologue REGISTER-RETRY "$o" swarm/trr20 trr20 1 PASS 0 0
+TEST_REGISTER_FAIL= TEST_REGISTER_BACKOFF= TEST_LINES=
+check "registration was retried" grep -q 'amail register attempt 1 failed; retrying' "$T/last-worker.log"
+check "the worker still took the task" grep -q '\[START trr20\]' "$T/mail/outbox.log"
+check "the worker still passed the task" grep -q '\[DONE trr20\]' "$T/mail/outbox.log"
 
 if [ "$fails" -eq 0 ]; then
   echo "all scenarios passed"

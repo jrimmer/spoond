@@ -10,6 +10,47 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+Round two of the worker harness (`images/worker-start.sh`, the
+`go-base-worker` image) after the first cut was measured.
+
+### Added
+
+- **The worker never loses uncommitted work and reports an honest empty
+  result.** `worker_rebase` now commits a dirty tree as a wip commit
+  (`worker_commit_dirty`) before rebasing, so a rebase cannot fail on a
+  dirty tree and a retried attempt's `reset --hard`/`clean` cannot wipe
+  the tail of the implement round. When a rebase drops every branch
+  commit (the change is already on the base) the worker reports
+  `[DONE] already on base <sha>; nothing to push` with the verifier's
+  verdict, instead of the `verifier did not pass ... nothing to push`
+  block the generic path used to send. A `PASS` whose findings still
+  list a `BLOCKER:` is downgraded to `FAIL`; a `[BLOCKED]` that never
+  reached a verifier says `no verify ran: gates failed` instead of
+  claiming N verify rounds; a `[DONE]` says `re-gated on <new base>` when
+  the push-stage rebase moved the base after the verify.
+- **Model-gateway backpressure is not charged to the verify clock.** The
+  gateway serves 4 concurrent committed requests and bursts to 8 from an
+  as-available queue. While it answers `429`/`503` (queueing, not
+  serving) the pass's wall-clock limit does not run down and the waited
+  time is reported in its own `llm wait` timing bucket;
+  `SWARM_LLM_MAX_WAIT` caps the total queue wait. Per-request model
+  timeouts are generous (`SWARM_LLM_REQUEST_TIMEOUT`, default 600 s) and
+  transient `429`/`503`/timeouts are retried with backoff inside Pi, so a
+  slow response never fails the task. The first `amail register` at boot
+  retries with backoff (five tries) so one DNS or network blip does not
+  kill the worker. The worker image installs `shellcheck` and its build
+  fails if it is missing; `images/shellcheck.sh` runs the lint gate.
+
+### Changed
+
+- **`worker-start_test.sh` covers the new exit paths** — empty-after-
+  rebase `DONE`, `PASS` downgraded by a listed `BLOCKER:`, the re-gated
+  `DONE`, a queued gateway that does not spend the verify clock, a dirty
+  tail committed before the rebase, and the boot-registration retry — and
+  `worker-git_test.sh` covers the dirty-tree rebase. `DONE`/`BLOCKED`
+  timings now read `implement …, rebase …, gates …, verify …, llm wait
+  …`. `images/README.md` describes the rules.
+
 ## [2.7.1] - 2026-10-07
 
 spoond looks after more of itself and says less on the dashboard about
