@@ -388,13 +388,15 @@ func urlQueryEscape(s string) string {
 }
 
 // execReq is the exec body: {"cmd","cwd","env","timeout"} (A1 §5).
-// Background (2.6, #135) starts the command as a tracked job.
+// Background (2.6, #135) starts the command as a tracked job;
+// max_runtime_secs (spoond-wb5) shortens the host cap for that job.
 type execReq struct {
-	Cmd        string            `json:"cmd"`
-	Cwd        string            `json:"cwd,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	Timeout    int               `json:"timeout,omitempty"`
-	Background bool              `json:"background,omitempty"`
+	Cmd            string            `json:"cmd"`
+	Cwd            string            `json:"cwd,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Timeout        int               `json:"timeout,omitempty"`
+	Background     bool              `json:"background,omitempty"`
+	MaxRuntimeSecs int64             `json:"max_runtime_secs,omitempty"`
 }
 
 // jobInfo is the background-job record shape (2.6, #135).
@@ -407,6 +409,7 @@ type jobInfo struct {
 	StartedAt  string `json:"started_at"`
 	EndedAt    string `json:"ended_at"`
 	StderrTail string `json:"stderr_tail"`
+	Reason     string `json:"reason"`
 }
 
 // jobStart is the POST .../exec "background": true answer.

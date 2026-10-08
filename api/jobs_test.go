@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -938,4 +939,546 @@ func TestJobWatchClosedStreamLeavesRunning(t *testing.T) {
 		t.Fatalf("job state = %q after a silently closed stream, want running", row.State)
 	}
 	_ = svc
+}
+
+// TestJobMaxRuntimeKillsJob: a job that has spent its effective max
+// runtime is killed and marked exited with reason timed_out, its exit
+// code is recorded and a job_exited event names the cap. The cap is
+// checked by reconcileJobs, so a `sleep infinity` cannot run forever
+// (spoond-wb5).
+func TestJobMaxRuntimeKillsJob(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1021)
+	installJobProcess(t, sub, p)
+	jobs := svc.Subscribe(EventFilter{})
+	defer jobs.Close()
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+	writeJobFile(t, sub, sandbox, jobID, "stderr", "still here\n")
+
+	// The requested runtime is stored on the record and shortens the host
+	// cap; it is never longer than the cap.
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.MaxRuntimeSecs != 3600 {
+		t.Fatalf("max_runtime_secs = %d, want 3600 (the host cap)", row.MaxRuntimeSecs)
+	}
+
+	// Move the service clock past the cap and reconcile.
+	base := time.Now()
+	svc.now = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+	svc.reconcileJobs(context.Background())
+
+	running := db.CountRunningJobs
+	if n, _ := running(context.Background(), id); n != 0 {
+		t.Fatalf("running jobs after timeout = %d, want 0", n)
+	}
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 124 {
+		t.Fatalf("exit code = %v, want 124", got.ExitCode)
+	}
+	if !strings.Contains(got.StderrTail, "still here") {
+		t.Fatalf("stderr tail = %q", got.StderrTail)
+	}
+	if svc.hasRunningJob(id) {
+		t.Fatalf("running-job count not cleared")
+	}
+
+	// A job_exited event names the cap. job_started precedes it.
+	var exited []string
+	deadline := time.After(2 * time.Second)
+	for len(exited) == 0 {
+		select {
+		case ev := <-jobs.C:
+			if ev.LeaseID == id && ev.Type == LeaseJobExited {
+				exited = append(exited, ev.Detail)
+			}
+		case <-deadline:
+			t.Fatalf("no job_exited event for the timed-out job")
+		}
+	}
+	if !strings.HasPrefix(exited[0], "timed out: exit 124") {
+		t.Fatalf("job_exited detail = %q, want it to name the cap", exited[0])
+	}
+}
+
+// TestJobShorterRequestedRuntimeWins: a job's own max_runtime_secs is
+// used when it is shorter than the host cap, the host cap wins when the
+// request is longer, and a negative request is refused.
+func TestJobShorterRequestedRuntimeWins(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	id, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1022)
+	installJobProcess(t, sub, p)
+	short, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600", "max_runtime_secs": 60})
+	row, err := svc.db.GetJob(context.Background(), short)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.MaxRuntimeSecs != 60 {
+		t.Fatalf("shorter request: max_runtime_secs = %d, want 60", row.MaxRuntimeSecs)
+	}
+
+	long, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 601", "max_runtime_secs": 999999})
+	row, err = svc.db.GetJob(context.Background(), long)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.MaxRuntimeSecs != 3600 {
+		t.Fatalf("longer request: max_runtime_secs = %d, want the 3600 host cap", row.MaxRuntimeSecs)
+	}
+
+	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "sleep 602", "background": true, "max_runtime_secs": -1})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("negative max_runtime_secs = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestJobEffectiveRuntimeNoOverflow: a request far larger than any real
+// cap must be clamped to the host cap, never allowed to overflow the
+// seconds-to-Duration conversion into a negative (which would read as
+// uncapped and let `sleep infinity` run forever). This is the exact
+// spoond-wb5 regression: requested=MaxInt64 used to store 0 (= uncapped).
+func TestJobEffectiveRuntimeNoOverflow(t *testing.T) {
+	svc := &Service{cfg: ServiceConfig{JobMaxRuntimeSecs: 86400}}
+	cases := []struct {
+		name      string
+		requested int64
+		want      time.Duration
+	}{
+		{"huge request clamps to the host cap", 9223372036854775807, 86400 * time.Second},
+		{"just over the duration limit clamps to the host cap", int64(maxJobRuntimeDuration/time.Second) + 1, 86400 * time.Second},
+		{"max representable seconds clamps to the host cap", int64(maxJobRuntimeDuration / time.Second), 86400 * time.Second},
+		{"a shorter in-range request wins", 60, 60 * time.Second},
+		{"a longer in-range request is capped", 5000000000, 86400 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := svc.effectiveJobRuntime(tc.requested); got != tc.want {
+				t.Fatalf("effectiveJobRuntime(%d) = %v, want %v", tc.requested, got, tc.want)
+			}
+		})
+	}
+
+	// An uncapped host keeps a huge -- but representable -- request
+	// rather than wrapping it negative.
+	uncapped := &Service{cfg: ServiceConfig{JobMaxRuntimeSecs: -1}}
+	if got := uncapped.effectiveJobRuntime(60); got != 60*time.Second {
+		t.Fatalf("uncapped effectiveJobRuntime(60) = %v, want 1m", got)
+	}
+	if got := uncapped.effectiveJobRuntime(9223372036854775807); got <= 0 {
+		t.Fatalf("uncapped effectiveJobRuntime(MaxInt64) = %v, want a positive duration", got)
+	}
+}
+
+// TestJobHugeRequestStoresHostCap: end to end, a background job asking
+// for an absurd max_runtime_secs is recorded with the host cap, not 0.
+// A stored 0 means uncapped and lets the job run forever (spoond-wb5).
+func TestJobHugeRequestStoresHostCap(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1026)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity", "max_runtime_secs": 9223372036854775807})
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.MaxRuntimeSecs != 3600 {
+		t.Fatalf("huge request stored max_runtime_secs = %d, want the 3600 host cap", row.MaxRuntimeSecs)
+	}
+}
+
+// TestJobMaxRuntimeAppliesToSuspendedLease: reconcileJobs must not call
+// markActive on a suspended lease's running job — a job does not keep an
+// untouched suspended lease out of the held rules — and a job whose cap
+// was spent while the lease was suspended is killed by the first
+// reconcile after it resumes (spoond-wb5).
+func TestJobMaxRuntimeAppliesToSuspendedLease(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := body["id"].(string)
+	lease := svc.lookupAny(id)
+	if lease == nil {
+		t.Fatalf("lease not in service")
+	}
+	sandbox := lease.SandboxID
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1023)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+
+	// Suspend the lease through the normal pause path: the job record
+	// stays running, as it did before this change.
+	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	l := svc.lookupAny(id)
+	if l == nil || !l.Suspended {
+		t.Fatalf("lease not suspended: %+v", l)
+	}
+
+	// A held lease, so suspendedByRule has a rule suspension to test: the
+	// holder plus the idle_suspend rule marker.
+	svc.store.mu.Lock()
+	l.Holder = "ci-job-1"
+	l.LastActive = time.Now().Add(-time.Hour)
+	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
+	l.LastActionAt = time.Now().Add(-30 * time.Minute)
+	lastActive := l.LastActive
+	svc.saveLeaseLocked(l)
+	svc.store.mu.Unlock()
+	svc.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+
+	// Past the cap, while the lease is suspended: reconcile must neither
+	// advance LastActive nor kill (the paused guest cannot be signalled).
+	// The record stays running.
+	svc.reconcileJobs(context.Background())
+	svc.store.mu.Lock()
+	l = svc.store.leases[id]
+	unchanged := l != nil && l.LastActive.Equal(lastActive)
+	_, byRule := suspendedByRule(l)
+	svc.store.mu.Unlock()
+	if !unchanged {
+		t.Fatalf("reconcileJobs advanced LastActive on a suspended lease")
+	}
+	if !byRule {
+		t.Fatalf("a suspended lease with a running job no longer looks untouched to suspendedByRule")
+	}
+	suspendedRow, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if suspendedRow.State != "running" {
+		t.Fatalf("job in a suspended lease = %q, want running", suspendedRow.State)
+	}
+
+	// Resume: the console first reconcile kills the job whose cap was
+	// spent while it was paused.
+	if _, err := svc.resume(context.Background(), "consumer-a", id); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	svc.reconcileJobs(context.Background())
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+}
+
+// TestJobMaxRuntimeDisabled: a negative JOB_MAX_RUNTIME leaves jobs
+// uncapped, and the record stores 0.
+func TestJobMaxRuntimeDisabled(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = -1
+
+	p := fake.NewProcess(1024)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.MaxRuntimeSecs != 0 {
+		t.Fatalf("uncapped job max_runtime_secs = %d, want 0", row.MaxRuntimeSecs)
+	}
+	svc.now = func() time.Time { return time.Now().Add(1000 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+	svc.reconcileJobs(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	still, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if still.State != "running" {
+		t.Fatalf("uncapped job state = %q, want running", still.State)
+	}
+}
+
+// TestJobReconcileDoesNotMarkSuspendedLeaseActive: reconcileJobs must
+// not call markActive on a suspended lease's running job, otherwise a
+// long job defeats suspendedByRule's untouched test and an idle
+// suspension can never become stale (spoond-wb5). A normal exit still
+// closes the record.
+func TestJobReconcileDoesNotMarkSuspendedLeaseActive(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := body["id"].(string)
+	lease := svc.lookupAny(id)
+	if lease == nil {
+		t.Fatalf("lease not in service")
+	}
+	sandbox := lease.SandboxID
+
+	p := fake.NewProcess(1025)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+
+	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	svc.store.mu.Lock()
+	l := svc.store.leases[id]
+	l.LastActive = time.Now().Add(-time.Hour)
+	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
+	l.LastActionAt = time.Now().Add(-30 * time.Minute)
+	lastActive := l.LastActive
+	svc.store.mu.Unlock()
+
+	// Several reconcile passes while the job runs: LastActive must not
+	// move.
+	for i := 0; i < 3; i++ {
+		svc.reconcileJobs(context.Background())
+	}
+	svc.store.mu.Lock()
+	l = svc.store.leases[id]
+	unchanged := l != nil && l.LastActive.Equal(lastActive)
+	svc.store.mu.Unlock()
+	if !unchanged {
+		t.Fatalf("reconcileJobs marked a suspended lease active while its job ran")
+	}
+
+	// The job's normal exit is still noticed after a resume.
+	if _, err := svc.resume(context.Background(), "consumer-a", id); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
+	svc.reconcileJobs(context.Background())
+	waitJobState(t, db, jobID, "exited", 2*time.Second)
+}
+
+// TestJobMaxRuntimeKillRetriesAfterFailure: if the cap's kill fails, the
+// record must stay running (not be closed as timed_out) so the next
+// reconcile retries, otherwise ListRunningJobs never returns it and the
+// running-job cap stops counting it — the leak the cap exists to close
+// (spoond-wb5 B1).
+func TestJobMaxRuntimeKillRetriesAfterFailure(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1031)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+	writeJobFile(t, sub, sandbox, jobID, "stderr", "still here\n")
+
+	// The first kill fails at the substrate.
+	var kills atomic.Int32
+	sub.SetExecHandler(func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {
+		if len(req.Args) == 6 && req.Args[0] == "/bin/sh" && strings.HasPrefix(req.Args[2], "kill ") {
+			if kills.Add(1) == 1 {
+				return substrate.ExecResult{Stderr: "envd hiccup", ExitCode: 1}
+			}
+			return substrate.ExecResult{ExitCode: 0}
+		}
+		return substrate.ExecResult{Stdout: "ok\n"}
+	})
+	t.Cleanup(func() { sub.SetExecHandler(nil) })
+
+	base := time.Now()
+	svc.now = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+
+	svc.reconcileJobs(context.Background())
+	still, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if still.State != "running" {
+		t.Fatalf("job after a failed kill = %q, want running", still.State)
+	}
+	if still.Reason != "" {
+		t.Fatalf("job after a failed kill reason = %q, want empty", still.Reason)
+	}
+	if n, _ := db.CountRunningJobs(context.Background(), id); n != 1 {
+		t.Fatalf("running jobs after a failed kill = %d, want 1", n)
+	}
+
+	// The next reconcile retries and closes the record.
+	svc.reconcileJobs(context.Background())
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 124 {
+		t.Fatalf("exit code = %v, want 124", got.ExitCode)
+	}
+	if n, _ := db.CountRunningJobs(context.Background(), id); n != 0 {
+		t.Fatalf("running jobs after the retried kill = %d, want 0", n)
+	}
+}
+
+// TestJobMaxRuntimeSkipsBusyLease: a lease busy with an in-flight pause
+// (Suspended still false while the snapshot is written) must be skipped
+// by the cap, since the substrate cannot be signalled mid-pause and a
+// kill would be captured in the snapshot. Once the lease is idle again
+// the next reconcile kills the job (spoond-wb5 B1).
+func TestJobMaxRuntimeSkipsBusyLease(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1032)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+
+	// Mark the lease busy the way an in-flight pause does.
+	svc.store.mu.Lock()
+	svc.store.leases[id].busy = true
+	svc.store.mu.Unlock()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+
+	svc.reconcileJobs(context.Background())
+	still, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if still.State != "running" {
+		t.Fatalf("job on a busy lease = %q, want running", still.State)
+	}
+
+	svc.store.mu.Lock()
+	svc.store.leases[id].busy = false
+	svc.store.mu.Unlock()
+	svc.reconcileJobs(context.Background())
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+}
+
+// TestJobMaxRuntimeAppliesToPreUpgradeRecord: a running job recorded
+// before the cap existed (max_runtime_secs 0) is still capped by the
+// current JOB_MAX_RUNTIME; a 0 record is not "uncapped" once the host has
+// a cap (spoond-wb5 NIT).
+func TestJobMaxRuntimeAppliesToPreUpgradeRecord(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, lease, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	// A record as an older backend would have written it: no cap stored.
+	started := time.Now().Add(-2 * time.Hour)
+	if err := db.InsertJob(context.Background(), store.JobRow{
+		JobID: "j-pre-upgrade", LeaseID: id, Owner: "consumer-a", Cmd: "sleep infinity",
+		State: "running", StartedAt: started, Generation: lease.Generation,
+	}); err != nil {
+		t.Fatalf("insert pre-upgrade job: %v", err)
+	}
+	writeJobFile(t, sub, sandbox, "j-pre-upgrade", "pid", "4242\n")
+
+	svc.reconcileJobs(context.Background())
+	got := waitJobState(t, db, "j-pre-upgrade", "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 124 {
+		t.Fatalf("exit code = %v, want 124", got.ExitCode)
+	}
+}
+
+// TestJobMaxRuntimeDoesNotRereadLeaseFieldsUnlocked: the cap path must
+// read the sandbox id and generation under the store lock (via the
+// snapshotted continuity), not off a *Lease returned by lookupAny, which
+// races resume/restore. Run with -race (spoond-wb5 B2).
+func TestJobMaxRuntimeDoesNotRereadLeaseFieldsUnlocked(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1033)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+
+	base := time.Now()
+	svc.now = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+
+	// A concurrent writer mutating SandboxID/Generation while the cap
+	// path reads them: a data race would be caught by -race.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			svc.store.mu.Lock()
+			if l := svc.store.leases[id]; l != nil {
+				l.SandboxID = sandbox
+				l.Generation = 1
+			}
+			svc.store.mu.Unlock()
+		}
+	}()
+	svc.reconcileJobs(context.Background())
+	wg.Wait()
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+}
+
+// TestJobWatcherDoesNotRecordTimingOutExit: while the cap is killing a
+// job, the live watcher must not close the record as a plain exit — the
+// cap owns the outcome. An in-memory flag blocks finishJob in that
+// window, so the record stays running until the cap records timed_out
+// (spoond-wb5 B1).
+func TestJobWatcherDoesNotRecordTimingOutExit(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1034)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
+
+	// The cap flags the job, then the watcher sees the kill's signal exit.
+	svc.markJobTimingOut(jobID)
+	svc.finishJobFromGuest(context.Background(), row, sandbox, row.Generation)
+	still, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if still.State != "running" {
+		t.Fatalf("job while timing out = %q, want running", still.State)
+	}
+
+	// The cap closes it with its own reason and clears the flag.
+	svc.finishJobTimedOut(context.Background(), row, 124, "", sandbox, row.Generation)
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+	if svc.jobIsTimingOut(jobID) {
+		t.Fatalf("timing-out flag not cleared after the record closed")
+	}
+
+	// A later normal exit is no longer blocked.
+	if err := svc.finishJob(context.Background(), row, 0, "", sandbox, row.Generation); err != nil {
+		t.Fatalf("finishJob after timing out: %v", err)
+	}
 }

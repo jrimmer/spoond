@@ -66,6 +66,15 @@ const (
 	DefaultJobRetentionSecs       = 604800 // 7 days
 )
 
+// DefaultJobMaxRuntimeSecs is the JOB_MAX_RUNTIME default: a background
+// job may run for 24 h before it is killed (spoond-wb5).
+const DefaultJobMaxRuntimeSecs = 24 * 60 * 60 // 24 hours
+
+// jobTimedOutReason is stored in lease_jobs.reason and named in the
+// job_exited event and the API record when the max runtime, not the
+// command, ended a job.
+const jobTimedOutReason = store.JobReasonTimedOut
+
 // errJobCap is returned when a lease is at its running-job cap.
 var errJobCap = errors.New("too many running background jobs for this lease")
 
@@ -145,21 +154,29 @@ type jobInfo struct {
 	StartedAt  string `json:"started_at"`
 	EndedAt    string `json:"ended_at,omitempty"`
 	StderrTail string `json:"stderr_tail,omitempty"`
+	// Reason is "timed_out" when the max runtime, not the command, ended
+	// the job; omitted for a normal exit (spoond-wb5).
+	Reason string `json:"reason,omitempty"`
+	// MaxRuntimeSecs is the effective cap the job ran under, in seconds,
+	// 0 when uncapped.
+	MaxRuntimeSecs int64 `json:"max_runtime_secs,omitempty"`
 }
 
 // jobInfoOf renders a store row for the API.
 func jobInfoOf(r store.JobRow) jobInfo {
 	return jobInfo{
-		JobID:      r.JobID,
-		LeaseID:    r.LeaseID,
-		Owner:      r.Owner,
-		Cmd:        r.Cmd,
-		Cwd:        r.Cwd,
-		State:      r.State,
-		ExitCode:   r.ExitCode,
-		StartedAt:  r.StartedAt.UTC().Format(time.RFC3339Nano),
-		EndedAt:    formatRFC3339(r.EndedAt),
-		StderrTail: r.StderrTail,
+		JobID:          r.JobID,
+		LeaseID:        r.LeaseID,
+		Owner:          r.Owner,
+		Cmd:            r.Cmd,
+		Cwd:            r.Cwd,
+		State:          r.State,
+		ExitCode:       r.ExitCode,
+		StartedAt:      r.StartedAt.UTC().Format(time.RFC3339Nano),
+		EndedAt:        formatRFC3339(r.EndedAt),
+		StderrTail:     r.StderrTail,
+		Reason:         r.Reason,
+		MaxRuntimeSecs: r.MaxRuntimeSecs,
 	}
 }
 
@@ -185,6 +202,76 @@ func (s *Service) jobRetention() time.Duration {
 		secs = DefaultJobRetentionSecs
 	}
 	return time.Duration(secs) * time.Second
+}
+
+// maxJobRuntimeDuration is the largest representable time.Duration; a
+// request at or below it cannot overflow the seconds conversion.
+const maxJobRuntimeDuration = time.Duration(1<<63 - 1)
+
+// secondsDuration converts a whole number of seconds to a duration,
+// clamping at the maximum representable duration. A value that does not
+// fit would otherwise overflow the multiplication and wrap negative,
+// which reads as "uncapped" and silently defeats the cap (spoond-wb5).
+// A non-positive value yields 0.
+func secondsDuration(secs int64) time.Duration {
+	if secs <= 0 {
+		return 0
+	}
+	if secs > int64(maxJobRuntimeDuration/time.Second) {
+		return maxJobRuntimeDuration
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// jobMaxRuntime returns the host's effective JOB_MAX_RUNTIME. 0 uses the
+// 24 h default; a negative value disables the cap. It returns the raw
+// duration, so a fractional Go duration is honoured to the second when
+// it is stored on the record, and clamps an oversized value instead of
+// letting it wrap negative. The startup parser rejects a negative value
+// whose magnitude is under a second, which would otherwise truncate to 0
+// and silently mean the default rather than "off".
+func (s *Service) jobMaxRuntime() time.Duration {
+	secs := s.cfg.JobMaxRuntimeSecs
+	if secs == 0 {
+		secs = DefaultJobMaxRuntimeSecs
+	}
+	return secondsDuration(secs)
+}
+
+// effectiveJobRuntime returns the max runtime a new job may run: the
+// host's JOB_MAX_RUNTIME (0 = uncapped), shortened by the job's own
+// max_runtime_secs when it asked for one. A requested value never
+// extends the host cap, and a request too large to represent is clamped
+// rather than allowed to wrap into "uncapped".
+func (s *Service) effectiveJobRuntime(requested int64) time.Duration {
+	max := s.jobMaxRuntime()
+	if requested <= 0 {
+		return max
+	}
+	req := secondsDuration(requested)
+	if max > 0 && max < req {
+		return max
+	}
+	return req
+}
+
+// hasSpentRuntime reports whether a running job has been running for at
+// least its effective max runtime, given the host's cap. A record with
+// max_runtime_secs 0 (a job written before the column existed, or an
+// uncapped start) is capped by hostMax, so an upgrade immediately
+// applies JOB_MAX_RUNTIME to jobs already running. A hostMax <= 0 means
+// the host cap is disabled and the job is uncapped. It is a pure
+// function of the row, the host cap and the clock, so the reconcile pass
+// can call it without a store read.
+func hasSpentRuntime(job store.JobRow, now time.Time, hostMax time.Duration) bool {
+	d := hostMax
+	if job.MaxRuntimeSecs > 0 {
+		d = secondsDuration(job.MaxRuntimeSecs)
+	}
+	if d <= 0 {
+		return false
+	}
+	return now.Sub(job.StartedAt) >= d
 }
 
 // buildJobWrapperArgs builds the argv handed to substrate.Start: the
@@ -244,7 +331,7 @@ func (s *Service) releaseJobStart(leaseID string, l *jobStartLock) {
 // startJob starts a background exec. It returns the job id, start time
 // and the envd Process carrying the stream (the caller watches it), or
 // an error the caller maps onto an HTTP status.
-func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string) (string, time.Time, substrate.Process, error) {
+func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, requestedMaxRuntimeSecs int64) (string, time.Time, substrate.Process, error) {
 	// The job outlives the HTTP request that asked for it. Detach the
 	// whole start from the request's cancellation so (a) the envd Start
 	// stream — the stream the watcher holds to notice the exit at once —
@@ -268,6 +355,22 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 
 	jobID := newID()
 	startedAt := time.Now().UTC()
+	maxRuntime := s.effectiveJobRuntime(requestedMaxRuntimeSecs)
+	var maxRuntimeSecs int64
+	if maxRuntime > 0 {
+		// Round up, so a sub-second cap never stores 0 (which reads as
+		// uncapped) and never grants a little more than asked. Divide
+		// before adding one so a duration near the maximum does not
+		// overflow, then clamp back under the largest representable
+		// whole-second value so reading it back cannot overflow.
+		maxRuntimeSecs = int64(maxRuntime / time.Second)
+		if maxRuntime%time.Second != 0 {
+			maxRuntimeSecs++
+		}
+		if lim := int64(maxJobRuntimeDuration / time.Second); maxRuntimeSecs > lim {
+			maxRuntimeSecs = lim
+		}
+	}
 
 	// Stage the job's secrets before the wrapper runs. The guest wrapper
 	// removes them at exit; the backend removes them on reconcile if the
@@ -322,14 +425,15 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 	}
 
 	if err := s.db.InsertJob(ctx, store.JobRow{
-		JobID:      jobID,
-		LeaseID:    lease.ID,
-		Owner:      owner,
-		Cmd:        cmd,
-		Cwd:        cwd,
-		State:      "running",
-		StartedAt:  startedAt,
-		Generation: lease.Generation,
+		JobID:          jobID,
+		LeaseID:        lease.ID,
+		Owner:          owner,
+		Cmd:            cmd,
+		Cwd:            cwd,
+		State:          "running",
+		StartedAt:      startedAt,
+		Generation:     lease.Generation,
+		MaxRuntimeSecs: maxRuntimeSecs,
 	}); err != nil {
 		// The process is running but unrecorded. Do not leave it: a
 		// best-effort TERM and the (empty) record-free result.
@@ -548,6 +652,21 @@ func (s *Service) leaseSuspended(leaseID string) bool {
 	return false
 }
 
+// leaseBusyOrSuspended reports whether a live lease is suspended or has
+// an in-flight lifecycle operation (pause, resume, restart or restore).
+// Either way the substrate cannot be reached to signal a job: a pause
+// has already taken the lease busy and is moving its memory, and the cap
+// defers to the first reconcile that sees the lease running and idle
+// (spoond-wb5).
+func (s *Service) leaseBusyOrSuspended(leaseID string) bool {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if l := s.store.leases[leaseID]; l != nil && !l.released {
+		return l.Suspended || l.busy
+	}
+	return false
+}
+
 // leaseContinuity snapshots a lease's sandbox id and generation under
 // the store lock, so a job path can read guest files and clean up
 // without chasing a lease across a cold restart.
@@ -563,8 +682,14 @@ func (s *Service) leaseContinuity(leaseID string) (string, int64, bool) {
 
 // finishJob marks a running job exited from the guest's rc file and
 // emits the event. It is idempotent: an already-finished record is left
-// alone, so the watcher and the reconcile pass cannot both count it.
+// alone, so the watcher and the reconcile pass cannot both count it. A
+// job the max-runtime cap has flagged is left to that path: the cap owns
+// the outcome, so the watcher must not record the kill's signal exit as
+// a normal one.
 func (s *Service) finishJob(ctx context.Context, job store.JobRow, exitCode int, stderrTail, sandboxID string, generation int64) error {
+	if s.jobIsTimingOut(job.JobID) {
+		return nil
+	}
 	changed, err := s.db.UpdateJobExit(ctx, job.JobID, exitCode, time.Now().UTC(), stderrTail)
 	if err != nil {
 		return err
@@ -630,6 +755,98 @@ func (s *Service) markLeaseJobsLost(ctx context.Context, leaseID, owner, why str
 		}
 		s.markJobLost(ctx, job, sandboxID, job.Generation, why)
 	}
+}
+
+// markJobTimingOut flags a job as being killed by the cap, so the live
+// watcher's finishJob leaves the record to the cap path.
+func (s *Service) markJobTimingOut(jobID string) {
+	s.timingOutMu.Lock()
+	s.timingOut[jobID] = struct{}{}
+	s.timingOutMu.Unlock()
+}
+
+// clearJobTimingOut drops the flag once the cap path is done with the job.
+func (s *Service) clearJobTimingOut(jobID string) {
+	s.timingOutMu.Lock()
+	delete(s.timingOut, jobID)
+	s.timingOutMu.Unlock()
+}
+
+// jobIsTimingOut reports whether the cap is killing a job right now, so
+// the watcher does not record the kill's signal exit as a normal one.
+func (s *Service) jobIsTimingOut(jobID string) bool {
+	s.timingOutMu.Lock()
+	defer s.timingOutMu.Unlock()
+	_, ok := s.timingOut[jobID]
+	return ok
+}
+
+// killJobTimeout stops a job that has spent its effective max runtime.
+// It flags the job in memory first, so the live watcher cannot record
+// the kill's signal exit as a normal exit in the window before the
+// record is closed, then signals the job's process group in the sandbox
+// the job ran in. Only once the kill succeeds is the record marked
+// exited with reason timed_out. A failed kill clears the flag and returns
+// false, leaving the record running so the next reconcile tries again;
+// a job that ended on its own in the meantime is then closed by the
+// normal rc path. The stderr tail is read before the kill so the
+// command's output is kept.
+func (s *Service) killJobTimeout(ctx context.Context, job store.JobRow, sandboxID string, generation int64) bool {
+	if s.leaseBusyOrSuspended(job.LeaseID) {
+		return false
+	}
+	tail, _ := s.readJobStderrTail(ctx, sandboxID, job.JobID, jobStderrTailBytes)
+	s.markJobTimingOut(job.JobID)
+	// Signal the sandbox the job ran in, never a new one after a cold
+	// restart: sandboxID/generation were snapshotted by the caller while
+	// the lease was on the job's continuity generation.
+	if err := s.signalJob(ctx, job.LeaseID, sandboxID, job, "KILL"); err != nil {
+		s.clearJobTimingOut(job.JobID)
+		s.log.Printf("jobs: %s: max runtime spent; kill: %v", job.JobID, err)
+		return false
+	}
+	// 124 is the conventional timeout exit code, the same exec's own
+	// timeout uses; the wrapper may not write rc for a KILL, and the cap,
+	// not the command's own status, is what the record reports.
+	s.finishJobTimedOut(ctx, job, 124, tail, sandboxID, generation)
+	return true
+}
+
+// finishJobTimedOut marks a running job exited because its max runtime
+// was spent and emits the job_exited event with a detail naming the cap.
+// The caller has already killed the process, so this only records the
+// outcome, releases the job's bookkeeping and cleans up its secrets.
+// Like finishJob it is idempotent: an already-finished record is left
+// alone, so the watcher and the reconcile cannot both count it, and the
+// in-memory timing-out flag is cleared on every path.
+func (s *Service) finishJobTimedOut(ctx context.Context, job store.JobRow, exitCode int, stderrTail, sandboxID string, generation int64) error {
+	defer s.clearJobTimingOut(job.JobID)
+	changed, err := s.db.MarkJobTimedOut(ctx, job.JobID, exitCode, time.Now().UTC(), stderrTail)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil // another path already finished it
+	}
+	s.emitLeaseEvent(job.LeaseID, job.Owner, LeaseJobExited, jobTimedOutDetail(exitCode, stderrTail))
+	s.jobFinishedMetrics(jobTimedOutReason)
+	s.decRunningJob(job.LeaseID)
+	s.removeJobSecrets(job.LeaseID, job.JobID, sandboxID, generation)
+	return nil
+}
+
+// jobTimedOutDetail renders the job_exited event detail for a job the max
+// runtime killed: "timed out" plus the exit code and stderr excerpt, so
+// the owner sees the cap, not just a signal exit, ended it.
+func jobTimedOutDetail(exitCode int, stderrTail string) string {
+	detail := fmt.Sprintf("timed out: exit %d", exitCode)
+	if lines := lastLines(toValidUTF8(stderrTail), jobEventStderrLines); lines != "" {
+		detail += "\n" + lines
+	}
+	if len(detail) > jobEventDetailBytes {
+		detail = cutToRunes(detail, jobEventDetailBytes)
+	}
+	return detail
 }
 
 // readJobRC reads a job's rc file from the guest. ok is false when the
@@ -741,13 +958,18 @@ func (s *Service) runJobReconcileLoop(ctx context.Context) {
 // reconcileJobs reads each running job's rc through the guest files and
 // marks finished ones exited. A job whose lease is gone or whose guest
 // files vanished is left running until a generation change or the
-// lease's own deletion loses it.
+// lease's own deletion loses it. On a running lease, a job that has
+// spent its effective max runtime is killed and marked exited with
+// reason timed_out first (spoond-wb5), so a `sleep infinity` cannot pin
+// a lease's memory and hugepages forever; a suspended lease's job is
+// left for the first reconcile after its resume.
 func (s *Service) reconcileJobs(ctx context.Context) {
 	rows, err := s.db.ListRunningJobs(ctx)
 	if err != nil {
 		s.storeError("list_running_jobs", "", err)
 		return
 	}
+	now := s.now()
 	for _, job := range rows {
 		sandboxID, generation, ok := s.leaseContinuity(job.LeaseID)
 		if !ok {
@@ -757,12 +979,32 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 			s.markJobLost(ctx, job, sandboxID, generation, "lease generation changed; the job did not survive")
 			continue
 		}
-		if s.leaseSuspended(job.LeaseID) {
-			// A planned pause continues the memory: leave the job running
-			// and reconcile after resume, but keep the lease active so no
-			// idle rule suspends it again mid-job.
-			s.markActive(job.LeaseID)
+		// A planned pause continues the memory: leave the job running and
+		// reconcile after resume. A lease busy with an in-flight pause,
+		// resume, restart or restore cannot be signalled either, so the cap
+		// waits for the first reconcile that sees the lease running and
+		// idle. Do NOT call markActive here: a suspended lease is not
+		// activity, so a job that outlives its owner's use of the lease must
+		// not keep it out of suspendedByRule's untouched test (a `sleep
+		// infinity` pinning hugepages forever was the audit finding). The
+		// max-runtime cap is enforced only once the lease is running again:
+		// a suspended lease has already freed its memory, and the substrate
+		// cannot kill a process in a paused guest — the first reconcile
+		// after resume kills a job whose cap was spent while the lease was
+		// paused (spoond-wb5).
+		if s.leaseBusyOrSuspended(job.LeaseID) {
 			continue
+		}
+		// The max runtime is wall-clock from the start, so a job that
+		// spent its cap while the lease was paused is killed at once on
+		// the first reconcile after resume. A failed kill leaves the
+		// record running; fall through to the rc check so a job that ended
+		// on its own is still noticed, and the next reconcile retries the
+		// kill for one that is still alive.
+		if hasSpentRuntime(job, now, s.jobMaxRuntime()) {
+			if s.killJobTimeout(ctx, job, sandboxID, generation) {
+				continue
+			}
 		}
 		code, done, err := s.readJobRC(ctx, sandboxID, job.JobID)
 		if err != nil {
@@ -775,6 +1017,10 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 			continue
 		}
 		if !done {
+			// A running job in a live lease is activity for the idle
+			// rules, but the startup seed already counts it; only record
+			// it here so reconcile keeps the lease awake while the command
+			// runs (2.6, #135).
 			s.markActive(job.LeaseID)
 			continue
 		}

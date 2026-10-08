@@ -10,6 +10,38 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **A cap on background job runtime (spoond-wb5).** A background exec job
+  may no longer run forever: `JOB_MAX_RUNTIME` (default 24 h, a Go
+  duration or seconds) is the host cap, the exec body's new optional
+  `max_runtime_secs` can ask for a shorter one — never a longer one, and
+  a negative value is `400`. Past its effective cap the job's process
+  group is killed first (the same path as
+  `POST …/jobs/{job}/signal`) and only then is the record marked exited
+  with reason `timed_out` and exit code `124`; a failed kill leaves the
+  record running so the next reconcile retries, rather than orphaning a
+  live process the counts no longer see. A `job_exited` event whose
+  detail starts `timed out: exit 124` tells the owner the cap, not the
+  command, ended it (`reason` is also on the job record, and
+  `spoond_jobs_exited_total` gains the `timed_out` result). The cap is
+  wall-clock from the job's start: while the lease is suspended — or
+  busy with an in-flight pause, resume, restart or restore — reconcile
+  leaves the job running (the guest cannot be signalled), and the first
+  reconcile after a resume kills a job whose cap was spent in the
+  meantime — so a `sleep infinity` can no longer pin a lease's memory
+  and hugepages forever. A running record written before the cap existed
+  (`max_runtime_secs` 0) is capped by the current host value. An
+  oversized `max_runtime_secs` is clamped to the host cap rather than
+  overflowing the seconds conversion into "uncapped".
+  Migration **0020** adds `lease_jobs.max_runtime_secs` and
+  `lease_jobs.reason`. A job on a suspended lease also no longer keeps
+  that lease active: `reconcileJobs` stopped calling `markActive` on a
+  suspended lease, so the held-lease rules' untouched test still sees
+  the suspension. A negative `JOB_MAX_RUNTIME` disables the cap entirely;
+  a negative value under one second is rejected at startup rather than
+  truncating to the default.
+
 ### Fixed
 
 - **Conformance N1 probes a configurable LAN target, and I3 no longer

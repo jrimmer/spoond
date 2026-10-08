@@ -23,8 +23,8 @@ import (
 
 // handleBackgroundExec answers the exec request with "background": true:
 // start the job and 202 as soon as it is running.
-func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string) {
-	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets)
+func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, lease *Lease, owner, cmd, cwd string, env map[string]string, secrets map[string]string, maxRuntimeSecs int64) {
+	jobID, startedAt, proc, err := s.svc.startJob(r.Context(), lease, owner, cmd, cwd, env, secrets, maxRuntimeSecs)
 	if err != nil {
 		switch {
 		case errors.Is(err, errJobCap):
@@ -303,7 +303,7 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "signal must be TERM or KILL")
 		return
 	}
-	if err := s.svc.signalJob(r.Context(), lease, row, req.Signal); err != nil {
+	if err := s.svc.signalJob(r.Context(), lease.ID, lease.SandboxID, row, req.Signal); err != nil {
 		if errors.Is(err, substrate.ErrNotFound) {
 			writeError(w, http.StatusConflict, "job is not running")
 			return
@@ -315,17 +315,19 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": row.JobID, "signal": req.Signal})
 }
 
-// signalJob signals a running job's process group. The job's pid was
-// recorded by the wrapper in the job directory; the wrapper starts the
-// command via setsid, so that pid is the process-group leader. The pid
-// is guest-writable state, so it is validated as a plain number and
-// passed as positional arguments to /bin/kill — it can never become
-// shell input. A pid file that has not appeared yet (the 202 beat the
-// wrapper's write) is waited for briefly, so a signal sent immediately
-// after the start still reaches the job; only when it stays missing does
-// the caller answer 409.
-func (s *Service) signalJob(ctx context.Context, lease *Lease, row store.JobRow, sig string) error {
-	pid, err := s.jobPID(ctx, lease.SandboxID, row.JobID)
+// signalJob signals a running job's process group in sandboxID. The
+// job's pid was recorded by the wrapper in the job directory; the wrapper
+// starts the command via setsid, so that pid is the process-group
+// leader. The pid is guest-writable state, so it is validated as a plain
+// number and passed as positional arguments to /bin/kill — it can never
+// become shell input. A pid file that has not appeared yet (the 202 beat
+// the wrapper's write) is waited for briefly, so a signal sent
+// immediately after the start still reaches the job; only when it stays
+// missing does the caller answer 409. The sandbox id and generation are
+// passed in rather than read off a *Lease, so a caller that already
+// snapshotted them (reconcile) never races a resume or restore.
+func (s *Service) signalJob(ctx context.Context, leaseID, sandboxID string, row store.JobRow, sig string) error {
+	pid, err := s.jobPID(ctx, sandboxID, row.JobID)
 	if err != nil {
 		return err
 	}
@@ -333,7 +335,7 @@ func (s *Service) signalJob(ctx context.Context, lease *Lease, row store.JobRow,
 	// signal and pid as arguments (never as part of the command text).
 	// dash's kill does not accept a `--` separator, so the pid is written
 	// straight after the dash; it is already a validated integer.
-	res, err := s.sub.Exec(ctx, lease.SandboxID, substrate.ExecRequest{
+	res, err := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{
 		Args:    []string{"/bin/sh", "-c", `kill -"$1" -"$2"`, "kill", sig, strconv.Itoa(pid)},
 		Timeout: 10 * time.Second,
 	})
@@ -344,7 +346,7 @@ func (s *Service) signalJob(ctx context.Context, lease *Lease, row store.JobRow,
 		return fmt.Errorf("kill exit %d: %s", res.ExitCode, res.Stderr)
 	}
 	// A successful signal exec proves the guest is alive (spoond-5ca).
-	s.recordRootfsAlive(lease.ID)
+	s.recordRootfsAlive(leaseID)
 	return nil
 }
 

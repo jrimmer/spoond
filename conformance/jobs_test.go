@@ -154,3 +154,53 @@ func TestJ2_BackgroundJobSignal(t *testing.T) {
 	}
 	failf(t, "job %s still running 10 s after TERM", start.JobID)
 }
+
+// TestJ3_BackgroundJobMaxRuntime: a job may request a shorter
+// max_runtime_secs than the host JOB_MAX_RUNTIME and is then killed and
+// marked exited with reason timed_out within a few seconds (spoond-wb5).
+// The 1 s request is shorter than any host default, so the test pins the
+// per-job cap path; the reconcile loop runs every 10 s, hence the
+// generous window.
+func TestJ3_BackgroundJobMaxRuntime(t *testing.T) {
+	begin(t)
+	l := createLease(t, map[string]any{"image": "py-base", "ttl": 600})
+
+	st, body, err := cl.startJob(l.ID, execReq{Cmd: "sleep 600", MaxRuntimeSecs: 1})
+	if err != nil {
+		failf(t, "start job: %v", err)
+	}
+	if st != 202 {
+		failf(t, "start job status %d: %s", st, truncate(body))
+	}
+	var start jobStart
+	if err := json.Unmarshal(body, &start); err != nil || start.JobID == "" {
+		failf(t, "start job bad body: %v (%s)", err, truncate(body))
+	}
+
+	// The reconcile loop runs every 10 s; allow it plus the kill a
+	// generous window.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		st, body, err = cl.readJob(l.ID, start.JobID, 2)
+		if err != nil {
+			failf(t, "read job: %v", err)
+		}
+		if st != 200 {
+			failf(t, "read job status %d: %s", st, truncate(body))
+		}
+		var read jobRead
+		if err := json.Unmarshal(body, &read); err != nil {
+			failf(t, "read job bad body: %v", err)
+		}
+		if read.Job.State == "exited" {
+			if read.Job.Reason != "timed_out" {
+				failf(t, "job reason = %q, want timed_out", read.Job.Reason)
+			}
+			if read.Job.ExitCode == nil || *read.Job.ExitCode != 124 {
+				failf(t, "job exit_code = %v, want 124", read.Job.ExitCode)
+			}
+			return
+		}
+	}
+	failf(t, "job %s not timed out within 30 s", start.JobID)
+}
