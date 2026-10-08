@@ -169,8 +169,9 @@ mount namespace (`/work` and `/root` private tmpfs, `pi` and `amail`
 stubs on `PATH`, a local bare origin) and asserts on what lands on origin
 and in the mail: the PASS/BLOCKED/cancelled exit paths, the `-wip`
 branches for rewritten history, `Base:`, rebase-before-verify with a
-moving base, the one-round/two-round sizing, verify timeouts, conflict
-resolution, and the migration guard.
+moving base, the one-round/two-round sizing, verify timeouts (including
+one that writes PASS but runs out of clock), conflict resolution, the
+push-stage fetch failure, and the migration guard.
 
 ```bash
 bash images/worker-start_test.sh
@@ -179,5 +180,6 @@ bash images/worker-start_test.sh
 The scripts are expected to be `shellcheck`-clean:
 
 ```bash
-shellcheck images/worker-start.sh images/worker-git.sh
+shellcheck images/worker-start.sh images/worker-git.sh \
+  images/worker-git_test.sh images/worker-start_test.sh
 ```

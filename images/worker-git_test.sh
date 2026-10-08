@@ -106,6 +106,23 @@ check "a migration not above the base highest fails" expect_eq "$rc" "1"
 check "the offending migration is named" bash -c 'grep -q 0002_below <<<"$1"' _ "$out"
 git -C "$w3" reset -q --hard HEAD~1
 
+# A base migration renamed by the branch is a rename, not a new migration:
+# the message names the real problem instead of blaming the version number.
+git -C "$w3" mv store/migrations/0002_x.sql store/migrations/0002_y.sql
+git -C "$w3" commit -q -m rename
+out=$(worker_migration_guard "$w3" origin/main); rc=$?
+check "renaming a base migration fails the guard" expect_eq "$rc" "1"
+check "the rename is reported as a rename" bash -c 'grep -q "was renamed" <<<"$1"' _ "$out"
+git -C "$w3" reset -q --hard HEAD~1
+
+# A base migration deleted by the branch is reported as a deletion.
+git -C "$w3" rm -q store/migrations/0002_x.sql
+git -C "$w3" commit -q -m delete
+out=$(worker_migration_guard "$w3" origin/main); rc=$?
+check "deleting a base migration fails the guard" expect_eq "$rc" "1"
+check "the deletion is reported as a deletion" bash -c 'grep -q "was deleted" <<<"$1"' _ "$out"
+git -C "$w3" reset -q --hard HEAD~1
+
 check "a branch with no migrations passes" bash -c 'git -C "$1" reset -q --hard origin/main' _ "$w3"
 check "a branch with no migrations passes" worker_migration_guard "$w3" origin/main
 check "versions are listed sorted and zero-padded-free" expect_eq \

@@ -81,10 +81,13 @@ worker_rebase_in_progress() {
 # worker_migration_guard WT BASE_REF: the migration-numbering gate.
 # Fails when two migrations on the branch share a version number, or when
 # a migration the branch adds is not numbered above the base's highest.
-# Prints one line per problem and returns 1; prints nothing and returns 0
-# when the numbering is sound (or store/migrations is absent).
+# A base migration the branch moved or removed is reported as such (git's
+# rename detection tells a genuine add from a moved base file), so the
+# message names the real problem. Prints one line per problem and returns
+# 1; prints nothing and returns 0 when the numbering is sound (or
+# store/migrations is absent).
 worker_migration_guard() {
-  local wt=$1 base=$2 bad=0 v name base_high=0 add
+  local wt=$1 base=$2 bad=0 v name base_high=0 st src dst
   local head_all base_all head_versions
 
   head_all=$(worker_migrations "$wt" HEAD)
@@ -103,22 +106,37 @@ worker_migration_guard() {
   done < <(printf '%s\n' "$head_versions" | sort -n | uniq -d)
 
   # 2. Every migration the branch adds must be above the base's highest.
-  if [ -n "$base_all" ]; then
-    base_high=$(cut -d' ' -f1 <<<"$base_all" | sort -n | tail -1)
-    add=$(comm -23 \
-      <(cut -d' ' -f2- <<<"$head_all" | sort) \
-      <(cut -d' ' -f2- <<<"$base_all" | sort))
-  else
-    add=$(cut -d' ' -f2- <<<"$head_all")
-  fi
-  while read -r name; do
-    [ -n "$name" ] || continue
-    v=$(sed -nE 's/^([0-9]+).*/\1/p' <<<"$name")
-    if [ "$((10#$v))" -le "$base_high" ]; then
-      bad=1
-      printf 'migration %s is not numbered above the base highest (%s)\n' \
-        "$name" "$base_high"
-    fi
-  done <<<"$add"
+  # git's rename detection separates a genuine add from a base migration
+  # that merely moved (same content, new name) or was removed, so each
+  # gets the right message instead of a misleading "not numbered" line.
+  # With no base migrations the highest is 0, so every add is still
+  # checked against it, as before.
+  [ -n "$base_all" ] && base_high=$(cut -d' ' -f1 <<<"$base_all" | sort -n | tail -1)
+  while IFS=$'\t' read -r st src dst; do
+    # Only migration files matter; a non-SQL or non-numeric file under
+    # store/migrations is not a migration and must not trip the guard.
+    case ${src#store/migrations/} in
+      [0-9]*.sql) ;;
+      *) continue ;;
+    esac
+    case $st in
+      A*)
+        name=${src#store/migrations/}
+        v=$(sed -nE 's/^([0-9]+).*/\1/p' <<<"$name")
+        if [ -n "$v" ] && [ "$((10#$v))" -le "$base_high" ]; then
+          bad=1
+          printf 'migration %s is not numbered above the base highest (%s)\n' \
+            "$name" "$base_high"
+        fi ;;
+      R*)
+        bad=1
+        printf 'base migration %s was renamed to %s; do not move a base migration\n' \
+          "${src#store/migrations/}" "${dst#store/migrations/}" ;;
+      D*)
+        bad=1
+        printf 'base migration %s was deleted; do not remove a base migration\n' \
+          "${src#store/migrations/}" ;;
+    esac
+  done < <(git -C "$wt" diff --name-status -M "$base" HEAD -- store/migrations 2>/dev/null)
   return "$bad"
 }

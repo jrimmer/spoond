@@ -100,16 +100,21 @@ STUB
 cat > "$T/bin/pi" <<'STUB'
 #!/bin/bash
 set -u
-key=""; prev=""
+key=""; prev=""; prompt=""
 while [ $# -gt 0 ]; do
   case $prev in
     --model) key=$1 ;;
+    -p) prompt=$1 ;;
   esac
   prev=$1; shift
 done
 W=${TEST_WORK:-/work}
 D=${TEST_STATE:?}
 mkdir -p "$D"
+# Record each pass's prompt so a test can assert what the implementer was
+# actually asked to do (the conflict-resolution prompt must include the
+# command that finishes the rebase).
+[ -n "$prompt" ] && { printf '=== %s\n' "$key"; printf '%s\n' "$prompt"; } >> "$D/prompts.log"
 wt=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 case $key in
   "$TEST_IMPL_MODEL")
@@ -157,6 +162,11 @@ case $key in
     fi
     ;;
   "$TEST_VERIFY_MODEL")
+    # TEST_BREAK_ORIGIN=1: make origin unreachable while the verify runs,
+    # so the push-stage fetch fails and the worker must not report DONE.
+    if [ "${TEST_BREAK_ORIGIN:-0}" = "1" ]; then
+      mv "$TEST_ORIGIN" "$TEST_ORIGIN.gone" 2>/dev/null || true
+    fi
     vn=$(( $(cat "$D/verify-round" 2>/dev/null || echo 0) + 1 )); printf '%s\n' "$vn" > "$D/verify-round"
     verdict=${TEST_VERDICT:-FAIL}
     # TEST_VERDICT_SEQ is a comma list chosen by verify call number, so a
@@ -166,6 +176,9 @@ case $key in
     fi
     case $verdict in
       TIMEOUT) sleep "${TEST_VERIFY_SLEEP:-2}" ;;  # let the pass timeout
+      TIMEOUT_PASS)                                  # PASS written, then run out of clock
+        printf 'PASS\nfinding one\n' > "$W/verdict.md"
+        sleep "${TEST_VERIFY_SLEEP:-2}" ;;
       "") : > "$W/verdict.md" ;;                    # no verdict at all
       *) printf '%s\nfinding one\nfinding two\n' "$verdict" > "$W/verdict.md" ;;
     esac
@@ -240,6 +253,7 @@ run_worker() {
     TEST_CONFLICT_FILE=${TEST_CONFLICT_FILE:-} TEST_MIGRATION=${TEST_MIGRATION:-} \
     TEST_MIGRATION_ONCE=${TEST_MIGRATION_ONCE:-} \
     TEST_VERIFY_TIMEOUT_LINE=${TEST_VERIFY_TIMEOUT_LINE:-} \
+    TEST_BREAK_ORIGIN=${TEST_BREAK_ORIGIN:-0} \
     TEST_VERIFY_SLEEP=${TEST_VERIFY_SLEEP:-2} \
     TEST_IMPL_MODEL=test-impl TEST_VERIFY_MODEL=test-verif \
     TEST_WORK=/work TEST_TMP=$T TEST_WORKER=$T/worker-start.sh \
@@ -337,6 +351,7 @@ check "pushed sha equals the worker's final HEAD" expect_eq "$tip" "$head"
 check "report names the pushed sha and branch" \
   grep -q "^pushed: $(short "$o" refs/heads/swarm/tc4) -> swarm/tc4 (succeeded" "$T/mail/outbox.log"
 check "report is [CANCELLED" grep -q "\[CANCELLED tc4\]" "$T/mail/outbox.log"
+check "cancelled report carries timings" grep -q '^timings: implement .*s, rebase .*s, gates .*s, verify .*s' "$T/mail/outbox.log"
 
 echo
 # --- BASE: the task names Base: v3; the branch starts from origin/v3, and
@@ -366,6 +381,22 @@ TEST_BASE=
 check "worker exits cleanly" expect_eq "$?" "0"
 check "reported blocked: no base branch" grep -q 'BLOCKED tn7\] permanent: no base branch no-such-base' "$T/mail/outbox.log"
 check "nothing was pushed for the task" expect_eq "$(git -C "$o" for-each-ref 'refs/heads/swarm/*' | wc -l)" "0"
+
+# --- PUSH-REBASE-FETCH-FAIL: origin goes away after the verify; the
+# push-stage fetch fails and the worker must BLOCK, never push a DONE on
+# the base it can no longer confirm. -------------------------------------
+o=$T/o-pushfail.git
+make_origin "$o" ""
+TEST_BREAK_ORIGIN=1
+run_worker "$o" swarm/tp14 tp14 1 PASS 0 0
+rc=$?
+mv "$o.gone" "$o" 2>/dev/null || true
+TEST_BREAK_ORIGIN=
+check "worker exits cleanly" expect_eq "$rc" "0"
+check "no DONE was reported when the push-stage fetch failed" \
+  bash -c '! grep -q "\[DONE tp14\]" "$1"' _ "$T/mail/outbox.log"
+check "the failure is reported as a rebase before push" \
+  grep -q 'BLOCKED tp14\] retryable: rebase failed before push' "$T/mail/outbox.log"
 
 # --- REBASE-BEFORE-VERIFY: origin/main advances after the implement pass;
 # the branch is rebased onto the new base before the verify, and the DONE
@@ -423,6 +454,18 @@ scenario_prologue VERIFY-TIMEOUT-LINE "$o" swarm/tv12 tv12 1 TIMEOUT 0 0
 TEST_VERIFY_TIMEOUT_LINE= TEST_VERIFY_SLEEP= TEST_SWARM_VERIFY_TIMEOUT=
 check "the task timeout was honoured" grep -q 'timed out after 1 min' "$T/mail/outbox.log"
 
+# --- TIMEOUT-BUT-PASS: the verify pass writes PASS and then runs out of
+# wall clock; the worker must treat it as no verdict, never DONE. -----------
+o=$T/o-timeoutpass.git
+make_origin "$o" ""
+TEST_SWARM_VERIFY_TIMEOUT=1 TEST_VERIFY_SLEEP=5
+scenario_prologue TIMEOUT-PASS "$o" swarm/ttp15 ttp15 3 TIMEOUT_PASS 0 0
+TEST_SWARM_VERIFY_TIMEOUT= TEST_VERIFY_SLEEP=
+check "a timed-out PASS is not reported as DONE" \
+  bash -c '! grep -q "\[DONE ttp15\]" "$1"' _ "$T/mail/outbox.log"
+check "a timed-out PASS is reported as no verdict" \
+  grep -q 'BLOCKED ttp15\] retryable: verifier gave no verdict' "$T/mail/outbox.log"
+
 # --- PASS AFTER A REBASE CONFLICT: the implement pass adds a file and main
 # adds the same file (TEST_MOVE_BASE); the rebase conflicts, the implementer
 # is asked to resolve it, and the task passes with no rebase left in
@@ -437,6 +480,8 @@ check "the resolved file landed on origin's branch" \
   git -C "$o" cat-file -e refs/heads/swarm/tc13:conflict.txt
 check "the log shows a rebase conflict was resolved" \
   grep -q 'rebase conflict' "$T/last-worker.log"
+check "the implementer was told how to finish the rebase" \
+  grep -q 'git rebase --continue' "$T/state/prompts.log"
 check "no rebase is left in progress in the final report" \
   bash -c '! grep -q "rebase --abort" "$1"' _ "$T/mail/outbox.log"
 

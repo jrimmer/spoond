@@ -18,6 +18,11 @@
 #                         the warm step (may be empty)
 ARG BASE
 FROM ${BASE}
+# resolveBase always passes SPOOND_GUEST_DNS_ADDR. The worker does not
+# re-bake the resolver: the FROM base already wrote /etc/spoond/guest-dns
+# from it. Declaring the ARG here keeps the build-arg from warning as an
+# unused variable, but it is intentionally not consumed in this layer.
+ARG SPOOND_GUEST_DNS_ADDR=
 
 # The layer installs with apt: every catalog base is Debian or Ubuntu.
 ENV DEBIAN_FRONTEND=noninteractive
