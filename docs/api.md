@@ -552,10 +552,17 @@ Response `200 OK`:
 `409` if the lease is suspended (`code: lease_suspended`, resume it
 first); `410` if it is
 `lost` (`code: lease_lost`, see [Lost leases](#lost-leases)) or the
-sandbox no longer exists on the substrate; `429` when
+sandbox no longer exists on the substrate; `413` when the JSON body is
+larger than `MAX_EXEC_BODY_BYTES` (default 8 MiB, leaving room for a
+large `cmd` and `env` next to the 64 KiB secrets cap); `429` when
 the per-owner concurrent exec/stream cap is reached. (Exec does not wait for or take the lease's lifecycle lock; its concurrency
 guard is the per-owner cap, which yields `429`. A busy lease shows up only
 as the `409` below.)
+
+The body cap bounds what the host buffers, not what the guest can run:
+the guest's own argv limit is about 128 KiB per string, so a `cmd`
+larger than that fails with `Argument list too long` from the guest
+shell (exit non-zero) rather than being refused here.
 
 A lease the idle sweep suspended (`idle_suspend`) is the exception: a
 suspended lease whose `last_action` is `idle_suspend/suspend_idle` is
@@ -805,6 +812,12 @@ Upgrade to WebSocket; the first client message starts a process:
 | `pty` | `true` | allocate a PTY |
 | `binary` | `false` | binary framing (below) |
 | `cols`, `rows` | `80`×`24` | initial PTY size |
+
+The first message is bounded to `MAX_EXEC_BODY_BYTES` (the exec body
+cap; default 8 MiB), as is every later message, so a client cannot make
+the server buffer an unbounded argv/env/secrets frame or stdin chunk.
+An oversize frame closes the WebSocket with close code `1009` (message
+too big) instead of being buffered whole.
 
 **Text mode (the default).** Server events are one text JSON frame each,
 with no trailing newline:
