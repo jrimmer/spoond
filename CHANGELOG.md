@@ -82,6 +82,26 @@ summarised from README "Status".
   list, so a released lease's resumed guest is stopped rather than left
   running (spoond-15i).
 
+- **Per-lease memory maps no longer leak, and the response to a leaked
+  auth IP is bounded.** Releasing a lease now drops its applied-egress
+  memo, its deferred exec-time secret removals and the queued auth
+  failures of an IP an attacker never retries; `DeleteBuildsPermanently`
+  only removes a build's refs while the build row is still `deleted`;
+  and `refreshPeers` reaps any memo whose lease is no longer live and
+  unreleased, so a refresh or network-policy update that races a release
+  cannot re-add one (spoond-966, follow-ups). The same release also
+  bounds long-deleted `builds` rows and lost job records. No API change;
+  no store migration.
+
+- **`ORPHAN_REAP` modes now mean exactly what the docs say.** `off` is a
+  hard stop: instead of still purging expired quarantined directories,
+  it leaves the snapshot disk entirely alone. `dryrun` logs what it
+  would reap — including what it would purge from quarantine — and
+  changes nothing. Only `quarantine` moves, restores and deletes. An
+  operator who set `off` to keep the GC's hands off the disk now gets
+  that, and an expired quarantine waits for a pass in a mode allowed to
+  purge it (spoond-ob18).
+
 ## [2.8.0] - 2026-10-08
 
 spoond cleans up after itself under every race it has met so far. A

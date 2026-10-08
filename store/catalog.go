@@ -384,7 +384,7 @@ func (db *DB) DeleteBuildsPermanently(ctx context.Context, cutoff time.Time) ([]
 
 	var removed []string
 	for _, id := range stale {
-		if _, err := db.w.ExecContext(ctx, `DELETE FROM build_refs WHERE build_id = ?`, id); err != nil {
+		if _, err := db.w.ExecContext(ctx, `DELETE FROM build_refs WHERE build_id = ? AND EXISTS (SELECT 1 FROM builds WHERE build_id = ? AND state = 'deleted')`, id, id); err != nil {
 			return removed, fmt.Errorf("store: delete build refs %s: %w", id, err)
 		}
 		res, err := db.w.ExecContext(ctx, `DELETE FROM builds WHERE build_id = ? AND state = 'deleted'`, id)

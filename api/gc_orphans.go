@@ -42,9 +42,11 @@ import (
 //
 // Everything else is an orphan. What happens to one is ORPHAN_REAP:
 //
-//   - off        — no reaping at all (but an already-quarantined,
-//     expired directory is still purged);
-//   - dryrun     — log what would happen, change nothing (the default);
+//   - off        — no reaping at all: nothing is moved, restored or
+//     purged. A hard stop for an operator who wants the GC to leave the
+//     snapshot disk entirely alone;
+//   - dryrun     — log what would happen (including what would be
+//     purged from quarantine), change nothing (the default);
 //   - quarantine — move the orphan to <storage path>/../quarantine/<id>
 //     with a marker, restore a quarantined directory the moment a later
 //     pass needs it again, and delete it only after it has sat in
@@ -323,6 +325,12 @@ func (s *Service) reapOrphans(ctx context.Context) (reaped int, freed int64) {
 		return 0, 0
 	}
 	mode := orphanReapModeFromEnv()
+	// off is a hard stop: the operator asked the GC to leave the
+	// snapshot disk alone, so nothing is listed, moved, restored or
+	// purged (spoond-ob18).
+	if mode == orphanReapOff {
+		return 0, 0
+	}
 	dirs, err := listOrphanDirs(root)
 	if err != nil {
 		s.log.Printf("gc: orphan reap skipped: %v", err)
@@ -384,10 +392,8 @@ func (s *Service) reapOrphans(ctx context.Context) (reaped int, freed int64) {
 	}
 
 	// Quarantine (or, in dry run, log) each unneeded storage directory.
-	// ORPHAN_REAP=off moves nothing new but still reaches the quarantine
-	// purge below (spoond-966 L5).
 	for _, d := range dirs {
-		if mode == orphanReapOff || needed[d.name] {
+		if needed[d.name] {
 			continue
 		}
 		size, _ := s.diskUsage(d.path)
@@ -403,12 +409,10 @@ func (s *Service) reapOrphans(ctx context.Context) (reaped int, freed int64) {
 	}
 
 	// Delete quarantined directories that have waited out the quarantine
-	// period. This is independent of ORPHAN_REAP: a directory reaches
-	// quarantine only under quarantine mode, and switching the mode to
-	// off or dryrun must not strand it there for ever (spoond-966 L5).
-	// A quarantined directory a later pass needs again is still spared
-	// (quarantine mode restores it above; the other modes leave it for a
-	// pass that can).
+	// period. Only quarantine mode gets here (off returns above, dryrun
+	// logs below); a needed quarantined directory is still spared. off
+	// never reaches this path, so an expired quarantine waits for a pass
+	// that runs in a mode allowed to purge it (spoond-ob18).
 	qage := orphanQuarantineAge()
 	for _, d := range quarantined {
 		if needed[d.name] {
@@ -419,6 +423,10 @@ func (s *Service) reapOrphans(ctx context.Context) (reaped int, freed int64) {
 			continue
 		}
 		size, _ := s.diskUsage(d.path)
+		if mode == orphanReapDryRun {
+			s.log.Printf("gc: would reap quarantined orphan %s (%s)", d.name, formatEventBytes(size))
+			continue
+		}
 		if err := os.RemoveAll(d.path); err != nil {
 			s.log.Printf("gc: reap quarantined orphan %s: %v", d.name, err)
 			continue

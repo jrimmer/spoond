@@ -1184,7 +1184,7 @@ func (s *Service) refreshPeers(ctx context.Context) {
 		if policy == "" {
 			policy = string(PolicyRestricted)
 		}
-		if !l.live() || NetworkPolicy(policy) == PolicyNone || l.SandboxID == "" {
+		if l.released || !l.live() || NetworkPolicy(policy) == PolicyNone || l.SandboxID == "" {
 			continue
 		}
 		eg := s.egressForLocked(l)
@@ -1203,10 +1203,37 @@ func (s *Service) refreshPeers(ctx context.Context) {
 			s.log.Printf("refreshPeers: update egress for %s: %v", u.leaseID, err)
 			continue
 		}
+		// Re-check the lease under the store lock before writing the memo:
+		// a release that landed while UpdateEgress ran cleared the entry,
+		// and writing it here would resurrect it (spoond-966 follow-up).
 		s.appliedMu.Lock()
-		s.appliedEgress[u.leaseID] = u.canon
+		s.store.mu.Lock()
+		if l := s.store.leases[u.leaseID]; l != nil && !l.released {
+			s.appliedEgress[u.leaseID] = u.canon
+		} else {
+			delete(s.appliedEgress, u.leaseID)
+		}
+		s.store.mu.Unlock()
 		s.appliedMu.Unlock()
 	}
+
+	// Drop any memo whose lease is no longer live and unreleased. A
+	// release clears its own entry, but a refresh that raced it (or a
+	// network-policy update that landed after the release) can have
+	// re-added one; this pass reaps it. The pool placeholder is kept:
+	// it never appears in the live store (spoond-966 follow-up).
+	s.appliedMu.Lock()
+	s.store.mu.Lock()
+	for id := range s.appliedEgress {
+		if id == "pool" {
+			continue
+		}
+		if l := s.store.leases[id]; l == nil || l.released || !l.live() {
+			delete(s.appliedEgress, id)
+		}
+	}
+	s.store.mu.Unlock()
+	s.appliedMu.Unlock()
 }
 
 // refreshPeersAsync schedules one refreshPeers run on a goroutine. Runs
@@ -2309,6 +2336,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			if err := s.sub.UpdateEndAt(ctx, id, lease.ExpiresAt); err != nil {
 				s.discardPoolSandbox(ctx, id)
 				s.endCreatingSandbox(id)
+				// The egress was recorded before the EndAt update failed: drop
+				// it with the discarded sandbox so a failed pooled grant leaves
+				// no memo behind (spoond-966 follow-up).
+				s.forgetAppliedEgress(lease.ID)
 				return nil, fmt.Errorf("update end at on pooled sandbox: %w", err)
 			}
 			row.LeaseID = lease.ID
@@ -2356,12 +2387,14 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("write lease-id and generation markers: %w", err)
 		}
 		if err := s.writeStartedFromMarker(lease); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("write started-from marker: %w", err)
 		}
 		// The snapshot's memory may still carry secret files (a save
@@ -2373,6 +2406,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("scrub secrets on snapshot start: %w", err)
 		}
 	}
@@ -2384,6 +2418,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		_ = s.sub.Delete(ctx, lease.SandboxID)
 		s.deleteSandboxRow(lease.SandboxID)
 		s.endCreatingSandbox(lease.SandboxID)
+		s.forgetAppliedEgress(lease.ID)
 		return nil, err
 	}
 	// Create-time secrets (#80) are staged after the integrity probe so
@@ -2395,6 +2430,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
 			s.endCreatingSandbox(lease.SandboxID)
+			s.forgetAppliedEgress(lease.ID)
 			return nil, fmt.Errorf("stage lease secrets: %w", err)
 		}
 		s.setCreateSecrets(lease.ID, req.createSecrets)
@@ -3335,6 +3371,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			_ = s.sub.Delete(ctx, l.SandboxID)
 			s.deleteSandboxRow(l.SandboxID)
 			s.endCreatingSandbox(l.SandboxID)
+			// The child's egress memo goes with its deleted sandbox, so a
+			// rolled-back fork leaves none behind (spoond-966 follow-up).
+			s.forgetAppliedEgress(l.ID)
 			s.store.mu.Lock()
 			delete(s.store.leases, l.ID)
 			s.deleteLeaseLocked(l.ID)
@@ -3643,7 +3682,14 @@ func (s *Service) setNetwork(ctx context.Context, owner, id, policy string, allo
 	if err := s.sub.UpdateEgress(ctx, l.SandboxID, eg); err != nil {
 		return nil, fmt.Errorf("update egress: %w", err)
 	}
-	s.recordAppliedEgress(l.ID, eg)
+	// The UpdateEgress ran without the store lock; a release can have
+	// landed meanwhile. Do not re-add the memo for a lease that is gone:
+	// that would resurrect the entry the release cleared (spoond-966
+	// follow-up). The lease itself is still returned (the caller set the
+	// policy before the release), but a released lease gets no memo.
+	if s.lookupLive(l.ID) != nil {
+		s.recordAppliedEgress(l.ID, eg)
+	}
 	s.refreshPeersAsync(ctx)
 	return l, nil
 }
@@ -3805,6 +3851,19 @@ func (s *Service) lookup(owner, id string) *Lease {
 	defer s.store.mu.Unlock()
 	l := s.store.leases[id]
 	if l == nil || l.Owner != owner || l.released {
+		return nil
+	}
+	return l
+}
+
+// lookupLive returns a lease by id when it is still live and unreleased.
+// Used by paths that must not write per-lease state after a release
+// cleared it (spoond-966 follow-up).
+func (s *Service) lookupLive(id string) *Lease {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.released || !l.live() {
 		return nil
 	}
 	return l

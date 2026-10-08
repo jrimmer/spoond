@@ -308,16 +308,23 @@ A directory is **needed**, and never touched, when it is:
 
 Everything else is an orphan. `ORPHAN_REAP` selects what happens to one:
 
-- `dryrun` (the default) logs
-  `gc: would reap orphan <id> (<size>)` and changes nothing;
+- `off` is a hard stop: the reap lists nothing and changes nothing — no
+  orphan is quarantined, no quarantined directory is restored, and none
+  is purged;
+- `dryrun` (the default) logs what it would do —
+  `gc: would reap orphan <id> (<size>)` or
+  `gc: would reap quarantined orphan <id> (<size>)` — and changes
+  nothing;
 - `quarantine` moves the directory to
   `<storage path>/../quarantine/<id>`, dropping a `.spoond-quarantine`
   marker that dates the move; every later pass moves a quarantined
   directory back if a catalog build, lease, kept build, sandbox or image
   needs it again, and deletes it only once it has sat there for
   `ORPHAN_QUARANTINE_SECS` (default `86400`) — so a misclassification is
-  recoverable for a day, across backend restarts;
-- `off` disables the reap entirely.
+  recoverable for a day, across backend restarts.
+
+Only `quarantine` deletes a quarantined directory; `off` and `dryrun`
+leave one in place until a pass runs in `quarantine` mode.
 
 `GC_DELETE` does not control the orphan reap. When a quarantined
 orphan is finally deleted, it is removed with `os.RemoveAll`, and the
