@@ -92,6 +92,16 @@ with `set -a; . /etc/spoond/conformance.env; set +a`. Per-run variables
 `CONFORMANCE_DESTRUCTIVE`) are set by the run. The staging equivalent,
 `/etc/spoond-staging/conformance.env`, is created by the Ops runner in U08.
 
+`CONFORMANCE_LAN_TARGET` was added after N1's old hardcoded `10.0.0.203`
+land target stopped answering. It is provisioned on sb (root, 0600) by
+appending the one line, then the suite is run (U12 step 14):
+
+```bash
+ssh root@spoond.example.com 'set -e; grep -qxF CONFORMANCE_LAN_TARGET=10.1.0.203:443 \
+  /etc/spoond/conformance.env || echo CONFORMANCE_LAN_TARGET=10.1.0.203:443 \
+  >> /etc/spoond/conformance.env'
+```
+
 ## Autonomous window protocol
 
 The human has given standing authorization for production-affecting steps,
