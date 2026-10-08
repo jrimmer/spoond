@@ -423,19 +423,29 @@ func (s *Service) resumePreempted(ctx context.Context) {
 // losePreempted marks a preempted lease lost after its resume budget ran
 // out: the reason is stored and carried by a lost event, its running jobs
 // (none, a suspended lease has no live guest) are settled and snapshot
-// retention runs. The caller has already given up on the resume. A lease
-// released while the loss was in flight is left alone: no save, no lost
-// event, no job marking (spoond-775).
+// retention runs. The caller has already given up on the resume.
+//
+// It only loses a lease an owner operation is not bringing back: the
+// lease must still be suspended, not busy and still preempted (B1). A
+// released lease is left alone: no save, no lost event, no job marking
+// (spoond-775). A lease an owner resumed before this call is left alone
+// too, its budget dropped, rather than deleted out from under the owner.
 func (s *Service) losePreempted(ctx context.Context, l *Lease, reason, cause string) {
 	s.clearRetry(s.preemptRetries, l.ID)
 	s.clearPreemptCapLog(l.ID)
 	s.store.mu.Lock()
-	released := l.released
-	if !released {
+	// Only a suspended, non-busy preempted lease may be lost: an owner
+	// resume (busy) or a resume that already completed (state running) is
+	// bringing the guest back, and deleting it would lose an intact lease
+	// (B1).
+	canLose := !l.released && !l.busy && l.State == "suspended" && !l.PreemptedAt.IsZero()
+	state, busy, preempted := l.State, l.busy, !l.PreemptedAt.IsZero()
+	if canLose {
 		s.markLost(l, reason)
 	}
 	s.store.mu.Unlock()
-	if released {
+	if !canLose {
+		s.log.Printf("preempt: not losing lease %s (state %s, busy=%v, preempted=%v)", l.ID, state, busy, preempted)
 		return
 	}
 	// Lost means stopped (spoond-63a): a failed resume can leave a

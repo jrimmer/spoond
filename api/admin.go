@@ -413,10 +413,22 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				s.log.Printf("undrain: resume %s deferred after %d attempt(s) (admission refused): %v", l.ID, attempts, err)
 				return
 			}
+			if errors.Is(err, errLeaseBusy) {
+				// Another operation holds the lease (an owner resume, a
+				// suspend): leave its guest alone and let a later undrain
+				// retry it. Losing a lease an operation is bringing back
+				// would delete an intact guest (B1).
+				mu.Lock()
+				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
+				mu.Unlock()
+				s.log.Printf("undrain: resume %s skipped (busy): %v", l.ID, err)
+				return
+			}
 			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
 			s.store.mu.Lock()
 			released := l.released
-			if !released {
+			alreadyLost := l.State == "lost"
+			if !released && !alreadyLost {
 				// markLost saves the row, Drained=false with it.
 				l.Drained = false
 				s.markLost(l, reason)
@@ -427,6 +439,15 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				// the release already stopped its sandbox and emitted the
 				// released event, so a loss must not resurrect it (no
 				// save, spoond-775).
+				mu.Lock()
+				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
+				mu.Unlock()
+				return
+			}
+			if alreadyLost {
+				// Another loss already recorded this lease (a concurrent
+				// resume gave up): do not emit a duplicate lost event or
+				// delete the guest twice.
 				mu.Lock()
 				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 				mu.Unlock()

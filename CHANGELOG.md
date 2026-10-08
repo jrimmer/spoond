@@ -13,9 +13,10 @@ summarised from README "Status".
 ### Fixed
 
 - **A lost lease's guest is stopped.** Every path that marks a lease
-  `lost` — crash recovery, the admin undrain and the rootfs probe — now
-  deletes the lease's sandbox through the substrate, retrying a few
-  times with a log line and dropping the sandbox row. Before this, a
+  `lost` — crash recovery (including a recovery budget that runs out or
+  a preempted resume that fails), the admin undrain and the rootfs probe
+  — now deletes the lease's sandbox through the substrate, retrying a
+  few times with a log line and dropping the sandbox row. Before this, a
   create or resume that failed after its VM had started could leave a
   guest running while the lease answered `410` and looked stopped: the
   crash reconcile's recover-from-checkpoint failure never deleted it,
@@ -24,9 +25,18 @@ summarised from README "Status".
   the retries is left to the periodic orphan sandbox sweep, which now
   treats a sandbox whose lease is lost or released as an orphan (and
   never touches a live or busy one); the startup `ReconcileOrphans` runs
-  the same rule in a second pass after its crash reconcile. `docs/api.md`
-  states it under [Lost leases]: a lost lease's guest is stopped, and
-  `DELETE` frees the quota.
+  the same rule after its crash reconcile. A lease an owner operation is
+  bringing back is never lost: the preempt-resume and undrain losses
+  require the lease to be still suspended, not busy and unreleased, so a
+  resume in flight saves the guest. A create that finishes after its
+  lease was released stops the fresh guest and skips every save, so a
+  release cannot be undone by a late recovery, resume, restart or
+  restore. The sweep also deletes any substrate sandbox no lease and no
+  pool entry claims, but only once it has been seen unclaimed on two
+  consecutive passes and never while a create holds that sandbox in
+  flight; the startup pass still deletes a foreign leftover at once.
+  `docs/api.md` states it under [Lost leases]: a lost lease's guest is
+  stopped, and `DELETE` frees the quota.
 
 ## [2.7.1] - 2026-10-07
 

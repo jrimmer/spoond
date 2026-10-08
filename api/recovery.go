@@ -109,8 +109,20 @@ func (s *Service) markLost(l *Lease, reason string) string {
 // that still fails is left to the periodic orphan sweep) and drops the
 // sandbox row. Call without s.store.mu held.
 func (s *Service) stopLostSandbox(sandboxID, leaseID string) {
-	s.deleteLostSandbox(sandboxID, leaseID)
+	s.deleteSandboxWithRetries(sandboxID, leaseID, "lost")
 	s.deleteSandboxRow(sandboxID)
+}
+
+// leaseReleased reports whether l has been released, under the store
+// lock. A released lease's row may already be gone, in which case l
+// itself carries the flag. Used to detect a release that raced a create.
+func (s *Service) leaseReleased(l *Lease) bool {
+	if l == nil {
+		return false
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	return l.released
 }
 
 // defaultLostSandboxDeleteAttempts and defaultLostSandboxDeleteBackoff
@@ -127,12 +139,14 @@ const (
 	lostSandboxDeleteTimeout = 30 * time.Second
 )
 
-// deleteLostSandbox stops a lost lease's sandbox through the substrate
-// with bounded retries, logging each failure. A nil or empty sandbox id
-// is a no-op. A delete that still fails after every attempt is logged
-// and recorded so the periodic orphan sweep retries it (a released
-// lease's row is gone by then, so the sweep cannot rediscover it).
-func (s *Service) deleteLostSandbox(sandboxID, leaseID string) {
+// deleteSandboxWithRetries stops a sandbox through the substrate with
+// bounded retries, logging each failure. A nil or empty sandbox id is a
+// no-op. reason names why the guest is being stopped ("lost" or
+// "released") for the log lines. A delete that still fails after every
+// attempt is logged and recorded so the periodic orphan sweep retries
+// it (a released lease's row is gone by then, so the sweep cannot
+// rediscover it).
+func (s *Service) deleteSandboxWithRetries(sandboxID, leaseID, reason string) {
 	if sandboxID == "" {
 		return
 	}
@@ -146,15 +160,15 @@ func (s *Service) deleteLostSandbox(sandboxID, leaseID string) {
 		err = s.sub.Delete(ctx, sandboxID)
 		cancel()
 		if err == nil {
-			s.log.Printf("lost: lease %s stopped sandbox %s", leaseID, sandboxID)
+			s.log.Printf("%s: lease %s stopped sandbox %s", reason, leaseID, sandboxID)
 			return
 		}
 		if attempt < attempts {
-			s.log.Printf("lost: lease %s delete sandbox %s attempt %d/%d failed (retrying): %v", leaseID, sandboxID, attempt, attempts, err)
+			s.log.Printf("%s: lease %s delete sandbox %s attempt %d/%d failed (retrying): %v", reason, leaseID, sandboxID, attempt, attempts, err)
 			time.Sleep(s.lostSandboxDeleteBackoff)
 		}
 	}
-	s.log.Printf("lost: lease %s delete sandbox %s failed after %d attempt(s); leaving it to the orphan sweep: %v", leaseID, sandboxID, attempts, err)
+	s.log.Printf("%s: lease %s delete sandbox %s failed after %d attempt(s); leaving it to the orphan sweep: %v", reason, leaseID, sandboxID, attempts, err)
 	s.rememberOrphanSandbox(sandboxID)
 }
 
@@ -272,9 +286,11 @@ func (s *Service) reconcileCrash(ctx context.Context) recoverySummary {
 
 // recoveryOutcome is what recoverOneLease did with one lease: "recovered"
 // (it came back from its checkpoint), "lost" (it had none, or its retry
-// budget ran out) or "recovering" (a transient failure left it for the
-// next reconcile pass). Generation and State are the lease's values after
-// the call. The crash test reports it; the reconcile loop counts it.
+// budget ran out), "recovering" (a transient failure left it for the
+// next reconcile pass) or "released" (the lease was released while the
+// recovery ran, so it was left released and nothing was saved).
+// Generation and State are the lease's values after the call. The crash
+// test reports it; the reconcile loop counts it.
 type recoveryOutcome struct {
 	Result     string `json:"result"`
 	Generation int64  `json:"generation"`
@@ -302,6 +318,14 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 		return s.loseRecovery(ctx, l, "no checkpoint to recover from; the running state is gone", "")
 	}
 	if err := s.recoverFromCheckpoint(ctx, l); err != nil {
+		// The lease was released while its recovery create ran: the
+		// release already stopped the guest it knew about and the
+		// create's fresh one was stopped too (spoond-775, spoond-63a).
+		// Nothing to lose and nothing to save.
+		if errors.Is(err, errLeaseReleased) {
+			s.log.Printf("recovery: lease %s was released during its recovery; recovery stops", l.ID)
+			return recoveryOutcome{Result: "released", Generation: l.Generation, State: l.State}
+		}
 		// A missing image or build can never succeed on a retry: give up
 		// now with the cause.
 		if recoveryFailurePermanent(err) {
@@ -434,7 +458,23 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	if err != nil {
 		return err
 	}
+	// A release that landed while the recovery create ran must not be
+	// undone by the saves below: createSandbox stopped the fresh guest,
+	// so skip every save and leave the lease released (spoond-775,
+	// spoond-63a).
+	if s.leaseReleased(l) {
+		s.log.Printf("recovery: lease %s was released during its recovery create; not saving", l.ID)
+		s.endCreatingSandbox(sb.ID)
+		return errLeaseReleased
+	}
 	s.store.mu.Lock()
+	if l.released {
+		s.store.mu.Unlock()
+		s.deleteSandboxWithRetries(sb.ID, l.ID, "released")
+		s.deleteSandboxRow(sb.ID)
+		s.endCreatingSandbox(sb.ID)
+		return errLeaseReleased
+	}
 	l.setState("recovered")
 	l.RecoveredFrom = l.LastCheckpointAt
 	l.BuildID = l.LastCheckpointBuildID
@@ -447,6 +487,7 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
+	s.endCreatingSandbox(sb.ID)
 	s.writeGeneration(l)
 	// Crash recovery rebuilt the guest from a checkpoint: its memory did
 	// not continue, so every running job is lost (2.6, #135).
