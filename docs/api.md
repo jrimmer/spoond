@@ -814,8 +814,10 @@ Upgrade to WebSocket; the first client message starts a process:
 | `cols`, `rows` | `80`×`24` | initial PTY size |
 
 The first message is bounded to `MAX_EXEC_BODY_BYTES` (the exec body
-cap; default 8 MiB). An oversize first frame closes the WebSocket with
-close code `1009` (message too big) instead of being buffered whole.
+cap; default 8 MiB), as is every later message, so a client cannot make
+the server buffer an unbounded argv/env/secrets frame or stdin chunk.
+An oversize frame closes the WebSocket with close code `1009` (message
+too big) instead of being buffered whole.
 
 **Text mode (the default).** Server events are one text JSON frame each,
 with no trailing newline:

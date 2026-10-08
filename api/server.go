@@ -834,10 +834,11 @@ var maxExecTimeout = func() int {
 	return 300 // seconds
 }()
 
-// maxExecBodyBytes caps the JSON body of a POST exec, and the first
-// WebSocket frame of a stream, which carries the same argv/env/secrets
-// shape. One authenticated caller must not be able to make the server
-// hold an arbitrarily large command or secret set in memory. The cap is
+// maxExecBodyBytes caps the JSON body of a POST exec and every message
+// of a stream WebSocket, whose first frame carries the same
+// argv/env/secrets shape and whose later frames carry stdin. One
+// authenticated caller must not be able to make the server hold an
+// arbitrarily large command or secret set in memory. The cap is
 // generous next to the secrets limit (64 KiB total) and leaves room for
 // a large cmd and env; the guest itself rejects an over-long argv
 // string with E2BIG ("Argument list too long"), so this only bounds the
@@ -1316,9 +1317,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
-	// The first message is the exec request; bound it to the same size as
-	// a POST exec body so a client cannot make the server buffer an
-	// unbounded argv/env/secrets frame.
+	// The first message is the exec request; bound every message to the
+	// same size as a POST exec body so a client cannot make the server
+	// buffer an unbounded argv/env/secrets frame or stdin chunk.
 	ws.SetReadLimit(maxExecBodyBytes)
 
 	// First message: the exec request.
