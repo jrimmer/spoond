@@ -176,7 +176,6 @@ summarised from README "Status".
   refusal onto `403 owner deleted` instead of a `500`, and the refused
   grant drops its staged create-time secrets.
 
-
 ## [2.8.0] - 2026-10-08
 
 spoond cleans up after itself under every race it has met so far. A
