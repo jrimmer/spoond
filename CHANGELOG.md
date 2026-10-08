@@ -10,6 +10,19 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-10-07
+
+spoond looks after more of itself and says less on the dashboard about
+things a viewer cannot act on. A lost lease now answers `410`
+with `code: lease_lost` and its reason, and is released once its grace period
+lapses, so its owner's quota comes back; every orchestrator call has a
+deadline. The dashboard gains a Notifications panel for spoond system
+messages only (dismissable per viewer), i/o stall and disk-busy meters,
+a left-aligned header with uptime and clock, a footer with the version,
+release date and a GitHub link, and a leases table whose access column
+says isolated for no network and whose columns fit their content. Store migration 0019 is additive; the grid package is
+unchanged since 2.7.0.
+
 ### Added
 
 - **The dashboard's host panel shows disk I/O pressure and the snapshot
@@ -47,6 +60,18 @@ summarised from README "Status".
   hidden while the trigger stays active and returns if the trigger
   clears and fires again. No server state; the dashboard stays
   read-only.
+- **The dashboard's leases table sizes its columns to the content and
+  names its policy and holder columns.** The network-policy column's
+  header reads **access** (narrow fallback `acc` / `net`), and a lease
+  whose API `network_policy` is `none` shows `isolated`; the stored
+  value stays `none`. The fixed-width columns (state, image, owner,
+  access, left) are as wide as the widest value actually shown, never
+  below their header, so a table of short states leaves no blank run;
+  the width freed that way widens the owner first (up to its own longest
+  value) and then the last column. The holder column's header is plain
+  `holder`, and the `◆ held · ◉ lapsed` legend moves to one dim line
+  directly under the table's last row, drawn only when a row carries a
+  hold. Docs and goldens cover both frame widths.
 - **Lost leases tell their initiator why and what to do.** A lease whose
   sandbox a substrate crash (or a failed recovery) lost now records the
   reason (`leases.lost_reason`, migration 0019) and returns it: the

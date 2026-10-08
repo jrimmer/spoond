@@ -245,6 +245,12 @@ stack does not exist yet.
 
 ## Status
 
+**v2.7.1: a utility that tidies up after itself.** A lost lease says
+why (`410` with `code: lease_lost`) and is released after its grace period, every
+orchestrator call has a deadline, and the dashboard shows spoond system
+messages in a dismissable Notifications panel, i/o stall and disk-busy
+meters, and the version and a GitHub link in its footer.
+
 **v2.7: named snapshots.** A lease can be saved as a named, versioned
 snapshot, and a new lease can start from it (`"snapshot": "name@v"`,
 or `spoondctl create --snapshot`); `spoondctl snapshot save|ls|show|rm`

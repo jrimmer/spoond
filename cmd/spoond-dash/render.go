@@ -1283,57 +1283,128 @@ func (l *layout) imagesServices(g *grid.Grid, y int) int {
 	return l.drawImagesServices(g, y)
 }
 
-// leaseCols picks the leases panel's column layout for width w. At the
-// wide frame it is the mockup's: id(12) image(17) owner(10) state(13)
-// policy(11) age(6) left(9) holder — the columns start at 2, 14, 31,
-// 41, 55, 67, 73, 81 (state keeps a clear cell before policy, so the
-// burst marker can fill its column). Below 104 the flexible columns
-// give (headers cut, values never reach the next column) and nothing
-// overflows.
+// leaseCols is the leases panel's column layout for one frame. Each
+// width includes the separator cell before the next column; the last
+// (holder) column's width fills whatever the others leave. A non-holder
+// column is content-fit: as wide as the widest value the rows actually
+// show, but never narrower than its header, so a column of short values
+// leaves no blank run. The width freed that way goes to the owner first
+// (up to its own widest value), then to the holder, so more of the owner
+// and holder is visible before truncation.
 type leaseCols struct {
 	id, img, own, st, pol, age, left, hold int // column start cells
 	idW, imgW, ownW, stW, polW, leftW      int
+	holdW                                  int
 }
 
-func leaseLayout(w int) leaseCols {
+// leaseLayout picks the leases panel's column layout for width w and the
+// rows actually shown. At the wide frame the base widths are the
+// mockup's (id(11) image(16) owner(10) state(19) access(11) age(7)
+// left(7)); below 104 the flexible clamps give. Either way the columns
+// shrink to their visible content and the slack lands on owner and
+// holder.
+func leaseLayout(w int, rows []LeaseRow) leaseCols {
+	// Header widths (with the trailing separator cell): the least a
+	// column may shrink to, so a header always keeps a gap after it.
+	const (
+		hID, hImg, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 6, 6, 7, 5, 7
+	)
+	// Base widths before content fitting: the widest the non-owner
+	// columns ever get.
+	var idW, imgW, ownW, stW, polW, leftW int
 	if w >= maxW {
-		// The state column fits its longest word in full ("‖ suspended,
-		// burst": 18), taking slack from the id (10 shown), the image
-		// ("honey-go-worker" still fits) and left; the holder keeps 21.
-		return leaseCols{
-			id: 2, idW: 11,
-			img: 13, imgW: 16,
-			own: 29, ownW: 10,
-			st: 39, stW: 19,
-			pol: 58, polW: 11,
-			age:  69,
-			left: 76, leftW: 7,
-			hold: 83,
-		}
+		idW, imgW, ownW, stW, polW, leftW = 11, 16, 10, 19, 11, 7
+	} else {
+		idW = clamp(w/10, 6, 12)
+		imgW = clamp(w/7, 8, 17)
+		ownW = clamp(w/12, 5, 10)
+		stW = clamp(w/7, 6, 17)
+		polW = clamp(w/14, 5, 12)
+		leftW = clamp(w/12, 4, 9)
 	}
-	c := leaseCols{id: 2, idW: clamp(w/10, 6, 12)}
-	c.img = c.id + c.idW + 1
-	c.imgW = clamp(w/7, 8, 17)
-	c.own = c.img + c.imgW + 1
-	c.ownW = clamp(w/12, 5, 10)
-	c.st = c.own + c.ownW + 1
-	c.stW = clamp(w/7, 6, 17)
-	c.pol = c.st + c.stW + 1
-	c.polW = clamp(w/14, 5, 12)
-	c.age = c.pol + c.polW + 1
+	// Content-fit each column to what the rows show: never narrower than
+	// its header (so a header always keeps a gap after it), never wider
+	// than its base (a value longer than the base still truncates).
+	cID, cImg, cOwn, cSt, cPol, cLeft := leaseValueWidths(rows)
+	idW = max(hID, min(idW, cID))
+	imgW = max(hImg, min(imgW, cImg))
+	ownW = max(hOwn, min(ownW, cOwn))
+	stW = max(hSt, min(stW, cSt))
+	polW = max(hPol, min(polW, cPol))
+	leftW = max(hLeft, min(leftW, cLeft))
+
+	avail := w - 4
+	// The owner claims freed width first, up to its own widest value; the
+	// holder gets the rest and fills the row.
+	sum := idW + imgW + ownW + stW + polW + ageW + leftW
+	if room := avail - sum - hHold; room > 0 && ownW < max(hOwn, cOwn) {
+		grow := min(room, max(hOwn, cOwn)-ownW)
+		ownW += grow
+		sum += grow
+	}
+	c := leaseCols{
+		idW: idW, imgW: imgW, ownW: ownW, stW: stW, polW: polW,
+		leftW: leftW, holdW: avail - sum,
+	}
+	c.id = 2
+	c.img = c.id + c.idW
+	c.own = c.img + c.imgW
+	c.st = c.own + c.ownW
+	c.pol = c.st + c.stW
+	c.age = c.pol + c.polW
 	c.left = c.age + ageW
-	c.leftW = clamp(w/12, 4, 9)
-	c.hold = c.left + c.leftW + 1
+	c.hold = c.left + c.leftW
 	return c
 }
 
-func (l *layout) leasesH() int {
-	n := len(l.s.Rows)
-	if n > maxLeaseRows(l.w) {
-		n = maxLeaseRows(l.w)
+// leaseValueWidths is how wide each non-holder column must be to draw the
+// rows' values whole, each including its trailing separator cell. The
+// state adds cells for its glyph, the space and the trailing separator;
+// the access column uses the full policy label. A column's own header is
+// a floor, applied by the caller.
+func leaseValueWidths(rows []LeaseRow) (id, img, own, st, pol, left int) {
+	for _, r := range rows {
+		id = max(id, len([]rune(sanitize(r.ID)))+1)
+		img = max(img, len([]rune(sanitize(r.Image)))+1)
+		own = max(own, len([]rune(sanitize(r.Owner)))+1)
+		st = max(st, len([]rune(stateWords(r)[0]))+3)
+		pol = max(pol, len([]rune(policyWords(r.Policy)[0]))+1)
+		left = max(left, len([]rune(leaseLeft(r)))+1)
 	}
+	return id, img, own, st, pol, left
+}
+
+// leaseLegend is the dim line under the leases table that explains the
+// holder column's marks; it is drawn only when a shown row carries one.
+const leaseLegend = "◆ held · ◉ lapsed"
+
+// hasLeaseLegend reports whether any shown lease carries a hold mark, so
+// the legend line belongs under the table.
+func (l *layout) hasLeaseLegend() bool {
+	for _, r := range l.shownRows() {
+		if r.Holder != "" && (r.HoldState == "active" || r.HoldState == "lapsed") {
+			return true
+		}
+	}
+	return false
+}
+
+// shownRows is the leases table's rows after the row cap.
+func (l *layout) shownRows() []LeaseRow {
+	rows := l.s.Rows
+	if n := maxLeaseRows(l.w); len(rows) > n {
+		rows = rows[:n]
+	}
+	return rows
+}
+
+func (l *layout) leasesH() int {
+	n := len(l.shownRows())
 	if n == 0 {
 		return 4 // title + header + the "no live leases" row (+ frame)
+	}
+	if l.hasLeaseLegend() {
+		return 4 + n // title + header + rows + the legend line
 	}
 	return 3 + n // title + header + rows (+ frame handled by panel)
 }
@@ -1368,32 +1439,21 @@ func ellipsize(s string, n int) string {
 func (l *layout) leases(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, 0, y, l.w, l.leasesH(), "leases", "leases")
-	c := leaseLayout(l.w)
+	c := leaseLayout(l.w, l.shownRows())
 	// Each header at its column's start, cut to the column's width so a
 	// narrow frame cannot smear one header into the next.
 	headers := []struct {
 		x, w int
 		text string
 	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.own, c.ownW, "owner"},
-		{c.st, c.stW, "state"}, {c.pol, c.polW, "policy"}, {c.age, 5, "age"},
-		{c.left, c.leftW, "left"}, {c.hold, l.w - 2 - c.hold, "holder"}}
+		{c.st, c.stW, "state"}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
+		{c.left, c.leftW, "left"}, {c.hold, c.holdW, "holder"}}
 	for _, h := range headers {
-		text := h.text
-		switch text {
-		case "policy":
-			text = fitWord([]string{"policy", "net"}, h.w-1)
-		case "holder":
-			// The holder column's marks, spelled out where they are used.
-			text = fitWord([]string{"holder (◆ held · ◉ lapsed hold)", "holder ◆ held ◉ lapsed",
-				"◆ held · ◉ lapsed hold", "◆ held · ◉ lapsed", "holder"}, h.w)
-		}
-		g.Text(h.x, top+1, text, "dim", h.w)
+		draw := cutHeaders(h.text, h.w)
+		g.Text(h.x, top+1, draw, "dim", h.w)
 	}
 
-	rows := l.s.Rows
-	if n := maxLeaseRows(l.w); len(rows) > n {
-		rows = rows[:n]
-	}
+	rows := l.shownRows()
 	for i, r := range rows {
 		yy := top + 2 + i
 		// Every cell keeps one column of space before the next and ends
@@ -1422,6 +1482,10 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	}
 	if len(rows) == 0 {
 		g.Text(2, top+2, "no live leases", "dim", l.w-4)
+	} else if l.hasLeaseLegend() {
+		// The holder marks, spelled out directly under the table's last
+		// row rather than crammed into the header.
+		g.Text(2, top+2+len(rows), leaseLegend, "dim", l.w-4)
 	}
 	return y
 }
@@ -1452,16 +1516,36 @@ func stateWords(r LeaseRow) []string {
 	}
 }
 
-// policyWords is a network policy, longest form first.
+// policyWords is a network policy, longest form first. The API value
+// "none" is shown as "isolated" — no egress at all; the stored policy
+// stays "none".
 func policyWords(p string) []string {
 	switch p {
 	case "restricted":
 		return []string{"restricted", "rstr"}
 	case "internet":
 		return []string{"internet", "inet"}
+	case "none":
+		return []string{"isolated", "iso"}
 	default:
 		return []string{sanitize(p)}
 	}
+}
+
+// cutHeaders fits a column header into w cells: the forms step down
+// from the full word ("access" to "acc"/"net", "holder" to
+// "hold"/"hld") until one fits the w-1 content cells, and the chosen
+// form is cut to w-1 runes. The spare cell is the column's separator,
+// so a header never touches the next header even when it exactly fills
+// its column's content width.
+func cutHeaders(word string, w int) string {
+	switch word {
+	case "access":
+		return cell(fitWord([]string{"access", "acc", "net"}, w-1), w)
+	case "holder":
+		return cell(fitWord([]string{"holder", "hold", "hld"}, w-1), w)
+	}
+	return cell(word, w)
 }
 
 // fitWord is the first form that fits n cells, or the shortest form cut
@@ -1490,7 +1574,7 @@ func leaseLeft(r LeaseRow) string {
 // lease's comment — dim, a CI job lease usually — when there is neither;
 // a dash when nothing at all. Cut with … so nothing reaches the border.
 func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
-	room := l.w - c.hold - 3 // one column clear of the border
+	room := c.holdW - 1 // one column clear of the border
 	if r.Holder != "" {
 		mark, style := "", "link"
 		switch r.HoldState {
