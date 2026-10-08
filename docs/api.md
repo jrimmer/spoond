@@ -614,12 +614,13 @@ resume kills a job whose cap was spent in the meantime. A record written
 before the cap existed (`max_runtime_secs` 0) is still capped by the
 current host value once the backend is upgraded. `JOB_MAX_RUNTIME=0`
 (unset) is the 24 h default and a negative value disables the cap; the
-cap is held as whole seconds, so a value under one second in either
-direction is rejected at startup — a positive one would truncate to 0
-and silently mean the default, and a negative one would truncate to 0
-and silently mean the default rather than "off". A bare integer too
-large to represent as a duration is clamped at startup rather than
-wrapping. Per-exec `secrets` stay staged under
+cap is held as whole seconds, so a positive fractional duration rounds
+up to the next whole second (`500ms` is 1 s, not a 0 that reads as the
+default, and `1500ms` is 2 s, not a truncated 1 s) and a negative value
+under one second is rejected at startup because it would round to 0 and
+mean the default rather than "off". A bare integer too large to
+represent as a duration is clamped at startup rather than wrapping.
+Per-exec `secrets` stay staged under
 `/run/secrets` for the job's life and are removed when it exits (the
 guest wrapper removes them; the backend also removes them on
 reconcile). Neither `env` nor secret values are ever stored in the job

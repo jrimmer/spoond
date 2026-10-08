@@ -155,9 +155,10 @@
 //	                  a Go duration or seconds; a job may ask for a
 //	                  shorter max_runtime_secs, never a longer one; a
 //	                  negative value disables the cap; the cap is held as
-//	                  whole seconds, so a value under one second is
-//	                  rejected in either direction, and a bare integer
-//	                  too large to represent is clamped)
+//	                  whole seconds, so a positive fractional duration
+//	                  rounds up and a negative value under one second is
+//	                  rejected, and a bare integer too large to represent
+//	                  is clamped)
 //	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
@@ -306,14 +307,14 @@ func parseGuestDNS(v string) ([]string, error) {
 
 // parseJobMaxRuntime parses JOB_MAX_RUNTIME: a Go duration or a whole
 // number of seconds (like envDurationOrZero). An empty or malformed
-// value is 0, the 24 h default; a negative value disables the cap. A
-// positive value smaller than one second is rejected: the configured cap
-// is held as whole seconds, so truncating it to 0 would silently read as
-// the default rather than the short cap the operator asked for
-// (spoond-wb5). A negative value smaller than one second is rejected for
-// the same reason: it would read as 0 = the default rather than "off". A
-// bare integer too large to convert is clamped to the largest
-// representable duration instead of wrapping (spoond-wb5).
+// value is 0, the 24 h default; a negative value disables the cap. The
+// cap is held as whole seconds, so a fractional Go duration is rounded
+// up to the next whole second when it is stored (see jobMaxRuntimeSecs):
+// 1500ms is 2 s, not a truncated 1 s, and 500ms is 1 s, not a 0 that
+// reads as the default. A negative value smaller than one second is
+// rejected: it would round to 0 and mean the default rather than "off"
+// (spoond-wb5). A bare integer too large to convert is clamped to the
+// largest representable magnitude rather than wrapping.
 func parseJobMaxRuntime(v string) (time.Duration, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -327,13 +328,27 @@ func parseJobMaxRuntime(v string) (time.Duration, error) {
 	} else {
 		return 0, nil
 	}
-	if d > 0 && d < time.Second {
-		return 0, fmt.Errorf("%s is less than a second; the cap is held as whole seconds", v)
-	}
 	if d < 0 && d > -time.Second {
 		return 0, fmt.Errorf("%s is less than a second; a negative value disables the cap", v)
 	}
 	return d, nil
+}
+
+// jobMaxRuntimeSecs converts a parsed JOB_MAX_RUNTIME duration to the
+// whole seconds the service config holds. A positive fractional duration
+// rounds up to the next whole second, so a sub-second cap never truncates
+// to 0 (= the 24 h default) and a cap between whole seconds never grants
+// less than asked; zero stays 0 (the default) and a negative disables the
+// cap.
+func jobMaxRuntimeSecs(d time.Duration) int64 {
+	if d <= 0 {
+		return int64(d / time.Second)
+	}
+	secs := int64(d / time.Second)
+	if d%time.Second != 0 {
+		secs++
+	}
+	return secs
 }
 
 // secondsToDurationClamped converts a whole number of seconds to a
@@ -564,9 +579,10 @@ func Main(args []string) int {
 
 	// Background jobs (spoond-wb5): JOB_MAX_RUNTIME is a Go duration or a
 	// whole number of seconds; 0 is the 24 h default and a negative value
-	// disables the cap. The cap is held as whole seconds, so a positive or
-	// negative value under one second is rejected here rather than
-	// truncating to 0 and silently meaning the default.
+	// disables the cap. The cap is held as whole seconds, so a positive
+	// fractional duration rounds up (jobMaxRuntimeSecs) and a negative
+	// value under one second is rejected here rather than rounding to 0,
+	// which would silently mean the default rather than "off".
 	jobMaxRuntime, err := parseJobMaxRuntime(os.Getenv("JOB_MAX_RUNTIME"))
 	if err != nil {
 		log.Fatalf("JOB_MAX_RUNTIME: %v", err)
@@ -612,7 +628,7 @@ func Main(args []string) int {
 		// value disables the cap.
 		MaxRunningJobsPerLease:   envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:         int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
-		JobMaxRuntimeSecs:        int64(jobMaxRuntime / time.Second),
+		JobMaxRuntimeSecs:        jobMaxRuntimeSecs(jobMaxRuntime),
 		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
 		SnapshotWriteConcurrency: snapshotWriteConcurrency,
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,

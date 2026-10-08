@@ -1026,7 +1026,7 @@ outcome without a second kill. A record written before the cap existed
 |---|---|---|
 | `MAX_RUNNING_JOBS_PER_LEASE` | `16` | running background jobs per lease; past it a start answers `429` |
 | `JOB_RETENTION_SECS` | `604800` (7 d) | exited job records older than this are pruned by the sweeper (running and lost records are kept) |
-| `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`. A start may ask for a shorter `max_runtime_secs`, never a longer one. Takes a Go duration (`24h`) or seconds; `0` is the default and a negative value disables the cap (the cap is held as whole seconds, so a value under one second is rejected at startup) (spoond-wb5) |
+| `JOB_MAX_RUNTIME` | `86400` (24 h) | how long a background job may run before the reconcile pass kills it and marks it exited with reason `timed_out`. A start may ask for a shorter `max_runtime_secs`, never a longer one. Takes a Go duration (`24h`) or seconds; `0` is the default and a negative value disables the cap (the cap is held as whole seconds: a positive fractional duration rounds up, and a negative value under one second is rejected at startup) (spoond-wb5) |
 
 The job record lives in the `lease_jobs` table (migration 0016, with
 migration 0020 adding the max-runtime cap and reason) and is deleted

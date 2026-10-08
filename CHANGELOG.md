@@ -49,14 +49,14 @@ summarised from README "Status".
   longer leaves the record running: the in-memory timed-out intent is
   kept, so the next reconcile records the outcome without signalling a
   process that is already gone. `JOB_MAX_RUNTIME` is held as whole
-  seconds, so a positive value under one second is rejected at startup
-  instead of truncating to 0 (= the 24 h default), and a bare integer too
-  large to represent is clamped instead of overflowing the seconds
-  conversion. A synchronous exec with a negative `max_runtime_secs` now
-  answers `400` (it was accepted and ignored), while a non-negative value
-  on a synchronous exec is still ignored. A job whose `pid` file never
-  appears is retried on a backoff, so it no longer costs the pid wait on
-  every reconcile pass.
+  seconds, so a positive fractional duration rounds up (`500ms` is 1 s,
+  not a 0 that reads as the default, and `1500ms` is 2 s, not a
+  truncated 1 s) and a bare integer too large to represent is clamped
+  instead of overflowing the seconds conversion. A synchronous exec with
+  a negative `max_runtime_secs` now answers `400` (it was accepted and
+  ignored), while a non-negative value on a synchronous exec is still
+  ignored. A job whose `pid` file never appears is retried on a backoff,
+  so it no longer costs the pid wait on every reconcile pass.
 
 - **Conformance N1 probes a configurable LAN target, and I3 no longer
   depends on a stale apt index.** N1 hardcoded `10.0.0.203:443` as the

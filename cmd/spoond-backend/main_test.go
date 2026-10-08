@@ -80,10 +80,11 @@ func TestEnvDurationOrZero(t *testing.T) {
 
 // TestParseJobMaxRuntime pins JOB_MAX_RUNTIME parsing (spoond-wb5): empty
 // or malformed is 0 (the 24 h default), a negative value disables the
-// cap, a Go duration or whole seconds both work, a value under one second
-// is rejected in either direction (the cap is held as whole seconds, so it
-// would truncate to 0 = the default), and a bare integer too large to
-// represent is clamped rather than overflowing the seconds conversion.
+// cap, a Go duration or whole seconds both work, a fractional duration is
+// kept as parsed (jobMaxRuntimeSecs rounds it up to whole seconds), a
+// negative value under one second is rejected (it would round to 0 = the
+// default rather than "off"), and a bare integer too large to represent
+// is clamped rather than overflowing the seconds conversion.
 func TestParseJobMaxRuntime(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -97,8 +98,8 @@ func TestParseJobMaxRuntime(t *testing.T) {
 		{"-1", -time.Second, false},
 		{"-5m", -5 * time.Minute, false},
 		{"-500ms", 0, true},
-		{"500ms", 0, true},
-		{"1ms", 0, true},
+		{"500ms", 500 * time.Millisecond, false},
+		{"1500ms", 1500 * time.Millisecond, false},
 		{"not-a-duration", 0, false},
 		// A bare integer above the ~9.2e9 seconds a Duration can hold is
 		// clamped, not wrapped negative (which would read as off).
@@ -114,6 +115,31 @@ func TestParseJobMaxRuntime(t *testing.T) {
 		}
 		if tc.in == "9223372036854775807" && got < 0 {
 			t.Fatalf("parseJobMaxRuntime(%q) = %s, want a non-negative clamp", tc.in, got)
+		}
+	}
+}
+
+// TestJobMaxRuntimeSecs pins the whole-second conversion (spoond-wb5): a
+// positive fractional duration rounds up to the next whole second (so a
+// sub-second cap is 1 s, not 0 = the default, and 1500ms is 2 s, not a
+// truncated 1 s), zero stays the default, and a negative stays negative
+// (off).
+func TestJobMaxRuntimeSecs(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want int64
+	}{
+		{0, 0},
+		{500 * time.Millisecond, 1},
+		{time.Second, 1},
+		{1500 * time.Millisecond, 2},
+		{24 * time.Hour, 86400},
+		{-time.Second, -1},
+		{-5 * time.Minute, -300},
+	}
+	for _, tc := range cases {
+		if got := jobMaxRuntimeSecs(tc.in); got != tc.want {
+			t.Fatalf("jobMaxRuntimeSecs(%s) = %d, want %d", tc.in, got, tc.want)
 		}
 	}
 }

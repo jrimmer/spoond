@@ -224,13 +224,12 @@ func secondsDuration(secs int64) time.Duration {
 }
 
 // jobMaxRuntime returns the host's effective JOB_MAX_RUNTIME. 0 uses the
-// 24 h default; a negative value disables the cap. The configured cap is
-// held as whole seconds, and the startup parser rejects a positive value
-// under a second so a short cap can never truncate to 0 (= the default);
-// a fractional Go duration is therefore already rounded down to whole
-// seconds at startup. A sub-second effective cap is rounded up when it
-// is stored on the record, so it never reads as uncapped. An oversized
-// value is clamped instead of being allowed to wrap negative.
+// 24 h default; a negative value disables the cap. The startup parser
+// holds the cap as whole seconds, rounding a positive fractional Go
+// duration up (so 500ms is 1 s, not a 0 that reads as the default, and
+// 1500ms is 2 s, not a truncated 1 s), so the returned duration is always
+// whole seconds. An oversized value is clamped instead of being allowed
+// to wrap negative.
 func (s *Service) jobMaxRuntime() time.Duration {
 	secs := s.cfg.JobMaxRuntimeSecs
 	if secs == 0 {
@@ -695,6 +694,7 @@ func (s *Service) finishJob(ctx context.Context, job store.JobRow, exitCode int,
 	if err != nil {
 		return err
 	}
+	s.clearJobTimingOut(job.JobID)
 	if !changed {
 		return nil // another path already finished it
 	}
