@@ -462,8 +462,18 @@ func TestAdmitWaitDrainAnswersQueued(t *testing.T) {
 
 	res := startCreate(t, h, context.Background(), "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
 	waitDepth(t, svc, 1)
-	go func() { _, _ = svc.drain(context.Background()) }()
+	// Wait for the drain before the test returns: it still touches the
+	// build storage during its quiesce/pause work, and a goroutine that
+	// outlives the test races t.TempDir's cleanup ("directory not
+	// empty").
+	drainDone := make(chan struct{})
+	go func() { defer close(drainDone); _, _ = svc.drain(context.Background()) }()
 	r := waitResult(t, res)
+	select {
+	case <-drainDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain did not return after answering the queued create")
+	}
 	if r.code != http.StatusServiceUnavailable {
 		t.Fatalf("drained queued create = %d, want 503 (%v)", r.code, r.body)
 	}
