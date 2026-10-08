@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1260,4 +1261,224 @@ func TestJobReconcileDoesNotMarkSuspendedLeaseActive(t *testing.T) {
 	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
 	svc.reconcileJobs(context.Background())
 	waitJobState(t, db, jobID, "exited", 2*time.Second)
+}
+
+// TestJobMaxRuntimeKillRetriesAfterFailure: if the cap's kill fails, the
+// record must stay running (not be closed as timed_out) so the next
+// reconcile retries, otherwise ListRunningJobs never returns it and the
+// running-job cap stops counting it — the leak the cap exists to close
+// (spoond-wb5 B1).
+func TestJobMaxRuntimeKillRetriesAfterFailure(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1031)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+	writeJobFile(t, sub, sandbox, jobID, "stderr", "still here\n")
+
+	// The first kill fails at the substrate.
+	var kills atomic.Int32
+	sub.SetExecHandler(func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult {
+		if len(req.Args) == 6 && req.Args[0] == "/bin/sh" && strings.HasPrefix(req.Args[2], "kill ") {
+			if kills.Add(1) == 1 {
+				return substrate.ExecResult{Stderr: "envd hiccup", ExitCode: 1}
+			}
+			return substrate.ExecResult{ExitCode: 0}
+		}
+		return substrate.ExecResult{Stdout: "ok\n"}
+	})
+	t.Cleanup(func() { sub.SetExecHandler(nil) })
+
+	base := time.Now()
+	svc.now = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+
+	svc.reconcileJobs(context.Background())
+	still, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if still.State != "running" {
+		t.Fatalf("job after a failed kill = %q, want running", still.State)
+	}
+	if still.Reason != "" {
+		t.Fatalf("job after a failed kill reason = %q, want empty", still.Reason)
+	}
+	if n, _ := db.CountRunningJobs(context.Background(), id); n != 1 {
+		t.Fatalf("running jobs after a failed kill = %d, want 1", n)
+	}
+
+	// The next reconcile retries and closes the record.
+	svc.reconcileJobs(context.Background())
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 124 {
+		t.Fatalf("exit code = %v, want 124", got.ExitCode)
+	}
+	if n, _ := db.CountRunningJobs(context.Background(), id); n != 0 {
+		t.Fatalf("running jobs after the retried kill = %d, want 0", n)
+	}
+}
+
+// TestJobMaxRuntimeSkipsBusyLease: a lease busy with an in-flight pause
+// (Suspended still false while the snapshot is written) must be skipped
+// by the cap, since the substrate cannot be signalled mid-pause and a
+// kill would be captured in the snapshot. Once the lease is idle again
+// the next reconcile kills the job (spoond-wb5 B1).
+func TestJobMaxRuntimeSkipsBusyLease(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1032)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+
+	// Mark the lease busy the way an in-flight pause does.
+	svc.store.mu.Lock()
+	svc.store.leases[id].busy = true
+	svc.store.mu.Unlock()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+
+	svc.reconcileJobs(context.Background())
+	still, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if still.State != "running" {
+		t.Fatalf("job on a busy lease = %q, want running", still.State)
+	}
+
+	svc.store.mu.Lock()
+	svc.store.leases[id].busy = false
+	svc.store.mu.Unlock()
+	svc.reconcileJobs(context.Background())
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+}
+
+// TestJobMaxRuntimeAppliesToPreUpgradeRecord: a running job recorded
+// before the cap existed (max_runtime_secs 0) is still capped by the
+// current JOB_MAX_RUNTIME; a 0 record is not "uncapped" once the host has
+// a cap (spoond-wb5 NIT).
+func TestJobMaxRuntimeAppliesToPreUpgradeRecord(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, lease, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	// A record as an older backend would have written it: no cap stored.
+	started := time.Now().Add(-2 * time.Hour)
+	if err := db.InsertJob(context.Background(), store.JobRow{
+		JobID: "j-pre-upgrade", LeaseID: id, Owner: "consumer-a", Cmd: "sleep infinity",
+		State: "running", StartedAt: started, Generation: lease.Generation,
+	}); err != nil {
+		t.Fatalf("insert pre-upgrade job: %v", err)
+	}
+	writeJobFile(t, sub, sandbox, "j-pre-upgrade", "pid", "4242\n")
+
+	svc.reconcileJobs(context.Background())
+	got := waitJobState(t, db, "j-pre-upgrade", "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 124 {
+		t.Fatalf("exit code = %v, want 124", got.ExitCode)
+	}
+}
+
+// TestJobMaxRuntimeDoesNotRereadLeaseFieldsUnlocked: the cap path must
+// read the sandbox id and generation under the store lock (via the
+// snapshotted continuity), not off a *Lease returned by lookupAny, which
+// races resume/restore. Run with -race (spoond-wb5 B2).
+func TestJobMaxRuntimeDoesNotRereadLeaseFieldsUnlocked(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1033)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	writeJobFile(t, sub, sandbox, jobID, "pid", "4242\n")
+
+	base := time.Now()
+	svc.now = func() time.Time { return base.Add(2 * time.Hour) }
+	t.Cleanup(func() { svc.now = time.Now })
+
+	// A concurrent writer mutating SandboxID/Generation while the cap
+	// path reads them: a data race would be caught by -race.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			svc.store.mu.Lock()
+			if l := svc.store.leases[id]; l != nil {
+				l.SandboxID = sandbox
+				l.Generation = 1
+			}
+			svc.store.mu.Unlock()
+		}
+	}()
+	svc.reconcileJobs(context.Background())
+	wg.Wait()
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+}
+
+// TestJobWatcherDoesNotRecordTimingOutExit: while the cap is killing a
+// job, the live watcher must not close the record as a plain exit — the
+// cap owns the outcome. An in-memory flag blocks finishJob in that
+// window, so the record stays running until the cap records timed_out
+// (spoond-wb5 B1).
+func TestJobWatcherDoesNotRecordTimingOutExit(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, sandbox := createJobLease(t, ts, svc)
+
+	p := fake.NewProcess(1034)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity"})
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	writeJobFile(t, sub, sandbox, jobID, "rc", "0\n")
+
+	// The cap flags the job, then the watcher sees the kill's signal exit.
+	svc.markJobTimingOut(jobID)
+	svc.finishJobFromGuest(context.Background(), row, sandbox, row.Generation)
+	still, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if still.State != "running" {
+		t.Fatalf("job while timing out = %q, want running", still.State)
+	}
+
+	// The cap closes it with its own reason and clears the flag.
+	svc.finishJobTimedOut(context.Background(), row, 124, "", sandbox, row.Generation)
+	got := waitJobState(t, db, jobID, "exited", 2*time.Second)
+	if got.Reason != "timed_out" {
+		t.Fatalf("reason = %q, want timed_out", got.Reason)
+	}
+	if svc.jobIsTimingOut(jobID) {
+		t.Fatalf("timing-out flag not cleared after the record closed")
+	}
+
+	// A later normal exit is no longer blocked.
+	if err := svc.finishJob(context.Background(), row, 0, "", sandbox, row.Generation); err != nil {
+		t.Fatalf("finishJob after timing out: %v", err)
+	}
 }

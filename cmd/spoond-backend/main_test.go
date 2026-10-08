@@ -77,3 +77,34 @@ func TestEnvDurationOrZero(t *testing.T) {
 		t.Fatalf("envDurationOrZero(malformed) = %s, want the default", got)
 	}
 }
+
+// TestParseJobMaxRuntime pins JOB_MAX_RUNTIME parsing (spoond-wb5): empty
+// or malformed is 0 (the 24 h default), a negative value disables the
+// cap, a Go duration or whole seconds both work, and a negative value
+// under a second is rejected because truncating it to 0 would silently
+// mean the default rather than "off".
+func TestParseJobMaxRuntime(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"0", 0, false},
+		{"24h", 24 * time.Hour, false},
+		{"3600", time.Hour, false},
+		{"-1", -time.Second, false},
+		{"-5m", -5 * time.Minute, false},
+		{"-500ms", 0, true},
+		{"not-a-duration", 0, false},
+	}
+	for _, tc := range cases {
+		got, err := parseJobMaxRuntime(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("parseJobMaxRuntime(%q) err = %v, wantErr %v", tc.in, err, tc.wantErr)
+		}
+		if !tc.wantErr && got != tc.want {
+			t.Fatalf("parseJobMaxRuntime(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+}

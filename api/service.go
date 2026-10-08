@@ -660,6 +660,15 @@ type Service struct {
 	// exactly those files if the guest wrapper did not. Lost on restart,
 	// when the wrapper's own cleanup is the only one left.
 	liveJobSecrets map[string][]string
+	// timingOutMu guards timingOut, the job ids the max-runtime cap is
+	// killing right now. The cap adds an id just before the kill and
+	// removes it once the record is closed, so the live watcher cannot
+	// record the kill's signal exit as a normal exit in that window. In
+	// memory only: a lost entry after a restart leaves the cap to close
+	// the record, and the watcher reads the guest rc if anything writes
+	// one.
+	timingOutMu sync.Mutex
+	timingOut   map[string]struct{}
 	// stagedExecSecrets counts leases with synchronous exec-time secrets
 	// staged right now (between stageSecrets and its deferred cleanup). A
 	// named snapshot save refuses while any is staged (2.7, #83): the
@@ -765,6 +774,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		bus:                       newEventBus(),
 		gcErr:                     newGCTracker(),
 		liveJobSecrets:            map[string][]string{},
+		timingOut:                 map[string]struct{}{},
 		stagedExecSecrets:         map[string]int{},
 		stagedExecSecretNames:     map[string][]string{},
 		pendingSecretRemovals:     map[string][]string{},

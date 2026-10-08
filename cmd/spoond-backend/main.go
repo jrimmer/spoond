@@ -300,6 +300,31 @@ func parseGuestDNS(v string) ([]string, error) {
 	return addrs, nil
 }
 
+// parseJobMaxRuntime parses JOB_MAX_RUNTIME: a Go duration or a whole
+// number of seconds (like envDurationOrZero). An empty or malformed
+// value is 0, the 24 h default; a negative value disables the cap. A
+// negative value smaller than one second is rejected: truncating it to
+// whole seconds would read as 0 = the default rather than "off"
+// (spoond-wb5).
+func parseJobMaxRuntime(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	var d time.Duration
+	if n, err := strconv.Atoi(v); err == nil {
+		d = time.Duration(n) * time.Second
+	} else if parsed, err := time.ParseDuration(v); err == nil {
+		d = parsed
+	} else {
+		return 0, nil
+	}
+	if d < 0 && d > -time.Second {
+		return 0, fmt.Errorf("%s is less than a second; a negative value disables the cap", v)
+	}
+	return d, nil
+}
+
 // envBoolOr accepts the usual off-words ("0", "false", "no") as false and
 // anything else as true, so a typo fails open to the default rather than
 // silently disabling a check.
@@ -507,6 +532,15 @@ func Main(args []string) int {
 		log.Fatalf("store: %v", err)
 	}
 
+	// Background jobs (spoond-wb5): JOB_MAX_RUNTIME is a Go duration or a
+	// whole number of seconds; 0 is the 24 h default and a negative value
+	// disables the cap. Reject a sub-second negative here so it cannot
+	// truncate to 0 and silently mean the default.
+	jobMaxRuntime, err := parseJobMaxRuntime(os.Getenv("JOB_MAX_RUNTIME"))
+	if err != nil {
+		log.Fatalf("JOB_MAX_RUNTIME: %v", err)
+	}
+
 	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
 		PoolSize:                  poolSize,
 		DefaultTTL:                defaultTTL,
@@ -547,7 +581,7 @@ func Main(args []string) int {
 		// value disables the cap.
 		MaxRunningJobsPerLease:   envIntOr("MAX_RUNNING_JOBS_PER_LEASE", api.DefaultMaxRunningJobsPerLease),
 		JobRetentionSecs:         int64(envIntOr("JOB_RETENTION_SECS", api.DefaultJobRetentionSecs)),
-		JobMaxRuntimeSecs:        int64(envDurationOrZero("JOB_MAX_RUNTIME", 0) / time.Second),
+		JobMaxRuntimeSecs:        int64(jobMaxRuntime / time.Second),
 		MaxAdmitWaitSecs:         maxAdmitWaitSecs,
 		SnapshotWriteConcurrency: snapshotWriteConcurrency,
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,
