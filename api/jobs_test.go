@@ -1044,6 +1044,63 @@ func TestJobShorterRequestedRuntimeWins(t *testing.T) {
 	}
 }
 
+// TestJobEffectiveRuntimeNoOverflow: a request far larger than any real
+// cap must be clamped to the host cap, never allowed to overflow the
+// seconds-to-Duration conversion into a negative (which would read as
+// uncapped and let `sleep infinity` run forever). This is the exact
+// spoond-wb5 regression: requested=MaxInt64 used to store 0 (= uncapped).
+func TestJobEffectiveRuntimeNoOverflow(t *testing.T) {
+	svc := &Service{cfg: ServiceConfig{JobMaxRuntimeSecs: 86400}}
+	cases := []struct {
+		name      string
+		requested int64
+		want      time.Duration
+	}{
+		{"huge request clamps to the host cap", 9223372036854775807, 86400 * time.Second},
+		{"just over the duration limit clamps to the host cap", int64(maxJobRuntimeDuration/time.Second) + 1, 86400 * time.Second},
+		{"max representable seconds clamps to the host cap", int64(maxJobRuntimeDuration / time.Second), 86400 * time.Second},
+		{"a shorter in-range request wins", 60, 60 * time.Second},
+		{"a longer in-range request is capped", 5000000000, 86400 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := svc.effectiveJobRuntime(tc.requested); got != tc.want {
+				t.Fatalf("effectiveJobRuntime(%d) = %v, want %v", tc.requested, got, tc.want)
+			}
+		})
+	}
+
+	// An uncapped host keeps a huge -- but representable -- request
+	// rather than wrapping it negative.
+	uncapped := &Service{cfg: ServiceConfig{JobMaxRuntimeSecs: -1}}
+	if got := uncapped.effectiveJobRuntime(60); got != 60*time.Second {
+		t.Fatalf("uncapped effectiveJobRuntime(60) = %v, want 1m", got)
+	}
+	if got := uncapped.effectiveJobRuntime(9223372036854775807); got <= 0 {
+		t.Fatalf("uncapped effectiveJobRuntime(MaxInt64) = %v, want a positive duration", got)
+	}
+}
+
+// TestJobHugeRequestStoresHostCap: end to end, a background job asking
+// for an absurd max_runtime_secs is recorded with the host cap, not 0.
+// A stored 0 means uncapped and lets the job run forever (spoond-wb5).
+func TestJobHugeRequestStoresHostCap(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	id, _, _ := createJobLease(t, ts, svc)
+	svc.cfg.JobMaxRuntimeSecs = 3600
+
+	p := fake.NewProcess(1026)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep infinity", "max_runtime_secs": 9223372036854775807})
+	row, err := db.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if row.MaxRuntimeSecs != 3600 {
+		t.Fatalf("huge request stored max_runtime_secs = %d, want the 3600 host cap", row.MaxRuntimeSecs)
+	}
+}
+
 // TestJobMaxRuntimeAppliesToSuspendedLease: reconcileJobs must not call
 // markActive on a suspended lease's running job — a job does not keep an
 // untouched suspended lease out of the held rules — and a job whose cap

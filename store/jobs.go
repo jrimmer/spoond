@@ -42,6 +42,11 @@ type JobRow struct {
 const jobColumns = `job_id, lease_id, owner, cmd, cwd, state, exit_code,
 	started_at, ended_at, stderr_tail, generation, max_runtime_secs, reason`
 
+// JobReasonTimedOut is the lease_jobs.reason recorded when the max
+// runtime, not the command, ended a job. It is also the label the API
+// and the job_exited event use (spoond-wb5).
+const JobReasonTimedOut = "timed_out"
+
 // InsertJob records a newly started background job. state must be
 // "running" and exit_code nil.
 func (db *DB) InsertJob(ctx context.Context, j JobRow) error {
@@ -90,9 +95,9 @@ WHERE job_id=? AND state='running'`,
 // job that ended on its own just before the cap won the race).
 func (db *DB) MarkJobTimedOut(ctx context.Context, jobID string, exitCode int, endedAt time.Time, stderrTail string) (bool, error) {
 	res, err := db.w.ExecContext(ctx, `
-UPDATE lease_jobs SET state='exited', exit_code=?, ended_at=?, stderr_tail=?, reason='timed_out'
+UPDATE lease_jobs SET state='exited', exit_code=?, ended_at=?, stderr_tail=?, reason=?
 WHERE job_id=? AND state='running'`,
-		exitCode, formatTime(endedAt), stderrTail, jobID)
+		exitCode, formatTime(endedAt), stderrTail, JobReasonTimedOut, jobID)
 	if err != nil {
 		return false, fmt.Errorf("store: mark job timed out %s: %w", jobID, err)
 	}
