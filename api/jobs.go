@@ -861,9 +861,9 @@ func (s *Service) killJobTimeout(ctx context.Context, job store.JobRow, sandboxI
 	// A previous pass already killed the process but could not record the
 	// outcome: do not signal an already-gone process, just record again.
 	if !s.jobIsTimingOut(job.JobID) {
-		// Back off a job whose pid file never appeared: the wrapper
-		// writes it within a second, so a job long past its cap without
-		// one should not spend the wait on every reconcile pass.
+		// Back off a job whose pid file never appeared: jobPID waits for
+		// it, so a job long past its cap without one should not spend that
+		// wait on every reconcile pass.
 		if !s.jobKillDue(job.JobID) {
 			return false
 		}
