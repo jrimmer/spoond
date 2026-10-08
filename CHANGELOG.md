@@ -120,6 +120,20 @@ summarised from README "Status".
   bounds long-deleted `builds` rows and lost job records. No API change;
   no store migration.
 
+- **A refresh mid-create no longer drops a lease's egress memo.**
+  `createSandbox` records the applied-egress memo before the lease
+  enters the store, so a `refreshPeers` landing in that gap pruned it as
+  a memo with no live lease, and the next pass re-applied egress once
+  needlessly (idempotent, never a wrong skip). The lease ids of creates
+  in progress are now tracked from before the memo is written until the
+  lease is registered or the create has cleaned up, and the prune skips
+  them (spoond-ob18). `DeleteBuildsPermanently` removes a build row and
+  its `build_refs` in one transaction guarded on the row still being
+  `deleted`; the deferred secret-removal and applied-egress guards now
+  test lease presence rather than liveness, so a suspended lease's
+  bookkeeping is not discarded; and the orphan reap's dry run logs the
+  quarantine restore it would do (spoond-ob18 NITs).
+
 - **`ORPHAN_REAP` modes now mean exactly what the docs say.** `off` is a
   hard stop: instead of still purging expired quarantined directories,
   it leaves the snapshot disk entirely alone. `dryrun` logs what it

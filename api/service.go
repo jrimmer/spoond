@@ -564,9 +564,16 @@ type Service struct {
 	// appliedEgress remembers the canonical JSON of the egress config
 	// last applied to each lease's sandbox, keyed by lease id, so
 	// refreshPeers only calls UpdateEgress on change.
+	// appliedMu guards appliedEgress and appliedInFlight.
 	appliedMu     sync.Mutex
 	appliedEgress map[string]string
-	log           *log.Logger
+	// appliedInFlight holds the ids of leases whose egress memo was just
+	// applied but whose lease is not yet in store.leases (a create records
+	// the memo before it registers the lease). refreshPeers' prune must
+	// not drop those memos in the gap, or the next pass re-applies egress
+	// once needlessly (spoond-ob18).
+	appliedInFlight map[string]struct{}
+	log             *log.Logger
 	// metrics (issue #20): service-level Prometheus metrics.
 	metrics *metrics.BackendMetrics
 	// draining is true while the admin drain is running (U10): pool
@@ -763,6 +770,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		diskCapacity:              statfsCapacity,
 		diskUsage:                 store.BuildDiskUsage,
 		appliedEgress:             map[string]string{},
+		appliedInFlight:           map[string]struct{}{},
 		createSecrets:             map[string]map[string]string{},
 		log:                       log.Default(),
 		probeEnabled:              true,
@@ -1174,6 +1182,26 @@ func (s *Service) forgetAppliedEgress(leaseID string) {
 	delete(s.appliedEgress, leaseID)
 }
 
+// beginAppliedEgress marks a lease as mid-create before createSandbox
+// records its egress memo. refreshPeers' prune skips in-flight ids, so a
+// refresh that lands in the gap between the egress record and the
+// store.leases insert does not drop the memo and force one redundant
+// UpdateEgress (spoond-ob18). endAppliedEgress clears the mark once the
+// lease is registered or the create has cleaned up.
+func (s *Service) beginAppliedEgress(leaseID string) {
+	s.appliedMu.Lock()
+	defer s.appliedMu.Unlock()
+	s.appliedInFlight[leaseID] = struct{}{}
+}
+
+// endAppliedEgress clears an in-flight egress hold. It is safe to call
+// more than once and on a lease that was never marked.
+func (s *Service) endAppliedEgress(leaseID string) {
+	s.appliedMu.Lock()
+	defer s.appliedMu.Unlock()
+	delete(s.appliedInFlight, leaseID)
+}
+
 // refreshPeers re-applies every live lease's egress config whose value
 // changed (U09): peer allowances move when leases expose ports, go live,
 // or are released, and each affected sandbox needs an UpdateEgress. The
@@ -1228,11 +1256,17 @@ func (s *Service) refreshPeers(ctx context.Context) {
 	// release clears its own entry, but a refresh that raced it (or a
 	// network-policy update that landed after the release) can have
 	// re-added one; this pass reaps it. The pool placeholder is kept:
-	// it never appears in the live store (spoond-966 follow-up).
+	// it never appears in the live store (spoond-966 follow-up), and a
+	// lease mid-create keeps its memo: it is recorded before the lease
+	// enters the store, and dropping it here would force one redundant
+	// UpdateEgress (spoond-ob18).
 	s.appliedMu.Lock()
 	s.store.mu.Lock()
 	for id := range s.appliedEgress {
 		if id == "pool" {
+			continue
+		}
+		if _, inflight := s.appliedInFlight[id]; inflight {
 			continue
 		}
 		if l := s.store.leases[id]; l == nil || l.released || !l.live() {
@@ -2281,6 +2315,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		return nil, err
 	}
 	lease.Class = class
+	// Hold the lease's egress memo in flight from before any sandbox is
+	// created until it is registered in the store (or the grant fails and
+	// cleans up). createSandbox records the memo before the lease row
+	// exists, and a refreshPeers landing in that gap must not prune it as
+	// a memo with no live lease (spoond-ob18).
+	s.beginAppliedEgress(lease.ID)
+	defer s.endAppliedEgress(lease.ID)
 
 	// Pool: pop the oldest entry for the image. The pool serves
 	// persistent and non-persistent grants alike. A pooled sandbox was
@@ -3292,6 +3333,10 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		return nil, "", err
 	}
 	lease.Class = class
+	// Hold the clone's egress memo in flight until it is in the store,
+	// so a refresh mid-create does not prune it (spoond-ob18).
+	s.beginAppliedEgress(lease.ID)
+	defer s.endAppliedEgress(lease.ID)
 	sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 	if err != nil {
 		return nil, "", err
@@ -3437,8 +3482,13 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			return rollback(err)
 		}
 		lease.Class = class
+		// Hold this child's egress memo in flight until it is in the store
+		// (or rolled back), so a refresh mid-create does not prune it
+		// (spoond-ob18).
+		s.beginAppliedEgress(lease.ID)
 		sb, err := s.createSandbox(ctx, img, b, false, "", lease)
 		if err != nil {
+			s.endAppliedEgress(lease.ID)
 			return rollback(err)
 		}
 		lease.SandboxID = sb.ID
@@ -3451,6 +3501,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
+		s.endAppliedEgress(lease.ID)
 		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
 		created = append(created, lease)
 	}
@@ -3697,8 +3748,11 @@ func (s *Service) setNetwork(ctx context.Context, owner, id, policy string, allo
 	// landed meanwhile. Do not re-add the memo for a lease that is gone:
 	// that would resurrect the entry the release cleared (spoond-966
 	// follow-up). The lease itself is still returned (the caller set the
-	// policy before the release), but a released lease gets no memo.
-	if s.lookupLive(l.ID) != nil {
+	// policy before the release), but a released lease gets no memo. A
+	// suspended lease still gets one: its memo is re-checked when it
+	// resumes, and present (not live) is the bookkeeping guard
+	// (spoond-ob18).
+	if s.lookupPresent(l.ID) != nil {
 		s.recordAppliedEgress(l.ID, eg)
 	}
 	s.refreshPeersAsync(ctx)
@@ -3867,14 +3921,18 @@ func (s *Service) lookup(owner, id string) *Lease {
 	return l
 }
 
-// lookupLive returns a lease by id when it is still live and unreleased.
-// Used by paths that must not write per-lease state after a release
-// cleared it (spoond-966 follow-up).
-func (s *Service) lookupLive(id string) *Lease {
+// lookupPresent returns a lease by id when it is still in the store and
+// unreleased, regardless of whether its sandbox is live. Paths that
+// guard per-lease bookkeeping (the egress memo, deferred secret
+// removals) only need presence: release clears that bookkeeping under
+// the same lock that marks the lease released, so a lease that is gone
+// can never have stale state re-added, and a suspended lease still owns
+// the bookkeeping that resumes with it (spoond-ob18).
+func (s *Service) lookupPresent(id string) *Lease {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	l := s.store.leases[id]
-	if l == nil || l.released || !l.live() {
+	if l == nil || l.released {
 		return nil
 	}
 	return l

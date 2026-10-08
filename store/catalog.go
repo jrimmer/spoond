@@ -384,18 +384,42 @@ func (db *DB) DeleteBuildsPermanently(ctx context.Context, cutoff time.Time) ([]
 
 	var removed []string
 	for _, id := range stale {
-		if _, err := db.w.ExecContext(ctx, `DELETE FROM build_refs WHERE build_id = ? AND EXISTS (SELECT 1 FROM builds WHERE build_id = ? AND state = 'deleted')`, id, id); err != nil {
-			return removed, fmt.Errorf("store: delete build refs %s: %w", id, err)
-		}
-		res, err := db.w.ExecContext(ctx, `DELETE FROM builds WHERE build_id = ? AND state = 'deleted'`, id)
+		ok, err := db.deleteBuildPermanently(ctx, id)
 		if err != nil {
-			return removed, fmt.Errorf("store: delete build %s: %w", id, err)
+			return removed, err
 		}
-		if n, err := res.RowsAffected(); err == nil && n > 0 {
+		if ok {
 			removed = append(removed, id)
 		}
 	}
 	return removed, nil
+}
+
+// deleteBuildPermanently removes one already-deleted build row and its
+// build_refs rows in a single transaction, guarded on the row still
+// being state deleted. It reports whether the row was removed. The
+// shared transaction means a crash cannot leave a deleted row without
+// its refs or vice versa, and the state guard means a build that was
+// un-deleted between the scan and the delete keeps both (spoond-ob18).
+func (db *DB) deleteBuildPermanently(ctx context.Context, id string) (bool, error) {
+	tx, err := db.w.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("store: begin delete build %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM build_refs WHERE build_id = ? AND EXISTS (SELECT 1 FROM builds WHERE build_id = ? AND state = 'deleted')`, id, id); err != nil {
+		tx.Rollback()
+		return false, fmt.Errorf("store: delete build refs %s: %w", id, err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM builds WHERE build_id = ? AND state = 'deleted'`, id)
+	if err != nil {
+		tx.Rollback()
+		return false, fmt.Errorf("store: delete build %s: %w", id, err)
+	}
+	n, rowsErr := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("store: commit delete build %s: %w", id, err)
+	}
+	return rowsErr == nil && n > 0, nil
 }
 
 // UpdateBuildSize records a build's measured disk size (U11 disk

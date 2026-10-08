@@ -483,8 +483,10 @@ func (s *Service) deferSecretRemoval(leaseID string, names []string) {
 	// marks the lease released under the store lock before it clears the
 	// pending list under this same secretsMu, so a defer that observes the
 	// release, or wins the lock first and is then cleared, can never leave
-	// a stale key behind.
-	if s.lookupLive(leaseID) == nil {
+	// a stale key behind. The guard needs the lease only to be present,
+	// not live: a suspended lease still has a sandbox-less secret set that
+	// drains on resume (spoond-ob18).
+	if s.lookupPresent(leaseID) == nil {
 		return
 	}
 	s.pendingSecretRemovals[leaseID] = append(s.pendingSecretRemovals[leaseID], names...)

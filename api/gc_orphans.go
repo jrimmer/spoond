@@ -375,20 +375,24 @@ func (s *Service) reapOrphans(ctx context.Context) (reaped int, freed int64) {
 	s.orphanHeaderClosure(all, needed)
 
 	// Restore any quarantined directory a later pass needs again, before
-	// considering the rest for deletion.
-	if mode == orphanReapQuarantine {
-		for _, d := range quarantined {
-			if !needed[d.name] {
-				continue
-			}
-			dest := filepath.Join(root, d.name)
-			if err := os.Rename(d.path, dest); err != nil {
-				s.log.Printf("gc: restore quarantined %s: %v", d.name, err)
-				continue
-			}
-			_ = os.Remove(filepath.Join(dest, orphanQuarantineMarker))
-			s.log.Printf("gc: restored quarantined build %s", d.name)
+	// considering the rest for deletion. dryrun logs what it would
+	// restore and changes nothing (it reaches this loop too; only off
+	// returned above) (spoond-ob18).
+	for _, d := range quarantined {
+		if !needed[d.name] {
+			continue
 		}
+		if mode == orphanReapDryRun {
+			s.log.Printf("gc: would restore quarantined build %s", d.name)
+			continue
+		}
+		dest := filepath.Join(root, d.name)
+		if err := os.Rename(d.path, dest); err != nil {
+			s.log.Printf("gc: restore quarantined %s: %v", d.name, err)
+			continue
+		}
+		_ = os.Remove(filepath.Join(dest, orphanQuarantineMarker))
+		s.log.Printf("gc: restored quarantined build %s", d.name)
 	}
 
 	// Quarantine (or, in dry run, log) each unneeded storage directory.
@@ -409,10 +413,11 @@ func (s *Service) reapOrphans(ctx context.Context) (reaped int, freed int64) {
 	}
 
 	// Delete quarantined directories that have waited out the quarantine
-	// period. Only quarantine mode gets here (off returns above, dryrun
-	// logs below); a needed quarantined directory is still spared. off
-	// never reaches this path, so an expired quarantine waits for a pass
-	// that runs in a mode allowed to purge it (spoond-ob18).
+	// period. Both dryrun and quarantine reach this loop (off returned
+	// above): dryrun logs what it would purge, quarantine purges. A
+	// needed quarantined directory is still spared. off never reaches
+	// here, so an expired quarantine waits for a pass that runs in a mode
+	// allowed to purge it (spoond-ob18).
 	qage := orphanQuarantineAge()
 	for _, d := range quarantined {
 		if needed[d.name] {
