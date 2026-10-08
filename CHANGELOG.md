@@ -152,8 +152,10 @@ summarised from README "Status".
   host-local veth IPs and host services listening on `0.0.0.0`/`::`, on
   both the CIDR and the domain path. The set is now recomputed from the
   live interfaces at most every 3 s, covers IPv4 (including
-  IPv4-mapped IPv6) and IPv6, and keeps loopback and link-local refused;
-  the domain path's resolved-IP check consults it too. Bundled with 2.9
+  IPv4-mapped IPv6, and a resolved-IPv6 zone id is stripped) and IPv6,
+  and keeps loopback and link-local refused; a failure to read the
+  interfaces fails closed, and the domain path's resolved-IP check
+  consults the same guard too. Bundled with 2.9
   (orchestrator swap first).
 
 - **The exec and stream request bodies are bounded (spoond-mrbr).**
