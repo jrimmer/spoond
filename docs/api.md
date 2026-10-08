@@ -1013,6 +1013,14 @@ can run after its last checkpoint. `recovered_from` and
 taken; the `spoond_checkpoint_pause_seconds` metric shows how long each
 checkpoint pauses its guest.
 
+A checkpoint, pause, resume or restore that is still running when its
+lease is released does not resurrect the lease: the released lease's row
+is not written back, the sandbox the operation created is stopped, and
+the build it wrote (a checkpoint or pause build) is left unreferenced for
+the snapshot GC to reclaim (spoond-775). A backend start drops any
+`state=running` row from such a race that has no in-memory lease and no
+sandbox on the host.
+
 ### `POST /api/leases/{id}/crash-test` — crash a lease and recover it
 
 **For testing crash recovery.** The route exists only when the host
