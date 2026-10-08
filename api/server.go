@@ -1543,7 +1543,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		case errNotFound:
 			writeError(w, http.StatusNotFound, "lease not found")
 		case errSuspended:
-			writeLeaseSuspended(w)
+			s.writeLeaseSuspendedID(w, id)
 		default:
 			s.svc.log.Printf("network %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "network update failed")
@@ -1847,7 +1847,7 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease.Suspended {
-		writeLeaseSuspended(w)
+		writeLeaseSuspended(w, lease)
 		return
 	}
 	model := req.Model
@@ -2150,7 +2150,7 @@ func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease.Suspended {
-		writeLeaseSuspended(w)
+		writeLeaseSuspended(w, lease)
 		return
 	}
 	const probe = `set -e
@@ -2393,7 +2393,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errSuspended):
-			writeLeaseSuspended(w)
+			s.writeLeaseSuspendedID(w, id)
 		case errors.Is(err, errLeaseBusy):
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errLeaseReleased):

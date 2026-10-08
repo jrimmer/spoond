@@ -49,11 +49,28 @@ func writeLeaseLostMessage(w http.ResponseWriter, msg string) {
 const leaseSuspendedMessage = "lease is suspended; resume it first"
 
 // writeLeaseSuspended answers 409 lease_suspended for a suspended lease.
-func writeLeaseSuspended(w http.ResponseWriter) {
-	writeJSON(w, http.StatusConflict, map[string]string{
+// When l is non-nil and the suspension was automatic, the body also
+// carries "reason" (idle|idle_suspend|hold_lapsed|pressure|preempt) so
+// a client learns why it was suspended without reading the event stream
+// (#145 D6). A hand or drain suspend has no reason and the field is
+// omitted.
+func writeLeaseSuspended(w http.ResponseWriter, l *Lease) {
+	body := map[string]string{
 		"error": leaseSuspendedMessage,
 		"code":  "lease_suspended",
-	})
+	}
+	if l != nil && l.SuspendReason != "" {
+		body["reason"] = l.SuspendReason
+	}
+	writeJSON(w, http.StatusConflict, body)
+}
+
+// writeLeaseSuspendedID answers a suspended-lease 409 for a caller that
+// has only the lease id (the service returned errSuspended): it looks
+// the lease up for its suspension reason. An unknown lease still gets
+// the same 409 with no reason, matching the other refusal sites.
+func (s *Server) writeLeaseSuspendedID(w http.ResponseWriter, id string) {
+	writeLeaseSuspended(w, s.svc.lookupAny(id))
 }
 
 // lostErr returns the 410 lease_lost error for a lease already lost, or

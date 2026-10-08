@@ -66,7 +66,7 @@ func (h *leaseHeartbeat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease.Suspended {
-		writeLeaseSuspended(w)
+		writeLeaseSuspended(w, lease)
 		return
 	}
 	if h.claimWrite(leaseID) {

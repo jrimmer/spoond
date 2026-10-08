@@ -243,13 +243,17 @@ func (s *Service) eventVisible(r *http.Request, ev *LeaseEvent) bool {
 // stable order; detail and owner may be empty.
 func marshalLeaseEvent(ev *LeaseEvent) string {
 	b, _ := json.Marshal(struct {
-		Seq     uint64         `json:"seq"`
-		Epoch   string         `json:"epoch"`
-		At      string         `json:"at"`
-		LeaseID string         `json:"lease_id"`
-		Owner   string         `json:"owner"`
-		Type    LeaseEventType `json:"type"`
-		Detail  string         `json:"detail"`
-	}{ev.Seq, ev.Epoch, ev.At.Format(time.RFC3339Nano), ev.LeaseID, ev.Owner, ev.Type, ev.Detail})
+		Seq        uint64         `json:"seq"`
+		Epoch      string         `json:"epoch"`
+		At         string         `json:"at"`
+		LeaseID    string         `json:"lease_id"`
+		Owner      string         `json:"owner"`
+		Type       LeaseEventType `json:"type"`
+		Detail     string         `json:"detail"`
+		Reason     string         `json:"reason,omitempty"`
+		PolicyStep string         `json:"policy_step,omitempty"`
+		BuildID    string         `json:"build_id,omitempty"`
+	}{ev.Seq, ev.Epoch, ev.At.Format(time.RFC3339Nano), ev.LeaseID, ev.Owner, ev.Type, ev.Detail,
+		ev.Reason, ev.PolicyStep, ev.BuildID})
 	return string(b)
 }
