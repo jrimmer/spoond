@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
@@ -833,6 +834,43 @@ var maxExecTimeout = func() int {
 	return 300 // seconds
 }()
 
+// maxExecBodyBytes caps the JSON body of a POST exec, and the first
+// WebSocket frame of a stream, which carries the same argv/env/secrets
+// shape. One authenticated caller must not be able to make the server
+// hold an arbitrarily large command or secret set in memory. The cap is
+// generous next to the secrets limit (64 KiB total) and leaves room for
+// a large cmd and env; the guest itself rejects an over-long argv
+// string with E2BIG ("Argument list too long"), so this only bounds the
+// host's memory. Overridable via MAX_EXEC_BODY_BYTES.
+var maxExecBodyBytes int64 = func() int64 {
+	if v := os.Getenv("MAX_EXEC_BODY_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 8 << 20 // 8 MiB
+}()
+
+// readExecBody reads a request body under maxExecBodyBytes, answering a
+// JSON 413 when the cap trips and a JSON 400 for any other read error.
+// The caller reads the body before ensureRunning so an oversize request
+// cannot resume an idle-suspended lease.
+func readExecBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxExecBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("request body exceeds the %d byte limit", maxExecBodyBytes))
+			return nil, false
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return nil, false
+	}
+	return body, true
+}
+
 // ownerFrom extracts the authenticated owner from the request context.
 func ownerFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxOwnerKey{}).(string)
@@ -1278,6 +1316,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
+	// The first message is the exec request; bound it to the same size as
+	// a POST exec body so a client cannot make the server buffer an
+	// unbounded argv/env/secrets frame.
+	ws.SetReadLimit(maxExecBodyBytes)
 
 	// First message: the exec request.
 	mt, payload, err := ws.ReadMessage()
@@ -1939,6 +1981,13 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(id) // exec is activity for the idle sweeper
+	// Bound and read the body before the lease is resumed: an oversize
+	// request must be refused with 413 without waking an idle-suspended
+	// lease, and the server must not hold an unbounded command in memory.
+	body, ok := readExecBody(w, r)
+	if !ok {
+		return
+	}
 	// A suspended workspace-backed lease has no running sandbox. One that
 	// idle_suspend suspended resumes first through the normal resume path
 	// (2.5, #129 part 2); any other suspension keeps the 409.
@@ -1968,7 +2017,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// only, never stored, logged or returned.
 		Secrets map[string]string `json:"secrets"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
