@@ -16,13 +16,13 @@ summarised from README "Status".
   (spoond-9gm2).** A `suspended` event now carries structured fields
   beside its human detail — `reason`
   (`idle`|`idle_suspend`|`hold_lapsed`|`pressure`|`preempt`),
-  `policy_step` (the pressure order's step name, empty until that order
-  names steps) and `build_id` (the pause build) — and the lease object
+  `policy_step` (the pressure order's step name; the order landed in
+  spoond-solj) and `build_id` (the pause build) — and the lease object
   gains `suspend_reason`, `suspend_policy_step`, `suspend_build_id` and
   `suspended_at` (additive, omitted while unset). Every automatic
   suspend names it: the plain `IDLE_TIMEOUT_SECS` sweep (`idle`), a
   lease's own `idle_suspend` (`idle_suspend`), a lapsed hold
-  (`hold_lapsed`), held rule 1 shortened under pressure (`pressure`) and
+  (`hold_lapsed`), the ordered memory-pressure reclaim (`pressure`) and
   preemption (`preempt`). A hand or drain suspend carries none of the
   four — it has no automatic reason. A `409`
   `lease_suspended` body adds `"reason"` when the suspension was
@@ -90,6 +90,30 @@ summarised from README "Status".
   `204` to `200` with `{"removed": {user, leases, jobs, snapshots,
   kept_builds}}`, so a caller can see exactly what was cleaned up
   (spoond-q4j).
+
+### Changed
+
+- **Memory pressure reclaims in one ordered policy, shared with
+  preemption (spoond-solj, #145 D1).** Held rule 4 no longer shortens
+  every held lease's idle threshold under pressure. `PRESSURE_ORDER`
+  (default `burst-unheld,burst-held,guaranteed-unheld-idle`) names the
+  reclaim steps the sweep runs when the node is healthy but free
+  hugepages cannot host a default 1 GiB lease; `PRESSURE_IDLE_SECS`
+  (default 1800) is the `guaranteed-unheld-idle` threshold. Within a
+  step the order is lowest `priority`, then newest, then the owner
+  furthest over its guarantee, then id. A guaranteed *held* lease is
+  never taken by memory pressure. A guaranteed admission lacking room
+  preempts through the same order. Each pause is lossless, runs one at a
+  time through the snapshot limiter, respects
+  `PREEMPT_DISK_FLOOR_PCT`, re-measures after every pause and stops as
+  soon as the pressure clears. Each pause records reason `pressure`
+  (sweep) or `preempt` (admission) and its step in the lease's
+  `suspend_policy_step` and the `suspended` event. Disk pressure no
+  longer shortens or reclaims anything (disk is rule 5 and the kept
+  quota); `PRESSURE_DISK_FREE_PCT` and `PRESSURE_HELD_IDLE_SECS` are
+  gone, and an unknown `PRESSURE_ORDER` step is a fatal configuration
+  error at startup. See [docs/operations.md](docs/operations.md) and
+  [docs/api.md](docs/api.md).
 
 ### Fixed
 

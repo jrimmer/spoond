@@ -202,14 +202,20 @@ default) and is stored with the lease.
 When a **guaranteed** admission (create, fork, clone, resume, warm or
 cold restart, restore, crash recovery, undrain) cannot get its
 hugepages — free hugepages less the burst reserve is smaller than the
-lease's `memory_mb` — spoond reclaims them from burst leases. It
-suspends them through the normal pause path (a snapshot build; the
-memory continues on resume, so the generation does **not** change), in
-this order: lowest `priority`, then newest, then the owner furthest
-over its `guaranteed_mib`. It stops as soon as enough memory is free and
-admits the guaranteed lease. Preemption is serialised: one preempting
-admission at a time, so two guaranteed creates cannot each preempt for
-themselves.
+lease's `memory_mb` — spoond reclaims them by suspending leases through
+the same ordered reclaim policy the sweep uses under memory pressure
+(`PRESSURE_ORDER`, see [operations.md](operations.md)). It pauses them
+through the normal pause path (a snapshot build; the memory continues
+on resume, so the generation does **not** change); the paused lease's
+`suspended` event names the step it was taken from in
+`suspend_policy_step` (`burst-unheld`, `burst-held`, or, for an unheld
+guaranteed lease idle past `PRESSURE_IDLE_SECS`,
+`guaranteed-unheld-idle`). A guaranteed held lease is never preempted.
+Within a step the order is lowest `priority`, then newest, then the
+owner furthest over its `guaranteed_mib`. It stops as soon as enough
+memory is free and admits the guaranteed lease. Preemption is
+serialised: one preempting admission at a time, so two guaranteed
+creates cannot each preempt for themselves.
 
 A preempted lease is marked `preempted: true` in `GET /api/leases` and
 `GET /api/leases/{id}`, keeps its `resume_build_id`, and emits a
@@ -222,7 +228,7 @@ emitted with detail `after preemption`. A client's explicit resume of a
 preempted lease takes the same path; until it succeeds the lease stays
 suspended.
 
-Preemption has a disk floor: it pauses a burst lease only while the
+Preemption has a disk floor: it pauses a lease only while the
 snapshot disk stays above `PREEMPT_DISK_FLOOR_PCT` (default 15) after
 the pause, estimated from the lease's `memory_mb`. When no candidate
 clears that floor, the guaranteed admission answers `503`
@@ -310,7 +316,7 @@ progress.
 A persistent lease may be suspended after a period without activity —
 its own `idle_suspend` (or the host default `IDLE_SUSPEND_DEFAULT_SECS`,
 both `0` = never). The plain `IDLE_TIMEOUT_SECS` sweep and the
-held-lease idle rule (rule 1, and rule 4's pressure shortening) apply to
+held-lease idle rule (rule 1) apply to
 leases whose effective `idle_suspend` is `0`; a lease with a non-zero
 value is reclaimed on that value alone. The idle sweep suspends it
 through the normal pause path: memory and hugepages are freed into a
@@ -361,9 +367,11 @@ held-lease action — `last_action` (`"rule/action"`, e.g.
 A suspended lease whose suspension was automatic also carries its
 structured suspension facts (#145 D6): `suspend_reason` (`idle` =
 the plain `IDLE_TIMEOUT_SECS` sweep, `idle_suspend` = the lease's own
-threshold, `hold_lapsed`, `pressure` = held rule 1 shortened under
-pressure, `preempt`), `suspend_policy_step` (the pressure order's step
-name, omitted until that order names steps), `suspend_build_id` (the
+threshold, `hold_lapsed`, `pressure` = the ordered memory-pressure
+reclaim (rule 4; see [operations.md](operations.md)), `preempt`),
+`suspend_policy_step` (the pressure order's step name, e.g.
+`burst-unheld`, `burst-held` or `guaranteed-unheld-idle`, omitted when
+none ordered the suspend), `suspend_build_id` (the
 pause build) and `suspended_at` (RFC 3339). A hand or drain suspend has
 no automatic reason and carries none of the four; the pause build is
 still `resume_build_id` and `last_action`/`last_action_at` name the
@@ -1375,9 +1383,11 @@ data: {"seq":43,…,"type":"suspended","detail":"paused into build 9e1f2ab3…",
 
 `reason` is one of `idle` (the plain `IDLE_TIMEOUT_SECS` sweep),
 `idle_suspend` (the lease's own threshold), `hold_lapsed`, `pressure`
-(held rule 1 shortened under pressure; from the pressure order on, its
-steps) or `preempt`. `policy_step` is the pressure order's step name,
-empty until that order names steps. `build_id` is the pause build the
+(the ordered memory-pressure reclaim, rule 4) or `preempt`. `policy_step`
+is the pressure order's step name that ordered the suspend
+(`burst-unheld`, `burst-held` or `guaranteed-unheld-idle` for the sweep;
+the step the victim was taken from for a `preempt`), omitted when
+none did. `build_id` is the pause build the
 suspend wrote. A suspend taken by hand or by the drain carries no
 `reason`, `policy_step` or `build_id` — it has no automatic reason, so
 the human `detail` still names the pause build.
@@ -1391,7 +1401,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 |---|---|---|
 | `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
 | `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule`, `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released` |
-| `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse, preemption) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
+| `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse, pressure reclaim, preemption) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |

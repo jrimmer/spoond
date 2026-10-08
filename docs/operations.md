@@ -987,16 +987,17 @@ the drain is never released by them.
 
 | # | Rule | Variable | Default | Meaning |
 |---|---|---|---|---|
-| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat, files, guest dial — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach). A lease whose own effective `idle_suspend` is `> 0` is reclaimed by the idle sweep on that value instead and is skipped by rule 1 (and by rule 4's shortening); see [Idle reclamation](#idle-reclamation) |
+| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat, files, guest dial — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach). A lease whose own effective `idle_suspend` is `> 0` is reclaimed by the idle sweep on that value instead and is skipped by rule 1; see [Idle reclamation](#idle-reclamation) |
 | 2 | Stale release | `HELD_SUSPENDED_RELEASE_SECS` | `604800` (7 d) | a held lease suspended by rule 1, 3 or 4 and untouched since for this long is **released** (deleted); the GC reclaims its builds |
 | 3 | Hold lapse | `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS` | `604800` (7 d), `2592000` (30 d) | an unrenewed hold lapses: a running lease is **suspended** (never released), stays held with no expiry, and rule 2 takes it from there |
-| 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a 1 GiB lease — no seeded image is smaller), rule 1 uses the shorter threshold |
+| 4 | Pressure | `PRESSURE_ORDER`, `PRESSURE_IDLE_SECS` | `burst-unheld,burst-held,guaranteed-unheld-idle`, `1800` (30 min) | when the node is healthy but free hugepages cannot host a default 1 GiB lease (no seeded image is smaller), the reclaim order is run: each named step's leases are **suspended** one at a time through the snapshot limiter, lowest priority then newest then the owner furthest over its guarantee, re-measuring after each and stopping as soon as the pressure clears. `burst-unheld`/`burst-held` cover burst leases without/with a holder; `guaranteed-unheld-idle` covers an unheld guaranteed lease idle for `PRESSURE_IDLE_SECS`. A **guaranteed held lease is never taken** by memory pressure. A lease with its own effective `idle_suspend`, or a running background job, is left to its own rule. Disk pressure no longer reclaims anything — disk is rule 5 and the kept quota |
 | 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage and `GC_DELETE=1`, held leases a rule suspended (1, 3 or 4), untouched since, are **released** oldest suspension first, at most one per sweep tick, until free space is above the recovery percentage; the GC runs first, at most every 5 minutes. A running lease is never released. With the dry-run GC the rule releases nothing, since nothing would be freed |
 | 6 | Scheduling | — | — | the rules run in the existing sweep loop and skip while the node is draining |
 
 Set `HELD_IDLE_TIMEOUT_SECS`, `HELD_SUSPENDED_RELEASE_SECS`,
-`PRESSURE_HELD_IDLE_SECS`, `PRESSURE_DISK_FREE_PCT` or
-`CRITICAL_DISK_FREE_PCT` to `0` to disable that rule. `HOLD_TTL_SECS`
+`PRESSURE_IDLE_SECS` or `CRITICAL_DISK_FREE_PCT` to `0` to disable that
+rule. `PRESSURE_ORDER` cannot be disabled; an unknown step is a fatal
+configuration error at startup. `HOLD_TTL_SECS`
 and `HOLD_TTL_MAX_SECS` cannot be disabled: `0` means their default, so
 every hold lapses eventually. Watch the rules with `journalctl -u spoond-backend | grep 'held
 lease'` and `spoond_held_actions_total` — a rising `critical{release}`
@@ -1073,7 +1074,7 @@ for the next use (the guest's memory continues on resume, so the
 generation does not change). Two mechanisms share the job:
 
 - **the plain sweep** (`IDLE_TIMEOUT_SECS`) and **held rule 1**
-  (`HELD_IDLE_TIMEOUT_SECS`, shortened under pressure by rule 4) apply to
+  (`HELD_IDLE_TIMEOUT_SECS`) apply to
   leases whose effective `idle_suspend` is `0` — today's behaviour;
 - **the idle sweep** (`#129` part 2) applies to a lease whose effective
   `idle_suspend` is `> 0`: the lease's own value, or the host default

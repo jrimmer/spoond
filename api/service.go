@@ -148,7 +148,7 @@ type Lease struct {
 	// SuspendReason, SuspendPolicyStep, SuspendBuildID and SuspendedAt
 	// record an automatic suspend (#145 D6): reason is one of
 	// idle|idle_suspend|hold_lapsed|pressure|preempt, policy step is the
-	// pressure order's step name ("" until it names steps), the build is
+	// pressure order's step name (#145 D1), the build is
 	// the pause build written and suspended_at is when. A hand or drain
 	// suspend carries none of them. Reported by the lease API as
 	// suspend_reason, suspend_policy_step, suspend_build_id and
@@ -1712,8 +1712,9 @@ func (s *Service) sweepExpired(ctx context.Context) {
 		}
 	}
 	s.store.mu.Unlock()
-	// Held-lease limits (2.1): hold expiry, stale release, idle suspend
-	// (shortened under pressure) and the critical-disk release — in that
+	// Held-lease limits (2.1): hold expiry, stale release, idle suspend,
+	// the ordered memory-pressure reclaim (#145 D1) and the critical-disk
+	// release — in that
 	// order. A hold expiring this tick clears the holder, so an
 	// already-expired TTL releases the lease in the second pass below;
 	// seenNow keeps leases already collected out of it.
@@ -2682,8 +2683,8 @@ const (
 // lease.suspended event, the lease's suspend_reason and the 409
 // lease_suspended body. idle is the plain IDLE_TIMEOUT_SECS sweep;
 // idle_suspend is the per-lease idle_suspend threshold; hold_lapsed is a
-// hold that expired; pressure is held rule 1 shortened under pressure
-// (rule 4) and, from the pressure order on, its eviction steps; preempt
+// hold that expired; pressure is the ordered memory-pressure reclaim
+// (rule 4, #145 D1) and, for preemption, the eviction step; preempt
 // is the resume queue reclaiming hugepages for a guaranteed admission.
 // A hand or drain suspend has no reason ("").
 const (
@@ -2696,8 +2697,8 @@ const (
 
 // suspendPolicy carries the structured suspension facts a pause stamps on
 // the lease and its suspended event (#145 D6): reason names why ("" for
-// a hand or drain suspend), policyStep the pressure order's step (""
-// until that order names steps).
+// a hand or drain suspend), policyStep the pressure order's step
+// (#145 D1).
 type suspendPolicy struct {
 	reason     string
 	policyStep string
@@ -4231,7 +4232,7 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 	// Structured suspension facts (#145 D6), additive and omitted while
 	// the lease is not suspended: why an automatic suspend happened
 	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
-	// order's step ("" until it names steps), the pause build and when.
+	// order's step (#145 D1), the pause build and when.
 	// A hand or drain suspend carries none of them and the fields stay
 	// off.
 	if l.SuspendReason != "" {

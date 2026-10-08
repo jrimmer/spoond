@@ -136,7 +136,7 @@ const (
 // LeaseEvent is one lease lifecycle change. Reason, PolicyStep and
 // BuildID carry the structured fields of a suspension (#145 D6): a
 // `suspended` event names why it happened, the pressure order's step
-// ("" until that order names steps) and the pause build it wrote. They
+// (#145 D1) and the pause build it wrote. They
 // are empty on every other event type and on a hand or drain suspend,
 // which has no automatic reason.
 type LeaseEvent struct {
