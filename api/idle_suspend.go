@@ -144,7 +144,7 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 		return true
 	}
 	if !s.svc.isIdleSuspended(l) {
-		writeError(w, http.StatusConflict, "lease is suspended; resume it first")
+		writeLeaseSuspended(w)
 		return false
 	}
 	if _, err := s.svc.resumeLease(r.Context(), l); err != nil {

@@ -41,6 +41,20 @@ func writeLeaseLostMessage(w http.ResponseWriter, msg string) {
 	})
 }
 
+// leaseSuspendedMessage is the single 409 body for a lease that is
+// suspended and must be resumed first. It carries code lease_suspended
+// so a client can tell it apart from the other 409 (busy, code
+// lease_busy) without matching the message text.
+const leaseSuspendedMessage = "lease is suspended; resume it first"
+
+// writeLeaseSuspended answers 409 lease_suspended for a suspended lease.
+func writeLeaseSuspended(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, map[string]string{
+		"error": leaseSuspendedMessage,
+		"code":  "lease_suspended",
+	})
+}
+
 // lostErr returns the 410 lease_lost error for a lease already lost, or
 // nil when the call may proceed. It is shared by the service operations
 // that touch a lease, so a lost lease is refused the same way everywhere

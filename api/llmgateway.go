@@ -150,7 +150,7 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease.Suspended {
-		http.Error(w, "lease is suspended; resume it first", http.StatusConflict)
+		writeLeaseSuspended(w)
 		return
 	}
 

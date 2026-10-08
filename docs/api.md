@@ -26,6 +26,28 @@ HTTP status. A lease runs on an E2B microVM (the substrate "sandbox");
 what that implies for a given field is noted below, and the platform
 itself is described in [substrate.md](substrate.md).
 
+Some errors carry a machine-readable `code` beside `error`, so a client
+can branch on the code instead of matching the message text. A `409` in
+particular means two different things depending on the code:
+
+| Status | `code` | Meaning |
+|---|---|---|
+| `400` | `bad_request` | malformed or out-of-range request fields |
+| `400` | `image_mismatch` | a create `image` does not match the `snapshot`'s image |
+| `404` | `not_found` | unknown lease, name, snapshot or image |
+| `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight; retry |
+| `409` | `lease_suspended` | the lease is suspended; `resume` it first |
+| `409` | `lease_not_live` | a released lease where a live one is required |
+| `409` | `cannot_start` | a snapshot build cannot run on this host; save it again |
+| `409` | `save_in_progress` | a named-snapshot save with the same idempotency key is running |
+| `409` | `secrets_in_use` | a background job with staged secrets blocks the save |
+| `409` | `snapshot_in_use` | a live lease started from the named snapshot |
+| `409` | `snapshot_limit` | the owner's `MAX_NAMED_SNAPSHOTS` cap is reached |
+| `409` | `kept_budget` | the owner's `max_kept_bytes` budget would be exceeded |
+| `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
+| `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
+| `500` | `internal` | an internal failure |
+
 ---
 
 ## Leases
@@ -310,8 +332,9 @@ normal resume path (admission, class and quota apply) and then serves
 the call; a refusal answers what resume would (`429` over quota, `503`
 with `Retry-After` for capacity or the burst reserve) and the lease stays
 suspended. A lease suspended any other way keeps the `409`
-`lease is suspended; resume it first`. An explicit resume works as
-always, and the SSH gateway already resumes on attach.
+`lease is suspended; resume it first` (`code: lease_suspended`). An
+explicit resume works as always, and the SSH gateway already resumes on
+attach.
 
 ### `GET /api/leases` — list leases
 
@@ -501,7 +524,8 @@ Response `200 OK`:
 {"stdout": "…", "stderr": "…", "exit": 0}
 ```
 
-`409` if the lease is suspended (resume it first); `410` if it is
+`409` if the lease is suspended (`code: lease_suspended`, resume it
+first); `410` if it is
 `lost` (`code: lease_lost`, see [Lost leases](#lost-leases)) or the
 sandbox no longer exists on the substrate; `429` when
 the per-owner concurrent exec/stream cap is reached. (Exec does not wait for or take the lease's lifecycle lock; its concurrency
@@ -513,7 +537,8 @@ suspended lease whose `last_action` is `idle_suspend/suspend_idle` is
 resumed first through the normal resume path and the exec then served;
 a refused resume answers what resume would (`429` over quota, `503` with
 `Retry-After` for capacity or the burst reserve). Any other suspension
-keeps the plain `409` — see [Idle reclamation](#idle-reclamation).
+keeps the plain `409` (`code: lease_suspended`) — see
+[Idle reclamation](#idle-reclamation).
 
 While a lifecycle operation is in flight on the lease (the periodic
 checkpoint, a suspend or a restart), the orchestrator briefly reports
@@ -635,8 +660,9 @@ guest root — a path that cleans to `/` names no file and answers `404`.
 Access follows the strictest lease model: the **owner** (or an admin,
 who may act on any lease); a grantee's `http` share does **not** carry
 file content, and anyone else gets the usual `404`. Every call counts
-as activity for the idle sweeper. A suspended lease answers `409` on
-every file route (resume it first), except one suspended by
+as activity for the idle sweeper. A suspended lease answers `409`
+(`code: lease_suspended`) on every file route (resume it first), except
+one suspended by
 `idle_suspend`, which is resumed first and then served (see
 [Idle reclamation](#idle-reclamation)); a `lost` lease answers `410`
 with `code: lease_lost` (see [Lost leases](#lost-leases)). File
@@ -774,8 +800,9 @@ every guest port, a step past what an `http` share grants.
 
 Errors: `400` port out of range or not a number, `403` port 49983 (envd,
 the guest's management port), `404` unknown lease or not the owner's,
-`409` suspended (resume it first — except a lease the idle sweep
-suspended, which is resumed first and then dialed; see
+`409` suspended (`code: lease_suspended`, resume it first — except a
+lease the idle sweep suspended, which is resumed first and then dialed;
+see
 [Idle reclamation](#idle-reclamation)), `410` with `code: lease_lost`
 for a lost
 lease (see [Lost leases](#lost-leases)), `429` when the owner's 16
@@ -1110,7 +1137,8 @@ allowances — no restart, no new lease.
 
 Request `{"network_policy":"none|lan|internet|restricted","egress_allowlist":[…]}`.
 Response `200` `{"id","network_policy","egress_allowlist"}`. `400` on an
-invalid policy, `404` unknown, `409` suspended.
+invalid policy, `404` unknown, `409` suspended
+(`code: lease_suspended`).
 
 ### `POST /api/leases/{id}/tag` — friendly name
 
@@ -1743,7 +1771,8 @@ and persists it. It does **not** extend `ExpiresAt`, change
 persistence, resume a suspended lease, or do anything else.
 
 Responses: `204` on success (no body); `404` for an unknown or released
-lease; `409` for a suspended lease; `405` for any other method. Writes
+lease; `409` for a suspended lease (`code: lease_suspended`); `405` for
+any other method. Writes
 are limited to one per lease per 60 s — later calls inside that window
 still return `204`, so a fast loop cannot hammer the store.
 
