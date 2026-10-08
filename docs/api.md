@@ -371,6 +371,15 @@ cause the `lost` event reported; see [Lost leases](#lost-leases)):
 list shows what unpinning would free. Requires the owner or an `http`
 share.
 
+The detail also carries the lease's **pause-chain size** (spoond-p9j):
+`chain_depth` is how many builds its chain holds (the pause build it
+would resume from, or the build it runs from, plus its ancestors up to
+the template root) and `chain_bytes` is their summed recorded
+`size_bytes`. A persistent lease that suspends repeatedly keeps one
+memory snapshot per pause until a cold restart breaks the chain; these
+fields show what that chain costs. A lease with no build yet omits both
+fields.
+
 A lease with an identity-store owner also carries its owner's memory
 quota (#128): `charged_mib` (the owner's current running-lease charge —
 what this lease contributes to while it runs), `guaranteed_mib` and

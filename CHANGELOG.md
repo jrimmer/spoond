@@ -12,6 +12,19 @@ summarised from README "Status".
 
 ### Added
 
+- **Pause-chain size is measured before any compaction (spoond-p9j).** A
+  pause build's parent is the build it resumed from and the GC keeps
+  every ancestor of a live lease's resume build, so a persistent lease
+  that suspends repeatedly accumulates one memory snapshot per pause
+  until a cold restart (or the lease's release) breaks the chain.
+  `GET /api/leases/{id}` now reports `chain_depth` (builds in the
+  lease's chain) and `chain_bytes` (their summed recorded `size_bytes`),
+  and every pause observes the same two numbers as the unlabeled
+  `spoond_pause_chain_depth` and `spoond_pause_chain_bytes` histograms —
+  bounded cardinality, so the per-lease figures stay on the lease API.
+  No compaction happens yet; a follow-up decides on automatic compaction
+  after measuring on the deployment.
+
 - **A cap on background job runtime (spoond-wb5).** A background exec job
   may no longer run forever: `JOB_MAX_RUNTIME` (default 24 h, a Go
   duration or seconds) is the host cap, the exec body's new optional
