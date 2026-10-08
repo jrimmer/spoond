@@ -29,6 +29,9 @@ if [ -n "$GUEST_DNS" ]; then
     done
   )
   if [ -n "$nameservers" ]; then
+    # Replace, never write through: an image's resolv.conf may be a symlink
+    # (e.g. to a systemd-resolved stub) whose target must not be rewritten.
+    rm -f /etc/resolv.conf
     printf '%s\n' "$nameservers" > /etc/resolv.conf
     printf 'options timeout:2 attempts:3 rotate\n' >> /etc/resolv.conf
   else
