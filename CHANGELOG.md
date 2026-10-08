@@ -44,6 +44,18 @@ summarised from README "Status".
 
 ### Fixed
 
+- **`spoond_builds_in_flight` reports the catalog's in-flight template
+  builds, and a stale-build failure is now announced.** The gauge was
+  only written during a `/metrics` scrape, so the dashboard's "builds
+  busy" cell could read 0 while `spoond images build` was baking; the
+  metrics tick now refreshes it from the catalog's template builds still
+  `building`, the same count the orphan sweep skips on (spoond-63a G3).
+  The GC's stale-building sweep emits a lease-less `gc` event per row it
+  fails (in dry-run too), because a template build has no owner and never
+  appears in `/api/snapshots`. `SPOOND_BUILD_TIMEOUT` now wires
+  `ServiceConfig.BuildTimeout` from the environment and is shared with
+  the image pipeline, so the two sides cannot drift.
+
 - **Per-lease memory maps no longer leak, and the response to a leaked
   auth IP is bounded.** Releasing a lease now drops its applied-egress
   memo, its deferred exec-time secret removals and the queued auth
@@ -73,18 +85,6 @@ summarised from README "Status".
   a clear message when it is unset, like the N9 `CONFORMANCE_MIXED_*`
   knobs. I3 installs `docker.io` into `dev-base` after `apt-get update`,
   so it no longer 404s on a package version the Ubuntu archive dropped.
-
-- **`spoond_builds_in_flight` reports the catalog's in-flight template
-  builds, and a stale-build failure is now announced.** The gauge was
-  only written during a `/metrics` scrape, so the dashboard's "builds
-  busy" cell could read 0 while `spoond images build` was baking; the
-  metrics tick now refreshes it from the catalog's template builds still
-  `building`, the same count the orphan sweep skips on (spoond-63a G3).
-  The GC's stale-building sweep emits a lease-less `gc` event per row it
-  fails (in dry-run too), because a template build has no owner and never
-  appears in `/api/snapshots`. `SPOOND_BUILD_TIMEOUT` now wires
-  `ServiceConfig.BuildTimeout` from the environment and is shared with
-  the image pipeline, so the two sides cannot drift.
 
 ## [2.8.0] - 2026-10-08
 
