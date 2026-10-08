@@ -474,6 +474,10 @@ type Service struct {
 	retryMu         sync.Mutex
 	recoveryRetries map[string]*retryBudget
 	preemptRetries  map[string]*retryBudget
+	// preemptCapLogAt is when the per-lease "deferred (waiting for
+	// capacity)" line was last logged, so a lease parked for a long time
+	// does not repeat it every resume tick. Guarded by retryMu.
+	preemptCapLogAt map[string]time.Time
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
 	// sweepTimeout bounds one background sweep stage and each other
@@ -660,6 +664,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		rootfsProbeFails:      map[string]*rootfsProbeFailure{},
 		recoveryRetries:       map[string]*retryBudget{},
 		preemptRetries:        map[string]*retryBudget{},
+		preemptCapLogAt:       map[string]time.Time{},
 		bus:                   newEventBus(),
 		gcErr:                 newGCTracker(),
 		liveJobSecrets:        map[string][]string{},
@@ -1544,6 +1549,7 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	// cannot trip a stale budget.
 	s.clearRecoveryRetries(l)
 	s.clearRetry(s.preemptRetries, l.ID)
+	s.clearPreemptCapLog(l.ID)
 	s.store.mu.Lock()
 	delete(s.store.leases, l.ID)
 	delete(s.store.shares, l.ID)
@@ -2462,6 +2468,7 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	// A successful resume ends any pending preempt-resume budget too, so
 	// a later preemption starts fresh.
 	s.clearRetry(s.preemptRetries, l.ID)
+	s.clearPreemptCapLog(l.ID)
 	// A resume frees its prior preemption and can move capacity: retry
 	// waiting creates (#129).
 	s.wakeAdmissionQueue()

@@ -430,6 +430,64 @@ func TestPreemptResumeAdmissionRefusalNeverAgesOut(t *testing.T) {
 	}
 }
 
+// TestPreemptResumeCapacityWaitResetsWindow: a long capacity wait
+// between two counted resume failures must not age the lease out. A
+// counted failure starts the window, the wait resets its origin, and the
+// next counted failure starts a fresh window instead of finding the old
+// one spent (spoond-dxq SH1).
+func TestPreemptResumeCapacityWaitResetsWindow(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	svc.cfg.PreemptResumeRetries = 3
+	svc.cfg.RecoveryRetryWindow = time.Minute
+
+	now := time.Now()
+	svc.now = func() time.Time { return now }
+
+	victim := preemptOne(t, svc, sub, ctx)
+	sb := victim.SandboxID
+
+	// One counted transient failure starts a budget with a window origin.
+	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
+	failTransient := true
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb && failTransient {
+			return substrate.Sandbox{}, errors.New("failed to init envd")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	svc.resumePreempted(ctx)
+	if !svc.retryPending(svc.preemptRetries, victim.ID) {
+		t.Fatal("setup: a counted resume failure did not start a budget")
+	}
+
+	// No room for over 30 min: only admission refusals. The wait resets
+	// the window, so the lease is not aged out and the next counted
+	// failure starts a fresh window.
+	svc.cfg.BurstReserveMiB = 1 << 20
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	for i := 0; i < 5; i++ {
+		now = now.Add(10 * time.Minute)
+		svc.resumePreempted(ctx)
+	}
+	if victim.State != "suspended" {
+		t.Fatalf("after the wait state = %q, want suspended", victim.State)
+	}
+
+	// Room returns and one more transient failure lands: the budget is
+	// 2 of 3 with a fresh window, so the lease must not be lost.
+	svc.cfg.BurstReserveMiB = 0
+	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
+	svc.resumePreempted(ctx)
+	if victim.State != "suspended" {
+		t.Fatalf("after the second counted failure state = %q, want suspended (not lost)", victim.State)
+	}
+	if victim.LostAt != (time.Time{}) || victim.LostReason != "" {
+		t.Fatalf("a lease was lost with a stale window: lostAt=%v reason=%q", victim.LostAt, victim.LostReason)
+	}
+}
+
 // TestRecoveryBudgetKeyedBySandbox: a transient recovery failure then a
 // cold restart gives the lease a new sandbox; the next reconcile must
 // leave the healthy lease alone instead of rolling it back to the old

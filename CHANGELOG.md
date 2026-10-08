@@ -136,10 +136,12 @@ unchanged since 2.7.0.
   `PREEMPT_RESUME_RETRIES` (default 3), marks the lease `lost` with the
   reason and emits a `lost` event. A preempted lease parked for room is
   different: its admission/capacity refusal neither counts nor starts the
-  window, so it waits for room indefinitely and resumes when room
-  appears. A recovery or preempt loss that races a release no longer
-  resurrects the released lease or emits a late `lost` event
-  (`spoond-dxq`).
+  window, and a wait also resets the window origin of any budget a
+  counted failure already started, so a long wait for room between two
+  counted failures cannot age an intact lease out; it waits for room
+  indefinitely and resumes when room appears. A recovery or preempt loss
+  that races a release no longer resurrects the released lease or emits a
+  late `lost` event (`spoond-dxq`).
 - **A lost lease is released automatically once its grace period
   lapses, freeing its owner's quota.** A lease in state `lost` was never
   released unless its owner deleted it: it kept holding the owner's

@@ -376,6 +376,57 @@ func TestRootfsProbeScriptReadsRootDevice(t *testing.T) {
 	}
 }
 
+// TestRootfsProbeSkipsRecoveryRetry: the rootfs probe must not target a
+// lease already waiting for a recovery retry. Its sandbox was deleted by
+// the failed recovery, so a probe would fail and stamp a spurious
+// rootfs_dead / the wrong lost_reason ahead of the retry (spoond-dxq SH2).
+func TestRootfsProbeSkipsRecoveryRetry(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.RecoveryRetryAttempts = 3
+
+	l := recoverTargetCheckpoint(t, svc, sub, ctx)
+	sb := l.SandboxID
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == sb {
+			return substrate.Sandbox{}, errors.New("failed to init envd")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	// A transient failure leaves a pending retry keyed by the dead sandbox.
+	if out := svc.reconcileCrash(ctx); out.Lost != 0 {
+		t.Fatalf("first failure lost the lease: %+v", out)
+	}
+	if !svc.recoveryPending(sb) {
+		t.Fatal("setup: no pending recovery retry")
+	}
+	// A dead disk on the old sandbox would otherwise be probed.
+	sub.rootfsFail[sb] = "dd: error reading '/dev/vda': Input/output error"
+
+	for i := 0; i < rootfsProbeFailuresThreshold+1; i++ {
+		svc.probeRootfsLeases(ctx)
+	}
+	if got := sub.RootfsProbeCalls(); got != 0 {
+		t.Fatalf("probe calls for a lease awaiting a recovery retry = %d, want 0", got)
+	}
+	if l.State == "lost" {
+		t.Fatal("the probe lost a lease that was waiting for a recovery retry")
+	}
+
+	// The retry then recovers it; the rootfs probe picking it up again is
+	// fine (the fresh sandbox is healthy).
+	sub.createFn = nil
+	if out := svc.reconcileCrash(ctx); out.Recovered != 1 {
+		t.Fatalf("reconcile after the retry = %+v, want one recovery", out)
+	}
+	if l.State != "recovered" {
+		t.Fatalf("state = %q, want recovered", l.State)
+	}
+}
+
 // TestRootfsProbeTransientRecoveryRetries: a rootfs-dead recovery that
 // fails transiently does not lose the lease; it emits a recovery_retry
 // event and the next reconcile retries it (spoond-dxq NIT).

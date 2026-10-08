@@ -117,7 +117,9 @@ func (s *Service) noteRetryFailure(m map[string]*retryBudget, key, leaseID strin
 // capacity rather than failing: it does not count an attempt (the node
 // may host the lease later), but it starts the window, so a wait that
 // never ends is still bounded. The entry is dropped when the window is
-// spent.
+// spent. (A preempted lease's capacity wait instead calls
+// resetRetryWindow, so a long park between counted failures never ages
+// an intact lease out — spoond-dxq SH1.)
 func (s *Service) noteRetryWait(m map[string]*retryBudget, key, leaseID string, window time.Duration) (int, bool) {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
@@ -134,6 +136,42 @@ func (s *Service) noteRetryWait(m map[string]*retryBudget, key, leaseID string, 
 		return b.attempts, true
 	}
 	return b.attempts, false
+}
+
+// resetRetryWindow clears the window origin of an existing retry budget
+// but keeps its counted attempts. A capacity wait calls it: the
+// wall-clock window must measure only an unbroken run of counted
+// failures, so a long wait for room between two counted failures cannot
+// age an intact lease out (spoond-dxq SH1). A missing budget is a no-op.
+func (s *Service) resetRetryWindow(m map[string]*retryBudget, key string) {
+	s.retryMu.Lock()
+	if b := m[key]; b != nil {
+		b.since = time.Time{}
+	}
+	s.retryMu.Unlock()
+}
+
+// shouldLogPreemptCap reports whether the capacity-wait line for a
+// preempted lease may be logged now: at most once per lease per interval
+// (preemptCapLogInterval), so a long wait does not fill the log with one
+// line every resume tick (spoond-dxq SH2 NIT).
+func (s *Service) shouldLogPreemptCap(leaseID string) bool {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	last := s.preemptCapLogAt[leaseID]
+	if !last.IsZero() && s.now().Sub(last) < preemptCapLogInterval {
+		return false
+	}
+	s.preemptCapLogAt[leaseID] = s.now()
+	return true
+}
+
+// clearPreemptCapLog drops a lease's capacity-wait log timestamp when it
+// resumes or is released, so a later preemption logs its first wait.
+func (s *Service) clearPreemptCapLog(leaseID string) {
+	s.retryMu.Lock()
+	delete(s.preemptCapLogAt, leaseID)
+	s.retryMu.Unlock()
 }
 
 // clearRetry drops a retry budget by key after its recovery or resume
@@ -154,6 +192,19 @@ func (s *Service) retryPending(m map[string]*retryBudget, key string) bool {
 	defer s.retryMu.Unlock()
 	_, ok := m[key]
 	return ok
+}
+
+// recoveryPendingSandboxes snapshots the sandbox ids with a pending
+// recovery retry, so the rootfs probe can skip those leases without
+// taking retryMu under the store lock (spoond-dxq SH2).
+func (s *Service) recoveryPendingSandboxes() map[string]bool {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	out := make(map[string]bool, len(s.recoveryRetries))
+	for key := range s.recoveryRetries {
+		out[key] = true
+	}
+	return out
 }
 
 // recoveryPending reports whether the sandbox that failed for a lease is

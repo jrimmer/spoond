@@ -124,11 +124,19 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 	// countRootfsFailure takes rootfsProbeMu and then the store lock, so
 	// this path must never hold the store lock while taking rootfsProbeMu.
 	aliveAt := s.rootfsAliveSnapshot()
+	// A lease already waiting for a recovery retry must not be probed: its
+	// sandbox was deleted (or its create failed) and a probe would only
+	// fail, bump a stale count and stamp a spurious rootfs_dead / the wrong
+	// lost_reason ahead of the retry (spoond-dxq SH2).
+	recoveryPending := s.recoveryPendingSandboxes()
 
 	s.store.mu.Lock()
 	var targets []*Lease
 	for _, l := range s.store.leases {
 		if l.released || !l.live() || l.busy {
+			continue
+		}
+		if recoveryPending[l.SandboxID] {
 			continue
 		}
 		if ok, seen := aliveAt[l.ID]; seen && now.Sub(ok) < every {

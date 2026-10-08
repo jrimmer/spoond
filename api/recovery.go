@@ -250,14 +250,17 @@ func (s *Service) recoverOneLease(ctx context.Context, l *Lease) recoveryOutcome
 			}
 			s.deleteSandboxRow(l.SandboxID)
 			// The owner sees the retry rather than a silent wait: the
-			// event names the attempt and the cause (S3).
+			// event names the attempt and the cause (S3). A capacity wait
+			// is not an attempt, so its text names only the wait.
 			if recoveryWaitForCapacity(err) {
-				s.emitLeaseEvent(l.ID, l.Owner, LeaseRetry, fmt.Sprintf("recovering from checkpoint %s: waiting for capacity (attempt %d/%d): %v",
-					shortEventBuildID(l.LastCheckpointBuildID), attempts, s.recoveryRetryLimit(), err))
-			} else {
-				s.emitLeaseEvent(l.ID, l.Owner, LeaseRetry, fmt.Sprintf("recovering from checkpoint %s: attempt %d/%d failed: %v",
-					shortEventBuildID(l.LastCheckpointBuildID), attempts, s.recoveryRetryLimit(), err))
+				s.emitLeaseEvent(l.ID, l.Owner, LeaseRetry, fmt.Sprintf("recovering from checkpoint %s: waiting for capacity: %v",
+					shortEventBuildID(l.LastCheckpointBuildID), err))
+				s.log.Printf("recovery: lease %s still recovering (waiting for capacity, checkpoint %s): %v",
+					l.ID, formatRFC3339(l.LastCheckpointAt), err)
+				return recoveryOutcome{Result: "recovering", Generation: l.Generation, State: l.State}
 			}
+			s.emitLeaseEvent(l.ID, l.Owner, LeaseRetry, fmt.Sprintf("recovering from checkpoint %s: attempt %d/%d failed: %v",
+				shortEventBuildID(l.LastCheckpointBuildID), attempts, s.recoveryRetryLimit(), err))
 			s.log.Printf("recovery: lease %s still recovering (attempt %d/%d, checkpoint %s): %v",
 				l.ID, attempts, s.recoveryRetryLimit(), formatRFC3339(l.LastCheckpointAt), err)
 			return recoveryOutcome{Result: "recovering", Generation: l.Generation, State: l.State}

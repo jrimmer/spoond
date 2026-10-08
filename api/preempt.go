@@ -26,6 +26,11 @@ const DefaultPreemptDiskFloorPct = 15
 // preempted leases that fit again.
 const preemptResumeInterval = 15 * time.Second
 
+// preemptCapLogInterval rate-limits the per-lease "deferred (waiting for
+// capacity)" line: a lease parked for room for hours logs its wait at
+// most this often, not once per 15 s tick (spoond-dxq SH2).
+const preemptCapLogInterval = 10 * time.Minute
+
 // errPreemptCannot is returned when a guaranteed admission ran out of
 // hugepages and could not preempt any burst lease because the snapshot
 // disk is too full. The lease API maps it to 503
@@ -354,7 +359,9 @@ func (s *Service) runPreemptResumeLoop(ctx context.Context) {
 // admission/capacity refusal is not a failure — the preemption parked
 // the lease to free the very room it now waits for — so it neither
 // counts an attempt nor starts the window, and the lease waits for room
-// indefinitely (B1).
+// indefinitely (B1). A wait resets the window origin of any budget a
+// counted failure started, so only an unbroken run of counted failures
+// is bounded by the window (SH1).
 //
 // A preempted lease that comes back classified guaranteed may itself
 // preempt other burst leases (normal admission does that). The cascade
@@ -380,6 +387,7 @@ func (s *Service) resumePreempted(ctx context.Context) {
 		_, err := s.resumeLease(ctx, v.l)
 		if err == nil {
 			s.clearRetry(s.preemptRetries, v.l.ID)
+			s.clearPreemptCapLog(v.l.ID)
 			s.log.Printf("preempt: resumed %s (preempted %s ago)", v.l.ID, s.now().Sub(v.at).Round(time.Second))
 			continue
 		}
@@ -387,11 +395,17 @@ func (s *Service) resumePreempted(ctx context.Context) {
 			continue
 		}
 		// An admission/capacity refusal is room the preemption was meant
-		// to free: the lease keeps waiting without touching its budget,
-		// so a long capacity wait never loses an intact preempted lease
-		// (B1).
+		// to free: the lease keeps waiting without touching its budget
+		// count, so a long capacity wait never loses an intact preempted
+		// lease (B1). The wait resets the window origin of any budget a
+		// counted failure already started, so the window measures only an
+		// unbroken run of counted failures and a long capacity wait
+		// between them cannot age the lease out either (SH1).
 		if preemptWaitForCapacity(err) {
-			s.log.Printf("preempt: resume %s deferred (waiting for capacity): %v", v.l.ID, err)
+			s.resetRetryWindow(s.preemptRetries, v.l.ID)
+			if s.shouldLogPreemptCap(v.l.ID) {
+				s.log.Printf("preempt: resume %s deferred (waiting for capacity): %v", v.l.ID, err)
+			}
 			continue
 		}
 		attempts, spent := s.noteRetryFailure(s.preemptRetries, v.l.ID, v.l.ID, s.preemptResumeLimit(), s.recoveryRetryWindow())
@@ -414,6 +428,7 @@ func (s *Service) resumePreempted(ctx context.Context) {
 // event, no job marking (spoond-775).
 func (s *Service) losePreempted(ctx context.Context, l *Lease, reason, cause string) {
 	s.clearRetry(s.preemptRetries, l.ID)
+	s.clearPreemptCapLog(l.ID)
 	s.store.mu.Lock()
 	released := l.released
 	if !released {
