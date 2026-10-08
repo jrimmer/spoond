@@ -140,16 +140,20 @@
 //	PREEMPT_RESUME_RETRIES  how many failed resume attempts a preempted
 //	                  lease gets from the resume queue before it is marked
 //	                  lost (spoond-dxq; default 3)
-//	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
-//	                  which crashes one lease and runs it through crash
-//	                  recovery (owner or admin; default off, the route
-//	                  then answers 404). For hosts that run crash suites.
+//	MAX_RUNNING_JOBS_PER_LEASE  the per-lease background-job cap; a
+//	                  start past it answers 429 (2.6, #135)
+//	JOB_RETENTION_SECS  how long an exited background-job record is kept
+//	                  before pruning (2.6, #135; default 604800 = 7 d)
 //	JOB_MAX_RUNTIME  how long a background exec job may run before the
 //	                  reconcile pass kills it and marks it exited with
 //	                  reason timed_out (spoond-wb5; default 24h = 86400;
 //	                  a Go duration or seconds; a job may ask for a
 //	                  shorter max_runtime_secs, never a longer one; a
 //	                  negative value disables the cap)
+//	CRASH_TEST       "1" or "true" enables POST /api/leases/{id}/crash-test,
+//	                  which crashes one lease and runs it through crash
+//	                  recovery (owner or admin; default off, the route
+//	                  then answers 404). For hosts that run crash suites.
 package spoondbackend
 
 import (
