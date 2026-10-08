@@ -15,8 +15,10 @@ import (
 // freed into a pause build, nothing is deleted, the generation does not
 // change, and the next call resumes it. For such a lease the setting is
 // the only idle threshold: it replaces the plain IDLE_TIMEOUT_SECS sweep
-// and held rule 1, and the pressure order does not reclaim it (like a
-// lease with a running job). Leases without a
+// and held rule 1, and the guaranteed-unheld-idle pressure step does not
+// reclaim it (the idle sweep does, on its own threshold; a burst lease
+// stays reclaimable by the pressure order's burst steps, like
+// preemption). Leases without a
 // value keep those rules exactly.
 //
 // Idle suspension shares preemption's snapshot-disk floor
