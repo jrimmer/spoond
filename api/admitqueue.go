@@ -371,6 +371,21 @@ func (s *Service) tryAdmitQueued(ctx context.Context) {
 				s.drainQueue()
 				return
 			}
+			if errors.Is(err, errOwnerGone) {
+				// The owner was deleted while the ticket waited: the
+				// refusal is final, so answer it now instead of leaving
+				// the ticket to time out at its deadline (N1b). A ticket
+				// queued after cancelQueuedForOwner ran reaches here on
+				// the pass its own wake-up starts.
+				if s.finishTicket(t) {
+					if s.metrics != nil {
+						s.metrics.AdmitTimeouts.Inc()
+					}
+					s.bus.emit(t.id, t.owner, LeaseTimedOut, "owner deleted")
+					t.send(admissionOutcome{err: err})
+				}
+				continue
+			}
 			// Still no room (or another refusal): leave the ticket for
 			// the next wake-up.
 			refused = true

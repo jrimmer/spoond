@@ -1152,6 +1152,14 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// (2.7, #83): 409 with a machine-readable code and no retry
 		// loop.
 		status, msg, code = http.StatusConflict, err.Error(), "cannot_start"
+	case errors.Is(err, errOwnerGone):
+		// The owner's identity was removed while the create was in
+		// flight (spoond-q4j): the user is gone, so the create is refused
+		// rather than granted ownerless and uncapped. Checked before the
+		// quota and capacity refusals because cancelQueuedForOwner wraps
+		// the refusal that queued the ticket, which would otherwise match
+		// (and answer) as if the owner were still there (N1).
+		status, msg = http.StatusForbidden, "owner deleted"
 	case errors.Is(err, errQuotaExceeded):
 		status, msg = http.StatusTooManyRequests, err.Error()
 	case errors.Is(err, errUnknownImage):
@@ -1170,11 +1178,6 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// three; tell clients when to come back instead of letting them
 		// guess.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "draining", drainRetryAfterSecs
-	case errors.Is(err, errOwnerGone):
-		// The owner's identity was removed while the create was in
-		// flight (spoond-q4j): the user is gone, so the create is refused
-		// rather than granted ownerless and uncapped.
-		status, msg = http.StatusForbidden, "owner deleted"
 	case errors.Is(err, substrate.ErrCapacity):
 		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
 	default:
