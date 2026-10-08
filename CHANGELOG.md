@@ -33,7 +33,9 @@ unchanged since 2.7.0.
   handed to the implementer as an extra implement round and every gate
   is rerun. After the rebase a migration guard fails the gate when two
   files under `store/migrations` share a version number, or when a
-  migration the branch adds is not numbered above the base's highest.
+  migration the branch adds is not numbered above the base's highest;
+  a base migration the branch renamed or deleted is reported as such,
+  not as a version-number problem.
   The verifier reviews only `git diff <base>...HEAD` and has a
   per-round wall-clock limit (`VERIFY_TIMEOUT`, default 20 min, or a
   task's `Verify-Timeout:` line); a diff under ~200 changed lines gets
@@ -45,7 +47,10 @@ unchanged since 2.7.0.
   round, so a repaired small diff can still reach its one verify. `DONE`
   names the base commit it was verified
   on; `DONE` and `BLOCKED` both carry implement/rebase/gates/verify
-  durations. The git and migration rules live in `images/worker-git.sh`
+  durations (a `[CANCELLED]` and a push-failed task that is upgraded to
+  `[BLOCKED]` carry them too). A fetch or rebase error on the
+  push-stage rebase blocks the task instead of pushing a `DONE` on the
+  stale base. The git and migration rules live in `images/worker-git.sh`
   with their own tests, and the loop's exit paths are covered end to end
   in `images/worker-start_test.sh`.
 

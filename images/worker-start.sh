@@ -37,12 +37,11 @@
 # branch starts from origin/<base>, and the verifier's diff, the commit
 # count and the push decision are all measured against it. Before the
 # branch is verified (and again before a DONE is pushed) it is rebased onto
-# the fetched base; a conflicted rebase is resolved by the implementer and
-# every gate is rerun, consuming an extra implement pass out of the same
-# round budget (worth knowing when MAX_ROUNDS is small). A round whose
-# gates fail (including the migration guard) does not spend a verify round:
-# it goes straight to another implement pass. Verify-Timeout: caps one
-# verify round in minutes (default 20).
+# the fetched base; a conflicted rebase is resolved by the implementer in a
+# separate implement pass and every gate is rerun. A round whose gates fail
+# (including the migration guard) does not spend a verify round: it goes
+# straight to another implement pass, bounded by a separate iteration cap.
+# Verify-Timeout: caps one verify round in minutes (default 20).
 set -uo pipefail
 # Mail is read through a few pipelines whose last stage is a sed/grep;
 # lastpipe keeps that stage in the current shell so the intent is explicit
@@ -132,11 +131,14 @@ next_task_msg() {
   for id in $ids; do
     line=$(amail inbox --all --limit 200 | grep -m1 "^#$id ")
     case "$line" in
-      *"from $ORCH"*"[TASK "*|*"from jason"*"[TASK "*|*"from HumanOverseer"*"[TASK "*)
+      *"from $ORCH"*"[TASK "*|*"from jason"*"[TASK "*)
         echo "$id"; return ;;
       *"from $ORCH"*"[WAIT "*)
         local mins; mins=$(sed -nE 's/.*\[WAIT ([0-9]+)\].*/\1/p' <<<"$line")
-        [ -n "$mins" ] && echo $(( $(date +%s) + mins * 60 )) > "$W/wait_until"
+        case $mins in
+          ''|*[!0-9]*) : ;;  # no (or malformed) minutes: ignore the override
+          *) echo $(( $(date +%s) + mins * 60 )) > "$W/wait_until" ;;
+        esac
         amail read "$id" >/dev/null ;;
       *) amail read "$id" >/dev/null ;;  # mark read; nothing else to do between tasks
     esac
@@ -210,14 +212,16 @@ llm_error() {
 
 pass() {  # pass DIR LOGNAME MODEL PROMPT [TIMEOUT]
   # PASS_TIMED_OUT is 1 when the pass ran out of time (timeout exit 124):
-  # it ended normally as far as Pi knows, but did not finish.
+  # it ended normally as far as Pi knows, but did not finish. Callers read
+  # it right after the call (e.g. the verify round treats PASS_TIMED_OUT=1
+  # as a timeout even when the partial run managed to write PASS).
   # A model-service failure (e.g. llm.lacy.casa 502 while its host is
   # stalled) is retried here with backoff and does not use up a round; only
   # after 6 failed attempts does the task fail, as an infrastructure block.
   local attempt err limit=${5:-$PASS_TIMEOUT}
-  PASS_TIMED_OUT=0
   for attempt in 1 2 3 4 5 6; do
     echo "pass $2 ($3) attempt $attempt $(date -Is)"
+    PASS_TIMED_OUT=0
     ( cd "$1" && timeout "$limit" pi -p "$4" --provider llm --model "$3" \
         --thinking "$THINKING" --no-session --mode json </dev/null > "$W/logs-$2.jsonl" 2>&1 ) &
     local pid=$!
@@ -257,6 +261,10 @@ timing_line() {
   printf 'timings: implement %ss, rebase %ss, gates %ss, verify %ss' \
     "$IMPL_SECS" "$REBASE_SECS" "$GATE_SECS" "$VERIFY_SECS"
 }
+
+# verify_minutes N: a seconds limit as whole minutes, rounded up, so a
+# limit that is not a multiple of 60 does not read as less than it is.
+verify_minutes() { echo $(( (${1:-0} + 59) / 60 )); }
 
 # diff_lines WT: added plus deleted lines in git diff BASE_REF...HEAD.
 # A binary file's "-" counts as zero so the total stays a number.
@@ -462,6 +470,7 @@ $(printf '%s\n' "$SWARM_GATES" | sed 's/^/    /')"
       git -C "$wt" add -A && git -C "$wt" commit -q -m "wip: $id" || true
       push_and_report "$wt" "$branch" "$id" "[CANCELLED $id]" <<EOF
 Cancelled; work in progress pushed.
+$(timing_line)
 EOF
       return
     fi
@@ -506,7 +515,7 @@ TASK:
 $(cat "$W/tasks/$id.md")
 
 Conflicted files: $cfl
-Finish with `git rebase --continue` (set GIT_EDITOR=true) so no rebase is left in progress, then run every gate again.
+Finish with \`git rebase --continue\` (set GIT_EDITOR=true) so no rebase is left in progress, then run every gate again.
 
 $rules" || { git -C "$wt" rebase --abort >/dev/null 2>&1 || true; break; }
       t1=$(date +%s); add_impl_secs $(( t1 - t0 ))
@@ -515,12 +524,12 @@ $rules" || { git -C "$wt" rebase --abort >/dev/null 2>&1 || true; break; }
       fi
       if worker_rebase_in_progress "$wt"; then
         git -C "$wt" rebase --abort >/dev/null 2>&1 || true
-        printf 'The rebase onto %s could not be completed cleanly.\n' "$BASE_REF" \
+        printf 'The rebase onto %s could not be completed cleanly.\n%s\n' "$BASE_REF" "$(timing_line)" \
           | say "$id" "[BLOCKED $id] retryable: rebase conflict"
         return
       fi
     elif [ "$REBASE_STATE" != UPTODATE ] && [ "$REBASE_STATE" != REBASED ]; then
-      printf 'Could not fetch or rebase %s onto %s (%s).\n' "$branch" "$BASE_REF" "$REBASE_STATE" \
+      printf 'Could not fetch or rebase %s onto %s (%s).\n%s\n' "$branch" "$BASE_REF" "$REBASE_STATE" "$(timing_line)" \
         | say "$id" "[BLOCKED $id] retryable: rebase failed"
       return
     fi
@@ -563,7 +572,7 @@ $rules" || { git -C "$wt" rebase --abort >/dev/null 2>&1 || true; break; }
 TASK:
 $(cat "$W/tasks/$id.md")
 
-You have $(( VERIFY_LIMIT / 60 )) minutes. Keep your notes in $W/verdict.md as you go, so nothing is lost if you run out of time. Review only git diff $BASE_REF...HEAD (plus the task text); never the whole repository history.
+You have $(verify_minutes "$VERIFY_LIMIT") minutes. Keep your notes in $W/verdict.md as you go, so nothing is lost if you run out of time. Review only git diff $BASE_REF...HEAD (plus the task text); never the whole repository history.
 
 Steps:
 1. Create $W/verdict.md now with the single line PENDING.
@@ -587,6 +596,13 @@ $rules" "$VERIFY_LIMIT" || break
       verdict=FAIL
     fi
     case $verdict in PASS|FAIL) ;; *) verdict=TIMEOUT ;; esac
+    # A pass that ran out of wall clock did not finish, whatever partial
+    # verdict file it managed to write: treat it as no verdict so the
+    # partial notes go out instead of a claimed PASS.
+    if [ "${PASS_TIMED_OUT:-0}" = 1 ]; then
+      echo "task $id round $round: verify pass timed out; treating as no verdict"
+      verdict=TIMEOUT
+    fi
     echo "task $id round $round verdict: $verdict"
     [ "$verdict" = PASS ] && break
     [ "$verdict" = TIMEOUT ] && break
@@ -602,7 +618,7 @@ $rules" "$VERIFY_LIMIT" || break
       echo "task $id: base moved before the push; re-gating on the new base"
       run_gates "$wt"
       if [ "$GATE_FAILED" = 1 ]; then
-        printf 'The base moved after the verify and the gates failed again.\n%s\n' "$GATE_OUT" \
+        printf 'The base moved after the verify and the gates failed again.\n%s\n%s\n' "$GATE_OUT" "$(timing_line)" \
           | say "$id" "[BLOCKED $id] retryable: gates failed on the moved base"
         return
       fi
@@ -610,8 +626,16 @@ $rules" "$VERIFY_LIMIT" || break
       commits=$(git -C "$wt" log --format='%h %s' "$BASE_REF"..HEAD)
     elif [ "$REBASE_STATE" = CONFLICT ]; then
       git -C "$wt" rebase --abort >/dev/null 2>&1 || true
-      printf 'The base moved before the push and the rebase conflicted.\n' \
+      printf 'The base moved before the push and the rebase conflicted.\n%s\n' "$(timing_line)" \
         | say "$id" "[BLOCKED $id] retryable: rebase conflict before push"
+      return
+    elif [ "$REBASE_STATE" != UPTODATE ]; then
+      # A fetch/rebase error here must not fall through to the push: the
+      # base may have moved and the branch is now neither rebased nor
+      # re-gated, so a DONE would name a base it was not verified on.
+      printf 'Could not fetch or rebase %s onto %s before the push (%s).\n%s\n' \
+        "$branch" "$BASE_REF" "$REBASE_STATE" "$(timing_line)" \
+        | say "$id" "[BLOCKED $id] retryable: rebase failed before push"
       return
     fi
     push_and_report "$wt" "$branch" "$id" "[DONE $id]" <<EOF
@@ -637,7 +661,7 @@ EOF
     fi
     if [ "$verdict" = TIMEOUT ]; then
       push_and_report "$wt" "$branch" "$id" "[BLOCKED $id] retryable: verifier gave no verdict" <<EOF
-The verifier timed out after $(( VERIFY_LIMIT / 60 )) min in round $round; review it by hand.
+The verifier timed out after $(verify_minutes "$VERIFY_LIMIT") min in round $round; review it by hand.
 HEAD: $sha, pushed to $branch.
 
 Partial notes:
@@ -662,7 +686,7 @@ EOF
       return
     fi
     if [ "$verdict" = TIMEOUT ]; then
-      { echo "The verifier timed out after $(( VERIFY_LIMIT / 60 )) min in round $round; review it by hand. Nothing was committed, so there is nothing to push."; echo
+      { echo "The verifier timed out after $(verify_minutes "$VERIFY_LIMIT") min in round $round; review it by hand. Nothing was committed, so there is nothing to push."; echo
         echo "Partial notes:"; echo "${findings:-none}"; echo "$(timing_line)"; } \
         | say "$id" "[BLOCKED $id] retryable: verifier gave no verdict"
       return
