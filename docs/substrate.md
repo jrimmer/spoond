@@ -174,9 +174,11 @@ incarnation loads them and reconciles.
 
 We do not carry a divergent fork. `git.example.com/example/e2b-runtime`
 mirrors upstream (`upstream` branch, pristine) plus a short patch series
-(`spoond` branch, at most five patches: startup-reclaim scoping, drain
-hooks, private egress allowances with a host-address guard, flag
-overrides), rebased at most monthly and gated by the conformance suite.
+(`spoond` branch: startup-reclaim scoping, drain hooks, private egress
+allowances with a host-address guard, flag overrides, NBD timeouts, the
+domain-path allowance fixes, and a host-address guard that follows the
+host's current interfaces and IPv6), rebased at most monthly and gated by
+the conformance suite.
 The procedure — including how to rebase, when a new Firecracker or kernel
 version may be adopted, and why version directories are never deleted
 while builds still reference them — is [e2b-upgrade.md](runbooks/e2b-upgrade.md).

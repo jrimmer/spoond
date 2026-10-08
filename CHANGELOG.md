@@ -144,6 +144,18 @@ summarised from README "Status".
   instead of `500`. The owner-deleted grant refusal also drops the
   lease's remembered egress config, like every other failed create.
 
+- **The host-address guard now follows the host's current addresses
+  (spoond-6s9, e2b-runtime P9).** The fork's `tcpfirewall` computed its
+  host-address set once at package init and from IPv4 addresses only, so
+  a slot veth address or a host IPv6 address that appeared later was not
+  guarded: an unscoped allowance such as `10.0.0.0/8` could reach
+  host-local veth IPs and host services listening on `0.0.0.0`/`::`, on
+  both the CIDR and the domain path. The set is now recomputed from the
+  live interfaces at most every 3 s, covers IPv4 (including
+  IPv4-mapped IPv6) and IPv6, and keeps loopback and link-local refused;
+  the domain path's resolved-IP check consults it too. Bundled with 2.9
+  (orchestrator swap first).
+
 - **The exec and stream request bodies are bounded (spoond-mrbr).**
   `POST /api/leases/{id}/exec` decoded its JSON body with no size bound,
   so one authenticated caller could send a multi-GB `cmd` or `secrets`
