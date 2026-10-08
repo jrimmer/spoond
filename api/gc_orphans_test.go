@@ -146,6 +146,42 @@ func TestReapOrphansQuarantinesDeletedAndUnknown(t *testing.T) {
 	}
 }
 
+// TestReapOrphansDryRunLogsRestore: dryrun logs that it would restore a
+// needed quarantined directory but leaves it in quarantine (spoond-ob18).
+func TestReapOrphansDryRunLogsRestore(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	t.Setenv("ORPHAN_REAP", "dryrun")
+	// Keep the root set non-empty with an unrelated live build.
+	seedGCBuild(t, db, e2b.NewUUID(), "template", "", "consumer-a", "ready", e2b.NewTemplateID())
+	id := e2b.NewUUID()
+	dir := mkOrphanDir(t, svc.cfg.TemplateStoragePath, id)
+	ageDir(t, dir)
+
+	// Quarantine it first (in quarantine mode), then run a dryrun pass
+	// with a catalog row that needs it again.
+	t.Setenv("ORPHAN_REAP", "quarantine")
+	if _, _ = svc.reapOrphans(context.Background()); dirExists(dir) {
+		t.Fatalf("orphan was not quarantined")
+	}
+	qdir := filepath.Join(svc.quarantineDir(), id)
+	if !dirExists(qdir) {
+		t.Fatalf("orphan not found in quarantine")
+	}
+	seedGCBuild(t, db, id, "pause", "", "consumer-a", "ready", e2b.NewTemplateID())
+
+	t.Setenv("ORPHAN_REAP", "dryrun")
+	buf.Reset()
+	if _, _ = svc.reapOrphans(context.Background()); !dirExists(qdir) {
+		t.Errorf("dryrun moved a quarantined directory back")
+	}
+	if dirExists(dir) {
+		t.Errorf("dryrun restored the needed directory")
+	}
+	if !strings.Contains(buf.String(), "gc: would restore quarantined build "+id) {
+		t.Errorf("dryrun did not log the restore:\n%s", buf.String())
+	}
+}
+
 // TestReapOrphansQuarantineRestore: a quarantined directory that a later
 // pass needs again is moved back into the storage path and its marker
 // dropped.
