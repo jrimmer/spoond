@@ -134,7 +134,7 @@ What arrives, with its key and severity:
 | `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
-| `node.draining` | warn | an admin drain is in effect: creates answer `503 draining` until it is lifted. `DRAIN_MAX_SECS` (default 900) bounds a healthy node's drain, so this alert reaches a person when a drain outlives its limit or the node is unwell |
+| `node.draining` | warn | an admin drain is in effect: creates answer `503 draining` until it is lifted. The alert fires only once a healthy node's drain passes half of `DRAIN_MAX_SECS` (default 900, so 7.5 min) or the node is unhealthy, so a planned restart under a minute stays silent |
 | `backup.stale` | warn | the newest database backup older than its age limit — `BACKUP_MAX_AGE_SECS`, default 93600 (26 h: the 03:00 daily run plus one missed day) |
 
 Delivery rules:
@@ -387,7 +387,7 @@ bounds a drain whose undrain never arrives, not the drain hook's own
 window.
 
 Drain and undrain run on a context **detached from the HTTP request**
-and bounded by spoond itself (`DRAIN`/undrain timeouts), so a hook that
+and bounded by spoond itself, so a hook that
 gives up waiting (the `--start` call's 300 s) cannot cancel the remaining
 pauses or resumes: a cancelled pause cannot leave a lease running into
 the stop, and a cancelled resume cannot lose the leases it had not
@@ -399,22 +399,29 @@ error keeps the lease `drained` for a retry rather than marking it
 
 - Every 15 s the backend resumes any lease still `drained` (an undrain
   that failed, or one whose resume was deferred), with the same
-  `UNDRAIN_CONCURRENCY` bound and retry policy. A deferred attempt logs
-  a line and emits a `drain_deferred` event naming the lease and the
-  refusal.
+  `UNDRAIN_CONCURRENCY` bound and retry policy. Each lease is retried
+  on its own doubling backoff (from 15 s up to 10 min); a deferred
+  attempt logs a line and emits a `drain_deferred` event on the first
+  deferral or when the cause changes, not once per pass. After
+  `DRAIN_RESUME_MAX_AGE` (default `24h`) of deferrals the loop stops,
+  keeps the lease suspended — its snapshot is intact, so it is not lost
+  — and emits a `drain_gave_up` event, leaving the exit to the owner or
+  the idle rules.
 - A lease the drain could not pause is logged and emits a
   `drain_failed` event naming the lease and the pause error, so a lease
   left running into the stop is visible outside the HTTP response.
-- A drain older than `DRAIN_MAX_SECS` (default `900`) while the node is
-  healthy is lifted automatically: the backend logs it, emits a
-  `drain_healed` event and resumes the drained leases. A drain that has
-  outlived its orchestrator restart therefore cannot refuse every
-  create with 503 forever. An unhealthy node's drain is left in place
-  (it may be waiting for the node to come back).
+- A manual drain held past `DRAIN_MAX_SECS` (default `900`) on a node
+  whose orchestrator is healthy is lifted automatically: the backend
+  logs it, emits a `drain_healed` event and resumes the drained leases,
+  so a drain nobody undrained cannot refuse every create with 503 for
+  ever. A node that is not healthy (or reports `draining` when spoond
+  itself is not draining — another process's planned stop) is left in
+  place, and a backend that starts while the node reports `draining`
+  adopts that drain so its own `DRAIN_MAX_SECS` clock applies.
 - A `SetDraining(false)` that fails during an undrain does not clear
   spoond's own draining state: the node still refuses creates, so the
   leases stay `drained` and the self-heal loop retries the clear on
-  every pass while the node is healthy — even when no drained lease
+  every pass while the node answers — even when no drained lease
   remains — logging each retry and emitting a `drain_healed` event when
   it finally clears.
 - Draining is visible: `/healthz` carries `"draining":true` while a

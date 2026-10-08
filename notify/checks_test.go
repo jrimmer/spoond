@@ -348,22 +348,43 @@ func TestProductionSourcesBackupMaxAge(t *testing.T) {
 	}
 }
 
-// TestDrainingCheck: node.draining warns while a drain is in effect and
-// resolves when it clears; a nil probe yields no check (spoond-52c H3).
+// TestDrainingCheck: node.draining warns while a healthy node's drain is
+// older than the threshold or the node is unhealthy, and resolves when
+// it clears; a nil probe yields no check (spoond-52c H3/S3).
 func TestDrainingCheck(t *testing.T) {
-	draining := false
-	evs := drainingCheck(func() bool { return draining }, checkNow)
-	if len(evs) != 1 || !evs[0].Resolved || evs[0].Key != KeyNodeDraining || evs[0].Severity != Warn {
-		t.Fatalf("undrained = %+v, want a resolved node.draining", evs)
+	healthy := func(forDur time.Duration) func() DrainState {
+		return func() DrainState {
+			return DrainState{Draining: true, For: forDur, NodeHealthy: true}
+		}
 	}
-	draining = true
-	evs = drainingCheck(func() bool { return draining }, checkNow)
-	if len(evs) != 1 || evs[0].Resolved || evs[0].Key != KeyNodeDraining || evs[0].Severity != Warn {
-		t.Fatalf("draining = %+v, want a warn node.draining", evs)
+	// A healthy node draining under the threshold stays silent (a planned
+	// restart under a minute).
+	ev := drainingCheck(func() DrainState {
+		return DrainState{Draining: true, For: 10 * time.Second, NodeHealthy: true}
+	}, time.Minute, checkNow)
+	if len(ev) != 1 || !ev[0].Resolved || ev[0].Key != KeyNodeDraining {
+		t.Fatalf("healthy brief drain = %+v, want a resolved node.draining", ev)
+	}
+	// Past the threshold it warns.
+	ev = drainingCheck(healthy(2*time.Minute), time.Minute, checkNow)
+	if len(ev) != 1 || ev[0].Resolved || ev[0].Key != KeyNodeDraining || ev[0].Severity != Warn {
+		t.Fatalf("healthy long drain = %+v, want a warn node.draining", ev)
+	}
+	// An unhealthy node warns however brief.
+	ev = drainingCheck(func() DrainState {
+		return DrainState{Draining: true, For: time.Second, NodeHealthy: false}
+	}, time.Minute, checkNow)
+	if len(ev) != 1 || ev[0].Resolved || ev[0].Key != KeyNodeDraining {
+		t.Fatalf("unhealthy node = %+v, want a warn node.draining", ev)
+	}
+	// Not draining resolves.
+	ev = drainingCheck(func() DrainState { return DrainState{} }, time.Minute, checkNow)
+	if len(ev) != 1 || !ev[0].Resolved || ev[0].Key != KeyNodeDraining {
+		t.Fatalf("undrained = %+v, want a resolved node.draining", ev)
 	}
 
 	// The source reaches Checks, and a nil Draining adds no check.
-	src := &CheckSources{Draining: func() bool { return true }}
+	src := &CheckSources{Draining: healthy(time.Minute)}
 	if got := len(src.Checks()); got != 1 {
 		t.Fatalf("Draining source checks = %d, want 1", got)
 	}

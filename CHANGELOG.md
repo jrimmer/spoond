@@ -21,19 +21,29 @@ summarised from README "Status".
   and a context, admission or capacity error keeps the lease `drained`
   for a retry instead of losing it. A lease the drain paused had no
   automatic exit: a drain self-heal loop now resumes any `drained` lease
-  with the same bounded retries as undrain (emitting a `drain_deferred`
-  event on a deferred attempt), so a missed undrain — a backend restart
-  between drain and undrain, or an `ExecStartPost` that exited 0 — no
-  longer strands the lease. A drain that outlives `DRAIN_MAX_SECS`
-  (default 900) on a healthy node now undrains itself, logs it and
-  emits a `drain_healed` event instead of refusing every create with
-  503 forever; a lease the drain could not pause is logged and emits a
-  `drain_failed` event, and a failed node-drain clear keeps spoond
-  draining so the self-heal loop retries it. Draining is reported in
-  `/healthz` (`"draining":true`) and `/readyz`, and the notifier adds
-  a `node.draining` key. An owner's own resume finally clears `drained`,
-  so resume-on-next-call keeps working and a later undrain cannot resume
-  a lease the owner is running.
+  with the same bounded retries as undrain, each on its own doubling
+  backoff (15 s to 10 min, so a permanently deferred lease is not
+  resumed every pass) and giving up after `DRAIN_RESUME_MAX_AGE`
+  (default 24 h) with the lease left suspended — its snapshot intact,
+  not lost — and a `drain_gave_up` event, so a missed undrain (a backend
+  restart between drain and undrain, or an `ExecStartPost` that exited
+  0) no longer strands the lease. A deferred attempt logs a line and
+  emits a `drain_deferred` event on the first deferral or a cause
+  change. A drain that outlives `DRAIN_MAX_SECS` (default 900) on a
+  healthy node now undrains itself, logs it and emits a `drain_healed`
+  event instead of refusing every create with 503 forever; a lease the
+  drain could not pause is logged and emits a `drain_failed` event, and
+  a failed node-drain clear keeps spoond draining so the self-heal loop
+  retries it. A backend that starts while the node reports `draining`
+  adopts that drain, so it does not undrain a node another process left
+  mid-planned-stop. A release that races a resume no longer resurrects
+  a released lease, and the sandbox the resume created is deleted. An
+  owner's own resume finally clears `drained`, so resume-on-next-call
+  keeps working and a later undrain cannot resume a lease the owner is
+  running. Draining is reported in `/healthz` (`"draining":true`) and
+  `/readyz`, and the notifier warns on a `node.draining` key only once a
+  healthy node's drain passes half the self-heal limit or the node is
+  unhealthy, so a planned restart under a minute stays silent.
 
 ## [2.7.1] - 2026-10-07
 

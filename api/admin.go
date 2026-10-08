@@ -140,6 +140,21 @@ const DefaultUndrainResumeRetries = 2
 // a drain whose undrain never arrives does not refuse creates forever.
 const DefaultDrainMaxSecs = 900
 
+// DefaultDrainResumeMaxAge is how long the drain self-heal loop keeps
+// retrying a lease whose resume is deferred when DRAIN_RESUME_MAX_AGE is
+// unset (DrainResumeMaxAge 0): 24 h. Past it the loop stops retrying,
+// keeps the lease suspended (its snapshot is intact) and emits a
+// drain_gave_up event, leaving the exit to the owner or the idle rules.
+const DefaultDrainResumeMaxAge = 24 * time.Hour
+
+// Drain self-heal backoff for a deferred resume: the first retry is the
+// next pass (drainHealInterval), doubling to drainHealBackoffMax so a
+// permanently deferred lease is not resumed every 15 s for ever.
+const (
+	drainHealBackoffMin = drainHealInterval
+	drainHealBackoffMax = 10 * time.Minute
+)
+
 // drainHealInterval is how often the drain self-heal loop looks for a
 // stale drain or for drained leases to resume.
 const drainHealInterval = 15 * time.Second
@@ -344,11 +359,17 @@ func undrainDeferred(err error) bool {
 // retryable envd/start failure up to the configured number of extra
 // attempts with a short backoff. It returns the last error (nil on
 // success) and how many attempts were made. An admission refusal is
-// returned at once: it keeps the lease drained for a later undrain.
+// returned at once: it keeps the lease drained for a later undrain. While
+// spoond is draining the resume is deferred at once (the node would
+// refuse it), so a heal pass that begins before an admin drain clears the
+// state does not race a Create into the stop (spoond-52c S1).
 func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int) {
 	maxAttempts := 1 + s.undrainResumeRetries()
 	var err error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if s.draining.Load() {
+			return errDraining, attempt
+		}
 		_, err = s.resumeLease(ctx, l)
 		if err == nil {
 			return nil, attempt
@@ -362,9 +383,7 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int)
 		s.log.Printf("undrain: resume %s attempt %d/%d failed (retrying): %v", l.ID, attempt, maxAttempts, err)
 		// A failed resume can leave a half-started sandbox behind; remove
 		// it (best effort) so the retry can reuse the same sandbox id.
-		if dErr := s.sub.Delete(context.WithoutCancel(ctx), l.SandboxID); dErr != nil {
-			s.log.Printf("undrain: resume %s cleanup before retry: %v", l.ID, dErr)
-		}
+		s.deleteHalfSandbox(ctx, l)
 		select {
 		case <-ctx.Done():
 			return err, attempt
@@ -374,6 +393,19 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int)
 	return err, maxAttempts
 }
 
+// deleteHalfSandbox removes a sandbox a failed or cut-off Create may have
+// left half-started, best effort, and drops its row so the next resume can
+// reuse the same sandbox id (spoond-52c S2).
+func (s *Service) deleteHalfSandbox(ctx context.Context, l *Lease) {
+	if l.SandboxID == "" {
+		return
+	}
+	if err := s.sub.Delete(context.WithoutCancel(ctx), l.SandboxID); err != nil {
+		s.log.Printf("undrain: resume %s cleanup: %v", l.ID, err)
+	}
+	s.deleteSandboxRow(l.SandboxID)
+}
+
 // undrain waits (up to 120 s) for the orchestrator to answer NodeInfo,
 // clears the draining state, then resumes exactly the drained leases,
 // UNDRAIN_CONCURRENCY (default 2) at a time. A resume that fails with a
@@ -381,13 +413,13 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease) (error, int)
 // 2) times with a short backoff before the lease becomes lost; an
 // admission refusal, a capacity answer or a bounded context keeps the
 // lease drained for a later undrain.
+//
+// The undrain serialisation is one-way (spoond-52c R4): the self-heal
+// loop defers to an undrain (undraining), but an admin undrain runs even
+// while a heal pass holds the flag, so a caller that wants the undrain
+// now gets it; a lease both reach is protected by its busy flag.
 func (s *Service) undrain(ctx context.Context) undrainResult {
 	res := undrainResult{Failed: []drainFailure{}}
-	// Mark an undrain in flight so the self-heal loop does not start a
-	// second pass over the same drained leases. The serialisation is
-	// one-way: the heal loop defers to an undrain, but an admin undrain
-	// does not defer to a heal pass (a caller that wants the undrain now
-	// gets it); a lease both reach is protected by its busy flag.
 	s.undraining.Store(true)
 	defer s.undraining.Store(false)
 
@@ -411,7 +443,12 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 		}
 	}
 
+	// The check-and-clear runs under the write side of drainGate, so a
+	// heal pass that decided to clear the drain cannot concurrently resume
+	// leases the admin undrain is also resuming (spoond-52c S1).
+	s.drainGate.Lock()
 	if err := s.sub.SetDraining(ctx, false); err != nil {
+		s.drainGate.Unlock()
 		// A stuck node drain is spoond's own drain state to heal: keep the
 		// flags so the self-heal loop retries the clear with backoff even
 		// when no drained lease remains (spoond-52c R1). The node still
@@ -424,6 +461,7 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 	s.draining.Store(false)
 	s.drainClearPending.Store(false)
 	s.drainStartedAt.Store(0)
+	s.drainGate.Unlock()
 
 	s.store.mu.Lock()
 	var targets []*Lease
@@ -458,12 +496,8 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 		go func(l *Lease) {
 			defer wg.Done()
 			defer release()
-			err, attempts := s.resumeDrainedLease(ctx, l)
+			err, attempts, deferred := s.drainResumeOutcome(ctx, l)
 			if err == nil {
-				s.store.mu.Lock()
-				l.Drained = false
-				s.saveLeaseLocked(l)
-				s.store.mu.Unlock()
 				mu.Lock()
 				res.Resumed++
 				mu.Unlock()
@@ -472,44 +506,81 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 				}
 				return
 			}
-			if undrainDeferred(err) || ctx.Err() != nil {
-				// Over the owner's memory cap, a burst lease that would dip
-				// the node under its burst reserve (#128 part 2), a
-				// guaranteed lease that could not preempt for room (#128
-				// part 3), a capacity answer or a cancelled/bounded context:
-				// each is a transient refusal, so the lease keeps its Drained
-				// flag and a later undrain (or the self-heal loop) retries
-				// it — refusing a resume must not lose the lease the way a
-				// failed resume (a sandbox that would not come back) does.
-				s.store.mu.Lock()
-				s.saveLeaseLocked(l)
-				s.store.mu.Unlock()
-				mu.Lock()
-				res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
-				mu.Unlock()
-				s.emitLeaseEvent(l.ID, l.Owner, LeaseDrainDeferred, fmt.Sprintf("after %d attempt(s): %v", attempts, err))
-				s.log.Printf("undrain: resume %s deferred after %d attempt(s): %v", l.ID, attempts, err)
-				return
-			}
-			reason := fmt.Sprintf("undrain resume failed after %d attempt(s): %v", attempts, err)
-			s.store.mu.Lock()
-			setLostReason(l, reason)
-			l.setState("lost")
-			l.Drained = false
-			s.saveLeaseLocked(l)
-			s.store.mu.Unlock()
-			s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
-			// A lease started from a named snapshot no longer protects it
-			// once lost (#83 S5).
-			s.rerunSnapshotRetention(ctx, l)
 			mu.Lock()
 			res.Failed = append(res.Failed, drainFailure{ID: l.ID, Error: err.Error(), Attempts: attempts})
 			mu.Unlock()
-			s.log.Printf("undrain: resume %s failed after %d attempt(s): %v", l.ID, attempts, err)
+			if deferred {
+				s.emitLeaseEvent(l.ID, l.Owner, LeaseDrainDeferred, fmt.Sprintf("after %d attempt(s): %v", attempts, err))
+				s.log.Printf("undrain: resume %s deferred after %d attempt(s): %v", l.ID, attempts, err)
+			}
 		}(l)
 	}
 	wg.Wait()
 	return res
+}
+
+// drainResumeOutcome runs one drained lease through resumeDrainedLease and
+// applies the result, the shared tail of the admin undrain and the drain
+// self-heal loop. On success it clears the lease's Drained flag (under the
+// store lock, unless the lease was released meanwhile — S4). A transient
+// refusal (admission, capacity, busy, draining, a bounded context) leaves
+// Drained set and returns deferred=true; a permanent failure loses the
+// lease, emitting its lost event and dropping its heal backoff. It is safe
+// to call concurrently for different leases.
+func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease) (error, int, bool) {
+	err, attempts := s.resumeDrainedLease(ctx, l)
+	if err == nil {
+		s.clearDrainHeal(l.ID)
+		s.store.mu.Lock()
+		if !l.released {
+			l.Drained = false
+			s.saveLeaseLocked(l)
+		}
+		s.store.mu.Unlock()
+		return nil, attempts, false
+	}
+	if undrainDeferred(err) || ctx.Err() != nil {
+		// A failed or cut-off resume can leave a half-started sandbox
+		// behind; remove it (best effort) so a retry reuses the same id
+		// (S2). Not for a busy lease, whose sandbox another operation is
+		// using.
+		if !errors.Is(err, errLeaseBusy) {
+			s.deleteHalfSandbox(ctx, l)
+		}
+		s.store.mu.Lock()
+		if !l.released {
+			s.saveLeaseLocked(l)
+		}
+		s.store.mu.Unlock()
+		return err, attempts, true
+	}
+	reason := fmt.Sprintf("drain resume failed after %d attempt(s): %v", attempts, err)
+	s.clearDrainHeal(l.ID)
+	s.store.mu.Lock()
+	if l.released || l.State == "lost" {
+		// A lease released or already lost while the resume was in flight
+		// is not lost again: clear its Drained flag if it still carries it
+		// and save nothing else, so no second lost event follows
+		// (spoond-775 class, spoond-52c NIT).
+		if !l.released && l.Drained {
+			l.Drained = false
+			s.saveLeaseLocked(l)
+		}
+		s.store.mu.Unlock()
+		return err, attempts, false
+	}
+	setLostReason(l, reason)
+	l.setState("lost")
+	l.Drained = false
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
+	s.deleteHalfSandbox(ctx, l)
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
+	// A lease started from a named snapshot no longer protects it once
+	// lost (#83 S5).
+	s.rerunSnapshotRetention(ctx, l)
+	s.log.Printf("undrain: resume %s failed after %d attempt(s): %v", l.ID, attempts, err)
+	return err, attempts, false
 }
 
 // startDrainHealLoop starts the drain self-heal loop (spoond-52c H3):
@@ -525,7 +596,9 @@ func (s *Service) startDrainHealLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.healDrain(ctx)
+			// The pass runs under the sweep bound, so one wedged substrate
+			// call cannot wedge the self-heal loop (spoond-52c NIT).
+			s.runSweepStage(ctx, "healDrain", s.healDrain)
 		}
 	}
 }
@@ -543,17 +616,94 @@ func (s *Service) drainMaxSecs() int {
 	return s.cfg.DrainMaxSecs
 }
 
-// healDrain is one self-heal pass. It first decides whether a stale
-// drain must be lifted: draining for longer than DRAIN_MAX_SECS while
-// the node reports healthy means the undrain never came (the hook timed
-// out, the unit did not restart), and a node that refuses every create
-// forever is exactly what the owner principle forbids. The automatic
-// undrain logs and emits its own event. Then it resumes every lease
-// still Drained, so a lease whose undrain was deferred or failed is
-// brought back with the same bounded retries an admin undrain uses. A
-// failed node-drain clear (an undrain that could not SetDraining(false))
-// is retried here too, whether or not a drained lease remains, and the
-// clear emits its event when it finally succeeds (spoond-52c R1).
+// drainHealState is the self-heal backoff of one lease whose resume was
+// deferred: when the next attempt may run, the doubling backoff, the
+// cause last seen (so drain_deferred is emitted only on a change) and
+// when spoond first started deferring it (the DRAIN_RESUME_MAX_AGE
+// bound).
+type drainHealState struct {
+	firstAt time.Time
+	nextAt  time.Time
+	backoff time.Duration
+	cause   string
+	tries   int
+	// gaveUp is set once the DRAIN_RESUME_MAX_AGE bound is spent: the
+	// heal stops retrying this lease and does not emit again, so a pass
+	// after the bound is a no-op. An admin undrain still retries the
+	// lease (it goes through undrain, not this state).
+	gaveUp bool
+}
+
+// drainHealFor returns the heal backoff state of a lease, creating it on
+// first sight.
+func (s *Service) drainHealFor(id string) *drainHealState {
+	s.drainHealMu.Lock()
+	defer s.drainHealMu.Unlock()
+	h := s.drainHeal[id]
+	if h == nil {
+		h = &drainHealState{firstAt: s.now()}
+		s.drainHeal[id] = h
+	}
+	return h
+}
+
+// clearDrainHeal forgets a lease's self-heal backoff after a successful or
+// terminal resume, so a later deferral starts fresh.
+func (s *Service) clearDrainHeal(id string) {
+	s.drainHealMu.Lock()
+	delete(s.drainHeal, id)
+	s.drainHealMu.Unlock()
+}
+
+// healDue reports whether a lease's next self-heal resume attempt is due
+// and, when it is, consumes the slot (advancing the backoff) so one pass
+// does not retry the same lease twice. It is false while the lease is
+// inside its backoff window.
+func (s *Service) healDue(h *drainHealState) bool {
+	s.drainHealMu.Lock()
+	defer s.drainHealMu.Unlock()
+	now := s.now()
+	if !h.nextAt.IsZero() && now.Before(h.nextAt) {
+		return false
+	}
+	h.tries++
+	if h.backoff == 0 {
+		h.backoff = drainHealBackoffMin
+	} else {
+		h.backoff *= 2
+		if h.backoff > drainHealBackoffMax {
+			h.backoff = drainHealBackoffMax
+		}
+	}
+	h.nextAt = now.Add(h.backoff)
+	return true
+}
+
+// drainResumeMaxAge is the effective DRAIN_RESUME_MAX_AGE. A negative
+// configured value disables the bound for tests that drive the loop by
+// hand; 0 means the default.
+func (s *Service) drainResumeMaxAge() time.Duration {
+	if s.cfg.DrainResumeMaxAge < 0 {
+		return 0
+	}
+	if s.cfg.DrainResumeMaxAge == 0 {
+		return DefaultDrainResumeMaxAge
+	}
+	return s.cfg.DrainResumeMaxAge
+}
+
+// healDrain is one self-heal pass. It first decides whether a stale drain
+// must be lifted: draining for longer than DRAIN_MAX_SECS while the node
+// reports healthy means the undrain never came (the hook timed out, the
+// unit did not restart), and a node that refuses every create forever is
+// exactly what the owner principle forbids. The automatic undrain logs
+// and emits its own event. Then it resumes leases still Drained, each on
+// its own backoff, so a lease whose undrain was deferred or failed is
+// brought back with the same bounded retries an admin undrain uses, and a
+// permanently deferred lease is given up on after DRAIN_RESUME_MAX_AGE
+// rather than retried every pass for ever (spoond-52c B2). A failed
+// node-drain clear is retried here too, whether or not a drained lease
+// remains, and the clear emits its event when it finally succeeds (R1).
 func (s *Service) healDrain(ctx context.Context) {
 	if s.undraining.Load() {
 		return
@@ -566,42 +716,128 @@ func (s *Service) healDrain(ctx context.Context) {
 	// Resolve the node once, up front: the self-heal loop never waits on
 	// an unreachable node for 120 s (the admin undrain does) and must not
 	// lose leases to transport errors while the node is down. An
-	// unreachable or unhealthy node leaves every drain and Drained lease
-	// exactly as it is, for the next pass.
+	// unreachable node leaves every drain and Drained lease exactly as it
+	// is, for the next pass.
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
 		s.log.Printf("drain self-heal: node info: %v", err)
 		return
 	}
-	healthy := info.Status == "healthy" || info.Status == "draining"
-	if !healthy {
-		return
-	}
-	// A failed undrain clear is retried on every pass while the node is
-	// healthy, whether or not a drained lease remains; each retry is
-	// logged and the clear emits its event (spoond-52c R1).
-	if s.draining.Load() {
-		switch {
-		case s.drainClearPending.Load():
+	healthy := info.Status == "healthy"
+	reachable := healthy || info.Status == "draining"
+
+	// spoond's own drain, or a drain clear a failed undrain left pending:
+	// clear the node's drain, either because our drain has outlived
+	// DRAIN_MAX_SECS (H3: a node that refuses every create for ever is what
+	// the owner principle forbids) or because the clear is pending (R1:
+	// retried every pass, whether or not a drained lease remains). A
+	// pending clear retries while the node answers at all (its 'draining'
+	// is spoond's own SetDraining, which the failed clear left in place);
+	// drainStale accepts a node reporting 'draining' for the same reason.
+	if s.draining.Load() || s.drainClearPending.Load() {
+		clearNow := s.drainClearPending.Load() && reachable
+		if !clearNow {
+			clearNow = s.drainStale(info)
+		}
+		if clearNow {
+			started := time.Unix(0, s.drainStartedAt.Load())
+			s.drainGate.Lock()
 			if err := s.sub.SetDraining(ctx, false); err != nil {
+				s.drainGate.Unlock()
 				s.log.Printf("drain self-heal: clear node draining retry: %v", err)
 				return
 			}
 			s.drainClearPending.Store(false)
 			s.draining.Store(false)
 			s.drainStartedAt.Store(0)
-			s.log.Printf("drain self-heal: node draining cleared after a failed undrain")
-			s.emitLeaseEvent("", "", LeaseDrainHealed, "node draining cleared after a failed undrain")
-		case s.drainStale(info):
-			started := time.Unix(0, s.drainStartedAt.Load())
-			s.log.Printf("drain self-heal: drain has lasted %s (limit %ds) while the node is healthy; undraining",
-				time.Since(started).Round(time.Second), s.drainMaxSecs())
-			s.emitLeaseEvent("", "", LeaseDrainHealed, fmt.Sprintf("drain lasted %s", time.Since(started).Round(time.Second)))
-		default:
-			return
+			s.drainGate.Unlock()
+			// The node accepted the clear, so it accepts work again; a
+			// lease still Drained resumes in this same pass rather than
+			// waiting a tick.
+			healthy = true
+			lasted := s.now().Sub(started).Round(time.Second)
+			s.log.Printf("drain self-heal: node draining cleared after %s", lasted)
+			s.emitLeaseEvent("", "", LeaseDrainHealed, fmt.Sprintf("drain lasted %s", lasted))
 		}
 	}
-	s.undrain(ctx)
+
+	// A lease still Drained can only resume once the node is healthy and
+	// spoond itself is no longer draining (B1: if spoond is not draining
+	// but the node reports 'draining', it is someone else's planned stop -
+	// do not fight it).
+	if !healthy || s.draining.Load() || s.drainClearPending.Load() {
+		return
+	}
+
+	// Resume each still-drained lease on its own backoff.
+	s.store.mu.Lock()
+	var targets []*Lease
+	for _, l := range s.store.leases {
+		if l.Drained && !l.released {
+			targets = append(targets, l)
+		}
+	}
+	s.store.mu.Unlock()
+	for _, l := range targets {
+		h := s.drainHealFor(l.ID)
+		maxAge := s.drainResumeMaxAge()
+		if maxAge > 0 && !h.gaveUp && s.now().Sub(h.firstAt) >= maxAge {
+			// The bound is spent: stop retrying, keep the lease suspended
+			// (its snapshot is intact - not lost) and tell the owner
+			// (spoond-52c B2). Mark the state so the log and event fire
+			// once, not every pass; an admin undrain can still retry it.
+			s.drainHealMu.Lock()
+			h.gaveUp = true
+			s.drainHealMu.Unlock()
+			reason := fmt.Sprintf("resume deferred for over %s; leaving the lease suspended for the owner", maxAge)
+			s.log.Printf("drain self-heal: giving up on %s after %s: %s", l.ID, s.now().Sub(h.firstAt).Round(time.Second), reason)
+			s.emitLeaseEvent(l.ID, l.Owner, LeaseDrainGaveUp, reason)
+			continue
+		}
+		if h.gaveUp {
+			continue
+		}
+		if !s.healDue(h) {
+			continue
+		}
+		err, attempts, deferred := s.drainResumeOutcome(ctx, l)
+		if err == nil {
+			s.log.Printf("drain self-heal: resumed %s", l.ID)
+			continue
+		}
+		if !deferred {
+			continue // drainResumeOutcome logged and emitted the loss
+		}
+		cause := err.Error()
+		if cause != h.cause {
+			// Only on a state change (first deferral, cause change): a
+			// permanently deferred lease does not emit a drain_deferred
+			// per lease per pass (spoond-52c B2).
+			h.cause = cause
+			s.emitLeaseEvent(l.ID, l.Owner, LeaseDrainDeferred, fmt.Sprintf("after %d attempt(s): %v", attempts, err))
+		}
+		s.log.Printf("drain self-heal: resume %s deferred (attempt %d, next in %s): %v", l.ID, h.tries, h.backoff, err)
+	}
+}
+
+// adoptDrainState reconciles spoond's own drain bookkeeping with the
+// node at Start: a node already reporting 'draining' was drained by a
+// previous process (a backend restart between drain and undrain), so
+// spoond adopts the drain with a fresh DRAIN_MAX_SECS clock instead of
+// believing it is healthy and undraining mid-planned-stop (spoond-52c
+// B1).
+func (s *Service) adoptDrainState(ctx context.Context) {
+	info, err := s.sub.NodeInfo(ctx)
+	if err != nil {
+		s.log.Printf("drain adopt: node info: %v", err)
+		return
+	}
+	if info.Status != "draining" {
+		return
+	}
+	s.draining.Store(true)
+	s.drainStartedAt.Store(s.now().UnixNano())
+	s.log.Printf("drain adopt: node reports draining; adopting it (DRAIN_MAX_SECS bounds the undrain)")
 }
 
 // hasDrainedLeases reports whether any live lease still carries the
@@ -629,7 +865,7 @@ func (s *Service) drainStale(info substrate.NodeInfo) bool {
 	if started == 0 {
 		return false
 	}
-	if time.Since(time.Unix(0, started)) <= time.Duration(max)*time.Second {
+	if s.now().Sub(time.Unix(0, started)) <= time.Duration(max)*time.Second {
 		return false
 	}
 	return info.Status == "healthy" || info.Status == "draining"

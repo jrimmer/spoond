@@ -605,3 +605,278 @@ func TestAdminUndrainDoesNotDeferToHeal(t *testing.T) {
 		t.Fatalf("lease = state=%s drained=%v, want running and undrained", leases[0].State, leases[0].Drained)
 	}
 }
+
+// TestStartAdoptsNodeDraining is spoond-52c B1: a backend that starts
+// while the node reports draining (a restart between drain and undrain)
+// must not believe it is healthy and undrain mid-planned-stop. At Start
+// it adopts the drain with a fresh DRAIN_MAX_SECS clock, so the heal
+// leaves it until the limit passes and then clears it.
+func TestStartAdoptsNodeDraining(t *testing.T) {
+	svc, _, sub := newTestService(t)
+	seedImage(t, svc.db, "py-base", 2048)
+	ctx := context.Background()
+
+	// Drain some leases, then simulate a backend restart: the process
+	// state is forgotten but the node still reports draining and the
+	// lease rows keep Drained.
+	leases := grantAndDrain(t, svc, 1)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "draining", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	svc.cfg.DrainMaxSecs = 1
+
+	// Start's adoption path sets spoond's draining state and a fresh
+	// DRAIN_MAX_SECS clock (it runs before the loops start).
+	startCtx, stop := context.WithCancel(context.Background())
+	svc.Start(startCtx)
+	stop()
+	if !svc.draining.Load() || svc.drainStartedAt.Load() == 0 {
+		t.Fatalf("adopt: draining=%v startedAt=%d, want both set", svc.draining.Load(), svc.drainStartedAt.Load())
+	}
+
+	// A heal pass before the limit must not clear it (the node reports
+	// draining, not healthy).
+	svc.healDrain(ctx)
+	if !svc.draining.Load() {
+		t.Fatal("the adopted drain was cleared before DRAIN_MAX_SECS")
+	}
+	if leases[0].Drained && leases[0].State == "running" {
+		t.Fatal("a lease resumed mid-planned-stop")
+	}
+
+	// Past the limit the heal clears it and resumes the lease.
+	svc.drainStartedAt.Store(svc.now().Add(-5 * time.Second).UnixNano())
+	svc.healDrain(ctx)
+	if svc.draining.Load() {
+		t.Fatal("the adopted drain was not cleared past DRAIN_MAX_SECS")
+	}
+	if leases[0].Drained || leases[0].State != "running" {
+		t.Fatalf("lease = state=%s drained=%v, want running and undrained", leases[0].State, leases[0].Drained)
+	}
+}
+
+// TestHealDoesNotUndrainOtherProcessesDrain is spoond-52c B1: when spoond
+// is not draining but the node reports 'draining' (someone else's planned
+// stop) and a lease of ours is still Drained, the heal resumes nothing
+// until the node reports healthy again.
+func TestHealDoesNotUndrainOtherProcessesDrain(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	leases := grantAndDrain(t, svc, 1)
+	// Forget spoond's own drain state, keep the node draining.
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "draining", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	svc.healDrain(ctx)
+	if !leases[0].Drained || leases[0].State != "suspended" {
+		t.Fatalf("lease = state=%s drained=%v, want it left suspended while the node drains", leases[0].State, leases[0].Drained)
+	}
+
+	// The node comes back healthy: the heal resumes it.
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+	svc.healDrain(ctx)
+	if leases[0].Drained || leases[0].State != "running" {
+		t.Fatalf("lease = state=%s drained=%v, want running once healthy", leases[0].State, leases[0].Drained)
+	}
+}
+
+// TestHealBackoffAndGivesUp is spoond-52c B2: a permanently deferred
+// lease is retried with doubling backoff, not every pass, and after
+// DRAIN_RESUME_MAX_AGE is left suspended with a drain_gave_up event.
+func TestHealBackoffAndGivesUp(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	base := time.Now()
+	now := base
+	svc.now = func() time.Time { return now }
+	svc.cfg.UndrainResumeRetries = 0
+	svc.cfg.DrainResumeMaxAge = 30 * time.Second
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	// Only the Drained recovery is under test: spoond is not draining and
+	// the node is healthy.
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	var creates atomic.Int32
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume {
+			creates.Add(1)
+			return substrate.Sandbox{}, errQuotaExceeded
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	events := svc.Subscribe(EventFilter{LeaseID: target.ID})
+	defer events.Close()
+
+	// The first pass attempts and defers.
+	svc.healDrain(context.Background())
+	if creates.Load() != 1 {
+		t.Fatalf("first pass attempts = %d, want 1", creates.Load())
+	}
+	// A second pass inside the backoff window is skipped.
+	svc.healDrain(context.Background())
+	if creates.Load() != 1 {
+		t.Fatalf("attempts inside the backoff window = %d, want 1", creates.Load())
+	}
+	// Past the backoff it retries.
+	now = now.Add(drainHealBackoffMin + time.Second)
+	svc.healDrain(context.Background())
+	if creates.Load() != 2 {
+		t.Fatalf("attempts after the backoff = %d, want 2", creates.Load())
+	}
+	// Only one drain_deferred event so far (the cause never changed).
+	drainDeferred := 0
+	for {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseDrainDeferred {
+				drainDeferred++
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if drainDeferred != 1 {
+		t.Fatalf("drain_deferred events = %d, want 1 (state change only)", drainDeferred)
+	}
+
+	// Age past DRAIN_RESUME_MAX_AGE: the loop gives up, keeps the lease
+	// suspended and emits drain_gave_up once.
+	now = now.Add(31 * time.Second)
+	svc.healDrain(context.Background())
+	if target.State == "lost" {
+		t.Fatal("the lease must be left suspended, not lost")
+	}
+	if !target.Drained {
+		t.Fatal("a given-up lease keeps its Drained flag")
+	}
+	gaveUp := 0
+	for {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseDrainGaveUp {
+				gaveUp++
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if gaveUp != 1 {
+		t.Fatalf("drain_gave_up events = %d, want 1", gaveUp)
+	}
+	// A later pass makes no further attempt.
+	before := creates.Load()
+	now = now.Add(time.Hour)
+	svc.healDrain(context.Background())
+	if creates.Load() != before {
+		t.Fatalf("attempts after giving up = %d, want no more than %d", creates.Load(), before)
+	}
+}
+
+// TestHealSkipsSetDrainingWhenNotDraining is spoond-52c B2: a pass that
+// has only a drained lease to resume (spoond is not draining) must not
+// call SetDraining(false) at all.
+func TestHealSkipsSetDrainingWhenNotDraining(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	grantAndDrain(t, svc, 1)
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+	before := calls(sub.Fake, "SetDraining")
+
+	svc.healDrain(ctx)
+	if got := calls(sub.Fake, "SetDraining") - before; got != 0 {
+		t.Fatalf("SetDraining calls during a Drained-only heal = %d, want 0", got)
+	}
+}
+
+// TestHealDeletedHalfSandbox is spoond-52c S2: a resume that fails and
+// leaves a half-started sandbox has it deleted (best effort) before the
+// deferral.
+func TestHealDeletedHalfSandbox(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	svc.draining.Store(false)
+	svc.drainStartedAt.Store(0)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume {
+			return substrate.Sandbox{}, errQuotaExceeded
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	before := calls(sub.Fake, "Delete")
+	svc.healDrain(ctx)
+	if got := calls(sub.Fake, "Delete") - before; got != 1 {
+		t.Fatalf("Delete calls during a deferred heal = %d, want 1", got)
+	}
+	if !target.Drained {
+		t.Fatal("the lease must stay drained")
+	}
+}
+
+// TestResumeOfReleasedLeaseDeletesSandbox is spoond-52c S4 (spoond-775
+// class): a release that lands while a resume's Create is in flight must
+// not be overwritten by the resume's save, and the sandbox just created
+// for the released lease is deleted.
+func TestResumeOfReleasedLeaseDeletesSandbox(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.suspend(ctx, "c", l.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		sb, err := sub.Fake.Create(cctx, req)
+		if err != nil {
+			return sb, err
+		}
+		// The owner's DELETE lands mid-Create.
+		svc.store.mu.Lock()
+		l.released = true
+		svc.store.mu.Unlock()
+		return sb, nil
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	before := calls(sub.Fake, "Delete")
+	if _, err := svc.resumeLease(ctx, l); !errors.Is(err, errNotFound) {
+		t.Fatalf("resume of a released lease = %v, want errNotFound", err)
+	}
+	if l.State != "suspended" || !l.Suspended {
+		t.Fatalf("lease = state=%s suspended=%v, want it left suspended", l.State, l.Suspended)
+	}
+	if got := calls(sub.Fake, "Delete") - before; got != 1 {
+		t.Fatalf("Delete calls = %d, want 1 (the half-started sandbox)", got)
+	}
+	for _, id := range sub.sandboxesLive(t) {
+		if id == l.SandboxID {
+			t.Fatalf("the released lease's new sandbox %s is still live", id)
+		}
+	}
+}

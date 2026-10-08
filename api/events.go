@@ -117,6 +117,11 @@ const (
 	// lease ran on into the orchestrator stop. The detail names the
 	// pause error (spoond-52c R2).
 	LeaseDrainFailed LeaseEventType = "drain_failed"
+	// LeaseDrainGaveUp marks the drain self-heal loop giving up on a
+	// drained lease whose resume stayed deferred past DRAIN_RESUME_MAX_AGE.
+	// The lease is left suspended (not lost: its snapshot is intact) for
+	// the owner or the idle rules to exit (spoond-52c B2).
+	LeaseDrainGaveUp LeaseEventType = "drain_gave_up"
 )
 
 // LeaseEvent is one lease lifecycle change.

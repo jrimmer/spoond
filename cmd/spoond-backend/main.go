@@ -379,6 +379,10 @@ func Main(args []string) int {
 	// while the node is healthy undrains itself rather than refusing
 	// every create forever. 0 means the default; a negative disables it.
 	drainMaxSecs := envIntOr("DRAIN_MAX_SECS", api.DefaultDrainMaxSecs)
+	// DRAIN_RESUME_MAX_AGE bounds how long the self-heal loop retries a
+	// lease whose resume stays deferred before leaving it suspended for
+	// the owner. 0 means the default; a negative disables the bound.
+	drainResumeMaxAge := envDurationOr("DRAIN_RESUME_MAX_AGE", api.DefaultDrainResumeMaxAge)
 	// Bounded recovery and preempt-resume retries (spoond-dxq): a
 	// transient failure keeps the lease recovering instead of losing it,
 	// and a permanently failing one gives up after a bounded budget.
@@ -479,9 +483,10 @@ func Main(args []string) int {
 		PreemptResumeRetries:     preemptResumeRetries,
 		// spoond-j3a: bound one background sweep stage so a hung
 		// substrate RPC frees the loop and the lease's busy flag.
-		SweepTimeout: envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
-		DrainMaxSecs: drainMaxSecs,
-		CrashTest:    os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		SweepTimeout:      envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
+		DrainMaxSecs:      drainMaxSecs,
+		DrainResumeMaxAge: drainResumeMaxAge,
+		CrashTest:         os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).
@@ -586,6 +591,7 @@ func Main(args []string) int {
 		// The admin drain state (spoond-52c H3): node.draining warns while
 		// the drain is in effect and resolves when it clears.
 		src.Draining = svc.Draining
+		src.DrainWarnAfter = svc.DrainWarnAfter()
 		for _, c := range src.Checks() {
 			notifier.AddCheck(c)
 		}
