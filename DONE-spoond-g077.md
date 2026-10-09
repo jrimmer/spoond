@@ -77,7 +77,10 @@ backend logged `list sandboxes failed: DeadlineExceeded` that night.
   `ErrUnavailable` and that it is not `ErrNotFound`.
 - `api/substrate_unavailable_test.go` (new):
   `TestExecSubstrateUnavailableIsRetryable` (503 + Retry-After +
-  `substrate_unavailable`, lease not lost) and
+  `substrate_unavailable`, lease not lost),
+  `TestResumeOnUseThenExecSubstrateUnavailable` (a suspended lease whose
+  resume succeeds and whose following exec hits an unknown `List` answers
+  503 `substrate_unavailable` and is not lost) and
   `TestExecSandboxConfirmedGoneIsStillGone` (410 unchanged).
 - `api/files_test.go`: `TestFilesSubstrateUnavailable` (503 +
   `substrate_unavailable` from a file stat, lease not lost).
@@ -122,6 +125,35 @@ fix is reverted:
 - **T1:** `TestSandboxListedListErrorIsUnavailable` asserts a literal `3`
   instead of comparing to `listProbeAttempts`, so a retry-count change fails
   it.
+
+### Round-3 rebase onto resume-on-use (spoond-1tb5)
+
+`origin/main` moved to `087f46d` (resume-on-use) before this branch could be
+pushed. The branch was rebased onto it and the `api/server.go` conflict
+resolved so both behaviours coexist:
+
+- `writeErrorCode` / `writeErrorCodeAfter` keep the 1tb5 codes
+  (`capacity_wait`, `quota_exceeded`, `lease_busy`) **and** carry
+  `substrate_unavailable`.
+- `handleExec` runs `ensureRunning` (resume-on-use) and then dispatches its
+  failed exec through `writeSandboxOpErrorFor`; the two do not overlap, so a
+  resume refusal is still `capacity_wait`/`quota_exceeded`/`lease_busy` and a
+  post-resume unknown `List` is `substrate_unavailable`. The new
+  `TestResumeOnUseThenExecSubstrateUnavailable` pins that composition.
+- `handleJobSignal` keeps 1tb5's check-job-before-resume and g077's
+  `ErrUnavailable` branch after the resume. `api/files.go`,
+  `api/idle_suspend.go`, `api/jobs_http.go`, `docs/api.md` and
+  `CHANGELOG.md` were checked for semantic (not only textual) clashes:
+  `filesGate` resumes then the file op maps an unknown through
+  `mapFileError`; `writeResumeRefusal` never sees `ErrUnavailable` (a
+  resume's `Create` tests `List` only on `Start`, but the defensive generic
+  500 stays). No other change.
+
+### Test-to-mutation map (round 3)
+
+| Test | Mutation it kills |
+|---|---|
+| `TestResumeOnUseThenExecSubstrateUnavailable` (`api/substrate_unavailable_test.go`) | Dropping g077's `ErrUnavailable` mapping from `handleExec` while keeping 1tb5's resume-on-use: the exec after the resume answers 500/`capacity_wait` instead of 503 `substrate_unavailable`, or the lease is marked lost. |
 
 ## Gates
 
