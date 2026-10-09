@@ -2146,7 +2146,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// orchestrator List failed) is 503 substrate_unavailable instead:
 		// 410 is final for clients, so an orchestrator stall must never
 		// become one.
-		if s.writeSandboxOpError(w, lease, err) {
+		if s.writeSandboxOpErrorFor(w, lease, "exec", err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "exec failed")
@@ -2201,10 +2201,22 @@ const substrateUnknownRetryAfterSecs = 5
 // writeSubstrateUnavailable answers a substrate operation that could not
 // confirm the sandbox's state (the orchestrator List failed): 503 with a
 // Retry-After and the machine-readable code substrate_unavailable. The
-// lease is never marked lost on this answer; the caller retries.
+// lease is never marked lost on this answer; the caller retries. It
+// logs nothing itself: callers that have the lease and the op call
+// writeSubstrateUnavailableFor so an orchestrator stall is visible in
+// the backend log with the lease id and op.
 func (s *Server) writeSubstrateUnavailable(w http.ResponseWriter) {
 	writeErrorCodeAfter(w, substrateUnknownStatusCode, substrateUnknownRetryAfterSecs, "substrate_unavailable",
 		"the substrate could not confirm the sandbox state (orchestrator unreachable); retry shortly")
+}
+
+// writeSubstrateUnavailableFor is writeSubstrateUnavailable plus the one
+// log line the substrate-unknown answer carries: lease id, op and
+// "substrate unavailable". The client only sees the retryable 503; the
+// backend log is where an orchestrator stall is diagnosed.
+func (s *Server) writeSubstrateUnavailableFor(w http.ResponseWriter, lease *Lease, op string) {
+	s.svc.log.Printf("%s: lease %s sandbox %s: substrate unavailable; answering a retryable 503", op, lease.ID, lease.SandboxID)
+	s.writeSubstrateUnavailable(w)
 }
 
 // writeSandboxOpError maps a failed substrate operation on a live lease:
@@ -2212,8 +2224,14 @@ func (s *Server) writeSubstrateUnavailable(w http.ResponseWriter) {
 // kept), and a confirmed not-found goes through writeSandboxGone
 // (409 busy / 410 lease_lost). It reports whether it wrote a response.
 func (s *Server) writeSandboxOpError(w http.ResponseWriter, l *Lease, err error) bool {
+	return s.writeSandboxOpErrorFor(w, l, "substrate op", err)
+}
+
+// writeSandboxOpErrorFor is writeSandboxOpError with the op named in the
+// substrate-unknown log line.
+func (s *Server) writeSandboxOpErrorFor(w http.ResponseWriter, l *Lease, op string, err error) bool {
 	if errors.Is(err, substrate.ErrUnavailable) {
-		s.writeSubstrateUnavailable(w)
+		s.writeSubstrateUnavailableFor(w, l, op)
 		return true
 	}
 	if errors.Is(err, substrate.ErrNotFound) {
@@ -2255,7 +2273,7 @@ echo "== df =="; df -P /
 		Timeout: 5 * time.Second,
 	})
 	if err != nil {
-		if s.writeSandboxOpError(w, lease, err) {
+		if s.writeSandboxOpErrorFor(w, lease, "stat", err) {
 			return
 		}
 		s.svc.log.Printf("stat: %s: %v", lease.SandboxID, err)

@@ -38,7 +38,7 @@ func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, le
 			// A confirmed not-found is 409 busy / 410 lease_lost; an
 			// unavailable decision is 503 substrate_unavailable and the
 			// lease is kept.
-			s.writeSandboxOpError(w, lease, err)
+			s.writeSandboxOpErrorFor(w, lease, "exec background", err)
 		default:
 			s.svc.log.Printf("exec background: %s: %v", lease.SandboxID, err)
 			writeError(w, http.StatusInternalServerError, "failed to start background job")
@@ -318,7 +318,7 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.svc.signalJob(r.Context(), lease.ID, lease.SandboxID, row, req.Signal); err != nil {
 		if errors.Is(err, substrate.ErrUnavailable) {
-			s.writeSubstrateUnavailable(w)
+			s.writeSubstrateUnavailableFor(w, lease, "job signal")
 			return
 		}
 		if errors.Is(err, substrate.ErrNotFound) {
