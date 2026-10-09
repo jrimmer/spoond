@@ -102,6 +102,30 @@ func watchIdleSuspended(leaseID string, out chan<- time.Duration) {
 	}
 }
 
+// leaseSuspendedMessage is the structured 409 body spoond answers on the
+// paths that cannot resume a suspended lease (2.9, #145 D2).
+const leaseSuspendedMessage = "lease is suspended; resume it first"
+
+// requireLeaseSuspended asserts the response is the structured 409
+// lease_suspended refusal (code and error) that only the paths which
+// cannot resume a suspended lease still answer (2.9, #145 D2).
+func requireLeaseSuspended(t *testing.T, what string, status int, body []byte) {
+	t.Helper()
+	if status != 409 {
+		failf(t, "%s: status %d, want 409: %s", what, status, truncate(body))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		failf(t, "%s: bad body: %v", what, err)
+	}
+	if m["code"] != "lease_suspended" {
+		failf(t, "%s: code = %v, want lease_suspended: %s", what, m["code"], truncate(body))
+	}
+	if m["error"] != leaseSuspendedMessage {
+		failf(t, "%s: error = %v, want %q: %s", what, m["error"], leaseSuspendedMessage, truncate(body))
+	}
+}
+
 // leaseSuspended reads a lease's suspended state from the API.
 func leaseSuspended(t *testing.T, id string) bool {
 	t.Helper()

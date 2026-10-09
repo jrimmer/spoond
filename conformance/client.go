@@ -190,6 +190,28 @@ func (c *client) suspend(id string) (int, []byte, error) {
 	return c.do("POST", "/api/sandboxes/"+id+"/suspend", nil)
 }
 
+// heartbeat posts the guest heartbeat (POST /lease/{id}/active) on the
+// guest-service listener. It carries no bearer token: the lease id is the
+// capability. The heartbeat is not a work call, so a suspended lease
+// still answers 409 lease_suspended.
+func (c *client) heartbeat(id string) (int, []byte, error) {
+	req, err := http.NewRequest(http.MethodPost, c.proxyURL+"/lease/"+id+"/active", nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	// The guest-service listener can run under forward-auth (U7/T7):
+	// present the proxy secret and user like the N3 proxy check does.
+	req.Header.Set("X-Proxy-Auth", c.proxySecret)
+	req.Header.Set("Remote-User", c.proxyUser)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, err
+}
+
 func (c *client) resume(id string) (int, []byte, error) {
 	return c.do("POST", "/api/sandboxes/"+id+"/resume", nil)
 }

@@ -171,9 +171,11 @@ func TestF2_LeaseFileOperations(t *testing.T) {
 	}
 }
 
-// TestF2_LeaseFilesSuspendedRefused: a suspended lease has no running
-// sandbox, so every file route answers 409 until it is resumed — and the
-// file written before the suspend is still there after the resume.
+// TestF2_LeaseFilesSuspendedRefused: a suspended lease resumes on the
+// next file work call (2.9, #145 D2) and the call is served — the file
+// written before the suspend is read back from the resumed guest. Only
+// the paths that cannot resume keep 409 lease_suspended, so the stat
+// probe still refuses while the lease is suspended.
 func TestF2_LeaseFilesSuspendedRefused(t *testing.T) {
 	begin(t)
 
@@ -196,21 +198,38 @@ func TestF2_LeaseFilesSuspendedRefused(t *testing.T) {
 		failf(t, "suspend: status %d: %s", st, truncate(data))
 	}
 
+	// The stat probe needs a running guest and cannot resume one: it is
+	// one of the few paths that still answers 409 lease_suspended.
+	if st, data, err = cl.stat(l.ID); err != nil {
+		failf(t, "stat on suspended: %v", err)
+	} else {
+		requireLeaseSuspended(t, "stat on suspended", st, data)
+	}
+
+	// Forking checkpoints the source guest, so it cannot resume either:
+	// it still answers 409 lease_suspended while the lease is suspended.
+	if st, data, err = cl.fork(l.ID, map[string]any{"count": 1}); err != nil {
+		failf(t, "fork on suspended: %v", err)
+	} else {
+		requireLeaseSuspended(t, "fork on suspended", st, data)
+	}
+
+	// The file get is work: it resumes the lease and serves the bytes.
 	st, data, err = cl.fileGet(l.ID, path, "")
 	if err != nil {
 		failf(t, "get on suspended: %v", err)
 	}
-	if st != 409 {
-		failf(t, "get on suspended: status %d, want 409: %s", st, truncate(data))
+	if st != 200 {
+		failf(t, "get on suspended: status %d, want 200 (the call resumes the lease): %s", st, truncate(data))
+	}
+	if string(data) != body {
+		failf(t, "get on suspended: body %q, want %q", data, body)
+	}
+	if leaseSuspended(t, l.ID) {
+		failf(t, "lease %s still suspended after the file get", l.ID)
 	}
 
-	st, data, err = cl.resume(l.ID)
-	if err != nil {
-		failf(t, "resume: %v", err)
-	}
-	if st != 200 {
-		failf(t, "resume: status %d: %s", st, truncate(data))
-	}
+	// The guest itself sees the file that survived the suspend/resume.
 	if got := execOK(t, l.ID, "cat -- "+shQuote(path)); !strings.Contains(got, "survives") {
 		failf(t, "guest cat after resume: got %q, want the marker", got)
 	}
