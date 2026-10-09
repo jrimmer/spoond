@@ -392,7 +392,13 @@ reclaims spoond's own garbage (#145 D5): below `DISK_CLEAN_START_PCT`
 None of these is owner data that is still live, and the tier never
 touches a running or suspended lease. A tick that frees anything emits
 one lease-less `disk.cleanup` event with the bytes freed per category.
-The critical-disk FIFO above stays the last resort below
+The catalog walk (the kept set and the candidate deletes) shares the
+critical rule's five-minute guard — it is the expensive part and the
+sweep ticks every few seconds — while the maintained rows and the
+orphan directory reap run every tick. The tier latches on below
+`DISK_CLEAN_START_PCT` and keeps running until `DISK_CLEAN_STOP_PCT` is
+reached, so it does not stop the moment the start level is crossed
+again. The critical-disk FIFO above stays the last resort below
 `CRITICAL_DISK_FREE_PCT`. Set `DISK_CLEAN_START_PCT` to `0` to disable
 the tier, and `KEPT_CHECKPOINT_TTL_SECS` to `0` to keep pins from
 expiring. Every catalog delete (leftover, template and expired pin)

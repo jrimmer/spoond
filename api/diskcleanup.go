@@ -87,10 +87,13 @@ func (s *Service) diskCleanupTick(ctx context.Context, now time.Time) {
 }
 
 // reclaimSpoondGarbage reclaims the proactive tier's categories in one
-// pass and returns the bytes each freed. It is best-effort: a failed
-// catalog or storage read skips the category and reports nothing rather
-// than failing the sweep. GC_DELETE still governs the catalog deletes
-// (gcCandidates), and ORPHAN_REAP still governs the orphan reap.
+// pass, in the owner's order - orphan directories first, then the
+// catalog's leftovers of released/lost leases, kept checkpoints and
+// unreferenced template builds - and returns the bytes each freed. It is
+// best-effort: a failed catalog or storage read skips the category and
+// reports nothing rather than failing the sweep. GC_DELETE still governs
+// the catalog deletes (gcCandidates), and ORPHAN_REAP still governs the
+// orphan reap.
 //
 // The catalog walk (kept set + candidate deletes) shares rule 5's
 // five-minute guard: it is the expensive part, and the sweep ticks every
@@ -108,11 +111,19 @@ func (s *Service) reclaimSpoondGarbage(ctx context.Context, now time.Time) gcSta
 	// builds then leave the kept set and become ordinary candidates in
 	// this same pass.
 	s.releaseExpiredLostLeases(ctx)
-	// Expire kept checkpoints past their TTL before the kept set is
-	// computed, so their builds are candidates in this same tick. The
+	// 1. Orphan build/snapshot directories with no store row. The reap is
+	// governed by ORPHAN_REAP, not GC_DELETE, like any GC pass, and is
+	// cheap enough to run every tick.
+	_, orphanFreed := s.reapOrphans(ctx)
+	stats.Orphans += orphanFreed
+	// 2/3. Expire kept checkpoints past their TTL before the kept set is
+	// computed, so their builds are candidates in this same pass. The
 	// bytes are reported even when GC_DELETE is off: the pin (not the
-	// file) is what expired.
+	// file) is what expired. A release frees no disk by itself.
 	stats.KeptCheckpoints += s.expireKeptCheckpoints(ctx, now)
+	// 2/4. The catalog GC reclaims the leftovers of released/lost leases
+	// (2) and the unreferenced template builds (4); stats splits them.
+	// Its own gc event may also fire, which is unchanged maintenance.
 	if now.Sub(s.criticalGCAt) >= 5*time.Minute {
 		s.criticalGCAt = now
 		kept, err := s.keptBuilds(ctx)
@@ -122,11 +133,6 @@ func (s *Service) reclaimSpoondGarbage(ctx context.Context, now time.Time) gcSta
 			s.log.Printf("disk cleanup: catalog: %v", err)
 		}
 	}
-	// The orphan reap sweeps directories the catalog never sees. It is
-	// governed by ORPHAN_REAP, not GC_DELETE, like any GC pass, and is
-	// cheap enough to run every tick.
-	_, orphanFreed := s.reapOrphans(ctx)
-	stats.Orphans += orphanFreed
 	return stats
 }
 
