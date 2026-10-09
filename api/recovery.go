@@ -133,6 +133,7 @@ func (s *Service) markLost(l *Lease, reason string) string {
 	setLostReason(l, reason)
 	l.setState("lost")
 	s.saveLeaseLocked(l)
+	s.journalLease(journalOpLost, l, reason)
 	return reason
 }
 
