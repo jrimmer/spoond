@@ -144,6 +144,31 @@ summarised from README "Status".
   instead of `500`. The owner-deleted grant refusal also drops the
   lease's remembered egress config, like every other failed create.
 
+- **The host-address guard now follows the host's current addresses
+  (spoond-6s9, e2b-runtime P9).** The fork's `tcpfirewall` computed its
+  host-address set once at package init and from IPv4 addresses only, so
+  a slot veth address or a host IPv6 address that appeared later was not
+  guarded: an unscoped allowance such as `10.0.0.0/8` could reach
+  host-local veth IPs and host services listening on `0.0.0.0`/`::`, on
+  both the CIDR and the domain path. The unspecified addresses `0.0.0.0/8`
+  and `::` are now always refused, and every IPv6 form that embeds an IPv4
+  address — IPv4-mapped, IPv4-compatible `::/96`, NAT64 `64:ff9b::/96` and
+  6to4 `2002::/16` — is normalized to that address before the host check,
+  so a guest `Host`/SNI of `0.0.0.0` or an allowed domain resolving to
+  `0.0.0.0`/`::` can no longer reach host loopback listeners. The guest's
+  own allowed/denied CIDRs still see the original destination, so
+  normalization cannot widen them. The set is
+  recomputed from the live interfaces at most every 3 s, covers IPv4 and
+  IPv6 (and a resolved-IPv6 zone id is stripped), and keeps loopback and
+  link-local refused. The snapshot is published through an atomic pointer
+  and refreshed single-flight with a non-blocking lock, so a decision never
+  waits on the interface syscall (a reader that loses the refresh race
+  serves the expired snapshot). A failed interface read keeps the last good
+  set for one extra
+  TTL and then fails closed, logging and counting the failure once per
+  TTL; the domain path's resolved-IP check consults the same guard.
+  Bundled with 2.9 (orchestrator swap first).
+
 - **The exec and stream request bodies are bounded (spoond-mrbr).**
   `POST /api/leases/{id}/exec` decoded its JSON body with no size bound,
   so one authenticated caller could send a multi-GB `cmd` or `secrets`
