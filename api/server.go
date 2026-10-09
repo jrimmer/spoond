@@ -2655,7 +2655,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // writeErrorCode is writeError with a machine-readable code beside the
-// message (e.g. substrate_unavailable, leased_busy).
+// message (e.g. substrate_unavailable, lease_busy).
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})
 }
