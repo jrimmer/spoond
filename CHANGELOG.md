@@ -253,6 +253,23 @@ summarised from README "Status".
   TTL; the domain path's resolved-IP check consults the same guard.
   Bundled with 2.9 (orchestrator swap first).
 
+- **The host-address guard follow-ups: the private allowance sees the
+  original IP, and the first host enumeration is blocking
+  (spoond-kh29, e2b-runtime P9a).** Two low-severity findings from the P9
+  review. First, a port-scoped private allowance naming a host's IPv4
+  address (`10.0.0.11/32` on port 8080) admitted a 6to4/NAT64 form of that
+  address (`2002:a00:b::1:8080`), whose dial goes to the IPv6 address, even
+  under `denied_cidrs ::/0`; the allowance is now matched against the
+  original destination while the host-address check keeps seeing the
+  normalized one. Go's `IPNet.Contains` still matches an IPv4-mapped
+  `::ffff:` address against an IPv4 allowance. Second, the host-address set
+  was published as an always-denied-only snapshot and refreshed lazily, so
+  a decision that lost the first `TryLock` was checked against that partial
+  set until the first enumeration published; the constructor now performs
+  one blocking enumeration, so a successful read publishes the real set
+  before any decision and a failed read publishes a fail-closed set that
+  the TTL refresh retries. Bundled with 2.9 (orchestrator swap first).
+
 - **The exec and stream request bodies are bounded (spoond-mrbr).**
   `POST /api/leases/{id}/exec` decoded its JSON body with no size bound,
   so one authenticated caller could send a multi-GB `cmd` or `secrets`
