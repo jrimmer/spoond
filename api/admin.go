@@ -383,6 +383,9 @@ func (s *Service) undrainBackoffFor(retry int) time.Duration {
 // gRPC error that did not go through mapError) is still treated as
 // indeterminate rather than a sandbox failure.
 func undrainNotReady(err error) bool {
+	if err == nil {
+		return false
+	}
 	if errors.Is(err, substrate.ErrUnavailable) {
 		return true
 	}
