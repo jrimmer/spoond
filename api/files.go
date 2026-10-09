@@ -96,7 +96,7 @@ func parseFileMode(raw string, def os.FileMode) (os.FileMode, error) {
 func (s *Server) mapFileError(w http.ResponseWriter, lease *Lease, op string, err error) {
 	sandboxID := lease.SandboxID
 	if errors.Is(err, substrate.ErrUnavailable) {
-		s.writeSubstrateUnavailable(w)
+		s.writeSubstrateUnavailableFor(w, lease, "files "+op)
 		return
 	}
 	s.svc.store.mu.Lock()
