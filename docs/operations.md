@@ -968,13 +968,15 @@ minute and one `waiting for capacity on spoond (N s)` log row at the
 start and every few minutes, so Forgejo does not reap the silent task.
 `RUNNER_JOB_TIMEOUT` (duration or seconds, default `6h`) bounds the
 whole job so a wait cannot pin a worker forever, and a job's own
-`timeout-minutes` is the tighter bound when set; a job that ran out of
-time is reported cancelled. A job still waiting for a sandbox when the
-runner drains is cancelled at once (no `RUNNER_STOP_GRACE`), and one
-granted a lease in the moment its client disappears is released with
-reason `client_gone` instead of leaking until its TTL. The lease
-client's own HTTP timeout grows to cover the admission wait, so a
-queued create is not cut by the client.
+`timeout-minutes` bounds its **execution** — it starts once the sandbox
+is created and does not count the admission wait, matching GitHub
+Actions. A `timeout-minutes` above `RUNNER_JOB_TIMEOUT` is capped by
+it; a job that ran out of time is reported cancelled. A job still
+waiting for a sandbox when the runner drains is cancelled at once (no
+`RUNNER_STOP_GRACE`), and one granted a lease in the moment its client
+disappears is released with reason `client_gone` instead of leaking
+until its TTL. The lease client's own HTTP timeout grows to cover the
+admission wait, so a queued create is not cut by the client.
 
 **Orphan sweep at start.** When the runner starts it lists its token's
 leases and deletes every one whose comment starts with `forgejo job ` —

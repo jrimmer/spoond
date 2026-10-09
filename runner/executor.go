@@ -32,8 +32,8 @@ type Executor struct {
 	// JobTimeout bounds the whole job (including waiting for capacity on
 	// Create). Zero leaves the caller's context in charge; the pool's
 	// job context (RUNNER_STOP_GRACE) is the normal bound. Set via
-	// RUNNER_JOB_TIMEOUT. A job's own timeout-minutes, when set, is the
-	// tighter of the two and wins.
+	// RUNNER_JOB_TIMEOUT. A job's own timeout-minutes is separate: it
+	// bounds execution only, once the sandbox exists (S1).
 	JobTimeout time.Duration
 	// RepoBaseURL is the git host base URL used to construct clone URLs
 	// for actions/checkout (e.g. https://code.example.com). The repo path
@@ -110,15 +110,15 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	if wfJob == nil {
 		return e.fail(ctx, job, fmt.Errorf("no job in workflow"))
 	}
-	// Bound the whole job — the create's wait for admission included —
-	// by the tighter of the job's own timeout-minutes and the host's
-	// RUNNER_JOB_TIMEOUT. A capacity refusal is retried until this, so a
-	// full node can hold the create but never a worker forever. The
-	// deferred cancel runs after the final report (report uses a fresh
-	// context once this one is dead).
-	if d := e.effectiveJobTimeout(wfJob); d > 0 {
+	// Bound the WHOLE job — the create's wait for admission included —
+	// by the host's RUNNER_JOB_TIMEOUT, so a full node can hold the
+	// create but never a worker forever. The job's own timeout-minutes
+	// is separate and bounds execution only, once the sandbox exists
+	// (S1). The deferred cancel runs after the final report (report uses
+	// a fresh context once this one is dead).
+	if e.JobTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, d)
+		ctx, cancel = context.WithTimeout(ctx, e.JobTimeout)
 		defer cancel()
 	}
 
@@ -150,6 +150,16 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 			return e.report(ctx, state, nil)
 		}
 		return e.fail(ctx, job, fmt.Errorf("create sandbox: %w", err))
+	}
+
+	// The job's own timeout-minutes bounds EXECUTION from here (S1,
+	// matching GitHub): the sandbox now exists, so the admission wait
+	// above does not count against it. It derives from ctx, so the host's
+	// RUNNER_JOB_TIMEOUT still caps it.
+	if d := executionTimeout(wfJob); d > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
 	}
 
 	state := &JobState{
@@ -519,19 +529,17 @@ func (e *Executor) runID(job *Job) int64 {
 	return job.ID
 }
 
-// effectiveJobTimeout is how long the whole job may take: the tighter of
-// the job's own timeout-minutes and the host's RUNNER_JOB_TIMEOUT. 0
-// means no bound here (the caller's context still governs). A negative
-// timeout-minutes is ignored like unset.
-func (e *Executor) effectiveJobTimeout(wfJob *WorkflowJob) time.Duration {
-	d := e.JobTimeout
-	if wfJob != nil && wfJob.TimeoutMinutes > 0 {
-		job := time.Duration(float64(wfJob.TimeoutMinutes) * float64(time.Minute))
-		if d <= 0 || job < d {
-			d = job
-		}
+// executionTimeout is a job's own `timeout-minutes` as a duration, or 0
+// when unset. It bounds the job's EXECUTION only, starting once the
+// sandbox exists (S1, matching GitHub Actions); the admission wait is
+// not counted against it. Executor.JobTimeout (RUNNER_JOB_TIMEOUT) stays
+// the whole-job bound, the wait included, so a timeout-minutes above it
+// is capped by it (the execution context derives from the job context).
+func executionTimeout(wfJob *WorkflowJob) time.Duration {
+	if wfJob == nil || wfJob.TimeoutMinutes <= 0 {
+		return 0
 	}
-	return d
+	return time.Duration(float64(wfJob.TimeoutMinutes) * float64(time.Minute))
 }
 
 // jobRecord builds the failure record for a finished job. Every executed step

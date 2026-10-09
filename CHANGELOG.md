@@ -190,8 +190,11 @@ summarised from README "Status".
   `waiting for capacity on spoond (N s)` log row, so Forgejo does not
   reap the silent task. `RUNNER_JOB_TIMEOUT` (duration or seconds,
   default `6h`) bounds the whole job so a wait cannot pin a worker
-  forever; a job's own `timeout-minutes` is the tighter bound when
-  set, and a job that ran out of time is reported cancelled. The lease
+  forever. A job's own `timeout-minutes` bounds its **execution**,
+  starting once the sandbox is created and not counting the admission
+  wait (matching GitHub Actions); a value above `RUNNER_JOB_TIMEOUT` is
+  capped by it, and a job that ran out of time is reported cancelled.
+  The lease
   client's HTTP timeout grows to cover the admission wait. A plain
   `503 capacity: …` refusal now also carries a `Retry-After: 30` like
   the burst-reserve and preempt ones, so a client that sent no `wait`
@@ -203,11 +206,16 @@ summarised from README "Status".
 
 - **`timeout-minutes` is enforced (spoond-r739).** A job that runs
   past its own `timeout-minutes` is cut and reported cancelled,
-  matching GitHub. The field parses leniently: a number (integer or
-  fractional) is honoured, an expression or string (e.g.
-  `timeout-minutes: ${{ matrix.t }}`) is ignored with one log line
-  instead of failing the whole workflow. Known users: the hrmny
-  `e2e-live.yml` live job (75) and `ci.yml` (45/45/20).
+  matching GitHub. It bounds the job's **execution**, starting once its
+  sandbox is created — the admission wait does not count against it
+  (`RUNNER_JOB_TIMEOUT`, default `6h`, remains the whole-job bound and
+  caps a larger `timeout-minutes`). The field parses leniently: a
+  number (integer or fractional) is honoured, an expression or string
+  (e.g. `timeout-minutes: ${{ matrix.t }}`) is ignored with one log
+  line instead of failing the whole workflow, and a non-finite, zero,
+  negative or absurdly large value (`.inf`, `1e300`) is ignored so it
+  cannot overflow the duration and remove every bound. Known users: the
+  hrmny `e2e-live.yml` live job (75) and `ci.yml` (45/45/20).
 
 - **A user delete that cannot finish now says so (spoond-y0jj).** When a
   cleanup store step failed — listing a user's running jobs or kept

@@ -974,6 +974,14 @@ func TestParseWorkflowTimeoutMinutesLenient(t *testing.T) {
 		{"${{ matrix.t }}", 0},
 		{`"45"`, 0},
 		{"true", 0},
+		// C1: values that would overflow the minutes-to-duration
+		// conversion (removing every bound) are ignored.
+		{".inf", 0},
+		{"-.inf", 0},
+		{"1e300", 0},
+		{"1000001", 0},
+		{"0", 0},
+		{"-5", 0},
 	}
 	for _, c := range cases {
 		payload := "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: " + c.value + "\n    steps:\n      - run: echo hi\n"
@@ -1061,11 +1069,35 @@ func TestExecutorJobTimeoutBoundsCreateWait(t *testing.T) {
 	}
 }
 
-// TestExecutorJobTimeoutMinutesBoundsCreateWait: a job's own
-// timeout-minutes bounds the create wait even when the host sets no
-// RUNNER_JOB_TIMEOUT.
-func TestExecutorJobTimeoutMinutesBoundsCreateWait(t *testing.T) {
-	lease := &blockingCreateLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+// delayedCreateLease is a fakeLease whose Create takes createDelay to
+// return (a create queued for capacity that is eventually admitted),
+// then records the execs. Its steps are quick.
+type delayedCreateLease struct {
+	fakeLease
+	createDelay time.Duration
+}
+
+func (d *delayedCreateLease) Create(ctx context.Context, image string, ttl int) (string, error) {
+	t := time.NewTimer(d.createDelay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return d.fakeLease.Create(ctx, image, ttl)
+}
+
+// TestExecutorTimeoutMinutesBoundsExecutionNotWait (S1): a job's own
+// timeout-minutes matches GitHub — it bounds execution from the moment
+// the sandbox exists, not the admission wait. A job that waits 200ms for
+// capacity and then runs a quick step, with timeout-minutes set to
+// 60ms worth of ".000..." minutes, is NOT cut: if the wait counted
+// against it the create would be cancelled. The host's JobTimeout, not
+// this field, is what bounds the wait (see
+// TestExecutorJobTimeoutBoundsCreateWait).
+func TestExecutorTimeoutMinutesBoundsExecutionNotWait(t *testing.T) {
+	lease := &delayedCreateLease{fakeLease: *newFakeLease(), createDelay: 200 * time.Millisecond}
 	sink := &fakeSink{}
 	exec := &Executor{
 		Sandbox:      lease,
@@ -1074,49 +1106,95 @@ func TestExecutorJobTimeoutMinutesBoundsCreateWait(t *testing.T) {
 		DefaultImage: "py-base",
 		TTL:          600,
 	}
-	// timeout-minutes is whole minutes, so this test would take a minute
-	// if honoured literally; use a fractional host cap to keep it quick
-	// and assert the tighter of the two is chosen instead.
-	exec.JobTimeout = 50 * time.Millisecond
-	done := make(chan error, 1)
-	go func() {
-		done <- exec.Run(context.Background(), testJob(
-			"jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: echo hi\n"))
-	}()
-	<-lease.started
+	// 60ms expressed in minutes: if the 200ms admission wait counted
+	// against it, the create would be cut (and reported cancelled).
+	job := testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 0.001\n    steps:\n      - run: echo hi\n")
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultSuccess {
+		t.Fatalf("reports = %+v, want one success (the wait must not count against timeout-minutes)", sink.reports)
+	}
+}
 
+// TestExecutorTimeoutMinutesBoundsExecution: once the sandbox exists,
+// timeout-minutes does bound execution — a step that runs past it is cut
+// and reported cancelled.
+func TestExecutorTimeoutMinutesBoundsExecution(t *testing.T) {
+	lease := &blockingLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	// 30ms in minutes; the blocking step never returns on its own.
+	job := testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 0.0005\n    steps:\n      - run: echo hi\n")
+	done := make(chan error, 1)
+	go func() { done <- exec.Run(context.Background(), job) }()
+	<-lease.started
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Run never returned; the create wait was not bounded")
+		t.Fatal("Run never returned; timeout-minutes did not bound execution")
 	}
 	if len(sink.reports) != 1 || sink.reports[0].Result != ResultCancelled {
 		t.Fatalf("reports = %+v, want one ResultCancelled", sink.reports)
 	}
 }
 
-// TestEffectiveJobTimeoutPicksTighter: the job's timeout-minutes and the
-// host RUNNER_JOB_TIMEOUT combine as the tighter bound.
-func TestEffectiveJobTimeoutPicksTighter(t *testing.T) {
+// TestExecutorJobTimeoutCapsExecutionTimeout: RUNNER_JOB_TIMEOUT stays
+// the whole-job bound, so a timeout-minutes above it is capped by it (the
+// execution context derives from the job context).
+func TestExecutorJobTimeoutCapsExecutionTimeout(t *testing.T) {
+	lease := &blockingLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+		JobTimeout:   50 * time.Millisecond,
+	}
+	// timeout-minutes (5) is far above the 50ms host cap: the host wins.
+	job := testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: echo hi\n")
+	done := make(chan error, 1)
+	go func() { done <- exec.Run(context.Background(), job) }()
+	<-lease.started
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run never returned; RUNNER_JOB_TIMEOUT did not cap execution")
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultCancelled {
+		t.Fatalf("reports = %+v, want one ResultCancelled", sink.reports)
+	}
+}
+
+// TestExecutionTimeout: the job's own timeout-minutes as a duration.
+// Unset and non-positive values mean no bound of its own.
+func TestExecutionTimeout(t *testing.T) {
 	cases := []struct {
-		host time.Duration
 		mins TimeoutMinutes
 		want time.Duration
 	}{
-		{0, 0, 0},
-		{time.Hour, 0, time.Hour},
-		{0, 5, 5 * time.Minute},
-		{2 * time.Hour, 5, 5 * time.Minute},
-		{10 * time.Minute, 30, 10 * time.Minute},
-		{time.Hour, -3, time.Hour},
+		{0, 0},
+		{-3, 0},
+		{5, 5 * time.Minute},
+		{1.5, 90 * time.Second},
 	}
 	for _, c := range cases {
-		e := &Executor{JobTimeout: c.host}
-		if got := e.effectiveJobTimeout(&WorkflowJob{TimeoutMinutes: c.mins}); got != c.want {
-			t.Errorf("effectiveJobTimeout(host=%s, mins=%v) = %s, want %s", c.host, float64(c.mins), got, c.want)
+		if got := executionTimeout(&WorkflowJob{TimeoutMinutes: c.mins}); got != c.want {
+			t.Errorf("executionTimeout(%v) = %s, want %s", float64(c.mins), got, c.want)
 		}
 	}
 }

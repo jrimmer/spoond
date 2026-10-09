@@ -3,6 +3,7 @@ package runner
 import (
 	"fmt"
 	"log"
+	"math"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,12 +38,21 @@ type TimeoutMinutes float64
 // UnmarshalYAML accepts a YAML number. Anything else — a matrix
 // expression, a quoted string, a mapping — is ignored with a log line:
 // the workflow still parses and runs, just without this bound.
+//
+// A value that is not finite, is <= 0, or is above maxTimeoutMinutes is
+// ignored too (C1): `.inf` or `1e300` would overflow the minutes-to-
+// duration conversion to a negative duration and remove every bound,
+// defeating the host's RUNNER_JOB_TIMEOUT default.
 func (t *TimeoutMinutes) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Tag {
 	case "!!int", "!!float":
 		var f float64
 		if err := value.Decode(&f); err != nil {
 			log.Printf("runner: ignoring timeout-minutes %q: %v", value.Value, err)
+			return nil
+		}
+		if math.IsInf(f, 0) || math.IsNaN(f) || f <= 0 || f > maxTimeoutMinutes {
+			log.Printf("runner: ignoring out-of-range timeout-minutes %q (must be finite, > 0 and <= %g)", value.Value, float64(maxTimeoutMinutes))
 			return nil
 		}
 		*t = TimeoutMinutes(f)
@@ -53,6 +63,13 @@ func (t *TimeoutMinutes) UnmarshalYAML(value *yaml.Node) error {
 	}
 	return nil
 }
+
+// maxTimeoutMinutes caps a job's own timeout-minutes (C1). GitHub's own
+// limit is 360 minutes (6h); a value above this is almost certainly a
+// typo or a YAML expression that decoded to a huge number, and it would
+// overflow the duration conversion. Anything above is ignored, so the
+// host's RUNNER_JOB_TIMEOUT (default 6h) remains the bound.
+const maxTimeoutMinutes = 1e6
 
 // Step is a single step in a job.
 type Step struct {
