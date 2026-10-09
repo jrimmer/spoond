@@ -155,3 +155,83 @@ and its `CHANGELOG.md` entry. `git diff HEAD...origin/main` touches no
 `api/`, `store/` or `store/migrations/` file, so there is no new step
 type, provider, restart, cancel or retry path to reconcile; the branch
 has no migrations of its own.
+
+## Round 4
+
+Layer-3 review of 06ca078: the code, gates and policy routing were
+right, but the tests did not catch the real regressions below. Same
+branch.
+
+### R1 — pin `/api/shares`
+
+- `api/shares_test.go` gains `TestShareListJSONShapePinned`: it grants
+  a share, decodes `GET /api/shares` with `DisallowUnknownFields` into
+  `{"shares":[{lease_id, grantee, mode, created_at, expires_at?}]}` and
+  asserts lease id, grantee and mode. Renaming `"shares"` or adding a
+  top-level key fails the decode; dropping the array fails the length
+  check; losing `created_at` fails the non-empty check.
+- `cmd/spoond-sshd-gateway/snapshot_handler_test.go` gains
+  `TestCtlShareListParsesSharesKey` (the backend's `shares` key renders
+  the table) and `TestCtlShareListRejectsRenamedKey` (a backend that
+  names it `grants` must not render a table).
+- Existing `TestShareGrantEnablesExec` in `api/shares_test.go` still
+  calls `GET /api/shares` and passes unchanged.
+
+### R2 — invalidation tests (fixed clock)
+
+`freezeFairShareClock` pins `svc.now`, so the 5 s TTL never expires and
+only an explicit invalidation replaces the snapshot; `freshAfter`
+asserts the next read is a different snapshot. Tests (each kills the
+mutation that removes its invalidation call):
+
+| Test | Mutation it kills |
+| --- | --- |
+| `TestFairSharesInvalidateOnLeaseRelease` | remove the `invalidateFairShares` in `saveLeaseLocked` |
+| `TestFairSharesInvalidateOnLeaseDelete` | remove it in `deleteLeaseLocked` |
+| `TestFairSharesInvalidateOnUserCreateAndDelete` | remove it in `handleUsersCreate` or `handleUsersDelete` |
+| `TestFairSharesInvalidateOnKeep` | remove it in `UpdateKeptMetrics` |
+| `TestFairSharesInvalidateOnNamedSaveAndDelete` | remove it in `UpdateNamedSnapshotMetrics` |
+
+Each was checked by removing the call and watching the test fail.
+
+### R3 — invalidate after the write
+
+`api/service.go` `saveLeaseLocked`/`deleteLeaseLocked` and
+`api/named_snapshots.go` `unkeepBuilds` now invalidate only after the
+store call succeeds. Invalidating first let a concurrent compute read
+the pre-write state and cache it for the TTL.
+
+### R4 — don't cache failed reads
+
+`fairShareSnapshot` carries `ok`. `computeFairShares` sets it false
+when the hugepage cache is cold, statfs fails or any of the three
+grouped store queries fails; `fairShares` returns that snapshot without
+storing it, so the next caller retries. The box-wide compute runs on
+`context.WithoutCancel(ctx)` under a 5 s timeout, so a client
+disconnect or hung read is not turned into cached zeros.
+
+`TestFairSharesFailedReadNotCached` covers a cold NodeInfo, a statfs
+error and a closed store (each asserts `!ok` and no cache entry);
+`TestFairSharesCancelledRequestContextDetached` asserts a pre-cancelled
+request context still yields an ok, cached snapshot.
+
+### R5 — no RPC on this path
+
+`totalHugepageMiB` reads only `nodeInfoCache`/`nodeInfoAt` under
+`nodeInfoMu`; a cold cache returns `(0, false)` and never calls
+`s.sub.NodeInfo`. `TestFairSharesFailedReadNotCached/cold_node_info`
+also asserts the fair-share path made no `NodeInfo` RPC.
+
+### Gates and origin/main
+
+All gates rerun on the branch: `go build ./...`, `go vet ./...`,
+`gofmt -l .` (empty), `go test -p 2 -count=1 ./...` and
+`go test -race -count=1 ./api/ ./store/`. The added tests pass as a
+non-root user (`user`, `HOME`/`GOCACHE` under `/home/user`) with
+`t.TempDir()` everywhere. `git fetch origin` shows `origin/main` gained
+the `work/spoond-qjsy` merge (`api/admitqueue.go`,
+`api/admitqueue_test.go`, `api/service.go` comment, `CHANGELOG.md`): a
+defensive compare-and-swap guard and an admission-test ordering fix in
+`tryAdmitQueued`, plus a comment on `admitPassHook`. None touches the
+fair-share files, no new step type, provider, restart, cancel or retry
+path; the branch adds no migration.
