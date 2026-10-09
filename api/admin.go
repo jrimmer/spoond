@@ -109,10 +109,11 @@ const drainConcurrency = 4
 // half-way) and bounded so the work is finite. The drain bound covers
 // the drain's own 180 s quiesce wait plus the pause phase; the undrain
 // bound covers its wait for the orchestrator to become ready, its
-// resume window and the resumes.
+// per-lease resume window (which can run in several concurrent rounds)
+// and the resumes.
 const (
 	adminDrainTimeout   = 6 * time.Minute
-	adminUndrainTimeout = 12 * time.Minute
+	adminUndrainTimeout = 20 * time.Minute
 )
 
 // adminContext detaches ctx from its caller and bounds it. context
