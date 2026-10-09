@@ -51,12 +51,11 @@ func TestUserDeleteRefusesQueuedCreateQuotaCap(t *testing.T) {
 	}
 }
 
-// TestUserDeleteTicketQueuedAfterCancelRefused: a ticket parked after
-// cancelQueuedForOwner ran must not wait out its deadline; since
-// spoond-y0jj a create for an owner already marked deleted is refused at
-// newAdmissionTicket, so it never parks, and a ticket that raced the
-// mark and parked just before it is still refused at its next admission
-// pass (spoond-q4j N1b).
+// TestUserDeleteTicketQueuedAfterCancelRefused: a ticket that raced the
+// owner-delete mark and parked just before it is still refused at its
+// next admission pass, and since spoond-y0jj a create for an owner
+// already marked deleted is refused at newAdmissionTicket, so it never
+// parks in the first place (spoond-q4j N1b).
 func TestUserDeleteTicketQueuedAfterCancelRefused(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -70,35 +69,40 @@ func TestUserDeleteTicketQueuedAfterCancelRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A ticket that raced the mark and parked just before it is still
-	// refused at the next admission pass instead of waiting out its
-	// deadline.
-	raced := svc.newAdmissionTicket("u-raced", leaseRequest{
-		owner: "u-raced", image: "py-base", ttl: time.Minute,
+	// A ticket that parked just before the mark (a request that passed
+	// auth before the removal) is refused at its next admission pass
+	// instead of waiting out its deadline. Park it through the normal
+	// path, then set the mark: exactly the production race.
+	tk := svc.newAdmissionTicket(u.ID, leaseRequest{
+		owner: u.ID, image: "py-base", ttl: time.Minute,
 	}, errQuotaExceeded, time.Minute)
-	if raced == nil {
-		t.Fatal("live owner ticket = nil, want a parked ticket")
+	if tk == nil {
+		t.Fatal("ticket for a live owner = nil, want a parked ticket")
 	}
-	svc.markOwnerDeleted("u-raced")
-	svc.cancelQueuedForOwner("u-raced")
+	svc.markOwnerDeleted(u.ID)
+
+	svc.tryAdmitQueued(context.Background())
+
 	select {
-	case o := <-raced.ch:
+	case o := <-tk.ch:
 		if !errors.Is(o.err, errOwnerGone) {
-			t.Fatalf("cancelled ticket outcome = %v, want errOwnerGone", o.err)
+			t.Fatalf("raced ticket outcome = %v, want errOwnerGone", o.err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("cancelled ticket was not refused")
+		t.Fatal("raced ticket was not refused early; it is still waiting")
+	}
+	if svc.queueDepth() != 0 {
+		t.Fatalf("queue depth after refusal = %d, want 0", svc.queueDepth())
 	}
 
 	// The delete's mark and cancel both ran before this ticket could
 	// park; the mark is checked under the queue lock, so it is refused
 	// before it enters the queue (spoond-y0jj).
-	svc.markOwnerDeleted(u.ID)
 	svc.cancelQueuedForOwner(u.ID)
-	if tk := svc.newAdmissionTicket(u.ID, leaseRequest{
+	if late := svc.newAdmissionTicket(u.ID, leaseRequest{
 		owner: u.ID, image: "py-base", ttl: time.Minute,
-	}, errQuotaExceeded, time.Minute); tk != nil {
-		t.Fatalf("ticket for deleted owner = %+v, want nil (refused before parking)", tk)
+	}, errQuotaExceeded, time.Minute); late != nil {
+		t.Fatalf("ticket for deleted owner = %+v, want nil (refused before parking)", late)
 	}
 	if svc.queueDepth() != 0 {
 		t.Fatalf("queue depth after refusal = %d, want 0", svc.queueDepth())

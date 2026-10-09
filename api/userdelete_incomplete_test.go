@@ -22,7 +22,7 @@ import (
 // silent 200; a retry with the store healthy completes the cleanup
 // (spoond-y0jj).
 func TestUserDeleteIncompleteAnswers500AndRetryCompletes(t *testing.T) {
-	ts, svc, _, sub, ids, victimID := newUserDeleteServer(t)
+	ts, svc, _, _, ids, victimID := newUserDeleteServer(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 
 	resp, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "victim-tok",
@@ -45,7 +45,6 @@ func TestUserDeleteIncompleteAnswers500AndRetryCompletes(t *testing.T) {
 	if l := svc.lookupAny(leaseID); l == nil {
 		t.Fatal("victim lease missing before delete")
 	}
-	_ = sub
 
 	// Fail only the named-snapshot drop, as a busy SQLite would. The
 	// other steps still run, so the partial body names what was removed.
