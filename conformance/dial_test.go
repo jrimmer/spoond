@@ -148,7 +148,9 @@ func TestN7b_GuestDialRefusals(t *testing.T) {
 
 	// Suspended lease: the dial resumes it and is then served. Port 80 has
 	// no listener in a fresh py-base lease, so the guest dial itself fails
-	// with 502 Bad Gateway.
+	// with 502 Bad Gateway. The lease must be running after the 502 — that
+	// proves the 502 came from the guest dial, not from a resume that was
+	// refused (a resume refusal is 409/429/503/410, never 502).
 	if st, body, err := cl.suspend(l.ID); err != nil || st != 200 {
 		failf(t, "suspend: %d %s (%v)", st, truncate(body), err)
 	}
@@ -159,6 +161,10 @@ func TestN7b_GuestDialRefusals(t *testing.T) {
 	}
 	if leaseSuspended(t, l.ID) {
 		failf(t, "lease %s still suspended after the dial", l.ID)
+	}
+	// The resumed guest runs: an exec answers (and nothing listens on 80).
+	if got := execOK(t, l.ID, "echo dialed"); got != "dialed" {
+		failf(t, "exec after the resuming dial: got %q, want dialed", got)
 	}
 }
 

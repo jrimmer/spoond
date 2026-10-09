@@ -58,6 +58,10 @@ func TestS1_SuspendResumeKeepsProcesses(t *testing.T) {
 		requireLeaseSuspended(t, "heartbeat on suspended", st, body)
 	}
 
+	// Sit out a window while suspended: the counter must not advance
+	// through it, which the read after the resuming exec below checks.
+	time.Sleep(5 * time.Second)
+
 	// A work call on the suspended lease resumes it and is served. The
 	// guest's memory survived the pause, so the counter and the tmux
 	// session are the same processes afterwards.
