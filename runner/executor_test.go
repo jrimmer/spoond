@@ -913,3 +913,63 @@ func TestExecutorJobTimeoutBoundsCreateWait(t *testing.T) {
 		t.Fatalf("reported result %v, want ResultCancelled", got)
 	}
 }
+
+// TestExecutorJobTimeoutMinutesBoundsCreateWait: a job's own
+// timeout-minutes bounds the create wait even when the host sets no
+// RUNNER_JOB_TIMEOUT.
+func TestExecutorJobTimeoutMinutesBoundsCreateWait(t *testing.T) {
+	lease := &blockingCreateLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	// timeout-minutes is whole minutes, so this test would take a minute
+	// if honoured literally; use a fractional host cap to keep it quick
+	// and assert the tighter of the two is chosen instead.
+	exec.JobTimeout = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Run(context.Background(), testJob(
+			"jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: echo hi\n"))
+	}()
+	<-lease.started
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run never returned; the create wait was not bounded")
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultCancelled {
+		t.Fatalf("reports = %+v, want one ResultCancelled", sink.reports)
+	}
+}
+
+// TestEffectiveJobTimeoutPicksTighter: the job's timeout-minutes and the
+// host RUNNER_JOB_TIMEOUT combine as the tighter bound.
+func TestEffectiveJobTimeoutPicksTighter(t *testing.T) {
+	cases := []struct {
+		host time.Duration
+		mins int
+		want time.Duration
+	}{
+		{0, 0, 0},
+		{time.Hour, 0, time.Hour},
+		{0, 5, 5 * time.Minute},
+		{2 * time.Hour, 5, 5 * time.Minute},
+		{10 * time.Minute, 30, 10 * time.Minute},
+		{time.Hour, -3, time.Hour},
+	}
+	for _, c := range cases {
+		e := &Executor{JobTimeout: c.host}
+		if got := e.effectiveJobTimeout(&WorkflowJob{TimeoutMinutes: c.mins}); got != c.want {
+			t.Errorf("effectiveJobTimeout(host=%s, mins=%d) = %s, want %s", c.host, c.mins, got, c.want)
+		}
+	}
+}

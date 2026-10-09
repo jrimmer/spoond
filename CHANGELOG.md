@@ -187,7 +187,9 @@ summarised from README "Status".
   the wait and retries per the response's `Retry-After` (or 30 s)
   until the create is admitted or the job's own timeout ends.
   `RUNNER_JOB_TIMEOUT` (duration or seconds, default `0`) bounds the
-  whole job so a waiting create cannot pin a worker forever; the lease
+  whole job so a waiting create cannot pin a worker forever; a job's
+  own `timeout-minutes` is the tighter bound when set, and a job that
+  ran out of time is reported cancelled. The lease
   client's HTTP timeout grows to cover the admission wait. A plain
   `503 capacity: …` refusal now also carries a `Retry-After: 30` like
   the burst-reserve and preempt ones, so a client that sent no `wait`

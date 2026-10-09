@@ -964,7 +964,8 @@ queue (#129) holds the create open instead of refusing it at once. A
 reserve — is **never** a job failure: the runner logs the wait and
 retries after the response's `Retry-After` (or 30 s) until it is
 admitted. `RUNNER_JOB_TIMEOUT` (duration or seconds, default `0`)
-bounds the whole job so a wait cannot pin a worker forever; a job that
+bounds the whole job so a wait cannot pin a worker forever, and a job's
+own `timeout-minutes` is the tighter bound when set; a job that
 ran out of time is reported cancelled. The lease client's own HTTP
 timeout grows to cover the admission wait, so a queued create is not cut
 by the client.
