@@ -545,6 +545,8 @@ func (s *Service) unkeepBuilds(ctx context.Context, builds []string) {
 
 // UpdateNamedSnapshotMetrics sets the named-snapshot gauges (2.7, #83).
 func (s *Service) UpdateNamedSnapshotMetrics(ctx context.Context) {
+	// A named-snapshot change moves the owner's disk usage (#145 FS1).
+	s.invalidateFairShares()
 	if s.metrics == nil {
 		return
 	}

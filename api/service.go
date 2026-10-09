@@ -676,6 +676,11 @@ type Service struct {
 	nodeInfoCache substrate.NodeInfo
 	nodeInfoAt    time.Time
 
+	// fairShares caches the per-owner slice and usage view (#145 FS1).
+	// It is invalidated on every lease state change and every owner
+	// add/delete (see invalidateFairShares).
+	fairShareCache fairSharesCache
+
 	// preemptMu serialises preemption (#128 part 3): one guaranteed
 	// admission preempts at a time, so two concurrent creates cannot
 	// each suspend a different burst lease for themselves. Held across
@@ -4668,6 +4673,9 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 		s.log.Printf("store: upsert_lease %s: dropped, lease was released", l.ID)
 		return
 	}
+	// A state change moves the owner's memory and disk usage: drop the
+	// fair-share snapshot so the next read recomputes it (#145 FS1).
+	s.invalidateFairShares()
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.UpsertLease(ctx, leaseToRow(l)); err != nil {
@@ -4763,6 +4771,9 @@ func (s *Service) bumpGenerationLocked(l *Lease) {
 }
 
 func (s *Service) deleteLeaseLocked(id string) {
+	// The lease is gone: its memory and disk usage leave the box view
+	// (#145 FS1).
+	s.invalidateFairShares()
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.DeleteLease(ctx, id); err != nil {
