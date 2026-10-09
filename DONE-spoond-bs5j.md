@@ -138,3 +138,20 @@ callers (`share ls`, clients). That is undone:
 - `docs/api.md` and `CHANGELOG.md` say `GET /api/fair-shares` is the
   admin fair-share view and that `GET /api/shares` still lists grants;
   no doc calls `/api/shares` the fair-share list.
+
+### Round-3 gates and origin/main
+
+All gates were rerun after the change: `go build ./...`,
+`go vet ./...`, `gofmt -l .` (empty), `go test -p 2 -count=1 ./...`
+and `go test -race -count=1 ./api/ ./store/`. The grant-listing and
+fair-share tests also pass as a non-root user (`user`, `HOME`,
+`GOCACHE` and `GOTMPDIR` under `/home/user`) with `t.TempDir()`
+everywhere; none needs root or reads `/work`, `/run/honey` or
+`/opt/honey`.
+
+`git fetch origin` since round 2 shows `origin/main` only gained the
+spoond-clcw conformance merge (`conformance/`, `DONE-spoond-clcw.md`)
+and its `CHANGELOG.md` entry. `git diff HEAD...origin/main` touches no
+`api/`, `store/` or `store/migrations/` file, so there is no new step
+type, provider, restart, cancel or retry path to reconcile; the branch
+has no migrations of its own.
