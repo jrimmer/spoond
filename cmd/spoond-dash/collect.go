@@ -124,6 +124,12 @@ type Snapshot struct {
 	KeptBuildsBytes int64   `json:"keptBuildsBytes"`
 	KeptDiskPct     float64 `json:"keptDiskPct"`
 
+	// PinnedIdle is the count of pinned leases whose last API activity
+	// passed PINNED_IDLE_NOTICE_DAYS (FS5, from leases.pinned_idle_since
+	// <> ''): visibility only, for the Notifications panel's one
+	// aggregate message. Nothing is paused, unpinned or released.
+	PinnedIdle int `json:"pinnedIdle"`
+
 	// Rendered as HTML element patches, not sent as signals.
 	Services []Service   `json:"-"`
 	Rows     []LeaseRow  `json:"-"`
@@ -1123,6 +1129,14 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		WHERE preempted_at != '' AND state IN ('running','suspended','recovered')`).Scan(&s.Preempted); err != nil {
 		s.Preempted = 0
 		return fmt.Errorf("count preempted leases: %w", err)
+	}
+	// The pinned-idle count (FS5): pinned leases the backend has flagged
+	// (pinned_idle_since set). Visibility only; the Notifications panel
+	// shows one aggregate message.
+	if err := db.QueryRow(`SELECT COUNT(*) FROM leases
+		WHERE pinned = 1 AND pinned_idle_since != ''`).Scan(&s.PinnedIdle); err != nil {
+		s.PinnedIdle = 0
+		return fmt.Errorf("count pinned-idle leases: %w", err)
 	}
 
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)

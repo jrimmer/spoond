@@ -500,6 +500,9 @@ func TestNoticeTriggers(t *testing.T) {
 		{"kept bytes past warn pct", func(s *Snapshot) {
 			s.KeptDiskPct = 41.0
 		}, "kept-disk", "warn", "kept checkpoints use 41% of the snapshot disk"},
+		{"pinned idle", func(s *Snapshot) {
+			s.PinnedIdle = 3
+		}, "pinned-idle", "warn", "3 pinned leases idle past the notice period"},
 	}
 	for _, tc := range cases {
 		s := healthySnapshot()

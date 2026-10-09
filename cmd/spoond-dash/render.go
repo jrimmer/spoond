@@ -136,12 +136,15 @@ type Notice struct {
 //   - free hugepages or snapshot disk past the danger level,
 //   - the snapshot disk's I/O stall past DASH_IO_FULL_BAD_PCT,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
-//     (#126).
+//     (#126),
+//   - pinned leases past PINNED_IDLE_NOTICE_DAYS, as one aggregate
+//     message (FS5, visibility only).
 //
 // Each message's ID comes from its trigger ("unit:<name>", "hugepages",
-// "disk", "io-pressure", "kept-disk"), so a viewer's dismissal can
+// "disk", "io-pressure", "kept-disk", "pinned-idle"), so a viewer's
+// dismissal can
 // follow one trigger across refreshes. The leases table still shows a
-// lost lease (■ lost), a preempted burst lease and a lapsed hold; those
+// lost lease (■ lost) and a preempted burst lease; those
 // are not messages here.
 func notices(s Snapshot) []Notice {
 	var out []Notice
@@ -170,7 +173,22 @@ func notices(s Snapshot) []Notice {
 		out = append(out, Notice{ID: "kept-disk", Severity: "warn",
 			Text: fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct)})
 	}
+	// One aggregate message for pinned leases past the idle notice
+	// (FS5, visibility only): the lease holder's to deal with, so the
+	// panel names the count, not each lease.
+	if s.PinnedIdle > 0 {
+		out = append(out, Notice{ID: "pinned-idle", Severity: "warn",
+			Text: fmt.Sprintf("%d pinned lease%s idle past the notice period", s.PinnedIdle, plural(s.PinnedIdle))})
+	}
 	return out
+}
+
+// plural returns "s" for a count other than one.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // reconcileDismissed is the pure core of the browser's dismissal logic
