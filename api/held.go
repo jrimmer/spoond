@@ -23,13 +23,16 @@ import (
 // explicit hold_ttl). A lapsed hold suspends a running lease and never
 // releases one: the lease stays held (no expiry, so the TTL sweep never
 // touches it), rules 1 and 2 still apply, and renewing restores a
-// normal hold. Rule 4 shortens rule 1's idle threshold under pressure;
-// rule 5 releases leases a rule suspended when the snapshot disk runs
-// critical, oldest suspension first.
+// normal hold. Rule 4 shortens rule 1's idle threshold under pressure.
 //
-// Nothing running is ever released automatically: rules 2 and 5 only
-// take leases that a rule suspended (idle, pressure or a lapse) and
-// that saw no activity since.
+// Rule 5 is now the one critical-disk cleanup for every suspended
+// lease (#145 D5), not only the ones a held rule suspended: below
+// CriticalDiskFreePct free it releases the oldest suspension
+// (suspended_at), one per tick, until CriticalDiskRecoverPct. The
+// proactive disk-cleanup tier (api/diskcleanup.go) runs before it and
+// reclaims spoond's own garbage first. Nothing running is ever
+// released: rule 2 takes only a lease a rule suspended and left
+// untouched, and rule 5 takes only a lease already suspended.
 
 // Held-lease rule names, as used in log lines, the
 // spoond_held_actions_total{rule} label and the recorded last_action.
