@@ -558,24 +558,25 @@ func TestPreemptedLostLeaseNotCounted(t *testing.T) {
 	}
 }
 
-// TestPreemptedHeldLeaseNeverStaleReleased: a held lease waiting in the
-// resume queue is not released by the stale rule, even when it still
-// carries an idle-suspend LastAction older than the release limit.
-func TestPreemptedHeldLeaseNeverStaleReleased(t *testing.T) {
+// TestPreemptedHeldLeaseStaleReleased: a preempted held lease is subject
+// to the stale rule like any other rule-suspended lease (#145 D2, review
+// R3). The old exemption ("waits for the resume queue") is gone with
+// that queue.
+func TestPreemptedHeldLeaseStaleReleased(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	victim := preemptOne(t, svc, sub, ctx)
 	old := time.Now().Add(-30 * 24 * time.Hour)
 	svc.store.mu.Lock()
 	victim.Holder = "pool:honey/work-1"
-	victim.LastAction = heldRuleIdle + "/" + heldActionSuspendIdle
+	victim.LastAction = pauseActionPreempt
 	victim.LastActionAt = old
 	victim.LastActive = old.Add(-time.Hour)
 	svc.store.mu.Unlock()
 	svc.cfg.HeldSuspendedRelease = time.Hour
 
 	svc.releaseStaleHeld(ctx, time.Now())
-	if victim.released || victim.State != "suspended" || victim.PreemptedAt.IsZero() {
-		t.Fatalf("stale rule touched a preempted lease: released=%v state=%s", victim.released, victim.State)
+	if !victim.released {
+		t.Fatalf("stale rule left a preempted held lease: released=%v state=%s", victim.released, victim.State)
 	}
 }
 

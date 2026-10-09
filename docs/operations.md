@@ -1085,8 +1085,8 @@ next one. An idle suspension marks the lease `last_action
 idle_suspend/suspend_idle`, emits an `idle_suspended` event and counts
 in `spoond_idle_suspends_total`. Because it is a rule suspension, rules
 2 and 5 may later release the lease if it stays idle-suspended and
-untouched — a preempted lease stays excluded, and nothing running is
-ever released.
+untouched — a preempted lease is subject to the same rules, and nothing
+running is ever released.
 
 The **next call resumes it** — and every other kind of suspend too
 (#145 D2). Exec, stream, files, proxy, jobs, the LLM gateway, a network

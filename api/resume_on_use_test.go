@@ -23,6 +23,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
@@ -252,7 +253,17 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 			srv.ProxyHandler().ServeHTTP(rec, req)
 			return rec.Result(), rec.Body.String(), rec.Header()
 		}},
-		{"jobs", func(t *testing.T, ts *httptest.Server, _ *Server, id string) (*http.Response, string, http.Header) {
+		{"jobs", func(t *testing.T, ts *httptest.Server, srv *Server, id string) (*http.Response, string, http.Header) {
+			// A running job record so the signal passes the state check
+			// (checked before the resume, review R5) and reaches the
+			// resume-on-use. The guest is never reached: the resume is
+			// refused for no room before the signal exec.
+			if err := srv.svc.db.InsertJob(context.Background(), store.JobRow{
+				JobID: "job-any", LeaseID: id, Owner: "consumer-a", Cmd: "sleep 600",
+				State: "running", StartedAt: time.Now(),
+			}); err != nil {
+				t.Fatalf("insert job: %v", err)
+			}
 			return rawWork(t, ts, "POST", "/api/leases/"+id+"/jobs/job-any/signal", "token-a", `{"signal":"TERM"}`)
 		}},
 	}

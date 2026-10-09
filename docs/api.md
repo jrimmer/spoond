@@ -342,7 +342,9 @@ suspension records `last_action` `idle_suspend/suspend_idle` with
 beside the pause build and time (#145 D6). Because it
 is a rule suspension, the stale-release (rule 2) and critical-disk
 (rule 5) held-lease rules may later release the lease if it stays
-idle-suspended and untouched; a preempted lease stays excluded.
+idle-suspended and untouched. A preempted lease is subject to rules 2
+and 5 like any other rule-suspended lease (#145 D2): the old exemption
+for a resume queue is gone.
 
 **Resume on next use (#145 D2):** every work call resumes a suspended
 lease first through the normal resume path (admission, class and quota
@@ -357,8 +359,10 @@ SSH gateway also resumes on attach.
 While its pause or another caller's resume is in flight, a work call
 answers `409` with `code: lease_busy` (retryable). A resume refused for
 the owner's own memory quota answers `429`; a resume that finds no room
-on the host answers the one shared no-room shape, `503` with
-`Retry-After: 30` and `code: capacity_wait`. The lease stays suspended
+on the host — including one during a planned-restart drain, which must
+not resurrect a `Drained` lease the drain's quiesce wait depends on —
+answers the one shared no-room shape, `503` with `Retry-After: 30` and
+`code: capacity_wait`. The lease stays suspended
 in every refusal. A lease whose hold lapsed resumes with its hold still
 lapsed: resuming does not renew a hold.
 
@@ -376,15 +380,18 @@ lapsed: resuming does not renew a hold.
 | the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| `GET /api/leases/{id}` (`stat` probe included) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}` (lease detail) | **no** | `200` (suspended details returned) | `200` | `200` | `200` (carries `lost_at`/`lost_reason`) |
+| `GET /api/leases/{id}/stat` (the stat probe runs an exec) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/fork` (needs a running source) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/crash-test` (nothing to crash) | **no** | `409` (suspended; plain message, no code) | `409` (suspended) | `409 lease_busy` | `410 lease_lost` |
-| the guest heartbeat (`POST /lease/{id}/active`) | **no** (not a work call) | `409 lease_suspended` | `409 lease_suspended` | `409 lease_suspended` | `410`/`409` |
+| the guest heartbeat (`POST /lease/{id}/active`) | **no** (not a work call) | `409 lease_suspended` | `409 lease_suspended` | `204` (busy is not suspended) | `410`/`409` |
 
-A path in the last four rows is not "work": it needs a running guest
-and cannot start one, so it answers the old `409 lease_suspended` with
-the structured `"reason"` when the suspension was automatic. No other
-path ever answers `409 lease_suspended` for a suspended lease.
+A path in the last four rows does not resume. The stat probe, fork,
+the crash test and the guest heartbeat need a running guest and cannot
+start one, so they answer `409 lease_suspended` with the structured
+`"reason"` when the suspension was automatic; the lease detail is a
+read and answers `200` for a suspended lease. No other path ever answers
+`409 lease_suspended` for a suspended lease.
 
 ### `GET /api/leases` — list leases
 
@@ -1968,7 +1975,8 @@ persistence, resume a suspended lease, or do anything else.
 
 Responses: `204` on success (no body); `404` for an unknown or released
 lease; `409` for a suspended lease (`code: lease_suspended`); `405` for
-any other method. Writes
+any other method. A lease merely busy with a lifecycle operation is not
+suspended, so its heartbeat still answers `204`. Writes
 are limited to one per lease per 60 s — later calls inside that window
 still return `204`, so a fast loop cannot hammer the store.
 

@@ -716,7 +716,8 @@ func TestIdleSuspendDiskFloorSkips(t *testing.T) {
 
 // TestIdleSuspendedStaleRelease: an idle-suspended lease (held or not)
 // with a holder is released by the stale-release rule once it has stayed
-// untouched long enough; a preempted lease never is.
+// untouched long enough. A preempted lease is subject to the same rule
+// (#145 D2, review R3): the old resume-queue exemption is gone.
 func TestIdleSuspendedStaleRelease(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -744,7 +745,7 @@ func TestIdleSuspendedStaleRelease(t *testing.T) {
 	svc.store.mu.Lock()
 	held.LastAction, held.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, base.Add(-2*time.Hour)
 	held.LastActive = base.Add(-3 * time.Hour)
-	preempted.LastAction, preempted.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, base.Add(-2*time.Hour)
+	preempted.LastAction, preempted.LastActionAt = pauseActionPreempt, base.Add(-2*time.Hour)
 	preempted.LastActive = base.Add(-3 * time.Hour)
 	preempted.PreemptedAt = base.Add(-2 * time.Hour)
 	svc.saveLeaseLocked(held)
@@ -754,16 +755,16 @@ func TestIdleSuspendedStaleRelease(t *testing.T) {
 	if at, ok := suspendedByRule(held); !ok || !at.Equal(base.Add(-2*time.Hour)) {
 		t.Fatalf("idle_suspended lease not seen as rule-suspended: at=%v ok=%v", at, ok)
 	}
-	if _, ok := suspendedByRule(preempted); ok {
-		t.Fatal("a preempted lease must never be seen as rule-suspended")
+	if at, ok := suspendedByRule(preempted); !ok || !at.Equal(base.Add(-2*time.Hour)) {
+		t.Fatalf("a preempted lease must be seen as rule-suspended: at=%v ok=%v", at, ok)
 	}
 
 	svc.releaseStaleHeld(ctx, base)
 	if svc.lookup("c", held.ID) != nil {
 		t.Fatal("an idle-suspended held lease was not stale-released")
 	}
-	if svc.lookup("c", preempted.ID) == nil {
-		t.Fatal("a preempted lease was stale-released")
+	if svc.lookup("c", preempted.ID) != nil {
+		t.Fatal("a preempted lease was not stale-released")
 	}
 }
 

@@ -23,7 +23,7 @@ summarised from README "Status".
   suspend**, not just `idle_suspend`. GET, status, events and SSE never
   resume, and `POST /resume` is unchanged. A lease suspended by a
   non-work path that cannot resume (the `stat` probe, forking a running
-  source, the crash test) still answers `409 `lease_suspended` with its
+  source, the crash test) still answers `409 lease_suspended` with its
   `reason` — `lease_suspended` no longer appears on any work path.
 
   - **Status codes changed.** A resume-on-use that finds no room on the
@@ -49,6 +49,18 @@ summarised from README "Status".
     loss are gone. `PREEMPT_RESUME_RETRIES` and its docs are removed
     (the environment variable is ignored). `spoond-dxq`'s
     crash-recovery retries are unchanged.
+  - **A work call cannot resume a `Drained` lease during a planned
+    restart.** While spoond is draining the node (or still owes a drain
+    clear), a resume-on-use refuses with the shared `503`
+    `capacity_wait` + `Retry-After` shape and the lease stays suspended
+    and `Drained`, so the drain's "no running sandboxes" wait is not
+    broken. The undrain clears the drain first and resumes the drained
+    leases as before.
+  - **A preempted held lease is subject to held rules 2 and 5 like any
+    other rule-suspended lease.** The old exemption ("waits for the
+    resume queue") is gone with that queue: a preempted held lease
+    untouched for `HeldSuspendedRelease` is released by the stale rule,
+    and one under critical disk pressure is rule 5's victim.
   - A lease whose hold lapsed (rule 3) resumes with its hold still
     lapsed: resuming does not renew a hold. See
     [docs/api.md](docs/api.md) for the full per-path status table.
