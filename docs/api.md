@@ -573,7 +573,10 @@ capacity_wait`/`409 lease_busy` shapes) and the lease stays suspended with its s
 intact. Undrain's bounded resume no longer marks a lease lost for a
 retryable or indeterminate failure either (spoond-638d): a resume that
 exhausts its retries is left suspended with reason `resume_failed` and
-its `drained` flag, so resume-on-use and the self-heal loop retry it.
+its `drained` flag, so resume-on-use and the self-heal loop retry it;
+a resume refused because the substrate is unavailable answers the
+retryable `503 substrate_unavailable` with `Retry-After: 5` (spoond-638d
+round 2).
 Only a permanent error (the build the resume needs is gone) loses the
 lease there, and only a lease still suspended and not busy is lost: a
 resume an owner has in flight saves its guest. A

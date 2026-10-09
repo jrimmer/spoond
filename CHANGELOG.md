@@ -30,6 +30,18 @@ summarised from README "Status".
   retries it through resume-on-use and the self-heal loop keeps trying;
   only a permanent error (the image or build is gone) still marks the
   lease `lost` (spoond-638d).
+- **Drain-resume outcomes are tidy on a planned restart.** A drained
+  lease another path already lost is no longer stamped `resume_failed`
+  and left `drained` for the heal loop to retry for 24 h: its
+  `drained` flag is cleared quietly, no `drain_deferred` is emitted for
+  a released lease, and a lease a concurrent resume brought back
+  running is left alone. A gRPC `Internal` envd start error whose text
+  happens to say "connection refused" now uses the bounded retry
+  budget instead of the long transport window. A resume refused because
+  the substrate is unavailable answers the retryable `503
+  substrate_unavailable` with `Retry-After: 5` (not a generic `500`),
+  and a lease left suspended with reason `resume_failed` now emits a
+  `suspended` event and a lease-journal line (spoond-638d round 2).
 
 ## [2.9.0] - 2026-10-09
 
