@@ -3757,8 +3757,8 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 
 // held reports whether the lease carries a holder label. Holder and
 // holder_url are plain labels with no lifecycle effect since FS5
-// (2026-10-08): only Pinned protects a lease. Kept as a name used by
-// validation and the dashboard, not by any rule.
+// (2026-10-08): only Pinned protects a lease. No rule reads this; it is
+// kept as a small convenience for tests.
 func (l *Lease) held() bool { return l.Holder != "" }
 
 // Checkpoint interval bounds (2.3, #122): the create field and the
