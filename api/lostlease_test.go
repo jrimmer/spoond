@@ -95,7 +95,7 @@ func TestReconcileCrashStampsLostAtOnce(t *testing.T) {
 // permanent error (its build is gone) during undrain becomes lost with
 // lost_at stamped and persisted. A non-permanent failure instead leaves
 // it suspended with reason resume_failed (spoond-638d; see
-// TestUndrainRepeatedEnvFailureLeavesSuspended).
+// TestUndrainResumeRetriesPermanent).
 func TestUndrainFailureStampsLostAt(t *testing.T) {
 	ts, svc, db, sub := newAdminServer(t, "admin-tok")
 	ctx := context.Background()

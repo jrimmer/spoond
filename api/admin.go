@@ -378,10 +378,9 @@ func (s *Service) undrainBackoffFor(retry int) time.Duration {
 // the connection dropped. Such an error says nothing about the sandbox,
 // so the undrain retries it for the resume window and never counts it
 // toward losing the lease (spoond-638d). The e2b client maps gRPC
-// Unavailable to substrate.ErrUnavailable; the transport markers are
-// recognised too, so an error from an out-of-tree substrate (or a raw
-// gRPC error that did not go through mapError) is still treated as
-// indeterminate rather than a sandbox failure.
+// Unavailable to substrate.ErrUnavailable; an out-of-tree substrate's raw
+// gRPC error is still recognised by its code, so the retry never depends
+// on the wire wording.
 func undrainNotReady(err error) bool {
 	if err == nil {
 		return false
@@ -390,8 +389,18 @@ func undrainNotReady(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
+	// A gRPC status error carries "rpc error: code = ". Its code names the
+	// failure precisely, so the transport text is not matched against it:
+	// an Internal error such as "failed to init envd: ... connection
+	// refused" is an envd start failure, not a not-ready orchestrator, and
+	// must use the bounded attempt budget rather than the whole window
+	// (spoond-638d round 2 F2). The gRPC Unavailable code is still
+	// recognised directly for an out-of-tree substrate whose raw error did
+	// not go through the e2b client's mapError.
+	if strings.Contains(msg, "rpc error: code = ") {
+		return strings.Contains(msg, "code = unavailable")
+	}
 	for _, marker := range []string{
-		"code = unavailable",
 		"connection reset",
 		"connection refused",
 		"error reading from server",
@@ -796,6 +805,13 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 		s.store.mu.Unlock()
 		return nil, attempts, false
 	}
+	if errors.Is(err, errLeaseReleased) {
+		// The lease was released while its resume started: nothing to
+		// resume, nothing failed, and no deferral event (spoond-775).
+		// Checked before the deferral branch so a released lease never
+		// makes the heal emit drain_deferred (spoond-638d round 2 N1).
+		return err, attempts, false
+	}
 	if undrainDeferred(err) || ctx.Err() != nil {
 		// A failed or cut-off resume can leave a half-started sandbox
 		// behind; resumeLease's createSandbox error path already deletes it
@@ -864,8 +880,23 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 	// Leave the lease suspended with reason resume_failed and Drained set,
 	// so the holder's next work call resumes it (resume-on-use) and the
 	// self-heal loop keeps retrying with backoff; a later admin undrain
-	// retries it too (spoond-638d).
-	s.markResumeFailed(l)
+	// retries it too (spoond-638d). markResumeFailed re-checks the lease
+	// under the store lock: a lease another path already lost, released or
+	// brought back by a concurrent resume is left alone (spoond-638d
+	// round 2 F1). It reports whether it stamped the reason.
+	if !s.markResumeFailed(l) {
+		// Already lost: clear the drained flag quietly (as the lost branch
+		// above does) so the heal loop stops retrying a lease whose sandbox
+		// is gone, and report non-deferred so no drain_deferred fires. A
+		// released, running or busy lease is skipped without a reason.
+		s.store.mu.Lock()
+		if !l.released && l.State == "lost" && l.Drained {
+			l.Drained = false
+			s.saveLeaseLocked(l)
+		}
+		s.store.mu.Unlock()
+		return err, attempts, false
+	}
 	s.log.Printf("undrain: resume %s failed after %d attempt(s); leaving it suspended for resume-on-use: %v", l.ID, attempts, err)
 	return err, attempts, true
 }
@@ -873,13 +904,20 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 // markResumeFailed leaves a lease the undrain could not bring back
 // suspended with reason resume_failed, keeping its Drained flag so the
 // self-heal loop and a later undrain retry it and its snapshot intact for
-// the holder's next resume-on-use call (spoond-638d). Call without
-// s.store.mu held.
-func (s *Service) markResumeFailed(l *Lease) {
+// the holder's next resume-on-use call (spoond-638d). It runs the
+// undrainLossAllowed guard under the store lock: a released or already
+// lost lease is never stamped, and neither is one a concurrent resume
+// brought back running or busy (spoond-638d round 2 F1). It reports
+// whether the reason was stamped. The suspension now emits the same
+// `suspended` event (reason resume_failed) and puqp journal line every
+// other automatic suspension carries, so the doc that says a suspended
+// event names resume_failed is true and the failure is not only visible
+// as a drain_deferred (spoond-638d round 2 N3).
+func (s *Service) markResumeFailed(l *Lease) bool {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	if l.released {
-		return
+	if _, alreadyLost, canLose := undrainLossAllowed(l); alreadyLost || !canLose {
+		return false
 	}
 	l.SuspendReason = suspendReasonResumeFailed
 	if l.SuspendBuildID == "" {
@@ -889,6 +927,12 @@ func (s *Service) markResumeFailed(l *Lease) {
 		l.SuspendedAt = s.now()
 	}
 	s.saveLeaseLocked(l)
+	// Emit under the store lock: the bus never takes it, and the event and
+	// journal name the lease exactly as it was persisted (spoond-638d
+	// round 2 N3).
+	s.emitSuspendEvent(l.ID, l.Owner, l.ResumeBuildID, suspendReasonResumeFailed, "")
+	s.journalLease(journalOpSuspend, l, suspendReasonResumeFailed)
+	return true
 }
 
 // startDrainHealLoop starts the drain self-heal loop (spoond-52c H3):

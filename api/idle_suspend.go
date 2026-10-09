@@ -212,6 +212,15 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 		writeErrorCodeAfter(w, http.StatusTooManyRequests, burstRetryAfterSecs, "quota_exceeded", err.Error())
 	case resumeNoRoom(err):
 		writeErrorCodeAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity_wait", resumeNoRoomMessage(err))
+	case errors.Is(err, substrate.ErrUnavailable):
+		// The resume's substrate could not be reached or could not confirm
+		// the sandbox state: the same retryable 503 substrate_unavailable
+		// the substrate-unknown contract answers every other work path
+		// with (spoond-g077), not a generic 500 "resume failed" the client
+		// would treat as a permanent lease failure (spoond-638d round 2
+		// N2). Short Retry-After: the orchestrator usually recovers.
+		writeErrorCodeAfter(w, substrateUnknownStatusCode, substrateUnknownRetryAfterSecs, "substrate_unavailable",
+			"the substrate could not confirm the sandbox state (orchestrator unreachable); retry shortly")
 	case errors.Is(err, errOwnerGone):
 		// The owner's identity was removed while the resume was in
 		// flight (spoond-q4j): the user is gone, so the resume is
