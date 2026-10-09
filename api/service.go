@@ -791,7 +791,10 @@ type Service struct {
 	// the pass has judged every queued ticket and is about to return. It
 	// lets a test hold a pass mid-flight while it frees room and wakes,
 	// then release the pass and assert the wake is absorbed
-	// (spoond-vbdj). Nil in production.
+	// (spoond-vbdj). A test must install it before it starts the creates
+	// whose passes read it, and must not change it afterwards: it is a
+	// plain field, so a later write would race a pass's read. Nil in
+	// production.
 	admitPassHook func()
 
 	// snapshotLimiters paces every substrate memory-snapshot write
