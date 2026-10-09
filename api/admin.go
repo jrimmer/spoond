@@ -376,9 +376,29 @@ func (s *Service) undrainBackoffFor(retry int) time.Duration {
 // failure: the orchestrator is not serving yet (it just restarted) or
 // the connection dropped. Such an error says nothing about the sandbox,
 // so the undrain retries it for the resume window and never counts it
-// toward losing the lease (spoond-638d).
+// toward losing the lease (spoond-638d). The e2b client maps gRPC
+// Unavailable to substrate.ErrUnavailable; the transport markers are
+// recognised too, so an error from an out-of-tree substrate (or a raw
+// gRPC error that did not go through mapError) is still treated as
+// indeterminate rather than a sandbox failure.
 func undrainNotReady(err error) bool {
-	return errors.Is(err, substrate.ErrUnavailable)
+	if errors.Is(err, substrate.ErrUnavailable) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"code = unavailable",
+		"connection reset",
+		"connection refused",
+		"error reading from server",
+		"unexpected eof",
+		"transport is closing",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // undrainReady waits until the orchestrator can answer both NodeInfo and
@@ -452,10 +472,6 @@ func resumeRetryable(err error) bool {
 		"envd not healthy",
 		"context deadline exceeded",
 		"deadline exceeded",
-		"connection reset",
-		"connection refused",
-		"error reading from server",
-		"unexpected eof",
 	} {
 		if strings.Contains(msg, marker) {
 			return true

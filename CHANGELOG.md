@@ -10,6 +10,27 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **A planned orchestrator restart no longer loses leases to a
+  not-yet-ready orchestrator.** The `ExecStartPost` drain resume ran
+  before the restarted orchestrator accepted sandbox creates, so a
+  resume failed with `Unavailable`/`connection reset`; the short attempt
+  budget was spent and the lease was marked `lost` — the worst outcome
+  on a planned restart. `POST /api/admin/undrain` now waits for the
+  orchestrator to answer both `NodeInfo` and a `List`
+  (`UNDRAIN_READY_TIMEOUT`, default `180s`) before the first resume, and
+  the e2b client maps gRPC `Unavailable` (a connection reset, an
+  unexpected EOF, the server not serving yet) to the retryable
+  `substrate.ErrUnavailable`. An indeterminate transport error is
+  retried with backoff for `UNDRAIN_RESUME_WINDOW` (default `5 min`) and
+  never counts toward losing the lease. A resume that exhausts its
+  retries is left suspended with reason `resume_failed` and its
+  `drained` flag — its snapshot intact — so the holder's next work call
+  retries it through resume-on-use and the self-heal loop keeps trying;
+  only a permanent error (the image or build is gone) still marks the
+  lease `lost` (spoond-638d).
+
 ## [2.9.0] - 2026-10-09
 
 A suspended lease now comes back on its holder's next work call,

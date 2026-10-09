@@ -36,7 +36,7 @@ particular means two different things depending on the code:
 | `400` | `image_mismatch` | a create `image` does not match the `snapshot`'s image |
 | `404` | `not_found` | unknown lease, name, snapshot or image |
 | `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight, or another caller's resume is; retry |
-| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` (`idle`|`idle_suspend`|`hold_lapsed`|`pressure`|`preempt`) when the suspension was automatic |
+| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` (`idle`|`idle_suspend`|`hold_lapsed`|`pressure`|`preempt`|`resume_failed`) when the suspension was automatic; `resume_failed` marks a lease an undrain could not bring back and left suspended with its snapshot intact for the next work call to retry (spoond-638d) |
 | `409` | `lease_not_live` | a released lease where a live one is required |
 | `409` | `cannot_start` | a snapshot build cannot run on this host; save it again |
 | `409` | `save_in_progress` | a named-snapshot save with the same idempotency key is running |
@@ -570,9 +570,13 @@ a creation's sandbox is never swept while the creation is in flight.
 A failed **resume-on-use** never loses a lease (#145 D2):
 its error goes to the caller (the shared `429 quota_exceeded`/`503
 capacity_wait`/`409 lease_busy` shapes) and the lease stays suspended with its snapshot
-intact. Only undrain's bounded resume still marks a lease lost after its
-retry budget is spent, and only a lease still suspended and not busy is
-lost there: a resume an owner has in flight saves its guest. A
+intact. Undrain's bounded resume no longer marks a lease lost for a
+retryable or indeterminate failure either (spoond-638d): a resume that
+exhausts its retries is left suspended with reason `resume_failed` and
+its `drained` flag, so resume-on-use and the self-heal loop retry it.
+Only a permanent error (the build the resume needs is gone) loses the
+lease there, and only a lease still suspended and not busy is lost: a
+resume an owner has in flight saves its guest. A
 create that finishes after its lease was released stops the fresh guest
 and saves nothing, so a release is never undone by a late recovery,
 resume, restart or restore.
@@ -1548,7 +1552,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
 | `recovery_retry` | a crash recovery failed transiently and the lease will be retried (spoond-dxq) | `recovering from checkpoint <build>: attempt N/K failed: <err>`, or `recovering from checkpoint <build>: waiting for capacity: <err>` (a capacity wait is not an attempt) |
 | `rootfs_dead` | the rootfs liveness probe found the lease's root disk unreadable (I/O errors) and started the shared recovery | `root disk unreadable (I/O errors)` (before the `recovered`/`lost`/`recovery_retry` event that follows) |
-| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume, or a crash-recovery retry budget spent), or its root disk answered I/O errors (rootfs liveness probe) | the reason, e.g. `no checkpoint to recover from; the running state is gone`, `recovery from checkpoint <build> failed after N attempt(s) within <window>: <err>` or `root disk unreadable (I/O errors)`; the same text is stored as `lost_reason` and returned by `GET` and every `410 lease_lost` (see [Lost leases](#lost-leases)) |
+| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, a permanently failed undrain resume such as a missing build, or a crash-recovery retry budget spent), or its root disk answered I/O errors (rootfs liveness probe) | the reason, e.g. `no checkpoint to recover from; the running state is gone`, `recovery from checkpoint <build> failed after N attempt(s) within <window>: <err>` or `root disk unreadable (I/O errors)`; the same text is stored as `lost_reason` and returned by `GET` and every `410 lease_lost` (see [Lost leases](#lost-leases)). A resume failure that is not permanent leaves the lease `suspended` with `suspend_reason: resume_failed` instead (spoond-638d) |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
 | `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |
@@ -1564,7 +1568,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
 | `gc` | a catalog GC pass deleted builds or failed a stale `building` row (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed`; or `stale build <id> failed · build timed out` |
 | `drain_failed` | the admin drain could not pause the lease: it ran on into the orchestrator stop (spoond-52c) | the pause error |
-| `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer or a bounded context (spoond-52c) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
+| `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer, an indeterminate orchestrator error, or a bounded context (spoond-52c, spoond-638d) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
 | `drain_healed` | the drain self-heal loop lifted a drain that outlived `DRAIN_MAX_SECS` on a healthy node, or cleared a node drain a failed undrain left set (spoond-52c) | `drain lasted <duration>` |
 | `drain_gave_up` | the drain self-heal loop stopped retrying the lease's resume after `DRAIN_RESUME_MAX_AGE`; the lease stays suspended with its snapshot intact, for the owner or the idle rules to exit (spoond-52c) | `resume deferred for over <duration>; leaving the lease suspended for the owner` |
 | `user_deleted` | `DELETE /api/users/{id}` removed a user and cleaned up their state (spoond-q4j); every one of the user's leases emitted its own `released` event with reason `user_deleted` | `removed user <id>: N lease(s), N job(s), N snapshot(s), N kept build(s)` |
@@ -2001,7 +2005,7 @@ wrong or missing token answers `401`.
 | Route | Effect |
 |---|---|
 | `POST /api/admin/drain` | Set the node draining and pause every live lease into a pause build (marking it drained), delete the warm pool, then wait up to 180 s until the node reports no running sandboxes and no outstanding work. Runs on a context detached from the request (a client disconnect does not cancel the pauses) bounded by 6 min. Response `{"paused":N,"failed":[{"id","error"}],"pool_deleted":M,"quiesced":bool}`; each failure is logged and emits a `drain_failed` event. `503 {"error":"orchestrator unreachable: …"}` (nothing changed) when the node cannot be reached. A manual drain held longer than `DRAIN_MAX_SECS` (default 900) on a healthy node is lifted automatically (see `POST /api/admin/undrain`); a backend that starts while the node reports `draining` adopts that drain. |
-| `POST /api/admin/undrain` | Wait up to 120 s for the node, clear draining, resume exactly the drained leases `UNDRAIN_CONCURRENCY` (default 2) at a time (a resume that fails with a retryable envd/start error is retried `UNDRAIN_RESUME_RETRIES` (default 2) times before the lease becomes `lost`; `failed` entries carry `attempts`; one over its owner's memory cap, without burst room, unable to preempt, refused for capacity, or hit by a cancelled/bounded call stays drained for the next undrain or the self-heal loop). A failed clear keeps the node draining and the leases drained so the self-heal loop retries the clear. Runs on a context detached from the request bounded by 5 min. Response `{"resumed":N,"failed":[{"id","error","attempts"}]}`. |
+| `POST /api/admin/undrain` | Wait for the orchestrator to answer `NodeInfo` and a `List` (`UNDRAIN_READY_TIMEOUT`, default 180 s), clear draining, then resume exactly the drained leases `UNDRAIN_CONCURRENCY` (default 2) at a time. A resume that fails with a retryable envd/start error is retried `UNDRAIN_RESUME_RETRIES` (default 2) times; an indeterminate orchestrator error (`Unavailable`, a connection reset) is retried with backoff for `UNDRAIN_RESUME_WINDOW` (default 5 min) and never loses the lease. A resume that exhausts its retries is left suspended and `drained` with reason `resume_failed` so resume-on-use and the self-heal loop can retry it; only a permanent error (the build is gone) marks it `lost`. An admission refusal, capacity answer or bounded call stays drained for the next undrain or the self-heal loop. A failed clear keeps the node draining and the leases drained so the self-heal loop retries the clear. Runs on a context detached from the request bounded by 12 min. `failed` entries carry `attempts`. Response `{"resumed":N,"failed":[{"id","error","attempts"}]}`. |
 | `POST /api/admin/reconcile` | Run the crash reconciliation now. Response `{"recovered":N,"lost":M}`. |
 
 These are what `spoond drain --stop|--start` calls from the orchestrator

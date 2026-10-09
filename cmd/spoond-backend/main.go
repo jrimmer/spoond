@@ -514,8 +514,8 @@ func Main(args []string) int {
 	// (unavailable/connection-reset) error, which never loses a lease.
 	undrainConcurrency := envIntOr("UNDRAIN_CONCURRENCY", api.DefaultUndrainConcurrency)
 	undrainResumeRetries := envIntOr("UNDRAIN_RESUME_RETRIES", api.DefaultUndrainResumeRetries)
-	undrainResumeWindow := envDurationOr("UNDRAIN_RESUME_WINDOW", api.DefaultUndrainResumeWindow)
-	undrainReadyTimeout := envDurationOr("UNDRAIN_READY_TIMEOUT", api.DefaultUndrainReadyTimeout)
+	undrainResumeWindow := envDurationOrZero("UNDRAIN_RESUME_WINDOW", api.DefaultUndrainResumeWindow)
+	undrainReadyTimeout := envDurationOrZero("UNDRAIN_READY_TIMEOUT", api.DefaultUndrainReadyTimeout)
 	// Drain self-heal (spoond-52c): a drain that outlives DRAIN_MAX_SECS
 	// while the node is healthy undrains itself rather than refusing
 	// every create forever. 0 means the default; a negative disables it.
