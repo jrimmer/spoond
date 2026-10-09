@@ -417,20 +417,30 @@ it lossless. Do not stop the backend first.
    (default `1`) that paces every other snapshot write — see
    [Snapshot write pacing](#snapshot-write-pacing).
 3. The orchestrator stops; on start, `ExecStartPost=/opt/spoond/spoond
-   drain --start` waits for the node (up to 120 s), calls
+   drain --start` waits for the node to become ready, calls
    `POST /api/admin/undrain`, which clears draining and resumes exactly
-   the drained leases. Resumes run `UNDRAIN_CONCURRENCY` (default `2`)
-   at a time, so restoring a batch of large memory snapshots does not
-   stack the node's I/O and memory. A resume that fails with a
-   retryable envd/start error ("syncing took too long", a context
-   deadline, envd init) is retried `UNDRAIN_RESUME_RETRIES` (default
-   `2`) times with a short backoff before the lease becomes `lost`; the
-   response's `failed` entry and the log line name how many attempts
-   were made. A lease that fails permanently (its build is gone, or the
-   node keeps refusing the resume) still becomes `lost`; one over its
-   owner's memory cap, without burst room, unable to preempt, refused
-   for capacity, or hit by a cancelled/bounded call stays `drained` for
-   a later undrain.
+   the drained leases. Before the first resume the undrain waits for the
+   orchestrator to answer both `NodeInfo` and a `List`
+   (`UNDRAIN_READY_TIMEOUT`, default `180s`), so a resume never runs
+   before a restarted orchestrator accepts sandbox creates. Resumes run
+   `UNDRAIN_CONCURRENCY` (default `2`) at a time, so restoring a batch of
+   large memory snapshots does not stack the node's I/O and memory. A
+   resume that fails with a retryable envd/start error ("syncing took
+   too long", a context deadline, envd init) is retried
+   `UNDRAIN_RESUME_RETRIES` (default `2`) times with a short backoff; an
+   **indeterminate** orchestrator error (`Unavailable`, a connection
+   reset, an unexpected EOF) is retried with backoff for the whole
+   `UNDRAIN_RESUME_WINDOW` (default `5 min`) and never counts toward
+   losing the lease, because it says nothing about the sandbox. A resume
+   that exhausts those retries is not lost either: the lease is left
+   suspended with reason `resume_failed` (its snapshot intact, its
+   `drained` flag kept), so the holder's next work call retries it
+   through resume-on-use and the self-heal loop keeps retrying it on its
+   backoff. Only a **permanent** error (the image or build the resume
+   needs is gone) still marks the lease `lost`; one over its owner's
+   memory cap, without burst room, unable to preempt, refused for
+   capacity, or hit by a cancelled/bounded call stays `drained` for a
+   later undrain.
 4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
    crashed or was killed), the drain is skipped — there is nothing to
    pause — and the backend's crash reconcile handles recovery.

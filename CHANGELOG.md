@@ -10,6 +10,39 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **A planned orchestrator restart no longer loses leases to a
+  not-yet-ready orchestrator.** The `ExecStartPost` drain resume ran
+  before the restarted orchestrator accepted sandbox creates, so a
+  resume failed with `Unavailable`/`connection reset`; the short attempt
+  budget was spent and the lease was marked `lost` — the worst outcome
+  on a planned restart. `POST /api/admin/undrain` now waits for the
+  orchestrator to answer both `NodeInfo` and a `List`
+  (`UNDRAIN_READY_TIMEOUT`, default `180s`) before the first resume, and
+  the e2b client maps gRPC `Unavailable` (a connection reset, an
+  unexpected EOF, the server not serving yet) to the retryable
+  `substrate.ErrUnavailable`. An indeterminate transport error is
+  retried with backoff for `UNDRAIN_RESUME_WINDOW` (default `5 min`) and
+  never counts toward losing the lease. A resume that exhausts its
+  retries is left suspended with reason `resume_failed` and its
+  `drained` flag — its snapshot intact — so the holder's next work call
+  retries it through resume-on-use and the self-heal loop keeps trying;
+  only a permanent error (the image or build is gone) still marks the
+  lease `lost` (spoond-638d).
+- **Drain-resume outcomes are tidy on a planned restart.** A drained
+  lease another path already lost is no longer stamped `resume_failed`
+  and left `drained` for the heal loop to retry for 24 h: its
+  `drained` flag is cleared quietly, no `drain_deferred` is emitted for
+  a released lease, and a lease a concurrent resume brought back
+  running is left alone. A gRPC `Internal` envd start error whose text
+  happens to say "connection refused" now uses the bounded retry
+  budget instead of the long transport window. A resume refused because
+  the substrate is unavailable answers the retryable `503
+  substrate_unavailable` with `Retry-After: 5` (not a generic `500`),
+  and a lease left suspended with reason `resume_failed` now emits a
+  `suspended` event and a lease-journal line (spoond-638d round 2).
+
 ## [2.9.0] - 2026-10-09
 
 A suspended lease now comes back on its holder's next work call,

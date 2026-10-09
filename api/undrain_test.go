@@ -89,8 +89,10 @@ func TestUndrainResumeRetriesTransient(t *testing.T) {
 }
 
 // TestUndrainResumeRetriesPermanent: a resume that keeps failing with a
-// retryable envd error is attempted 1+retries times and then the lease
-// becomes lost; the failure records how many attempts were made.
+// retryable envd error is attempted 1+retries times and then the lease is
+// left suspended with reason resume_failed (its snapshot intact) rather
+// than lost, so the holder's next work call can retry; the failure
+// records how many attempts were made (spoond-638d).
 func TestUndrainResumeRetriesPermanent(t *testing.T) {
 	_, svc, _, sub := newAdminServer(t, "admin-tok")
 	ctx := context.Background()
@@ -118,11 +120,14 @@ func TestUndrainResumeRetriesPermanent(t *testing.T) {
 	if f.ID != target.ID || f.Attempts != 3 {
 		t.Fatalf("failed entry = %+v, want id %s attempts 3", f, target.ID)
 	}
-	if target.State != "lost" || target.Drained {
-		t.Fatalf("lease = state=%s drained=%v, want lost and undrained", target.State, target.Drained)
+	if target.State != "suspended" || !target.Drained {
+		t.Fatalf("lease = state=%s drained=%v, want suspended and drained (not lost)", target.State, target.Drained)
 	}
-	if target.LostAt.IsZero() {
-		t.Fatal("a permanently failed resume must stamp the lease lost")
+	if !target.LostAt.IsZero() {
+		t.Fatal("a repeated but non-permanent resume failure must not stamp the lease lost")
+	}
+	if target.SuspendReason != suspendReasonResumeFailed {
+		t.Fatalf("suspend_reason = %q, want %q", target.SuspendReason, suspendReasonResumeFailed)
 	}
 	// grant + three resume attempts.
 	if got := calls(sub.Fake, "Create "+targetSandbox); got != 1 {

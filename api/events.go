@@ -148,7 +148,8 @@ type LeaseEvent struct {
 	Type    LeaseEventType `json:"type"`
 	Detail  string         `json:"detail,omitempty"`
 	// Reason is one of idle|idle_suspend|hold_lapsed|pressure|preempt
-	// on a suspended event; "" elsewhere.
+	// on a suspended event (and resume_failed when an undrain left a lease
+	// suspended it could not resume); "" elsewhere.
 	Reason string `json:"reason,omitempty"`
 	// PolicyStep is the pressure order's step name that ordered the
 	// suspend, or "" when none did.
