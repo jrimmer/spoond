@@ -551,6 +551,13 @@ func (s *Service) scheduledWake() {
 	for {
 		s.wakePending.Store(false)
 		s.tryAdmitQueued(context.Background())
+		// This goroutine owns wakeScheduled from the CAS in
+		// wakeAdmissionQueue until the CAS below, and no other goroutine
+		// can take the flag while it is set (wakeAdmissionQueue's
+		// CAS(false, true) fails while it is true). The compare-and-swap
+		// below therefore always wins; the branch is a defensive guard,
+		// kept so a future change that shares the flag cannot silently
+		// drop a wake.
 		if !s.wakeScheduled.CompareAndSwap(true, false) {
 			return // lost ownership; the owner that took it handles pending
 		}
