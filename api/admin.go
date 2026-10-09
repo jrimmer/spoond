@@ -793,6 +793,11 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 		s.store.mu.Unlock()
 		return err, attempts, true
 	}
+	if errors.Is(err, errLeaseReleased) {
+		// The lease was released while its resume started: nothing to
+		// resume, nothing failed, and no deferral event (spoond-775).
+		return err, attempts, false
+	}
 	// A permanent error — the image or build the resume needs is gone — is
 	// the only failure that loses the lease: nothing can bring the
 	// snapshot back, so keeping it suspended would only fail again on the
