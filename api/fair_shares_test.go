@@ -35,9 +35,10 @@ func newFairShareService(t *testing.T) (*Service, *store.DB, *testSub, *identity
 		HugepagesTotal:    512,
 		HugepageSizeBytes: 2 << 20, // 1024 MiB total
 	}, nil)
-	svc.nodeInfoMu.Lock()
-	svc.nodeInfoAt = time.Time{}
-	svc.nodeInfoMu.Unlock()
+	// Warm the shared NodeInfo cache the same way the node-metrics loop
+	// does: the fair-share view reads the cache and never makes an RPC
+	// (R5), so a cold cache would report unknown capacity.
+	svc.updateNodeMetrics(context.Background())
 	svc.diskCapacity = func(string) (uint64, uint64, error) { return 1 << 30, 1 << 29, nil }
 	return svc, db, sub, ids
 }
@@ -225,11 +226,10 @@ func TestFairSharesNChanges(t *testing.T) {
 func TestFairSharesZeroCapacityGuard(t *testing.T) {
 	svc, _, sub, ids := newFairShareService(t)
 	addIdentityUser(t, ids, "alice")
-	// A node reporting no hugepage size (and no disk) is the guard.
+	// A node reporting no hugepage size (and no disk) is the guard. Warm
+	// the cache so the reading is a real zero capacity, not an unknown.
 	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy"}, nil)
-	svc.nodeInfoMu.Lock()
-	svc.nodeInfoAt = time.Time{}
-	svc.nodeInfoMu.Unlock()
+	svc.updateNodeMetrics(context.Background())
 	svc.diskCapacity = func(string) (uint64, uint64, error) { return 0, 0, nil }
 	svc.invalidateFairShares()
 
@@ -553,5 +553,243 @@ func TestSharesListJSONShape(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"slice_bytes"`) {
 		t.Fatalf("missing disk keys: %s", rec.Body.String())
+	}
+}
+
+// freezeFairShareClock pins the service clock so the cache TTL can never
+// expire inside a test: a snapshot is then only replaced when an
+// invalidation drops it, which makes a missing invalidation visible.
+func freezeFairShareClock(svc *Service, base time.Time) {
+	svc.now = func() time.Time { return base }
+}
+
+// freshAfter asserts that the next read is a different snapshot than the
+// cached one and returns it: the mutation under test must have
+// invalidated the cache. Removing that invalidation makes this fail
+// because a frozen clock never expires the TTL.
+func freshAfter(t *testing.T, svc *Service, before *fairShareSnapshot) *fairShareSnapshot {
+	t.Helper()
+	after := svc.fairShares(context.Background())
+	if after == before {
+		t.Fatal("snapshot was not invalidated: the cached one was returned")
+	}
+	return after
+}
+
+// TestFairSharesInvalidateOnLeaseRelease: releasing a live lease drops
+// its memory usage, and the read must be fresh.
+func TestFairSharesInvalidateOnLeaseRelease(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
+	seedImage(t, db, "py-base", 256)
+	u := addIdentityUser(t, ids, "alice")
+	l, err := svc.grant(context.Background(), u.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	before := svc.fairShares(context.Background())
+	if got := shareByOwner(before)[u.ID].Memory.UsedMiB; got != 256 {
+		t.Fatalf("used memory before release = %d, want 256", got)
+	}
+	svc.release(context.Background(), l)
+	after := freshAfter(t, svc, before)
+	if got := shareByOwner(after)[u.ID].Memory.UsedMiB; got != 0 {
+		t.Fatalf("used memory after release = %d, want 0", got)
+	}
+}
+
+// TestFairSharesInvalidateOnLeaseDelete: deleteLeaseLocked (a fork
+// rollback / recovery delete) invalidates even when the in-memory lease
+// is already gone.
+func TestFairSharesInvalidateOnLeaseDelete(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
+	seedImage(t, db, "py-base", 256)
+	u := addIdentityUser(t, ids, "alice")
+	l, err := svc.grant(context.Background(), u.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	before := svc.fairShares(context.Background())
+	// Drop the in-memory row the way a rollback does, then delete the
+	// store row: the invalidation must live in deleteLeaseLocked.
+	svc.store.mu.Lock()
+	delete(svc.store.leases, l.ID)
+	svc.store.mu.Unlock()
+	svc.deleteLeaseLocked(l.ID)
+	freshAfter(t, svc, before)
+}
+
+// TestFairSharesInvalidateOnUserCreateAndDelete: adding or removing an
+// identity owner changes N, and the read must be fresh each time.
+func TestFairSharesInvalidateOnUserCreateAndDelete(t *testing.T) {
+	srv, svc, _, _ := newFairShareServer(t)
+	freezeFairShareClock(svc, time.Now())
+	adminTok, _ := bootstrapAdmin(t, srv)
+
+	before := svc.fairShares(context.Background())
+	rec, body := doUsersReq(t, srv.Handler(), "POST", "/api/users", adminTok, `{"name":"new","fingerprints":["SHA256:fp-new"],"token":"new-tok"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	afterCreate := freshAfter(t, svc, before)
+	if afterCreate.ownersN != before.ownersN+1 {
+		t.Fatalf("ownersN after create = %d, want %d", afterCreate.ownersN, before.ownersN+1)
+	}
+	id := body["user"].(map[string]any)["id"].(string)
+	rec2, _ := doUsersReq(t, srv.Handler(), "DELETE", "/api/users/"+id, adminTok, "")
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", rec2.Code, rec2.Body.String())
+	}
+	afterDelete := freshAfter(t, svc, afterCreate)
+	if afterDelete.ownersN != before.ownersN {
+		t.Fatalf("ownersN after delete = %d, want %d", afterDelete.ownersN, before.ownersN)
+	}
+}
+
+// TestFairSharesInvalidateOnKeep: a keepped checkpoint changes the
+// owner's kept bytes and the read must be fresh.
+func TestFairSharesInvalidateOnKeep(t *testing.T) {
+	srv, svc, db, _ := newFairShareServer(t)
+	freezeFairShareClock(svc, time.Now())
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 256)
+	id := createLeaseAs(srv.Handler(), "legacy-tok")
+	if id == "" {
+		t.Fatal("could not create lease")
+	}
+	before := svc.fairShares(context.Background())
+	rec, body := doUsersReq(t, srv.Handler(), "POST", "/api/leases/"+id+"/checkpoint", "legacy-tok", `{"keep":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("checkpoint keep: %d %s", rec.Code, rec.Body.String())
+	}
+	if body["build_id"] == nil {
+		t.Fatalf("no build_id: %v", body)
+	}
+	// The keep path calls UpdateKeptMetrics, which invalidates.
+	freshAfter(t, svc, before)
+}
+
+// TestFairSharesInvalidateOnNamedSaveAndDelete: a named save and a named
+// delete change the owner's named bytes and the read must be fresh each
+// time.
+func TestFairSharesInvalidateOnNamedSaveAndDelete(t *testing.T) {
+	srv, svc, db, _ := newFairShareServer(t)
+	freezeFairShareClock(svc, time.Now())
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 256)
+	id := createLeaseAs(srv.Handler(), "legacy-tok")
+	if id == "" {
+		t.Fatal("could not create lease")
+	}
+	before := svc.fairShares(context.Background())
+	rec, body := doUsersReq(t, srv.Handler(), "POST", "/api/leases/"+id+"/snapshots", "legacy-tok", `{"name":"spoond/warm"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	if body["name"] != "spoond/warm" {
+		t.Fatalf("save body = %v", body)
+	}
+	afterSave := freshAfter(t, svc, before)
+
+	rec2, _ := doUsersReq(t, srv.Handler(), "DELETE", "/api/named-snapshots/spoond/warm", "legacy-tok", "")
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("delete named snapshot: %d %s", rec2.Code, rec2.Body.String())
+	}
+	freshAfter(t, svc, afterSave)
+}
+
+// TestFairSharesFailedReadNotCached: a failed capacity or store read
+// yields a not-ok snapshot that is never cached, so the next read
+// retries instead of serving zeros for the TTL.
+func TestFairSharesFailedReadNotCached(t *testing.T) {
+	t.Run("cold node info", func(t *testing.T) {
+		svc, _, _, ids := newFairShareService(t)
+		freezeFairShareClock(svc, time.Now())
+		addIdentityUser(t, ids, "alice")
+		// Cold cache: no NodeInfo reading is available.
+		svc.nodeInfoMu.Lock()
+		svc.nodeInfoAt = time.Time{}
+		svc.nodeInfoMu.Unlock()
+		beforeCalls := calls(svc.sub.(*testSub).Fake, "NodeInfo")
+		snap := svc.fairShares(context.Background())
+		if snap.ok {
+			t.Fatal("cold NodeInfo snapshot marked ok")
+		}
+		if afterCalls := calls(svc.sub.(*testSub).Fake, "NodeInfo"); afterCalls != beforeCalls {
+			t.Fatalf("fair-share path made %d NodeInfo RPC(s), want 0", afterCalls-beforeCalls)
+		}
+		svc.fairShareCache.mu.Lock()
+		cached := svc.fairShareCache.snap
+		svc.fairShareCache.mu.Unlock()
+		if cached != nil {
+			t.Fatal("not-ok snapshot was cached")
+		}
+		// A warm cache then reads a real slice.
+		svc.updateNodeMetrics(context.Background())
+		again := svc.fairShares(context.Background())
+		if !again.ok {
+			t.Fatal("warm NodeInfo snapshot not marked ok")
+		}
+	})
+
+	t.Run("disk capacity error", func(t *testing.T) {
+		svc, _, _, ids := newFairShareService(t)
+		freezeFairShareClock(svc, time.Now())
+		addIdentityUser(t, ids, "alice")
+		svc.diskCapacity = func(string) (uint64, uint64, error) {
+			return 0, 0, context.DeadlineExceeded
+		}
+		snap := svc.fairShares(context.Background())
+		if snap.ok {
+			t.Fatal("failed statfs snapshot marked ok")
+		}
+		svc.fairShareCache.mu.Lock()
+		cached := svc.fairShareCache.snap
+		svc.fairShareCache.mu.Unlock()
+		if cached != nil {
+			t.Fatal("failed statfs snapshot was cached")
+		}
+	})
+
+	t.Run("store query error", func(t *testing.T) {
+		svc, db, _, ids := newFairShareService(t)
+		freezeFairShareClock(svc, time.Now())
+		addIdentityUser(t, ids, "alice")
+		// Close the store so the grouped byte queries fail.
+		if err := db.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+		snap := svc.fairShares(context.Background())
+		if snap.ok {
+			t.Fatal("failed store snapshot marked ok")
+		}
+		svc.fairShareCache.mu.Lock()
+		cached := svc.fairShareCache.snap
+		svc.fairShareCache.mu.Unlock()
+		if cached != nil {
+			t.Fatal("failed store snapshot was cached")
+		}
+	})
+}
+
+// TestFairSharesCancelledRequestContextDetached: the box-wide compute
+// runs detached from the request context, so a client disconnect does
+// not turn the read into a failed, uncached snapshot.
+func TestFairSharesCancelledRequestContextDetached(t *testing.T) {
+	svc, _, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
+	addIdentityUser(t, ids, "alice")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	snap := svc.fairShares(ctx)
+	if !snap.ok {
+		t.Fatal("cancelled request context produced a not-ok snapshot")
+	}
+	svc.fairShareCache.mu.Lock()
+	cached := svc.fairShareCache.snap
+	svc.fairShareCache.mu.Unlock()
+	if cached == nil {
+		t.Fatal("ok snapshot from a cancelled request was not cached")
 	}
 }

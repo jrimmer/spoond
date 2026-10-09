@@ -62,7 +62,17 @@ type fairShareSnapshot struct {
 	diskTotalBytes int64
 	// at is when the snapshot was computed.
 	at time.Time
+	// ok reports whether every read behind the snapshot succeeded. A
+	// snapshot with ok false is still returned to the caller (it carries
+	// whatever was readable) but is never cached.
+	ok bool
 }
+
+// fairShareComputeTimeout bounds one computation of the box-wide view.
+// The computation runs on a context detached from the request that
+// happened to trigger it, so a client disconnect cannot poison the cache
+// and a hung store or statfs cannot pin a compute forever.
+const fairShareComputeTimeout = 5 * time.Second
 
 // fairSharesCache holds the last computed snapshot behind a mutex.
 // invalidate() bumps the epoch so a concurrent reader that computed
@@ -121,24 +131,23 @@ func (s *Service) ownerDisplayName(owner string) string {
 	return ""
 }
 
-// totalHugepageMiB reports the box's hugepage memory pool in MiB, from
-// the same cached NodeInfo admissions read (nodeInfoCache). ok is false
-// when no reading can be had or the reading has no hugepage size; the
-// caller then reports 0 slices rather than guess.
-func (s *Service) totalHugepageMiB(ctx context.Context) (int, bool) {
+// totalHugepageMiB reports the box's hugepage memory pool in MiB from
+// the existing NodeInfo cache (kept warm by updateNodeMetrics and the
+// admission path). It deliberately makes no RPC: the fair-share view is
+// read on a request path, and calling s.sub.NodeInfo here would put a
+// substrate round trip (under nodeInfoMu) behind every read and could
+// stampede the orchestrator. When the cache is cold the capacity is
+// unknown: ok is false and the caller reports a not-ok, uncached
+// snapshot. A warm reading with no hugepage size is a real zero capacity
+// and reports ok true.
+func (s *Service) totalHugepageMiB() (int, bool) {
 	s.nodeInfoMu.Lock()
 	defer s.nodeInfoMu.Unlock()
-	if s.nodeInfoAt.IsZero() || s.nodeInfoCache.HugepageSizeBytes == 0 {
-		// Refresh once so a fresh backend reports a real slice.
-		info, err := s.sub.NodeInfo(ctx)
-		if err != nil {
-			return 0, false
-		}
-		s.nodeInfoCache = info
-		s.nodeInfoAt = s.now()
-		if info.HugepageSizeBytes == 0 {
-			return 0, false
-		}
+	if s.nodeInfoAt.IsZero() {
+		return 0, false
+	}
+	if s.nodeInfoCache.HugepageSizeBytes == 0 {
+		return 0, true
 	}
 	total := s.nodeInfoCache.HugepagesTotal * s.nodeInfoCache.HugepageSizeBytes
 	return int(total / (1024 * 1024)), true
@@ -159,7 +168,9 @@ func (s *Service) totalSnapshotBytes() (int64, bool) {
 // the running leases under the store lock (memory), then the recorded
 // snapshot sizes in a handful of store queries — never a filesystem walk
 // per request. A cached snapshot is returned until a lease change or an
-// owner add/delete invalidates it.
+// owner add/delete invalidates it. ok is false when any read failed: the
+// partial snapshot is still returned (the caller reports what it knows)
+// but it is not cached.
 func (s *Service) fairShares(ctx context.Context) *fairShareSnapshot {
 	// A short TTL bounds how stale a snapshot can be when a change was
 	// missed (e.g. a lease state change that does not call invalidate);
@@ -173,7 +184,16 @@ func (s *Service) fairShares(ctx context.Context) *fairShareSnapshot {
 	epoch := s.fairShareCache.epoch
 	s.fairShareCache.mu.Unlock()
 
-	snap := s.computeFairShares(ctx)
+	// Compute on a context detached from the request and bounded in time:
+	// the snapshot covers the whole box, so one client disconnect or one
+	// hung store read must not be turned into cached zeros.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fairShareComputeTimeout)
+	defer cancel()
+	snap := s.computeFairShares(cctx)
+	if !snap.ok {
+		// A failed read must not be cached: the next caller retries.
+		return snap
+	}
 
 	s.fairShareCache.mu.Lock()
 	// Only store it when no invalidation happened while computing: a
@@ -185,13 +205,22 @@ func (s *Service) fairShares(ctx context.Context) *fairShareSnapshot {
 	return snap
 }
 
-// computeFairShares builds a fresh snapshot from the current state.
+// computeFairShares builds a fresh snapshot from the current state. The
+// snapshot's ok is false when any read failed; it then carries only the
+// values that were readable.
 func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 	owners := s.ownersOfBox()
 	n := len(owners)
 
-	memTotalMiB, _ := s.totalHugepageMiB(ctx)
-	diskTotalBytes, _ := s.totalSnapshotBytes()
+	ok := true
+	memTotalMiB, memOK := s.totalHugepageMiB()
+	if !memOK {
+		ok = false
+	}
+	diskTotalBytes, diskOK := s.totalSnapshotBytes()
+	if !diskOK {
+		ok = false
+	}
 
 	// Running-lease memory, under the store lock so a concurrent
 	// release/suspend cannot tear the view. The disk sums come from
@@ -206,10 +235,26 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 	}
 	s.store.mu.Unlock()
 
-	// Disk usage by recorded snapshot size, three queries for the box.
-	pausedByOwner, _ := s.db.PausedBytesByOwner(ctx)
-	keptByOwner, _ := s.db.KeptBytesByOwner(ctx)
-	namedByOwner, _ := s.db.NamedSnapshotBytesByOwner(ctx)
+	// Disk usage by recorded snapshot size, three queries for the box. A
+	// failed query must not be cached as zero disk.
+	pausedByOwner, err := s.db.PausedBytesByOwner(ctx)
+	if err != nil {
+		s.log.Printf("fair shares: paused bytes: %v", err)
+		ok = false
+		pausedByOwner = map[string]int64{}
+	}
+	keptByOwner, err := s.db.KeptBytesByOwner(ctx)
+	if err != nil {
+		s.log.Printf("fair shares: kept bytes: %v", err)
+		ok = false
+		keptByOwner = map[string]int64{}
+	}
+	namedByOwner, err := s.db.NamedSnapshotBytesByOwner(ctx)
+	if err != nil {
+		s.log.Printf("fair shares: named bytes: %v", err)
+		ok = false
+		namedByOwner = map[string]int64{}
+	}
 
 	// Memory slice: 1/N of the pool, integer MiB. Disk slice: 1/N of the
 	// volume's usable bytes.
@@ -228,6 +273,7 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 		memoryTotalMiB: memTotalMiB,
 		diskTotalBytes: diskTotalBytes,
 		at:             s.now(),
+		ok:             ok,
 	}
 	for _, owner := range owners {
 		o := &FairShareOwner{Owner: owner, Name: s.ownerDisplayName(owner)}
@@ -267,9 +313,10 @@ func ratioOf(o *FairShareOwner, memSliceMiB int, diskSliceBytes int64) float64 {
 	return ratio
 }
 
-// fairShareFor returns one owner's view from the cached snapshot. ok is
+// fairShareFor returns one owner's view from the current snapshot. ok is
 // false when the owner does not exist (no identity row and no legacy
-// token).
+// token). A failed box read still yields the owner's (partial) view: the
+// owner lookup itself is independent of the capacity reads.
 func (s *Service) fairShareFor(ctx context.Context, owner string) (*FairShareOwner, bool) {
 	snap := s.fairShares(ctx)
 	o, ok := snap.byID[owner]

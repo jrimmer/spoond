@@ -147,6 +147,35 @@ func TestCtlSnapshotShowAndRm(t *testing.T) {
 	}
 }
 
+// TestCtlShareListParsesSharesKey: `share ls` must parse the backend's
+// top-level "shares" key; a backend that renames it yields the
+// pass-through JSON (or "no shares"), not a rendered table.
+func TestCtlShareListParsesSharesKey(t *testing.T) {
+	withFakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"shares":[{"lease_id":"0123456789abcdef0123456789abcdef","grantee":"u-grantee","mode":"http","created_at":"2026-10-06T09:00:00Z"}]}`))
+	})
+	out := runControlCommand(t.Context(), "share ls", nil, "alice", "", "")
+	if !strings.Contains(out, "0123456789ab…") && !strings.Contains(out, "0123456789abcdef0123456789abcdef") {
+		t.Fatalf("share ls did not render a table: %q", out)
+	}
+	if strings.Contains(out, "no shares") {
+		t.Fatalf("share ls ignored the shares key: %q", out)
+	}
+}
+
+// TestCtlShareListRejectsRenamedKey is the mutation guard: if the
+// backend names the array anything other than "shares", `share ls`
+// must not render the parsed table (it falls back to raw JSON).
+func TestCtlShareListRejectsRenamedKey(t *testing.T) {
+	withFakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"grants":[{"lease_id":"0123456789abcdef0123456789abcdef","grantee":"u-grantee","mode":"http","created_at":"2026-10-06T09:00:00Z"}]}`))
+	})
+	out := runControlCommand(t.Context(), "share ls", nil, "alice", "", "")
+	if strings.Contains(out, "GRANTEE") || strings.Contains(out, "LEASE ") {
+		t.Fatalf("share ls rendered a table from a renamed key: %q", out)
+	}
+}
+
 // TestCtlSnapshotErrorPropagates: a 4xx from the backend is reported as
 // the gateway's {"error":...} JSON.
 func TestCtlSnapshotErrorPropagates(t *testing.T) {

@@ -2326,6 +2326,13 @@ The share object is:
 owner inside their slice is below `1`. When the box has no capacity (or
 no owners exist) every slice and ratio is `0` — no division by zero.
 
+Capacity is read from the node-info cache the admission path keeps warm
+(`updateNodeMetrics`); the fair-share routes never make a substrate RPC.
+When that cache is cold the capacity is unknown: the endpoint still
+answers `200` with the owner list, the slices are `0` and the result is
+not cached, so the next request retries. The same applies to a failed
+store read: the view is not cached and the next request recomputes.
+
 ### `GET /api/fair-shares` — every owner's slice and usage (admin only)
 
 `403` for non-admin callers. Read-only:

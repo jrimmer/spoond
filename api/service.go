@@ -4709,13 +4709,16 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 		return
 	}
 	// A state change moves the owner's memory and disk usage: drop the
-	// fair-share snapshot so the next read recomputes it (#145 FS1).
-	s.invalidateFairShares()
+	// fair-share snapshot so the next read recomputes it (#145 FS1). The
+	// invalidation runs AFTER the write succeeds: invalidating first lets a
+	// concurrent compute read the pre-write state and cache it for the TTL.
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.UpsertLease(ctx, leaseToRow(l)); err != nil {
 		s.storeError("upsert_lease", l.ID, err)
+		return
 	}
+	s.invalidateFairShares()
 }
 
 // leaseReleased reports whether l was released, under the store lock.
@@ -4807,13 +4810,15 @@ func (s *Service) bumpGenerationLocked(l *Lease) {
 
 func (s *Service) deleteLeaseLocked(id string) {
 	// The lease is gone: its memory and disk usage leave the box view
-	// (#145 FS1).
-	s.invalidateFairShares()
+	// (#145 FS1). Invalidate AFTER the row is gone, so a concurrent compute
+	// cannot read the pre-delete state and cache it for the TTL.
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.DeleteLease(ctx, id); err != nil {
 		s.storeError("delete_lease", id, err)
+		return
 	}
+	s.invalidateFairShares()
 }
 
 func (s *Service) saveShareLocked(sh *Share) {

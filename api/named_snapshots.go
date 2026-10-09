@@ -539,12 +539,15 @@ func (s *Service) unkeepBuilds(ctx context.Context, builds []string) {
 	if len(builds) == 0 {
 		return
 	}
-	// Dropping pins moves the owner's kept-bytes usage (#145 FS1).
-	s.invalidateFairShares()
 	for _, id := range builds {
 		if err := s.db.UnkeepBuildAny(ctx, id); err != nil {
 			s.log.Printf("snapshot: unkeep %s: %v", id, err)
+			continue
 		}
+		// Dropping a pin moves the owner's kept-bytes usage (#145 FS1).
+		// Invalidate AFTER the write, so a concurrent compute cannot read
+		// the pre-write state and cache it for the TTL.
+		s.invalidateFairShares()
 	}
 }
 
