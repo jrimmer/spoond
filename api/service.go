@@ -1923,6 +1923,7 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, reason)
+	s.journalLease(journalOpRelease, l, journalReleaseReason(l, reason))
 	s.creditNodeInfo(freedMiB)
 	// The owner's guarantee may have room now (#128).
 	s.promoteBurst(l.Owner)
@@ -2602,6 +2603,11 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		detail = fmt.Sprintf("started from snapshot %s@%d in %s", snap.row.Name, snap.row.Version, eventDuration(time.Since(start)))
 	}
 	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, detail)
+	createReason := "new"
+	if snap != nil {
+		createReason = journalCreateReason(fmt.Sprintf("%s@%d", snap.row.Name, snap.row.Version), "", "")
+	}
+	s.journalLease(journalOpCreate, lease, createReason)
 	return lease, nil
 }
 
@@ -2818,6 +2824,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	s.store.mu.Unlock()
 	s.deleteSandboxRow(l.SandboxID)
 	s.emitSuspendEvent(l.ID, l.Owner, buildID, pol.reason, pol.policyStep)
+	s.journalLease(journalOpSuspend, l, journalSuspendReason(pol, drained))
 	// A pause frees the lease's hugepages and quota: retry waiting
 	// creates (#129).
 	// The pause freed the lease's hugepages: the next admission inside
@@ -3537,6 +3544,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("cloned from %s (build %s)", srcID, b.BuildID))
+	s.journalLease(journalOpCreate, lease, journalCreateReason("", srcID, ""))
 	return lease, b.BuildID, nil
 }
 
@@ -3706,6 +3714,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.endCreatingSandbox(sb.ID)
 		s.endAppliedEgress(lease.ID)
 		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
+		s.journalLease(journalOpCreate, lease, journalCreateReason("", "", srcID))
 		created = append(created, lease)
 	}
 	s.releaseQuotaReservation(owner, count, memPer)

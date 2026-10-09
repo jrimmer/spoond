@@ -611,7 +611,10 @@ body `{"reason": "<text>"}`. The text is at most 120 printable
 characters, sanitised like a lease comment (control and format
 characters become spaces), and `400` otherwise. Without a reason the
 event keeps its `deleted through the API` detail. The same reason works
-through the `/api/sandboxes` alias.
+through the `/api/sandboxes` alias. Every create, release, lost and
+suspend also writes one durable journal line (see
+[operations.md](operations.md#the-lease-journal)) that outlives the
+event ring and the lease row.
 
 ### `POST /api/leases/{id}/exec` — run a command
 

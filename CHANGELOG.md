@@ -75,6 +75,27 @@ summarised from README "Status".
 
 ### Added
 
+- **A durable lease journal (spoond-puqp).** Every lease create,
+  release, lost and suspend (including preemption) now writes one
+  logfmt line to the backend's journal, so a lease-to-sandbox mapping
+  and the reason a lease went can be reconstructed from `journalctl`
+  alone — even after the dashboard's 50-event ring has rolled over and
+  the lease row is gone (the 2026-10-08 incident). The line names the
+  operation, the lease id, the owner id (never the token), the sandbox
+  id, the image, the admission class and a reason; an empty value is
+  `""` and a value with a space, quote, equals sign or control
+  character is quoted, so a field splitter cannot be confused. The
+  release reason is canonical: the owner-named API deletion
+  (`deleted via API by <owner>`), `ttl`, `lost grace expired`,
+  `user deleted`, `disk`, `idle` or `hold_lapsed`, with a caller's own
+  reason (a CI job's `ci job <id> …`) kept verbatim; a create says
+  `new`, `snapshot <name>@<version>`, `clone of <id>` or
+  `fork of <id>`; a suspend says its automatic reason (`idle`,
+  `idle_suspend`, `hold_lapsed`, `pressure`, `preempt`), `drain` or
+  `hand`; and a lost lease carries the same reason as its `lost` event.
+  The line carries no secret material. See
+  [operations.md](docs/operations.md#the-lease-journal).
+
 - **Every automatic suspend names its reason, policy step and build
   (spoond-9gm2).** A `suspended` event now carries structured fields
   beside its human detail — `reason`
