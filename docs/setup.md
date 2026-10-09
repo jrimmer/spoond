@@ -115,7 +115,7 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `E2B_DELETE_TIMEOUT` | `2m` | per-call bound for orchestrator delete |
 | `E2B_NODEINFO_TIMEOUT` | `15s` | per-call bound for `NodeInfo` |
 | `E2B_CONTROL_TIMEOUT` | `30s` | per-call bound for every other orchestrator call (list, update, drain override, template builds) |
-| `SWEEP_TIMEOUT` | `15m` | bound for one background sweep stage (TTL release, held rules, pool refill, job prune), so a hung substrate RPC frees the loop and the lease's busy flag |
+| `SWEEP_TIMEOUT` | `15m` | bound for one background sweep stage (TTL release, the one paused-release clock, pool refill, job prune), so a hung substrate RPC frees the loop and the lease's busy flag |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | build store — where GC and disk accounting look |
 | `SPOOND_BUILD_TIMEOUT` | `1h` | how long a template build may run before the GC fails a still-`building` row as stale (twice this); a Go duration or seconds. The backend reads it from its own environment; `spoond images build` reads it separately, so set it for both (spoond-4yl, spoond-rzz) |
 | `IMAGE_REGISTRY` | `localhost:5000` | registry `spoond images build` pushes to |
@@ -155,16 +155,9 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `TLS_CERT` / `TLS_KEY` | *(empty)* | serve HTTPS on :8890 when both set. Comma-separated lists of equal length serve several certificates, chosen by the client's SNI and paired by position; the first is the default (no SNI, a connection by IP, or a name none covers). The files are re-read every minute, so a renewal needs no restart; a pair caught half-written keeps serving the old certificate until it is complete |
 | `DEFAULT_TTL_SECS` | `300` | default lease TTL for non-persistent sandboxes |
 | `MAX_TTL_SECS` | `3600` | maximum TTL a consumer may request |
-| `IDLE_TIMEOUT_SECS` | `0` | legacy plain-sweep auto-suspend: suspend a persistent lease idle for this long when its effective `idle_suspend` is `0` (`0` disables; new deployments should use `IDLE_SUSPEND_DEFAULT_SECS` and per-lease `idle_suspend`) |
 | `IDLE_SUSPEND_DEFAULT_SECS` | `0` | default per-lease idle reclamation threshold for leases without their own `idle_suspend` (`0` = never; a lease's own `idle_suspend` overrides; #129 part 2) |
-| `HELD_IDLE_TIMEOUT_SECS` | `14400` | suspend a held lease idle this long (held-lease rule 1; `0` disables) |
-| `HELD_SUSPENDED_RELEASE_SECS` | `604800` | release a held lease a rule suspended once it stays untouched this long (rule 2; `0` disables) |
-| `HOLD_TTL_SECS` | `604800` | how long a hold lasts from when it was set or renewed (rule 3; `0` means the default) |
-| `HOLD_TTL_MAX_SECS` | `2592000` | cap for an explicit `hold_ttl` (`0` means the default) |
-| `PRESSURE_DISK_FREE_PCT` | `15` | snapshot-disk free percentage under which rule 1 uses the shorter threshold (rule 4; `0` disables the disk trigger) |
-| `PRESSURE_HELD_IDLE_SECS` | `1800` | rule 1's threshold under pressure (`0` disables rule 4) |
-| `CRITICAL_DISK_FREE_PCT` | `5` | snapshot-disk free percentage under which rule 5 releases rule-suspended held leases (needs `GC_DELETE=1`; `0` disables) |
-| `CRITICAL_DISK_RECOVER_PCT` | `10` | rule 5 stops releasing above this free percentage |
+| `PAUSED_RELEASE_DAYS` | `30` | every paused lease is released this many days after its pause date (the one clock, v3.0 FS5) |
+| `PINNED_IDLE_NOTICE_DAYS` | `7` | a pinned lease whose last API activity is older than this is flagged `pinned_idle_since` (visibility only; v3.0 FS5) |
 | `MAX_ADMIT_WAIT_SECS` | `600` | how long a create may wait for admission when it sends `wait` (`0` disables waiting; #129 part 1) |
 | `SNAPSHOT_WRITE_CONCURRENCY` | `1` | how many memory-snapshot writes (substrate `Pause`/`Checkpoint`) may run at once process-wide; every pause and checkpoint goes through this limiter (`0` = unlimited, the pre-fix behaviour; spoond-t1s) |
 | `DRAIN_SNAPSHOT_CONCURRENCY` | `2` | how many of those writes the admin drain may run at once, so a planned orchestrator restart can pause a batch of leases inside the unit's `TimeoutStopSec` (`0` = unlimited; see [operations.md](operations.md#restarting-the-orchestrator-planned)) |

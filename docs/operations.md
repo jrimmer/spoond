@@ -128,7 +128,9 @@ What arrives, with its key and severity:
 | Key | Severity | When |
 |---|---|---|
 | `lease.lost.<lease-id>` | critical | a lease was lost (orchestrator crash, failed recovery) |
-| `held.<rule>.<lease-id>` | warn, critical on `release` | a held-lease rule acted on a lease |
+| `box.full` | critical | a request needed room and every take-back candidate was pinned (v3.0 FS5); nothing was paused or released — unpin or release leases to make room |
+| `paused.expiring.<lease-id>` | warn | a paused lease is 24 h from release by the one clock (v3.0 FS5) |
+| `pinned.idle.<lease-id>` | warn | a pinned lease's last API activity crossed `PINNED_IDLE_NOTICE_DAYS` (visibility only) |
 | `unit.inactive.<unit>` | critical | a watched systemd unit is not active. `NOTIFY_UNITS` lists them, comma-separated; the default is `e2b-orchestrator.service,spoond-sshd-gateway.service`, and `none` watches nothing (a host without systemd, where every probe would fail) |
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
 | `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
@@ -359,17 +361,15 @@ lease lives. Two caps keep pins from filling the disk (#126):
 `spoond_kept_builds` and `spoond_kept_builds_bytes` report the totals
 over live leases. When kept bytes pass `KEPT_DISK_WARN_PCT` (default
 `40`) percent of the snapshot disk, the dashboard's Notifications panel
-says so and the notifier raises `disk.kept` (warn) — the held-lease
-critical-disk rule never deletes a kept build, so unpinning stays with
+says so and the notifier raises `disk.kept` (warn) — nothing deletes a
+kept build automatically, so unpinning stays with
 the owner.
 
-Interaction with the held-lease critical rule (rule 5 in [Held-lease
-limits](#held-lease-limits)): a release frees no disk by itself — the
+A release (the one paused-release clock, the TTL, an owner's DELETE)
+frees no disk by itself — the
 space returns only when the GC reclaims the released lease's builds,
-which takes the GC age (1 h) and `GC_DELETE=1`. Under the dry-run
-default the critical rule therefore releases nothing (it logs, at most
-once an hour, that the dry-run GC stops it); a full snapshot disk on a
-node with held leases is a reason to turn the GC out of dry-run.
+which takes the GC age (1 h) and `GC_DELETE=1`. A full snapshot disk is a
+reason to turn the GC out of dry-run.
 
 ### Pause chains
 
@@ -511,8 +511,8 @@ disk (permanent EIO). spoond therefore runs every snapshot write
 through one process-wide limiter:
 
 - `SNAPSHOT_WRITE_CONCURRENCY` (default `1`) is its width. Every pause
-  and checkpoint — a hand suspend, the idle sweep, the held-lease
-  idle/pressure rules, preemption, restart's pause leg, a drain pause
+  and checkpoint — a hand suspend, the payoff of an `idle_suspend`
+  threshold, take-back (preemption), restart's pause leg, a drain pause
   (which has its own width), and every checkpoint (on demand, periodic,
   clone, fork, keep) — waits its turn. `0` means unlimited, the
   pre-fix behaviour.
@@ -525,8 +525,8 @@ longer than the limiter only sees added latency, never a different
 answer. A write that waited 5 s or more logs one line naming the wait
 and the backlog (`snapshot write waited 41s behind 1 other`). The
 gauges `spoond_snapshot_writes_in_flight` and
-`spoond_snapshot_write_wait_seconds` show the pressure. The idle sweep
-and the held-lease rules suspend at most one lease per tick while the
+`spoond_snapshot_write_wait_seconds` show the pressure. The idle_suspend
+sweep suspends at most one lease per tick while the
 limiter is busy, skipping the rest to retry on the next tick rather
 than queueing a batch.
 
@@ -542,7 +542,7 @@ and `E2B_CONTROL_TIMEOUT` with a Go duration (`90s`, `5m`) or seconds to
 change them. Exec keeps its own request timeout. The client also sends
 HTTP/2 keepalive pings every 5 minutes (the gRPC server's default
 minimum) with a 20 s ack timeout. On the service
-side each sweep stage (TTL release, held rules, pool refill, job prune)
+side each sweep stage (TTL release, the paused-release clock, pool refill, job prune)
 is bounded by `SWEEP_TIMEOUT` (default `15m`): a stage that overruns is
 logged and abandoned, the lease's `busy` flag clears through its deferred
 release, and the next tick runs.
@@ -694,8 +694,8 @@ lease). A lease's own `checkpoint_interval` (`POST /api/leases`, `PUT
 never, 60..604800 = seconds. The loop ticks every minute and
 checkpoints a live lease whose effective interval has elapsed since its
 last checkpoint and that has been active since — that is what bounds
-the loss. Being held no longer puts a lease on the pass (before 2.3 it
-did). Users can force one with `POST /api/leases/{id}/checkpoint`, and
+the loss. Being held does not itself put a lease on the pass (since 2.3).
+Users can force one with `POST /api/leases/{id}/checkpoint`, and
 every checkpoint's guest pause is observed in
 `spoond_checkpoint_pause_seconds` with a log line naming the lease, the
 pause and the image's `memory_mb`.
@@ -960,8 +960,9 @@ journalctl -u spoond-backend | grep 'op=release' | tail -20
 `spoond-runner` (the `runner` subcommand) runs Forgejo Actions jobs in
 sandboxes leased from the backend. Each job lease is labelled with its
 job (#119): right after the create, the runner sets the lease's comment
-to `forgejo job <id> <job URL>`. The lease is deliberately **not held**:
-a hold would keep it out of the TTL sweep, and since 2.3 a hold no
+to `forgejo job <id> <job URL>`. The lease is deliberately **unpinned**:
+an unpinned lease is reclaimed by the TTL sweep when it is taken back,
+and since 2.3 a holder label no
 longer brings periodic checkpointing with it anyway (a lease is
 checkpointed only when its own `checkpoint_interval` says so — set one
 on create if a job's work must survive a crash). A job lease lives for
@@ -1018,48 +1019,73 @@ If `RUNNER_STOP_GRACE` is raised, raise `TimeoutStopSec` with it; a
 SIGKILLed runner leaves its job leases behind until the next runner
 start's orphan sweep (or their TTL) releases them.
 
-## Held-lease limits
+## Pins and the paused-release clock
 
-A held lease (`holder` set, see [api.md](api.md)) is exempt from the
-plain TTL and idle sweeps — that is the point — but it must never be
-able to keep memory or disk forever, and nobody watches the dashboard.
-So the limits act on their own: they run in the existing sweep loop
-(every `sweepInterval`, 5 s) and skip while the node is draining. Every
-automatic action is logged as one line naming the lease, the holder,
-the rule and the numbers that triggered it, counted in
-`spoond_held_actions_total{rule,action}`, and recorded on the lease
-(`last_action`, `last_action_at`, returned by the lease API with
-`hold_expires_at` and `hold_state`). A hold also lapses on its own: it
-lasts `HOLD_TTL_SECS` from when it was set or renewed (renewal is `PUT
-/api/leases/{id}/holder` with the same holder), at most
-`HOLD_TTL_MAX_SECS` for an explicit `hold_ttl`. A lapsed hold
-**suspends** a running lease and never releases one: the lease stays
-held with no expiry (`hold_state` `lapsed`), so the TTL sweep never
-touches it however long ago its own TTL passed; rule 2 releases it once
-it has stayed suspended and untouched for its limit, and renewing
-restores a normal hold.
+Since v3.0 (owner decision 2026-10-08) spoond does not pre-emptively do
+anything: there is no auto idle pause, no pressure sweep and no
+different clocks. **One behavior.** A user can pin anything they want,
+even to the point of abuse, and spoond honors it.
 
-**Nothing running is ever released automatically.** Rules 2 and 5
-release only leases that a rule suspended (idle, pressure or a lapse)
-and that saw no activity since; a held lease suspended by hand or by
-the drain is never released by them.
+**The lease lifecycle is:**
 
-| # | Rule | Variable | Default | Meaning |
-|---|---|---|---|---|
-| 1 | Idle suspend | `HELD_IDLE_TIMEOUT_SECS` | `14400` (4 h) | a held lease with no activity — what the idle sweep already counts: exec, stream, proxy, keepalive, guest heartbeat, files, guest dial — for this long is **suspended** (memory and hugepages freed; nothing deleted; it resumes on next use, the SSH gateway does that on attach). A lease whose own effective `idle_suspend` is `> 0` is reclaimed by the idle sweep on that value instead and is skipped by rule 1 (and by rule 4's shortening); see [Idle reclamation](#idle-reclamation) |
-| 2 | Stale release | `HELD_SUSPENDED_RELEASE_SECS` | `604800` (7 d) | a held lease suspended by rule 1, 3 or 4 and untouched since for this long is **released** (deleted); the GC reclaims its builds |
-| 3 | Hold lapse | `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS` | `604800` (7 d), `2592000` (30 d) | an unrenewed hold lapses: a running lease is **suspended** (never released), stays held with no expiry, and rule 2 takes it from there |
-| 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a 1 GiB lease — no seeded image is smaller), rule 1 uses the shorter threshold |
-| 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage and `GC_DELETE=1`, held leases a rule suspended (1, 3 or 4), untouched since, are **released** oldest suspension first, at most one per sweep tick, until free space is above the recovery percentage; the GC runs first, at most every 5 minutes. A running lease is never released. With the dry-run GC the rule releases nothing, since nothing would be freed |
-| 6 | Scheduling | — | — | the rules run in the existing sweep loop and skip while the node is draining |
+```
+running ──► paused ──► resumed on next call
+              │
+              └──► released 30 d after the pause date
+```
 
-Set `HELD_IDLE_TIMEOUT_SECS`, `HELD_SUSPENDED_RELEASE_SECS`,
-`PRESSURE_HELD_IDLE_SECS`, `PRESSURE_DISK_FREE_PCT` or
-`CRITICAL_DISK_FREE_PCT` to `0` to disable that rule. `HOLD_TTL_SECS`
-and `HOLD_TTL_MAX_SECS` cannot be disabled: `0` means their default, so
-every hold lapses eventually. Watch the rules with `journalctl -u spoond-backend | grep 'held
-lease'` and `spoond_held_actions_total` — a rising `critical{release}`
-means the disk needs attention the leases are paying for.
+- A lease is **paused** for one of three reasons: take-back (memory or
+disk — a request needs room and the unpinned lease is a candidate), its
+own `idle_suspend` opt-in, or `POST /api/leases/{id}/pause`. A paused
+lease resumes on the next call (exec, stream, files, proxy, jobs, the
+LLM gateway, a network change, a prompt, or an explicit `POST /resume`).
+- **One clock.** Every paused lease is released `PAUSED_RELEASE_DAYS`
+  (default `30`) days after its **pause date**, whatever paused it. A
+  `lease.paused_expiring` event is emitted 24 h before. Resuming clears
+  the date. Nothing else deletes on a timer. The GC still cleans
+  spoond's own garbage (orphan dirs, leftovers) as housekeeping.
+- **Pinned** (`pinned: true` on create, or `PUT
+  /api/leases/{id}/pin`) means spoond **never pauses or deletes** the
+  lease before its own expiry. The lease's **TTL still applies**: pin
+  and expiry collaborate, so a pinned lease is unpausable until it
+expires. A pinned **persistent** lease (which has no TTL) stays until
+the owner releases it. There is no limit on how many leases an owner
+pins. Only the owner (unpin, `DELETE`) changes a pin.
+- **`holder` and `holder_url` are plain labels** with no lifecycle
+effect. Setting a holder never pins. They are returned by the lease API
+and shown on the dashboard.
+- A pinned lease whose last API activity (`LastActive`; no heartbeat, no
+guest activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`)
+  is **flagged, visibility only**: GET returns `pinned_idle_since`, one
+  `lease.pinned_idle` event fires per crossing, and the dashboard shows
+  one aggregate notification. Nothing is paused, unpinned or released
+  because of it.
+
+**Take-back touches only unpinned leases.** If nothing unpinned can be
+taken for a request, the request answers `429` with code `box_full` and
+an alert (`lease.box_full`, critical). Nothing is paused or released by
+a refused request.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PAUSED_RELEASE_DAYS` | `30` | every paused lease is released this many days after its pause date |
+| `PINNED_IDLE_NOTICE_DAYS` | `7` | a pinned lease's last API activity older than this flags it (visibility only) |
+
+**Migration from 2.9:** every lease with an unexpired hold becomes
+pinned (store migration 0022). Pool workers are held by `pool-spawn`
+today, so the 2.9 window will unpin worker leases by their holder label
+right after the migration: `POST
+/api/admin/unpin-by-holder?holder_prefix=pool:` (admin token) unpins
+every lease whose holder starts with the prefix. `pool-spawn` needs no
+change; it sends holder labels only.
+
+**Removed in v3.0:** `HELD_IDLE_TIMEOUT_SECS`,
+`HELD_SUSPENDED_RELEASE_SECS`, `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS`,
+`PRESSURE_HELD_IDLE_SECS` and `IDLE_TIMEOUT_SECS`, along with the
+automatic held/idle/pressure/critical rules and the `hold_ttl` request
+field. A set variable is logged as removed and ignored at startup;
+`hold_ttl` is accepted and ignored for one release, with a `Deprecation`
+header. `holder`/`holder_url` stay.
 
 ## Background exec jobs
 
@@ -1075,8 +1101,8 @@ files path. The files are kept until the exited record is pruned (after
 `JOB_RETENTION_SECS`), when the sweeper removes the job directory too;
 the job record outlives the files only within that window.
 
-A running job keeps its lease out of every idle rule — the plain
-`IDLE_TIMEOUT_SECS` sweep, held rule 1 and idle suspension — so nothing
+A running job keeps its lease out of idle suspension — the lease's own
+`idle_suspend` — so nothing
 suspends a lease mid-job. A lease that does suspend normally with a job
 running leaves the job record `running` (the memory continues; reconcile
 after resume). When the guest's memory does **not** continue — a cold
@@ -1099,10 +1125,7 @@ an in-flight pause, resume, restart or restore — the reconcile leaves
 the job alone (the guest cannot be signalled, and a suspended lease's
 memory is already freed), and the first reconcile after a resume kills a
 job whose cap was spent in the meantime — so a `sleep infinity` can no
-longer pin hugepages indefinitely. A job running on a suspended lease
-also no longer keeps that lease active: `reconcileJobs` stopped calling
-`markActive` on a suspended lease, so the held-lease rules' untouched
-test still sees the suspension. The record is marked `timed_out` only
+longer pin hugepages indefinitely. The record is marked `timed_out` only
 after the kill succeeds; a failed kill leaves it running so the next
 reconcile retries, and when the kill succeeds but the store write fails
 the in-memory timed-out intent is kept so the next pass records the
@@ -1126,33 +1149,33 @@ The endpoints, the events and the lease's `jobs` summary are in
 
 ## Idle reclamation
 
-Persistent leases can be suspended after a period without activity,
-freeing their hugepages and disk-backed memory while keeping everything
+A persistent lease can be suspended after a period without activity,
+freeing its hugepages and disk-backed memory while keeping everything
 for the next use (the guest's memory continues on resume, so the
-generation does not change). Two mechanisms share the job:
+generation does not change). Since v3.0 there is **one** mechanism: the
+lease's own opt-in.
 
-- **the plain sweep** (`IDLE_TIMEOUT_SECS`) and **held rule 1**
-  (`HELD_IDLE_TIMEOUT_SECS`, shortened under pressure by rule 4) apply to
-  leases whose effective `idle_suspend` is `0` — today's behaviour;
-- **the idle sweep** (`#129` part 2) applies to a lease whose effective
-  `idle_suspend` is `> 0`: the lease's own value, or the host default
-  `IDLE_SUSPEND_DEFAULT_SECS` when it has none. `POST /api/leases` and
-  `PUT /api/leases/{id}/idle-policy` set it (`0` = never, `60`–`604800`
-  seconds). A non-zero value needs a persistent lease.
+- A lease whose effective `idle_suspend` is `> 0` — its own value, or
+the host default `IDLE_SUSPEND_DEFAULT_SECS` when it has none — is
+suspended on that threshold. `POST /api/leases` and `PUT
+/api/leases/{id}/idle-policy` set it (`0` = never, `60`–`604800`
+seconds). A non-zero value needs a persistent lease.
+- A lease whose effective `idle_suspend` is `0` is **never** idle-
+suspended. There is no plain idle sweep and no held rule: the old
+`IDLE_TIMEOUT_SECS` and `HELD_IDLE_TIMEOUT_SECS` variables are removed
+(see Pins and the paused-release clock).
 
-A lease with a non-zero `idle_suspend` is reclaimed on that value alone;
-the plain sweep and rule 1 skip it. Activity is what the sweeps already
-count — exec, stream, proxy, keepalive, guest heartbeat, the files API
-and guest port dial — and the threshold is measured from `LastActive`.
-The sweep suspends through the normal pause path and shares preemption's
-snapshot-disk floor (`PREEMPT_DISK_FLOOR_PCT`): a pause that would take
-the disk under the floor is skipped for that pass and retried on the
-next one. An idle suspension marks the lease `last_action
-idle_suspend/suspend_idle`, emits an `idle_suspended` event and counts
-in `spoond_idle_suspends_total`. Because it is a rule suspension, rules
-2 and 5 may later release the lease if it stays idle-suspended and
-untouched — a preempted lease is subject to the same rules, and nothing
-running is ever released.
+Activity is what the sweeps already count — exec, stream, proxy,
+keepalive, guest heartbeat, the files API and guest port dial — and the
+threshold is measured from `LastActive`. The sweep suspends through the
+normal pause path and shares preemption's snapshot-disk floor
+(`PREEMPT_DISK_FLOOR_PCT`): a pause that would take the disk under the
+floor is skipped for that pass and retried on the next one. An idle
+suspension marks the lease `last_action idle_suspend/suspend_idle`,
+emits an `idle_suspended` event and counts in
+`spoond_idle_suspends_total`. A paused lease is released
+`PAUSED_RELEASE_DAYS` (default 30) after its pause date by the one
+clock, unless it is resumed first.
 
 The **next call resumes it** — and every other kind of suspend too
 (#145 D2). Exec, stream, files, proxy, jobs, the LLM gateway, a network
@@ -1165,9 +1188,7 @@ flight) and the lease stays suspended. GET, status, events and SSE never
 resume. Only a path with nothing to resume — the `stat` probe, forking a
 running source, the crash test — still answers `409 lease is suspended;
 resume it first`; an explicit `resume` (and the SSH gateway's resume on
-attach) works as always. `IDLE_TIMEOUT_SECS` remains the legacy host-wide
-knob — new deployments should set `IDLE_SUSPEND_DEFAULT_SECS` and the
-per-lease value instead. Watch idle suspensions with `journalctl -u
+attach) works as always. Watch idle suspensions with `journalctl -u
 spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
 
 ## Users & identity
@@ -1246,12 +1267,12 @@ and a sparkline over the history, titled with the window the history
 covers), live leases (id, image, owner, the run state — ▶ running,
 ‖ suspended, ■ lost, ⭘ recovered —, the access policy (`isolated` when
 the API's `network_policy` is `none`, else `lan`/`restricted`/
-`internet`), age, time left and the holder, ◆ when a hold is active and
-◉ once it has lapsed; on the page the holder is a link; the table's
+`internet`), age, time left and the holder, with ◆ before a pinned
+lease's holder; on the page the holder is a link; the table's
 fixed columns are sized to the values actually shown, so short states
 leave no blank run and the freed width goes to the owner then the
-holder, and the ◆ held · ◉ lapsed legend sits on one dim line under the
-table when a row carries a hold), the image catalog (shape, live leases, lifetime
+holder, and the ◆ pinned legend sits on one dim line under the
+table when a row is pinned), the image catalog (shape, live leases, lifetime
 uses, baked-at) beside the systemd units, a refusals-and-failures row
 (auth, quota, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and
@@ -1321,7 +1342,7 @@ the backend's lease event stream (`/api/leases/events`, resuming by
 `Last-Event-ID` and backing off when the backend refuses it) and keeps
 the last 50 events; the events panel shows the newest 5 — `HH:MM:SS`,
 the type, the lease id and the holder (else the comment, else the
-owner), lost and held-lease actions highlighted, releases dim. Without
+owner), lost events highlighted, releases dim. Without
 the token the panel says `events need DASH_EVENTS_TOKEN` instead.
 Configuration lives in `cmd/spoond-dash/dash.go`; the notable
 variables:
@@ -1407,7 +1428,7 @@ marker. The substrate-specific series:
 | `spoond_kept_builds_bytes` | disk bytes held by kept checkpoints of live leases (recorded `size_bytes`; #126) |
 | `spoond_pause_chain_depth` | histogram of a lease's build-chain depth at each pause (the pause build and its ancestors to the template root; spoond-p9j) |
 | `spoond_pause_chain_bytes` | histogram of the lease's parent chain's recorded `size_bytes` summed at each pause, including shared ancestors (spoond-p9j) |
-| `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
+| `spoond_box_full_total` | requests refused `box_full`: a request needed room and every take-back candidate was pinned (nothing unpinned could be taken; v3.0 FS5) |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |
