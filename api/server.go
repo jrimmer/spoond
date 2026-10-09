@@ -177,7 +177,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	if openRouterURL != "" {
 		// svc.identities must be installed (SetIdentities) before
 		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
-		s.llm = newLLMGateway(svc.log, svc.lookupAny, svc.resumeLease, svc.identities, openRouterURL, openRouterKey, defaultModel, modelMap)
+		s.llm = newLLMGateway(svc.log, svc.lookupAny, svc.resumeForUse, svc.identities, openRouterURL, openRouterKey, defaultModel, modelMap)
 		s.llm.metrics = s.metrics
 	}
 	s.svc.SetMetrics(s.metrics)

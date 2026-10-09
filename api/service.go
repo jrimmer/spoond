@@ -2846,7 +2846,7 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		return nil, errNotPersistent
 	}
 	s.store.mu.Unlock()
-	return s.resumeLease(ctx, l)
+	return s.resumeForUse(ctx, l)
 }
 
 // resumeAny is resume without the owner check, for the SSH gateway's
@@ -2866,6 +2866,30 @@ func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
 		return nil, errNotPersistent
 	}
 	s.store.mu.Unlock()
+	return s.resumeForUse(ctx, l)
+}
+
+// resumeForUse is the resume every work call and the POST /resume route
+// run: it refuses while spoond is draining the node (or still owes a
+// drain clear) and otherwise holds drainGate's read side across the
+// resume, so a drain that begins mid-resume waits for it instead of
+// racing a Create into the stop (R1). The undrain does not use this: it
+// clears the drain first and resumes drained leases through resumeLease.
+func (s *Service) resumeForUse(ctx context.Context, l *Lease) (*Lease, error) {
+	// Take the read side before checking: a drain takes the write side
+	// to set its state, so this either runs before the drain (and the
+	// drain then pauses the resumed lease) or after it (and the check
+	// below sees draining and refuses). TryRLock fails at once when a
+	// drain holds or is waiting for the write side, so a work call never
+	// queues behind a finishing drain.
+	if !s.drainGate.TryRLock() {
+		return nil, errDraining
+	}
+	if s.draining.Load() || s.drainClearPending.Load() {
+		s.drainGate.RUnlock()
+		return nil, errDraining
+	}
+	defer s.drainGate.RUnlock()
 	return s.resumeLease(ctx, l)
 }
 

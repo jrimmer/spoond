@@ -254,30 +254,30 @@ func (s *Service) expireHolds(ctx context.Context, now time.Time) []string {
 	return ids
 }
 
-// suspendedByRule reports whether l is suspended because a held-lease
-// rule suspended it (idle, pressure or a lapse) and has seen no activity
-// since; it returns the time of that suspension. Only such leases may
-// be released by rules 2 and 5: a lease suspended by hand or by the
-// drain, or resumed and used since, is never released automatically.
+// suspendedByRule reports whether l is suspended because a rule
+// suspended it (idle, pressure, a lapse, or preemption) and has seen no
+// activity since; it returns the time of that suspension. Only such
+// leases may be released by rules 2 and 5: a lease suspended by hand or
+// by the drain, or resumed and used since, is never released
+// automatically. A preempted lease is subject to the same rules as any
+// other rule-suspended lease (#145 D2, review R3): it is no longer
+// exempted while it waits for a resume queue that no longer exists.
 // Call with s.store.mu held.
 func suspendedByRule(l *Lease) (time.Time, bool) {
 	if l.released || !l.held() || l.State != "suspended" || !l.Suspended || l.LastActionAt.IsZero() {
 		return time.Time{}, false
 	}
-	if !l.PreemptedAt.IsZero() {
-		// A preempted lease waits for the resume queue (#128 part 3):
-		// no rule released it into suspension, so none releases it from
-		// there, however long it waits or whatever LastAction it kept.
-		return time.Time{}, false
-	}
+	// A preempted lease carries last_action "preempt/suspend" (the
+	// preemption stamps it after the pause), so it is covered by the
+	// rules below just like an idle or pressure suspension.
 	switch l.LastAction {
 	case heldRuleIdle + "/" + heldActionSuspendIdle,
 		heldRulePressure + "/" + heldActionSuspendIdle,
 		heldRuleExpiry + "/" + heldActionSuspendLapse,
+		pauseActionPreempt,
 		// A per-lease idle_suspend suspension (2.5, #129 part 2) is a
 		// rule suspension too: rules 2 and 5 may release it once it has
-		// stayed idle-suspended and untouched. A preempted lease is
-		// excluded above, as before.
+		// stayed idle-suspended and untouched.
 		idleSuspendRule + "/" + heldActionSuspendIdle:
 	default:
 		return time.Time{}, false

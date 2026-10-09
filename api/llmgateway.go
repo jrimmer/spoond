@@ -157,15 +157,6 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "lease not found", http.StatusNotFound)
 		return
 	}
-	if lease.Suspended {
-		// Every suspended lease resumes on its holder's next gateway call
-		// (#145 D2). A refused resume answers 503 capacity_wait / 429
-		// quota / 409 lease_busy and the gateway stops here.
-		if _, err := g.resume(r.Context(), lease); err != nil {
-			writeResumeRefusal(w, g.log, leaseID, err)
-			return
-		}
-	}
 
 	// Per-user LLM key auth (U8/T8): when the lease owner has a key
 	// configured, the caller must present it. A key that verifies is by
@@ -175,6 +166,9 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// deployment has not opted into legacy-open, a keyless owner's lease
 	// is DENIED rather than silently open — otherwise any token holder
 	// could burn the host's LLM quota through another user's lease.
+	// Authentication runs BEFORE the resume (#145 D2, review R2): an
+	// unauthenticated or wrongly-keyed request must not spend hugepages
+	// (or preempt another lease) only to answer 401.
 	if g.users != nil {
 		owner := g.users.UserByID(lease.Owner)
 		if owner != nil && owner.LLMKeyHash != "" {
@@ -193,6 +187,17 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// leases — owner not in the store — keep the capability
 			// model: the operator controls those tokens.)
 			http.Error(w, "LLM access requires the lease owner to configure an LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if lease.Suspended {
+		// Every suspended lease resumes on its holder's next gateway call
+		// (#145 D2), after authentication. A refused resume answers 503
+		// capacity_wait / 429 quota / 409 lease_busy and the gateway stops
+		// here.
+		if _, err := g.resume(r.Context(), lease); err != nil {
+			writeResumeRefusal(w, g.log, leaseID, err)
 			return
 		}
 	}

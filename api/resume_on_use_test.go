@@ -20,6 +20,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
@@ -336,6 +337,92 @@ func TestResumeOnUseLLMNoRoom(t *testing.T) {
 	}
 	if !l.Suspended {
 		t.Fatal("llm resumed the lease despite no room")
+	}
+}
+
+// TestResumeOnUseDrainRefuses: a work call during a planned-restart
+// drain must not resume a Drained lease. It answers the shared no-room
+// shape (503 capacity_wait) and the lease stays suspended and Drained,
+// so the drain's "no running sandboxes" wait is not broken (R1).
+func TestResumeOnUseDrainRefuses(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	// Plenty of room: only the drain state may refuse the resume.
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// A drained, suspended lease, as the planned-restart drain leaves it.
+	if _, err := svc.pauseLeaseWith(ctx, l, true, suspendPolicy{}); err != nil {
+		t.Fatalf("drain pause: %v", err)
+	}
+	if !l.Drained || !l.Suspended {
+		t.Fatal("precondition: lease not suspended and Drained")
+	}
+	// spoond is draining: a work call must wait, not resume.
+	svc.draining.Store(true)
+	t.Cleanup(func() { svc.draining.Store(false) })
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a",
+		map[string]any{"cmd": "echo hi"})
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("exec during drain = %d, want 503: %v", resp.StatusCode, body)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra == "" {
+		t.Fatal("exec during drain has no Retry-After")
+	}
+	if body["code"] != "capacity_wait" {
+		t.Fatalf("exec during drain code = %v, want capacity_wait: %v", body["code"], body)
+	}
+	if !l.Suspended || !l.Drained {
+		t.Fatalf("the drain-refused work call changed the lease: suspended=%v Drained=%v", l.Suspended, l.Drained)
+	}
+}
+
+// TestResumeOnUseLLM401LeavesSuspended: the LLM gateway authenticates the
+// per-user key BEFORE it resumes a suspended lease (review R2). A
+// request with no or a wrong key answers 401 and the lease stays
+// suspended, so a token holder cannot spend hugepages (or preempt
+// another lease) through another owner's lease.
+func TestResumeOnUseLLM401LeavesSuspended(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetIdentities(ids)
+	owner, err := ids.AddUser("owner", identity.KindPerson, []string{"SHA256:fp-owner"}, "owner-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ids.SetLLMKey(owner.ID, "slk-owner-secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := svc.grant(context.Background(), owner.ID, "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.suspend(context.Background(), owner.ID, l.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+
+	srv := NewServerWithLLM(svc, NewImageRegistry(db), "http://127.0.0.1:1", "host-key", "", nil)
+	for _, key := range []string{"", "slk-wrong"} {
+		req := httptest.NewRequest("POST", llmGatewayPrefix+l.ID+"/openai/chat/completions", strings.NewReader(`{"model":"m"}`))
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		rec := httptest.NewRecorder()
+		srv.llm.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("llm key %q = %d, want 401: %s", key, rec.Code, rec.Body.String())
+		}
+		if !l.Suspended {
+			t.Fatalf("llm key %q resumed the lease before authenticating", key)
+		}
 	}
 }
 
