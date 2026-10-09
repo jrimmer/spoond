@@ -91,6 +91,14 @@ func envDurOr(key string, def time.Duration) time.Duration {
 	return def
 }
 
+// jobTimeoutFromEnv is the whole-job bound (RUNNER_JOB_TIMEOUT): a Go
+// duration or bare seconds, defaulting to runner.DefaultJobTimeout (6h).
+// `0` disables it. It is a named helper so Main's wiring (not just the
+// constant) can be pinned by a test (T2).
+func jobTimeoutFromEnv() time.Duration {
+	return envDurOr("RUNNER_JOB_TIMEOUT", runner.DefaultJobTimeout)
+}
+
 // Main runs the runner until SIGTERM/SIGINT (systemd's stop signal is
 // SIGTERM). Shutdown is graceful (#119): the pool stops fetching new
 // jobs, running jobs get StopGrace (RUNNER_STOP_GRACE) to finish, then
@@ -136,7 +144,7 @@ func Main(args []string) int {
 	// node answering 503 forever cannot pin a worker indefinitely; the
 	// default is 6h. A job's own timeout-minutes is the tighter bound
 	// when set.
-	jobTimeout := envDurOr("RUNNER_JOB_TIMEOUT", runner.DefaultJobTimeout)
+	jobTimeout := jobTimeoutFromEnv()
 
 	// The pool's own lease client: at start it sweeps this token's
 	// orphaned job leases (#119). Per-worker copies (newWorker below)

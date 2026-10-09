@@ -395,17 +395,31 @@ func TestEnvDurOrBareSeconds(t *testing.T) {
 }
 
 // TestDefaultJobTimeout (L4): RUNNER_JOB_TIMEOUT defaults to six hours, so
-// a node that answers 503 forever cannot pin a worker indefinitely. The
-// envDurOr call in Main uses this default; this pins the value.
+// a node that answers 503 forever cannot pin a worker indefinitely. It
+// pins the helper Main actually uses (jobTimeoutFromEnv), so a mutation
+// of the env read in Main fails the test too (T2).
 func TestDefaultJobTimeout(t *testing.T) {
 	if runner.DefaultJobTimeout != 6*time.Hour {
 		t.Fatalf("DefaultJobTimeout = %s, want 6h", runner.DefaultJobTimeout)
 	}
-	if got := envDurOr("RUNNER_JOB_TIMEOUT", runner.DefaultJobTimeout); got != 6*time.Hour {
-		t.Fatalf("unset RUNNER_JOB_TIMEOUT = %s, want 6h", got)
+	cases := []struct {
+		val  string
+		set  bool
+		want time.Duration
+	}{
+		{"", false, 6 * time.Hour},
+		{"0", true, 0},
+		{"90m", true, 90 * time.Minute},
+		{"5400", true, 90 * time.Minute},
 	}
-	t.Setenv("RUNNER_JOB_TIMEOUT", "0")
-	if got := envDurOr("RUNNER_JOB_TIMEOUT", runner.DefaultJobTimeout); got != 0 {
-		t.Fatalf("RUNNER_JOB_TIMEOUT=0 = %s, want 0 (disabled)", got)
+	for _, c := range cases {
+		if c.set {
+			t.Setenv("RUNNER_JOB_TIMEOUT", c.val)
+		} else {
+			os.Unsetenv("RUNNER_JOB_TIMEOUT")
+		}
+		if got := jobTimeoutFromEnv(); got != c.want {
+			t.Errorf("jobTimeoutFromEnv() with RUNNER_JOB_TIMEOUT=%q = %s, want %s", c.val, got, c.want)
+		}
 	}
 }
