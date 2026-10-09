@@ -536,6 +536,11 @@ func (s *Service) writeLastSaveMarker(ctx context.Context, l *Lease, row store.N
 // so a version dropped by retention frees its build for the GC (a lease
 // still running from it would have blocked the prune).
 func (s *Service) unkeepBuilds(ctx context.Context, builds []string) {
+	if len(builds) == 0 {
+		return
+	}
+	// Dropping pins moves the owner's kept-bytes usage (#145 FS1).
+	s.invalidateFairShares()
 	for _, id := range builds {
 		if err := s.db.UnkeepBuildAny(ctx, id); err != nil {
 			s.log.Printf("snapshot: unkeep %s: %v", id, err)
