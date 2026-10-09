@@ -33,8 +33,8 @@ func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, data []b
 		return err
 	}
 	if err := uploadFile(ctx, c.envdClient(sandboxID, ""), c.cfg.ProxyURL, path, data); err != nil {
-		if !c.listed(ctx, sandboxID) {
-			return fmt.Errorf("%w: %v", substrate.ErrNotFound, err)
+		if serr := c.sandboxListed(ctx, sandboxID); serr != nil {
+			return fmt.Errorf("%w: %v", serr, err)
 		}
 		return err
 	}

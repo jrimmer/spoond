@@ -34,8 +34,11 @@ func (s *Server) handleBackgroundExec(w http.ResponseWriter, r *http.Request, le
 			// #83 B2): the job did not start, so retrying is safe.
 			w.Header().Set("Retry-After", "5")
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "code": "lease_busy"})
-		case errors.Is(err, substrate.ErrNotFound):
-			s.writeSandboxGone(w, lease)
+		case errors.Is(err, substrate.ErrNotFound), errors.Is(err, substrate.ErrUnavailable):
+			// A confirmed not-found is 409 busy / 410 lease_lost; an
+			// unavailable decision is 503 substrate_unavailable and the
+			// lease is kept.
+			s.writeSandboxOpError(w, lease, err)
 		default:
 			s.svc.log.Printf("exec background: %s: %v", lease.SandboxID, err)
 			writeError(w, http.StatusInternalServerError, "failed to start background job")
@@ -140,11 +143,17 @@ func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 	resp["stdout"], resp["stderr"] = "", ""
 	if out, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stdout", jobStdoutReadBytes); err == nil {
 		resp["stdout"] = out
+	} else if errors.Is(err, substrate.ErrUnavailable) {
+		s.writeSubstrateUnavailable(w)
+		return
 	} else if !errors.Is(err, substrate.ErrNotFound) {
 		resp["stdout_error"] = "output unavailable"
 	}
 	if errText, err := s.svc.readJobOutput(r.Context(), lease.SandboxID, row.JobID, "stderr", jobStderrReadBytes); err == nil {
 		resp["stderr"] = errText
+	} else if errors.Is(err, substrate.ErrUnavailable) {
+		s.writeSubstrateUnavailable(w)
+		return
 	} else if !errors.Is(err, substrate.ErrNotFound) {
 		resp["stderr_error"] = "output unavailable"
 	}
@@ -239,6 +248,10 @@ func (s *Server) handleJobOutput(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := s.svc.readJobRange(r.Context(), lease.SandboxID, row.JobID, stream, offset, limit)
 	if err != nil {
+		if errors.Is(err, substrate.ErrUnavailable) {
+			s.writeSubstrateUnavailable(w)
+			return
+		}
 		if errors.Is(err, substrate.ErrNotFound) {
 			// No output yet (or the sandbox is gone): an empty answer.
 			data = nil
@@ -305,6 +318,10 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.signalJob(r.Context(), lease.ID, lease.SandboxID, row, req.Signal); err != nil {
+		if errors.Is(err, substrate.ErrUnavailable) {
+			s.writeSubstrateUnavailable(w)
+			return
+		}
 		if errors.Is(err, substrate.ErrNotFound) {
 			writeError(w, http.StatusConflict, "job is not running")
 			return
