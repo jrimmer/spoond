@@ -501,7 +501,6 @@ func (s *Service) drainQueue() {
 // time) so a release or a quota change never waits on a sandbox create.
 //
 // A wake that arrives while a pass is already running is never dropped:
-// A wake that arrives while a pass is already running is never dropped:
 // every call sets wakePending, and the running pass loops until a pass
 // completes with no wakePending left (scheduledWake). The pass releases
 // wakeScheduled with a compare-and-swap before it reads wakePending, so
