@@ -1088,12 +1088,16 @@ in `spoond_idle_suspends_total`. Because it is a rule suspension, rules
 untouched — a preempted lease stays excluded, and nothing running is
 ever released.
 
-The **next call resumes it**: exec, stream, files and guest port dial on
-an `idle_suspend`-suspended lease resume it first through the normal
-resume path (admission, class and quota apply) and then serve the call;
-a refused resume answers what resume would (`429` over quota, `503` with
-`Retry-After` for capacity or the burst reserve) and the lease stays
-suspended. Any other suspension keeps answering `409 lease is suspended;
+The **next call resumes it** — and every other kind of suspend too
+(#145 D2). Exec, stream, files, proxy, jobs, the LLM gateway, a network
+change and a prompt resume a suspended lease first through the normal
+resume path (admission, class and quota apply) and then serve the call,
+whatever suspended it; a refused resume answers the shared shapes (`429`
+over the owner's quota, `503 capacity_wait` with `Retry-After` when the
+host has no room, `409 lease_busy` while a pause or another resume is in
+flight) and the lease stays suspended. GET, status, events and SSE never
+resume. Only a path with nothing to resume — the `stat` probe, forking a
+running source, the crash test — still answers `409 lease is suspended;
 resume it first`; an explicit `resume` (and the SSH gateway's resume on
 attach) works as always. `IDLE_TIMEOUT_SECS` remains the legacy host-wide
 knob — new deployments should set `IDLE_SUSPEND_DEFAULT_SECS` and the
