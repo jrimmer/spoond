@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -78,6 +79,12 @@ const (
 	// failure). On its own across every lease it points at the
 	// orchestrator, not the guests.
 	rootfsProbeTransport
+	// rootfsProbeUnavailable: the substrate could not confirm the
+	// sandbox's state (the orchestrator List failed), so the probe says
+	// nothing about the guest. Like a timeout it is logged and metered
+	// but never counted toward recovery: the sandbox must not be deleted
+	// on an unknown (spoond-g077).
+	rootfsProbeUnavailable
 )
 
 // rootfsProbeFailure is a lease's consecutive probe-failure count. The
@@ -167,21 +174,22 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 		outcomes[i] = s.probeRootfsOnce(ctx, l)
 	}
 
-	// If every target failed at the transport, the orchestrator is
-	// unreachable, not the guests: log once and change nothing. A guest
-	// that answers with an I/O error or a timeout has proven the
-	// orchestrator is reachable, so a mixed pass still acts on the
-	// affected leases. With a single running lease an all-transport
-	// pass is indistinguishable from an orchestrator outage, so a lone
-	// guest whose agent died is left to the crash reconcile and the
-	// exec route's own errors rather than being marked lost here.
-	allTransport := len(targets) > 0
+	// If every target failed at the transport (or could not confirm the
+	// sandbox state), the orchestrator is unreachable, not the guests:
+	// log once and change nothing. A guest that answers with an I/O error
+	// or a timeout has proven the orchestrator is reachable, so a mixed
+	// pass still acts on the affected leases. With a single running lease
+	// an all-unknown pass is indistinguishable from an orchestrator
+	// outage, so a lone guest whose agent died is left to the crash
+	// reconcile and the exec route's own errors rather than being marked
+	// lost here.
+	allUnknown := len(targets) > 0
 	for _, o := range outcomes {
-		if o != rootfsProbeTransport {
-			allTransport = false
+		if o != rootfsProbeTransport && o != rootfsProbeUnavailable {
+			allUnknown = false
 		}
 	}
-	if allTransport {
+	if allUnknown {
 		if !s.rootfsAllFailedLogged() {
 			s.log.Printf("rootfs probe: every probe across %d running lease(s) failed; treating it as the orchestrator being unreachable and taking no action", len(targets))
 			s.setRootfsAllFailedLogged()
@@ -211,6 +219,15 @@ func (s *Service) probeRootfsLeases(ctx context.Context) {
 			if s.metrics != nil {
 				s.metrics.RootfsProbeFailuresTotal.Inc()
 			}
+		case rootfsProbeUnavailable:
+			// The orchestrator List failed while confirming the sandbox:
+			// the guest may be perfectly healthy. Never count it toward
+			// recovery (which could delete a live sandbox) and never mark
+			// the lease lost on an unknown (spoond-g077).
+			s.log.Printf("rootfs probe: lease %s substrate unavailable; not counted toward recovery", l.ID)
+			if s.metrics != nil {
+				s.metrics.RootfsProbeFailuresTotal.Inc()
+			}
 		case rootfsProbeEIO, rootfsProbeTransport:
 			s.countRootfsFailure(ctx, l)
 		}
@@ -227,6 +244,14 @@ func (s *Service) probeRootfsOnce(parent context.Context, l *Lease) rootfsProbeO
 		Timeout: rootfsProbeDuration,
 	})
 	if err != nil {
+		// The substrate could not confirm the sandbox's state (the
+		// orchestrator List failed): the probe proves nothing about the
+		// guest, so it must not count toward recovery. This is checked
+		// before the deadline case: an unavailable error is a
+		// non-answer, not the probe's own timeout (spoond-g077).
+		if errors.Is(err, substrate.ErrUnavailable) {
+			return rootfsProbeUnavailable
+		}
 		// A substrate that returns the probe's own deadline as an error
 		// is still a timeout (some backends cancel the stream when the
 		// context fires). A cancelled parent means the loop is stopping,

@@ -265,6 +265,51 @@ func TestRootfsProbeTimeoutDoesNotRecover(t *testing.T) {
 	}
 }
 
+// TestRootfsProbeUnavailableDoesNotCount: a probe whose exec fails with
+// substrate.ErrUnavailable (the orchestrator List failed while confirming
+// the sandbox) says nothing about the guest, so it must not count toward
+// the 3-strike recovery even in a mixed pass where another lease answers
+// with an I/O error. Counting it would let three passes delete a live
+// sandbox and recover from an older checkpoint or mark the lease lost,
+// breaking "never mark lost on unknown" (spoond-g077 F1).
+func TestRootfsProbeUnavailableDoesNotCount(t *testing.T) {
+	svc, sub, l1 := newRootfsProbeService(t, false)
+	ctx := context.Background()
+	l2, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, false, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant second: %v", err)
+	}
+	// l1 is unknown (unavailable); l2 proves the orchestrator is reachable
+	// by answering with an I/O error, so the pass is mixed, not all-unknown.
+	sub.rootfsUnavailable[l1.SandboxID] = true
+	sub.rootfsFail[l2.SandboxID] = "dd: error reading '/dev/vda': Input/output error"
+
+	for i := 0; i < rootfsProbeFailuresThreshold; i++ {
+		svc.probeRootfsLeases(ctx)
+	}
+
+	// The EIO lease crossed the threshold and recovered; the unknown one
+	// must not have been counted, deleted, or recovered.
+	if l2.State == "running" {
+		t.Fatalf("EIO lease = %q, want it recovered at the threshold", l2.State)
+	}
+	if l1.State != "running" || !l1.live() {
+		t.Fatalf("unavailable lease = %q (live=%v), want running", l1.State, l1.live())
+	}
+	if got := calls(sub.Fake, "Delete "+l1.SandboxID); got != 0 {
+		t.Fatalf("Delete calls for the unavailable lease's sandbox = %d, want 0", got)
+	}
+	svc.rootfsProbeMu.Lock()
+	count := 0
+	if f := svc.rootfsProbeFails[l1.ID]; f != nil {
+		count = f.count
+	}
+	svc.rootfsProbeMu.Unlock()
+	if count != 0 {
+		t.Fatalf("unavailable lease failure count = %d, want 0", count)
+	}
+}
+
 // TestRootfsProbeIgnoresNonIOError: a non-zero exit that is not an I/O
 // error (the guest answered) is not a failure.
 func TestRootfsProbeIgnoresNonIOError(t *testing.T) {
