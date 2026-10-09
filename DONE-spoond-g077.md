@@ -44,18 +44,18 @@ backend logged `list sandboxes failed: DeadlineExceeded` that night.
 
    | Path | Where | Confirmed absent | Unknown |
    |---|---|---|---|
-   | exec | `api/server.go` `handleExec` | 410 `lease_lost` | 503 `substrate_unavailable` |
-   | stat probe | `api/server.go` `handleStat` | 410 `lease_lost` | 503 `substrate_unavailable` |
+   | exec | `api/server.go` `handleExec` | 410 `lease no longer exists` (no code) | 503 `substrate_unavailable` |
+   | stat probe | `api/server.go` `handleStat` | 410 `lease no longer exists` (no code) | 503 `substrate_unavailable` |
    | exec stream | `api/server.go` `handleStream` | WS `error` frame | WS `error` frame with `substrate: unavailable` (upgrade already committed) |
-   | background exec | `api/jobs_http.go` `handleBackgroundExec` | 410 `lease_lost` | 503 `substrate_unavailable` |
+   | background exec | `api/jobs_http.go` `handleBackgroundExec` | 410 `lease no longer exists` (no code) | 503 `substrate_unavailable` |
    | files (stat/download/upload/mkdir/remove) | `api/files.go` `mapFileError` | 404 `file not found` | 503 `substrate_unavailable` |
-   | guest dial | `api/guestdial.go` `handleGuestDial` | 410 `lease_lost` | 503 `substrate_unavailable` |
+   | guest dial | `api/guestdial.go` `handleGuestDial` | 410 `lease no longer exists` (no code) | 503 `substrate_unavailable` |
    | job output | `api/jobs_http.go` `handleJobGet`/output | empty output | 503 `substrate_unavailable` |
    | job signal | `api/jobs_http.go` `handleJobSignal` | 409 `job is not running` | 503 `substrate_unavailable` |
    | proxy | `api/proxy.go` | (no substrate-list check; dials directly) | unchanged 502 |
    | recovery | `api/recovery.go` `reconcileCrash` | marks lost only when `List` succeeds and the sandbox is absent | takes no action on a failed `List` (already correct) |
    | lost-lease guard | `api/recovery.go` `ensureLive`/`lostErr` | reads store state only; no substrate `List` | unaffected |
-   | rootfs probe | `api/rootfs_probe.go` | transport failure counts toward recovery | a `List` failure only arises through exec; `ErrUnavailable` is a transport-class failure and is not marked lost by the probe |
+   | rootfs probe | `api/rootfs_probe.go` `probeRootfsOnce`/`probeRootfsLeases` | a transport failure counts toward recovery | `substrate.ErrUnavailable` is its own `rootfsProbeUnavailable` outcome: logged and metered but **never counted** toward the 3-strike threshold, so a mixed pass cannot delete a live sandbox or mark the lease lost (round-2 F1) |
    | no-room refusal | `api/idle_suspend.go` `writeResumeRefusal` | n/a | `substrate.ErrUnavailable` falls to the generic 500 (only reachable if a resume's create reports it) |
 
    The proxy is unaffected: it does not consult `listed()`, it dials the
@@ -81,6 +81,47 @@ backend logged `list sandboxes failed: DeadlineExceeded` that night.
   `TestExecSandboxConfirmedGoneIsStillGone` (410 unchanged).
 - `api/files_test.go`: `TestFilesSubstrateUnavailable` (503 +
   `substrate_unavailable` from a file stat, lease not lost).
+- `api/rootfs_probe_test.go`: `TestRootfsProbeUnavailableDoesNotCount` (round-2
+  F1).
+
+### Test-to-mutation map (round 2)
+
+Every mutation the round-2 fixes guard against has a test that fails when the
+fix is reverted:
+
+| Test | Mutation it kills |
+|---|---|
+| `TestRootfsProbeUnavailableDoesNotCount` (`api/rootfs_probe_test.go`) | Reverting F1: treating `ErrUnavailable` as transport/EIO and counting it. In the mixed pass the unknown lease reaches the threshold, so the test sees it recovered (or deleted) and fails. |
+| `TestSandboxListedListErrorIsUnavailable` (`substrate/e2b/listed_test.go`) | Changing `listProbeAttempts` (the test now asserts a literal `3`, so a retry-count change fails it). |
+| `TestExecSubstrateUnavailableIsRetryable` | Mapping `ErrUnavailable` to 410 (or not keeping the lease). |
+| `TestExecSandboxConfirmedGoneIsStillGone` | Mapping a confirmed not-found away from 410. |
+| `TestFilesSubstrateUnavailable` | Dropping the `ErrUnavailable` branch in `mapFileError`. |
+| `TestWriteFileUploadFails` | Reporting a failed `List` as `ErrNotFound` again. |
+
+### Round-2 review fixes
+
+- **F1 (medium):** `probeRootfsOnce` now classifies `substrate.ErrUnavailable`
+  as the new `rootfsProbeUnavailable` outcome. `probeRootfsLeases` logs and
+  meters it but never counts it toward `rootfsProbeFailuresThreshold`, and an
+  all-unknown pass is treated like an all-transport one. Previously a mixed
+  pass (a fast-failing orchestrator mid-pass) could reach the 3-strike
+  threshold on an unknown and recover, deleting a live sandbox (or losing the
+  lease) on a non-answer.
+- **F2 (docs):** the Honey status table now lists exactly the paths that can
+  produce `substrate_unavailable` on e2b (only `Start`, `Exec` and `WriteFile`
+  call the sandbox-list check): `POST exec`, `GET stat`, background exec,
+  file `PUT`/dir remove, job signal, exec stream. The guest-dial, job
+  get/output and file `GET`/`stat`/`mkdir` defensive branches are kept in code
+  but are not documented as live.
+- **F3 (docs):** confirmed-absence wording corrected: `writeSandboxGone`
+  answers `{"error":"lease no longer exists"}` with **no** code; only an
+  already-lost lease carries `code: lease_lost`.
+- **F4:** the stat, files, job-signal and background-exec 503 paths now log
+  one line with the lease id, op and "substrate unavailable", like
+  `handleExec`.
+- **T1:** `TestSandboxListedListErrorIsUnavailable` asserts a literal `3`
+  instead of comparing to `listProbeAttempts`, so a retry-count change fails
+  it.
 
 ## Gates
 

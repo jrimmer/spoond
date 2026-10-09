@@ -617,33 +617,38 @@ This is deliberately not `410 lease_lost`: `410` is final for clients
 the job permanently), and an orchestrator stall must never become one.
 The lease is not marked lost on this answer. A `List` that succeeds and
 does not name the sandbox is still a confirmed absence and answers
-`410 lease_lost` (exec, stat, guest dial, background exec) or `404`
-(files).
+`410` (the body is `{"error":"lease no longer exists"}` with **no**
+`code`; only a lease that is already marked `lost` carries
+`code: lease_lost`), or `404` on files.
+
+On the e2b backend only `Start`, `Exec` and `WriteFile` call the
+sandbox-list check, so the paths that can actually answer
+`substrate_unavailable` are exactly the ones in the table below. The
+other routes (`dial`, job read/output, the file `GET`/`stat`/`mkdir`
+branches) keep a defensive `ErrUnavailable` branch, but on e2b their
+calls do not fail into it today, so it is not documented as a live
+status change.
 
 #### Status changes for the substrate-unknown path
 
-Every caller of the e2b client's sandbox-list check is listed here.
 "Unknown" means the operation failed *and* the confirming `List`
 failed; the confirmed-absence answer is unchanged in every row.
 
 | Path | Confirmed absent | Unknown (orchestrator `List` failed) |
 |---|---|---|
-| `POST …/exec` (`api/server.go`, `handleExec`) | `410 lease_lost` | `503 substrate_unavailable` |
-| `GET …/stat` (`api/server.go`, `handleStat`) | `410 lease_lost` | `503 substrate_unavailable` |
-| `POST …/exec` `background:true` (`api/jobs_http.go`) | `410 lease_lost` | `503 substrate_unavailable` |
-| files (`api/files.go`: `GET` content, `PUT`, `POST` mkdir/remove, `stat=1`) | `404 file not found` | `503 substrate_unavailable` |
-| `GET …/ports/{port}/dial` (`api/guestdial.go`) | `410 lease_lost` | `503 substrate_unavailable` |
-| `GET …/jobs/{job}`, `…/jobs/{job}/output` (`api/jobs_http.go`) | empty output | `503 substrate_unavailable` |
+| `POST …/exec` (`api/server.go`, `handleExec`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
+| `GET …/stat` (`api/server.go`, `handleStat`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
+| `POST …/exec` `background:true` (`api/jobs_http.go`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
+| `PUT …/files/{path}` and directory remove (`api/files.go`) | `404 file not found` | `503 substrate_unavailable` |
 | `POST …/jobs/{job}/signal` (`api/jobs_http.go`) | `409 job is not running` | `503 substrate_unavailable` |
 | `GET …/stream` (`api/server.go`, `handleStream`) | `error` frame | `error` frame naming `substrate: unavailable` |
 
-The `stream` and proxy paths have already committed a protocol (a
-WebSocket upgrade / a reverse-proxy dial) by the time the substrate
-answers, so they cannot return a status; they surface the new error text
-instead. Recovery and the lost-lease guard are unaffected: a lease is
-never marked lost on an unknown, and a recovery that fails with
-`substrate.ErrUnavailable` is a transient failure and gets the existing
-bounded retry (`api/retry.go`).
+The exec-stream path has already committed a protocol (a WebSocket
+upgrade) by the time the substrate answers, so it cannot return a
+status; it surfaces the new error text instead. Recovery and the
+lost-lease guard are unaffected: a lease is never marked lost on an
+unknown, and a recovery that fails with `substrate.ErrUnavailable` is a
+transient failure and gets the existing bounded retry (`api/retry.go`).
 
 ### `GET /api/names/{name}` — resolve by name
 

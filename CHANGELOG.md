@@ -362,9 +362,12 @@ summarised from README "Status".
   unknown it retries `List` a bounded number of times with a short
   backoff and then returns the new `substrate.ErrUnavailable`; the API
   answers **`503` with `Retry-After: 5` and code `substrate_unavailable`**
-  (a retryable answer) and **never marks the lease lost**. A confirmed
-  absence is unchanged: `410 lease_lost` on exec/stream/dial and `404`
-  on files. See [docs/api.md](docs/api.md).
+  (a retryable answer) and **never marks the lease lost**. The rootfs
+  liveness probe never counts an `ErrUnavailable` probe toward its
+  3-strike recovery, so an orchestrator stall cannot delete a live
+  sandbox. A confirmed absence is unchanged: `410 lease no longer
+  exists` on exec/stat/background exec and `404` on files. See
+  [docs/api.md](docs/api.md).
 
 ## [2.8.0] - 2026-10-08
 
