@@ -32,10 +32,14 @@ import (
 
 // The call timeouts leave room for the drain's own internal waits
 // (pausing every sandbox, then waiting for the node to quiesce) and for
-// undrain's wait for the node to come back.
+// undrain's wait for the node to come back, its readiness wait and its
+// resume window. The undrain POST itself is bounded by the backend (see
+// UNDRAIN_READY_TIMEOUT and UNDRAIN_RESUME_WINDOW); this timeout is how
+// long the hook waits for the response, and the backend's work continues
+// on a context detached from the request even if the hook gives up.
 const (
 	stopTimeout  = 240 * time.Second
-	startTimeout = 300 * time.Second
+	startTimeout = 360 * time.Second
 )
 
 // target is one resolved URL/token pair.

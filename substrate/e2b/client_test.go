@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/jrimmer/spoond/v2/substrate"
 )
@@ -201,5 +205,36 @@ func TestWaitOutstandingTreatsPollErrorsAsAboveBaseline(t *testing.T) {
 	waitOutstanding(t.Context(), "i0123456789abcdefghij", "pause", 0, stub.nodeInfo, time.Millisecond, 30*time.Millisecond)
 	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
 		t.Fatalf("wait returned after %s, wanted the full bound", elapsed)
+	}
+}
+
+// TestMapErrorUnavailable pins that a gRPC Unavailable — the code a gRPC
+// transport error (a connection reset, an unexpected EOF, the server not
+// serving yet) carries — maps to the retryable substrate.ErrUnavailable
+// rather than staying a raw gRPC error. The undrain resume relies on this
+// to treat a not-yet-ready orchestrator as indeterminate and retry it
+// instead of losing the lease (spoond-638d).
+func TestMapErrorUnavailable(t *testing.T) {
+	err := mapError(status.Error(codes.Unavailable, "error reading from server: connection reset by peer"))
+	if !errors.Is(err, substrate.ErrUnavailable) {
+		t.Fatalf("mapError(Unavailable) = %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, substrate.ErrNotFound) || errors.Is(err, substrate.ErrCapacity) {
+		t.Fatalf("mapError(Unavailable) must not be NotFound or Capacity: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("mapError(Unavailable) = %v, want the gRPC message kept", err)
+	}
+
+	// The other mapped codes keep their meaning.
+	if got := mapError(status.Error(codes.NotFound, "no sandbox")); !errors.Is(got, substrate.ErrNotFound) {
+		t.Fatalf("mapError(NotFound) = %v, want ErrNotFound", got)
+	}
+	if got := mapError(status.Error(codes.ResourceExhausted, "full")); !errors.Is(got, substrate.ErrCapacity) {
+		t.Fatalf("mapError(ResourceExhausted) = %v, want ErrCapacity", got)
+	}
+	// A nil error maps to nil.
+	if got := mapError(nil); got != nil {
+		t.Fatalf("mapError(nil) = %v, want nil", got)
 	}
 }

@@ -509,8 +509,13 @@ func Main(args []string) int {
 	// Undrain resume pacing (spoond-urm): a bounded resume width and a
 	// couple of retries for a transient envd start/sync failure, so a
 	// busy node does not lose 4 GiB leases to "syncing took too long".
+	// spoond-638d adds a wait for the orchestrator to be ready before the
+	// first resume and a generous window for an indeterminate
+	// (unavailable/connection-reset) error, which never loses a lease.
 	undrainConcurrency := envIntOr("UNDRAIN_CONCURRENCY", api.DefaultUndrainConcurrency)
 	undrainResumeRetries := envIntOr("UNDRAIN_RESUME_RETRIES", api.DefaultUndrainResumeRetries)
+	undrainResumeWindow := envDurationOr("UNDRAIN_RESUME_WINDOW", api.DefaultUndrainResumeWindow)
+	undrainReadyTimeout := envDurationOr("UNDRAIN_READY_TIMEOUT", api.DefaultUndrainReadyTimeout)
 	// Drain self-heal (spoond-52c): a drain that outlives DRAIN_MAX_SECS
 	// while the node is healthy undrains itself rather than refusing
 	// every create forever. 0 means the default; a negative disables it.
@@ -630,6 +635,8 @@ func Main(args []string) int {
 		DrainSnapshotConcurrency: drainSnapshotConcurrency,
 		UndrainConcurrency:       undrainConcurrency,
 		UndrainResumeRetries:     undrainResumeRetries,
+		UndrainResumeWindow:      undrainResumeWindow,
+		UndrainReadyTimeout:      undrainReadyTimeout,
 		RecoveryRetryAttempts:    recoveryRetryAttempts,
 		RecoveryRetryWindow:      recoveryRetryWindow,
 		// spoond-j3a: bound one background sweep stage so a hung

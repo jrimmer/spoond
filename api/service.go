@@ -427,10 +427,25 @@ type ServiceConfig struct {
 	UndrainConcurrency int
 	// UndrainResumeRetries is how many extra attempts a resume the admin
 	// undrain failed with a retryable envd/start error gets before the
-	// lease is marked lost (UNDRAIN_RESUME_RETRIES). 0 disables retries;
-	// cmd maps an unset variable to DefaultUndrainResumeRetries (2).
-	// spoond-urm.
+	// lease is left suspended (UNDRAIN_RESUME_RETRIES). 0 disables
+	// retries; cmd maps an unset variable to DefaultUndrainResumeRetries
+	// (2). spoond-urm, spoond-638d.
 	UndrainResumeRetries int
+	// UndrainResumeWindow bounds how long the admin undrain keeps
+	// retrying a resume that failed because the orchestrator was not
+	// ready for creates (Unavailable, a connection reset, a transport
+	// error). Those are indeterminate: they say nothing about the
+	// sandbox, so they never count toward losing the lease and are
+	// retried with backoff until this window expires
+	// (UNDRAIN_RESUME_WINDOW). <=0 uses DefaultUndrainResumeWindow
+	// (5 min). spoond-638d.
+	UndrainResumeWindow time.Duration
+	// UndrainReadyTimeout bounds the undrain's wait for the orchestrator
+	// to answer NodeInfo and a List before the first resume
+	// (UNDRAIN_READY_TIMEOUT): a resume must not run before the
+	// restarted orchestrator is ready for sandbox creates. <=0 uses
+	// DefaultUndrainReadyTimeout (180 s). spoond-638d.
+	UndrainReadyTimeout time.Duration
 	// RecoveryRetryAttempts is how many failed crash-recovery attempts
 	// (a transient failure of recoverFromCheckpoint) a lease gets before
 	// it is marked lost (RECOVERY_RETRY_ATTEMPTS). <=0 uses
@@ -549,6 +564,15 @@ type Service struct {
 	// orphan sweep. Fields so tests can shrink the pause.
 	lostSandboxDeleteAttempts int
 	lostSandboxDeleteBackoff  time.Duration
+	// undrainBackoffMin and undrainBackoffMax space the admin undrain's
+	// resume attempts out: the first retry waits the minimum, then the
+	// pause doubles to the maximum. Fields so tests can shrink them.
+	undrainBackoffMin time.Duration
+	undrainBackoffMax time.Duration
+	// undrainReadyPoll is how long undrainReady waits between readiness
+	// probes (NodeInfo + List) while the orchestrator comes back. Field
+	// so tests can shrink it.
+	undrainReadyPoll time.Duration
 	// orphanSweepInterval is how often the periodic orphan sandbox sweep
 	// runs (spoond-abc): it deletes substrate sandboxes whose lease is
 	// lost or released, catching a lost path's bounded delete that still
@@ -831,6 +855,9 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		recoveryRetries:           map[string]*retryBudget{},
 		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
 		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
+		undrainBackoffMin:         undrainRetryBackoff,
+		undrainBackoffMax:         undrainRetryBackoffMax,
+		undrainReadyPoll:          time.Second,
 		orphanSweepInterval:       defaultOrphanSweepInterval,
 		orphanSandboxIDs:          map[string]struct{}{},
 		orphanSweep:               newOrphanSweepState(),
@@ -2689,6 +2716,11 @@ const (
 	suspendReasonHoldLapsed  = "hold_lapsed"
 	suspendReasonPressure    = "pressure"
 	suspendReasonPreempt     = "preempt"
+	// suspendReasonResumeFailed marks a lease the admin undrain could not
+	// bring back and left suspended (its snapshot intact) instead of
+	// losing it: the holder's next work call retries through the normal
+	// resume-on-use path (spoond-638d).
+	suspendReasonResumeFailed = "resume_failed"
 )
 
 // suspendPolicy carries the structured suspension facts a pause stamps on

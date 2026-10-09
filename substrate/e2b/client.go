@@ -106,6 +106,16 @@ func mapError(err error) error {
 		// limit is hit, and pauses/checkpoints while it persists another
 		// snapshot (A2 §3.6).
 		return fmt.Errorf("%w: %s", substrate.ErrCapacity, status.Convert(err).Message())
+	case codes.Unavailable:
+		// The orchestrator is not serving yet (it just restarted) or the
+		// connection dropped: a connection reset, an unexpected EOF, a
+		// transport failure. It says nothing about any sandbox's state, so
+		// classify it as the retryable substrate-unavailable error rather
+		// than leaving the raw gRPC error. A caller that cannot recognise
+		// it (the undrain resume) would otherwise treat a not-yet-ready
+		// orchestrator as a sandbox failure and lose the lease
+		// (spoond-638d).
+		return fmt.Errorf("%w: %s", substrate.ErrUnavailable, status.Convert(err).Message())
 	default:
 		return err
 	}

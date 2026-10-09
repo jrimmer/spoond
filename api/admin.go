@@ -108,10 +108,11 @@ const drainConcurrency = 4
 // its request (a client disconnect must not cancel a pause or resume
 // half-way) and bounded so the work is finite. The drain bound covers
 // the drain's own 180 s quiesce wait plus the pause phase; the undrain
-// bound covers its 120 s node wait plus the resumes.
+// bound covers its wait for the orchestrator to become ready, its
+// resume window and the resumes.
 const (
 	adminDrainTimeout   = 6 * time.Minute
-	adminUndrainTimeout = 5 * time.Minute
+	adminUndrainTimeout = 12 * time.Minute
 )
 
 // adminContext detaches ctx from its caller and bounds it. context
@@ -132,6 +133,22 @@ const DefaultUndrainConcurrency = 2
 // when UNDRAIN_RESUME_RETRIES is unset: two, so a transient "syncing took
 // too long" does not lose the lease (spoond-urm).
 const DefaultUndrainResumeRetries = 2
+
+// DefaultUndrainResumeWindow is how long the admin undrain keeps
+// retrying a resume that failed because the orchestrator was not ready
+// for creates when UNDRAIN_RESUME_WINDOW is unset: 5 min. An
+// Unavailable or connection-reset error right after the orchestrator
+// starts says nothing about the sandbox, so it is retried with backoff
+// for this generous window and never counts toward losing the lease
+// (spoond-638d).
+const DefaultUndrainResumeWindow = 5 * time.Minute
+
+// DefaultUndrainReadyTimeout is how long the admin undrain waits for
+// the orchestrator to answer NodeInfo and a List before the first
+// resume when UNDRAIN_READY_TIMEOUT is unset: 180 s. A resume that runs
+// before the restarted orchestrator is ready for sandbox creates fails
+// with a connection reset and used to lose the lease (spoond-638d).
+const DefaultUndrainReadyTimeout = 180 * time.Second
 
 // DefaultDrainMaxSecs is how long a drain may stay in effect while the
 // node is healthy before spoond undrains itself when DRAIN_MAX_SECS is
@@ -159,8 +176,15 @@ const (
 // stale drain or for drained leases to resume.
 const drainHealInterval = 15 * time.Second
 
-// undrainRetryBackoff is the pause between undrain resume attempts.
-const undrainRetryBackoff = 500 * time.Millisecond
+// undrainRetryBackoff and undrainRetryBackoffMax space the undrain's
+// resume attempts out. The first retry waits the minimum; the pause
+// doubles up to the maximum so a long window of an unreachable
+// orchestrator does not spin a Create every 500 ms (spoond-638d). The
+// heal uses its own per-lease schedule.
+const (
+	undrainRetryBackoff    = 500 * time.Millisecond
+	undrainRetryBackoffMax = 15 * time.Second
+)
 
 // drain pauses every live lease (persistent or not) into a pause build
 // and marks it Drained, deletes the warm pool, then waits until the node
@@ -306,6 +330,92 @@ func (s *Service) undrainResumeRetries() int {
 	return s.cfg.UndrainResumeRetries
 }
 
+// undrainResumeWindow is how long the admin undrain keeps retrying a
+// resume that failed with an indeterminate orchestrator error: the
+// configured UNDRAIN_RESUME_WINDOW, DefaultUndrainResumeWindow when
+// unset.
+func (s *Service) undrainResumeWindow() time.Duration {
+	if s.cfg.UndrainResumeWindow <= 0 {
+		return DefaultUndrainResumeWindow
+	}
+	return s.cfg.UndrainResumeWindow
+}
+
+// undrainReadyTimeout is how long the admin undrain waits for the
+// orchestrator to answer NodeInfo and a List before the first resume:
+// the configured UNDRAIN_READY_TIMEOUT, DefaultUndrainReadyTimeout when
+// unset.
+func (s *Service) undrainReadyTimeout() time.Duration {
+	if s.cfg.UndrainReadyTimeout <= 0 {
+		return DefaultUndrainReadyTimeout
+	}
+	return s.cfg.UndrainReadyTimeout
+}
+
+// undrainBackoffFor returns the pause before retry attempt n (1-based
+// retry number): the minimum, doubling up to the maximum.
+func (s *Service) undrainBackoffFor(retry int) time.Duration {
+	min, max := s.undrainBackoffMin, s.undrainBackoffMax
+	if min <= 0 {
+		min = undrainRetryBackoff
+	}
+	if max <= 0 {
+		max = undrainRetryBackoffMax
+	}
+	d := min
+	for i := 1; i < retry && d < max; i++ {
+		d *= 2
+	}
+	if d > max {
+		d = max
+	}
+	return d
+}
+
+// undrainNotReady reports whether err is an indeterminate orchestrator
+// failure: the orchestrator is not serving yet (it just restarted) or
+// the connection dropped. Such an error says nothing about the sandbox,
+// so the undrain retries it for the resume window and never counts it
+// toward losing the lease (spoond-638d).
+func undrainNotReady(err error) bool {
+	return errors.Is(err, substrate.ErrUnavailable)
+}
+
+// undrainReady waits until the orchestrator can answer both NodeInfo and
+// a List, so the first resume does not run before the restarted
+// orchestrator is ready for sandbox creates (spoond-638d). It returns
+// nil once ready, the last error when the window expires, or ctx.Err()
+// when the caller's context ends. Overridable in tests with a shorter
+// window.
+func (s *Service) undrainReady(ctx context.Context) error {
+	deadline := time.Now().Add(s.undrainReadyTimeout())
+	poll := s.undrainReadyPoll
+	if poll <= 0 {
+		poll = time.Second
+	}
+	var lastErr error
+	for {
+		_, nodeErr := s.sub.NodeInfo(ctx)
+		if nodeErr == nil {
+			_, listErr := s.sub.List(ctx)
+			if listErr == nil {
+				return nil
+			}
+			lastErr = listErr
+		} else {
+			lastErr = nodeErr
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("orchestrator not ready after %s: %w", s.undrainReadyTimeout(), lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+}
+
 // undrainAdmissionRefusal reports whether err is one of the transient
 // admission answers (over quota, no burst room, no preemption room): they
 // keep the lease drained for a later undrain and must not be retried in a
@@ -317,7 +427,8 @@ func undrainAdmissionRefusal(err error) bool {
 // resumeRetryable reports whether a failed undrain resume is worth
 // retrying. The envd/start failures a busy node answers on resume
 // ("syncing took too long", a context deadline, envd init not healthy)
-// are transient; an image or build that is gone is not.
+// are transient; an image or build that is gone is not. An
+// orchestrator-unavailable error is retryable too (spoond-638d).
 func resumeRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -326,6 +437,9 @@ func resumeRetryable(err error) bool {
 	// cannot bring it back, so the lease goes lost at once.
 	if permanentNotFound(err) {
 		return false
+	}
+	if undrainNotReady(err) {
+		return true
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
@@ -338,6 +452,10 @@ func resumeRetryable(err error) bool {
 		"envd not healthy",
 		"context deadline exceeded",
 		"deadline exceeded",
+		"connection reset",
+		"connection refused",
+		"error reading from server",
+		"unexpected eof",
 	} {
 		if strings.Contains(msg, marker) {
 			return true
@@ -348,12 +466,13 @@ func resumeRetryable(err error) bool {
 
 // undrainDeferred reports whether a failed undrain resume must leave
 // the lease Drained for a later attempt rather than marking it lost. An
-// admission refusal, a capacity answer and a cancelled or bounded
-// context are transient conditions the next undrain (or the self-heal
-// loop) can retry; a sandbox that will not come back is not covered and
-// still becomes lost.
+// admission refusal, a capacity answer, an orchestrator-unavailable
+// error and a cancelled or bounded context are transient conditions
+// the next undrain (or the self-heal loop) can retry; a sandbox that
+// will not come back is not covered and still becomes lost.
 func undrainDeferred(err error) bool {
 	return undrainAdmissionRefusal(err) ||
+		undrainNotReady(err) ||
 		errors.Is(err, errLeaseBusy) ||
 		errors.Is(err, substrate.ErrCapacity) ||
 		errors.Is(err, context.Canceled) ||
@@ -363,12 +482,19 @@ func undrainDeferred(err error) bool {
 
 // resumeDrainedLease runs one drained lease through resumeLease, giving a
 // retryable envd/start failure up to the configured number of extra
-// attempts with a short backoff. It returns the last error (nil on
-// success) and how many attempts were made. An admission refusal is
-// returned at once: it keeps the lease drained for a later undrain. While
-// spoond is draining the resume is deferred at once (the node would
-// refuse it), so a heal pass that begins before an admin drain clears the
-// state does not race a Create into the stop (spoond-52c S1).
+// attempts with a short backoff. An error that says the orchestrator is
+// not ready (Unavailable, a connection reset, a transport failure) is
+// indeterminate: it is retried with the same backoff for the whole
+// UNDRAIN_RESUME_WINDOW regardless of that attempt budget and never
+// counts toward losing the lease, because it says nothing about the
+// sandbox (spoond-638d).
+//
+// It returns the last error (nil on success) and how many attempts were
+// made. An admission refusal is returned at once: it keeps the lease
+// drained for a later undrain. While spoond is draining the resume is
+// deferred at once (the node would refuse it), so a heal pass that
+// begins before an admin drain clears the state does not race a Create
+// into the stop (spoond-52c S1).
 //
 // acquire, when non-nil, is called before each attempt; release is called
 // for the backoff gap between attempts, so a caller's external lock (the
@@ -379,14 +505,20 @@ func undrainDeferred(err error) bool {
 // releases once after the call (spoond-52c S1).
 func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease, acquire, release func()) (error, int) {
 	maxAttempts := 1 + s.undrainResumeRetries()
+	// The window for an indeterminate orchestrator error. It starts at
+	// the first attempt so a long stream of not-ready answers is still
+	// bounded.
+	notReadyUntil := time.Now().Add(s.undrainResumeWindow())
 	take := func() {
 		if acquire != nil {
 			acquire()
 		}
 	}
 	var err error
+	attempt, retries, envdTries := 0, 0, 0
 	take()
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for {
+		attempt++
 		if s.draining.Load() {
 			return errDraining, attempt
 		}
@@ -397,10 +529,37 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease, acquire, rel
 		if undrainAdmissionRefusal(err) {
 			return err, attempt
 		}
-		if !resumeRetryable(err) || attempt == maxAttempts {
+		// An indeterminate orchestrator error never counts toward losing
+		// the lease: retry it for the whole window whatever the envd
+		// attempt budget has left (spoond-638d).
+		if undrainNotReady(err) {
+			if !time.Now().Before(notReadyUntil) {
+				return err, attempt
+			}
+			retries++
+			s.log.Printf("undrain: resume %s attempt %d hit a not-ready orchestrator (retrying for up to %s): %v", l.ID, attempt, time.Until(notReadyUntil).Round(time.Second), err)
+			wait := s.undrainBackoffFor(retries)
+			if remaining := time.Until(notReadyUntil); remaining < wait {
+				wait = remaining
+			}
+			if release != nil {
+				release()
+			}
+			select {
+			case <-ctx.Done():
+				take()
+				return err, attempt
+			case <-time.After(wait):
+			}
+			take()
+			continue
+		}
+		envdTries++
+		if !resumeRetryable(err) || envdTries >= maxAttempts {
 			return err, attempt
 		}
-		s.log.Printf("undrain: resume %s attempt %d/%d failed (retrying): %v", l.ID, attempt, maxAttempts, err)
+		retries++
+		s.log.Printf("undrain: resume %s attempt %d/%d failed (retrying): %v", l.ID, envdTries, maxAttempts, err)
 		// Space the attempts out. resumeLeaseBody's createSandbox error
 		// path already deleted any half-started sandbox inside the busy
 		// window, so the retry can reuse the same id. The lock is dropped
@@ -412,11 +571,10 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease, acquire, rel
 		case <-ctx.Done():
 			take() // keep the one-outstanding invariant for the caller
 			return err, attempt
-		case <-time.After(undrainRetryBackoff):
+		case <-time.After(s.undrainBackoffFor(retries)):
 		}
 		take()
 	}
-	return err, maxAttempts
 }
 
 // deleteHalfSandbox removes a sandbox a failed or cut-off Create may have
@@ -448,13 +606,16 @@ func undrainLossAllowed(l *Lease) (released, alreadyLost, canLose bool) {
 	return released, alreadyLost, canLose
 }
 
-// undrain waits (up to 120 s) for the orchestrator to answer NodeInfo,
+// undrain waits for the orchestrator to be ready (NodeInfo and a List),
 // clears the draining state, then resumes exactly the drained leases,
-// UNDRAIN_CONCURRENCY (default 2) at a time. A resume that fails with a
-// retryable envd/start error is retried UNDRAIN_RESUME_RETRIES (default
-// 2) times with a short backoff before the lease becomes lost; an
-// admission refusal, a capacity answer or a bounded context keeps the
-// lease drained for a later undrain.
+// UNDRAIN_CONCURRENCY (default 2) at a time. The readiness wait means a
+// resume never runs before the restarted orchestrator accepts sandbox
+// creates (spoond-638d). A resume that fails with a retryable envd/start
+// error is retried UNDRAIN_RESUME_RETRIES (default 2) times with a short
+// backoff; an orchestrator-unavailable error is retried with backoff for
+// UNDRAIN_RESUME_WINDOW (default 5 min) and never counts toward losing
+// the lease; an admission refusal, a capacity answer or a bounded
+// context keeps the lease drained for a later undrain.
 //
 // The undrain serialisation is one-way (spoond-52c R4): the self-heal
 // loop defers to an undrain (undraining), but an admin undrain runs even
@@ -465,24 +626,15 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 	s.undraining.Store(true)
 	defer s.undraining.Store(false)
 
-	deadline := time.Now().Add(120 * time.Second)
-	for {
-		_, err := s.sub.NodeInfo(ctx)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			s.log.Printf("undrain: node info still failing after 120s: %v", err)
-			break
-		}
-		select {
-		case <-ctx.Done():
-			// The caller went away: change nothing, the node stays
-			// draining and a retry can pick it up.
-			s.log.Printf("undrain: cancelled before the node answered: %v", ctx.Err())
-			return res
-		case <-time.After(time.Second):
-		}
+	// Wait for the orchestrator to answer both NodeInfo and a List before
+	// the first resume. Right after an orchestrator restart it accepts the
+	// gRPC connection but is not ready for sandbox creates yet; a resume
+	// then fails with a connection reset, which used to lose the lease
+	// (spoond-638d). An unreachable node after the wait is not fatal: the
+	// resumes below are deferred and the self-heal loop retries them, so
+	// the leases stay drained rather than lost.
+	if err := s.undrainReady(ctx); err != nil {
+		s.log.Printf("undrain: %v", err)
 	}
 
 	// The check-and-clear runs under the write side of drainGate, so a
@@ -577,15 +729,19 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 // applies the result, the shared tail of the admin undrain and the drain
 // self-heal loop. On success it clears the lease's Drained flag (under the
 // store lock, unless the lease was released meanwhile — S4). A transient
-// refusal (admission, capacity, busy, draining, a bounded context) leaves
-// Drained set and returns deferred=true; a permanent failure loses the
-// lease, emitting its lost event and dropping its heal backoff. It is safe
-// to call concurrently for different leases. acquire, when non-nil, is
-// called before each resume attempt and release for the backoff gap
-// between attempts; the heal uses them to hold its drainGate read side
-// across each attempt but not across the wait, so a waiting admin drain
-// gets the write side before the next attempt rather than after the whole
-// retry budget (spoond-52c S1).
+// refusal (admission, capacity, busy, draining, a bounded context, or an
+// orchestrator that is not ready) leaves Drained set and returns
+// deferred=true. A failure that exhausts its retries leaves the lease
+// suspended with reason resume_failed and Drained set (it may retry on the
+// holder's next work call and the self-heal loop keeps trying) rather than
+// losing an intact snapshot. Only a permanent error — the image or build
+// the resume needs is gone — loses the lease, because a retry cannot bring
+// that back (spoond-638d). It is safe to call concurrently for different
+// leases. acquire, when non-nil, is called before each resume attempt and
+// release for the backoff gap between attempts; the heal uses them to hold
+// its drainGate read side across each attempt but not across the wait, so
+// a waiting admin drain gets the write side before the next attempt
+// rather than after the whole retry budget (spoond-52c S1).
 func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, release func()) (error, int, bool) {
 	err, attempts := s.resumeDrainedLease(ctx, l, acquire, release)
 	if err == nil {
@@ -610,46 +766,82 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 		s.store.mu.Unlock()
 		return err, attempts, true
 	}
-	reason := fmt.Sprintf("drain resume failed after %d attempt(s): %v", attempts, err)
-	s.clearDrainHeal(l.ID)
-	s.store.mu.Lock()
-	released, alreadyLost, canLose := undrainLossAllowed(l)
-	if released || alreadyLost {
-		// A lease released or already lost while the resume was in flight
-		// is not lost again: clear its Drained flag if it still carries it
-		// and save nothing else, so no second lost event follows
-		// (spoond-775 class, spoond-52c NIT).
-		if !released && l.Drained {
-			l.Drained = false
-			s.saveLeaseLocked(l)
+	// A permanent error — the image or build the resume needs is gone — is
+	// the only failure that loses the lease: nothing can bring the
+	// snapshot back, so keeping it suspended would only fail again on the
+	// holder's next call.
+	if permanentNotFound(err) {
+		reason := fmt.Sprintf("drain resume failed after %d attempt(s): %v", attempts, err)
+		s.clearDrainHeal(l.ID)
+		s.store.mu.Lock()
+		released, alreadyLost, canLose := undrainLossAllowed(l)
+		if released || alreadyLost {
+			// A lease released or already lost while the resume was in
+			// flight is not lost again: clear its Drained flag if it still
+			// carries it and save nothing else, so no second lost event
+			// follows (spoond-775 class, spoond-52c NIT).
+			if !released && l.Drained {
+				l.Drained = false
+				s.saveLeaseLocked(l)
+			}
+			s.store.mu.Unlock()
+			return err, attempts, false
 		}
+		// Only a suspended, non-busy lease may be lost (B1/G1): an owner
+		// resume (busy) or one that already completed (state running) is
+		// bringing the guest back, and losing it would delete an intact
+		// lease. Anything else is a logged skip: no markLost, no
+		// stopLostSandbox, no lost event.
+		if !canLose {
+			busy, state := l.busy, l.State
+			s.store.mu.Unlock()
+			s.log.Printf("undrain: not losing lease %s (state %s, busy=%v)", l.ID, state, busy)
+			return err, attempts, false
+		}
+		l.Drained = false
+		s.markLost(l, reason)
 		s.store.mu.Unlock()
+		// Lost means stopped (spoond-63a): stop the half-started sandbox a
+		// failed resume left behind (the retry loop cleans it between
+		// attempts, but the last failure must stop it too).
+		s.stopLostSandbox(l.SandboxID, l.ID)
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
+		// A lease started from a named snapshot no longer protects it once
+		// lost (#83 S5).
+		s.rerunSnapshotRetention(ctx, l)
+		s.log.Printf("undrain: resume %s failed after %d attempt(s): %v", l.ID, attempts, err)
 		return err, attempts, false
 	}
-	// Only a suspended, non-busy lease may be lost (B1/G1): an owner
-	// resume (busy) or one that already completed (state running) is
-	// bringing the guest back, and losing it would delete an intact
-	// lease. Anything else is a logged skip: no markLost, no
-	// stopLostSandbox, no lost event.
-	if !canLose {
-		busy, state := l.busy, l.State
-		s.store.mu.Unlock()
-		s.log.Printf("undrain: not losing lease %s (state %s, busy=%v)", l.ID, state, busy)
-		return err, attempts, false
+	// A definitive but recoverable failure (a sandbox start that failed on
+	// a healthy orchestrator, repeated): do not lose an intact snapshot.
+	// Leave the lease suspended with reason resume_failed and Drained set,
+	// so the holder's next work call resumes it (resume-on-use) and the
+	// self-heal loop keeps retrying with backoff; a later admin undrain
+	// retries it too (spoond-638d).
+	s.markResumeFailed(l)
+	s.log.Printf("undrain: resume %s failed after %d attempt(s); leaving it suspended for resume-on-use: %v", l.ID, attempts, err)
+	return err, attempts, true
+}
+
+// markResumeFailed leaves a lease the undrain could not bring back
+// suspended with reason resume_failed, keeping its Drained flag so the
+// self-heal loop and a later undrain retry it and its snapshot intact for
+// the holder's next resume-on-use call (spoond-638d). Call without
+// s.store.mu held.
+func (s *Service) markResumeFailed(l *Lease) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if l.released {
+		return
 	}
-	l.Drained = false
-	s.markLost(l, reason)
-	s.store.mu.Unlock()
-	// Lost means stopped (spoond-63a): stop the half-started sandbox a
-	// failed resume left behind (the retry loop cleans it between
-	// attempts, but the last failure must stop it too).
-	s.stopLostSandbox(l.SandboxID, l.ID)
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseLost, reason)
-	// A lease started from a named snapshot no longer protects it once
-	// lost (#83 S5).
-	s.rerunSnapshotRetention(ctx, l)
-	s.log.Printf("undrain: resume %s failed after %d attempt(s): %v", l.ID, attempts, err)
-	return err, attempts, false
+	l.SuspendReason = suspendReasonResumeFailed
+	if l.SuspendBuildID == "" {
+		l.SuspendBuildID = l.ResumeBuildID
+	}
+	if l.SuspendedAt.IsZero() {
+		l.SuspendedAt = s.now()
+	}
+	s.saveLeaseLocked(l)
 }
 
 // startDrainHealLoop starts the drain self-heal loop (spoond-52c H3):

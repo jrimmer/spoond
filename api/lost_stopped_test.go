@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
@@ -25,6 +27,23 @@ func failCreateAfterStart(t *testing.T, sub *testSub, sandboxID string) {
 				return substrate.Sandbox{}, err
 			}
 			return substrate.Sandbox{}, errors.New("create failed after the VM started")
+		}
+		return sub.Fake.Create(ctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+}
+
+// failCreateAfterStartPermanent is failCreateAfterStart but reports a
+// permanent error (the build is gone), the only resume failure that still
+// loses a lease (spoond-638d).
+func failCreateAfterStartPermanent(t *testing.T, sub *testSub, sandboxID string) {
+	t.Helper()
+	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.SandboxID == sandboxID {
+			if _, err := sub.Fake.Create(ctx, req); err != nil {
+				return substrate.Sandbox{}, err
+			}
+			return substrate.Sandbox{}, fmt.Errorf("load build b-missing: %w", store.ErrNotFound)
 		}
 		return sub.Fake.Create(ctx, req)
 	}
@@ -67,9 +86,9 @@ func TestReconcileLostDeletesHalfStartedSandbox(t *testing.T) {
 	}
 }
 
-// TestUndrainLostDeletesHalfStartedSandbox: the final resume attempt of
-// an undrain fails after starting its VM; the lease goes lost and the
-// half-started sandbox is stopped.
+// TestUndrainLostDeletesHalfStartedSandbox: an undrain resume that fails
+// after starting its VM with a permanent error (the build is gone) loses
+// the lease and the half-started sandbox is stopped.
 func TestUndrainLostDeletesHalfStartedSandbox(t *testing.T) {
 	_, svc, _, sub := newAdminServer(t, "admin-tok")
 	ctx := context.Background()
@@ -79,7 +98,7 @@ func TestUndrainLostDeletesHalfStartedSandbox(t *testing.T) {
 	leases := grantAndDrain(t, svc, 1)
 	target := leases[0]
 	sandbox := target.SandboxID
-	failCreateAfterStart(t, sub, sandbox)
+	failCreateAfterStartPermanent(t, sub, sandbox)
 
 	res := svc.undrain(ctx)
 	if res.Resumed != 0 || len(res.Failed) != 1 {
@@ -90,6 +109,35 @@ func TestUndrainLostDeletesHalfStartedSandbox(t *testing.T) {
 	}
 	if sandboxOnFake(t, sub, sandbox) {
 		t.Fatalf("the half-started sandbox %s still runs after the lease went lost", sandbox)
+	}
+}
+
+// TestUndrainHalfStartedSandboxStoppedWhenSuspended: an undrain resume
+// that fails after starting its VM with a recoverable error leaves the
+// lease suspended with reason resume_failed; the half-started sandbox is
+// still stopped so the next resume-on-use can reuse the id (spoond-638d).
+func TestUndrainHalfStartedSandboxStoppedWhenSuspended(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	sandbox := target.SandboxID
+	failCreateAfterStart(t, sub, sandbox)
+
+	res := svc.undrain(ctx)
+	if res.Resumed != 0 || len(res.Failed) != 1 {
+		t.Fatalf("undrain = +%v, want one failure", res)
+	}
+	if target.State != "suspended" || !target.Drained {
+		t.Fatalf("lease state = %q drained = %v, want suspended and drained", target.State, target.Drained)
+	}
+	if target.SuspendReason != suspendReasonResumeFailed {
+		t.Fatalf("suspend_reason = %q, want %q", target.SuspendReason, suspendReasonResumeFailed)
+	}
+	if sandboxOnFake(t, sub, sandbox) {
+		t.Fatalf("the half-started sandbox %s still runs after the resume was deferred", sandbox)
 	}
 }
 
