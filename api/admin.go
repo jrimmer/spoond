@@ -545,6 +545,12 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease, acquire, rel
 		if undrainAdmissionRefusal(err) {
 			return err, attempt
 		}
+		// A permanent error is never indeterminate, even if its text happens
+		// to carry a transport marker: a missing image or build still loses
+		// the lease at once.
+		if permanentNotFound(err) {
+			return err, attempt
+		}
 		// An indeterminate orchestrator error never counts toward losing
 		// the lease: retry it for the whole window whatever the envd
 		// attempt budget has left (spoond-638d).
@@ -651,6 +657,11 @@ func (s *Service) undrain(ctx context.Context) undrainResult {
 	// the leases stay drained rather than lost.
 	if err := s.undrainReady(ctx); err != nil {
 		s.log.Printf("undrain: %v", err)
+		if ctx.Err() != nil {
+			// The caller went away: change nothing, the node stays
+			// draining and a retry can pick it up.
+			return res
+		}
 	}
 
 	// The check-and-clear runs under the write side of drainGate, so a

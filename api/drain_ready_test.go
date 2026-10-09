@@ -21,7 +21,7 @@ import (
 // shortUndrainReadiness shrinks the undrain's readiness wait and backoff
 // so a test drives the not-ready path without production pauses.
 func shortUndrainReadiness(svc *Service) {
-	svc.cfg.UndrainReadyTimeout = 2 * time.Second
+	svc.cfg.UndrainReadyTimeout = 500 * time.Millisecond
 	svc.undrainReadyPoll = 5 * time.Millisecond
 	svc.undrainBackoffMin = time.Millisecond
 	svc.undrainBackoffMax = 10 * time.Millisecond
@@ -235,6 +235,42 @@ func TestResumeOnUseAfterResumeFailed(t *testing.T) {
 	}
 }
 
+// TestUndrainNotReadyClassification pins what counts as an indeterminate
+// (never-lose) resume failure: a gRPC Unavailable code and the common
+// transport text are; a permanent not-found and an envd start error are
+// not. A permanent error is separated out even when its text carries a
+// marker, so it still loses the lease.
+func TestUndrainNotReadyClassification(t *testing.T) {
+	notReady := []error{
+		substrate.ErrUnavailable,
+		fmt.Errorf("rpc error: code = Unavailable desc = error reading from server: connection reset by peer"),
+		errors.New("connection reset by peer"),
+		errors.New("unexpected EOF"),
+		errors.New("transport is closing"),
+	}
+	for _, err := range notReady {
+		if !undrainNotReady(err) {
+			t.Errorf("undrainNotReady(%v) = false, want true", err)
+		}
+	}
+	ready := []error{
+		errors.New("failed to init envd: syncing took too long"),
+		fmt.Errorf("load build b: %w", store.ErrNotFound),
+		errQuotaExceeded,
+	}
+	for _, err := range ready {
+		if undrainNotReady(err) {
+			t.Errorf("undrainNotReady(%v) = true, want false", err)
+		}
+	}
+	// A permanent error with a transport-looking message is still not
+	// classified as not-ready: permanentNotFound is checked first in the
+	// retry loop.
+	if !permanentNotFound(fmt.Errorf("connection reset: %w", store.ErrNotFound)) {
+		t.Fatal("a wrapped not-found lost its permanence")
+	}
+}
+
 // TestUndrainReadyRequiresListNotJustNodeInfo: readiness is not met until
 // a List succeeds too. An orchestrator that answers NodeInfo but refuses
 // List has not accepted the sandbox service; resuming then would fail.
@@ -249,5 +285,22 @@ func TestUndrainReadyRequiresListNotJustNodeInfo(t *testing.T) {
 
 	if err := svc.undrainReady(context.Background()); err == nil {
 		t.Fatal("undrainReady succeeded with a failing List")
+	}
+}
+
+// TestUndrainReadyRequiresNodeInfo: a node that cannot even answer
+// NodeInfo is not ready either, and a node that answers again becomes
+// ready.
+func TestUndrainReadyRequiresNodeInfo(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	shortUndrainReadiness(svc)
+
+	sub.SetNodeInfo(substrate.NodeInfo{}, errors.New("node down"))
+	if err := svc.undrainReady(context.Background()); err == nil {
+		t.Fatal("undrainReady succeeded with a failing NodeInfo")
+	}
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy"}, nil)
+	if err := svc.undrainReady(context.Background()); err != nil {
+		t.Fatalf("undrainReady once the node answers: %v", err)
 	}
 }

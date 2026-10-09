@@ -147,10 +147,10 @@ type Lease struct {
 	SnapshotBuildID string `json:"-"`
 	// SuspendReason, SuspendPolicyStep, SuspendBuildID and SuspendedAt
 	// record an automatic suspend (#145 D6): reason is one of
-	// idle|idle_suspend|hold_lapsed|pressure|preempt, policy step is the
-	// pressure order's step name ("" until it names steps), the build is
-	// the pause build written and suspended_at is when. A hand or drain
-	// suspend carries none of them. Reported by the lease API as
+	// idle|idle_suspend|hold_lapsed|pressure|preempt|resume_failed, policy
+	// step is the pressure order's step name ("" until it names steps), the
+	// build is the pause build written and suspended_at is when. A hand or
+	// drain suspend carries none of them. Reported by the lease API as
 	// suspend_reason, suspend_policy_step, suspend_build_id and
 	// suspended_at; cleared on resume. Persisted (migration 0021).
 	SuspendReason     string    `json:"-"`
