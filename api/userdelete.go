@@ -41,6 +41,10 @@ const (
 	userDeleteStepListKeptBuilds = "list_kept_builds"
 	userDeleteStepUnpinBuilds    = "unpin_kept_builds"
 	userDeleteStepDropSnapshots  = "drop_named_snapshots"
+	// userDeleteStepOwnerState is not a cleanup step: it is the pre-check
+	// read of whether an unknown id still has state. A failure there is
+	// reported by the handler as a plain 500, never a 404 (spoond-y0jj).
+	userDeleteStepOwnerState = "read_owner_state"
 )
 
 // userDeleteStepError names the cleanup step whose store call failed. A
@@ -281,40 +285,55 @@ func mergeUnique(base, extra []string) []string {
 // kept build. handleUsersDelete uses it to tell a real (or half-cleaned)
 // user from an id that never existed, so an unknown id answers 404
 // instead of silently succeeding (spoond-q4j S2).
-func (s *Service) ownerHasState(ctx context.Context, owner string) bool {
+//
+// A store read that fails returns the error instead of false: false
+// means "read the store, found nothing", and a caller must not turn a
+// busy SQLite into a 404 that hides leftover rows. After a backend
+// restart a retry meets an unknown id that still owns a named snapshot,
+// so this read decides whether the retry cleans up or answers 404; the
+// handler answers 500 when it cannot read (spoond-y0jj).
+func (s *Service) ownerHasState(ctx context.Context, owner string) (bool, error) {
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
 			s.store.mu.Unlock()
-			return true
+			return true, nil
 		}
 	}
 	s.store.mu.Unlock()
+	if err := s.userDeleteStoreError(userDeleteStepOwnerState); err != nil {
+		s.log.Printf("user delete: read state of %s: %v", owner, err)
+		return false, err
+	}
 	if rows, err := s.db.ListLeases(ctx); err != nil {
 		s.log.Printf("user delete: list leases of %s: %v", owner, err)
+		return false, err
 	} else {
 		for _, r := range rows {
 			if r.Owner == owner {
-				return true
+				return true, nil
 			}
 		}
 	}
 	if rows, err := s.db.ListRunningJobsOfOwner(ctx, owner); err != nil {
 		s.log.Printf("user delete: list jobs of %s: %v", owner, err)
+		return false, err
 	} else if len(rows) > 0 {
-		return true
+		return true, nil
 	}
 	if n, err := s.db.CountNamedSnapshotNames(ctx, owner); err != nil {
 		s.log.Printf("user delete: count snapshots of %s: %v", owner, err)
+		return false, err
 	} else if n > 0 {
-		return true
+		return true, nil
 	}
 	if kept, err := s.db.ListKeptBuildsOfOwner(ctx, owner); err != nil {
 		s.log.Printf("user delete: list kept builds of %s: %v", owner, err)
+		return false, err
 	} else if len(kept) > 0 {
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 // legacyTokenOwner reports whether id is the owner of a legacy consumer
@@ -380,13 +399,25 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 	// proceeds; RemoveUser is idempotent so a retry after a partial
 	// cleanup works.
 	known := s.svc.identities != nil && s.svc.identities.UserByID(id) != nil
-	if !known && !s.svc.ownerHasState(ctx, id) {
+	if !known {
 		s.svc.ownerDeleteMu.Lock()
 		deleted := s.svc.deletedOwners[id]
 		s.svc.ownerDeleteMu.Unlock()
 		if !deleted {
-			writeError(w, http.StatusNotFound, "user not found")
-			return
+			has, err := s.svc.ownerHasState(ctx, id)
+			if err != nil {
+				// The store could not be read, so an id that never
+				// existed cannot be told from one whose cleanup was
+				// interrupted (after a restart the in-memory mark is
+				// gone). Answer 500 so the admin retries rather than
+				// believing a 404 that hides leftover rows (spoond-y0jj).
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("read state: %v", err))
+				return
+			}
+			if !has {
+				writeError(w, http.StatusNotFound, "user not found")
+				return
+			}
 		}
 	}
 	// Remove the identity first: once its token no longer resolves, no

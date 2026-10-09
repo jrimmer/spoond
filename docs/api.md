@@ -2056,6 +2056,14 @@ completes the cleanup: the identity is already gone and every step is
 idempotent, so the second call clears whatever rows the failed step left
 and answers `200` when nothing is left.
 
+A retry after a backend restart is the same, with one extra check: the
+in-memory deleted-owner mark is gone, so the delete first reads the
+store to tell an id that never existed (`404`) from a half-cleaned one
+the retry must finish. When that read itself fails — a busy SQLite —
+the delete answers `500` with `read state: …` rather than a `404` that
+would hide the leftover rows; retry once the store is readable
+(spoond-y0jj T2).
+
 ### `POST /api/users/{id}/quota` — set lease quota (admin only)
 
 Request `{"max_leases": N, "max_ttl": S, "max_kept_bytes": B,

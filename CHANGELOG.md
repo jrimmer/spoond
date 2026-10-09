@@ -102,7 +102,12 @@ summarised from README "Status".
   `"incomplete": true` and the failed `step` (`list_jobs`,
   `list_kept_builds`, `unpin_kept_builds` or `drop_named_snapshots`),
   while the other steps still run so the body lists what was removed; a
-  retry completes the cleanup. A create for an owner already marked
+  retry completes the cleanup. A retry after a backend restart also
+  survives a busy store: the in-memory deleted-owner mark is gone, so
+  the delete reads the store to tell a never-existed id (`404`) from a
+  half-cleaned one, and answers `500 read state: …` when that read
+  fails instead of a `404` that hides the leftover rows. A create for
+  an owner already marked
   deleted is now refused before its admission ticket parks, instead of
   waiting out a deadline the admission pass would only refuse at the
   end. `docs/api.md` also notes that the repeat-delete `200` holds only

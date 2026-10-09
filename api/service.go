@@ -764,9 +764,10 @@ type Service struct {
 	// window (G2). Nil in production.
 	restartBeforeRecheck func()
 	// userDeleteStoreErr, when set by a test, returns an error for a named
-	// user-delete cleanup store step (list_jobs, list_kept_builds,
-	// unpin_kept_builds or drop_named_snapshots), so a test can pin that
-	// the failed step answers an incomplete cleanup instead of a 200
+	// user-delete store read (list_jobs, list_kept_builds,
+	// unpin_kept_builds, drop_named_snapshots or the owner-state pre-check
+	// read_owner_state), so a test can pin that the failed read answers an
+	// incomplete cleanup (or a 500 pre-check) instead of a 200 or 404
 	// (spoond-y0jj). It is consulted once per step before the real store
 	// call. Nil in production.
 	userDeleteStoreErr func(step string) error
