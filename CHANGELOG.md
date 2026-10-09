@@ -114,6 +114,21 @@ summarised from README "Status".
   until a backend restart: the deleted-owner mark is in memory, so a
   repeat delete of a fully cleaned user answers `404` after a restart.
 
+- **An orchestrator stall no longer reports a sandbox as gone
+  (spoond-g077).** A failed substrate operation (an envd stream drop, an
+  exec error, a file-path failure) was mapped to `substrate.ErrNotFound`
+  whenever the orchestrator `List` call failed, so a stream drop during
+  an orchestrator stall became `404`/`410 lease_lost`. `410` is final for
+  clients: Honey treats it as gone with no confirming GET, and the runner
+  fails the job permanently. The e2b client now distinguishes *List
+  failed* (the sandbox's state is unknown) from *listed and absent*. On
+  unknown it retries `List` a bounded number of times with a short
+  backoff and then returns the new `substrate.ErrUnavailable`; the API
+  answers **`503` with `Retry-After: 5` and code `substrate_unavailable`**
+  (a retryable answer) and **never marks the lease lost**. A confirmed
+  absence is unchanged: `410 lease_lost` on exec/stream/dial and `404`
+  on files. See [docs/api.md](docs/api.md).
+
 - **A queued create no longer stalls for a full tick when a wake-up
   arrives while an admission pass is already running (spoond-vbdj).** A
   release (or pause, preemption, quota change) credited capacity to a
