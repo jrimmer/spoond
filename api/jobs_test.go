@@ -750,18 +750,23 @@ func TestJobsCrossConsumerDenied(t *testing.T) {
 	}
 }
 
-// TestJobStartOnSuspendedLease: a background exec on a suspended lease is
-// 409, like exec.
-func TestJobStartOnSuspendedLease(t *testing.T) {
+// TestJobStartOnSuspendedResumes: a background exec on a hand-suspended
+// lease resumes it on use (#145 D2) and starts the job, instead of the
+// old 409 lease_suspended.
+func TestJobStartOnSuspendedResumes(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("suspended background exec = %d, want 409", resp.StatusCode)
+	l := svc.lookupAny(id)
+	resp, out := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
+	if resp.StatusCode == http.StatusConflict {
+		t.Fatalf("suspended background exec answered 409; it must resume on use: %v", out)
+	}
+	if l.Suspended {
+		t.Fatalf("the background exec did not resume the lease: %v", out)
 	}
 }
 

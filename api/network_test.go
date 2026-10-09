@@ -249,8 +249,8 @@ func TestNetworkRoute(t *testing.T) {
 		}
 		resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-a",
 			map[string]any{"network_policy": "lan"})
-		if resp.StatusCode != http.StatusConflict {
-			t.Fatalf("status %d, want 409", resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d, want 200 (a network change resumes on use)", resp.StatusCode)
 		}
 		// Resume via the API to leave the lease live again.
 		resp, _ = doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/resume", "token-a", nil)

@@ -770,7 +770,8 @@ func TestIdleSuspendedStaleRelease(t *testing.T) {
 // TestIdleSuspendExecAutoResumes: exec on a lease suspended by
 // idle_suspend resumes it through the normal path and serves the call,
 // keeping /dev/shm; the generation does not change. An exec on a lease
-// suspended by hand still answers 409.
+// suspended by hand resumes it too (#145 D2, one rule for every kind of
+// suspend).
 func TestIdleSuspendExecAutoResumes(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
 	ctx := context.Background()
@@ -821,8 +822,8 @@ func TestIdleSuspendExecAutoResumes(t *testing.T) {
 		t.Fatalf("/dev/shm marker after auto-resume = %q (%v), want kept", got, err)
 	}
 
-	// A lease suspended by hand (no idle_suspend action) still answers
-	// 409.
+	// A lease suspended by hand resumes on its next exec too (#145 D2):
+	// every suspend reason shares the one resume-on-use rule.
 	manual, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant manual: %v", err)
@@ -832,8 +833,11 @@ func TestIdleSuspendExecAutoResumes(t *testing.T) {
 	}
 	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+manual.ID+"/exec", "token-a",
 		map[string]any{"cmd": "echo hi"})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("exec on hand-suspended lease: %d, want 409: %v", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("exec on hand-suspended lease: %d, want 200 (resume on use): %v", resp.StatusCode, body)
+	}
+	if manual.Suspended || !manual.live() {
+		t.Fatalf("hand-suspended lease not resumed by exec: state=%s suspended=%v", manual.State, manual.Suspended)
 	}
 }
 
@@ -931,9 +935,10 @@ func TestIdleSuspendExecResumeRefusalBurst(t *testing.T) {
 }
 
 // TestIdleSuspendStaleMarkerDoesNotResume: a lease once idle-suspended,
-// resumed by use and later suspended by hand, or drained, keeps the
-// stale idle_suspend LastAction; its next exec must answer 409 like any
-// other suspended lease instead of resuming it.
+// resumed by use and later suspended by hand is resumed by its next exec
+// through the same one resume-on-use rule, whatever stale idle_suspend
+// LastAction it kept (#145 D2). A drained lease carrying the marker is
+// not specially handled either.
 func TestIdleSuspendStaleMarkerDoesNotResume(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	ctx := context.Background()
@@ -948,35 +953,24 @@ func TestIdleSuspendStaleMarkerDoesNotResume(t *testing.T) {
 	l.LastActive = time.Now().Add(-2 * time.Minute)
 	svc.store.mu.Unlock()
 	svc.suspendIdleLeases(ctx, time.Now())
-	if !svc.isIdleSuspended(l) {
+	if !l.Suspended {
 		t.Fatal("setup: the lease was not idle-suspended")
 	}
 	// Use resumes it.
 	if _, err := svc.resumeLease(ctx, l); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	// Suspended by hand: the stale marker must not count.
+	// Suspended by hand: the stale marker must not count, and this exec
+	// resumes it through the same one rule (#145 D2).
 	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
 		t.Fatalf("hand suspend: %v", err)
 	}
-	if svc.isIdleSuspended(l) {
-		t.Fatal("a hand-suspended lease reads as idle-suspended through a stale marker")
-	}
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a",
 		map[string]any{"cmd": "echo hi"})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("exec on a hand-suspended lease = %d, want 409: %v", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("exec on a hand-suspended lease = %d, want 200 (resume on use): %v", resp.StatusCode, body)
 	}
-
-	// A drained lease carrying the marker is not idle-suspended either.
-	svc.store.mu.Lock()
-	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
-	l.LastActionAt = time.Now()
-	l.LastActive = l.LastActionAt.Add(-time.Minute)
-	l.Drained = true
-	ok := idleSuspended(l)
-	svc.store.mu.Unlock()
-	if ok {
-		t.Fatal("a drained lease reads as idle-suspended")
+	if l.Suspended || !l.live() {
+		t.Fatalf("hand-suspended lease not resumed: state=%s suspended=%v", l.State, l.Suspended)
 	}
 }

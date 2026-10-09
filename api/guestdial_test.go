@@ -233,7 +233,7 @@ func TestGuestDialNotFoundForOtherOwner(t *testing.T) {
 		t.Fatalf("cross-owner dial = %d, want 404", resp.StatusCode)
 	}
 }
-func TestGuestDialSuspendedConflict(t *testing.T) {
+func TestGuestDialSuspendedResumes(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	host, port := newEchoServer(t)
 
@@ -245,11 +245,19 @@ func TestGuestDialSuspendedConflict(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("suspend = %d", resp.StatusCode)
 	}
+	l := svc.lookupAny(id)
 
+	// The dial resumes the suspended lease on use (#145 D2); it never
+	// answers 409 lease_suspended. The resume resets HostIP to the fake
+	// sandbox's address, so the dial itself may fail later (that is not
+	// a suspend refusal).
 	if _, resp, err := dialGuest(t, ts, id, port, "token-a"); err == nil {
-		t.Fatal("suspended lease dial succeeded, want 409")
-	} else if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("suspended dial = %d, want 409", resp.StatusCode)
+		t.Fatal("dial succeeded, want the post-resume dial to fail on the fake address")
+	} else if resp.StatusCode == http.StatusConflict {
+		t.Fatalf("suspended dial = %d, want no 409: a suspended lease resumes on dial", resp.StatusCode)
+	}
+	if l.Suspended {
+		t.Fatal("the dial did not resume the suspended lease")
 	}
 }
 

@@ -430,7 +430,12 @@ func TestFilesAdminAccess(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestFilesSuspendedConflict(t *testing.T) {
+// TestFilesSuspendedResumes: every file route on a hand-suspended lease
+// resumes it on use (#145 D2), so none answers 409 lease_suspended any
+// more. With the fake sandbox back, the operations succeed or fail on
+// their own merits (a missing file is 404, which is not a suspend
+// refusal).
+func TestFilesSuspendedResumes(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	ctx := context.Background()
 	id, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil, "", "", nil)
@@ -447,10 +452,13 @@ func TestFilesSuspendedConflict(t *testing.T) {
 			query = "op=mkdir"
 		}
 		resp := filesDo(t, method, filesURL(ts, id.ID, "/f.txt", query), "token-a", "x")
-		if resp.StatusCode != 409 {
-			t.Fatalf("%s on suspended lease: %d %s", method, resp.StatusCode, filesBody(t, resp))
+		body := filesBody(t, resp)
+		if resp.StatusCode == http.StatusConflict && strings.Contains(body, "lease_suspended") {
+			t.Fatalf("%s on a suspended lease answered 409 lease_suspended; every file route resumes on use: %s", method, body)
 		}
-		resp.Body.Close()
+		if id.Suspended {
+			t.Fatalf("%s did not resume the lease: %s", method, body)
+		}
 	}
 }
 

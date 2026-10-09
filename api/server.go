@@ -1579,16 +1579,29 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "network_policy must be none|lan|internet|restricted")
 		return
 	}
+	// A suspended lease has no running sandbox to update, so it resumes
+	// on this work call (#145 D2) through the normal resume path. A
+	// refused resume answers capacity_wait/quota/lease_busy.
+	lease := s.svc.lookup(owner, id)
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	if !s.ensureRunning(w, r, lease) {
+		return
+	}
 	lease, err := s.svc.setNetwork(r.Context(), owner, id, req.NetPolicy, req.NetAllow)
 	if err != nil {
 		if writeLeaseLostErr(w, err) {
 			return
 		}
-		switch err {
-		case errNotFound:
+		switch {
+		case errors.Is(err, errNotFound):
 			writeError(w, http.StatusNotFound, "lease not found")
-		case errSuspended:
-			s.writeLeaseSuspendedID(w, id)
+		case errors.Is(err, errSuspended):
+			// A suspend raced the resume: the lease is busy with it now,
+			// so answer the retryable lease_busy, never lease_suspended.
+			writeErrorCode(w, http.StatusConflict, "lease_busy", "lease is busy; retry")
 		default:
 			s.svc.log.Printf("network %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "network update failed")
@@ -1896,8 +1909,8 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureLive(w, lease) {
 		return
 	}
-	if lease.Suspended {
-		writeLeaseSuspended(w, s.svc.leaseSuspendReason(id))
+	// A prompt is work: a suspended lease resumes on it (#145 D2).
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	model := req.Model

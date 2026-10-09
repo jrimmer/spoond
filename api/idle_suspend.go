@@ -126,24 +126,6 @@ func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 	s.store.mu.Unlock()
 }
 
-// idleSuspended reports whether l is suspended by the idle_suspend rule
-// and only that — a lease the resume queue preempted, one suspended
-// by hand or the drain, or one whose resume/checkpoint is in flight is
-// not. Call with s.store.mu held.
-func idleSuspended(l *Lease) bool {
-	// Every pause records its own LastAction (pauseLeaseBody), so the
-	// idle_suspend marker here always describes the current suspension.
-	return l.Suspended && !l.busy && !l.Drained && l.PreemptedAt.IsZero() &&
-		l.LastAction == idleSuspendRule+"/"+heldActionSuspendIdle
-}
-
-// isIdleSuspended is idleSuspended with the lock taken.
-func (s *Service) isIdleSuspended(l *Lease) bool {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	return idleSuspended(l)
-}
-
 // ensureRunning serves the next work call on a suspended lease: it
 // resumes the lease through the normal resume path (admission, class and
 // quota apply) and then lets the caller serve. Every suspension resumes
