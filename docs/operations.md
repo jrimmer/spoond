@@ -963,12 +963,18 @@ queue (#129) holds the create open instead of refusing it at once. A
 `503` from the create — the node is full, draining, or above the burst
 reserve — is **never** a job failure: the runner logs the wait and
 retries after the response's `Retry-After` (or 30 s) until it is
-admitted. `RUNNER_JOB_TIMEOUT` (duration or seconds, default `0`)
-bounds the whole job so a wait cannot pin a worker forever, and a job's
-own `timeout-minutes` is the tighter bound when set; a job that
-ran out of time is reported cancelled. The lease client's own HTTP
-timeout grows to cover the admission wait, so a queued create is not cut
-by the client.
+admitted. While a create waits it sends a `Sink.Keepalive` every
+minute and one `waiting for capacity on spoond (N s)` log row at the
+start and every few minutes, so Forgejo does not reap the silent task.
+`RUNNER_JOB_TIMEOUT` (duration or seconds, default `6h`) bounds the
+whole job so a wait cannot pin a worker forever, and a job's own
+`timeout-minutes` is the tighter bound when set; a job that ran out of
+time is reported cancelled. A job still waiting for a sandbox when the
+runner drains is cancelled at once (no `RUNNER_STOP_GRACE`), and one
+granted a lease in the moment its client disappears is released with
+reason `client_gone` instead of leaking until its TTL. The lease
+client's own HTTP timeout grows to cover the admission wait, so a
+queued create is not cut by the client.
 
 **Orphan sweep at start.** When the runner starts it lists its token's
 leases and deletes every one whose comment starts with `forgejo job ` —

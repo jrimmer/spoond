@@ -865,6 +865,153 @@ jobs:
 	}
 }
 
+// keepaliveSink counts Keepalive calls and records log rows.
+type keepaliveSink struct {
+	fakeSink
+	mu         sync.Mutex
+	keepalives int
+}
+
+func (s *keepaliveSink) Keepalive(ctx context.Context, jobID int64) error {
+	s.mu.Lock()
+	s.keepalives++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *keepaliveSink) keepaliveCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.keepalives
+}
+
+// TestExecutorCreateWaitSendsKeepalives (H1): a create that waits for
+// capacity longer than the keepalive interval pings the sink (Forgejo
+// reaps a silent task after ~13 min) and writes a "waiting for
+// capacity" log row. Removing the wait-time keepalive fails this test.
+func TestExecutorCreateWaitSendsKeepalives(t *testing.T) {
+	lease := &blockingCreateLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+	sink := &keepaliveSink{}
+	exec := &Executor{
+		Sandbox:                 lease,
+		Sink:                    sink,
+		Labels:                  map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage:            "py-base",
+		TTL:                     600,
+		CreateKeepaliveInterval: 20 * time.Millisecond,
+		CreateLogInterval:       20 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Run(ctx, testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"))
+	}()
+	<-lease.started
+
+	// Wait for at least two keepalives: one proves the goroutine runs,
+	// two that it repeats on the interval.
+	deadline := time.Now().Add(2 * time.Second)
+	for sink.keepaliveCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := sink.keepaliveCount(); got < 2 {
+		cancel()
+		<-done
+		t.Fatalf("keepalives during the create wait = %d, want >= 2", got)
+	}
+	cancel()
+	<-done
+
+	var sawWaitRow bool
+	for _, l := range sink.logs {
+		if strings.Contains(l, "waiting for capacity on spoond") {
+			sawWaitRow = true
+		}
+	}
+	if !sawWaitRow {
+		t.Fatalf("no waiting-for-capacity log row during the create wait; logs: %v", sink.logs)
+	}
+}
+
+// TestExecutorCreateAdmittedAtOnceSendsNoWaitRows: a create that is
+// admitted immediately sends no keepalive and no waiting row — the wait
+// machinery only engages on a real wait.
+func TestExecutorCreateAdmittedAtOnceSendsNoWaitRows(t *testing.T) {
+	sink := &keepaliveSink{}
+	exec := &Executor{
+		Sandbox:                 newFakeLease(),
+		Sink:                    sink,
+		Labels:                  map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage:            "py-base",
+		TTL:                     600,
+		CreateKeepaliveInterval: 20 * time.Millisecond,
+		CreateLogInterval:       20 * time.Millisecond,
+	}
+	if err := exec.Run(context.Background(), testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := sink.keepaliveCount(); got != 0 {
+		t.Fatalf("keepalives for an immediate create = %d, want 0", got)
+	}
+	for _, l := range sink.logs {
+		if strings.Contains(l, "waiting for capacity") {
+			t.Fatalf("waiting row for an immediate create: %q", l)
+		}
+	}
+}
+
+// TestParseWorkflowTimeoutMinutesLenient (M1): timeout-minutes accepts
+// an int or a float and ignores anything else (an expression, a string)
+// with one log line, instead of failing the whole workflow parse.
+func TestParseWorkflowTimeoutMinutesLenient(t *testing.T) {
+	cases := []struct {
+		value string
+		want  float64
+	}{
+		{"5", 5},
+		{"1.5", 1.5},
+		{"${{ matrix.t }}", 0},
+		{`"45"`, 0},
+		{"true", 0},
+	}
+	for _, c := range cases {
+		payload := "jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: " + c.value + "\n    steps:\n      - run: echo hi\n"
+		wf, err := ParseWorkflow([]byte(payload))
+		if err != nil {
+			t.Fatalf("timeout-minutes: %s failed the whole parse: %v", c.value, err)
+		}
+		job := wf.Jobs["build"]
+		if job == nil {
+			t.Fatalf("timeout-minutes: %s: no build job", c.value)
+		}
+		if got := float64(job.TimeoutMinutes); got != c.want {
+			t.Fatalf("timeout-minutes: %s parsed as %v, want %v", c.value, got, c.want)
+		}
+	}
+}
+
+// TestExecutorTimeoutMinutesExpressionDoesNotBound (M1): a workflow
+// whose timeout-minutes is an expression still runs (the old int field
+// failed the parse); no job bound is taken from the ignored value.
+func TestExecutorTimeoutMinutesExpressionDoesNotBound(t *testing.T) {
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      newFakeLease(),
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	job := testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: ${{ matrix.t }}\n    steps:\n      - run: echo hi\n")
+	if err := exec.Run(context.Background(), job); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sink.reports) != 1 || sink.reports[0].Result != ResultSuccess {
+		t.Fatalf("reports = %+v, want one success", sink.reports)
+	}
+}
+
 // blockingCreateLease blocks its Create until ctx ends: a create queued
 // on a full node (#129) the client is waiting out.
 type blockingCreateLease struct {
@@ -956,7 +1103,7 @@ func TestExecutorJobTimeoutMinutesBoundsCreateWait(t *testing.T) {
 func TestEffectiveJobTimeoutPicksTighter(t *testing.T) {
 	cases := []struct {
 		host time.Duration
-		mins int
+		mins TimeoutMinutes
 		want time.Duration
 	}{
 		{0, 0, 0},
@@ -969,7 +1116,7 @@ func TestEffectiveJobTimeoutPicksTighter(t *testing.T) {
 	for _, c := range cases {
 		e := &Executor{JobTimeout: c.host}
 		if got := e.effectiveJobTimeout(&WorkflowJob{TimeoutMinutes: c.mins}); got != c.want {
-			t.Errorf("effectiveJobTimeout(host=%s, mins=%d) = %s, want %s", c.host, c.mins, got, c.want)
+			t.Errorf("effectiveJobTimeout(host=%s, mins=%v) = %s, want %s", c.host, float64(c.mins), got, c.want)
 		}
 	}
 }

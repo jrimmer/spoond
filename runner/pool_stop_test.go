@@ -486,3 +486,70 @@ func TestStartSweepErrorIsNotFatal(t *testing.T) {
 	}
 	p.Stop()
 }
+
+// createWaitWorker is a RunnerWorker whose Run blocks in the create
+// wait: it reports waiting=true to the pool's notifier and stays there
+// until its context dies — a job that has no sandbox yet when a
+// shutdown arrives (L3).
+type createWaitWorker struct {
+	drainingWorker
+	notify    func(bool)
+	waiting   chan struct{}
+	createBeg chan struct{}
+}
+
+func newCreateWaitWorker() *createWaitWorker {
+	return &createWaitWorker{waiting: make(chan struct{}), createBeg: make(chan struct{})}
+}
+
+func (w *createWaitWorker) SetCreateWaitNotifier(fn func(bool)) { w.notify = fn }
+
+func (w *createWaitWorker) Run(ctx context.Context, job *Job) error {
+	if w.notify != nil {
+		w.notify(true)
+	}
+	close(w.createBeg)
+	<-ctx.Done()
+	if w.notify != nil {
+		w.notify(false)
+	}
+	w.mu.Lock()
+	w.cancel = true
+	w.releases = append(w.releases, "no-lease")
+	w.mu.Unlock()
+	return ctx.Err()
+}
+
+// TestStopCancelsJobWaitingInCreate (L3): a job still waiting in Create
+// for a sandbox is cancelled at once on Stop — it has no sandbox and no
+// work to finish, so the drain must not spend RUNNER_STOP_GRACE on it.
+func TestStopCancelsJobWaitingInCreate(t *testing.T) {
+	w := newCreateWaitWorker()
+	w.setBusy(true)
+	var sw fakeSweeper
+	p := NewRunnerPool(PoolConfig{
+		Floor:        1,
+		Max:          1,
+		PollInterval: 10 * time.Millisecond,
+		StopGrace:    5 * time.Second, // would stall the test if it were honoured
+		Leases:       &sw,
+	}, func() RunnerWorker { return w }, "r", "tok", []string{"spoond"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+
+	select {
+	case <-w.createBeg:
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never reached the create wait")
+	}
+
+	start := time.Now()
+	p.Stop()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Stop took %s; a create-waiting job must not spend the grace", elapsed)
+	}
+	if !w.wasCancelled() {
+		t.Fatal("the create-waiting job was not cancelled")
+	}
+}

@@ -70,6 +70,13 @@ func (w *WorkerImpl) Run(ctx context.Context, job *Job) error {
 	return w.Exec.Run(ctx, job)
 }
 
+// SetCreateWaitNotifier wires the executor's create-wait callback (L3):
+// the pool calls it on a fresh worker to learn when a job is waiting for
+// a sandbox, so a shutdown can cancel it without the grace.
+func (w *WorkerImpl) SetCreateWaitNotifier(fn func(bool)) {
+	w.Exec.OnCreateWait = fn
+}
+
 // PoolConfig configures the adaptive runner pool.
 type PoolConfig struct {
 	Floor     int // minimum registered runners (always kept)
@@ -266,6 +273,12 @@ type worker struct {
 	state     workerState
 	idleSince time.Time
 
+	// createWait is true while the worker's job is blocked in Create
+	// waiting for a sandbox (L3). The pool's Stop cancels such a job at
+	// once: it has no sandbox and no work to finish, so there is no grace
+	// to spend. Guarded by mu.
+	createWait bool
+
 	// cancelJob cancels the job-run context run derives per job (nil
 	// while no job is being set up); done is closed when the worker loop
 	// exits. Both are guarded by mu. The pool's Stop cancels job runs
@@ -290,6 +303,22 @@ func (w *worker) snapshot() (workerState, time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.state, w.idleSince
+}
+
+// setCreateWait records whether the worker's job is currently waiting in
+// Create for a sandbox (L3).
+func (w *worker) setCreateWait(waiting bool) {
+	w.mu.Lock()
+	w.createWait = waiting
+	w.mu.Unlock()
+}
+
+// createWaiting reports whether the worker's job is waiting in Create
+// for a sandbox (L3).
+func (w *worker) createWaiting() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.createWait
 }
 
 // run is the worker's main loop. It registers once (or restores
@@ -386,6 +415,7 @@ func (w *worker) run(ctx context.Context, stop <-chan struct{}, jobs *jobContext
 		w.mu.Unlock()
 		runErr := w.impl.Run(jobCtx, job)
 		cancel()
+		w.setCreateWait(false)
 		w.mu.Lock()
 		w.cancelJob = nil
 		w.mu.Unlock()
@@ -542,6 +572,11 @@ func (p *RunnerPool) Stop() {
 		if p.cfg.StopGrace > 0 {
 			log.Printf("pool: draining, waiting up to %s for running jobs", p.cfg.StopGrace)
 		}
+		// A job that has not obtained its sandbox yet (still waiting in
+		// Create for capacity) has no work to finish: cancel it at once
+		// (L3), so the drain does not spend RUNNER_STOP_GRACE on it. A
+		// job running steps keeps the existing grace.
+		p.cancelWaitingJobs()
 		for {
 			p.mu.Lock()
 			busy := 0
@@ -555,6 +590,9 @@ func (p *RunnerPool) Stop() {
 				break
 			}
 			if p.cfg.StopGrace >= 0 && time.Now().Before(deadline) {
+				// A job may enter its create wait while another finishes;
+				// cancel it too rather than letting it wait out the grace.
+				p.cancelWaitingJobs()
 				time.Sleep(20 * time.Millisecond)
 				continue
 			}
@@ -596,6 +634,30 @@ func (p *RunnerPool) Stop() {
 		wg.Wait()
 		log.Printf("pool: stopped")
 	})
+}
+
+// cancelWaitingJobs cancels every worker job that is still waiting in
+// Create for a sandbox (L3). Such a job has no sandbox and no work to
+// finish, so a shutdown must not spend RUNNER_STOP_GRACE on it; the
+// executor's Create returns the cancellation and reports the job
+// cancelled. Jobs running steps are left for the grace.
+func (p *RunnerPool) cancelWaitingJobs() {
+	p.mu.Lock()
+	workers := make([]*worker, 0, len(p.workers))
+	for _, w := range p.workers {
+		workers = append(workers, w)
+	}
+	p.mu.Unlock()
+	for _, w := range workers {
+		w.mu.Lock()
+		waiting := w.createWait
+		cancel := w.cancelJob
+		w.mu.Unlock()
+		if waiting && cancel != nil {
+			log.Printf("pool: cancelling worker %d's job while it waits for a sandbox", w.id)
+			cancel()
+		}
+	}
 }
 
 // Start cleans up stale runners, releases the previous process's
@@ -656,6 +718,11 @@ func (p *RunnerPool) spawn(ctx context.Context) *worker {
 		state:     workerIdle,
 		idleSince: time.Now(),
 		done:      make(chan struct{}),
+	}
+	// Let the worker's executor report create waits, so Stop can cancel a
+	// still-waiting job without the grace (L3).
+	if r, ok := w.impl.(CreateWaitReporter); ok {
+		r.SetCreateWaitNotifier(w.setCreateWait)
 	}
 	p.nextID++
 	p.workers[w.id] = w

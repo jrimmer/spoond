@@ -185,16 +185,29 @@ summarised from README "Status".
   create now sends `"wait": RUNNER_ADMIT_WAIT_SECS` (default `900`,
   `0` = no wait) and a `503` is never a job failure: the runner logs
   the wait and retries per the response's `Retry-After` (or 30 s)
-  until the create is admitted or the job's own timeout ends.
-  `RUNNER_JOB_TIMEOUT` (duration or seconds, default `0`) bounds the
-  whole job so a waiting create cannot pin a worker forever; a job's
-  own `timeout-minutes` is the tighter bound when set, and a job that
-  ran out of time is reported cancelled. The lease
+  until the create is admitted or the job's own timeout ends. While a
+  create waits it sends `Sink.Keepalive` every minute and a
+  `waiting for capacity on spoond (N s)` log row, so Forgejo does not
+  reap the silent task. `RUNNER_JOB_TIMEOUT` (duration or seconds,
+  default `6h`) bounds the whole job so a wait cannot pin a worker
+  forever; a job's own `timeout-minutes` is the tighter bound when
+  set, and a job that ran out of time is reported cancelled. The lease
   client's HTTP timeout grows to cover the admission wait. A plain
   `503 capacity: …` refusal now also carries a `Retry-After: 30` like
   the burst-reserve and preempt ones, so a client that sent no `wait`
-  still knows when to come back. See
-  [docs/operations.md](docs/operations.md).
+  still knows when to come back. A job granted a lease in the moment
+  its client disappears is released (`client_gone`) instead of leaking
+  until its TTL, and a job still waiting for a sandbox when the runner
+  drains is cancelled at once instead of spending `RUNNER_STOP_GRACE`.
+  See [docs/operations.md](docs/operations.md).
+
+- **`timeout-minutes` is enforced (spoond-r739).** A job that runs
+  past its own `timeout-minutes` is cut and reported cancelled,
+  matching GitHub. The field parses leniently: a number (integer or
+  fractional) is honoured, an expression or string (e.g.
+  `timeout-minutes: ${{ matrix.t }}`) is ignored with one log line
+  instead of failing the whole workflow. Known users: the hrmny
+  `e2e-live.yml` live job (75) and `ci.yml` (45/45/20).
 
 - **A user delete that cannot finish now says so (spoond-y0jj).** When a
   cleanup store step failed — listing a user's running jobs or kept

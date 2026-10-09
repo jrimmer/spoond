@@ -15,6 +15,12 @@ import (
 // Executor runs a job in a sandbox. It depends only on the ports
 // (SandboxProvider, JobSink) and is transport-agnostic: the same core
 // drives a Forgejo task, an exe.dev harness, or a pi/code-harness job.
+// DefaultJobTimeout is the default RUNNER_JOB_TIMEOUT (L4): a job that
+// cannot get a sandbox — a node answering 503 forever — is cut at 6h
+// instead of pinning a worker indefinitely. A job's own timeout-minutes
+// is the tighter bound when set; RUNNER_JOB_TIMEOUT=0 disables it.
+const DefaultJobTimeout = 6 * time.Hour
+
 type Executor struct {
 	Sandbox SandboxProvider
 	Sink    JobSink
@@ -46,6 +52,23 @@ type Executor struct {
 	// RecordDir is where failed jobs are recorded as JSON (one file per
 	// job). Empty disables recording. Set via JOB_RECORD_DIR.
 	RecordDir string
+	// CreateKeepaliveInterval is how often a create that is still waiting
+	// for a sandbox pings the job sink (H1). Forgejo declares a silent
+	// task failed after ~13 min, and admission waits plus capacity
+	// retries can outlast that; a keepalive during the wait keeps the
+	// task alive. Defaults to 60s. Non-positive disables the ping (used
+	// by tests).
+	CreateKeepaliveInterval time.Duration
+	// CreateLogInterval is how often a waiting create writes a
+	// "waiting for capacity" log row (H1): one at the start of the wait
+	// and one every interval. Defaults to 3m.
+	CreateLogInterval time.Duration
+	// OnCreateWait, when set, is called true the moment Create starts a
+	// wait for a sandbox and false when it returns (L3). The pool uses it
+	// to cancel a still-waiting job at once on a shutdown instead of
+	// spending RUNNER_STOP_GRACE: there is no sandbox and no work to
+	// finish. It is called from the job's goroutine.
+	OnCreateWait func(waiting bool)
 	// ForgejoURL is the Forgejo instance base URL (e.g.
 	// https://code.example.com). When set, the lease the job runs in is
 	// labelled with the job (#119): its comment is
@@ -100,7 +123,21 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	}
 
 	image := e.imageFor(wfJob)
+	// A create can wait a long time: the admission queue (#129) holds it
+	// for up to RUNNER_ADMIT_WAIT_SECS and a capacity 503 is retried
+	// until the job's timeout. Forgejo declares a silent task failed
+	// after ~13 min, so ping the sink and write a "waiting for capacity"
+	// row while the create waits (H1). The goroutine stops when the
+	// create returns; its start is the waiter's first wait, so a create
+	// that is admitted at once never logs or pings.
+	created := make(chan struct{})
+	waitDone := make(chan int64, 1)
+	go func() { waitDone <- e.keepaliveWhileWaiting(ctx, job, created) }()
+	e.setCreateWait(true)
 	sandboxID, err := e.Sandbox.Create(ctx, image, e.TTL)
+	e.setCreateWait(false)
+	close(created)
+	createLogRows := <-waitDone
 	if err != nil {
 		if ctx.Err() != nil {
 			// The job's context died while waiting for a sandbox — the
@@ -150,7 +187,9 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	// use the workspace as cwd once the repo is present there.
 	checkedOut := false
 
-	var logIndex int64
+	// The waiting create's log rows come first; the first step's rows
+	// continue after them.
+	var logIndex int64 = createLogRows
 	// The step that failed, with its output tail, held for the failure
 	// record — the sink streams logs to Forgejo and keeps nothing readable.
 	var failed *StepState
@@ -384,6 +423,61 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	return e.report(ctx, state, nil)
 }
 
+// setCreateWait reports a create wait to OnCreateWait when set.
+func (e *Executor) setCreateWait(waiting bool) {
+	if e.OnCreateWait != nil {
+		e.OnCreateWait(waiting)
+	}
+}
+
+// keepaliveWhileWaiting keeps the job alive while its create waits for
+// a sandbox (H1): a "waiting for capacity on spoond (N s)" log row at
+// the start of the wait and every CreateLogInterval, and a
+// Sink.Keepalive every CreateKeepaliveInterval. done is closed when
+// Create returns (admitted or failed), which stops the goroutine and
+// lets the caller number the waiting rows before the first step's. A
+// create admitted at once closes done before the first tick, so it
+// sends nothing. The context is the job's own: when it dies (graceful
+// stop or job timeout) the ping stops too. It returns the number of log
+// rows it wrote, so the executor can index later rows after them.
+func (e *Executor) keepaliveWhileWaiting(ctx context.Context, job *Job, done <-chan struct{}) int64 {
+	kaEvery := e.CreateKeepaliveInterval
+	if kaEvery <= 0 {
+		kaEvery = 60 * time.Second
+	}
+	logEvery := e.CreateLogInterval
+	if logEvery <= 0 {
+		logEvery = 3 * time.Minute
+	}
+	// The first row lands at the start of a real wait, but not before the
+	// create has had a moment to be admitted at once: a sub-second wait
+	// is not worth a job-log row.
+	startDelay := time.Second
+	if logEvery < startDelay {
+		startDelay = logEvery
+	}
+	start := time.Now()
+	logTimer := time.NewTimer(startDelay)
+	defer logTimer.Stop()
+	kaT := time.NewTicker(kaEvery)
+	defer kaT.Stop()
+	var rows int64
+	for {
+		select {
+		case <-ctx.Done():
+			return rows
+		case <-done:
+			return rows
+		case <-logTimer.C:
+			e.log(ctx, job, rows, fmt.Sprintf("waiting for capacity on spoond (%ds)", int(time.Since(start).Seconds())))
+			rows++
+			logTimer.Reset(logEvery)
+		case <-kaT.C:
+			_ = e.Sink.Keepalive(ctx, job.ID)
+		}
+	}
+}
+
 // reportTimeout bounds a final report made after the job's own context
 // died: the runner must not hang on a wedged sink while the shutdown
 // grace (and systemd's TimeoutStopSec) tick down.
@@ -432,7 +526,7 @@ func (e *Executor) runID(job *Job) int64 {
 func (e *Executor) effectiveJobTimeout(wfJob *WorkflowJob) time.Duration {
 	d := e.JobTimeout
 	if wfJob != nil && wfJob.TimeoutMinutes > 0 {
-		job := time.Duration(wfJob.TimeoutMinutes) * time.Minute
+		job := time.Duration(float64(wfJob.TimeoutMinutes) * float64(time.Minute))
 		if d <= 0 || job < d {
 			d = job
 		}
