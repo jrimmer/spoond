@@ -208,10 +208,12 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/network", s.handleNetwork)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/fork", s.handleFork)
-	// Sharing (T6/#33).
+	// Sharing (T6/#33): lease grants are listed at /api/shares/grants;
+	// /api/shares itself is the admin fair-share view (#145 FS1).
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/share", s.handleShareGrant)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/share/{grantee}", s.handleShareRevoke)
-	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
+	s.mux.HandleFunc("GET /api/shares/grants", s.handleShareList)
+	s.mux.HandleFunc("GET /api/shares", s.handleSharesList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
 	// Snapshot catalog (U11): list and delete the caller's builds.
@@ -281,6 +283,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	if s.svc.identities != nil {
 		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
 		s.mux.HandleFunc("GET /api/users/me", s.handleUsersMe)
+		// GET /api/users/{id} is the admin per-owner usage view (#145
+		// FS1); the literal "me" above wins over this wildcard.
+		s.mux.HandleFunc("GET /api/users/{id}", s.handleUserUsage)
 		s.mux.HandleFunc("GET /api/users/by-name/{name}", s.handleUsersByName)
 		s.mux.HandleFunc("GET /api/users/by-key", s.handleUsersByKey)
 		s.mux.HandleFunc("GET /api/identity-status", s.handleIdentityStatus)
@@ -289,6 +294,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.mux.HandleFunc("POST /api/users/{id}/llm-key", s.handleUsersLLMKey) // U8/T8
 		s.mux.HandleFunc("DELETE /api/users/{id}", s.handleUsersDelete)
 	}
+	// The caller's own fair-share usage (#145 FS1); available with or
+	// without an identity store (a legacy consumer token has an owner).
+	s.mux.HandleFunc("GET /api/usage", s.handleUsage)
 	if s.llm != nil {
 		// The LLM gateway is auth-exempt (lease id in path is the
 		// capability); it MUST be mounted on the outer handler after

@@ -93,13 +93,33 @@ func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
 
 // handleUsersMe returns the caller's own user record. Available to any
 // authenticated identity-store user (self-scoped, no directory leak).
+// It carries the caller's fair-share slice and usage (#145 FS1) beside
+// the user record.
 func (s *Server) handleUsersMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	if u == nil {
 		writeError(w, http.StatusNotFound, "no identity user for this token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
+	share, _ := s.svc.fairShareFor(r.Context(), u.ID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":  toUserView(u, s.svc.usedMiB(u.ID)),
+		"share": share,
+	})
+}
+
+// handleUsage is GET /api/usage: the caller's own fair-share slice and
+// usage (#145 FS1), self-scoped. A legacy consumer-token caller (no
+// identity row) still resolves to their token owner, so its usage view
+// is available too.
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	owner := ownerFrom(r.Context())
+	share, ok := s.svc.fairShareFor(r.Context(), owner)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no usage for this owner")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"share": share})
 }
 
 // handleUsersByName resolves a username to a minimal identity (id +
@@ -162,6 +182,8 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	// A new owner changes N and every owner's slice (#145 FS1).
+	s.svc.invalidateFairShares()
 	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
 }
 
