@@ -786,6 +786,17 @@ type Service struct {
 	// wakeScheduled guards against piling up wake-up passes: at most one
 	// queued-admission retry runs at a time.
 	wakeScheduled atomic.Bool
+	// wakePending records a wake-up that arrived while a pass was
+	// running. The running pass re-checks it before it finishes, so a
+	// release that credits room mid-pass is never lost to the periodic
+	// tick (#spoond-vbdj).
+	wakePending atomic.Bool
+	// admitPassHook, when set by a test, runs inside tryAdmitQueued each
+	// time a queued create is refused for want of room. It lets a test
+	// hold a pass mid-flight while it frees room and wakes, then release
+	// the pass and assert the wake is absorbed (spoond-vbdj). Nil in
+	// production.
+	admitPassHook func()
 
 	// snapshotLimiters paces every substrate memory-snapshot write
 	// (Pause and Checkpoint) process-wide (spoond-t1s). The default

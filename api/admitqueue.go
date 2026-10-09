@@ -356,6 +356,12 @@ func (s *Service) tryAdmitQueued(ctx context.Context) {
 			}
 		}
 		if t == nil {
+			// The pass has judged every queued ticket. A test may hold
+			// it here to free room and wake the queue, pinning that a
+			// wake arriving while a pass is finishing is not lost.
+			if s.admitPassHook != nil {
+				s.admitPassHook()
+			}
 			return
 		}
 		tried[t] = true
@@ -493,17 +499,54 @@ func (s *Service) drainQueue() {
 // wakeAdmissionQueue nudges a retry pass when tickets are waiting. It is
 // non-blocking: the pass runs on its own goroutine (at most one at a
 // time) so a release or a quota change never waits on a sandbox create.
+//
+// A wake that arrives while a pass is already running is never dropped:
+// A wake that arrives while a pass is already running is never dropped:
+// every call sets wakePending, and the running pass loops until a pass
+// completes with no wakePending left (scheduledWake). The pass releases
+// wakeScheduled with a compare-and-swap before it reads wakePending, so
+// a wake landing in that gap either still sees wakeScheduled set (sets
+// wakePending for the running pass) or sees it cleared and starts a
+// fresh pass itself; either way the wake starts or feeds a pass. This
+// closes the window where a release credited room while a pass had
+// judged the tickets full, which otherwise left the ticket stalled until
+// the next periodic tick (spoond-vbdj).
 func (s *Service) wakeAdmissionQueue() {
 	if s.queueDepth() == 0 {
 		return
 	}
+	s.wakePending.Store(true)
 	if !s.wakeScheduled.CompareAndSwap(false, true) {
 		return
 	}
-	go func() {
-		defer s.wakeScheduled.Store(false)
+	go s.scheduledWake()
+}
+
+// scheduledWake runs the wake-up passes for one scheduling. It owns the
+// wakeScheduled flag: tryAdmitQueued is looped until a full pass
+// completes with no wakePending set, i.e. until it has absorbed every
+// wake that arrived during it. It releases the flag with a CAS before
+// checking pending, so a wake that lands in the window between the pass
+// and the clear either observes the flag still set (and sets pending for
+// this loop to pick up) or observes it cleared (and starts a fresh pass
+// itself); either way no wake is lost.
+func (s *Service) scheduledWake() {
+	for {
+		s.wakePending.Store(false)
 		s.tryAdmitQueued(context.Background())
-	}()
+		if !s.wakeScheduled.CompareAndSwap(true, false) {
+			return // lost ownership; the owner that took it handles pending
+		}
+		if !s.wakePending.Load() {
+			return
+		}
+		// A wake arrived while the pass ran: it set pending but lost the
+		// CAS (it still saw wakeScheduled set). Take the flag again and
+		// run another pass. If someone else already took it, they will.
+		if !s.wakeScheduled.CompareAndSwap(false, true) {
+			return
+		}
+	}
 }
 
 // runAdmitQueueLoop retries the queue on a fixed tick (capacity can free

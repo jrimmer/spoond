@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -271,6 +272,62 @@ func TestAdmitWaitBurstReserveTimesOut(t *testing.T) {
 	}
 	if waited, _ := r.body["waited_ms"].(float64); waited < 900 {
 		t.Fatalf("waited_ms = %v, want >= 900", r.body["waited_ms"])
+	}
+}
+
+// TestAdmitWakeWhilePassRunning: a release that frees room while an
+// admission pass is already running must still be retried, even when no
+// periodic tick can help (spoond-vbdj). The old wake-up dropped the
+// release's wake because a pass held wakeScheduled, so the waiting
+// create sat until the next tick.
+func TestAdmitWakeWhilePassRunning(t *testing.T) {
+	_, h, svc, sub, _ := newAdmitServer(t)
+	fillers := fillTwo(t, h, sub, svc, "tok-1")
+	svc.admitQ.tick = time.Hour // no periodic rescue: only the wake can help
+
+	// Queue the waiting create and let its own initial pass finish, so
+	// the pass we hold below is the only one scheduled.
+	res := startCreate(t, h, context.Background(), "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
+	waitDepth(t, svc, 1)
+	deadline := time.Now().Add(3 * time.Second)
+	for svc.wakeScheduled.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if svc.wakeScheduled.Load() {
+		t.Fatal("initial wake-up pass did not finish")
+	}
+	// Drain any directly-invoked pass (waitForAdmission's own) too.
+	svc.admitQ.admitMu.Lock()
+	svc.admitQ.admitMu.Unlock()
+
+	// Hold the next pass right after it judges the queue full.
+	held := make(chan struct{})
+	releasePass := make(chan struct{})
+	var hold atomic.Bool
+	var once atomic.Bool
+	svc.admitPassHook = func() {
+		if !hold.Load() || !once.CompareAndSwap(false, true) {
+			return
+		}
+		close(held)
+		<-releasePass
+	}
+	hold.Store(true)
+	svc.wakeAdmissionQueue()
+	select {
+	case <-held:
+	case <-time.After(3 * time.Second):
+		t.Fatal("admission pass was not held")
+	}
+
+	// Free room while the pass is held, then let it finish: the release's
+	// wake must be absorbed and retried, not lost to the tick.
+	deleteLease(t, h, "tok-1", fillers[0])
+	close(releasePass)
+
+	r := waitResult(t, res)
+	if r.code != http.StatusCreated {
+		t.Fatalf("waiting create after a mid-pass wake = %d, want 201 (%v)", r.code, r.body)
 	}
 }
 
