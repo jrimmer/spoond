@@ -159,12 +159,12 @@ func notices(s Snapshot) []Notice {
 		out = append(out, Notice{ID: "disk", Severity: "bad",
 			Text: fmt.Sprintf("snapshot disk %.0f%% used - past the danger level", s.DiskUsedPct)})
 	}
-	// The disk I/O full pressure (PSI): a sustained stall, not a spike,
+	// The disk I/O stall pressure (PSI): a sustained stall, not a spike,
 	// is a system message. The bad level is configurable (default 15 %)
 	// and the text carries the 60 s average it tripped on.
 	if s.IOAvail && s.IOFull60 >= ioFullBadPct() {
 		out = append(out, Notice{ID: "io-pressure", Severity: "bad",
-			Text: fmt.Sprintf("disk i/o stalled: full pressure %.0f%% over 60 s", s.IOFull60)})
+			Text: fmt.Sprintf("disk i/o stalled %.0f%% of the last 60 s", s.IOFull60)})
 	}
 	if pct := keptDiskWarnPct(); pct > 0 && s.KeptDiskPct >= pct {
 		out = append(out, Notice{ID: "kept-disk", Severity: "warn",
@@ -727,7 +727,7 @@ const capacityMinRows = 4
 // swept line and the shares/users/builds line (dim). The per-image
 // rows are drawn separately, after a ┄ rule.
 func (l *layout) capacityRows() []capacityRow {
-	m := l.meterSegs("running", l.runningPct(), 75, 90, meterBarW)
+	m := l.meterSegs("running", l.runningPct(), 75, 90, meterBarW, false)
 	rows := []capacityRow{{segs: m, right: fmt.Sprintf("%d / %d", l.s.Running, l.s.Limit)}}
 
 	// Leases: total, then running (with its burst share in brackets,
@@ -1002,16 +1002,44 @@ func (l *layout) runningPct() float64 {
 // side and stacked alike, matching the mockup.
 const meterBarW = 16
 
+// meterScaleWarnFrac is where a scaled meter's warning tick sits: the
+// same 80% of the bar the memory-class meters' warn levels land on
+// (int(0.80*meterBarW) = cell 12), so every host meter's tick is one
+// column and progress toward it reads the same.
+const meterScaleWarnFrac = 0.80
+
+// meterFill returns the share of the bar a meter's value fills. A plain
+// meter fills pct/100. A scaled meter is for levels far below 100 (the
+// i/o stall meter): 0..warnPct fills 0..meterScaleWarnFrac of the bar,
+// warnPct..dangerPct fills the rest, and dangerPct or more fills it all.
+// When the levels are not usable the plain scale is the fallback.
+func meterFill(pct, warnPct, dangerPct float64, scaled bool) float64 {
+	if !scaled || warnPct <= 0 || dangerPct <= warnPct {
+		return pct / 100
+	}
+	switch {
+	case pct >= dangerPct:
+		return 1
+	case pct >= warnPct:
+		return meterScaleWarnFrac + (pct-warnPct)/(dangerPct-warnPct)*(1-meterScaleWarnFrac)
+	default:
+		return pct / warnPct * meterScaleWarnFrac
+	}
+}
+
 // meterSegs is one meter row's left part as styled segments: a label
 // padded to meterLabelW, a space, then a bar of barW cells whose style
 // follows pct (ok below warnPct, warn below dangerPct, bad at or
-// above), with a ╎ tick at the warning level. The value is not part of
-// the row: callers right-align it so it ends one column clear of the
-// panel's inner right edge.
-func (l *layout) meterSegs(label string, pct, warnPct, dangerPct float64, barW int) []grid.Seg {
+// above), with a ╎ tick at the warning level. scaled marks a meter
+// whose levels are far below 100: the bar is drawn piecewise (see
+// meterFill) and the tick sits at meterScaleWarnFrac instead of the
+// real warnPct, so it lines up with the other host meters. The value is
+// not part of the row: callers right-align it so it ends one column
+// clear of the panel's inner right edge.
+func (l *layout) meterSegs(label string, pct, warnPct, dangerPct float64, barW int, scaled bool) []grid.Seg {
 	segs := []grid.Seg{{Text: fmt.Sprintf("%-*s", meterLabelW, label), Style: "dim"}, {Text: " ", Style: "dim"}}
 	if barW > 0 {
-		filled := clamp(int(pct/100*float64(barW)), 0, barW)
+		filled := clamp(int(meterFill(pct, warnPct, dangerPct, scaled)*float64(barW)), 0, barW)
 		if pct > 0 && filled == 0 {
 			filled = 1 // anything above zero shows: 3 of 64 is not an empty bar
 		}
@@ -1034,7 +1062,11 @@ func (l *layout) meterSegs(label string, pct, warnPct, dangerPct float64, barW i
 		// warning level draws no tick.
 		tick := -1
 		if warnPct > 0 && warnPct < 100 {
-			if tx := int(warnPct / 100 * float64(barW)); tx < barW {
+			tx := int(warnPct / 100 * float64(barW))
+			if scaled {
+				tx = int(meterScaleWarnFrac * float64(barW))
+			}
+			if tx < barW {
 				tick = tx
 			}
 		}
@@ -1062,6 +1094,9 @@ type hostRow struct {
 	pct, warn float64
 	danger    float64
 	right     string
+	// scaled draws the bar piecewise (see meterFill) for a meter whose
+	// levels are far below 100, so its tick lines up with the others.
+	scaled bool
 }
 
 // hostPanelRows builds the host panel's rows: cpu, the disk I/O meters,
@@ -1069,14 +1104,14 @@ type hostRow struct {
 // levels the panel draws, with the CPU's core count in its value text.
 func hostPanelRows(s Snapshot) []hostRow {
 	rows := []hostRow{
-		{"cpu", s.CPUPct, 75, 90, fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores)},
+		{label: "cpu", pct: s.CPUPct, warn: 75, danger: 90, right: fmt.Sprintf("%.0f%%  load %.1f  %d cores", s.CPUPct, s.Load1, s.Cores)},
 	}
 	rows = append(rows, ioHostRows(s)...)
 	return append(rows,
-		hostRow{"memory", s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB)},
-		hostRow{"hugepages", s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB)},
-		hostRow{"snapshot disk", s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB)},
-		hostRow{"root disk", s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", s.RootFreeGiB)},
+		hostRow{label: "memory", pct: s.MemUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f of %.1f GiB", s.MemUsedGiB, s.MemTotalGiB)},
+		hostRow{label: "hugepages", pct: s.HugeUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f GiB free", s.HugeFreeGiB)},
+		hostRow{label: "snapshot disk", pct: s.DiskUsedPct, warn: 80, danger: 90, right: fmt.Sprintf("%.1f GiB free", s.DiskFreeGiB)},
+		hostRow{label: "root disk", pct: s.RootUsedPct, warn: 75, danger: 90, right: fmt.Sprintf("%.1f GiB free", s.RootFreeGiB)},
 	)
 }
 
@@ -1092,14 +1127,14 @@ func (l *layout) hostH() int {
 // value text at the row's end.
 func (l *layout) hostRows() []hostRow {
 	rows := []hostRow{
-		{"cpu", l.s.CPUPct, 75, 90, fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1)},
+		{label: "cpu", pct: l.s.CPUPct, warn: 75, danger: 90, right: fmt.Sprintf("%.0f%% · load %.1f", l.s.CPUPct, l.s.Load1)},
 	}
 	rows = append(rows, ioHostRows(l.s)...)
 	return append(rows,
-		hostRow{"memory", l.s.MemUsedPct, 80, 92, fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB)},
-		hostRow{"hugepages", l.s.HugeUsedPct, 80, 92, fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB)},
-		hostRow{"snapshot disk", l.s.DiskUsedPct, 80, 90, fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB)},
-		hostRow{"root disk", l.s.RootUsedPct, 75, 90, fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB)},
+		hostRow{label: "memory", pct: l.s.MemUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f of %.1f GiB", l.s.MemUsedGiB, l.s.MemTotalGiB)},
+		hostRow{label: "hugepages", pct: l.s.HugeUsedPct, warn: 80, danger: 92, right: fmt.Sprintf("%.1f GiB free", l.s.HugeFreeGiB)},
+		hostRow{label: "snapshot disk", pct: l.s.DiskUsedPct, warn: 80, danger: 90, right: fmt.Sprintf("%.1f GiB free", l.s.DiskFreeGiB)},
+		hostRow{label: "root disk", pct: l.s.RootUsedPct, warn: 75, danger: 90, right: fmt.Sprintf("%.1f GiB free", l.s.RootFreeGiB)},
 	)
 }
 
@@ -1109,12 +1144,16 @@ func (l *layout) hostRows() []hostRow {
 // device the collector could not resolve (DiskDevice "") hides the busy
 // meter only.
 //
-//	i/o stall      ░░░░░░░░░░░░░░░░           0.4% full
-//	nvme0n1 busy   ██░░░░░░░░░░░░░░     18% · 12 MB/s w
+//	i/o stall      █░░░░░░░░░░░╎░░░            0.4% stalled
+//	nvme0n1 busy   ██░░░░░░░░░░╎░░░     18% · 12 MB/s w
 //
 // The stall meter's value is the PSI io full 60 s average against the
 // configurable levels (DASH_IO_FULL_WARN_PCT / DASH_IO_FULL_BAD_PCT);
-// the busy meter's is the device's busy share (warn 80, bad 90).
+// the busy meter's is the device's busy share (warn 80, bad 90). Because
+// those levels are far below 100, the stall meter is drawn on a display
+// scale whose warn level sits at meterScaleWarnFrac of the bar, the same
+// cell as every other host meter's tick; its value text still carries
+// the true 60 s average.
 func ioHostRows(s Snapshot) []hostRow {
 	var rows []hostRow
 	if s.IOAvail {
@@ -1123,7 +1162,8 @@ func ioHostRows(s Snapshot) []hostRow {
 			pct:    s.IOFull60,
 			warn:   ioFullWarnPct(),
 			danger: ioFullBadPct(),
-			right:  fmt.Sprintf("%.1f%% full", s.IOFull60),
+			right:  fmt.Sprintf("%.1f%% stalled", s.IOFull60),
+			scaled: true,
 		})
 	}
 	if s.DiskDevice != "" {
@@ -1165,7 +1205,7 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 
 	row := top + 1
 	for _, r := range l.hostRows() {
-		g.Segs(x+2, row, l.meterSegs(r.label, r.pct, r.warn, r.danger, meterBarW), inner)
+		g.Segs(x+2, row, l.meterSegs(r.label, r.pct, r.warn, r.danger, meterBarW, r.scaled), inner)
 		g.Right(x+w-4, row, []grid.Seg{{Text: r.right, Style: "text"}})
 		row++
 	}
