@@ -1923,11 +1923,11 @@ func eventTypeStyle(t string) string {
 	switch t {
 	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
 		return "title"
-	case "suspended", "preempted", "idle_suspended", "queued", "recovery_retry", "rootfs_dead", "user_deleted":
+	case "suspended", "preempted", "idle_suspended", "queued", "recovery_retry", "rootfs_dead", "user_deleted", "critical_release":
 		return "warn"
 	case "lost", "timed_out":
 		return "bad"
-	case "gc":
+	case "gc", "disk.cleanup":
 		return "ok"
 	default:
 		return "dim"

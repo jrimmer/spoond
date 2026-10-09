@@ -129,6 +129,21 @@ func (s *Service) notifyLeaseEvent(ev LeaseEvent) {
 			}),
 			At: ev.At,
 		})
+	case LeaseCriticalRelease:
+		// The critical disk cleanup released a suspended lease (#145 D5):
+		// the owner's work is gone, so it needs a person like any held
+		// rule release. The key stays under held.critical.* so existing
+		// held-rule webhook filters catch it.
+		s.notifier.Enqueue(notify.Event{
+			Key:      "held.critical." + ev.LeaseID,
+			Severity: notify.Critical,
+			Title:    "Critical disk: released suspended lease " + shortID(ev.LeaseID),
+			Body: joinBody([]string{
+				"lease " + ev.LeaseID + " (owner " + ev.Owner + ")",
+				ev.Detail,
+			}),
+			At: ev.At,
+		})
 	default:
 		// created/released/suspended/… and gap markers: not for a person.
 	}

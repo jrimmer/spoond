@@ -163,8 +163,11 @@ with provisioning instructions. The pre-2.0 `FORKD_*` names still work
 | `HOLD_TTL_MAX_SECS` | `2592000` | cap for an explicit `hold_ttl` (`0` means the default) |
 | `PRESSURE_DISK_FREE_PCT` | `15` | snapshot-disk free percentage under which rule 1 uses the shorter threshold (rule 4; `0` disables the disk trigger) |
 | `PRESSURE_HELD_IDLE_SECS` | `1800` | rule 1's threshold under pressure (`0` disables rule 4) |
-| `CRITICAL_DISK_FREE_PCT` | `5` | snapshot-disk free percentage under which rule 5 releases rule-suspended held leases (needs `GC_DELETE=1`; `0` disables) |
-| `CRITICAL_DISK_RECOVER_PCT` | `10` | rule 5 stops releasing above this free percentage |
+| `CRITICAL_DISK_FREE_PCT` | `5` | snapshot-disk free percentage under which the critical-disk cleanup releases the oldest suspended lease, one per sweep tick (needs `GC_DELETE=1`; `0` disables) |
+| `CRITICAL_DISK_RECOVER_PCT` | `10` | the critical-disk cleanup stops releasing above this free percentage |
+| `DISK_CLEAN_START_PCT` | `20` | snapshot-disk free percentage under which the proactive cleanup reclaims spoond's own garbage each tick before any live work is touched (`0` disables; #145 D5) |
+| `DISK_CLEAN_STOP_PCT` | `25` | the proactive cleanup stops once this much of the disk is free (below the start is raised to it) |
+| `KEPT_CHECKPOINT_TTL_SECS` | `604800` | how long a kept checkpoint may stay pinned before the proactive cleanup expires it (`0` disables the expiry; #145 D5) |
 | `MAX_ADMIT_WAIT_SECS` | `600` | how long a create may wait for admission when it sends `wait` (`0` disables waiting; #129 part 1) |
 | `SNAPSHOT_WRITE_CONCURRENCY` | `1` | how many memory-snapshot writes (substrate `Pause`/`Checkpoint`) may run at once process-wide; every pause and checkpoint goes through this limiter (`0` = unlimited, the pre-fix behaviour; spoond-t1s) |
 | `DRAIN_SNAPSHOT_CONCURRENCY` | `2` | how many of those writes the admin drain may run at once, so a planned orchestrator restart can pause a batch of leases inside the unit's `TimeoutStopSec` (`0` = unlimited; see [operations.md](operations.md#restarting-the-orchestrator-planned)) |

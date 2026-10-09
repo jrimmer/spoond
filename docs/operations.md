@@ -131,7 +131,7 @@ What arrives, with its key and severity:
 | `held.<rule>.<lease-id>` | warn, critical on `release` | a held-lease rule acted on a lease |
 | `unit.inactive.<unit>` | critical | a watched systemd unit is not active. `NOTIFY_UNITS` lists them, comma-separated; the default is `e2b-orchestrator.service,spoond-sshd-gateway.service`, and `none` watches nothing (a host without systemd, where every probe would fail) |
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
-| `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
+| `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. A pin past `KEPT_CHECKPOINT_TTL_SECS` (default 7 d) is expired by the proactive disk cleanup once free space is low; below that threshold only a person can unpin |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
 | `node.draining` | warn | an admin drain is in effect: creates answer `503 draining` until it is lifted. The alert fires only once a healthy node's drain passes half of `DRAIN_MAX_SECS` (default 900, so 7.5 min) or the node is unhealthy, so a planned restart under a minute stays silent |
@@ -359,9 +359,11 @@ lease lives. Two caps keep pins from filling the disk (#126):
 `spoond_kept_builds` and `spoond_kept_builds_bytes` report the totals
 over live leases. When kept bytes pass `KEPT_DISK_WARN_PCT` (default
 `40`) percent of the snapshot disk, the dashboard's Notifications panel
-says so and the notifier raises `disk.kept` (warn) — the held-lease
-critical-disk rule never deletes a kept build, so unpinning stays with
-the owner.
+says so and the notifier raises `disk.kept` (warn). A kept checkpoint
+past `KEPT_CHECKPOINT_TTL_SECS` (default 7 d) is unpinned by the
+proactive disk-cleanup tier (#145 D5) once free space is low, so a
+keep-happy loop cannot pin the catalog forever; below that threshold
+only the owner can unpin.
 
 Interaction with the held-lease critical rule (rule 5 in [Held-lease
 limits](#held-lease-limits)): a release frees no disk by itself — the
@@ -370,6 +372,30 @@ which takes the GC age (1 h) and `GC_DELETE=1`. Under the dry-run
 default the critical rule therefore releases nothing (it logs, at most
 once an hour, that the dry-run GC stops it); a full snapshot disk on a
 node with held leases is a reason to turn the GC out of dry-run.
+
+### Proactive disk cleanup
+
+Before the critical rule releases anyone's work, a proactive tier
+reclaims spoond's own garbage (#145 D5): below `DISK_CLEAN_START_PCT`
+(default 20) free, each sweep tick frees, in this order, until
+`DISK_CLEAN_STOP_PCT` (default 25) is free:
+
+1. orphan build/snapshot directories with no store row (the existing
+   orphan reap; `GC_DELETE` still guards the catalog deletes, and
+   `ORPHAN_REAP` still governs the directory reap);
+2. leftovers of released or lost leases — unreferenced pause/checkpoint
+   builds the catalog still holds;
+3. kept checkpoints past `KEPT_CHECKPOINT_TTL_SECS` (default `604800` =
+   7 d): the pin is dropped so the GC may reclaim the build;
+4. unreferenced template builds.
+
+None of these is owner data that is still live, and the tier never
+touches a running or suspended lease. A tick that frees anything emits
+one lease-less `disk.cleanup` event with the bytes freed per category.
+The critical-disk FIFO above stays the last resort below
+`CRITICAL_DISK_FREE_PCT`. Set `DISK_CLEAN_START_PCT` to `0` to disable
+the tier, and `KEPT_CHECKPOINT_TTL_SECS` to `0` to keep pins from
+expiring.
 
 ### Pause chains
 
@@ -980,10 +1006,11 @@ touches it however long ago its own TTL passed; rule 2 releases it once
 it has stayed suspended and untouched for its limit, and renewing
 restores a normal hold.
 
-**Nothing running is ever released automatically.** Rules 2 and 5
-release only leases that a rule suspended (idle, pressure or a lapse)
-and that saw no activity since; a held lease suspended by hand or by
-the drain is never released by them.
+**Nothing running is ever released automatically.** Rule 2 releases
+only leases that a held-lease rule suspended (idle, pressure or a
+lapse) and that saw no activity since. Rule 5 (the critical-disk
+cleanup) is broader: it releases the oldest **suspended** lease,
+whatever suspended it, but never a running one.
 
 | # | Rule | Variable | Default | Meaning |
 |---|---|---|---|---|
@@ -991,7 +1018,7 @@ the drain is never released by them.
 | 2 | Stale release | `HELD_SUSPENDED_RELEASE_SECS` | `604800` (7 d) | a held lease suspended by rule 1, 3 or 4 and untouched since for this long is **released** (deleted); the GC reclaims its builds |
 | 3 | Hold lapse | `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS` | `604800` (7 d), `2592000` (30 d) | an unrenewed hold lapses: a running lease is **suspended** (never released), stays held with no expiry, and rule 2 takes it from there |
 | 4 | Pressure | `PRESSURE_DISK_FREE_PCT`, `PRESSURE_HELD_IDLE_SECS` | `15`, `1800` (30 min) | when snapshot-disk free space is under the percentage, or free hugepages are short (admission would refuse a 1 GiB lease — no seeded image is smaller), rule 1 uses the shorter threshold |
-| 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage and `GC_DELETE=1`, held leases a rule suspended (1, 3 or 4), untouched since, are **released** oldest suspension first, at most one per sweep tick, until free space is above the recovery percentage; the GC runs first, at most every 5 minutes. A running lease is never released. With the dry-run GC the rule releases nothing, since nothing would be freed |
+| 5 | Critical disk | `CRITICAL_DISK_FREE_PCT`, `CRITICAL_DISK_RECOVER_PCT` | `5`, `10` | when snapshot-disk free space is under the critical percentage and `GC_DELETE=1`, the **oldest suspended lease** (by `suspended_at`, whatever suspended it) is **released**, one per sweep tick, until free space is above the recovery percentage; the GC runs first, at most every 5 minutes. One `critical_release` event names the lease, its owner and the free percentage before its `released` event (reason `disk_critical`). A running lease is never released. With the dry-run GC the rule releases nothing, since nothing would be freed |
 | 6 | Scheduling | — | — | the rules run in the existing sweep loop and skip while the node is draining |
 
 Set `HELD_IDLE_TIMEOUT_SECS`, `HELD_SUSPENDED_RELEASE_SECS`,
@@ -1340,7 +1367,7 @@ marker. The substrate-specific series:
 | `spoond_kept_builds_bytes` | disk bytes held by kept checkpoints of live leases (recorded `size_bytes`; #126) |
 | `spoond_pause_chain_depth` | histogram of a lease's build-chain depth at each pause (the pause build and its ancestors to the template root; spoond-p9j) |
 | `spoond_pause_chain_bytes` | histogram of the lease's parent chain's recorded `size_bytes` summed at each pause, including shared ancestors (spoond-p9j) |
-| `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire` |
+| `spoond_held_actions_total{rule,action}` | automatic actions on held leases: `rule` is `idle`, `stale`, `expiry`, `pressure` or `critical`; `action` is `suspend_idle`, `suspend_lapsed`, `release` or `expire`. The critical-disk cleanup (#145 D5) counts every suspended lease it releases as `critical{release}`, held or not |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |

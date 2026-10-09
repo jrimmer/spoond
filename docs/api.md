@@ -1297,6 +1297,33 @@ on the lease. A held lease suspended by the idle rule resumes on next
 use: the SSH gateway does this automatically on attach, and the owner
 can call `POST /api/leases/{id}/resume`.
 
+### Critical disk cleanup
+
+spoond never refuses a create or resume because its own snapshot disk
+is full: it reclaims instead, and a structural shortage is a wait (`503`
+with `Retry-After`), never a permanent refusal (#145 D5). Two tiers run
+in the sweep, before any live work is touched:
+
+- **Proactive cleanup** (`DISK_CLEAN_START_PCT`, default 20): below that
+  free percentage each tick frees spoond's own garbage — orphan build
+  directories with no store row, leftovers of released or lost leases,
+  kept checkpoints past `KEPT_CHECKPOINT_TTL_SECS` (default 7 d) and
+  unreferenced template builds — until `DISK_CLEAN_STOP_PCT` (default
+  25). One lease-less `disk.cleanup` event per tick carries the bytes
+  freed per category.
+- **Critical FIFO** (`CRITICAL_DISK_FREE_PCT`, default 5): below that,
+  the **oldest suspended lease** (by `suspended_at`, whatever suspended
+  it) is released, one per sweep tick, until `CRITICAL_DISK_RECOVER_PCT`
+  (default 10). The GC runs first and the dry-run `GC_DELETE` guard
+  still applies; a running lease is never released. One
+  `critical_release` event names the lease, its owner and the free
+  percentage before the lease's `released` event, whose reason is
+  `disk_critical`; afterwards the lease answers `404 lease not found`
+  like any other release.
+
+Both tiers are additive maintenance and change no existing status code:
+no route answers a new code because of them.
+
 ### `POST /api/leases/{id}/resume` — resume a held lease (gateway)
 
 Owner-blind resume for **held** leases: used by the SSH gateway on
@@ -1390,7 +1417,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `event` | emitted when | `detail` names |
 |---|---|---|
 | `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
-| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule`, `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released` |
+| `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release, a lost lease's grace period lapse, the critical-disk cleanup) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule`, `lost_expired` (the GC released a lost lease whose grace period lapsed), `disk_critical` (the critical-disk cleanup released the oldest suspended lease), or `lease released` |
 | `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse, preemption) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
@@ -1414,6 +1441,8 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `promoted` | a running burst lease moved to guaranteed: its owner's guarantee has room again | `to guaranteed: the owner's guarantee has room` |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
 | `gc` | a catalog GC pass deleted builds or failed a stale `building` row (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed`; or `stale build <id> failed · build timed out` |
+| `disk.cleanup` | the proactive disk-cleanup tier ran below `DISK_CLEAN_START_PCT` free and reclaimed spoond's own garbage (spoond's own maintenance, not a lease's) | the bytes freed per category, e.g. `orphans 1.2 GiB · released builds 512.0 MiB · kept checkpoints 0 KiB · template builds 2.0 GiB · 3.7 GiB freed` |
+| `critical_release` | the critical-disk cleanup released the oldest suspended lease below `CRITICAL_DISK_FREE_PCT` free (#145 D5); the lease's own `released` event with reason `disk_critical` follows | the free percentage, the recovery level and the suspension time, e.g. `disk 3.0% free < 5% critical (recovery at 10%); releasing the oldest suspended lease, suspended since 2026-10-08T12:00:00Z` |
 | `drain_failed` | the admin drain could not pause the lease: it ran on into the orchestrator stop (spoond-52c) | the pause error |
 | `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer or a bounded context (spoond-52c) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
 | `drain_healed` | the drain self-heal loop lifted a drain that outlived `DRAIN_MAX_SECS` on a healthy node, or cleared a node drain a failed undrain left set (spoond-52c) | `drain lasted <duration>` |
@@ -1429,6 +1458,9 @@ pass that deletes nothing (the default dry run included) emits none, but
 the stale-building sweep does emit one per row it fails even in dry-run
 mode, because a template build has no owner and never appears in
 `/api/snapshots`, so the event is where its failure is visible.
+`disk.cleanup` is lease-less the same way. A `critical_release` carries
+the released lease's id and owner (it reaches both the all-leases and
+that lease's stream), so the owner sees why their suspended lease went.
 `drain_healed` is lease-less the same way, and so is `user_deleted`
 (it carries the removed owner); `drain_failed` and `drain_deferred`
 name their lease (and owner), so they reach the per-lease stream too.

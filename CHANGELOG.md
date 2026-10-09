@@ -12,6 +12,32 @@ summarised from README "Status".
 
 ### Added
 
+- **Critical disk: FIFO release of the oldest suspended lease, and a
+  proactive cleanup tier before it (spoond-5x1l, #145 D5).** Held rule 5
+  is no longer only for held leases a rule suspended: below
+  `CRITICAL_DISK_FREE_PCT` (default 5) the **oldest suspended lease**
+  (by `suspended_at`) is released, one per sweep tick, until free space
+  is above `CRITICAL_DISK_RECOVER_PCT` (default 10) — the GC runs first,
+  at most every 5 minutes, and the `GC_DELETE=1` guard still applies (a
+  dry-run GC frees nothing, so nothing is released). A running lease is
+  never released. One `critical_release` event names the lease, its
+  owner and the free percentage before the lease's `released` event
+  (reason `disk_critical`); the lease then answers `404 lease not found`
+  like any other release. Before the FIFO, a **proactive cleanup tier**
+  reclaims spoond's own garbage first: below `DISK_CLEAN_START_PCT`
+  (default 20) free each tick frees orphan build directories with no
+  store row, leftovers of released or lost leases, kept checkpoints
+  past `KEPT_CHECKPOINT_TTL_SECS` (default 604800 = 7 d) and
+  unreferenced template builds, until `DISK_CLEAN_STOP_PCT` (default
+  25), emitting one `disk.cleanup` event with the bytes freed per
+  category. So a full disk is cleaned before any live owner's work is
+  touched, and spoond never refuses new work for it. New env vars:
+  `DISK_CLEAN_START_PCT`, `DISK_CLEAN_STOP_PCT`,
+  `KEPT_CHECKPOINT_TTL_SECS`. See
+  [docs/api.md](docs/api.md) and [docs/operations.md](docs/operations.md).
+
+### Added
+
 - **Every automatic suspend names its reason, policy step and build
   (spoond-9gm2).** A `suspended` event now carries structured fields
   beside its human detail — `reason`
