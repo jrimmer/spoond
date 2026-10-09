@@ -10,16 +10,17 @@ import (
 // query for the whole box, so the per-request owner-usage view never
 // walks the filesystem.
 
-// PausedBytesByOwner sums the recorded size_bytes of the pause snapshot
-// each owner's leases resume from (leases.resume_build_id), per owner.
-// A lease without a resume point counts nothing, and a deleted build's
-// files are gone so it is skipped.
+// PausedBytesByOwner sums the recorded size_bytes of each owner's
+// pause snapshots (builds of kind pause), per owner. Every pause build
+// stays on disk until the GC reclaims it, so a lease's whole pause chain
+// counts, not only the build it currently resumes from. A deleted build's
+// files are gone and is skipped.
 func (db *DB) PausedBytesByOwner(ctx context.Context) (map[string]int64, error) {
 	return db.bytesByOwner(ctx, `
-		SELECT l.owner, COALESCE(SUM(b.size_bytes), 0)
-		FROM leases l JOIN builds b ON b.build_id = l.resume_build_id
-		WHERE l.resume_build_id <> '' AND b.state <> 'deleted'
-		GROUP BY l.owner`)
+		SELECT owner, COALESCE(SUM(size_bytes), 0)
+		FROM builds
+		WHERE kind = 'pause' AND state <> 'deleted'
+		GROUP BY owner`)
 }
 
 // KeptBytesByOwner sums the recorded size_bytes of the builds each
