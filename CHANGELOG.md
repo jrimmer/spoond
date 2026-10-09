@@ -42,6 +42,13 @@ summarised from README "Status".
   substrate_unavailable` with `Retry-After: 5` (not a generic `500`),
   and a lease left suspended with reason `resume_failed` now emits a
   `suspended` event and a lease-journal line (spoond-638d round 2).
+- **A failing drain resume no longer looks like a fresh suspension on
+  every retry.** The self-heal loop calls the resume-failed stamp every
+  interval for a lease whose resume keeps failing, but only the call
+  that changes the reason to `resume_failed` emits the `suspended` event
+  and the lease-journal line. Later retries keep the lease suspended
+  without emitting, so a consumer never reads one failing lease as a new
+  suspension each interval (spoond-hfko).
 
 ## [2.9.0] - 2026-10-09
 
