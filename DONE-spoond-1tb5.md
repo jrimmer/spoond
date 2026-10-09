@@ -176,15 +176,47 @@ the heartbeat row records 204 for a busy (not suspended) lease. The
 `CHANGELOG.md` mismatched backtick at the non-work-path sentence is
 fixed; the preempted-rule change and the drain refusal are documented.
 
-## Round 2 gates
+## Round 3 (layer-3 review of 2095373)
+
+### R7 — quota refusal carries a code and Retry-After
+
+`writeResumeRefusal` (`api/idle_suspend.go`) now answers
+`errQuotaExceeded` with `429`, `Retry-After: 30` and JSON `code:
+quota_exceeded` (`writeErrorCodeAfter`, like `capacity_wait`), instead
+of a bare `429` message. It covers every resume-on-use path, the LLM
+gateway (which shares `writeResumeRefusal`) and `POST /resume`/
+`POST .../resume` for held leases.
+
+- Test: `TestResumeOnUseQuotaEveryPath` (`api/resume_on_use_test.go`),
+  the same table (`resumeOnUseWorkPaths`: exec, stream, files, proxy,
+  jobs) asserting `429`, `Retry-After: 30` and `code: quota_exceeded`.
+- Mutation that fails it: revert the `errQuotaExceeded` case to
+  `writeError(w, http.StatusTooManyRequests, err.Error())` (no code, no
+  header).
+
+The same table is reused by `TestResumeOnUseBusyEveryPath`, which pins
+`409` + `code: lease_busy` on every path while a pause or another
+resume is in flight.
+
+### D1 — `POST /resume` during a drain
+
+`resume` and `resumeAny` (`api/service.go`) run `resumeForUse`, so
+`POST /api/leases/{id}/resume` and the SSH gateway's owner-blind resume
+now answer `503` `capacity_wait` + `Retry-After` while spoond is
+draining (or owes a drain clear), where on main they resumed.
+`docs/api.md`'s `POST /resume` section and the resume-on-use paragraph
+say so, and the row that called `POST /resume` "unchanged" is gone.
+
+## Round 3 gates
 
 - `go build ./...` — clean
 - `go vet ./...` — clean
 - `gofmt -l .` — empty
 - `go test -p 2 -count=1 ./...` — all pass
 - `go test -race -count=1 ./api/ ./store/` — all pass
-- The added and updated tests pass as a non-root user
-  (`spoondtest`), with `t.TempDir()` everywhere.
-- `git fetch origin`: `origin/main` is unchanged since the branch base
-  (`git log HEAD..origin/main` is empty), so there is no new step type,
-  provider, restart, cancel or retry path to reconcile.
+- The added tests pass as a non-root user with `t.TempDir()`
+  everywhere; none needs root or reads `/work`.
+- `git fetch origin`: `origin/main` gained the user-delete cleanup
+  commits since the branch base; none adds a step type, provider,
+  restart, cancel or retry path that touches resume-on-use. Your branch
+  is rebased onto it by the harness.

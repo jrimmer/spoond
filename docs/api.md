@@ -45,7 +45,8 @@ particular means two different things depending on the code:
 | `409` | `snapshot_limit` | the owner's `MAX_NAMED_SNAPSHOTS` cap is reached |
 | `409` | `kept_budget` | the owner's `max_kept_bytes` budget would be exceeded |
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
-| `429` | `quota` | the owner is over their own memory quota (`max_mib`); every status-code section below says `429` without a code, and the body names the limit |
+| `429` | `quota` | the owner is over their own memory quota (`max_mib`); the body names the limit |
+| `429` | `quota_exceeded` | the same memory quota on a resume (a resume-on-use or `POST /resume`); carries `Retry-After: 30` and the lease stays suspended |
 | `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
 | `500` | `internal` | an internal failure |
 
@@ -353,12 +354,15 @@ sweep, the lease's own `idle_suspend`, held rule 1 (shortened under
 pressure), a lapsed hold (rule 3), preemption, or the holder's own hand
 suspend. This is one rule for every kind of suspend, not just
 `idle_suspend`. GET, status, events and SSE never resume, and neither
-`POST /resume` (unchanged) nor a path with nothing to resume. The
+`POST /resume` (which now refuses during a drain like any work call,
+see below) nor a path with nothing to resume. The
 SSH gateway also resumes on attach.
 
 While its pause or another caller's resume is in flight, a work call
 answers `409` with `code: lease_busy` (retryable). A resume refused for
-the owner's own memory quota answers `429`; a resume that finds no room
+the owner's own memory quota answers `429` with `Retry-After: 30` and
+`code: quota_exceeded` (the quota frees when the owner releases its own
+leases); a resume that finds no room
 on the host — including one during a planned-restart drain, which must
 not resurrect a `Drained` lease the drain's quiesce wait depends on —
 answers the one shared no-room shape, `503` with `Retry-After: 30` and
@@ -367,19 +371,20 @@ in every refusal. A lease whose hold lapsed resumes with its hold still
 lapsed: resuming does not renew a hold.
 
 **Per-path status (resume-on-use).** Every path is listed; the
-`capacity_wait` row is the same on all of them:
+`capacity_wait` and `quota_exceeded` rows are the same on all of them:
 
 | Path | Resumes on use | No room | Owner over `max_mib` | In-flight pause/resume | Lost sandbox |
 |---|---|---|---|---|---|
-| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| `GET /api/leases/{id}/stream` (exec stream) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| the HTTP proxy (`<lease>-<port>.<suffix>`) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| background jobs (`POST .../exec` `background:true`, `POST .../jobs/{job}/signal`) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
-| `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}/stream` (exec stream) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| the HTTP proxy (`<lease>-<port>.<suffix>`) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| background jobs (`POST .../exec` `background:true`, `POST .../jobs/{job}/signal`) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/resume` (anchored, see below) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}` (lease detail) | **no** | `200` (suspended details returned) | `200` | `200` | `200` (carries `lost_at`/`lost_reason`) |
 | `GET /api/leases/{id}/stat` (the stat probe runs an exec) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/fork` (needs a running source) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
@@ -560,8 +565,8 @@ orphan, and also deletes any substrate sandbox no lease and no pool
 entry claims once it has been seen unclaimed on two consecutive passes;
 a creation's sandbox is never swept while the creation is in flight.
 A failed **resume-on-use** never loses a lease (#145 D2):
-its error goes to the caller (the shared `429`/`503 capacity_wait`/`409
-lease_busy` shapes) and the lease stays suspended with its snapshot
+its error goes to the caller (the shared `429 quota_exceeded`/`503
+capacity_wait`/`409 lease_busy` shapes) and the lease stays suspended with its snapshot
 intact. Only undrain's bounded resume still marks a lease lost after its
 retry budget is spent, and only a lease still suspended and not busy is
 lost there: a resume an owner has in flight saves its guest. A
@@ -629,7 +634,8 @@ Response `200 OK`:
 work path — and this one is work — resumes a suspended lease on use
 (#145 D2) first, then serves the exec: whatever suspended it (the idle
 sweep, `idle_suspend`, held rule 1, a lapsed hold, preemption, or a hand
-suspend). A refused resume answers the shared shapes: `429` over the
+suspend). A refused resume answers the shared shapes: `429`
+`quota_exceeded` with `Retry-After` over the
 owner's quota, `503 capacity_wait` with `Retry-After` when the host has
 no room, `409 lease_busy` while its pause or another resume is in
 flight. `410` if it is
@@ -805,7 +811,7 @@ who may act on any lease); a grantee's `http` share does **not** carry
 file content, and anyone else gets the usual `404`. Every call counts
 as activity for the idle sweeper. A suspended lease — whatever suspended
 it — is resumed first on every file route and then served (#145 D2); a
-refused resume answers the shared shapes (`429` quota, `503
+refused resume answers the shared shapes (`429 quota_exceeded`, `503
 capacity_wait` with `Retry-After`, `409 lease_busy`). A `lost` lease
 answers `410`
 with `code: lease_lost` (see [Lost leases](#lost-leases)). File
@@ -922,8 +928,9 @@ frames carry the same control JSON as above. `started`, `exit_code` and
 Closing the WebSocket stops the relay but does **not** kill the process;
 send `stop` or `kill` for that. A stream attach — a work call — resumes a
 suspended lease first, whatever suspended it (#145 D2), and then starts
-the process; a refused resume answers the shared shapes (`429` quota,
-`503 capacity_wait` with `Retry-After`, `409 lease_busy`).
+the process; a refused resume answers the shared shapes (`429
+quota_exceeded`, `503 capacity_wait` with `Retry-After`, `409
+lease_busy`).
 
 ### `GET /api/leases/{id}/ports/{port}/dial` — raw TCP to a guest port (WebSocket)
 
@@ -949,7 +956,7 @@ every guest port, a step past what an `http` share grants.
 
 Errors: `400` port out of range or not a number, `403` port 49983 (envd,
 the guest's management port), `404` unknown lease or not the owner's,
-`429` quota and `503 capacity_wait` with `Retry-After` if a suspended
+`429` quota (`quota_exceeded` on a resume) and `503 capacity_wait` with `Retry-After` if a suspended
 lease cannot resume on use (a dial is work, #145 D2), `409 lease_busy`
 while its pause or another resume is in flight; `410` with
 `code: lease_lost`
@@ -982,8 +989,14 @@ session starts. Response
 operation is in flight; this is how a pause or another caller's resume
 answers, and the already-suspended body no longer uses
 `lease_suspended` anywhere a resume is possible).
+While spoond is draining for a planned restart (or still owes a drain
+clear), `POST /resume` answers `503` with `Retry-After: 30` and `code:
+capacity_wait` and the lease stays suspended; the SSH gateway's resume
+on attach takes the same path, so neither can race a resume into a
+node that is stopping.
 A suspended lease holds no hugepages, so resuming one re-passes the
-owner's memory quota (#128): `429` when the charge would pass
+owner's memory quota (#128): `429` with `Retry-After: 30` and `code:
+quota_exceeded` when the charge would pass
 `max_mib` — the lease stays suspended. A resume that finds no room on
 the host answers `503` with `Retry-After: 30` and `code: capacity_wait`
 (one shape for every no-room refusal, whether the burst reserve, the
@@ -1315,8 +1328,8 @@ Request `{"network_policy":"none|lan|internet|restricted","egress_allowlist":[�
 Response `200` `{"id","network_policy","egress_allowlist"}`. `400` on an
 invalid policy, `404` unknown. A suspended lease resumes on this work
 call (#145 D2) before the policy is applied; a refused resume answers
-the shared shapes (`429` quota, `503 capacity_wait` with `Retry-After`,
-`409 lease_busy`).
+the shared shapes (`429 quota_exceeded`, `503 capacity_wait` with
+`Retry-After`, `409 lease_busy`).
 
 ### `POST /api/leases/{id}/tag` — friendly name
 

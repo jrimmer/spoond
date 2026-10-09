@@ -33,12 +33,20 @@ summarised from README "Status".
     lease_suspended` on paths that did not resume). A host-structural
     shortage (disk, hugepages, the burst reserve, the snapshot store,
     orchestrator capacity) is a wait, never a refusal: spoond acts and
-    the caller retries. The owner's own memory quota stays `429`; a
+    the caller retries. The owner's own memory quota on a resume is
+    `429` with `Retry-After: 30` and JSON `code: quota_exceeded` (the
+    quota frees when the owner releases its own leases); a
     `kept_budget` refusal stays `409`. While a pause or another caller's
     resume is in flight a work call answers `409` with `code:
     lease_busy` (retryable). This also unifies `POST /resume`, where the
     preemption-disk-floor and burst-reserve bodies now carry
     `capacity_wait`.
+  - **`POST /resume` and the SSH gateway's resume now refuse during a
+    drain.** Both run the resume-on-use path, so while spoond is
+    draining for a planned restart (or still owes a drain clear) they
+    answer the shared `503` `capacity_wait` + `Retry-After` shape and
+    the lease stays suspended, instead of racing a resume into a node
+    that is stopping.
   - **No resume failure marks a lease `lost`.** The preempt-resume
     budget (`PREEMPT_RESUME_RETRIES`) and its lose-after-N-failures path
     are removed, along with the `runPreemptResumeLoop`,

@@ -152,11 +152,12 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 }
 
 // writeResumeRefusal maps a failed resume onto the response the resume
-// route would give: a quota refusal is 429, a lease busy with its pause
-// or another resume is 409 lease_busy, a lost sandbox 410 lease_lost with
-// the reason, and every structural no-room refusal is 503 with
-// Retry-After and code capacity_wait. It is shared by the resume route
-// and every resume-on-use path so they cannot drift (#145 D2).
+// route would give: a quota refusal is 429 with Retry-After and code
+// quota_exceeded, a lease busy with its pause or another resume is 409
+// lease_busy, a lost sandbox 410 lease_lost with the reason, and every
+// structural no-room refusal is 503 with Retry-After and code
+// capacity_wait. It is shared by the resume route and every resume-on-use
+// path so they cannot drift (#145 D2).
 func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error) {
 	writeResumeRefusal(w, s.svc.log, id, err)
 }
@@ -205,7 +206,10 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 	case errors.Is(err, errLeaseReleased):
 		writeError(w, http.StatusNotFound, "lease not found")
 	case errors.Is(err, errQuotaExceeded):
-		writeError(w, http.StatusTooManyRequests, err.Error())
+		// The owner's own quota frees when the owner releases its own
+		// leases, so this is a retryable wait, not a loss: 429 with
+		// code quota_exceeded and a Retry-After, like capacity_wait.
+		writeErrorCodeAfter(w, http.StatusTooManyRequests, burstRetryAfterSecs, "quota_exceeded", err.Error())
 	case resumeNoRoom(err):
 		writeErrorCodeAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity_wait", resumeNoRoomMessage(err))
 	case errors.Is(err, errOwnerGone):

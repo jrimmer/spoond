@@ -216,24 +216,23 @@ func TestResumeOnUseNoRoomCapacityWait(t *testing.T) {
 }
 
 // workPath is one HTTP request that must resume a suspended lease on use
-// and answer the identical 503 capacity_wait shape when there is no room.
+// and answer the identical refusal when the lease cannot resume.
 type workPath struct {
 	name string
-	do   func(t *testing.T, ts *httptest.Server, srv *Server, id string) (*http.Response, string, http.Header)
+	do   func(t *testing.T, ts *httptest.Server, srv *Server, id, token string) (*http.Response, string, http.Header)
 }
 
-// TestResumeOnUseNoRoomEveryPath is the one table test the contract asks
-// for: every resume-on-use path answers a no-room refusal identically —
-// 503, Retry-After, JSON {"error": ..., "code": "capacity_wait"} — and
-// never 409 lease_suspended.
-func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
-	paths := []workPath{
-		{"exec", func(t *testing.T, ts *httptest.Server, _ *Server, id string) (*http.Response, string, http.Header) {
-			return rawWork(t, ts, "POST", "/api/leases/"+id+"/exec", "token-a", `{"cmd":"echo hi"}`)
+// resumeOnUseWorkPaths is the one table every resume-on-use refusal test
+// shares: exec, exec stream, files, the proxy and a job signal. The
+// per-path shape is the same whatever refused the resume.
+func resumeOnUseWorkPaths() []workPath {
+	return []workPath{
+		{"exec", func(t *testing.T, ts *httptest.Server, _ *Server, id, token string) (*http.Response, string, http.Header) {
+			return rawWork(t, ts, "POST", "/api/leases/"+id+"/exec", token, `{"cmd":"echo hi"}`)
 		}},
-		{"stream", func(t *testing.T, ts *httptest.Server, _ *Server, id string) (*http.Response, string, http.Header) {
+		{"stream", func(t *testing.T, ts *httptest.Server, _ *Server, id, token string) (*http.Response, string, http.Header) {
 			wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/leases/" + id + "/stream"
-			_, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer token-a"}})
+			_, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer " + token}})
 			if err == nil {
 				t.Fatal("stream dial succeeded, want a refusal")
 			}
@@ -244,29 +243,37 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 			resp.Body.Close()
 			return resp, string(b), resp.Header
 		}},
-		{"files", func(t *testing.T, ts *httptest.Server, _ *Server, id string) (*http.Response, string, http.Header) {
-			return rawWork(t, ts, "GET", "/api/leases/"+id+"/files/f.txt", "token-a", "")
+		{"files", func(t *testing.T, ts *httptest.Server, _ *Server, id, token string) (*http.Response, string, http.Header) {
+			return rawWork(t, ts, "GET", "/api/leases/"+id+"/files/f.txt", token, "")
 		}},
-		{"proxy", func(t *testing.T, _ *httptest.Server, srv *Server, id string) (*http.Response, string, http.Header) {
+		{"proxy", func(t *testing.T, _ *httptest.Server, srv *Server, id, _ string) (*http.Response, string, http.Header) {
 			req := httptest.NewRequest("GET", "http://"+id+"-3000.sandbox.example.com/", nil)
 			rec := httptest.NewRecorder()
 			srv.ProxyHandler().ServeHTTP(rec, req)
 			return rec.Result(), rec.Body.String(), rec.Header()
 		}},
-		{"jobs", func(t *testing.T, ts *httptest.Server, srv *Server, id string) (*http.Response, string, http.Header) {
+		{"jobs", func(t *testing.T, ts *httptest.Server, srv *Server, id, token string) (*http.Response, string, http.Header) {
 			// A running job record so the signal passes the state check
 			// (checked before the resume, review R5) and reaches the
 			// resume-on-use. The guest is never reached: the resume is
-			// refused for no room before the signal exec.
+			// refused before the signal exec.
 			if err := srv.svc.db.InsertJob(context.Background(), store.JobRow{
 				JobID: "job-any", LeaseID: id, Owner: "consumer-a", Cmd: "sleep 600",
 				State: "running", StartedAt: time.Now(),
 			}); err != nil {
 				t.Fatalf("insert job: %v", err)
 			}
-			return rawWork(t, ts, "POST", "/api/leases/"+id+"/jobs/job-any/signal", "token-a", `{"signal":"TERM"}`)
+			return rawWork(t, ts, "POST", "/api/leases/"+id+"/jobs/job-any/signal", token, `{"signal":"TERM"}`)
 		}},
 	}
+}
+
+// TestResumeOnUseNoRoomEveryPath is the one table test the contract asks
+// for: every resume-on-use path answers a no-room refusal identically —
+// 503, Retry-After, JSON {"error": ..., "code": "capacity_wait"} — and
+// never 409 lease_suspended.
+func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
+	paths := resumeOnUseWorkPaths()
 	for _, p := range paths {
 		t.Run(p.name, func(t *testing.T) {
 			ts, svc, db, sub := newTestServerWithService(t)
@@ -286,7 +293,7 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 			svc.nodeInfoMu.Unlock()
 
 			srv := NewServer(svc, NewImageRegistry(db))
-			resp, body, hdr := p.do(t, ts, srv, l.ID)
+			resp, body, hdr := p.do(t, ts, srv, l.ID, "token-a")
 			if resp.StatusCode != http.StatusServiceUnavailable {
 				t.Fatalf("%s no-room = %d, want 503: %s", p.name, resp.StatusCode, body)
 			}
@@ -305,6 +312,100 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 			}
 			if !l.Suspended {
 				t.Fatalf("%s resumed the lease despite no room", p.name)
+			}
+		})
+	}
+}
+
+// TestResumeOnUseQuotaEveryPath: the owner's own memory quota refusal
+// is the one shape every resume-on-use path shares too — 429 with a
+// Retry-After header and JSON code quota_exceeded — and never 409
+// lease_suspended (review R7). Deleting the code or the header from
+// writeResumeRefusal's quota case makes this fail.
+func TestResumeOnUseQuotaEveryPath(t *testing.T) {
+	for _, p := range resumeOnUseWorkPaths() {
+		t.Run(p.name, func(t *testing.T) {
+			// Two big leases under a max_mib that fits one: the second
+			// fills the cap so the suspended first cannot re-admit.
+			srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
+			svc := srv.svc
+			rec, first := createPersistentAs(t, h, tok, "big")
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("first create: %d %s", rec.Code, rec.Body.String())
+			}
+			id := first["id"].(string)
+			l := svc.lookup(uid, id)
+			if _, err := svc.suspend(context.Background(), ownerIDFor(t, h, tok), id); err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			if rec2, _ := createSandboxAs(t, h, tok, "big"); rec2.Code != http.StatusCreated {
+				t.Fatalf("second create: %d %s", rec2.Code, rec2.Body.String())
+			}
+
+			ts := httptest.NewServer(h)
+			t.Cleanup(ts.Close)
+			resp, body, hdr := p.do(t, ts, srv, id, tok)
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("%s quota refusal = %d, want 429: %s", p.name, resp.StatusCode, body)
+			}
+			if ra := hdr.Get("Retry-After"); ra != "30" {
+				t.Fatalf("%s quota Retry-After = %q, want 30", p.name, ra)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(body), &doc); err != nil {
+				t.Fatalf("%s body is not JSON: %v (%s)", p.name, err, body)
+			}
+			if doc["code"] != "quota_exceeded" {
+				t.Fatalf("%s code = %v, want quota_exceeded: %s", p.name, doc["code"], body)
+			}
+			if _, ok := doc["error"]; !ok {
+				t.Fatalf("%s body has no error: %s", p.name, body)
+			}
+			if !l.Suspended {
+				t.Fatalf("%s resumed the lease despite the quota", p.name)
+			}
+		})
+	}
+}
+
+// TestResumeOnUseBusyEveryPath: while its pause or another caller's
+// resume is in flight every work path answers 409 with code lease_busy
+// (retryable), never 409 lease_suspended.
+func TestResumeOnUseBusyEveryPath(t *testing.T) {
+	for _, p := range resumeOnUseWorkPaths() {
+		t.Run(p.name, func(t *testing.T) {
+			srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 2048}, `{"max_mib":65536}`)
+			svc := srv.svc
+			rec, first := createPersistentAs(t, h, tok, "big")
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+			}
+			id := first["id"].(string)
+			l := svc.lookup(uid, id)
+			if _, err := svc.suspend(context.Background(), ownerIDFor(t, h, tok), id); err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			svc.store.mu.Lock()
+			l.busy = true
+			svc.store.mu.Unlock()
+			t.Cleanup(func() {
+				svc.store.mu.Lock()
+				l.busy = false
+				svc.store.mu.Unlock()
+			})
+
+			ts := httptest.NewServer(h)
+			t.Cleanup(ts.Close)
+			resp, body, _ := p.do(t, ts, srv, id, tok)
+			if resp.StatusCode != http.StatusConflict {
+				t.Fatalf("%s busy = %d, want 409: %s", p.name, resp.StatusCode, body)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(body), &doc); err != nil {
+				t.Fatalf("%s busy body is not JSON: %v (%s)", p.name, err, body)
+			}
+			if doc["code"] != "lease_busy" {
+				t.Fatalf("%s busy code = %v, want lease_busy: %s", p.name, doc["code"], body)
 			}
 		})
 	}
