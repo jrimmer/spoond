@@ -91,6 +91,12 @@ func (s *Service) diskCleanupTick(ctx context.Context, now time.Time) {
 // catalog or storage read skips the category and reports nothing rather
 // than failing the sweep. GC_DELETE still governs the catalog deletes
 // (gcCandidates), and ORPHAN_REAP still governs the orphan reap.
+//
+// The catalog walk (kept set + candidate deletes) shares rule 5's
+// five-minute guard: it is the expensive part, and the sweep ticks every
+// few seconds, so it runs at most every five minutes while the cheap
+// maintained rows (stale building, long-deleted, lost, expired pins)
+// and the orphan directory reap run every tick.
 func (s *Service) reclaimSpoondGarbage(ctx context.Context, now time.Time) gcStats {
 	var stats gcStats
 	// Fail stale building rows and drop long-deleted rows first, exactly
@@ -107,19 +113,18 @@ func (s *Service) reclaimSpoondGarbage(ctx context.Context, now time.Time) gcSta
 	// bytes are reported even when GC_DELETE is off: the pin (not the
 	// file) is what expired.
 	stats.KeptCheckpoints += s.expireKeptCheckpoints(ctx, now)
-	kept, err := s.keptBuilds(ctx)
-	if err != nil {
-		s.log.Printf("disk cleanup: kept set: %v", err)
-		return stats
-	}
-	// The catalog GC reclaims the leftovers of released/lost leases and
-	// the unreferenced template builds; stats splits the two. Its own
-	// gc event may also fire, which is unchanged maintenance.
-	if _, _, err := s.gcCandidates(ctx, kept, &stats); err != nil {
-		s.log.Printf("disk cleanup: catalog: %v", err)
+	if now.Sub(s.criticalGCAt) >= 5*time.Minute {
+		s.criticalGCAt = now
+		kept, err := s.keptBuilds(ctx)
+		if err != nil {
+			s.log.Printf("disk cleanup: kept set: %v", err)
+		} else if _, _, err := s.gcCandidates(ctx, kept, &stats); err != nil {
+			s.log.Printf("disk cleanup: catalog: %v", err)
+		}
 	}
 	// The orphan reap sweeps directories the catalog never sees. It is
-	// governed by ORPHAN_REAP, not GC_DELETE, like any GC pass.
+	// governed by ORPHAN_REAP, not GC_DELETE, like any GC pass, and is
+	// cheap enough to run every tick.
 	_, orphanFreed := s.reapOrphans(ctx)
 	stats.Orphans += orphanFreed
 	return stats
