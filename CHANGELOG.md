@@ -296,9 +296,10 @@ A summary for clients; the details are in the entries below and in
   full node while the wake-up goroutine was between its "no room"
   judgement and its end; the old `wakeScheduled` compare-and-swap then
   dropped the release's wake-up, so the waiting create sat until the
-  periodic retry (the `ADMIT_QUEUE` tick, an hour in some
-  tests). Every wake-up now sets a `wakePending` flag, the pass loops
-  until it has absorbed every wake that arrived during it, and it
+  periodic retry (the `admitQueueTick` constant, 5 s in production,
+  or an hour in some tests). Every wake-up now sets a `wakePending`
+  flag, the pass loops until it has absorbed every wake that arrived
+  during it, and it
   releases `wakeScheduled` with a compare-and-swap ordered so a wake
   landing in the gap either feeds the running pass or starts a new one.
   At most one wake-up goroutine still runs and callers stay

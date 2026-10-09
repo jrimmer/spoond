@@ -285,33 +285,49 @@ func TestAdmitWakeWhilePassRunning(t *testing.T) {
 	fillers := fillTwo(t, h, sub, svc, "tok-1")
 	svc.admitQ.tick = time.Hour // no periodic rescue: only the wake can help
 
-	// Queue the waiting create and let its own initial pass finish, so
-	// the pass we hold below is the only one scheduled.
-	res := startCreate(t, h, context.Background(), "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
-	waitDepth(t, svc, 1)
-	deadline := time.Now().Add(3 * time.Second)
-	for svc.wakeScheduled.Load() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if svc.wakeScheduled.Load() {
-		t.Fatal("initial wake-up pass did not finish")
-	}
-	// Drain any directly-invoked pass (waitForAdmission's own) too.
-	svc.admitQ.admitMu.Lock()
-	svc.admitQ.admitMu.Unlock()
-
-	// Hold the next pass right after it judges the queue full.
+	// Install the hold gate before the create starts. The waiting create's
+	// own initial passes — the wakeAdmissionQueue goroutine and
+	// waitForAdmission's direct retry — both read the hook, so installing
+	// it later would race that read (a -race report) and could hold the
+	// handler's direct pass instead of the pass this test schedules,
+	// letting the test pass even on the old buggy code. hold stays false
+	// until the test arms it, so the initial passes run straight through.
 	held := make(chan struct{})
 	releasePass := make(chan struct{})
 	var hold atomic.Bool
 	var once atomic.Bool
+	var initialPasses atomic.Int64
 	svc.admitPassHook = func() {
+		initialPasses.Add(1)
 		if !hold.Load() || !once.CompareAndSwap(false, true) {
 			return
 		}
 		close(held)
 		<-releasePass
 	}
+
+	// Queue the waiting create and let both of its initial passes finish,
+	// so the pass held below is the only one left to schedule. The hook
+	// fires once per completed pass, so reaching two proves the handler's
+	// direct pass has judged the queue and will not consume the hold.
+	res := startCreate(t, h, context.Background(), "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
+	waitDepth(t, svc, 1)
+	deadline := time.Now().Add(3 * time.Second)
+	for (svc.wakeScheduled.Load() || initialPasses.Load() < 2) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if svc.wakeScheduled.Load() || initialPasses.Load() < 2 {
+		t.Fatalf("initial admission passes did not finish: scheduled=%v passes=%d",
+			svc.wakeScheduled.Load(), initialPasses.Load())
+	}
+	// Drain any pass between the hook and its admitMu release.
+	svc.admitQ.admitMu.Lock()
+	svc.admitQ.admitMu.Unlock()
+	if once.Load() {
+		t.Fatal("an initial pass held the hook before it was armed")
+	}
+
+	// Hold the next pass right after it judges the queue full.
 	hold.Store(true)
 	svc.wakeAdmissionQueue()
 	select {
