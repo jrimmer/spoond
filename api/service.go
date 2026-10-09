@@ -678,6 +678,12 @@ type Service struct {
 	// when it last logged that a dry-run GC stops it. Sweep goroutine only.
 	criticalGCAt         time.Time
 	criticalDryRunLogged time.Time
+	// diskCleanActive is the proactive cleanup's hysteresis latch (#145
+	// D5): once the disk falls under DISK_CLEAN_START_PCT the tier keeps
+	// running every tick until it reaches DISK_CLEAN_STOP_PCT, instead of
+	// stopping the moment the start level is crossed again. Sweep
+	// goroutine only (runHeldRules is the only writer).
+	diskCleanActive bool
 	// bus is the lease event bus (2.2, #115): every lifecycle change
 	// emits one event here. Set in NewService; never nil.
 	bus *eventBus

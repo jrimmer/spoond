@@ -56,7 +56,19 @@ func (s *Service) diskCleanupTick(ctx context.Context, now time.Time) {
 		stop = start // a stop below the start never terminates
 	}
 	pct, ok := s.freePercent(s.cfg.TemplateStoragePath)
-	if !ok || pct >= start {
+	if !ok {
+		return
+	}
+	// Hysteresis: start cleaning below the start level, but once started
+	// keep going until the stop level is reached, so the tier does not
+	// stop the moment the start level is crossed again.
+	if !s.diskCleanActive {
+		if pct >= start {
+			return
+		}
+		s.diskCleanActive = true
+	} else if pct >= stop {
+		s.diskCleanActive = false
 		return
 	}
 	stats := s.reclaimSpoondGarbage(ctx, now)
