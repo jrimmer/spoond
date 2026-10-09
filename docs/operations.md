@@ -1260,8 +1260,8 @@ a **Notifications** panel below the header (only when there is a
 message): spoond's own system messages, one row each — a unit not
 active, free hugepages or snapshot disk past the danger level, kept
 checkpoints past `KEPT_DISK_WARN_PCT` of the snapshot disk (#126), or
-the snapshot disk's I/O full pressure past `DASH_IO_FULL_BAD_PCT`
-(`disk i/o stalled: full pressure N% over 60 s`, cleared when the
+the snapshot disk's I/O stall pressure past `DASH_IO_FULL_BAD_PCT`
+(`disk i/o stalled N% of the last 60 s`, cleared when the
 pressure drops). Each
 message has a stable id from its trigger, a severity (warn/bad) and a
 `×` the viewer can dismiss for their own browser (`localStorage`, no
@@ -1304,8 +1304,12 @@ comes from `/proc/pressure/io` (PSI: `some` and `full` over 60 s, not
 `iowait`, which drops when CPUs are busy even if the disk is saturated)
 and `/proc/diskstats` (the snapshot device's write MB/s and busy share,
 a delta between collections). The i/o stall meter's value is the full
-60 s average, shown as `0.4% full` (the 60 s `some` average stays in
-the metrics, not on the meter); the busy meter's value text is
+60 s average, shown as `0.4% stalled` (the 60 s `some` average stays in
+the metrics, not on the meter); its levels (defaults 5 and 15) are far
+below 100, so the bar is drawn on a display scale that puts its warning
+tick at the same column as every other host meter's (80% of the bar,
+cell 12), while the right-hand text keeps the true value. The busy
+meter's value text is
 `<busy>% · <N> MB/s w`, its label the device name (`nvme0n1 busy`)
 when that fits the meter label column, else `disk busy`. A kernel
 without PSI (no `/proc/pressure`) simply hides the stall meter;

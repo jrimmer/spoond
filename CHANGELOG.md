@@ -10,6 +10,22 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **The dashboard's i/o stall meter is scaled to line up with the other
+  host meters, and its value reads plainly.** Its levels
+  (`DASH_IO_FULL_WARN_PCT` / `DASH_IO_FULL_BAD_PCT`, defaults 5 and 15)
+  are far below 100, so on a 0-100 % bar its warning tick sat at the
+  far left and progress toward it was hard to see. The bar is now drawn
+  piecewise: 0..warn fills 0..80 % of the bar, warn..bad fills
+  80..100 %, and bad or more fills it, putting the tick on cell 12 —
+  the same column as every other host meter's. Colours still follow the
+  real value against warn/bad and the right-hand text keeps the true
+  60 s average. The value text also drops the PSI term "full" for the
+  plain "stalled": `0.4% stalled` on the meter and `disk i/o stalled
+  N% of the last 60 s` in the notification. The `DASH_IO_FULL_*`
+  variable names are unchanged.
+
 ### Fixed
 
 - **A planned orchestrator restart no longer loses leases to a
