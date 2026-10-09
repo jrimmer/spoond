@@ -101,3 +101,90 @@ internally; the network handler now maps that to `409 lease_busy`
 - `git fetch origin`: no commits were added to `origin/main` since the
   branch base, so there is no new step type, provider, restart, cancel or
   retry path to reconcile.
+
+## Round 2 (layer-3 review of 2d8f376)
+
+### R1 — drain hole
+
+`ensureRunning` (`api/idle_suspend.go`) now calls the new
+`Service.resumeForUse` (`api/service.go`); `resume` and `resumeAny`
+route through it too. `resumeForUse` takes `drainGate`'s read side with
+`TryRLock` (a work call never queues behind a finishing drain), refuses
+with `errDraining` while `draining` or `drainClearPending` is set, and
+holds the read side across `resumeLease`. `writeResumeRefusal` maps
+`errDraining` onto the shared `503` + `Retry-After: 30` +
+`code: capacity_wait` shape (the previously dead `resumeNoRoom` branch).
+The undrain still clears the drain first and resumes the drained leases
+through `resumeLease` directly.
+
+- Test: `TestResumeOnUseDrainRefuses` (`api/resume_on_use_test.go`).
+- Mutation that fails it: disable the `draining.Load() ||
+  drainClearPending.Load()` check in `resumeForUse` (exec on a Drained
+  lease during drain then returns 200 and clears `Drained`).
+
+### R2 — LLM gateway auth order
+
+`api/llmgateway.go` now runs the per-user LLM key / `requireKey` check
+before the `lease.Suspended` resume, so a 401 leaves the lease
+suspended and spends no hugepages.
+
+- Test: `TestResumeOnUseLLM401LeavesSuspended`
+  (`api/resume_on_use_test.go`).
+- Mutation that fails it: move the resume block back above the
+  authentication block (an empty key resumes the lease before 401).
+
+### R3 — preempted held leases stranded
+
+`suspendedByRule` (`api/held.go`) no longer exempts a preempted lease;
+`pauseActionPreempt` (`preempt/suspend`) is one of the accepted
+`LastAction`s, so rules 2 and 5 cover it like any rule suspension. The
+old exemption's comment is gone.
+
+- Tests: `TestPreemptedHeldLeaseReleasedByStaleRule`,
+  `TestPreemptedHeldLeaseReleasedByCriticalRule` (`api/held_test.go`);
+  `TestPreemptedHeldLeaseStaleReleased` (`api/preempt_test.go`) and
+  `TestIdleSuspendedStaleRelease` (`api/idle_suspend_test.go`) updated
+  to the new behaviour.
+- Mutation that fails them: re-add the `!l.PreemptedAt.IsZero()` early
+  return in `suspendedByRule`.
+
+### R4 — concurrency
+
+`TestResumeOnUseConcurrentExactlyOneResume`
+(`api/resume_on_use_test.go`) runs four real parallel execs on one
+suspended lease with the first resume's `Create` held open; it asserts
+exactly one resume `Create`, every caller answered 200 or `409
+lease_busy`, and no 500.
+
+- Mutation that fails it: `if false && l.busy` in `resumeLease`
+  (4 Creates instead of 1).
+
+### R5 — job signal order
+
+`handleJobSignal` (`api/jobs_http.go`) resolves the job record and
+checks `State == "running"` before `ensureRunning`, so signalling a
+finished job does not resume the lease.
+
+- Test: `TestJobSignalFinishedDoesNotResume` (`api/jobs_test.go`).
+
+### R6 — docs
+
+`docs/api.md`'s per-path table now splits `GET /api/leases/{id}` (lease
+detail: 200 for a suspended lease) from
+`GET /api/leases/{id}/stat` (the stat probe: 409 lease_suspended), and
+the heartbeat row records 204 for a busy (not suspended) lease. The
+`CHANGELOG.md` mismatched backtick at the non-work-path sentence is
+fixed; the preempted-rule change and the drain refusal are documented.
+
+## Round 2 gates
+
+- `go build ./...` — clean
+- `go vet ./...` — clean
+- `gofmt -l .` — empty
+- `go test -p 2 -count=1 ./...` — all pass
+- `go test -race -count=1 ./api/ ./store/` — all pass
+- The added and updated tests pass as a non-root user
+  (`spoondtest`), with `t.TempDir()` everywhere.
+- `git fetch origin`: `origin/main` is unchanged since the branch base
+  (`git log HEAD..origin/main` is empty), so there is no new step type,
+  provider, restart, cancel or retry path to reconcile.
