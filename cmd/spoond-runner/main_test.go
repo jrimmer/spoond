@@ -372,3 +372,24 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	lease.release()
 	forgejo.release()
 }
+
+// TestEnvDurOrBareSeconds: the duration knob accepts the *_SECS form too
+// (RUNNER_JOB_TIMEOUT=3600 is an hour), a Go duration, and falls back to
+// the default otherwise.
+func TestEnvDurOrBareSeconds(t *testing.T) {
+	cases := []struct {
+		val  string
+		want time.Duration
+	}{
+		{"3600", time.Hour},
+		{"10m", 10 * time.Minute},
+		{"", 42 * time.Second},
+		{"nonsense", 42 * time.Second},
+	}
+	for _, c := range cases {
+		t.Setenv("RUNNER_JOB_TIMEOUT", c.val)
+		if got := envDurOr("RUNNER_JOB_TIMEOUT", 42*time.Second); got != c.want {
+			t.Errorf("envDurOr(%q) = %s, want %s", c.val, got, c.want)
+		}
+	}
+}
