@@ -104,10 +104,24 @@ and `10.1.0.3` is unaffected: those are not sandbox-vrt addresses.
 - the touched package tests pass; the 5 DSCP failures and the
   rootless-Docker container test are pre-existing environment-only
   (missing kernel DSCP module / no rootless Docker), confirmed on
-  `origin/spoond`
+  `origin/spoond`. The v2 package's
+  `TestCreateNetworkV2_ForwardsUnderDropPolicy` probe also fails on the
+  untouched base commit (no usable netns capture in this lease), so it
+  is not a regression from this change.
 - the new tests use `t.TempDir()`/no `/work`, `/run/honey` or `/opt/honey`
   path, and run as a non-root user
 - live firewall on no host was changed
+
+Race output tail for the named tests (`-race -count=10`):
+
+```
+=== RUN   TestFilterRules_HostDropPrecedesAllow
+--- PASS: TestFilterRules_HostDropPrecedesAllow (0.00s)
+=== RUN   TestNewFirewall_ConcurrentSetCreation
+--- PASS: TestNewFirewall_ConcurrentSetCreation (0.00s)
+PASS
+ok  github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/network 1.161s
+```
 
 ## Fork commit
 
