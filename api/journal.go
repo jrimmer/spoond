@@ -38,7 +38,7 @@ const (
 // release or loss is about to delete the sandbox. A nil lease writes
 // nothing.
 func (s *Service) journalLease(op string, l *Lease, reason string) {
-	if s == nil || l == nil {
+	if s == nil || s.log == nil || l == nil {
 		return
 	}
 	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s class=%s reason=%s",
