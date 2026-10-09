@@ -80,6 +80,11 @@ func envDurOr(key string, def time.Duration) time.Duration {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
 		}
+		// A bare whole number is seconds (the sibling *_SECS knobs accept
+		// both, e.g. RUNNER_JOB_TIMEOUT=3600).
+		if n, err := strconv.Atoi(v); err == nil {
+			return time.Duration(n) * time.Second
+		}
 	}
 	return def
 }
