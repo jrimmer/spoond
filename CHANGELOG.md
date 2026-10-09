@@ -10,6 +10,38 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Fair shares: an equal floating slice per owner and usage
+  accounting (#145 FS1).** Every owner now has a computed 1/N slice of
+  the box — the hugepage memory pool and the snapshot volume's usable
+  bytes, N being the number of owners that exist (each identity user,
+  plus the legacy consumer token as one owner). Usage is measured from
+  recorded state: memory is the owner's running leases, disk is their
+  pause snapshots + kept checkpoints + named snapshots (recorded
+  `size_bytes`, never a filesystem walk per request). The view is
+  computed in one place (`api/fair_shares.go`), cached, and invalidated
+  on lease state changes and owner add/delete.
+
+  - **API.** `GET /api/fair-shares` (admin) lists every owner sorted by
+    ratio (usage/slice) descending; `GET /api/users/{id}` (admin) and
+    `GET /api/users/me`/`GET /api/usage` (self) return the owner's
+    `slice_pct`, `memory {slice_mib, used_mib}`, `disk {slice_bytes,
+    used_bytes, paused_bytes, kept_bytes, named_bytes}` and `ratio`.
+  - **`GET /api/shares` is unchanged.** It still lists the caller's
+    lease grants; the fair-share view is served at `GET
+    /api/fair-shares` instead, so no existing caller breaks. The SSH
+    gateway's `share ls` is untouched.
+  - This unit computes and reports the shares only: no admission,
+    preemption or take-back behaviour changes yet.
+  - Capacity is read from the node-info cache the admission path keeps
+    warm; the fair-share routes make no substrate RPC. On a cold cache,
+    or when a store read fails, the slices are `0`, the result is marked
+    unknown and **not cached**, and the next request recomputes it (a
+    failed read is never served as a real zero). Invalidations run
+    after the store write, so a concurrent compute cannot cache the
+    pre-write state.
+
 ## [2.9.2] - 2026-10-09
 
 ### Changed
@@ -185,29 +217,6 @@ A summary for clients; the details are in the entries below and in
     [docs/api.md](docs/api.md) for the full per-path status table.
 
 ### Added
-
-- **Fair shares: an equal floating slice per owner and usage
-  accounting (#145 FS1).** Every owner now has a computed 1/N slice of
-  the box — the hugepage memory pool and the snapshot volume's usable
-  bytes, N being the number of owners that exist (each identity user,
-  plus the legacy consumer token as one owner). Usage is measured from
-  recorded state: memory is the owner's running leases, disk is their
-  pause snapshots + kept checkpoints + named snapshots (recorded
-  `size_bytes`, never a filesystem walk per request). The view is
-  computed in one place (`api/shares.go`), cached, and invalidated on
-  lease state changes and owner add/delete.
-
-  - **API.** `GET /api/shares` (admin) lists every owner sorted by
-    ratio (usage/slice) descending; `GET /api/users/{id}` (admin) and
-    `GET /api/users/me`/`GET /api/usage` (self) return the owner's
-    `slice_pct`, `memory {slice_mib, used_mib}`, `disk {slice_bytes,
-    used_bytes, paused_bytes, kept_bytes, named_bytes}` and `ratio`.
-  - **`GET /api/shares` changed meaning.** It now carries the
-    fair-share view (admin only) instead of the lease-grant listing;
-    the grant listing moved to `GET /api/shares/grants`. The SSH
-    gateway's `share ls` follows.
-  - This unit computes and reports the shares only: no admission,
-    preemption or take-back behaviour changes yet.
 
 - **A durable lease journal (spoond-puqp).** Every lease create,
   release, lost and suspend (including preemption) now writes one
