@@ -99,6 +99,16 @@ func (e *Executor) Run(ctx context.Context, job *Job) error {
 	image := e.imageFor(wfJob)
 	sandboxID, err := e.Sandbox.Create(ctx, image, e.TTL)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The job's context died while waiting for a sandbox — the
+			// runner's graceful stop or the job timeout. Report it as
+			// cancelled, not failed, the way a mid-step cancellation is
+			// (the sandbox was never obtained, so there is nothing to
+			// release).
+			log.Printf("executor: job %d create cancelled: %v", job.ID, err)
+			state := &JobState{ID: job.ID, Result: ResultCancelled}
+			return e.report(ctx, state, nil)
+		}
 		return e.fail(ctx, job, fmt.Errorf("create sandbox: %w", err))
 	}
 

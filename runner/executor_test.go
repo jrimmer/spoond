@@ -900,13 +900,16 @@ func TestExecutorJobTimeoutBoundsCreateWait(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("Run succeeded, want a timeout error")
+		if err != nil {
+			t.Fatalf("Run: %v", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run never returned; JobTimeout did not bound the create wait")
 	}
 	if len(sink.reports) != 1 {
 		t.Fatalf("reported %d state(s), want exactly 1 (the timed-out job)", len(sink.reports))
+	}
+	if got := sink.reports[0].Result; got != ResultCancelled {
+		t.Fatalf("reported result %v, want ResultCancelled", got)
 	}
 }
