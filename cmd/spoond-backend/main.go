@@ -96,10 +96,19 @@
 //	PRESSURE_HELD_IDLE_SECS  the shortened idle threshold under pressure
 //	                  (default 1800 = 30 min; 0 disables the shortening)
 //	CRITICAL_DISK_FREE_PCT  snapshot-disk free percentage under which
-//	                  suspended held leases are released (default 5; 0
+//	                  suspended leases are released (default 5; 0
 //	                  disables)
 //	CRITICAL_DISK_RECOVER_PCT  release stops above this free percentage
 //	                  (default 10)
+//	DISK_CLEAN_START_PCT  snapshot-disk free percentage under which the
+//	                  proactive disk cleanup reclaims spoond's own garbage
+//	                  each tick (default 20; 0 disables)
+//	DISK_CLEAN_STOP_PCT  the proactive cleanup's target: it stops once
+//	                  this much is free (default 25; below the start is
+//	                  raised to it)
+//	KEPT_CHECKPOINT_TTL_SECS  how long a kept checkpoint may stay pinned
+//	                  before the proactive cleanup expires it so the GC
+//	                  can reclaim it (default 604800 = 7 d; 0 disables)
 //	NOTIFY_WEBHOOKS  JSON list of webhook receivers for events that
 //	                  need a person (2.2 #117): [{"url":..., "format":
 //	                  "ntfy"|"slack"|"json", "min_severity":
@@ -541,6 +550,14 @@ func Main(args []string) int {
 	holdTTL := time.Duration(envIntOr("HOLD_TTL_SECS", 604800)) * time.Second
 	holdTTLMax := time.Duration(envIntOr("HOLD_TTL_MAX_SECS", 2592000)) * time.Second
 	pressureIdle := time.Duration(envIntOr("PRESSURE_HELD_IDLE_SECS", 1800)) * time.Second
+	// Proactive disk cleanup (#145 D5, owner refinement 2026-10-08):
+	// below DISK_CLEAN_START_PCT free each sweep tick reclaims spoond's
+	// own garbage until DISK_CLEAN_STOP_PCT is free, and a kept
+	// checkpoint older than KEPT_CHECKPOINT_TTL_SECS is unpinned so the
+	// GC can reclaim it.
+	diskCleanStartPct := float64(envIntOr("DISK_CLEAN_START_PCT", api.DefaultDiskCleanStartPct))
+	diskCleanStopPct := float64(envIntOr("DISK_CLEAN_STOP_PCT", api.DefaultDiskCleanStopPct))
+	keptCheckpointTTL := time.Duration(envIntOr("KEPT_CHECKPOINT_TTL_SECS", int(api.DefaultKeptCheckpointTTL/time.Second))) * time.Second
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
@@ -615,6 +632,9 @@ func Main(args []string) int {
 		PressureHeldIdle:          pressureIdle,
 		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
 		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
+		DiskCleanStartPct:         diskCleanStartPct,
+		DiskCleanStopPct:          diskCleanStopPct,
+		KeptCheckpointTTL:         keptCheckpointTTL,
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),
 		SnapshotKeepVersions:      envIntOr("SNAPSHOT_KEEP_VERSIONS", api.DefaultSnapshotKeepVersions),

@@ -269,8 +269,40 @@ func (s *Service) failStaleBuildingBuilds(ctx context.Context) {
 // bounding the catalog.
 const deletedBuildRetention = 30 * 24 * time.Hour
 
+// gcStats accumulates the bytes one GC or disk-cleanup pass freed, split
+// by the category the proactive disk-cleanup tier reports (#145 D5).
+type gcStats struct {
+	// Orphans is bytes freed by the orphan build-directory reap.
+	Orphans int64
+	// ReleasedBuilds is bytes of unreferenced non-template builds
+	// (pause/checkpoint builds left by released or lost leases).
+	ReleasedBuilds int64
+	// TemplateBuilds is bytes of unreferenced, no-longer-current template
+	// builds.
+	TemplateBuilds int64
+	// KeptCheckpoints is bytes of kept pins the cleanup expired (their
+	// builds then became reclaimable).
+	KeptCheckpoints int64
+}
+
+// total is every byte the pass freed across the categories.
+func (st gcStats) total() int64 {
+	return st.Orphans + st.ReleasedBuilds + st.TemplateBuilds + st.KeptCheckpoints
+}
+
+// nonEmpty reports whether the pass freed anything worth an event.
+func (st gcStats) nonEmpty() bool { return st.total() > 0 }
+
 // gcPass is gcOnce's body: one full pass.
 func (s *Service) gcPass(ctx context.Context) error {
+	_, err := s.gcPassStats(ctx)
+	return err
+}
+
+// gcPassStats is gcPass with a per-category byte breakdown, for the
+// proactive disk-cleanup tier (#145 D5).
+func (s *Service) gcPassStats(ctx context.Context) (gcStats, error) {
+	var stats gcStats
 	// Fail stale building rows before the kept set is computed: a building
 	// row is a root, so a SIGKILL or reboot mid-build would otherwise pin
 	// its whole ancestor chain forever (spoond-4yl).
@@ -285,11 +317,11 @@ func (s *Service) gcPass(ctx context.Context) error {
 	s.releaseExpiredLostLeases(ctx)
 	kept, err := s.keptBuilds(ctx)
 	if err != nil {
-		return err
+		return stats, err
 	}
-	deleted, freed, err := s.gcCandidates(ctx, kept)
+	deleted, freed, err := s.gcCandidates(ctx, kept, &stats)
 	if err != nil {
-		return err
+		return stats, err
 	}
 	// After the catalog candidates, sweep the directories under the
 	// storage path that the catalog never sees (an abandoned pause whose
@@ -299,6 +331,7 @@ func (s *Service) gcPass(ctx context.Context) error {
 	orphans, orphanFreed := s.reapOrphans(ctx)
 	deleted += orphans
 	freed += orphanFreed
+	stats.Orphans += orphanFreed
 	// A pass that deleted builds is spoond's own maintenance and emits
 	// one lease-less `gc` event (2.5, #132 part 2); a pass that deleted
 	// nothing (the default dry run included) emits nothing.
@@ -306,12 +339,12 @@ func (s *Service) gcPass(ctx context.Context) error {
 		s.emitGCEvent(fmt.Sprintf("%s · %s freed", pluralBuilds(deleted), formatEventBytes(freed)))
 	}
 	if err := s.accountDisk(ctx); err != nil {
-		return err
+		return stats, err
 	}
 	// The kept gauges ride the same hourly pass as the disk accounting
 	// they summarize (#126).
 	s.UpdateKeptMetrics(ctx)
-	return nil
+	return stats, nil
 }
 
 // pluralBuilds renders a deleted-build count for a gc event detail:
@@ -533,8 +566,12 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 // every ready/failed build outside kept with an updated_at older than
 // gcAge. It returns how many builds it actually deleted and how many
 // bytes those builds' rows recorded, for the lease-less gc event
-// (2.5, #132 part 2).
-func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) (deleted int, freed int64, err error) {
+// (2.5, #132 part 2). When stats is non-nil the freed bytes are also
+// split by category for the proactive disk-cleanup tier (#145 D5): a
+// template row (current or not) counts as TemplateBuilds; any other
+// unreferenced build left behind by a released or lost lease counts as
+// ReleasedBuilds.
+func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool, stats *gcStats) (deleted int, freed int64, err error) {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("gc: list builds: %w", err)
@@ -565,6 +602,13 @@ func (s *Service) gcCandidates(ctx context.Context, kept map[string]bool) (delet
 		}
 		deleted++
 		freed += b.SizeBytes
+		if stats != nil {
+			if b.Kind == "template" {
+				stats.TemplateBuilds += b.SizeBytes
+			} else {
+				stats.ReleasedBuilds += b.SizeBytes
+			}
+		}
 	}
 	return deleted, freed, nil
 }

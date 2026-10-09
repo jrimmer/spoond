@@ -428,10 +428,14 @@ func TestCriticalReleasesOldestSuspendedFirstToRecovery(t *testing.T) {
 	older := time.Now().Add(-20 * time.Minute)
 	mid := time.Now().Add(-10 * time.Minute)
 	svc.store.mu.Lock()
-	suspended[0].LastActionAt = older
-	suspended[1].LastActionAt = mid
-	suspended[2].LastActionAt = time.Now()
+	// The FIFO key is suspended_at (#145 D5): stagger it so "oldest
+	// first" is observable. The action time follows for the recorded
+	// last_action.
+	suspended[0].SuspendedAt = older
+	suspended[1].SuspendedAt = mid
+	suspended[2].SuspendedAt = time.Now()
 	for _, l := range suspended { // no activity since each suspension
+		l.LastActionAt = l.SuspendedAt
 		l.LastActive = older.Add(-time.Minute)
 	}
 	svc.store.mu.Unlock()
@@ -813,47 +817,63 @@ func TestLapseOfSuspendedHoldDoesNotRelease(t *testing.T) {
 	}
 }
 
-// TestOnlyRuleSuspendedLeasesAreReleased: a held lease suspended by hand
-// is never released by rules 2 or 5, and neither is one a rule
-// suspended that was used again since.
-func TestOnlyRuleSuspendedLeasesAreReleased(t *testing.T) {
+// TestCriticalReleasesAnySuspendedOldestFirst: rule 5 is the one
+// critical-disk cleanup for every suspended lease (#145 D5) — a lease
+// suspended by hand is a candidate like a rule-suspended one, the
+// oldest suspension goes first, and a running lease is never touched.
+func TestCriticalReleasesAnySuspendedOldestFirst(t *testing.T) {
 	t.Setenv("GC_DELETE", "1")
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 	svc.SetMetrics(metrics.NewBackendMetrics())
-	svc.cfg.HeldSuspendedRelease = time.Hour
+	svc.cfg.HeldSuspendedRelease = 0 // rule 2 off: only rule 5 acts here
 	svc.cfg.HeldIdleTimeout = 0
 	svc.cfg.CriticalDiskFreePct = 5
 	svc.cfg.CriticalDiskRecoverPct = 10
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 1, nil } // critical
 
-	manual, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "by-hand", "", nil)
+	// A hand-suspended lease: no automatic reason, so suspended_at is
+	// unset and the pause's action time orders it.
+	manual, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "by-hand", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	if _, err := svc.pauseLease(ctx, manual, false); err != nil {
 		t.Fatalf("manual suspend: %v", err)
 	}
-	used, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "used-again", "", nil)
+	// A second suspended lease, newer: the hand-suspended one is older,
+	// so it goes first even though it carries no automatic reason.
+	used, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "suspended-later", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	if _, err := svc.pauseLease(ctx, used, false); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
+	// A running lease must never be a victim.
+	running, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "running", "", nil)
+	if err != nil {
+		t.Fatalf("grant running: %v", err)
+	}
+
+	now := time.Now()
 	svc.store.mu.Lock()
-	used.LastAction, used.LastActionAt = "idle/suspend_idle", time.Now().Add(-2*time.Hour)
-	used.LastActive = time.Now().Add(-time.Hour) // touched after the rule's suspend
+	manual.LastActionAt = now.Add(-time.Hour)
+	used.LastActionAt = now.Add(-time.Minute)
 	svc.store.mu.Unlock()
 
-	svc.runHeldRules(ctx, time.Now().Add(30*24*time.Hour))
-	if svc.lookup("c", manual.ID) == nil {
-		t.Fatal("a held lease suspended by hand was released")
+	svc.runHeldRules(ctx, now.Add(time.Hour))
+	if svc.lookup("c", manual.ID) != nil {
+		t.Fatal("the oldest suspended lease (hand-suspended) was not released")
 	}
+	// One per tick: the newer suspended lease and the running lease stay.
 	if svc.lookup("c", used.ID) == nil {
-		t.Fatal("a lease used since its rule suspension was released")
+		t.Fatal("more than one suspended lease was released in the tick")
+	}
+	if svc.lookup("c", running.ID) == nil || running.Suspended || running.State != "running" {
+		t.Fatalf("running lease touched: %+v", running)
 	}
 }
 

@@ -97,6 +97,50 @@ func (db *DB) DeleteKeptBuildsOfOwner(ctx context.Context, owner string) ([]stri
 	return ids, nil
 }
 
+// KeptBuildPin is one (lease, build) pin with when it was taken, for
+// the proactive disk-cleanup tier's kept-checkpoint TTL (#145 D5).
+type KeptBuildPin struct {
+	LeaseID, BuildID string
+	KeptAt           time.Time
+}
+
+// ListKeptBuildPins returns every kept-builds row ordered by kept_at.
+// Unlike ListKeptBuilds it keeps the time and the lease id, so the disk
+// cleanup can expire a pin past its TTL.
+func (db *DB) ListKeptBuildPins(ctx context.Context) ([]KeptBuildPin, error) {
+	rows, err := db.r.QueryContext(ctx,
+		`SELECT lease_id, build_id, kept_at FROM lease_kept_builds ORDER BY kept_at`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list kept build pins: %w", err)
+	}
+	defer rows.Close()
+	var out []KeptBuildPin
+	for rows.Next() {
+		var p KeptBuildPin
+		var keptAt string
+		if err := rows.Scan(&p.LeaseID, &p.BuildID, &keptAt); err != nil {
+			return nil, fmt.Errorf("store: list kept build pins: %w", err)
+		}
+		p.KeptAt = parseTime(keptAt)
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list kept build pins: %w", err)
+	}
+	return out, nil
+}
+
+// DeleteKeptBuild drops one lease's pin on buildID (the disk cleanup's
+// kept-checkpoint TTL expiry). A missing row is not an error.
+func (db *DB) DeleteKeptBuild(ctx context.Context, leaseID, buildID string) error {
+	_, err := db.w.ExecContext(ctx,
+		`DELETE FROM lease_kept_builds WHERE lease_id = ? AND build_id = ?`, leaseID, buildID)
+	if err != nil {
+		return fmt.Errorf("store: delete kept build %s for lease %s: %w", buildID, leaseID, err)
+	}
+	return nil
+}
+
 // ListKeptBuilds returns every (lease_id, build_id) row as
 // lease id -> kept build ids.
 func (db *DB) ListKeptBuilds(ctx context.Context) (map[string][]string, error) {

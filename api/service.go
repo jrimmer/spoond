@@ -360,6 +360,22 @@ type ServiceConfig struct {
 	PressureHeldIdle       time.Duration
 	CriticalDiskFreePct    float64
 	CriticalDiskRecoverPct float64
+	// DiskCleanStartPct / DiskCleanStopPct bound the proactive disk-cleanup
+	// tier (#145 D5): below DiskCleanStartPct free, each sweep tick
+	// reclaims spoond's own garbage (orphan dirs, released-lease and
+	// unreferenced-template builds, expired kept checkpoints, in that
+	// order) until free space is above DiskCleanStopPct. 0 disables the
+	// tier. DISK_CLEAN_START_PCT (default 20) and DISK_CLEAN_STOP_PCT
+	// (default 25). A stop below the start never terminates, so it is
+	// raised to the start.
+	DiskCleanStartPct float64
+	DiskCleanStopPct  float64
+	// KeptCheckpointTTL is how long a kept checkpoint may stay pinned
+	// before the proactive disk-cleanup tier unpins it so the GC can
+	// reclaim it (#145 D5). 0 disables the expiry (kept builds then live
+	// as long as their lease). KEPT_CHECKPOINT_TTL_SECS (default 604800 =
+	// 7 d).
+	KeptCheckpointTTL time.Duration
 	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
 	// keep on a lease already holding this many kept builds answers 409
 	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default

@@ -101,6 +101,20 @@ const (
 	// the freed bytes for a deletion, or the failed build for the stale
 	// sweep.
 	LeaseGC LeaseEventType = "gc"
+	// LeaseDiskCleanup marks a proactive disk-cleanup tick (#145 D5): the
+	// snapshot disk is under DISK_CLEAN_START_PCT, so spoond reclaimed its
+	// own garbage (orphan dirs, released-lease and unreferenced-template
+	// builds, expired kept checkpoints) before any live work is touched.
+	// It is spoond's own maintenance, not a lease's: the lease id and
+	// owner are empty, and the detail names the bytes freed per category.
+	LeaseDiskCleanup LeaseEventType = "disk.cleanup"
+	// LeaseCriticalRelease marks a critical-disk cleanup of a suspended
+	// lease (#145 D5): the snapshot disk is under CRITICAL_DISK_FREE_PCT,
+	// so the oldest suspended lease is released, one per sweep tick,
+	// until free space is above CRITICAL_DISK_RECOVER_PCT. It is emitted
+	// before the lease's own `released` event, which carries reason
+	// `disk_critical`.
+	LeaseCriticalRelease LeaseEventType = "critical_release"
 	// LeaseSnapshotSaved marks a lease saved as a named snapshot (2.7,
 	// #83): the detail names the name@version, the size and how long the
 	// checkpoint took.
@@ -460,6 +474,13 @@ func (s *Service) emitSuspendEvent(leaseID, owner, buildID, reason, policyStep s
 // the all-leases stream (and the events-only token) does.
 func (s *Service) emitGCEvent(detail string) {
 	s.bus.emit("", "", LeaseGC, detail)
+}
+
+// emitDiskCleanupEvent records one proactive disk-cleanup tick (#145 D5).
+// Like a gc event it is spoond's own maintenance: no lease id and no
+// owner, so only the all-leases stream carries it.
+func (s *Service) emitDiskCleanupEvent(detail string) {
+	s.bus.emit("", "", LeaseDiskCleanup, detail)
 }
 
 // Lease-event detail formats (2.5, #132 part 2). The units stay in the

@@ -361,12 +361,24 @@ func (s *Service) releaseHeld(ctx context.Context, l *Lease) {
 	s.releaseBecause(ctx, l, "released by a held-lease rule")
 }
 
-// releaseSuspendedHeldUntil implements rule 5: while the snapshot disk
-// is under CriticalDiskFreePct, release held leases already suspended
-// by rule 1 (or 4), oldest suspension first, until free space is above
+// criticalReleaseReason is the `released` event's reason when the
+// critical-disk cleanup releases a suspended lease (#145 D5): the
+// snapshot disk was under CRITICAL_DISK_FREE_PCT and the lease was the
+// oldest suspended one. It goes through releaseBecause like any other
+// release, so the lease answers 404 afterwards with no new state.
+const criticalReleaseReason = "disk_critical"
+
+// releaseSuspendedUntil implements rule 5, now the one critical-disk
+// cleanup for every suspended lease (#145 D5): while the snapshot disk
+// is under CriticalDiskFreePct, release the oldest suspended lease
+// (by suspended_at), one per sweep tick, until free space is above
 // CriticalDiskRecoverPct — the GC having run first. A running (or
-// otherwise live) held lease is never released here.
-func (s *Service) releaseSuspendedHeldUntil(ctx context.Context, now time.Time) {
+// otherwise live) lease is never released here; neither is a lease
+// with an in-flight operation. Before each release one
+// lease.critical_release warning event names the lease, its owner and
+// the free percentage, then the lease is released with reason
+// disk_critical.
+func (s *Service) releaseSuspendedUntil(ctx context.Context, now time.Time) {
 	crit := s.cfg.CriticalDiskFreePct
 	recover := s.cfg.CriticalDiskRecoverPct
 	if crit <= 0 || s.cfg.TemplateStoragePath == "" {
@@ -381,12 +393,12 @@ func (s *Service) releaseSuspendedHeldUntil(ctx context.Context, now time.Time) 
 	}
 	// Releasing a lease frees disk only through the GC's deletions. With
 	// the GC in dry-run (GC_DELETE unset) nothing is ever freed, so
-	// releasing would destroy held work for no gain: refuse, and say so
-	// (at most once an hour).
+	// releasing would destroy suspended work for no gain: refuse, and
+	// say so (at most once an hour).
 	if os.Getenv("GC_DELETE") != "1" {
 		if now.Sub(s.criticalDryRunLogged) >= time.Hour {
 			s.criticalDryRunLogged = now
-			s.log.Printf("held leases: disk %.1f%% free < %.0f%% critical, but GC_DELETE is not 1 (dry-run GC frees nothing): releasing no held lease", pct, crit)
+			s.log.Printf("critical disk: disk %.1f%% free < %.0f%% critical, but GC_DELETE is not 1 (dry-run GC frees nothing): releasing no suspended lease", pct, crit)
 		}
 		return
 	}
@@ -413,30 +425,49 @@ func (s *Service) releaseSuspendedHeldUntil(ctx context.Context, now time.Time) 
 	// Releasing one per tick costs nothing against a 5 s sweep, and each
 	// next tick's leading GC pass reclaims the previous victims' builds
 	// when GC_DELETE=1, so the recovery level is still approached.
-	victim, suspendedAt, ok := s.oldestSuspendedHeld(now)
+	victim, suspendedAt, ok := s.oldestSuspended()
 	if !ok {
 		return
 	}
-	s.heldActionLocked(ctx, victim, heldRuleCritical, heldActionRelease,
-		fmt.Sprintf("disk %.1f%% free < %.0f%% critical; suspended at %s (%s ago), oldest first; recovery at %.0f%%",
-			pct, crit, suspendedAt.Format(time.RFC3339), now.Sub(suspendedAt).Round(time.Second), recover),
-		now)
-	s.releaseHeld(ctx, victim)
+	s.log.Printf("critical disk: releasing suspended lease %s (owner %s): disk %.1f%% free < %.0f%% critical, suspended since %s",
+		victim.ID, victim.Owner, pct, crit, suspendedAt.Format(time.RFC3339))
+	s.store.mu.Lock()
+	if !victim.released {
+		victim.LastAction = heldRuleCritical + "/" + heldActionRelease
+		victim.LastActionAt = now
+		s.saveLeaseLocked(victim)
+	}
+	s.store.mu.Unlock()
+	if s.metrics != nil {
+		s.metrics.HeldActions.WithLabelValues(heldRuleCritical, heldActionRelease).Inc()
+	}
+	s.emitLeaseEvent(victim.ID, victim.Owner, LeaseCriticalRelease,
+		fmt.Sprintf("disk %.1f%% free < %.0f%% critical (recovery at %.0f%%); releasing the oldest suspended lease, suspended since %s",
+			pct, crit, recover, suspendedAt.Format(time.RFC3339)))
+	s.releaseBecause(ctx, victim, criticalReleaseReason)
 }
 
-// oldestSuspendedHeld returns the lease a rule suspended longest ago
-// (suspendedByRule) — rule 5's victim. Running leases, and leases
-// suspended by hand or by the drain, are never candidates. Call with s.store.mu NOT
-// held (the returned pointer is used outside the lock, like the
-// sweeper's other victims).
-func (s *Service) oldestSuspendedHeld(now time.Time) (*Lease, time.Time, bool) {
+// oldestSuspended returns the lease that has been suspended longest —
+// rule 5's victim. Every suspended lease is a candidate regardless of
+// why it was suspended (#145 D5); a running, lost or busy lease is
+// never one. suspended_at names an automatic suspension; a hand or
+// drain suspension has none, so the action time recorded by the pause
+// stands in. Call with s.store.mu NOT held (the returned pointer is
+// used outside the lock, like the sweeper's other victims).
+func (s *Service) oldestSuspended() (*Lease, time.Time, bool) {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	var best *Lease
 	var bestAt time.Time
 	for _, l := range s.store.leases {
-		at, ok := suspendedByRule(l)
-		if !ok {
+		if l.released || l.busy || !l.Suspended || l.State != "suspended" {
+			continue
+		}
+		at := l.SuspendedAt
+		if at.IsZero() {
+			at = l.LastActionAt
+		}
+		if at.IsZero() {
 			continue
 		}
 		if best == nil || at.Before(bestAt) {
@@ -481,17 +512,18 @@ func (s *Service) releaseStaleHeld(ctx context.Context, now time.Time) {
 }
 
 // runHeldRules runs the held-lease rules for one sweep tick, in order:
-// hold lapse (3, suspending running leases, releasing none),
-// stale-release (2), then
-// idle-suspend (1, shortened by pressure (4)) — pressure is evaluated
-// once per tick — and critical-release (5) last, so a tick that both
-// suspends and frees leaves the disk check looking at the resulting
-// state. Skips while draining (the sweep already checked; this guards
-// direct callers).
+// the proactive disk cleanup (reclaim spoond's own garbage below
+// DISK_CLEAN_START_PCT), hold lapse (3, suspending running leases,
+// releasing none), stale-release (2), idle-suspend (1, shortened by
+// pressure (4)) — pressure is evaluated once per tick — and
+// critical-release (5) last, so a tick that both suspends and frees
+// leaves the disk check looking at the resulting state. Skips while
+// draining (the sweep already checked; this guards direct callers).
 func (s *Service) runHeldRules(ctx context.Context, now time.Time) {
 	if s.draining.Load() {
 		return
 	}
+	s.diskCleanupTick(ctx, now)
 	s.expireHolds(ctx, now)
 	s.releaseStaleHeld(ctx, now)
 
@@ -499,7 +531,7 @@ func (s *Service) runHeldRules(ctx context.Context, now time.Time) {
 	if timeout > 0 {
 		s.suspendIdleHeld(ctx, now, timeout, why)
 	}
-	s.releaseSuspendedHeldUntil(ctx, now)
+	s.releaseSuspendedUntil(ctx, now)
 }
 
 // suspendIdleHeld suspends every held lease idle for at least timeout
