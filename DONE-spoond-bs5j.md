@@ -102,15 +102,18 @@ backend prints the real numbers for sb's current owners.
   `GOCACHE` under `/home/user`), using `t.TempDir()` everywhere; none
   needs root or reads `/work`, `/run/honey` or `/opt/honey`.
 - `git fetch origin`: `origin/main` gained the v2.9.0 tag, the
-  spoond-r739 runner merge and the fork P10 guest-log merge since the
-  branch base (`0a1c495`). spoond-r739 is in `runner/`, the create
-  path's capacity `503` (Retry-After) and `admitqueue_test.go`; P10 is
-  the orchestrator fork's `/logs` handler and its changelog. Neither
-  adds a step type, provider, restart, cancel or retry path that touches
-  the shares work. The harness rebase onto `origin/main` leaves the
-  branch building, vetting, gofmt-clean and passing
-  `go test -p 2 -count=1 ./...` and `go test -race -count=1 ./api/
-  ./store/`. The one rebase conflict is `CHANGELOG.md` at the v2.9.0
-  release boundary (main moved the old `[Unreleased]` content into the
-  released section); the fair-shares entry is kept under `[Unreleased]`
-  here so the resolution stays a 3.0 change.
+  spoond-r739 runner merge, the fork P10 guest-log merge and the
+  spoond-clcw conformance merge since the branch base (`0a1c495`).
+  spoond-r739 is in `runner/`, the create path's capacity `503`
+  (Retry-After) and `admitqueue_test.go`; P10 is the orchestrator
+  fork's `/logs` handler and its changelog; clcw only touches
+  `conformance/` and `DONE-spoond-clcw.md`. None adds a step type,
+  provider, restart, cancel or retry path that touches the shares work,
+  and `git diff HEAD...origin/main` shows no `api/`, `store/` or
+  `store/migrations/` change at all. The round-2 rebase onto
+  `origin/main` (`eb49895`) applied cleanly, leaving the branch
+  building, vetting, gofmt-clean and passing `go test -p 2 -count=1
+  ./...` and `go test -race -count=1 ./api/ ./store/`. The
+  fair-shares `CHANGELOG.md` entry stays under the empty `[Unreleased]`
+  section above `[2.9.0]`, so it remains a 3.0 change; the `[2.9.0]`
+  section is untouched.
