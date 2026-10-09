@@ -30,6 +30,8 @@ UPDATE leases SET pinned = 1
  WHERE hold_expires_at <> ''
    AND hold_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 
-ALTER TABLE leases DROP COLUMN hold_expires_at;
-ALTER TABLE leases DROP COLUMN hold_set_at;
-ALTER TABLE leases DROP COLUMN hold_ttl;
+-- The hold columns (hold_set_at, hold_expires_at, hold_ttl) stay in the
+-- table, unused and ignored, for one release: dropping a column cannot be
+-- made re-runnable on SQLite, and the FS5 code never reads or writes them
+-- again. Migration 0008 still creates them, so an older rewind applies
+-- cleanly and this UPDATE keeps working.

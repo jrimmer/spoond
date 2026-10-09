@@ -45,9 +45,10 @@ func (s *sink) at(i int) (key, severity string, resolved bool) {
 	return e.key, e.severity, e.resolved
 }
 
-// TestNotifyLoopForwardsLostAndHeldActions: the lease event bus's lost
-// and held_action events reach the notifier; lifecycle churn does not.
-func TestNotifyLoopForwardsLostAndHeldActions(t *testing.T) {
+// TestNotifyLoopForwardsLostAndBoxFull: the lease event bus's lost,
+// box_full, paused_expiring and pinned_idle events reach the notifier;
+// lifecycle churn does not.
+func TestNotifyLoopForwardsLostAndBoxFull(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	rec := &sink{}
 	svc.SetNotifier(rec)
@@ -63,33 +64,36 @@ func TestNotifyLoopForwardsLostAndHeldActions(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	svc.emitLeaseEvent("lease-1", "owner-a", LeaseLost, "no checkpoint to recover from")
-	svc.emitLeaseEvent("lease-2", "owner-b", LeaseHeldAction, "idle/suspend_idle: idle 4h0m0s")
-	svc.emitLeaseEvent("lease-3", "owner-b", LeaseHeldAction, "stale/release: suspended 7d")
-	svc.emitLeaseEvent("lease-4", "owner-a", LeaseCreated, "granted") // churn: dropped
-	svc.emitLeaseEvent("lease-5", "owner-a", LeaseReleased, "gone")   // churn: dropped
+	svc.emitLeaseEvent("", "", LeaseBoxFull, "4 GiB request for \"owner-b\": every take-back candidate is pinned")
+	svc.emitLeaseEvent("lease-3", "owner-b", LeasePausedExpiring, "paused since now; released at +30d unless resumed")
+	svc.emitLeaseEvent("lease-4", "owner-b", LeasePinnedIdle, "pinned and idle since now")
+	svc.emitLeaseEvent("lease-5", "owner-a", LeaseCreated, "granted") // churn: dropped
 
 	deadline := time.Now().Add(2 * time.Second)
-	for rec.len() < 3 && time.Now().Before(deadline) {
+	for rec.len() < 4 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	if rec.len() != 3 {
-		t.Fatalf("forwarded %d events, want 3", rec.len())
+	if rec.len() != 4 {
+		t.Fatalf("forwarded %d events, want 4", rec.len())
 	}
 	key0, sev0, _ := rec.at(0)
 	if key0 != "lease.lost.lease-1" || sev0 != "critical" {
 		t.Fatalf("lost = %q/%q", key0, sev0)
 	}
-	// suspend_idle is warn; release is critical.
 	key1, sev1, _ := rec.at(1)
-	if key1 != "held.idle.lease-2" || sev1 != "warn" {
-		t.Fatalf("held suspend = %q/%q", key1, sev1)
+	if key1 != "box.full" || sev1 != "critical" {
+		t.Fatalf("box_full = %q/%q", key1, sev1)
 	}
 	key2, sev2, _ := rec.at(2)
-	if key2 != "held.stale.lease-3" || sev2 != "critical" {
-		t.Fatalf("held release = %q/%q", key2, sev2)
+	if key2 != "paused.expiring.lease-3" || sev2 != "warn" {
+		t.Fatalf("paused_expiring = %q/%q", key2, sev2)
+	}
+	key3, sev3, _ := rec.at(3)
+	if key3 != "pinned.idle.lease-4" || sev3 != "warn" {
+		t.Fatalf("pinned_idle = %q/%q", key3, sev3)
 	}
 }
 
@@ -120,23 +124,7 @@ func TestNotifyLoopStopsOnCancel(t *testing.T) {
 	}
 }
 
-// TestParseHeldDetail pins the key parts of a held_action detail.
-func TestParseHeldDetail(t *testing.T) {
-	for detail, want := range map[string][2]string{
-		"idle/suspend_idle: idle 4h0m0s": {"idle", "suspend_idle"},
-		"stale/release: suspended 168h":  {"stale", "release"},
-		"expiry/expire: hold lapsed":     {"expiry", "expire"},
-		"pressure/release: disk 4%":      {"pressure", "release"},
-		"critical/release: disk 3%":      {"critical", "release"},
-		"garbage-without-slash":          {"held", "action"},
-		"":                               {"held", "action"},
-	} {
-		rule, action := parseHeldDetail(detail)
-		if rule != want[0] || action != want[1] {
-			t.Fatalf("parseHeldDetail(%q) = %q/%q, want %q/%q", detail, rule, action, want[0], want[1])
-		}
-	}
-}
+// TestParseHeldDetail is removed with the held rules (FS5).
 
 // TestShortID is rune-safe and shortens with the ellipsis.
 func TestShortID(t *testing.T) {

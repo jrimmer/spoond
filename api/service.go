@@ -340,10 +340,11 @@ func newID() string {
 
 // ServiceConfig carries the constructor tunables.
 type ServiceConfig struct {
-	PoolSize                        int
-	DefaultTTL, MaxTTL, IdleTimeout time.Duration
-	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
-	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
+	PoolSize      int
+	DefaultTTL    time.Duration
+	MaxTTL        time.Duration
+	HostGuestAddr string // HOST_GUEST_SERVICE_ADDR
+	HostGuestPort int    // HOST_GUEST_SERVICE_PORT
 	// GuestDNSAddr is the guest's DNS resolver address or addresses
 	// (SPOOND_GUEST_DNS_ADDR, comma-separated). Each is granted to every
 	// lease's egress policy on port 53. Empty = no resolver allowance
@@ -1766,6 +1767,10 @@ func (s *Service) sweepExpired(ctx context.Context) {
 	// paused, so they never hit it.
 	s.notifyPausedExpiring(ctx, now)
 	s.releasePausedLeases(ctx, now)
+	// A lease's own idle_suspend opt-in is unchanged (FS5): a persistent
+	// lease with an effective idle_suspend > 0 is paused on that
+	// threshold. There is no plain idle sweep any more.
+	s.suspendIdleLeases(ctx, now)
 	// The pinned-idle notice (FS5, visibility only): flag a pinned lease
 	// whose last API activity passed PINNED_IDLE_NOTICE_DAYS and emit
 	// one lease.pinned_idle event per crossing. Nothing is paused,

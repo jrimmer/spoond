@@ -266,42 +266,8 @@ func TestSnapshotLimiterBusySkipsSweep(t *testing.T) {
 	}
 }
 
-// TestSnapshotLimiterBusySkipsHeldRules: the held-lease idle rule also
-// stands down for a tick while the limiter is busy, then retries.
-func TestSnapshotLimiterBusySkipsHeldRules(t *testing.T) {
-	svc, db, _ := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
-	ctx := context.Background()
-	setSnapshotWidth(svc, 1)
-	svc.cfg.HeldIdleTimeout = time.Minute
-	svc.cfg.HoldTTL = time.Hour
-
-	base := time.Now()
-	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "ci-job", "", nil)
-	if err != nil {
-		t.Fatalf("grant: %v", err)
-	}
-	if _, err := svc.setHolderWithTTL("c", l.ID, "ci-job", "", 0); err != nil {
-		t.Fatalf("set holder: %v", err)
-	}
-	svc.store.mu.Lock()
-	l.LastActive = base
-	svc.store.mu.Unlock()
-
-	release, err := svc.snapshotAcquire(ctx, false)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	svc.runHeldRules(ctx, base.Add(2*time.Minute))
-	if l.Suspended {
-		t.Fatal("the held idle rule suspended a lease while the limiter was busy")
-	}
-	release()
-	svc.runHeldRules(ctx, base.Add(2*time.Minute))
-	if !l.Suspended {
-		t.Fatal("the held idle rule did not retry once the limiter was free")
-	}
-}
+// TestSnapshotLimiterBusySkipsHeldRules is removed with the held rules
+// (FS5).
 
 // TestSnapshotLimiterContextCancel: a write waiting for a slot returns
 // the caller's context error when it is cancelled, and leaks no slot.

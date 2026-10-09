@@ -558,25 +558,61 @@ func TestPreemptedLostLeaseNotCounted(t *testing.T) {
 	}
 }
 
-// TestPreemptedHeldLeaseStaleReleased: a preempted held lease is subject
-// to the stale rule like any other rule-suspended lease (#145 D2, review
-// R3). The old exemption ("waits for the resume queue") is gone with
-// that queue.
-func TestPreemptedHeldLeaseStaleReleased(t *testing.T) {
-	svc, sub, ctx := newPreemptService(t)
-	victim := preemptOne(t, svc, sub, ctx)
-	old := time.Now().Add(-30 * 24 * time.Hour)
-	svc.store.mu.Lock()
-	victim.Holder = "pool:honey/work-1"
-	victim.LastAction = pauseActionPreempt
-	victim.LastActionAt = old
-	victim.LastActive = old.Add(-time.Hour)
-	svc.store.mu.Unlock()
-	svc.cfg.HeldSuspendedRelease = time.Hour
+// TestPreemptedHeldLeaseStaleReleased is removed with the stale-release
+// rule (FS5). TestPreemptionNeverPausesPinned covers the pin contract.
 
-	svc.releaseStaleHeld(ctx, time.Now())
-	if !victim.released {
-		t.Fatalf("stale rule left a preempted held lease: released=%v state=%s", victim.released, victim.State)
+// TestPreemptionNeverPausesPinned: a pinned burst lease is never a
+// take-back candidate (FS5); another unpinned burst lease is preempted
+// instead.
+func TestPreemptionNeverPausesPinned(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	installDynamicNode(t, svc, sub, 1024, 0, 512)
+	// Two burst leases; pin the first.
+	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: time.Hour, burst: true})
+	if err != nil {
+		t.Fatalf("grant pinned: %v", err)
+	}
+	unpinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-b", image: "mid", ttl: time.Hour, burst: true})
+	if err != nil {
+		t.Fatalf("grant unpinned: %v", err)
+	}
+	if _, err := svc.setPinned("burst-a", pinned.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	_ = unpinned
+
+	// A 1024 MiB guaranteed lease needs one 1024 MiB burst lease freed.
+	// The pinned one must be left alone; the unpinned one is preempted.
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("guaranteed grant: %v", err)
+	}
+	if pinned.Suspended {
+		t.Fatal("a pinned lease was preempted")
+	}
+}
+
+// TestBoxFullWhenOnlyPinnedCandidates: when the only take-back
+// candidates are pinned, a guaranteed admission answers box_full and
+// pauses nothing (FS5).
+func TestBoxFullWhenOnlyPinnedCandidates(t *testing.T) {
+	svc, sub, ctx := newPreemptService(t)
+	installDynamicNode(t, svc, sub, 512, 0, 512)
+	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: time.Hour, burst: true})
+	if err != nil {
+		t.Fatalf("grant pinned: %v", err)
+	}
+	if _, err := svc.setPinned("burst-a", pinned.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	// A 1024 MiB guaranteed lease cannot fit; the only candidate is
+	// pinned, so this is box_full, not a preemption.
+	_, err = svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour})
+	if !isBoxFull(err) {
+		t.Fatalf("guaranteed grant err = %v, want box_full", err)
+	}
+	if pinned.Suspended {
+		t.Fatal("a pinned lease was paused for a box_full request")
 	}
 }
 

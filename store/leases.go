@@ -106,6 +106,9 @@ type LeaseRow struct {
 	SuspendedAt       time.Time
 }
 
+// leaseColumns is the leases table's column list in row order. It must
+// hold exactly as many names as UpsertLease passes values (the test
+// suite pins the count): the FS5 columns live next to drained/lost.
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
 	persistent, last_active, workspace, suspended, name, net_policy, net_allow,
 	expose_ports, exposed_ip, comment, state, resume_build_id,
@@ -130,9 +133,11 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	}
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,

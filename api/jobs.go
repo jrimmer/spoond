@@ -1058,14 +1058,11 @@ func (s *Service) reconcileJobs(ctx context.Context) {
 		// resume, restart or restore cannot be signalled either, so the cap
 		// waits for the first reconcile that sees the lease running and
 		// idle. Do NOT call markActive here: a suspended lease is not
-		// activity, so a job that outlives its owner's use of the lease must
-		// not keep it out of suspendedByRule's untouched test (a `sleep
-		// infinity` pinning hugepages forever was the audit finding). The
-		// max-runtime cap is enforced only once the lease is running again:
-		// a suspended lease has already freed its memory, and the substrate
-		// cannot kill a process in a paused guest — the first reconcile
-		// after resume kills a job whose cap was spent while the lease was
-		// paused (spoond-wb5).
+		// activity. The max-runtime cap is enforced only once the lease is
+		// running again: a suspended lease has already freed its memory,
+		// and the substrate cannot kill a process in a paused guest — the
+		// first reconcile after resume kills a job whose cap was spent while
+		// the lease was paused (spoond-wb5).
 		if s.leaseBusyOrSuspended(job.LeaseID) {
 			continue
 		}

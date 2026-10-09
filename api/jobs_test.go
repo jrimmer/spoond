@@ -629,11 +629,10 @@ func TestJobPruning(t *testing.T) {
 }
 
 // TestRunningJobKeepsLeaseActive: a running job keeps a persistent lease
-// out of the idle sweep.
+// out of the idle_suspend sweep.
 func TestRunningJobKeepsLeaseActive(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
-	svc.cfg.IdleTimeout = 100 * time.Millisecond
-	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
 	id := body["id"].(string)
 	l := svc.lookupAny(id)
 	if l == nil {
@@ -644,12 +643,12 @@ func TestRunningJobKeepsLeaseActive(t *testing.T) {
 	installJobProcess(t, sub, p)
 	startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 
-	// Age the lease past the idle timeout: the running job keeps it out
-	// of the sweep.
+	// Age the lease past the idle_suspend threshold: the running job
+	// keeps it out of the sweep.
 	svc.store.mu.Lock()
 	l.LastActive = time.Now().Add(-time.Hour)
 	svc.store.mu.Unlock()
-	svc.sweepExpired(context.Background())
+	svc.suspendIdleLeases(context.Background(), time.Now())
 
 	if got := svc.lookupAny(id); got == nil || got.Suspended {
 		t.Fatalf("lease suspended mid-job: %+v", got)
@@ -1175,13 +1174,10 @@ func TestJobMaxRuntimeAppliesToSuspendedLease(t *testing.T) {
 		t.Fatalf("lease not suspended: %+v", l)
 	}
 
-	// A held lease, so suspendedByRule has a rule suspension to test: the
-	// holder plus the idle_suspend rule marker.
+	// A suspended lease: reconcileJobs' "do not mark active" rule is
+	// exercised by checking LastActive stays put.
 	svc.store.mu.Lock()
-	l.Holder = "ci-job-1"
 	l.LastActive = time.Now().Add(-time.Hour)
-	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
-	l.LastActionAt = time.Now().Add(-30 * time.Minute)
 	lastActive := l.LastActive
 	svc.saveLeaseLocked(l)
 	svc.store.mu.Unlock()
@@ -1195,13 +1191,9 @@ func TestJobMaxRuntimeAppliesToSuspendedLease(t *testing.T) {
 	svc.store.mu.Lock()
 	l = svc.store.leases[id]
 	unchanged := l != nil && l.LastActive.Equal(lastActive)
-	_, byRule := suspendedByRule(l)
 	svc.store.mu.Unlock()
 	if !unchanged {
 		t.Fatalf("reconcileJobs advanced LastActive on a suspended lease")
-	}
-	if !byRule {
-		t.Fatalf("a suspended lease with a running job no longer looks untouched to suspendedByRule")
 	}
 	suspendedRow, err := db.GetJob(context.Background(), jobID)
 	if err != nil {
@@ -1254,10 +1246,8 @@ func TestJobMaxRuntimeDisabled(t *testing.T) {
 }
 
 // TestJobReconcileDoesNotMarkSuspendedLeaseActive: reconcileJobs must
-// not call markActive on a suspended lease's running job, otherwise a
-// long job defeats suspendedByRule's untouched test and an idle
-// suspension can never become stale (spoond-wb5). A normal exit still
-// closes the record.
+// not call markActive on a suspended lease's running job. A normal exit
+// still closes the record.
 func TestJobReconcileDoesNotMarkSuspendedLeaseActive(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
@@ -1278,8 +1268,6 @@ func TestJobReconcileDoesNotMarkSuspendedLeaseActive(t *testing.T) {
 	svc.store.mu.Lock()
 	l := svc.store.leases[id]
 	l.LastActive = time.Now().Add(-time.Hour)
-	l.LastAction = idleSuspendRule + "/" + heldActionSuspendIdle
-	l.LastActionAt = time.Now().Add(-30 * time.Minute)
 	lastActive := l.LastActive
 	svc.store.mu.Unlock()
 

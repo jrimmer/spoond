@@ -57,29 +57,16 @@ type resumeReason struct {
 	suspend func(t *testing.T, svc *Service, ctx context.Context, l *Lease)
 }
 
-// resumeReasonCases covers one automatic or manual suspension per distinct
-// reason. Each pause reasons through the shared pause path, matching the
-// production caller so the structured facts a resume clears are exercised.
+// resumeReasonCases covers one automatic or manual suspension per
+// distinct reason that still exists after FS5: the per-lease
+// idle_suspend, preemption and a hand suspend. Each pause reasons
+// through the shared pause path, matching the production caller so the
+// structured facts a resume clears are exercised.
 func resumeReasonCases() []resumeReason {
 	return []resumeReason{
-		{"idle", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
-			if _, err := svc.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdle}); err != nil {
-				t.Fatalf("idle suspend: %v", err)
-			}
-		}},
 		{"idle_suspend", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
 			if _, err := svc.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdleSuspend}); err != nil {
 				t.Fatalf("idle_suspend suspend: %v", err)
-			}
-		}},
-		{"hold_lapsed", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
-			if _, err := svc.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonHoldLapsed}); err != nil {
-				t.Fatalf("hold_lapsed suspend: %v", err)
-			}
-		}},
-		{"pressure", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
-			if _, err := svc.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonPressure}); err != nil {
-				t.Fatalf("pressure suspend: %v", err)
 			}
 		}},
 		{"preempt", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
