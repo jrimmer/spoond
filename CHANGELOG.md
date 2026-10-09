@@ -220,6 +220,19 @@ A summary for clients; the details are in the entries below and in
 
 ### Fixed
 
+- **Guest log lines are dropped, not flooded, when no collector is
+  configured (spoond-99c8, e2b-runtime P10).** `LOGS_COLLECTOR_ADDRESS`
+  is unset on spoond hosts, but envd in every guest still posts log
+  lines to the orchestrator's `/logs` because its MMDS address is always
+  set. With an empty primary URL the fork's handler forwarded each line
+  to nothing and logged one ERROR per failure — roughly 29k lines/hour,
+  enough for journald to suppress real orchestrator errors (it hid the
+  2026-10-08 CI incident). `Logs` now resolves the route first and, when
+  the primary URL is empty and there are no shadow URLs, answers `200`
+  and records a `primary`/`dropped`/`no_collector` metric instead of
+  forwarding, mirroring how the sandbox logger disables itself on an
+  empty collector address. Bundled with 2.9 (orchestrator swap first).
+
 - **A runner job no longer fails when the node is full: the create
   waits for admission and retries capacity refusals (spoond-r739).** A
   `create` sent no `"wait"`, so the backend's admission queue (#129)
