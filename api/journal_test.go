@@ -244,6 +244,35 @@ func TestJournalValueQuoting(t *testing.T) {
 	}
 }
 
+// TestJournalLostLine pins that marking a lease lost writes the
+// journal line with the same reason its lost event carries.
+func TestJournalLostLine(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	l, err := svc.grant(context.Background(), "owner-1", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	sandbox := l.SandboxID
+
+	var buf strings.Builder
+	svc.log = log.New(&buf, "", 0)
+	svc.store.mu.Lock()
+	svc.markLost(l, "root disk unreadable (I/O errors)")
+	svc.store.mu.Unlock()
+
+	f := journalFields(t, strings.TrimSpace(buf.String()))
+	if f["op"] != journalOpLost {
+		t.Errorf("op = %q, want %q", f["op"], journalOpLost)
+	}
+	if f["sandbox"] != sandbox {
+		t.Errorf("sandbox = %q, want %q", f["sandbox"], sandbox)
+	}
+	if f["reason"] != "root disk unreadable (I/O errors)" {
+		t.Errorf("reason = %q, want the loss reason", f["reason"])
+	}
+}
+
 // TestJournalNoSecretMaterial pins that the create-line fields a caller
 // controls (create secrets) never reach the journal. The line carries
 // only identity and mapping, no token or secret.
