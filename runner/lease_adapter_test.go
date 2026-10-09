@@ -3,11 +3,13 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestHTTPLeaseClientAgentToken asserts the lease client authenticates
@@ -272,5 +274,176 @@ func TestHTTPLeaseClientDeleteReason(t *testing.T) {
 	}
 	if gotBody {
 		t.Fatalf("plain Delete sent a reason body: %q", gotReason)
+	}
+}
+
+// TestHTTPLeaseClientCreateSendsAdmitWait: every create carries the
+// admission wait (RUNNER_ADMIT_WAIT_SECS) so a full node's queue (#129)
+// holds it open instead of refusing at once.
+func TestHTTPLeaseClientCreateSendsAdmitWait(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes" {
+			json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"id":"sb-1"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	c.SetAdmitWait(900)
+	if _, err := c.Create(context.Background(), "py-base", 600); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got, ok := body["wait"].(float64); !ok || int(got) != 900 {
+		t.Fatalf("create wait = %v, want 900", body["wait"])
+	}
+}
+
+// TestHTTPLeaseClientCreateNoWaitWhenDisabled: RUNNER_ADMIT_WAIT_SECS=0
+// sends no "wait" field (today's behaviour).
+func TestHTTPLeaseClientCreateNoWaitWhenDisabled(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"sb-1"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	c.SetAdmitWait(0)
+	if _, err := c.Create(context.Background(), "py-base", 600); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, ok := body["wait"]; ok {
+		t.Fatalf("create sent a wait with admission waiting disabled: %v", body["wait"])
+	}
+}
+
+// TestHTTPLeaseClientCreateRetriesCapacity503: a create refused for
+// capacity (503) is retried after Retry-After, logged, and eventually
+// succeeds — a capacity refusal never fails the job.
+func TestHTTPLeaseClientCreateRetriesCapacity503(t *testing.T) {
+	var attempts int
+	var waits []time.Duration
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/sandboxes" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		attempts++
+		if attempts < 3 {
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"capacity: no room"}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"sb-cold"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	c.sleepFn = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}
+	id, err := c.Create(context.Background(), "py-base", 600)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if id != "sb-cold" {
+		t.Fatalf("Create id = %q, want sb-cold", id)
+	}
+	if attempts != 3 {
+		t.Fatalf("create attempts = %d, want 3", attempts)
+	}
+	if len(waits) != 2 || waits[0] != 7*time.Second || waits[1] != 7*time.Second {
+		t.Fatalf("retry waits = %v, want two 7s waits", waits)
+	}
+}
+
+// TestHTTPLeaseClientCreateCapacity503DefaultRetryAfter: a capacity 503
+// without a Retry-After uses the default hint.
+func TestHTTPLeaseClientCreateCapacity503DefaultRetryAfter(t *testing.T) {
+	var waits []time.Duration
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(waits) == 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"sb-1"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	c.sleepFn = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}
+	if _, err := c.Create(context.Background(), "py-base", 600); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(waits) != 1 || waits[0] != defaultCapacityRetryAfter {
+		t.Fatalf("retry wait = %v, want %s", waits, defaultCapacityRetryAfter)
+	}
+}
+
+// TestHTTPLeaseClientCreateCapacity503BoundedByContext: the job's own
+// timeout still bounds the retry loop — a 503 that never clears ends
+// when ctx ends, not before and not forever.
+func TestHTTPLeaseClientCreateCapacity503BoundedByContext(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.Create(ctx, "py-base", 600)
+	if err == nil {
+		t.Fatal("Create succeeded on a permanently full node, want a context error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Create error = %v, want context.DeadlineExceeded", err)
+	}
+	if attempts < 1 {
+		t.Fatalf("create attempts = %d, want at least 1", attempts)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Create waited %s past its context, want a bounded wait", elapsed)
+	}
+}
+
+// TestHTTPLeaseClientCreateNon503NotRetried: a permanent refusal (400,
+// 404, 429) is returned at once and never retried.
+func TestHTTPLeaseClientCreateNon503NotRetried(t *testing.T) {
+	for _, code := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusTooManyRequests} {
+		var attempts int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			w.WriteHeader(code)
+		}))
+		c := NewHTTPLeaseClient(srv.URL, "tok")
+		c.sleepFn = func(ctx context.Context, d time.Duration) error {
+			t.Fatalf("slept on a %d refusal", code)
+			return nil
+		}
+		if _, err := c.Create(context.Background(), "py-base", 600); err == nil {
+			t.Fatalf("Create succeeded on %d, want error", code)
+		}
+		if attempts != 1 {
+			t.Fatalf("create attempts on %d = %d, want 1", code, attempts)
+		}
+		srv.Close()
 	}
 }

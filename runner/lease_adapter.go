@@ -7,10 +7,23 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// DefaultAdmitWaitSecs is the "wait" the runner asks the backend for on
+// every create (RUNNER_ADMIT_WAIT_SECS): when the node is full the
+// backend's admission queue holds the create open for up to this long
+// instead of refusing at once (#129), so a momentarily busy host no
+// longer fails a job at the create. 0 sends no wait.
+const DefaultAdmitWaitSecs = 900
+
+// defaultCapacityRetryAfter is the backoff a capacity 503 without a
+// Retry-After header uses: the same hint the backend puts on a burst
+// refusal (burstRetryAfterSecs).
+const defaultCapacityRetryAfter = 30 * time.Second
 
 // HTTPLeaseClient is a SandboxProvider backed by the spoond backend's
 // lease HTTP API.
@@ -29,27 +42,57 @@ type HTTPLeaseClient struct {
 	NetPolicy string   // egress policy: none|lan|internet|restricted (default: internet for CI)
 	NetAllow  []string // allowlist IPs/CIDRs for restricted policy
 
+	// AdmitWaitSecs is the "wait" sent on Create (RUNNER_ADMIT_WAIT_SECS):
+	// how long the backend may queue the create for admission. Negative
+	// reads as 0 (no wait). Set with SetAdmitWait so the client timeout
+	// grows to cover it.
+	AdmitWaitSecs int
+
 	// labelMu guards the label the next Create applies (set via
 	// WithLabel, a LeaseLabeler capability).
 	labelMu sync.Mutex
 	label   string
+
+	// sleepFn waits for a retry delay or until ctx ends; nil uses the
+	// real timer. A test seam for Retry-After waits.
+	sleepFn func(context.Context, time.Duration) error
 }
 
 // NewHTTPLeaseClient builds a lease API adapter.
 func NewHTTPLeaseClient(baseURL, token string) *HTTPLeaseClient {
 	return &HTTPLeaseClient{
-		BaseURL:   baseURL,
-		Token:     token,
-		Client:    &http.Client{Timeout: 600 * time.Second},
-		NetPolicy: "lan", // CI sandboxes need LAN egress to reach Forgejo
+		BaseURL: baseURL,
+		Token:   token,
+		// The default timeout must cover a queued create's whole wait
+		// (AdmitWaitSecs) plus a margin, or the client would cut a held
+		// create before the backend admitted it. Exec raises it further
+		// for long steps.
+		Client:        &http.Client{Timeout: time.Duration(DefaultAdmitWaitSecs+120) * time.Second},
+		NetPolicy:     "lan", // CI sandboxes need LAN egress to reach Forgejo
+		AdmitWaitSecs: DefaultAdmitWaitSecs,
 	}
 }
 
 // SetHTTPTimeout raises the lease client's overall timeout so long exec
-// calls (EXEC_TIMEOUT_SECS) are not cut at the default 600s by the
-// runner's own HTTP client. Must exceed the backend's exec timeout.
+// calls (EXEC_TIMEOUT_SECS) are not cut at the default by the runner's
+// own HTTP client. It only raises: a shorter value never undoes a
+// timeout already set large enough to cover a queued create.
 func (c *HTTPLeaseClient) SetHTTPTimeout(d time.Duration) {
-	c.Client.Timeout = d
+	if d > c.Client.Timeout {
+		c.Client.Timeout = d
+	}
+}
+
+// SetAdmitWait sets the wait sent on Create (RUNNER_ADMIT_WAIT_SECS)
+// and raises the client timeout to cover it plus a margin, so a create
+// the backend holds for admission is not cut by the client's own timeout.
+func (c *HTTPLeaseClient) SetAdmitWait(secs int) {
+	c.AdmitWaitSecs = secs
+	if secs > 0 {
+		if need := time.Duration(secs+120) * time.Second; need > c.Client.Timeout {
+			c.Client.Timeout = need
+		}
+	}
 }
 
 // WithLabel sets the comment the lease the next Create grants gets:
@@ -62,6 +105,15 @@ func (c *HTTPLeaseClient) WithLabel(label string) {
 }
 
 // Create grants a new sandbox lease.
+//
+// It sends "wait" (AdmitWaitSecs, RUNNER_ADMIT_WAIT_SECS) so a full
+// node's admission queue can hold the create instead of refusing it, and
+// it never treats a capacity 503 as final: a 503 is a full (or draining)
+// node, so Create logs the wait, sleeps for Retry-After (or a default)
+// and tries again until the create is admitted or ctx ends. ctx is the
+// job's own timeout — a capacity refusal must never fail a job, but a
+// job that has run out of time must stop waiting. Any other refusal
+// (bad request, auth, unknown image, quota) is returned at once.
 func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (string, error) {
 	c.labelMu.Lock()
 	label := c.label
@@ -73,35 +125,107 @@ func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (st
 	if len(c.NetAllow) > 0 {
 		payload["egress_allowlist"] = c.NetAllow
 	}
+	if w := c.admitWaitSecs(); w > 0 {
+		// Queued admission (#129): let the backend hold the create for
+		// room instead of answering 503 at once.
+		payload["wait"] = w
+	}
 	body, _ := json.Marshal(payload)
+
+	for attempt := 0; ; attempt++ {
+		id, retryAfter, capacity, err := c.createOnce(ctx, body)
+		if !capacity {
+			if err != nil {
+				return "", err
+			}
+			if label != "" {
+				// The label is best effort: a lease without it still runs its
+				// job; it only escapes the orphan sweep if the runner then dies.
+				if err := c.comment(ctx, id, label); err != nil {
+					log.Printf("lease %s: label %q: %v", id, label, err)
+				}
+			}
+			return id, nil
+		}
+		log.Printf("create sandbox: %v; waiting %s then retrying (attempt %d)", err, retryAfter, attempt+1)
+		if err := c.waitForRetry(ctx, retryAfter); err != nil {
+			return "", fmt.Errorf("create sandbox: waiting for capacity: %w", err)
+		}
+	}
+}
+
+// createOnce posts one create. capacity is true for a 503 (a full or
+// draining node), with retryAfter parsed from its Retry-After header (or
+// the default when absent). A fresh body reader is built per call so a
+// retry never reuses a consumed one.
+func (c *HTTPLeaseClient) createOnce(ctx context.Context, body []byte) (id string, retryAfter time.Duration, capacity bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/sandboxes", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", 0, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.Client.Do(req)
 	if err != nil {
-		return "", err
+		return "", 0, false, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("create sandbox: status %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusCreated {
+		var out struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return "", 0, false, err
+		}
+		return out.ID, 0, false, nil
 	}
-	var out struct {
-		ID string `json:"id"`
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return "", parseRetryAfter(resp.Header.Get("Retry-After")), true, fmt.Errorf("create sandbox: status %d", resp.StatusCode)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
+	return "", 0, false, fmt.Errorf("create sandbox: status %d", resp.StatusCode)
+}
+
+// admitWaitSecs is the effective wait sent on Create; negative reads as 0.
+func (c *HTTPLeaseClient) admitWaitSecs() int {
+	if c.AdmitWaitSecs < 0 {
+		return 0
 	}
-	if label != "" {
-		// The label is best effort: a lease without it still runs its
-		// job; it only escapes the orphan sweep if the runner then dies.
-		if err := c.comment(ctx, out.ID, label); err != nil {
-			log.Printf("lease %s: label %q: %v", out.ID, label, err)
+	return c.AdmitWaitSecs
+}
+
+// parseRetryAfter reads a Retry-After header in seconds; a missing,
+// zero or unparsable value falls back to defaultCapacityRetryAfter.
+func parseRetryAfter(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultCapacityRetryAfter
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	// An HTTP-date is legal, but the backend only sends seconds.
+	if t, err := http.ParseTime(raw); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
 		}
 	}
-	return out.ID, nil
+	return defaultCapacityRetryAfter
+}
+
+// waitForRetry waits d or until ctx ends. sleepFn is a test seam so a
+// Retry-After test does not have to sleep through the configured delay.
+func (c *HTTPLeaseClient) waitForRetry(ctx context.Context, d time.Duration) error {
+	if c.sleepFn != nil {
+		return c.sleepFn(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // comment sets the lease's comment (POST /api/leases/{id}/comment).

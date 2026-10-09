@@ -1155,6 +1155,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				s.writeCreateRefusal(w, req.Image, req.Snapshot, err, waited)
 				return
 			}
+			// The queue can admit the ticket in the moment the client
+			// disappears (L2): finishTicket lost that race to the client's
+			// context, so the granted lease has no runner owner and no job
+			// label and would live until its TTL. Release it with a reason
+			// and never write to the dead connection.
+			if r.Context().Err() != nil {
+				s.svc.releaseBecause(context.Background(), lease, "client_gone")
+				return
+			}
 			s.writeCreatedLease(w, r, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 			return
 		}
@@ -1216,7 +1225,10 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// guess.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "draining", drainRetryAfterSecs
 	case errors.Is(err, substrate.ErrCapacity):
-		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
+		// Hugepages full and preemption could not make room (or the node
+		// is not healthy): 503 with a retry hint, so a client that did
+		// not send "wait" still knows when to come back.
+		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), burstRetryAfterSecs
 	default:
 		if snapshot != "" {
 			s.svc.log.Printf("create: grant snapshot %s: %v", snapshot, err)

@@ -486,3 +486,165 @@ func TestStartSweepErrorIsNotFatal(t *testing.T) {
 	}
 	p.Stop()
 }
+
+// createWaitWorker is a RunnerWorker whose Run blocks in the create
+// wait: it reports waiting=true to the pool's notifier and stays there
+// until its context dies — a job that has no sandbox yet when a
+// shutdown arrives (L3).
+type createWaitWorker struct {
+	drainingWorker
+	notify    func(bool)
+	waiting   chan struct{}
+	createBeg chan struct{}
+}
+
+func newCreateWaitWorker() *createWaitWorker {
+	return &createWaitWorker{waiting: make(chan struct{}), createBeg: make(chan struct{})}
+}
+
+func (w *createWaitWorker) SetCreateWaitNotifier(fn func(bool)) { w.notify = fn }
+
+func (w *createWaitWorker) Run(ctx context.Context, job *Job) error {
+	if w.notify != nil {
+		w.notify(true)
+	}
+	close(w.createBeg)
+	<-ctx.Done()
+	if w.notify != nil {
+		w.notify(false)
+	}
+	w.mu.Lock()
+	w.cancel = true
+	w.releases = append(w.releases, "no-lease")
+	w.mu.Unlock()
+	return ctx.Err()
+}
+
+// executorWorker drives a REAL Executor through the pool, so the
+// executor's own createWait reporting is exercised end to end (T1).
+// Fetch hands out one job.
+type executorWorker struct {
+	exec  *Executor
+	once  sync.Once
+	jobID int64
+}
+
+func (w *executorWorker) SetCreateWaitNotifier(fn func(bool)) { w.exec.OnCreateWait = fn }
+func (w *executorWorker) Register(ctx context.Context, name, token string, labels []string) (int64, error) {
+	return 1, nil
+}
+func (w *executorWorker) Restore(uuid, token string, id int64) {}
+func (w *executorWorker) RunnerID() int64                      { return 1 }
+func (w *executorWorker) Deregister(adminToken string) error   { return nil }
+func (w *executorWorker) Credentials() RunnerStateEntry        { return RunnerStateEntry{} }
+func (w *executorWorker) Fetch(ctx context.Context, version int64) (*Job, int64, error) {
+	var job *Job
+	w.once.Do(func() {
+		id := w.jobID
+		if id == 0 {
+			id = 42
+		}
+		job = testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")
+		job.ID = id
+	})
+	if job == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	return job, version, nil
+}
+func (w *executorWorker) Run(ctx context.Context, job *Job) error { return w.exec.Run(ctx, job) }
+
+// stepBlockingLease creates at once, then blocks in Exec until its
+// context dies — a job past Create and running a step.
+type stepBlockingLease struct {
+	fakeLease
+	execStarted chan struct{}
+}
+
+func (l *stepBlockingLease) Exec(ctx context.Context, id, cmd, cwd string, env map[string]string, timeout int) (*ExecResult, error) {
+	close(l.execStarted)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestStopCancelsJobWaitingInCreateKeepsGraceForRunningJob (T1): on Stop,
+// a job PAST Create — running a step — still keeps RUNNER_STOP_GRACE,
+// while another job still in Create is cancelled at once. It runs the
+// real executor through the pool, so the executor must CLEAR its
+// createWait once the sandbox exists: the mutation "never clear
+// createWait after Create" leaves the pool believing the job still waits
+// and cancels it without the grace, and Stop returns at once.
+func TestStopCancelsJobWaitingInCreateKeepsGraceForRunningJob(t *testing.T) {
+	lease := &stepBlockingLease{fakeLease: *newFakeLease(), execStarted: make(chan struct{})}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         &fakeSink{},
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+	}
+	rw := &executorWorker{exec: exec}
+
+	var sw fakeSweeper
+	p := NewRunnerPool(PoolConfig{
+		Floor:        1,
+		Max:          1,
+		PollInterval: 10 * time.Millisecond,
+		StopGrace:    150 * time.Millisecond,
+		Leases:       &sw,
+	}, func() RunnerWorker { return rw }, "r", "tok", []string{"spoond"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+
+	select {
+	case <-lease.execStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("the job's step never started")
+	}
+
+	start := time.Now()
+	p.Stop()
+	// The running job must keep its grace: Stop cannot return before it.
+	if elapsed := time.Since(start); elapsed < 120*time.Millisecond {
+		t.Fatalf("Stop took %s; a job past Create must keep RUNNER_STOP_GRACE", elapsed)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Stop took %s, want ≈ grace (150ms) + a little", elapsed)
+	}
+}
+
+// TestStopCancelsJobWaitingInCreate (L3): a job still waiting in Create
+// for a sandbox is cancelled at once on Stop — it has no sandbox and no
+// work to finish, so the drain must not spend RUNNER_STOP_GRACE on it.
+func TestStopCancelsJobWaitingInCreate(t *testing.T) {
+	w := newCreateWaitWorker()
+	w.setBusy(true)
+	var sw fakeSweeper
+	p := NewRunnerPool(PoolConfig{
+		Floor:        1,
+		Max:          1,
+		PollInterval: 10 * time.Millisecond,
+		StopGrace:    5 * time.Second, // would stall the test if it were honoured
+		Leases:       &sw,
+	}, func() RunnerWorker { return w }, "r", "tok", []string{"spoond"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+
+	select {
+	case <-w.createBeg:
+	case <-time.After(2 * time.Second):
+		t.Fatal("job never reached the create wait")
+	}
+
+	start := time.Now()
+	p.Stop()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Stop took %s; a create-waiting job must not spend the grace", elapsed)
+	}
+	if !w.wasCancelled() {
+		t.Fatal("the create-waiting job was not cancelled")
+	}
+}

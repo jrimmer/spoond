@@ -159,7 +159,8 @@ body is `snapshot <name>@<v> cannot start on this host (<cause>); save
 it again`, and there is no retry loop),
 `429` quota — the user's concurrent-lease cap or their memory cap
 (#128, see `POST /api/users/{id}/quota`), `503` capacity (not enough
-free hugepage memory for the image, or the node is not healthy), and
+free hugepage memory for the image, or the node is not healthy, with
+`Retry-After: 30`), and
 `503` `no burst capacity` with `Retry-After: 30` when the lease is
 burst (asked for, or above the owner's `guaranteed_mib`) and the node's
 free hugepages would dip under `BURST_RESERVE_MIB` after it — see

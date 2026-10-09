@@ -668,3 +668,83 @@ func TestAdmitWaitQueuePosition(t *testing.T) {
 	}
 	svc.drainQueue()
 }
+
+// TestAdmitCapacityRefusalCarriesRetryAfter: a create refused because
+// the node is full answers 503 with a Retry-After, like the burst and
+// preempt refusals — so a client that did not send "wait" still knows
+// when to come back.
+func TestAdmitCapacityRefusalCarriesRetryAfter(t *testing.T) {
+	_, h, svc, sub, _ := newAdmitServer(t)
+	fillTwo(t, h, sub, svc, "tok-1")
+
+	r := waitCreate(t, h, "tok-1", `{"image":"mid","ttl":60}`)
+	if r.code != http.StatusServiceUnavailable {
+		t.Fatalf("full-node create = %d, want 503 (%v)", r.code, r.body)
+	}
+	if ra := r.hdr.Get("Retry-After"); ra != strconv.Itoa(burstRetryAfterSecs) {
+		t.Fatalf("Retry-After = %q, want %d", ra, burstRetryAfterSecs)
+	}
+}
+
+// goneContext is a request context that reports a client-gone error
+// without its Done channel ever closing, so a test can pin the exact
+// moment admission and the client's disappearance interleave (L2): the
+// queue admits the ticket while Err already says the client is gone.
+type goneContext struct {
+	context.Context
+	gone atomic.Bool
+}
+
+func (c *goneContext) Err() error {
+	if c.gone.Load() {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestAdmitGrantedLeaseReleasedWhenClientGone (L2): the queue can admit
+// a ticket in the moment the client's context ends — finishTicket sees
+// the ticket already done, the lease is granted, and the handler would
+// otherwise write a 201 to a dead connection and leak a lease with no
+// runner owner and no job label until its TTL. The granted lease must be
+// released with reason client_gone and nothing written.
+func TestAdmitGrantedLeaseReleasedWhenClientGone(t *testing.T) {
+	_, h, svc, sub, _ := newAdmitServer(t)
+	fillers := fillTwo(t, h, sub, svc, "tok-1")
+	svc.admitQ.tick = time.Hour // only the release's wake may decide
+
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+
+	ctx := &goneContext{Context: context.Background()}
+	res := startCreate(t, h, ctx, "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
+	waitDepth(t, svc, 1)
+
+	// The client's context ends while the ticket waits, then capacity
+	// frees: admission and the disappearance meet.
+	ctx.gone.Store(true)
+	deleteLease(t, h, "tok-1", fillers[0])
+
+	r := waitResult(t, res)
+	if r.code == http.StatusCreated {
+		t.Fatalf("granted lease written to a gone client: %d %v", r.code, r.body)
+	}
+	// The granted lease is released with reason client_gone, not leaked.
+	deadline := time.Now().Add(3 * time.Second)
+	seen := ""
+	for seen != "client_gone" && time.Now().Before(deadline) {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseReleased && ev.Detail == "client_gone" {
+				seen = ev.Detail
+			}
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if seen != "client_gone" {
+		t.Fatalf("no released event with detail client_gone; got %q", seen)
+	}
+	if live := len(sub.sandboxesLive(t)); live != 1 {
+		t.Fatalf("live sandboxes = %d, want the 1 remaining filler (granted lease not released)", live)
+	}
+}

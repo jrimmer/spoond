@@ -957,6 +957,27 @@ checkpointed only when its own `checkpoint_interval` says so — set one
 on create if a job's work must survive a crash). A job lease lives for
 `LEASE_TTL` like any plain lease.
 
+**Waiting for admission.** Every create carries `"wait"`
+(`RUNNER_ADMIT_WAIT_SECS`, default `900`), so a full node's admission
+queue (#129) holds the create open instead of refusing it at once. A
+`503` from the create — the node is full, draining, or above the burst
+reserve — is **never** a job failure: the runner logs the wait and
+retries after the response's `Retry-After` (or 30 s) until it is
+admitted. While a create waits it sends a `Sink.Keepalive` every
+minute and one `waiting for capacity on spoond (N s)` log row at the
+start and every few minutes, so Forgejo does not reap the silent task.
+`RUNNER_JOB_TIMEOUT` (duration or seconds, default `6h`) bounds the
+whole job so a wait cannot pin a worker forever, and a job's own
+`timeout-minutes` bounds its **execution** — it starts once the sandbox
+is created and does not count the admission wait, matching GitHub
+Actions. A `timeout-minutes` above `RUNNER_JOB_TIMEOUT` is capped by
+it; a job that ran out of time is reported cancelled. A job still
+waiting for a sandbox when the runner drains is cancelled at once (no
+`RUNNER_STOP_GRACE`), and one granted a lease in the moment its client
+disappears is released with reason `client_gone` instead of leaking
+until its TTL. The lease client's own HTTP timeout grows to cover the
+admission wait, so a queued create is not cut by the client.
+
 **Orphan sweep at start.** When the runner starts it lists its token's
 leases and deletes every one whose comment starts with `forgejo job ` —
 at start the process runs nothing, so all of them are orphans of a

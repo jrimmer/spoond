@@ -17,6 +17,15 @@
 //	                   (no default; checkout fails without it)
 //	LEASE_TTL          Sandbox lease TTL seconds (default 600)
 //	EXEC_TIMEOUT_SECS  Per-step exec timeout seconds (default 300)
+//	RUNNER_ADMIT_WAIT_SECS  Seconds to wait for admission on a full
+//	                   node (sent as "wait", #129; default 900, 0 = no
+//	                   wait). A create refused for capacity is retried
+//	                   for up to RUNNER_JOB_TIMEOUT instead of failing.
+//	RUNNER_JOB_TIMEOUT  Whole-job timeout as a Go duration or seconds
+//	                   (default 6h = DefaultJobTimeout; 0 = the job's own
+//	                   context governs). Bounds the create's capacity retry
+//	                   loop, so a node answering 503 forever cannot pin a
+//	                   worker.
 //	RUNNER_FLOOR       Minimum registered runners (default 3)
 //	RUNNER_MAX         Maximum registered runners (default 12)
 //	RUNNER_SCALE_STEP  Runners added/removed per scale event (default 3)
@@ -73,8 +82,21 @@ func envDurOr(key string, def time.Duration) time.Duration {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
 		}
+		// A bare whole number is seconds (the sibling *_SECS knobs accept
+		// both, e.g. RUNNER_JOB_TIMEOUT=3600).
+		if n, err := strconv.Atoi(v); err == nil {
+			return time.Duration(n) * time.Second
+		}
 	}
 	return def
+}
+
+// jobTimeoutFromEnv is the whole-job bound (RUNNER_JOB_TIMEOUT): a Go
+// duration or bare seconds, defaulting to runner.DefaultJobTimeout (6h).
+// `0` disables it. It is a named helper so Main's wiring (not just the
+// constant) can be pinned by a test (T2).
+func jobTimeoutFromEnv() time.Duration {
+	return envDurOr("RUNNER_JOB_TIMEOUT", runner.DefaultJobTimeout)
 }
 
 // Main runs the runner until SIGTERM/SIGINT (systemd's stop signal is
@@ -115,10 +137,20 @@ func Main(args []string) int {
 		}
 	}
 
+	// Admission wait (#129): how long a create may be queued for room on
+	// a full node before the runner gives up on it. 0 sends no "wait".
+	admitWaitSecs := envIntOr("RUNNER_ADMIT_WAIT_SECS", runner.DefaultAdmitWaitSecs)
+	// Whole-job timeout. A capacity refusal is retried until this, so a
+	// node answering 503 forever cannot pin a worker indefinitely; the
+	// default is 6h. A job's own timeout-minutes is the tighter bound
+	// when set.
+	jobTimeout := jobTimeoutFromEnv()
+
 	// The pool's own lease client: at start it sweeps this token's
 	// orphaned job leases (#119). Per-worker copies (newWorker below)
 	// are what Create, Exec and Delete go through.
 	leaseClient := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+	leaseClient.SetAdmitWait(admitWaitSecs)
 
 	// Parse image map.
 	imageMap := map[string]string{}
@@ -176,8 +208,9 @@ func Main(args []string) int {
 	newWorker := func() runner.RunnerWorker {
 		proto := runner.NewForgejoAdapterWithInternal(forgejoURL, envOr("REPO_BASE_URL", ""), nil)
 		lease := runner.NewHTTPLeaseClient(leaseURL, leaseToken)
+		lease.SetAdmitWait(admitWaitSecs)
 		// Keep the lease client's HTTP timeout above the per-step exec
-		// timeout, or long CI steps die at the client's own 600s cap.
+		// timeout, or long CI steps die at the client's own cap.
 		if stepTimeout > 0 {
 			lease.SetHTTPTimeout(time.Duration(stepTimeout+120) * time.Second)
 		}
@@ -195,6 +228,7 @@ func Main(args []string) int {
 			Labels:       imageMap,
 			DefaultImage: defaultImage,
 			TTL:          ttl,
+			JobTimeout:   jobTimeout,
 			RepoBaseURL:  envOr("REPO_BASE_URL", ""),
 			StepTimeout:  stepTimeout,
 			RecordDir:    envOr("JOB_RECORD_DIR", "/var/lib/spoond/jobs"),

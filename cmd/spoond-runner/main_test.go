@@ -14,6 +14,8 @@ import (
 	"connectrpc.com/connect"
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
 	"gitea.dev/actions-proto-go/runner/v1/runnerv1connect"
+
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 // The fake backend pair here stands in for Forgejo and the spoond lease
@@ -250,7 +252,7 @@ func waitFor(t *testing.T, what string, pred func() bool) {
 func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	for _, k := range []string{"FORGEJO_URL", "RUNNER_TOKEN", "RUNNER_NAME", "LEASE_URL", "LEASE_TOKEN",
 		"RUNNER_FLOOR", "RUNNER_MAX", "RUNNER_STATE_FILE", "JOB_RECORD_DIR", "RUNNER_STOP_GRACE",
-		"METRICS_LISTEN", "IMAGE_MAP"} {
+		"METRICS_LISTEN", "IMAGE_MAP", "RUNNER_ADMIT_WAIT_SECS", "RUNNER_JOB_TIMEOUT"} {
 		os.Unsetenv(k)
 	}
 	forgejo := &fakeForgejo{}
@@ -299,6 +301,12 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 		if _, ok := create[k]; ok {
 			t.Fatalf("%s sent on create: the job lease must not be held", k)
 		}
+	}
+	// The create carries the admission wait (#129): a full node's queue
+	// holds it open instead of answering 503 at once. This run used the
+	// default (RUNNER_ADMIT_WAIT_SECS was unset).
+	if got, ok := create["wait"].(float64); !ok || int(got) != runner.DefaultAdmitWaitSecs {
+		t.Fatalf("create wait = %v, want %d", create["wait"], runner.DefaultAdmitWaitSecs)
 	}
 	waitFor(t, "the lease label", func() bool {
 		lease.mu.Lock()
@@ -363,4 +371,55 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	// fakes' connections drain and their servers can close.
 	lease.release()
 	forgejo.release()
+}
+
+// TestEnvDurOrBareSeconds: the duration knob accepts the *_SECS form too
+// (RUNNER_JOB_TIMEOUT=3600 is an hour), a Go duration, and falls back to
+// the default otherwise.
+func TestEnvDurOrBareSeconds(t *testing.T) {
+	cases := []struct {
+		val  string
+		want time.Duration
+	}{
+		{"3600", time.Hour},
+		{"10m", 10 * time.Minute},
+		{"", 42 * time.Second},
+		{"nonsense", 42 * time.Second},
+	}
+	for _, c := range cases {
+		t.Setenv("RUNNER_JOB_TIMEOUT", c.val)
+		if got := envDurOr("RUNNER_JOB_TIMEOUT", 42*time.Second); got != c.want {
+			t.Errorf("envDurOr(%q) = %s, want %s", c.val, got, c.want)
+		}
+	}
+}
+
+// TestDefaultJobTimeout (L4): RUNNER_JOB_TIMEOUT defaults to six hours, so
+// a node that answers 503 forever cannot pin a worker indefinitely. It
+// pins the helper Main actually uses (jobTimeoutFromEnv), so a mutation
+// of the env read in Main fails the test too (T2).
+func TestDefaultJobTimeout(t *testing.T) {
+	if runner.DefaultJobTimeout != 6*time.Hour {
+		t.Fatalf("DefaultJobTimeout = %s, want 6h", runner.DefaultJobTimeout)
+	}
+	cases := []struct {
+		val  string
+		set  bool
+		want time.Duration
+	}{
+		{"", false, 6 * time.Hour},
+		{"0", true, 0},
+		{"90m", true, 90 * time.Minute},
+		{"5400", true, 90 * time.Minute},
+	}
+	for _, c := range cases {
+		if c.set {
+			t.Setenv("RUNNER_JOB_TIMEOUT", c.val)
+		} else {
+			os.Unsetenv("RUNNER_JOB_TIMEOUT")
+		}
+		if got := jobTimeoutFromEnv(); got != c.want {
+			t.Errorf("jobTimeoutFromEnv() with RUNNER_JOB_TIMEOUT=%q = %s, want %s", c.val, got, c.want)
+		}
+	}
 }

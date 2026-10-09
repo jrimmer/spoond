@@ -116,6 +116,15 @@ type LeaseLabeler interface {
 	WithLabel(label string)
 }
 
+// CreateWaitReporter is the optional capability of a RunnerWorker to
+// learn from its executor that a create has started (or ended) a wait
+// for a sandbox (L3). The pool uses it to cancel a still-waiting job at
+// once on a shutdown: there is no sandbox and no work to finish, so
+// RUNNER_STOP_GRACE would only delay the drain.
+type CreateWaitReporter interface {
+	SetCreateWaitNotifier(fn func(bool))
+}
+
 // LeaseSweeper lists the caller's leases and releases orphans.
 // Implemented by HTTPLeaseClient; the runner pool calls it once at
 // startup to release leases left over from a previous process.

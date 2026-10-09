@@ -177,6 +177,46 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A runner job no longer fails when the node is full: the create
+  waits for admission and retries capacity refusals (spoond-r739).** A
+  `create` sent no `"wait"`, so the backend's admission queue (#129)
+  was skipped and a `503` on a full node failed the job at once — no
+  sandbox, no task logs, `dbfs actions_log` missing. Every runner
+  create now sends `"wait": RUNNER_ADMIT_WAIT_SECS` (default `900`,
+  `0` = no wait) and a `503` is never a job failure: the runner logs
+  the wait and retries per the response's `Retry-After` (or 30 s)
+  until the create is admitted or the job's own timeout ends. While a
+  create waits it sends `Sink.Keepalive` every minute and a
+  `waiting for capacity on spoond (N s)` log row, so Forgejo does not
+  reap the silent task. `RUNNER_JOB_TIMEOUT` (duration or seconds,
+  default `6h`) bounds the whole job so a wait cannot pin a worker
+  forever. A job's own `timeout-minutes` bounds its **execution**,
+  starting once the sandbox is created and not counting the admission
+  wait (matching GitHub Actions); a value above `RUNNER_JOB_TIMEOUT` is
+  capped by it, and a job that ran out of time is reported cancelled.
+  The lease
+  client's HTTP timeout grows to cover the admission wait. A plain
+  `503 capacity: …` refusal now also carries a `Retry-After: 30` like
+  the burst-reserve and preempt ones, so a client that sent no `wait`
+  still knows when to come back. A job granted a lease in the moment
+  its client disappears is released (`client_gone`) instead of leaking
+  until its TTL, and a job still waiting for a sandbox when the runner
+  drains is cancelled at once instead of spending `RUNNER_STOP_GRACE`.
+  See [docs/operations.md](docs/operations.md).
+
+- **`timeout-minutes` is enforced (spoond-r739).** A job that runs
+  past its own `timeout-minutes` is cut and reported cancelled,
+  matching GitHub. It bounds the job's **execution**, starting once its
+  sandbox is created — the admission wait does not count against it
+  (`RUNNER_JOB_TIMEOUT`, default `6h`, remains the whole-job bound and
+  caps a larger `timeout-minutes`). The field parses leniently: a
+  number (integer or fractional) is honoured, an expression or string
+  (e.g. `timeout-minutes: ${{ matrix.t }}`) is ignored with one log
+  line instead of failing the whole workflow, and a non-finite, zero,
+  negative or absurdly large value (`.inf`, `1e300`) is ignored so it
+  cannot overflow the duration and remove every bound. Known users: the
+  hrmny `e2e-live.yml` live job (75) and `ci.yml` (45/45/20).
+
 - **A user delete that cannot finish now says so (spoond-y0jj).** When a
   cleanup store step failed — listing a user's running jobs or kept
   builds, unpinning their kept builds, or dropping their named snapshots

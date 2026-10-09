@@ -288,6 +288,8 @@ for the full reference):
 | `IMAGE_MAP` / `DEFAULT_IMAGE` | `runs-on` label → image mapping ([ci-jobs.md](ci-jobs.md)) |
 | `LEASE_TTL` | sandbox lease TTL seconds (default 600) |
 | `EXEC_TIMEOUT_SECS` | per-step exec timeout override (0 = the backend's `MAX_EXEC_TIMEOUT_SECS`, default 300) |
+| `RUNNER_ADMIT_WAIT_SECS` | seconds a create waits for admission on a full node (`wait`, #129; default 900, 0 = no wait). A create refused for capacity is retried per `Retry-After` until `RUNNER_JOB_TIMEOUT`, so a momentarily full node no longer fails a job |
+| `RUNNER_JOB_TIMEOUT` | whole-job timeout as a Go duration or seconds (default 6h). A job's own `timeout-minutes` is the tighter bound, and a job that runs past it is reported cancelled. Bounds the create's capacity retry, so a node answering 503 forever cannot pin a worker |
 | `LEASE_NETPOL` | egress policy the runner's leases get (`none` \| `lan` \| `internet` \| `restricted`; default `internet`) |
 | `LEASE_NET_ALLOW` | comma-separated allowlist entries added on top of the policy |
 | `RUNNER_FLOOR` / `RUNNER_MAX` / `RUNNER_SCALE_STEP` / `SCALE_UP_DELAY` / `SCALE_DOWN_DELAY` | registered-runner pool: floor, cap, step and scale delays |
