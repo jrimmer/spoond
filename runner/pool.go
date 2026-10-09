@@ -641,6 +641,13 @@ func (p *RunnerPool) Stop() {
 // finish, so a shutdown must not spend RUNNER_STOP_GRACE on it; the
 // executor's Create returns the cancellation and reports the job
 // cancelled. Jobs running steps are left for the grace.
+//
+// The read of createWait and the cancel happen under w.mu (C2): the
+// executor clears createWait under the same lock right after Create
+// returns and before its first step, so a job that got its sandbox in
+// the moment Stop looked is either seen as still waiting (and
+// cancelled) or as past Create (and keeps its grace) — never cancelled
+// out from under a running step.
 func (p *RunnerPool) cancelWaitingJobs() {
 	p.mu.Lock()
 	workers := make([]*worker, 0, len(p.workers))
@@ -650,13 +657,11 @@ func (p *RunnerPool) cancelWaitingJobs() {
 	p.mu.Unlock()
 	for _, w := range workers {
 		w.mu.Lock()
-		waiting := w.createWait
-		cancel := w.cancelJob
-		w.mu.Unlock()
-		if waiting && cancel != nil {
+		if w.createWait && w.cancelJob != nil {
 			log.Printf("pool: cancelling worker %d's job while it waits for a sandbox", w.id)
-			cancel()
+			w.cancelJob()
 		}
+		w.mu.Unlock()
 	}
 }
 
