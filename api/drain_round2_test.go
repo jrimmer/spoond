@@ -288,3 +288,56 @@ func TestMarkResumeFailedEmitsSuspendedEventAndJournal(t *testing.T) {
 		t.Fatalf("no suspend journal line with reason resume_failed:\n%s", buf.String())
 	}
 }
+
+// TestMarkResumeFailedEmitsOnlyOnReasonChange (F1): the drain self-heal
+// loop calls markResumeFailed every interval for a lease whose resume
+// keeps failing. Only the first call changes the reason to resume_failed
+// and so emits the `suspended` event and the journal line; an unchanged
+// retry must not look like a fresh suspension to Honey or the dashboard.
+// Mutation: emit regardless of the previous reason, which produces one
+// suspended event (and one drain_deferred for the consumer) per retry.
+func TestMarkResumeFailedEmitsOnlyOnReasonChange(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.UndrainResumeRetries = 0
+
+	var buf strings.Builder
+	svc.log = log.New(&buf, "", 0)
+	all := svc.Subscribe(EventFilter{})
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+
+	if !svc.markResumeFailed(target) {
+		t.Fatal("first markResumeFailed = false, want the reason stamped")
+	}
+	if !svc.markResumeFailed(target) {
+		t.Fatal("second markResumeFailed = false, want the lease still suspended for retry")
+	}
+	all.Close()
+
+	var suspended int
+	events := eventsFor(collectEvents(all.C), target.ID)
+	for _, ev := range events {
+		if ev.Type == LeaseSuspended && ev.Reason == suspendReasonResumeFailed {
+			suspended++
+		}
+	}
+	if suspended != 1 {
+		t.Fatalf("resume_failed suspended events = %d, want 1", suspended)
+	}
+
+	var journal int
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if !strings.Contains(line, "lease journal:") {
+			continue
+		}
+		f := journalFields(t, strings.TrimSpace(line))
+		if f["op"] == journalOpSuspend && f["lease_id"] == target.ID && f["reason"] == suspendReasonResumeFailed {
+			journal++
+		}
+	}
+	if journal != 1 {
+		t.Fatalf("resume_failed suspend journal lines = %d, want 1:\n%s", journal, buf.String())
+	}
+}

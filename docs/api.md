@@ -370,7 +370,10 @@ leases); a resume that finds no room
 on the host — including one during a planned-restart drain, which must
 not resurrect a `Drained` lease the drain's quiesce wait depends on —
 answers the one shared no-room shape, `503` with `Retry-After: 30` and
-`code: capacity_wait`. The lease stays suspended
+`code: capacity_wait`; a resume refused because the substrate is
+unavailable answers the retryable `503 substrate_unavailable` with
+`Retry-After: 5` (spoond-638d round 2); and a resume of a lost sandbox
+answers `410 lease_lost`. The lease stays suspended
 in every refusal. A lease whose hold lapsed resumes with its hold still
 lapsed: resuming does not renew a hold.
 
@@ -573,10 +576,7 @@ capacity_wait`/`409 lease_busy` shapes) and the lease stays suspended with its s
 intact. Undrain's bounded resume no longer marks a lease lost for a
 retryable or indeterminate failure either (spoond-638d): a resume that
 exhausts its retries is left suspended with reason `resume_failed` and
-its `drained` flag, so resume-on-use and the self-heal loop retry it;
-a resume refused because the substrate is unavailable answers the
-retryable `503 substrate_unavailable` with `Retry-After: 5` (spoond-638d
-round 2).
+its `drained` flag, so resume-on-use and the self-heal loop retry it.
 Only a permanent error (the build the resume needs is gone) loses the
 lease there, and only a lease still suspended and not busy is lost: a
 resume an owner has in flight saves its guest. A
