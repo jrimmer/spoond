@@ -128,6 +128,109 @@ func TestHeartbeatPreventsHeldIdleSuspend(t *testing.T) {
 	}
 }
 
+// TestPreemptedHeldLeaseReleasedByStaleRule (review R3): a preempted
+// held lease is subject to rule 2 like any rule-suspended lease. It was
+// previously exempted while it "waited for the resume queue", which no
+// longer exists; one rule for every kind of suspend means the stale
+// release covers it too.
+func TestPreemptedHeldLeaseReleasedByStaleRule(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.SetMetrics(metrics.NewBackendMetrics())
+
+	base := time.Now()
+	svc.cfg.HeldSuspendedRelease = 7 * 24 * time.Hour
+	svc.cfg.HeldIdleTimeout = 0 // rule 1 off: only the stale release acts
+	cur := base
+	svc.now = func() time.Time { return cur }
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	sbID := l.SandboxID
+	// A burst lease so it is a preemption candidate.
+	svc.store.mu.Lock()
+	l.Class = ClassBurst
+	svc.store.mu.Unlock()
+	if err := svc.preemptLease(ctx, l, "another-owner"); err != nil {
+		t.Fatalf("preempt: %v", err)
+	}
+	if !l.Suspended || l.PreemptedAt.IsZero() {
+		t.Fatal("setup: lease not suspended and preempted")
+	}
+	if l.LastAction != pauseActionPreempt {
+		t.Fatalf("last_action = %q, want %q", l.LastAction, pauseActionPreempt)
+	}
+	// Untouched since the preemption: no activity after the stamp.
+	svc.store.mu.Lock()
+	l.LastActive = l.LastActionAt.Add(-time.Minute)
+	svc.store.mu.Unlock()
+
+	// Before the stale limit it is kept; after it, rule 2 releases it.
+	cur = base.Add(6 * 24 * time.Hour)
+	svc.releaseStaleHeld(ctx, cur)
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("preempted held lease released before HeldSuspendedRelease")
+	}
+	cur = base.Add(7*24*time.Hour + time.Minute)
+	svc.releaseStaleHeld(ctx, cur)
+	if svc.lookup("c", l.ID) != nil {
+		t.Fatal("preempted held lease not released by rule 2 after the stale limit")
+	}
+	if got := calls(sub.Fake, "Delete "+sbID); got != 1 {
+		t.Fatalf("delete calls = %d, want 1", got)
+	}
+	if n := heldCounter(t, svc, "stale", "release"); n != 1 {
+		t.Fatalf("held_actions_total{stale,release} = %g, want 1", n)
+	}
+}
+
+// TestPreemptedHeldLeaseReleasedByCriticalRule (review R3): under
+// critical disk pressure a preempted held lease is rule 5's victim like
+// any other rule-suspended lease, and a preempted lease still inside
+// another owner's guarantee is not exempted.
+func TestPreemptedHeldLeaseReleasedByCriticalRule(t *testing.T) {
+	t.Setenv("GC_DELETE", "1")
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	svc.cfg.HeldIdleTimeout = 0
+	svc.cfg.CriticalDiskFreePct = 5
+	svc.cfg.CriticalDiskRecoverPct = 10
+	svc.cfg.TemplateStoragePath = t.TempDir()
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	sbID := l.SandboxID
+	svc.store.mu.Lock()
+	l.Class = ClassBurst
+	svc.store.mu.Unlock()
+	if err := svc.preemptLease(ctx, l, "another-owner"); err != nil {
+		t.Fatalf("preempt: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.LastActive = l.LastActionAt.Add(-time.Minute)
+	svc.store.mu.Unlock()
+
+	// 2% free (< 5% critical): rule 5 must pick the preempted lease.
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 2, nil }
+	svc.releaseSuspendedHeldUntil(ctx, time.Now())
+	if svc.lookup("c", l.ID) != nil {
+		t.Fatal("preempted held lease not released by rule 5 under critical disk")
+	}
+	if got := calls(sub.Fake, "Delete "+sbID); got != 1 {
+		t.Fatalf("delete calls = %d, want 1", got)
+	}
+	if n := heldCounter(t, svc, "critical", "release"); n != 1 {
+		t.Fatalf("held_actions_total{critical,release} = %g, want 1", n)
+	}
+}
+
 // TestHeldSuspendedReleasedAtThresholdNotBefore (rule 2): a held lease
 // suspended by rule 1 and untouched for HeldSuspendedRelease is
 // released (deleted), and not before.

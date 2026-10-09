@@ -10,6 +10,69 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **A suspended lease resumes on its holder's next work call; the
+  background preempt auto-resume is gone (#145 D2, spoond-1tb5).** Every
+  automatically suspended lease — pressure, preemption, the plain idle
+  sweep, the lease's own `idle_suspend`, held rule 1 and a lapsed hold
+  (rule 3) — and one its holder suspended by hand resumes on its
+  holder's next work call: exec, exec stream, files (read/write/stat/
+  list), the proxy and guest dial, jobs, the LLM gateway, a network
+  change and a prompt. This is now **one rule for every kind of
+  suspend**, not just `idle_suspend`. GET, status, events and SSE never
+  resume, and `POST /resume` is unchanged. A lease suspended by a
+  non-work path that cannot resume (the `stat` probe, forking a running
+  source, the crash test) still answers `409 lease_suspended` with its
+  `reason` — `lease_suspended` no longer appears on any work path.
+
+  - **Status codes changed.** A resume-on-use that finds no room on the
+    host answers the one shape every path shares: `503` with a
+    `Retry-After` header and JSON `{"error": ..., "code":
+    "capacity_wait"}` (was `503` with a plain `error`, or `409
+    lease_suspended` on paths that did not resume). A host-structural
+    shortage (disk, hugepages, the burst reserve, the snapshot store,
+    orchestrator capacity) is a wait, never a refusal: spoond acts and
+    the caller retries. The owner's own memory quota on a resume is
+    `429` with `Retry-After: 30` and JSON `code: quota_exceeded` (the
+    quota frees when the owner releases its own leases); a
+    `kept_budget` refusal stays `409`. While a pause or another caller's
+    resume is in flight a work call answers `409` with `code:
+    lease_busy` (retryable). This also unifies `POST /resume`, where the
+    preemption-disk-floor and burst-reserve bodies now carry
+    `capacity_wait`.
+  - **`POST /resume` and the SSH gateway's resume now refuse during a
+    drain.** Both run the resume-on-use path, so while spoond is
+    draining for a planned restart (or still owes a drain clear) they
+    answer the shared `503` `capacity_wait` + `Retry-After` shape and
+    the lease stays suspended, instead of racing a resume into a node
+    that is stopping.
+  - **No resume failure marks a lease `lost`.** The preempt-resume
+    budget (`PREEMPT_RESUME_RETRIES`) and its lose-after-N-failures path
+    are removed, along with the `runPreemptResumeLoop`,
+    `resumePreempted` and `losePreempted` code. The error goes to the
+    caller and the lease stays suspended with its snapshot intact.
+    `promoteAllBurst` keeps its own 15 s ticker. A preempted lease's
+    victim choice is unchanged; only its background auto-resume and its
+    loss are gone. `PREEMPT_RESUME_RETRIES` and its docs are removed
+    (the environment variable is ignored). `spoond-dxq`'s
+    crash-recovery retries are unchanged.
+  - **A work call cannot resume a `Drained` lease during a planned
+    restart.** While spoond is draining the node (or still owes a drain
+    clear), a resume-on-use refuses with the shared `503`
+    `capacity_wait` + `Retry-After` shape and the lease stays suspended
+    and `Drained`, so the drain's "no running sandboxes" wait is not
+    broken. The undrain clears the drain first and resumes the drained
+    leases as before.
+  - **A preempted held lease is subject to held rules 2 and 5 like any
+    other rule-suspended lease.** The old exemption ("waits for the
+    resume queue") is gone with that queue: a preempted held lease
+    untouched for `HeldSuspendedRelease` is released by the stale rule,
+    and one under critical disk pressure is rule 5's victim.
+  - A lease whose hold lapsed (rule 3) resumes with its hold still
+    lapsed: resuming does not renew a hold. See
+    [docs/api.md](docs/api.md) for the full per-path status table.
+
 ### Added
 
 - **Every automatic suspend names its reason, policy step and build

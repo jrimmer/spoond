@@ -282,212 +282,6 @@ func TestRecoveryRetryBudgetClearedOnSuccess(t *testing.T) {
 	}
 }
 
-// TestPreemptResumeGivesUpAfterBudget: a preempted lease whose resume
-// keeps failing with a non-admission error is marked lost once its
-// budget is spent, with a lost event and the reason.
-func TestPreemptResumeGivesUpAfterBudget(t *testing.T) {
-	svc, sub, ctx := newPreemptService(t)
-	svc.cfg.PreemptResumeRetries = 3
-	victim := preemptOne(t, svc, sub, ctx)
-	sb := victim.SandboxID
-
-	esub := svc.Subscribe(EventFilter{LeaseID: victim.ID})
-	defer esub.Close()
-
-	// Room returns, but the resume create keeps failing.
-	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
-	var attempts int
-	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
-		if req.Resume && req.SandboxID == sb {
-			attempts++
-			return substrate.Sandbox{}, errors.New("failed to create sandbox: failed to init envd")
-		}
-		return sub.Fake.Create(ctx, req)
-	}
-	t.Cleanup(func() { sub.createFn = nil })
-
-	for i := 0; i < 3; i++ {
-		svc.resumePreempted(ctx)
-	}
-	if victim.State != "lost" {
-		t.Fatalf("state after 3 failed resumes = %q, want lost", victim.State)
-	}
-	if attempts != 3 {
-		t.Fatalf("resume attempts = %d, want 3", attempts)
-	}
-	if !strings.Contains(victim.LostReason, "after 3 attempt(s)") {
-		t.Fatalf("lost reason = %q, want the attempt count", victim.LostReason)
-	}
-	esub.Close()
-	events := collectEvents(esub.C)
-	var lost LeaseEvent
-	for _, ev := range events {
-		if ev.Type == LeaseLost {
-			lost = ev
-		}
-	}
-	if lost.Type != LeaseLost {
-		t.Fatalf("no lost event in %v", eventTypes(events))
-	}
-	if !strings.Contains(lost.Detail, "after 3 attempt(s)") {
-		t.Fatalf("lost event detail = %q, want the attempt count", lost.Detail)
-	}
-}
-
-// TestPreemptResumeCapacityRefusalWaits: a resume refused for capacity
-// is not counted against the retry budget and keeps the lease suspended
-// for a later tick.
-func TestPreemptResumeCapacityRefusalWaits(t *testing.T) {
-	svc, sub, ctx := newPreemptService(t)
-	svc.cfg.PreemptResumeRetries = 2
-	victim := preemptOne(t, svc, sub, ctx)
-	sb := victim.SandboxID
-
-	// The node has no room for the 1024 MiB burst lease: the reserve
-	// check refuses before any create, so the resume waits.
-	svc.cfg.BurstReserveMiB = 1 << 20
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	var attempts int
-	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
-		if req.Resume && req.SandboxID == sb {
-			attempts++
-		}
-		return sub.Fake.Create(ctx, req)
-	}
-	t.Cleanup(func() { sub.createFn = nil })
-
-	for i := 0; i < 5; i++ {
-		svc.resumePreempted(ctx)
-	}
-	if victim.State != "suspended" || victim.PreemptedAt.IsZero() {
-		t.Fatalf("state = %q preempted = %v, want still suspended and preempted", victim.State, !victim.PreemptedAt.IsZero())
-	}
-	if attempts != 0 {
-		t.Fatalf("a capacity-refused resume reached the substrate %d times, want 0", attempts)
-	}
-}
-
-// TestPreemptResumeAdmissionRefusalNeverAgesOut: a preempted lease parked
-// while the node has no room waits for room indefinitely — an admission
-// refusal neither counts nor starts/extends the window — and resumes as
-// soon as room appears, even after a counted failure and then the window
-// would have elapsed (spoond-dxq B1).
-func TestPreemptResumeAdmissionRefusalNeverAgesOut(t *testing.T) {
-	svc, sub, ctx := newPreemptService(t)
-	svc.cfg.PreemptResumeRetries = 2
-	svc.cfg.RecoveryRetryWindow = time.Minute
-
-	now := time.Now()
-	svc.now = func() time.Time { return now }
-
-	victim := preemptOne(t, svc, sub, ctx)
-	sb := victim.SandboxID
-
-	// Room is available, but the resume fails once with a transient
-	// error: that counts one attempt and starts the window.
-	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
-	var attempts int
-	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
-		if req.Resume && req.SandboxID == sb {
-			attempts++
-			return substrate.Sandbox{}, errors.New("failed to init envd")
-		}
-		return sub.Fake.Create(ctx, req)
-	}
-	t.Cleanup(func() { sub.createFn = nil })
-	svc.resumePreempted(ctx)
-	if !svc.retryPending(svc.preemptRetries, victim.ID) {
-		t.Fatal("setup: a counted resume failure did not start a budget")
-	}
-
-	// No room now: the burst reserve refuses the resume before any
-	// create. Advance well past the window with only admission refusals:
-	// the lease stays intact and preempted because the wait does not
-	// touch or age the budget.
-	svc.cfg.BurstReserveMiB = 1 << 20
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	for i := 0; i < 5; i++ {
-		now = now.Add(10 * time.Minute)
-		svc.resumePreempted(ctx)
-	}
-	if victim.State != "suspended" || victim.PreemptedAt.IsZero() {
-		t.Fatalf("state = %q preempted = %v, want still suspended and preempted after a long wait", victim.State, !victim.PreemptedAt.IsZero())
-	}
-	if victim.LostAt != (time.Time{}) || victim.LostReason != "" {
-		t.Fatalf("a lease waiting for capacity was marked lost: lostAt=%v reason=%q", victim.LostAt, victim.LostReason)
-	}
-	if attempts != 1 {
-		t.Fatalf("a capacity-refused resume reached the substrate: attempts = %d, want 1", attempts)
-	}
-
-	// Room appears and the resume now succeeds.
-	svc.cfg.BurstReserveMiB = 0
-	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
-	sub.createFn = nil
-	svc.resumePreempted(ctx)
-	if victim.State != "running" || victim.Suspended || !victim.PreemptedAt.IsZero() {
-		t.Fatalf("after room returned lease = %q suspended=%v preempted=%v, want running resumed", victim.State, victim.Suspended, !victim.PreemptedAt.IsZero())
-	}
-}
-
-// TestPreemptResumeCapacityWaitResetsWindow: a long capacity wait
-// between two counted resume failures must not age the lease out. A
-// counted failure starts the window, the wait resets its origin, and the
-// next counted failure starts a fresh window instead of finding the old
-// one spent (spoond-dxq SH1).
-func TestPreemptResumeCapacityWaitResetsWindow(t *testing.T) {
-	svc, sub, ctx := newPreemptService(t)
-	svc.cfg.PreemptResumeRetries = 3
-	svc.cfg.RecoveryRetryWindow = time.Minute
-
-	now := time.Now()
-	svc.now = func() time.Time { return now }
-
-	victim := preemptOne(t, svc, sub, ctx)
-	sb := victim.SandboxID
-
-	// One counted transient failure starts a budget with a window origin.
-	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
-	failTransient := true
-	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
-		if req.Resume && req.SandboxID == sb && failTransient {
-			return substrate.Sandbox{}, errors.New("failed to init envd")
-		}
-		return sub.Fake.Create(ctx, req)
-	}
-	t.Cleanup(func() { sub.createFn = nil })
-
-	svc.resumePreempted(ctx)
-	if !svc.retryPending(svc.preemptRetries, victim.ID) {
-		t.Fatal("setup: a counted resume failure did not start a budget")
-	}
-
-	// No room for over 30 min: only admission refusals. The wait resets
-	// the window, so the lease is not aged out and the next counted
-	// failure starts a fresh window.
-	svc.cfg.BurstReserveMiB = 1 << 20
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	for i := 0; i < 5; i++ {
-		now = now.Add(10 * time.Minute)
-		svc.resumePreempted(ctx)
-	}
-	if victim.State != "suspended" {
-		t.Fatalf("after the wait state = %q, want suspended", victim.State)
-	}
-
-	// Room returns and one more transient failure lands: the budget is
-	// 2 of 3 with a fresh window, so the lease must not be lost.
-	svc.cfg.BurstReserveMiB = 0
-	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
-	svc.resumePreempted(ctx)
-	if victim.State != "suspended" {
-		t.Fatalf("after the second counted failure state = %q, want suspended (not lost)", victim.State)
-	}
-	if victim.LostAt != (time.Time{}) || victim.LostReason != "" {
-		t.Fatalf("a lease was lost with a stale window: lostAt=%v reason=%q", victim.LostAt, victim.LostReason)
-	}
-}
-
 // TestRecoveryBudgetKeyedBySandbox: a transient recovery failure then a
 // cold restart gives the lease a new sandbox; the next reconcile must
 // leave the healthy lease alone instead of rolling it back to the old
@@ -623,18 +417,6 @@ func TestRecoveryKeepsLeaseWhenReleased(t *testing.T) {
 		t.Fatal("the released lease row came back")
 	}
 
-	// The same through losePreempted: a preempted lease released while
-	// its loss was in flight is not resurrected.
-	pre, err := svc.grant(ctx, "c", "py-base", time.Minute, false, "", nil, "", "", nil)
-	if err != nil {
-		t.Fatalf("grant preempt: %v", err)
-	}
-	svc.releaseBecause(ctx, pre, "deleted through the API")
-	svc.losePreempted(ctx, pre, "preempted resume failed", "boom")
-	if pre.State == "lost" {
-		t.Fatal("a released preempted lease was resurrected to lost")
-	}
-
 	esub.Close()
 	for _, ev := range collectEvents(esub.C) {
 		if ev.Type == LeaseLost {
@@ -643,8 +425,9 @@ func TestRecoveryKeepsLeaseWhenReleased(t *testing.T) {
 	}
 }
 
-// TestReleaseDropsRetryBudgets: releasing a lease drops both its
-// recovery and preempt-resume budgets (spoond-dxq S2).
+// TestReleaseDropsRetryBudget: releasing a lease drops its recovery
+// budget (spoond-dxq S2). The background preempt-resume budget it used to
+// drop too is gone with that loop (#145 D2).
 func TestReleaseDropsRetryBudgets(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -663,10 +446,8 @@ func TestReleaseDropsRetryBudgets(t *testing.T) {
 	if out := svc.reconcileCrash(ctx); out.Lost != 0 {
 		t.Fatalf("first failure lost the lease: %+v", out)
 	}
-	// Seed a preempt budget as the resume queue would.
-	svc.noteRetryFailure(svc.preemptRetries, l.ID, l.ID, 3, time.Hour)
-	if !svc.recoveryPending(sb) || !svc.retryPending(svc.preemptRetries, l.ID) {
-		t.Fatal("setup: expected both budgets present")
+	if !svc.recoveryPending(sb) {
+		t.Fatal("setup: expected a recovery budget present")
 	}
 
 	sub.createFn = nil
@@ -674,8 +455,5 @@ func TestReleaseDropsRetryBudgets(t *testing.T) {
 
 	if svc.retryPending(svc.recoveryRetries, sb) {
 		t.Fatal("the recovery budget survived the release")
-	}
-	if svc.retryPending(svc.preemptRetries, l.ID) {
-		t.Fatal("the preempt-resume budget survived the release")
 	}
 }

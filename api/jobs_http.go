@@ -267,7 +267,9 @@ func parseNonNeg(s string) (int, error) {
 }
 
 // handleJobSignal answers POST .../jobs/{job}/signal: signal the job's
-// process group. 409 when the job is not running.
+// process group. 409 when the job is not running. The job record is
+// checked BEFORE the lease resumes (review R5): signalling a finished
+// job must not spend hugepages resuming a suspended lease for nothing.
 func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
@@ -282,11 +284,10 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "job is not running")
 		return
 	}
-	// A suspended lease has no running sandbox; the job may still be
-	// running in its paused guest, but the substrate cannot be reached
-	// until the lease resumes. Answer 409 without calling the substrate.
-	if s.svc.leaseSuspended(lease.ID) {
-		writeLeaseSuspended(w, s.svc.leaseSuspendReason(lease.ID))
+	// Signalling a running job is work: a suspended lease resumes first,
+	// whatever suspended it (#145 D2). A refused resume answers and the
+	// caller stops here.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	var req struct {

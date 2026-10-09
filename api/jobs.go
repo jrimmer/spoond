@@ -642,16 +642,6 @@ func (s *Service) leaseState(leaseID string) string {
 	return ""
 }
 
-// leaseSuspended reports whether a live lease is suspended.
-func (s *Service) leaseSuspended(leaseID string) bool {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	if l := s.store.leases[leaseID]; l != nil && !l.released {
-		return l.Suspended
-	}
-	return false
-}
-
 // leaseBusyOrSuspended reports whether a live lease is suspended or has
 // an in-flight lifecycle operation (pause, resume, restart or restore).
 // Either way the substrate cannot be reached to signal a job: a pause

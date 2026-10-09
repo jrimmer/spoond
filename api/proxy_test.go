@@ -234,9 +234,10 @@ func TestProxyLeaseHostRoutesBeforeGuestService(t *testing.T) {
 	}
 }
 
-// TestProxyRefusesEnvdPortAndSuspended: guest port 49983 is refused with
-// 403, and a suspended lease answers 409.
-func TestProxyRefusesEnvdPortAndSuspended(t *testing.T) {
+// TestProxyRefusesEnvdPortAndResumesSuspended: guest port 49983 is
+// refused with 403, and a suspended lease resumes on the next proxied
+// request (#145 D2) instead of the old 409.
+func TestProxyRefusesEnvdPortAndResumesSuspended(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
@@ -252,15 +253,20 @@ func TestProxyRefusesEnvdPortAndSuspended(t *testing.T) {
 		t.Fatalf("envd port status %d, want 403", rec.Code)
 	}
 
-	// Suspended → 409.
+	// Suspended → the proxy resumes on use; with the fake sandbox back
+	// and no real upstream, the request fails downstream, never 409.
 	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("suspend status %d", resp.StatusCode)
 	}
+	l := svc.lookupAny(id)
 	req = httptest.NewRequest("GET", "http://"+id+"-3000.sandbox.example.com/", nil)
 	rec = httptest.NewRecorder()
 	proxy.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("suspended proxy status %d, want 409", rec.Code)
+	if rec.Code == http.StatusConflict {
+		t.Fatalf("suspended proxy status %d, want no 409: it resumes on use", rec.Code)
+	}
+	if l.Suspended {
+		t.Fatal("the proxied request did not resume the suspended lease")
 	}
 }

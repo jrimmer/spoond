@@ -654,20 +654,11 @@ retry as `recovery: {attempt, of, since}`. When the budget is spent the
 lease is marked `lost` with a reason naming the attempts and the error,
 and a `lost` event is emitted.
 
-Preemption's resume queue (`resumePreempted`, every 15 s) is bounded
-differently: a preempted lease whose resume keeps failing with a
-non-admission error gets `PREEMPT_RESUME_RETRIES` (default 3) attempts
-before it is marked `lost` with the reason and a `lost` event. An
-admission/capacity refusal is not a failure — the preemption parked the
-lease to free the very room it now waits for — so it neither counts nor
-starts the window, and it also resets the window origin of any budget a
-counted failure already started: the window measures only an unbroken run
-of counted failures, so a long wait for room between two of them cannot
-age an intact lease out. The lease waits for room indefinitely, resuming
-when room appears. The per-lease deferred log line is rate-limited to
-once per 10 minutes. So a permanently failing resume cannot create a new
-orchestrator sandbox every 15 s for ever, while a lease merely waiting
-for capacity is never lost.
+Preemption no longer has a background resume queue (#145 D2): a
+preempted lease comes back on its holder's next work call, exactly as an
+idle-suspended one does, and spoond never marks a lease `lost` because a
+resume failed — the error goes to the caller. (Recovery, above, keeps its
+bounded retry budget.)
 
 The recovery budget is keyed by the sandbox that failed and dropped
 whenever the lease gets a new sandbox (restart, restore, resume), on
@@ -837,17 +828,19 @@ and suspends no one. If the node cannot host the lease even after
 pausing every candidate, preemption suspends no one and the admission
 falls through to the ordinary capacity check.
 
-The **resume queue** runs every 15 s: it resumes preempted leases,
-oldest preemption first, whenever they fit again — host hugepages above
-the reserve and the owner within `max_mib` — through the normal
+The **promote sweep** runs every 15 s: it promotes running burst leases
+back into an owner's `guaranteed_mib` as leases churn. Preemption itself
+is temporary but on the holder's terms now (#145 D2): a preempted lease
+is not resumed by a background queue — it resumes on its holder's next
+work call (exec, files, proxy, jobs, the LLM gateway), through the normal
 admission path, as a burst lease again if the owner is still above the
 guarantee. On resume `preempted` is cleared and a `resumed` event is
-emitted with detail `after preemption`. A preemption is therefore
-temporary: clients (Honey included) should treat a `preempted` lease as
-waiting rather than gone, and simply wait for its `resumed` event or
-poll the lease — deleting and recreating it throws away the paused
-work. A client's own `resume` of a preempted lease takes the same path
-and answers `503` while capacity is still short.
+emitted with detail `after preemption`. Clients (Honey included) should
+treat a `preempted` lease as waiting rather than gone, and simply use it
+when they next need it — deleting and recreating it throws away the
+paused work. A work call that finds the node still full answers `503`
+`capacity_wait` with `Retry-After: 30` (the one no-room shape every
+resume-on-use path shares) and the lease stays suspended, never lost.
 
 **Queued admission** (#129 part 1): a create can wait for room instead
 of failing, by sending `"wait": N` (seconds) on `POST /api/leases` (see
@@ -887,9 +880,9 @@ each request's env.
 | `503 capacity: … bytes of hugepage memory free` | not enough free hugepages for the image, or the node is draining/unhealthy | free sandboxes, lower `POOL_SIZE`, or raise `vm.nr_hugepages` (then re-check with doctor) |
 | `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
 | `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
-| lease shows `preempted` / `‖ preempted` on the dashboard | a guaranteed admission suspended a burst lease to reclaim memory; the resume queue will restore it | wait for the lease's `resumed` event (`after preemption`) or poll it; do not delete and recreate |
+| lease shows `preempted` / `‖ preempted` on the dashboard | a guaranteed admission suspended a burst lease to reclaim memory; the lease comes back on its holder's next work call (#145 D2) | use the lease (exec, files, proxy, jobs, LLM); it resumes on that call. Do not delete and recreate. A call while the node is still full answers `503 capacity_wait` and the lease stays suspended |
 | `410 lease_lost` (`code: lease_lost`) | the lease's sandbox died with no checkpoint (or its recovery failed); the message names the reason | `DELETE` the lease to free its quota; nothing to resume |
-| `409 lease is suspended; resume it first` | the lease is paused | `resume` it (the SSH gateway does this automatically on attach) |
+| `409 lease is suspended; resume it first` | a non-work path that cannot resume a suspended lease (the stat probe, fork, the crash test) | `resume` it (the SSH gateway does this automatically on attach); exec, files, proxy, jobs and the LLM gateway resume it themselves on the next call |
 | `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
 | `exec failed` / `agent unreachable` | envd in the guest is not answering (sandbox died under us, node overloaded) | `spoond doctor`; if the sandbox is really gone the next reconcile marks the lease |
 | `unknown image tag: …` on create | the image has no current build in the catalog | `spoond images build <name>` (see [ci-jobs.md](ci-jobs.md)) |
@@ -1092,15 +1085,19 @@ next one. An idle suspension marks the lease `last_action
 idle_suspend/suspend_idle`, emits an `idle_suspended` event and counts
 in `spoond_idle_suspends_total`. Because it is a rule suspension, rules
 2 and 5 may later release the lease if it stays idle-suspended and
-untouched — a preempted lease stays excluded, and nothing running is
-ever released.
+untouched — a preempted lease is subject to the same rules, and nothing
+running is ever released.
 
-The **next call resumes it**: exec, stream, files and guest port dial on
-an `idle_suspend`-suspended lease resume it first through the normal
-resume path (admission, class and quota apply) and then serve the call;
-a refused resume answers what resume would (`429` over quota, `503` with
-`Retry-After` for capacity or the burst reserve) and the lease stays
-suspended. Any other suspension keeps answering `409 lease is suspended;
+The **next call resumes it** — and every other kind of suspend too
+(#145 D2). Exec, stream, files, proxy, jobs, the LLM gateway, a network
+change and a prompt resume a suspended lease first through the normal
+resume path (admission, class and quota apply) and then serve the call,
+whatever suspended it; a refused resume answers the shared shapes (`429`
+over the owner's quota, `503 capacity_wait` with `Retry-After` when the
+host has no room, `409 lease_busy` while a pause or another resume is in
+flight) and the lease stays suspended. GET, status, events and SSE never
+resume. Only a path with nothing to resume — the `stat` probe, forking a
+running source, the crash test — still answers `409 lease is suspended;
 resume it first`; an explicit `resume` (and the SSH gateway's resume on
 attach) works as always. `IDLE_TIMEOUT_SECS` remains the legacy host-wide
 knob — new deployments should set `IDLE_SUSPEND_DEFAULT_SECS` and the

@@ -237,9 +237,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(lease.ID) // proxied web traffic is activity for the idle sweeper
-	// A suspended lease has no running sandbox; resume it first.
-	if lease.Suspended {
-		writeLeaseSuspended(w, s.svc.leaseSuspendReason(lease.ID))
+	// Every suspended lease — whatever suspended it — resumes on its
+	// holder's next work call (#145 D2). A refused resume answers 503
+	// capacity_wait / 429 quota / 409 lease_busy and the caller stops here.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	// A lease lost in a substrate crash has no sandbox to proxy to (U10).

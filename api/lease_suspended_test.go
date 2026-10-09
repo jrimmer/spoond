@@ -11,11 +11,14 @@ import (
 	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
-// The 409 a suspended lease answers is written with code lease_suspended
-// so a client can tell it apart from the other 409 (busy, code
-// lease_busy) without matching the message text. Every refusal site must
-// answer JSON {"error":"lease is suspended; resume it first",
-// "code":"lease_suspended"} with status 409.
+// Every automatically or manually suspended lease resumes on its
+// holder's next work call (#145 D2). No work path answers the old 409
+// lease_suspended any more. The code stays only for the paths that
+// genuinely cannot resume a suspended lease because they need a running
+// guest and are not "work": GET and status (the stat probe), forking a
+// suspended source (a checkpoint needs the guest) and the crash test
+// (nothing is running to crash). Those answer 409 lease_suspended with
+// the structured reason the suspension carried.
 
 // requireLeaseSuspended fails unless status is 409 and body carries the
 // exact suspended-lease error and code.
@@ -33,8 +36,7 @@ func requireLeaseSuspended(t *testing.T, what string, status int, body map[strin
 }
 
 // suspendedLease creates a persistent lease and suspends it through the
-// public verb, so the refused routes see a hand-suspended lease (not one
-// the idle sweep would auto-resume).
+// public verb, so the refused routes see a hand-suspended lease.
 func suspendedLease(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
@@ -49,28 +51,9 @@ func suspendedLease(t *testing.T, ts *httptest.Server) string {
 	return id
 }
 
-// TestLeaseSuspendedErrorCodeNetwork: a network-policy change on a
-// suspended lease answers 409 lease_suspended.
-func TestLeaseSuspendedErrorCodeNetwork(t *testing.T) {
-	ts, _, _, _ := newTestServerWithService(t)
-	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-a",
-		map[string]any{"network_policy": "lan"})
-	requireLeaseSuspended(t, "network", resp.StatusCode, body)
-}
-
-// TestLeaseSuspendedErrorCodePrompt: a prompt on a suspended lease
-// answers 409 lease_suspended.
-func TestLeaseSuspendedErrorCodePrompt(t *testing.T) {
-	ts, _, _, _ := newTestServerWithService(t)
-	id := suspendedLease(t, ts)
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/prompt", "token-a",
-		map[string]any{"message": "hi"})
-	requireLeaseSuspended(t, "prompt", resp.StatusCode, body)
-}
-
-// TestLeaseSuspendedErrorCodeStat: the stat probe on a suspended lease
-// answers 409 lease_suspended.
+// TestLeaseSuspendedErrorCodeStat: the stat probe needs a running guest
+// and is not a resume-on-use work call, so it answers 409
+// lease_suspended.
 func TestLeaseSuspendedErrorCodeStat(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
@@ -78,8 +61,8 @@ func TestLeaseSuspendedErrorCodeStat(t *testing.T) {
 	requireLeaseSuspended(t, "stat", resp.StatusCode, body)
 }
 
-// TestLeaseSuspendedErrorCodeFork: forking a suspended source answers
-// 409 lease_suspended.
+// TestLeaseSuspendedErrorCodeFork: forking a suspended source needs the
+// guest to checkpoint, so it answers 409 lease_suspended.
 func TestLeaseSuspendedErrorCodeFork(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
@@ -88,20 +71,60 @@ func TestLeaseSuspendedErrorCodeFork(t *testing.T) {
 	requireLeaseSuspended(t, "fork", resp.StatusCode, body)
 }
 
-// TestLeaseSuspendedErrorCodeExec: exec (through ensureRunning) on a
-// hand-suspended lease answers 409 lease_suspended.
-func TestLeaseSuspendedErrorCodeExec(t *testing.T) {
+// requireNoLeaseSuspended fails when a response is the old 409
+// lease_suspended body: a work call must resume a suspended lease, never
+// answer that code.
+func requireNoLeaseSuspended(t *testing.T, what string, status int, body map[string]any) {
+	t.Helper()
+	if status == http.StatusConflict && body["code"] == "lease_suspended" {
+		t.Fatalf("%s answered 409 lease_suspended; it must resume on use: %v", what, body)
+	}
+}
+
+// TestResumeOnUseExec: exec on a suspended lease resumes it and serves
+// the call, never 409 lease_suspended.
+func TestResumeOnUseExec(t *testing.T) {
 	ts, _, _, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
 	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a",
 		map[string]any{"cmd": "echo hi"})
-	requireLeaseSuspended(t, "exec", resp.StatusCode, body)
+	requireNoLeaseSuspended(t, "exec", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("exec on a suspended lease: %d: %v", resp.StatusCode, body)
+	}
 }
 
-// TestLeaseSuspendedErrorCodeJobSignal: signalling a running job whose
-// lease is suspended answers 409 lease_suspended without reaching the
-// substrate.
-func TestLeaseSuspendedErrorCodeJobSignal(t *testing.T) {
+// TestResumeOnUseNetwork: a network-policy change on a suspended lease
+// resumes it (the guest must be running to apply egress) and never
+// answers 409 lease_suspended.
+func TestResumeOnUseNetwork(t *testing.T) {
+	ts, _, _, _ := newTestServerWithService(t)
+	id := suspendedLease(t, ts)
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/network", "token-a",
+		map[string]any{"network_policy": "lan"})
+	requireNoLeaseSuspended(t, "network", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("network on a suspended lease: %d: %v", resp.StatusCode, body)
+	}
+}
+
+// TestResumeOnUsePrompt: a prompt on a suspended lease resumes it and
+// serves the call.
+func TestResumeOnUsePrompt(t *testing.T) {
+	ts, _, _, _ := newTestServerWithService(t)
+	id := suspendedLease(t, ts)
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/prompt", "token-a",
+		map[string]any{"message": "hi"})
+	requireNoLeaseSuspended(t, "prompt", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("prompt on a suspended lease: %d: %v", resp.StatusCode, body)
+	}
+}
+
+// TestResumeOnUseJobSignal: signalling a job on a suspended lease
+// resumes it first; the signal then succeeds or reports the job not
+// running, never 409 lease_suspended.
+func TestResumeOnUseJobSignal(t *testing.T) {
 	ts, svc, _, sub := newTestServerWithService(t)
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 		map[string]any{"image": "py-base", "persistent": true})
@@ -112,23 +135,21 @@ func TestLeaseSuspendedErrorCodeJobSignal(t *testing.T) {
 	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
 
 	// Suspend after the job started so the record exists and reads as
-	// running; the signal must be refused before any substrate call.
+	// running; the signal must resume the lease first.
 	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	before := calls(sub.Fake, "Exec")
 	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a",
 		map[string]any{"signal": "TERM"})
-	requireLeaseSuspended(t, "job signal", resp.StatusCode, body)
-	if got := calls(sub.Fake, "Exec"); got != before {
-		t.Fatalf("job signal reached the substrate: Exec calls %d -> %d", before, got)
+	requireNoLeaseSuspended(t, "job signal", resp.StatusCode, body)
+	if svc.lookupAny(id).Suspended {
+		t.Fatal("the job signal did not resume the suspended lease")
 	}
 }
 
-// TestLeaseSuspendedErrorCodeProxy: a proxied guest request to a
-// suspended lease answers JSON 409 lease_suspended (the site was
-// plain-text http.Error before).
-func TestLeaseSuspendedErrorCodeProxy(t *testing.T) {
+// TestResumeOnUseProxy: a proxied guest request to a suspended lease
+// resumes it; the downstream then answers from the fake (never 409).
+func TestResumeOnUseProxy(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	id := suspendedLease(t, ts)
 
@@ -136,18 +157,17 @@ func TestLeaseSuspendedErrorCodeProxy(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://"+id+"-3000.sandbox.example.com/", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Fatalf("proxy: content-type = %q, want application/json", ct)
+	if rec.Code == http.StatusConflict {
+		t.Fatalf("proxy answered 409; it must resume on use: %s", rec.Body.String())
 	}
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("proxy: body is not JSON: %v (%s)", err, rec.Body.String())
+	if svc.lookupAny(id).Suspended {
+		t.Fatal("the proxied request did not resume the suspended lease")
 	}
-	requireLeaseSuspended(t, "proxy", rec.Code, body)
 }
 
-// TestLeaseSuspendedErrorCodeHeartbeat: the guest heartbeat on a
-// suspended lease answers JSON 409 lease_suspended.
+// TestLeaseSuspendedErrorCodeHeartbeat: the guest heartbeat is not a
+// work call (it only moves LastActive), so a suspended lease answers 409
+// lease_suspended.
 func TestLeaseSuspendedErrorCodeHeartbeat(t *testing.T) {
 	ts, srv, _, _, _, _ := newHeartbeatTestServer(t)
 	id := suspendedLease(t, ts)
@@ -165,9 +185,9 @@ func TestLeaseSuspendedErrorCodeHeartbeat(t *testing.T) {
 	requireLeaseSuspended(t, "heartbeat", rec.Code, body)
 }
 
-// TestLeaseSuspendedErrorCodeLLM: the per-lease LLM gateway on a
-// suspended lease answers JSON 409 lease_suspended.
-func TestLeaseSuspendedErrorCodeLLM(t *testing.T) {
+// TestResumeOnUseLLM: the per-lease LLM gateway resumes a suspended
+// lease on use and forwards the request (never 409 lease_suspended).
+func TestResumeOnUseLLM(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	srv := NewServerWithLLM(svc, NewImageRegistry(db), "http://127.0.0.1:1", "host-key", "", nil)
@@ -179,12 +199,10 @@ func TestLeaseSuspendedErrorCodeLLM(t *testing.T) {
 		strings.NewReader(`{"model":"m"}`))
 	rec := httptest.NewRecorder()
 	srv.llm.ServeHTTP(rec, req)
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Fatalf("llm: content-type = %q, want application/json", ct)
+	if rec.Code == http.StatusConflict {
+		t.Fatalf("llm answered 409; it must resume on use: %s", rec.Body.String())
 	}
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("llm: body is not JSON: %v (%s)", err, rec.Body.String())
+	if svc.lookupAny(id).Suspended {
+		t.Fatal("the gateway call did not resume the suspended lease")
 	}
-	requireLeaseSuspended(t, "llm", rec.Code, body)
 }

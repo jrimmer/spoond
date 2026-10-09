@@ -361,6 +361,43 @@ func TestJobSignalOnSuspendedLease(t *testing.T) {
 	}
 }
 
+// TestJobSignalFinishedDoesNotResume (review R5): signalling a job that
+// is no longer running answers 409 without resuming the lease, so a
+// finished job cannot make a suspended lease spend hugepages for
+// nothing. The job record is checked before the resume.
+func TestJobSignalFinishedDoesNotResume(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
+	id := body["id"].(string)
+	l := svc.lookupAny(id)
+	if l == nil {
+		t.Fatalf("lease %s not in service", id)
+	}
+	sandbox := l.SandboxID
+
+	p := fake.NewProcess(1007)
+	installJobProcess(t, sub, p)
+	jobID, _ := startBackgroundJob(t, ts, id, map[string]any{"cmd": "sleep 600"})
+	writeJobFile(t, sub, sandbox, jobID, "rc", "143\n")
+	p.Push(substrate.ProcessEvent{Kind: substrate.EventExit, ExitCode: 143})
+	waitJobState(t, db, jobID, "exited", 2*time.Second)
+
+	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	createsBefore := calls(sub.Fake, "Create")
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/jobs/"+jobID+"/signal", "token-a", map[string]any{"signal": "TERM"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("signal of a finished job = %d, want 409: %v", resp.StatusCode, body)
+	}
+	if !l.Suspended {
+		t.Fatal("signalling a finished job resumed the suspended lease")
+	}
+	if got := calls(sub.Fake, "Create"); got != createsBefore {
+		t.Fatalf("signalling a finished job issued %d Create(s), want none", got-createsBefore)
+	}
+}
+
 // TestJobSignal: a running job's process group is signalled; a finished
 // job answers 409.
 func TestJobSignal(t *testing.T) {
@@ -750,18 +787,23 @@ func TestJobsCrossConsumerDenied(t *testing.T) {
 	}
 }
 
-// TestJobStartOnSuspendedLease: a background exec on a suspended lease is
-// 409, like exec.
-func TestJobStartOnSuspendedLease(t *testing.T) {
+// TestJobStartOnSuspendedResumes: a background exec on a hand-suspended
+// lease resumes it on use (#145 D2) and starts the job, instead of the
+// old 409 lease_suspended.
+func TestJobStartOnSuspendedResumes(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	_, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := body["id"].(string)
 	if _, err := svc.suspend(context.Background(), "consumer-a", id); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("suspended background exec = %d, want 409", resp.StatusCode)
+	l := svc.lookupAny(id)
+	resp, out := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/exec", "token-a", map[string]any{"cmd": "echo", "background": true})
+	if resp.StatusCode == http.StatusConflict {
+		t.Fatalf("suspended background exec answered 409; it must resume on use: %v", out)
+	}
+	if l.Suspended {
+		t.Fatalf("the background exec did not resume the lease: %v", out)
 	}
 }
 

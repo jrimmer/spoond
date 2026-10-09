@@ -445,12 +445,6 @@ type ServiceConfig struct {
 	// refusal from waiting forever. <=0 uses DefaultRecoveryRetryWindow.
 	// spoond-dxq.
 	RecoveryRetryWindow time.Duration
-	// PreemptResumeRetries is how many failed resume attempts a preempted
-	// lease gets from the preemption resume queue before it is marked
-	// lost (PREEMPT_RESUME_RETRIES). Admission/capacity refusals do not
-	// count and wait for capacity. <=0 uses DefaultPreemptResumeRetries.
-	// spoond-dxq.
-	PreemptResumeRetries int
 	// SweepTimeout bounds one background sweep stage (TTL release, held
 	// rules, pool refill, job prune) and each other background loop
 	// pass. The substrate bounds every individual RPC too (spoond-j3a);
@@ -536,17 +530,11 @@ type Service struct {
 	// retryMu guards the per-lease retry budgets below. recoveryRetries
 	// counts the failed crash-recovery attempts of a lease, keyed by the
 	// sandbox id that failed (so a lease given a new sandbox is never
-	// rolled back to an old checkpoint by a stale budget); preemptRetries
-	// counts the failed resume attempts of a preempted lease, keyed by its
-	// lease id (spoond-dxq). Both are in memory: a lease that recovers, is
-	// lost or is released has its entry dropped.
+	// rolled back to an old checkpoint by a stale budget). It is in
+	// memory: a lease that recovers, is lost or is released has its entry
+	// dropped (spoond-dxq).
 	retryMu         sync.Mutex
 	recoveryRetries map[string]*retryBudget
-	preemptRetries  map[string]*retryBudget
-	// preemptCapLogAt is when the per-lease "deferred (waiting for
-	// capacity)" line was last logged, so a lease parked for a long time
-	// does not repeat it every resume tick. Guarded by retryMu.
-	preemptCapLogAt map[string]time.Time
 	// sweepInterval is the TTL-sweeper tick (overridable in tests).
 	sweepInterval time.Duration
 	// sweepTimeout bounds one background sweep stage and each other
@@ -838,8 +826,6 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		rootfsProbeOK:             map[string]time.Time{},
 		rootfsProbeFails:          map[string]*rootfsProbeFailure{},
 		recoveryRetries:           map[string]*retryBudget{},
-		preemptRetries:            map[string]*retryBudget{},
-		preemptCapLogAt:           map[string]time.Time{},
 		lostSandboxDeleteAttempts: defaultLostSandboxDeleteAttempts,
 		lostSandboxDeleteBackoff:  defaultLostSandboxDeleteBackoff,
 		orphanSweepInterval:       defaultOrphanSweepInterval,
@@ -1596,9 +1582,11 @@ func (s *Service) Start(ctx context.Context) {
 	// the catalog-derived template-bake gauge on each /metrics scrape,
 	// which is when the dashboard reads it (spoond-rzz).
 	go s.runNodeMetricsLoop(ctx)
-	// Preemption resume queue (#128 part 3): every 15 s, resume preempted
-	// leases that fit again.
-	go s.runPreemptResumeLoop(ctx)
+	// Promote burst leases into an owner's guarantee as leases churn
+	// (#128): every 15 s, so the guarantee stays filled. This used to ride
+	// the preemption resume queue; that background auto-resume is gone
+	// (#145 D2), the promote sweep stays on its own ticker.
+	go s.runPromoteLoop(ctx)
 	// Background exec jobs (2.6, #135): every 10 s reconcile running job
 	// records against the guest files (a backend restart or a broken
 	// envd stream left them unobserved).
@@ -1912,12 +1900,10 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 	s.settleJobsOfReleasedLease(ctx, l)
 	// The rootfs probe's per-lease state goes with the lease.
 	s.forgetRootfs(l.ID)
-	// A released lease has no in-flight recovery or resume: drop both
-	// retry budgets (spoond-dxq S2), so a later release or sandbox reuse
-	// cannot trip a stale budget.
+	// A released lease has no in-flight recovery: drop its retry budget
+	// (spoond-dxq S2), so a later release or sandbox reuse cannot trip a
+	// stale budget.
 	s.clearRecoveryRetries(l)
-	s.clearRetry(s.preemptRetries, l.ID)
-	s.clearPreemptCapLog(l.ID)
 	// A release drops any drain self-heal backoff the lease carried, so a
 	// later planned restart's deferral starts fresh (spoond-52c B3).
 	s.clearDrainHeal(l.ID)
@@ -2860,7 +2846,7 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		return nil, errNotPersistent
 	}
 	s.store.mu.Unlock()
-	return s.resumeLease(ctx, l)
+	return s.resumeForUse(ctx, l)
 }
 
 // resumeAny is resume without the owner check, for the SSH gateway's
@@ -2880,6 +2866,30 @@ func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
 		return nil, errNotPersistent
 	}
 	s.store.mu.Unlock()
+	return s.resumeForUse(ctx, l)
+}
+
+// resumeForUse is the resume every work call and the POST /resume route
+// run: it refuses while spoond is draining the node (or still owes a
+// drain clear) and otherwise holds drainGate's read side across the
+// resume, so a drain that begins mid-resume waits for it instead of
+// racing a Create into the stop (R1). The undrain does not use this: it
+// clears the drain first and resumes drained leases through resumeLease.
+func (s *Service) resumeForUse(ctx context.Context, l *Lease) (*Lease, error) {
+	// Take the read side before checking: a drain takes the write side
+	// to set its state, so this either runs before the drain (and the
+	// drain then pauses the resumed lease) or after it (and the check
+	// below sees draining and refuses). TryRLock fails at once when a
+	// drain holds or is waiting for the write side, so a work call never
+	// queues behind a finishing drain.
+	if !s.drainGate.TryRLock() {
+		return nil, errDraining
+	}
+	if s.draining.Load() || s.drainClearPending.Load() {
+		s.drainGate.RUnlock()
+		return nil, errDraining
+	}
+	defer s.drainGate.RUnlock()
 	return s.resumeLease(ctx, l)
 }
 
@@ -3026,10 +3036,6 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	// The lease is running again from its sandbox: any crash-recovery
 	// budget keyed by that sandbox is stale (spoond-dxq B2).
 	s.clearRecoveryRetries(l)
-	// A successful resume ends any pending preempt-resume budget too, so
-	// a later preemption starts fresh.
-	s.clearRetry(s.preemptRetries, l.ID)
-	s.clearPreemptCapLog(l.ID)
 	// A resume frees its prior preemption and can move capacity: retry
 	// waiting creates (#129).
 	s.wakeAdmissionQueue()

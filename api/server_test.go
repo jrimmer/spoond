@@ -1224,7 +1224,8 @@ func TestLLMGateway(t *testing.T) {
 		t.Fatalf("expected 501 for anthropic provider, got %d", resp3.StatusCode)
 	}
 
-	// 4. Suspended lease -> 409.
+	// 4. Suspended lease resumes on use (#145 D2): the gateway resumes it
+	// and forwards the request instead of the old 409.
 	respS, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/suspend", "token-a", nil)
 	if respS.StatusCode != 200 {
 		t.Fatalf("suspend status %d", respS.StatusCode)
@@ -1235,8 +1236,8 @@ func TestLLMGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp4.Body.Close()
-	if resp4.StatusCode != 409 {
-		t.Fatalf("expected 409 for suspended lease, got %d", resp4.StatusCode)
+	if resp4.StatusCode == 409 {
+		t.Fatalf("suspended lease answered 409; the gateway resumes on use, got %d", resp4.StatusCode)
 	}
 
 	// 5. Malformed path -> 400.

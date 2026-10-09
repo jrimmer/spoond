@@ -197,7 +197,7 @@ func (s *Service) promoteBurst(owner string) {
 }
 
 // promoteAllBurst runs promoteBurst for every owner with a running
-// burst lease (the resume queue's tick).
+// burst lease (the promote loop's tick).
 func (s *Service) promoteAllBurst() {
 	s.store.mu.Lock()
 	owners := map[string]bool{}
@@ -209,6 +209,30 @@ func (s *Service) promoteAllBurst() {
 	s.store.mu.Unlock()
 	for o := range owners {
 		s.promoteBurst(o)
+	}
+}
+
+// promoteInterval is how often the promote loop fills every owner's
+// guarantee as leases churn. It used to be the preemption resume queue's
+// tick; it outlives that queue (#145 D2).
+const promoteInterval = 15 * time.Second
+
+// runPromoteLoop keeps every owner's guarantee filled as leases churn
+// (#128): every promoteInterval it promotes running burst leases into
+// the guarantee. It stops with ctx and skips while the node is draining.
+func (s *Service) runPromoteLoop(ctx context.Context) {
+	t := time.NewTicker(promoteInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if s.draining.Load() {
+				continue
+			}
+			s.promoteAllBurst()
+		}
 	}
 }
 
