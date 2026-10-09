@@ -127,8 +127,11 @@ func TestSandboxListedListErrorIsUnavailable(t *testing.T) {
 	if errors.Is(err, substrate.ErrNotFound) {
 		t.Fatalf("sandboxListed on a list error must not be ErrNotFound: %v", err)
 	}
-	if got := o.callCount(); got != listProbeAttempts {
-		t.Fatalf("List calls = %d, want the bounded retry of %d", got, listProbeAttempts)
+	// A literal 3, not listProbeAttempts: comparing against the same
+	// constant the implementation uses cannot catch a retry-count change
+	// (spoond-g077 T1).
+	if got := o.callCount(); got != 3 {
+		t.Fatalf("List calls = %d, want the bounded retry of 3", got)
 	}
 }
 
