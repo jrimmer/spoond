@@ -39,27 +39,46 @@ UDP/ICMP to a non-host `10.x` address are accepted, and TCP is left to
 layer 2. Plus hostaddrs tests for the one-shot fresh enumeration, the
 in-flight-refresh wait, and the IPv4 filtering.
 
-## Race fix (round 3)
+## Race fix (rounds 3–4)
 
 google/nftables v0.3.0 allocates set IDs from an unsynchronised
 package-level counter (`set.go: allocSetID++`), so the two new tests
 raced under `-race` when they allocated nftables sets in parallel. Both
 tests now run without `t.Parallel` (marked `//nolint:paralleltest` like
-`firewall_maxboundary_test.go`), and every set-building call site in the
-fork is serialized behind one process-wide mutex in the network package:
-the slot firewall's five `set.New` calls and the v2 host firewall's two
-`AddSet` calls. In production the slot firewall is built by the single
-pool `Populate` goroutine, but the v2 host firewall builds its sets on a
-startup goroutine, so the counter is reachable concurrently; the guard
-covers both rather than relying on that scheduling. `go test -race` on
-the two tests passes 10 consecutive runs, as root and as a non-root user.
+`firewall_maxboundary_test.go`), including the subtests of the named
+regression, and every set-building call site in the fork is serialized
+behind one process-wide mutex (`WithNftablesSetLock`) in the network
+package: the slot firewall's five `set.New` calls and the v2 host
+firewall's two `AddSet` calls. In production the slot firewall is built
+by the single pool `Populate` goroutine, but the v2 host firewall builds
+its sets on a startup goroutine, so the counter is reachable
+concurrently; the guard covers both rather than relying on that
+scheduling.
+
+`TestNewFirewall_ConcurrentSetCreation` builds several firewalls on
+separate connections at once, so the lock — not scheduling — is what
+keeps the counter race-free. With the lock temporarily removed the test
+fails `-race` on `set.go:505`, evidence the test actually exercises the
+race. `go test -race -count=10` on the two host-deny tests plus the
+concurrency test passes 10/10, as root and as a non-root user (with
+`HOME`/`GOCACHE` under `/tmp`, `GOMODCACHE=/opt/gomod`). Race output tail:
+
+```
+=== RUN   TestFilterRules_HostDropPrecedesAllow
+--- PASS: TestFilterRules_HostDropPrecedesAllow (0.00s)
+=== RUN   TestNewFirewall_ConcurrentSetCreation
+--- PASS: TestNewFirewall_ConcurrentSetCreation (0.00s)
+PASS
+ok  github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/network 1.096s
+```
 
 ## Gates
 
 - `go build ./...` — clean
-- `go vet ./pkg/sandbox/network/... ./pkg/tcpfirewall/...` — clean
+- `go vet ./pkg/sandbox/network/...` — clean
 - `gofmt -l` on the touched packages — empty
-- `go test -race` on the two new tests 10 times — pass (root and non-root)
+- `go test -race -count=10` on the named host-deny tests and the
+  concurrency test — pass 10/10 (root and non-root)
 - the touched package tests pass; the 5 DSCP failures, the v2
   forward-probe failure and the rootless-Docker container test are
   pre-existing environment-only (missing kernel DSCP module / netns
@@ -71,4 +90,6 @@ the two tests passes 10 consecutive runs, as root and as a non-root user.
 ## Fork commit
 
 `work/spoond-50m4` in `e2b-runtime`, one squashed commit (P11), SHA
-`a107cc3dc5bfbee9df1776c6b5175a1ebf61b26e`.
+`6c8eaf36354922bab756fb79b68907208b160f03` (round 4; supersedes
+`a107cc3dc5bfbee9df1776c6b5175a1ebf61b26e`). `origin/work/spoond-50m4`
+was force-pushed with `--force-with-lease` to this SHA.
