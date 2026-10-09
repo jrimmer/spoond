@@ -354,8 +354,8 @@ sweep, the lease's own `idle_suspend`, held rule 1 (shortened under
 pressure), a lapsed hold (rule 3), preemption, or the holder's own hand
 suspend. This is one rule for every kind of suspend, not just
 `idle_suspend`. GET, status, events and SSE never resume, and neither
-`POST /resume` (which now refuses during a drain like any work call,
-see below) nor a path with nothing to resume. The
+does a path with nothing to resume. `POST /resume` is not a work call
+but now refuses during a drain like one (see below); the
 SSH gateway also resumes on attach.
 
 While its pause or another caller's resume is in flight, a work call
@@ -384,7 +384,6 @@ lapsed: resuming does not renew a hold.
 | the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| `POST /api/leases/{id}/resume` (anchored, see below) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}` (lease detail) | **no** | `200` (suspended details returned) | `200` | `200` | `200` (carries `lost_at`/`lost_reason`) |
 | `GET /api/leases/{id}/stat` (the stat probe runs an exec) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/fork` (needs a running source) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
