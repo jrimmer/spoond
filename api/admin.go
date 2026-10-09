@@ -824,11 +824,6 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 		s.store.mu.Unlock()
 		return err, attempts, true
 	}
-	if errors.Is(err, errLeaseReleased) {
-		// The lease was released while its resume started: nothing to
-		// resume, nothing failed, and no deferral event (spoond-775).
-		return err, attempts, false
-	}
 	// A permanent error — the image or build the resume needs is gone — is
 	// the only failure that loses the lease: nothing can bring the
 	// snapshot back, so keeping it suspended would only fail again on the
@@ -908,17 +903,21 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 // undrainLossAllowed guard under the store lock: a released or already
 // lost lease is never stamped, and neither is one a concurrent resume
 // brought back running or busy (spoond-638d round 2 F1). It reports
-// whether the reason was stamped. The suspension now emits the same
-// `suspended` event (reason resume_failed) and puqp journal line every
-// other automatic suspension carries, so the doc that says a suspended
-// event names resume_failed is true and the failure is not only visible
-// as a drain_deferred (spoond-638d round 2 N3).
+// whether the lease was left stamped with the reason. The suspension
+// emits the same `suspended` event (reason resume_failed) and puqp
+// journal line every other automatic suspension carries, so the doc that
+// says a suspended event names resume_failed is true and the failure is
+// not only visible as a drain_deferred (spoond-638d round 2 N3). It
+// emits them only when the reason changes to resume_failed: the heal
+// retries the same failing lease every interval, and each retry must not
+// look like a fresh suspension to a consumer (spoond-hfko F1).
 func (s *Service) markResumeFailed(l *Lease) bool {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	if _, alreadyLost, canLose := undrainLossAllowed(l); alreadyLost || !canLose {
 		return false
 	}
+	changed := l.SuspendReason != suspendReasonResumeFailed
 	l.SuspendReason = suspendReasonResumeFailed
 	if l.SuspendBuildID == "" {
 		l.SuspendBuildID = l.ResumeBuildID
@@ -927,6 +926,12 @@ func (s *Service) markResumeFailed(l *Lease) bool {
 		l.SuspendedAt = s.now()
 	}
 	s.saveLeaseLocked(l)
+	if !changed {
+		// Already stamped by an earlier retry: the lease stays suspended
+		// for the next retry, but no new suspension happened, so no event
+		// and no journal line (spoond-hfko F1).
+		return true
+	}
 	// Emit under the store lock: the bus never takes it, and the event and
 	// journal name the lease exactly as it was persisted (spoond-638d
 	// round 2 N3).
