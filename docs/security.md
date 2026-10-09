@@ -41,13 +41,16 @@ for memory snapshots). Compensating controls:
 
 **The host-address guard (patch P4, refreshed by P9).** The orchestrator's
 TCP egress firewall refuses any connection whose destination is an address
-of the host itself — including loopback — unless a sandbox's egress policy
-carries an allowance naming *both* the IP and the TCP port. The guard is
+of the host itself — including loopback and the unspecified address
+`0.0.0.0`/`::` — unless a sandbox's egress policy carries an allowance
+naming *both* the IP and the TCP port. The guard is
 decided against the host's current interfaces (re-read at most every 3 s),
 so a per-slot veth address that appears later and a host IPv6 address are
-guarded too, not just the IPv4 addresses present at process start. A read
-failure fails closed, and an IPv4-mapped IPv6 address or a resolved-IPv6
-zone id cannot evade the check. spoond's
+guarded too, not just the IPv4 addresses present at process start. An
+IPv4-mapped or otherwise IPv4-embedding IPv6 address (IPv4-compatible
+`::/96`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`) or a resolved-IPv6 zone
+id cannot evade the check. A read failure keeps the last good set for one
+extra TTL and then fails closed. spoond's
 policies use exactly that mechanism to grant what guests need: the proxy
 / LLM gateway port (`HOST_GUEST_SERVICE_PORT`) and DNS, plus the lease API
 port for `lan`/`internet` guests. So a guest with `lan` or `internet`
