@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.9.2] - 2026-10-09
+
 ### Changed
 
 - **The dashboard's i/o stall meter is scaled to line up with the other
