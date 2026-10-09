@@ -122,7 +122,11 @@ while True:
 
 // TestN7b_GuestDialRefusals checks the route's guards from inside the
 // suite: a bad port is 400, an unknown lease is 404, and a suspended
-// lease is 409.
+// lease resumes on the dial (2.9, #145 D2) and is then dialed. Nothing
+// listens on the dialed port in a fresh py-base lease, so the resumed
+// dial fails with 502 — the guest-dial error, not a resume failure (a
+// failed resume answers 409/429/503/410, never 502). The lease is
+// running after the dial.
 func TestN7b_GuestDialRefusals(t *testing.T) {
 	begin(t)
 
@@ -142,14 +146,25 @@ func TestN7b_GuestDialRefusals(t *testing.T) {
 		failf(t, "unknown-lease dial status %d, want 404", status)
 	}
 
-	// Suspended lease.
+	// Suspended lease: the dial resumes it and is then served. Port 80 has
+	// no listener in a fresh py-base lease, so the guest dial itself fails
+	// with 502 Bad Gateway. The lease must be running after the 502 — that
+	// proves the 502 came from the guest dial, not from a resume that was
+	// refused (a resume refusal is 409/429/503/410, never 502).
 	if st, body, err := cl.suspend(l.ID); err != nil || st != 200 {
 		failf(t, "suspend: %d %s (%v)", st, truncate(body), err)
 	}
 	if _, status, err := cl.dialGuest(l.ID, 80); err == nil {
-		failf(t, "suspended-lease dial succeeded, want 409")
-	} else if status != 409 {
-		failf(t, "suspended-lease dial status %d, want 409", status)
+		failf(t, "suspended-lease dial succeeded, want 502 (nothing listens on 80)")
+	} else if status != 502 {
+		failf(t, "suspended-lease dial status %d, want 502 (a resumed dial with no listener): %v", status, err)
+	}
+	if leaseSuspended(t, l.ID) {
+		failf(t, "lease %s still suspended after the dial", l.ID)
+	}
+	// The resumed guest runs: an exec answers (and nothing listens on 80).
+	if got := execOK(t, l.ID, "echo dialed"); got != "dialed" {
+		failf(t, "exec after the resuming dial: got %q, want dialed", got)
 	}
 }
 

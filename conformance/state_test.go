@@ -15,8 +15,9 @@ import (
 const counterCmd = "nohup sh -c 'i=0; while :; do i=$((i+1)); echo $i > /tmp/ctr; sleep 0.2; done' >/dev/null 2>&1 & echo started"
 
 // TestS1_SuspendResumeKeepsProcesses suspends a sandbox with a running
-// counter and a tmux session and checks that neither advanced through the
-// suspended window but both resume.
+// counter and a tmux session and checks that the next work call resumes
+// it (2.9, #145 D2) and that neither process was lost: the counter did
+// not advance through the suspended window and both survive the resume.
 func TestS1_SuspendResumeKeepsProcesses(t *testing.T) {
 	rec := begin(t)
 	l := createLease(t, map[string]any{"image": "dev-base", "persistent": true, "ttl": 3600})
@@ -39,26 +40,43 @@ func TestS1_SuspendResumeKeepsProcesses(t *testing.T) {
 	}
 	suspendMS := time.Since(t0).Milliseconds()
 	rec.set("suspend_ms", suspendMS)
+	if !leaseSuspended(t, l.ID) {
+		failf(t, "lease %s is not suspended after the suspend", l.ID)
+	}
+	// The stat probe cannot resume a suspended lease, so it still answers
+	// 409 lease_suspended while the exec below is the work call that
+	// resumes.
+	if st, body, err := cl.stat(l.ID); err != nil {
+		failf(t, "stat on suspended: %v", err)
+	} else {
+		requireLeaseSuspended(t, "stat on suspended", st, body)
+	}
+	// The guest heartbeat is not a work call either: it still refuses.
+	if st, body, err := cl.heartbeat(l.ID); err != nil {
+		failf(t, "heartbeat on suspended: %v", err)
+	} else {
+		requireLeaseSuspended(t, "heartbeat on suspended", st, body)
+	}
 
+	// Sit out a window while suspended: the counter must not advance
+	// through it, which the read after the resuming exec below checks.
+	time.Sleep(5 * time.Second)
+
+	// A work call on the suspended lease resumes it and is served. The
+	// guest's memory survived the pause, so the counter and the tmux
+	// session are the same processes afterwards.
+	t1 := time.Now()
 	st, body, err = cl.exec(l.ID, execReq{Cmd: "echo hi"})
 	if err != nil {
 		failf(t, "exec while suspended: %v", err)
 	}
-	if st != 409 {
-		failf(t, "exec while suspended: status %d, want 409: %s", st, truncate(body))
-	}
-
-	time.Sleep(5 * time.Second)
-
-	t1 := time.Now()
-	st, body, err = cl.resume(l.ID)
-	if err != nil {
-		failf(t, "resume: %v", err)
-	}
 	if st != 200 {
-		failf(t, "resume: status %d: %s", st, truncate(body))
+		failf(t, "exec while suspended: status %d, want 200 (the work call resumes): %s", st, truncate(body))
 	}
 	rec.set("resume_ms", time.Since(t1).Milliseconds())
+	if leaseSuspended(t, l.ID) {
+		failf(t, "lease %s still suspended after the resuming exec", l.ID)
+	}
 
 	b := readCtr(t, l.ID)
 	time.Sleep(2 * time.Second)
