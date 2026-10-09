@@ -864,3 +864,49 @@ jobs:
 		t.Fatalf("reported %+v, want one success", sink.reports)
 	}
 }
+
+// blockingCreateLease blocks its Create until ctx ends: a create queued
+// on a full node (#129) the client is waiting out.
+type blockingCreateLease struct {
+	fakeLease
+	started chan struct{}
+}
+
+func (b *blockingCreateLease) Create(ctx context.Context, image string, ttl int) (string, error) {
+	close(b.started)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestExecutorJobTimeoutBoundsCreateWait: a job whose create is waiting
+// for capacity is bounded by the executor's JobTimeout — a full node may
+// hold the create, but a runner worker must not be pinned forever.
+func TestExecutorJobTimeoutBoundsCreateWait(t *testing.T) {
+	lease := &blockingCreateLease{fakeLease: *newFakeLease(), started: make(chan struct{})}
+	sink := &fakeSink{}
+	exec := &Executor{
+		Sandbox:      lease,
+		Sink:         sink,
+		Labels:       map[string]string{"ubuntu-latest": "py-base"},
+		DefaultImage: "py-base",
+		TTL:          600,
+		JobTimeout:   50 * time.Millisecond,
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Run(context.Background(), testJob("jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"))
+	}()
+	<-lease.started
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run succeeded, want a timeout error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run never returned; JobTimeout did not bound the create wait")
+	}
+	if len(sink.reports) != 1 {
+		t.Fatalf("reported %d state(s), want exactly 1 (the timed-out job)", len(sink.reports))
+	}
+}

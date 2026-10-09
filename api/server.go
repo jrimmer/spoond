@@ -1216,7 +1216,10 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// guess.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "draining", drainRetryAfterSecs
 	case errors.Is(err, substrate.ErrCapacity):
-		status, msg = http.StatusServiceUnavailable, "capacity: "+err.Error()
+		// Hugepages full and preemption could not make room (or the node
+		// is not healthy): 503 with a retry hint, so a client that did
+		// not send "wait" still knows when to come back.
+		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), burstRetryAfterSecs
 	default:
 		if snapshot != "" {
 			s.svc.log.Printf("create: grant snapshot %s: %v", snapshot, err)

@@ -23,6 +23,11 @@ type Executor struct {
 	DefaultImage string
 	// TTL is the sandbox lease TTL in seconds.
 	TTL int
+	// JobTimeout bounds the whole job (including waiting for capacity on
+	// Create). Zero leaves the caller's context in charge; the pool's
+	// job context (RUNNER_STOP_GRACE) is the normal bound. Set via
+	// RUNNER_JOB_TIMEOUT.
+	JobTimeout time.Duration
 	// RepoBaseURL is the git host base URL used to construct clone URLs
 	// for actions/checkout (e.g. https://code.example.com). The repo path
 	// comes from the github.repository context. Required for checkout.
@@ -54,6 +59,15 @@ var checkoutRe = regexp.MustCompile(`(?i)^actions/checkout(@.*)?$`)
 // Run executes a job's workflow in a sandbox, streaming logs and
 // reporting the final state. It always releases the sandbox.
 func (e *Executor) Run(ctx context.Context, job *Job) error {
+	if e.JobTimeout > 0 {
+		// Bound the whole job, Create's capacity wait included: a runner
+		// that dropped its job timeout would let a waiting create hold a
+		// worker forever. The deferred cancel runs after the final report
+		// (report uses a fresh context once this one is dead).
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.JobTimeout)
+		defer cancel()
+	}
 	jobStart := time.Now()
 	if e.Metrics != nil {
 		e.Metrics.JobsActive.Inc()

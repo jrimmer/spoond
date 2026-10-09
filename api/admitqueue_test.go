@@ -668,3 +668,20 @@ func TestAdmitWaitQueuePosition(t *testing.T) {
 	}
 	svc.drainQueue()
 }
+
+// TestAdmitCapacityRefusalCarriesRetryAfter: a create refused because
+// the node is full answers 503 with a Retry-After, like the burst and
+// preempt refusals — so a client that did not send "wait" still knows
+// when to come back.
+func TestAdmitCapacityRefusalCarriesRetryAfter(t *testing.T) {
+	_, h, svc, sub, _ := newAdmitServer(t)
+	fillTwo(t, h, sub, svc, "tok-1")
+
+	r := waitCreate(t, h, "tok-1", `{"image":"mid","ttl":60}`)
+	if r.code != http.StatusServiceUnavailable {
+		t.Fatalf("full-node create = %d, want 503 (%v)", r.code, r.body)
+	}
+	if ra := r.hdr.Get("Retry-After"); ra != strconv.Itoa(burstRetryAfterSecs) {
+		t.Fatalf("Retry-After = %q, want %d", ra, burstRetryAfterSecs)
+	}
+}
