@@ -405,12 +405,13 @@ func undrainNotReady(err error) bool {
 	return false
 }
 
-// undrainReady waits until the orchestrator can answer both NodeInfo and
-// a List, so the first resume does not run before the restarted
-// orchestrator is ready for sandbox creates (spoond-638d). It returns
-// nil once ready, the last error when the window expires, or ctx.Err()
-// when the caller's context ends. Overridable in tests with a shorter
-// window.
+// undrainReady waits until the orchestrator reports a workable status and
+// can answer a List, so the first resume does not run before the
+// restarted orchestrator is ready for sandbox creates (spoond-638d). A
+// node that reports healthy or draining (our own drain, about to be
+// cleared) is workable; unhealthy, standby, shutting_down and unknown are
+// not. It returns nil once ready, the last error or status when the
+// window expires, or ctx.Err() when the caller's context ends.
 func (s *Service) undrainReady(ctx context.Context) error {
 	deadline := time.Now().Add(s.undrainReadyTimeout())
 	poll := s.undrainReadyPoll
@@ -419,15 +420,18 @@ func (s *Service) undrainReady(ctx context.Context) error {
 	}
 	var lastErr error
 	for {
-		_, nodeErr := s.sub.NodeInfo(ctx)
-		if nodeErr == nil {
-			_, listErr := s.sub.List(ctx)
-			if listErr == nil {
-				return nil
-			}
-			lastErr = listErr
-		} else {
+		info, nodeErr := s.sub.NodeInfo(ctx)
+		switch {
+		case nodeErr != nil:
 			lastErr = nodeErr
+		case !undrainReadyStatus(info.Status):
+			lastErr = fmt.Errorf("node status %s", info.Status)
+		default:
+			if _, listErr := s.sub.List(ctx); listErr == nil {
+				return nil
+			} else {
+				lastErr = listErr
+			}
 		}
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("orchestrator not ready after %s: %w", s.undrainReadyTimeout(), lastErr)
@@ -438,6 +442,13 @@ func (s *Service) undrainReady(ctx context.Context) error {
 		case <-time.After(poll):
 		}
 	}
+}
+
+// undrainReadyStatus reports whether a node status is workable for an
+// undrain resume: healthy, or draining (spoond's own drain, which the
+// undrain is about to clear).
+func undrainReadyStatus(status string) bool {
+	return status == "healthy" || status == "draining"
 }
 
 // undrainAdmissionRefusal reports whether err is one of the transient

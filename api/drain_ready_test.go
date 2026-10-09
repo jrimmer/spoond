@@ -304,3 +304,25 @@ func TestUndrainReadyRequiresNodeInfo(t *testing.T) {
 		t.Fatalf("undrainReady once the node answers: %v", err)
 	}
 }
+
+// TestUndrainReadyRejectsUnworkableStatus: a node that answers NodeInfo
+// but reports unhealthy, standby, shutting_down or unknown is not ready:
+// a Create would be refused. Healthy and draining (spoond's own drain,
+// about to be cleared) are workable.
+func TestUndrainReadyRejectsUnworkableStatus(t *testing.T) {
+	_, svc, _, sub := newAdminServer(t, "admin-tok")
+	shortUndrainReadiness(svc)
+
+	for _, status := range []string{"unhealthy", "standby", "shutting_down", "unknown"} {
+		sub.SetNodeInfo(substrate.NodeInfo{Status: status}, nil)
+		if err := svc.undrainReady(context.Background()); err == nil {
+			t.Errorf("undrainReady accepted node status %q", status)
+		}
+	}
+	for _, status := range []string{"healthy", "draining"} {
+		sub.SetNodeInfo(substrate.NodeInfo{Status: status}, nil)
+		if err := svc.undrainReady(context.Background()); err != nil {
+			t.Errorf("undrainReady rejected node status %q: %v", status, err)
+		}
+	}
+}
