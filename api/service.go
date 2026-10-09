@@ -2880,7 +2880,7 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
-	if !l.Persistent && !l.held() {
+	if !l.Persistent && !l.Pinned {
 		s.store.mu.Unlock()
 		return nil, errNotPersistent
 	}
@@ -2890,9 +2890,8 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 
 // resumeAny is resume without the owner check, for the SSH gateway's
 // service token: before a session starts, the gateway resumes a
-// suspended lease the connecting user is already authorised for (a held
-// lease suspended by an idle rule resumes on next use this way).
-// Persistent and held leases only, as for resume.
+// suspended lease the connecting user is already authorised for.
+// Persistent and pinned leases only, as for resume.
 func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
@@ -2900,7 +2899,7 @@ func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
-	if !l.Persistent && !l.held() {
+	if !l.Persistent && !l.Pinned {
 		s.store.mu.Unlock()
 		return nil, errNotPersistent
 	}

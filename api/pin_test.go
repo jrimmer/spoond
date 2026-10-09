@@ -103,6 +103,21 @@ func TestHolderLabelNeverPins(t *testing.T) {
 	if l := svc.lookup("consumer-a", l.ID); l.Pinned {
 		t.Fatalf("PUT holder pinned the lease: %+v", l)
 	}
+
+	// A holder label never makes a non-persistent lease resumable: the
+	// resume gate keys on Pinned, not on Holder.
+	if _, err := svc.resume(context.Background(), "consumer-a", l.ID); err != errNotPersistent {
+		t.Fatalf("resume of a holder-labelled non-persistent lease = %v, want errNotPersistent", err)
+	}
+	resp, body = doReq(t, "PUT", ts.URL+"/api/leases/"+l.ID+"/pin", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pin = %d (%v), want 200", resp.StatusCode, body)
+	}
+	l = svc.lookup("consumer-a", l.ID)
+	l.Suspended = true
+	if _, err := svc.resume(context.Background(), "consumer-a", l.ID); err == errNotPersistent {
+		t.Fatal("pinned non-persistent lease should be resumable")
+	}
 }
 
 // TestPinRoutesAndVisibility: PUT pins, DELETE unpins, owner or admin,
