@@ -62,7 +62,9 @@ summarised from README "Status".
   `ApplyRules` forces a fresh enumeration and waits out a refresh in
   flight, so it never builds the set from an expired or fail-closed
   snapshot. This is in the orchestrator fork and needs its matching
-  build.
+  build. (A follow-up in the fork also serializes nftables set creation,
+  whose package-level ID counter in google/nftables v0.3.0 is
+  unsynchronised, and drops `t.Parallel` from the two new tests.)
 
 ## [2.9.0] - 2026-10-09
 
