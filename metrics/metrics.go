@@ -130,8 +130,9 @@ type BackendMetrics struct {
 	NamedSnapshots     prometheus.Gauge // named snapshot version rows
 	NamedSnapshotBytes prometheus.Gauge // summed size_bytes over named snapshot versions
 
-	// Held-lease limits (2.1): automatic actions on held leases
-	HeldActions *prometheus.CounterVec // {rule,action}: idle/stale/expiry/pressure/critical × suspend/release/expire
+	// Take-back (FS5): the box_full refusals (a request needed room and
+	// every take-back candidate was pinned).
+	BoxFullTotal prometheus.Counter // cumulative box_full refusals
 
 	// Preemption (#128 part 3): burst leases suspended to make room for
 	// a guaranteed admission, and how many are preempted right now.
@@ -461,11 +462,11 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Disk bytes held by named snapshot versions (summed recorded size_bytes).",
 	})
 
-	// Held-lease limits (2.1): automatic actions on held leases.
-	m.HeldActions = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "spoond", Name: "held_actions_total",
-		Help: "Automatic actions on held leases, by rule (idle, stale, expiry, pressure, critical) and action (suspend_idle, release, expire).",
-	}, []string{"rule", "action"})
+	// Take-back (FS5): box_full refusals.
+	m.BoxFullTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "box_full_total",
+		Help: "Requests refused box_full: every take-back candidate was pinned (nothing unpinned could be taken).",
+	})
 
 	// Preemption (#128 part 3): burst leases suspended to make room for
 	// a guaranteed admission.
@@ -570,8 +571,8 @@ func NewBackendMetrics() *BackendMetrics {
 		m.KeptBuildsBytes, m.KeptBuilds,
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
-		m.HeldActions,
 		m.PreemptionsTotal, m.PreemptedLeases,
+		m.BoxFullTotal,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,

@@ -81,25 +81,14 @@
 //	                  being written
 //	ORPHAN_QUARANTINE_SECS  how long a quarantined orphan waits
 //	                  before it may be deleted (default 86400)
-//	HELD_IDLE_TIMEOUT_SECS  how long a held lease may sit idle (no exec,
-//	                  stream, proxy, keepalive or heartbeat) before the
-//	                  sweep suspends it (default 14400 = 4 h; 0 disables)
-//	HELD_SUSPENDED_RELEASE_SECS  how long a held lease suspended by the
-//	                  idle or critical rule may stay untouched before it
-//	                  is released (default 604800 = 7 d; 0 disables)
-//	HOLD_TTL_SECS    how long a hold lasts from when it was set or
-//	                  renewed (default 604800 = 7 d; 0 uses the default)
-//	HOLD_TTL_MAX_SECS  the cap for an explicit hold_ttl on create or
-//	                  PUT /api/leases/{id}/holder (default 2592000 = 30 d)
-//	PRESSURE_DISK_FREE_PCT  snapshot-disk free percentage under which
-//	                  the idle threshold shortens (default 15; 0 disables)
-//	PRESSURE_HELD_IDLE_SECS  the shortened idle threshold under pressure
-//	                  (default 1800 = 30 min; 0 disables the shortening)
-//	CRITICAL_DISK_FREE_PCT  snapshot-disk free percentage under which
-//	                  suspended held leases are released (default 5; 0
-//	                  disables)
-//	CRITICAL_DISK_RECOVER_PCT  release stops above this free percentage
-//	                  (default 10)
+//	SPOOND_DB_PATH   path to the SQLite database (default /var/lib/spoond/spoond.db)
+//	PAUSED_RELEASE_DAYS  days after its pause date that every paused
+//	                  lease is released (default 30)
+//	PINNED_IDLE_NOTICE_DAYS  days of no API activity after which a
+//	                  pinned lease is flagged (default 7; visibility only)
+//	IDLE_TIMEOUT_SECS, HELD_IDLE_TIMEOUT_SECS, HELD_SUSPENDED_RELEASE_SECS,
+//	HOLD_TTL_SECS, HOLD_TTL_MAX_SECS, PRESSURE_HELD_IDLE_SECS: removed.
+//	                  A set variable is logged as removed and ignored.
 //	NOTIFY_WEBHOOKS  JSON list of webhook receivers for events that
 //	                  need a person (2.2 #117): [{"url":..., "format":
 //	                  "ntfy"|"slack"|"json", "min_severity":
@@ -252,6 +241,30 @@ func envIntOr(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// removedEnvVars are the environment variables FS5 (2026-10-08) removed:
+// every held-lease and idle rule they configured is gone, and pins plus
+// the one paused-release clock replace them. A set variable is warned
+// about once at startup and ignored, so an operator's old EnvironmentFile
+// does not silently look effective.
+var removedEnvVars = []string{
+	"HELD_IDLE_TIMEOUT_SECS",
+	"HELD_SUSPENDED_RELEASE_SECS",
+	"HOLD_TTL_SECS",
+	"HOLD_TTL_MAX_SECS",
+	"PRESSURE_HELD_IDLE_SECS",
+	"IDLE_TIMEOUT_SECS",
+}
+
+// warnRemovedEnv logs one line per removed variable that is still set.
+// get reads the environment (os.Getenv in production, a fake in tests).
+func warnRemovedEnv(logf interface{ Printf(string, ...any) }, get func(string) string) {
+	for _, name := range removedEnvVars {
+		if get(name) != "" {
+			logf.Printf("%s is removed and ignored: pins replace holds, and one clock releases every paused lease PAUSED_RELEASE_DAYS after its pause date", name)
+		}
+	}
 }
 
 // notifyBackupMaxAge is the backup check's age limit in seconds
@@ -442,8 +455,6 @@ func Main(args []string) int {
 		log.Fatalf("TLS_CERT/TLS_KEY: %v", err)
 	}
 	poolSize := envIntOr("POOL_SIZE", 0)
-	idleTimeoutSecs := envIntOr("IDLE_TIMEOUT_SECS", 0) // persistent-lease auto-suspend
-	idleTimeout := time.Duration(idleTimeoutSecs) * time.Second
 	defaultTTL := time.Duration(envIntOr("DEFAULT_TTL_SECS", 300)) * time.Second
 	maxTTL := time.Duration(envIntOr("MAX_TTL_SECS", 3600)) * time.Second
 	hostGuestAddr := os.Getenv("HOST_GUEST_SERVICE_ADDR")
@@ -534,14 +545,14 @@ func Main(args []string) int {
 	// become candidates.
 	lostGracePersistent := envDurationOr("GC_LOST_GRACE_PERSISTENT", 7*24*time.Hour)
 	lostGrace := envDurationOr("GC_LOST_GRACE", 24*time.Hour)
-	// Held-lease limits (2.1, owner decision 2026-10-03): a held lease
-	// must never keep memory or disk forever, and nobody watches the
-	// dashboard, so the limits act on their own (0 disables a rule).
-	heldIdle := time.Duration(envIntOr("HELD_IDLE_TIMEOUT_SECS", 14400)) * time.Second
-	heldRelease := time.Duration(envIntOr("HELD_SUSPENDED_RELEASE_SECS", 604800)) * time.Second
-	holdTTL := time.Duration(envIntOr("HOLD_TTL_SECS", 604800)) * time.Second
-	holdTTLMax := time.Duration(envIntOr("HOLD_TTL_MAX_SECS", 2592000)) * time.Second
-	pressureIdle := time.Duration(envIntOr("PRESSURE_HELD_IDLE_SECS", 1800)) * time.Second
+	// Pins and one clock (FS5, owner decision 2026-10-08): PAUSED_RELEASE_DAYS
+	// is how many days after its pause date every paused lease is released
+	// (default 30); PINNED_IDLE_NOTICE_DAYS is the pinned-idle notice age
+	// (default 7, visibility only).
+	pausedReleaseDays := envIntOr("PAUSED_RELEASE_DAYS", api.DefaultPausedReleaseDays)
+	pinnedIdleNoticeDays := envIntOr("PINNED_IDLE_NOTICE_DAYS", api.DefaultPinnedIdleNoticeDays)
+	// Removed hold/idle variables (FS5): warn once at startup and ignore.
+	warnRemovedEnv(log.Default(), os.Getenv)
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
@@ -593,7 +604,6 @@ func Main(args []string) int {
 		PoolSize:                  poolSize,
 		DefaultTTL:                defaultTTL,
 		MaxTTL:                    maxTTL,
-		IdleTimeout:               idleTimeout,
 		HostGuestAddr:             hostGuestAddr,
 		HostGuestPort:             hostGuestPort,
 		GuestDNSAddr:              guestDNSAddr,
@@ -608,14 +618,8 @@ func Main(args []string) int {
 		BuildTimeout:              buildTimeout,
 		LostGracePersistent:       lostGracePersistent,
 		LostGrace:                 lostGrace,
-		HeldIdleTimeout:           heldIdle,
-		HeldSuspendedRelease:      heldRelease,
-		HoldTTL:                   holdTTL,
-		HoldTTLMax:                holdTTLMax,
-		PressureDiskFreePct:       float64(envIntOr("PRESSURE_DISK_FREE_PCT", api.DefaultPressureDiskFreePct)),
-		PressureHeldIdle:          pressureIdle,
-		CriticalDiskFreePct:       float64(envIntOr("CRITICAL_DISK_FREE_PCT", api.DefaultCriticalDiskFreePct)),
-		CriticalDiskRecoverPct:    float64(envIntOr("CRITICAL_DISK_RECOVER_PCT", api.DefaultCriticalRecoverPct)),
+		PausedReleaseDays:         pausedReleaseDays,
+		PinnedIdleNoticeDays:      pinnedIdleNoticeDays,
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),
 		SnapshotKeepVersions:      envIntOr("SNAPSHOT_KEEP_VERSIONS", api.DefaultSnapshotKeepVersions),

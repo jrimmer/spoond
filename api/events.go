@@ -32,7 +32,21 @@ const (
 	LeaseRestarted     LeaseEventType = "restarted"
 	LeaseHolderSet     LeaseEventType = "holder_set"
 	LeaseHolderCleared LeaseEventType = "holder_cleared"
-	LeaseHeldAction    LeaseEventType = "held_action"
+	// LeasePinned and LeaseUnpinned mark a pin change (FS5): a pinned
+	// lease is never paused or released before its own expiry; a holder
+	// or holder_url label never pins.
+	LeasePinned   LeaseEventType = "pinned"
+	LeaseUnpinned LeaseEventType = "unpinned"
+	// LeasePausedExpiring marks the warning 24 h before a paused lease is
+	// released by the one clock (FS5).
+	LeasePausedExpiring LeaseEventType = "paused_expiring"
+	// LeasePinnedIdle marks a pinned lease crossing the
+	// PINNED_IDLE_NOTICE_DAYS threshold (FS5, visibility only): nothing is
+	// paused, unpinned or released because of it.
+	LeasePinnedIdle LeaseEventType = "pinned_idle"
+	// LeaseAdminUnpin marks the admin route that unpins leases by holder
+	// prefix for the 2.9→3.0 migration window. It carries no lease id.
+	LeaseAdminUnpin LeaseEventType = "admin_unpin"
 	// LeaseCheckpointPolicy marks a per-lease checkpoint interval change
 	// (2.3, #122): the detail carries the new effective seconds.
 	LeaseCheckpointPolicy LeaseEventType = "checkpoint_policy"
@@ -119,6 +133,11 @@ const (
 	// lease ran on into the orchestrator stop. The detail names the
 	// pause error (spoond-52c R2).
 	LeaseDrainFailed LeaseEventType = "drain_failed"
+	// LeaseBoxFull marks a request that needed room but could not be
+	// admitted because every take-back candidate was pinned (FS5).
+	// Nothing was paused or released. It carries no lease id; the detail
+	// names the request's memory and owner.
+	LeaseBoxFull LeaseEventType = "box_full"
 	// LeaseDrainGaveUp marks the drain self-heal loop giving up on a
 	// drained lease whose resume stayed deferred past DRAIN_RESUME_MAX_AGE.
 	// The lease is left suspended (not lost: its snapshot is intact) for
