@@ -72,17 +72,39 @@ PASS
 ok  github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/network 1.096s
 ```
 
+## Late-slot and fail-closed follow-ups (round 5)
+
+The layer-3 review of `6c8eaf36` found two gaps. First, the host set
+was a point-in-time interface snapshot, so a slot veth created after
+the snapshot got a host-side IP in the vrt range (`10.12.0.0/16`), and
+a broad `10/8` allowance could still reach it with UDP/ICMP. The layer-1
+host drop set now always carries the whole vrt network (both the
+host-side veth and its peer) plus the loopback and link-local prefixes,
+independent of the snapshot. `SANDBOXES_VRT_NETWORK_CIDR` is the single
+source of truth. Second, a fail-closed snapshot (an enumeration that
+never succeeds) returned an empty list, so layer 1 came up with no host
+drop at all; `ipv4CIDRs` now returns the fixed prefixes plus the vrt
+range when `failClosed`, matching `egressproxy.go`'s "fails closed".
+
+Tests now read membership back from the buffered `NFT_MSG_NEWSETELEM`
+elements the firewall actually emitted, not from the test's own inputs,
+and a late-slot test pins that a veth IP absent from the snapshot is
+still dropped for UDP and ICMP. The process-wide `nftablesSetMu`, the
+rule order, and the one-commit squashed P11 are kept. DNS to `10.1.0.2`
+and `10.1.0.3` is unaffected: those are not sandbox-vrt addresses.
+
 ## Gates
 
 - `go build ./...` — clean
-- `go vet ./pkg/sandbox/network/...` — clean
+- `go vet ./pkg/sandbox/network/... ./pkg/tcpfirewall/...` — clean
 - `gofmt -l` on the touched packages — empty
-- `go test -race -count=10` on the named host-deny tests and the
-  concurrency test — pass 10/10 (root and non-root)
-- the touched package tests pass; the 5 DSCP failures, the v2
-  forward-probe failure and the rootless-Docker container test are
-  pre-existing environment-only (missing kernel DSCP module / netns
-  capture / no rootless Docker), confirmed on `origin/spoond`
+- `go test -race -count=10` on the named host-deny tests (including the
+  late-slot and fixed-range regressions) and the concurrency test —
+  pass 10/10 (root and non-root)
+- the touched package tests pass; the 5 DSCP failures and the
+  rootless-Docker container test are pre-existing environment-only
+  (missing kernel DSCP module / no rootless Docker), confirmed on
+  `origin/spoond`
 - the new tests use `t.TempDir()`/no `/work`, `/run/honey` or `/opt/honey`
   path, and run as a non-root user
 - live firewall on no host was changed
@@ -90,6 +112,7 @@ ok  github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/network 1.096s
 ## Fork commit
 
 `work/spoond-50m4` in `e2b-runtime`, one squashed commit (P11), SHA
-`6c8eaf36354922bab756fb79b68907208b160f03` (round 4; supersedes
-`a107cc3dc5bfbee9df1776c6b5175a1ebf61b26e`). `origin/work/spoond-50m4`
-was force-pushed with `--force-with-lease` to this SHA.
+`0eece3dfe5a51d6cc543d1b74e9f0af4627aec25` (round 5; supersedes
+`6c8eaf36354922bab756fb79b68907208b160f03`). `origin/work/spoond-50m4`
+was force-pushed with `--force-with-lease` to this SHA, and
+`git ls-remote origin work/spoond-50m4` reports the same SHA.

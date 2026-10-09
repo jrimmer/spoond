@@ -64,7 +64,12 @@ summarised from README "Status".
   snapshot. This is in the orchestrator fork and needs its matching
   build. (A follow-up in the fork also serializes nftables set creation,
   whose package-level ID counter in google/nftables v0.3.0 is
-  unsynchronised, and drops `t.Parallel` from the two new tests.)
+  unsynchronised, and drops `t.Parallel` from the two new tests.) The
+  layer-1 host drop set is not only the enumeration snapshot: it always
+  carries the whole sandbox vrt network (`10.12.0.0/16`) plus loopback
+  and link-local, so a slot whose veth is created after the snapshot is
+  still refused on UDP/ICMP, and a fail-closed enumeration now yields
+  the fixed ranges instead of an empty set.
 
 ## [2.9.0] - 2026-10-09
 
