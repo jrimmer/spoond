@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-10-09
+
 ### Fixed
 
 - **A planned orchestrator restart no longer loses leases to a
@@ -49,6 +51,14 @@ summarised from README "Status".
   and the lease-journal line. Later retries keep the lease suspended
   without emitting, so a consumer never reads one failing lease as a new
   suspension each interval (spoond-hfko).
+
+### Changed
+
+- **Conformance F2, S1 and N7b follow resume on use.** They expected the
+  pre-2.9 `409` on a suspended or paused lease. They now expect the
+  lease to come back on the holder's work call and check that it does
+  (spoond-clcw). The admission wake test installs its pass hook before
+  the create, so it no longer races (spoond-qjsy).
 
 ## [2.9.0] - 2026-10-09
 
