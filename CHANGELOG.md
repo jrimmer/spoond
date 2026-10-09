@@ -372,6 +372,24 @@ summarised from README "Status".
   refusal onto `403 owner deleted` instead of a `500`, and the refused
   grant drops its staged create-time secrets.
 
+- **An orchestrator stall no longer reports a sandbox as gone
+  (spoond-g077).** A failed substrate operation (an envd stream drop, an
+  exec error, a file-path failure) was mapped to `substrate.ErrNotFound`
+  whenever the orchestrator `List` call failed, so a stream drop during
+  an orchestrator stall became `404`/`410 lease_lost`. `410` is final for
+  clients: Honey treats it as gone with no confirming GET, and the runner
+  fails the job permanently. The e2b client now distinguishes *List
+  failed* (the sandbox's state is unknown) from *listed and absent*. On
+  unknown it retries `List` a bounded number of times with a short
+  backoff and then returns the new `substrate.ErrUnavailable`; the API
+  answers **`503` with `Retry-After: 5` and code `substrate_unavailable`**
+  (a retryable answer) and **never marks the lease lost**. The rootfs
+  liveness probe never counts an `ErrUnavailable` probe toward its
+  3-strike recovery, so an orchestrator stall cannot delete a live
+  sandbox. A confirmed absence is unchanged: `410 lease no longer
+  exists` on exec/stat/background exec and `404` on files. See
+  [docs/api.md](docs/api.md).
+
 ## [2.8.0] - 2026-10-08
 
 spoond cleans up after itself under every race it has met so far. A

@@ -34,10 +34,13 @@ type testSub struct {
 	// answer the given stderr with exit code 1 ("Input/output error" for
 	// a dead disk). rootfsErr, keyed the same way, makes it a transport
 	// failure instead; rootfsTimeout makes it the substrate's own timeout
-	// marker (exit 124, nil error) (spoond-5ca).
-	rootfsFail    map[string]string
-	rootfsErr     map[string]bool
-	rootfsTimeout map[string]bool
+	// marker (exit 124, nil error) (spoond-5ca). rootfsUnavailable makes
+	// the probe exec fail with substrate.ErrUnavailable (the orchestrator
+	// List failed while confirming the sandbox) (spoond-g077).
+	rootfsFail        map[string]string
+	rootfsErr         map[string]bool
+	rootfsTimeout     map[string]bool
+	rootfsUnavailable map[string]bool
 
 	// onRootfsProbe, when set, runs while a rootfs probe exec is being
 	// served, before its outcome is decided. Tests use it to start an
@@ -146,7 +149,7 @@ func (ts *testSub) Delete(ctx context.Context, sandboxID string) error {
 }
 
 func newTestSub() *testSub {
-	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}, rootfsFail: map[string]string{}, rootfsErr: map[string]bool{}, rootfsTimeout: map[string]bool{}}
+	ts := &testSub{Fake: fake.New(), probeFail: map[string]string{}, rootfsFail: map[string]string{}, rootfsErr: map[string]bool{}, rootfsTimeout: map[string]bool{}, rootfsUnavailable: map[string]bool{}}
 	ts.Fake.SetExecHandler(ts.exec)
 	return ts
 }
@@ -171,6 +174,9 @@ func (ts *testSub) Exec(ctx context.Context, sandboxID string, req substrate.Exe
 		}
 		if ts.rootfsErr[sandboxID] {
 			return substrate.ExecResult{}, fmt.Errorf("exec %s: agent unreachable", sandboxID)
+		}
+		if ts.rootfsUnavailable[sandboxID] {
+			return substrate.ExecResult{}, fmt.Errorf("exec %s: %w", sandboxID, substrate.ErrUnavailable)
 		}
 		if ts.rootfsTimeout[sandboxID] {
 			// The e2b backend kills a probe that outlives its timer and

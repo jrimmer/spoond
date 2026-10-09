@@ -89,9 +89,16 @@ func parseFileMode(raw string, def os.FileMode) (os.FileMode, error) {
 }
 
 // mapFileError translates a substrate file error onto the HTTP status
-// the route contract names.
+// the route contract names. A substrate that could not confirm the
+// sandbox's state (the orchestrator List failed) is 503 with Retry-After
+// and code substrate_unavailable, never a not-found: the lease is kept
+// and the caller retries.
 func (s *Server) mapFileError(w http.ResponseWriter, lease *Lease, op string, err error) {
 	sandboxID := lease.SandboxID
+	if errors.Is(err, substrate.ErrUnavailable) {
+		s.writeSubstrateUnavailableFor(w, lease, "files "+op)
+		return
+	}
 	s.svc.store.mu.Lock()
 	busy := lease.busy
 	s.svc.store.mu.Unlock()

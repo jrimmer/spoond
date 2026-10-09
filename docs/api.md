@@ -47,6 +47,7 @@ particular means two different things depending on the code:
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
 | `429` | `quota` | the owner is over their own memory quota (`max_mib`); the body names the limit |
 | `429` | `quota_exceeded` | the same memory quota on a resume (a resume-on-use or `POST /resume`); carries `Retry-After: 30` and the lease stays suspended |
+| `503` | `substrate_unavailable` | the substrate could not confirm the sandbox's state (the orchestrator was unreachable); retry; see [Substrate unavailable](#substrate-unavailable) |
 | `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
 | `500` | `internal` | an internal failure |
 
@@ -593,6 +594,62 @@ GC's normal grace period). A lost lease's guest is stopped when it
 becomes lost, so `DELETE` only has to release the lease's quota; it
 does not have to stop a running sandbox.
 
+### Substrate unavailable
+
+Before a lease is called `lost`, spoond confirms the sandbox really is
+gone by listing the orchestrator's sandboxes. When an operation fails
+(an envd stream drop, an exec error, a file-path failure) and the
+orchestrator `List` *also* fails — an orchestrator stall or restart —
+the state is **unknown**, not absent. The e2b client retries `List` a
+bounded number of times with a short backoff and then answers
+`503 Service Unavailable` with `Retry-After: 5` and code
+`substrate_unavailable`:
+
+```json
+{
+  "error": "the substrate could not confirm the sandbox state (orchestrator unreachable); retry shortly",
+  "code": "substrate_unavailable"
+}
+```
+
+This is deliberately not `410 lease_lost`: `410` is final for clients
+(Honey treats it as gone with no confirming GET, and the runner fails
+the job permanently), and an orchestrator stall must never become one.
+The lease is not marked lost on this answer. A `List` that succeeds and
+does not name the sandbox is still a confirmed absence and answers
+`410` (the body is `{"error":"lease no longer exists"}` with **no**
+`code`; only a lease that is already marked `lost` carries
+`code: lease_lost`), or `404` on files.
+
+On the e2b backend only `Start`, `Exec` and `WriteFile` call the
+sandbox-list check, so the paths that can actually answer
+`substrate_unavailable` are exactly the ones in the table below. The
+other routes (`dial`, job read/output, the file `GET`/`stat`/`mkdir`
+branches) keep a defensive `ErrUnavailable` branch, but on e2b their
+calls do not fail into it today, so it is not documented as a live
+status change.
+
+#### Status changes for the substrate-unknown path
+
+"Unknown" means the operation failed *and* the confirming `List`
+failed; the confirmed-absence answer is unchanged in every row.
+
+| Path | Confirmed absent | Unknown (orchestrator `List` failed) |
+|---|---|---|
+| `POST …/exec` (`api/server.go`, `handleExec`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
+| `GET …/stat` (`api/server.go`, `handleStat`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
+| `POST …/exec` `background:true` (`api/jobs_http.go`) | `410 lease no longer exists` (no code) | `503 substrate_unavailable` |
+| `PUT …/files/{path}` and directory remove (`api/files.go`) | `404 file not found` | `503 substrate_unavailable` |
+| `POST …/jobs/{job}/signal` (`api/jobs_http.go`) | `409 job is not running` | `503 substrate_unavailable` |
+| `GET …/stream` (`api/server.go`, `handleStream`) | `error` frame | `error` frame naming `substrate: unavailable` |
+
+The exec-stream path has already committed a protocol (a WebSocket
+upgrade) by the time the substrate answers, so it cannot return a
+status; it surfaces the new error text instead. Recovery and the
+lost-lease guard are unaffected: a lease is never marked lost on an
+unknown, and a recovery that fails with `substrate.ErrUnavailable` is a
+transient failure and gets the existing bounded retry (`api/retry.go`).
+
 ### `GET /api/names/{name}` — resolve by name
 
 `{"id": "<lease-id>", "name": …, "image": …}` for a friendly name set
@@ -660,7 +717,10 @@ its sandbox missing; for a large guest a checkpoint can take a couple of
 minutes. Exec, stat, guest dial and the file routes then answer `409`
 with `Retry-After: 5`, not `410`: retry. `410` means the sandbox is gone
 with nothing in flight (a lease marked `lost` answers `410` with
-`code: lease_lost` and its reason instead).
+`code: lease_lost` and its reason instead). When spoond cannot reach the
+orchestrator to confirm the sandbox is gone, the answer is `503` with
+`code: substrate_unavailable` and `Retry-After` — see
+[Substrate unavailable](#substrate-unavailable); the lease is kept.
 
 #### Background exec (2.6, #135)
 
