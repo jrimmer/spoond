@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // filesDo performs a raw request (no JSON encoding) and returns the
@@ -493,5 +494,24 @@ func TestFilesTouchCountsAsActivity(t *testing.T) {
 	resp.Body.Close()
 	if !l.LastActive.After(before) {
 		t.Fatalf("LastActive not moved by files PUT: %v -> %v", before, l.LastActive)
+	}
+}
+
+// TestFilesSubstrateUnavailable: a file operation the substrate could not
+// confirm (orchestrator List failed) answers 503 with Retry-After and code
+// substrate_unavailable, not 404 'file not found' and never 410. The
+// lease is kept.
+func TestFilesSubstrateUnavailable(t *testing.T) {
+	ts, svc, sub, id := filesSetup(t)
+	sub.FailCall("Stat", 0, substrate.ErrUnavailable)
+	st, doc := statFile(t, ts, "token-a", id, "/f.txt")
+	if st != http.StatusServiceUnavailable {
+		t.Fatalf("stat on an unknown substrate = %d %v, want 503", st, doc)
+	}
+	if doc["code"] != "substrate_unavailable" {
+		t.Fatalf("code = %v, want substrate_unavailable", doc["code"])
+	}
+	if got := leaseState(svc, id); got == "lost" {
+		t.Fatalf("lease state = %q, must not be lost", got)
 	}
 }
