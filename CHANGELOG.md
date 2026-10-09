@@ -93,6 +93,22 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A queued create no longer stalls for a full tick when a wake-up
+  arrives while an admission pass is already running (spoond-vbdj).** A
+  release (or pause, preemption, quota change) credited capacity to a
+  full node while the wake-up goroutine was between its "no room"
+  judgement and its end; the old `wakeScheduled` compare-and-swap then
+  dropped the release's wake-up, so the waiting create sat until the
+  periodic retry (`ADMIT_QUEUE` tick in production, an hour in some
+  tests). Every wake-up now sets a `wakePending` flag, the pass loops
+  until it has absorbed every wake that arrived during it, and it
+  releases `wakeScheduled` with a compare-and-swap ordered so a wake
+  landing in the gap either feeds the running pass or starts a new one.
+  At most one wake-up goroutine still runs and callers stay
+  non-blocking. A deterministic regression test holds a pass inside
+  `tryAdmitQueued`, frees room and wakes, then releases the pass and
+  asserts the ticket is admitted with no tick.
+
 - **User-delete cleanup follow-ups (spoond-q4j).** A create of a deleted
   user that was parked on a quota cap (`max_leases` or memory) answered
   the cap's `429` when the delete refused it, because the queued-create
