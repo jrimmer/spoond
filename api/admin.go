@@ -427,11 +427,11 @@ func (s *Service) undrainReady(ctx context.Context) error {
 		case !undrainReadyStatus(info.Status):
 			lastErr = fmt.Errorf("node status %s", info.Status)
 		default:
-			if _, listErr := s.sub.List(ctx); listErr == nil {
+			_, listErr := s.sub.List(ctx)
+			if listErr == nil {
 				return nil
-			} else {
-				lastErr = listErr
 			}
+			lastErr = listErr
 		}
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("orchestrator not ready after %s: %w", s.undrainReadyTimeout(), lastErr)
