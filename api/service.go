@@ -763,6 +763,14 @@ type Service struct {
 	// store lock for the save, so a test can land a release in that
 	// window (G2). Nil in production.
 	restartBeforeRecheck func()
+	// userDeleteStoreErr, when set by a test, returns an error for a named
+	// user-delete store read (list_jobs, list_kept_builds,
+	// unpin_kept_builds, drop_named_snapshots or the owner-state pre-check
+	// read_owner_state), so a test can pin that the failed read answers an
+	// incomplete cleanup (or a 500 pre-check) instead of a 200 or 404
+	// (spoond-y0jj). It is consulted once per step before the real store
+	// call. Nil in production.
+	userDeleteStoreErr func(step string) error
 	// saves tracks in-flight and recently failed named-snapshot saves in
 	// memory (2.7, #83 A2): a concurrent same-key save answers 409, a
 	// failed key is retryable, and both read absent after a restart.

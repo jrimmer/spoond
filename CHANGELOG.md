@@ -93,6 +93,27 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A user delete that cannot finish now says so (spoond-y0jj).** When a
+  cleanup store step failed — listing a user's running jobs or kept
+  builds, unpinning their kept builds, or dropping their named snapshots
+  — `DELETE /api/users/{id}` logged it, still answered `200` with empty
+  lists and left the rows behind as GC roots, so an admin had no reason
+  to retry. It now answers `500` with the partial `removed` body,
+  `"incomplete": true` and the failed `step` (`list_jobs`,
+  `list_kept_builds`, `unpin_kept_builds` or `drop_named_snapshots`),
+  while the other steps still run so the body lists what was removed; a
+  retry completes the cleanup. A retry after a backend restart also
+  survives a busy store: the in-memory deleted-owner mark is gone, so
+  the delete reads the store to tell a never-existed id (`404`) from a
+  half-cleaned one, and answers `500 read state: …` when that read
+  fails instead of a `404` that hides the leftover rows. A create for
+  an owner already marked
+  deleted is now refused before its admission ticket parks, instead of
+  waiting out a deadline the admission pass would only refuse at the
+  end. `docs/api.md` also notes that the repeat-delete `200` holds only
+  until a backend restart: the deleted-owner mark is in memory, so a
+  repeat delete of a fully cleaned user answers `404` after a restart.
+
 - **A queued create no longer stalls for a full tick when a wake-up
   arrives while an admission pass is already running (spoond-vbdj).** A
   release (or pause, preemption, quota change) credited capacity to a

@@ -1136,6 +1136,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil && waitRefusal(err) {
 		if wait, ok := s.svc.admissionWait(req.Wait); ok {
 			t := s.svc.newAdmissionTicket(leaseReq.owner, leaseReq, err, wait)
+			if t == nil {
+				// The owner was deleted before the ticket parked
+				// (spoond-y0jj): answer the refusal at once rather than
+				// waiting out a deadline the admission pass would only
+				// refuse at the end.
+				s.writeCreateRefusal(w, req.Image, req.Snapshot, fmt.Errorf("%w: %w", errOwnerGone, err), 0)
+				return
+			}
 			s.svc.wakeAdmissionQueue()
 			var waited time.Duration
 			lease, waited, err = s.svc.waitForAdmission(r.Context(), t)
