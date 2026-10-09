@@ -39,9 +39,12 @@ garbage in this order until `DISK_CLEAN_STOP_PCT` (default 25):
    dropped so this same tick's GC may reclaim the build);
 4. unreferenced template builds.
 
-One `disk.cleanup` event per tick carries the bytes freed per category.
-None of these is live owner data, and the tier never touches a running
-or suspended lease. The FIFO below 5 % remains the last resort.
+One `disk.cleanup` event per tick that frees anything carries the bytes
+freed per category. None of these is live owner data, and the tier
+never touches a running or suspended lease. It latches on below the
+start level and keeps running until the stop level is reached
+(hysteresis), shares the critical rule's five-minute catalog guard, and
+leaves the FIFO below 5 % as the last resort.
 
 New env vars: `DISK_CLEAN_START_PCT`, `DISK_CLEAN_STOP_PCT`,
 `KEPT_CHECKPOINT_TTL_SECS` (default 604800 = 7 d).
