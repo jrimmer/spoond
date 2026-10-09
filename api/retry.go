@@ -8,22 +8,17 @@ import (
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
-// Bounded retry of crash recovery and preempt-resume (spoond-dxq). A
-// lease whose sandbox died must not be marked lost on a transient
-// failure (a busy node's envd start, a context deadline), and it must
-// not be retried forever either: every in-flight recovery and
-// preempt-resume gets a bounded budget, so the state always exits —
-// recovered or lost — without waiting on a person.
+// Bounded retry of crash recovery (spoond-dxq). A lease whose sandbox
+// died must not be marked lost on a transient failure (a busy node's envd
+// start, a context deadline), and it must not be retried forever either:
+// every in-flight recovery gets a bounded budget, so the state always
+// exits — recovered or lost — without waiting on a person.
 //
 // Recovery retries anything that is not permanent (deliberately the
 // inverse of resumeRetryable): a retry could still clear it. Only a
 // substrate capacity refusal waits for room without counting an attempt
 // — and even that wait is bounded by the window, because a lease whose
-// sandbox is gone must eventually get an exit. A preempted lease is
-// different: it is parked by spoond itself and its resume is a wait for
-// the room the preemption was meant to free, so an admission/capacity
-// refusal neither counts nor starts the window and it waits for room
-// indefinitely.
+// sandbox is gone must eventually get an exit.
 
 const (
 	// DefaultRecoveryRetryAttempts is how many failed crash-recovery
@@ -36,16 +31,12 @@ const (
 	// that never resolves gives up after this. It bounds the
 	// wait-for-capacity case the attempt count alone would not.
 	DefaultRecoveryRetryWindow = 30 * time.Minute
-	// DefaultPreemptResumeRetries is how many failed resume attempts a
-	// preempted lease gets from the preemption resume queue before it is
-	// marked lost (PREEMPT_RESUME_RETRIES). The queue runs every 15 s.
-	DefaultPreemptResumeRetries = 3
 )
 
-// retryBudget is the bounded retry state of one in-flight recovery or
-// preempt-resume: how many counted failures it has had and when the
-// first one happened (the window's origin). leaseID lets the lease API
-// find a recovery budget keyed by the sandbox that failed.
+// retryBudget is the bounded retry state of one in-flight recovery: how
+// many counted failures it has had and when the first one happened (the
+// window's origin). leaseID lets the lease API find a recovery budget
+// keyed by the sandbox that failed.
 type retryBudget struct {
 	attempts int
 	since    time.Time
@@ -71,23 +62,12 @@ func (s *Service) recoveryRetryWindow() time.Duration {
 	return s.cfg.RecoveryRetryWindow
 }
 
-// preemptResumeLimit is the number of failed resume attempts a
-// preempted lease gets from the resume queue. A non-positive
-// configuration reads as the default.
-func (s *Service) preemptResumeLimit() int {
-	if s.cfg.PreemptResumeRetries <= 0 {
-		return DefaultPreemptResumeRetries
-	}
-	return s.cfg.PreemptResumeRetries
-}
-
 // noteRetryFailure records one counted failed attempt for key in m and
 // reports how many attempts are on the books and whether the budget is
 // spent so the caller must give up. It is for a failure a retry could
 // clear (an envd start, a deadline, any non-permanent recovery error). A
 // capacity wait uses noteRetryWait instead: it is not a failure and does
-// not count, and a preempt admission refusal does not touch the budget
-// at all. The entry is dropped when the budget is spent (the caller is
+// not count. The entry is dropped when the budget is spent (the caller is
 // about to end the state).
 func (s *Service) noteRetryFailure(m map[string]*retryBudget, key, leaseID string, limit int, window time.Duration) (int, bool) {
 	s.retryMu.Lock()
@@ -117,9 +97,7 @@ func (s *Service) noteRetryFailure(m map[string]*retryBudget, key, leaseID strin
 // capacity rather than failing: it does not count an attempt (the node
 // may host the lease later), but it starts the window, so a wait that
 // never ends is still bounded. The entry is dropped when the window is
-// spent. (A preempted lease's capacity wait instead calls
-// resetRetryWindow, so a long park between counted failures never ages
-// an intact lease out — spoond-dxq SH1.)
+// spent.
 func (s *Service) noteRetryWait(m map[string]*retryBudget, key, leaseID string, window time.Duration) (int, bool) {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
@@ -138,45 +116,8 @@ func (s *Service) noteRetryWait(m map[string]*retryBudget, key, leaseID string, 
 	return b.attempts, false
 }
 
-// resetRetryWindow clears the window origin of an existing retry budget
-// but keeps its counted attempts. A capacity wait calls it: the
-// wall-clock window must measure only an unbroken run of counted
-// failures, so a long wait for room between two counted failures cannot
-// age an intact lease out (spoond-dxq SH1). A missing budget is a no-op.
-func (s *Service) resetRetryWindow(m map[string]*retryBudget, key string) {
-	s.retryMu.Lock()
-	if b := m[key]; b != nil {
-		b.since = time.Time{}
-	}
-	s.retryMu.Unlock()
-}
-
-// shouldLogPreemptCap reports whether the capacity-wait line for a
-// preempted lease may be logged now: at most once per lease per interval
-// (preemptCapLogInterval), so a long wait does not fill the log with one
-// line every resume tick (spoond-dxq SH2 NIT).
-func (s *Service) shouldLogPreemptCap(leaseID string) bool {
-	s.retryMu.Lock()
-	defer s.retryMu.Unlock()
-	last := s.preemptCapLogAt[leaseID]
-	if !last.IsZero() && s.now().Sub(last) < preemptCapLogInterval {
-		return false
-	}
-	s.preemptCapLogAt[leaseID] = s.now()
-	return true
-}
-
-// clearPreemptCapLog drops a lease's capacity-wait log timestamp when it
-// resumes or is released, so a later preemption logs its first wait.
-func (s *Service) clearPreemptCapLog(leaseID string) {
-	s.retryMu.Lock()
-	delete(s.preemptCapLogAt, leaseID)
-	s.retryMu.Unlock()
-}
-
-// clearRetry drops a retry budget by key after its recovery or resume
-// succeeded or its sandbox changed: the next failure starts a fresh
-// budget.
+// clearRetry drops a retry budget by key after its recovery succeeded
+// or its sandbox changed: the next failure starts a fresh budget.
 func (s *Service) clearRetry(m map[string]*retryBudget, key string) {
 	if key == "" {
 		return
@@ -268,18 +209,6 @@ func (s *Service) clearRecoveryRetries(l *Lease) {
 // retry could clear, so it is counted (spoond-dxq S4).
 func recoveryWaitForCapacity(err error) bool {
 	return err != nil && errors.Is(err, substrate.ErrCapacity)
-}
-
-// preemptWaitForCapacity reports whether a preempted lease's resume was
-// refused for room. Such a lease waits for capacity indefinitely by
-// design: the preemption parked it to free the room, so the refusal
-// neither counts an attempt nor starts/extends the window. Only a
-// counted (non-admission) failure is bounded (spoond-dxq B1).
-func preemptWaitForCapacity(err error) bool {
-	if err == nil {
-		return false
-	}
-	return undrainAdmissionRefusal(err) || errors.Is(err, substrate.ErrCapacity)
 }
 
 // recoveryFailurePermanent reports whether err can never succeed on a

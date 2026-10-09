@@ -177,7 +177,7 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	if openRouterURL != "" {
 		// svc.identities must be installed (SetIdentities) before
 		// NewServerWithLLM for per-user LLM key enforcement (U8/T8).
-		s.llm = newLLMGateway(svc.log, svc.lookupAny, svc.leaseSuspendReason, svc.identities, openRouterURL, openRouterKey, defaultModel, modelMap)
+		s.llm = newLLMGateway(svc.log, svc.lookupAny, svc.resumeLease, svc.identities, openRouterURL, openRouterKey, defaultModel, modelMap)
 		s.llm.metrics = s.metrics
 	}
 	s.svc.SetMetrics(s.metrics)
@@ -2617,11 +2617,25 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// writeErrorCode is writeError with a machine-readable code beside the
+// message (e.g. capacity_wait, lease_busy).
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
 // writeErrorAfter is writeError with a Retry-After header (seconds):
 // the shape a refused burst is answered with (#128 part 2).
 func writeErrorAfter(w http.ResponseWriter, status int, retryAfter int, msg string) {
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	writeError(w, status, msg)
+}
+
+// writeErrorCodeAfter is writeErrorCode with a Retry-After header: the
+// one shape a no-room resume refusal is answered with (#145 D2,
+// capacity_wait), so every resume-on-use path answers identically.
+func writeErrorCodeAfter(w http.ResponseWriter, status int, retryAfter int, code, msg string) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeErrorCode(w, status, code, msg)
 }
 
 // tailStr returns the last n bytes of s, prefixed with a truncation marker

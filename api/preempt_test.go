@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -72,6 +73,26 @@ func newPreemptService(t *testing.T) (*Service, *testSub, context.Context) {
 		HugepageSizeBytes: 2 << 20,
 	}, nil)
 	return svc, sub, context.Background()
+}
+
+// newPreemptServer is newPreemptService plus an HTTP server and its DB,
+// for the resume-on-use tests that go through the API.
+func newPreemptServer(t *testing.T) (*httptest.Server, *Service, *testSub, context.Context) {
+	t.Helper()
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "mid", 1024)
+	seedImage(t, db, "big", 2048)
+	svc.cfg.BurstReserveMiB = 0
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    1 << 20,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	srv := NewServer(svc, NewImageRegistry(db))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts, svc, sub, context.Background()
 }
 
 // burstLease creates a burst lease owned by owner over the given image
@@ -243,14 +264,16 @@ func TestPreemptionDiskFloorRefusedHTTP(t *testing.T) {
 	}
 }
 
-// TestPreemptionAutomaticResume: the resume queue brings preempted
-// leases back when capacity returns, oldest preemption first, clearing
-// preempted and emitting "resumed" with detail "after preemption".
-func TestPreemptionAutomaticResume(t *testing.T) {
-	svc, sub, ctx := newPreemptService(t)
+// TestPreemptionResumeOnUse: a preempted lease comes back on its
+// holder's next work call instead of on a background queue (#145 D2).
+// The exec resumes it through the normal path, clearing preempted and
+// emitting "resumed" with detail "after preemption", and the generation
+// does not change (the pause/resume continues the memory).
+func TestPreemptionResumeOnUse(t *testing.T) {
+	ts, svc, sub, ctx := newPreemptServer(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	burstLease(t, svc, ctx, "burst-a", "mid")
-	burstLease(t, svc, ctx, "burst-b", "mid")
+	burstLease(t, svc, ctx, "consumer-a", "mid")
+	burstLease(t, svc, ctx, "consumer-a", "mid")
 
 	installDynamicNode(t, svc, sub, 3072, 3072-2*512, 512)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
@@ -262,10 +285,7 @@ func TestPreemptionAutomaticResume(t *testing.T) {
 	}
 	var victim *Lease
 	for id := range pre {
-		victim = svc.lookup("burst-a", id)
-		if victim == nil {
-			victim = svc.lookup("burst-b", id)
-		}
+		victim = svc.lookup("consumer-a", id)
 	}
 	if victim == nil {
 		t.Fatal("preempted lease not found")
@@ -278,12 +298,15 @@ func TestPreemptionAutomaticResume(t *testing.T) {
 	subEvents := svc.Subscribe(EventFilter{LeaseID: victim.ID})
 	defer subEvents.Close()
 
-	// The guaranteed lease releases, capacity returns; the queue resumes
-	// the victim.
+	// Capacity returns: the holder's next work call resumes it.
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	svc.resumePreempted(ctx)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+victim.ID+"/exec", "token-a",
+		map[string]any{"cmd": "echo hi"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("exec on a preempted lease: %d: %v", resp.StatusCode, body)
+	}
 	if victim.Suspended || !victim.PreemptedAt.IsZero() {
-		t.Fatalf("victim after resume: suspended=%v preemptedAt=%v", victim.Suspended, victim.PreemptedAt)
+		t.Fatalf("victim after resume: suspended=%v preemptedAt=%v", victim.Suspended, !victim.PreemptedAt.IsZero())
 	}
 	if victim.Generation != 1 {
 		t.Fatalf("resume changed the generation to %d, want 1", victim.Generation)
@@ -301,39 +324,6 @@ func TestPreemptionAutomaticResume(t *testing.T) {
 		case <-deadline:
 			t.Fatal("no resumed event for the preempted lease")
 		}
-	}
-}
-
-// TestPreemptionResumeOldestFirst: with capacity for one, the oldest
-// preemption resumes first.
-func TestPreemptionResumeOldestFirst(t *testing.T) {
-	svc, sub, ctx := newPreemptService(t)
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	a := burstLease(t, svc, ctx, "burst-a", "mid")
-	b := burstLease(t, svc, ctx, "burst-b", "mid")
-
-	// Force both preempted with distinct preemption instants.
-	if err := svc.preemptLease(ctx, a, "guaranteed"); err != nil {
-		t.Fatalf("preempt a: %v", err)
-	}
-	if err := svc.preemptLease(ctx, b, "guaranteed"); err != nil {
-		t.Fatalf("preempt b: %v", err)
-	}
-	svc.store.mu.Lock()
-	a.PreemptedAt = time.Now().Add(-time.Hour)
-	b.PreemptedAt = time.Now().Add(-time.Minute)
-	svc.saveLeaseLocked(a)
-	svc.saveLeaseLocked(b)
-	svc.store.mu.Unlock()
-
-	// Room for exactly one 1024 MiB lease.
-	installDynamicNode(t, svc, sub, 2048, 1536, 512)
-	svc.resumePreempted(ctx)
-	if a.Suspended {
-		t.Fatal("oldest preemption should have resumed first")
-	}
-	if !b.Suspended {
-		t.Fatal("newer preemption resumed while only one lease fits")
 	}
 }
 

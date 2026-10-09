@@ -274,19 +274,18 @@ func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.svc.touch(lease.ID)
+	// Signaling a job is work: a suspended lease resumes first, whatever
+	// suspended it (#145 D2). A refused resume answers and the caller
+	// stops here.
+	if !s.ensureRunning(w, r, lease) {
+		return
+	}
 	row, ok := s.jobTarget(w, r, lease)
 	if !ok {
 		return
 	}
 	if row.State != "running" {
 		writeError(w, http.StatusConflict, "job is not running")
-		return
-	}
-	// A suspended lease has no running sandbox; the job may still be
-	// running in its paused guest, but the substrate cannot be reached
-	// until the lease resumes. Answer 409 without calling the substrate.
-	if s.svc.leaseSuspended(lease.ID) {
-		writeLeaseSuspended(w, s.svc.leaseSuspendReason(lease.ID))
 		return
 	}
 	var req struct {
