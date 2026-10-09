@@ -395,7 +395,9 @@ one lease-less `disk.cleanup` event with the bytes freed per category.
 The critical-disk FIFO above stays the last resort below
 `CRITICAL_DISK_FREE_PCT`. Set `DISK_CLEAN_START_PCT` to `0` to disable
 the tier, and `KEPT_CHECKPOINT_TTL_SECS` to `0` to keep pins from
-expiring.
+expiring. Every catalog delete (leftover, template and expired pin)
+still needs `GC_DELETE=1`; with the dry-run default the tier only reaps
+what `ORPHAN_REAP` allows, and the pin expiry stays off.
 
 ### Pause chains
 

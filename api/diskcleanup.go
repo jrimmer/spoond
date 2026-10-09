@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -115,10 +116,13 @@ func (s *Service) reclaimSpoondGarbage(ctx context.Context, now time.Time) gcSta
 // expireKeptCheckpoints drops every kept pin older than the configured
 // kept-checkpoint TTL and returns the recorded bytes its builds hold, so
 // the GC may reclaim them. 0 (or a negative value) disables the expiry.
-// A pin whose build row is already gone counts nothing.
+// Like every catalog delete it runs only with GC_DELETE=1: under the
+// dry-run default expiring a pin would drop an owner's restore point
+// and free nothing. A pin whose build row is already gone counts
+// nothing.
 func (s *Service) expireKeptCheckpoints(ctx context.Context, now time.Time) int64 {
 	ttl := s.cfg.KeptCheckpointTTL
-	if ttl <= 0 {
+	if ttl <= 0 || os.Getenv("GC_DELETE") != "1" {
 		return 0
 	}
 	pins, err := s.db.ListKeptBuildPins(ctx)

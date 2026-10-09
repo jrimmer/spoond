@@ -65,18 +65,19 @@ func TestNotifyLoopForwardsLostAndHeldActions(t *testing.T) {
 	svc.emitLeaseEvent("lease-1", "owner-a", LeaseLost, "no checkpoint to recover from")
 	svc.emitLeaseEvent("lease-2", "owner-b", LeaseHeldAction, "idle/suspend_idle: idle 4h0m0s")
 	svc.emitLeaseEvent("lease-3", "owner-b", LeaseHeldAction, "stale/release: suspended 7d")
+	svc.emitLeaseEvent("lease-6", "owner-c", LeaseCriticalRelease, "disk 3.0% free < 5% critical; releasing the oldest suspended lease")
 	svc.emitLeaseEvent("lease-4", "owner-a", LeaseCreated, "granted") // churn: dropped
 	svc.emitLeaseEvent("lease-5", "owner-a", LeaseReleased, "gone")   // churn: dropped
 
 	deadline := time.Now().Add(2 * time.Second)
-	for rec.len() < 3 && time.Now().Before(deadline) {
+	for rec.len() < 4 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	if rec.len() != 3 {
-		t.Fatalf("forwarded %d events, want 3", rec.len())
+	if rec.len() != 4 {
+		t.Fatalf("forwarded %d events, want 4", rec.len())
 	}
 	key0, sev0, _ := rec.at(0)
 	if key0 != "lease.lost.lease-1" || sev0 != "critical" {
@@ -90,6 +91,12 @@ func TestNotifyLoopForwardsLostAndHeldActions(t *testing.T) {
 	key2, sev2, _ := rec.at(2)
 	if key2 != "held.stale.lease-3" || sev2 != "critical" {
 		t.Fatalf("held release = %q/%q", key2, sev2)
+	}
+	// The critical-disk release is critical and keyed under held.critical
+	// so existing held-rule webhook filters catch it (#145 D5).
+	key3, sev3, _ := rec.at(3)
+	if key3 != "held.critical.lease-6" || sev3 != "critical" {
+		t.Fatalf("critical release = %q/%q", key3, sev3)
 	}
 }
 
