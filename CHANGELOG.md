@@ -49,6 +49,20 @@ summarised from README "Status".
   and the lease-journal line. Later retries keep the lease suspended
   without emitting, so a consumer never reads one failing lease as a new
   suspension each interval (spoond-hfko).
+- **A private egress allowance no longer opens UDP/ICMP to host
+  addresses (spoond-50m4, e2b-runtime P11).** Layer 1 of the fork's
+  per-sandbox firewall merged an `AllowedPrivate` allowance such as
+  `10.0.0.0/8` into its always-allow set, which accepts every protocol,
+  so guest UDP and ICMP could reach the host's veth IPs and host UDP
+  services even though the layer-2 TCP host-address guard refused TCP.
+  Layer 1 now builds a host-address drop set from the same interface
+  enumeration layer 2 guards, captured in the host network namespace,
+  and drops every non-TCP destination in it before the always-allow
+  rule; TCP stays with the layer-2 port-scoped guard. The one-shot
+  `ApplyRules` forces a fresh enumeration and waits out a refresh in
+  flight, so it never builds the set from an expired or fail-closed
+  snapshot. This is in the orchestrator fork and needs its matching
+  build.
 
 ## [2.9.0] - 2026-10-09
 
