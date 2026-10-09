@@ -6,7 +6,7 @@ does **not** change any admission, preemption or take-back behaviour.
 
 ## Changes
 
-1. **One place computes the shares (`api/shares.go`).** `fairShares`
+1. **One place computes the shares (`api/fair_shares.go`).** `fairShares`
    builds a `fairShareSnapshot`: for N = the number of owners that exist
    (each identity user, plus the legacy consumer token as one owner),
    every owner gets `slice_pct = 100/N`, `memory.slice_mib = pool/N` and
@@ -35,12 +35,13 @@ does **not** change any admission, preemption or take-back behaviour.
      a non-admin, `404` for an unknown id.
    - `GET /api/users/me` now also carries `"share"`.
    - `GET /api/usage` (self-scoped, any token): `{"share": …}`.
-   - `GET /api/shares` (admin) is now the fair-share view: `{"owners":
+   - `GET /api/fair-shares` (admin) is the fair-share view: `{"owners":
      [...]}` sorted by `ratio` descending, ties by owner id.
-   - **Status-code/shape change:** `GET /api/shares` used to list the
-     caller's lease grants. That listing moved to
-     `GET /api/shares/grants` (same body and statuses). The SSH
-     gateway's `share ls` calls the new path.
+   - **`GET /api/shares` is unchanged.** It still lists the caller's
+     lease grants, exactly as on `origin/main` (`handleShareList`,
+     `{"shares": …}`); the fair-share admin view lives at `GET
+     /api/fair-shares` instead, so no existing caller (the SSH
+     gateway's `share ls`, clients) breaks.
 
 4. **Store helpers.** `store/usage.go` adds `PausedBytesByOwner`
    (recorded `size_bytes` of each owner's `kind='pause'` builds, deleted
@@ -55,7 +56,7 @@ fields are untouched (removing them is later work).
 
 ## Tests
 
-- `api/shares_test.go`
+- `api/fair_shares_test.go`
   - `TestFairSharesEqualSlices` — every owner gets exactly 1/3 for three
     owners (100/3 %, 341 MiB, 1 GiB/3).
   - `TestFairSharesLegacyTokenIsOneOwner` — an identity user plus a
@@ -69,8 +70,8 @@ fields are untouched (removing them is later work).
   - `TestFairSharesUsageByKind` — one running lease, a pause build, a
     kept checkpoint and a named snapshot land in the right buckets and
     the ratio is the max of the two resource ratios.
-  - `TestFairSharesRatioOrdering` — `GET /api/shares` lists the heavier
-    owner first, ratios non-increasing.
+  - `TestFairSharesRatioOrdering` — `GET /api/fair-shares` lists the
+    heavier owner first, ratios non-increasing.
   - `TestFairSharesCacheInvalidated` — the cached snapshot is returned
     until invalidated, then recomputed.
   - `TestFairSharesOwnerDeleteViaAPI` — `DELETE /api/users/{id}` drops N
@@ -78,6 +79,9 @@ fields are untouched (removing them is later work).
   - `TestUserUsageEndpointAdminOnly`, `TestUserMeCarriesShare`,
     `TestSharesListAdminOnly`, `TestSharesListJSONShape`,
     `TestFairSharesDeletedBuildNotCounted`.
+- `api/shares_test.go` is the `origin/main` lease-grant suite, untouched:
+  `TestShareGrantEnablesExec` still calls `GET /api/shares` and passes
+  unchanged, so the grant listing behaves exactly as before.
 - `store/usage_test.go` — `TestUsageBytesByOwner` (pause/kept/named sums
   per owner, deleted builds excluded) and `TestUsageBytesEmptyStore`.
 
@@ -88,8 +92,8 @@ None is present in the repository — there is no checked-in snapshot of
 sb's users, leases or snapshot sizes — and the harness rules forbid
 touching the production host, so no real per-owner numbers are computed
 here. The table test `TestFairSharesNChanges` covers the arithmetic for
-the plausible small N (1–4 owners). `GET /api/shares` on the deployed
-backend prints the real numbers for sb's current owners.
+the plausible small N (1–4 owners). `GET /api/fair-shares` on the
+deployed backend prints the real numbers for sb's current owners.
 
 ## Gates
 
@@ -114,3 +118,23 @@ backend prints the real numbers for sb's current owners.
   release boundary (main moved the old `[Unreleased]` content into the
   released section); the fair-shares entry is kept under `[Unreleased]`
   here so the resolution stays a 3.0 change.
+
+## Round 3
+
+Round 2 had moved the lease-grant listing to `GET /api/shares/grants`
+and given `/api/shares` to the fair-share view, breaking existing
+callers (`share ls`, clients). That is undone:
+
+- `api/shares.go` and `api/shares_test.go` are restored byte-for-byte to
+  `origin/main`; `GET /api/shares` lists lease grants with the same body
+  and statuses, and its grant-listing test (`TestShareGrantEnablesExec`)
+  passes unchanged.
+- The fair-share implementation and its tests moved to
+  `api/fair_shares.go` / `api/fair_shares_test.go` (the `lease_shares.go`
+  copies are gone). The admin fair-share list is now
+  `GET /api/fair-shares`; it is admin-only and sorted by ratio.
+- `cmd/spoond-sshd-gateway/main.go` is restored to `origin/main`, so
+  `share ls` calls `/api/shares` again.
+- `docs/api.md` and `CHANGELOG.md` say `GET /api/fair-shares` is the
+  admin fair-share view and that `GET /api/shares` still lists grants;
+  no doc calls `/api/shares` the fair-share list.

@@ -972,7 +972,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			}
 			return strings.TrimSpace(string(b))
 		case "ls":
-			b, err := backendJSON(ctx, http.MethodGet, "/api/shares/grants", nil)
+			b, err := backendJSON(ctx, http.MethodGet, "/api/shares", nil)
 			if err != nil {
 				return fmt.Sprintf(`{"error":"%v"}`, err)
 			}

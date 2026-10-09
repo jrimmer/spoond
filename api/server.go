@@ -208,12 +208,14 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/network", s.handleNetwork)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/clone", s.handleClone)
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/fork", s.handleFork)
-	// Sharing (T6/#33): lease grants are listed at /api/shares/grants;
-	// /api/shares itself is the admin fair-share view (#145 FS1).
+	// Sharing (T6/#33). The fair-share admin view is a separate
+	// route, GET /api/fair-shares (#145 FS1); GET /api/shares keeps
+	// listing the caller's lease grants.
 	s.mux.HandleFunc("POST /api/sandboxes/{id}/share", s.handleShareGrant)
 	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/share/{grantee}", s.handleShareRevoke)
-	s.mux.HandleFunc("GET /api/shares/grants", s.handleShareList)
-	s.mux.HandleFunc("GET /api/shares", s.handleSharesList)
+	s.mux.HandleFunc("GET /api/shares", s.handleShareList)
+	// Every owner's fair-share slice and usage, admin-only (#145 FS1).
+	s.mux.HandleFunc("GET /api/fair-shares", s.handleSharesList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
 	// Snapshot catalog (U11): list and delete the caller's builds.

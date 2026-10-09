@@ -2326,7 +2326,7 @@ The share object is:
 owner inside their slice is below `1`. When the box has no capacity (or
 no owners exist) every slice and ratio is `0` — no division by zero.
 
-### `GET /api/shares` — every owner's slice and usage (admin only)
+### `GET /api/fair-shares` — every owner's slice and usage (admin only)
 
 `403` for non-admin callers. Read-only:
 `{"owners": [{owner, name?, slice_pct, memory {slice_mib, used_mib},
@@ -2335,8 +2335,8 @@ ratio}]}`, sorted by `ratio` descending — the owner furthest over their
 slice first. Ties sort by owner id. This is the view the take-back
 policy (a later unit) reads; this version only reports it.
 
-This route carried the lease-grant listing before 3.0; that listing is
-now `GET /api/shares/grants` (see [Shares](#shares)).
+`GET /api/shares` is unchanged: it still lists the caller's lease
+grants (see [Shares](#shares)).
 
 ### Self-scoped usage
 
@@ -2371,11 +2371,11 @@ Created` `{"shared":true,"lease_id":…,"grantee":…,"mode":…}`.
 the lookup is owner-scoped, so a lease you do not own looks the same as
 a lease that does not exist.
 
-There is no per-lease share listing. `GET /api/shares/grants` lists
+There is no per-lease share listing. `GET /api/shares` lists
 every share granted on the caller's leases — `{"shares": [{lease_id,
 grantee, mode, created_at, expires_at?}]}` — which is what `share ls`
-prints. (It moved here from `GET /api/shares` in 3.0, when
-`/api/shares` became the admin fair-share view.)
+prints. This route is unchanged in 3.0; the admin fair-share view is
+`GET /api/fair-shares` (see [Fair shares](#fair-shares)).
 
 ### `DELETE /api/leases/{id}/share/{grantee}` — revoke (owner only)
 
