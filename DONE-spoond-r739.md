@@ -94,3 +94,46 @@ no `"wait"`, so the backend admission queue (#129) was skipped, and a
 Gates run on this branch: `go build ./...`, `go vet ./...`, `gofmt -l .`
 empty, `go test -p 2 -count=1 ./...`, `go test -race -count=1 ./runner/
 ./api/`.
+
+## Round 3
+
+11. **T1 create-wait test gap.**
+    `TestStopCancelsJobWaitingInCreateKeepsGraceForRunningJob` drives the
+    real `Executor` through the pool and asserts a job past Create (a
+    step running) keeps `RUNNER_STOP_GRACE` while another still waiting
+    is cancelled at once. Kills the mutation that never clears
+    `createWait` after `Create`.
+12. **T2 env read.** `jobTimeoutFromEnv` is the helper `Main` uses;
+    `TestDefaultJobTimeout` now calls it (unset -> 6h, `0` -> no bound,
+    `90m`, `5400`). Kills `envDurOr("RUNNER_JOB_TIMEOUT", 0)` in Main,
+    which the constant-only test survived.
+13. **C1 overflow.** `TimeoutMinutes.UnmarshalYAML` ignores and logs a
+    non-finite, `<= 0`, or `> 1e6` value, so `.inf`/`1e300` cannot
+    overflow the minutes-to-duration conversion and remove every bound.
+    `TestParseWorkflowTimeoutMinutesLenient` covers `.inf`, `-.inf`,
+    `1e300`, `1000001`, `0`, `-5`.
+14. **C2 race.** `cancelWaitingJobs` re-checks `createWait` and cancels
+    under `w.mu`; the executor clears `createWait` under the same lock
+    after Create and before steps. The T1 test fails if the flag is not
+    cleared.
+15. **S1 semantics.** `timeout-minutes` bounds execution from sandbox
+    creation, not the admission wait; `RUNNER_JOB_TIMEOUT` stays the
+    whole-job bound and caps a larger `timeout-minutes`. Documented in
+    `docs/operations.md` and CHANGELOG. Tests:
+    `TestExecutorTimeoutMinutesBoundsExecutionNotWait`,
+    `TestExecutorTimeoutMinutesBoundsExecution`,
+    `TestExecutorJobTimeoutCapsExecutionTimeout`, `TestExecutionTimeout`.
+
+Round 3 test names and the mutation each kills:
+
+- `TestStopCancelsJobWaitingInCreateKeepsGraceForRunningJob` — never
+  clear `createWait` after `Create` (also covers the C2 re-check).
+- `TestDefaultJobTimeout` — `envDurOr("RUNNER_JOB_TIMEOUT", 0)` in Main.
+- `TestParseWorkflowTimeoutMinutesLenient` — drop the C1 overflow guard.
+- `TestExecutorTimeoutMinutesBoundsExecutionNotWait` — count the
+  admission wait against `timeout-minutes`.
+- `TestExecutorTimeoutMinutesBoundsExecution` — never bound execution by
+  `timeout-minutes`.
+- `TestExecutorJobTimeoutCapsExecutionTimeout` — let `timeout-minutes`
+  beat the host cap.
+- `TestExecutionTimeout` — mis-map unset/non-positive minutes.
