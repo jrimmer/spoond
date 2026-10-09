@@ -910,6 +910,41 @@ Failed CI jobs are recorded as JSON under `/var/lib/spoond/jobs/`
 tail — the first place to look for a red build, since Forgejo exposes no
 readable log API. See [ci-jobs.md](ci-jobs.md).
 
+## The lease journal
+
+Every lease create, release, lost and suspend (including preemption) also
+writes one logfmt line, so a lease-to-sandbox mapping and the reason a
+lease went can be reconstructed from `journalctl` alone — even after the
+dashboard's 50-event ring has rolled over and the lease row is gone:
+
+```
+lease journal: op=release lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason="ci job 3609 ✓ 11m02s"
+lease journal: op=suspend lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason=preempt
+lease journal: op=create  lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason=new
+lease journal: op=lost    lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason="no checkpoint to recover from"
+```
+
+The fields are always present, in that order; an empty value is `""` and
+a value with a space, quote, equals sign or control character is quoted.
+`owner` is the identity (a user id or legacy consumer id), never the
+bearer token the caller authenticated with; the line carries no secret.
+`reason` names why: for a release it is the owner-named API deletion
+(`deleted via API by <owner>`), `ttl`, `lost grace expired`,
+`user deleted`, `disk`, `idle`, `hold_lapsed` or the caller's own reason
+verbatim (the CI runner's reason says `ci job <id> …`); for a create
+it is `new`, `snapshot <name>@<version>`, `clone of <id>` or
+`fork of <id>`; for a suspend it is the automatic reason (`idle`,
+`idle_suspend`, `hold_lapsed`, `pressure`, `preempt`), `drain` or `hand`;
+for a lost lease it is the loss reason already carried by the `lost`
+event.
+
+```bash
+# everything one lease did, from its id
+journalctl -u spoond-backend | grep 'lease journal:' | grep 0f3c
+# the most recent release and why
+journalctl -u spoond-backend | grep 'op=release' | tail -20
+```
+
 ## The runner
 
 `spoond-runner` (the `runner` subcommand) runs Forgejo Actions jobs in
