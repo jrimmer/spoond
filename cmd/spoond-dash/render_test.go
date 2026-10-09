@@ -1270,7 +1270,7 @@ func TestEventsPanelLostAndCreatedColours(t *testing.T) {
 // warning level draws no tick.
 func TestMeterWarningTick(t *testing.T) {
 	l := &layout{w: DefaultWidth, host: "h"}
-	segs := l.meterSegs("cpu", 50, 75, 90, meterBarW)
+	segs := l.meterSegs("cpu", 50, 75, 90, meterBarW, false)
 	tick := false
 	for _, s := range segs {
 		for _, r := range []rune(s.Text) {
@@ -1289,7 +1289,7 @@ func TestMeterWarningTick(t *testing.T) {
 		t.Fatalf("meter width = %d, want %d (the tick must not widen the bar): %+v", got, meterLabelW+1+meterBarW, segs)
 	}
 
-	noWarn := l.meterSegs("cpu", 50, 0, 90, meterBarW)
+	noWarn := l.meterSegs("cpu", 50, 0, 90, meterBarW, false)
 	if strings.Contains(segWidthText(noWarn), "╎") {
 		t.Fatalf("meter without a warning level drew a tick: %+v", noWarn)
 	}
@@ -1808,7 +1808,7 @@ func TestIOHostRowsDrawn(t *testing.T) {
 	s.IOSome10, s.IOSome60 = 0.3, 0.2
 	s.DiskDevice, s.DiskWriteMB, s.DiskBusyPct = "nvme0n1", 12, 18
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "i/o stall") || !strings.Contains(p, "0.0% full") {
+	if !strings.Contains(p, "i/o stall") || !strings.Contains(p, "0.0% stalled") {
 		t.Fatalf("stall meter missing:\n%s", p)
 	}
 	if !strings.Contains(p, "nvme0n1 busy") || !strings.Contains(p, "18% · 12 MB/s w") {
@@ -1917,6 +1917,116 @@ func TestIOMeterStyle(t *testing.T) {
 	}
 }
 
+// TestIOStallScale: the i/o stall meter is drawn on a display scale so
+// its warning tick lines up with the other host meters' ticks, while
+// its value text keeps the true 60 s average; a tiny non-zero value
+// still shows one filled cell.
+func TestIOStallScale(t *testing.T) {
+	barW := meterBarW
+	wantTick := int(meterScaleWarnFrac * float64(barW))
+	s := healthySnapshot()
+	s.IOAvail = true
+	s.IOFull60 = 0.4
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	if got, want := hostTickCol(t, g, "i/o stall"), hostTickCol(t, g, "memory"); got != want {
+		t.Fatalf("i/o stall tick col = %d, memory tick col = %d; want the same", got, want)
+	}
+	if p := g.Plain(); !strings.Contains(p, "0.4% stalled") {
+		t.Fatalf("stall meter value text missing:\n%s", p)
+	}
+	if n := hostFilledCells(t, g, "i/o stall"); n != 1 {
+		t.Fatalf("0.4%% stall filled %d cells, want 1", n)
+	}
+
+	// Every other host meter's tick already lands on the same cell.
+	for _, label := range []string{"cpu", "nvme0n1 busy", "memory", "hugepages", "snapshot disk", "root disk"} {
+		if got := hostTickCol(t, g, label); got != hostTickCol(t, g, "i/o stall") {
+			t.Fatalf("%s tick col = %d, i/o stall tick col = %d; want the same", label, got, hostTickCol(t, g, "i/o stall"))
+		}
+	}
+
+	// A value at warn fills exactly up to (not past) the tick.
+	warn, bad := ioFullWarnPct(), ioFullBadPct()
+	l := &layout{}
+	segs := l.meterSegs("i/o stall", warn, warn, bad, barW, true)
+	if got := strings.Count(segWidthText(segs), "█"); got != wantTick {
+		t.Fatalf("value at warn filled %d cells, want %d (up to the tick)", got, wantTick)
+	}
+	if got := runeIndex(segWidthText(segs), '╎'); got != meterLabelW+1+wantTick {
+		t.Fatalf("tick at offset %d, want %d", got, meterLabelW+1+wantTick)
+	}
+
+	// A value at bad fills the bar (only the tick glyph itself is not █).
+	segs = l.meterSegs("i/o stall", bad, warn, bad, barW, true)
+	p := segWidthText(segs)
+	if strings.Contains(p, "░") {
+		t.Fatalf("value at bad left empty cells: %q", p)
+	}
+	if got := strings.Count(p, "█"); got != barW-1 {
+		t.Fatalf("value at bad filled %d cells, want %d", got, barW-1)
+	}
+
+	// The env var names stay even though the wording changed.
+	t.Setenv("DASH_IO_FULL_WARN_PCT", "10")
+	t.Setenv("DASH_IO_FULL_BAD_PCT", "30")
+	if ioFullWarnPct() != 10 || ioFullBadPct() != 30 {
+		t.Fatalf("env thresholds = %v / %v, want 10 / 30", ioFullWarnPct(), ioFullBadPct())
+	}
+}
+
+// hostTickCol returns the column of the first ╎ at or after the label
+// on the row carrying it.
+func hostTickCol(t *testing.T, g *grid.Grid, label string) int {
+	t.Helper()
+	for y, row := range strings.Split(g.Plain(), "\n") {
+		at := strings.Index(row, label)
+		if at < 0 {
+			continue
+		}
+		col := len([]rune(row[:at]))
+		for x := col; x < g.Cols(); x++ {
+			if g.At(x, y).Rune == '╎' {
+				return x
+			}
+		}
+		t.Fatalf("row with %q has no tick", label)
+	}
+	t.Fatalf("row with %q not found", label)
+	return -1
+}
+
+// runeIndex returns the rune offset of the first occurrence of r in s,
+// or -1.
+func runeIndex(s string, r rune) int {
+	for i, got := range []rune(s) {
+		if got == r {
+			return i
+		}
+	}
+	return -1
+}
+
+// hostFilledCells counts the █ cells on the row carrying label.
+func hostFilledCells(t *testing.T, g *grid.Grid, label string) int {
+	t.Helper()
+	for y, row := range strings.Split(g.Plain(), "\n") {
+		at := strings.Index(row, label)
+		if at < 0 {
+			continue
+		}
+		col := len([]rune(row[:at]))
+		n := 0
+		for x := col; x < g.Cols(); x++ {
+			if g.At(x, y).Rune == '█' {
+				n++
+			}
+		}
+		return n
+	}
+	t.Fatalf("row with %q not found", label)
+	return 0
+}
+
 // TestIOPressureNotice: a sustained full stall (full avg60 at or above
 // DASH_IO_FULL_BAD_PCT) is a system message with the io-pressure id;
 // it clears when the pressure drops, and a kernel without PSI never
@@ -1927,7 +2037,7 @@ func TestIOPressureNotice(t *testing.T) {
 	s.IOFull60 = 15
 	rows := notices(s)
 	if len(rows) != 1 || rows[0].ID != "io-pressure" || rows[0].Severity != "bad" ||
-		rows[0].Text != "disk i/o stalled: full pressure 15% over 60 s" {
+		rows[0].Text != "disk i/o stalled 15% of the last 60 s" {
 		t.Fatalf("notices = %+v", rows)
 	}
 	s.IOFull60 = 14.9
