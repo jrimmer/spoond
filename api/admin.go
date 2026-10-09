@@ -101,6 +101,28 @@ func (s *Server) handleAdminReconcile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.reconcileCrash(r.Context()))
 }
 
+// handleAdminUnpinByHolder clears the pinned flag of every lease whose
+// holder label starts with the prefix (FS5 migration window: migration
+// 0022 turns every live hold into a pin, and pool-spawn held its worker
+// leases by holder label). Admin only. The prefix is a required query
+// parameter; an empty one is refused so it cannot unpin every lease.
+func (s *Server) handleAdminUnpinByHolder(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	prefix := r.URL.Query().Get("holder_prefix")
+	if prefix == "" {
+		writeError(w, http.StatusBadRequest, "holder_prefix is required")
+		return
+	}
+	n, err := s.svc.unpinByHolderPrefix(r.Context(), prefix)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unpin failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"unpinned": n})
+}
+
 // drainConcurrency bounds the concurrent pauses of the drain.
 const drainConcurrency = 4
 

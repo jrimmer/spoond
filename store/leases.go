@@ -240,7 +240,7 @@ func (db *DB) UnpinLeasesByHolderPrefix(ctx context.Context, prefix string) (int
 		return 0, fmt.Errorf("store: unpin by holder prefix: prefix is empty")
 	}
 	res, err := db.w.ExecContext(ctx,
-		`UPDATE leases SET pinned = 0 WHERE pinned = 1 AND holder LIKE ? ESCAPE '\\'`,
+		`UPDATE leases SET pinned = 0 WHERE pinned = 1 AND holder LIKE ? ESCAPE '\'`,
 		escapeLikePrefix(prefix)+"%")
 	if err != nil {
 		return 0, fmt.Errorf("store: unpin leases by holder prefix %q: %w", prefix, err)

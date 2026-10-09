@@ -875,3 +875,116 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 		t.Fatalf("suspend facts after upsert = %+v", again)
 	}
 }
+
+// TestMigration22PinOnV21Database builds a database at version 21 (with
+// a live-hold lease, a lapsed-hold lease and a plain lease) and opens
+// it: migration 22 must apply, turning every lease with an unexpired
+// hold into a pin and leaving a lapsed hold unpinned (FS5).
+func TestMigration22PinOnV21Database(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v21.db")
+	{
+		db, err := Open(path) // applies every migration
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind to version 21: drop what migration 22 added and its row, so
+	// the next Open applies 0022 for real. The hold columns stay (FS5
+	// leaves them in place), so the UPDATE's columns exist.
+	db21, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version = 22`,
+	} {
+		if _, err := db21.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	for _, seed := range []struct {
+		id, holder, holdExpires string
+	}{
+		{"lease-hold", "ci-job", future},
+		{"lease-lapsed", "ci-job", past},
+		{"lease-plain", "", ""},
+	} {
+		if _, err := db21.Exec(
+			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, holder, hold_expires_at)
+			 VALUES (?, 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'running', ?, ?)`,
+			seed.id, seed.holder, seed.holdExpires); err != nil {
+			t.Fatalf("seed %s: %v", seed.id, err)
+		}
+	}
+	db21.Close()
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open v21 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	rows, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	pinned := map[string]bool{}
+	for _, r := range rows {
+		pinned[r.ID] = r.Pinned
+	}
+	if !pinned["lease-hold"] {
+		t.Fatal("a lease with an unexpired hold was not pinned by migration 22")
+	}
+	if pinned["lease-lapsed"] {
+		t.Fatal("a lease with a lapsed hold was pinned by migration 22")
+	}
+	if pinned["lease-plain"] {
+		t.Fatal("a plain lease was pinned by migration 22")
+	}
+}
+
+// TestUnpinLeasesByHolderPrefix: the migration-window helper clears only
+// the matching pinned leases and refuses an empty prefix.
+func TestUnpinLeasesByHolderPrefix(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	for _, r := range []LeaseRow{
+		{ID: "worker", Owner: "o", Image: "i", State: "running", Class: "guaranteed", Holder: "pool:honey/work-1", Pinned: true},
+		{ID: "other", Owner: "o", Image: "i", State: "running", Class: "guaranteed", Holder: "ci-job", Pinned: true},
+		{ID: "wild", Owner: "o", Image: "i", State: "running", Class: "guaranteed", Holder: "poolX", Pinned: true},
+	} {
+		if err := db.UpsertLease(ctx, r); err != nil {
+			t.Fatalf("upsert %s: %v", r.ID, err)
+		}
+	}
+	if _, err := db.UnpinLeasesByHolderPrefix(ctx, ""); err == nil {
+		t.Fatal("an empty prefix was accepted")
+	}
+	n, err := db.UnpinLeasesByHolderPrefix(ctx, "pool:")
+	if err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("unpinned %d leases, want 1", n)
+	}
+	rows, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.ID] = r.Pinned
+	}
+	if got["worker"] || !got["other"] || !got["wild"] {
+		t.Fatalf("unpin by prefix hit the wrong rows: %v", got)
+	}
+}

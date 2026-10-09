@@ -143,3 +143,40 @@ func TestJobMaxRuntimeSecs(t *testing.T) {
 		}
 	}
 }
+
+// TestWarnRemovedEnv pins the FS5 removed-variable warning: each removed
+// variable that is still set logs one line, and an unset one stays
+// silent. The variables are ignored, never read into the config.
+func TestWarnRemovedEnv(t *testing.T) {
+	set := map[string]string{
+		"HELD_IDLE_TIMEOUT_SECS":      "14400",
+		"HELD_SUSPENDED_RELEASE_SECS": "604800",
+		"HOLD_TTL_SECS":               "604800",
+		"HOLD_TTL_MAX_SECS":           "2592000",
+		"PRESSURE_HELD_IDLE_SECS":     "1800",
+		"IDLE_TIMEOUT_SECS":           "3600",
+	}
+	for _, name := range removedEnvVars {
+		if _, ok := set[name]; !ok {
+			t.Fatalf("removed env %s has no test case", name)
+		}
+	}
+	var lines []string
+	logf := captureLogger{&lines}
+	warnRemovedEnv(logf, func(name string) string { return set[name] })
+	if len(lines) != len(removedEnvVars) {
+		t.Fatalf("warnRemovedEnv logged %d lines, want %d: %v", len(lines), len(removedEnvVars), lines)
+	}
+	lines = nil
+	warnRemovedEnv(logf, func(string) string { return "" })
+	if len(lines) != 0 {
+		t.Fatalf("warnRemovedEnv logged with nothing set: %v", lines)
+	}
+}
+
+// captureLogger collects Printf output for the warning test.
+type captureLogger struct{ lines *[]string }
+
+func (c captureLogger) Printf(format string, args ...any) {
+	*c.lines = append(*c.lines, format)
+}

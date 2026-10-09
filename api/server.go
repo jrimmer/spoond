@@ -235,6 +235,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
+	// FS5 migration window: unpin every lease whose holder label starts
+	// with a prefix (pool-spawn held its workers by label).
+	s.mux.HandleFunc("POST /api/admin/unpin-by-holder", s.handleAdminUnpinByHolder)
 	// Lease event streams (2.2, #115): Server-Sent Events of every lease
 	// lifecycle change, the caller's leases (admins see all) or one
 	// lease. The /api/leases alias covers both via rewriteLeasePath; the
