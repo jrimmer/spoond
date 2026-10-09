@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -456,5 +458,109 @@ func TestResumeOnUseBusyCode(t *testing.T) {
 	}
 	if body["code"] != "lease_busy" {
 		t.Fatalf("busy code = %v, want lease_busy: %v", body["code"], body)
+	}
+}
+
+// TestResumeOnUseConcurrentExactlyOneResume (review R4): four real
+// concurrent work calls on one suspended lease resume it exactly once.
+// The one resume's Create runs; the others wait on the busy flag and
+// then serve (200) or answer 409 lease_busy, never 500. Deleting
+// resumeLease's `l.busy` guard makes more than one Create (or a 500)
+// observable here.
+func TestResumeOnUseConcurrentExactlyOneResume(t *testing.T) {
+	ts, svc, _, sub := newTestServerWithService(t)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
+
+	ctx := context.Background()
+	l, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if !l.Suspended {
+		t.Fatal("precondition: lease not suspended")
+	}
+
+	// Hold the first resume's Create briefly so the other three calls
+	// reach the lease while its busy flag is set, rather than each
+	// finding it already running with nothing to do.
+	var creates atomic.Int32
+	release := make(chan struct{})
+	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume {
+			n := creates.Add(1)
+			if n > 1 {
+				// A second resume reached createSandbox: the busy guard
+				// failed to serialise. Let it complete so the assertion
+				// below reports the count rather than a timeout.
+				t.Errorf("resume Create #%d ran; want exactly one", n)
+			}
+			// Wait long enough for the other calls to arrive.
+			select {
+			case <-release:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		return sub.Fake.Create(cctx, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	const workers = 4
+	type result struct {
+		status int
+		code   any
+	}
+	results := make(chan result, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequest("POST", ts.URL+"/api/leases/"+l.ID+"/exec", strings.NewReader(`{"cmd":"echo hi"}`))
+			req.Header.Set("Authorization", "Bearer token-a")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				results <- result{status: -1}
+				return
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var doc map[string]any
+			_ = json.Unmarshal(b, &doc)
+			results <- result{status: resp.StatusCode, code: doc["code"]}
+		}()
+	}
+	// Let the first resume reach its Create and the others find the
+	// lease busy, then release it.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(results)
+
+	oks, busy := 0, 0
+	for r := range results {
+		switch {
+		case r.status == http.StatusOK:
+			oks++
+		case r.status == http.StatusConflict && r.code == "lease_busy":
+			busy++
+		default:
+			t.Fatalf("concurrent exec = %d code=%v, want 200 or 409 lease_busy", r.status, r.code)
+		}
+	}
+	// The one resume serves at least one call; the others either serve
+	// after waiting or answer the retryable 409 lease_busy. None may be
+	// a 500, and together they cover every caller.
+	if oks < 1 || oks+busy != workers {
+		t.Fatalf("concurrent exec: %d served, %d busy (of %d), want >=1 served and no 500", oks, busy, workers)
+	}
+	if got := creates.Load(); got != 1 {
+		t.Fatalf("resume Creates = %d, want exactly 1", got)
+	}
+	if l.Suspended {
+		t.Fatal("the lease is still suspended after the concurrent work calls")
 	}
 }

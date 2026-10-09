@@ -267,25 +267,27 @@ func parseNonNeg(s string) (int, error) {
 }
 
 // handleJobSignal answers POST .../jobs/{job}/signal: signal the job's
-// process group. 409 when the job is not running.
+// process group. 409 when the job is not running. The job record is
+// checked BEFORE the lease resumes (review R5): signalling a finished
+// job must not spend hugepages resuming a suspended lease for nothing.
 func (s *Server) handleJobSignal(w http.ResponseWriter, r *http.Request) {
 	lease := s.jobsTarget(w, r)
 	if lease == nil {
 		return
 	}
 	s.svc.touch(lease.ID)
-	// Signaling a job is work: a suspended lease resumes first, whatever
-	// suspended it (#145 D2). A refused resume answers and the caller
-	// stops here.
-	if !s.ensureRunning(w, r, lease) {
-		return
-	}
 	row, ok := s.jobTarget(w, r, lease)
 	if !ok {
 		return
 	}
 	if row.State != "running" {
 		writeError(w, http.StatusConflict, "job is not running")
+		return
+	}
+	// Signalling a running job is work: a suspended lease resumes first,
+	// whatever suspended it (#145 D2). A refused resume answers and the
+	// caller stops here.
+	if !s.ensureRunning(w, r, lease) {
 		return
 	}
 	var req struct {
