@@ -2141,9 +2141,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		// Map substrate ErrNotFound (sandbox gone from the orchestrator
 		// but the lease still exists in our store) to 410 Gone so the
 		// caller can distinguish a permanently dead sandbox from a
-		// transient exec failure (e.g. node overload, network blip).
-		if errors.Is(err, substrate.ErrNotFound) {
-			s.writeSandboxGone(w, lease)
+		// transient exec failure (e.g. node overload, network blip). A
+		// substrate that could not confirm the sandbox's state (the
+		// orchestrator List failed) is 503 substrate_unavailable instead:
+		// 410 is final for clients, so an orchestrator stall must never
+		// become one.
+		if s.writeSandboxOpError(w, lease, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "exec failed")
@@ -2185,6 +2188,41 @@ func (s *Server) writeSandboxGone(w http.ResponseWriter, l *Lease) {
 	writeError(w, http.StatusGone, "lease no longer exists")
 }
 
+// substrateUnknownStatusCode is the status a substrate operation answers
+// when the orchestrator could not be reached to confirm whether the
+// sandbox exists. It is retryable: 410 lease_lost is final for clients,
+// so an orchestrator stall must never be reported as one.
+const substrateUnknownStatusCode = http.StatusServiceUnavailable
+
+// substrateUnknownRetryAfterSecs is the Retry-After a substrate-unknown
+// refusal carries: short, because the orchestrator usually recovers.
+const substrateUnknownRetryAfterSecs = 5
+
+// writeSubstrateUnavailable answers a substrate operation that could not
+// confirm the sandbox's state (the orchestrator List failed): 503 with a
+// Retry-After and the machine-readable code substrate_unavailable. The
+// lease is never marked lost on this answer; the caller retries.
+func (s *Server) writeSubstrateUnavailable(w http.ResponseWriter) {
+	writeErrorCodeAfter(w, substrateUnknownStatusCode, substrateUnknownRetryAfterSecs, "substrate_unavailable",
+		"the substrate could not confirm the sandbox state (orchestrator unreachable); retry shortly")
+}
+
+// writeSandboxOpError maps a failed substrate operation on a live lease:
+// an unavailable decision is 503 substrate_unavailable (retryable, lease
+// kept), and a confirmed not-found goes through writeSandboxGone
+// (409 busy / 410 lease_lost). It reports whether it wrote a response.
+func (s *Server) writeSandboxOpError(w http.ResponseWriter, l *Lease, err error) bool {
+	if errors.Is(err, substrate.ErrUnavailable) {
+		s.writeSubstrateUnavailable(w)
+		return true
+	}
+	if errors.Is(err, substrate.ErrNotFound) {
+		s.writeSandboxGone(w, l)
+		return true
+	}
+	return false
+}
+
 // handleStat returns lightweight guest-side metrics for a sandbox
 // (ticket #25): vCPU load, memory, disk, and network RX/TX. Data comes
 // from a one-shot exec probe (KTD5-style, stateless, 5s timeout) —
@@ -2217,8 +2255,7 @@ echo "== df =="; df -P /
 		Timeout: 5 * time.Second,
 	})
 	if err != nil {
-		if errors.Is(err, substrate.ErrNotFound) {
-			s.writeSandboxGone(w, lease)
+		if s.writeSandboxOpError(w, lease, err) {
 			return
 		}
 		s.svc.log.Printf("stat: %s: %v", lease.SandboxID, err)
@@ -2617,11 +2654,23 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// writeErrorCode is writeError with a machine-readable code beside the
+// message (e.g. substrate_unavailable, leased_busy).
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "code": code})
+}
+
 // writeErrorAfter is writeError with a Retry-After header (seconds):
 // the shape a refused burst is answered with (#128 part 2).
 func writeErrorAfter(w http.ResponseWriter, status int, retryAfter int, msg string) {
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	writeError(w, status, msg)
+}
+
+// writeErrorCodeAfter is writeErrorCode with a Retry-After header.
+func writeErrorCodeAfter(w http.ResponseWriter, status int, retryAfter int, code, msg string) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	writeErrorCode(w, status, code, msg)
 }
 
 // tailStr returns the last n bytes of s, prefixed with a truncation marker

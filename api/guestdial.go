@@ -9,7 +9,6 @@ package api
 // leaves the guest here.
 
 import (
-	"errors"
 	"net"
 	"net/http"
 	"strconv"
@@ -18,8 +17,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // guestDialIdleTimeout closes a dial that has carried no bytes for this
@@ -121,8 +118,7 @@ func (s *Server) handleGuestDial(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.svc.sub.DialGuest(r.Context(), lease.SandboxID, lease.HostIP, port)
 	s.metrics.GuestDialsTotal.WithLabelValues(map[bool]string{true: "ok", false: "error"}[err == nil]).Inc()
 	if err != nil {
-		if errors.Is(err, substrate.ErrNotFound) {
-			s.writeSandboxGone(w, lease)
+		if s.writeSandboxOpError(w, lease, err) {
 			return
 		}
 		s.svc.log.Printf("dial %s: guest %s:%d: %v", lease.ID, lease.HostIP, port, err)

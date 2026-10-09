@@ -27,6 +27,17 @@ const envdPort = 49983
 const (
 	defaultExecTimeout = 30 * time.Second
 	execKillGrace      = 2 * time.Second
+
+	// listProbeAttempts, listProbeTimeout and listProbeBackoff bound the
+	// retry of the orchestrator List that distinguishes "the sandbox is
+	// absent" from "the sandbox state is unknown" after a failed
+	// operation. A stream drop during an orchestrator stall must not be
+	// reported as the sandbox being gone: the List is retried a few
+	// times, each attempt under its own short bound, before the caller
+	// answers a retryable error.
+	listProbeAttempts = 3
+	listProbeTimeout  = 5 * time.Second
+	listProbeBackoff  = 250 * time.Millisecond
 )
 
 // envdHeaders carries the per-sandbox routing and auth headers added to every
@@ -131,8 +142,8 @@ func (c *Client) Health(ctx context.Context, sandboxID string) error {
 func (c *Client) Start(ctx context.Context, sandboxID string, req substrate.StartRequest) (substrate.Process, error) {
 	p, err := c.startProcess(ctx, sandboxID, req)
 	if err != nil {
-		if !c.listed(ctx, sandboxID) {
-			return nil, fmt.Errorf("%w: %v", substrate.ErrNotFound, err)
+		if serr := c.sandboxListed(ctx, sandboxID); serr != nil {
+			return nil, fmt.Errorf("%w: %v", serr, err)
 		}
 		return nil, err
 	}
@@ -365,8 +376,8 @@ func (c *Client) Exec(ctx context.Context, sandboxID string, req substrate.ExecR
 	}
 	p, err := c.startProcess(ctx, sandboxID, substrate.StartRequest{Args: req.Args, Env: req.Env, User: req.User})
 	if err != nil {
-		if !c.listed(ctx, sandboxID) {
-			return substrate.ExecResult{}, fmt.Errorf("%w: %v", substrate.ErrNotFound, err)
+		if serr := c.sandboxListed(ctx, sandboxID); serr != nil {
+			return substrate.ExecResult{}, fmt.Errorf("%w: %v", serr, err)
 		}
 		return substrate.ExecResult{}, err
 	}
@@ -411,8 +422,8 @@ func (c *Client) Exec(ctx context.Context, sandboxID string, req substrate.ExecR
 				return substrate.ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: ev.ExitCode}, nil
 			case substrate.EventError:
 				err := fmt.Errorf("e2b: exec %s: %s", sandboxID, ev.Err)
-				if !c.listed(ctx, sandboxID) {
-					return substrate.ExecResult{}, fmt.Errorf("%w: %v", substrate.ErrNotFound, err)
+				if serr := c.sandboxListed(ctx, sandboxID); serr != nil {
+					return substrate.ExecResult{}, fmt.Errorf("%w: %v", serr, err)
 				}
 				return substrate.ExecResult{}, err
 			case substrate.EventStarted:
@@ -422,18 +433,37 @@ func (c *Client) Exec(ctx context.Context, sandboxID string, req substrate.ExecR
 	}
 }
 
-// listed reports whether the orchestrator still lists the sandbox. Used to
-// tell a dead sandbox from a transient envd failure, since the proxy's HTTP
-// status for an unknown sandbox is not relied on.
-func (c *Client) listed(ctx context.Context, sandboxID string) bool {
-	list, err := c.List(ctx)
-	if err != nil {
-		return false
-	}
-	for _, s := range list {
-		if s.ID == sandboxID {
-			return true
+// sandboxListed resolves whether a failed operation on sandboxID means the
+// sandbox is gone. It reports nil when the orchestrator still lists the
+// sandbox (a transient operation failure), an error wrapping
+// substrate.ErrNotFound when the list succeeded and the sandbox was absent,
+// and an error wrapping substrate.ErrUnavailable when every List attempt
+// failed, so the caller answers a retryable error and never marks the lease
+// lost. List is retried a bounded number of times with a short backoff,
+// because a stream drop during an orchestrator stall is not evidence that
+// the sandbox is gone.
+func (c *Client) sandboxListed(ctx context.Context, sandboxID string) error {
+	var lastErr error
+	for attempt := range listProbeAttempts {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%w: %v", substrate.ErrUnavailable, ctx.Err())
+			case <-time.After(listProbeBackoff):
+			}
 		}
+		probeCtx, cancel := bound(ctx, listProbeTimeout)
+		list, err := c.List(probeCtx)
+		cancel()
+		if err == nil {
+			for _, s := range list {
+				if s.ID == sandboxID {
+					return nil
+				}
+			}
+			return fmt.Errorf("%w", substrate.ErrNotFound)
+		}
+		lastErr = err
 	}
-	return false
+	return fmt.Errorf("%w: %v", substrate.ErrUnavailable, lastErr)
 }

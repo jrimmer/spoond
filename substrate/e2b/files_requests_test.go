@@ -93,12 +93,17 @@ func TestWriteFileRootPath(t *testing.T) {
 }
 
 func TestWriteFileUploadFails(t *testing.T) {
-	// Point the client at a closed port: the upload fails and the sandbox is
-	// not listed (no orchestrator), so the error wraps ErrNotFound.
+	// Point the client at a closed port: the upload fails and the
+	// orchestrator is unreachable, so the failure is unknown rather than a
+	// confirmed absence. It must wrap ErrUnavailable (retryable) and never
+	// ErrNotFound (which the API answers as 410 lease_lost).
 	c := newFilesClient(t, "http://127.0.0.1:1")
 	err := c.WriteFile(context.Background(), filesSandboxID, "/f", []byte("x"), 0o644)
-	if !errors.Is(err, substrate.ErrNotFound) {
-		t.Fatalf("WriteFile on a dead sandbox: %v", err)
+	if !errors.Is(err, substrate.ErrUnavailable) {
+		t.Fatalf("WriteFile on an unreachable orchestrator: %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, substrate.ErrNotFound) {
+		t.Fatalf("WriteFile on an unreachable orchestrator must not be ErrNotFound: %v", err)
 	}
 }
 
