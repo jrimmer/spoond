@@ -184,6 +184,23 @@ func histogramCountAndSum(t *testing.T, svc *Service, name string) (uint64, floa
 	return 0, 0
 }
 
+// TestPauseChainSkipsDeletedBuild: a pause build the GC (or a release
+// during the pause) deleted before the settle finished yields a depth-0
+// chain; the observation is skipped rather than recorded in the lowest
+// bucket.
+func TestPauseChainSkipsDeletedBuild(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	// The chain is observed for a build id that does not exist: depth 0.
+	svc.observePauseChain(context.Background(), "build-gone")
+	if n, _ := histogramCountAndSum(t, svc, "spoond_pause_chain_depth"); n != 0 {
+		t.Fatalf("deleted build recorded a pause-chain depth sample count %d, want 0", n)
+	}
+	if n, _ := histogramCountAndSum(t, svc, "spoond_pause_chain_bytes"); n != 0 {
+		t.Fatalf("deleted build recorded a pause-chain bytes sample count %d, want 0", n)
+	}
+}
+
 // TestPauseChainObservedAfterSettle: the pause-chain bytes histogram is
 // observed from the settle path, not at insert time, so it includes the
 // pause build's memory snapshot when that lands (and commits on ZFS)

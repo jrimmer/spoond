@@ -79,6 +79,14 @@ func (s *Service) observePauseChain(ctx context.Context, buildID string) {
 		s.log.Printf("pause-chain metrics: %v", err)
 		return
 	}
+	if depth == 0 {
+		// The pause build was deleted before the settle finished: the
+		// lease was released during the pause, or the GC ran inside the
+		// settle window. There is no chain to measure, so skip the
+		// observation rather than recording a depth-0/bytes-0 sample in
+		// the lowest histogram bucket.
+		return
+	}
 	s.metrics.PauseChainDepth.Observe(float64(depth))
 	s.metrics.PauseChainBytes.Observe(float64(bytes))
 }

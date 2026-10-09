@@ -66,4 +66,7 @@ func TestGatewayHostNames(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("want exactly one deprecation warning line, got %q", lines)
 	}
+	if !strings.Contains(lines[0], "FORKD_GATEWAY_HOST is deprecated") {
+		t.Fatalf("deprecation warning = %q, want it to name FORKD_GATEWAY_HOST as deprecated", lines[0])
+	}
 }
