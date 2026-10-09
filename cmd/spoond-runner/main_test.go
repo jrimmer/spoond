@@ -14,6 +14,8 @@ import (
 	"connectrpc.com/connect"
 	runnerv1 "gitea.dev/actions-proto-go/runner/v1"
 	"gitea.dev/actions-proto-go/runner/v1/runnerv1connect"
+
+	"github.com/jrimmer/spoond/v2/runner"
 )
 
 // The fake backend pair here stands in for Forgejo and the spoond lease
@@ -250,7 +252,7 @@ func waitFor(t *testing.T, what string, pred func() bool) {
 func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	for _, k := range []string{"FORGEJO_URL", "RUNNER_TOKEN", "RUNNER_NAME", "LEASE_URL", "LEASE_TOKEN",
 		"RUNNER_FLOOR", "RUNNER_MAX", "RUNNER_STATE_FILE", "JOB_RECORD_DIR", "RUNNER_STOP_GRACE",
-		"METRICS_LISTEN", "IMAGE_MAP"} {
+		"METRICS_LISTEN", "IMAGE_MAP", "RUNNER_ADMIT_WAIT_SECS", "RUNNER_JOB_TIMEOUT"} {
 		os.Unsetenv(k)
 	}
 	forgejo := &fakeForgejo{}
@@ -299,6 +301,12 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 		if _, ok := create[k]; ok {
 			t.Fatalf("%s sent on create: the job lease must not be held", k)
 		}
+	}
+	// The create carries the admission wait (#129): a full node's queue
+	// holds it open instead of answering 503 at once. This run used the
+	// default (RUNNER_ADMIT_WAIT_SECS was unset).
+	if got, ok := create["wait"].(float64); !ok || int(got) != runner.DefaultAdmitWaitSecs {
+		t.Fatalf("create wait = %v, want %d", create["wait"], runner.DefaultAdmitWaitSecs)
 	}
 	waitFor(t, "the lease label", func() bool {
 		lease.mu.Lock()
