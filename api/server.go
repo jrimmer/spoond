@@ -1155,6 +1155,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				s.writeCreateRefusal(w, req.Image, req.Snapshot, err, waited)
 				return
 			}
+			// The queue can admit the ticket in the moment the client
+			// disappears (L2): finishTicket lost that race to the client's
+			// context, so the granted lease has no runner owner and no job
+			// label and would live until its TTL. Release it with a reason
+			// and never write to the dead connection.
+			if r.Context().Err() != nil {
+				s.svc.releaseBecause(context.Background(), lease, "client_gone")
+				return
+			}
 			s.writeCreatedLease(w, r, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 			return
 		}
