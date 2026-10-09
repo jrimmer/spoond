@@ -287,10 +287,10 @@ memory goes back to the host and the next call resumes it.
 
 **v2.4: capacity on shared hosts.** Memory quotas per user
 (`guaranteed_mib`, `max_mib`), guaranteed and burst leases with a
-hugepage reserve, and preemption of burst leases by suspend with an
-automatic resume queue, so CI and other guaranteed work get room on a
-busy host without losing anyone's state. spoond is BSD-3-Clause
-licensed from this release.
+hugepage reserve, and preemption of burst leases by suspend, so CI and
+other guaranteed work get room on a busy host without losing anyone's
+state. A preempted lease comes back on its holder's next work call
+(#145 D2); spoond is BSD-3-Clause licensed from this release.
 
 **v2.3: checkpoints on the lease's terms.** Periodic checkpoints are off
 by default and set per lease (`checkpoint_interval`); a checkpoint can be
@@ -382,7 +382,7 @@ may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `IDLE_SUSPEND_DEFAULT_SECS`, `SNAPSHOT_WRITE_CONCURRENCY`,
 `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_CONCURRENCY`,
 `UNDRAIN_RESUME_RETRIES`, `RECOVERY_RETRY_ATTEMPTS`,
-`RECOVERY_RETRY_WINDOW`, `PREEMPT_RESUME_RETRIES`, `ROOTFS_PROBE_SECS`,
+`RECOVERY_RETRY_WINDOW`, `ROOTFS_PROBE_SECS`,
 `SWEEP_TIMEOUT`), the
 per-call E2B RPC bounds (`E2B_CREATE_TIMEOUT` and friends), named
 snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs

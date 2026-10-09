@@ -35,8 +35,8 @@ particular means two different things depending on the code:
 | `400` | `bad_request` | malformed or out-of-range request fields |
 | `400` | `image_mismatch` | a create `image` does not match the `snapshot`'s image |
 | `404` | `not_found` | unknown lease, name, snapshot or image |
-| `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight; retry |
-| `409` | `lease_suspended` | the lease is suspended; `resume` it first. The body adds `"reason"` (`idle`|`idle_suspend`|`hold_lapsed`|`pressure`|`preempt`) when the suspension was automatic |
+| `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight, or another caller's resume is; retry |
+| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` (`idle`|`idle_suspend`|`hold_lapsed`|`pressure`|`preempt`) when the suspension was automatic |
 | `409` | `lease_not_live` | a released lease where a live one is required |
 | `409` | `cannot_start` | a snapshot build cannot run on this host; save it again |
 | `409` | `save_in_progress` | a named-snapshot save with the same idempotency key is running |
@@ -45,8 +45,18 @@ particular means two different things depending on the code:
 | `409` | `snapshot_limit` | the owner's `MAX_NAMED_SNAPSHOTS` cap is reached |
 | `409` | `kept_budget` | the owner's `max_kept_bytes` budget would be exceeded |
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
+| `429` | `quota` | the owner is over their own memory quota (`max_mib`); every status-code section below says `429` without a code, and the body names the limit |
 | `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
 | `500` | `internal` | an internal failure |
+
+A resume-on-use work call that finds no room on the host answers `503`
+with `code: capacity_wait` and a `Retry-After` header, identically on
+every path (exec, exec stream, files, proxy, jobs, the LLM gateway). Per
+the owner contract (2026-10-08) a **host-structural** shortage — disk,
+hugepages, the burst reserve, the snapshot store, orchestrator capacity —
+never refuses for good: spoond acts (reclaims or FIFO-cleanup) and the
+caller waits. Only per-owner quota refuses with `429` (memory) or `409`
+(`kept_budget`):
 
 ---
 
@@ -214,13 +224,17 @@ themselves.
 A preempted lease is marked `preempted: true` in `GET /api/leases` and
 `GET /api/leases/{id}`, keeps its `resume_build_id`, and emits a
 `preempted` event with detail `for a guaranteed lease of <owner>`. It
-stays suspended until it fits again: the backend resumes preempted
-leases every 15 s, oldest preemption first, through the normal resume
-path (as a burst lease again if the owner is still above the
-guarantee). On resume `preempted` is cleared and a `resumed` event is
-emitted with detail `after preemption`. A client's explicit resume of a
-preempted lease takes the same path; until it succeeds the lease stays
-suspended.
+stays suspended until its holder next uses it (#145 D2): the next work
+call — exec, exec stream, files, proxy, jobs, the LLM gateway — resumes
+it through the normal resume path (as a burst lease again if the owner
+is still above the guarantee). On resume `preempted` is cleared and a
+`resumed` event is emitted with detail `after preemption`. A client's
+explicit resume of a preempted lease takes the same path. There is no
+background resume queue any more, and spoond never marks a preempted
+lease `lost` because a resume failed: if the node still has no room the
+work call answers `503` `capacity_wait` with `Retry-After: 30` and the
+lease stays suspended. Only the promote sweep (which moves running burst
+leases into an owner's guarantee) still runs on a 15 s tick.
 
 Preemption has a disk floor: it pauses a burst lease only while the
 snapshot disk stays above `PREEMPT_DISK_FLOOR_PCT` (default 15) after
@@ -228,7 +242,7 @@ the pause, estimated from the lease's `memory_mb`. When no candidate
 clears that floor, the guaranteed admission answers `503`
 `capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`.
 Honey-like clients should treat a `preempted` lease as temporarily
-unavailable and wait for its `resumed` event (or poll the lease) rather
+unavailable: just use it when needed — it resumes on that call — rather
 than deleting and recreating it.
 
 ### Queued admission
@@ -330,15 +344,47 @@ is a rule suspension, the stale-release (rule 2) and critical-disk
 (rule 5) held-lease rules may later release the lease if it stays
 idle-suspended and untouched; a preempted lease stays excluded.
 
-**Resume on next use:** an exec, files call, guest port dial or stream
-on a lease suspended by `idle_suspend` resumes it first through the
-normal resume path (admission, class and quota apply) and then serves
-the call; a refusal answers what resume would (`429` over quota, `503`
-with `Retry-After` for capacity or the burst reserve) and the lease stays
-suspended. A lease suspended any other way keeps the `409`
-`lease is suspended; resume it first` (`code: lease_suspended`). An
-explicit resume works as always, and the SSH gateway already resumes on
-attach.
+**Resume on next use (#145 D2):** every work call resumes a suspended
+lease first through the normal resume path (admission, class and quota
+apply) and then serves the call — whatever suspended it: the plain idle
+sweep, the lease's own `idle_suspend`, held rule 1 (shortened under
+pressure), a lapsed hold (rule 3), preemption, or the holder's own hand
+suspend. This is one rule for every kind of suspend, not just
+`idle_suspend`. GET, status, events and SSE never resume, and neither
+`POST /resume` (unchanged) nor a path with nothing to resume. The
+SSH gateway also resumes on attach.
+
+While its pause or another caller's resume is in flight, a work call
+answers `409` with `code: lease_busy` (retryable). A resume refused for
+the owner's own memory quota answers `429`; a resume that finds no room
+on the host answers the one shared no-room shape, `503` with
+`Retry-After: 30` and `code: capacity_wait`. The lease stays suspended
+in every refusal. A lease whose hold lapsed resumes with its hold still
+lapsed: resuming does not renew a hold.
+
+**Per-path status (resume-on-use).** Every path is listed; the
+`capacity_wait` row is the same on all of them:
+
+| Path | Resumes on use | No room | Owner over `max_mib` | In-flight pause/resume | Lost sandbox |
+|---|---|---|---|---|---|
+| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}/stream` (exec stream) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| the HTTP proxy (`<lease>-<port>.<suffix>`) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| background jobs (`POST .../exec` `background:true`, `POST .../jobs/{job}/signal`) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}` (`stat` probe included) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/fork` (needs a running source) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/crash-test` (nothing to crash) | **no** | `409` (suspended; plain message, no code) | `409` (suspended) | `409 lease_busy` | `410 lease_lost` |
+| the guest heartbeat (`POST /lease/{id}/active`) | **no** (not a work call) | `409 lease_suspended` | `409 lease_suspended` | `409 lease_suspended` | `410`/`409` |
+
+A path in the last four rows is not "work": it needs a running guest
+and cannot start one, so it answers the old `409 lease_suspended` with
+the structured `"reason"` when the suspension was automatic. No other
+path ever answers `409 lease_suspended` for a suspended lease.
 
 ### `GET /api/leases` — list leases
 
@@ -407,7 +453,9 @@ scoped to this lease's owner.
 behaves exactly like `running` — it marks a lease the crash reconcile
 resumed from a checkpoint, and keeps showing `recovered` until the lease
 is suspended or restarted. `lost` means the sandbox died with no
-checkpoint (or its recovery or preempt-resume retries ran out); the detail carries `lost_reason`,
+checkpoint (or its crash-recovery retries ran out); a failed
+resume-on-use never loses a lease, its error goes to the caller (#145
+D2). The detail carries `lost_reason`,
 the cause the `lost` event reported, and every call on the lease answers
 `410` with `code: lease_lost` (see [Lost leases](#lost-leases)); the
 lease should be deleted to free its quota. While a crash recovery is
@@ -504,8 +552,12 @@ sweep, which treats a sandbox whose lease is `lost` or released as an
 orphan, and also deletes any substrate sandbox no lease and no pool
 entry claims once it has been seen unclaimed on two consecutive passes;
 a creation's sandbox is never swept while the creation is in flight.
-Only a lease still suspended and not busy is lost by the preempt-resume
-and undrain paths: a resume an owner has in flight saves its guest. A
+A failed **resume-on-use** never loses a lease (#145 D2):
+its error goes to the caller (the shared `429`/`503 capacity_wait`/`409
+lease_busy` shapes) and the lease stays suspended with its snapshot
+intact. Only undrain's bounded resume still marks a lease lost after its
+retry budget is spent, and only a lease still suspended and not busy is
+lost there: a resume an owner has in flight saves its guest. A
 create that finishes after its lease was released stops the fresh guest
 and saves nothing, so a release is never undone by a late recovery,
 resume, restart or restore.
@@ -566,8 +618,14 @@ Response `200 OK`:
 {"stdout": "…", "stderr": "…", "exit": 0}
 ```
 
-`409` if the lease is suspended (`code: lease_suspended`, resume it
-first); `410` if it is
+`409` if the lease is suspended and the path cannot resume it. Every
+work path — and this one is work — resumes a suspended lease on use
+(#145 D2) first, then serves the exec: whatever suspended it (the idle
+sweep, `idle_suspend`, held rule 1, a lapsed hold, preemption, or a hand
+suspend). A refused resume answers the shared shapes: `429` over the
+owner's quota, `503 capacity_wait` with `Retry-After` when the host has
+no room, `409 lease_busy` while its pause or another resume is in
+flight. `410` if it is
 `lost` (`code: lease_lost`, see [Lost leases](#lost-leases)) or the
 sandbox no longer exists on the substrate; `413` when the JSON body is
 larger than `MAX_EXEC_BODY_BYTES` (default 8 MiB, leaving room for a
@@ -580,14 +638,6 @@ The body cap bounds what the host buffers, not what the guest can run:
 the guest's own argv limit is about 128 KiB per string, so a `cmd`
 larger than that fails with `Argument list too long` from the guest
 shell (exit non-zero) rather than being refused here.
-
-A lease the idle sweep suspended (`idle_suspend`) is the exception: a
-suspended lease whose `last_action` is `idle_suspend/suspend_idle` is
-resumed first through the normal resume path and the exec then served;
-a refused resume answers what resume would (`429` over quota, `503` with
-`Retry-After` for capacity or the burst reserve). Any other suspension
-keeps the plain `409` (`code: lease_suspended`) — see
-[Idle reclamation](#idle-reclamation).
 
 While a lifecycle operation is in flight on the lease (the periodic
 checkpoint, a suspend or a restart), the orchestrator briefly reports
@@ -616,8 +666,9 @@ Response `202 Accepted` as soon as the process has started:
 {"job_id": "<hex>", "started_at": "2026-10-05T12:00:00.123456789Z"}
 ```
 
-Without `background` nothing changes. A suspended lease still answers
-`409` and a `lost` one `410` with `code: lease_lost` (see [Lost
+Without `background` nothing changes. A suspended lease resumes on use
+first (the background exec is a work call, #145 D2), then the job starts;
+a `lost` lease answers `410` with `code: lease_lost` (see [Lost
 leases](#lost-leases)). At most `MAX_RUNNING_JOBS_PER_LEASE`
 (default 16) jobs may run at once per lease; past it the request answers
 `429`.
@@ -745,11 +796,11 @@ guest root — a path that cleans to `/` names no file and answers `404`.
 Access follows the strictest lease model: the **owner** (or an admin,
 who may act on any lease); a grantee's `http` share does **not** carry
 file content, and anyone else gets the usual `404`. Every call counts
-as activity for the idle sweeper. A suspended lease answers `409`
-(`code: lease_suspended`) on every file route (resume it first), except
-one suspended by
-`idle_suspend`, which is resumed first and then served (see
-[Idle reclamation](#idle-reclamation)); a `lost` lease answers `410`
+as activity for the idle sweeper. A suspended lease — whatever suspended
+it — is resumed first on every file route and then served (#145 D2); a
+refused resume answers the shared shapes (`429` quota, `503
+capacity_wait` with `Retry-After`, `409 lease_busy`). A `lost` lease
+answers `410`
 with `code: lease_lost` (see [Lost leases](#lost-leases)). File
 counts and sizes are capped at **256 MiB**: a bigger upload is refused
 with `413` before anything is written, and a bigger download with
@@ -862,10 +913,10 @@ frames carry the same control JSON as above. `started`, `exit_code` and
 `error` stay text JSON frames in both modes.
 
 Closing the WebSocket stops the relay but does **not** kill the process;
-send `stop` or `kill` for that. A stream attach on a lease the idle
-sweep suspended resumes the lease first and then starts the process (see
-[Idle reclamation](#idle-reclamation)); any other suspension keeps the
-`409`.
+send `stop` or `kill` for that. A stream attach — a work call — resumes a
+suspended lease first, whatever suspended it (#145 D2), and then starts
+the process; a refused resume answers the shared shapes (`429` quota,
+`503 capacity_wait` with `Retry-After`, `409 lease_busy`).
 
 ### `GET /api/leases/{id}/ports/{port}/dial` — raw TCP to a guest port (WebSocket)
 
@@ -891,10 +942,10 @@ every guest port, a step past what an `http` share grants.
 
 Errors: `400` port out of range or not a number, `403` port 49983 (envd,
 the guest's management port), `404` unknown lease or not the owner's,
-`409` suspended (`code: lease_suspended`, resume it first — except a
-lease the idle sweep suspended, which is resumed first and then dialed;
-see
-[Idle reclamation](#idle-reclamation)), `410` with `code: lease_lost`
+`429` quota and `503 capacity_wait` with `Retry-After` if a suspended
+lease cannot resume on use (a dial is work, #145 D2), `409 lease_busy`
+while its pause or another resume is in flight; `410` with
+`code: lease_lost`
 for a lost
 lease (see [Lost leases](#lost-leases)), `429` when the owner's 16
 concurrent dials are already open, `502` when the lease has no running
@@ -920,21 +971,30 @@ id**, so its address and identity are unchanged. Owner only (admins
 too); the SSH gateway's service token may resume any lease before a
 session starts. Response
 `{"id":"…","status":"running","address":"…"}`. `400` if neither persistent nor held,
-`409` if the lease is busy (another lifecycle operation is in flight).
+`409` with `code: lease_busy` if the lease is busy (another lifecycle
+operation is in flight; this is how a pause or another caller's resume
+answers, and the already-suspended body no longer uses
+`lease_suspended` anywhere a resume is possible).
 A suspended lease holds no hugepages, so resuming one re-passes the
 owner's memory quota (#128): `429` when the charge would pass
-`max_mib` — the lease stays suspended. The resume re-decides the
+`max_mib` — the lease stays suspended. A resume that finds no room on
+the host answers `503` with `Retry-After: 30` and `code: capacity_wait`
+(one shape for every no-room refusal, whether the burst reserve, the
+preemption disk floor or the orchestrator's capacity) — the lease stays
+suspended. The resume re-decides the
 lease's class too (#128 part 2): a burst lease coming back into a full
-burst reserve answers `503` `no burst capacity` with `Retry-After: 30`
-and stays suspended. Resuming a lease that a preemption suspended
-(#128 part 3, `preempted: true`) takes the same path and answers the
-same way; on success `preempted` is cleared and the `resumed` event's
+burst reserve takes that same `503 capacity_wait`. Resuming a lease that
+a preemption suspended
+(#128 part 3, `preempted: true`) takes the same path; on success
+`preempted` is cleared and the `resumed` event's
 detail is `after preemption`. Resuming a lease that is
 already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.) An
 `owner deleted` (`403`) refuses the resume when the owner's identity was
-removed while the resume was in flight (spoond-q4j).
+removed while the resume was in flight (spoond-q4j). Resuming does not
+renew a lapsed hold: a lease whose hold lapsed comes back with the hold
+still lapsed.
 
 ### `POST /api/leases/{id}/restart` — pause and resume, or a fresh guest
 
@@ -1171,7 +1231,9 @@ of the event stream can tell a test from a real crash.
 It touches only that one lease: no other lease, no warm-pool sweep, no
 peer refresh and no release. The recovery runs to the end even if the
 client hangs up. `409` while another operation is in flight or while
-the lease is suspended (nothing is running to crash), `409` with `code:
+the lease is suspended (nothing is running to crash; this is one of the
+few paths that cannot resume, so it answers `409 lease_suspended` with
+the reason), `409` with `code:
 lease_lost` for a lease
 already lost, `404` for an unknown or released lease. Response `200`:
 
@@ -1244,8 +1306,10 @@ allowances — no restart, no new lease.
 
 Request `{"network_policy":"none|lan|internet|restricted","egress_allowlist":[…]}`.
 Response `200` `{"id","network_policy","egress_allowlist"}`. `400` on an
-invalid policy, `404` unknown, `409` suspended
-(`code: lease_suspended`).
+invalid policy, `404` unknown. A suspended lease resumes on this work
+call (#145 D2) before the policy is applied; a refused resume answers
+the shared shapes (`429` quota, `503 capacity_wait` with `Retry-After`,
+`409 lease_busy`).
 
 ### `POST /api/leases/{id}/tag` — friendly name
 
@@ -1392,14 +1456,14 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
 | `released` | the lease is deleted (TTL sweep, idle rules, `DELETE`, held-lease release, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `released by a held-lease rule`, `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released` |
 | `suspended` | the sandbox is paused into a build (suspend, drain, held idle-suspend, hold lapse, preemption) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
-| `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, preemption resume) | the resume build id; `after preemption` for a lease the resume queue brought back after preemption |
+| `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, resume on use) | the resume build id; `after preemption` for a preempted lease its holder's work call brought back |
 | `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
 | `snapshot_saved` | `POST /api/leases/{id}/snapshots` saved the lease as a named snapshot (2.7, #83) | `saved as <name>@<version> · <size> · <duration>`, e.g. `saved as spoond/warm@4 · 2.1 GiB · 820 ms` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
 | `recovery_retry` | a crash recovery failed transiently and the lease will be retried (spoond-dxq) | `recovering from checkpoint <build>: attempt N/K failed: <err>`, or `recovering from checkpoint <build>: waiting for capacity: <err>` (a capacity wait is not an attempt) |
 | `rootfs_dead` | the rootfs liveness probe found the lease's root disk unreadable (I/O errors) and started the shared recovery | `root disk unreadable (I/O errors)` (before the `recovered`/`lost`/`recovery_retry` event that follows) |
-| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume, or a recovery/preempt-resume retry budget spent), or its root disk answered I/O errors (rootfs liveness probe) | the reason, e.g. `no checkpoint to recover from; the running state is gone`, `recovery from checkpoint <build> failed after N attempt(s) within <window>: <err>` or `root disk unreadable (I/O errors)`; the same text is stored as `lost_reason` and returned by `GET` and every `410 lease_lost` (see [Lost leases](#lost-leases)) |
+| `lost` | the lease's sandbox died with nothing to recover from (crash reconcile, failed undrain resume, or a crash-recovery retry budget spent), or its root disk answered I/O errors (rootfs liveness probe) | the reason, e.g. `no checkpoint to recover from; the running state is gone`, `recovery from checkpoint <build> failed after N attempt(s) within <window>: <err>` or `root disk unreadable (I/O errors)`; the same text is stored as `lost_reason` and returned by `GET` and every `410 lease_lost` (see [Lost leases](#lost-leases)) |
 | `restarted` | `POST /api/leases/{id}/restart` completed | `restarted (snapshot round-trip)` for a warm persistent restart, `cold` for `mode=cold`, or `cold-restarted from image <image>` for a non-persistent lease |
 | `restored` | `POST /api/leases/{id}/restore` completed (2.3, #121) | the restored-to checkpoint build id |
 | `crash_test` | `POST /api/leases/{id}/crash-test` crashed the lease (only on hosts with `CRASH_TEST=1`) | `crashed by its owner` or `crashed by an admin` (before the `recovered`/`lost` event that follows) |
