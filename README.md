@@ -101,15 +101,22 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   it or when asked (`"burst": true`, with a `priority`). Burst leases
   are admitted only while `BURST_RESERVE_MIB` of hugepages stays free,
   and when guaranteed work needs room spoond suspends them (lowest
-  priority, then newest) and resumes them by itself once they fit again
-  (`preempted`/`resumed` events; the memory continues). A user without
+  priority, then newest); a preempted lease resumes on its holder's
+  next work call (`preempted`/`resumed` events; the memory continues). A user without
   a `guaranteed_mib` keeps every lease guaranteed. A create may
   **wait** for room or for one of its owner's own leases to go
   (`"wait": <seconds>`, up to `MAX_ADMIT_WAIT_SECS`) instead of failing
   on capacity, the memory cap or the lease-count cap, served in
   fair-share order; a persistent lease
-  may set `idle_suspend` to give its memory back when idle, and the
-  next exec, files call or dial resumes it.
+  may set `idle_suspend` to give its memory back when idle.
+- **Resume on use**: a suspended lease, whatever suspended it (idle,
+  `idle_suspend`, a held-lease rule, preemption or its holder), resumes
+  on its holder's next work call: exec, exec stream, files, guest dial,
+  the proxy, jobs, the LLM gateway, a network change or a prompt. A
+  resume that finds no room answers `503` `capacity_wait` with
+  `Retry-After` and the lease stays suspended; no failed resume marks a
+  lease lost. Automatic suspends name their reason on the lease and its
+  `suspended` event.
 - **Images**: one Dockerfile per capability in `images/`, built into E2B
   templates by `spoond images build <name>` (or `--all`). Every guest
   resolves names through the LAN resolver only and carries a container
@@ -137,11 +144,17 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   `none` may not. Known limit: a domain in a `restricted` allowlist
   currently breaks HTTPS to allow-listed LAN IPs, so list IPs only.
 - **Forgejo Actions runner**: `spoond runner` leases sandboxes as CI
-  workers.
+  workers. On a full node a job waits for admission and retries instead
+  of failing, and a job's `timeout-minutes` is enforced as in GitHub
+  Actions (execution from sandbox creation), capped by
+  `RUNNER_JOB_TIMEOUT` (default 6h, the whole job).
 - **Dashboard**: `spoond dash` and `spoond top`, below.
 - **Observability**: `/metrics` (Prometheus) covers the backend, the
   orchestrator (via an OpenTelemetry collector) and leases per state and
   per image. It needs an admin token or the scrape-only `METRICS_TOKEN`.
+  Every lease create, release, loss and suspend also writes one line to
+  the backend's journal (the lease journal), so `journalctl` alone can
+  say what happened to a lease and why.
   `GET /readyz` answers uptime monitors such as Gatus (orchestrator,
   database, disk and hugepage checks; an example config is in
   [docs/operations.md](docs/operations.md#uptime-monitoring-gatus)).
@@ -170,7 +183,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v2.8.0 (2026-10-08) · GitHub` — with the
+line — `Spoond v2.9.0 (2026-10-09) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -244,6 +257,16 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v2.9: resume on use.** A suspended lease comes back on its holder's
+next work call, whatever suspended it, and every refusal has one shape
+(`503 capacity_wait`, `429 quota_exceeded`, `409 lease_busy`). An
+orchestrator stall answers a retryable `503 substrate_unavailable`
+instead of reporting a sandbox gone. CI jobs wait for room on a full
+node and honour `timeout-minutes`. Deleting a user releases their
+leases and drops their snapshots and kept builds; background jobs have
+a runtime cap; exec bodies are bounded; and the lease journal records
+every lease's life in the backend's journal.
 
 **v2.8: no loose ends.** A lost lease's guest is always stopped, and
 spoond sweeps away sandboxes nothing claims. A late checkpoint, pause or
@@ -386,7 +409,9 @@ may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
 `SWEEP_TIMEOUT`), the
 per-call E2B RPC bounds (`E2B_CREATE_TIMEOUT` and friends), named
 snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
-(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`), `CRASH_TEST`, the
+(`MAX_RUNNING_JOBS_PER_LEASE`, `JOB_RETENTION_SECS`, `JOB_MAX_RUNTIME`),
+`MAX_EXEC_BODY_BYTES`, the runner's `RUNNER_ADMIT_WAIT_SECS` and
+`RUNNER_JOB_TIMEOUT`, `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
 the held-lease
 limits (`HOLD_TTL_SECS` and the rest, in

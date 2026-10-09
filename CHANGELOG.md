@@ -10,6 +10,50 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-10-09
+
+A suspended lease now comes back on its holder's next work call,
+whatever suspended it, and every resume refusal has one shape: `503
+capacity_wait`, `429 quota_exceeded` or `409 lease_busy`, with the
+lease left suspended and never marked lost. An orchestrator stall
+answers a retryable `503 substrate_unavailable` instead of reporting a
+sandbox gone. The CI runner waits for room on a full node instead of
+failing the job, and enforces a job's `timeout-minutes`. Deleting a
+user releases their leases and drops their named snapshots and kept
+builds. Background jobs get a runtime cap, exec and stream bodies are
+bounded, every automatic suspend names its reason, and a lease journal
+records every lease's life in the backend's journal. Store migrations
+0020 and 0021 are additive.
+
+### Status code changes
+
+A summary for clients; the details are in the entries below and in
+[docs/api.md](docs/api.md).
+
+- **Resume on use.** Exec, exec stream, files, guest dial, the proxy,
+  jobs, the LLM gateway, `POST …/network` and `POST …/prompt` resume a
+  suspended lease instead of answering `409 lease_suspended`. A resume
+  they cannot do answers `503` `capacity_wait` with `Retry-After` (no
+  room on the host, or a drain in progress), `429` `quota_exceeded`
+  with `Retry-After: 30` (the owner's own memory quota), `409`
+  `lease_busy` (a pause or another resume is in flight; retry) or `410`
+  `lease_lost`. `POST /resume` and the SSH gateway's resume answer the
+  same shapes. The stat probe, fork and the crash test still answer
+  `409 lease_suspended`.
+- **`503 substrate_unavailable`** with `Retry-After: 5` when the
+  orchestrator cannot confirm a sandbox's state, on exec, stat,
+  background exec, `PUT` file and directory remove, and job signal.
+  These answered `410` (exec, stat, background exec), `404` (files) or
+  `409` (job signal) before. A confirmed absence is unchanged.
+- **`DELETE /api/users/{id}`** answers `200` with a `removed` body
+  (was `204`), and `500` with `"incomplete": true` and the failed
+  `step` when the cleanup could not finish, or `500 read state: …` when
+  the store cannot be read after a restart.
+- **A create's plain capacity `503`** (`capacity: …`) now carries
+  `Retry-After: 30`, like the burst-reserve and preemption refusals.
+- **An oversized exec body** answers `413`; an oversized exec-stream
+  first frame closes the socket with code `1009`.
+
 ### Changed
 
 - **A suspended lease resumes on its holder's next work call; the
@@ -21,12 +65,16 @@ summarised from README "Status".
   list), the proxy and guest dial, jobs, the LLM gateway, a network
   change and a prompt. This is now **one rule for every kind of
   suspend**, not just `idle_suspend`. GET, status, events and SSE never
-  resume, and `POST /resume` is unchanged. A lease suspended by a
+  resume. `POST /resume` is the explicit resume: it and the SSH
+  gateway's resume take the same path and answer the same refusal
+  shapes (below), including `503 capacity_wait` during a drain or a
+  pending drain clear and `429 quota_exceeded` with `Retry-After: 30`
+  for the owner's quota. A lease suspended by a
   non-work path that cannot resume (the `stat` probe, forking a running
   source, the crash test) still answers `409 lease_suspended` with its
   `reason` — `lease_suspended` no longer appears on any work path.
 
-  - **Status codes changed.** A resume-on-use that finds no room on the
+  - **One refusal shape.** A resume-on-use that finds no room on the
     host answers the one shape every path shares: `503` with a
     `Retry-After` header and JSON `{"error": ..., "code":
     "capacity_wait"}` (was `503` with a plain `error`, or `409
@@ -41,12 +89,14 @@ summarised from README "Status".
     lease_busy` (retryable). This also unifies `POST /resume`, where the
     preemption-disk-floor and burst-reserve bodies now carry
     `capacity_wait`.
-  - **`POST /resume` and the SSH gateway's resume now refuse during a
-    drain.** Both run the resume-on-use path, so while spoond is
-    draining for a planned restart (or still owes a drain clear) they
-    answer the shared `503` `capacity_wait` + `Retry-After` shape and
-    the lease stays suspended, instead of racing a resume into a node
-    that is stopping.
+  - **No resume during a planned-restart drain.** While spoond is
+    draining the node (or still owes a drain clear), a resume-on-use,
+    `POST /resume` and the SSH gateway's resume all refuse with the
+    shared `503` `capacity_wait` + `Retry-After` shape. The lease stays
+    suspended and `Drained`, so no resume races into a node that is
+    stopping and the drain's "no running sandboxes" wait is not broken.
+    The undrain clears the drain first and resumes the drained leases as
+    before.
   - **No resume failure marks a lease `lost`.** The preempt-resume
     budget (`PREEMPT_RESUME_RETRIES`) and its lose-after-N-failures path
     are removed, along with the `runPreemptResumeLoop`,
@@ -57,13 +107,6 @@ summarised from README "Status".
     loss are gone. `PREEMPT_RESUME_RETRIES` and its docs are removed
     (the environment variable is ignored). `spoond-dxq`'s
     crash-recovery retries are unchanged.
-  - **A work call cannot resume a `Drained` lease during a planned
-    restart.** While spoond is draining the node (or still owes a drain
-    clear), a resume-on-use refuses with the shared `503`
-    `capacity_wait` + `Retry-After` shape and the lease stays suspended
-    and `Drained`, so the drain's "no running sandboxes" wait is not
-    broken. The undrain clears the drain first and resumes the drained
-    leases as before.
   - **A preempted held lease is subject to held rules 2 and 5 like any
     other rule-suspended lease.** The old exemption ("waits for the
     resume queue") is gone with that queue: a preempted held lease
@@ -128,7 +171,7 @@ summarised from README "Status".
   `spoond_pause_chain_bytes` histograms once its build has settled —
   bounded cardinality, so the per-lease figures stay on the lease API.
   No compaction happens yet; a follow-up decides on automatic compaction
-  after measuring on the deployment.
+  after measuring.
 
 - **A cap on background job runtime (spoond-wb5).** A background exec job
   may no longer run forever: `JOB_MAX_RUNTIME` (default 24 h, a Go
@@ -185,17 +228,13 @@ summarised from README "Status".
   create now sends `"wait": RUNNER_ADMIT_WAIT_SECS` (default `900`,
   `0` = no wait) and a `503` is never a job failure: the runner logs
   the wait and retries per the response's `Retry-After` (or 30 s)
-  until the create is admitted or the job's own timeout ends. While a
-  create waits it sends `Sink.Keepalive` every minute and a
+  until the create is admitted or `RUNNER_JOB_TIMEOUT` ends the job.
+  While a create waits it sends `Sink.Keepalive` every minute and a
   `waiting for capacity on spoond (N s)` log row, so Forgejo does not
   reap the silent task. `RUNNER_JOB_TIMEOUT` (duration or seconds,
-  default `6h`) bounds the whole job so a wait cannot pin a worker
-  forever. A job's own `timeout-minutes` bounds its **execution**,
-  starting once the sandbox is created and not counting the admission
-  wait (matching GitHub Actions); a value above `RUNNER_JOB_TIMEOUT` is
-  capped by it, and a job that ran out of time is reported cancelled.
-  The lease
-  client's HTTP timeout grows to cover the admission wait. A plain
+  default `6h`) bounds the whole job, the wait included, so a wait
+  cannot pin a worker forever. The lease client's HTTP timeout grows to
+  cover the admission wait. A plain
   `503 capacity: …` refusal now also carries a `Retry-After: 30` like
   the burst-reserve and preempt ones, so a client that sent no `wait`
   still knows when to come back. A job granted a lease in the moment
@@ -204,17 +243,17 @@ summarised from README "Status".
   drains is cancelled at once instead of spending `RUNNER_STOP_GRACE`.
   See [docs/operations.md](docs/operations.md).
 
-- **`timeout-minutes` is enforced (spoond-r739).** A job that runs
-  past its own `timeout-minutes` is cut and reported cancelled,
-  matching GitHub. It bounds the job's **execution**, starting once its
-  sandbox is created — the admission wait does not count against it
-  (`RUNNER_JOB_TIMEOUT`, default `6h`, remains the whole-job bound and
-  caps a larger `timeout-minutes`). The field parses leniently: a
-  number (integer or fractional) is honoured, an expression or string
-  (e.g. `timeout-minutes: ${{ matrix.t }}`) is ignored with one log
-  line instead of failing the whole workflow, and a non-finite, zero,
-  negative or absurdly large value (`.inf`, `1e300`) is ignored so it
-  cannot overflow the duration and remove every bound. Known users: the
+- **The CI runner now enforces a job's `timeout-minutes` (spoond-r739).**
+  It follows GitHub Actions: the timeout counts the job's execution
+  time from sandbox creation, and the admission wait is excluded. A job
+  that runs past it is cut and reported cancelled. `RUNNER_JOB_TIMEOUT`
+  (default `6h`) bounds the whole job, the wait included, and caps a
+  larger `timeout-minutes`. The field parses leniently: a number
+  (integer or fractional) is honoured, an expression or string (e.g.
+  `timeout-minutes: ${{ matrix.t }}`) is ignored with one log line
+  instead of failing the whole workflow, and a value that is not
+  finite, is zero or less, or is above `1e6` is ignored so it cannot
+  overflow the duration and remove every bound. Known users: the
   hrmny `e2e-live.yml` live job (75) and `ci.yml` (45/45/20).
 
 - **A user delete that cannot finish now says so (spoond-y0jj).** When a
@@ -244,7 +283,7 @@ summarised from README "Status".
   full node while the wake-up goroutine was between its "no room"
   judgement and its end; the old `wakeScheduled` compare-and-swap then
   dropped the release's wake-up, so the waiting create sat until the
-  periodic retry (`ADMIT_QUEUE` tick in production, an hour in some
+  periodic retry (the `ADMIT_QUEUE` tick, an hour in some
   tests). Every wake-up now sets a `wakePending` flag, the pass loops
   until it has absorbed every wake that arrived during it, and it
   releases `wakeScheduled` with a compare-and-swap ordered so a wake
@@ -291,7 +330,7 @@ summarised from README "Status".
   set for one extra
   TTL and then fails closed, logging and counting the failure once per
   TTL; the domain path's resolved-IP check consults the same guard.
-  Bundled with 2.9 (orchestrator swap first).
+  The fix is in the orchestrator fork and needs its matching build.
 
 - **The host-address guard follow-ups: the private allowance sees the
   original IP, and the first host enumeration is blocking
@@ -308,7 +347,7 @@ summarised from README "Status".
   set until the first enumeration published; the constructor now performs
   one blocking enumeration, so a successful read publishes the real set
   before any decision and a failed read publishes a fail-closed set that
-  the TTL refresh retries. Bundled with 2.9 (orchestrator swap first).
+  the TTL refresh retries. Also in the orchestrator fork.
 
 - **The exec and stream request bodies are bounded (spoond-mrbr).**
   `POST /api/leases/{id}/exec` decoded its JSON body with no size bound,
@@ -344,7 +383,7 @@ summarised from README "Status".
   private destination for the `internet` and `lan` policies; that box was
   gone, so the case failed even though the substrate was correct. The
   target is now `CONFORMANCE_LAN_TARGET` (a private `host:port`, no
-  default): sb sets it in `/etc/spoond/conformance.env` and N1 skips with
+  default): set it in `/etc/spoond/conformance.env`; N1 skips with
   a clear message when it is unset, like the N9 `CONFORMANCE_MIXED_*`
   knobs. I3 installs `docker.io` into `dev-base` after `apt-get update`,
   so it no longer 404s on a package version the Ubuntu archive dropped.

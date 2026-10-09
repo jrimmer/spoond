@@ -356,9 +356,11 @@ sweep, the lease's own `idle_suspend`, held rule 1 (shortened under
 pressure), a lapsed hold (rule 3), preemption, or the holder's own hand
 suspend. This is one rule for every kind of suspend, not just
 `idle_suspend`. GET, status, events and SSE never resume, and neither
-does a path with nothing to resume. `POST /resume` is not a work call
-but now refuses during a drain like one (see below); the
-SSH gateway also resumes on attach.
+does a path with nothing to resume. `POST /resume` is the explicit
+resume: it runs the same resume path as a work call and shares its
+refusal shapes below, during a drain too (see
+[`POST /api/leases/{id}/resume`](#post-apileasesidresume--start-from-the-snapshot));
+the SSH gateway's resume on attach takes the same path.
 
 While its pause or another caller's resume is in flight, a work call
 answers `409` with `code: lease_busy` (retryable). A resume refused for

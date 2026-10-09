@@ -20,9 +20,10 @@ type WorkflowJob struct {
 	Env    map[string]string `yaml:"env"`
 	Steps  []Step            `yaml:"steps"`
 	// TimeoutMinutes is the job's own timeout in minutes (GitHub Actions
-	// `timeout-minutes`): it bounds the whole job, the create's wait for
-	// admission included. 0 means unset (the host's RUNNER_JOB_TIMEOUT,
-	// or no bound).
+	// `timeout-minutes`): it bounds the job's execution, starting once the
+	// sandbox is created, so the create's wait for admission does not
+	// count. RUNNER_JOB_TIMEOUT, which bounds the whole job wait included,
+	// caps it. 0 means unset (only RUNNER_JOB_TIMEOUT applies).
 	TimeoutMinutes TimeoutMinutes `yaml:"timeout-minutes"`
 }
 

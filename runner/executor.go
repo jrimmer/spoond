@@ -12,15 +12,17 @@ import (
 	"github.com/jrimmer/spoond/v2/metrics"
 )
 
+// DefaultJobTimeout is the default RUNNER_JOB_TIMEOUT (L4): it bounds
+// the whole job, the wait for a sandbox included, so a job that cannot
+// get one — a node answering 503 forever — is cut at 6h instead of
+// pinning a worker indefinitely. A job's own timeout-minutes bounds only
+// its execution, from sandbox creation, and is capped by this bound;
+// RUNNER_JOB_TIMEOUT=0 disables it.
+const DefaultJobTimeout = 6 * time.Hour
+
 // Executor runs a job in a sandbox. It depends only on the ports
 // (SandboxProvider, JobSink) and is transport-agnostic: the same core
 // drives a Forgejo task, an exe.dev harness, or a pi/code-harness job.
-// DefaultJobTimeout is the default RUNNER_JOB_TIMEOUT (L4): a job that
-// cannot get a sandbox — a node answering 503 forever — is cut at 6h
-// instead of pinning a worker indefinitely. A job's own timeout-minutes
-// is the tighter bound when set; RUNNER_JOB_TIMEOUT=0 disables it.
-const DefaultJobTimeout = 6 * time.Hour
-
 type Executor struct {
 	Sandbox SandboxProvider
 	Sink    JobSink

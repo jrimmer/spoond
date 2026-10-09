@@ -142,8 +142,8 @@ func Main(args []string) int {
 	admitWaitSecs := envIntOr("RUNNER_ADMIT_WAIT_SECS", runner.DefaultAdmitWaitSecs)
 	// Whole-job timeout. A capacity refusal is retried until this, so a
 	// node answering 503 forever cannot pin a worker indefinitely; the
-	// default is 6h. A job's own timeout-minutes is the tighter bound
-	// when set.
+	// default is 6h. A job's own timeout-minutes bounds only its
+	// execution, from sandbox creation, and is capped by this.
 	jobTimeout := jobTimeoutFromEnv()
 
 	// The pool's own lease client: at start it sweeps this token's
