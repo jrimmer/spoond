@@ -233,8 +233,14 @@ func containsStr(arr []any, want string) bool {
 func TestUserDeleteDataIdempotent(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()
-	first := svc.deleteUserData(ctx, "u-nobody")
-	second := svc.deleteUserData(ctx, "u-nobody")
+	first, err := svc.deleteUserData(ctx, "u-nobody")
+	if err != nil {
+		t.Fatalf("first cleanup: %v", err)
+	}
+	second, err := svc.deleteUserData(ctx, "u-nobody")
+	if err != nil {
+		t.Fatalf("second cleanup: %v", err)
+	}
 	for _, r := range []userDeleteResult{first, second} {
 		if len(r.Leases) != 0 || len(r.Jobs) != 0 || len(r.Snapshots) != 0 || len(r.KeptBuilds) != 0 {
 			t.Fatalf("cleanup of an absent owner = %+v, want all empty", r)
@@ -360,7 +366,10 @@ func TestUserDeleteJobsListNeverNull(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	res := svc.deleteUserData(ctx, "u-none")
+	res, err := svc.deleteUserData(ctx, "u-none")
+	if err == nil {
+		t.Fatal("cleanup of a closed store returned no error")
+	}
 	if res.Jobs == nil {
 		t.Fatal("Jobs = nil, want an empty non-nil slice")
 	}

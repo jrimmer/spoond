@@ -2028,11 +2028,33 @@ quota).
 
 An id that is neither a known identity nor has any remaining state
 answers `404 user not found`; deleting the same real user twice is
-idempotent and answers `200` the second time. An id that is the owner of
+idempotent and answers `200` the second time, **until the backend
+restarts**: the marker that makes a repeat delete answer `200` rather
+than `404` lives in memory only, so after a restart a repeat delete of a
+fully cleaned user answers `404` (it was already gone before the mark
+was lost). An id that is the owner of
 a legacy consumer token (a single-user deployment's token map) answers
 `409` and is left untouched: it has no identity row but still
 authenticates, so marking it deleted would permanently refuse its
 creates.
+
+A cleanup that fails part-way answers `500` instead of `200`, with the
+partial `removed` body, `"incomplete": true` and the store step that
+failed:
+
+```json
+{"removed": {"user": "u-…", "leases": ["…"], "jobs": [],
+            "snapshots": [], "kept_builds": ["…"]},
+ "incomplete": true, "step": "drop_named_snapshots",
+ "error": "drop_named_snapshots: database is locked"}
+```
+
+The `step` names the failed call: `list_jobs`, `list_kept_builds`,
+`unpin_kept_builds` or `drop_named_snapshots`. The other steps still
+ran, so `removed` lists what the attempt did remove. Retrying the delete
+completes the cleanup: the identity is already gone and every step is
+idempotent, so the second call clears whatever rows the failed step left
+and answers `200` when nothing is left.
 
 ### `POST /api/users/{id}/quota` — set lease quota (admin only)
 

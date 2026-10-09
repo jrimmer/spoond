@@ -168,10 +168,28 @@ func (s *Service) admissionWait(waitSecs int) (time.Duration, bool) {
 	return wait, true
 }
 
-// newAdmissionTicket builds and registers one waiting create, allocating
-// its lease id.
+// newAdmissionTicket builds and registers one waiting create,
+// allocating its lease id. It refuses a create whose owner was already
+// marked deleted before the ticket parks (spoond-y0jj): parking it would
+// only wait out the deadline, since grantQueued refuses a deleted owner
+// anyway. The mark is checked under admitQ.mu, the same lock
+// cancelQueuedForOwner takes, so a ticket either parks before the mark
+// (and the cancel then refuses it) or sees the mark and is never
+// parked; it cannot slip in between the two.
 func (s *Service) newAdmissionTicket(owner string, req leaseRequest, refusal error, wait time.Duration) *admissionTicket {
 	s.admitQ.mu.Lock()
+	// Read the owner-deleted mark under admitQ.mu so it is ordered with
+	// cancelQueuedForOwner's sweep: a ticket parked here is seen by that
+	// sweep, and a ticket created after the mark is refused without
+	// parking. ownerDeleteMu nests inside admitQ.mu, never the other way
+	// (cancelQueuedForOwner releases admitQ.mu before it reads the mark).
+	s.ownerDeleteMu.Lock()
+	deleted := s.deletedOwners[owner]
+	s.ownerDeleteMu.Unlock()
+	if deleted {
+		s.admitQ.mu.Unlock()
+		return nil
+	}
 	s.admitQ.seq++
 	now := s.now()
 	t := &admissionTicket{

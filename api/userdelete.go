@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -32,6 +33,32 @@ type userDeleteResult struct {
 	KeptBuilds []string `json:"kept_builds"`
 }
 
+// The cleanup step names a userDeleteStepError reports (spoond-y0jj): a
+// store call that failed part-way through the cleanup. They are stable
+// wire values, so a client can tell an admin which step to retry.
+const (
+	userDeleteStepListJobs       = "list_jobs"
+	userDeleteStepListKeptBuilds = "list_kept_builds"
+	userDeleteStepUnpinBuilds    = "unpin_kept_builds"
+	userDeleteStepDropSnapshots  = "drop_named_snapshots"
+)
+
+// userDeleteStepError names the cleanup step whose store call failed. A
+// failed step does not stop the rest of the cleanup: whatever the other
+// steps removed is still reported. handleUsersDelete answers 500 with
+// the partial result and this step so the admin retries; a retry
+// completes the cleanup (spoond-y0jj).
+type userDeleteStepError struct {
+	Step string
+	Err  error
+}
+
+func (e *userDeleteStepError) Error() string {
+	return fmt.Sprintf("%s: %v", e.Step, e.Err)
+}
+
+func (e *userDeleteStepError) Unwrap() error { return e.Err }
+
 // deleteUserData releases a removed user's leases and drops the state
 // that would otherwise outlive them (spoond-q4j): every running job is
 // cancelled (signalled then marked lost), every lease is released with
@@ -43,13 +70,29 @@ type userDeleteResult struct {
 //
 // It is safe to call for an owner whose identity is already gone: it
 // then only clears whatever state still bears that owner id.
-func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteResult {
+//
+// A store step that fails is reported, not swallowed: the returned
+// error is a *userDeleteStepError naming the step, and the result still
+// lists what the other steps removed. A caller that answers the delete
+// must surface it as an incomplete cleanup so the admin retries
+// (spoond-y0jj).
+func (s *Service) deleteUserData(ctx context.Context, owner string) (userDeleteResult, error) {
 	res := userDeleteResult{
 		User:       owner,
 		Leases:     []string{},
 		Jobs:       []string{},
 		Snapshots:  []string{},
 		KeptBuilds: []string{},
+	}
+
+	// First failure wins: it is the step the admin should look at, but
+	// every step below still runs so a retry has less left to do (and a
+	// later step may clear rows an earlier one could not).
+	var failed error
+	record := func(step string, err error) {
+		if err != nil && failed == nil {
+			failed = &userDeleteStepError{Step: step, Err: err}
+		}
 	}
 
 	// Refuse any admission ticket the user parked before the identity was
@@ -65,12 +108,18 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	// event even if the signal could not be delivered. Append, never
 	// overwrite, so the response's jobs list stays a JSON array even when
 	// the listing query fails.
-	res.Jobs = append(res.Jobs, s.cancelUserJobs(ctx, owner)...)
+	jobs, err := s.cancelUserJobs(ctx, owner)
+	res.Jobs = append(res.Jobs, jobs...)
+	record(userDeleteStepListJobs, err)
 
 	// Snapshot the pins before the releases drop them per lease, so the
 	// response can name every build that stopped being a GC root.
-	if kept, err := s.db.ListKeptBuildsOfOwner(ctx, owner); err != nil {
+	if err := s.userDeleteStoreError(userDeleteStepListKeptBuilds); err != nil {
 		s.log.Printf("user delete: list kept builds of %s: %v", owner, err)
+		record(userDeleteStepListKeptBuilds, err)
+	} else if kept, err := s.db.ListKeptBuildsOfOwner(ctx, owner); err != nil {
+		s.log.Printf("user delete: list kept builds of %s: %v", owner, err)
+		record(userDeleteStepListKeptBuilds, err)
 	} else {
 		res.KeptBuilds = append(res.KeptBuilds, kept...)
 	}
@@ -103,8 +152,12 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	// Safety net: a kept-builds row whose lease row lagged the in-memory
 	// set (or a release path that missed it) must not pin a build after
 	// the user is gone.
-	if extra, err := s.db.DeleteKeptBuildsOfOwner(ctx, owner); err != nil {
+	if err := s.userDeleteStoreError(userDeleteStepUnpinBuilds); err != nil {
 		s.log.Printf("user delete: unpin kept builds of %s: %v", owner, err)
+		record(userDeleteStepUnpinBuilds, err)
+	} else if extra, err := s.db.DeleteKeptBuildsOfOwner(ctx, owner); err != nil {
+		s.log.Printf("user delete: unpin kept builds of %s: %v", owner, err)
+		record(userDeleteStepUnpinBuilds, err)
 	} else {
 		for _, id := range extra {
 			s.log.Printf("user delete: unpinned build %s of %s", id, owner)
@@ -122,9 +175,12 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	// row could be inserted after this drop and survive: retention keeps
 	// the newest versions and the GC treats named_snapshots rows as GC
 	// roots, so it would never be reclaimed.
-	rows, err := s.db.DeleteNamedSnapshotsOfOwner(ctx, owner)
-	if err != nil {
+	if err := s.userDeleteStoreError(userDeleteStepDropSnapshots); err != nil {
 		s.log.Printf("user delete: drop named snapshots of %s: %v", owner, err)
+		record(userDeleteStepDropSnapshots, err)
+	} else if rows, err := s.db.DeleteNamedSnapshotsOfOwner(ctx, owner); err != nil {
+		s.log.Printf("user delete: drop named snapshots of %s: %v", owner, err)
+		record(userDeleteStepDropSnapshots, err)
 	} else {
 		for _, r := range rows {
 			s.log.Printf("user delete: dropped snapshot %s/%s@%d of %s", r.Owner, r.Name, r.Version, owner)
@@ -140,7 +196,18 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 	s.emitLeaseEvent("", owner, LeaseUserDeleted, fmt.Sprintf(
 		"removed user %s: %d lease(s), %d job(s), %d snapshot(s), %d kept build(s)",
 		owner, len(res.Leases), len(res.Jobs), len(res.Snapshots), len(res.KeptBuilds)))
-	return res
+	return res, failed
+}
+
+// userDeleteStoreError consults the test-only store-error hook for one
+// cleanup step; nil in production. It lets a test pin that a failed
+// store step answers an incomplete cleanup instead of a 200
+// (spoond-y0jj).
+func (s *Service) userDeleteStoreError(step string) error {
+	if s.userDeleteStoreErr == nil {
+		return nil
+	}
+	return s.userDeleteStoreErr(step)
 }
 
 // cancelUserJobs signals every running job of one owner's leases with
@@ -148,12 +215,18 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) userDeleteRe
 // ids it settled. A signal that cannot be delivered (the guest is gone)
 // is logged and the job is still settled, so no running count or secret
 // name survives the user. It always returns a non-nil slice, so a caller
-// can append it into a JSON array without turning the field null.
-func (s *Service) cancelUserJobs(ctx context.Context, owner string) []string {
+// can append it into a JSON array without turning the field null. A
+// failed listing returns the error alongside the empty slice, so the
+// caller can report the cleanup incomplete (spoond-y0jj).
+func (s *Service) cancelUserJobs(ctx context.Context, owner string) ([]string, error) {
+	if err := s.userDeleteStoreError(userDeleteStepListJobs); err != nil {
+		s.log.Printf("user delete: list running jobs of %s: %v", owner, err)
+		return []string{}, err
+	}
 	rows, err := s.db.ListRunningJobsOfOwner(ctx, owner)
 	if err != nil {
 		s.log.Printf("user delete: list running jobs of %s: %v", owner, err)
-		return []string{}
+		return []string{}, err
 	}
 	out := make([]string, 0, len(rows))
 	for _, j := range rows {
@@ -170,7 +243,7 @@ func (s *Service) cancelUserJobs(ctx context.Context, owner string) []string {
 		s.markJobLost(ctx, j, sandboxID, j.Generation, "user deleted")
 		out = append(out, j.JobID)
 	}
-	return out
+	return out, nil
 }
 
 // leasesOfOwner snapshots the owner's live leases, ordered by id so the
@@ -273,6 +346,11 @@ func (s *Service) legacyTokenOwner(id string) bool {
 // (spoond-q4j N2); an id that was never a user still answers 404. A
 // legacy token-map owner answers 409 and is left untouched: it has no
 // identity row but still authenticates.
+//
+// A cleanup whose store step failed answers 500 with the partial
+// "removed" body, "incomplete": true and the failed "step", so the
+// admin knows to retry rather than believing the user is fully gone
+// (spoond-y0jj). A retry completes the cleanup.
 func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -322,6 +400,16 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 	// cleans up, so reserveQuota and grantLease refuse a create that
 	// raced the identity removal, and the cleanup releases any lease that
 	// slipped through before the mark.
-	res := s.svc.deleteUserData(ctx, id)
+	res, cleanupErr := s.svc.deleteUserData(ctx, id)
+	if cleanupErr != nil {
+		body := map[string]any{"removed": res, "incomplete": true}
+		var stepErr *userDeleteStepError
+		if errors.As(cleanupErr, &stepErr) {
+			body["step"] = stepErr.Step
+			body["error"] = cleanupErr.Error()
+		}
+		writeJSON(w, http.StatusInternalServerError, body)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"removed": res})
 }
