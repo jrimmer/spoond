@@ -145,9 +145,9 @@ resolved so both behaviours coexist:
   `api/idle_suspend.go`, `api/jobs_http.go`, `docs/api.md` and
   `CHANGELOG.md` were checked for semantic (not only textual) clashes:
   `filesGate` resumes then the file op maps an unknown through
-  `mapFileError`; `writeResumeRefusal` never sees `ErrUnavailable` (a
-  resume's `Create` tests `List` only on `Start`, but the defensive generic
-  500 stays). No other change.
+  `mapFileError`; `writeResumeRefusal` keeps a defensive generic 500 for
+  `ErrUnavailable` (the e2b `Create` path maps only through `mapError`,
+  which never returns `ErrUnavailable`). No other change.
 
 ### Test-to-mutation map (round 3)
 
