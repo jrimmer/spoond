@@ -86,6 +86,8 @@ no `"wait"`, so the backend admission queue (#129) was skipped, and a
   the release) for a granted lease whose client is gone.
 - `TestStopCancelsJobWaitingInCreate` — insert the grace before
   cancelling a create-waiting job.
+- `TestDefaultJobTimeout` (cmd) — change the 6h default or ignore an
+  explicit `RUNNER_JOB_TIMEOUT=0`.
 - `TestMainSIGTERMGraceThenCancel` (cmd) — the wiring end to end: the
   create carries the default wait, the running step gets the grace.
 
