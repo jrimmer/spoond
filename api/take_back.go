@@ -248,26 +248,29 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	out := make([]takeBackOwner, 0, len(snap.owners))
-	byOwner := map[string]*takeBackOwner{}
+	// Owner -> index into out. Pointers into out would go stale when a
+	// lease of an unknown owner appends a row and out reallocates: the
+	// earlier appends would take through a dangling copy and their
+	// leases would be lost.
+	byOwner := map[string]int{}
 	for _, o := range snap.owners {
+		byOwner[o.Owner] = len(out)
 		out = append(out, takeBackOwner{Owner: o.Owner, UsedMiB: o.Memory.UsedMiB, SliceMiB: o.Memory.SliceMiB})
-	}
-	for i := range out {
-		byOwner[out[i].Owner] = &out[i]
 	}
 	for _, l := range s.store.leases {
 		if l.released || l.Owner == "" || !l.live() {
 			continue
 		}
-		v := byOwner[l.Owner]
-		if v == nil {
+		i, ok := byOwner[l.Owner]
+		if !ok {
 			// A lease of an owner the fair snapshot does not know (an
 			// owner added after it was computed, say): its memory is in
 			// the box, so give it the owner row the snapshot missed.
+			i = len(out)
+			byOwner[l.Owner] = i
 			out = append(out, takeBackOwner{Owner: l.Owner})
-			v = &out[len(out)-1]
-			byOwner[l.Owner] = v
 		}
+		v := &out[i]
 		v.Leases = append(v.Leases, takeBackLease{
 			ID:         l.ID,
 			MemoryMiB:  l.MemoryMB,

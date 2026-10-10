@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
@@ -224,6 +225,62 @@ func TestTakeBackOwnersViews(t *testing.T) {
 	}
 	if bv.Leases[0].LastActive.IsZero() {
 		t.Fatal("LastActive not carried")
+	}
+}
+
+// TestTakeBackOwnersUnknownOwnerLeaseKept: a lease whose owner the fair
+// snapshot does not know (a box owner added after the snapshot was
+// computed) still lands in the views, and the rows the snapshot did
+// know keep their leases when the slice reallocates for the new row.
+// The bug this pins: the owner map held pointers into the out slice, so
+// a later append moved the rows and an earlier owner's leases went
+// through stale pointers — an over-slice owner could come back with
+// zero leases and take-back would pass it by. The store's lease map is
+// iterated in random order, so the call is repeated: the bad order
+// (the unknown owner's lease seen first) hits within a few rounds.
+func TestTakeBackOwnersUnknownOwnerLeaseKept(t *testing.T) {
+	svc, db, _, ctx := newTakeBackService(t)
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetIdentities(ids)
+	known := addIdentityUser(t, ids, "known")
+	seedImage(t, db, "mid", 1024)
+
+	// The known owner's lease is seen first; the unknown owner's lease
+	// (created without an identity row) then appends a new owner row.
+	lk, err := svc.grantLease(ctx, leaseRequest{owner: known.ID, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant known: %v", err)
+	}
+	lu, err := svc.grantLease(ctx, leaseRequest{owner: "unknown-owner", image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant unknown: %v", err)
+	}
+	svc.updateNodeMetrics(ctx)
+	svc.invalidateFairShares()
+
+	for round := 0; round < 50; round++ {
+		views := svc.takeBackOwners(ctx)
+		by := map[string]takeBackOwner{}
+		for _, v := range views {
+			by[v.Owner] = v
+		}
+		kv, ok := by[known.ID]
+		if !ok {
+			t.Fatalf("round %d: known owner missing from views: %+v", round, views)
+		}
+		if len(kv.Leases) != 1 || kv.Leases[0].ID != lk.ID {
+			t.Fatalf("round %d: known owner leases = %+v, want [%s] (a later append must not orphan them)", round, kv.Leases, lk.ID)
+		}
+		uv, ok := by["unknown-owner"]
+		if !ok {
+			t.Fatalf("round %d: unknown owner missing from views: %+v", round, views)
+		}
+		if len(uv.Leases) != 1 || uv.Leases[0].ID != lu.ID {
+			t.Fatalf("round %d: unknown owner leases = %+v, want [%s]", round, uv.Leases, lu.ID)
+		}
 	}
 }
 
