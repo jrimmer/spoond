@@ -876,11 +876,15 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 	}
 }
 
-// TestMigration22PinOnV21Database builds a database at version 21 (with
-// a live-hold lease, a lapsed-hold lease and a plain lease) and opens
-// it: migration 22 must apply, turning every lease with an unexpired
-// hold into a pin and leaving a lapsed hold unpinned (FS5).
-func TestMigration22PinOnV21Database(t *testing.T) {
+// TestMigration22PinsHoldsAndBackfillsPausedAt builds a database at
+// version 21 with a live-hold lease, a lapsed-hold lease, an
+// unheld-suspended lease, a held-suspended lease and a lost lease, and
+// opens it. Migration 22 must apply: every unexpired hold becomes a pin,
+// every row already suspended (held or not) gets paused_at backfilled to
+// the migration time so the one clock starts a fresh 30 d from the
+// upgrade, and the hold columns are cleared for rollback (FS5,
+// spoond-k0uz H3/M6).
+func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v21.db")
 	{
 		db, err := Open(path) // applies every migration
@@ -892,8 +896,8 @@ func TestMigration22PinOnV21Database(t *testing.T) {
 		}
 	}
 	// Rewind to version 21: drop what migration 22 added and its row, so
-	// the next Open applies 0022 for real. The hold columns stay (FS5
-	// leaves them in place), so the UPDATE's columns exist.
+	// the next Open applies 0022 for real. The hold columns stay (0008
+	// created them), so the UPDATE's columns exist.
 	db21, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -958,17 +962,18 @@ func TestMigration22PinOnV21Database(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	pinned := map[string]bool{}
+	got := map[string]LeaseRow{}
 	for _, r := range rows {
-		pinned[r.ID] = r.Pinned
+		got[r.ID] = r
 	}
-	if !pinned["lease-hold"] {
+	// A live hold becomes a pin; a lapsed or absent hold does not.
+	if !got["lease-hold"].Pinned {
 		t.Fatal("a lease with an unexpired hold was not pinned by migration 22")
 	}
-	if pinned["lease-lapsed"] {
+	if got["lease-lapsed"].Pinned {
 		t.Fatal("a lease with a lapsed hold was pinned by migration 22")
 	}
-	if pinned["lease-plain"] {
+	if got["lease-plain"].Pinned {
 		t.Fatal("a plain lease was pinned by migration 22")
 	}
 	if !got["lease-held-suspended"].Pinned {

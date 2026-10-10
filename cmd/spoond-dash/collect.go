@@ -127,8 +127,11 @@ type Snapshot struct {
 	// PinnedIdle is the count of pinned leases whose last API activity
 	// passed PINNED_IDLE_NOTICE_DAYS (FS5, from leases.pinned_idle_since
 	// <> ''): visibility only, for the Notifications panel's one
-	// aggregate message. Nothing is paused, unpinned or released.
-	PinnedIdle int `json:"pinnedIdle"`
+	// aggregate message. PinnedIdleByOwner breaks that count down by
+	// owner label (display name where known), for the message's
+	// per-owner detail. Nothing is paused, unpinned or released.
+	PinnedIdle        int            `json:"pinnedIdle"`
+	PinnedIdleByOwner map[string]int `json:"-"`
 
 	// Rendered as HTML element patches, not sent as signals.
 	Services []Service   `json:"-"`
@@ -229,7 +232,9 @@ func jobExitedStyle(detail string) string {
 // are the live lease table the same tick built; a lease that has left
 // it (released) falls through to the event's owner.
 func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string {
-	if ev.LeaseID == "" {
+	// A lease-less event (the catalog gc, box_full, admin_unpin) carries
+	// no lease id or the placeholder "-", so it names spoond.
+	if ev.LeaseID == "" || ev.LeaseID == "-" {
 		return "spoond"
 	}
 	for _, r := range rows {
@@ -1131,13 +1136,35 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		return fmt.Errorf("count preempted leases: %w", err)
 	}
 	// The pinned-idle count (FS5): pinned leases the backend has flagged
-	// (pinned_idle_since set). Visibility only; the Notifications panel
-	// shows one aggregate message.
-	if err := db.QueryRow(`SELECT COUNT(*) FROM leases
-		WHERE pinned = 1 AND pinned_idle_since != ''`).Scan(&s.PinnedIdle); err != nil {
-		s.PinnedIdle = 0
+	// (pinned_idle_since set), counted per owner so the one aggregate
+	// message can name the count by owner. Visibility only; the
+	// Notifications panel shows one aggregate message.
+	s.PinnedIdle = 0
+	s.PinnedIdleByOwner = map[string]int{}
+	idleRows, err := db.Query(`SELECT owner, COUNT(*) FROM leases
+		WHERE pinned = 1 AND pinned_idle_since != '' GROUP BY owner`)
+	if err != nil {
 		return fmt.Errorf("count pinned-idle leases: %w", err)
 	}
+	for idleRows.Next() {
+		var owner string
+		var n int
+		if err := idleRows.Scan(&owner, &n); err != nil {
+			idleRows.Close()
+			return fmt.Errorf("count pinned-idle leases: %w", err)
+		}
+		name := names[owner]
+		if name == "" {
+			name = owner
+		}
+		s.PinnedIdleByOwner[name] += n
+		s.PinnedIdle += n
+	}
+	if err := idleRows.Err(); err != nil {
+		idleRows.Close()
+		return fmt.Errorf("count pinned-idle leases: %w", err)
+	}
+	idleRows.Close()
 
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
 	if err != nil {

@@ -332,6 +332,25 @@ func TestEventLinesGC(t *testing.T) {
 	}
 }
 
+// TestEventLinesLeaseLessPlaceholder: the box_full and admin_unpin
+// events carry the placeholder lease id "-"; the events panel still
+// names spoond as their subject, not the placeholder (spoond-k0uz L10).
+func TestEventLinesLeaseLessPlaceholder(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.events.add(dashEvent{At: at, Type: "box_full", LeaseID: "-",
+		Detail: "4096 MiB request for \"owner-b\": every take-back candidate is pinned"})
+	l := c.eventLines(at)[0]
+	if !strings.Contains(l.Text, "spoond") {
+		t.Fatalf("lease-less box_full line = %+v, want the spoond subject", l)
+	}
+	// The placeholder id is drawn in the id column (documented, L10),
+	// but the subject is spoond, never the placeholder.
+	if !strings.Contains(l.Text, "box_full  -") {
+		t.Fatalf("the placeholder id is not shown in the id column: %q", l.Text)
+	}
+}
+
 // TestEventLinesFailedCIReleaseWarn: a released event whose reason names
 // a failure (the runner's ✗) draws warn; a plain release stays dim.
 func TestEventLinesFailedCIReleaseWarn(t *testing.T) {

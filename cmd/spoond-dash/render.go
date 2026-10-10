@@ -174,13 +174,32 @@ func notices(s Snapshot) []Notice {
 			Text: fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct)})
 	}
 	// One aggregate message for pinned leases past the idle notice
-	// (FS5, visibility only): the lease holder's to deal with, so the
-	// panel names the count, not each lease.
+	// (FS5, visibility only): the lease holders' to deal with, so the
+	// panel names the count and the per-owner breakdown, not each lease.
 	if s.PinnedIdle > 0 {
 		out = append(out, Notice{ID: "pinned-idle", Severity: "warn",
-			Text: fmt.Sprintf("%d pinned lease%s idle past the notice period", s.PinnedIdle, plural(s.PinnedIdle))})
+			Text: fmt.Sprintf("%d pinned lease%s idle over 7 d (%s)", s.PinnedIdle, plural(s.PinnedIdle), pinnedIdleOwnerCounts(s.PinnedIdleByOwner))})
 	}
 	return out
+}
+
+// pinnedIdleOwnerCounts renders the per-owner breakdown of the
+// pinned-idle notice: "owner: count" pairs, ordered by owner name, with
+// a stable fallback when the collector could not break the count down.
+func pinnedIdleOwnerCounts(byOwner map[string]int) string {
+	if len(byOwner) == 0 {
+		return "owner: count"
+	}
+	names := make([]string, 0, len(byOwner))
+	for name := range byOwner {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s: %d", name, byOwner[name]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // plural returns "s" for a count other than one.
