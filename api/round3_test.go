@@ -454,6 +454,41 @@ func TestReleasePausedRacesResume(t *testing.T) {
 	}
 }
 
+// TestReleasePausedSkipsBusyLease: a lease that has turned busy by the
+// point of release — a suspend or resume of its own is in flight — is
+// not released by the one clock even past its deadline (the predicate
+// runs inside the commit lock; spoond-k0uz R3-3/R4-3). Mutation: make
+// the predicate ignore busy, which deletes the lease mid-operation.
+func TestReleasePausedSkipsBusyLease(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.pauseLease(ctx, l, false); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	due := l.PausedAt.Add(30 * 24 * time.Hour)
+	svc.store.mu.Lock()
+	l.busy = true
+	svc.store.mu.Unlock()
+	if svc.releaseIfPausedExpired(ctx, l, due, "paused_expired") {
+		t.Fatal("the clock released a busy lease")
+	}
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("the clock released a busy lease")
+	}
+	svc.store.mu.Lock()
+	l.busy = false
+	svc.store.mu.Unlock()
+	if !svc.releaseIfPausedExpired(ctx, l, due, "paused_expired") {
+		t.Fatal("the clock did not release the lease once its operation finished")
+	}
+}
+
 // TestResumeRunningLeaseIsNoop: resuming a lease that is already running
 // must not restore its pause build again (that would roll the guest's
 // memory back); it returns the lease unchanged. Restored regression test

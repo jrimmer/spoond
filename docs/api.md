@@ -36,7 +36,7 @@ particular means two different things depending on the code:
 | `400` | `image_mismatch` | a create `image` does not match the `snapshot`'s image |
 | `404` | `not_found` | unknown lease, name, snapshot or image |
 | `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight, or another caller's resume is; retry |
-| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` (`idle_suspend`|`preempt`) when the suspension was automatic; `resume_failed` marks a lease an undrain could not bring back and left suspended with its snapshot intact for the next work call to retry (spoond-638d) |
+| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` — `idle_suspend` or `preempt` when the suspension was automatic, `resume_failed` when an undrain could not bring the lease back and left it suspended with its snapshot intact for the next work call to retry (spoond-638d) |
 | `409` | `lease_not_live` | a released lease where a live one is required |
 | `409` | `cannot_start` | a snapshot build cannot run on this host; save it again |
 | `409` | `save_in_progress` | a named-snapshot save with the same idempotency key is running |
