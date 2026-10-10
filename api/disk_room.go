@@ -439,12 +439,12 @@ func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick i
 		released = !c.released && c.Suspended && !c.busy && !c.Pinned && c.ID == v.ID
 		return released
 	})
-	s.emitLeaseEvent(v.ID, v.Owner, LeaseCriticalRelease,
-		fmt.Sprintf("owner %q at %.0f%% of its disk slice; %.1f%% of the snapshot disk free; reclaiming paused lease %s",
-			v.Owner, v.Ratio*100, freePct, shortID(v.ID)))
 	if !released {
 		return false
 	}
+	s.emitLeaseEvent(v.ID, v.Owner, LeaseCriticalRelease,
+		fmt.Sprintf("owner %q at %.0f%% of its disk slice; %.1f%% of the snapshot disk free; reclaiming paused lease %s",
+			v.Owner, v.Ratio*100, freePct, shortID(v.ID)))
 	s.log.Printf("disk reclaim: releasing paused lease %s of %q (ratio %.2f, %s) for a request that does not fit",
 		v.ID, v.Owner, v.Ratio, formatEventBytes(v.Bytes))
 	s.noteDiskFreeing(v.Bytes, freeAtPick)

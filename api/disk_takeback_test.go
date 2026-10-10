@@ -575,9 +575,10 @@ func TestDiskTakeBackNothingReclaimableBoxFull(t *testing.T) {
 // goes around and takes the next candidate instead.
 func TestDiskTakeBackStalePickNoEventNoRefusal(t *testing.T) {
 	h := newDiskTBHarness(t, 1<<30)
-	h.seedPausedLease(t, "vict-1", "consumer-b", 200<<20, time.Hour, false)
-	// The loop must go around once: after the stale pick, this second
-	// unpinned paused lease of the same owner is the fresh pick.
+	// vict-1 is the OLDEST unpinned paused lease, so the selector picks
+	// it first — and the resume below makes that pick stale. vict-2 is
+	// younger; it is the fresh pick the loop takes on its second pass.
+	h.seedPausedLease(t, "vict-1", "consumer-b", 200<<20, 3*time.Hour, false)
 	h.seedPausedLease(t, "vict-2", "consumer-b", 400<<20, 2*time.Hour, false)
 	h.tightBox(t, 100<<20, 0, "5")
 
@@ -592,18 +593,6 @@ func TestDiskTakeBackStalePickNoEventNoRefusal(t *testing.T) {
 		l.State = "running"
 	}
 	h.svc.store.mu.Unlock()
-	// A live lease emit that fired before the watcher subscribed: the
-	// probe below consumes it on its way to disk.cleanup, which is the
-	// exact shape a mutated emit-before-release produces (the bogus
-	// critical_release is read before the cleanup). Under the committed
-	// order the stale pick emits nothing and this extra event is the
-	// only noise the waitFor walks past.
-	svc := h.svc
-	sub := svc.Subscribe(EventFilter{})
-	svc.emitLeaseEvent("pre-existing", "legacy-consumer", LeaseCriticalRelease, "pre-existing event before the pass")
-	<-sub.C // proof the emit landed on the bus (this watcher's own copy)
-	sub.Close()
-
 	evs := watchEvents(t, h.svc)
 	freed, err := h.svc.diskTakeBack(context.Background(), 100<<20, "consumer-a")
 	if err != nil {

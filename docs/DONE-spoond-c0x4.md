@@ -2,8 +2,9 @@
 
 Round 2–5 scope: FS3a ONLY, the core as new code, not wired into any
 request path. `api/disk_room.go` (accounting, selector, take-back) and
-`api/disk_takeback_test.go` carry it; migration 0023 backfills
-`paused_at` for the one clock's rows.
+`api/disk_takeback_test.go` carry it; migration 0023 adds
+`leases.disk_mb` and backfills it from `images.disk_mb` (it does NOT
+backfill `paused_at`).
 
 ## Done
 
@@ -42,15 +43,22 @@ request path. `api/disk_room.go` (accounting, selector, take-back) and
   disk usage/slice from the fair-share snapshot plus paused candidates
   sized by the pause build's recorded `size_bytes`; one lease-catalog
   read per pass.
-- **Migration 0023** backfills `paused_at` for suspended rows (the one
-  clock), mirroring the approved memory-mb backfill shape.
+- **Migration 0023** adds `leases.disk_mb` (the whole disk allowance,
+  stamped beside memory_mb) and backfills it from `images.disk_mb`; a
+  lease whose image row is gone stays 0 (unknown). It does not touch
+  `paused_at` — the one clock's pause date is set when a lease pauses.
 - **Tests.** The eight FS3a behaviours fail under mutation: each room
   term; garbage before any lease; inside-slice owner untouched; ratio
   ordering; pinned and running leases never taken; named/kept never
   touched; statfs lag causes no second deletion; nothing reclaimable
   answers box-full. Event assertions wait for the always-emitted
-  `disk.cleanup` before checking `critical_release`'s absence (proof:
-  moving the emit ahead of the release makes the stale-pick test fail).
+  `disk.cleanup` before checking `critical_release`'s absence. Stale-pick
+  proof: with the `if !released { return false }` guard moved back below
+  the emit (the round-5 regression), the stale pick announces again and
+  `TestDiskTakeBackStalePickNoEventNoRefusal` FAILS at "a stale pick must
+  not emit critical_release"; with the guard first it passes. The test's
+  oldest lease (paused 3 h before the younger one) is the one made stale,
+  so the mutated emit lands on exactly the pick the predicate refuses.
 
 ## FS3b still owes (after FS2 spoond-pxsn lands)
 
