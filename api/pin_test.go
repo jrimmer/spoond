@@ -143,8 +143,6 @@ func TestHolderLabelNeverPins(t *testing.T) {
 	// resumed (v3.0, spoond-k0uz M5): persistence is not a resume gate,
 	// and a holder label does not change that either way. The take-back
 	// pause left it with a resume build, like resume-on-use requires.
-	// The guaranteed lease gives the room back first so the burst
-	// re-admission fits.
 	// The guaranteed lease is released so the burst re-admission of the
 	// suspended lease fits (its resume-on-use re-admission is a burst
 	// admission).
