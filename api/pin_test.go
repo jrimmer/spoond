@@ -23,19 +23,23 @@ import (
 func TestPinnedLeaseSurvivesTakeBackButExpiresAtTTL(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 512, 0, 512)
+	// Identity owners, so each has a fair slice take-back can measure.
+	holder := preemptOwner(t, svc, "burst-a")
+	requester := preemptOwner(t, svc, "guaranteed")
 
 	// One pinned burst lease fills the node.
-	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: 20 * time.Millisecond, burst: true})
+	pinned, err := svc.grantLease(ctx, leaseRequest{owner: holder, image: "mid", ttl: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("grant pinned: %v", err)
 	}
-	if _, err := svc.setPinned("burst-a", pinned.ID, true); err != nil {
+	if _, err := svc.setPinned(holder, pinned.ID, true); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
 
 	// A guaranteed create that needs the pinned lease's room is refused
 	// box_full and pauses nothing.
-	_, err = svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour})
+	warmFairShares(svc, ctx)
+	_, err = svc.grantLease(ctx, leaseRequest{owner: requester, image: "mid", ttl: time.Hour})
 	if !isBoxFull(err) {
 		t.Fatalf("guaranteed grant err = %v, want box_full", err)
 	}
@@ -48,7 +52,7 @@ func TestPinnedLeaseSurvivesTakeBackButExpiresAtTTL(t *testing.T) {
 	svc.now = func() time.Time { return time.Now().Add(time.Second) }
 	t.Cleanup(func() { svc.now = time.Now })
 	svc.sweepExpired(ctx)
-	if svc.lookup("burst-a", pinned.ID) != nil {
+	if svc.lookup(holder, pinned.ID) != nil {
 		t.Fatal("a pinned lease was not released at its own TTL")
 	}
 }
@@ -60,14 +64,15 @@ func TestBoxFullHTTP429(t *testing.T) {
 	installDynamicNode(t, svc, sub, 512, 0, 512)
 
 	// A pinned burst lease fills the node.
-	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: time.Hour, burst: true})
+	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-b", image: "mid", ttl: time.Hour})
 	if err != nil {
 		t.Fatalf("grant pinned: %v", err)
 	}
-	if _, err := svc.setPinned("burst-a", pinned.ID, true); err != nil {
+	if _, err := svc.setPinned("consumer-b", pinned.ID, true); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
 
+	warmFairShares(svc, ctx)
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{"image": "mid", "ttl": 3600})
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("box_full create = %d (%v), want 429", resp.StatusCode, body)

@@ -84,35 +84,3 @@ func (s *Service) cachedFreeHugepageMiB(ctx context.Context) (uint64, error) {
 	defer s.nodeInfoMu.Unlock()
 	return s.freeHugepageMiBLocked(ctx)
 }
-
-// takeableFreeableMiB is the memory of the running leases take-back may
-// pause: live, idle, unpinned. It is an upper bound (the selector still
-// leaves owners inside their slice alone).
-func (s *Service) takeableFreeableMiB() uint64 {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	var n uint64
-	for _, l := range s.store.leases {
-		if l.released || l.busy || l.Suspended || !l.live() || l.Pinned {
-			continue
-		}
-		n += uint64(l.MemoryMB)
-	}
-	return n
-}
-
-// pinnedFreeableMiB is the memory of the running leases that are pinned
-// and so are not take-back candidates. It lets admitMemory tell "no room
-// exists" from "every candidate is pinned".
-func (s *Service) pinnedFreeableMiB() uint64 {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	var n uint64
-	for _, l := range s.store.leases {
-		if l.released || l.busy || l.Suspended || !l.live() || !l.Pinned {
-			continue
-		}
-		n += uint64(l.MemoryMB)
-	}
-	return n
-}

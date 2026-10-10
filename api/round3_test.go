@@ -182,15 +182,16 @@ func boxFullNode(t *testing.T) (*httptest.Server, *Service, *Lease, *Lease) {
 	// The pinned lease that takes the room back while the victim is
 	// suspended: 1024 MiB free after the fill, and every take-back
 	// candidate pinned.
-	filler, err := svc.grantLease(ctx, leaseRequest{owner: "filler-a", image: "mid", ttl: time.Hour})
+	filler, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-a", image: "mid", ttl: time.Hour})
 	if err != nil {
 		t.Fatalf("grant filler: %v", err)
 	}
-	if _, err := svc.setPinned("filler-a", filler.ID, true); err != nil {
+	if _, err := svc.setPinned("consumer-a", filler.ID, true); err != nil {
 		t.Fatalf("pin filler: %v", err)
 	}
 	// Sanity: a guaranteed admission of the victim's size is box_full now.
 	dropNodeCache(svc)
+	warmFairShares(svc, ctx)
 	if err := svc.admitMemory(ctx, "consumer-b", 1024); !isBoxFull(err) {
 		t.Fatalf("setup: memory admission err = %v, want box_full", err)
 	}
@@ -271,17 +272,18 @@ func TestUndrainBoxFullDefers(t *testing.T) {
 		t.Fatalf("drain left the target in the wrong shape: %+v", target)
 	}
 
-	// While it is suspended, a pinned lease takes half the room:
-	// 1024 MiB free, every take-back candidate pinned, and the target's
-	// re-admission (2048 MiB) is box_full.
-	filler, err := svc.grantLease(ctx, leaseRequest{owner: "filler-a", image: "mid", ttl: time.Hour})
+	// While it is suspended, a pinned 2048 MiB lease takes the room: its
+	// owner is over its 1024 MiB slice but every take-back candidate is
+	// pinned, so the target's re-admission (2048 MiB) is box_full.
+	filler, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-b", image: "big", ttl: time.Hour})
 	if err != nil {
 		t.Fatalf("grant filler: %v", err)
 	}
-	if _, err := svc.setPinned("filler-a", filler.ID, true); err != nil {
+	if _, err := svc.setPinned("consumer-b", filler.ID, true); err != nil {
 		t.Fatalf("pin filler: %v", err)
 	}
 	dropNodeCache(svc)
+	warmFairShares(svc, ctx)
 	if err := svc.admitMemory(ctx, "consumer-a", 2048); !isBoxFull(err) {
 		t.Fatalf("setup: memory re-admission err = %v, want box_full", err)
 	}

@@ -602,17 +602,21 @@ func TestPreemptionNeverPausesPinned(t *testing.T) {
 func TestBoxFullWhenOnlyPinnedCandidates(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 512, 0, 512)
-	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: time.Hour, burst: true})
+	// Identity owners, so each has a fair slice take-back can measure.
+	holder := preemptOwner(t, svc, "burst-a")
+	requester := preemptOwner(t, svc, "guaranteed")
+	pinned, err := svc.grantLease(ctx, leaseRequest{owner: holder, image: "mid", ttl: time.Hour})
 	if err != nil {
 		t.Fatalf("grant pinned: %v", err)
 	}
-	if _, err := svc.setPinned("burst-a", pinned.ID, true); err != nil {
+	if _, err := svc.setPinned(holder, pinned.ID, true); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
 
 	// A 1024 MiB guaranteed lease cannot fit; the only candidate is
 	// pinned, so this is box_full, not a preemption.
-	_, err = svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour})
+	warmFairShares(svc, ctx)
+	_, err = svc.grantLease(ctx, leaseRequest{owner: requester, image: "mid", ttl: time.Hour})
 	if !isBoxFull(err) {
 		t.Fatalf("guaranteed grant err = %v, want box_full", err)
 	}
