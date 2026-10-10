@@ -117,8 +117,27 @@ func mapError(err error) error {
 		// (spoond-638d).
 		return fmt.Errorf("%w: %s", substrate.ErrUnavailable, status.Convert(err).Message())
 	default:
+		// A disk-full failure from the orchestrator (create, pause,
+		// resume, checkpoint) arrives as Internal or Unknown rather than
+		// ResourceExhausted, and would otherwise fall through as a 500.
+		// The same holds for a non-gRPC error from a local file write
+		// whose text reports ENOSPC. Recognise both by text and answer
+		// them like any other capacity refusal.
+		msg := status.Convert(err).Message()
+		if diskFull(msg) {
+			return fmt.Errorf("%w: %s", substrate.ErrCapacity, msg)
+		}
 		return err
 	}
+}
+
+// diskFull reports whether an error message describes a full filesystem or
+// an exhausted disk quota (ENOSPC).
+func diskFull(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "no space left on device") ||
+		strings.Contains(m, "enospc") ||
+		strings.Contains(m, "disk quota exceeded")
 }
 
 // Create starts a sandbox and waits for envd to become healthy.
