@@ -1293,6 +1293,10 @@ redrawn every 2 seconds until interrupted. It runs as its own service on **:8893
 one) — and serves HTTPS when `DASH_TLS_CERT`/`DASH_TLS_KEY` are set.
 Since basic auth sends the password, use TLS unless it is bound to
 localhost.
+`DASH_AUTH=off` turns the login off: anyone who can reach the port sees
+the page and its stream (lease ids, owners, host load), so use it only
+on a private network. The dashboard logs a line at startup when it is
+off. `/healthz` and `/readyz` never need a login.
 
 One collector loop builds a snapshot every `DASH_INTERVAL` (default 2 s)
 from spoond's `/metrics` using the scrape-only `METRICS_TOKEN`, the
@@ -1329,7 +1333,8 @@ variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `DASH_ADDR` | `0.0.0.0:8893` | listen address |
-| `DASH_USER`, `DASH_PASSWORD_HASH` | *(required)* | basic auth (`spoond dash hash PASS` makes the hash) |
+| `DASH_AUTH` | `on` | require basic auth; `off` (or `0`, `false`, `no`) serves with no login, and any other value keeps it on |
+| `DASH_USER`, `DASH_PASSWORD_HASH` | *(required while `DASH_AUTH` is on)* | basic auth (`spoond dash hash PASS` makes the hash) |
 | `DASH_TLS_CERT`, `DASH_TLS_KEY` | *(unset)* | serve HTTPS (set both or neither); comma-separated lists serve several certificates by SNI and reload on change, as `TLS_CERT`/`TLS_KEY` do |
 | `METRICS_URL` | `https://127.0.0.1:8890/metrics` | spoond's `/metrics` |
 | `METRICS_SERVER_NAME` | *(METRICS_URL host)* | TLS server name for that URL |

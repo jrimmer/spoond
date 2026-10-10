@@ -18,8 +18,12 @@
 //	DASH_TLS_CERT, DASH_TLS_KEY  serve HTTPS with this pair, or comma-separated
 //	                             lists chosen by SNI, reloaded on change (basic auth
 //	                     sends the password, so use TLS beyond localhost)
-//	DASH_USER            basic-auth user (required)
-//	DASH_PASSWORD_HASH   bcrypt hash of the password (required)
+//	DASH_AUTH            require basic auth (default on; "0", "false", "no"
+//	                     or "off" serve the page and stream to anyone who
+//	                     can reach DASH_ADDR — only for a private network)
+//	DASH_USER            basic-auth user (required while DASH_AUTH is on)
+//	DASH_PASSWORD_HASH   bcrypt hash of the password (required while
+//	                     DASH_AUTH is on)
 //	METRICS_URL          spoond /metrics (default https://127.0.0.1:8890/metrics)
 //	METRICS_SERVER_NAME  TLS server name for METRICS_URL (default: METRICS_URL host)
 //	METRICS_TOKEN        spoond's scrape-only token (required)
@@ -111,6 +115,9 @@ type Config struct {
 	History    int
 	Width      int    // grid width in cells (DASH_WIDTH, 72–104)
 	Host       string // header label (DASH_HOST, else the hostname)
+	// NoAuth turns basic auth off (DASH_AUTH off). The zero value
+	// keeps the login, so a Config built in code is guarded by default.
+	NoAuth bool
 }
 
 func configFromEnv() (Config, error) {
@@ -136,6 +143,7 @@ func configFromEnv() (Config, error) {
 		Services: strings.Split(env("DASH_SERVICES",
 			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch"), ","),
 		EventsToken: os.Getenv("DASH_EVENTS_TOKEN"),
+		NoAuth:      !authOn(os.Getenv("DASH_AUTH")),
 	}
 	var err error
 	if c.Interval, err = time.ParseDuration(env("DASH_INTERVAL", "2s")); err != nil || c.Interval < time.Second {
@@ -165,9 +173,23 @@ func configFromEnv() (Config, error) {
 	return c, nil
 }
 
+// authOn reads DASH_AUTH. Only the usual off-words turn the login off;
+// empty or anything else (a typo included) keeps it on.
+func authOn(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
 // requireLogin checks the settings only the web dashboard needs: spoond
-// top draws in the operator's own terminal and has no login.
+// top draws in the operator's own terminal and has no login. With
+// DASH_AUTH off there is no login to configure.
 func requireLogin(c Config) error {
+	if c.NoAuth {
+		return nil
+	}
 	for k, v := range map[string]string{"DASH_USER": c.User, "DASH_PASSWORD_HASH": c.PasswordHash} {
 		if v == "" {
 			return fmt.Errorf("%s is required", k)
@@ -198,6 +220,9 @@ func Main(args []string) int {
 	if err != nil {
 		log.Printf("spoond dash: %v", err)
 		return 2
+	}
+	if cfg.NoAuth {
+		log.Printf("spoond dash: DASH_AUTH is off: the dashboard serves without a login on %s", cfg.Addr)
 	}
 	d, err := newDash(cfg)
 	if err != nil {
@@ -339,6 +364,9 @@ func (d *dash) handler() http.Handler {
 	// reads answers — metrics, catalog and identity store. Auth-exempt
 	// like /healthz: an uptime monitor holds no credentials.
 	mux.HandleFunc("GET /readyz", d.handleReadyz)
+	if d.cfg.NoAuth {
+		return mux
+	}
 	return d.basicAuth(mux)
 }
 
