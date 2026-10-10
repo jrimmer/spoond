@@ -202,11 +202,3 @@ func TestDiskRoomBoxFullError(t *testing.T) {
 		t.Fatal("errBoxFull should match")
 	}
 }
-
-func TestDiskTakeBackGarbageFirst(t *testing.T) {
-	t.Skip("TODO(FS3a step 3): with orphans and a paused over-slice lease on disk, diskTakeBack must reap orphans first (honouring GC_DELETE), release no lease if garbage alone covers the need, and emit one disk.cleanup event with per-category bytes")
-}
-
-func TestDiskTakeBackNamedKeptUntouched(t *testing.T) {
-	t.Skip("TODO(FS3a step 3): named/kept builds and pinned leases must never be deleted or released by diskTakeBack, even when the need cannot be met; the result is *boxFullError and no lease.critical_release event is emitted for them")
-}

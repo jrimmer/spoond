@@ -228,14 +228,17 @@ func diskVictims(owners []diskOwner, requester string, needBytes int64) []diskVi
 				continue
 			}
 			r := diskRatio(st.used, st.o.SliceBytes)
-			if r <= reqRatio {
-				continue
-			}
 			// The candidate must leave the owner strictly above the
 			// requester's after-request ratio (checked on the lease's own
 			// bytes, so a bigger lease may be unreachable while a smaller
-			// one of the same owner still qualifies).
-			if !diskVictimAgainstRequester(float64(st.used), float64(st.leaps[0].Bytes), float64(st.o.SliceBytes), reqRatio) {
+			// one of the same owner still qualifies), and strictly above
+			// the requester's ratio right now. Together with the
+			// used > slice guard this is the alignment with memVictims
+			// (FS2): take-back never pushes an owner below the point the
+			// requester itself would sit at, and never below its own
+			// slice.
+			if r <= reqRatio ||
+				!diskVictimAgainstRequester(float64(st.used), float64(st.leaps[0].Bytes), float64(st.o.SliceBytes), reqRatio) {
 				continue
 			}
 			if best == nil || r > bestRatio {
@@ -421,8 +424,10 @@ func (s *Service) diskOwners(ctx context.Context, needBytes int64) []diskOwner {
 }
 
 // pauseBuildsByLease maps lease id → pause build row for every lease's
-// resume build, from one catalog read. ok is false when the read failed
-// (no candidate is built from a half-read catalog).
+// resume build, from one catalog read. A pause build names the lease it
+// was snapshotted from as its parent (pauseLeaseBody writes
+// ParentBuildID = l.ID), so the key is the parent. ok is false when the
+// read failed (no candidate is built from a half-read catalog).
 func (s *Service) pauseBuildsByLease(ctx context.Context) (map[string]store.BuildRow, bool) {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
@@ -439,11 +444,11 @@ func (s *Service) pauseBuildsByLease(ctx context.Context) (map[string]store.Buil
 }
 
 // pausedLeasesOf lists owner's suspended leases as diskLease candidates:
-// one per lease, sized by its lease's pause build's re-measured
-// size_bytes (falling back to the owner's recorded pause bytes per lease
-// is wrong, so a lease with no pause build row is skipped — its bytes
-// are gone or unknown). Pinned leases are carried so the selector can
-// refuse them explicitly.
+// one per lease, sized by its lease's pause build's recorded size_bytes
+// (the number the disk usage accounting reads, so the victim list and
+// the owner's Used can never disagree). A lease with no pause build row
+// is skipped — its bytes are gone or unknown. Pinned leases are carried
+// so the selector can refuse them explicitly.
 func (s *Service) pausedLeasesOf(ctx context.Context, owner string, byPauseBuild map[string]store.BuildRow) []diskLease {
 	rows, err := s.db.ListLeases(ctx)
 	if err != nil {
@@ -452,10 +457,10 @@ func (s *Service) pausedLeasesOf(ctx context.Context, owner string, byPauseBuild
 	}
 	var out []diskLease
 	for _, r := range rows {
-		if r.Owner != owner || !r.Suspended || r.State == "deleted" || r.ResumeBuildID == "" {
+		if r.Owner != owner || r.State != "suspended" || r.ResumeBuildID == "" {
 			continue
 		}
-		b, ok := byPauseBuild[r.ResumeBuildID]
+		b, ok := byPauseBuild[r.ID]
 		if !ok || b.SizeBytes <= 0 {
 			continue
 		}
