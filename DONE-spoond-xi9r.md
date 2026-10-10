@@ -48,12 +48,13 @@ Tests:
 
 ## (c) unconditional invalidation on size settle
 
-`api/gc.go` `settleBuildSize`'s `record` closure invalidated the
-fair-share cache only through `UpdateKeptMetrics`, which returns before
-`invalidateFairShares` when `s.metrics == nil` (in production the metrics
-are wired, but the service is usable without them and the tests exercise
-that path). `record` now calls `s.invalidateFairShares()` directly after
-the store write, then reaches for the gauges.
+`api/gc.go` `settleBuildSize`'s `record` closure now calls
+`s.invalidateFairShares()` directly after the store write. Before this,
+the invalidation was reached only through `UpdateKeptMetrics`; the base
+`UpdateKeptMetrics` already invalidated unconditionally before its
+metrics nil check, so this was not an observed bug. The change makes the
+invalidation explicit in `record` rather than incidental to the gauge
+update, and a test pins it independent of the metrics wiring.
 
 Test: `TestFairSharesSizeSettleInvalidatesWithoutMetrics` (api), with
 `s.metrics == nil` and a frozen clock, asserts the snapshot is replaced

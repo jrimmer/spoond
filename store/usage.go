@@ -25,7 +25,9 @@ type OwnerUsage struct {
 // whole box in one query: pause snapshots, kept checkpoints and named
 // snapshots, from each build's recorded size_bytes. A deleted build's
 // files are gone and count for nothing in the kept and pause sets; a
-// named snapshot keeps its recorded size (its build is a GC root).
+// named snapshot prefers its build row's re-measured size and falls back
+// to its own recorded size only when the build row is gone (its build is
+// a GC root).
 //
 // The three sets overlap — a saved snapshot's checkpoint stays pinned by
 // the lease it was saved from — so a build is attributed to its owner

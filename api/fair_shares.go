@@ -172,8 +172,9 @@ func (s *Service) totalHugepageMiB() (int, bool) {
 // usableSnapshotBytes reports the snapshot volume's usable bytes: the
 // statfs bytes available to an unprivileged writer (Bavail, the second
 // return of diskCapacity) plus the snapshot bytes spoond itself already
-// accounts for (the sum of every owner's recorded pause + kept + named
-// bytes, de-duplicated by build). That is the space spoond can hand out
+// accounts for (the box-level sum over DISTINCT build_id from
+// store.AccountedSnapshotBytes, which collapses the pause, kept-pin and
+// named arms to one size per build). That is the space spoond can hand out
 // to owners, not the raw filesystem total: the root-reserved blocks are
 // not spoond's to give, and the bytes spoond already holds are still
 // part of the pool the next snapshot can draw on once reclaimed. A
