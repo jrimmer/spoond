@@ -426,6 +426,8 @@ func (s *Server) handleUsersDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("remove: %v", err))
 		return
 	}
+	// A removed owner changes N and every owner's slice (#145 FS1).
+	s.svc.invalidateFairShares()
 	// Stop any create of this owner that is already admitted or waiting
 	// (spoond-q4j): deleteUserData marks the owner deleted before it
 	// cleans up, so reserveQuota and grantLease refuse a create that

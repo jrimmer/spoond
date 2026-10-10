@@ -10,6 +10,54 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Fair shares: an equal floating slice per owner and usage
+  accounting (#145 FS1).** Every owner now has a computed 1/N slice of
+  the box — the hugepage memory pool and the snapshot volume's usable
+  bytes, N being the number of owners that exist (each identity user,
+  plus the legacy consumer token as one owner). Usage is measured from
+  recorded state: memory is the owner's running leases, disk is their
+  pause snapshots + kept checkpoints + named snapshots (recorded
+  `size_bytes`, never a filesystem walk per request). The view is
+  computed in one place (`api/fair_shares.go`), cached, and invalidated
+  on lease state changes and owner add/delete.
+
+  - **API.** `GET /api/fair-shares` (admin) lists every owner sorted by
+    ratio (usage/slice) descending; `GET /api/users/{id}` (admin) and
+    `GET /api/users/me`/`GET /api/usage` (self) return the owner's
+    `slice_pct`, `memory {slice_mib, used_mib}`, `disk {slice_bytes,
+    used_bytes, paused_bytes, kept_bytes, named_bytes}` and `ratio`.
+  - **`GET /api/shares` is unchanged.** It still lists the caller's
+    lease grants; the fair-share view is served at `GET
+    /api/fair-shares` instead, so no existing caller breaks. The SSH
+    gateway's `share ls` is untouched.
+  - This unit computes and reports the shares only: no admission,
+    preemption or take-back behaviour changes yet.
+  - Capacity is read from the node-info cache the admission path keeps
+    warm; the fair-share routes make no substrate RPC. On a cold cache,
+    or when a store read fails, the slices are `0`, the result is marked
+    unknown and **not cached**, and the next request recomputes it (a
+    failed read is never served as a real zero). Invalidations run
+    after the store write, so a concurrent compute cannot cache the
+    pre-write state.
+  - **Unknown capacity is explicit (`capacity_known`).** The
+    `/api/fair-shares`, `/api/usage` and `users/me` share payloads carry
+    a `capacity_known` boolean: `false` means the node-info cache was
+    cold or a store read failed, so the slices are not computed yet
+    (rather than a wrong zero). The endpoint still answers `200`.
+  - **Disk slice basis is the volume's usable bytes.** The slice is
+    1/N of the `statfs` free-to-unprivileged bytes (`Bavail`, not the
+    raw filesystem total) plus the snapshot bytes spoond already
+    accounts for (kept + named + paused) — the space spoond can hand
+    out. A build that is both a kept checkpoint and a named snapshot
+    counts once.
+  - **The cache does not churn on activity.** A lease save invalidates
+    the fair-share view only when an accounted quantity changes (a
+    lease is created/released/suspended/resumed, or its memory charge
+    changes); an activity-only save (`LastActive`, expiry, holder)
+    leaves it warm.
+
 ## [2.9.2] - 2026-10-09
 
 ### Changed

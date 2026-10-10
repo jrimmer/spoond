@@ -107,6 +107,79 @@ func TestShareGrantEnablesExec(t *testing.T) {
 	_ = aID
 }
 
+func TestShareListJSONShapePinned(t *testing.T) {
+	h, _, bID := newShareTestServer(t)
+	lid := createLeaseAs(h, "tok-a")
+	if lid == "" {
+		t.Fatal("a could not create lease")
+	}
+	// Grant one share so the list is non-empty and carries every field.
+	g := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/sandboxes/"+lid+"/share", strings.NewReader(`{"grantee":"`+bID+`","mode":"http","ttl":3600}`))
+	req.Header.Set("Authorization", "Bearer tok-a")
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(g, req)
+	if g.Code != http.StatusCreated {
+		t.Fatalf("grant: %d %s", g.Code, g.Body.String())
+	}
+
+	ls := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/api/shares", nil)
+	req2.Header.Set("Authorization", "Bearer tok-a")
+	h.ServeHTTP(ls, req2)
+	if ls.Code != http.StatusOK {
+		t.Fatalf("GET /api/shares: %d %s", ls.Code, ls.Body.String())
+	}
+
+	// Pin the wire shape: a top-level "shares" array whose entries carry
+	// exactly lease_id, grantee, mode and created_at (expires_at optional).
+	// DisallowUnknownFields rejects any extra top-level key, so renaming
+	// "shares" or adding a key to /api/shares fails this test.
+	type shareEntry struct {
+		LeaseID   string `json:"lease_id"`
+		Grantee   string `json:"grantee"`
+		Mode      string `json:"mode"`
+		CreatedAt string `json:"created_at"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	var got struct {
+		Shares []shareEntry `json:"shares"`
+	}
+	dec := json.NewDecoder(strings.NewReader(ls.Body.String()))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("decode /api/shares: %v (body %s)", err, ls.Body.String())
+	}
+	if len(got.Shares) != 1 {
+		t.Fatalf("shares = %d, want 1: %s", len(got.Shares), ls.Body.String())
+	}
+	sh := got.Shares[0]
+	if sh.LeaseID != lid || sh.Grantee != bID || sh.Mode != "http" {
+		t.Fatalf("share = %+v, want lease %s grantee %s mode http", sh, lid, bID)
+	}
+	if sh.CreatedAt == "" {
+		t.Fatalf("share missing created_at: %+v", sh)
+	}
+	// expires_at is optional but, when present, must parse as a time.
+	if sh.ExpiresAt != "" {
+		if _, err := time.Parse(time.RFC3339, sh.ExpiresAt); err != nil {
+			t.Fatalf("expires_at %q: %v", sh.ExpiresAt, err)
+		}
+	}
+
+	// A missing or renamed "shares" key must not decode into the entries:
+	// the length check above then fails.
+	var renamed struct {
+		Grants []shareEntry `json:"shares"`
+	}
+	if err := json.Unmarshal([]byte(`{"grants":[]}`), &renamed); err != nil {
+		t.Fatalf("decode renamed: %v", err)
+	}
+	if len(renamed.Grants) != 0 {
+		t.Fatalf("renamed shares decoded: %+v", renamed.Grants)
+	}
+}
+
 func TestShareRevokeDenies(t *testing.T) {
 	h, _, bID := newShareTestServer(t)
 	lid := createLeaseAs(h, "tok-a")

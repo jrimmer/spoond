@@ -279,6 +279,26 @@ type Store struct {
 	// they walk, so a lease with a running job counts as active without a
 	// store round trip.
 	runningJobs map[string]int
+	// accounted caches the last-saved accounted signature of each lease
+	// (owner, running state, memory charge). saveLeaseLocked invalidates
+	// the fair-share view only when a lease's signature changes, so an
+	// activity-only save (LastActive, ExpiresAt, holder) does not churn
+	// the cache (#145 FS1 R5-3).
+	accounted map[string]leaseAccounted
+}
+
+// leaseAccounted is the part of a lease that feeds the fair-share usage
+// view: its owner, whether it is running (memory charged) and its memory
+// charge. Disk usage moves through the build/keep/named paths, which
+// invalidate explicitly.
+type leaseAccounted struct {
+	owner    string
+	live     bool
+	memoryMB int
+}
+
+func leaseAccountedOf(l *Lease) leaseAccounted {
+	return leaseAccounted{owner: l.Owner, live: l.live(), memoryMB: l.MemoryMB}
 }
 
 func newStore() *Store {
@@ -290,6 +310,7 @@ func newStore() *Store {
 		pendingMiB:      make(map[string]int),
 		lastActiveDirty: make(map[string]time.Time),
 		runningJobs:     make(map[string]int),
+		accounted:       make(map[string]leaseAccounted),
 	}
 }
 
@@ -699,6 +720,11 @@ type Service struct {
 	nodeInfoMu    sync.Mutex
 	nodeInfoCache substrate.NodeInfo
 	nodeInfoAt    time.Time
+
+	// fairShares caches the per-owner slice and usage view (#145 FS1).
+	// It is invalidated on every lease state change and every owner
+	// add/delete (see invalidateFairShares).
+	fairShareCache fairSharesCache
 
 	// preemptMu serialises preemption (#128 part 3): one guaranteed
 	// admission preempts at a time, so two concurrent creates cannot
@@ -4703,10 +4729,23 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 		s.log.Printf("store: upsert_lease %s: dropped, lease was released", l.ID)
 		return
 	}
+	// A state change that moves an accounted quantity — the owner, a
+	// running/suspended transition, or the memory charge — drops the
+	// fair-share snapshot so the next read recomputes it (#145 FS1). An
+	// activity-only save (LastActive, ExpiresAt, holder, name, comment)
+	// leaves the cache warm (R5-3). Disk usage moves through the build,
+	// keep and named paths, which invalidate explicitly. The invalidation
+	// runs AFTER the write succeeds: invalidating first lets a concurrent
+	// compute read the pre-write state and cache it for the TTL.
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.UpsertLease(ctx, leaseToRow(l)); err != nil {
 		s.storeError("upsert_lease", l.ID, err)
+		return
+	}
+	if acc := leaseAccountedOf(l); acc != s.store.accounted[l.ID] {
+		s.store.accounted[l.ID] = acc
+		s.invalidateFairShares()
 	}
 }
 
@@ -4798,11 +4837,19 @@ func (s *Service) bumpGenerationLocked(l *Lease) {
 }
 
 func (s *Service) deleteLeaseLocked(id string) {
+	// The lease is gone: its memory and disk usage leave the box view
+	// (#145 FS1). Invalidate AFTER the row is gone, so a concurrent compute
+	// cannot read the pre-delete state and cache it for the TTL. A deleted
+	// lease's accounted signature goes too, so a re-created lease under
+	// the same id is a change again.
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
 	if err := s.db.DeleteLease(ctx, id); err != nil {
 		s.storeError("delete_lease", id, err)
+		return
 	}
+	delete(s.store.accounted, id)
+	s.invalidateFairShares()
 }
 
 func (s *Service) saveShareLocked(sh *Share) {
@@ -4947,6 +4994,9 @@ func (s *Service) LoadState(ctx context.Context) error {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	s.store.leases = loaded
+	for id, l := range loaded {
+		s.store.accounted[id] = leaseAccountedOf(l)
+	}
 	for _, r := range shareRows {
 		if s.store.shares[r.LeaseID] == nil {
 			s.store.shares[r.LeaseID] = make(map[string]*Share)

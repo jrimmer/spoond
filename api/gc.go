@@ -328,6 +328,8 @@ func pluralBuilds(n int) string {
 // (their recorded size_bytes). A failed read leaves the gauges at their
 // last values.
 func (s *Service) UpdateKeptMetrics(ctx context.Context) {
+	// A kept-build change moves the owner's disk usage (#145 FS1).
+	s.invalidateFairShares()
 	if s.metrics == nil {
 		return
 	}
