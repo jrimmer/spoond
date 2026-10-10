@@ -483,14 +483,11 @@ func undrainReadyStatus(status string) bool {
 }
 
 // undrainAdmissionRefusal reports whether err is one of the transient
-// admission answers (over quota, no burst room, no preemption room, or
-// box_full: every take-back candidate is pinned, FS5): they keep the
-// lease drained for a later undrain and must not be retried in a tight
-// loop here. A box_full undrain must never report resume_failed or lose
-// the lease — nothing spoond can pause will ever make room
-// (spoond-k0uz R3-2).
+// admission answers (over quota, no burst room, no preemption room): they
+// keep the lease drained for a later undrain and must not be retried in a
+// tight loop here.
 func undrainAdmissionRefusal(err error) bool {
-	return errors.Is(err, errQuotaExceeded) || errors.Is(err, errBurstReserve) || errors.Is(err, errPreemptCannot) || isBoxFull(err)
+	return errors.Is(err, errQuotaExceeded) || errors.Is(err, errBurstReserve) || errors.Is(err, errPreemptCannot)
 }
 
 // resumeRetryable reports whether a failed undrain resume is worth

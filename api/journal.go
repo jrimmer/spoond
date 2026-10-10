@@ -85,7 +85,7 @@ func journalCreateReason(snapshot, clonedFrom, forkedFrom string) string {
 // journalReleaseReason maps the human release reason to the journal's
 // canonical one. The event keeps its free text; the journal prefers a
 // short, stable token so a release can be counted and grepped, except
-// for a callersupplied reason (a CI job names itself), which is kept
+// for a caller-supplied reason (a CI job names itself), which is kept
 // verbatim because it is the most useful thing on the line, and the
 // owner-named API deletion.
 func journalReleaseReason(l *Lease, reason string) string {

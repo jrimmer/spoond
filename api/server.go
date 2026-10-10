@@ -1149,6 +1149,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	leaseReq := leaseRequest{
 		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
+		pinned:        req.Pinned,
 		createSecrets: secrets, exposePorts: expose, burst: req.Burst, priority: priority,
 		snapshot: start,
 	}

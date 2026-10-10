@@ -294,7 +294,7 @@ func (s *Service) boxFullAlert(owner string, memoryMB int) {
 	if s.metrics != nil {
 		s.metrics.BoxFullTotal.Inc()
 	}
-	s.emitLeaseEvent("", "", LeaseBoxFull, fmt.Sprintf("%d MiB request for %q: every take-back candidate is pinned", memoryMB, owner))
+	s.emitLeaseEvent("-", "", LeaseBoxFull, fmt.Sprintf("%d MiB request for %q: every take-back candidate is pinned", memoryMB, owner))
 }
 
 // cachedFreeHugepageMiB reads the node's free hugepage memory in MiB from

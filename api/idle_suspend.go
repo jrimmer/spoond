@@ -13,19 +13,19 @@ import (
 // effective idle_suspend is > 0 and that has been idle that long is
 // suspended through the normal pause path — memory and hugepages are
 // freed into a pause build, nothing is deleted, the generation does not
-// change, and the next call resumes it. For such a lease the setting is
-// the only idle threshold: it replaces the plain IDLE_TIMEOUT_SECS sweep
-// and held rule 1 (and rule 4's pressure shortening). Leases without a
-// value keep those rules exactly.
+// change, and the next call resumes it. This is the only idle threshold
+// spoond has (FS5): the plain IDLE_TIMEOUT_SECS sweep and the held rules
+// that shortened it are removed. A lease with no value (and no host
+// default) is never idle-suspended, and a **pinned** lease is never
+// paused by spoond at all, whatever its idle_suspend says.
 //
 // Idle suspension shares preemption's snapshot-disk floor
 // (PREEMPT_DISK_FLOOR_PCT, api/preempt.go): a pause that would take the
 // disk under it is skipped this sweep and retried on the next one.
 
-// idleSuspendRule is the recorded LastAction rule ("idle_suspend"): a
-// lease suspended by this rule may later be released by the stale-release
-// (rule 2) and critical-disk (rule 5) held-lease rules, like any other
-// rule suspension.
+// idleSuspendRule is the recorded LastAction rule ("idle_suspend"): the
+// rule an idle-suspended lease carries. Since FS5 no held rule reads it
+// any more; the one paused-release clock uses PausedAt instead.
 const idleSuspendRule = "idle_suspend"
 
 // suspendIdleLeases suspends every persistent lease idle past its own
@@ -38,8 +38,10 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
 		// A running background job is activity (2.6, #135): never
-		// suspend a lease mid-job.
-		if l.released || l.Suspended || l.busy || !l.Persistent || s.hasRunningJobLocked(l.ID) {
+		// suspend a lease mid-job. A pinned lease is never paused by
+		// spoond's idle logic (FS5, owner: "Pins don't pause"); only
+		// the owner's own POST /pause pauses a pinned lease.
+		if l.released || l.Suspended || l.busy || l.Pinned || !l.Persistent || s.hasRunningJobLocked(l.ID) {
 			continue
 		}
 		threshold := time.Duration(s.effectiveIdleSuspend(l)) * time.Second
@@ -72,7 +74,7 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 		s.store.mu.Lock()
 		threshold := time.Duration(s.effectiveIdleSuspend(l)) * time.Second
 		lastActive := l.LastActive
-		skip := l.released || l.Suspended || l.busy || !l.Persistent || threshold <= 0 ||
+		skip := l.released || l.Suspended || l.busy || l.Pinned || !l.Persistent || threshold <= 0 ||
 			!now.After(lastActive.Add(threshold))
 		s.store.mu.Unlock()
 		if skip {
@@ -130,16 +132,14 @@ func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 // resumes the lease through the normal resume path (admission, class and
 // quota apply) and then lets the caller serve. Every suspension resumes
 // this way (#145 D2, one rule for every kind of suspend): a lease
-// suspended by pressure, preemption, the idle sweep, idle_suspend or a
-// lapsed hold (rule 3), and one its holder suspended by hand. A refusal
+// suspended by pressure, preemption, idle_suspend, take-back or the
+// admin drain, and one its owner suspended by hand. A refusal
 // answers what resume would: 429 for the owner's own memory quota, 503
 // capacity_wait with Retry-After when the node has no room (a structural
 // shortage never refuses: the caller waits), 409 lease_busy while its
 // pause or another caller's resume is in flight, 410 lease_lost when its
-// sandbox is gone. GET, status, events and SSE never call this. A lease
-// whose hold lapsed resumes with its hold still lapsed: resuming does not
-// renew a hold. Returns false when the caller must stop (the response is
-// written).
+// sandbox is gone. GET, status, events and SSE never call this. Returns
+// false when the caller must stop (the response is written).
 func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease) bool {
 	if !l.Suspended {
 		return true
@@ -205,12 +205,6 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 		writeErrorCode(w, http.StatusConflict, "lease_busy", err.Error())
 	case errors.Is(err, errLeaseReleased):
 		writeError(w, http.StatusNotFound, "lease not found")
-	case isBoxFull(err):
-		// The resume's class re-admission needed room and every take-back
-		// candidate is pinned (FS5): the same 429 box_full refusal a create
-		// is answered with, not a 500 a client would read as a permanent
-		// lease failure (spoond-k0uz R3-2). Nothing was paused or released.
-		writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 	case errors.Is(err, errQuotaExceeded):
 		// The owner's own quota frees when the owner releases its own
 		// leases, so this is a retryable wait, not a loss: 429 with

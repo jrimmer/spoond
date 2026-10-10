@@ -2872,8 +2872,11 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	return buildID, nil
 }
 
-// resume restores a suspended persistent lease: create with snapshot
-// from the pause build, same sandbox id.
+// resume restores a suspended lease: create with snapshot from the
+// pause build, same sandbox id. Any suspended lease the caller owns can
+// be explicitly resumed, as resume-on-use already allows; persistence is
+// not required (a non-persistent lease the drain left suspended is the
+// case that matters).
 func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
@@ -2881,28 +2884,20 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
-	if !l.Persistent && !l.Pinned {
-		s.store.mu.Unlock()
-		return nil, errNotPersistent
-	}
 	s.store.mu.Unlock()
 	return s.resumeForUse(ctx, l)
 }
 
 // resumeAny is resume without the owner check, for the SSH gateway's
 // service token: before a session starts, the gateway resumes a
-// suspended lease the connecting user is already authorised for.
-// Persistent and pinned leases only, as for resume.
+// suspended lease the connecting user is already authorised for. Any
+// suspended lease, as for resume.
 func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
 	if l == nil || l.released {
 		s.store.mu.Unlock()
 		return nil, errNotFound
-	}
-	if !l.Persistent && !l.Pinned {
-		s.store.mu.Unlock()
-		return nil, errNotPersistent
 	}
 	s.store.mu.Unlock()
 	return s.resumeForUse(ctx, l)
@@ -3812,10 +3807,14 @@ func validateIdleSuspend(secs int64) error {
 // (IdleSuspendDefault; 0 = never). A non-persistent lease can never be
 // idle-suspended — there is no snapshot to resume from — so its
 // effective value is always 0 (never), whatever the host default is.
-// This also keeps held rule 1 in force for non-persistent held leases
-// (2.5, #129 part 2).
+//
+// A pinned lease is never paused by spoond (FS5, owner: "Pins don't
+// pause"), so its effective value is always 0 (never) too: a caller's
+// explicit POST /pause is the owner's own action and still works, but
+// the idle sweep skips a pinned lease whatever the host default or the
+// lease's own value says.
 func (s *Service) effectiveIdleSuspend(l *Lease) int64 {
-	if !l.Persistent {
+	if !l.Persistent || l.Pinned {
 		return 0
 	}
 	if l.IdleSuspend != idleSuspendHost {
