@@ -267,6 +267,10 @@ func TestMapErrorDiskFull(t *testing.T) {
 	if got := mapError(status.Error(codes.Internal, "failed to load template")); errors.Is(got, substrate.ErrCapacity) {
 		t.Fatalf("mapError(Internal, unrelated) = %v, must not be ErrCapacity", got)
 	}
+	// A non-gRPC error (a local file write) with matching text maps too.
+	if got := mapError(errors.New("write /var/lib/spoond/x: no space left on device")); !errors.Is(got, substrate.ErrCapacity) {
+		t.Fatalf("mapError(local ENOSPC) = %v, want ErrCapacity", got)
+	}
 	if got := mapError(status.Error(codes.NotFound, "no sandbox")); !errors.Is(got, substrate.ErrNotFound) {
 		t.Fatalf("mapError(NotFound) = %v, want ErrNotFound", got)
 	}
