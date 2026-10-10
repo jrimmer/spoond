@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ const (
 	KeyUnitInactive    = "unit.inactive"
 	KeyDiskWarn        = "disk.warn"
 	KeyDiskDanger      = "disk.danger"
+	KeyDiskLow         = "capacity.disk_low"
 	KeyHugepagesWarn   = "hugepages.warn"
 	KeyHugepagesDanger = "hugepages.danger"
 	KeyGCFailed        = "gc.failed"
@@ -35,6 +37,34 @@ const (
 	HugepagesWarnUsedPct   = 80.0
 	HugepagesDangerUsedPct = 92.0
 )
+
+// DefaultDiskReservePct is the snapshot disk share kept free
+// (DISK_RESERVE_PCT on the backend's disk room and this check; default
+// 5, clamped to 0..50 by the backend). diskLowCheck alerts when the
+// free bytes fall below this floor.
+const DefaultDiskReservePct = 5.0
+
+// DiskReservePctFromEnv reads DISK_RESERVE_PCT the way the backend's
+// disk room does: 5 when unset or unreadable, clamped to 0..50. The
+// alert then watches exactly the floor the room formula reserves, so
+// the two can never disagree.
+func DiskReservePctFromEnv() float64 {
+	v := strings.TrimSpace(os.Getenv("DISK_RESERVE_PCT"))
+	if v == "" {
+		return DefaultDiskReservePct
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f != f {
+		return DefaultDiskReservePct
+	}
+	if f < 0 {
+		return 0
+	}
+	if f > 50 {
+		return 50
+	}
+	return f
+}
 
 // DefaultKeptDiskWarnPct is the kept-checkpoint share of the snapshot
 // disk (#126) past which disk.kept warns (KEPT_DISK_WARN_PCT on both
@@ -107,15 +137,18 @@ type DrainState struct {
 // not an incident. TLS certificate expiry is not watched here: that is
 // for the host's own IT tooling.
 type CheckSources struct {
-	Unit        SystemdUnit
-	Units       []string // systemd units to watch (e.g. spoond-backend)
-	Disk        DiskUsage
-	Hugepages   HugepageUsage
-	LastBackup  LastBackup
-	GCFailed    GCLastError
-	KeptDisk    KeptDisk // kept checkpoints vs the snapshot disk (#126); nil = no check
-	KeptWarnPct float64  // disk.kept warn level, % of the disk; 0 = DefaultKeptDiskWarnPct
-	Draining    Draining // admin drain state (spoond-52c); nil = no check
+	Unit  SystemdUnit
+	Units []string // systemd units to watch (e.g. spoond-backend)
+	Disk  DiskUsage
+	// DiskReservePct is the snapshot disk share kept free: diskLowCheck
+	// alerts when free falls below it (DiskReservePctFromEnv).
+	DiskReservePct float64
+	Hugepages      HugepageUsage
+	LastBackup     LastBackup
+	GCFailed       GCLastError
+	KeptDisk       KeptDisk // kept checkpoints vs the snapshot disk (#126); nil = no check
+	KeptWarnPct    float64  // disk.kept warn level, % of the disk; 0 = DefaultKeptDiskWarnPct
+	Draining       Draining // admin drain state (spoond-52c); nil = no check
 	// DrainWarnAfter is how old a drain must be before node.draining
 	// warns while the node is healthy (DRAIN_MAX_SECS/2 from the
 	// backend). 0 warns on any drain.
@@ -193,6 +226,14 @@ func (src *CheckSources) Checks() []Check {
 		disk := src.Disk
 		out = append(out, func(_ context.Context, now time.Time) []Event {
 			return diskCheck(disk, now)
+		})
+		// The reserve-floor alert is passive: it reads statfs and emits,
+		// nothing more. A disk below the floor means the room formula's
+		// Usable is already negative, so creates and resumes will be
+		// answering capacity_wait until a person acts.
+		reservePct := src.DiskReservePct
+		out = append(out, func(_ context.Context, now time.Time) []Event {
+			return diskLowCheck(disk, reservePct, now)
 		})
 	}
 	if src.Hugepages != nil {
@@ -314,6 +355,33 @@ func diskCheck(usage DiskUsage, now time.Time) []Event {
 	default:
 		return []Event{resolved(KeyDiskWarn, Warn, now), resolved(KeyDiskDanger, Critical, now)}
 	}
+}
+
+// diskLowCheck alerts when the snapshot disk's free bytes fall below
+// reservePct percent of its total — the same floor the backend's disk
+// room formula keeps (DISK_RESERVE_PCT, default 5). severity Critical:
+// below the floor Usable is negative, so creates and resumes answer
+// capacity_wait. It is a passive alert only; nothing here or in the
+// notifier deletes a byte. A probe that cannot stat, or a disk whose
+// total is 0, is not an incident: the check stays silent. reservePct is
+// the configured share (DiskReservePctFromEnv); 0 keeps no floor and so
+// never alerts.
+func diskLowCheck(usage DiskUsage, reservePct float64, now time.Time) []Event {
+	total, free, err := usage()
+	if err != nil || total == 0 {
+		return nil
+	}
+	floor := uint64(float64(total) * reservePct / 100)
+	if free < floor {
+		return []Event{{
+			Key:      KeyDiskLow,
+			Severity: Critical,
+			Title:    "Snapshot disk below its reserve floor",
+			Body:     fmt.Sprintf("%s free, below the %s reserve floor (%.0f%% of %s); nothing will be reclaimed by this alert", humanBytes(free), humanBytes(floor), reservePct, humanBytes(total)),
+			At:       now,
+		}}
+	}
+	return []Event{resolved(KeyDiskLow, Critical, now)}
 }
 
 // keptDiskCheck warns when kept checkpoints (#126) hold past warnPct

@@ -754,6 +754,9 @@ func Main(args []string) int {
 		// the drain is in effect and resolves when it clears.
 		src.Draining = svc.Draining
 		src.DrainWarnAfter = svc.DrainWarnAfter()
+		// The reserve-floor alert watches exactly the floor the disk room
+		// formula reserves (DISK_RESERVE_PCT), so the two never disagree.
+		src.DiskReservePct = notify.DiskReservePctFromEnv()
 		for _, c := range src.Checks() {
 			notifier.AddCheck(c)
 		}
