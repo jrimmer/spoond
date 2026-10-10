@@ -2051,7 +2051,7 @@ func eventTypeStyle(t string) string {
 	switch t {
 	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
 		return "title"
-	case "suspended", "take_back", "taken_back", "idle_suspended", "queued", "recovery_retry", "rootfs_dead", "user_deleted":
+	case "suspended", "take_back", "idle_suspended", "queued", "recovery_retry", "rootfs_dead", "user_deleted":
 		return "warn"
 	case "lost", "timed_out":
 		return "bad"
