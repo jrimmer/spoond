@@ -800,6 +800,12 @@ type Service struct {
 	// can land a pin in that window and pin the sweep's second re-check
 	// (FS5). Nil in production.
 	idleBeforePause func(l *Lease)
+	// testBeforeReleaseCommit, when set by a test, runs at the very top of
+	// releaseBecauseIf, before it takes the store lock, so a test can land
+	// a state change (busy, a cleared Suspended) in the window between a
+	// caller's collection pass and the release's own re-check. Nil in
+	// production.
+	testBeforeReleaseCommit func(l *Lease)
 	// restartBeforeRecheck, when set by a test, runs after restart has
 	// re-checked the lease is not released and just before it takes the
 	// store lock for the save, so a test can land a release in that
@@ -1903,6 +1909,9 @@ func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
 // lock, but the sandbox teardown after the unlock still runs against a
 // lease that changed since the caller decided (spoond-k0uz R4-3).
 func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string, ok func(l *Lease) bool) {
+	if s.testBeforeReleaseCommit != nil {
+		s.testBeforeReleaseCommit(l)
+	}
 	s.store.mu.Lock()
 	if l.released {
 		s.store.mu.Unlock()
