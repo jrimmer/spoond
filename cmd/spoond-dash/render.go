@@ -1610,7 +1610,7 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		// The state cell (#128, #129): the glyph always carries the run
 		// state (▶ ‖ ■ ⭘, explained by the legend), and the word spells
 		// it out with any qualifier — "taken back", "idle-suspended".
-		// "idle-suspended". When the column is narrow the word steps down
+		// When the column is narrow the word steps down
 		// through fixed shorter forms (stateWords), so the state is never
 		// a cryptic suffix or a word cut mid-way.
 		word := fitWord(stateWords(r), c.stW-2)
