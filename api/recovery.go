@@ -512,11 +512,9 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		// brings hugepages back, so a burst lease re-passes the reserve
 		// (the reconciler's own reserve work lands in #128 part 3; until
 		// then a burst lease keeps its demand-burst standing here).
-		class, err := s.admitClass(ctx, l.Owner, img.MemoryMB, l.Burst, l.ID)
-		if err != nil {
+		if err := s.admitMemory(ctx, l.Owner, img.MemoryMB); err != nil {
 			return err
 		}
-		l.Class = class
 	}
 	sb, err := s.createSandbox(ctx, img, b, true, l.SandboxID, l)
 	if err != nil {

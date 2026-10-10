@@ -205,6 +205,7 @@ func boxFullNode(t *testing.T) (*httptest.Server, *Service, *Lease, *Lease) {
 // (spoond-k0uz R3-2). Mutation: drop the isBoxFull case in
 // writeResumeRefusal, which answers 500 "resume failed".
 func TestResumeBoxFullHTTP429(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	ts, svc, victim, filler := boxFullNode(t)
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+victim.ID+"/resume", "token-b", nil)
@@ -228,6 +229,7 @@ func TestResumeBoxFullHTTP429(t *testing.T) {
 // the same as TestResumeBoxFullHTTP429 (the exec path answers through
 // writeResumeRefusal).
 func TestExecResumeOnUseBoxFullHTTP429(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	ts, svc, victim, _ := boxFullNode(t)
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+victim.ID+"/exec", "token-b",
@@ -249,6 +251,7 @@ func TestExecResumeOnUseBoxFullHTTP429(t *testing.T) {
 // Mutation: drop errBoxFull from undrainAdmissionRefusal, which runs the
 // failure through the resume_failed stamp (and would lose the lease).
 func TestUndrainBoxFullDefers(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	ts, svc, sub, ctx := newPreemptServer(t)
 	svc.cfg.UndrainResumeRetries = 0
 	// 1536 pages of 2 MiB = 3072 MiB, 1024 MiB of it held outside

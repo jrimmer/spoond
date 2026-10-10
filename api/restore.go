@@ -75,11 +75,9 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		// Class re-admission (#128 part 2), as for a resume: a
 		// demand-burst lease stays burst and re-passes the reserve; a
 		// guarantee-burst one may fall back to guaranteed.
-		class, err := s.admitClass(ctx, l.Owner, img.MemoryMB, l.Burst, l.ID)
-		if err != nil {
+		if err := s.admitMemory(ctx, l.Owner, img.MemoryMB); err != nil {
 			return err
 		}
-		l.Class = class
 	}
 	// The fresh sandbox exists before the old one goes (as restartCold):
 	// a failed create leaves the lease exactly as it was.
@@ -212,6 +210,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errLeaseReleased):
 			writeError(w, http.StatusNotFound, "lease not found")
+		// TODO(FS2b-1 step 2): remove
 		case errors.Is(err, errPreemptCannot):
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.

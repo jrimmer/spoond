@@ -255,6 +255,7 @@ func TestAdmitWaitTimesOut(t *testing.T) {
 // errBurstReserve times out with the 503 "no burst capacity" and its
 // Retry-After.
 func TestAdmitWaitBurstReserveTimesOut(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	_, h, svc, sub, _ := newAdmitServer(t)
 	svc.cfg.BurstReserveMiB = 4096 // larger than the whole node
 	installDynamicNode(t, svc, sub, 1024, 0, 512)

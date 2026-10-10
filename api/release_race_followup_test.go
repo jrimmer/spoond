@@ -87,6 +87,7 @@ func TestPauseReleaseRaceUnderLock(t *testing.T) {
 // TestPreemptReleaseRaceNoMetric: preemption skips a lease released while
 // its pause ran: no preemption stamp, counter or event.
 func TestPreemptReleaseRaceNoMetric(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	svc.SetMetrics(metrics.NewBackendMetrics())

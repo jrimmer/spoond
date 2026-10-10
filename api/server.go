@@ -1235,6 +1235,7 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		status, msg = http.StatusTooManyRequests, err.Error()
 	case errors.Is(err, errUnknownImage):
 		status, msg = http.StatusNotFound, "unknown image tag: "+image
+	// TODO(FS2b-1 step 2): remove
 	case errors.Is(err, errPreemptCannot):
 		// A guaranteed lease that could not preempt (#128 part 3): the
 		// snapshot disk is too full to pause a burst lease.
@@ -1757,6 +1758,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// hugepages) back, so it re-passes the memory check (#128):
 			// over max_mib answers 429 and the lease stays suspended.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		// TODO(FS2b-1 step 2): remove
 		case errors.Is(err, errPreemptCannot):
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
@@ -2522,6 +2524,7 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// Quota enforcement (security review #37 rescan F1): clone
 			// surfaces the same 429 as create, not a generic 500.
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		// TODO(FS2b-1 step 2): remove
 		case errors.Is(err, errPreemptCannot):
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
@@ -2599,6 +2602,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
+		// TODO(FS2b-1 step 2): remove
 		case errors.Is(err, errPreemptCannot):
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.

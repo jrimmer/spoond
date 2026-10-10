@@ -230,9 +230,7 @@ func TestTakeBackOrderOwnerRatioThenLRU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("guaranteed create: %v", err)
 	}
-	if guaranteed.Class != ClassGuaranteed {
-		t.Fatalf("guaranteed create class = %s", guaranteed.Class)
-	}
+	_ = guaranteed
 
 	got := pausedIDs(svc)
 	if len(got) != 2 {
@@ -312,6 +310,7 @@ func TestPreemptionFreesEnoughAndNoMore(t *testing.T) {
 // 503 "capacity: cannot preempt (snapshot disk low)" with Retry-After,
 // and nothing is preempted.
 func TestPreemptionDiskFloorRefuses(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
 	l := burstLease(t, svc, ctx, "burst-a", "mid")
@@ -342,6 +341,7 @@ func TestPreemptionDiskFloorRefuses(t *testing.T) {
 // documented 503: "capacity: cannot preempt (snapshot disk low)" with
 // Retry-After: 30.
 func TestPreemptionDiskFloorRefusedHTTP(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
 	svc := srv.svc
 	svc.cfg.BurstReserveMiB = 0
@@ -557,6 +557,7 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 // and age, the owner furthest over its guarantee is preempted first.
 // FS2b removes this function with the classes.
 func TestPreemptionCandidateOrderOverGuarantee(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
 
@@ -604,6 +605,7 @@ func TestPreemptionCandidateOrderOverGuarantee(t *testing.T) {
 // disk floor is the only obstacle, so the admission answers
 // errPreemptCannot and suspends nothing.
 func TestPreemptionDiskFloorMixedPreemptsNothing(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
 	small := burstLease(t, svc, ctx, "burst-a", "mid") // 1024 MiB, disk-allowed

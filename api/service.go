@@ -438,11 +438,13 @@ type ServiceConfig struct {
 	// lease must leave free on the node after its own hugepages — the
 	// guaranteed class never runs into it. BURST_RESERVE_MIB, default
 	// DefaultBurstReserveMiB. 0 disables the reserve.
+	// TODO(FS2b-1 step 2): remove
 	BurstReserveMiB int
 	// PreemptDiskFloorPct is the snapshot-disk free percentage a
 	// preemption or idle-suspend pause must leave after it (#128 part 3,
 	// 2.5). PREEMPT_DISK_FLOOR_PCT, default DefaultPreemptDiskFloorPct.
 	// 0 or negative means the default.
+	// TODO(FS2b-1 step 2): remove
 	PreemptDiskFloorPct float64
 	// MaxRunningJobsPerLease bounds concurrent background exec jobs per
 	// lease (2.6, #135). 0 = DefaultMaxRunningJobsPerLease.
@@ -2457,11 +2459,9 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// charge above is the sum the guarantee is measured against) and
 	// holds a burst lease to the node's reserve. A refusal answers
 	// before any sandbox exists.
-	class, err := s.admitClass(ctx, owner, memoryMB, req.burst, "")
-	if err != nil {
+	if err := s.admitMemory(ctx, owner, memoryMB); err != nil {
 		return nil, err
 	}
-	lease.Class = class
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
 	// cleans up). createSandbox records the memo before the lease row
@@ -3046,11 +3046,9 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	// burst (and held to the reserve); a lease that burst because the
 	// guarantee was full may come back guaranteed now that the charge
 	// has room — the class follows the owner's current standing.
-	class, err := s.admitClass(ctx, l.Owner, memPer, l.Burst, l.ID)
-	if err != nil {
+	if err := s.admitMemory(ctx, l.Owner, memPer); err != nil {
 		return nil, err
 	}
-	l.Class = class
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
 	}
@@ -3206,11 +3204,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		// Class re-admission (#128 part 2), as for a resume: a
 		// demand-burst lease stays burst, a guarantee-burst one may
 		// fall back to guaranteed.
-		class, err := s.admitClass(ctx, owner, l.MemoryMB, l.Burst, l.ID)
-		if err != nil {
+		if err := s.admitMemory(ctx, owner, l.MemoryMB); err != nil {
 			return nil, err
 		}
-		l.Class = class
 	}
 
 	if persistent {
@@ -3326,11 +3322,9 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		// Class re-admission (#128 part 2) against the image's current
 		// charge — the number the fresh guest runs (and is stamped with
 		// below), as for the memory check above.
-		class, err := s.admitClass(ctx, owner, img.MemoryMB, l.Burst, l.ID)
-		if err != nil {
+		if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
 			return nil, err
 		}
-		l.Class = class
 	}
 	// The fresh guest is created before the old one goes: a failed
 	// create (no capacity) leaves the lease exactly as it was, running
@@ -3602,11 +3596,9 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	// Class admission (#128 part 2): a clone takes its own class from
 	// the owner's guarantee — a full one bursts the clone — and never
 	// carries a request's burst flag or priority.
-	class, err := s.admitClass(ctx, owner, img.MemoryMB, false, "")
-	if err != nil {
+	if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
 		return nil, "", err
 	}
-	lease.Class = class
 	// Hold the clone's egress memo in flight until it is in the store,
 	// so a refresh mid-create does not prune it (spoond-ob18).
 	s.beginAppliedEgress(lease.ID)
@@ -3775,11 +3767,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		// fork call gets the same class (the charge the class measures
 		// moves only when a sandbox is created, one at a time below),
 		// decided once here so the batch behaves as one.
-		class, err := s.admitClass(ctx, owner, img.MemoryMB, false, "")
-		if err != nil {
+		if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
 			return rollback(err)
 		}
-		lease.Class = class
 		// Hold this child's egress memo in flight until it is in the store
 		// (or rolled back), so a refresh mid-create does not prune it
 		// (spoond-ob18).

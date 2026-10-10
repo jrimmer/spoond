@@ -97,6 +97,7 @@ func TestClassGuaranteedWithinQuota(t *testing.T) {
 // guarantee again is not (each lease's own charge is what tips the
 // sum).
 func TestClassBurstsPastGuarantee(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	_, h, _, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"guaranteed_mib":2048,"max_mib":8192}`)
 
 	code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60}`)
@@ -147,6 +148,7 @@ func TestClassNoGuaranteeKeepsGuaranteed(t *testing.T) {
 // TestClassExplicitBurstFlag: "burst": true classifies the lease burst
 // even within the guarantee, and "priority" is stored and reported.
 func TestClassExplicitBurstFlag(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	_, h, _, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"guaranteed_mib":8192,"max_mib":16384}`)
 
 	code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60,"burst":true,"priority":5}`)
@@ -166,6 +168,7 @@ func TestClassExplicitBurstFlag(t *testing.T) {
 // own class — a fork past the guarantee bursts its children, a clone
 // within it stays guaranteed.
 func TestClassForkAndCloneAdmit(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, _, _, _, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"guaranteed_mib":2048,"max_mib":16384}`)
 	svc := srv.svc
 	ctx := context.Background()
@@ -200,6 +203,7 @@ func TestClassForkAndCloneAdmit(t *testing.T) {
 // was full falls back to guaranteed when the charge has room again —
 // and re-passes the memory check on the way (resume re-admits).
 func TestClassResumeReadmits(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, _, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"guaranteed_mib":2048,"max_mib":16384}`)
 	svc := srv.svc
 	owner := ownerIDFor(t, h, tok)
@@ -287,6 +291,7 @@ func leaseIDs(t *testing.T, h http.Handler, token string) []string {
 // refusal answers 503 "no burst capacity" with Retry-After: 30, and a
 // guaranteed lease is never held to the reserve.
 func TestBurstReserveRefused(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
 	srv.svc.cfg.BurstReserveMiB = 8192
 	// 1024 MiB free: plenty for the lease itself, under any reserve.
@@ -350,6 +355,7 @@ func burstLeaseID(t *testing.T, h http.Handler, token string) string {
 // so resuming it re-passes the reserve — and a resume into a full
 // reserve answers 503 and leaves the lease suspended.
 func TestBurstReserveSuspendFrees(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
 	srv.svc.cfg.BurstReserveMiB = 8192
 	svc := srv.svc
@@ -406,6 +412,7 @@ func httptestGet(t *testing.T, h http.Handler, token, path string) *httptest.Res
 // answers 503 no burst capacity with Retry-After: 30 and stays
 // suspended — warm and cold alike.
 func TestBurstReserveRestartRefused(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
 	srv.svc.cfg.BurstReserveMiB = 8192
 	svc := srv.svc
@@ -456,6 +463,7 @@ func TestBurstReserveRestartRefused(t *testing.T) {
 // fit the reserve leaves it drained (retryable), not lost — the same
 // answer an over-quota lease gets — and a later undrain resumes it.
 func TestBurstReserveUndrainDefers(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
 	srv.svc.cfg.BurstReserveMiB = 8192
 	svc := srv.svc
@@ -594,6 +602,7 @@ func shrinkNodeTo(t *testing.T, svc *Service, sub *testSub, freePages uint64) {
 // resume, so a burst lease restored into a full reserve answers 503 no
 // burst capacity and stays suspended.
 func TestBurstReserveRestoreRefused(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
 	srv.svc.cfg.BurstReserveMiB = 8192
 	svc := srv.svc
@@ -638,6 +647,7 @@ func TestBurstReserveRestoreRefused(t *testing.T) {
 // too, so recovering a suspended burst lease into a full reserve fails
 // with no burst capacity and leaves the lease suspended.
 func TestBurstReserveRecoveryRefused(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
 	srv.svc.cfg.BurstReserveMiB = 8192
 	svc := srv.svc
@@ -676,6 +686,7 @@ func TestBurstReserveRecoveryRefused(t *testing.T) {
 // 1 GiB burst leases, then refuses the third without a fresh reading;
 // a guaranteed lease in between also counts.
 func TestBurstReserveDebitsCachedReading(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, sub, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":16384}`)
 	srv.svc.cfg.BurstReserveMiB = 1024
 	sub.SetNodeInfo(substrate.NodeInfo{

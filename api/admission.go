@@ -24,6 +24,7 @@ const (
 // DefaultBurstReserveMiB is the burst reserve when BURST_RESERVE_MIB is
 // unset: 8 GiB of hugepages kept free of burst leases, so guaranteed
 // work (and crash recovery) always has room to land.
+// TODO(FS2b-1 step 2): remove
 const DefaultBurstReserveMiB = 8192
 
 // nodeInfoCacheTTL bounds how long freeHugepageMiBLocked trusts its cached
@@ -236,6 +237,7 @@ func (s *Service) runPromoteLoop(ctx context.Context) {
 	}
 }
 
+// TODO(FS2b-1 step 2): delete
 func (s *Service) admitClass(ctx context.Context, owner string, memoryMB int, burst bool, self string) (string, error) {
 	class := s.classify(owner, burst, memoryMB, self)
 	if class != ClassBurst {

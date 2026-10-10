@@ -23,6 +23,7 @@ func classOf(t *testing.T, srv *Server, uid, id string) string {
 // promotes it (event "promoted"), so the guarantee stays filled as
 // leases churn, instead of every survivor drifting to burst.
 func TestBurstPromotedWhenGuaranteeFrees(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, _, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"guaranteed_mib":2048,"max_mib":8192}`)
 	svc := srv.svc
 	var ids []string
@@ -70,6 +71,7 @@ func TestBurstPromotedWhenGuaranteeFrees(t *testing.T) {
 // guarantee has room (the old rule compared total usage and made every
 // new lease burst).
 func TestBurstLeasesDoNotCountAgainstGuarantee(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, _, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"guaranteed_mib":2048,"max_mib":8192}`)
 	for i := 0; i < 3; i++ {
 		if rec, _ := createSandboxBody(t, h, tok, `{"image":"mid","ttl":600,"burst":true}`); rec.Code != http.StatusCreated {
@@ -88,6 +90,7 @@ func TestBurstLeasesDoNotCountAgainstGuarantee(t *testing.T) {
 // TestRequestedBurstNeverPromoted: a lease created with "burst": true
 // stays burst even when the guarantee has room.
 func TestRequestedBurstNeverPromoted(t *testing.T) {
+	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	srv, h, _, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"guaranteed_mib":4096,"max_mib":8192}`)
 	rec, m := createSandboxBody(t, h, tok, `{"image":"mid","ttl":600,"burst":true}`)
 	if rec.Code != http.StatusCreated {

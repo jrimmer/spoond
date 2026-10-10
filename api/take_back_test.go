@@ -151,11 +151,16 @@ func TestMemVictimsZeroSliceSafe(t *testing.T) {
 // (an in-flight operation or a running background job) and LastActive
 // carried through.
 func TestTakeBackOwnersViews(t *testing.T) {
-	svc, db, _, ids := newFairShareService(t)
+	svc, db, sub, ids := newFairShareService(t)
 	alice := addIdentityUser(t, ids, "alice")
 	bob := addIdentityUser(t, ids, "bob")
 	ctx := context.Background()
 	seedImage(t, db, "mid", 1024)
+	// Room for all four leases: with one pool and no classes, a pinned
+	// lease on a full node is box_full (FS2b-1).
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20}, nil)
+	dropNodeCache(svc)
+	svc.updateNodeMetrics(ctx)
 
 	// Alice: two running leases (one pinned, one with a running job).
 	a1, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})

@@ -20,16 +20,19 @@ import (
 // preemptor must leave after a pause, when PREEMPT_DISK_FLOOR_PCT is
 // unset: a pause writes a snapshot, and filling the disk to admit work
 // would be a worse failure than a refused create.
+// TODO(FS2b-1 step 2): remove
 const DefaultPreemptDiskFloorPct = 15
 
 // errPreemptCannot is returned when a guaranteed admission ran out of
 // hugepages and could not preempt any burst lease because the snapshot
 // disk is too full. The lease API maps it to 503
 // "capacity: cannot preempt (snapshot disk low)" with Retry-After: 30.
+// TODO(FS2b-1 step 2): remove
 var errPreemptCannot = errors.New("cannot preempt (snapshot disk low)")
 
 // preemptDiskFloorPct is the effective disk floor: the configured value,
 // or the default when unset.
+// TODO(FS2b-1 step 2): remove
 func (s *Service) preemptDiskFloorPct() float64 {
 	if s.cfg.PreemptDiskFloorPct <= 0 {
 		return DefaultPreemptDiskFloorPct
@@ -116,6 +119,7 @@ func (s *Service) ownerOverGuaranteeLocked(owner string) int {
 // preempted, in preemption order: lowest priority first, then the
 // newest lease, then the owner furthest over its guarantee. It snapshots
 // the store; each candidate is re-checked just before it is paused.
+// TODO(FS2b-1 step 2): remove
 func (s *Service) preemptionCandidates() []*Lease {
 	s.store.mu.Lock()
 	var out []*Lease
@@ -151,6 +155,7 @@ func (s *Service) preemptionCandidates() []*Lease {
 // the future snapshot's size) leaves the snapshot disk at or above the
 // preemption floor. A disk that cannot be read does not block
 // preemption — same as the held-lease rules.
+// TODO(FS2b-1 step 2): remove
 func (s *Service) preemptDiskOK(l *Lease) bool {
 	if s.cfg.TemplateStoragePath == "" {
 		return true
@@ -175,6 +180,7 @@ func (s *Service) preemptDiskOK(l *Lease) bool {
 // reading. The mutex spans preemption and the debit, so two concurrent
 // guaranteed admissions cannot each preempt for themselves: the first
 // one's debit is visible to the second.
+// TODO(FS2b-1 step 2): delete
 func (s *Service) admitGuaranteed(ctx context.Context, owner string, memoryMB int) error {
 	s.preemptMu.Lock()
 	defer s.preemptMu.Unlock()
@@ -203,6 +209,7 @@ func (s *Service) admitGuaranteed(ctx context.Context, owner string, memoryMB in
 // there is nothing to gain from taking anything and it falls through to
 // the ordinary capacity check. A NodeInfo read failure likewise falls
 // through rather than failing here (the ordinary check answers).
+// TODO(FS2b-1 step 2): delete
 func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memoryMB int) error {
 	fits, err := s.guaranteedFits(ctx, memoryMB)
 	if err != nil {
