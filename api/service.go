@@ -795,6 +795,11 @@ type Service struct {
 	// suspended. It lets a test land a release in that window to pin the
 	// re-check under the lock (spoond-d76). Nil in production.
 	pauseBeforeSuspend func(l *Lease)
+	// idleBeforePause, when set by a test, runs after the idle sweep's
+	// pre-check and before pauseLeaseWith takes the store lock, so a test
+	// can land a pin in that window and pin the sweep's second re-check
+	// (FS5). Nil in production.
+	idleBeforePause func(l *Lease)
 	// restartBeforeRecheck, when set by a test, runs after restart has
 	// re-checked the lease is not released and just before it takes the
 	// store lock for the save, so a test can land a release in that
@@ -2750,6 +2755,13 @@ const (
 type suspendPolicy struct {
 	reason     string
 	policyStep string
+	// refusePinned, when set, makes pauseLeaseWith refuse a pinned lease
+	// in the same store-lock section that sets busy: the idle sweep
+	// re-checks a pin there, so a pin landing between its collection pass
+	// and the pause wins and the lease is not suspended (FS5, "pins don't
+	// pause"). A hand or drain pause leaves it unset: the owner's own
+	// POST /pause still pauses a pinned lease.
+	refusePinned bool
 	// takeBackRatio/takeBackFor ride on the suspended event when reason
 	// is take_back (FS2a): the victim owner's usage/slice ratio and the
 	// owner the take-back made room for.
@@ -2768,6 +2780,13 @@ func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (strin
 func (s *Service) pauseLeaseWith(ctx context.Context, l *Lease, drained bool, pol suspendPolicy) (string, error) {
 	s.store.mu.Lock()
 	if l.busy {
+		s.store.mu.Unlock()
+		return "", errLeaseBusy
+	}
+	if pol.refusePinned && l.Pinned {
+		// A pin landed between the idle sweep's re-check and this pause:
+		// refuse in the same lock section that would set busy, so the
+		// pin wins (FS5). The caller treats it like a busy lease.
 		s.store.mu.Unlock()
 		return "", errLeaseBusy
 	}
