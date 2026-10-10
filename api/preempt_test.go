@@ -184,13 +184,14 @@ func pausedIDs(svc *Service) map[string]bool {
 	return out
 }
 
-// TestPreemptionOrderPriorityThenNewest: take-back pauses the owner
-// furthest over their slice first, and within an owner the least
-// recently used lease (FS2a spoond-pxsn; priority and newest-first were
-// the pre-FS2a preemption order). Two owners are equally over, so the
-// tie is broken by the selector's stable owner order; each gives up its
-// least recently used lease and the request is satisfied.
-func TestPreemptionOrderPriorityThenNewest(t *testing.T) {
+// TestTakeBackOrderOwnerRatioThenLRU: take-back takes the owner
+// furthest over their slice first (ratio, not absolute usage), and
+// within an owner the least recently used lease (FS2a spoond-pxsn;
+// priority and newest-first were the pre-FS2a preemption order). Two
+// owners are equally over, so the tie is broken by the selector's
+// stable owner order; each gives up its least recently used lease and
+// the request is satisfied.
+func TestTakeBackOrderOwnerRatioThenLRU(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	// Room for the burst leases; the guaranteed lease below needs two
 	// leases' worth of room, one from each over-slice owner.
@@ -550,8 +551,11 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 	}
 }
 
-// TestPreemptionCandidateOrderOverGuarantee: with equal priority and
-// age, the owner furthest over its guarantee is preempted first.
+// TestPreemptionCandidateOrderOverGuarantee: preemptionCandidates (the
+// FS2b gate that will restrict take-back to burst leases) still orders
+// its candidates by the pre-FS2a preemption rule: with equal priority
+// and age, the owner furthest over its guarantee is preempted first.
+// FS2b removes this function with the classes.
 func TestPreemptionCandidateOrderOverGuarantee(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
@@ -877,9 +881,22 @@ func TestGuaranteedUsesReserveWithoutPreempting(t *testing.T) {
 	installDynamicNode(t, svc, sub, 8192, 0, 512)
 	owner := preemptOwner(t, svc, "heavy")
 	victim := burstLease(t, svc, ctx, owner, "mid")
+	var others []*Lease
 	for i := 0; i < 4; i++ {
-		burstLease(t, svc, ctx, owner, "mid")
+		others = append(others, burstLease(t, svc, ctx, owner, "mid"))
 	}
+	// A definite LRU order: the victim is the least recently used, the
+	// others follow in grant order — so the take-back pick is the victim
+	// itself, not "some lease of the owner".
+	svc.store.mu.Lock()
+	base := time.Now().Add(-5 * time.Hour)
+	victim.LastActive = base
+	for i, l := range others {
+		l.LastActive = base.Add(time.Duration(i+1) * time.Hour)
+		svc.saveLeaseLocked(l)
+	}
+	svc.saveLeaseLocked(victim)
+	svc.store.mu.Unlock()
 
 	// Now 1 GiB free (5120 pages base + the five 1024 MiB leases on the
 	// 16 GiB pool): a 1 GiB guaranteed lease fits, though it takes the
@@ -904,20 +921,12 @@ func TestGuaranteedUsesReserveWithoutPreempting(t *testing.T) {
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create on a full node: %v", err)
 	}
-	if !victim.Suspended && victim.TakeBackFor == "" {
-		// Grant2 succeeded but did not take the victim: some other lease
-		// of the owner was the LRU pick. Any pause of the owner proves
-		// the point (the reserve did not shield the leases).
-		svc.store.mu.Lock()
-		paused := 0
-		for _, l := range svc.store.leases {
-			if l.Suspended && l.Owner == owner {
-				paused++
-			}
-		}
-		svc.store.mu.Unlock()
-		if paused == 0 {
-			t.Fatal("a guaranteed lease that does not fit should take an over-slice lease back")
+	if !victim.Suspended || victim.TakeBackFor == "" {
+		t.Fatalf("a guaranteed lease that does not fit should take the owner's least recently used lease (%s) back", victim.ID)
+	}
+	for _, l := range others {
+		if l.Suspended {
+			t.Fatalf("lease %s was paused though an older lease of the owner freed enough", l.ID)
 		}
 	}
 }
