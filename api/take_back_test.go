@@ -161,6 +161,7 @@ func TestTakeBackOwnersViews(t *testing.T) {
 	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20}, nil)
 	dropNodeCache(svc)
 	svc.updateNodeMetrics(ctx)
+	roomyDisk(svc) // the grants and the suspend must fit in the snapshot disk (FS3b)
 
 	// Alice: two running leases (one pinned, one with a running job).
 	a1, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})

@@ -82,11 +82,10 @@ type LeaseRow struct {
 	// disk's running reservation while the lease runs. 0 = unknown (the
 	// image row is gone).
 	DiskMB int
-	// Class is the lease's admission class (#128 part 2):
-	// "guaranteed" while the owner's running charge stays within their
-	// guaranteed_mib, "burst" above it (or when the request forced
-	// burst). Priority orders preemption within a class: a lower
-	// number is preempted first, 0 the default.
+	// Class and Priority are the pre-3.0 admission class and preemption
+	// order (#128 part 2). 3.0 fair shares (spoond-pxsn) has one pool and
+	// no classes: nothing reads them, and an empty Class is written as
+	// "guaranteed" so the column's CHECK (migration 0013) still holds.
 	Class    string
 	Priority int
 	// PreemptedAt is when the lease was preempted (#128 part 3): it was
@@ -128,6 +127,9 @@ const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
 func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
+	if l.Class == "" {
+		l.Class = "guaranteed"
+	}
 	netAllow, err := json.Marshal(l.NetAllow)
 	if err != nil {
 		return fmt.Errorf("store: lease %s: net_allow: %w", l.ID, err)

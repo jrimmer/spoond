@@ -400,6 +400,7 @@ func seedSnapshotLease(t *testing.T, root string) (*httptest.Server, *Service, *
 	t.Helper()
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = root
+	roomyDisk(svc) // the create's root disk and the checkpoints must fit (FS3b)
 	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create: status %d: %v", resp.StatusCode, body)

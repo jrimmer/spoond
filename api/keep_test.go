@@ -116,6 +116,7 @@ func TestCheckpointKeepRoute(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the create and every checkpoint must fit (FS3b)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})

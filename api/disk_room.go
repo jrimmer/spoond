@@ -12,12 +12,25 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // errDiskUnknown marks a snapshot-capacity read that failed: disk room
 // is unknown, so nothing may be reclaimed on a wrong number and the
 // caller treats the request as a wait, never a refusal.
 var errDiskUnknown = errors.New("disk: capacity unknown")
+
+// errDiskCapacityWait is the structural "no disk room yet" refusal of
+// ensureDiskRoom: take-back ran and the room is still short, or the disk
+// could not be read mid take-back. It wraps substrate.ErrCapacity, the
+// sentinel every no-room mapping already answers as 503 capacity_wait
+// with Retry-After (create, resume, pause, keep), so no route needs a
+// new case. It is a wait, never a loss.
+var errDiskCapacityWait = fmt.Errorf("disk: no room yet: %w", substrate.ErrCapacity)
+
+// diskNoInfoOnce keeps the "disk room unknown, allowing" log to one line
+// per process.
+var diskNoInfoOnce sync.Once
 
 // sawRequesterAmong reports whether owners contains requester. The
 // selector needs the requester's after-request ratio to bound how far
@@ -593,4 +606,52 @@ func (s *Service) emitDiskCleanup(garbage, leases int64) {
 	s.emitLeaseEvent("", "", LeaseDiskCleanup,
 		fmt.Sprintf("disk take-back freed %s of garbage, %s of paused leases",
 			formatEventBytes(garbage), formatEventBytes(leases)))
+}
+
+// ensureDiskRoom makes sure needBytes of snapshot disk fit for owner and
+// holds them as pending until the returned release runs. The caller
+// calls release (idempotent) once the bytes are on disk and statfs sees
+// them, usually in a defer.
+//
+// Flow: a need of 0 or less is a no-op. When the disk cannot be read
+// (diskRoomNow ok=false) the request is allowed and the gap is logged
+// once. When Usable (already net of pending and freeing) covers the
+// need, the bytes are reserved and the request goes on. Otherwise
+// diskTakeBack runs for owner; its *boxFullError (nothing reclaimable)
+// is returned as is, for the 429 box_full mapping. After take-back the
+// room is read again: it fits -> reserve; still short, or unreadable ->
+// errDiskCapacityWait (503 capacity_wait with Retry-After).
+func (s *Service) ensureDiskRoom(ctx context.Context, owner string, needBytes int64) (release func(), err error) {
+	noop := func() {}
+	if needBytes <= 0 {
+		return noop, nil
+	}
+	room, ok := s.diskRoomNow(ctx) // settles the inflight tracker
+	if !ok {
+		diskNoInfoOnce.Do(func() {
+			s.log.Printf("disk room: capacity unreadable; admitting requests without a disk check")
+		})
+		return noop, nil
+	}
+	if room.Usable >= needBytes {
+		return s.diskInflight.reserve(needBytes), nil
+	}
+	if _, err := s.diskTakeBack(ctx, needBytes, owner); err != nil {
+		var bf *boxFullError
+		if errors.As(err, &bf) {
+			return nil, bf
+		}
+		if errors.Is(err, errDiskUnknown) {
+			return nil, errDiskCapacityWait
+		}
+		return nil, err
+	}
+	room, ok = s.diskRoomNow(ctx)
+	if !ok {
+		return nil, errDiskCapacityWait
+	}
+	if room.Usable < needBytes {
+		return nil, errDiskCapacityWait
+	}
+	return s.diskInflight.reserve(needBytes), nil
 }

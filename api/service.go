@@ -2408,6 +2408,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		lease.SnapshotName = snap.row.Name
 		lease.SnapshotVersion = snap.row.Version
 	}
+	// The lease's root disk must fit in usable snapshot disk (FS3);
+	// the reservation is held until the grant returns.
+	diskRelease, err := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	defer diskRelease()
 	// Memory admission (FS2b-1): the one-pool check with take-back. A
 	// refusal answers before any sandbox exists.
 	if err := s.admitMemory(ctx, owner, memoryMB); err != nil {
@@ -2777,6 +2784,20 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		return "", err
 	}
 	defer release()
+	// The snapshot must fit in usable snapshot disk (FS3). A pause gives
+	// back the lease's own disk_mb reservation, so only the snapshot
+	// beyond it (memory size as the estimate) needs room. An admin drain
+	// is never refused for disk: refusing would leave the lease running
+	// into the orchestrator stop and lose its memory state.
+	need := int64(l.MemoryMB-l.DiskMB) * 1024 * 1024
+	if drained {
+		need = 0
+	}
+	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, need)
+	if err != nil {
+		return "", err
+	}
+	defer diskRelease()
 	buildID, refs, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
 		return "", err
@@ -2988,6 +3009,12 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 		return nil, err
 	}
 	defer func() { s.releaseQuotaReservation(l.Owner, 1, memPer) }()
+	// A resumed lease's root disk counts as reserved again (FS3).
+	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, int64(l.DiskMB)*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	defer diskRelease()
 	// Memory re-admission (FS2b-1): a resume brings the guest (and its
 	// hugepages) back, so it re-passes the one-pool admission on the way.
 	if err := s.admitMemory(ctx, l.Owner, memPer); err != nil {
@@ -3350,6 +3377,14 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		return store.BuildRow{}, err
 	}
 	defer release()
+	// Every checkpoint (keep, named save, automatic) must fit in usable
+	// snapshot disk (FS3); the memory size is the estimate. The
+	// kept_budget check needs the real size and still runs after.
+	diskRelease, err := s.ensureDiskRoom(ctx, src.Owner, int64(src.MemoryMB)*1024*1024)
+	if err != nil {
+		return store.BuildRow{}, err
+	}
+	defer diskRelease()
 	start := time.Now()
 	buildID, refs, err := s.sub.Checkpoint(ctx, src.SandboxID)
 	pause := time.Since(start)
@@ -4277,7 +4312,7 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 		// Preemption (FS2b-1): always false — nothing stamps preempted_at
 		// any more (the field stays for client compatibility; a lease
 		// migrated from a pre-3.0 store carries no live stamp either).
-		"preempted": !l.PreemptedAt.IsZero(),
+		"preempted": false, // 3.0: no preemption; kept for API compatibility
 		// Pin (FS5): true when the owner pinned this lease; spoond never
 		// pauses or deletes it before its own expiry. A pinned lease
 		// reports pinned_idle_since once its last API activity passed
