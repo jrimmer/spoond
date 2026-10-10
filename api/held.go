@@ -100,12 +100,14 @@ func (s *Service) setPinned(owner, id string, pinned bool) (*Lease, error) {
 	}
 	s.saveLeaseLocked(l)
 	if pinned {
-		s.emitLeaseEvent(id, owner, LeasePinned, "pinned; never paused or released before its own expiry")
+		s.emitLeaseEvent(id, owner, LeasePinned, pinEventDetail)
 	} else {
 		s.emitLeaseEvent(id, owner, LeaseUnpinned, "unpinned; take-back may pause it again")
 	}
 	return l, nil
 }
+
+const pinEventDetail = "pinned; a pin protects only a running VM — it is never paused or released by spoond before its own expiry, and a paused pinned lease is released 30 d after its pause date like any other"
 
 // unpinByHolderPrefix clears the pinned flag of every lease whose holder
 // label starts with prefix, returning the count. It exists for the

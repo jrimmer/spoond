@@ -80,13 +80,17 @@ func TestBoxFullHTTP429(t *testing.T) {
 	}
 }
 
-// TestHolderLabelNeverPins: a create with a holder and no pinned gives an
-// unpinned lease that take-back can pause (FS5 contract).
+// TestHolderLabelNeverPins: a create with a holder and no pinned gives
+// an unpinned lease that take-back can pause (FS5 contract). The second
+// clause is the load-bearing one: take-back must actually pause a lease
+// that carries a holder label, so a regression that re-introduces a
+// holder-based take-back exemption (2.9's held() was Holder != "") fails
+// here.
 func TestHolderLabelNeverPins(t *testing.T) {
-	ts, svc, _, _ := newTestServerWithService(t)
+	ts, svc, sub, ctx := newPreemptServer(t)
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{
-		"image": "py-base", "ttl": 300, "holder": "ci-job-42",
+		"image": "mid", "ttl": 300, "holder": "ci-job-42", "burst": true,
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create = %d (%v), want 201", resp.StatusCode, body)
@@ -107,14 +111,50 @@ func TestHolderLabelNeverPins(t *testing.T) {
 		t.Fatalf("PUT holder pinned the lease: %+v", l)
 	}
 
+	// Take-back: the holder-labelled lease is the only thing on a full
+	// node, and a guaranteed admission takes its room by pausing it. A
+	// holder label is a plain label: it must neither pin the lease nor
+	// shield it.
+	installDynamicNode(t, svc, sub, 512, 0, 512)
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-b", image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("guaranteed grant over the holder-labelled lease: %v", err)
+	}
+	l = svc.lookup("consumer-a", l.ID)
+	if !l.Suspended {
+		t.Fatal("take-back did not pause the holder-labelled lease")
+	}
+	if l.SuspendReason != suspendReasonPreempt {
+		t.Fatalf("holder-labelled lease suspend reason = %q, want %q", l.SuspendReason, suspendReasonPreempt)
+	}
+	if l.Pinned || l.Holder != "flight-7" {
+		t.Fatalf("holder-labelled lease changed identity: pinned=%v holder=%q", l.Pinned, l.Holder)
+	}
+
 	// A suspended non-persistent lease the caller owns can be explicitly
 	// resumed (v3.0, spoond-k0uz M5): persistence is not a resume gate,
-	// and a holder label does not change that either way. Pause it for
-	// real so it has a resume build, like resume-on-use requires.
-	if _, err := svc.pauseLease(context.Background(), l, false); err != nil {
-		t.Fatalf("pause non-persistent lease: %v", err)
+	// and a holder label does not change that either way. The take-back
+	// pause left it with a resume build, like resume-on-use requires.
+	// The guaranteed lease gives the room back first so the burst
+	// re-admission fits.
+	// The guaranteed lease is released so the burst re-admission of the
+	// suspended lease fits (its resume-on-use re-admission is a burst
+	// admission).
+	svc.store.mu.Lock()
+	var gID string
+	for _, other := range svc.store.leases {
+		if other.Owner == "consumer-b" {
+			gID = other.ID
+		}
 	}
-	if _, err := svc.resume(context.Background(), "consumer-a", l.ID); err != nil {
+	svc.store.mu.Unlock()
+	if gID == "" {
+		t.Fatal("guaranteed take-back lease not found")
+	}
+	g := svc.lookup("consumer-b", gID)
+	if g != nil {
+		svc.release(ctx, g)
+	}
+	if _, err := svc.resume(ctx, "consumer-a", l.ID); err != nil {
 		t.Fatalf("resume of a suspended non-persistent lease = %v, want success", err)
 	}
 }

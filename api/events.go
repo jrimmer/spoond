@@ -32,9 +32,12 @@ const (
 	LeaseRestarted     LeaseEventType = "restarted"
 	LeaseHolderSet     LeaseEventType = "holder_set"
 	LeaseHolderCleared LeaseEventType = "holder_cleared"
-	// LeasePinned and LeaseUnpinned mark a pin change (FS5): a pinned
-	// lease is never paused or released before its own expiry; a holder
-	// or holder_url label never pins.
+	// LeasePinned and LeaseUnpinned mark a pin change (FS5, owner
+	// decision 2026-10-09): a pin protects only a running VM — spoond
+	// never pauses or releases a running pinned lease before its own
+	// expiry, and a paused pinned lease is released 30 d after its pause
+	// date like every paused lease. A holder or holder_url label never
+	// pins.
 	LeasePinned   LeaseEventType = "pinned"
 	LeaseUnpinned LeaseEventType = "unpinned"
 	// LeasePausedExpiring marks the warning 24 h before a paused lease is
@@ -167,9 +170,9 @@ type LeaseEvent struct {
 	Owner   string         `json:"owner"`
 	Type    LeaseEventType `json:"type"`
 	Detail  string         `json:"detail,omitempty"`
-	// Reason is one of idle|idle_suspend|hold_lapsed|pressure|preempt
-	// on a suspended event (and resume_failed when an undrain left a lease
-	// suspended it could not resume); "" elsewhere.
+	// Reason is idle_suspend|preempt|resume_failed on a suspended
+	// event (resume_failed when an undrain left a lease suspended it
+	// could not resume); "" for a hand or drain suspend.
 	Reason string `json:"reason,omitempty"`
 	// PolicyStep is the pressure order's step name that ordered the
 	// suspend, or "" when none did.

@@ -111,8 +111,8 @@ func journalReleaseReason(l *Lease, reason string) string {
 // the held-lease rules (FS5).
 
 // journalSuspendReason names why a lease was suspended: the structured
-// automatic reason when there is one (idle, idle_suspend, hold_lapsed,
-// pressure, preempt), else "drain" for the admin drain and "hand" for an
+// automatic reason when there is one (idle_suspend, preempt or
+// resume_failed), else "drain" for the admin drain and "hand" for an
 // owner's own suspend.
 func journalSuspendReason(pol suspendPolicy, drained bool) string {
 	if pol.reason != "" {

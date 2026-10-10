@@ -160,7 +160,7 @@ type Lease struct {
 	SnapshotBuildID string `json:"-"`
 	// SuspendReason, SuspendPolicyStep, SuspendBuildID and SuspendedAt
 	// record an automatic suspend (#145 D6): reason is one of
-	// idle|idle_suspend|hold_lapsed|pressure|preempt|resume_failed, policy
+	// idle_suspend|preempt|resume_failed, policy
 	// step is the pressure order's step name ("" until it names steps), the
 	// build is the pause build written and suspended_at is when. A hand or
 	// drain suspend carries none of them. Reported by the lease API as
@@ -2851,7 +2851,7 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	// later; resumeClock clears it.
 	s.pauseClock(l, l.LastActionAt)
 	// The structured suspension facts (#145 D6): the reason
-	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
+	// (idle_suspend|preempt|resume_failed), the pressure
 	// order's step, the pause build it wrote and when describe an
 	// automatic suspend. A hand or drain pause has no automatic reason,
 	// so all four stay empty and the GET omits them; the lease still
@@ -4299,7 +4299,7 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 	}
 	// Structured suspension facts (#145 D6), additive and omitted while
 	// the lease is not suspended: why an automatic suspend happened
-	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
+	// (idle_suspend|preempt|resume_failed), the pressure
 	// order's step ("" until it names steps), the pause build and when.
 	// A hand or drain suspend carries none of them and the fields stay
 	// off.
