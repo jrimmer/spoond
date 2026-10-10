@@ -153,11 +153,43 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 }
 
 // takeBackOwners builds the selector's view of every owner: memory used
-// and slice from fairShares, plus the owner's running leases.
+// and slice from fairShares, plus the owner's running leases. The fair
+// snapshot supplies each owner's UsedMiB and SliceMiB; the store lock
+// then lists the owner's live, unreleased leases (running only — a
+// suspended lease holds no hugepages to take back). A lease is busy
+// when it has an in-flight operation or a running background job: both
+// rank last in the within-owner order. Callers must re-check every
+// candidate at the moment of the pause (takeBackPause).
 func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
-	// TODO(FS2a step 3): for each owner in s.fairShares(ctx).owners take
-	// Memory.UsedMiB / Memory.SliceMiB, and under s.store.mu list the
-	// owner's live, unreleased leases as takeBackLease (MemoryMB,
-	// Pinned, busy || s.runningJobs[id] > 0, LastActive).
-	return nil
+	snap := s.fairShares(ctx)
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	byOwner := map[string]*takeBackOwner{}
+	out := make([]takeBackOwner, 0, len(snap.owners))
+	for _, o := range snap.owners {
+		out = append(out, takeBackOwner{Owner: o.Owner, UsedMiB: o.Memory.UsedMiB, SliceMiB: o.Memory.SliceMiB})
+		byOwner[o.Owner] = &out[len(out)-1]
+	}
+	for _, l := range s.store.leases {
+		if l.released || l.Owner == "" || !l.live() {
+			continue
+		}
+		v := byOwner[l.Owner]
+		if v == nil {
+			// A lease of an owner the fair snapshot does not know (an
+			// owner added after it was computed, say): its memory is in
+			// the box, so give it the owner row the snapshot missed.
+			v = &takeBackOwner{Owner: l.Owner}
+			byOwner[l.Owner] = v
+			out = append(out, *v)
+		}
+		v.Leases = append(v.Leases, takeBackLease{
+			ID:         l.ID,
+			MemoryMiB:  l.MemoryMB,
+			Pinned:     l.Pinned,
+			Busy:       l.busy || s.hasRunningJobLocked(l.ID),
+			LastActive: l.LastActive,
+		})
+	}
+	return out
 }

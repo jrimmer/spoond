@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -143,4 +144,87 @@ func TestMemVictimsZeroSliceSafe(t *testing.T) {
 // pinned first is never paused.
 func TestTakeBackPauseGuardRace(t *testing.T) {
 	t.Skip("TODO(FS2a step 2): guard race")
+}
+
+// TestTakeBackOwnersViews: takeBackOwners builds one view per fair-share
+// owner from the snapshot (UsedMiB, SliceMiB) and lists the owner's
+// running, unreleased leases under the store lock — with Pinned, busy
+// (an in-flight operation or a running background job) and LastActive
+// carried through.
+func TestTakeBackOwnersViews(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	alice := addIdentityUser(t, ids, "alice")
+	bob := addIdentityUser(t, ids, "bob")
+	ctx := context.Background()
+	seedImage(t, db, "mid", 1024)
+
+	// Alice: two running leases (one pinned, one with a running job).
+	a1, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant a1: %v", err)
+	}
+	if _, err := svc.setPinned(alice.ID, a1.ID, true); err != nil {
+		t.Fatalf("pin a1: %v", err)
+	}
+	a2, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant a2: %v", err)
+	}
+	// Bob: one running lease plus one suspended (which holds no
+	// hugepages and must not be listed).
+	b1, err := svc.grantLease(ctx, leaseRequest{owner: bob.ID, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant b1: %v", err)
+	}
+	b2, err := svc.grantLease(ctx, leaseRequest{owner: bob.ID, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant b2: %v", err)
+	}
+	if _, err := svc.suspend(ctx, bob.ID, b2.ID); err != nil {
+		t.Fatalf("suspend b2: %v", err)
+	}
+	// A running background job marks a2 busy like an in-flight pause.
+	svc.incRunningJob(a2.ID)
+
+	// Warm the node cache so the fair snapshot is computed; each lease
+	// shows up in its owner's memory usage through the store read.
+	svc.updateNodeMetrics(ctx)
+	svc.invalidateFairShares()
+
+	views := svc.takeBackOwners(ctx)
+	by := map[string]takeBackOwner{}
+	for _, v := range views {
+		by[v.Owner] = v
+	}
+	av, okA := by[alice.ID]
+	bv, okB := by[bob.ID]
+	if !okA || !okB {
+		t.Fatalf("views missing owners: %+v", views)
+	}
+	if av.SliceMiB != bv.SliceMiB || av.SliceMiB == 0 {
+		t.Fatalf("slices = %d/%d, want equal nonzero", av.SliceMiB, bv.SliceMiB)
+	}
+	// Memory usage from the snapshot: 2048 MiB each (two 1024 leases).
+	if av.UsedMiB != 2048 || bv.UsedMiB != 1024 {
+		t.Fatalf("used = alice %d bob %d, want 2048/1024", av.UsedMiB, bv.UsedMiB)
+	}
+	if len(av.Leases) != 2 || len(bv.Leases) != 1 {
+		t.Fatalf("leases = alice %d bob %d, want 2/1", len(av.Leases), len(bv.Leases))
+	}
+	la := map[string]takeBackLease{}
+	for _, l := range av.Leases {
+		la[l.ID] = l
+	}
+	if !la[a1.ID].Pinned {
+		t.Fatal("a1 should carry Pinned")
+	}
+	if !la[a2.ID].Busy {
+		t.Fatal("a2 should be busy through its running job")
+	}
+	if bv.Leases[0].ID != b1.ID || bv.Leases[0].Busy || bv.Leases[0].Pinned {
+		t.Fatalf("b1 view = %+v, want the plain running lease", bv.Leases[0])
+	}
+	if bv.Leases[0].LastActive.IsZero() {
+		t.Fatal("LastActive not carried")
+	}
 }
