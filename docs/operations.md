@@ -373,7 +373,8 @@ reason to turn the GC out of dry-run.
 
 ### Pause chains
 
-A **pause** (suspend, drain, idle rule, preemption) writes a new build
+A **pause** (suspend, drain, take-back, preemption, the lease's own
+`idle_suspend`) writes a new build
 whose `parent_build_id` is the build the lease was running from, and the
 GC keeps every ancestor of a live lease's resume build. A persistent
 lease that suspends repeatedly therefore accumulates a chain —
@@ -473,8 +474,9 @@ error keeps the lease `drained` for a retry rather than marking it
   deferral or when the cause changes, not once per pass. After
   `DRAIN_RESUME_MAX_AGE` (default `24h`) of deferrals the loop stops,
   keeps the lease suspended — its snapshot is intact, so it is not lost
-  — and emits a `drain_gave_up` event, leaving the exit to the owner or
-  the idle rules.
+  — and emits a `drain_gave_up` event, leaving the exit to the owner
+  (a work call's resume-on-use, `POST /resume`) or the one
+  paused-release clock.
 - A lease the drain could not pause is logged and emits a
   `drain_failed` event naming the lease and the pause error, so a lease
   left running into the stop is visible outside the HTTP response.
@@ -1072,12 +1074,42 @@ a refused request.
 | `PINNED_IDLE_NOTICE_DAYS` | `7` | a pinned lease's last API activity older than this flags it (visibility only) |
 
 **Migration from 2.9:** every lease with an unexpired hold becomes
-pinned (store migration 0022). Pool workers are held by `pool-spawn`
-today, so the 2.9 window will unpin worker leases by their holder label
-right after the migration: `POST
+pinned (store migration 0022), and every lease already suspended at the
+upgrade gets `paused_at` = the migration time, so it gets a fresh 30 d
+from the upgrade (no lease is released sooner). A non-persistent lease
+whose hold had already outlived its TTL — the shape a holder client
+kept alive by renewing the hold — gets `expires_at` = its hold expiry,
+so the first 3.0 sweep does not delete it at once. Pool workers are
+held by `pool-spawn` today, so the 2.9 window will unpin worker leases
+by their holder label right after the migration: `POST
 /api/admin/unpin-by-holder?holder_prefix=pool:` (admin token) unpins
 every lease whose holder starts with the prefix. `pool-spawn` needs no
 change; it sends holder labels only.
+
+**Pre-deploy gate (read before the 3.0 upgrade).** Clients that kept
+leases alive with a holder — Honey's flights — must create them with
+`"pinned": true` (plus `"persistent": true` if they must outlive
+`MaxTTL`) before 3.0 deploys. From 3.0 on, `PUT /holder` no longer
+renews anything (a holder is a plain label) and a non-persistent lease
+cannot be extended: the only TTL a non-pinned lease has is its own, and
+only a keepalive on a persistent lease moves it. A flight created the
+2.9 way keeps its VM past the upgrade only as far as migration 0022's
+one-time extension to the old hold expiry.
+
+**Rollback:** migration 0022 clears `hold_expires_at`, `hold_set_at`
+and `hold_ttl` after converting a live hold to a pin, so a 2.9 binary
+rolled back onto this database reads every lease as unheld rather than
+treating an unexpired hold as live again (which would re-protect — or
+re-pause — leases the admin route had just unpinned). Know what 2.9
+does to a database 3.0 has touched: **2.9 honours no pins.** It applies
+`IDLE_TIMEOUT_SECS` (if the variable is still set in its environment)
+and its pressure rules to every lease, pinned or not, so a pinned lease
+can be paused or released by a rolled-back 2.9. A lease 2.9 pauses
+carries no `paused_at` (2.9 never writes the column); the roll-forward
+repairs that — `LoadState` stamps the clock fresh at load, so the lease
+gets a new 30 d from the upgrade instead of never expiring — and clears
+the stale pause date of any lease 2.9 resumed while running. The 2.9
+code TTL-sweeps by expiry and applies no held rules.
 
 **Removed in v3.0:** `HELD_IDLE_TIMEOUT_SECS`,
 `HELD_SUSPENDED_RELEASE_SECS`, `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS`,

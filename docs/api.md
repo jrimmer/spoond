@@ -47,7 +47,7 @@ particular means two different things depending on the code:
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
 | `429` | `quota` | the owner is over their own memory quota (`max_mib`); the body names the limit |
 | `429` | `quota_exceeded` | the same memory quota on a resume (a resume-on-use or `POST /resume`); carries `Retry-After: 30` and the lease stays suspended |
-| `429` | `box_full` | a request needed room and every take-back candidate is pinned (v3.0 FS5); nothing was paused or released — unpin or release leases to make room |
+| `429` | `box_full` | a request needed room and every take-back candidate is pinned (v3.0 FS5); nothing was paused or released — unpin or release leases to make room. Answers a create, and (since the round-3 fix) any re-admission: resume, resume-on-use, restart, clone, fork, restore |
 | `503` | `substrate_unavailable` | the substrate could not confirm the sandbox's state (the orchestrator was unreachable); retry; see [Substrate unavailable](#substrate-unavailable) |
 | `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
 | `500` | `internal` | an internal failure |
@@ -330,7 +330,10 @@ its own `idle_suspend` (or the host default `IDLE_SUSPEND_DEFAULT_SECS`,
 both `0` = never). Since v3.0 this is the **only** idle threshold: the
 plain `IDLE_TIMEOUT_SECS` sweep and every held-lease rule are removed
 (see [Pins and the paused-release clock](operations.md#pins-and-the-paused-release-clock)).
-The idle sweep suspends it through the normal pause path: memory and
+A **pinned lease is never idle-suspended** — its effective threshold
+reads `0` whatever it and the host default say (the pin wins; the
+stored value returns on unpin). For everyone else
+the idle sweep suspends it through the normal pause path: memory and
 hugepages are freed into a pause build, nothing is deleted, the
 generation does not change, and the idle sweep shares preemption's
 snapshot-disk floor
@@ -379,7 +382,7 @@ more, only labels.
 
 | Path | Resumes on use | No room | Owner over `max_mib` | In-flight pause/resume | Lost sandbox |
 |---|---|---|---|---|---|
-| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` (`429 box_full` when every take-back candidate is pinned) | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}/stream` (exec stream) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
@@ -409,7 +412,9 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 `name`, `comment`, `holder`, `holder_url`, `net_policy`,
 `egress_allowlist`, `exposed`, `generation`, `checkpoint_interval`
 (effective seconds; `0` = never), `idle_suspend` (effective seconds;
-`0` = never), `class`, `priority`, `preempted` and `pinned`
+`0` = never; **a pinned lease always reports `0`** — the pin wins over
+the idle sweep, and the lease's stored value comes back on unpin),
+`class`, `priority`, `preempted` and `pinned`
 (see [Lease classes](#lease-classes),
 [Preemption](#preemption) and [Pins and the paused-release clock](operations.md#pins-and-the-paused-release-clock)).
 
@@ -1070,7 +1075,10 @@ quota_exceeded` when the charge would pass
 the host answers `503` with `Retry-After: 30` and `code: capacity_wait`
 (one shape for every no-room refusal, whether the burst reserve, the
 preemption disk floor or the orchestrator's capacity) — the lease stays
-suspended. The resume re-decides the
+suspended. A resume whose class re-admission cannot get room because
+every take-back candidate is pinned answers `429` with `code:
+box_full` (the create body's refusal, not a 500) — the lease stays
+suspended, nothing was paused or released. The resume re-decides the
 lease's class too (#128 part 2): a burst lease coming back into a full
 burst reserve takes that same `503 capacity_wait`. Resuming a lease that
 a preemption suspended
@@ -1253,7 +1261,8 @@ Response `200 OK`:
 ```
 
 `idle_suspend` in the response is the effective value (the value just
-set). The change emits an `idle_policy` lease event naming the new
+set; a pinned lease reads `0` — the pin wins, and the stored value
+comes back on unpin). The change emits an `idle_policy` lease event naming the new
 effective seconds — see [Lease events](#lease-events-server-sent-events) — and takes effect on
 the sweep's next pass.
 
@@ -1420,11 +1429,15 @@ routes. Sets the `holder` and `holder_url` labels on an existing lease:
 
 Both fields empty clears the label. The same validation applies as on
 create (`400` naming the offending field). Response `200`
-`{"id":"…","holder":"…","holder_url":"…","ok":true}`.
+`{"id":"…","holder":"…","holder_url":"…","ok":true}`. Setting a
+different holder replaces the old one; there is no `409` (v3.0: a
+holder is a plain label, so there is nothing to conflict with).
 
 **Since v3.0 the labels have no lifecycle effect:** setting a holder
 never pins, never keeps the lease past its TTL and never protects it
-from take-back. `hold_ttl` is removed (accepted and ignored for one
+from take-back — and it is not activity for the idle sweep either: only
+work-call and keepalive activity moves `LastActive`. `hold_ttl` is
+removed (accepted and ignored for one
 release, with a `Deprecation` header). To keep a lease, use the pin
 routes below. A holder label still counts as the lease's activity for
 the pinned-idle notice and is shown on the dashboard, and a lease with
@@ -1579,7 +1592,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `drain_failed` | the admin drain could not pause the lease: it ran on into the orchestrator stop (spoond-52c) | the pause error |
 | `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer, an indeterminate orchestrator error, or a bounded context (spoond-52c, spoond-638d) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
 | `drain_healed` | the drain self-heal loop lifted a drain that outlived `DRAIN_MAX_SECS` on a healthy node, or cleared a node drain a failed undrain left set (spoond-52c) | `drain lasted <duration>` |
-| `drain_gave_up` | the drain self-heal loop stopped retrying the lease's resume after `DRAIN_RESUME_MAX_AGE`; the lease stays suspended with its snapshot intact, for the owner or the idle rules to exit (spoond-52c) | `resume deferred for over <duration>; leaving the lease suspended for the owner` |
+| `drain_gave_up` | the drain self-heal loop stopped retrying the lease's resume after `DRAIN_RESUME_MAX_AGE`; the lease stays suspended with its snapshot intact, for the owner or the one paused-release clock to exit (spoond-52c) | `resume deferred for over <duration>; leaving the lease suspended for the owner` |
 | `user_deleted` | `DELETE /api/users/{id}` removed a user and cleaned up their state (spoond-q4j); every one of the user's leases emitted its own `released` event with reason `user_deleted` | `removed user <id>: N lease(s), N job(s), N snapshot(s), N kept build(s)` |
 | `gap` | a hole in *your* stream, not a lease change | what was missed and why |
 

@@ -76,7 +76,24 @@ summarised from README "Status".
   `PUT /api/leases/{id}/pin` and `DELETE
   /api/leases/{id}/pin` answer the lease's pin state, and the
   `pinned`, `paused_at` and `pinned_idle_since` fields appear on the
-  lease API. `hold_expires_at` and `hold_state` are gone.
+  lease API. `hold_expires_at` and `hold_state` are gone. The
+  `box_full` and `admin_unpin` events carry lease id `-` (a placeholder
+  for a lease-less event), documented in `docs/api.md`. **Every
+  re-admission path answers it too:** `POST /resume`, every resume-on-use
+  work call (exec, stream, files, proxy, jobs, the LLM gateway, the SSH
+  gateway), restart, clone, fork and restore map a box_full class
+  re-admission to the same `429 box_full` body a create gets, not a 500
+  a client would read as a permanent lease failure; and an undrain in
+  that state defers (the lease stays `drained`) instead of reporting
+  `resume_failed` or losing the lease (spoond-k0uz R3-2).
+- **Resume no longer refuses an unpinned non-persistent lease.**
+  `POST /api/leases/{id}/resume` and the SSH gateway's resume accept
+  any suspended lease the caller owns, as resume-on-use already did; the
+  `400` for a non-persistent lease is gone. A suspended non-persistent
+  lease the drain left suspended resumes normally.
+- **`PUT /holder` with a different holder replaces it** instead of
+  answering `409`: a holder is a plain label now, so there is nothing
+  to conflict with (v3.0).
 
 ### Changed
 
@@ -109,10 +126,36 @@ summarised from README "Status".
     the count. Nothing is paused, unpinned or released because of it.
   - **Migration 0022** turns every lease with an unexpired hold into a
     pin, adds `pinned`, `paused_at`, `pinned_idle_since` and
-    `paused_expiry_notified`, and leaves the old hold columns in place
-    (unused). The 2.9 window's pool workers are held by `pool-spawn`,
+    `paused_expiry_notified`, backfills `paused_at` to the migration
+    time for every lease already `suspended` (a fresh 30 d from the
+    upgrade; no lease is released sooner), extends the `expires_at` of
+    every pinned non-persistent lease whose hold had outlived its TTL
+    to that hold's expiry (the hold was what kept it alive in 2.9, so
+    the first 3.0 sweep must not delete it at once — spoond-k0uz R3-1),
+    and clears the old hold columns (`hold_expires_at`, `hold_set_at`,
+    `hold_ttl`). The 2.9
+    window's pool workers are held by `pool-spawn`,
     so `POST /api/admin/unpin-by-holder?holder_prefix=pool:` (admin
     token) unpins leases by holder label; `pool-spawn` needs no change.
+    Clearing the hold columns is the **rollback story**: a 2.9 binary
+    rolled back onto this database reads every row as unheld instead of
+    treating an unexpired hold as live again (spoond-k0uz M6, see
+    `docs/operations.md`).
+  - **Pre-deploy gate:** clients that kept leases alive with a holder
+    (Honey) must create them with `"pinned": true` (plus
+    `"persistent": true` if they must outlive `MaxTTL`) before 3.0
+    deploys — `PUT /holder` no longer renews anything, and a
+    non-persistent lease cannot be extended (spoond-k0uz R3-1).
+  - **The one clock only ever releases a suspended lease
+    (spoond-k0uz R3-3).** A running lease with a stale `paused_at` (the
+    mark of a rollback to 2.9, which resumes without clearing the
+    column) is not deleted 30 d after the old pause: the clock's sweep
+    and its pre-release re-check both require the lease to still be
+    suspended, unreleased and not busy, and `LoadState` clears the
+    stale date (and stamps a fresh one on a suspended row with none) at
+    load. This also closes the race where a resume landing between the
+    sweep's collection pass and the release deleted a lease that had
+    just come back.
 
 ### Removed
 
