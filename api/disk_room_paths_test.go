@@ -262,3 +262,42 @@ func TestDiskRoomPathKeepNothingReclaimableBoxFull(t *testing.T) {
 		map[string]any{"keep": true})
 	expectBoxFull(t, resp, body, "lkc-consumer-b", h)
 }
+
+// A pause gives back the lease's own disk_mb reservation, so a lease
+// whose reservation covers its snapshot pauses even when usable disk is
+// negative and nothing can be taken back.
+func TestDiskRoomPathPauseCountsItsOwnReservation(t *testing.T) {
+	h := newDiskPathHarness(t, 1<<30)
+	h.tightBox(t, 100<<20, 0, "5")
+	h.seedRunningLeaseAsRow(t, "a-run", "sb-a-run", 4096)
+
+	resp, body := doReq(t, "POST", h.ts.URL+"/api/leases/a-run/suspend", "token-a", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("suspend: %d (%v), want 200: the pause frees its own 4 GiB reservation", resp.StatusCode, body)
+	}
+	if r := h.leaseRowMust(t, "a-run"); r.State != "suspended" {
+		t.Fatalf("a-run = %v, want it suspended", r)
+	}
+}
+
+// An admin drain is never refused for disk, even when the snapshot is
+// bigger than the lease's reservation and nothing can be taken back.
+func TestDiskRoomDrainNeverRefusedForDisk(t *testing.T) {
+	h := newDiskPathHarness(t, 1<<30)
+	h.tightBox(t, 100<<20, 0, "5")
+	h.seedRunningLeaseAsRow(t, "a-run", "sb-a-run", 0)
+
+	res, err := h.svc.drain(context.Background())
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	// tightBox's reserve-run has no build to pause; only a-run matters.
+	for _, f := range res.Failed {
+		if f.ID == "a-run" {
+			t.Fatalf("drain failed a-run: %s, want no disk refusal", f.Error)
+		}
+	}
+	if r := h.leaseRowMust(t, "a-run"); r.State != "suspended" {
+		t.Fatalf("a-run = %v, want it paused by the drain", r)
+	}
+}

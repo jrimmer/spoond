@@ -2834,9 +2834,16 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		return "", err
 	}
 	defer release()
-	// The snapshot must fit in usable snapshot disk (FS3); its memory
-	// size is the estimate, held until the write has finished.
-	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, int64(l.MemoryMB)*1024*1024)
+	// The snapshot must fit in usable snapshot disk (FS3). A pause gives
+	// back the lease's own disk_mb reservation, so only the snapshot
+	// beyond it (memory size as the estimate) needs room. An admin drain
+	// is never refused for disk: refusing would leave the lease running
+	// into the orchestrator stop and lose its memory state.
+	need := int64(l.MemoryMB-l.DiskMB) * 1024 * 1024
+	if drained {
+		need = 0
+	}
+	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, need)
 	if err != nil {
 		return "", err
 	}
