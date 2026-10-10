@@ -297,17 +297,16 @@ func TestUserDeleteCancelQueuedRace(t *testing.T) {
 // delete exists to remove (spoond-q4j).
 func TestUserDeleteRefusesQueuedCreate(t *testing.T) {
 	ts, svc, _, sub, _, victimID := newUserDeleteServer(t)
-	// A node with room for exactly one py-base (2048 MiB = 1024 pages),
-	// so the second create must wait for the first to go.
-	installDynamicNode(t, svc, sub, 1024, 0, 1024)
+	// A node whose 2048 MiB are all held outside spoond: nothing to
+	// take back and the victim borrows nothing, so its create is a
+	// structural capacity wait (filling the box with the victim's own
+	// lease would make it the biggest borrower: box_full, no wait).
+	installDynamicNode(t, svc, sub, 1024, 1024, 1024)
 	svc.cfg.MaxAdmitWaitSecs = 60
 	svc.admitQ.tick = 20 * time.Millisecond
 	h := ts.Config.Handler
 
-	if r := waitCreate(t, h, "victim-tok", `{"image":"py-base","ttl":60}`); r.code != http.StatusCreated {
-		t.Fatalf("filler create: %d %v", r.code, r.body)
-	}
-	// The victim's next create is refused for capacity and waits.
+	// The victim's create is refused for capacity and waits.
 	res := startCreate(t, h, context.Background(), "victim-tok", `{"image":"py-base","ttl":60,"wait":60}`)
 	waitDepth(t, svc, 1)
 

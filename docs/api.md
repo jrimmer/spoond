@@ -47,7 +47,7 @@ particular means two different things depending on the code:
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
 | `429` | `quota` | the owner is over their own memory quota (`max_mib`); the body names the limit |
 | `429` | `quota_exceeded` | the same memory quota on a resume (a resume-on-use or `POST /resume`); carries `Retry-After: 30` and the lease stays suspended |
-| `429` | `box_full` | a request needed room and every take-back candidate is pinned (v3.0 FS5); nothing was paused or released — unpin or release leases to make room. Answers a create, and (since the round-3 fix) any re-admission: resume, resume-on-use, restart, clone, fork, restore |
+| `429` | `box_full` | a request needed room and take-back can free none for it: every candidate is pinned (v3.0 FS5), or the requester is itself the biggest borrower — over its fair slice after the request with no other owner further over (FS2b); nothing was paused or released — unpin or release leases to make room. Answers a create, and (since the round-3 fix) any re-admission: resume, resume-on-use, restart, clone, fork, restore |
 | `503` | `substrate_unavailable` | the substrate could not confirm the sandbox's state (the orchestrator was unreachable); retry; see [Substrate unavailable](#substrate-unavailable) |
 | `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
 | `500` | `internal` | an internal failure |
@@ -324,7 +324,7 @@ more, only labels.
 
 | Path | Resumes on use | No room | Owner over `max_mib` | In-flight pause/resume | Lost sandbox |
 |---|---|---|---|---|---|
-| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` (`429 box_full` when every take-back candidate is pinned) | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` (`429 box_full` when every take-back candidate is pinned or the caller is the biggest borrower) | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}/stream` (exec stream) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
@@ -1022,7 +1022,8 @@ the host answers `503` with `Retry-After: 30` and `code: capacity_wait`
 snapshot disk, or the orchestrator's
 capacity) — the lease stays
 suspended. A resume whose re-admission cannot get room because
-every take-back candidate is pinned answers `429` with `code:
+every take-back candidate is pinned, or because the caller is itself
+the biggest borrower, answers `429` with `code:
 box_full` (the create body's refusal, not a 500) — the lease stays
 suspended, nothing was paused or released. The same `429 box_full`
 answers a resume whose root disk does not fit in usable snapshot disk

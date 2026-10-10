@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // admitMemory admits memoryMB of guest memory for owner against the one
@@ -12,7 +13,8 @@ import (
 // take-back (memVictims over takeBackOwners, one takeBackPause at a
 // time) pauses the leases of the owners furthest over their slice until
 // it fits. A request no take-back can serve returns errBoxFull when only
-// pinned leases stand in the way, and otherwise falls through to the
+// pinned leases stand in the way or the requester is itself the biggest
+// borrower (a *memBoxFullError), and otherwise falls through to the
 // ordinary capacity check that createSandbox performs.
 //
 // Under preemptMu, so two concurrent admissions cannot each take back
@@ -58,7 +60,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		// ones alone would free enough, the request is box_full: nothing
 		// unpinned can be taken for it.
 		if freeMiB+freeable+s.pinnedFreeableMiB() >= need {
-			s.boxFullAlert(owner, memoryMB)
+			s.boxFullAlert(owner, memoryMB, "every take-back candidate is pinned")
 			return errBoxFull
 		}
 		// Not enough memory exists at all: taking back would only
@@ -82,6 +84,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	// and the ordinary capacity check answers.
 	const maxRefusedRounds = 3
 	refused := 0
+	pausedAny := false
 	for refused < maxRefusedRounds {
 		freeMiB, err = s.cachedFreeHugepageMiB(ctx)
 		if err != nil {
@@ -95,11 +98,21 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		if shortfall <= 0 {
 			return nil
 		}
-		victims := memVictims(s.takeBackOwners(ctx), owner, shortfall, memoryMB)
+		owners := s.takeBackOwners(ctx)
+		victims := memVictims(owners, owner, shortfall, memoryMB)
 		if len(victims) == 0 {
-			// Take-back can free nothing: either everyone is inside
-			// their slice or the requester is itself the biggest
-			// borrower. The ordinary capacity check answers.
+			// Take-back can free nothing. When the requester would be
+			// over its own slice and no other owner borrows more, the
+			// requester is the biggest borrower: box_full at once, it
+			// does not wait (fair shares). Otherwise (everyone inside
+			// their slice, or a bigger borrower whose leases are busy)
+			// the ordinary capacity check answers with a wait.
+			if !pausedAny {
+				if bf := biggestBorrowerRefusal(owners, owner, memoryMB); bf != nil {
+					s.boxFullAlert(owner, memoryMB, "the requester is the biggest borrower")
+					return bf
+				}
+			}
 			return nil
 		}
 		// One pause at a time, in the selector's order, re-checking free
@@ -123,7 +136,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 				}
 				continue
 			}
-			paused = true
+			paused, pausedAny = true, true
 			break
 		}
 		if !paused {
@@ -137,4 +150,48 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	// trying. The caller's debit and createSandbox's ordinary capacity
 	// check answer from here.
 	return nil
+}
+
+// memBoxFullError is the memory box_full refusal for a requester that is
+// itself the biggest borrower: its usage after the request is over its
+// slice and no other owner's ratio is higher, so take-back has no one to
+// take from. It unwraps to errBoxFull (429 box_full).
+type memBoxFullError struct {
+	Owner             string
+	UsedMiB, SliceMiB int
+	RequestMiB        int
+}
+
+func (e *memBoxFullError) Error() string {
+	return fmt.Sprintf("box_full: owner %q would use %d MiB of a %d MiB memory slice with this %d MiB request, and no other owner borrows more",
+		e.Owner, e.UsedMiB+e.RequestMiB, e.SliceMiB, e.RequestMiB)
+}
+
+func (e *memBoxFullError) Unwrap() error { return errBoxFull }
+
+// biggestBorrowerRefusal returns the box_full refusal when requester,
+// after requestMiB more, is over its slice and at least as far over it
+// (by used/slice) as every other owner; nil otherwise. An owner without
+// a slice (unknown to the fair snapshot) is never refused here.
+func biggestBorrowerRefusal(owners []takeBackOwner, requester string, requestMiB int) error {
+	var req *takeBackOwner
+	for i := range owners {
+		if owners[i].Owner == requester {
+			req = &owners[i]
+			break
+		}
+	}
+	if req == nil || req.SliceMiB <= 0 {
+		return nil
+	}
+	after := tbRatio(req.UsedMiB+requestMiB, req.SliceMiB)
+	if after <= 1 {
+		return nil
+	}
+	for _, o := range owners {
+		if o.Owner != requester && tbRatio(o.UsedMiB, o.SliceMiB) > after {
+			return nil
+		}
+	}
+	return &memBoxFullError{Owner: requester, UsedMiB: req.UsedMiB, SliceMiB: req.SliceMiB, RequestMiB: requestMiB}
 }
