@@ -472,6 +472,11 @@ func TestFromDBPinnedIdleCountsOutsideTheWindow(t *testing.T) {
 	if s.PinnedIdle != 42 {
 		t.Fatalf("pinnedIdle = %d, want 42 (the one flagged lease plus the 41 outside the window; unpinned and fresh pinned rows excluded)", s.PinnedIdle)
 	}
+	// The per-owner breakdown uses the display name where the identity
+	// store has one (L7).
+	if got := s.PinnedIdleByOwner["ci"]; got != 42 {
+		t.Fatalf("pinnedIdleByOwner[ci] = %d, want 42", got)
+	}
 }
 
 func TestFromDBReadsLeasesAndImages(t *testing.T) {

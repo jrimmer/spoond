@@ -9,9 +9,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // TestPinnedLeaseSurvivesTakeBackButExpiresAtTTL: a pinned lease is the
@@ -104,19 +107,15 @@ func TestHolderLabelNeverPins(t *testing.T) {
 		t.Fatalf("PUT holder pinned the lease: %+v", l)
 	}
 
-	// A holder label never makes a non-persistent lease resumable: the
-	// resume gate keys on Pinned, not on Holder.
-	if _, err := svc.resume(context.Background(), "consumer-a", l.ID); err != errNotPersistent {
-		t.Fatalf("resume of a holder-labelled non-persistent lease = %v, want errNotPersistent", err)
+	// A suspended non-persistent lease the caller owns can be explicitly
+	// resumed (v3.0, spoond-k0uz M5): persistence is not a resume gate,
+	// and a holder label does not change that either way. Pause it for
+	// real so it has a resume build, like resume-on-use requires.
+	if _, err := svc.pauseLease(context.Background(), l, false); err != nil {
+		t.Fatalf("pause non-persistent lease: %v", err)
 	}
-	resp, body = doReq(t, "PUT", ts.URL+"/api/leases/"+l.ID+"/pin", "token-a", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("pin = %d (%v), want 200", resp.StatusCode, body)
-	}
-	l = svc.lookup("consumer-a", l.ID)
-	l.Suspended = true
-	if _, err := svc.resume(context.Background(), "consumer-a", l.ID); err == errNotPersistent {
-		t.Fatal("pinned non-persistent lease should be resumable")
+	if _, err := svc.resume(context.Background(), "consumer-a", l.ID); err != nil {
+		t.Fatalf("resume of a suspended non-persistent lease = %v, want success", err)
 	}
 }
 
@@ -309,6 +308,205 @@ func TestPinnedIdleNoticeSetAndClearedNoLifecycleChange(t *testing.T) {
 	// The lease is untouched: still pinned, still running, never paused.
 	if !l.Pinned || l.Suspended || svc.lookup("c", l.ID) == nil {
 		t.Fatalf("the notice changed the lease: %+v", l)
+	}
+}
+
+// TestCreatePinnedTrueHTTP: a create with "pinned": true pins the new
+// lease at the HTTP level (spoond-k0uz H1: the field was decoded but
+// dropped by the request path; the other tests call grantLease
+// directly).
+func TestCreatePinnedTrueHTTP(t *testing.T) {
+	ts, svc, _, _ := newTestServerWithService(t)
+
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "pinned": true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create pinned = %d (%v), want 201", resp.StatusCode, body)
+	}
+	if body["pinned"] != true {
+		t.Fatalf("create response pinned = %v, want true", body["pinned"])
+	}
+	l := svc.lookup("consumer-a", body["id"].(string))
+	if l == nil || !l.Pinned {
+		t.Fatalf("the HTTP create did not pin the lease: %+v", l)
+	}
+
+	// A create with the field absent (or false) stays unpinned.
+	resp, body = doReq(t, "POST", ts.URL+"/api/leases", "token-a", map[string]any{
+		"image": "py-base", "ttl": 300, "pinned": false,
+	})
+	if resp.StatusCode != http.StatusCreated || body["pinned"] != false {
+		t.Fatalf("create unpinned = %d (%v), want 201 pinned=false", resp.StatusCode, body)
+	}
+}
+
+// TestPinnedNotIdleSuspended: a pinned lease with its own idle_suspend
+// is never paused by the idle sweep (spoond-k0uz H2, owner: "Pins don't
+// pause"). A caller's explicit POST /pause still works.
+func TestPinnedNotIdleSuspended(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	pinned, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setPinned("c", pinned.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	// The lease's own idle_suspend opt-in would fire, but the pin wins.
+	if _, err := svc.setIdlePolicy(pinned, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	svc.store.mu.Lock()
+	pinned.LastActive = base.Add(-time.Hour)
+	svc.store.mu.Unlock()
+
+	svc.suspendIdleLeases(ctx, base)
+	if pinned.Suspended {
+		t.Fatal("the idle sweep paused a pinned lease despite its idle_suspend")
+	}
+	// The owner's own explicit pause is their action and still works.
+	if _, err := svc.pauseLease(ctx, pinned, false); err != nil {
+		t.Fatalf("explicit pause of a pinned lease: %v", err)
+	}
+	if !pinned.Suspended {
+		t.Fatal("an explicit pause did not suspend a pinned lease")
+	}
+}
+
+// TestPinnedNotPausedByHostDefaultIdle: the same with the host default
+// idle_suspend (idle_suspend absent): effectiveIdleSuspend must return 0
+// for a pinned lease (spoond-k0uz H2).
+func TestPinnedNotPausedByHostDefaultIdle(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.IdleSuspendDefault = 60
+	ctx := context.Background()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	pinned, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setPinned("c", pinned.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if got := svc.effectiveIdleSuspend(pinned); got != 0 {
+		t.Fatalf("effectiveIdleSuspend(pinned) = %d, want 0", got)
+	}
+	// An unpinned twin under the same host default does suspend, so the
+	// test proves the pin is what stops it.
+	unpinned, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant unpinned: %v", err)
+	}
+	svc.store.mu.Lock()
+	pinned.LastActive = base.Add(-time.Hour)
+	unpinned.LastActive = base.Add(-time.Hour)
+	svc.store.mu.Unlock()
+
+	svc.suspendIdleLeases(ctx, base)
+	if pinned.Suspended {
+		t.Fatal("the idle sweep paused a pinned lease under the host default")
+	}
+	if !unpinned.Suspended {
+		t.Fatal("the idle sweep did not pause the unpinned lease under the host default")
+	}
+}
+
+// TestPausedPinnedReleasedAt30: a pinned lease that is paused (the
+// owner's own POST /pause, or a failed drain resume) is on the one clock
+// and released 30 d after its pause date. A running pinned lease is
+// never touched (owner decision 2026-10-09).
+func TestPausedPinnedReleasedAt30(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	pausedPinned, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant paused pinned: %v", err)
+	}
+	if _, err := svc.setPinned("c", pausedPinned.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if _, err := svc.pauseLease(ctx, pausedPinned, false); err != nil {
+		t.Fatalf("pause pinned: %v", err)
+	}
+	runningPinned, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant running pinned: %v", err)
+	}
+	if _, err := svc.setPinned("c", runningPinned.ID, true); err != nil {
+		t.Fatalf("pin running: %v", err)
+	}
+
+	// A day short of 30: the paused pinned lease is still there.
+	svc.releasePausedLeases(ctx, base.Add(29*24*time.Hour))
+	if svc.lookup("c", pausedPinned.ID) == nil {
+		t.Fatal("a paused pinned lease was released before 30 d")
+	}
+	// At 30 d it is released; the running pinned lease is never touched.
+	svc.releasePausedLeases(ctx, base.Add(30*24*time.Hour))
+	if svc.lookup("c", pausedPinned.ID) != nil {
+		t.Fatal("a paused pinned lease was not released at 30 d")
+	}
+	if svc.lookup("c", runningPinned.ID) == nil {
+		t.Fatal("a running pinned lease was released by the pause clock")
+	}
+}
+
+// TestDrainedResumeFailedPausedAtOneClock: a lease the admin drain left
+// suspended and whose resume then failed (resume_failed) keeps the pause
+// date its drain pause stamped, so it is on the one clock and released
+// 30 d after that pause (owner decision 2026-10-09).
+func TestDrainedResumeFailedPausedAtOneClock(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+	svc.cfg.UndrainResumeRetries = 0
+
+	leases := grantAndDrain(t, svc, 1)
+	target := leases[0]
+	targetSandbox := target.SandboxID
+	pauseAt := target.PausedAt
+	if pauseAt.IsZero() {
+		t.Fatal("drain did not stamp paused_at")
+	}
+
+	sub.createFn = func(c context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		if req.Resume && req.SandboxID == targetSandbox {
+			return substrate.Sandbox{}, errors.New("failed to init envd: syncing took too long")
+		}
+		return sub.Fake.Create(c, req)
+	}
+	t.Cleanup(func() { sub.createFn = nil })
+
+	svc.undrain(ctx)
+	if target.SuspendReason != suspendReasonResumeFailed {
+		t.Fatalf("suspend_reason = %q, want resume_failed", target.SuspendReason)
+	}
+	if !target.PausedAt.Equal(pauseAt) {
+		t.Fatalf("resume_failed moved paused_at from the drain pause: %v -> %v", pauseAt, target.PausedAt)
+	}
+
+	// A day short of 30 d it is still there; at 30 d the one clock
+	// releases it.
+	svc.releasePausedLeases(ctx, pauseAt.Add(29*24*time.Hour))
+	if svc.lookup("c", target.ID) == nil {
+		t.Fatal("a drained resume_failed lease was released before 30 d")
+	}
+	svc.releasePausedLeases(ctx, pauseAt.Add(30*24*time.Hour))
+	if svc.lookup("c", target.ID) != nil {
+		t.Fatal("a drained resume_failed lease was not released at 30 d")
 	}
 }
 

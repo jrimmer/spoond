@@ -45,7 +45,8 @@ const (
 	// paused, unpinned or released because of it.
 	LeasePinnedIdle LeaseEventType = "pinned_idle"
 	// LeaseAdminUnpin marks the admin route that unpins leases by holder
-	// prefix for the 2.9→3.0 migration window. It carries no lease id.
+	// prefix for the 2.9→3.0 migration window. It carries lease id "-"
+	// (a lease-less placeholder).
 	LeaseAdminUnpin LeaseEventType = "admin_unpin"
 	// LeaseCheckpointPolicy marks a per-lease checkpoint interval change
 	// (2.3, #122): the detail carries the new effective seconds.
