@@ -2310,15 +2310,24 @@ recorded state, never a filesystem walk per request:
   lease holds no hugepages).
 - **disk** — the owner's pause snapshots + kept checkpoints + named
   snapshots, from each build's recorded `size_bytes`. A build that is
-  both a kept checkpoint and a named snapshot counts once.
+  both a kept checkpoint and a named snapshot counts once. For a named
+  snapshot the build's `size_bytes` is preferred and the named row's
+  own `size_bytes` (the size at save time) is used only when the build
+  row is gone — the build is re-measured by the hourly disk accounting
+  pass and is authoritative. `named_bytes` can therefore differ from the
+  `size_bytes` the [named-snapshot listing](#get-apinamed-snapshots--list-your-snapshots)
+  reports for the same snapshot; the fair-share number is the disk's.
 
 The **disk slice basis** is the snapshot volume's usable bytes: the
 `statfs` bytes available to an unprivileged writer (`Bavail`, not the
 raw filesystem total, which includes the root-only reserve) plus the
 snapshot bytes spoond itself already accounts for (kept + named +
-paused). That is the space spoond can hand out to owners: the free
-space plus what it currently holds and can reclaim. Memory uses the
-hugepage pool spoond admits against.
+paused). The accounted bytes are summed over **distinct builds**, so a
+build shared by two owners (one pins another's build, or a named
+snapshot is owned apart from its build's owner) counts once for the box
+rather than once per owner. That is the space spoond can hand out to
+owners: the free space plus what it currently holds and can reclaim.
+Memory uses the hugepage pool spoond admits against.
 
 The share object is:
 

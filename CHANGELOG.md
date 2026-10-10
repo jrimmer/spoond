@@ -57,6 +57,16 @@ summarised from README "Status".
     lease is created/released/suspended/resumed, or its memory charge
     changes); an activity-only save (`LastActive`, expiry, holder)
     leaves it warm.
+  - **A shared build counts once in the disk basis.** The accounted
+    part of the disk slice basis is summed over distinct builds, so a
+    build pinned by two owners (or named apart from its build's owner)
+    does not count twice. `named_bytes` uses the build's recorded
+    `size_bytes` (re-measured by the hourly pass) and falls back to the
+    named row's size only when the build row is gone, so it can differ
+    from the named-snapshot listing's `size_bytes`.
+  - **A settled build size invalidates the cache unconditionally.**
+    `settleBuildSize` drops the fair-share cache even when the metrics
+    gauges are not wired.
 
 ## [2.9.2] - 2026-10-09
 
