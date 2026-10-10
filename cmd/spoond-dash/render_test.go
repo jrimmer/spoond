@@ -531,6 +531,22 @@ func TestNoticeTriggers(t *testing.T) {
 	}
 }
 
+// TestPinnedIdleNoticeDaysText: the pinned-idle notice names the
+// configured PINNED_IDLE_NOTICE_DAYS (FS5), not a hardcoded 7.
+func TestPinnedIdleNoticeDaysText(t *testing.T) {
+	s := healthySnapshot()
+	s.PinnedIdle = 1
+	s.PinnedIdleByOwner = map[string]int{"alice": 1}
+	if rows := notices(s); len(rows) != 1 || !strings.Contains(rows[0].Text, "idle over 7 d") {
+		t.Fatalf("default pinned-idle text = %+v, want 7 d", rows)
+	}
+	t.Setenv("PINNED_IDLE_NOTICE_DAYS", "14")
+	rows := notices(s)
+	if len(rows) != 1 || !strings.Contains(rows[0].Text, "idle over 14 d") {
+		t.Fatalf("PINNED_IDLE_NOTICE_DAYS=14 text = %+v, want 14 d", rows)
+	}
+}
+
 // TestKeptDiskWarnPctQuiet: kept checkpoints under KEPT_DISK_WARN_PCT
 // (default 40 %) draw no notification, and 0 disables the trigger
 // entirely while a custom pct raises it (#126).

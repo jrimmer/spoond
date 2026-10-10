@@ -178,7 +178,7 @@ func notices(s Snapshot) []Notice {
 	// panel names the count and the per-owner breakdown, not each lease.
 	if s.PinnedIdle > 0 {
 		out = append(out, Notice{ID: "pinned-idle", Severity: "warn",
-			Text: fmt.Sprintf("%d pinned lease%s idle over 7 d (%s)", s.PinnedIdle, plural(s.PinnedIdle), pinnedIdleOwnerCounts(s.PinnedIdleByOwner))})
+			Text: fmt.Sprintf("%d pinned lease%s idle over %d d (%s)", s.PinnedIdle, plural(s.PinnedIdle), pinnedIdleNoticeDays(), pinnedIdleOwnerCounts(s.PinnedIdleByOwner))})
 	}
 	return out
 }
@@ -240,6 +240,27 @@ func reconcileDismissed(active, dismissed []string) (kept, visible []string) {
 // DefaultKeptDiskWarnPct is the kept-checkpoint disk share (#126) past
 // which the Notifications panel warns, when KEPT_DISK_WARN_PCT is unset.
 const DefaultKeptDiskWarnPct = 40.0
+
+// DefaultPinnedIdleNoticeDays is PINNED_IDLE_NOTICE_DAYS when the
+// environment does not set it: the same 7-day default the backend uses
+// (FS5). The dashboard only names the value in its pinned-idle notice;
+// the backend does the flagging.
+const DefaultPinnedIdleNoticeDays = 7
+
+// pinnedIdleNoticeDays reads the pinned-idle notice age
+// (PINNED_IDLE_NOTICE_DAYS, in days): unset or unparsable values mean
+// the default.
+func pinnedIdleNoticeDays() int {
+	v := os.Getenv("PINNED_IDLE_NOTICE_DAYS")
+	if v == "" {
+		return DefaultPinnedIdleNoticeDays
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return DefaultPinnedIdleNoticeDays
+	}
+	return n
+}
 
 // DefaultIOFullWarnPct and DefaultIOFullBadPct are the disk I/O full
 // pressure (PSI) levels, in percent of the 60 s average, at which the
