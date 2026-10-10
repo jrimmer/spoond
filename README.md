@@ -186,7 +186,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v2.9.2 (2026-10-09) · GitHub` — with the
+line — `Spoond v2.9.3 (2026-10-09) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -273,6 +273,8 @@ every lease's life in the backend's journal. 2.9.1 makes a planned
 orchestrator restart wait for the orchestrator before resuming leases,
 so a restart no longer loses them. 2.9.2 scales the dashboard's i/o
 stall meter so its warning tick lines up with the other host meters.
+2.9.3 adds `DASH_AUTH`, which can turn the dashboard's login off for a
+dashboard on a private network (it stays on by default).
 
 **v2.8: no loose ends.** A lost lease's guest is always stopped, and
 spoond sweeps away sandboxes nothing claims. A late checkpoint, pause or

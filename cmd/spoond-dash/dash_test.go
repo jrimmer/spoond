@@ -182,6 +182,53 @@ func TestBasicAuthAndStream(t *testing.T) {
 	}
 }
 
+// DASH_AUTH off serves the page, the stream and the static files with
+// no login. The default, a typo or an empty value keeps the login, and
+// with the login off DASH_USER and DASH_PASSWORD_HASH are not required.
+func TestDashAuthToggle(t *testing.T) {
+	for v, want := range map[string]bool{"": true, "on": true, "1": true, "yes": true, "ofF": false,
+		"off": false, "0": false, "false": false, "no": false, " No ": false, "of": true} {
+		if got := authOn(v); got != want {
+			t.Errorf("authOn(%q) = %v, want %v", v, got, want)
+		}
+	}
+	t.Setenv("METRICS_TOKEN", "scrape")
+	t.Setenv("DASH_USER", "")
+	t.Setenv("DASH_PASSWORD_HASH", "")
+	t.Setenv("DASH_AUTH", "")
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NoAuth || requireLogin(cfg) == nil {
+		t.Fatalf("default: NoAuth=%v, requireLogin=%v; want the login on and required", cfg.NoAuth, requireLogin(cfg))
+	}
+	t.Setenv("DASH_AUTH", "off")
+	if cfg, err = configFromEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.NoAuth || requireLogin(cfg) != nil {
+		t.Fatalf("DASH_AUTH=off: NoAuth=%v, requireLogin=%v; want no login", cfg.NoAuth, requireLogin(cfg))
+	}
+
+	srv := metricsServer(t, "scrape", []string{frame(1, 1, "1")})
+	tc := testConfig(t, srv.URL)
+	tc.NoAuth, tc.User, tc.PasswordHash = true, "", ""
+	d, err := newDash(tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := d.handler()
+	for _, path := range []string{"/", "/static/vendor/webtui/full.css", "/healthz"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 || rec.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("%s with DASH_AUTH off: %d (WWW-Authenticate %q), want 200 and no challenge",
+				path, rec.Code, rec.Header().Get("WWW-Authenticate"))
+		}
+	}
+}
+
 // The dashboard's /readyz (issue #81): 200 when every source the
 // dashboard reads answers, 503 naming the failing ones. The sources are
 // probed live per request (no dashboard-side cache — the collector tick
