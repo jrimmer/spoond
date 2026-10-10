@@ -277,16 +277,16 @@ func (b *eventBus) emitTakeBack(leaseID, owner string, typ LeaseEventType, detai
 	defer b.mu.Unlock()
 	b.seq++
 	ev := LeaseEvent{
-		Seq:        b.seq,
-		Epoch:      b.epoch,
-		At:         time.Now().UTC(),
-		LeaseID:    leaseID,
-		Owner:      owner,
-		Type:       typ,
-		Detail:     detail,
-		Reason:     reason,
-		PolicyStep: policyStep,
-		BuildID:    buildID,
+		Seq:           b.seq,
+		Epoch:         b.epoch,
+		At:            time.Now().UTC(),
+		LeaseID:       leaseID,
+		Owner:         owner,
+		Type:          typ,
+		Detail:        detail,
+		Reason:        reason,
+		PolicyStep:    policyStep,
+		BuildID:       buildID,
 		TakeBackRatio: takeBackRatio,
 		TakeBackFor:   takeBackFor,
 	}
