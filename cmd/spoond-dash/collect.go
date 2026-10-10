@@ -83,11 +83,10 @@ type Snapshot struct {
 	HugeFreeGiB float64 `json:"hugeFreeGiB"`
 	DiskUsedPct float64 `json:"diskUsedPct"`
 	DiskFreeGiB float64 `json:"diskFreeGiB"`
-	// DiskRoom is the snapshot disk's room as the fair-share endpoint
-	// reports it (FS3b): total, free, reserved for running leases, the
-	// reserve floor, pending and freeing bytes and the resulting usable
-	// space. DiskRoomKnown is false when the endpoint or the read
-	// failed; the field is then not drawn.
+	// DiskRoom is the snapshot disk's room (FS3b) from the backend's
+	// spoond_snapshot_disk_{reserved,usable}_bytes gauges. DiskRoomKnown
+	// is false when the scrape did not carry them; the line is then not
+	// drawn.
 	DiskRoom      DiskRoom `json:"diskRoom"`
 	DiskRoomKnown bool     `json:"diskRoomKnown"`
 	VCPUAlloc     int      `json:"vcpuAlloc"`
@@ -147,18 +146,11 @@ type Snapshot struct {
 	Events   []EventLine `json:"-"` // the events panel, newest first
 }
 
-// DiskRoom is the snapshot disk's room as GET /api/fair-shares's
-// "disk" object reports it, every size in bytes. The take-back policy
-// decides with these numbers: Reserved is the running leases' whole
-// disk_mb allowance, Floor the DISK_RESERVE_PCT reserve and Usable the
-// room a new request may actually use.
+// DiskRoom is the snapshot disk's room as the backend's gauges report
+// it, in bytes: Reserved is the running leases' whole disk_mb allowance
+// and Usable the room a new request may actually use (negative = short).
 type DiskRoom struct {
-	Total    int64 `json:"total_bytes"`
-	Free     int64 `json:"free_bytes"`
 	Reserved int64 `json:"reserved_bytes"`
-	Floor    int64 `json:"floor_bytes"`
-	Pending  int64 `json:"pending_bytes"`
-	Freeing  int64 `json:"freeing_bytes"`
 	Usable   int64 `json:"usable_bytes"`
 }
 
@@ -393,48 +385,6 @@ func eventsURL(metricsURL string) string {
 	return u.String()
 }
 
-// fairSharesURL is the admin fair-share URL: the metrics URL's scheme
-// and host (the same backend), /api/fair-shares on the path.
-func fairSharesURL(metricsURL string) string {
-	u, err := url.Parse(metricsURL)
-	if err != nil || u.Host == "" {
-		return "https://127.0.0.1:8890/api/fair-shares"
-	}
-	u.Path = "/api/fair-shares"
-	u.RawQuery, u.Fragment = "", ""
-	return u.String()
-}
-
-// diskRoom reads the snapshot disk's room from GET /api/fair-shares
-// (admin only). known is false without an admin token or when the read
-// fails: the host panel then omits the room line. Nothing here is an
-// incident — statfs already supplies the panel's used/free meters.
-func (c *collector) diskRoom(ctx context.Context) (room DiskRoom, known bool) {
-	if c.cfg.AdminToken == "" {
-		return DiskRoom{}, false
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fairSharesURL(c.cfg.MetricsURL), nil)
-	if err != nil {
-		return DiskRoom{}, false
-	}
-	req.Header.Set("Authorization", "Bearer "+c.cfg.AdminToken)
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return DiskRoom{}, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return DiskRoom{}, false
-	}
-	var body struct {
-		Disk *DiskRoom `json:"disk"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil || body.Disk == nil {
-		return DiskRoom{}, false
-	}
-	return *body.Disk, true
-}
-
 // collect builds a snapshot. A failing source fills Err and leaves its
 // fields at zero; the rest of the frame still renders.
 func (c *collector) collect(ctx context.Context) Snapshot {
@@ -453,12 +403,6 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 	if err := c.fromDB(&s, now); err != nil {
 		errs = append(errs, "db: "+err.Error())
 	}
-	// The snapshot disk's room (FS3b): the admin-only fair-share
-	// endpoint's "disk" object. Best-effort — an unset admin token or a
-	// failed read just leaves the host panel's room line off, and never
-	// adds a scrape error (the panel already shows disk used/free from
-	// statfs).
-	s.DiskRoom, s.DiskRoomKnown = c.diskRoom(ctx)
 	s.Services = c.services(ctx)
 	for _, svc := range s.Services {
 		if svc.State != "active" {
@@ -554,6 +498,14 @@ func byLabel(f *dto.MetricFamily, label string) map[string]int {
 
 func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, now time.Time) {
 	g := func(name string) float64 { return value(fams[name]) }
+	// The snapshot disk's room (FS3b), when the backend exports it.
+	if fams["spoond_snapshot_disk_usable_bytes"] != nil {
+		s.DiskRoom = DiskRoom{
+			Reserved: int64(g("spoond_snapshot_disk_reserved_bytes")),
+			Usable:   int64(g("spoond_snapshot_disk_usable_bytes")),
+		}
+		s.DiskRoomKnown = true
+	}
 	s.Leases = int(g("spoond_leases_active"))
 	s.ByState = byLabel(fams["spoond_leases"], "state")
 	s.Queued = int(g("spoond_leases_queued"))

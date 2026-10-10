@@ -131,10 +131,10 @@ summarised from README "Status".
   reserve floor (`DISK_RESERVE_PCT`, default 5, of the disk), resolving
   when free comes back. It is a passive alert: it reads statfs and
   emits, and deletes nothing.
-- **The dashboard shows the snapshot disk's fair-share room.** With
-  `DASH_ADMIN_TOKEN` set, the collector reads `GET /api/fair-shares`
-  and the host panel draws one line, `disk reserved X · usable Y`
-  (humanized); unset, the line is simply not drawn.
+- **The dashboard shows the snapshot disk's fair-share room.** The
+  backend exports `spoond_snapshot_disk_reserved_bytes` and
+  `spoond_snapshot_disk_usable_bytes`, and the host panel draws one
+  line, `disk reserved X · usable Y` (humanized).
 
 ### Status code changes
 

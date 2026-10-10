@@ -134,6 +134,11 @@ type BackendMetrics struct {
 	// every take-back candidate was pinned).
 	BoxFullTotal prometheus.Counter // cumulative box_full refusals
 
+	// Snapshot disk room (FS3b): the running leases' reserved disk_mb
+	// and the room a new request may use (Usable may be negative).
+	SnapshotDiskReserved prometheus.Gauge
+	SnapshotDiskUsable   prometheus.Gauge
+
 	// Memory take-back (FS2a): the biggest borrower's leases suspended
 	// so a requester's admission fits (spoond-pxsn).
 	TakeBacksTotal prometheus.Counter // cumulative take-back pauses
@@ -462,6 +467,14 @@ func NewBackendMetrics() *BackendMetrics {
 	})
 
 	// Take-back (FS5): box_full refusals.
+	m.SnapshotDiskReserved = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "snapshot_disk_reserved_bytes",
+		Help: "Snapshot disk reserved for the running leases (their whole disk_mb).",
+	})
+	m.SnapshotDiskUsable = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "snapshot_disk_usable_bytes",
+		Help: "Snapshot disk a new request may use: free - reserved - floor - pending + freeing (negative = short).",
+	})
 	m.BoxFullTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "box_full_total",
 		Help: "Requests refused box_full: every take-back candidate was pinned (nothing unpinned could be taken).",
@@ -567,6 +580,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
 		m.BoxFullTotal, m.TakeBacksTotal,
+		m.SnapshotDiskReserved, m.SnapshotDiskUsable,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,

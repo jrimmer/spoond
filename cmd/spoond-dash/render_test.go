@@ -652,7 +652,7 @@ func TestKeptDiskPctFromCollect(t *testing.T) {
 }
 
 // TestHostPanelDiskRoomLine: the host panel draws one disk-room line
-// "disk reserved X · usable Y" when the fair-share endpoint supplied
+// "disk reserved X · usable Y" when the backend exported
 // the room, and nothing when it did not (FS3b).
 func TestHostPanelDiskRoomLine(t *testing.T) {
 	s := healthySnapshot()

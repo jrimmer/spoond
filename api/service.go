@@ -1706,6 +1706,11 @@ func (s *Service) updateNodeMetrics(ctx context.Context) {
 	s.metrics.NodeRunning.Set(float64(info.RunningSandboxes))
 	s.metrics.NodeWork.Set(float64(info.OutstandingWork))
 	s.metrics.NodeHugepagesFree.Set(float64(info.FreeHugepageBytes()))
+	// The snapshot disk's room (FS3b), for the dashboard's host panel.
+	if room, ok := s.diskRoomNow(ctx); ok {
+		s.metrics.SnapshotDiskReserved.Set(float64(room.Reserved))
+		s.metrics.SnapshotDiskUsable.Set(float64(room.Usable))
+	}
 }
 
 // refillPool pre-creates cfg.PoolSize sandboxes for every image with a
