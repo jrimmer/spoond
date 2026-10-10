@@ -470,14 +470,9 @@ func (s *Service) checkNamedSnapshotLimit(ctx context.Context, owner, name strin
 }
 
 // enforceNamedSnapshotBudget refuses a save whose size would push the
-// owner's kept+named bytes past max_kept_bytes.
+// owner's kept+named bytes past their fair disk slice (keptBudgetFor).
 func (s *Service) enforceNamedSnapshotBudget(ctx context.Context, owner string, size int64) *namedSnapshotError {
-	var budget int64
-	if s.identities != nil {
-		if u := s.identities.UserByID(owner); u != nil {
-			budget = u.MaxKeptBytes
-		}
-	}
+	budget := s.keptBudgetFor(ctx, owner)
 	if budget <= 0 {
 		return nil
 	}

@@ -2,14 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jrimmer/spoond/v2/identity"
-	"github.com/jrimmer/spoond/v2/substrate"
-	"github.com/jrimmer/spoond/v2/substrate/e2b"
 	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
@@ -136,38 +134,44 @@ func TestKeptCapUnpinFreesSlot(t *testing.T) {
 	}
 }
 
-// TestKeptBudgetOverBudgetKeepNotPinned: a keep whose fresh build would
-// push the owner's kept bytes past max_kept_bytes is 409, the build is
-// NOT pinned (it stays an ordinary, GC-able checkpoint) and the body
-// names its build_id for a retry without keep (#126).
-func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
-	ts, svc, db, sub := newTestServerWithService(t)
-	root := t.TempDir()
-	svc.cfg.TemplateStoragePath = root
-	seedImage(t, db, "py-base", 2048)
-
-	// The fake's Checkpoint only mints a build id; leave build files the
-	// way the real substrate does so the write-time measurement (#125)
-	// records a real size (≥ 8192 allocated bytes per build).
-	// Handler-goroutine closure: errors come back as the checkpoint's
-	// error, not t.Fatal.
-	sub.checkpointFn = func(ctx context.Context, sandboxID string) (string, substrate.BuildRefs, error) {
-		id := e2b.NewUUID()
-		if _, err := writeBuildDir(filepath.Join(root, id), 4096, 8192); err != nil {
-			return "", substrate.BuildRefs{}, err
+// keptBudgetSetup gives the box a fixed, roomy snapshot volume and
+// returns a function that reads owner's fair DISK slice (the kept
+// budget since 3.0, FS4). It fails the test when the slice is not known
+// (capacity unreadable) or the box has fewer than two owners: the
+// budget tests size builds against the slice, and the slice grows by
+// size/N as kept bytes are accounted, so N >= 2 keeps a 0.7-slice
+// build's second keep over it.
+func keptBudgetSetup(t *testing.T, svc *Service) func(owner string) int64 {
+	t.Helper()
+	roomyDisk(svc)
+	return func(owner string) int64 {
+		t.Helper()
+		svc.updateNodeMetrics(context.Background()) // warm the node-info cache the view reads
+		svc.invalidateFairShares()
+		share, ok := svc.fairShareFor(context.Background(), owner)
+		if !ok || !share.CapacityKnown || share.Disk.SliceBytes <= 0 {
+			t.Fatalf("fair share of %s = %+v (ok %v), want a known disk slice", owner, share, ok)
 		}
-		return id, substrate.BuildRefs{}, nil
+		if n := len(svc.ownersOfBox()); n < 2 {
+			t.Fatalf("box has %d owner(s), want at least 2", n)
+		}
+		return share.Disk.SliceBytes
 	}
+}
 
-	// Identity user with a byte budget of one and a half builds, as this
-	// filesystem allocates them: block sizes differ between hosts (4 KiB
-	// on ext4, up to 128 KiB records on ZFS), so measure one first.
-	probe := filepath.Join(t.TempDir(), "probe")
-	one, err := writeBuildDir(probe, 4096, 8192)
-	if err != nil || one <= 0 {
-		t.Fatalf("probe build size %d: %v", one, err)
-	}
-	budget := one + one/2
+// buildsMeasure makes every new build measure size bytes at write time.
+func buildsMeasure(svc *Service, size int64) {
+	svc.diskUsage = func(string) (int64, error) { return size, nil }
+}
+
+// TestKeptBudgetOverBudgetKeepNotPinned: a keep whose fresh build would
+// push the owner's kept bytes past their fair disk slice is 409, the
+// build is NOT pinned (it stays an ordinary, GC-able checkpoint) and the
+// body names its build_id for a retry without keep (#126, FS4).
+func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
 	ids, err := identity.NewStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -177,17 +181,17 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, budget); err != nil {
-		t.Fatal(err)
-	}
-	roomyDisk(svc) // the create and the keeps must fit in the snapshot disk (FS3b)
+	sliceOf := keptBudgetSetup(t, svc)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
 	ctx := context.Background()
 
-	// First keep lands: the fresh build fits under the budget.
+	// Each build is 70% of the slice: one fits, two do not.
+	buildsMeasure(svc, sliceOf(u.ID)*7/10)
+
+	// First keep lands: the fresh build fits inside the slice.
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "keeper-tok",
 		map[string]any{"keep": true})
 	if resp.StatusCode != http.StatusOK {
@@ -199,8 +203,8 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 		t.Fatalf("kept rows = %v (%v), want [%s]", keeps, err, first)
 	}
 
-	// Second keep would pass the budget: 409 naming the budget, with
-	// the fresh build's id in the body and kept=false.
+	// Second keep would pass the slice: 409 naming the budget, with the
+	// fresh build's id in the body and kept=false.
 	resp, body = doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "keeper-tok",
 		map[string]any{"keep": true})
 	if resp.StatusCode != http.StatusConflict {
@@ -226,17 +230,78 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 	if err != nil || b.State != "ready" {
 		t.Fatalf("over-budget build %s state = %v (%v), want ready (written, unpinned)", second, b, err)
 	}
-
-	// The pin is refused, so the build is an ordinary checkpoint: it is
-	// the lease's live build (the lease runs from it, and ordinary
-	// checkpoints age out once the lease moves on) but carries no
-	// kept-builds row — unpin-and-move-on GC semantics, not a pin.
 	kept, err := svc.keptBuilds(ctx)
 	if err != nil {
 		t.Fatalf("keptBuilds: %v", err)
 	}
 	if !kept[first] {
 		t.Fatalf("first build %s not kept after the over-budget keep", first)
+	}
+}
+
+// TestKeptBudgetInsideSliceKeeps: keeps whose total stays inside the
+// owner's fair disk slice are all pinned.
+func TestKeptBudgetInsideSliceKeeps(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetIdentities(ids)
+	u, err := ids.AddUser("keeper", identity.KindPerson, []string{"SHA256:fp-k"}, "keeper-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sliceOf := keptBudgetSetup(t, svc)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
+		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	id := create["id"].(string)
+
+	// Three builds of 30% each: 90% of the slice, all inside it.
+	buildsMeasure(svc, sliceOf(u.ID)*3/10)
+	for i := 0; i < 3; i++ {
+		resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "keeper-tok",
+			map[string]any{"keep": true})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("keep %d inside the slice: status %d (%v), want 200", i, resp.StatusCode, body)
+		}
+	}
+	keeps, err := db.ListKeptBuilds(context.Background())
+	if err != nil || len(keeps[id]) != 3 {
+		t.Fatalf("kept rows = %v (%v), want 3", keeps, err)
+	}
+}
+
+// TestKeptBudgetUnknownCapacityNoBudget: while the box capacity cannot
+// be read the fair slice is unknown, and keptBudgetFor answers 0 (no
+// budget) rather than refusing every keep on a wrong number.
+func TestKeptBudgetUnknownCapacityNoBudget(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	ids, _ := identity.NewStore("")
+	svc.SetIdentities(ids)
+	u, err := ids.AddUser("keeper", identity.KindPerson, nil, "keeper-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 0, 0, errors.New("statfs: no") }
+	svc.invalidateFairShares()
+	if got := svc.keptBudgetFor(context.Background(), u.ID); got != 0 {
+		t.Fatalf("keptBudgetFor with unknown capacity = %d, want 0 (no budget)", got)
+	}
+	// A known capacity gives the slice.
+	roomyDisk(svc)
+	svc.updateNodeMetrics(context.Background())
+	svc.invalidateFairShares()
+	share, ok := svc.fairShareFor(context.Background(), u.ID)
+	if !ok || !share.CapacityKnown || share.Disk.SliceBytes <= 0 {
+		t.Fatalf("fair share = %+v (ok %v), want a known disk slice", share, ok)
+	}
+	if got := svc.keptBudgetFor(context.Background(), u.ID); got != share.Disk.SliceBytes {
+		t.Fatalf("keptBudgetFor = %d, want the disk slice %d", got, share.Disk.SliceBytes)
 	}
 }
 
