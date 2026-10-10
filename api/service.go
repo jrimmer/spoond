@@ -4970,6 +4970,7 @@ func (s *Service) LoadState(ctx context.Context) error {
 	}
 	loaded := make(map[string]*Lease, len(leases))
 	loadedAt := time.Now()
+	var repairs []*Lease
 	for _, r := range leases {
 		l := rowToLease(r)
 		// One-clock hygiene at load (spoond-k0uz R3-3c): the clock may
@@ -4979,17 +4980,17 @@ func (s *Service) LoadState(ctx context.Context) error {
 		// otherwise get a running VM deleted 30 d after an old pause. A
 		// suspended row with no pause date (a pause a rolled-back 2.9
 		// took) gets the clock stamped at load: a fresh 30 d from now.
-		// Either correction is persisted, so the store and memory agree.
+		// The corrected rows are saved below under the store lock.
 		if !l.Suspended {
 			if !l.PausedAt.IsZero() || l.PausedExpiryNotified {
 				l.PausedAt = time.Time{}
 				l.PausedExpiryNotified = false
-				s.saveLeaseLocked(l)
+				repairs = append(repairs, l)
 			}
 		} else if l.PausedAt.IsZero() {
 			l.PausedAt = loadedAt
 			l.PausedExpiryNotified = false
-			s.saveLeaseLocked(l)
+			repairs = append(repairs, l)
 		}
 		if img, err := s.db.GetImage(ctx, l.Image); err == nil {
 			l.TemplateID = img.TemplateID
@@ -5004,6 +5005,11 @@ func (s *Service) LoadState(ctx context.Context) error {
 	s.store.leases = loaded
 	for id, l := range loaded {
 		s.store.accounted[id] = leaseAccountedOf(l)
+	}
+	// Persist the one-clock repairs under the lock, so a racing save sees
+	// the corrected row.
+	for _, l := range repairs {
+		s.saveLeaseLocked(l)
 	}
 	for _, r := range shareRows {
 		if s.store.shares[r.LeaseID] == nil {
