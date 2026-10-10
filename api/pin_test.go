@@ -114,8 +114,12 @@ func TestHolderLabelNeverPins(t *testing.T) {
 	// Take-back: the holder-labelled lease is the only thing on a full
 	// node, and a guaranteed admission takes its room by pausing it. A
 	// holder label is a plain label: it must neither pin the lease nor
-	// shield it.
-	installDynamicNode(t, svc, sub, 512, 0, 512)
+	// shield it. consumer-a runs three leases on the 3072 MiB pool
+	// (three box owners, slice 1024): ratio 3, the biggest borrower.
+	burstLease(t, svc, ctx, "consumer-a", "mid")
+	burstLease(t, svc, ctx, "consumer-a", "mid")
+	installDynamicNode(t, svc, sub, 1536, 0, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-b", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed grant over the holder-labelled lease: %v", err)
 	}
@@ -123,8 +127,8 @@ func TestHolderLabelNeverPins(t *testing.T) {
 	if !l.Suspended {
 		t.Fatal("take-back did not pause the holder-labelled lease")
 	}
-	if l.SuspendReason != suspendReasonPreempt {
-		t.Fatalf("holder-labelled lease suspend reason = %q, want %q", l.SuspendReason, suspendReasonPreempt)
+	if l.SuspendReason != suspendReasonTakeBack {
+		t.Fatalf("holder-labelled lease suspend reason = %q, want %q", l.SuspendReason, suspendReasonTakeBack)
 	}
 	if l.Pinned || l.Holder != "flight-7" {
 		t.Fatalf("holder-labelled lease changed identity: pinned=%v holder=%q", l.Pinned, l.Holder)

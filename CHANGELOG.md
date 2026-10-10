@@ -12,6 +12,20 @@ summarised from README "Status".
 
 ### Added
 
+- **FS2a: memory take-back picks the biggest borrower by ratio.**
+  When a guaranteed admission does not fit, the fair-shares selector
+  (`api/take_back.go`) names the leases to pause: the owner furthest
+  over their slice (usage/slice, never an owner inside their slice, and
+  a give-up that would drop them below the requester's post-request
+  ratio is never made), and within that owner the least recently used
+  unpinned lease (busy leases last, pinned leases never). Pauses run
+  one at a time through `takeBackPause`, which re-checks the victim's
+  eligibility in the same critical section that marks it busy and
+  un-does the pause if the owner pins the lease mid-pause. The
+  `lease.suspended` event with reason `take_back` now carries
+  `take_back_ratio` (the victim owner's ratio) and `take_back_for` (the
+  requesting owner); the `take_back` event is unchanged.
+
 - **Fair shares: an equal floating slice per owner and usage
   accounting (#145 FS1).** Every owner now has a computed 1/N slice of
   the box — the hugepage memory pool and the snapshot volume's usable

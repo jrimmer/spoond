@@ -134,6 +134,10 @@ type BackendMetrics struct {
 	// every take-back candidate was pinned).
 	BoxFullTotal prometheus.Counter // cumulative box_full refusals
 
+	// Memory take-back (FS2a): the biggest borrower's leases suspended
+	// so a requester's admission fits (spoond-pxsn).
+	TakeBacksTotal prometheus.Counter // cumulative take-back pauses
+
 	// Preemption (#128 part 3): burst leases suspended to make room for
 	// a guaranteed admission, and how many are preempted right now.
 	PreemptionsTotal prometheus.Counter // cumulative preemptions
@@ -468,6 +472,13 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Requests refused box_full: every take-back candidate was pinned (nothing unpinned could be taken).",
 	})
 
+	// Memory take-back (FS2a, spoond-pxsn): the biggest borrower's
+	// leases suspended so a requester's admission could fit.
+	m.TakeBacksTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "take_backs_total",
+		Help: "Leases suspended by the fair-shares memory take-back.",
+	})
+
 	// Preemption (#128 part 3): burst leases suspended to make room for
 	// a guaranteed admission.
 	m.PreemptionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -572,7 +583,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
 		m.PreemptionsTotal, m.PreemptedLeases,
-		m.BoxFullTotal,
+		m.BoxFullTotal, m.TakeBacksTotal,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
