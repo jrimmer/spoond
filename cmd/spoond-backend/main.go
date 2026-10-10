@@ -497,15 +497,6 @@ func Main(args []string) int {
 	// environment; `spoond images build` reads the same variable in its
 	// environment, so both must be set (spoond-rzz).
 	buildTimeout := substrate.BuildTimeoutFromEnv()
-	// The burst lease reserve (#128 part 2): BURST_RESERVE_MIB keeps
-	// this much hugepage memory free of burst leases, so guaranteed
-	// work always has room to land; 0 disables the reserve.
-	burstReserveMiB := envIntOr("BURST_RESERVE_MIB", api.DefaultBurstReserveMiB)
-	// The preemption disk floor (#128 part 3): a preemption pause must
-	// leave this percentage of the snapshot disk free, estimated from
-	// the burst lease's memory_mb. PREEMPT_DISK_FLOOR_PCT, default 15;
-	// fractional values (e.g. 12.5) are honoured.
-	preemptDiskFloorPct := envFloatOr("PREEMPT_DISK_FLOOR_PCT", api.DefaultPreemptDiskFloorPct)
 	// Queued admission (#129 part 1): MAX_ADMIT_WAIT_SECS caps how long
 	// a create may wait for room. 0 disables waiting (the request's
 	// "wait" field is accepted and ignored).
@@ -623,8 +614,6 @@ func Main(args []string) int {
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),
 		SnapshotKeepVersions:      envIntOr("SNAPSHOT_KEEP_VERSIONS", api.DefaultSnapshotKeepVersions),
-		BurstReserveMiB:           burstReserveMiB,
-		PreemptDiskFloorPct:       preemptDiskFloorPct,
 		// Background exec jobs (2.6, #135): per-lease running cap and
 		// exited-record retention. JOB_MAX_RUNTIME (spoond-wb5) caps how
 		// long a job may run; it takes a Go duration or a number of

@@ -226,10 +226,10 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 		return err
 	}
 
-	// Record the take-back like preemptLease records a preemption: the
-	// stamp is re-checked under the lock, so a concurrent resume that
-	// already brought the lease back leaves no stale record (the same
-	// shape spoond-d76 pinned for the preemption stamp). This critical
+	// Record the take-back stamp: the stamp is re-checked under the
+	// lock, so a concurrent resume that already brought the lease back
+	// leaves no stale record (the same shape spoond-d76 pinned for the
+	// old preemption stamp). This critical
 	// section also settles the pin-during-pause race: busy is still
 	// ours, so a pin that landed while the pause ran is visible here and
 	// un-does the pause (a pinned lease is never left suspended for

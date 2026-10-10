@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -74,7 +75,7 @@ func trimJournalValue(v string) string {
 }
 
 // TestJournalLineFormat pins the one-line shape an incident reader
-// reconstructs from: op, lease id, owner, sandbox, image, class and
+// reconstructs from: op, lease id, owner, sandbox, image, memory and
 // reason, all on one logfmt line and all present (an empty value is
 // quoted "").
 func TestJournalLineFormat(t *testing.T) {
@@ -92,20 +93,20 @@ func TestJournalLineFormat(t *testing.T) {
 	line := strings.TrimSpace(buf.String())
 	f := journalFields(t, line)
 	want := map[string]string{
-		"op":       "release",
-		"lease_id": l.ID,
-		"owner":    "owner-1",
-		"sandbox":  l.SandboxID,
-		"image":    "py-base",
-		"class":    ClassGuaranteed,
-		"reason":   "deleted via API by owner-1",
+		"op":         "release",
+		"lease_id":   l.ID,
+		"owner":      "owner-1",
+		"sandbox":    l.SandboxID,
+		"image":      "py-base",
+		"memory_mib": fmt.Sprint(l.MemoryMB),
+		"reason":     "deleted via API by owner-1",
 	}
 	for k, v := range want {
 		if f[k] != v {
 			t.Errorf("journal %s = %q, want %q (line: %s)", k, f[k], v, line)
 		}
 	}
-	// Exactly the seven fields: no eighth field sneaks in (and the
+	// Exactly the six fields: no seventh field sneaks in (and the
 	// reason's own spaces did not split into extra tokens).
 	if len(f) != len(want) {
 		t.Errorf("journal has %d fields, want %d (line: %s)", len(f), len(want), line)
@@ -209,7 +210,7 @@ func TestJournalSuspendReason(t *testing.T) {
 		want    string
 	}{
 		{suspendPolicy{reason: suspendReasonIdleSuspend}, false, "idle_suspend"},
-		{suspendPolicy{reason: suspendReasonPreempt}, false, "preempt"},
+		{suspendPolicy{reason: suspendReasonTakeBack}, false, "take_back"},
 		{suspendPolicy{}, true, "drain"},
 		{suspendPolicy{}, false, "hand"},
 	}

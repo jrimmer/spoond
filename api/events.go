@@ -75,15 +75,6 @@ const (
 	// is emitted before the recovery events (recovered/lost) that follow
 	// the same call.
 	LeaseCrashTest LeaseEventType = "crash_test"
-	// LeasePreempted marks a burst lease suspended to free hugepages for
-	// a guaranteed admission (#128 part 3). Its generation does not
-	// change: the pause/resume memory continues. The detail names the
-	// guaranteed lease's owner.
-	LeasePreempted LeaseEventType = "preempted"
-	// LeasePromoted marks a running burst lease moved to guaranteed
-	// because its owner's guarantee has room again (#128): bookkeeping
-	// only, the VM is untouched.
-	LeasePromoted LeaseEventType = "promoted"
 	// LeaseRetry marks a transient crash-recovery failure that keeps the
 	// lease recovering for another pass (spoond-dxq): the detail names the
 	// attempt and the cause, so an owner sees the retry rather than a

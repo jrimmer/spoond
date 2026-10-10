@@ -12,6 +12,14 @@ summarised from README "Status".
 
 ### Added
 
+- **FS2b: the biggest borrower gets box_full at once.** When take-back
+  can free nothing because the requester is itself the biggest borrower
+  (over its fair memory slice after the request, and no other owner
+  further over), create, resume, restart, clone and fork answer
+  `429 box_full` immediately, with the `box_full` event and alert,
+  instead of waiting on `503 capacity_wait`. A shortfall no owner causes
+  still waits.
+
 - **FS2a: memory take-back picks the biggest borrower by ratio.**
   When a guaranteed admission does not fit, the fair-shares selector
   (`api/take_back.go`) names the leases to pause: the owner furthest
@@ -245,6 +253,22 @@ summarised from README "Status".
   logged as removed and ignored at startup. `spoond_held_actions_total`
   is replaced by `spoond_box_full_total`. Only the lease's own
   `idle_suspend` opt-in suspends a lease for idleness now.
+
+- **Lease classes (FS2b-1).** Every lease now admits against one
+  hugepage pool; memory take-back (FS2a) replaces classes and preemption.
+  Removed:
+  - the create fields `burst` and `priority` (now ignored if sent) and
+    the lease field `class`;
+  - promotion of burst leases and the `promoted` event;
+  - the burst reserve and the environment variable `BURST_RESERVE_MIB`,
+    with the `503 no burst capacity` refusal;
+  - preemption of burst leases, the `preempted` event, and the
+    environment variable `PREEMPT_DISK_FLOOR_PCT` with the
+    `503 capacity: cannot preempt (snapshot disk low)` refusal.
+  - the metrics `spoond_preemptions_total` and `spoond_preempted_leases`.
+  The lease field `preempted` stays and is always `false`. The suspend
+  reason `preempt` is now `take_back`. `guaranteed_mib` and `max_mib`
+  stay for now.
 
 ## [2.9.3] - 2026-10-09
 

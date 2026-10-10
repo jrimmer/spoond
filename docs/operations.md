@@ -374,7 +374,7 @@ reason to turn the GC out of dry-run.
 
 ### Pause chains
 
-A **pause** (suspend, drain, take-back, preemption, the lease's own
+A **pause** (suspend, drain, take-back, the lease's own
 `idle_suspend`) writes a new build
 whose `parent_build_id` is the build the lease was running from, and the
 GC keeps every ancestor of a live lease's resume build. A persistent
@@ -440,7 +440,7 @@ it lossless. Do not stop the backend first.
    through resume-on-use and the self-heal loop keeps retrying it on its
    backoff. Only a **permanent** error (the image or build the resume
    needs is gone) still marks the lease `lost`; one over its owner's
-   memory cap, without burst room, unable to preempt, refused for
+   memory cap, refused for
    capacity, or hit by a cancelled/bounded call stays `drained` for a
    later undrain.
 4. If systemd's `SERVICE_RESULT` is not `success` (the orchestrator
@@ -515,7 +515,7 @@ through one process-wide limiter:
 
 - `SNAPSHOT_WRITE_CONCURRENCY` (default `1`) is its width. Every pause
   and checkpoint — a hand suspend, the payoff of an `idle_suspend`
-  threshold, take-back (preemption), restart's pause leg, a drain pause
+  threshold, take-back, restart's pause leg, a drain pause
   (which has its own width), and every checkpoint (on demand, periodic,
   clone, fork, keep) — waits its turn. `0` means unlimited, the
   pre-fix behaviour.
@@ -658,7 +658,7 @@ deadline or any other retryable error counts against
 `RECOVERY_RETRY_WINDOW` (default 30m) since the first failure. The only
 recovery failure that waits for room instead of counting is a substrate
 `ErrCapacity` (the node is full or draining); admission refusals (over
-quota, under the burst reserve, no preemption room) cannot reach a live
+quota) cannot reach a live
 lease's recovery, which skips admission, so they are not in this path. A
 missing checkpoint build or image is permanent and loses the lease at
 once. Every transient failure emits a `recovery_retry` event naming the
@@ -667,8 +667,8 @@ retry as `recovery: {attempt, of, since}`. When the budget is spent the
 lease is marked `lost` with a reason naming the attempts and the error,
 and a `lost` event is emitted.
 
-Preemption no longer has a background resume queue (#145 D2): a
-preempted lease comes back on its holder's next work call, exactly as an
+Take-back has no background resume queue (#145 D2): a
+taken-back lease comes back on its holder's next work call, exactly as an
 idle-suspended one does, and spoond never marks a lease `lost` because a
 resume failed — the error goes to the caller. (Recovery, above, keeps its
 bounded retry budget.)
@@ -677,7 +677,7 @@ The recovery budget is keyed by the sandbox that failed and dropped
 whenever the lease gets a new sandbox (restart, restore, resume), on
 recovery success, loss and release, so a stale budget can never make the
 next reconcile roll a healthy lease back to an old checkpoint. A
-recovery or preemption loss that races a release leaves the released
+recovery loss that races a release leaves the released
 lease alone: no resurrection, no late `lost` event.
 
 To the API and the gateway, `recovered` behaves exactly like `running`
@@ -802,58 +802,15 @@ size) is below the image's `memory_mb`, or when the node is not
 If creates start failing this way, check `grep HugePages_
 /proc/meminfo` and `spoond_node_hugepages_free_bytes` first.
 
-**Burst leases keep a reserve** (#128 part 2). Every lease is admitted
-`guaranteed` or `burst` (see Users & identity below): guaranteed when
-the owner's running charge with the lease stays within their
-`guaranteed_mib`, burst above it or when the request forces it. A burst
-lease is admitted only while the node's free hugepages (the same
-`spoond_node_hugepages_free_bytes` source, cached at most 15 s) stay
-above the reserve after its own — so guaranteed work and crash recovery
-always have room to land even when burst tenants fill the node. The
-reserve is `BURST_RESERVE_MIB`, default `8192` (8 GiB); `0` disables
-it. A burst lease refused on the reserve answers `503` `no burst
-capacity` with `Retry-After: 30` and the lease stays as it was; the
-reserve frees as guaranteed work suspends. Size it from your crash
-recovery headroom: everything you want a recovered lease to be able to
-resume into, minus what guaranteed tenants are entitled to.
-
-**Preemption reclaims burst capacity by suspending** (#128 part 3). When
-a guaranteed admission (create, fork, clone, resume, warm or cold
-restart, restore, crash recovery, undrain) cannot get its hugepages,
-spoond suspends burst leases through the usual pause path — memory
-continues on resume, so the generation does not change — in order of
-lowest `priority`, then newest, then the owner furthest over their
-`guaranteed_mib`. It stops as soon as enough memory is free and admits
-the guaranteed lease, and it serialises preemption, so two guaranteed
-creates cannot each preempt for themselves. Each preempted lease is
-marked `preempted` and emits a `preempted` event naming the guaranteed
-lease's owner; `spoond_preemptions_total` counts them and
-`spoond_preempted_leases` is the current gauge.
-
-The pause writes a snapshot, so preemption stops before the snapshot
-disk does: `PREEMPT_DISK_FLOOR_PCT` (default `15`) is the free
-percentage a pause must leave, estimated from the burst lease's
-`memory_mb`. The floor cannot be turned off: `0` or a negative value
-means the default. If preemption can free enough memory only by pausing
-leases the floor blocks, the guaranteed admission answers `503`
-`capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`
-and suspends no one. If the node cannot host the lease even after
-pausing every candidate, preemption suspends no one and the admission
-falls through to the ordinary capacity check.
-
-The **promote sweep** runs every 15 s: it promotes running burst leases
-back into an owner's `guaranteed_mib` as leases churn. Preemption itself
-is temporary but on the holder's terms now (#145 D2): a preempted lease
-is not resumed by a background queue — it resumes on its holder's next
-work call (exec, files, proxy, jobs, the LLM gateway), through the normal
-admission path, as a burst lease again if the owner is still above the
-guarantee. On resume `preempted` is cleared and a `resumed` event is
-emitted with detail `after preemption`. Clients (Honey included) should
-treat a `preempted` lease as waiting rather than gone, and simply use it
-when they next need it — deleting and recreating it throws away the
-paused work. A work call that finds the node still full answers `503`
-`capacity_wait` with `Retry-After: 30` (the one no-room shape every
-resume-on-use path shares) and the lease stays suspended, never lost.
+**Memory take-back** (FS2). All leases share one hugepage pool. When a
+request does not fit, spoond pauses leases of the owner furthest over
+their fair slice, least recently used first. Pinned leases are never
+taken. A taken-back lease resumes on its holder's next work call
+(exec, files, proxy, jobs, the LLM gateway), through the normal
+admission path; a call that finds the node still full answers `503`
+`capacity_wait` with `Retry-After: 30` and the lease stays suspended,
+never lost. `429 box_full` means only pinned leases stand in the way.
+See [api.md](api.md#memory-take-back).
 
 **Queued admission** (#129 part 1): a create can wait for room instead
 of failing, by sending `"wait": N` (seconds) on `POST /api/leases` (see
@@ -865,7 +822,7 @@ their `guaranteed_mib` first (an owner with no `guaranteed_mib`, or
 already at it, ranks after every owner with headroom), then FIFO; each
 wake-up admits every queued create that fits, so a smaller one may pass
 a larger one. The queue is retried whenever capacity may have freed (a
-lease released, suspended, preempted-and-resumed, or a quota changed)
+lease released, suspended, taken back and resumed, or a quota changed)
 and on a 5 s tick. The metrics: `spoond_leases_queued` (current queue
 depth), `spoond_leases_queued_oldest_seconds` (the oldest ticket's age),
 `spoond_admit_wait_seconds` (histogram of the wait of admitted creates)
@@ -891,9 +848,7 @@ each request's env.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `503 capacity: … bytes of hugepage memory free` | not enough free hugepages for the image, or the node is draining/unhealthy | free sandboxes, lower `POOL_SIZE`, or raise `vm.nr_hugepages` (then re-check with doctor) |
-| `503 capacity: cannot preempt (snapshot disk low)` | a guaranteed lease needed hugepages, but pausing a burst lease would take the snapshot disk under `PREEMPT_DISK_FLOOR_PCT` | free snapshot disk (run the catalog GC, delete old snapshots) or lower `PREEMPT_DISK_FLOOR_PCT`; retry after `Retry-After` |
 | `503 draining` on a create with `"wait"` | the admin drain started while the create was queued; the drain answers every queued create at once | retry after `undrain` |
-| lease shows `preempted` / `‖ preempted` on the dashboard | a guaranteed admission suspended a burst lease to reclaim memory; the lease comes back on its holder's next work call (#145 D2) | use the lease (exec, files, proxy, jobs, LLM); it resumes on that call. Do not delete and recreate. A call while the node is still full answers `503 capacity_wait` and the lease stays suspended |
 | `410 lease_lost` (`code: lease_lost`) | the lease's sandbox died with no checkpoint (or its recovery failed); the message names the reason | `DELETE` the lease to free its quota; nothing to resume |
 | `409 lease is suspended; resume it first` | a non-work path that cannot resume a suspended lease (the stat probe, fork, the crash test) | `resume` it (the SSH gateway does this automatically on attach); exec, files, proxy, jobs and the LLM gateway resume it themselves on the next call |
 | `409 lease is busy; retry` | a suspend/resume/restart/checkpoint is already in flight on that lease | retry once it finishes |
@@ -925,16 +880,16 @@ readable log API. See [ci-jobs.md](ci-jobs.md).
 
 ## The lease journal
 
-Every lease create, release, lost and suspend (including preemption) also
+Every lease create, release, lost and suspend (including take-back) also
 writes one logfmt line, so a lease-to-sandbox mapping and the reason a
 lease went can be reconstructed from `journalctl` alone — even after the
 dashboard's 50-event ring has rolled over and the lease row is gone:
 
 ```
-lease journal: op=release lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason="ci job 3609 ✓ 11m02s"
-lease journal: op=suspend lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason=preempt
-lease journal: op=create  lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason=new
-lease journal: op=lost    lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base class=burst reason="no checkpoint to recover from"
+lease journal: op=release lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason="ci job 3609 ✓ 11m02s"
+lease journal: op=suspend lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason=take_back
+lease journal: op=create  lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason=new
+lease journal: op=lost    lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason="no checkpoint to recover from"
 ```
 
 The fields are always present, in that order; an empty value is `""` and
@@ -947,7 +902,7 @@ bearer token the caller authenticated with; the line carries no secret.
 verbatim (the CI runner's reason says `ci job <id> …`); for a create
 it is `new`, `snapshot <name>@<version>`, `clone of <id>` or
 `fork of <id>`; for a suspend it is the automatic reason
-(`idle_suspend`, `preempt`, `resume_failed`), `drain` or `hand`;
+(`idle_suspend`, `take_back`, `resume_failed`), `drain` or `hand`;
 for a lost lease it is the loss reason already carried by the `lost`
 event.
 
@@ -974,8 +929,7 @@ on create if a job's work must survive a crash). A job lease lives for
 **Waiting for admission.** Every create carries `"wait"`
 (`RUNNER_ADMIT_WAIT_SECS`, default `900`), so a full node's admission
 queue (#129) holds the create open instead of refusing it at once. A
-`503` from the create — the node is full, draining, or above the burst
-reserve — is **never** a job failure: the runner logs the wait and
+`503` from the create — the node is full or draining — is **never** a job failure: the runner logs the wait and
 retries after the response's `Retry-After` (or 30 s) until it is
 admitted. While a create waits it sends a `Sink.Keepalive` every
 minute and one `waiting for capacity on spoond (N s)` log row at the
@@ -1210,9 +1164,7 @@ suspended. There is no plain idle sweep and no held rule: the old
 Activity is what the sweeps already count — exec, stream, proxy,
 keepalive, guest heartbeat, the files API and guest port dial — and the
 threshold is measured from `LastActive`. The sweep suspends through the
-normal pause path and shares preemption's snapshot-disk floor
-(`PREEMPT_DISK_FLOOR_PCT`): a pause that would take the disk under the
-floor is skipped for that pass and retried on the next one. An idle
+normal pause path. An idle
 suspension marks the lease `last_action idle_suspend/suspend_idle`,
 emits an `idle_suspended` event and counts in
 `spoond_idle_suspends_total`. A paused lease is released
@@ -1256,23 +1208,8 @@ spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
   losing it. Create, clone and fork (each child's `memory_mb`, reserved
   up front, all or nothing) are checked under the same lock as
   `max_leases`, so races cannot blow past either cap. `guaranteed_mib`
-  is the user's floor of host memory; admission does not count it
-  against them. Watch a user's charge as `used_mib` on
-  `GET /api/users/me` (and `charged_mib` on the lease detail).
-- **Lease classes** (#128 part 2): every lease is `guaranteed` or
-  `burst`, decided at admission and stored with it (dashboard: `▶
-  running, burst` and `burst N` in the capacity panel). A lease past the
-  owner's `guaranteed_mib` bursts, as does one created with
-  `"burst": true`; a user with no `guaranteed_mib` keeps every lease
-  guaranteed. A burst lease is preemptible even within another user's
-  guarantee and is held to the node's burst reserve — `BURST_RESERVE_MIB`,
-  default `8192` (see Capacity and the warm pool above): refused with
-  `503` `no burst capacity` (`Retry-After: 30`) while free hugepages
-  would dip under it. Every re-admission re-decides the class — a
-  guarantee-burst lease can fall back to guaranteed when the charge has
-  room, a request-burst one stays burst — and an undrain whose burst
-  lease cannot fit the reserve leaves it drained for a retry, like the
-  over-quota case above.
+  stays settable for now; it no longer decides a lease class.
+  Watch a user's charge as `used_mib` on `GET /api/users/me` (and `charged_mib` on the lease detail).
   - **Migration:** none, by design. A user with `max_leases > 0` and no
     `max_mib` keeps working unchanged — no count is converted into a
     memory number. To cap a user's memory, set it explicitly, sizing it

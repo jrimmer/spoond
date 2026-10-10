@@ -37,6 +37,10 @@ func newDiskPathHarness(t *testing.T, free uint64) *diskPathHarness {
 		HugepagesTotal:    1 << 20,
 		HugepageSizeBytes: 2 << 20,
 	}, nil)
+	// The roomy node replaces the harness's: drop the cached reading so
+	// memory admission and the fair slices see it.
+	dropNodeCache(h.svc)
+	h.svc.updateNodeMetrics(context.Background())
 	srv := NewServer(h.svc, NewImageRegistry(h.db))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

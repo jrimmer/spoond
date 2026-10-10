@@ -203,7 +203,7 @@ func (s *Service) clearRecoveryRetries(l *Lease) {
 // recoveryWaitForCapacity reports whether a recovery failure is a
 // substrate capacity refusal — the only recovery error that waits for
 // capacity instead of counting an attempt. Admission refusals
-// (errQuotaExceeded, errBurstReserve, errPreemptCannot) cannot reach a
+// (errQuotaExceeded) cannot reach a
 // live lease's recovery: recoverFromCheckpoint skips admission for a
 // running lease, and a suspended lease's refusal is a failure that a
 // retry could clear, so it is counted (spoond-dxq S4).

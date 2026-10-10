@@ -484,14 +484,13 @@ func undrainReadyStatus(status string) bool {
 }
 
 // undrainAdmissionRefusal reports whether err is one of the transient
-// admission answers (over quota, no burst room, no preemption room, or
-// box_full: every take-back candidate is pinned, FS5): they keep the
-// lease drained for a later undrain and must not be retried in a tight
-// loop here. A box_full undrain must never report resume_failed or lose
-// the lease — nothing spoond can pause will ever make room
-// (spoond-k0uz R3-2).
-func undrainAdmissionRefusal(err error) bool {
-	return errors.Is(err, errQuotaExceeded) || errors.Is(err, errBurstReserve) || errors.Is(err, errPreemptCannot) || isBoxFull(err)
+// admission answers (over quota, or box_full: every take-back candidate
+// is pinned, FS5): they keep the lease drained for a later undrain and
+// must not be retried in a tight loop here. A box_full undrain must
+// never report resume_failed or lose the lease — nothing spoond can
+// pause will ever make room (spoond-k0uz R3-2).
+func (s *Service) undrainAdmissionRefusal(err error) bool {
+	return errors.Is(err, errQuotaExceeded) || isBoxFull(err)
 }
 
 // resumeRetryable reports whether a failed undrain resume is worth
@@ -536,8 +535,8 @@ func resumeRetryable(err error) bool {
 // error and a cancelled or bounded context are transient conditions
 // the next undrain (or the self-heal loop) can retry; a sandbox that
 // will not come back is not covered and still becomes lost.
-func undrainDeferred(err error) bool {
-	return undrainAdmissionRefusal(err) ||
+func (s *Service) undrainDeferred(err error) bool {
+	return s.undrainAdmissionRefusal(err) ||
 		undrainNotReady(err) ||
 		errors.Is(err, errLeaseBusy) ||
 		errors.Is(err, substrate.ErrCapacity) ||
@@ -592,7 +591,7 @@ func (s *Service) resumeDrainedLease(ctx context.Context, l *Lease, acquire, rel
 		if err == nil {
 			return nil, attempt
 		}
-		if undrainAdmissionRefusal(err) {
+		if s.undrainAdmissionRefusal(err) {
 			return err, attempt
 		}
 		// A permanent error is never indeterminate, even if its text happens
@@ -838,7 +837,7 @@ func (s *Service) drainResumeOutcome(ctx context.Context, l *Lease, acquire, rel
 		// makes the heal emit drain_deferred (spoond-638d round 2 N1).
 		return err, attempts, false
 	}
-	if undrainDeferred(err) || ctx.Err() != nil {
+	if s.undrainDeferred(err) || ctx.Err() != nil {
 		// A failed or cut-off resume can leave a half-started sandbox
 		// behind; resumeLease's createSandbox error path already deletes it
 		// inside the busy window, before a retry can reuse the id

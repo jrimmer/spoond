@@ -58,32 +58,28 @@ func (s *Service) markOwnerDeleted(owner string) {
 }
 
 // waitRefusal reports whether err is one a create may wait out (#129):
-// substrate capacity (hugepages full and preemption could not help), the
-// burst reserve, a failed preemption, and the owner's quota caps — the
-// memory cap and, since 2.5.1, the lease-count cap (`max_leases`): a
-// create at the cap waits for one of the owner's own leases to go, which
-// the wait bounds and which takes no room from anyone else. Bad
-// requests, auth and unknown images answer at once.
+// substrate capacity (hugepages full and take-back could not help), and
+// the owner's quota caps — the memory cap and, since 2.5.1, the
+// lease-count cap (`max_leases`): a create at the cap waits for one of
+// the owner's own leases to go, which the wait bounds and which takes no
+// room from anyone else. Bad requests, auth and unknown images answer at
+// once.
 func waitRefusal(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, substrate.ErrCapacity) || errors.Is(err, errBurstReserve) || errors.Is(err, errPreemptCannot) {
+	if errors.Is(err, substrate.ErrCapacity) {
 		return true
 	}
 	return errors.Is(err, errQuotaExceeded) // memory cap or lease-count cap
 }
 
 // waitRefusalDetail is the refusal the `queued` event names, e.g.
-// "memory cap" or "no burst capacity".
+// "memory cap" or "capacity".
 func waitRefusalDetail(err error) string {
 	switch {
 	case errors.Is(err, substrate.ErrCapacity):
 		return "capacity"
-	case errors.Is(err, errBurstReserve):
-		return "no burst capacity"
-	case errors.Is(err, errPreemptCannot):
-		return "cannot preempt"
 	case isMemoryQuotaRefusal(err):
 		return "memory cap"
 	case errors.Is(err, errQuotaExceeded):

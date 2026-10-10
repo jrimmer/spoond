@@ -13,6 +13,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"github.com/jrimmer/spoond/v2/substrate"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -22,7 +23,6 @@ import (
 
 	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // idleSuspendsCounter reads spoond_idle_suspends_total from the
@@ -616,45 +616,6 @@ func TestIdleSuspendOverridesIdleTimeout(t *testing.T) {
 // (FS5); TestIdleSuspendOverridesIdleTimeout covers the caller-chosen
 // threshold.
 
-// TestIdleSuspendDiskFloorSkips: a pause that would take the snapshot
-// disk under the shared PREEMPT_DISK_FLOOR_PCT is skipped this sweep and
-// suspended once room returns.
-func TestIdleSuspendDiskFloorSkips(t *testing.T) {
-	svc, db, _ := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
-	ctx := context.Background()
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	svc.cfg.PreemptDiskFloorPct = 15
-
-	base := time.Now()
-	svc.now = func() time.Time { return base }
-	roomyDisk(svc) // the create's root disk must fit in the snapshot disk (FS3b)
-	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
-	if err != nil {
-		t.Fatalf("grant: %v", err)
-	}
-	if _, err := svc.setIdlePolicy(l, 60); err != nil {
-		t.Fatalf("setIdlePolicy: %v", err)
-	}
-	svc.store.mu.Lock()
-	l.LastActive = base
-	svc.store.mu.Unlock()
-
-	const gib = uint64(1) << 30
-	var total, free uint64 = 100 * gib, 16 * gib // 16 GiB free, a 2 GiB pause leaves 14% < 15%
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return total, free, nil }
-	svc.suspendIdleLeases(ctx, base.Add(2*time.Minute))
-	if l.Suspended {
-		t.Fatal("idle suspend ignored the snapshot-disk floor")
-	}
-	// Room returns: the next sweep suspends.
-	free = 40 * gib
-	svc.suspendIdleLeases(ctx, base.Add(2*time.Minute))
-	if !l.Suspended {
-		t.Fatal("idle suspend did not retry once the disk had room")
-	}
-}
-
 // TestPausedLeaseReleasedByOneClock: a lease paused through the pause
 // path is released PAUSED_RELEASE_DAYS after its pause date, not before
 // (FS5 one clock).
@@ -852,51 +813,44 @@ func TestIdleSuspendExecResumeRefusalQuota(t *testing.T) {
 	}
 }
 
-// TestIdleSuspendExecResumeRefusalBurst: an auto-resume refused by the
-// burst reserve answers what resume would — 503 no burst capacity with
-// Retry-After: 30 — and leaves the lease suspended.
-func TestIdleSuspendExecResumeRefusalBurst(t *testing.T) {
-	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
-	srv.svc.cfg.BurstReserveMiB = 8192
-	svc := srv.svc
-	owner := ownerIDFor(t, h, tok)
+// TestIdleSuspendExecResumeRefusalCapacity: an auto-resume refused for
+// no room (the one pool is full and take-back cannot help: the only
+// other lease is pinned) answers what resume would — 503 with code
+// capacity_wait and Retry-After: 30 — and leaves the lease suspended.
+func TestIdleSuspendExecResumeRefusalCapacity(t *testing.T) {
+	ts, svc, db, sub := newTestServerWithService(t)
+	seedImage(t, db, "mid", 1024)
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	// Dynamic node: every live sandbox counts 512 pages (1024 MiB), the
+	// whole box is 2048 MiB.
+	installDynamicNode(t, svc, sub, 1024, 0, 512)
 	ctx := context.Background()
 
-	rec, first := createPersistentAs(t, h, tok, "mid")
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	l, err := svc.grant(ctx, "consumer-a", "mid", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
 	}
-	id := first["id"].(string)
-	l := svc.lookup(uid, id)
-	l.Burst = true // the flag the request would have carried
-	if _, err := svc.setIdlePolicy(l, 60); err != nil {
-		t.Fatalf("setIdlePolicy: %v", err)
-	}
-	if _, err := svc.suspend(ctx, owner, id); err != nil {
+	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
+	// Something outside spoond fills the box: the re-admission has no
+	// room, no lease can be taken back and none is pinned, so this is a
+	// structural wait (503), not box_full. The dynamic node gives way to
+	// the static full-box reading.
+	sub.SetNodeInfoFunc(nil)
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1024, HugepagesUsed: 1024, HugepageSizeBytes: 2 << 20}, nil)
 	svc.store.mu.Lock()
 	l.LastAction, l.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, time.Now()
 	svc.store.mu.Unlock()
-	// Shrink the node so the burst admission cannot fit.
-	sub.SetNodeInfo(substrate.NodeInfo{
-		Status:            "healthy",
-		HugepagesTotal:    512 + 1,
-		HugepageSizeBytes: 2 << 20,
-	}, nil)
-	svc.nodeInfoMu.Lock()
-	svc.nodeInfoAt = time.Time{}
-	svc.nodeInfoMu.Unlock()
+	dropNodeCache(svc)
 
-	rec2 := postLeaseAction(t, h, tok, "/api/leases/"+id+"/exec", `{"cmd":"echo hi"}`)
-	if rec2.Code != http.StatusServiceUnavailable {
-		t.Fatalf("exec auto-resume burst refusal = %d, want 503: %s", rec2.Code, rec2.Body.String())
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+l.ID+"/exec", "token-a",
+		map[string]any{"cmd": "echo hi"})
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("exec auto-resume no-room refusal = %d, want 503: %v", resp.StatusCode, body)
 	}
-	if !strings.Contains(rec2.Body.String(), "no burst capacity") {
-		t.Fatalf("503 should name the burst capacity, got %s", rec2.Body.String())
-	}
-	if ra := rec2.Header().Get("Retry-After"); ra != "30" {
-		t.Fatalf("Retry-After = %q, want 30", ra)
+	if !strings.Contains(body["code"].(string), "capacity_wait") {
+		t.Fatalf("503 should carry code capacity_wait, got %v", body)
 	}
 	if !l.Suspended {
 		t.Fatal("a refused auto-resume left the lease running")

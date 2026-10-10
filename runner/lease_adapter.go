@@ -22,7 +22,7 @@ const DefaultAdmitWaitSecs = 900
 
 // defaultCapacityRetryAfter is the backoff a capacity 503 without a
 // Retry-After header uses: the same hint the backend puts on a burst
-// refusal (burstRetryAfterSecs).
+// refusal (capacityRetryAfterSecs).
 const defaultCapacityRetryAfter = 30 * time.Second
 
 // HTTPLeaseClient is a SandboxProvider backed by the spoond backend's
