@@ -231,6 +231,21 @@ summarised from README "Status".
   is replaced by `spoond_box_full_total`. Only the lease's own
   `idle_suspend` opt-in suspends a lease for idleness now.
 
+- **Lease classes (FS2b-1).** Every lease now admits against one
+  hugepage pool; memory take-back (FS2a) replaces classes and preemption.
+  Removed:
+  - the create fields `burst` and `priority` (now ignored if sent) and
+    the lease field `class`;
+  - promotion of burst leases and the `promoted` event;
+  - the burst reserve and the environment variable `BURST_RESERVE_MIB`,
+    with the `503 no burst capacity` refusal;
+  - preemption of burst leases, the `preempted` event, and the
+    environment variable `PREEMPT_DISK_FLOOR_PCT` with the
+    `503 capacity: cannot preempt (snapshot disk low)` refusal.
+  The lease field `preempted` stays and is always `false`. The suspend
+  reason `preempt` is now `take_back`. `guaranteed_mib` and `max_mib`
+  stay for now.
+
 ## [2.9.3] - 2026-10-09
 
 ### Added
