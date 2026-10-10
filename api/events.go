@@ -154,6 +154,18 @@ const (
 	// unpinned and its running jobs cancelled. The detail summarises the
 	// counts; the event carries the removed owner and no lease id.
 	LeaseUserDeleted LeaseEventType = "user_deleted"
+	// LeaseCriticalRelease marks a paused lease released by disk
+	// take-back (FS3a): a request's snapshot write did not fit, and this
+	// lease was the biggest disk borrower's oldest unpinned paused one.
+	// The release itself emits the ordinary `released` event with reason
+	// disk_reclaim; this event announces the take-back first with the
+	// owner's ratio and the disk's free percentage in the detail.
+	LeaseCriticalRelease LeaseEventType = "critical_release"
+	// LeaseDiskCleanup marks one disk take-back pass (FS3a): the detail
+	// carries the bytes freed by the garbage pass and by reclaimed
+	// paused leases. Spoond's own maintenance, not a lease's: it carries
+	// no lease id and no owner.
+	LeaseDiskCleanup LeaseEventType = "disk_cleanup"
 )
 
 // LeaseEvent is one lease lifecycle change. Reason, PolicyStep and
