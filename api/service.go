@@ -4309,10 +4309,10 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 		// Fair shares (3.0): no admission class and no priority — every
 		// lease admits against the one hugepage pool and take-back
 		// decides whose room it takes. The fields left the API.
-		// Preemption (FS2b-1): always false — nothing stamps preempted_at
-		// any more (the field stays for client compatibility; a lease
-		// migrated from a pre-3.0 store carries no live stamp either).
-		"preempted": false, // 3.0: no preemption; kept for API compatibility
+		// Preemption (FS2b-1): always false — 3.0 never preempts, and a
+		// pre-3.0 lease's stored stamp is not reported. The field stays
+		// for client compatibility.
+		"preempted": false,
 		// Pin (FS5): true when the owner pinned this lease; spoond never
 		// pauses or deletes it before its own expiry. A pinned lease
 		// reports pinned_idle_since once its last API activity passed
