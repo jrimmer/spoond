@@ -2461,6 +2461,8 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if err != nil {
 		return nil, err
 	}
+	// TODO(FS3b-1 step 2): call ensureDiskRoom here (need = int64(img.DiskMB)*1024*1024,
+	// owner = owner; defer release() so the reservation is held until the VM is running).
 	lease.Class = class
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
@@ -2826,6 +2828,9 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	if err != nil {
 		return "", err
 	}
+	// TODO(FS3b-1 step 2): call ensureDiskRoom here, before the snapshot write (need =
+	// int64(l.MemoryMB)*1024*1024 as the snapshot estimate, owner = l.Owner;
+	// defer release() once the pause write has finished).
 	defer release()
 	buildID, refs, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
@@ -3050,6 +3055,8 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	if err != nil {
 		return nil, err
 	}
+	// TODO(FS3b-1 step 2): call ensureDiskRoom here (need = int64(l.DiskMB)*1024*1024,
+	// owner = l.Owner; defer release() until the resume has finished).
 	l.Class = class
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err

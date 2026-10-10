@@ -354,6 +354,10 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 	if berr := s.enforceNamedSnapshotBudget(ctx, l.Owner, b.SizeBytes); berr != nil {
 		return store.NamedSnapshotRow{}, false, berr
 	}
+	// TODO(FS3b-1 step 2): call ensureDiskRoom here (need = int64(l.MemoryMB)*1024*1024 as the
+	// snapshot estimate, owner = l.Owner; defer release()). The kept_budget 409 above stays first.
+	// Note the checkpoint is already written at this point; step 2 decides whether the call must
+	// move before s.checkpointLease (the budget check needs the size, the room check only the estimate).
 	// The save point that simulates a backend stopping between the
 	// checkpoint and the row insert (A7): the build is written but never
 	// named, so a replay with the same key starts from scratch.

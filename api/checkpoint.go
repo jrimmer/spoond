@@ -174,6 +174,8 @@ func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease, keep bool) 
 		if berr := s.enforceKeptBudget(ctx, l.Owner, b.BuildID, budget); berr != nil {
 			return b, berr
 		}
+		// TODO(FS3b-1 step 2): call ensureDiskRoom here (need = int64(l.MemoryMB)*1024*1024 as the
+		// snapshot estimate, owner = l.Owner; defer release()). The kept_budget 409 above stays first.
 		if kerr := s.keepBuild(ctx, l.ID, b.BuildID); kerr != nil {
 			// The checkpoint stands; only the pin failed.
 			s.log.Printf("checkpoint: keep %s: %v", b.BuildID, kerr)
