@@ -316,6 +316,11 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A refused fork batch leaves no take-back victim paused.** A fork
+  admits its whole batch's memory once, before any child is created, so
+  a refusal cannot leave an earlier child's take-back behind: the
+  children share one admission and a rollback credits it.
+
 - **A memory admission that fails afterwards gives its cache debit
   back.** `admitMemory` returns an undo that credits the cached
   `NodeInfo` when the create or resume it admitted never took hold, so
