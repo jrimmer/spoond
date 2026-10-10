@@ -1058,8 +1058,8 @@ Restores a suspended lease from `resume_build_id` **with the same sandbox
 id**, so its address and identity are unchanged. Owner only (admins
 too); the SSH gateway's service token may resume any lease before a
 session starts. Response
-`{"id":"…","status":"running","address":"…"}`. `400` if neither persistent nor held,
-`409` with `code: lease_busy` if the lease is busy (another lifecycle
+`{"id":"…","status":"running","address":"…"}`. `409` with
+`code: lease_busy` if the lease is busy (another lifecycle
 operation is in flight; this is how a pause or another caller's resume
 answers, and the already-suspended body no longer uses
 `lease_suspended` anywhere a resume is possible).
@@ -1089,8 +1089,9 @@ already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.) An
 `owner deleted` (`403`) refuses the resume when the owner's identity was
-removed while the resume was in flight (spoond-q4j). Resuming does not
-renew a hold: there is no hold any more, only labels.
+removed while the resume was in flight (spoond-q4j). A suspended lease
+the caller owns resumes whatever suspended it; being persistent or
+pinned is not required (v3.0).
 
 ### `POST /api/leases/{id}/restart` — pause and resume, or a fresh guest
 
@@ -1439,9 +1440,9 @@ from take-back — and it is not activity for the idle sweep either: only
 work-call and keepalive activity moves `LastActive`. `hold_ttl` is
 removed (accepted and ignored for one
 release, with a `Deprecation` header). To keep a lease, use the pin
-routes below. A holder label still counts as the lease's activity for
-the pinned-idle notice and is shown on the dashboard, and a lease with
-a holder that has its own `checkpoint_interval` follows it.
+routes below. The label is shown on the dashboard (a pinned lease's
+holder is marked ◆), and a lease with a holder that has its own
+`checkpoint_interval` follows it.
 
 ### `PUT /api/leases/{id}/pin` and `DELETE /api/leases/{id}/pin` — pin or unpin
 
@@ -1468,11 +1469,11 @@ those. An empty prefix is refused (`400`).
 
 ### `POST /api/leases/{id}/resume` — resume a suspended lease (gateway)
 
-Owner-blind resume for **persistent or pinned** leases: used by the SSH gateway on
+Owner-blind resume for any suspended lease: used by the SSH gateway on
 attach, where the capability is the lease id or name and no owner id is
 known. Restores a suspended lease from `resume_build_id`
 with the same sandbox id (see [Pins and the paused-release clock](operations.md#pins-and-the-paused-release-clock)). An
-unpinned non-persistent or unknown lease answers `404`. Response `200`
+unknown lease answers `404`. Response `200`
 `{"id":"…","status":"running","address":"…"}`.
 
 ### `POST /api/leases/{id}/prompt` — message the in-sandbox Shelley agent
@@ -1579,8 +1580,8 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `unpinned` | a lease is unpinned (`DELETE /api/leases/{id}/pin`) | the unpin |
 | `paused_expiring` | a paused lease is 24 h from release by the one clock (FS5) | the pause date and the release time |
 | `pinned_idle` | a pinned lease's last API activity crossed `PINNED_IDLE_NOTICE_DAYS` (visibility only) | the idle-since time, or `activity; pinned-idle notice cleared` |
-| `box_full` | a request needed room and every take-back candidate was pinned (FS5); carries no lease id | the request's memory and owner |
-| `admin_unpin` | `POST /api/admin/unpin-by-holder` unpinned leases by holder prefix; carries no lease id | the count and prefix |
+| `box_full` | a request needed room and every take-back candidate was pinned (FS5); carries lease id `-` | the request's memory and owner |
+| `admin_unpin` | `POST /api/admin/unpin-by-holder` unpinned leases by holder prefix; carries lease id `-` | the count and prefix |
 | `job_started` | a background exec job started (2.6, #135) | the command, cut to 120 chars |
 | `job_exited` | a background exec job ended (2.6, #135) | `exit <code>` and the last 10 stderr lines (at most 1 KiB); for a job killed by the max runtime, `timed out: exit 124` and the stderr excerpt (spoond-wb5) |
 | `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |
@@ -1599,7 +1600,15 @@ every 15 s thereafter, so proxies do not close an idle stream.
 A `gc` event is lease-less: its `lease_id` and `owner` are empty, it
 reaches the all-leases stream (and the events-only `EVENTS_TOKEN`) but
 never `GET /api/leases/{id}/events` or a per-lease in-process
-subscription, and the dashboard shows its subject as `spoond`. A GC
+subscription, and the dashboard shows its subject as `spoond`. The
+`box_full` and `admin_unpin` events are not about one lease either: they
+carry lease id `-` (a placeholder, not a real id) so a consumer that
+keys on `lease_id` sees a well-formed value and a per-lease stream
+(`?lease_id=<id>`, or an in-process `EventFilter{LeaseID: …}`) never
+matches them, since a real id is never `-`; they reach the all-leases
+stream only (the SSE JSON carries `"lease_id":"-"`, as the dashboard's
+event panel shows in its id column). The notifier keys them by
+`box.full` and the prefix count, not the lease id. A GC
 pass that deletes nothing (the default dry run included) emits none, but
 the stale-building sweep does emit one per row it fails even in dry-run
 mode, because a template build has no owner and never appears in
