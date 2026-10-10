@@ -3101,6 +3101,9 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = resumeBuild
+	// A taken-back lease comes back here: read the take-back reason
+	// before setState clears it, for the event's detail below (#145 FS2a).
+	takenBack := l.SuspendReason == suspendReasonTakeBack
 	// A preempted lease comes back here: read the preemption before
 	// setState clears it, for the event's detail below (#128 part 3).
 	preempted := !l.PreemptedAt.IsZero()
@@ -3128,6 +3131,8 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	}
 	if preempted {
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "after preemption")
+	} else if takenBack {
+		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "after take-back")
 	} else {
 		s.emitLeaseEvent(l.ID, l.Owner, LeaseResumed, "resumed from build "+resumeBuild)
 	}

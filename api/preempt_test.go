@@ -15,10 +15,13 @@ import (
 	"github.com/jrimmer/spoond/v2/substrate"
 )
 
-// Preemption tests (#128 part 3). The fake substrate's NodeInfo is made
-// controllable by a function that counts the fake's live sandboxes, so a
-// pause really frees hugepages: the same shape the orchestrator reports
-// in production.
+// Preemption tests (#128 part 3, updated by FS2a spoond-pxsn). The fake
+// substrate's NodeInfo is made controllable by a function that counts the
+// fake's live sandboxes, so a pause really frees hugepages: the same shape
+// the orchestrator reports in production. Since FS2a the victim choice is
+// the fair-shares take-back selector, so a burst owner must be a box owner
+// (identity user or token owner) with memory over their slice to be
+// touchable: preemptOwner below grants one.
 
 // dynNode is a controllable NodeInfo: baseUsed pages are held outside
 // leases, and every live sandbox on the fake counts pagesPerLease.
@@ -56,6 +59,35 @@ func dropNodeCache(svc *Service) {
 	svc.nodeInfoMu.Unlock()
 }
 
+// preemptOwner grants owner an identity user and returns its id, so the
+// fair-shares take-back selector sees the lease (a lease owner that is
+// neither an identity user nor a token owner is not a box owner and can
+// never be over its slice).
+func preemptOwner(t *testing.T, svc *Service, name string) string {
+	t.Helper()
+	if svc.identities == nil {
+		ids, err := identity.NewStore("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc.SetIdentities(ids)
+	}
+	u, err := svc.identities.AddUser(name, identity.KindPerson, nil, "")
+	if err != nil {
+		t.Fatalf("add user %s: %v", name, err)
+	}
+	return u.ID
+}
+
+// warmFairShares refreshes the NodeInfo cache and invalidates the fair
+// snapshot, so a take-back choice made now reads the current usage. (In
+// production the node-metrics loop keeps both warm; grantLease already
+// invalidates the snapshot.)
+func warmFairShares(svc *Service, ctx context.Context) {
+	svc.updateNodeMetrics(ctx)
+	svc.invalidateFairShares()
+}
+
 // newPreemptService builds a service over a fake and an image "mid" of
 // 1024 MiB, with the burst reserve off (so the preemption math is the
 // only thing under test) and no disk floor unless a test sets one.
@@ -72,6 +104,17 @@ func newPreemptService(t *testing.T) (*Service, *testSub, context.Context) {
 		HugepagesTotal:    1 << 20,
 		HugepageSizeBytes: 2 << 20,
 	}, nil)
+	// FS2a: the victim choice reads the fair-share snapshot, whose memory
+	// slice exists only when every capacity read works. The snapshot disk
+	// read is stubbed roomy (the tests below that exercise the disk floor
+	// override this) and the storage root exists, so take-back sees real
+	// slices and statfs stays off the temp dir.
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	var diskTotal uint64 = 100 << 30
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return diskTotal, diskTotal, nil }
+	// Pause builds measure at their memory_mb, so a taken-back lease
+	// moves its owner's disk usage like a real pause would.
+	svc.diskUsage = func(dir string) (int64, error) { return 1024 << 20, nil }
 	return svc, sub, context.Background()
 }
 
@@ -89,6 +132,13 @@ func newPreemptServer(t *testing.T) (*httptest.Server, *Service, *testSub, conte
 		HugepagesTotal:    1 << 20,
 		HugepageSizeBytes: 2 << 20,
 	}, nil)
+	// FS2a: same fair-share groundwork as newPreemptService — a known
+	// snapshot disk and per-pause build sizes — so the take-back selector
+	// sees real slices.
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	var diskTotal uint64 = 100 << 30
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return diskTotal, diskTotal, nil }
+	svc.diskUsage = func(dir string) (int64, error) { return 1024 << 20, nil }
 	srv := NewServer(svc, NewImageRegistry(db))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -119,34 +169,62 @@ func preemptedIDs(svc *Service) map[string]bool {
 	return out
 }
 
-// TestPreemptionOrderPriorityThenNewest: preemption takes the lowest
-// priority first, then the newest lease.
+// pausedIDs returns the ids of the leases currently suspended (the
+// take-back view of "preempted": the stamps differ, the pause is the
+// same).
+func pausedIDs(svc *Service) map[string]bool {
+	svc.store.mu.Lock()
+	defer svc.store.mu.Unlock()
+	out := map[string]bool{}
+	for id, l := range svc.store.leases {
+		if l.Suspended {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// TestPreemptionOrderPriorityThenNewest: take-back pauses the owner
+// furthest over their slice first, and within an owner the least
+// recently used lease (FS2a spoond-pxsn; priority and newest-first were
+// the pre-FS2a preemption order). Two owners are equally over, so the
+// tie is broken by the selector's stable owner order; each gives up its
+// least recently used lease and the request is satisfied.
 func TestPreemptionOrderPriorityThenNewest(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	// Room for the burst leases; the guaranteed lease below needs two
-	// of the three preempted.
+	// leases' worth of room, one from each over-slice owner.
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
 
-	old := burstLease(t, svc, ctx, "burst-a", "mid")
-	newest := burstLease(t, svc, ctx, "burst-b", "mid")
-	lowest := burstLease(t, svc, ctx, "burst-c", "mid")
+	overA := preemptOwner(t, svc, "aaa") // sorts before zzz: tied ratios go to it first
+	overB := preemptOwner(t, svc, "zzz")
+	old := burstLease(t, svc, ctx, overA, "mid")
+	newest := burstLease(t, svc, ctx, overA, "mid")
+	fillA := burstLease(t, svc, ctx, overA, "mid")
+	fillA2 := burstLease(t, svc, ctx, overA, "mid")
+	bOld := burstLease(t, svc, ctx, overB, "mid")
+	bNewest := burstLease(t, svc, ctx, overB, "mid")
+	fillB := burstLease(t, svc, ctx, overB, "mid")
+	fillB2 := burstLease(t, svc, ctx, overB, "mid")
 
-	base := time.Now()
+	// LRU order per owner: the oldest lease of each owner is the one to
+	// go; the "newest" ones must be left running.
+	base := time.Now().Add(-5 * time.Hour)
 	svc.store.mu.Lock()
-	old.CreatedAt = base.Add(-2 * time.Hour)
-	newest.CreatedAt = base.Add(-time.Minute)
-	lowest.CreatedAt = base.Add(-time.Hour)
-	old.Priority = 5
-	newest.Priority = 5
-	lowest.Priority = -1 // must go first
-	for _, l := range []*Lease{old, newest, lowest} {
+	for i, l := range []*Lease{old, newest, fillA, fillA2, bOld, bNewest, fillB, fillB2} {
+		l.LastActive = base.Add(time.Duration(i%4) * time.Hour)
 		svc.saveLeaseLocked(l)
 	}
 	svc.store.mu.Unlock()
 
-	// Fill the node so only the leases themselves are free, then ask for
-	// 2048 MiB: two 1024 MiB leases must be preempted.
-	installDynamicNode(t, svc, sub, 2048, 2048-3*512, 512)
+	// Both owners run 4096 MiB — eight leases fill the 8192 MiB pool
+	// exactly (slice 1638 MiB over five box owners, ratio 2.5 each, far
+	// over) — and the two LRU leases together free the 2048 MiB the big
+	// guaranteed lease needs. (One owner alone could not give both: the
+	// second give-up would drop it to the requester's own post-request
+	// ratio, which the selector never does.)
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	warmFairShares(svc, ctx)
 	guaranteed, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "big", ttl: time.Hour})
 	if err != nil {
 		t.Fatalf("guaranteed create: %v", err)
@@ -155,40 +233,68 @@ func TestPreemptionOrderPriorityThenNewest(t *testing.T) {
 		t.Fatalf("guaranteed create class = %s", guaranteed.Class)
 	}
 
-	got := preemptedIDs(svc)
-	if !got[lowest.ID] {
-		t.Fatalf("lowest-priority lease %s was not preempted (preempted: %v)", lowest.ID, got)
+	got := pausedIDs(svc)
+	if len(got) != 2 {
+		t.Fatalf("paused %d leases, want exactly 2 (%v)", len(got), got)
 	}
-	if !got[newest.ID] {
-		t.Fatalf("newest lease %s was not preempted second (preempted: %v)", newest.ID, got)
+	if !got[old.ID] || !got[bOld.ID] {
+		t.Fatalf("the least recently used lease of each owner was not paused (paused: %v; want %s and %s)", got, old.ID, bOld.ID)
 	}
-	if got[old.ID] {
-		t.Fatalf("older same-priority lease %s was preempted, want the newest first", old.ID)
+	for _, keep := range []*Lease{newest, fillA, fillA2, bNewest, fillB, fillB2} {
+		if got[keep.ID] {
+			t.Fatalf("lease %s was paused though older leases of its owner freed enough", keep.ID)
+		}
+	}
+	// No preemption stamps: take-back suppresses auto-resume (#145 D2);
+	// the holder's next work call resumes the lease.
+	for _, l := range []*Lease{old, bOld} {
+		if !l.PreemptedAt.IsZero() {
+			t.Fatalf("take-back stamped preempted_at on %s", l.ID)
+		}
 	}
 }
 
-// TestPreemptionFreesEnoughAndNoMore: preemption stops as soon as the
+// TestPreemptionFreesEnoughAndNoMore: take-back stops as soon as the
 // guaranteed lease fits, leaving the other burst leases running.
 func TestPreemptionFreesEnoughAndNoMore(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	a := burstLease(t, svc, ctx, "burst-a", "mid")
-	b := burstLease(t, svc, ctx, "burst-b", "mid")
-	c := burstLease(t, svc, ctx, "burst-c", "mid")
-	_ = c
+	owner := preemptOwner(t, svc, "heavy")
+	a := burstLease(t, svc, ctx, owner, "mid")
+	b := burstLease(t, svc, ctx, owner, "mid")
+	c := burstLease(t, svc, ctx, owner, "mid")
 
-	// One preemption frees 1024 MiB, enough for a 1024 MiB guaranteed
-	// lease: exactly one of the three goes.
-	installDynamicNode(t, svc, sub, 3072, 3072-3*512, 512)
+	// LRU order a → b → c.
+	svc.store.mu.Lock()
+	base := time.Now().Add(-3 * time.Hour)
+	a.LastActive = base
+	b.LastActive = base.Add(time.Hour)
+	c.LastActive = base.Add(2 * time.Hour)
+	svc.saveLeaseLocked(a)
+	svc.saveLeaseLocked(b)
+	svc.saveLeaseLocked(c)
+	svc.store.mu.Unlock()
+
+	// The owner runs 3072 MiB on a box with three other owners and a
+	// 3072 MiB pool (slice 768 MiB each): ratio 4, far over, and the
+	// three leases fill it exactly. One 1024 MiB guaranteed lease needs
+	// one lease paused; the selector takes the least recently used and
+	// stops (giving more would push the owner toward the requester, and
+	// the room is already there).
+	installDynamicNode(t, svc, sub, 1536, 0, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create: %v", err)
 	}
-	got := preemptedIDs(svc)
+	got := pausedIDs(svc)
 	if len(got) != 1 {
-		t.Fatalf("preempted %d leases, want exactly 1 (%v)", len(got), got)
+		t.Fatalf("paused %d leases, want exactly 1 (%v)", len(got), got)
 	}
-	running := 0
+	if !got[a.ID] {
+		t.Fatalf("least-recently-used lease %s was not the one paused (paused: %v)", a.ID, got)
+	}
 	svc.store.mu.Lock()
+	running := 0
 	for _, l := range []*Lease{a, b, c} {
 		if !l.Suspended {
 			running++
@@ -264,34 +370,44 @@ func TestPreemptionDiskFloorRefusedHTTP(t *testing.T) {
 	}
 }
 
-// TestPreemptionResumeOnUse: a preempted lease comes back on its
-// holder's next work call instead of on a background queue (#145 D2).
-// The exec resumes it through the normal path, clearing preempted and
-// emitting "resumed" with detail "after preemption", and the generation
-// does not change (the pause/resume continues the memory).
+// TestPreemptionResumeOnUse: a taken-back lease comes back on its
+// holder's next work call instead of on a background queue (#145 D2,
+// FS2a spoond-pxsn). The exec resumes it through the normal path,
+// clearing the take-back stamp and emitting "resumed" with detail
+// "after take-back", and the generation does not change (the
+// pause/resume continues the memory).
 func TestPreemptionResumeOnUse(t *testing.T) {
 	ts, svc, sub, ctx := newPreemptServer(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	l1 := burstLease(t, svc, ctx, "consumer-a", "mid") // exec'd via token-a below
 	burstLease(t, svc, ctx, "consumer-a", "mid")
-	burstLease(t, svc, ctx, "consumer-a", "mid")
+	l3 := burstLease(t, svc, ctx, "consumer-a", "mid")
+	svc.store.mu.Lock()
+	l1.LastActive = time.Now().Add(-time.Hour)
+	l3.LastActive = time.Now()
+	svc.saveLeaseLocked(l1)
+	svc.saveLeaseLocked(l3)
+	svc.store.mu.Unlock()
 
-	installDynamicNode(t, svc, sub, 3072, 3072-2*512, 512)
+	// consumer-a runs three leases (3072 MiB) and fills the 3072 MiB
+	// pool exactly (three box owners, slice 1024 MiB each): ratio 3. A
+	// 1024 MiB guaranteed lease takes the owner's least recently used
+	// lease — the holder execs it through token-a below — while the
+	// owner stays above the requester's post-request ratio.
+	installDynamicNode(t, svc, sub, 1536, 0, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create: %v", err)
 	}
-	pre := preemptedIDs(svc)
-	if len(pre) != 1 {
-		t.Fatalf("want 1 preempted lease, got %v", pre)
+	if !l1.Suspended || l3.Suspended {
+		t.Fatalf("take-back paused the wrong lease: l1=%v l3=%v", l1.Suspended, l3.Suspended)
 	}
-	var victim *Lease
-	for id := range pre {
-		victim = svc.lookup("consumer-a", id)
-	}
-	if victim == nil {
-		t.Fatal("preempted lease not found")
+	victim := l1
+	if victim.SuspendReason != suspendReasonTakeBack || victim.TakeBackFor != "guaranteed" {
+		t.Fatalf("victim stamps: reason=%q for=%q, want take_back/guaranteed", victim.SuspendReason, victim.TakeBackFor)
 	}
 	if victim.Generation != 1 {
-		t.Fatalf("preemption changed the generation to %d, want 1", victim.Generation)
+		t.Fatalf("take-back changed the generation to %d, want 1", victim.Generation)
 	}
 
 	// Watch the resumed event.
@@ -303,10 +419,10 @@ func TestPreemptionResumeOnUse(t *testing.T) {
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+victim.ID+"/exec", "token-a",
 		map[string]any{"cmd": "echo hi"})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("exec on a preempted lease: %d: %v", resp.StatusCode, body)
+		t.Fatalf("exec on a taken-back lease: %d: %v", resp.StatusCode, body)
 	}
-	if victim.Suspended || !victim.PreemptedAt.IsZero() {
-		t.Fatalf("victim after resume: suspended=%v preemptedAt=%v", victim.Suspended, !victim.PreemptedAt.IsZero())
+	if victim.Suspended || victim.TakeBackFor != "" {
+		t.Fatalf("victim after resume: suspended=%v takeBackFor=%q", victim.Suspended, victim.TakeBackFor)
 	}
 	if victim.Generation != 1 {
 		t.Fatalf("resume changed the generation to %d, want 1", victim.Generation)
@@ -316,28 +432,38 @@ func TestPreemptionResumeOnUse(t *testing.T) {
 		select {
 		case ev := <-subEvents.C:
 			if ev.Type == LeaseResumed {
-				if ev.Detail != "after preemption" {
-					t.Fatalf("resumed detail = %q, want %q", ev.Detail, "after preemption")
+				if ev.Detail != "after take-back" {
+					t.Fatalf("resumed detail = %q, want %q", ev.Detail, "after take-back")
 				}
 				return
 			}
 		case <-deadline:
-			t.Fatal("no resumed event for the preempted lease")
+			t.Fatal("no resumed event for the taken-back lease")
 		}
 	}
 }
 
-// TestPreemptionSerialised: two concurrent guaranteed creates preempt
-// once between them, because one preemption frees enough for both and
-// the preemption mutex makes the second see the first's freed memory.
+// TestPreemptionSerialised: two concurrent guaranteed creates take back
+// once between them, because one pause frees enough for both and
+// preemptMu makes the second see the first's freed memory.
 func TestPreemptionSerialised(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	burstLease(t, svc, ctx, "burst-a", "mid")
+	owner := preemptOwner(t, svc, "heavy")
+	burstLease(t, svc, ctx, owner, "mid")
+	burstLease(t, svc, ctx, owner, "mid")
+	burstLease(t, svc, ctx, owner, "mid")
+	burstLease(t, svc, ctx, owner, "mid")
 
-	// The burst lease's 1024 MiB is the only free memory; the two
-	// guaranteed leases each need 1024 MiB.
-	installDynamicNode(t, svc, sub, 2048, 1024, 512)
+	// Five box owners on a 5120 MiB pool; the owner runs four leases
+	// (4096 MiB, ratio 3.2) and the free 1024 MiB admits the first
+	// guaranteed lease. The second finds no free memory and takes the
+	// owner's oldest lease back — which leaves the owner above
+	// consumer-a's post-request ratio — while preemptMu makes it see
+	// the first create's debit: between the two creates exactly one
+	// lease is paused.
+	installDynamicNode(t, svc, sub, 2560, 0, 512)
+	warmFairShares(svc, ctx)
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
@@ -345,7 +471,7 @@ func TestPreemptionSerialised(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour})
+			_, errs[i] = svc.grantLease(ctx, leaseRequest{owner: "consumer-a", image: "mid", ttl: time.Hour})
 		}(i)
 	}
 	wg.Wait()
@@ -354,47 +480,72 @@ func TestPreemptionSerialised(t *testing.T) {
 			t.Fatalf("guaranteed create %d: %v", i, err)
 		}
 	}
-	if got := preemptedIDs(svc); len(got) != 1 {
-		t.Fatalf("concurrent creates preempted %d leases, want exactly 1 (serialised)", len(got))
+	svc.store.mu.Lock()
+	paused, victim := 0, ""
+	for _, l := range svc.store.leases {
+		if l.Suspended {
+			paused++
+			victim = l.Owner
+		}
+	}
+	svc.store.mu.Unlock()
+	if paused != 1 {
+		t.Fatalf("concurrent creates paused %d leases, want exactly 1 (serialised)", paused)
+	}
+	if victim != owner {
+		t.Fatalf("the paused lease belongs to %q, want the over-slice owner", victim)
 	}
 }
 
-// TestPreemptionAPIReportsPreempted: a preempted lease reports
-// "preempted": true in list and detail, carries no generation bump, and
-// emits one "preempted" event naming the guaranteed lease's owner.
-func TestPreemptionAPIReportsPreempted(t *testing.T) {
+// TestPreemptionAPIReportsTakenBack: a taken-back lease reports
+// "suspended" with reason take_back, carries no generation bump, and
+// emits the take_back event naming the requesting owner and the
+// over-slice ratio (the old preempted reporting went with the
+// pre-FS2a victim choice).
+func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	victim := burstLease(t, svc, ctx, "burst-a", "mid")
+	victim := burstLease(t, svc, ctx, "consumer-a", "mid")
+	filler := burstLease(t, svc, ctx, "consumer-a", "mid")
+	filler2 := burstLease(t, svc, ctx, "consumer-a", "mid")
 
 	events := svc.Subscribe(EventFilter{LeaseID: victim.ID})
 	defer events.Close()
 
-	installDynamicNode(t, svc, sub, 2048, 2048-512, 512)
+	// consumer-a fills the 3072 MiB pool exactly (three box owners,
+	// slice 1024): ratio 3. The guaranteed lease takes the LRU lease.
+	installDynamicNode(t, svc, sub, 1536, 0, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create: %v", err)
 	}
+	if !victim.Suspended || filler.Suspended || filler2.Suspended {
+		t.Fatalf("take-back paused the wrong lease: v=%v f=%v f2=%v", victim.Suspended, filler.Suspended, filler2.Suspended)
+	}
 
 	m := leaseMap(victim, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim))
-	if got := m["preempted"]; got != true {
-		t.Fatalf("preempted field = %v, want true", got)
+	if got := m["preempted"]; got != false {
+		t.Fatalf("preempted field = %v, want false (take-back does not stamp preempted)", got)
+	}
+	if victim.SuspendReason != suspendReasonTakeBack {
+		t.Fatalf("suspend reason = %q, want take_back", victim.SuspendReason)
 	}
 	if victim.Generation != 1 {
-		t.Fatalf("preemption bumped the generation to %d, want 1", victim.Generation)
+		t.Fatalf("take-back bumped the generation to %d, want 1", victim.Generation)
 	}
 
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case ev := <-events.C:
-			if ev.Type == LeasePreempted {
-				if ev.Detail != "for a guaranteed lease of guaranteed" {
-					t.Fatalf("preempted detail = %q", ev.Detail)
+			if ev.Type == LeaseTakeBack {
+				if !strings.Contains(ev.Detail, "for guaranteed") || !strings.Contains(ev.Detail, "3.00") {
+					t.Fatalf("take-back detail = %q, want the requester and the 3.00 ratio", ev.Detail)
 				}
 				return
 			}
 		case <-deadline:
-			t.Fatal("no preempted event")
+			t.Fatal("no take-back event")
 		}
 	}
 }
@@ -502,59 +653,55 @@ func TestPreemptionUnfulfillablePreemptsNothing(t *testing.T) {
 	}
 }
 
-// preemptOne preempts a single burst lease of burst-a for a guaranteed
-// create and returns the victim.
+// preemptOne takes back a single burst lease of consumer-a for a
+// guaranteed create and returns the victim.
 func preemptOne(t *testing.T, svc *Service, sub *testSub, ctx context.Context) *Lease {
 	t.Helper()
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	victim := burstLease(t, svc, ctx, "burst-a", "mid")
-	installDynamicNode(t, svc, sub, 2048, 2048-512, 512)
+	victim := burstLease(t, svc, ctx, "consumer-a", "mid")
+	burstLease(t, svc, ctx, "consumer-a", "mid")
+	burstLease(t, svc, ctx, "consumer-a", "mid")
+	installDynamicNode(t, svc, sub, 1536, 0, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create: %v", err)
 	}
-	if victim.PreemptedAt.IsZero() || !victim.Suspended {
-		t.Fatal("setup: the burst lease was not preempted")
+	if !victim.Suspended || victim.TakeBackFor == "" {
+		t.Fatal("setup: the burst lease was not taken back")
 	}
 	return victim
 }
 
-// TestPreemptedColdRestartClearsFlag: a path other than resume that runs
-// a preempted lease again (here a cold restart) ends the preemption, so
-// the lease does not report preempted while running, the gauge drops
-// it, and the resume queue no longer picks it up.
-func TestPreemptedColdRestartClearsFlag(t *testing.T) {
+// TestTakenBackColdRestartRunsAgain: a path other than resume that runs
+// a taken-back lease again (here a cold restart) brings it back running
+// with the take-back stamp cleared.
+func TestTakenBackColdRestartRunsAgain(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	victim := preemptOne(t, svc, sub, ctx)
 
 	installDynamicNode(t, svc, sub, 1<<20, 0, 512)
-	if _, err := svc.restartCold(ctx, "burst-a", victim); err != nil {
+	if _, err := svc.restartCold(ctx, "consumer-a", victim); err != nil {
 		t.Fatalf("cold restart: %v", err)
 	}
-	if victim.State != "running" || !victim.PreemptedAt.IsZero() {
-		t.Fatalf("after a cold restart state=%s preempted=%v, want running and not preempted", victim.State, !victim.PreemptedAt.IsZero())
+	if victim.State != "running" || victim.TakeBackFor != "" {
+		t.Fatalf("after a cold restart state=%s takeBackFor=%q, want running and no take-back stamp", victim.State, victim.TakeBackFor)
 	}
 	if m := leaseMap(victim, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim)); m["preempted"] != false {
 		t.Fatalf("preempted field = %v, want false", m["preempted"])
 	}
-	svc.store.mu.Lock()
-	n := svc.preemptedCountLocked()
-	svc.store.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("preempted gauge count = %d, want 0", n)
-	}
 }
 
-// TestPreemptedLostLeaseNotCounted: a preempted lease that is lost is no
-// longer preempted, so the gauge (like the dashboard) does not count it.
-func TestPreemptedLostLeaseNotCounted(t *testing.T) {
+// TestTakenBackLostLeaseKeepsNoStamp: a taken-back lease that is lost
+// loses the take-back stamp with its state (setState clears it), so no
+// view reports a lost lease as taken back.
+func TestTakenBackLostLeaseKeepsNoStamp(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	victim := preemptOne(t, svc, sub, ctx)
 	svc.store.mu.Lock()
 	victim.setState("lost")
-	n := svc.preemptedCountLocked()
 	svc.store.mu.Unlock()
-	if n != 0 || !victim.PreemptedAt.IsZero() {
-		t.Fatalf("lost preempted lease: count=%d preempted=%v, want 0 and false", n, !victim.PreemptedAt.IsZero())
+	if victim.State != "lost" || victim.TakeBackFor != "" {
+		t.Fatalf("lost taken-back lease: state=%s takeBackFor=%q, want lost and no stamp", victim.State, victim.TakeBackFor)
 	}
 }
 
@@ -562,32 +709,41 @@ func TestPreemptedLostLeaseNotCounted(t *testing.T) {
 // rule (FS5). TestPreemptionNeverPausesPinned covers the pin contract.
 
 // TestPreemptionNeverPausesPinned: a pinned burst lease is never a
-// take-back candidate (FS5); another unpinned burst lease is preempted
-// instead.
+// take-back victim (FS5); the same owner's unpinned lease goes instead,
+// even though the pinned one is older.
 func TestPreemptionNeverPausesPinned(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
-	installDynamicNode(t, svc, sub, 1024, 0, 512)
-	// Two burst leases; pin the first.
-	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: time.Hour, burst: true})
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	// Three burst leases of one owner; the first is the oldest and gets
+	// pinned, so the LRU pick must skip it.
+	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-a", image: "mid", ttl: time.Hour, burst: true})
 	if err != nil {
 		t.Fatalf("grant pinned: %v", err)
 	}
-	unpinned, err := svc.grantLease(ctx, leaseRequest{owner: "burst-b", image: "mid", ttl: time.Hour, burst: true})
-	if err != nil {
-		t.Fatalf("grant unpinned: %v", err)
-	}
-	if _, err := svc.setPinned("burst-a", pinned.ID, true); err != nil {
+	victim := burstLease(t, svc, ctx, "consumer-a", "mid")
+	filler := burstLease(t, svc, ctx, "consumer-a", "mid")
+	svc.store.mu.Lock()
+	victim.LastActive = time.Now().Add(-time.Hour)
+	filler.LastActive = time.Now()
+	svc.saveLeaseLocked(victim)
+	svc.saveLeaseLocked(filler)
+	svc.store.mu.Unlock()
+	if _, err := svc.setPinned("consumer-a", pinned.ID, true); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
-	_ = unpinned
 
-	// A 1024 MiB guaranteed lease needs one 1024 MiB burst lease freed.
-	// The pinned one must be left alone; the unpinned one is preempted.
+	// The owner fills the 3072 MiB pool (slice 1024, ratio 3); a 1024
+	// MiB guaranteed lease takes the least recently used UNPINNED lease.
+	installDynamicNode(t, svc, sub, 1536, 0, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed grant: %v", err)
 	}
 	if pinned.Suspended {
-		t.Fatal("a pinned lease was preempted")
+		t.Fatal("a pinned lease was taken back")
+	}
+	if !victim.Suspended || filler.Suspended {
+		t.Fatalf("the unpinned LRU lease was not the victim: victim=%v filler=%v", victim.Suspended, filler.Suspended)
 	}
 }
 
@@ -655,31 +811,56 @@ func TestPreemptionUndrainDefers(t *testing.T) {
 // TestGuaranteedUsesReserveWithoutPreempting: the burst reserve is room
 // kept for guaranteed work, so a guaranteed create that fits in free
 // memory is admitted without preempting anyone, even when that dips
-// into the reserve. Only a guaranteed lease that does not fit preempts.
+// into the reserve. Only a guaranteed lease that does not fit takes
+// memory back.
 func TestGuaranteedUsesReserveWithoutPreempting(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	svc.cfg.BurstReserveMiB = 2048
-	// Room for a burst lease above the reserve: 16 GiB, nothing used.
+	// Room for the burst leases above the reserve: 16 GiB, nothing used.
 	installDynamicNode(t, svc, sub, 8192, 0, 512)
-	victim := burstLease(t, svc, ctx, "burst-a", "mid")
+	owner := preemptOwner(t, svc, "heavy")
+	victim := burstLease(t, svc, ctx, owner, "mid")
+	for i := 0; i < 4; i++ {
+		burstLease(t, svc, ctx, owner, "mid")
+	}
 
-	// Now 2 GiB free (1024 pages): a 1 GiB guaranteed lease fits, though
-	// it takes the node under the 2 GiB reserve. Preempting the burst
-	// lease would restore the reserve, and must not happen.
-	installDynamicNode(t, svc, sub, 8192, 8192-1024-512, 512)
+	// Now 1 GiB free (5120 pages base + the five 1024 MiB leases on the
+	// 16 GiB pool): a 1 GiB guaranteed lease fits, though it takes the
+	// node under the 2 GiB reserve. Taking the owner's leases back
+	// would restore the reserve, and must not happen.
+	installDynamicNode(t, svc, sub, 8192, 5120, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create: %v", err)
 	}
-	if victim.Suspended || !victim.PreemptedAt.IsZero() {
-		t.Fatal("a guaranteed lease that fits preempted a burst lease to protect the reserve")
+	if victim.Suspended || victim.TakeBackFor != "" {
+		t.Fatal("a guaranteed lease that fits took a burst lease back to protect the reserve")
 	}
 
-	// Full node (nothing free): the next guaranteed lease does preempt.
-	installDynamicNode(t, svc, sub, 8192, 8192-2*512, 512)
+	// Full node (base + the five leases + grant1's sandbox = exactly
+	// the 16 GiB pool): the next guaranteed lease does take one of the
+	// owner's five leases (5120 MiB over a 4096 MiB slice; giving one
+	// leaves the owner strictly above the requester), and the paused
+	// lease's room admits the new sandbox.
+	installDynamicNode(t, svc, sub, 8192, 8192-6*512, 512)
+	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create on a full node: %v", err)
 	}
-	if !victim.Suspended || victim.PreemptedAt.IsZero() {
-		t.Fatal("a guaranteed lease that does not fit should preempt the burst lease")
+	if !victim.Suspended && victim.TakeBackFor == "" {
+		// Grant2 succeeded but did not take the victim: some other lease
+		// of the owner was the LRU pick. Any pause of the owner proves
+		// the point (the reserve did not shield the leases).
+		svc.store.mu.Lock()
+		paused := 0
+		for _, l := range svc.store.leases {
+			if l.Suspended && l.Owner == owner {
+				paused++
+			}
+		}
+		svc.store.mu.Unlock()
+		if paused == 0 {
+			t.Fatal("a guaranteed lease that does not fit should take an over-slice lease back")
+		}
 	}
 }
