@@ -458,6 +458,24 @@ func TestTakeBackPauseGuardRace(t *testing.T) {
 	}
 }
 
+// TestMemVictimsFallbackSkipsPinned: the fall-through must skip pinned
+// leases outright, never pick one because the unpinned lease's give-up
+// fails the ratio check. The owner is far over (8192 used of a 4096
+// slice) with a 4096 unpinned lease whose give-up would drop them below
+// the requester and a small pinned one; the only legal answer is nil.
+func TestMemVictimsFallbackSkipsPinned(t *testing.T) {
+	big := tbL("big", 4096, 2*time.Hour)
+	pin := tbL("pin", 1024, time.Hour)
+	pin.Pinned = true
+	owners := []takeBackOwner{
+		{Owner: "req", UsedMiB: 4096, SliceMiB: 4096},
+		{Owner: "o", UsedMiB: 8192, SliceMiB: 4096, Leases: []takeBackLease{big, pin}},
+	}
+	if got := memVictims(owners, "req", 512); got != nil {
+		t.Fatalf("got %v, want nil (the pinned lease must never be the fall-through pick)", ids(got))
+	}
+}
+
 // TestMemVictimsFallsThroughToSmallerLease: when an owner's LRU lease is
 // too big to pass the "ratio after give-up stays above the requester"
 // check, the owner is skipped only if no smaller lease of theirs passes

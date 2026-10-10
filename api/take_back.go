@@ -121,13 +121,16 @@ func memVictims(owners []takeBackOwner, requester string, needMiB int) []takeBac
 func tbPickLeaseFor(o *takeBackOwner, reqAfter float64) int {
 	order := make([]int, 0, len(o.Leases))
 	for i := range o.Leases {
+		if o.Leases[i].Pinned {
+			// A pinned lease is never a take-back candidate (FS5), not
+			// even in the fall-through: sorting it last is not enough,
+			// it must be skipped outright.
+			continue
+		}
 		order = append(order, i)
 	}
 	sort.SliceStable(order, func(a, b int) bool {
 		x, y := o.Leases[order[a]], o.Leases[order[b]]
-		if x.Pinned != y.Pinned {
-			return !x.Pinned
-		}
 		if x.Busy != y.Busy {
 			return !x.Busy
 		}
