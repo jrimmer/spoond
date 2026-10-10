@@ -80,7 +80,14 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 		if skip {
 			continue
 		}
-		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdleSuspend}); err != nil {
+		// idleBeforePause, when set by a test, runs in the window between
+		// the re-check above and pauseLeaseWith's own lock, so a test can
+		// land a pin there and pin the second re-check (FS5). Nil in
+		// production.
+		if s.idleBeforePause != nil {
+			s.idleBeforePause(l)
+		}
+		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdleSuspend, refusePinned: true}); err != nil {
 			// A release that raced the pause is not an idle-suspend error:
 			// the lease is gone and nothing was suspended (spoond-15i).
 			if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -126,7 +127,7 @@ func (s *Service) unpinByHolderPrefix(ctx context.Context, prefix string) (int64
 	var n int64
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
-		if !l.Pinned || !hasPrefix(l.Holder, prefix) {
+		if !l.Pinned || !strings.HasPrefix(l.Holder, prefix) {
 			continue
 		}
 		l.Pinned = false
@@ -146,11 +147,6 @@ func (s *Service) unpinByHolderPrefix(ctx context.Context, prefix string) (int64
 		s.emitLeaseEvent("-", "", LeaseAdminUnpin, fmt.Sprintf("%d lease(s) unpinned by holder prefix %q", n, prefix))
 	}
 	return n, nil
-}
-
-// hasPrefix is strings.HasPrefix without importing strings here.
-func hasPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
 // leasePausedExpiredLocked reports whether l is due for its
@@ -267,7 +263,11 @@ func (s *Service) noticePinnedIdle(ctx context.Context, now time.Time) {
 		idle := !l.LastActive.IsZero() && now.Sub(l.LastActive) >= notice
 		switch {
 		case idle && l.PinnedIdleSince.IsZero():
-			l.PinnedIdleSince = now
+			// The stamp is the moment the threshold was crossed — the
+			// lease's LastActive plus the notice age — not the sweep time:
+			// a sweep that runs late (or a restarted process) must report
+			// when the lease first became idle, not when it was noticed.
+			l.PinnedIdleSince = l.LastActive.Add(notice)
 			s.saveLeaseLocked(l)
 			crossings = append(crossings, crossing{l: l, idle: true, since: l.LastActive})
 		case !idle && !l.PinnedIdleSince.IsZero():
