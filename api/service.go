@@ -1763,13 +1763,14 @@ func (s *Service) sweepExpired(ctx context.Context) {
 	s.store.mu.Unlock()
 	// The one paused-lease clock (FS5): every paused lease is released
 	// PAUSED_RELEASE_DAYS after its pause date, preceded by a
-	// lease.paused_expiring event 24 h before. Pinned leases are never
-	// paused, so they never hit it.
+	// lease.paused_expiring event 24 h before. A paused pinned lease is on
+	// the same clock (a pin protects only a running VM).
 	s.notifyPausedExpiring(ctx, now)
 	s.releasePausedLeases(ctx, now)
-	// A lease's own idle_suspend opt-in is unchanged (FS5): a persistent
-	// lease with an effective idle_suspend > 0 is paused on that
-	// threshold. There is no plain idle sweep any more.
+	// A lease's own idle_suspend opt-in is unchanged (FS5): a persistent,
+	// unpinned lease with an effective idle_suspend > 0 is paused on that
+	// threshold. There is no plain idle sweep any more and a pinned lease
+	// is never idle-suspended.
 	s.suspendIdleLeases(ctx, now)
 	// The pinned-idle notice (FS5, visibility only): flag a pinned lease
 	// whose last API activity passed PINNED_IDLE_NOTICE_DAYS and emit

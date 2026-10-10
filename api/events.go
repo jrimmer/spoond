@@ -454,7 +454,10 @@ func (s *Service) Subscribe(f EventFilter) *EventSubscription {
 
 // emitLeaseEvent records one lifecycle change on the bus. Safe to call
 // with s.store.mu held (the bus never takes the store lock); the SSE
-// streams and in-process subscribers are fed from here.
+// streams and in-process subscribers are fed from here. A lease-less
+// event (box_full, admin_unpin) passes lease id "-", a placeholder so
+// the SSE JSON's lease_id is always well-formed and a per-lease filter
+// never matches it.
 func (s *Service) emitLeaseEvent(leaseID, owner string, typ LeaseEventType, detail string) {
 	s.bus.emit(leaseID, owner, typ, detail)
 }
