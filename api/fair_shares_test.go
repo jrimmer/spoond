@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -707,6 +709,60 @@ func TestFairSharesCapacityKnownStates(t *testing.T) {
 	}
 }
 
+// TestFairSharesSizeSettleInvalidatesWithoutMetrics: settleBuildSize
+// records every new build size and must drop the fair-share cache even
+// when the metrics gauges are not wired (FS1 follow-up c). newTestService
+// leaves s.metrics nil, so this exercises exactly that path.
+func TestFairSharesSizeSettleInvalidatesWithoutMetrics(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
+	addIdentityUser(t, ids, "alice")
+	root := t.TempDir()
+	svc.cfg.TemplateStoragePath = root
+	if err := os.MkdirAll(filepath.Join(root, "b-settle"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b-settle", "memfile"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now()
+	if err := db.InsertBuild(ctx, store.BuildRow{
+		BuildID: "b-settle", Kind: "checkpoint", Owner: "alice", State: "ready",
+		SizeBytes: 0, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.metrics != nil {
+		t.Fatal("test expects metrics to be nil")
+	}
+
+	// Prime the cache while the build still records 0 bytes.
+	before := svc.fairShares(ctx)
+
+	svc.diskUsage = func(string) (int64, error) { return 12345, nil }
+	svc.SetBuildSizeSettle(5*time.Millisecond, time.Second)
+	svc.sizeSettleQuiet = 20 * time.Millisecond
+	svc.settleBuildSize("b-settle")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b, err := db.GetBuild(ctx, "b-settle")
+		if err == nil && b.SizeBytes == 12345 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("size = %d, want the settled 12345", b.SizeBytes)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// A frozen clock means a missing invalidation would return the exact
+	// same cached snapshot.
+	if after := svc.fairShares(ctx); after == before {
+		t.Fatal("size settle did not invalidate the fair-share cache")
+	}
+}
+
 // TestFairSharesUsableDiskBasis: the disk slice basis is the statfs
 // free-to-unprivileged bytes plus the snapshot bytes spoond already
 // accounts for, and it moves as accounted bytes grow (R5-2).
@@ -731,6 +787,75 @@ func TestFairSharesUsableDiskBasis(t *testing.T) {
 	}
 	if o.Disk.UsedBytes != 200<<20 {
 		t.Fatalf("used = %d, want %d", o.Disk.UsedBytes, int64(200<<20))
+	}
+}
+
+// TestFairSharesSharedBuildCountedOnceInBasis: a build pinned by two
+// owners' leases is one build on disk, so the accounted part of the disk
+// slice basis counts it once for the box, not once per owner (FS1
+// follow-up b). The per-owner usage still attributes it to each owner.
+func TestFairSharesSharedBuildCountedOnceInBasis(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	alice := addIdentityUser(t, ids, "alice")
+	bob := addIdentityUser(t, ids, "bob")
+	ctx := context.Background()
+	now := time.Now()
+
+	// One 200 MiB build on disk, owned by alice. Both alice's and bob's
+	// leases pin it, and alice also names it (with a stale named size) so
+	// the named arm and the build arm point at the same build.
+	if err := db.InsertBuild(ctx, store.BuildRow{
+		BuildID: "shared", Kind: "checkpoint", Owner: alice.ID, State: "ready",
+		SizeBytes: 200 << 20, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []string{alice.ID, bob.ID} {
+		leaseID := "lease-" + owner
+		if err := db.UpsertLease(ctx, store.LeaseRow{
+			ID: leaseID, Owner: owner, Image: "py-base", State: "running",
+			CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
+			Class: "guaranteed",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.KeepBuild(ctx, leaseID, "shared", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.InsertNamedSnapshot(ctx, store.NamedSnapshotRow{
+		Owner: alice.ID, Name: "warm", BuildID: "shared", SourceLeaseID: "lease-" + alice.ID,
+		Image: "py-base", ImageBuildID: "img-1", MemoryMB: 1024, SizeBytes: 99 << 20,
+		CreatedAt: now,
+	}, 1); err != nil {
+		t.Fatal(err)
+	}
+	svc.invalidateFairShares()
+
+	// Per-owner usage attributes the shared build to both owners (each
+	// sees its own 200 MiB), and alice's named_bytes prefers the build
+	// row's 200 MiB over the stale named row's 99 MiB.
+	by := shareByOwner(svc.fairShares(ctx))
+	if got := by[alice.ID].Disk.KeptBytes; got != 200<<20 {
+		t.Fatalf("alice kept = %d, want %d", got, int64(200<<20))
+	}
+	if got := by[bob.ID].Disk.KeptBytes; got != 200<<20 {
+		t.Fatalf("bob kept = %d, want %d", got, int64(200<<20))
+	}
+	if got := by[alice.ID].Disk.NamedBytes; got != 200<<20 {
+		t.Fatalf("alice named = %d, want %d (build row beats the named row)", got, int64(200<<20))
+	}
+
+	// The basis is 1 GiB free + the 200 MiB build once, not the 400 MiB
+	// sum of the two owners' Used values. N is 2, so the slice is half
+	// the basis.
+	wantBasis := int64(1<<30) + 200<<20
+	wantSlice := wantBasis / 2
+	if got := by[alice.ID].Disk.SliceBytes; got != wantSlice {
+		t.Fatalf("alice disk slice = %d, want %d (shared build counted once)", got, wantSlice)
+	}
+	if got := by[bob.ID].Disk.SliceBytes; got != wantSlice {
+		t.Fatalf("bob disk slice = %d, want %d", got, wantSlice)
 	}
 }
 

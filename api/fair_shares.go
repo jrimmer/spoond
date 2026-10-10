@@ -256,16 +256,24 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 
 	// Disk usage by recorded snapshot size, one query for the box. A
 	// failed query must not be cached as zero disk. A build that is both
-	// kept and named counts once.
+	// kept and named counts once in its owner's Used.
 	usageByOwner, err := s.db.DiskUsageByOwner(ctx)
 	if err != nil {
 		s.log.Printf("fair shares: disk usage: %v", err)
 		capacityKnown = false
 		usageByOwner = map[string]store.OwnerUsage{}
 	}
-	var accounted int64
-	for _, u := range usageByOwner {
-		accounted += u.Used
+	// The disk slice basis adds the snapshot bytes spoond already holds,
+	// counted per build. A build shared by several owners (one pins
+	// another's build, or a named snapshot is owned apart from its
+	// build's owner) must count once for the box, not once per owner, so
+	// this is a box-level sum over DISTINCT build_id rather than the sum
+	// of each owner's Used (FS1 follow-up b). A failed read is the same
+	// unknown capacity as a failed DiskUsageByOwner: do not cache it.
+	accounted, err := s.db.AccountedSnapshotBytes(ctx)
+	if err != nil {
+		s.log.Printf("fair shares: accounted snapshot bytes: %v", err)
+		capacityKnown = false
 	}
 
 	// The disk slice basis is the volume's usable bytes: free-to-
