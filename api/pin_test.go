@@ -330,10 +330,14 @@ func TestPinnedIdleNoticeSetAndClearedNoLifecycleChange(t *testing.T) {
 	all := svc.Subscribe(EventFilter{LeaseID: l.ID})
 	defer all.Close()
 
-	// 8 days idle: flagged and one event.
+	// 8 days idle: flagged at the moment the 7-day threshold was crossed
+	// (LastActive + notice), not at the sweep time, and one event.
 	svc.noticePinnedIdle(ctx, base.Add(8*24*time.Hour))
 	if l.PinnedIdleSince.IsZero() {
 		t.Fatal("a pinned lease idle past the notice threshold was not flagged")
+	}
+	if want := base.Add(7 * 24 * time.Hour); !l.PinnedIdleSince.Equal(want) {
+		t.Fatalf("PinnedIdleSince = %v, want the threshold crossing %v", l.PinnedIdleSince, want)
 	}
 	if !l.Pinned || l.Suspended {
 		t.Fatalf("the notice changed the lease's lifecycle: pinned=%v suspended=%v", l.Pinned, l.Suspended)

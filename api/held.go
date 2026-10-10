@@ -263,7 +263,11 @@ func (s *Service) noticePinnedIdle(ctx context.Context, now time.Time) {
 		idle := !l.LastActive.IsZero() && now.Sub(l.LastActive) >= notice
 		switch {
 		case idle && l.PinnedIdleSince.IsZero():
-			l.PinnedIdleSince = now
+			// The stamp is the moment the threshold was crossed — the
+			// lease's LastActive plus the notice age — not the sweep time:
+			// a sweep that runs late (or a restarted process) must report
+			// when the lease first became idle, not when it was noticed.
+			l.PinnedIdleSince = l.LastActive.Add(notice)
 			s.saveLeaseLocked(l)
 			crossings = append(crossings, crossing{l: l, idle: true, since: l.LastActive})
 		case !idle && !l.PinnedIdleSince.IsZero():
