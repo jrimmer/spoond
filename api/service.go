@@ -176,6 +176,20 @@ type Lease struct {
 	SuspendPolicyStep string    `json:"-"`
 	SuspendBuildID    string    `json:"-"`
 	SuspendedAt       time.Time `json:"-"`
+	// TakeBackAt is when the lease was paused by the fair-shares memory
+	// take-back (FS2a, spoond-pxsn): it was suspended so the requesting
+	// owner's admission could fit. The stamp carries the requester and
+	// the victim owner's usage/slice ratio at the moment of the take.
+	// Unlike PreemptedAt it books no auto-resume anywhere: a taken-back
+	// lease comes back only on its holder's next work call, so a resumed
+	// lease can never be re-taken by the lease that displaced it (no
+	// ping-pong). Zero = not taken back; cleared with the suspension
+	// facts by setState. Not persisted: the structured facts on the lease
+	// (suspend_reason take_back) already survive a restart, and the stamp
+	// only has to outlive the take-back call that wrote it.
+	TakeBackAt    time.Time `json:"-"`
+	TakeBackFor   string    `json:"-"`
+	TakeBackRatio float64   `json:"-"`
 	// SnapshotName and SnapshotVersion name the named-snapshot version
 	// the lease started from, for the "snapshot" object in the API
 	// (A3). They are not persisted; a lease loaded from the store looks
@@ -233,6 +247,12 @@ func (l *Lease) setState(state string) {
 		// D6): a resume, restore, restart or loss must not leave a stale
 		// reason, policy step, build or time behind.
 		clearSuspendFactsLocked(l)
+		// Leaving it also ends a take-back stamp (FS2a): the lease came
+		// back (its holder's next work call, the only way), so the
+		// displacement is over and no auto-resume owes it anything.
+		l.TakeBackAt = time.Time{}
+		l.TakeBackFor = ""
+		l.TakeBackRatio = 0
 		// The one clock (FS5): leaving the suspended state clears the
 		// pause date and its expiring-notified flag. A pause stamps them
 		// again.
@@ -2734,17 +2754,26 @@ const (
 	pauseActionHand    = "suspend/hand"
 	pauseActionDrain   = "drain/suspend"
 	pauseActionPreempt = "preempt/suspend"
+	// pauseActionTakeBack is a fair-shares memory take-back pause
+	// (FS2a): the biggest borrower's lease paused for a requester.
+	pauseActionTakeBack = "take_back/suspend"
 )
 
 // Suspend reasons (#145 D6): the "reason" field of an automatic
 // lease.suspended event, the lease's suspend_reason and the 409
 // lease_suspended body. idle_suspend is the per-lease idle_suspend
-// threshold; preempt is a take-back suspension freeing hugepages for a
-// guaranteed admission. A hand or drain suspend has no reason ("").
+// threshold; preempt and take_back are memory take-back suspensions
+// freeing hugepages for another admission (FS2a). A hand or drain
+// suspend has no reason ("").
 // The old plain-idle, hold_lapsed and pressure rules are removed (FS5).
 const (
 	suspendReasonIdleSuspend = "idle_suspend"
 	suspendReasonPreempt     = "preempt"
+	// suspendReasonTakeBack marks a lease paused by the fair-shares
+	// memory take-back: the biggest borrower's lease paused so the
+	// requesting owner's admission fits. Unlike preempt it is never
+	// auto-resumed (no ping-pong; spoond-pxsn).
+	suspendReasonTakeBack = "take_back"
 	// suspendReasonResumeFailed marks a lease the admin undrain could not
 	// bring back and left suspended (its snapshot intact) instead of
 	// losing it: the holder's next work call retries through the normal

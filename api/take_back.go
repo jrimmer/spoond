@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"sort"
 	"time"
 )
@@ -89,7 +89,14 @@ func memVictims(owners []takeBackOwner, requester string, needMiB int) []takeBac
 				continue
 			}
 			if tbRatio(o.UsedMiB-o.Leases[li].MemoryMiB, o.SliceMiB) <= reqAfter {
-				continue
+				// The LRU lease would drop this owner below the
+				// requester: try the owner's leases in LRU order and
+				// take the first that passes, so a smaller lease is
+				// not lost just because a bigger one cannot go.
+				li = tbPickLeaseFor(o, reqAfter)
+				if li < 0 {
+					continue
+				}
 			}
 			if r := tbRatio(o.UsedMiB, o.SliceMiB); bestOwner < 0 || r > bestRatio {
 				bestOwner, bestLease, bestRatio = i, li, r
@@ -106,6 +113,35 @@ func memVictims(owners []takeBackOwner, requester string, needMiB int) []takeBac
 		o.Leases = append(o.Leases[:bestLease], o.Leases[bestLease+1:]...)
 	}
 	return out
+}
+
+// tbPickLeaseFor returns the first lease of o in take-back order (see
+// tbPickLease) whose give-up keeps o's ratio above reqAfter; -1 when no
+// lease of o passes.
+func tbPickLeaseFor(o *takeBackOwner, reqAfter float64) int {
+	order := make([]int, 0, len(o.Leases))
+	for i := range o.Leases {
+		order = append(order, i)
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		x, y := o.Leases[order[a]], o.Leases[order[b]]
+		if x.Pinned != y.Pinned {
+			return !x.Pinned
+		}
+		if x.Busy != y.Busy {
+			return !x.Busy
+		}
+		if !x.LastActive.Equal(y.LastActive) {
+			return x.LastActive.Before(y.LastActive)
+		}
+		return x.ID < y.ID
+	})
+	for _, i := range order {
+		if tbRatio(o.UsedMiB-o.Leases[i].MemoryMiB, o.SliceMiB) > reqAfter {
+			return i
+		}
+	}
+	return -1
 }
 
 // tbPickLease returns the index of the lease to take next: unpinned,
@@ -140,16 +176,60 @@ func tbPickLease(ls []takeBackLease) int {
 
 // takeBackPause pauses one victim lease for the requester.
 //
-// It must re-check, in the same store-lock critical section in which it
-// sets busy, that the lease is still running, unpinned, not released and
-// not busy (a pin, release or job that landed after victim selection
-// wins). Then it pauses the lease (pauseLeaseWith, reason take_back),
-// emits lease.suspended with reason take_back carrying the victim's
-// ratio and the requester, and marks the lease so the preempt auto-resume
-// does not bring it back.
+// It re-checks, in the same store-lock critical section in which it
+// marks the lease busy, that the lease is still a legal victim —
+// running, unreleased, unpinned, not already suspended and not busy —
+// so a pin, release, resume or job that landed between victim selection
+// and this call wins and the pause is refused (errLeaseBusy). Setting
+// busy under the same lock closes the gap: a later pin or exec sees
+// busy and waits or fails instead of racing the pause. Then it runs the
+// pause sub-work (pauseLeaseBody, reason take_back — takeBackPause owns
+// the busy window), emits lease.suspended
+// with reason take_back carrying the victim owner's ratio and the
+// requester, and stamps the lease so no auto-resume brings it back into
+// a take-back of the lease that displaced it (no ping-pong).
 func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string, ratio float64) error {
-	// TODO(FS2a step 2): implement per the doc comment.
-	return errors.New("takeBackPause: not implemented")
+	s.store.mu.Lock()
+	if l.released || l.busy || l.Suspended || !l.live() || l.Pinned ||
+		s.hasRunningJobLocked(l.ID) || l.Owner == requester {
+		s.store.mu.Unlock()
+		return errLeaseBusy
+	}
+	l.busy = true
+	s.store.mu.Unlock()
+	defer s.endBusy(l)
+
+	if _, err := s.pauseLeaseBody(ctx, l, false, suspendPolicy{reason: suspendReasonTakeBack}); err != nil {
+		return err
+	}
+
+	// Record the take-back like preemptLease records a preemption: the
+	// stamp is re-checked under the lock, so a concurrent resume that
+	// already brought the lease back leaves no stale record (the same
+	// shape spoond-d76 pinned for the preemption stamp). We still own
+	// the busy window here (busy is ours until endBusy), so busy being
+	// set is expected; only a release or a resumed lease skips the stamp.
+	s.store.mu.Lock()
+	if !l.Suspended || l.released {
+		s.store.mu.Unlock()
+		return errLeaseBusy
+	}
+	l.TakeBackAt = s.now()
+	l.TakeBackFor = requester
+	l.TakeBackRatio = ratio
+	l.LastAction, l.LastActionAt = pauseActionTakeBack, l.TakeBackAt
+	s.saveLeaseLocked(l)
+	s.store.mu.Unlock()
+
+	if s.metrics != nil {
+		s.metrics.TakeBacksTotal.Inc()
+	}
+	s.log.Printf("take back: lease %s (owner %s, ratio %.2f) paused for %s", l.ID, l.Owner, ratio, requester)
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseTakeBack,
+		fmt.Sprintf("for %s: owner %.2f over their slice; it resumes on the holder's next work call", requester, ratio))
+	// The pause already credited this lease's hugepages to the cached
+	// reading and woke the admission queue (pauseLeaseBody).
+	return nil
 }
 
 // takeBackOwners builds the selector's view of every owner: memory used
@@ -164,11 +244,13 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 	snap := s.fairShares(ctx)
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	byOwner := map[string]*takeBackOwner{}
 	out := make([]takeBackOwner, 0, len(snap.owners))
+	byOwner := map[string]*takeBackOwner{}
 	for _, o := range snap.owners {
 		out = append(out, takeBackOwner{Owner: o.Owner, UsedMiB: o.Memory.UsedMiB, SliceMiB: o.Memory.SliceMiB})
-		byOwner[o.Owner] = &out[len(out)-1]
+	}
+	for i := range out {
+		byOwner[out[i].Owner] = &out[i]
 	}
 	for _, l := range s.store.leases {
 		if l.released || l.Owner == "" || !l.live() {
@@ -179,9 +261,9 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 			// A lease of an owner the fair snapshot does not know (an
 			// owner added after it was computed, say): its memory is in
 			// the box, so give it the owner row the snapshot missed.
-			v = &takeBackOwner{Owner: l.Owner}
+			out = append(out, takeBackOwner{Owner: l.Owner})
+			v = &out[len(out)-1]
 			byOwner[l.Owner] = v
-			out = append(out, *v)
 		}
 		v.Leases = append(v.Leases, takeBackLease{
 			ID:         l.ID,

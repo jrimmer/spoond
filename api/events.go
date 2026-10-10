@@ -22,10 +22,15 @@ import (
 type LeaseEventType string
 
 const (
-	LeaseCreated       LeaseEventType = "created"
-	LeaseReleased      LeaseEventType = "released"
-	LeaseSuspended     LeaseEventType = "suspended"
-	LeaseResumed       LeaseEventType = "resumed"
+	LeaseCreated   LeaseEventType = "created"
+	LeaseReleased  LeaseEventType = "released"
+	LeaseSuspended LeaseEventType = "suspended"
+	LeaseResumed   LeaseEventType = "resumed"
+	// LeaseTakeBack marks a fair-shares memory take-back (FS2a): the
+	// victim lease was paused so the requesting owner's admission could
+	// fit. The suspended event with reason take_back always accompanies
+	// it; this one names the requester in its detail for the stream.
+	LeaseTakeBack      LeaseEventType = "take_back"
 	LeaseCheckpointed  LeaseEventType = "checkpointed"
 	LeaseRecovered     LeaseEventType = "recovered"
 	LeaseLost          LeaseEventType = "lost"

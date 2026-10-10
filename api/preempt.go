@@ -187,18 +187,22 @@ func (s *Service) admitGuaranteed(ctx context.Context, owner string, memoryMB in
 	return nil
 }
 
-// preemptForGuaranteed suspends burst leases (lowest priority, then
-// newest, then the owner furthest over its guarantee) until the node can
-// host memoryMB with the reserve intact, then returns. The caller holds
-// preemptMu and performs the debit.
+// preemptForGuaranteed takes memory back for an admission that does not
+// fit (FS2a, spoond-pxsn): the fair-shares selector (memVictims over
+// takeBackOwners) names the leases to pause — the owner furthest over
+// their slice first, that owner's least recently used unpinned lease,
+// busy leases last, an owner inside their slice never — and one pause
+// runs at a time through takeBackPause, with the free-hugepage reading
+// re-checked after each. It stops as soon as the admission fits. The
+// caller holds preemptMu and performs the debit.
 //
 // It first checks whether the disk-allowed candidates can free enough:
 // when they cannot but the disk-blocked ones would, the disk floor is
 // what stops the admission and it returns errPreemptCannot **without
-// preempting anything**. When not even every candidate together is
-// enough, there is nothing to gain from preempting and it falls through
-// to the ordinary capacity check. A NodeInfo read failure likewise
-// falls through rather than failing here (the ordinary check answers).
+// pausing anything**. When not even every candidate together is enough,
+// there is nothing to gain from taking anything and it falls through to
+// the ordinary capacity check. A NodeInfo read failure likewise falls
+// through rather than failing here (the ordinary check answers).
 func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memoryMB int) error {
 	fits, err := s.guaranteedFits(ctx, memoryMB)
 	if err != nil {
@@ -236,37 +240,67 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 			// without suspending any lease.
 			return errPreemptCannot
 		}
-		// Pinned candidates are not take-back victims (FS5). If the
-		// pinned ones alone would free enough, the request is
-		// box_full: nothing unpinned can be taken for it.
+		// Pinned leases are not take-back victims (FS5). If the pinned
+		// ones alone would free enough, the request is box_full: nothing
+		// unpinned can be taken for it.
 		if freeMiB+freeable+s.pinnedFreeableMiB() >= need {
 			s.boxFullAlert(owner, memoryMB)
 			return errBoxFull
 		}
-		// Not enough memory exists at all: preempting would only
+		// Not enough memory exists at all: taking back would only
 		// suspend leases for an admission that cannot succeed.
 		return nil
 	}
 
-	for _, v := range candidates {
-		if !s.preemptDiskOK(v) {
-			continue
-		}
-		if err := s.preemptLease(ctx, v, owner); err != nil {
-			if !errors.Is(err, errLeaseBusy) {
-				s.log.Printf("preempt: lease %s: %v", v.ID, err)
-			}
-			continue
-		}
-		if fits, err = s.guaranteedFits(ctx, memoryMB); err != nil {
-			s.log.Printf("preempt: node info: %v", err)
+	// The selector works in MiB of freed hugepages and is re-run after
+	// every pause: earlier pauses moved usage, so the biggest borrower
+	// may have changed (and a taken-back lease must never be picked
+	// again — it is suspended and leaves the running-lease views).
+	for {
+		victims := memVictims(s.takeBackOwners(ctx), owner, memoryMB)
+		if len(victims) == 0 {
+			// Take-back can free nothing: either everyone is inside
+			// their slice or the requester is itself the biggest
+			// borrower. The ordinary capacity check answers.
 			return nil
 		}
-		if fits {
+		// One pause at a time, in the selector's order, re-checking free
+		// memory after each and stopping as soon as the request fits.
+		paused := false
+		for _, v := range victims {
+			if fits, err = s.guaranteedFits(ctx, memoryMB); err != nil {
+				s.log.Printf("preempt: node info: %v", err)
+				return nil
+			}
+			if fits {
+				return nil
+			}
+			l := s.lookupAny(v.LeaseID)
+			if l == nil {
+				continue
+			}
+			if !s.preemptDiskOK(l) {
+				continue
+			}
+			if err := s.takeBackPause(ctx, l, owner, v.Ratio); err != nil {
+				if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
+					s.log.Printf("preempt: lease %s: %v", v.LeaseID, err)
+				}
+				continue
+			}
+			paused = true
+			break
+		}
+		if !paused {
+			// Every candidate was refused (a race won each one) or was
+			// disk-blocked: re-run the selector on fresh views rather
+			// than spinning forever on the same names.
+			if fits, err = s.guaranteedFits(ctx, memoryMB); err != nil || fits {
+				return nil
+			}
 			return nil
 		}
 	}
-	return nil
 }
 
 // pinnedFreeableMiB is the memory of the running burst leases that are
