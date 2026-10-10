@@ -256,18 +256,12 @@ func TestAdmitWaitTimesOut(t *testing.T) {
 // original 503 and its Retry-After.
 func TestAdmitWaitCapacityTimesOut(t *testing.T) {
 	_, h, svc, sub, _ := newAdmitServer(t)
-	// 512 pages of 2 MiB = 1024 MiB, each live sandbox counts 512 pages
-	// = 1024 MiB: the first (pinned) lease fills the box and every
-	// take-back candidate is pinned, so a second create can never be
-	// served and waits out its budget.
-	installDynamicNode(t, svc, sub, 512, 0, 512)
+	// 512 pages of 2 MiB = 1024 MiB, all held by something outside
+	// spoond: no lease can be taken back and none is pinned, so the
+	// shortfall is structural (not box_full) and the create waits out
+	// its budget.
+	installDynamicNode(t, svc, sub, 512, 512, 512)
 	svc.admitQ.tick = 20 * time.Millisecond
-
-	rec, m := createSandboxBody(t, h, "tok-1", `{"image":"mid","ttl":60,"pinned":true}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("pinned fill create: %d %v", rec.Code, m)
-	}
-	dropNodeCache(svc)
 
 	r := waitCreate(t, h, "tok-1", `{"image":"mid","ttl":60,"wait":1}`)
 	if r.code != http.StatusServiceUnavailable {

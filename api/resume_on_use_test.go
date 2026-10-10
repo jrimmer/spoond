@@ -178,19 +178,11 @@ func TestResumeOnUseNoRoomCapacityWait(t *testing.T) {
 	l.TakeBackFor = "other-owner"
 	svc.store.mu.Unlock()
 
-	// No room: a pinned filler holds half the box, and the suspended
-	// lease's re-admission (2048 MiB) is more than the box can ever
-	// offer again — take-back cannot serve it (the pinned filler is no
-	// candidate) and the shortfall is structural, so the resume is a
-	// wait, never box_full.
-	filler, err := svc.grantLease(ctx, leaseRequest{owner: "other-a", image: "py-base", ttl: time.Hour})
-	if err != nil {
-		t.Fatalf("grant filler: %v", err)
-	}
-	if _, err := svc.setPinned("other-a", filler.ID, true); err != nil {
-		t.Fatalf("pin filler: %v", err)
-	}
-	dropNodeCache(svc)
+	// No room: something outside spoond holds the whole box, so the
+	// suspended lease's re-admission (2048 MiB) has nothing to take back
+	// and nothing pinned in its way — the shortfall is structural and
+	// the resume is a wait, never box_full.
+	installDynamicNode(t, svc, sub, 1024, 1024, 512)
 
 	rec2 := postLeaseAction(t, srv.Handler(), "token-a", "/api/leases/"+l.ID+"/exec", `{"cmd":"echo hi"}`)
 	if rec2.Code != http.StatusServiceUnavailable {
@@ -272,9 +264,10 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 	for _, p := range paths {
 		t.Run(p.name, func(t *testing.T) {
 			ts, svc, db, sub := newTestServerWithService(t)
-			// A suspended lease whose re-admission can never be served: a
-			// pinned filler holds the box (the deterministic no-room
-			// refusal — take-back cannot touch it).
+			// A suspended lease whose re-admission can never be served:
+			// something outside spoond holds the box (the deterministic
+			// structural no-room refusal — no lease to take back, none
+			// pinned, so a wait rather than box_full).
 			l, err := svc.grantLease(context.Background(), leaseRequest{owner: "consumer-a", image: "py-base", ttl: time.Hour, persistent: true})
 			if err != nil {
 				t.Fatalf("grant: %v", err)
@@ -282,15 +275,7 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 			if _, err := svc.suspend(context.Background(), "consumer-a", l.ID); err != nil {
 				t.Fatalf("suspend: %v", err)
 			}
-			filler, err := svc.grantLease(context.Background(), leaseRequest{owner: "filler-a", image: "py-base", ttl: time.Hour})
-			if err != nil {
-				t.Fatalf("grant filler: %v", err)
-			}
-			if _, err := svc.setPinned("filler-a", filler.ID, true); err != nil {
-				t.Fatalf("pin filler: %v", err)
-			}
-			// A 4 GiB box with the two 2048 MiB leases on it: nothing free,
-			// and the only candidate is pinned.
+			// A 4 GiB box with nothing free.
 			sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 2048, HugepagesUsed: 2048, HugepageSizeBytes: 2 << 20}, nil)
 			svc.nodeInfoMu.Lock()
 			svc.nodeInfoAt = time.Time{}
@@ -431,15 +416,9 @@ func TestResumeOnUseLLMNoRoom(t *testing.T) {
 	if _, err := svc.suspend(context.Background(), "consumer-a", l.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	// A pinned filler holds the box, so the resume's re-admission is
-	// refused (the deterministic no-room refusal).
-	filler, err := svc.grantLease(context.Background(), leaseRequest{owner: "filler-a", image: "py-base", ttl: time.Hour})
-	if err != nil {
-		t.Fatalf("grant filler: %v", err)
-	}
-	if _, err := svc.setPinned("filler-a", filler.ID, true); err != nil {
-		t.Fatalf("pin filler: %v", err)
-	}
+	// Something outside spoond holds the box, so the resume's
+	// re-admission is refused as a structural wait (no lease to take
+	// back, none pinned).
 	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 2048, HugepagesUsed: 2048, HugepageSizeBytes: 2 << 20}, nil)
 	svc.nodeInfoMu.Lock()
 	svc.nodeInfoAt = time.Time{}

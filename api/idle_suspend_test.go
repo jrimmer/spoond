@@ -830,21 +830,13 @@ func TestIdleSuspendExecResumeRefusalCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	// A pinned filler holds the box, so the resume of the suspended
-	// lease cannot take it back and the re-admission is refused.
-	filler, err := svc.grantLease(ctx, leaseRequest{owner: "other-a", image: "mid", ttl: time.Hour})
-	if err != nil {
-		t.Fatalf("grant filler: %v", err)
-	}
-	if _, err := svc.setPinned("other-a", filler.ID, true); err != nil {
-		t.Fatalf("pin filler: %v", err)
-	}
 	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	// The box is full with the pinned filler alone: the re-admission has
-	// no room and take-back cannot serve it. The dynamic node gives way
-	// to the static full-box reading.
+	// Something outside spoond fills the box: the re-admission has no
+	// room, no lease can be taken back and none is pinned, so this is a
+	// structural wait (503), not box_full. The dynamic node gives way to
+	// the static full-box reading.
 	sub.SetNodeInfoFunc(nil)
 	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1024, HugepagesUsed: 1024, HugepageSizeBytes: 2 << 20}, nil)
 	svc.store.mu.Lock()
