@@ -14,13 +14,13 @@ import (
 
 	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/metrics"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Queued-admission tests (#129 part 1). The fake substrate's NodeInfo is
 // controllable via installDynamicNode (api/preempt_test.go), so a "full"
 // node is a small total with enough live sandboxes that the next create
-// cannot fit. The fillers and waiters are all guaranteed, so no
-// preemption can mask a capacity refusal.
+// cannot fit.
 
 // newAdmitServer builds a service over a fake with identity users and
 // seeded images (mid=1024 MiB, small=256 MiB). It returns the server,
@@ -62,14 +62,6 @@ func uid(t *testing.T, ids *identity.Store, tok string) string {
 		t.Fatalf("no user for token %s", tok)
 	}
 	return u.ID
-}
-
-// setQuota sets a user's quota directly.
-func setQuota(t *testing.T, ids *identity.Store, userID string, maxLeases, guaranteed, maxMiB int) {
-	t.Helper()
-	if err := ids.SetQuota(userID, maxLeases, 0, guaranteed, maxMiB, 0); err != nil {
-		t.Fatalf("set quota: %v", err)
-	}
 }
 
 type createResult struct {
@@ -350,43 +342,86 @@ func TestAdmitWakeWhilePassRunning(t *testing.T) {
 	}
 }
 
-// TestAdmitWaitFairShare: of two waiting creates, the owner with
-// guaranteed_mib headroom is admitted first even though it queued later.
+// TestAdmitWaitFairShare: of two waiting creates, the owner with the
+// lower fair-share ratio is admitted first even though it queued later
+// (3.0 FS4). The node is full of memory held outside spoond, so neither
+// owner borrows and both wait; tok-1 runs one small lease, tok-2 none.
 func TestAdmitWaitFairShare(t *testing.T) {
-	_, h, svc, sub, ids := newAdmitServer(t)
-	setQuota(t, ids, uid(t, ids, "tok-1"), 0, 4096, 8192)
-	fillers := fillTwo(t, h, sub, svc, "tok-1")
-	// No periodic pass: the release's own wake-up (its last step, after
-	// the room is credited) runs the pass. A tick landing mid-release
-	// could try the guaranteed create before the room appears and the
-	// other just after; fair share is best-effort across that window
-	// (docs/api.md), and this test checks the ordering itself.
+	_, h, svc, sub, _ := newAdmitServer(t)
+	roomyDisk(svc)
+	// 4096 pages (8192 MiB), 128 pages (256 MiB) per sandbox.
+	installDynamicNode(t, svc, sub, 4096, 0, 128)
+	if r := waitCreate(t, h, "tok-1", `{"image":"small","ttl":60}`); r.code != http.StatusCreated {
+		t.Fatalf("tok-1's small lease: %d %v", r.code, r.body)
+	}
+	// Everything else is held outside spoond: the node is full.
+	installDynamicNode(t, svc, sub, 4096, 4096-128, 128)
+	svc.updateNodeMetrics(context.Background()) // the fair-share view reads the node-info cache
+	// No periodic pass: the explicit wake below runs it, so the test
+	// checks the ordering itself.
 	svc.admitQ.tick = time.Hour
 
-	// The no-guarantee owner queues first…
-	resNoGuarantee := startCreate(t, h, context.Background(), "tok-2", `{"image":"mid","ttl":60,"wait":60}`)
+	// tok-1 (ratio > 0) queues first…
+	resHigher := startCreate(t, h, context.Background(), "tok-1", `{"image":"small","ttl":60,"wait":60}`)
 	waitDepth(t, svc, 1)
-	// …then the guaranteed owner queues, and should win the freed slot.
-	resGuaranteed := startCreate(t, h, context.Background(), "tok-1", `{"image":"mid","ttl":60,"wait":60}`)
+	// …then tok-2 (ratio 0) queues, and should win the freed room.
+	resLow := startCreate(t, h, context.Background(), "tok-2", `{"image":"small","ttl":60,"wait":60}`)
 	waitDepth(t, svc, 2)
 
-	// Let the pass that queuing started finish before freeing room, so
-	// the release's own wake-up decides who gets it.
+	// Let the pass that queuing started finish, then free room for
+	// exactly one small lease.
 	svc.admitQ.admitMu.Lock()
 	svc.admitQ.admitMu.Unlock()
-	deleteLease(t, h, "tok-1", fillers[0])
+	installDynamicNode(t, svc, sub, 4096, 4096-256, 128)
+	svc.wakeAdmissionQueue()
 
-	r := waitResult(t, resGuaranteed)
+	r := waitResult(t, resLow)
 	if r.code != http.StatusCreated {
-		t.Fatalf("guaranteed waiting create = %d, want 201 (%v)", r.code, r.body)
+		t.Fatalf("low-ratio waiting create = %d, want 201 (%v)", r.code, r.body)
 	}
-	// The no-guarantee create must still be waiting.
+	// The higher-ratio create must still be waiting.
 	select {
-	case r2 := <-resNoGuarantee:
-		t.Fatalf("no-guarantee create should have waited, got %d", r2.code)
+	case r2 := <-resHigher:
+		t.Fatalf("higher-ratio create should have waited, got %d (%v)", r2.code, r2.body)
 	case <-time.After(300 * time.Millisecond):
 	}
 	svc.drainQueue()
+}
+
+// TestAdmitOrderByFairShareRatio: orderedTickets puts the lowest
+// fair-share ratio first, owners the fair-share view does not know
+// after every known owner, and FIFO within equal ratios.
+func TestAdmitOrderByFairShareRatio(t *testing.T) {
+	_, _, svc, sub, ids := newAdmitServer(t)
+	installDynamicNode(t, svc, sub, 1<<20, 0, 0)
+	roomyDisk(svc)
+	one, two := uid(t, ids, "tok-1"), uid(t, ids, "tok-2")
+	// tok-1 runs 4096 MiB, tok-2 runs 1024 MiB: tok-1's ratio is higher.
+	addRunningLease(svc, "l-one", one, 4096)
+	addRunningLease(svc, "l-two", two, 1024)
+	svc.updateNodeMetrics(context.Background()) // the view reads the node-info cache
+	svc.invalidateFairShares()
+	if share, ok := svc.fairShareFor(context.Background(), one); !ok || !share.CapacityKnown {
+		t.Fatalf("fair share of tok-1 = %+v (ok %v), want a known capacity", share, ok)
+	}
+
+	req := func(owner string) leaseRequest { return leaseRequest{owner: owner, image: "mid", ttl: time.Minute} }
+	tGhost := svc.newAdmissionTicket("ghost", req("ghost"), substrate.ErrCapacity, time.Minute)
+	tOne := svc.newAdmissionTicket(one, req(one), substrate.ErrCapacity, time.Minute)
+	tTwoA := svc.newAdmissionTicket(two, req(two), substrate.ErrCapacity, time.Minute)
+	tTwoB := svc.newAdmissionTicket(two, req(two), substrate.ErrCapacity, time.Minute)
+	t.Cleanup(svc.drainQueue)
+
+	got := svc.orderedTickets()
+	want := []*admissionTicket{tTwoA, tTwoB, tOne, tGhost}
+	if len(got) != len(want) {
+		t.Fatalf("ordered %d tickets, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("position %d = owner %s seq %d, want owner %s seq %d", i, got[i].owner, got[i].seq, want[i].owner, want[i].seq)
+		}
+	}
 }
 
 // TestAdmitWaitBackfill: a small create passes a big one that does not
