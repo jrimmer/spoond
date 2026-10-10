@@ -583,7 +583,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
 		m.PreemptionsTotal, m.PreemptedLeases,
-		m.BoxFullTotal,
+		m.BoxFullTotal, m.TakeBacksTotal,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,

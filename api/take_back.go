@@ -252,7 +252,7 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 			// The box cannot host the lease again right now: the pin
 			// stands, the lease waits suspended for capacity like any
 			// pinned pause (the holder's next work call resumes it) and
-			// it stays pinned and suspended, stamped for take-back so
+			// it stays pinned and suspended, with SuspendReason take_back so
 			// the resume-on-use path carries the detail. Nothing counts
 			// as freed: the pause's credit is still in the cache and
 			// covers the suspended lease's memory. Busy is still set:
