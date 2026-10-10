@@ -424,6 +424,12 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 			})
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// The checkpoint could not fit in usable snapshot disk and
+			// take-back had nothing to reclaim (FS3b): the same 429
+			// box_full refusal a create is answered with. Nothing was
+			// written; the lease keeps running as it was.
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		default:
 			s.svc.log.Printf("checkpoint %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "checkpoint failed")
