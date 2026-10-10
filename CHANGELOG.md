@@ -12,6 +12,14 @@ summarised from README "Status".
 
 ### Added
 
+- **FS2b: the biggest borrower gets box_full at once.** When take-back
+  can free nothing because the requester is itself the biggest borrower
+  (over its fair memory slice after the request, and no other owner
+  further over), create, resume, restart, clone and fork answer
+  `429 box_full` immediately, with the `box_full` event and alert,
+  instead of waiting on `503 capacity_wait`. A shortfall no owner causes
+  still waits.
+
 - **FS2a: memory take-back picks the biggest borrower by ratio.**
   When a guaranteed admission does not fit, the fair-shares selector
   (`api/take_back.go`) names the leases to pause: the owner furthest

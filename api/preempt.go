@@ -63,16 +63,17 @@ func (s *Service) creditNodeInfoLocked(memoryMB int) {
 	}
 }
 
-// boxFullAlert logs and announces the box_full refusal (FS5): a request
-// needed room and every take-back candidate was pinned. Nothing was
-// paused or released; an operator can free room by unpinning or
-// releasing leases.
-func (s *Service) boxFullAlert(owner string, memoryMB int) {
-	s.log.Printf("box_full: %d MiB request for %q cannot be admitted: every take-back candidate is pinned; nothing was paused or released", memoryMB, owner)
+// boxFullAlert logs and announces the box_full refusal (FS5, FS2b): a
+// request needed room and take-back could serve none of it — every
+// candidate was pinned, or the requester is itself the biggest
+// borrower. why names which. Nothing was paused or released; an operator
+// can free room by unpinning or releasing leases.
+func (s *Service) boxFullAlert(owner string, memoryMB int, why string) {
+	s.log.Printf("box_full: %d MiB request for %q cannot be admitted: %s; nothing was paused or released", memoryMB, owner, why)
 	if s.metrics != nil {
 		s.metrics.BoxFullTotal.Inc()
 	}
-	s.emitLeaseEvent("-", "", LeaseBoxFull, fmt.Sprintf("%d MiB request for %q: every take-back candidate is pinned", memoryMB, owner))
+	s.emitLeaseEvent("-", "", LeaseBoxFull, fmt.Sprintf("%d MiB request for %q: %s", memoryMB, owner, why))
 }
 
 // cachedFreeHugepageMiB reads the node's free hugepage memory in MiB from
