@@ -119,7 +119,7 @@ func fitItems(segs []grid.Seg, w int) []grid.Seg {
 // "bad") and the message text. The panel is for spoond's own system
 // messages only and is dismissable per viewer; it carries no per-lease
 // call to action, because the dashboard viewer cannot act on a lease. A
-// lost, preempted or lapsed-hold lease is the lease initiator's to deal
+// lost, taken-back or lapsed-hold lease is the lease initiator's to deal
 // with, and spoond tells that initiator through the API and the lease
 // event stream, not through the dashboard.
 type Notice struct {
@@ -144,7 +144,7 @@ type Notice struct {
 // "disk", "io-pressure", "kept-disk", "pinned-idle"), so a viewer's
 // dismissal can
 // follow one trigger across refreshes. The leases table still shows a
-// lost lease (■ lost) and a preempted burst lease; those
+// lost lease (■ lost) and a taken-back lease; those
 // are not messages here.
 func notices(s Snapshot) []Notice {
 	var out []Notice
@@ -788,10 +788,10 @@ func (l *layout) capacityRows() []capacityRow {
 	m := l.meterSegs("running", l.runningPct(), 75, 90, meterBarW, false)
 	rows := []capacityRow{{segs: m, right: fmt.Sprintf("%d / %d", l.s.Running, l.s.Limit)}}
 
-	// Leases: total, then running (with its burst share in brackets,
-	// #128), suspended and lost; recovered only when non-zero. A zero
-	// count is dim. One line: when the full words do not fit the panel,
-	// "susp"/"recov" stand in (alts), and only then does it wrap.
+	// Leases: total, then running, suspended, taken back (FS2a) and lost;
+	// recovered only when non-zero. A zero count is dim. One line: when
+	// the full words do not fit the panel, "susp"/"recov" stand in
+	// (alts), and only then does it wrap.
 	leaseLine := func(susp, recov string) []grid.Seg {
 		count := func(n int, label string) []grid.Seg {
 			style := "text"
@@ -802,10 +802,8 @@ func (l *layout) capacityRows() []capacityRow {
 		}
 		segs := []grid.Seg{{Text: fmt.Sprintf("%d leases", l.s.Leases), Style: "text"}}
 		segs = append(segs, count(l.s.ByState["running"], "running")...)
-		if n := l.s.Burst; n > 0 {
-			segs = append(segs, grid.Seg{Text: fmt.Sprintf(" (%d burst)", n), Style: "dim"})
-		}
 		segs = append(segs, count(l.s.ByState["suspended"], susp)...)
+		segs = append(segs, count(l.s.TakenBack, "taken back")...)
 		segs = append(segs, count(l.s.ByState["lost"], "lost")...)
 		if n := l.s.ByState["recovered"]; n > 0 {
 			segs = append(segs, count(n, recov)...)
@@ -1611,7 +1609,7 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		g.Text(c.own, yy, cell(sanitize(r.Owner), c.ownW), "owner", c.ownW)
 		// The state cell (#128, #129): the glyph always carries the run
 		// state (▶ ‖ ■ ⭘, explained by the legend), and the word spells
-		// it out with any qualifier — "running, burst", "preempted",
+		// it out with any qualifier — "taken back", "idle-suspended".
 		// "idle-suspended". When the column is narrow the word steps down
 		// through fixed shorter forms (stateWords), so the state is never
 		// a cryptic suffix or a word cut mid-way.
@@ -1643,22 +1641,18 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 }
 
 // stateWords is a lease row's state word, longest form first, each next
-// one shorter: the run state with its qualifier (burst class,
-// preemption, idle suspension).
+// one shorter: the run state with its qualifier (take-back, idle
+// suspension).
 func stateWords(r LeaseRow) []string {
 	// The qualifier goes first as the column narrows; the state word
 	// (or its short form) stays to the end.
 	switch {
-	case r.Preempted:
-		return []string{"preempted", "preempt", "susp"}
+	case r.TakenBack:
+		return []string{"taken back", "taken-back", "taken", "susp"}
 	case r.IdleSuspended:
 		return []string{"idle-suspended", "idle-susp", "susp"}
-	case r.State == "running" && r.Burst:
-		return []string{"running, burst", "run, burst", "running", "run"}
 	case r.State == "running":
 		return []string{"running", "run"}
-	case r.State == "suspended" && r.Burst:
-		return []string{"suspended, burst", "susp, burst", "suspended", "susp"}
 	case r.State == "suspended":
 		return []string{"suspended", "susp"}
 	case r.State == "recovered":
@@ -2050,14 +2044,14 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 // eventTypeStyle is the colour the events panel's type word takes: the
 // title cyan for the lease lifecycle (created, released, resumed,
 // restarted, restored, checkpointed, recovered), warn for a lease put
-// aside or retried (suspended, preempted, idle_suspended, queued,
+// aside or retried (suspended, taken_back, idle_suspended, queued,
 // recovery_retry, rootfs_dead), bad for one lost or timed out, ok for
 // spoond's own catalog gc, dim for anything else.
 func eventTypeStyle(t string) string {
 	switch t {
 	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
 		return "title"
-	case "suspended", "preempted", "idle_suspended", "queued", "recovery_retry", "rootfs_dead", "user_deleted":
+	case "suspended", "take_back", "taken_back", "idle_suspended", "queued", "recovery_retry", "rootfs_dead", "user_deleted":
 		return "warn"
 	case "lost", "timed_out":
 		return "bad"

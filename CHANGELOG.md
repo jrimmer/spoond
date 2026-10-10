@@ -186,6 +186,12 @@ summarised from README "Status".
 
 ### Changed
 
+- **The dashboard drops the burst and preempted marks for taken-back
+  leases.** The 3.0 dashboard no longer shows the removed burst class or
+  preemption: the capacity panel's `taken back N` count and the leases
+  table's "taken back" state name the leases suspended by memory
+  take-back (`suspend_reason = 'take_back'`).
+
 - **Queued creates are served by fair-share ratio (FS4).** The owner
   with the lowest ratio (usage over their equal slice) goes first, an
   owner the fair-share view does not know after every known one, then
