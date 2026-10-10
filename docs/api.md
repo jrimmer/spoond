@@ -157,9 +157,10 @@ cannot_start` when the snapshot's build cannot start on this host (the
 body is `snapshot <name>@<v> cannot start on this host (<cause>); save
 it again`, and there is no retry loop),
 `429` quota — the user's concurrent-lease cap or their memory cap
-(#128, see `POST /api/users/{id}/quota`), `503` capacity (not enough
-free hugepage memory for the image, or the node is not healthy, with
-`Retry-After: 30`). When the lease's hugepages do not fit, take-back
+(#128, see `POST /api/users/{id}/quota`), `503 capacity_wait` with
+`Retry-After: 30` (not enough
+free hugepage memory for the image, or the node is not healthy). When the
+lease's hugepages do not fit, take-back
 runs first (see [Memory take-back](#memory-take-back)). The lease's root disk must fit in
 usable snapshot disk too (FS3): `429` with `code: box_full` when
 take-back had nothing to reclaim, `503` with `Retry-After: 30` and
@@ -207,8 +208,8 @@ immediate refusal exactly; a negative value is `400`.
 Only these refusals are **waitable** (the request is held open and
 retried):
 
-- `503 capacity: …` — hugepages full and take-back could not make room
-  (or the node is not healthy).
+- `503 capacity_wait` with `Retry-After: 30` — hugepages full and
+  take-back could not make room (or the node is not healthy).
 - `429 … memory limit of N MiB exceeded` — the owner's `max_mib` cap
   refused it.
 - `429 lease quota exceeded` — the owner is at its lease-count cap
@@ -240,7 +241,9 @@ Outcomes:
 - **Admitted** — the usual `201` body, plus `waited_ms` (the wait in
   milliseconds).
 - **Timed out** — the refusal the create would have got had it not
-  waited: the same status, body and `Retry-After`, plus `waited_ms`.
+  waited: the same status, body and `Retry-After` (a structural capacity
+  refusal times out as `503 capacity_wait` with `Retry-After: 30`), plus
+  `waited_ms`.
 - **Client gone** — the ticket is dropped; nothing is written.
 - **Drain** — a drain that starts answers every queued create `503
   draining` at once.
@@ -1147,7 +1150,7 @@ Works on a running or a suspended lease; a lease lost in a substrate
 crash answers `410` with `code: lease_lost` like every other route
 (restore does not resurrect it; see [Lost leases](#lost-leases)); `409`
 while another operation is in flight; a substrate capacity
-failure maps to `503`. Restoring a suspended lease brings a running
+failure maps to `503 capacity_wait` with `Retry-After: 30`. Restoring a suspended lease brings a running
 sandbox (and its hugepages) back, so it re-passes the owner's memory
 quota (#128): `429` when the charge would pass `max_mib` — the lease
 stays suspended, untouched. An `owner deleted` (`403`) refuses the restore
@@ -1311,7 +1314,8 @@ friendly *name*). Response `201 Created`:
 
 The clone costs the source image's `memory_mb` against the owner's
 memory quota like any create (#128); `429` when it would pass
-`max_mib`. An `owner deleted` (`403`) refuses the clone when the owner's identity
+`max_mib`. A structural capacity shortfall that take-back cannot close is
+`503 capacity_wait` with `Retry-After: 30`. An `owner deleted` (`403`) refuses the clone when the owner's identity
 was removed while the clone's checkpoint was in flight (spoond-q4j): the
 fresh sandbox is stopped and no lease is committed, so a deleted owner
 cannot acquire an ownerless, uncapped copy.
@@ -1336,7 +1340,8 @@ Response `201 Created`:
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
 suspended or busy, `429` quota — including the memory cap (#128): each
 fork costs its image's `memory_mb`, `count` times, reserved up front,
-all or nothing — `503` capacity. An `owner deleted` (`403`) refuses a fork whose owner's identity was
+all or nothing — `503 capacity_wait` with `Retry-After: 30` for a
+structural shortfall take-back cannot close. An `owner deleted` (`403`) refuses a fork whose owner's identity was
 removed while the fork's checkpoint was in flight (spoond-q4j): every
 child created so far is rolled back (its sandbox stopped once) and the
 rest are refused, so a deleted owner cannot acquire ownerless, uncapped
