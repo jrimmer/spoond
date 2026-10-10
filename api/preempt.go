@@ -84,21 +84,6 @@ func (s *Service) cachedFreeHugepageMiB(ctx context.Context) (uint64, error) {
 	return s.freeHugepageMiBLocked(ctx)
 }
 
-// preemptedCountLocked reports how many live leases carry a preemption
-// stamp (for the gauge). Classes are gone, so nothing stamps it any
-// more: pre-3.0 rows keep their historical value until the lease next
-// leaves the suspended state, and the gauge reads 0 on any 3.0 box.
-// Caller holds the store lock.
-func (s *Service) preemptedCountLocked() int {
-	n := 0
-	for _, l := range s.store.leases {
-		if !l.released && !l.PreemptedAt.IsZero() && l.State == "suspended" {
-			n++
-		}
-	}
-	return n
-}
-
 // takeableFreeableMiB is the memory of the running leases take-back may
 // pause: live, idle, unpinned. It is an upper bound (the selector still
 // leaves owners inside their slice alone).

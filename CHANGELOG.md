@@ -242,6 +242,7 @@ summarised from README "Status".
   - preemption of burst leases, the `preempted` event, and the
     environment variable `PREEMPT_DISK_FLOOR_PCT` with the
     `503 capacity: cannot preempt (snapshot disk low)` refusal.
+  - the metrics `spoond_preemptions_total` and `spoond_preempted_leases`.
   The lease field `preempted` stays and is always `false`. The suspend
   reason `preempt` is now `take_back`. `guaranteed_mib` and `max_mib`
   stay for now.

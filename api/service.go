@@ -5167,10 +5167,6 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	}
 	m.SharesActive.Set(float64(shares))
 
-	// Preempted leases (#128 part 3): live leases suspended by
-	// preemption, awaiting the resume queue.
-	preempted := s.preemptedCountLocked()
-
 	// Queued creates waiting for admission (#129 part 1).
 	s.admitQ.mu.Lock()
 	queued := len(s.admitQ.tickets)
@@ -5183,7 +5179,6 @@ func (s *Service) CollectMetrics(m *metrics.BackendMetrics) {
 	s.admitQ.mu.Unlock()
 
 	s.store.mu.Unlock()
-	m.PreemptedLeases.Set(float64(preempted))
 	m.LeasesQueued.Set(float64(queued))
 	oldest := float64(0)
 	if !oldestQueued.IsZero() {
