@@ -160,6 +160,62 @@ func TestEventsURL(t *testing.T) {
 	}
 }
 
+// TestFairSharesURL: the fair-share URL is the metrics URL with the
+// fair-shares path.
+func TestFairSharesURL(t *testing.T) {
+	cases := map[string]string{
+		"https://127.0.0.1:8890/metrics":       "https://127.0.0.1:8890/api/fair-shares",
+		"http://backend.internal:8890/metrics": "http://backend.internal:8890/api/fair-shares",
+		"https://vm.example.com/metrics?x=1":   "https://vm.example.com/api/fair-shares",
+	}
+	for in, want := range cases {
+		if got := fairSharesURL(in); got != want {
+			t.Errorf("fairSharesURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestDiskRoomCollect: the collector reads the snapshot disk's room from
+// the admin fair-share endpoint with the admin token, and reports it as
+// unknown when the token is unset, the response is not 200, or the
+// "disk" object is absent.
+func TestDiskRoomCollect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/fair-shares" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer admin-tok" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		fmt.Fprint(w, `{"capacity_known":true,"owners":[],"disk":{"total_bytes":1073741824,"free_bytes":943718400,"reserved_bytes":104857600,"floor_bytes":53687091,"pending_bytes":0,"freeing_bytes":0,"usable_bytes":785171709}}`)
+	}))
+	defer srv.Close()
+
+	c := newCollector(Config{MetricsURL: srv.URL + "/metrics", AdminToken: "admin-tok"})
+	room, ok := c.diskRoom(context.Background())
+	if !ok {
+		t.Fatal("diskRoom = not known, want the endpoint's disk object")
+	}
+	want := DiskRoom{Total: 1 << 30, Free: 900 << 20, Reserved: 100 << 20, Floor: 53687091, Usable: 785171709}
+	if room != want {
+		t.Fatalf("room = %+v, want %+v", room, want)
+	}
+
+	// No admin token: never fetched, not known.
+	c = newCollector(Config{MetricsURL: srv.URL + "/metrics"})
+	if _, ok := c.diskRoom(context.Background()); ok {
+		t.Fatal("diskRoom known without an admin token")
+	}
+
+	// A 403 (wrong token) or a body without "disk" is not known.
+	c = newCollector(Config{MetricsURL: srv.URL + "/metrics", AdminToken: "wrong"})
+	if _, ok := c.diskRoom(context.Background()); ok {
+		t.Fatal("diskRoom known on a 403")
+	}
+}
+
 // TestEventBufferCap: the buffer keeps the newest maxEvents and reports
 // them newest first.
 func TestEventBufferCap(t *testing.T) {

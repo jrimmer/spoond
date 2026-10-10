@@ -30,6 +30,10 @@
 //	DASH_EVENTS_TOKEN    the backend's events-only EVENTS_TOKEN; the
 //	                     lease events panel's source. Without it the
 //	                     panel says so instead of streaming.
+//	DASH_ADMIN_TOKEN     an admin bearer token (the backend's
+//	                     ADMIN_TOKEN); reads GET /api/fair-shares for the
+//	                     snapshot disk's room shown in the host panel.
+//	                     Unset: that line is not drawn.
 //	SPOOND_DB_PATH       catalog database (default /var/lib/spoond/spoond.db)
 //	USERS_FILE           identity store (default /var/lib/spoond/users.json)
 //	E2B_TEMPLATE_STORAGE_PATH  disk to report (default /forkdcache/e2b/storage/templates)
@@ -104,7 +108,11 @@ type Config struct {
 	// (DASH_EVENTS_TOKEN); it subscribes the collector to
 	// /api/leases/events. Empty: no stream, and the events panel says
 	// so.
-	EventsToken                    string
+	EventsToken string
+	// AdminToken is an admin bearer token (ADMIN_TOKEN) so the collector
+	// may read the admin-only GET /api/fair-shares for the snapshot
+	// disk's room. Empty: the host panel does not draw the room line.
+	AdminToken                     string
 	DBPath, UsersFile, StoragePath string
 	// DiskDevice is the block device (e.g. nvme0n1) whose write
 	// throughput and busy share the host panel shows (DASH_DISK_DEVICE);
@@ -143,6 +151,7 @@ func configFromEnv() (Config, error) {
 		Services: strings.Split(env("DASH_SERVICES",
 			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch"), ","),
 		EventsToken: os.Getenv("DASH_EVENTS_TOKEN"),
+		AdminToken:  os.Getenv("DASH_ADMIN_TOKEN"),
 		NoAuth:      !authOn(os.Getenv("DASH_AUTH")),
 	}
 	var err error

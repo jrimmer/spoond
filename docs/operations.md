@@ -1402,6 +1402,7 @@ variables:
 | `METRICS_SERVER_NAME` | *(METRICS_URL host)* | TLS server name for that URL |
 | `METRICS_TOKEN` | *(required)* | the backend's scrape-only token |
 | `DASH_EVENTS_TOKEN` | *(unset)* | the backend's events-only `EVENTS_TOKEN`; the lease events panel's source (unset: the panel says so) |
+| `DASH_ADMIN_TOKEN` | *(unset)* | an admin bearer token (the backend's `ADMIN_TOKEN`); reads `GET /api/fair-shares` for the snapshot disk's room line in the host panel (unset: that line is not drawn) |
 | `SPOOND_DB_PATH` | `/var/lib/spoond/spoond.db` | catalog database (opened read-only) |
 | `USERS_FILE` | `/var/lib/spoond/users.json` | identity store (names only) |
 | `E2B_TEMPLATE_STORAGE_PATH` | `/forkdcache/e2b/storage/templates` | disk to report |
@@ -1423,7 +1424,8 @@ disk is saturated — PSI's `full` line measures the stall itself.
 The dashboard can only read: it has no write path to the backend, the
 database or the orchestrator, and the tokens it holds are refused
 everywhere except their own routes — `METRICS_TOKEN` on `/metrics`,
-`DASH_EVENTS_TOKEN` on `GET /api/leases/events`.
+`DASH_EVENTS_TOKEN` on `GET /api/leases/events`, `DASH_ADMIN_TOKEN` on
+`GET /api/fair-shares` (a read-only admin GET).
 
 ### Setting up the events panel
 
