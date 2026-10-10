@@ -18,17 +18,24 @@ package api
 
 import (
 	"context"
+	"database/sql"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite" // register the "sqlite" database/sql driver
+
 	"github.com/jrimmer/spoond/v2/store"
 )
 
-// seedPinnedRow inserts a lease row the shape migration 0022 leaves for
-// a Honey flight: pinned, non-persistent, with the given expiry.
+// seedPinnedRow is kept for the other pinned-row tests: it inserts a
+// lease row the shape migration 0022 leaves for a Honey flight —
+// pinned, non-persistent, with the given expiry.
 func seedPinnedRow(t *testing.T, svc *Service, id string, expiresAt time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -47,34 +54,102 @@ func seedPinnedRow(t *testing.T, svc *Service, id string, expiresAt time.Time) {
 // the R3-1 fix. A pinned non-persistent row with a past TTL and a
 // future hold is exactly what migration 0022 must extend (its store
 // fixture asserts the UPDATE); loaded into a service and run through
-// sweepExpired, the lease must still be there afterwards. Mutation:
-// drop the migration's expires_at extension, which lets the sweep
-// release the lease at once (the shape that would delete a Honey
-// flight that outlived its TTL at the upgrade).
+// sweepExpired, the lease must still be there afterwards. The test runs
+// migration 0022 for real over a seeded schema-21 database — the same
+// UPDATE the store fixture asserts — so a drop of that UPDATE fails it
+// at once. Mutation: drop the migration's expires_at extension, which
+// lets the sweep release the lease (the shape that would delete a
+// Honey flight that outlived its TTL at the upgrade).
 func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
-	svc, db, _ := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	// The migration's output for a live hold on a non-persistent lease
-	// whose TTL the hold had already outlived: expires_at moved to the
-	// hold expiry, an hour out.
-	seedPinnedRow(t, svc, "migrated", time.Now().Add(time.Hour))
-	// Its control: a pinned non-persistent lease the migration did not
-	// extend (no hold) still expires on its own TTL.
-	seedPinnedRow(t, svc, "plain", time.Now().Add(-time.Minute))
+	// A schema-21 database (no pinned/paused_at columns yet) with the
+	// two rows: a non-persistent lease whose hold is live and whose TTL
+	// the hold has already outlived, and its control without a hold.
+	path := filepath.Join(t.TempDir(), "v21.db")
+	{
+		db, err := store.Open(path)
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		db21, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+		if err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		for _, stmt := range []string{
+			`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+			`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+			`ALTER TABLE leases DROP COLUMN paused_at`,
+			`ALTER TABLE leases DROP COLUMN pinned`,
+			`DELETE FROM schema_migrations WHERE version = 22`,
+		} {
+			if _, err := db21.Exec(stmt); err != nil {
+				t.Fatalf("rewind (%s): %v", stmt, err)
+			}
+		}
+		now := time.Now().UTC()
+		for _, seed := range []struct {
+			id, holder, holdExpires, expiresAt string
+		}{
+			// ttl+holder, no persistent: the Honey shape. In 2.9 the live
+			// hold kept it past its TTL, so expires_at is already past.
+			{"flight", "pool:honey/work-1", now.Add(time.Hour).Format(time.RFC3339Nano), now.Add(-time.Minute).Format(time.RFC3339Nano)},
+			// The control: no hold, so nothing pins or extends it.
+			{"plain", "", "", now.Add(-time.Minute).Format(time.RFC3339Nano)},
+		} {
+			if _, err := db21.Exec(
+				`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, persistent, holder, hold_expires_at, hold_set_at, hold_ttl)
+				 VALUES (?, 'consumer-a', 'py-base', ?, ?, ?, 'running', 0, 0, ?, ?, ?, 3600)`,
+				seed.id, now.Add(-2*time.Hour).Format(time.RFC3339Nano), seed.expiresAt,
+				now.Add(-time.Hour).Format(time.RFC3339Nano), seed.holder, seed.holdExpires, seed.holdExpires); err != nil {
+				t.Fatalf("seed %s: %v", seed.id, err)
+			}
+		}
+		if err := db21.Close(); err != nil {
+			t.Fatalf("close v21: %v", err)
+		}
+	}
 
-	if err := svc.LoadState(ctx); err != nil {
+	// The upgrade: migration 0022 runs for real over the v21 rows.
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("upgrade open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	rows, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	seeded := map[string]store.LeaseRow{}
+	for _, r := range rows {
+		seeded[r.ID] = r
+	}
+	if !seeded["flight"].Pinned {
+		t.Fatal("setup: the live hold did not pin the flight lease")
+	}
+	if seeded["flight"].ExpiresAt.Before(time.Now()) {
+		t.Fatalf("setup: the migration did not extend the flight's expires_at (%v); the mutation this test kills has already fired", seeded["flight"].ExpiresAt)
+	}
+
+	// Load the migrated rows into a service and sweep.
+	seedImage(t, db, "py-base", 2048)
+	svcM := NewService(newTestSub(), db, map[string]string{"token-a": "consumer-a"},
+		ServiceConfig{DefaultTTL: 60 * time.Second, MaxTTL: 10 * time.Minute, ProxyURL: "http://127.0.0.1:1"})
+	svcM.log = log.New(io.Discard, "", 0)
+	if err := svcM.LoadState(ctx); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if svc.lookup("consumer-a", "migrated") == nil {
+	if svcM.lookup("consumer-a", "flight") == nil {
 		t.Fatal("the migrated lease did not load")
 	}
-	svc.sweepExpired(ctx)
-	if svc.lookup("consumer-a", "migrated") == nil {
+	svcM.sweepExpired(ctx)
+	if svcM.lookup("consumer-a", "flight") == nil {
 		t.Fatal("sweepExpired released a migrated pinned lease whose TTL the migration had extended to the hold expiry")
 	}
-	if svc.lookup("consumer-a", "plain") != nil {
+	if svcM.lookup("consumer-a", "plain") != nil {
 		t.Fatal("sweepExpired kept a pinned non-persistent lease past its own TTL")
 	}
 }

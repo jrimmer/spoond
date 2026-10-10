@@ -914,6 +914,7 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 		}
 	}
 	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	later := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
 	for _, seed := range []struct {
 		id, state, holder, holdExpires string
@@ -939,9 +940,10 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 		// migration must extend the TTL to the hold's expiry or the first
 		// 3.0 sweep deletes the VM at once.
 		{"lease-hold-ttl-past", "running", "pool:honey/work-1", future, 0, 0, past},
-		// The same shape whose hold is not later than its TTL: nothing to
-		// extend (max() keeps the later value).
-		{"lease-hold-ttl-future", "running", "pool:honey/work-2", future, 0, 0, future},
+		// The same shape whose TTL is not later than its hold: nothing to
+		// extend (max() keeps the later value). The TTL is strictly later
+		// than the hold so the max() is really exercised (R4-4).
+		{"lease-hold-ttl-future", "running", "pool:honey/work-2", future, 0, 0, later},
 	} {
 		if _, err := db21.Exec(
 			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, persistent, holder, hold_expires_at, hold_set_at, hold_ttl)
@@ -999,8 +1001,9 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 	if want, _ := time.Parse(time.RFC3339Nano, future); !got["lease-hold-ttl-past"].ExpiresAt.Equal(want) {
 		t.Fatalf("a pinned non-persistent lease with a past TTL kept expires_at %v, want the hold expiry %v", got["lease-hold-ttl-past"].ExpiresAt, want)
 	}
-	// max(): a TTL already at or past the hold expiry is left alone.
-	if want, _ := time.Parse(time.RFC3339Nano, future); !got["lease-hold-ttl-future"].ExpiresAt.Equal(want) {
+	// max(): a TTL already past the hold expiry is left alone; the seed's
+	// TTL is strictly later than the hold, so the max() is really tested.
+	if want, _ := time.Parse(time.RFC3339Nano, later); !got["lease-hold-ttl-future"].ExpiresAt.Equal(want) {
 		t.Fatalf("a pinned non-persistent lease with a later TTL had its expires_at changed to %v, want %v", got["lease-hold-ttl-future"].ExpiresAt, want)
 	}
 	// Persistent rows are never TTL-swept, so the conversion leaves their

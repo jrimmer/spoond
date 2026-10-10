@@ -1885,8 +1885,25 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 // releaseBecause is release with the reason its released event carries
 // (the dashboard's events panel and SSE clients read it).
 func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
+	s.releaseBecauseIf(ctx, l, reason, nil)
+}
+
+// releaseBecauseIf releases l with the given reason, running ok inside
+// the same store-lock section that marks the lease released. When ok is
+// non-nil and returns false there, the release is abandoned — the lease
+// was no longer releasable at the moment of commitment (a resume that
+// landed between the caller's collection pass and this call, a lease
+// that turned busy) and nothing else happens. This closes the gap
+// releaseBecause's own released re-check leaves: it re-checks under the
+// lock, but the sandbox teardown after the unlock still runs against a
+// lease that changed since the caller decided (spoond-k0uz R4-3).
+func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string, ok func(l *Lease) bool) {
 	s.store.mu.Lock()
 	if l.released {
+		s.store.mu.Unlock()
+		return
+	}
+	if ok != nil && !ok(l) {
 		s.store.mu.Unlock()
 		return
 	}

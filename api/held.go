@@ -14,11 +14,14 @@ import (
 // spoond honors it. Never pausing. Pins don't pause. All paused VMs are
 // deleted 30d from pause date."
 //
-//   - A pinned lease is never paused or deleted before its own expiry.
-//     The lease's TTL still applies (pin and expiry work together); a
-//     pinned persistent lease stays until the owner releases it. There
-//     is no limit on how many leases an owner pins. Only the owner
-//     (unpin, DELETE) changes a pin.
+//   - A pinned lease is never paused or deleted by spoond before its own
+//     expiry. A pin protects only a **running** VM: once a lease is
+//     paused (the owner's own POST /pause, or a failed drain resume),
+//     it is on the same one clock as every other paused lease. The
+//     lease's TTL still applies (pin and expiry work together); a pinned
+//     persistent lease stays until the owner releases it. There is no
+//     limit on how many leases an owner pins. Only the owner (unpin,
+//     DELETE) changes a pin.
 //   - Take-back (memory and disk) touches only unpinned leases. If
 //     nothing unpinned can be taken for a request, the request answers
 //     429 box_full and an alert is raised.
@@ -27,9 +30,9 @@ import (
 //     Spoond's own garbage (orphan dirs, leftovers) is still cleaned as
 //     housekeeping by the GC.
 //   - One clock: every paused lease is released PAUSED_RELEASE_DAYS
-//     (default 30) after its pause date, whatever paused it, preceded by
-//     a lease.paused_expiring event 24 h before. Resuming clears the
-//     date. Nothing else deletes on a timer.
+//     (default 30) after its pause date, whatever paused it and whether
+//     it is pinned, preceded by a lease.paused_expiring event 24 h
+//     before. Resuming clears the date. Nothing else deletes on a timer.
 //   - A lease's own TTL (unpinned or pinned) and its own idle_suspend
 //     opt-in are unchanged and caller-chosen; a resumed lease comes back
 //     on the next call.
@@ -108,27 +111,37 @@ func (s *Service) setPinned(owner, id string, pinned bool) (*Lease, error) {
 // label starts with prefix, returning the count. It exists for the
 // 2.9→3.0 window: migration 0022 turns every live hold into a pin, and
 // pool-spawn held its worker leases by holder label. Admin only.
+//
+// It updates the in-memory leases first and saves them, so the running
+// process and the store never disagree about a pin (spoond-k0uz L9); the
+// store helper then catches any row with no in-memory twin. A lease
+// saved pinned=0 is no longer matched by the helper's WHERE pinned = 1,
+// so the two counts add without double-counting.
 func (s *Service) unpinByHolderPrefix(ctx context.Context, prefix string) (int64, error) {
-	n, err := s.db.UnpinLeasesByHolderPrefix(ctx, prefix)
+	if prefix == "" {
+		return 0, errors.New("unpin by holder prefix: prefix is empty")
+	}
+	var n int64
+	s.store.mu.Lock()
+	for _, l := range s.store.leases {
+		if !l.Pinned || !hasPrefix(l.Holder, prefix) {
+			continue
+		}
+		l.Pinned = false
+		l.PinnedIdleSince = time.Time{}
+		s.saveLeaseLocked(l)
+		n++
+	}
+	s.store.mu.Unlock()
+	// Any pinned row with no in-memory twin (a lease this process has not
+	// loaded) is cleared by the store.
+	stored, err := s.db.UnpinLeasesByHolderPrefix(ctx, prefix)
 	if err != nil {
 		return 0, err
 	}
+	n += stored
 	if n > 0 {
-		// The in-memory leases carry Pinned; reload them so the running
-		// process agrees with the store.
-		s.store.mu.Lock()
-		for _, l := range s.store.leases {
-			if !l.Pinned {
-				continue
-			}
-			if hasPrefix(l.Holder, prefix) {
-				l.Pinned = false
-				l.PinnedIdleSince = time.Time{}
-				s.saveLeaseLocked(l)
-			}
-		}
-		s.store.mu.Unlock()
-		s.emitLeaseEvent("", "", LeaseAdminUnpin, fmt.Sprintf("%d lease(s) unpinned by holder prefix %q", n, prefix))
+		s.emitLeaseEvent("-", "", LeaseAdminUnpin, fmt.Sprintf("%d lease(s) unpinned by holder prefix %q", n, prefix))
 	}
 	return n, nil
 }
@@ -140,7 +153,9 @@ func hasPrefix(s, prefix string) bool {
 
 // leasePausedExpiredLocked reports whether l is due for its
 // paused-release: unreleased, actually suspended, not busy, past its
-// pause deadline. Call with s.store.mu held.
+// pause deadline. Call with s.store.mu held. It is the releaseBecauseIf
+// predicate for the one clock, so the same conditions are re-checked
+// inside the lock section that marks the lease released.
 func (s *Service) leasePausedExpiredLocked(l *Lease, now time.Time, release time.Duration) bool {
 	return !l.released && l.Suspended && !l.busy && !l.PausedAt.IsZero() &&
 		!now.Before(l.PausedAt.Add(release))
@@ -148,19 +163,18 @@ func (s *Service) leasePausedExpiredLocked(l *Lease, now time.Time, release time
 
 // releaseIfPausedExpired releases l with the given reason only if it is
 // still a suspended, unreleased, unbusy lease past its pause deadline —
-// re-checked under the store lock at the moment of the release, so a
-// resume (or a pause that never finished) landing between a sweep's
-// collection pass and this call cannot delete a running lease
-// (spoond-k0uz R3-3). It reports whether the release ran.
+// re-checked inside the same lock section that marks the lease released
+// (releaseBecauseIf), so a resume (or a pause that never finished)
+// landing between a sweep's collection pass and this call cannot delete
+// a running or mid-resume lease (spoond-k0uz R3-3 and R4-3). It reports
+// whether the release ran.
 func (s *Service) releaseIfPausedExpired(ctx context.Context, l *Lease, now time.Time, reason string) bool {
-	s.store.mu.Lock()
-	due := s.leasePausedExpiredLocked(l, now, s.pausedRelease())
-	s.store.mu.Unlock()
-	if !due {
-		return false
-	}
-	s.releaseBecause(ctx, l, reason)
-	return true
+	due := false
+	s.releaseBecauseIf(ctx, l, reason, func(c *Lease) bool {
+		due = s.leasePausedExpiredLocked(c, now, s.pausedRelease())
+		return due
+	})
+	return due
 }
 
 // releasePausedLeases implements the one clock: every lease paused at

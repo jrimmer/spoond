@@ -138,7 +138,9 @@ seconds with the same shape (the lease's own value, or the host default;
 `0` = never). Clone and fork copy the source's value; a lease created
 without the field keeps the host default until `PUT
 /api/leases/{id}/idle-policy` changes it — see
-[Idle reclamation](#idle-reclamation).
+[Idle reclamation](#idle-reclamation). A pinned lease always reports `0`:
+spoond never idle-pauses a pinned lease (FS5, pins don't pause), and its
+stored value comes back when it is unpinned.
 
 `address` is the lease's host-side address (no port). `exposed` maps
 each published port to `<address>:<port>` — reachable from peers whose
