@@ -267,6 +267,21 @@ func TestDiskRoomPathKeepNothingReclaimableBoxFull(t *testing.T) {
 	expectBoxFull(t, resp, body, "lkc-consumer-b", h)
 }
 
+// A named save's checkpoint refused for snapshot disk answers like
+// every other path: box_full is 429 box_full, a disk still short after
+// take-back is 503 capacity_wait with Retry-After — never a 500.
+func TestNamedSaveMapsDiskRefusals(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	bf := svc.mapSnapshotCheckpointError(&boxFullError{Owner: "a"})
+	if bf.status != http.StatusTooManyRequests || bf.code != "box_full" {
+		t.Fatalf("box_full mapped to %d %s", bf.status, bf.code)
+	}
+	cw := svc.mapSnapshotCheckpointError(errDiskCapacityWait)
+	if cw.status != http.StatusServiceUnavailable || cw.code != "capacity_wait" || cw.retryAfter != capacityRetryAfterSecs {
+		t.Fatalf("capacity wait mapped to %d %s retry %d", cw.status, cw.code, cw.retryAfter)
+	}
+}
+
 // A pause gives back the lease's own disk_mb reservation, so a lease
 // whose reservation covers its snapshot pauses even when usable disk is
 // negative and nothing can be taken back.
