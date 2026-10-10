@@ -12,6 +12,11 @@ summarised from README "Status".
 
 ### Added
 
+- **Named saves answer disk refusals like every other path.** A save
+  whose checkpoint does not fit in usable snapshot disk answers
+  `429 box_full` or `503 capacity_wait` with `Retry-After`, not
+  `500 save failed`.
+
 - **FS2b: the biggest borrower gets box_full at once.** When take-back
   can free nothing because the requester is itself the biggest borrower
   (over its fair memory slice after the request, and no other owner
