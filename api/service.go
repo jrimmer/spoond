@@ -143,21 +143,14 @@ type Lease struct {
 	// the bytes a new write must leave free. Whole allowance, not bytes
 	// written: conservative by design. 0 = unknown (no image row).
 	DiskMB int `json:"-"`
-	// Class is the lease's admission class (#128 part 2):
-	// "guaranteed" or "burst", decided once at admission and kept for
-	// the lease's life. Guaranteed: the owner's running charge with
-	// this lease stays within their guaranteed_mib (a user with none
-	// keeps every lease guaranteed — today's behaviour). Burst: above
-	// the guarantee, or the request forced burst; admissible only while
-	// the node's free hugepages stay above BurstReserveMiB after this
-	// lease's own. Reported by the lease API as "class".
-	Class string `json:"-"`
-	// PreemptedAt is when the lease was preempted (#128 part 3): it was
-	// suspended through the pause path to free hugepages for a
-	// guaranteed admission. A preempted lease is a burst lease the
-	// resume queue brings back when capacity allows; resume clears the
-	// instant. Zero = not preempted. Persisted as preempted_at and
-	// reported by the lease API as "preempted".
+	// PreemptedAt is a pre-3.0 lease's preemption stamp (#128 part 3):
+	// it was suspended through the pause path to free hugepages for
+	// another admission, when burst leases still existed. Classes are
+	// gone (3.0 fair shares, spoond-pxsn): nothing stamps it any more
+	// and take-back leaves it alone (its leases report "preempted":
+	// false); a lease loaded from a pre-3.0 store keeps the stamp only
+	// while it stays suspended. Zero = not preempted. Persisted as
+	// preempted_at and reported by the lease API as "preempted".
 	PreemptedAt time.Time `json:"-"`
 	// SnapshotBuildID is the named-snapshot version's build the lease was
 	// started from (2.7, #83); '' when it did not start from one. A
@@ -196,23 +189,6 @@ type Lease struct {
 	// its version up by SnapshotBuildID when the API needs it.
 	SnapshotName    string `json:"-"`
 	SnapshotVersion int64  `json:"-"`
-	// Priority orders preemption within a class (#128 part 2): a lower
-	// number is preempted first. 0 = the default. Reported as
-	// "priority".
-	Priority int `json:"-"`
-	// Burst records the request's "burst": true (#128 part 2) — the
-	// caller asked for preemptible scheduling even within the owner's
-	// guarantee. It keeps the lease bursting across rebuilds: a lease
-	// classified burst by demand stays burst on resume/restart, while
-	// one classified burst by a full guarantee may fall back to
-	// guaranteed when the charge drops below it. Not persisted; Class
-	// is. The cost of that: a backend restart loads leases from the
-	// store without the flag, so a request-burst lease re-classifies
-	// from the owner's standing at its next resume/restart — its stored
-	// class stays burst until then, but the re-decision may return it
-	// to guaranteed. Accepted for part 2: the flag is the request's,
-	// the stored class stays the truthful last admission.
-	Burst bool `json:"-"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -236,10 +212,10 @@ func (l *Lease) live() bool { return l.State == "running" || l.State == "recover
 // it.
 func (l *Lease) setState(state string) {
 	l.State = state
-	// Only a suspended lease can be preempted (#128 part 3): every path
+	// Only a suspended lease can carry a preemption stamp: every path
 	// that runs it again — resume, restore, cold restart, recovery — or
-	// loses it ends the preemption here, so none can leave a running or
-	// lost lease flagged for the resume queue. resumeLease reads the
+	// loses it ends the stamp here, so none can leave a running or
+	// lost lease flagged. resumeLease reads the
 	// flag before this call for its event detail.
 	if state != "suspended" {
 		l.PreemptedAt = time.Time{}
@@ -434,18 +410,6 @@ type ServiceConfig struct {
 	// first-save keep overrides it. SNAPSHOT_KEEP_VERSIONS, default
 	// DefaultSnapshotKeepVersions.
 	SnapshotKeepVersions int
-	// BurstReserveMiB is the hugepage reserve (#128 part 2) a burst
-	// lease must leave free on the node after its own hugepages — the
-	// guaranteed class never runs into it. BURST_RESERVE_MIB, default
-	// DefaultBurstReserveMiB. 0 disables the reserve.
-	// TODO(FS2b-1 step 2): remove
-	BurstReserveMiB int
-	// PreemptDiskFloorPct is the snapshot-disk free percentage a
-	// preemption or idle-suspend pause must leave after it (#128 part 3,
-	// 2.5). PREEMPT_DISK_FLOOR_PCT, default DefaultPreemptDiskFloorPct.
-	// 0 or negative means the default.
-	// TODO(FS2b-1 step 2): remove
-	PreemptDiskFloorPct float64
 	// MaxRunningJobsPerLease bounds concurrent background exec jobs per
 	// lease (2.6, #135). 0 = DefaultMaxRunningJobsPerLease.
 	MaxRunningJobsPerLease int
@@ -761,10 +725,10 @@ type Service struct {
 	// add/delete (see invalidateFairShares).
 	fairShareCache fairSharesCache
 
-	// preemptMu serialises preemption (#128 part 3): one guaranteed
-	// admission preempts at a time, so two concurrent creates cannot
-	// each suspend a different burst lease for themselves. Held across
-	// the whole preempt-then-admit sequence (see admitClass).
+	// preemptMu serialises memory take-back: one admission takes back
+	// at a time, so two concurrent creates cannot each pause a
+	// different lease for themselves. Held across the whole take-back
+	// and admit sequence (see admitMemory).
 	preemptMu sync.Mutex
 
 	// jobStartMu guards the jobStarts map: one start lock per lease,
@@ -1686,11 +1650,6 @@ func (s *Service) Start(ctx context.Context) {
 	// the catalog-derived template-bake gauge on each /metrics scrape,
 	// which is when the dashboard reads it (spoond-rzz).
 	go s.runNodeMetricsLoop(ctx)
-	// Promote burst leases into an owner's guarantee as leases churn
-	// (#128): every 15 s, so the guarantee stays filled. This used to ride
-	// the preemption resume queue; that background auto-resume is gone
-	// (#145 D2), the promote sweep stays on its own ticker.
-	go s.runPromoteLoop(ctx)
 	// Background exec jobs (2.6, #135): every 10 s reconcile running job
 	// records against the guest files (a backend restart or a broken
 	// envd stream left them unobserved).
@@ -2003,8 +1962,6 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, reason)
 	s.journalLease(journalOpRelease, l, journalReleaseReason(l, reason))
 	s.creditNodeInfo(freedMiB)
-	// The owner's guarantee may have room now (#128).
-	s.promoteBurst(l.Owner)
 	// A release frees hugepages and quota: retry waiting creates (#129).
 	s.wakeAdmissionQueue()
 }
@@ -2435,10 +2392,6 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		CheckpointInterval: checkpointIntervalHost,
 		IdleSuspend:        idleSuspendHost,
 		TemplateID:         img.TemplateID,
-		// The class knobs (#128 part 2): priority rides the request,
-		// and the class stamp lands after admitClass decides it below.
-		Priority: req.priority,
-		Burst:    req.burst,
 	}
 	if lease.TemplateID == "" {
 		// A snapshot start does not need the image's current build, so a
@@ -2455,10 +2408,8 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		lease.SnapshotName = snap.row.Name
 		lease.SnapshotVersion = snap.row.Version
 	}
-	// Class admission (#128 part 2): decides guaranteed vs burst (the
-	// charge above is the sum the guarantee is measured against) and
-	// holds a burst lease to the node's reserve. A refusal answers
-	// before any sandbox exists.
+	// Memory admission (FS2b-1): the one-pool check with take-back. A
+	// refusal answers before any sandbox exists.
 	if err := s.admitMemory(ctx, owner, memoryMB); err != nil {
 		return nil, err
 	}
@@ -2751,9 +2702,8 @@ func (s *Service) suspendWith(ctx context.Context, owner, id string, pol suspend
 // suspended — plus Drained when drained.
 // LastAction values a pause records before any rule overwrites them.
 const (
-	pauseActionHand    = "suspend/hand"
-	pauseActionDrain   = "drain/suspend"
-	pauseActionPreempt = "preempt/suspend"
+	pauseActionHand  = "suspend/hand"
+	pauseActionDrain = "drain/suspend"
 	// pauseActionTakeBack is a fair-shares memory take-back pause
 	// (FS2a): the biggest borrower's lease paused for a requester.
 	pauseActionTakeBack = "take_back/suspend"
@@ -2762,13 +2712,13 @@ const (
 // Suspend reasons (#145 D6): the "reason" field of an automatic
 // lease.suspended event, the lease's suspend_reason and the 409
 // lease_suspended body. idle_suspend is the per-lease idle_suspend
-// threshold; preempt and take_back are memory take-back suspensions
+// threshold; take_back is the fair-shares memory take-back suspension
 // freeing hugepages for another admission (FS2a). A hand or drain
 // suspend has no reason ("").
-// The old plain-idle, hold_lapsed and pressure rules are removed (FS5).
+// The old plain-idle, hold_lapsed, pressure and preempt rules are
+// removed (FS5, spoond-pxsn).
 const (
 	suspendReasonIdleSuspend = "idle_suspend"
-	suspendReasonPreempt     = "preempt"
 	// suspendReasonTakeBack marks a lease paused by the fair-shares
 	// memory take-back: the biggest borrower's lease paused so the
 	// requesting owner's admission fits. Unlike preempt it is never
@@ -2934,13 +2884,9 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	// A pause frees the lease's hugepages and quota: retry waiting
 	// creates (#129).
 	// The pause freed the lease's hugepages: the next admission inside
-	// the cache window sees them (every pause: hand, drain, idle, held
-	// rules and preemption alike).
+	// the cache window sees them (every pause: hand, drain, idle and
+	// take-back alike).
 	s.creditNodeInfo(l.MemoryMB)
-	// A paused guaranteed lease frees its owner's guarantee (#128).
-	if l.Class != ClassBurst {
-		s.promoteBurst(l.Owner)
-	}
 	s.wakeAdmissionQueue()
 	return buildID, nil
 }
@@ -3042,10 +2988,8 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 		return nil, err
 	}
 	defer func() { s.releaseQuotaReservation(l.Owner, 1, memPer) }()
-	// Class re-admission (#128 part 2): a demand-burst lease stays
-	// burst (and held to the reserve); a lease that burst because the
-	// guarantee was full may come back guaranteed now that the charge
-	// has room — the class follows the owner's current standing.
+	// Memory re-admission (FS2b-1): a resume brings the guest (and its
+	// hugepages) back, so it re-passes the one-pool admission on the way.
 	if err := s.admitMemory(ctx, l.Owner, memPer); err != nil {
 		return nil, err
 	}
@@ -3201,9 +3145,8 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 			return nil, err
 		}
 		defer func() { s.releaseQuotaReservation(owner, 1, l.MemoryMB) }()
-		// Class re-admission (#128 part 2), as for a resume: a
-		// demand-burst lease stays burst, a guarantee-burst one may
-		// fall back to guaranteed.
+		// Memory re-admission (FS2b-1), as for a resume: bringing the
+		// guest back re-passes the one-pool admission.
 		if err := s.admitMemory(ctx, owner, l.MemoryMB); err != nil {
 			return nil, err
 		}
@@ -3319,7 +3262,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 			return nil, err
 		}
 		defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
-		// Class re-admission (#128 part 2) against the image's current
+		// Memory re-admission (FS2b-1) against the image's current
 		// charge — the number the fresh guest runs (and is stamped with
 		// below), as for the memory check above.
 		if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
@@ -3593,9 +3536,8 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		Generation:         1,            // every lease starts on generation 1 (2.2)
 		TemplateID:         img.TemplateID,
 	}
-	// Class admission (#128 part 2): a clone takes its own class from
-	// the owner's guarantee — a full one bursts the clone — and never
-	// carries a request's burst flag or priority.
+	// Memory admission (FS2b-1): the clone takes its own charge against
+	// the one pool, like every lease.
 	if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
 		return nil, "", err
 	}
@@ -3761,12 +3703,11 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			Generation:         1,            // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
-		// Class admission (#128 part 2), per child: the whole batch was
-		// reserved against max_mib above, but each child's class follows
-		// the owner's charge as the children land. Every child of one
-		// fork call gets the same class (the charge the class measures
-		// moves only when a sandbox is created, one at a time below),
-		// decided once here so the batch behaves as one.
+		// Memory admission (FS2b-1), per child: the whole batch was
+		// reserved against max_mib above, but each child's charge lands
+		// on the one pool as the children are created — one at a time
+		// below, so each child admits in turn and the batch behaves as
+		// one.
 		if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
 			return rollback(err)
 		}
@@ -4330,15 +4271,12 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 		// Effective per-lease idle reclamation threshold in seconds
 		// (2.5, #129 part 2): the host default resolved; 0 = never.
 		"idle_suspend": idleSuspend,
-		// Admission class and scheduling priority (#128 part 2):
-		// guaranteed within the owner's guaranteed_mib, burst above it
-		// (preemptible, held to the node's reserve); a lower priority
-		// is preempted first.
-		"class":    leaseClassRow(l),
-		"priority": l.Priority,
-		// Preemption (#128 part 3): true when this burst lease was
-		// suspended to make room for a guaranteed lease; it comes back
-		// on its holder's next work call.
+		// Fair shares (3.0): no admission class and no priority — every
+		// lease admits against the one hugepage pool and take-back
+		// decides whose room it takes. The fields left the API.
+		// Preemption (FS2b-1): always false — nothing stamps preempted_at
+		// any more (the field stays for client compatibility; a lease
+		// migrated from a pre-3.0 store carries no live stamp either).
 		"preempted": !l.PreemptedAt.IsZero(),
 		// Pin (FS5): true when the owner pinned this lease; spoond never
 		// pauses or deletes it before its own expiry. A pinned lease
@@ -4658,8 +4596,6 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		IdleSuspend:           l.IdleSuspend,
 		MemoryMB:              l.MemoryMB,
 		DiskMB:                l.DiskMB,
-		Class:                 leaseClassRow(l),
-		Priority:              l.Priority,
 		PreemptedAt:           l.PreemptedAt,
 		SnapshotBuildID:       l.SnapshotBuildID,
 		SuspendReason:         l.SuspendReason,
@@ -4667,16 +4603,6 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		SuspendBuildID:        l.SuspendBuildID,
 		SuspendedAt:           l.SuspendedAt,
 	}
-}
-
-// leaseClassRow fills the row's class: an unstamped lease (from before
-// #128 part 2) reads as guaranteed — the class every lease had before
-// classes existed.
-func leaseClassRow(l *Lease) string {
-	if l.Class == "" {
-		return ClassGuaranteed
-	}
-	return l.Class
 }
 
 // rowToLease maps a store row back to an in-memory lease. The Suspended
@@ -4720,8 +4646,6 @@ func rowToLease(r store.LeaseRow) *Lease {
 		IdleSuspend:           r.IdleSuspend,
 		MemoryMB:              r.MemoryMB,
 		DiskMB:                r.DiskMB,
-		Class:                 r.Class,
-		Priority:              r.Priority,
 		PreemptedAt:           r.PreemptedAt,
 		SnapshotBuildID:       r.SnapshotBuildID,
 		SuspendReason:         r.SuspendReason,

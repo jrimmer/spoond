@@ -34,7 +34,7 @@ func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) e
 // takeBackForAdmission is the take-back loop of admitMemory. The caller
 // holds preemptMu and performs the debit.
 func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memoryMB int) error {
-	fits, err := s.guaranteedFits(ctx, memoryMB)
+	fits, err := s.fits(ctx, memoryMB)
 	if err != nil {
 		// The node could not be read: do not fail the admission here.
 		// createSandbox's ordinary capacity check reads NodeInfo again
@@ -46,7 +46,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		return nil
 	}
 
-	freeable := s.takeableRunningMiB()
+	freeable := s.takeableFreeableMiB()
 	freeMiB, err := s.cachedFreeHugepageMiB(ctx)
 	if err != nil {
 		s.log.Printf("preempt: node info: %v", err)
@@ -57,7 +57,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		// Pinned leases are not take-back victims (FS5). If the pinned
 		// ones alone would free enough, the request is box_full: nothing
 		// unpinned can be taken for it.
-		if freeMiB+freeable+s.pinnedRunningMiB() >= need {
+		if freeMiB+freeable+s.pinnedFreeableMiB() >= need {
 			s.boxFullAlert(owner, memoryMB)
 			return errBoxFull
 		}
@@ -106,7 +106,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		// memory after each and stopping as soon as the request fits.
 		paused := false
 		for _, v := range victims {
-			if fits, err = s.guaranteedFits(ctx, memoryMB); err != nil {
+			if fits, err = s.fits(ctx, memoryMB); err != nil {
 				s.log.Printf("preempt: node info: %v", err)
 				return nil
 			}
@@ -137,36 +137,4 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	// trying. The caller's debit and createSandbox's ordinary capacity
 	// check answer from here.
 	return nil
-}
-
-// takeableRunningMiB is the memory of the running leases take-back may
-// pause: live, idle, unpinned. It is an upper bound (the selector still
-// leaves owners inside their slice alone).
-func (s *Service) takeableRunningMiB() uint64 {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	var n uint64
-	for _, l := range s.store.leases {
-		if l.released || l.busy || l.Suspended || !l.live() || l.Pinned {
-			continue
-		}
-		n += uint64(l.MemoryMB)
-	}
-	return n
-}
-
-// pinnedRunningMiB is the memory of the running leases that are pinned
-// and so are not take-back candidates. It lets admitMemory tell "no room
-// exists" from "every candidate is pinned".
-func (s *Service) pinnedRunningMiB() uint64 {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	var n uint64
-	for _, l := range s.store.leases {
-		if l.released || l.busy || l.Suspended || !l.live() || !l.Pinned {
-			continue
-		}
-		n += uint64(l.MemoryMB)
-	}
-	return n
 }

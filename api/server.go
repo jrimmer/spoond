@@ -933,10 +933,10 @@ func isAdmin(r *http.Request) bool {
 	return u != nil && u.Admin
 }
 
-// burstRetryAfterSecs is the Retry-After a refused burst carries: the
-// reserve frees as guaranteed work suspends, usually well inside a
-// minute.
-const burstRetryAfterSecs = 30
+// capacityRetryAfterSecs is the Retry-After a capacity-refused call
+// carries: room frees as leases pause, release and are taken back,
+// usually well inside a minute.
+const capacityRetryAfterSecs = 30
 
 // drainRetryAfterSecs is the Retry-After on a create refused while the
 // node drains for a planned orchestrator restart.
@@ -984,13 +984,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// host default (IDLE_SUSPEND_DEFAULT_SECS). Only persistent
 		// leases may set it: suspension needs persistence.
 		IdleSuspend *int64 `json:"idle_suspend"`
-		// Burst asks for a preemptible lease (#128 part 2): it is
-		// classified burst even within the owner's guaranteed_mib, and
-		// admitted only while the node keeps its burst reserve free.
-		// Priority orders preemption within a class: a lower number is
-		// preempted first (0 = the default).
-		Burst    bool `json:"burst"`
-		Priority *int `json:"priority"`
+		// Fair shares (3.0): no burst flag and no priority — every lease
+		// admits against the one hugepage pool. The fields are gone from
+		// the API (an unknown field in a request body is ignored).
 		// Wait is how many seconds a create refused for a waitable reason
 		// (#129 part 1) may wait for admission instead. 0 keeps today's
 		// behaviour (answer at once); above 0 it is capped at
@@ -1085,14 +1081,6 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	priority := 0
-	if req.Priority != nil {
-		if *req.Priority < -128 || *req.Priority > 127 {
-			writeError(w, http.StatusBadRequest, "priority must be between -128 and 127")
-			return
-		}
-		priority = *req.Priority
-	}
 	if req.Wait < 0 {
 		writeError(w, http.StatusBadRequest, "wait must be >= 0")
 		return
@@ -1150,7 +1138,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
 		pinned:        req.Pinned,
-		createSecrets: secrets, exposePorts: expose, burst: req.Burst, priority: priority,
+		createSecrets: secrets, exposePorts: expose,
 		snapshot: start,
 	}
 	grantStart := time.Now()
@@ -1235,20 +1223,10 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		status, msg = http.StatusTooManyRequests, err.Error()
 	case errors.Is(err, errUnknownImage):
 		status, msg = http.StatusNotFound, "unknown image tag: "+image
-	// TODO(FS2b-1 step 2): remove
-	case errors.Is(err, errPreemptCannot):
-		// A guaranteed lease that could not preempt (#128 part 3): the
-		// snapshot disk is too full to pause a burst lease.
-		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), burstRetryAfterSecs
 	case isBoxFull(err):
 		// Take-back could not make room: every candidate was pinned
 		// (FS5). 429 box_full: nothing was paused or released.
 		status, msg, code = http.StatusTooManyRequests, err.Error(), "box_full"
-	case errors.Is(err, errBurstReserve):
-		// A burst lease that would dip the node under its reserve
-		// (#128 part 2): 503 with a retry hint, not a generic capacity
-		// error.
-		status, msg, retryAfter = http.StatusServiceUnavailable, err.Error(), burstRetryAfterSecs
 	case errors.Is(err, errDraining):
 		// A planned orchestrator restart drains the node for a minute or
 		// three; tell clients when to come back instead of letting them
@@ -1258,7 +1236,7 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// Hugepages full and preemption could not make room (or the node
 		// is not healthy): 503 with a retry hint, so a client that did
 		// not send "wait" still knows when to come back.
-		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), burstRetryAfterSecs
+		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), capacityRetryAfterSecs
 	default:
 		if snapshot != "" {
 			s.svc.log.Printf("create: grant snapshot %s: %v", snapshot, err)
@@ -1308,8 +1286,6 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease
 		"generation":          lease.Generation,
 		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
 		"idle_suspend":        s.svc.effectiveIdleSuspend(lease),
-		"class":               leaseClassRow(lease),
-		"priority":            lease.Priority,
 	}
 	// A lease started from a named snapshot carries what it started from
 	// (A3).
@@ -1758,23 +1734,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// hugepages) back, so it re-passes the memory check (#128):
 			// over max_mib answers 429 and the lease stays suspended.
 			writeError(w, http.StatusTooManyRequests, err.Error())
-		// TODO(FS2b-1 step 2): remove
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case isBoxFull(err):
 			// Restart re-admits a suspended lease like a resume; a node full
 			// of pinned leases refuses it with the create body's 429
 			// box_full, not a 500 (spoond-k0uz R3-2). The lease stays as it
 			// was.
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
-		case errors.Is(err, errBurstReserve):
-			// Restart re-admits a suspended lease like a resume, so a
-			// burst lease restarting into a full reserve answers 503
-			// with a retry hint too (#128 part 2); the lease stays
-			// suspended.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, errOwnerGone):
 			// The owner's identity was removed while the restart was in
 			// flight (spoond-q4j): the user is gone, so the restart is
@@ -2524,18 +2489,11 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// Quota enforcement (security review #37 rescan F1): clone
 			// surfaces the same 429 as create, not a generic 500.
 			writeError(w, http.StatusTooManyRequests, err.Error())
-		// TODO(FS2b-1 step 2): remove
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case isBoxFull(err):
 			// The clone's own class admission is box_full when every
 			// take-back candidate is pinned (FS5): 429 like create, not a
 			// 500 (spoond-k0uz R3-2).
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
-		case errors.Is(err, errBurstReserve):
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
@@ -2602,18 +2560,11 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errQuotaExceeded):
 			writeError(w, http.StatusTooManyRequests, err.Error())
-		// TODO(FS2b-1 step 2): remove
-		case errors.Is(err, errPreemptCannot):
-			// A guaranteed lease that could not preempt (#128 part 3):
-			// the snapshot disk is too full to pause a burst lease.
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
 		case isBoxFull(err):
 			// A fork child's class admission is box_full when every
 			// take-back candidate is pinned (FS5): 429 like create, not a
 			// 500 (spoond-k0uz R3-2).
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
-		case errors.Is(err, errBurstReserve):
-			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
@@ -2768,7 +2719,7 @@ func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 }
 
 // writeErrorAfter is writeError with a Retry-After header (seconds):
-// the shape a refused burst is answered with (#128 part 2).
+// the shape a capacity-refused call is answered with.
 func writeErrorAfter(w http.ResponseWriter, status int, retryAfter int, msg string) {
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	writeError(w, status, msg)
