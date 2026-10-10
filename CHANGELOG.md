@@ -112,6 +112,21 @@ summarised from README "Status".
   does not fit answers `429 box_full` (nothing reclaimable) or `503
   capacity_wait` (a structural shortage), on create, resume, suspend,
   checkpoint/keep and named save alike.
+- **`GET /api/fair-shares` reports the snapshot disk's room.** When the
+  disk can be read the response carries a `disk` object
+  (`total_bytes`, `free_bytes`, `reserved_bytes`, `floor_bytes`,
+  `pending_bytes`, `freeing_bytes`, `usable_bytes`) — the same numbers
+  the take-back policy decides with; the object is omitted when the
+  statfs read fails, so an unknown disk is never a zero one.
+- **`capacity.disk_low` alert.** The notifier's periodic checks now
+  alert (critical) when the snapshot disk's free bytes fall below the
+  reserve floor (`DISK_RESERVE_PCT`, default 5, of the disk), resolving
+  when free comes back. It is a passive alert: it reads statfs and
+  emits, and deletes nothing.
+- **The dashboard shows the snapshot disk's fair-share room.** With
+  `DASH_ADMIN_TOKEN` set, the collector reads `GET /api/fair-shares`
+  and the host panel draws one line, `disk reserved X · usable Y`
+  (humanized); unset, the line is simply not drawn.
 
 ### Status code changes
 

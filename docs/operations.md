@@ -133,6 +133,7 @@ What arrives, with its key and severity:
 | `pinned.idle.<lease-id>` | warn | a pinned lease's last API activity crossed `PINNED_IDLE_NOTICE_DAYS` (visibility only) |
 | `unit.inactive.<unit>` | critical | a watched systemd unit is not active. `NOTIFY_UNITS` lists them, comma-separated; the default is `e2b-orchestrator.service,spoond-sshd-gateway.service`, and `none` watches nothing (a host without systemd, where every probe would fail) |
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
+| `capacity.disk_low` | critical | the snapshot disk's free bytes below the reserve floor (`DISK_RESERVE_PCT`, default 5, of the disk). Below the floor `usable_bytes` on `GET /api/fair-shares` is negative, so creates and resumes answer `capacity_wait`. The alert is passive: it reads statfs and emits, and deletes nothing |
 | `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
