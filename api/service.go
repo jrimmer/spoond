@@ -873,6 +873,12 @@ type Service struct {
 	// frees late). diskTakeBack credits freeing so a lagging statfs does
 	// not cause a second deletion.
 	diskInflight diskInflight
+
+	// takeDiskMu serialises disk take-back: two calls (a create racing a
+	// named save) must not both reclaim for the same shortfall — the
+	// second re-reads the room under the mutex and finds the first's
+	// work.
+	takeDiskMu sync.Mutex
 }
 
 // NewService builds the lease service on sub. db is required: every

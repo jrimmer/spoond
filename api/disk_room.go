@@ -35,13 +35,17 @@ func sawRequesterAmong(owners []diskOwner, requester string) bool {
 // diskRoom is one snapshot of how much disk a new request may use.
 // All fields are bytes. Usable may be negative: that is the shortfall.
 type diskRoom struct {
-	Total    int64
-	Free     int64
-	Reserved int64 // bytes still to be written by running VMs
-	Floor    int64 // reserve kept free (DISK_RESERVE_PCT of Total)
-	Pending  int64 // admitted requests that have not written yet
-	Freeing  int64 // deletions issued but not yet visible in statfs
-	Usable   int64
+	Total int64
+	Free  int64
+	// Reserved is the running leases' WHOLE disk_mb allowance (not what
+	// they have written): bytes a VM already wrote count again, which is
+	// accepted as the conservative option.
+	Reserved int64
+	// Floor is the reserve kept free (DISK_RESERVE_PCT of Total).
+	Floor   int64
+	Pending int64 // admitted requests that have not written yet
+	Freeing int64 // deletions issued but not yet visible in statfs
+	Usable  int64
 }
 
 // computeDiskRoom is the pure room formula:
@@ -187,10 +191,10 @@ func diskRatio(used, slice int64) float64 {
 
 // diskVictims picks paused leases to release so needBytes become free for
 // requester. The owner with the highest disk ratio goes first, and only
-// while that ratio stays above the requester's (used+need over slice) and
-// above 1 (never inside its slice). Within an owner the oldest unpinned
-// paused lease goes first; pinned leases never. Returns nil when the need
-// cannot be met.
+// while it stays above the requester's after-request ratio; its own
+// after-give-up ratio must too (the alignment with memVictims, FS2).
+// Within an owner the oldest unpinned paused lease goes first; pinned
+// leases never. Returns nil when the need cannot be met.
 func diskVictims(owners []diskOwner, requester string, needBytes int64) []diskVictim {
 	if needBytes <= 0 || len(owners) == 0 || !sawRequesterAmong(owners, requester) {
 		return nil
@@ -231,12 +235,12 @@ func diskVictims(owners []diskOwner, requester string, needBytes int64) []diskVi
 			// The candidate must leave the owner strictly above the
 			// requester's after-request ratio (checked on the lease's own
 			// bytes, so a bigger lease may be unreachable while a smaller
-			// one of the same owner still qualifies), and strictly above
-			// the requester's ratio right now. Together with the
-			// used > slice guard this is the alignment with memVictims
-			// (FS2): take-back never pushes an owner below the point the
-			// requester itself would sit at, and never below its own
-			// slice.
+			// one of the same owner still qualifies). That is the
+			// alignment with memVictims (FS2): an owner is taken only
+			// while it stays further over its slice than the requester
+			// would be after its request, which also keeps take-back
+			// from pushing an owner below the point the requester itself
+			// would sit at.
 			if r <= reqRatio ||
 				!diskVictimAgainstRequester(float64(st.used), float64(st.leaps[0].Bytes), float64(st.o.SliceBytes), reqRatio) {
 				continue
@@ -309,6 +313,11 @@ func (s *Service) diskTakeBack(ctx context.Context, needBytes int64, requester s
 	garbageFreed := s.reapGarbageForRoom(ctx)
 	s.noteDiskFreeing(garbageFreed, room.Free)
 	freed += garbageFreed
+	// Garbage alone may cover the need: no lease is then touched.
+	if room2, ok := s.diskRoomNow(ctx); ok && room2.Usable >= needBytes {
+		s.emitDiskCleanup(garbageFreed, 0)
+		return freed, nil
+	}
 
 	leaseFreed, err := s.reclaimLeasesForRoom(ctx, requester, needBytes)
 	freed += leaseFreed
@@ -331,22 +340,30 @@ func (s *Service) reapGarbageForRoom(ctx context.Context) int64 {
 
 // reclaimLeasesForRoom loops diskVictims one victim at a time: pick,
 // announce, release, credit freeing, re-check room — stopping as soon as
-// the need fits. A victim that was no longer releasable at the moment of
-// commitment (a resume that landed between the pick and the release) is
-// skipped: its bytes never freed, so the loop goes around again and the
-// next pick sees the true state. errBoxFull (as *boxFullError) when no
-// unpinned paused lease of a further-over owner can free the need.
+// the room covers the need. The take-back mutex keeps two concurrent
+// calls from reclaiming for the same shortfall: the second call re-reads
+// the room once it holds the mutex and finds the first call's work. A
+// victim that was no longer releasable at the moment of commitment (a
+// resume that landed between the pick and the release) is skipped: its
+// bytes never freed, so the loop goes around again and the next pick
+// sees the true state. *boxFullError when no unpinned paused lease of a
+// further-over owner can free the need.
 func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, needBytes int64) (int64, error) {
+	s.takeDiskMu.Lock()
+	defer s.takeDiskMu.Unlock()
 	var freed int64
 	for {
 		room, ok := s.diskRoomNow(ctx)
 		if !ok {
 			return freed, errDiskUnknown
 		}
-		if freed > 0 && room.Usable >= needBytes {
+		if room.Usable >= needBytes {
 			return freed, nil
 		}
-		victims := diskVictims(s.diskOwners(ctx, needBytes), requester, needBytes)
+		// One lease-catalog read per pass, shared by every owner's view:
+		// the in-memory leases when loaded, the store rows otherwise.
+		rows := s.leasesOnce(ctx)
+		victims := diskVictims(s.diskOwnersAtView(ctx, rows), requester, needBytes)
 		if len(victims) == 0 {
 			// Nothing (left) to take: the good-citizen refusal (FS3b
 			// maps it to 429 box_full and raises the alert).
@@ -356,20 +373,41 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 			return freed, errBoxFull
 		}
 		if !s.takeDiskVictim(ctx, victims[0], room.Free) {
-			return freed, errBoxFull
+			// A stale pick — a resume or a pin won the race between the
+			// catalog read and the commitment. No event ever went out;
+			// go around and pick against the true state again.
+			continue
 		}
 		freed += victims[0].Bytes
 	}
 }
 
-// takeDiskVictim announces and releases one paused lease for disk
-// take-back. It emits lease.critical_release {owner, ratio, free_pct}
-// first, then releases with reason disk_reclaim; the lease answers 404
-// everywhere afterwards. ok is false when the release was abandoned —
-// the lease changed between the pick and the commitment (a resume or a
-// pin that landed in between wins) — and the caller must not count its
-// bytes as freed.
+// takeDiskVictim releases one paused lease for disk take-back: the
+// LIVE lease (s.store.leases under the store lock — a stub would carry
+// no Suspended state and no SandboxID for the teardown) is released with
+// reason disk_reclaim, re-checked inside the same lock section that
+// marks it released: still paused, unpinned, unreleased and not
+// mid-resume at the moment of commitment, so a resume or a pin that
+// landed between the pick and here wins and nothing is deleted. Only a
+// committed release emits lease.critical_release {owner, ratio,
+// free_pct} — a stale pick announces nothing. Afterwards the lease
+// answers 404 everywhere. ok is false when the release was abandoned;
+// the caller must not count its bytes as freed.
 func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick int64) bool {
+	s.store.mu.Lock()
+	l, ok := s.store.leases[v.ID]
+	s.store.mu.Unlock()
+	if !ok {
+		return false
+	}
+	released := false
+	s.releaseBecauseIf(ctx, l, "disk_reclaim", func(c *Lease) bool {
+		released = !c.released && c.Suspended && !c.busy && !c.Pinned && c.ID == v.ID
+		return released
+	})
+	if !released {
+		return false
+	}
 	total, _, err := s.diskCapacity(s.cfg.TemplateStoragePath)
 	freePct := -1.0
 	if err == nil && total > 0 {
@@ -380,25 +418,8 @@ func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick i
 			v.Owner, v.Ratio*100, freePct, shortID(v.ID)))
 	s.log.Printf("disk reclaim: releasing paused lease %s of %q (ratio %.2f, %s) for a request that does not fit",
 		v.ID, v.Owner, v.Ratio, formatEventBytes(v.Bytes))
-	released := false
-	s.releaseBecauseIf(ctx, leaseForDiskVictim(v), "disk_reclaim", func(c *Lease) bool {
-		// Same re-check the one clock uses: still paused, unpinned,
-		// unreleased and not mid-resume at the moment of commitment.
-		released = !c.released && c.Suspended && !c.busy && c.Pinned == v.Pinned && c.ID == v.ID
-		return released
-	})
-	if !released {
-		return false
-	}
 	s.noteDiskFreeing(v.Bytes, freeAtPick)
 	return true
-}
-
-// leaseForDiskVictim rebuilds the minimal Lease handle releaseBecauseIf
-// needs: it matches by id against the live in-memory lease under the
-// store lock. When the lease is gone the predicate never passes.
-func leaseForDiskVictim(v diskVictim) *Lease {
-	return &Lease{ID: v.ID, Owner: v.Owner}
 }
 
 // diskOwners builds the selector's view of every owner: disk used and
@@ -408,18 +429,24 @@ func leaseForDiskVictim(v diskVictim) *Lease {
 // candidates; a running lease never appears in Paused. A failed disk
 // usage read leaves the owner with no candidates rather than a wrong
 // list.
-func (s *Service) diskOwners(ctx context.Context, needBytes int64) []diskOwner {
+func (s *Service) diskOwners(ctx context.Context) []diskOwner {
+	return s.diskOwnersAtView(ctx, s.leasesOnce(ctx))
+}
+
+// diskOwnersAtView is diskOwners against a pre-read lease listing: the
+// take-back loop reads the catalog once per pass and hands the same
+// rows to every owner view it builds.
+func (s *Service) diskOwnersAtView(ctx context.Context, rows []store.LeaseRow) []diskOwner {
 	snap := s.fairShares(ctx)
 	byPauseBuild, ok := s.pauseBuildsByLease(ctx)
 	owners := make([]diskOwner, 0, len(snap.owners))
 	for _, o := range snap.owners {
 		do := diskOwner{Owner: o.Owner, UsedBytes: o.Disk.UsedBytes, SliceBytes: o.Disk.SliceBytes}
 		if ok {
-			do.Paused = s.pausedLeasesOf(ctx, o.Owner, byPauseBuild)
+			do.Paused = s.pausedLeaseList(rows, o.Owner, byPauseBuild)
 		}
 		owners = append(owners, do)
 	}
-	_ = needBytes
 	return owners
 }
 
@@ -443,18 +470,25 @@ func (s *Service) pauseBuildsByLease(ctx context.Context) (map[string]store.Buil
 	return out, true
 }
 
-// pausedLeasesOf lists owner's suspended leases as diskLease candidates:
-// one per lease, sized by its lease's pause build's recorded size_bytes
+// pausedLeasesOf lists owner's suspended leases as diskLease candidates
+// (the one-owner path; the take-back loop uses diskOwnersAtView): one
+// per lease, sized by its lease's pause build's recorded size_bytes
 // (the number the disk usage accounting reads, so the victim list and
 // the owner's Used can never disagree). A lease with no pause build row
 // is skipped — its bytes are gone or unknown. Pinned leases are carried
 // so the selector can refuse them explicitly.
 func (s *Service) pausedLeasesOf(ctx context.Context, owner string, byPauseBuild map[string]store.BuildRow) []diskLease {
-	rows, err := s.db.ListLeases(ctx)
-	if err != nil {
-		s.log.Printf("disk reclaim: list leases: %v", err)
-		return nil
-	}
+	return s.pausedLeaseList(s.leasesOnce(ctx), owner, byPauseBuild)
+}
+
+// pausedLeaseList filters one lease-row listing down to owner's paused
+// lease candidates (so a pass reads the catalog once, not per owner):
+// one per lease, sized by its lease's pause build's recorded size_bytes
+// (the number the disk usage accounting reads, so the victim list and
+// the owner's Used can never disagree). A lease with no pause build row
+// is skipped — its bytes are gone or unknown. Pinned leases are carried
+// so the selector can refuse them explicitly.
+func (s *Service) pausedLeaseList(rows []store.LeaseRow, owner string, byPauseBuild map[string]store.BuildRow) []diskLease {
 	var out []diskLease
 	for _, r := range rows {
 		if r.Owner != owner || r.State != "suspended" || r.ResumeBuildID == "" {
@@ -474,6 +508,18 @@ func (s *Service) pausedLeasesOf(ctx context.Context, owner string, byPauseBuild
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].PausedAt.Before(out[j].PausedAt) })
 	return out
+}
+
+// leasesOnce lists the lease catalog from the store: the take-back loop
+// reads it once per pass and hands the rows to every owner's view, not
+// once per owner.
+func (s *Service) leasesOnce(ctx context.Context) []store.LeaseRow {
+	rows, err := s.db.ListLeases(ctx)
+	if err != nil {
+		s.log.Printf("disk reclaim: list leases: %v", err)
+		return nil
+	}
+	return rows
 }
 
 // diskRoomNow reads one room snapshot from the live box: statfs total
