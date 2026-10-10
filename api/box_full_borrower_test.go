@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // TestBiggestBorrowerRefusal: the requester is refused only when, after
@@ -18,6 +20,9 @@ func TestBiggestBorrowerRefusal(t *testing.T) {
 		request int
 		refuse  bool
 	}{
+		{"borrows nothing yet", []takeBackOwner{
+			{Owner: "req", UsedMiB: 0, SliceMiB: 1024},
+			{Owner: "b", UsedMiB: 0, SliceMiB: 1024}}, 2048, false},
 		{"inside its slice after the request", []takeBackOwner{
 			{Owner: "req", UsedMiB: 512, SliceMiB: 2048},
 			{Owner: "b", UsedMiB: 0, SliceMiB: 2048}}, 1024, false},
@@ -126,4 +131,66 @@ func TestBoxFullBiggestBorrowerEveryPath(t *testing.T) {
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: bob.ID, image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("bob's create on alice's full box: %v", err)
 	}
+}
+
+// TestBoxFullCountsOnlyTakeableOwners: the pinned box_full pre-check
+// counts only the leases of owners take-back may take from — other
+// owners over their slice and further over it than the requester would
+// be. The requester's own leases and an inside-slice owner's pinned
+// leases do not decide it.
+func TestBoxFullCountsOnlyTakeableOwners(t *testing.T) {
+	t.Run("over-slice owner all pinned is box_full", func(t *testing.T) {
+		svc, db, sub, ids := newFairShareService(t)
+		alice := addIdentityUser(t, ids, "alice")
+		bob := addIdentityUser(t, ids, "bob")
+		ctx := context.Background()
+		seedImage(t, db, "mid", 1024)
+		roomyDisk(svc)
+		installDynamicNode(t, svc, sub, 2048, 0, 512) // 4096 MiB, two 2048 MiB slices
+		for i := 0; i < 3; i++ {
+			l, err := svc.grantLease(ctx, leaseRequest{owner: bob.ID, image: "mid", ttl: time.Hour})
+			if err != nil {
+				t.Fatalf("grant bob %d: %v", i, err)
+			}
+			if _, err := svc.setPinned(bob.ID, l.ID, true); err != nil {
+				t.Fatalf("pin: %v", err)
+			}
+		}
+		a, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour})
+		if err != nil {
+			t.Fatalf("grant alice: %v", err)
+		}
+		dropNodeCache(svc)
+		warmFairShares(svc, ctx)
+		_, err = svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour})
+		if !isBoxFull(err) {
+			t.Fatalf("alice's create with only bob's pinned leases to take = %v, want box_full", err)
+		}
+		if a.Suspended {
+			t.Fatal("the requester's own lease was paused")
+		}
+	})
+	t.Run("inside-slice owner's pins are a wait", func(t *testing.T) {
+		svc, db, sub, ids := newFairShareService(t)
+		alice := addIdentityUser(t, ids, "alice")
+		bob := addIdentityUser(t, ids, "bob")
+		ctx := context.Background()
+		seedImage(t, db, "mid", 1024)
+		roomyDisk(svc)
+		installDynamicNode(t, svc, sub, 2048, 0, 512)
+		l, err := svc.grantLease(ctx, leaseRequest{owner: bob.ID, image: "mid", ttl: time.Hour})
+		if err != nil {
+			t.Fatalf("grant bob: %v", err)
+		}
+		if _, err := svc.setPinned(bob.ID, l.ID, true); err != nil {
+			t.Fatalf("pin: %v", err)
+		}
+		// The other 3072 MiB are held outside spoond.
+		installDynamicNode(t, svc, sub, 2048, 1536, 512)
+		warmFairShares(svc, ctx)
+		_, err = svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour})
+		if isBoxFull(err) || !errors.Is(err, substrate.ErrCapacity) {
+			t.Fatalf("create blocked by outside memory and an inside-slice pin = %v, want a capacity wait", err)
+		}
+	})
 }

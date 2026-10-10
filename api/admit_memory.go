@@ -48,23 +48,32 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		return nil
 	}
 
-	freeable := s.takeableFreeableMiB()
 	freeMiB, err := s.cachedFreeHugepageMiB(ctx)
 	if err != nil {
 		s.log.Printf("preempt: node info: %v", err)
 		return nil
 	}
 	need := uint64(memoryMB)
-	if freeMiB+freeable < need {
+	owners := s.takeBackOwners(ctx)
+	takeable, pinned := takeBackPool(owners, owner)
+	if freeMiB+takeable < need {
 		// Pinned leases are not take-back victims (FS5). If the pinned
-		// ones alone would free enough, the request is box_full: nothing
-		// unpinned can be taken for it.
-		if freeMiB+freeable+s.pinnedFreeableMiB() >= need {
+		// leases of the owners over their slice would free enough, the
+		// request is box_full: nothing unpinned can be taken for it.
+		if freeMiB+takeable+pinned >= need {
 			s.boxFullAlert(owner, memoryMB, "every take-back candidate is pinned")
 			return errBoxFull
 		}
-		// Not enough memory exists at all: taking back would only
-		// suspend leases for an admission that cannot succeed.
+		// The requester itself is the biggest borrower: box_full at
+		// once, it does not wait (fair shares).
+		if bf := biggestBorrowerRefusal(owners, owner, memoryMB); bf != nil {
+			s.boxFullAlert(owner, memoryMB, "the requester is the biggest borrower")
+			return bf
+		}
+		// A shortfall no owner causes (memory held outside spoond, or
+		// every owner inside their slice): taking back would only
+		// suspend leases for an admission that cannot succeed. The
+		// ordinary capacity check answers with a wait.
 		return nil
 	}
 
@@ -98,7 +107,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		if shortfall <= 0 {
 			return nil
 		}
-		owners := s.takeBackOwners(ctx)
+		owners = s.takeBackOwners(ctx)
 		victims := memVictims(owners, owner, shortfall, memoryMB)
 		if len(victims) == 0 {
 			// Take-back can free nothing. When the requester would be
@@ -169,9 +178,10 @@ func (e *memBoxFullError) Error() string {
 
 func (e *memBoxFullError) Unwrap() error { return errBoxFull }
 
-// biggestBorrowerRefusal returns the box_full refusal when requester,
-// after requestMiB more, is over its slice and at least as far over it
-// (by used/slice) as every other owner; nil otherwise. An owner without
+// biggestBorrowerRefusal returns the box_full refusal when requester
+// already holds at least its slice and, after requestMiB more, is over
+// it and at least as far over it (by used/slice) as every other owner;
+// nil otherwise. An owner without
 // a slice (unknown to the fair snapshot) is never refused here.
 func biggestBorrowerRefusal(owners []takeBackOwner, requester string, requestMiB int) error {
 	var req *takeBackOwner
@@ -184,6 +194,12 @@ func biggestBorrowerRefusal(owners []takeBackOwner, requester string, requestMiB
 	if req == nil || req.SliceMiB <= 0 {
 		return nil
 	}
+	// The requester must already hold its whole slice: an owner that
+	// borrows nothing yet is short only because of memory outside
+	// spoond or a box full of fair-share usage — a wait, not a refusal.
+	if req.UsedMiB < req.SliceMiB {
+		return nil
+	}
 	after := tbRatio(req.UsedMiB+requestMiB, req.SliceMiB)
 	if after <= 1 {
 		return nil
@@ -194,4 +210,26 @@ func biggestBorrowerRefusal(owners []takeBackOwner, requester string, requestMiB
 		}
 	}
 	return &memBoxFullError{Owner: requester, UsedMiB: req.UsedMiB, SliceMiB: req.SliceMiB, RequestMiB: requestMiB}
+}
+
+// takeBackPool sums the memory of the leases take-back could ever reach
+// for requester: those of the OTHER owners that are over their slice
+// (an owner inside their slice is never touched, and the requester is
+// never its own victim). takeable is their unpinned leases, pinned their
+// pinned ones. Both are upper bounds: memVictims still stops an owner
+// from dropping below the requester.
+func takeBackPool(owners []takeBackOwner, requester string) (takeable, pinned uint64) {
+	for _, o := range owners {
+		if o.Owner == requester || o.SliceMiB <= 0 || o.UsedMiB <= o.SliceMiB {
+			continue
+		}
+		for _, l := range o.Leases {
+			if l.Pinned {
+				pinned += uint64(l.MemoryMiB)
+			} else {
+				takeable += uint64(l.MemoryMiB)
+			}
+		}
+	}
+	return takeable, pinned
 }
