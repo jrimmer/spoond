@@ -316,6 +316,12 @@ summarised from README "Status".
 
 ### Fixed
 
+- **A disk-full failure from the orchestrator is a 503
+  `capacity_wait`, not a 500.** Create, pause, resume and checkpoint
+  errors whose message reports `no space left on device`, `ENOSPC` or
+  `disk quota exceeded` are mapped to `substrate.ErrCapacity` even when
+  the orchestrator sends them as `Internal`/`Unknown`.
+
 - **A memory admission that fails afterwards gives its cache debit
   back.** `admitMemory` returns an undo that credits the cached
   `NodeInfo` when the create or resume it admitted never took hold, so

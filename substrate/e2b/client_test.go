@@ -238,3 +238,46 @@ func TestMapErrorUnavailable(t *testing.T) {
 		t.Fatalf("mapError(nil) = %v, want nil", got)
 	}
 }
+
+// TestMapErrorDiskFull pins that an orchestrator disk-full error — create,
+// pause, resume and checkpoint failures arrive as Internal or Unknown with a
+// message naming ENOSPC — maps to substrate.ErrCapacity, the 503
+// capacity_wait the API already answers for ResourceExhausted.
+func TestMapErrorDiskFull(t *testing.T) {
+	phrases := []string{
+		"write /mnt/snapshots/x: no space left on device",
+		"ENOSPC: no space left on device, write",
+		"disk quota exceeded",
+		"No Space Left On Device",
+	}
+	for _, code := range []codes.Code{codes.Internal, codes.Unknown} {
+		for _, phrase := range phrases {
+			got := mapError(status.Error(code, phrase))
+			if !errors.Is(got, substrate.ErrCapacity) {
+				t.Errorf("mapError(%v, %q) = %v, want ErrCapacity", code, phrase, got)
+			}
+			if !strings.Contains(got.Error(), phrase) {
+				t.Errorf("mapError(%v, %q) = %v, want the message kept", code, phrase, got)
+			}
+		}
+	}
+
+	// An unrelated Internal error stays a raw gRPC error (a 500), and the
+	// codes already mapped keep their meaning.
+	if got := mapError(status.Error(codes.Internal, "failed to load template")); errors.Is(got, substrate.ErrCapacity) {
+		t.Fatalf("mapError(Internal, unrelated) = %v, must not be ErrCapacity", got)
+	}
+	// A non-gRPC error (a local file write) with matching text maps too.
+	if got := mapError(errors.New("write /var/lib/spoond/x: no space left on device")); !errors.Is(got, substrate.ErrCapacity) {
+		t.Fatalf("mapError(local ENOSPC) = %v, want ErrCapacity", got)
+	}
+	if got := mapError(status.Error(codes.NotFound, "no sandbox")); !errors.Is(got, substrate.ErrNotFound) {
+		t.Fatalf("mapError(NotFound) = %v, want ErrNotFound", got)
+	}
+	if got := mapError(status.Error(codes.ResourceExhausted, "full")); !errors.Is(got, substrate.ErrCapacity) {
+		t.Fatalf("mapError(ResourceExhausted) = %v, want ErrCapacity", got)
+	}
+	if got := mapError(status.Error(codes.Unavailable, "connection reset")); !errors.Is(got, substrate.ErrUnavailable) {
+		t.Fatalf("mapError(Unavailable) = %v, want ErrUnavailable", got)
+	}
+}
