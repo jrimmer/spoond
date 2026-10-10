@@ -60,6 +60,16 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	if err != nil {
 		return err
 	}
+	// ok guards the admission debit: until it is set true, the deferred
+	// undo gives the memory back (a failed restore never took the
+	// hugepages).
+	ok := false
+	undo := func() {}
+	defer func() {
+		if !ok {
+			undo()
+		}
+	}()
 	if l.Suspended {
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; restoring it brings a running sandbox back, and
@@ -74,7 +84,8 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		// Class re-admission (#128 part 2), as for a resume: a
 		// demand-burst lease stays burst and re-passes the reserve; a
 		// guarantee-burst one may fall back to guaranteed.
-		if err := s.admitMemory(ctx, l.Owner, img.MemoryMB); err != nil {
+		undo, err = s.admitMemory(ctx, l.Owner, img.MemoryMB)
+		if err != nil {
 			return err
 		}
 	}
@@ -155,6 +166,7 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseRestored, "restored from build "+b.BuildID)
+	ok = true
 	return nil
 }
 

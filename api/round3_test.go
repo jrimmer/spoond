@@ -192,7 +192,7 @@ func boxFullNode(t *testing.T) (*httptest.Server, *Service, *Lease, *Lease) {
 	// Sanity: a guaranteed admission of the victim's size is box_full now.
 	dropNodeCache(svc)
 	warmFairShares(svc, ctx)
-	if err := svc.admitMemory(ctx, "consumer-b", 1024); !isBoxFull(err) {
+	if _, err := svc.admitMemory(ctx, "consumer-b", 1024); !isBoxFull(err) {
 		t.Fatalf("setup: memory admission err = %v, want box_full", err)
 	}
 	return ts, svc, victim, filler
@@ -284,7 +284,7 @@ func TestUndrainBoxFullDefers(t *testing.T) {
 	}
 	dropNodeCache(svc)
 	warmFairShares(svc, ctx)
-	if err := svc.admitMemory(ctx, "consumer-a", 2048); !isBoxFull(err) {
+	if _, err := svc.admitMemory(ctx, "consumer-a", 2048); !isBoxFull(err) {
 		t.Fatalf("setup: memory re-admission err = %v, want box_full", err)
 	}
 

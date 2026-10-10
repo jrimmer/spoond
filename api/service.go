@@ -2367,9 +2367,21 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	defer diskRelease()
 	// Memory admission (FS2b-1): the one-pool check with take-back. A
 	// refusal answers before any sandbox exists.
-	if err := s.admitMemory(ctx, owner, memoryMB); err != nil {
+	//
+	// ok guards the admission debit: until it is set true, the deferred
+	// undo gives the memory back (a failed grant never took the
+	// hugepages). The warm-pool path below calls it too, because a
+	// pooled sandbox already holds its memory and so needs no new debit.
+	ok := false
+	undo, err := s.admitMemory(ctx, owner, memoryMB)
+	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if !ok {
+			undo()
+		}
+	}()
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
 	// cleans up). createSandbox records the memo before the lease row
@@ -2456,6 +2468,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			// until then, then release the in-flight hold.
 			break
 		}
+	}
+	// A pooled sandbox was created (and its hugepages debited) by an
+	// earlier warm-pool grant, so this grant must not hold a second
+	// debit for the same memory: give the admission's debit back now.
+	// undo is once-safe, so a later failure's deferred call is a no-op.
+	if lease.pooled {
+		undo()
 	}
 
 	if lease.SandboxID == "" {
@@ -2600,6 +2619,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		createReason = journalCreateReason(fmt.Sprintf("%s@%d", snap.row.Name, snap.row.Version), "", "")
 	}
 	s.journalLease(journalOpCreate, lease, createReason)
+	ok = true
 	return lease, nil
 }
 
@@ -2980,15 +3000,26 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	defer diskRelease()
 	// Memory re-admission (FS2b-1): a resume brings the guest (and its
 	// hugepages) back, so it re-passes the one-pool admission on the way.
-	if err := s.admitMemory(ctx, l.Owner, memPer); err != nil {
+	// ok guards the debit: until the resume body succeeds, the deferred
+	// undo gives the memory back (a failed resume never took the
+	// hugepages).
+	ok := false
+	undo, err := s.admitMemory(ctx, l.Owner, memPer)
+	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if !ok {
+			undo()
+		}
+	}()
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
 	}
 	// Written on every resume too, so a lease created before generations
 	// existed gets the file the first time it comes back.
 	s.writeGeneration(l)
+	ok = true
 	return l, nil
 }
 
@@ -3122,6 +3153,20 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
 
+	// ok guards a suspended lease's admission debit: until it is set
+	// true on a success return, the deferred undo gives the memory back
+	// (a failed restart never took the hugepages). A running lease admits
+	// nothing, so undo stays a no-op. mode cold returns through
+	// restartCold, which owns its own guard.
+	ok := false
+	var err error
+	undo := func() {}
+	defer func() {
+		if !ok {
+			undo()
+		}
+	}()
+
 	if mode == "cold" {
 		return s.restartCold(ctx, owner, l)
 	}
@@ -3136,7 +3181,8 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		defer func() { s.releaseQuotaReservation(owner, 1, l.MemoryMB) }()
 		// Memory re-admission (FS2b-1), as for a resume: bringing the
 		// guest back re-passes the one-pool admission.
-		if err := s.admitMemory(ctx, owner, l.MemoryMB); err != nil {
+		undo, err = s.admitMemory(ctx, owner, l.MemoryMB)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -3156,6 +3202,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 			return nil, err
 		}
 		s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "restarted (snapshot round-trip)")
+		ok = true
 		return l, nil
 	}
 
@@ -3221,6 +3268,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "cold-restarted from image "+l.Image)
+	ok = true
 	return l, nil
 }
 
@@ -3242,6 +3290,17 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	if err != nil {
 		return nil, err
 	}
+	// ok guards a suspended lease's admission debit: until it is set true
+	// on a success return, the deferred undo gives the memory back (a
+	// failed cold restart never took the hugepages). A running lease
+	// admits nothing, so undo stays a no-op.
+	ok := false
+	undo := func() {}
+	defer func() {
+		if !ok {
+			undo()
+		}
+	}()
 	if l.Suspended {
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; the fresh guest needs it back, so the cold restart
@@ -3253,7 +3312,8 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		// Memory re-admission (FS2b-1) against the image's current
 		// charge — the number the fresh guest runs (and is stamped with
 		// below), as for the memory check above.
-		if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
+		undo, err = s.admitMemory(ctx, owner, img.MemoryMB)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -3322,6 +3382,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		s.refreshPeersAsync(ctx)
 	}
 	s.emitLeaseEvent(l.ID, owner, LeaseRestarted, "cold")
+	ok = true
 	return l, nil
 }
 
@@ -3495,6 +3556,17 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	s.store.mu.Unlock()
 	defer s.endBusy(src)
 
+	// ok guards the clone's admission debit: until it is set true on a
+	// success return, the deferred undo gives the memory back (a failed
+	// clone never took the hugepages).
+	ok := false
+	undo := func() {}
+	defer func() {
+		if !ok {
+			undo()
+		}
+	}()
+
 	// The clone costs its image's memory_mb like any create (#128).
 	memPer := s.imageMiB(src.Image)
 	if err := s.reserveQuota(owner, 1, memPer, true); err != nil {
@@ -3534,7 +3606,8 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	}
 	// Memory admission (FS2b-1): the clone takes its own charge against
 	// the one pool, like every lease.
-	if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
+	undo, err = s.admitMemory(ctx, owner, img.MemoryMB)
+	if err != nil {
 		return nil, "", err
 	}
 	// Hold the clone's egress memo in flight until it is in the store,
@@ -3582,6 +3655,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	}
 	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("cloned from %s (build %s)", srcID, b.BuildID))
 	s.journalLease(journalOpCreate, lease, journalCreateReason("", srcID, ""))
+	ok = true
 	return lease, b.BuildID, nil
 }
 
@@ -3649,7 +3723,16 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	}
 
 	var created []*Lease
+	// undos holds each admitted child's admission undo: a rollback stops
+	// the children's sandboxes (freeing their hugepages), so it credits
+	// every admission back too. A child that is not rolled back keeps its
+	// debit.
+	var undos []func()
 	rollback := func(err error) ([]*Lease, string, error) {
+		for _, u := range undos {
+			u()
+		}
+		undos = nil
 		for _, l := range created {
 			_ = s.sub.Delete(ctx, l.SandboxID)
 			s.deleteSandboxRow(l.SandboxID)
@@ -3703,10 +3786,14 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		// reserved above, but each child's charge lands
 		// on the one pool as the children are created — one at a time
 		// below, so each child admits in turn and the batch behaves as
-		// one.
-		if err := s.admitMemory(ctx, owner, img.MemoryMB); err != nil {
+		// one. undo credits this child's debit; it is collected so a
+		// later rollback credits it (the child's sandbox is stopped
+		// there, freeing the memory).
+		undo, err := s.admitMemory(ctx, owner, img.MemoryMB)
+		if err != nil {
 			return rollback(err)
 		}
+		undos = append(undos, undo)
 		// Hold this child's egress memo in flight until it is in the store
 		// (or rolled back), so a refresh mid-create does not prune it
 		// (spoond-ob18).
