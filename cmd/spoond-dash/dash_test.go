@@ -329,11 +329,11 @@ func TestUserNamesLayouts(t *testing.T) {
 	}
 }
 
-// TestFromDBBurstCountsAllLiveBurstLeases: the capacity panel's burst
-// count comes from the store over every live burst lease, not from the
-// ≤40 rows the leases panel reads — a burst lease older than the
-// display window still counts.
-func TestFromDBBurstCountsAllLiveBurstLeases(t *testing.T) {
+// TestFromDBTakenBackCountsOutsideTheWindow: the capacity panel's
+// taken-back count comes from the store over every lease suspended by
+// memory take-back, even one older than the leases panel's 40-row
+// window, and from the row itself as the state mark.
+func TestFromDBTakenBackCountsOutsideTheWindow(t *testing.T) {
 	cfg := testConfig(t, "")
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -346,21 +346,19 @@ func TestFromDBBurstCountsAllLiveBurstLeases(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
-	// 41 running burst leases (the oldest outside the 40-row window), a
-	// guaranteed lease, a lost burst lease (not live) and a suspended
-	// burst lease.
 	queries := []string{
 		`INSERT INTO images (name, template_id, current_build_id, vcpu, memory_mb, disk_mb, updated_at) VALUES ('go-base','t1','b1',2,2048,6144,'` + ts(-48*time.Hour) + `')`,
-		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class) VALUES ('guaranteed','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','running','guaranteed')`,
-		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class) VALUES ('lost-burst','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','lost','burst')`,
+		// A running lease that still carries the reason is not suspended,
+		// and an idle-suspended lease carries another reason: neither is
+		// taken back.
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspend_reason) VALUES ('running','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','running','take_back')`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspend_reason) VALUES ('idle','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','suspended','idle_suspend')`,
 	}
 	for i := 0; i < 41; i++ {
 		queries = append(queries, fmt.Sprintf(
-			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class) VALUES ('burst-%02d','u-1','go-base','%s','%s','%s','running','burst')`,
+			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspend_reason) VALUES ('taken-%02d','u-1','go-base','%s','%s','%s','suspended','take_back')`,
 			i, ts(-time.Duration(i+2)*time.Minute), ts(time.Hour), ts(0)))
 	}
-	queries = append(queries,
-		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class) VALUES ('susp-burst','u-1','go-base','`+ts(-2*time.Hour)+`','`+ts(time.Hour)+`','`+ts(0)+`','suspended',1,'burst')`)
 	for _, q := range queries {
 		if _, err := raw.Exec(q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -376,59 +374,15 @@ func TestFromDBBurstCountsAllLiveBurstLeases(t *testing.T) {
 	if len(s.Rows) != 40 {
 		t.Fatalf("rows = %d, want the display window's 40", len(s.Rows))
 	}
-	if s.Burst != 42 {
-		t.Fatalf("burst = %d, want 42 (41 running + 1 suspended, live; the lost one and the guaranteed one excluded)", s.Burst)
+	if s.TakenBack != 41 {
+		t.Fatalf("takenBack = %d, want 41 (the running and idle-suspended rows excluded)", s.TakenBack)
 	}
 }
 
-// TestFromDBPreemptedCountsOutsideTheWindow: the preempted count comes
-// from the store over every live preempted lease (#128 part 3), even one
-// older than the leases panel's 40-row window.
-func TestFromDBPreemptedCountsOutsideTheWindow(t *testing.T) {
-	cfg := testConfig(t, "")
-	db, err := store.Open(cfg.DBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	raw, err := sql.Open("sqlite", cfg.DBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
-	queries := []string{
-		`INSERT INTO images (name, template_id, current_build_id, vcpu, memory_mb, disk_mb, updated_at) VALUES ('go-base','t1','b1',2,2048,6144,'` + ts(-48*time.Hour) + `')`,
-		// 41 preempted leases, the oldest outside the display window, and
-		// one running lease that is not preempted.
-		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class, preempted_at) VALUES ('running','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','running',0,'burst','')`,
-	}
-	for i := 0; i < 41; i++ {
-		queries = append(queries, fmt.Sprintf(
-			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class, preempted_at) VALUES ('preempt-%02d','u-1','go-base','%s','%s','%s','suspended',1,'burst','%s')`,
-			i, ts(-time.Duration(i+2)*time.Minute), ts(time.Hour), ts(0), ts(-time.Duration(i+1)*time.Minute)))
-	}
-	for _, q := range queries {
-		if _, err := raw.Exec(q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	raw.Close()
-	os.WriteFile(cfg.UsersFile, []byte(`{"users":[{"id":"u-1","name":"ci"}]}`), 0o600)
-
-	var s Snapshot
-	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
-		t.Fatal(err)
-	}
-	if s.Preempted != 41 {
-		t.Fatalf("preempted = %d, want 41 (the running lease excluded)", s.Preempted)
-	}
-}
-
-// TestFromDBLostPreemptedNotMarked: a lost row keeps its preempted_at
-// in the store, but it is not waiting for a resume, so neither the "·p"
-// row mark nor the attention-strip count applies.
-func TestFromDBLostPreemptedNotMarked(t *testing.T) {
+// TestFromDBLostTakenBackNotMarked: a lost row may keep its suspend_reason
+// in the store, but it is not suspended, so neither the row mark nor the
+// capacity count applies.
+func TestFromDBLostTakenBackNotMarked(t *testing.T) {
 	cfg := testConfig(t, "")
 	db, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -443,8 +397,8 @@ func TestFromDBLostPreemptedNotMarked(t *testing.T) {
 	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
 	for _, q := range []string{
 		`INSERT INTO images (name, template_id, current_build_id, vcpu, memory_mb, disk_mb, updated_at) VALUES ('go-base','t1','b1',2,2048,6144,'` + ts(-48*time.Hour) + `')`,
-		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, class, preempted_at) VALUES ('lost-preempt','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','lost','burst','` + ts(-time.Minute) + `')`,
-		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, class, preempted_at) VALUES ('susp-preempt','u-1','go-base','` + ts(-2*time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','suspended',1,'burst','` + ts(-time.Minute) + `')`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspend_reason) VALUES ('lost-taken','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','lost','take_back')`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspend_reason) VALUES ('susp-taken','u-1','go-base','` + ts(-2*time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','suspended','take_back')`,
 	} {
 		if _, err := raw.Exec(q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -457,18 +411,18 @@ func TestFromDBLostPreemptedNotMarked(t *testing.T) {
 	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
 		t.Fatal(err)
 	}
-	if s.Preempted != 1 {
-		t.Fatalf("preempted = %d, want 1 (the lost row excluded)", s.Preempted)
+	if s.TakenBack != 1 {
+		t.Fatalf("takenBack = %d, want 1 (the lost row excluded)", s.TakenBack)
 	}
 	for _, r := range s.Rows {
 		switch r.ID {
-		case "lost-preempt":
-			if r.Preempted {
-				t.Fatal("lost preempted row must not show the ·p mark")
+		case "lost-taken":
+			if r.TakenBack {
+				t.Fatal("lost row must not show the taken-back state")
 			}
-		case "susp-preempt":
-			if !r.Preempted {
-				t.Fatal("suspended preempted row must show the ·p mark")
+		case "susp-taken":
+			if !r.TakenBack {
+				t.Fatal("suspended take-back row must show the taken-back state")
 			}
 		}
 	}
