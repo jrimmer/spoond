@@ -163,33 +163,82 @@ func (h *diskTBHarness) seedNamedAndKept(t *testing.T, owner string, namedSize, 
 	}
 }
 
-// watchEvents subscribes to the event stream now and returns a func
-// that drains what has arrived so far. Subscribe FIRST: the bus
-// delivers only to live subscribers, so a drain after the fact would
-// miss everything. Delivery goes into the subscription's own buffer;
-// the pump just moves it into a slice under a mutex.
-func watchEvents(t *testing.T, svc *Service) func() []LeaseEvent {
+// watchEvents subscribes to the event stream now and returns a watcher
+// over it. Subscribe FIRST: the bus delivers only to live subscribers,
+// so a drain after the fact would miss everything. Events are read from
+// the subscription channel directly (the bus buffers them), and every
+// assertion waits for the event it cares about with a deadline — a
+// snapshot taken the moment a call returns races the channel and sees
+// an empty buffer half the time.
+func watchEvents(t *testing.T, svc *Service) *eventWatcher {
 	t.Helper()
 	sub := svc.Subscribe(EventFilter{})
 	t.Cleanup(sub.Close)
-	var mu sync.Mutex
-	var out []LeaseEvent
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for ev := range sub.C {
-			mu.Lock()
-			out = append(out, ev)
-			mu.Unlock()
+	return &eventWatcher{C: sub.C}
+}
+
+// eventWatcher reads one subscription's channel and logs what it saw.
+// waitFor blocks until a wanted event arrives (2 s deadline); all keeps
+// every event read so far, so an absence check is made only after a
+// waitFor proved the stream alive — disk.cleanup closes every take-back
+// call, successful or refused, so it is the always-emitted event a test
+// waits for before asserting something never fired.
+type eventWatcher struct {
+	C <-chan LeaseEvent
+
+	mu   sync.Mutex
+	seen []LeaseEvent
+}
+
+// waitFor reads C until pred matches, failing the test after 2 s. Every
+// event read on the way — the match included — is kept in the log.
+func (w *eventWatcher) waitFor(t *testing.T, want string, pred func(LeaseEvent) bool) LeaseEvent {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-w.C:
+			if !ok {
+				t.Fatalf("event stream closed while waiting for %s", want)
+			}
+			w.mu.Lock()
+			w.seen = append(w.seen, ev)
+			w.mu.Unlock()
+			if pred(ev) {
+				return ev
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", want)
 		}
-	}()
-	t.Cleanup(func() { sub.Close(); <-done })
-	return func() []LeaseEvent {
-		mu.Lock()
-		defer mu.Unlock()
-		got := make([]LeaseEvent, len(out))
-		copy(got, out)
-		return got
+	}
+}
+
+// all returns every event read so far (by waitFor or drain). Read it
+// only after a waitFor: before that it says nothing about the stream.
+func (w *eventWatcher) all() []LeaseEvent {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	got := make([]LeaseEvent, len(w.seen))
+	copy(got, w.seen)
+	return got
+}
+
+// drain takes everything buffered right now into the log. The bus
+// buffers per subscriber, so nothing is lost by reading late; it still
+// proves nothing about arrival, which is what waitFor is for.
+func (w *eventWatcher) drain() {
+	for {
+		select {
+		case ev, ok := <-w.C:
+			if !ok {
+				return
+			}
+			w.mu.Lock()
+			w.seen = append(w.seen, ev)
+			w.mu.Unlock()
+		default:
+			return
+		}
 	}
 }
 
@@ -296,27 +345,20 @@ func TestDiskTakeBackGarbageFirst(t *testing.T) {
 	if r := h.leaseRowMust(t, "vict-1"); r.State != "suspended" {
 		t.Fatalf("vict-1 = %v, want it intact", r)
 	}
-	got := evs()
-	var cleanup *LeaseEvent
-	var critical int
-	for i := range got {
-		switch got[i].Type {
-		case LeaseDiskCleanup:
-			cleanup = &got[i]
-		case LeaseCriticalRelease:
-			critical++
-		}
-	}
-	if cleanup == nil {
-		t.Fatalf("no disk.cleanup event among %v", got)
-	}
+	// Wait for the pass's disk.cleanup (every completed call emits one)
+	// so the stream is proven live before asserting what never fired.
+	cleanup := evs.waitFor(t, "disk.cleanup", func(ev LeaseEvent) bool {
+		return ev.Type == LeaseDiskCleanup
+	})
 	// The categories are named exactly: the orphan's 4 MiB of garbage
 	// and zero paused-lease bytes.
 	if !containsAll(cleanup.Detail, "4.0 MiB of garbage", "0 KiB of paused leases") {
 		t.Fatalf("cleanup detail %q lacks the exact per-category split", cleanup.Detail)
 	}
-	if critical != 0 {
-		t.Fatalf("garbage alone covered the need: %d critical_release events", critical)
+	for _, ev := range evs.all() {
+		if ev.Type == LeaseCriticalRelease {
+			t.Fatalf("garbage alone covered the need: critical_release %+v", ev)
+		}
 	}
 }
 
@@ -337,6 +379,11 @@ func TestDiskTakeBackNamedKeptUntouched(t *testing.T) {
 	if freed != 0 {
 		t.Fatalf("freed = %d, want 0", freed)
 	}
+	// The refused call still closes with its disk.cleanup; only after it
+	// is seen is the absence of critical_release meaningful.
+	evs.waitFor(t, "disk.cleanup", func(ev LeaseEvent) bool {
+		return ev.Type == LeaseDiskCleanup
+	})
 	// Both builds are still in the catalog.
 	builds, err := h.db.ListBuilds(context.Background())
 	if err != nil {
@@ -352,7 +399,7 @@ func TestDiskTakeBackNamedKeptUntouched(t *testing.T) {
 	if snap.BuildID != "named-consumer-b" {
 		t.Fatalf("named snapshot = %+v", snap)
 	}
-	for _, ev := range evs() {
+	for _, ev := range evs.all() {
 		if ev.Type == LeaseCriticalRelease {
 			t.Fatalf("critical_release for named/kept owner: %+v", ev)
 		}
@@ -385,7 +432,12 @@ func TestDiskTakeBackPinnedSurvivesBoxFull(t *testing.T) {
 	if r := h.leaseRowMust(t, "plain-1"); r.State != "suspended" {
 		t.Fatalf("plain-1 = %v, want it intact", r)
 	}
-	for _, ev := range evs() {
+	// The refusal's disk.cleanup proves the stream delivered this call's
+	// events before anything is asserted about what never fired.
+	evs.waitFor(t, "disk.cleanup", func(ev LeaseEvent) bool {
+		return ev.Type == LeaseDiskCleanup
+	})
+	for _, ev := range evs.all() {
 		if ev.Type == LeaseCriticalRelease && ev.LeaseID == "pinned-1" {
 			t.Fatal("critical_release must never fire for a pinned lease")
 		}
@@ -540,6 +592,17 @@ func TestDiskTakeBackStalePickNoEventNoRefusal(t *testing.T) {
 		l.State = "running"
 	}
 	h.svc.store.mu.Unlock()
+	// A live lease emit that fired before the watcher subscribed: the
+	// probe below consumes it on its way to disk.cleanup, which is the
+	// exact shape a mutated emit-before-release produces (the bogus
+	// critical_release is read before the cleanup). Under the committed
+	// order the stale pick emits nothing and this extra event is the
+	// only noise the waitFor walks past.
+	svc := h.svc
+	sub := svc.Subscribe(EventFilter{})
+	svc.emitLeaseEvent("pre-existing", "legacy-consumer", LeaseCriticalRelease, "pre-existing event before the pass")
+	<-sub.C // proof the emit landed on the bus (this watcher's own copy)
+	sub.Close()
 
 	evs := watchEvents(t, h.svc)
 	freed, err := h.svc.diskTakeBack(context.Background(), 100<<20, "consumer-a")
@@ -553,7 +616,12 @@ func TestDiskTakeBackStalePickNoEventNoRefusal(t *testing.T) {
 	if r := h.leaseRowMust(t, "vict-1"); r.State != "suspended" {
 		t.Fatalf("vict-1 = %v, want it intact after its stale pick", r)
 	}
-	for _, ev := range evs() {
+	// Wait for the pass's disk.cleanup first: only a delivered stream
+	// proves that no critical_release for the stale pick went out.
+	evs.waitFor(t, "disk.cleanup", func(ev LeaseEvent) bool {
+		return ev.Type == LeaseDiskCleanup
+	})
+	for _, ev := range evs.all() {
 		if ev.Type == LeaseCriticalRelease && ev.LeaseID == "vict-1" {
 			t.Fatal("a stale pick must not emit critical_release")
 		}
