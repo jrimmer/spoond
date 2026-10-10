@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v2/substrate"
 )
 
 // Named snapshots (2.7, #83): a checkpoint build with a stable name and a
@@ -505,6 +506,15 @@ func (s *Service) mapSnapshotCheckpointError(err error) *namedSnapshotError {
 		return errLeaseNotFound()
 	case errors.As(err, &capErr), errors.As(err, &budgetErr):
 		return errKeptBudget(err.Error())
+	case isBoxFull(err):
+		// The save's checkpoint could not fit in usable snapshot disk
+		// and take-back had nothing to reclaim (FS3b): the same 429
+		// box_full every other path answers.
+		return &namedSnapshotError{status: http.StatusTooManyRequests, code: "box_full", msg: err.Error()}
+	case errors.Is(err, substrate.ErrCapacity):
+		// Take-back ran and the disk is still short: a wait, never a
+		// failure.
+		return &namedSnapshotError{status: http.StatusServiceUnavailable, code: "capacity_wait", msg: "capacity: " + err.Error(), retryAfter: capacityRetryAfterSecs}
 	default:
 		return &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "save failed"}
 	}

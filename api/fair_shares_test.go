@@ -599,8 +599,9 @@ func TestSharesListJSONShape(t *testing.T) {
 		CapacityKnown bool    `json:"capacity_known"`
 	}
 	var got struct {
-		CapacityKnown bool        `json:"capacity_known"`
-		Owners        []shareJSON `json:"owners"`
+		CapacityKnown bool             `json:"capacity_known"`
+		Owners        []shareJSON      `json:"owners"`
+		Disk          map[string]int64 `json:"disk"`
 	}
 	dec := json.NewDecoder(rec.Body)
 	dec.DisallowUnknownFields()
@@ -639,6 +640,68 @@ func TestSharesListJSONShape(t *testing.T) {
 	}
 	if alice.Ratio <= 0 {
 		t.Fatalf("ratio = %v, want > 0", alice.Ratio)
+	}
+}
+
+// TestSharesListDiskRoom: GET /api/fair-shares carries the snapshot
+// disk's room as a "disk" object when the disk can be read, and omits
+// it when the read fails (unknown capacity is not a zero disk). The
+// numbers are the same diskRoomNow formula the take-back policy uses.
+func TestSharesListDiskRoom(t *testing.T) {
+	srv, svc, _, _ := newFairShareServer(t)
+	adminTok, _ := bootstrapAdmin(t, srv)
+
+	readDisk := func() (map[string]any, bool) {
+		req := httptest.NewRequest("GET", "/api/fair-shares", nil)
+		req.Header.Set("Authorization", "Bearer "+adminTok)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/fair-shares: %d %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		disk, ok := body["disk"].(map[string]any)
+		return disk, ok
+	}
+
+	// A readable disk: total 1 GiB, free 900 MiB, no reservations and
+	// no floor. The seven named keys must all be present.
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 1 << 30, 900 << 20, nil }
+	t.Setenv("DISK_RESERVE_PCT", "0")
+	svc.diskInflight.settle(time.Now(), int64(900<<20))
+	disk, ok := readDisk()
+	if !ok {
+		t.Fatal("disk object missing from a readable box")
+	}
+	want := map[string]float64{
+		"total_bytes":    1 << 30,
+		"free_bytes":     900 << 20,
+		"reserved_bytes": 0,
+		"floor_bytes":    0,
+		"pending_bytes":  0,
+		"freeing_bytes":  0,
+		"usable_bytes":   900 << 20,
+	}
+	for k, w := range want {
+		got, present := disk[k]
+		if !present {
+			t.Fatalf("disk key %q missing from %v", k, disk)
+		}
+		if got.(float64) != w {
+			t.Fatalf("disk[%q] = %v, want %v", k, got, w)
+		}
+	}
+	if len(disk) != len(want) {
+		t.Fatalf("disk has %d keys, want %d: %v", len(disk), len(want), disk)
+	}
+
+	// An unreadable disk: the object must be omitted, never zero-filled.
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 0, 0, context.DeadlineExceeded }
+	if disk, ok := readDisk(); ok {
+		t.Fatalf("disk = %v present for an unreadable box, want omitted", disk)
 	}
 }
 

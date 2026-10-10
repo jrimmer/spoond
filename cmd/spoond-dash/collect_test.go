@@ -11,6 +11,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 )
 
 // sseServer is a minimal /api/leases/events stand-in: it answers GETs
@@ -157,6 +161,32 @@ func TestEventsURL(t *testing.T) {
 		if got := eventsURL(in); got != want {
 			t.Errorf("eventsURL(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestDiskRoomFromMetrics: the collector reads the snapshot disk's
+// room from the backend's gauges, and leaves it unknown when the scrape
+// does not carry them.
+func TestDiskRoomFromMetrics(t *testing.T) {
+	parse := func(text string) map[string]*dto.MetricFamily {
+		t.Helper()
+		p := expfmt.NewTextParser(model.UTF8Validation)
+		fams, err := p.TextToMetricFamilies(strings.NewReader(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fams
+	}
+	c := newCollector(Config{Interval: time.Second, History: 10})
+	var s Snapshot
+	c.fromMetrics(&s, parse("spoond_snapshot_disk_reserved_bytes 104857600\nspoond_snapshot_disk_usable_bytes -2048\n"), time.Now())
+	if !s.DiskRoomKnown || s.DiskRoom != (DiskRoom{Reserved: 100 << 20, Usable: -2048}) {
+		t.Fatalf("room = %+v known=%v, want reserved 100 MiB, usable -2048", s.DiskRoom, s.DiskRoomKnown)
+	}
+	s = Snapshot{}
+	c.fromMetrics(&s, parse("spoond_leases_active 1\n"), time.Now())
+	if s.DiskRoomKnown {
+		t.Fatal("room known without the gauges")
 	}
 }
 

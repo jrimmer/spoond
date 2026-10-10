@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh search *)",
+      "Bash(gh api *)",
+      "Bash(gh release *)",
+      "Bash(grep -v \"^\\\\s*$\")"
+    ]
+  },
+  "spinnerTipsEnabled": false
+}

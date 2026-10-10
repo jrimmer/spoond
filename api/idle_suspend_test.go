@@ -395,6 +395,49 @@ func TestIdleSuspendSweepAtThreshold(t *testing.T) {
 	}
 }
 
+// TestIdleSuspendPinInWindowNotSuspended: a pin landing between the
+// sweep's collection pass and the pause wins. The second re-check runs
+// in the same store-lock section that sets busy (refusePinned), so the
+// lease is not suspended and the owner's pin is honoured (FS5).
+func TestIdleSuspendPinInWindowNotSuspended(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(l, 60); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
+	}
+	svc.store.mu.Lock()
+	l.LastActive = base
+	svc.store.mu.Unlock()
+	sbID := l.SandboxID
+
+	// The pin lands after the sweep's re-check and before the pause.
+	svc.idleBeforePause = func(victim *Lease) {
+		svc.idleBeforePause = nil
+		if _, err := svc.setPinned("c", victim.ID, true); err != nil {
+			t.Errorf("pin mid-sweep: %v", err)
+		}
+	}
+	svc.suspendIdleLeases(ctx, base.Add(61*time.Second))
+
+	if l.Suspended {
+		t.Fatal("a pin landing in the pause window did not stop the idle suspend")
+	}
+	if !l.Pinned {
+		t.Fatal("the mid-sweep pin was not kept")
+	}
+	if got := calls(sub.Fake, "Pause "+sbID); got != 0 {
+		t.Fatalf("pause calls = %d, want 0", got)
+	}
+}
+
 // TestIdleSuspendEmitsEvent: the sweep emits an idle_suspended event
 // whose detail names how long the lease had been idle.
 func TestIdleSuspendEmitsEvent(t *testing.T) {

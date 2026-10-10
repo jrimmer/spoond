@@ -12,6 +12,11 @@ summarised from README "Status".
 
 ### Added
 
+- **Named saves answer disk refusals like every other path.** A save
+  whose checkpoint does not fit in usable snapshot disk answers
+  `429 box_full` or `503 capacity_wait` with `Retry-After`, not
+  `500 save failed`.
+
 - **FS2b: the biggest borrower gets box_full at once.** When take-back
   can free nothing because the requester is itself the biggest borrower
   (over its fair memory slice after the request, and no other owner
@@ -120,6 +125,21 @@ summarised from README "Status".
   does not fit answers `429 box_full` (nothing reclaimable) or `503
   capacity_wait` (a structural shortage), on create, resume, suspend,
   checkpoint/keep and named save alike.
+- **`GET /api/fair-shares` reports the snapshot disk's room.** When the
+  disk can be read the response carries a `disk` object
+  (`total_bytes`, `free_bytes`, `reserved_bytes`, `floor_bytes`,
+  `pending_bytes`, `freeing_bytes`, `usable_bytes`) — the same numbers
+  the take-back policy decides with; the object is omitted when the
+  statfs read fails, so an unknown disk is never a zero one.
+- **`capacity.disk_low` alert.** The notifier's periodic checks now
+  alert (critical) when the snapshot disk's free bytes fall below the
+  reserve floor (`DISK_RESERVE_PCT`, default 5, of the disk), resolving
+  when free comes back. It is a passive alert: it reads statfs and
+  emits, and deletes nothing.
+- **The dashboard shows the snapshot disk's fair-share room.** The
+  backend exports `spoond_snapshot_disk_reserved_bytes` and
+  `spoond_snapshot_disk_usable_bytes`, and the host panel draws one
+  line, `disk reserved X · usable Y` (humanized).
 
 ### Status code changes
 

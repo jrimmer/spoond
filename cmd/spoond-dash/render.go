@@ -178,7 +178,7 @@ func notices(s Snapshot) []Notice {
 	// panel names the count and the per-owner breakdown, not each lease.
 	if s.PinnedIdle > 0 {
 		out = append(out, Notice{ID: "pinned-idle", Severity: "warn",
-			Text: fmt.Sprintf("%d pinned lease%s idle over 7 d (%s)", s.PinnedIdle, plural(s.PinnedIdle), pinnedIdleOwnerCounts(s.PinnedIdleByOwner))})
+			Text: fmt.Sprintf("%d pinned lease%s idle over %d d (%s)", s.PinnedIdle, plural(s.PinnedIdle), pinnedIdleNoticeDays(), pinnedIdleOwnerCounts(s.PinnedIdleByOwner))})
 	}
 	return out
 }
@@ -240,6 +240,27 @@ func reconcileDismissed(active, dismissed []string) (kept, visible []string) {
 // DefaultKeptDiskWarnPct is the kept-checkpoint disk share (#126) past
 // which the Notifications panel warns, when KEPT_DISK_WARN_PCT is unset.
 const DefaultKeptDiskWarnPct = 40.0
+
+// DefaultPinnedIdleNoticeDays is PINNED_IDLE_NOTICE_DAYS when the
+// environment does not set it: the same 7-day default the backend uses
+// (FS5). The dashboard only names the value in its pinned-idle notice;
+// the backend does the flagging.
+const DefaultPinnedIdleNoticeDays = 7
+
+// pinnedIdleNoticeDays reads the pinned-idle notice age
+// (PINNED_IDLE_NOTICE_DAYS, in days): unset or unparsable values mean
+// the default.
+func pinnedIdleNoticeDays() int {
+	v := os.Getenv("PINNED_IDLE_NOTICE_DAYS")
+	if v == "" {
+		return DefaultPinnedIdleNoticeDays
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return DefaultPinnedIdleNoticeDays
+	}
+	return n
+}
 
 // DefaultIOFullWarnPct and DefaultIOFullBadPct are the disk I/O full
 // pressure (PSI) levels, in percent of the 60 s average, at which the
@@ -821,6 +842,36 @@ func dimLine(parts ...string) []grid.Seg {
 	return segs
 }
 
+// humanBytes renders a byte count for the host panel's disk-room line:
+// "1.0 TiB", "1.5 GiB", "512 MiB", "0 B". It mirrors the notifier's
+// humanBytes so the dashboard and the alert name the same size the same
+// way.
+func humanBytes(n int64) string {
+	neg := n < 0
+	u := uint64(n)
+	if neg {
+		u = uint64(-n)
+	}
+	const unit = 1 << 10
+	var out string
+	switch {
+	case u < unit:
+		out = fmt.Sprintf("%d B", u)
+	case u < unit<<10:
+		out = fmt.Sprintf("%.0f KiB", float64(u)/unit)
+	case u < unit<<20:
+		out = fmt.Sprintf("%.1f MiB", float64(u)/(unit<<10))
+	case u < unit<<30:
+		out = fmt.Sprintf("%.1f GiB", float64(u)/(unit<<20))
+	default:
+		out = fmt.Sprintf("%.1f TiB", float64(u)/(unit<<30))
+	}
+	if neg {
+		return "-" + out
+	}
+	return out
+}
+
 // thousands formats n with commas every three digits: 1234 reads
 // "1,234".
 func thousands(n int) string {
@@ -1154,9 +1205,15 @@ func hostPanelRows(s Snapshot) []hostRow {
 
 // hostH is the host panel's own height: title, meters, rule, the two
 // tail rows and the frame's bottom edge. Side by side, the panel is
-// drawn as tall as capacity instead — the taller of the two.
+// drawn as tall as capacity instead — the taller of the two. The disk
+// room line, when the fair-share endpoint supplied it, is a third tail
+// row.
 func (l *layout) hostH() int {
-	return 1 + len(hostPanelRows(l.s)) + 1 + 2 + 1
+	tails := 2
+	if l.s.DiskRoomKnown {
+		tails++
+	}
+	return 1 + len(hostPanelRows(l.s)) + 1 + tails + 1
 }
 
 // hostRows builds the host panel's meter rows: cpu, the disk I/O meters,
@@ -1258,6 +1315,17 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 	alloc[2].Style = "text"
 	g.Segs(x+2, row, alloc, inner)
 	row++
+
+	// The snapshot disk's fair-share room (FS3b), when the collector
+	// could read it: what the take-back policy reserves and what a new
+	// request may actually use, side by side with the statfs meter above.
+	if l.s.DiskRoomKnown {
+		room := l.s.DiskRoom
+		g.Segs(x+2, row, dimLine(
+			fmt.Sprintf("disk reserved %s", humanBytes(room.Reserved)),
+			fmt.Sprintf("usable %s", humanBytes(room.Usable))), inner)
+		row++
+	}
 
 	// The build GC's mode — bold ok when deletion is on, dim when it
 	// only logs candidates — and its lifetime count, left out at zero.
