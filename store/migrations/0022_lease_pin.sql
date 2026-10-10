@@ -30,8 +30,40 @@ UPDATE leases SET pinned = 1
  WHERE hold_expires_at <> ''
    AND hold_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
 
+-- A non-persistent lease the conversion pinned keeps its VM past the TTL
+-- its hold had already outlived (spoond-k0uz R3-1). In 2.9 a held lease
+-- was never TTL-swept while its hold lived, so a holder client (Honey)
+-- could keep a ttl+holder lease alive indefinitely by renewing the hold;
+-- such a row's expires_at may be long past at upgrade. Extending it to
+-- the hold's expiry (only when that is later) gives the owner the window
+-- the hold promised; the first 3.0 sweep would otherwise release the VM
+-- at once, because the hold no longer protects anything. Pinned
+-- persistent rows are not TTL-swept and need no extension.
+UPDATE leases SET expires_at = hold_expires_at
+ WHERE pinned = 1
+   AND persistent = 0
+   AND hold_expires_at > expires_at;
+
+-- Backfill the one clock: every lease already suspended when the upgrade
+-- runs is paused as of the migration time, so it gets a fresh
+-- PAUSED_RELEASE_DAYS (30 d) from the upgrade — no lease is released
+-- sooner than 30 d after the upgrade. A hand/drain/automatic suspend
+-- taken before this migration has no paused_at, and without this backfill
+-- such a lease would never hit the one clock (spoond-k0uz H3).
+UPDATE leases SET paused_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ WHERE suspended = 1
+   AND paused_at = '';
+
+-- Rollback story (spoond-k0uz M6): clear the hold columns once their
+-- expiry has become a pin. A 2.9 binary rolled back onto this database
+-- re-reads hold_expires_at and would treat an unexpired hold as live
+-- again, re-protecting (or re-pausing) leases the admin route just
+-- unpinned. Clearing them makes every row read as unheld to 2.9: it
+-- TTL-sweeps by expiry and applies no held rules. The columns stay in the
+-- table (dropping a column cannot be made re-runnable on SQLite); the
+-- FS5 code never reads or writes them.
+UPDATE leases SET hold_expires_at = '', hold_set_at = '', hold_ttl = 0;
+
 -- The hold columns (hold_set_at, hold_expires_at, hold_ttl) stay in the
--- table, unused and ignored, for one release: dropping a column cannot be
--- made re-runnable on SQLite, and the FS5 code never reads or writes them
--- again. Migration 0008 still creates them, so an older rewind applies
--- cleanly and this UPDATE keeps working.
+-- table, unused and ignored, for one release. Migration 0008 still creates
+-- them, so an older rewind applies cleanly and this UPDATE keeps working.

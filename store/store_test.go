@@ -912,16 +912,37 @@ func TestMigration22PinOnV21Database(t *testing.T) {
 	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
 	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
 	for _, seed := range []struct {
-		id, holder, holdExpires string
+		id, state, holder, holdExpires string
+		suspended                      int
+		persistent                     int
+		expiresAt                      string
 	}{
-		{"lease-hold", "ci-job", future},
-		{"lease-lapsed", "ci-job", past},
-		{"lease-plain", "", ""},
+		{"lease-hold", "running", "ci-job", future, 0, 1, past},
+		{"lease-lapsed", "running", "ci-job", past, 0, 1, past},
+		{"lease-plain", "running", "", "", 0, 1, past},
+		// Already suspended with no hold: the backfill gives it the one
+		// clock (it would otherwise never be released).
+		{"lease-suspended", "suspended", "", "", 1, 1, past},
+		// Suspended and held: pinned by the hold conversion and given the
+		// same clock.
+		{"lease-held-suspended", "suspended", "ci-job", future, 1, 1, past},
+		// A lost lease is suspended too; the backfill applies, so it is
+		// never released sooner than 30 d after the upgrade.
+		{"lease-lost", "lost", "", "", 1, 1, past},
+		// spoond-k0uz R3-1: a non-persistent lease with a live hold. In
+		// 2.9 the hold kept it past its TTL (held() is Holder != ""), so
+		// its expires_at may already be past when the upgrade pins it; the
+		// migration must extend the TTL to the hold's expiry or the first
+		// 3.0 sweep deletes the VM at once.
+		{"lease-hold-ttl-past", "running", "pool:honey/work-1", future, 0, 0, past},
+		// The same shape whose hold is not later than its TTL: nothing to
+		// extend (max() keeps the later value).
+		{"lease-hold-ttl-future", "running", "pool:honey/work-2", future, 0, 0, future},
 	} {
 		if _, err := db21.Exec(
-			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, holder, hold_expires_at)
-			 VALUES (?, 'alice', 'py-base', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T00:30:00Z', 'running', ?, ?)`,
-			seed.id, seed.holder, seed.holdExpires); err != nil {
+			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, persistent, holder, hold_expires_at, hold_set_at, hold_ttl)
+			 VALUES (?, 'alice', 'py-base', '2026-01-01T00:00:00Z', ?, '2026-01-01T00:30:00Z', ?, ?, ?, ?, ?, ?, 3600)`,
+			seed.id, seed.expiresAt, seed.state, seed.suspended, seed.persistent, seed.holder, seed.holdExpires, seed.holdExpires); err != nil {
 			t.Fatalf("seed %s: %v", seed.id, err)
 		}
 	}
@@ -949,6 +970,52 @@ func TestMigration22PinOnV21Database(t *testing.T) {
 	}
 	if pinned["lease-plain"] {
 		t.Fatal("a plain lease was pinned by migration 22")
+	}
+	if !got["lease-held-suspended"].Pinned {
+		t.Fatal("a suspended lease with an unexpired hold was not pinned by migration 22")
+	}
+	// Every row already suspended gets the paused_at backfill, pinned or
+	// not, lost included.
+	for _, id := range []string{"lease-suspended", "lease-held-suspended", "lease-lost"} {
+		if got[id].PausedAt.IsZero() {
+			t.Fatalf("%s (suspended) did not get paused_at backfilled", id)
+		}
+		if age := time.Since(got[id].PausedAt); age < 0 || age > time.Minute {
+			t.Fatalf("%s paused_at = %v, want the migration time", id, got[id].PausedAt)
+		}
+	}
+	// A row that was not suspended gets no clock.
+	if !got["lease-hold"].PausedAt.IsZero() || !got["lease-plain"].PausedAt.IsZero() {
+		t.Fatal("a running lease was given a pause date by migration 22")
+	}
+	// spoond-k0uz R3-1: the pinned non-persistent row whose TTL the hold
+	// had already outlived gets expires_at = its hold_expires_at, so the
+	// first 3.0 sweep does not delete a lease the hold was keeping alive.
+	if want, _ := time.Parse(time.RFC3339Nano, future); !got["lease-hold-ttl-past"].ExpiresAt.Equal(want) {
+		t.Fatalf("a pinned non-persistent lease with a past TTL kept expires_at %v, want the hold expiry %v", got["lease-hold-ttl-past"].ExpiresAt, want)
+	}
+	// max(): a TTL already at or past the hold expiry is left alone.
+	if want, _ := time.Parse(time.RFC3339Nano, future); !got["lease-hold-ttl-future"].ExpiresAt.Equal(want) {
+		t.Fatalf("a pinned non-persistent lease with a later TTL had its expires_at changed to %v, want %v", got["lease-hold-ttl-future"].ExpiresAt, want)
+	}
+	// Persistent rows are never TTL-swept, so the conversion leaves their
+	// expires_at alone (the seed's past value, not the hold's future one).
+	if want, _ := time.Parse(time.RFC3339Nano, past); !got["lease-hold"].ExpiresAt.Equal(want) {
+		t.Fatalf("a persistent pinned lease's expires_at was rewritten to %v, want %v", got["lease-hold"].ExpiresAt, want)
+	}
+	// Rollback: the hold columns are cleared after conversion, so a 2.9
+	// binary re-reads every row as unheld (spoond-k0uz M6).
+	for _, id := range []string{"lease-hold", "lease-held-suspended", "lease-lapsed"} {
+		var holdExpires, holdSetAt string
+		var holdTTL int
+		if err := db.r.QueryRowContext(ctx,
+			`SELECT hold_expires_at, hold_set_at, hold_ttl FROM leases WHERE id = ?`, id).
+			Scan(&holdExpires, &holdSetAt, &holdTTL); err != nil {
+			t.Fatalf("read hold columns for %s: %v", id, err)
+		}
+		if holdExpires != "" || holdSetAt != "" || holdTTL != 0 {
+			t.Fatalf("migration 22 left hold columns on %s: expires=%q set=%q ttl=%d", id, holdExpires, holdSetAt, holdTTL)
+		}
 	}
 }
 
