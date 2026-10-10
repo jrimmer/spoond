@@ -11,7 +11,7 @@
 //
 // The line is logfmt-shaped so an operator can grep it:
 //
-//	lease journal: op=<op> lease_id=<id> owner=<owner> sandbox=<sandbox> image=<image> class=<class> reason=<reason>
+//	lease journal: op=<op> lease_id=<id> owner=<owner> sandbox=<sandbox> image=<image> memory_mib=<n> reason=<reason>
 //
 // A value with a space, quote, equals sign or control character is
 // quoted with Go's %q so the fields stay parseable; the reason is the
@@ -41,9 +41,9 @@ func (s *Service) journalLease(op string, l *Lease, reason string) {
 	if s == nil || s.log == nil || l == nil {
 		return
 	}
-	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s class=%s reason=%s",
+	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s memory_mib=%d reason=%s",
 		journalValue(op), journalValue(l.ID), journalValue(l.Owner),
-		journalValue(l.SandboxID), journalValue(l.Image), journalValue(leaseClassRow(l)),
+		journalValue(l.SandboxID), journalValue(l.Image), l.MemoryMB,
 		journalValue(reason))
 }
 

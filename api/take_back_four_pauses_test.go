@@ -14,7 +14,6 @@ func TestPreemptionTakesFourPausesWhenNeeded(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "small", 512)
 	seedImage(t, db, "big", 2048)
-	svc.cfg.BurstReserveMiB = 0
 	svc.SetMetrics(metrics.NewBackendMetrics())
 	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20}, nil)
 	svc.cfg.TemplateStoragePath = t.TempDir()

@@ -36,7 +36,7 @@ particular means two different things depending on the code:
 | `400` | `image_mismatch` | a create `image` does not match the `snapshot`'s image |
 | `404` | `not_found` | unknown lease, name, snapshot or image |
 | `409` | `lease_busy` | a suspend/resume/restart/checkpoint/save is already in flight, or another caller's resume is; retry |
-| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` — `idle_suspend` or `preempt` when the suspension was automatic, `resume_failed` when an undrain could not bring the lease back and left it suspended with its snapshot intact for the next work call to retry (spoond-638d) |
+| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (the stat probe, fork, crash test); `resume` it first. Every work call — exec, stream, files, proxy, jobs, the LLM gateway — resumes a suspended lease on use instead and never answers this. The body adds `"reason"` — `idle_suspend` or `take_back` when the suspension was automatic, `resume_failed` when an undrain could not bring the lease back and left it suspended with its snapshot intact for the next work call to retry (spoond-638d) |
 | `409` | `lease_not_live` | a released lease where a live one is required |
 | `409` | `cannot_start` | a snapshot build cannot run on this host; save it again |
 | `409` | `save_in_progress` | a named-snapshot save with the same idempotency key is running |
@@ -56,7 +56,7 @@ A resume-on-use work call that finds no room on the host answers `503`
 with `code: capacity_wait` and a `Retry-After` header, identically on
 every path (exec, exec stream, files, proxy, jobs, the LLM gateway). Per
 the owner contract (2026-10-08) a **host-structural** shortage — disk,
-hugepages, the burst reserve, the snapshot store, orchestrator capacity —
+hugepages, the snapshot store, orchestrator capacity —
 never refuses for good: spoond acts (reclaims or FIFO-cleanup) and the
 caller waits. Only per-owner quota refuses with `429` (memory) or `409`
 (`kept_budget`):
@@ -87,8 +87,6 @@ Request:
 | `pinned` | bool | `false` | pin the new lease: spoond never pauses or deletes it before its own expiry. The TTL still applies; a pinned persistent lease stays until the owner releases it. `holder`/`holder_url` never pin. See [Pins and the paused-release clock](#pins-and-the-paused-release-clock) |
 | `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
 | `idle_suspend` | int | host default | the lease's own idle reclamation threshold in seconds: `0` = never; `60`–`604800` = suspend the lease after that long without activity (exec, stream, proxy, keepalive, guest heartbeat, files, guest port dial), resuming it on the next call. Omitted = the host default (`IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never — see [Idle reclamation](#idle-reclamation)). Anything else is `400`, and a non-zero value needs a persistent lease (`400`) — a non-persistent lease has nothing to suspend into |
-| `burst` | bool | `false` | force the **burst** admission class: the lease is scheduled preemptibly even while the owner's charge stays within their `guaranteed_mib` — see [Lease classes](#lease-classes) |
-| `priority` | int | `0` | preemption order within the lease's class: a lower number is preempted first, between `-128` and `127` (anything else is `400`) — see [Preemption](#preemption) |
 | `wait` | int | `0` | seconds a create refused for a **waitable** reason may wait for room instead of failing (see [Queued admission](#queued-admission)). `0` keeps the immediate refusal; above `0` it is capped at `MAX_ADMIT_WAIT_SECS` (`0` disables waiting, the field is accepted and ignored); negative is `400` |
 | `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
 
@@ -109,8 +107,6 @@ Response `201 Created`:
   "generation": 1,
   "checkpoint_interval": 300,
   "idle_suspend": 0,
-  "class": "guaranteed",
-  "priority": 0,
   "exposed": {"9042": "10.11.0.7:9042"}
 }
 ```
@@ -163,97 +159,43 @@ it again`, and there is no retry loop),
 `429` quota — the user's concurrent-lease cap or their memory cap
 (#128, see `POST /api/users/{id}/quota`), `503` capacity (not enough
 free hugepage memory for the image, or the node is not healthy, with
-`Retry-After: 30`), and
-`503` `no burst capacity` with `Retry-After: 30` when the lease is
-burst (asked for, or above the owner's `guaranteed_mib`) and the node's
-free hugepages would dip under `BURST_RESERVE_MIB` after it — see
-[Lease classes](#lease-classes). The lease's root disk must fit in
+`Retry-After: 30`). When the lease's hugepages do not fit, take-back
+runs first (see [Memory take-back](#memory-take-back)). The lease's root disk must fit in
 usable snapshot disk too (FS3): `429` with `code: box_full` when
 take-back had nothing to reclaim, `503` with `Retry-After: 30` and
-`code: capacity_wait` when take-back ran and the disk is still short. A
-**guaranteed** lease that cannot get
-its hugepages preempts burst leases instead (see
-[Preemption](#preemption)); when the snapshot disk is too full to pause
-one, the create answers `503`
-`capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`.
+`code: capacity_wait` when take-back ran and the disk is still short.
 
-### Lease classes
+### Memory take-back
 
-Every lease is admitted as `guaranteed` or `burst`, decided once at
-admission (create, fork, clone and every path that resumes a suspended
-lease: resume, warm and cold restart, restore, crash recovery,
-undrain) and persisted with the lease. The class answers one question:
-whose room does this lease take?
+Every lease is admitted against one hugepage memory pool. When a request
+(create, fork, clone, resume, restart, restore, undrain) does not fit,
+spoond takes memory back by pausing leases through the normal pause path
+(a snapshot build; the memory continues on resume, so the generation does
+**not** change). It picks the owner furthest over their fair slice
+(usage/slice ratio), and within that owner the least recently used lease.
+Pinned leases are never taken. The requester takes only from owners whose
+ratio stays above its own after the request. Take-back runs one request
+at a time.
 
-- **`guaranteed`** — the memory of the owner's live *guaranteed*
-  leases, plus this lease, stays within their `guaranteed_mib` (burst
-  leases do not count against the guarantee). A user with no
-  `guaranteed_mib` keeps every lease guaranteed, which is today's
-  behaviour.
-- **`burst`** — the lease would pass the guarantee, or the request
-  forced it with `"burst": true`.
-- **Promotion.** When an owner's guaranteed lease is released or
-  paused, and every 15 s, spoond moves the owner's oldest running burst
-  leases to guaranteed while they fit the guarantee, and emits
-  `promoted` for each. The VM is untouched; only its class changes. A
-  lease created with `"burst": true` is never promoted. So the
-  guarantee stays filled as leases come and go, and does not drift to
-  all-burst. A burst lease
-  is preemptible even within another user's guarantee, and it is
-  admitted only while the node's free hugepages stay above
-  `BURST_RESERVE_MIB` (default 8192, `0` = the reserve is disabled;
-  see [operations.md](operations.md)) after its own — guaranteed work
-  and crash recovery always have room to land. A burst lease refused on
-  the reserve answers `503` `no burst capacity` with `Retry-After: 30`
-  and stays as it was (suspended on resume, uncreated on create).
+A taken-back lease is suspended with reason `take_back`. It stays
+suspended until its holder next uses it (#145 D2): the next work call
+(exec, exec stream, files, proxy, jobs, the LLM gateway) resumes it, and
+an explicit resume takes the same path. If the node still has no room the
+call answers `503` `capacity_wait` with `Retry-After: 30` and the lease
+stays suspended; spoond never marks it `lost` for that. Clients should
+treat a taken-back lease as waiting rather than gone: just use it when
+needed instead of deleting and recreating it.
 
-The class can change at re-admission: a lease that burst because the
-guarantee was full may come back `guaranteed` when the charge has room
-again, while a lease the request forced burst stays burst (`burst` is
-the request's flag, `class` the decided and stored outcome — the flag
-itself is not persisted, so a backend restart re-classifies from the
-owner's standing at the next resume; the stored class still reads burst
-until then). `priority`
-orders preemption within a class (lower is preempted first, `0` the
-default) and is stored with the lease.
+Two refusals tell the caller what is in the way:
 
-### Preemption
+- `429` `box_full` — only pinned leases stand in the way; nothing
+  unpinned can be taken.
+- `503` `capacity_wait` with `Retry-After: 30` — a structural shortfall
+  that take-back cannot close.
 
-When a **guaranteed** admission (create, fork, clone, resume, warm or
-cold restart, restore, crash recovery, undrain) cannot get its
-hugepages — free hugepages less the burst reserve is smaller than the
-lease's `memory_mb` — spoond reclaims them from burst leases. It
-suspends them through the normal pause path (a snapshot build; the
-memory continues on resume, so the generation does **not** change), in
-this order: lowest `priority`, then newest, then the owner furthest
-over its `guaranteed_mib`. It stops as soon as enough memory is free and
-admits the guaranteed lease. Preemption is serialised: one preempting
-admission at a time, so two guaranteed creates cannot each preempt for
-themselves.
-
-A preempted lease is marked `preempted: true` in `GET /api/leases` and
-`GET /api/leases/{id}`, keeps its `resume_build_id`, and emits a
-`preempted` event with detail `for a guaranteed lease of <owner>`. It
-stays suspended until its holder next uses it (#145 D2): the next work
-call — exec, exec stream, files, proxy, jobs, the LLM gateway — resumes
-it through the normal resume path (as a burst lease again if the owner
-is still above the guarantee). On resume `preempted` is cleared and a
-`resumed` event is emitted with detail `after preemption`. A client's
-explicit resume of a preempted lease takes the same path. There is no
-background resume queue any more, and spoond never marks a preempted
-lease `lost` because a resume failed: if the node still has no room the
-work call answers `503` `capacity_wait` with `Retry-After: 30` and the
-lease stays suspended. Only the promote sweep (which moves running burst
-leases into an owner's guarantee) still runs on a 15 s tick.
-
-Preemption has a disk floor: it pauses a burst lease only while the
-snapshot disk stays above `PREEMPT_DISK_FLOOR_PCT` (default 15) after
-the pause, estimated from the lease's `memory_mb`. When no candidate
-clears that floor, the guaranteed admission answers `503`
-`capacity: cannot preempt (snapshot disk low)` with `Retry-After: 30`.
-Honey-like clients should treat a `preempted` lease as temporarily
-unavailable: just use it when needed — it resumes on that call — rather
-than deleting and recreating it.
+The create fields `burst` and `priority` and the lease field `class` no
+longer exist (a create that sends them has them ignored). The lease
+field `preempted` stays for old clients and is always `false`.
 
 ### Queued admission
 
@@ -265,11 +207,8 @@ immediate refusal exactly; a negative value is `400`.
 Only these refusals are **waitable** (the request is held open and
 retried):
 
-- `503 capacity: …` — hugepages full and preemption could not make room
+- `503 capacity: …` — hugepages full and take-back could not make room
   (or the node is not healthy).
-- `503 no burst capacity` — the burst reserve would be crossed.
-- `503 capacity: cannot preempt (snapshot disk low)` — the preemption
-  disk floor blocked it.
 - `429 … memory limit of N MiB exceeded` — the owner's `max_mib` cap
   refused it.
 - `429 lease quota exceeded` — the owner is at its lease-count cap
@@ -292,9 +231,9 @@ order is re-read before every attempt; it is best-effort only when room
 frees in the middle of a pass (a create tried just before may miss room
 that one tried just after gets).
 Admissions from the queue go through the normal admission path, so
-classes, the burst reserve, quotas and preemption apply unchanged. The
+quotas and take-back apply unchanged. The
 queue is retried whenever capacity may have freed (a release, suspend,
-resume, preemption or quota change) and on a 5 s tick.
+resume, take-back or quota change) and on a 5 s tick.
 
 Outcomes:
 
@@ -341,10 +280,7 @@ reads `0` whatever it and the host default say (the pin wins; the
 stored value returns on unpin). For everyone else
 the idle sweep suspends it through the normal pause path: memory and
 hugepages are freed into a pause build, nothing is deleted, the
-generation does not change, and the idle sweep shares preemption's
-snapshot-disk floor
-(`PREEMPT_DISK_FLOOR_PCT`) — a pause that would take the disk under it
-is skipped for that sweep and retried on the next one.
+generation does not change.
 
 Activity is what the sweep counts: exec, stream, proxy, keepalive, guest
 heartbeat, files API and guest port dial all move `LastActive`. An idle
@@ -357,9 +293,9 @@ the **one clock** — `PAUSED_RELEASE_DAYS` (default 30) after its pause
 date — unless a resume clears the date first.
 
 **Resume on next use (#145 D2):** every work call resumes a suspended
-lease first through the normal resume path (admission, class and quota
+lease first through the normal resume path (admission and quota
 apply) and then serves the call — whatever suspended it: the lease's own
-`idle_suspend`, take-back, preemption, or the owner's hand suspend. This
+`idle_suspend`, take-back, or the owner's hand suspend. This
 is one rule for every kind of suspend, not just
 `idle_suspend`. GET, status, events and SSE never resume, and neither
 does a path with nothing to resume. `POST /resume` is the explicit
@@ -420,9 +356,8 @@ Response `200 OK`: `{"sandboxes":[ {…lease…}, … ]}` where each row has
 (effective seconds; `0` = never), `idle_suspend` (effective seconds;
 `0` = never; **a pinned lease always reports `0`** — the pin wins over
 the idle sweep, and the lease's stored value comes back on unpin),
-`class`, `priority`, `preempted` and `pinned`
-(see [Lease classes](#lease-classes),
-[Preemption](#preemption) and [Pins and the paused-release clock](operations.md#pins-and-the-paused-release-clock)).
+`preempted` (always `false`) and `pinned`
+(see [Memory take-back](#memory-take-back) and [Pins and the paused-release clock](operations.md#pins-and-the-paused-release-clock)).
 
 A pinned lease's row adds `pinned_idle_since` (RFC 3339) once its last
 API activity passes `PINNED_IDLE_NOTICE_DAYS` (visibility only; cleared
@@ -433,7 +368,7 @@ with `last_action_at` (RFC 3339). A paused lease carries `paused_at`
 
 A suspended lease whose suspension was automatic also carries its
 structured suspension facts (#145 D6): `suspend_reason` (`idle_suspend`
-= the lease's own threshold, `preempt`), `suspend_policy_step` (the
+= the lease's own threshold, `take_back`), `suspend_policy_step` (the
 pressure order's step name, omitted until that order names steps),
 `suspend_build_id` (the pause build) and `suspended_at` (RFC 3339). A
 hand or drain suspend has no automatic reason and carries none of the
@@ -710,7 +645,7 @@ Response `200 OK`:
 `409` if the lease is suspended and the path cannot resume it. Every
 work path — and this one is work — resumes a suspended lease on use
 (#145 D2) first, then serves the exec: whatever suspended it (the lease's
-own `idle_suspend`, take-back, preemption, or a hand suspend). A refused
+own `idle_suspend`, take-back, or a hand suspend). A refused
 resume answers the shared shapes: `429`
 `quota_exceeded` with `Retry-After` over the
 owner's quota, `503 capacity_wait` with `Retry-After` when the host has
@@ -1083,22 +1018,17 @@ owner's memory quota (#128): `429` with `Retry-After: 30` and `code:
 quota_exceeded` when the charge would pass
 `max_mib` — the lease stays suspended. A resume that finds no room on
 the host answers `503` with `Retry-After: 30` and `code: capacity_wait`
-(one shape for every no-room refusal, whether the burst reserve, the
-preemption disk floor, the snapshot disk, or the orchestrator's
+(one shape for every no-room refusal, whether the
+snapshot disk, or the orchestrator's
 capacity) — the lease stays
-suspended. A resume whose class re-admission cannot get room because
+suspended. A resume whose re-admission cannot get room because
 every take-back candidate is pinned answers `429` with `code:
 box_full` (the create body's refusal, not a 500) — the lease stays
 suspended, nothing was paused or released. The same `429 box_full`
 answers a resume whose root disk does not fit in usable snapshot disk
 with nothing left to reclaim, and the `503 capacity_wait` one whose
 take-back ran and the snapshot disk is still short (FS3). The resume
-re-decides the lease's class too (#128 part 2): a burst lease coming back into a full
-burst reserve takes that same `503 capacity_wait`. Resuming a lease that
-a preemption suspended
-(#128 part 3, `preempted: true`) takes the same path; on success
-`preempted` is cleared and the `resumed` event's
-detail is `after preemption`. Resuming a lease that is
+Resuming a lease that is
 already running does nothing and answers `200`
 with the lease as it is: the guest keeps its memory. (Before 2.1.2 it
 restored the pause build again, rolling the guest's memory back.) An
@@ -1143,11 +1073,7 @@ Response `{"id":"…","status":"running","message":"lease restarted"}`.
 `404` unknown, `400` for an unknown mode, `409` when busy; restarting a
 suspended lease brings its guest (and its hugepages) back, so it
 re-passes the owner's memory quota (#128): `429` when the charge would
-pass `max_mib` — the lease stays suspended, untouched. The restart
-re-decides the lease's class (#128 part 2), so a burst lease restarting
-into a full burst reserve answers `503` `no burst capacity` with
-`Retry-After: 30` — like resume, fork and clone — and stays suspended.
-A substrate failure on the fresh-guest path (which does create a sandbox) surfaces
+pass `max_mib` — the lease stays suspended, untouched. A substrate failure on the fresh-guest path (which does create a sandbox) surfaces
 as `500`, not `503` — unlike create, fork and clone, restart does not
 map capacity errors to `503`.
 
@@ -1215,10 +1141,7 @@ while another operation is in flight; a substrate capacity
 failure maps to `503`. Restoring a suspended lease brings a running
 sandbox (and its hugepages) back, so it re-passes the owner's memory
 quota (#128): `429` when the charge would pass `max_mib` — the lease
-stays suspended, untouched. The restore re-decides the lease's class
-(#128 part 2), so a burst lease restored into a full burst reserve
-answers `503` `no burst capacity` with `Retry-After: 30`, and the
-lease stays as it was. An `owner deleted` (`403`) refuses the restore
+stays suspended, untouched. An `owner deleted` (`403`) refuses the restore
 when the owner's identity was removed while it was in flight
 (spoond-q4j): the user is gone, so the restore is not run ownerless.
 
@@ -1379,9 +1302,7 @@ friendly *name*). Response `201 Created`:
 
 The clone costs the source image's `memory_mb` against the owner's
 memory quota like any create (#128); `429` when it would pass
-`max_mib`. The clone is classified and held to the burst reserve like
-any create (#128 part 2); a refusal answers `503` `no burst capacity`.
-An `owner deleted` (`403`) refuses the clone when the owner's identity
+`max_mib`. An `owner deleted` (`403`) refuses the clone when the owner's identity
 was removed while the clone's checkpoint was in flight (spoond-q4j): the
 fresh sandbox is stopped and no lease is committed, so a deleted owner
 cannot acquire an ownerless, uncapped copy.
@@ -1406,11 +1327,7 @@ Response `201 Created`:
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
 suspended or busy, `429` quota — including the memory cap (#128): each
 fork costs its image's `memory_mb`, `count` times, reserved up front,
-all or nothing — `503` capacity. Every child is classified at
-admission (#128 part 2): with the whole batch's charge pending, all
-children of a fork past the guarantee burst together, and a burst child
-refused on the reserve fails the call with `503` `no burst capacity`.
-An `owner deleted` (`403`) refuses a fork whose owner's identity was
+all or nothing — `503` capacity. An `owner deleted` (`403`) refuses a fork whose owner's identity was
 removed while the fork's checkpoint was in flight (spoond-q4j): every
 child created so far is rolled back (its sandbox stopped once) and the
 rest are refused, so a deleted owner cannot acquire ownerless, uncapped
@@ -1563,8 +1480,8 @@ data: {"seq":43,…,"type":"suspended","detail":"paused into build 9e1f2ab3…",
 
 ```
 
-`reason` is `idle_suspend` (the lease's own threshold) or `preempt`
-(a take-back suspension for a guaranteed admission). The removed `idle`
+`reason` is `idle_suspend` (the lease's own threshold) or `take_back`
+(a take-back suspension). The removed `idle`
 (plain `IDLE_TIMEOUT_SECS` sweep), `hold_lapsed` and `pressure` reasons
 are gone with the held rules (FS5). `policy_step` is the pressure
 order's step name,
@@ -1582,9 +1499,8 @@ every 15 s thereafter, so proxies do not close an idle stream.
 |---|---|---|
 | `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
 | `released` | the lease is deleted (TTL sweep, `DELETE`, the one paused-release clock, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `paused_expired` (the one clock released a paused lease 30 d after its pause date), `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released` |
-| `suspended` | the sandbox is paused into a build (suspend, drain, the lease's own idle_suspend, preemption) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
-| `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, resume on use) | the resume build id; `after preemption` for a preempted lease its holder's work call brought back |
-| `preempted` | a guaranteed admission suspended a burst lease to reclaim its hugepages (preemption, #128 part 3) | `for a guaranteed lease of <owner>` |
+| `suspended` | the sandbox is paused into a build (suspend, drain, the lease's own idle_suspend, take-back) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
+| `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, resume on use) | the resume build id; a taken-back lease its holder's work call brought back |
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
 | `snapshot_saved` | `POST /api/leases/{id}/snapshots` saved the lease as a named snapshot (2.7, #83) | `saved as <name>@<version> · <size> · <duration>`, e.g. `saved as spoond/warm@4 · 2.1 GiB · 820 ms` |
 | `recovered` | a lease is resumed from its checkpoint after a crash | the checkpoint build id |
@@ -1607,7 +1523,6 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `job_lost` | a running background job did not survive a generation bump (cold restart, restore, crash recovery) | the reason |
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
-| `promoted` | a running burst lease moved to guaranteed: its owner's guarantee has room again | `to guaranteed: the owner's guarantee has room` |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
 | `gc` | a catalog GC pass deleted builds or failed a stale `building` row (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed`; or `stale build <id> failed · build timed out` |
 | `drain_failed` | the admin drain could not pause the lease: it ran on into the orchestrator stop (spoond-52c) | the pause error |
@@ -2300,9 +2215,7 @@ quota (#128): the sum of `memory_mb` over the user's **running** leases
 may not pass `M` (`0` = no cap; a suspended lease holds no hugepages
 and is not charged). All five default to `0` =
 unlimited/unset. `guaranteed_mib` is the user's guaranteed-memory
-floor: a lease whose charge keeps the owner's running sum within it is
-admitted `guaranteed`; once the sum passes it, the next lease is
-admitted `burst` (see [Lease classes](#lease-classes)). It must be
+floor, kept for now. It must be
 `<= max_mib` when both are set (`400` otherwise). Over-cap
 creates, forks and clones return `429`; so does any operation that
 brings a suspended lease's guest back over the cap — resume, restart,

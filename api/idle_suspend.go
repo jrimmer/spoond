@@ -80,11 +80,6 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 		if skip {
 			continue
 		}
-		if !s.preemptDiskOK(l) {
-			s.log.Printf("idle suspend: lease %s: pause would take the snapshot disk under the %.0f%% floor; skipping this sweep",
-				l.ID, s.preemptDiskFloorPct())
-			continue
-		}
 		if _, err := s.pauseLeaseWith(ctx, l, false, suspendPolicy{reason: suspendReasonIdleSuspend}); err != nil {
 			// A release that raced the pause is not an idle-suspend error:
 			// the lease is gone and nothing was suspended (spoond-15i).
@@ -163,14 +158,12 @@ func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error)
 }
 
 // resumeNoRoom reports whether a failed resume was refused for a
-// structural shortage of host resources (hugepages, the burst reserve,
-// the snapshot disk floor, a draining node). Per the 2026-10-08 owner
-// contract such a refusal is a wait, never a loss: the caller gets 503
-// capacity_wait with a Retry-After. Only per-owner quota refuses
-// otherwise (memory quota 429).
+// structural shortage of host resources (hugepages, a draining node).
+// Per the 2026-10-08 owner contract such a refusal is a wait, never a
+// loss: the caller gets 503 capacity_wait with a Retry-After. Only
+// per-owner quota refuses otherwise (memory quota 429).
 func resumeNoRoom(err error) bool {
-	return errors.Is(err, errPreemptCannot) || errors.Is(err, errBurstReserve) ||
-		errors.Is(err, substrate.ErrCapacity) || errors.Is(err, errDraining)
+	return errors.Is(err, substrate.ErrCapacity) || errors.Is(err, errDraining)
 }
 
 // resumeNoRoomMessage is the human detail of a no-room resume refusal,
@@ -180,11 +173,8 @@ func resumeNoRoomMessage(err error) string {
 	switch {
 	case errors.Is(err, errDraining):
 		return "draining"
-	case errors.Is(err, errBurstReserve):
-		return err.Error()
 	default:
-		// errPreemptCannot and substrate.ErrCapacity keep their
-		// "capacity: ..." prefix.
+		// substrate.ErrCapacity keeps its "capacity: ..." prefix.
 		return "capacity: " + err.Error()
 	}
 }
@@ -215,9 +205,9 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 		// The owner's own quota frees when the owner releases its own
 		// leases, so this is a retryable wait, not a loss: 429 with
 		// code quota_exceeded and a Retry-After, like capacity_wait.
-		writeErrorCodeAfter(w, http.StatusTooManyRequests, burstRetryAfterSecs, "quota_exceeded", err.Error())
+		writeErrorCodeAfter(w, http.StatusTooManyRequests, capacityRetryAfterSecs, "quota_exceeded", err.Error())
 	case resumeNoRoom(err):
-		writeErrorCodeAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity_wait", resumeNoRoomMessage(err))
+		writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", resumeNoRoomMessage(err))
 	case errors.Is(err, substrate.ErrUnavailable):
 		// The resume's substrate could not be reached or could not confirm
 		// the sandbox state: the same retryable 503 substrate_unavailable

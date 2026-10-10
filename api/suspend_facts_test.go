@@ -173,13 +173,11 @@ func TestSuspendFactsIdleSuspend(t *testing.T) {
 	}
 }
 
-// TestSuspendFactsPreempt: a preemption records reason preempt.
-func TestSuspendFactsPreempt(t *testing.T) {
+// TestSuspendFactsTakeBack: a take-back pause records reason take_back.
+func TestSuspendFactsTakeBack(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
-	svc.cfg.PreemptDiskFloorPct = 0
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 100, nil }
 
 	base := time.Now()
 	svc.now = func() time.Time { return base }
@@ -187,19 +185,16 @@ func TestSuspendFactsPreempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
-	svc.store.mu.Lock()
-	l.Class = ClassBurst
-	svc.store.mu.Unlock()
 
-	if err := svc.preemptLease(ctx, l, "other-owner"); err != nil {
-		t.Fatalf("preemptLease: %v", err)
+	if err := svc.takeBackPause(ctx, l, "other-owner", 1.5); err != nil {
+		t.Fatalf("takeBackPause: %v", err)
 	}
 	reason, _, build, at := suspendFactsOf(t, svc, l.ID)
-	if reason != suspendReasonPreempt {
-		t.Fatalf("preempt suspend_reason = %q, want %q", reason, suspendReasonPreempt)
+	if reason != suspendReasonTakeBack {
+		t.Fatalf("take-back suspend_reason = %q, want %q", reason, suspendReasonTakeBack)
 	}
 	if build == "" || at.IsZero() {
-		t.Fatalf("preempt suspend facts = build %q at %v", build, at)
+		t.Fatalf("take-back suspend facts = build %q at %v", build, at)
 	}
 }
 
@@ -240,8 +235,7 @@ func TestSuspendFactsClearedOnResume(t *testing.T) {
 	// setState is the shared seam restore and recovery run through: it
 	// clears the facts for every state but suspended.
 	svc.store.mu.Lock()
-	l.SuspendReason = suspendReasonPreempt
-	l.SuspendPolicyStep = "pressure/disk"
+	l.SuspendReason = suspendReasonTakeBack
 	l.SuspendBuildID = "b-x"
 	l.SuspendedAt = time.Now()
 	l.setState("recovered")
@@ -345,13 +339,13 @@ func TestSuspendEventStructuredWire(t *testing.T) {
 	ev := LeaseEvent{
 		Seq: 1, Epoch: "e", At: time.Now(), LeaseID: "l", Owner: "o",
 		Type: LeaseSuspended, Detail: "paused into build b1",
-		Reason: suspendReasonPreempt, BuildID: "b1",
+		Reason: suspendReasonTakeBack, BuildID: "b1",
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(marshalLeaseEvent(&ev)), &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if m["reason"] != suspendReasonPreempt || m["build_id"] != "b1" {
+	if m["reason"] != suspendReasonTakeBack || m["build_id"] != "b1" {
 		t.Fatalf("wire = %v, want reason and build_id", m)
 	}
 	if _, ok := m["policy_step"]; ok {

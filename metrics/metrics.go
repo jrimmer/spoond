@@ -138,11 +138,6 @@ type BackendMetrics struct {
 	// so a requester's admission fits (spoond-pxsn).
 	TakeBacksTotal prometheus.Counter // cumulative take-back pauses
 
-	// Preemption (#128 part 3): burst leases suspended to make room for
-	// a guaranteed admission, and how many are preempted right now.
-	PreemptionsTotal prometheus.Counter // cumulative preemptions
-	PreemptedLeases  prometheus.Gauge   // leases currently preempted
-
 	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
 	// the idle sweep through the pause path; the next call resumes them.
 	IdleSuspendsTotal prometheus.Counter // cumulative idle suspensions
@@ -479,17 +474,6 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Leases suspended by the fair-shares memory take-back.",
 	})
 
-	// Preemption (#128 part 3): burst leases suspended to make room for
-	// a guaranteed admission.
-	m.PreemptionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "spoond", Name: "preemptions_total",
-		Help: "Burst leases suspended to make room for a guaranteed admission.",
-	})
-	m.PreemptedLeases = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "spoond", Name: "preempted_leases",
-		Help: "Burst leases currently suspended by preemption, awaiting the resume queue.",
-	})
-
 	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
 	// the idle sweep. The next call resumes them.
 	m.IdleSuspendsTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -582,7 +566,6 @@ func NewBackendMetrics() *BackendMetrics {
 		m.KeptBuildsBytes, m.KeptBuilds,
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
-		m.PreemptionsTotal, m.PreemptedLeases,
 		m.BoxFullTotal, m.TakeBacksTotal,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,

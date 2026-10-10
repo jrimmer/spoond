@@ -508,15 +508,11 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 			return err
 		}
 		defer s.releaseQuotaReservation(l.Owner, 1, img.MemoryMB)
-		// Class re-admission (#128 part 2), as for a resume: recovery
-		// brings hugepages back, so a burst lease re-passes the reserve
-		// (the reconciler's own reserve work lands in #128 part 3; until
-		// then a burst lease keeps its demand-burst standing here).
-		class, err := s.admitClass(ctx, l.Owner, img.MemoryMB, l.Burst, l.ID)
-		if err != nil {
+		// Class re-admission removed (FS2b-1): recovery brings hugepages
+		// back, so it re-passes the one-pool admission like a resume.
+		if err := s.admitMemory(ctx, l.Owner, img.MemoryMB); err != nil {
 			return err
 		}
-		l.Class = class
 	}
 	sb, err := s.createSandbox(ctx, img, b, true, l.SandboxID, l)
 	if err != nil {

@@ -1,12 +1,11 @@
 package api
 
 // Resume on the holder's next work call (#145 D2). Every lease
-// automatically suspended — pressure, preemption, the idle sweep,
-// idle_suspend, a lapsed hold (rule 3) — and one its holder suspended by
-// hand resumes when the holder next uses it. A no-room refusal is the one
-// 503 capacity_wait shape with Retry-After on every path. GET, status,
-// events and SSE never resume. A failed resume is never turned into a
-// lost lease.
+// automatically suspended — take-back, the idle sweep, idle_suspend, a
+// lapsed hold — and one its holder suspended by hand resumes when the
+// holder next uses it. A no-room refusal is the one 503 capacity_wait
+// shape with Retry-After on every path. GET, status, events and SSE
+// never resume. A failed resume is never turned into a lost lease.
 
 import (
 	"context"
@@ -23,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/metrics"
 	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
@@ -69,15 +69,12 @@ func resumeReasonCases() []resumeReason {
 				t.Fatalf("idle_suspend suspend: %v", err)
 			}
 		}},
-		{"preempt", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
-			svc.store.mu.Lock()
-			l.Class = ClassBurst
-			svc.store.mu.Unlock()
-			if err := svc.preemptLease(ctx, l, "another-owner"); err != nil {
-				t.Fatalf("preempt: %v", err)
+		{"take_back", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
+			if err := svc.takeBackPause(ctx, l, "another-owner", 2.0); err != nil {
+				t.Fatalf("take-back: %v", err)
 			}
-			if l.PreemptedAt.IsZero() {
-				t.Fatal("preempt did not stamp preempted_at")
+			if l.TakeBackFor != "another-owner" {
+				t.Fatal("take-back did not stamp take_back_for")
 			}
 		}},
 		{"hand", func(t *testing.T, svc *Service, ctx context.Context, l *Lease) {
@@ -153,38 +150,41 @@ func TestResumeOnUseGetNeverResumes(t *testing.T) {
 	}
 }
 
-// TestResumeOnUseNoRoomCapacityWait: a preempted lease whose resume finds
-// no room answers 503 with Retry-After and code capacity_wait, stays
-// suspended, and is not marked lost.
+// TestResumeOnUseNoRoomCapacityWait: a taken-back lease whose resume
+// finds no room answers 503 with Retry-After and code capacity_wait,
+// stays suspended, and is not marked lost.
 func TestResumeOnUseNoRoomCapacityWait(t *testing.T) {
-	srv, h, sub, tok, uid := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
-	svc := srv.svc
+	_, svc, db, sub := newTestServerWithService(t)
+	seedImage(t, db, "big", 2048)
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	srv := NewServer(svc, NewImageRegistry(db))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	// Dynamic node: every live sandbox counts 512 pages (1024 MiB), the
+	// whole box is 2048 MiB.
+	installDynamicNode(t, svc, sub, 1024, 0, 512)
 	ctx := context.Background()
 
-	rec, first := createPersistentAs(t, h, tok, "mid")
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	l, err := svc.grant(ctx, "consumer-a", "big", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
 	}
-	id := first["id"].(string)
-	l := svc.lookup(uid, id)
-	l.Burst = true
-	if _, err := svc.suspend(ctx, uid, id); err != nil {
+	if _, err := svc.suspend(ctx, "consumer-a", l.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	// Mark it preempted so this is the preemption-reason resume.
+	// Mark it taken-back so this is the take-back-reason resume.
 	svc.store.mu.Lock()
-	l.PreemptedAt = time.Now()
-	l.Class = ClassBurst
+	l.TakeBackAt = time.Now()
+	l.TakeBackFor = "other-owner"
 	svc.store.mu.Unlock()
 
-	// No room: the burst reserve cannot be met.
-	svc.cfg.BurstReserveMiB = 8192
-	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 512 + 1, HugepageSizeBytes: 2 << 20}, nil)
-	svc.nodeInfoMu.Lock()
-	svc.nodeInfoAt = time.Time{}
-	svc.nodeInfoMu.Unlock()
+	// No room: something outside spoond holds the whole box, so the
+	// suspended lease's re-admission (2048 MiB) has nothing to take back
+	// and nothing pinned in its way — the shortfall is structural and
+	// the resume is a wait, never box_full.
+	installDynamicNode(t, svc, sub, 1024, 1024, 512)
 
-	rec2 := postLeaseAction(t, h, tok, "/api/leases/"+id+"/exec", `{"cmd":"echo hi"}`)
+	rec2 := postLeaseAction(t, srv.Handler(), "token-a", "/api/leases/"+l.ID+"/exec", `{"cmd":"echo hi"}`)
 	if rec2.Code != http.StatusServiceUnavailable {
 		t.Fatalf("exec auto-resume no-room = %d, want 503: %s", rec2.Code, rec2.Body.String())
 	}
@@ -264,17 +264,19 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 	for _, p := range paths {
 		t.Run(p.name, func(t *testing.T) {
 			ts, svc, db, sub := newTestServerWithService(t)
-			// A burst lease with no room so the resume is refused on the
-			// reserve, the deterministic no-room refusal.
-			l, err := svc.grantLease(context.Background(), leaseRequest{owner: "consumer-a", image: "py-base", ttl: time.Hour, persistent: true, burst: true})
+			// A suspended lease whose re-admission can never be served:
+			// something outside spoond holds the box (the deterministic
+			// structural no-room refusal — no lease to take back, none
+			// pinned, so a wait rather than box_full).
+			l, err := svc.grantLease(context.Background(), leaseRequest{owner: "consumer-a", image: "py-base", ttl: time.Hour, persistent: true})
 			if err != nil {
 				t.Fatalf("grant: %v", err)
 			}
 			if _, err := svc.suspend(context.Background(), "consumer-a", l.ID); err != nil {
 				t.Fatalf("suspend: %v", err)
 			}
-			svc.cfg.BurstReserveMiB = 1 << 20
-			sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20}, nil)
+			// A 4 GiB box with nothing free.
+			sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 2048, HugepagesUsed: 2048, HugepageSizeBytes: 2 << 20}, nil)
 			svc.nodeInfoMu.Lock()
 			svc.nodeInfoAt = time.Time{}
 			svc.nodeInfoMu.Unlock()
@@ -407,15 +409,17 @@ func TestResumeOnUseLLMNoRoom(t *testing.T) {
 	h := httptest.NewServer(srv.Handler())
 	t.Cleanup(h.Close)
 
-	l, err := svc.grantLease(context.Background(), leaseRequest{owner: "consumer-a", image: "py-base", ttl: time.Hour, persistent: true, burst: true})
+	l, err := svc.grantLease(context.Background(), leaseRequest{owner: "consumer-a", image: "py-base", ttl: time.Hour, persistent: true})
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	if _, err := svc.suspend(context.Background(), "consumer-a", l.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	svc.cfg.BurstReserveMiB = 1 << 20
-	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20}, nil)
+	// Something outside spoond holds the box, so the resume's
+	// re-admission is refused as a structural wait (no lease to take
+	// back, none pinned).
+	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 2048, HugepagesUsed: 2048, HugepageSizeBytes: 2 << 20}, nil)
 	svc.nodeInfoMu.Lock()
 	svc.nodeInfoAt = time.Time{}
 	svc.nodeInfoMu.Unlock()
