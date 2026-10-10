@@ -1800,6 +1800,10 @@ and inserts the version. Response `201`:
   `max_kept_bytes` alongside kept checkpoints (`409 kept_budget`), and a
   save that would add a name past `MAX_NAMED_SNAPSHOTS` (`0` = no cap)
   answers `409 snapshot_limit`. An existing name is always savable.
+- **Snapshot disk.** The save's checkpoint must fit in usable snapshot
+  disk (FS3): `429 box_full` when take-back has nothing to reclaim,
+  `503 capacity_wait` with `Retry-After: 30` while the disk is still
+  short.
 - **Retention.** A name keeps its last `SNAPSHOT_KEEP_VERSIONS` versions
   (default `3`; the first save's optional `keep`, `1`–`20`, overrides it
   for the name — A6). Older versions lose their row after a save unless
