@@ -31,6 +31,13 @@ type OwnerUsage struct {
 // the lease it was saved from — so a build is attributed to its owner
 // once in Used even when it is both kept and named. The per-kind fields
 // report each kind's raw bytes.
+//
+// A named snapshot's size_bytes is the size at save time; the build row
+// is re-measured by the hourly disk accounting pass and is authoritative.
+// The named arm prefers the build row and falls back to the named row
+// only when the build row is gone (COALESCE), so an owner's Named (and
+// the Used built from it) can differ from the size_bytes the
+// named-snapshot listing reports.
 func (db *DB) DiskUsageByOwner(ctx context.Context) (map[string]OwnerUsage, error) {
 	rows, err := db.r.QueryContext(ctx, `
 		SELECT owner, build_id, MAX(size_bytes), MAX(is_pause), MAX(is_kept), MAX(is_named)
@@ -45,8 +52,9 @@ func (db *DB) DiskUsageByOwner(ctx context.Context) (map[string]OwnerUsage, erro
 			JOIN builds b ON b.build_id = k.build_id
 			WHERE b.state <> 'deleted'
 			UNION ALL
-			SELECT n.owner, n.build_id, n.size_bytes, 0, 0, 1
+			SELECT n.owner, n.build_id, COALESCE(b.size_bytes, n.size_bytes), 0, 0, 1
 			FROM named_snapshots n
+			LEFT JOIN builds b ON b.build_id = n.build_id
 		)
 		GROUP BY owner, build_id`)
 	if err != nil {
@@ -77,4 +85,45 @@ func (db *DB) DiskUsageByOwner(ctx context.Context) (map[string]OwnerUsage, erro
 		return nil, fmt.Errorf("store: disk usage by owner: %w", err)
 	}
 	return out, nil
+}
+
+// AccountedSnapshotBytes returns the box-wide recorded snapshot bytes
+// with every build counted once, even when several owners share it. A
+// build can be attributed to more than one owner — a lease may pin a
+// build another owner owns, and a named snapshot is owned independently
+// of the owner of its build — so summing the per-owner Used values would
+// count a shared build once per owner. This derives the accounted part
+// of the disk slice basis from DISTINCT build_id instead (FS1 follow-up
+// b).
+//
+// Every kind contributes its build exactly once: a pause build, a kept
+// pin and a named snapshot all collapse to one row per build_id, and the
+// largest recorded size wins (the build row's re-measured size is the
+// authoritative one; a named snapshot whose build row is gone still
+// counts with its own recorded size).
+func (db *DB) AccountedSnapshotBytes(ctx context.Context) (int64, error) {
+	var total int64
+	err := db.r.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(size_bytes), 0) FROM (
+			SELECT build_id, MAX(size_bytes) AS size_bytes
+			FROM (
+				SELECT build_id, size_bytes
+				FROM builds
+				WHERE kind = 'pause' AND state <> 'deleted'
+				UNION ALL
+				SELECT b.build_id, b.size_bytes
+				FROM lease_kept_builds k
+				JOIN builds b ON b.build_id = k.build_id
+				WHERE b.state <> 'deleted'
+				UNION ALL
+				SELECT n.build_id, COALESCE(b.size_bytes, n.size_bytes)
+				FROM named_snapshots n
+				LEFT JOIN builds b ON b.build_id = n.build_id
+			)
+			GROUP BY build_id
+		)`).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("store: accounted snapshot bytes: %w", err)
+	}
+	return total, nil
 }

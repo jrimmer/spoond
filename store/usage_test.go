@@ -151,3 +151,106 @@ func TestUsageDiskEmptyStore(t *testing.T) {
 		t.Fatalf("usage = %v, want empty", got)
 	}
 }
+
+// TestUsageAccountedSnapshotBytesCountsSharedBuildOnce: a build pinned by
+// two owners' leases and also named once is one build on disk, so the
+// box-level accounted bytes count it once while each owner's Used still
+// reports it (FS1 follow-up b).
+func TestUsageAccountedSnapshotBytesCountsSharedBuildOnce(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now()
+	for _, id := range []string{"l-alice", "l-bob"} {
+		owner := "alice"
+		if id == "l-bob" {
+			owner = "bob"
+		}
+		if err := db.UpsertLease(ctx, LeaseRow{ID: id, Owner: owner, Image: "img",
+			State: "running", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+			LastActive: now, Class: "guaranteed"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.InsertBuild(ctx, BuildRow{BuildID: "shared", Kind: "checkpoint",
+		Owner: "alice", State: "ready", SizeBytes: 700, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertBuild(ctx, BuildRow{BuildID: "solo", Kind: "checkpoint",
+		Owner: "bob", State: "ready", SizeBytes: 300, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	// Two owners pin the same build, and alice also names it. The named
+	// row records a stale size (500); the build row's 700 wins.
+	for _, pin := range []struct{ lease, build string }{{"l-alice", "shared"}, {"l-bob", "shared"}, {"l-bob", "solo"}} {
+		if err := db.KeepBuild(ctx, pin.lease, pin.build, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.InsertNamedSnapshot(ctx, NamedSnapshotRow{
+		Owner: "alice", Name: "warm", BuildID: "shared", SourceLeaseID: "l-alice",
+		Image: "img", ImageBuildID: "img-1", MemoryMB: 1, SizeBytes: 500,
+		CreatedAt: now,
+	}, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := db.DiskUsageByOwner(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The shared build is attributed to both owners, so summing Used
+	// would double-count it: 700 (alice) + 1000 (bob).
+	if got := usage["alice"].Kept; got != 700 {
+		t.Fatalf("alice kept = %d, want 700", got)
+	}
+	if got := usage["bob"].Kept; got != 1000 {
+		t.Fatalf("bob kept = %d, want 1000", got)
+	}
+	if got := usage["alice"].Named; got != 700 {
+		t.Fatalf("alice named = %d, want 700 (build row wins over named row)", got)
+	}
+
+	accounted, err := db.AccountedSnapshotBytes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Distinct builds: shared (700) + solo (300) = 1000, not the
+	// 1700 the per-owner sums would give.
+	if accounted != 1000 {
+		t.Fatalf("accounted = %d, want 1000 (one shared build once)", accounted)
+	}
+}
+
+// TestUsageAccountedSnapshotBytesFallsBackToNamedSize: a named snapshot
+// whose build row is gone still counts its own recorded size.
+func TestUsageAccountedSnapshotBytesFallsBackToNamedSize(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now()
+	if _, err := db.InsertNamedSnapshot(ctx, NamedSnapshotRow{
+		Owner: "alice", Name: "warm", BuildID: "gone", SourceLeaseID: "l1",
+		Image: "img", ImageBuildID: "img-1", MemoryMB: 1, SizeBytes: 42,
+		CreatedAt: now,
+	}, 1); err != nil {
+		t.Fatal(err)
+	}
+	accounted, err := db.AccountedSnapshotBytes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accounted != 42 {
+		t.Fatalf("accounted = %d, want 42 (named size fallback)", accounted)
+	}
+}
+
+// TestUsageAccountedSnapshotBytesEmpty: an empty store sums to 0.
+func TestUsageAccountedSnapshotBytesEmpty(t *testing.T) {
+	db, _ := openTestDB(t)
+	got, err := db.AccountedSnapshotBytes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 0 {
+		t.Fatalf("accounted = %d, want 0", got)
+	}
+}
