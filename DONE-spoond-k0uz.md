@@ -219,3 +219,78 @@ that only existed in the old branch's merge resolution; they were
 restored in dedicated commits (dash per-owner notice, migration
 fixture, create-pin wiring, idle-suspend guards, resume gate, box_full
 mapping, docs) and every gate re-run after each.
+
+## Round 4 (this round)
+
+Started from `origin/work/spoond-k0uz` a935c55, which already contained
+current `origin/main` (merged by orch-1); `git fetch origin` shows main
+has not moved since, so no merge or rebase was needed and main is
+untouched. R3-1 to R3-5 were verified fixed before starting; this round
+is the small regression pass.
+
+R4-1 (regression from the round-3 rebase): `unpinByHolderPrefix` had
+gone back to its round-1 shape (store first, reload after, empty-prefix
+accepted, event lease id ""). Restored exactly as at f805043: the
+empty-prefix guard, the in-memory loop first (clear `Pinned` and
+`PinnedIdleSince`, `saveLeaseLocked`, count), then the store helper with
+`n += stored`, then the `admin_unpin` event with lease id `-`, and the
+L9 doc comment.
+
+- **`TestAdminUnpinEventCarriesDashLeaseID`** (api): the
+  `admin_unpin` event from an unpin-by-holder-prefix carries
+  `lease_id: "-"`. Proven: emit `""` instead → the test fails
+  (mutations: both the `-` literal and the in-memory-first order).
+
+R4-2 (regression): the held.go package comment had lost the owner
+decision. Restored from f805043: a pin protects only a **running** VM,
+and every paused lease — pinned or not — is on the one 30 d clock
+(owner decision 2026-10-09). Comment-only; covered by the round-3
+tests.
+
+R4-3 (race, data loss): `releaseIfPausedExpired` checked its conditions
+under the store lock, unlocked, and `releaseBecause` re-checked only
+`released` in its own lock section — a POST /resume landing in the gap
+had its sandbox deleted mid-resume. `releaseBecauseIf` now runs an
+optional predicate inside the SAME lock section that sets `l.released`
+and abandons the release when it is false; `releaseIfPausedExpired`
+passes `leasePausedExpiredLocked` (which keeps the `busy` check that
+was inlined before).
+
+- **`TestReleasePausedRacesResume`** now fails when the predicate is
+  made always-true (proven; the resumed lease was released).
+- **`TestReleasePausedSkipsBusyLease`** (api): a lease that turned busy
+  by the point of release survives the clock, and is released once its
+  operation finishes. Proven mutations: drop the `busy` check from
+  `leasePausedExpiredLocked`, and make the predicate always-true.
+
+R4-4 (tests and docs):
+
+- The store fixture's `lease-hold-ttl-future` now has an `expires_at`
+  strictly LATER than its `hold_expires_at`, so the migration's `max()`
+  is really exercised. Proven: drop the `hold_expires_at > expires_at`
+  guard from the UPDATE → `TestMigration22PinsHoldsAndBackfillsPausedAt`
+  fails (the TTL gets overwritten with the earlier hold).
+- `TestSweepExpiredSparesMigratedPinnedTLLLease` no longer seeds the
+  already-migrated shape: it builds a schema-21 database, seeds the
+  ttl+holder rows, runs migration 0022 for real, `LoadState`s the
+  result and only then sweeps. Proven: drop the migration's
+  `expires_at` UPDATE → the test fails at its own setup assertion
+  (the migration did not extend the flight's TTL).
+- docs/api.md: the `lease_suspended` refusal's `reason` list reads
+  `idle_suspend`|`preempt`|`resume_failed`; the pinned-lease
+  `idle_suspend 0` note was already in place from round 3 and stands.
+
+Round-4 gates: `go build ./...`, `go vet ./...`, `gofmt -l .` empty,
+`go test -p 2 -count=1 ./...`,
+`go test -race -count=1 -timeout 50m ./api/ ./store/` — all green; the
+touched tests also pass as a non-root user.
+
+New/changed tests and the mutation each kills (round 4):
+
+| Test | Mutation killed |
+|---|---|
+| `TestSweepExpiredSparesMigratedPinnedTLLLease` (rewritten) | drop the migration's `expires_at = hold_expires_at` UPDATE (data loss at upgrade) |
+| `TestMigration22PinsHoldsAndBackfillsPausedAt` (sharpened) | drop the `hold_expires_at > expires_at` guard from that UPDATE (max() broken) |
+| `TestReleasePausedRacesResume` (now fails the R4-3 mutation) | predicate made always-true → a lease resumed after collection is deleted |
+| `TestReleasePausedSkipsBusyLease` (new) | drop the `busy` check in `leasePausedExpiredLocked`, or make the predicate always-true → a busy lease is deleted mid-operation |
+| `TestAdminUnpinEventCarriesDashLeaseID` (new) | emit `""` instead of `"-"`, or store-first order → the event carries an empty lease id |
