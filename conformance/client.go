@@ -75,10 +75,9 @@ type config struct {
 	// probe.
 	MixedSSHPort int
 	// SecondToken is the token of a second, non-admin identity user
-	// (CONFORMANCE_SECOND_TOKEN). Group C uses it as the owner of the
-	// guaranteed lease: the production conformance user is not admin and
-	// there is no promote API, so the suite cannot create a second user
-	// there.
+	// (CONFORMANCE_SECOND_TOKEN). Group C fills the host as that user:
+	// the production conformance user is not admin and there is no
+	// promote API, so the suite cannot create a second user there.
 	SecondToken string
 }
 
@@ -469,8 +468,10 @@ type leaseInfo struct {
 	ResumeBuildID string            `json:"resume_build_id"`
 	Generation    int64             `json:"generation"`
 	Name          string            `json:"name"`
-	Class         string            `json:"class"`
 	Preempted     bool              `json:"preempted"`
+	// SuspendReason is the automatic suspension's reason
+	// (idle_suspend|take_back|resume_failed), absent while running.
+	SuspendReason string `json:"suspend_reason"`
 	// WaitedMS is how long a queued create waited for admission
 	// (#129 part 1); absent (0) when it answered at once.
 	WaitedMS int64 `json:"waited_ms"`
