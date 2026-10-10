@@ -492,6 +492,16 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	if err != nil {
 		return err
 	}
+	// ok guards the admission debit: until it is set true, the deferred
+	// undo gives the memory back (a failed recovery never took the
+	// hugepages).
+	ok := false
+	undo := func() {}
+	defer func() {
+		if !ok {
+			undo()
+		}
+	}()
 	if !l.live() {
 		// A suspended lease is uncharged (no hugepages), so turning its
 		// sandbox back on here passes the memory check like any resume
@@ -509,7 +519,8 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		defer s.releaseQuotaReservation(l.Owner, 1, img.MemoryMB)
 		// Class re-admission removed (FS2b-1): recovery brings hugepages
 		// back, so it re-passes the one-pool admission like a resume.
-		if err := s.admitMemory(ctx, l.Owner, img.MemoryMB); err != nil {
+		undo, err = s.admitMemory(ctx, l.Owner, img.MemoryMB)
+		if err != nil {
 			return err
 		}
 	}
@@ -562,5 +573,6 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	// Crash recovery replaced the sandbox; put the lease's create-time
 	// secrets back into the fresh tmpfs (#80).
 	s.restageCreateSecrets(ctx, l, "recovery")
+	ok = true
 	return nil
 }
