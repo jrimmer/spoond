@@ -126,7 +126,7 @@ func TestDiskVictimsInsideSliceUntouched(t *testing.T) {
 		{Owner: "req", UsedBytes: 10, SliceBytes: 100},
 		{Owner: "a", UsedBytes: 90, SliceBytes: 100, Paused: []diskLease{dl("a1", 50, false, time.Hour)}},
 	}
-	if v := diskVictims(owners, "req", 10); v != nil {
+	if v := diskVictims(owners, "req", 10, 10); v != nil {
 		t.Fatalf("victims = %v", victimIDs(v))
 	}
 }
@@ -138,7 +138,7 @@ func TestDiskVictimsStopsAtSlice(t *testing.T) {
 			dl("a1", 20, false, 3*time.Hour), dl("a2", 20, false, 2*time.Hour)}},
 	}
 	// After a1 the owner sits at 90, inside its slice, so a2 is safe.
-	if v := diskVictims(owners, "req", 40); v != nil {
+	if v := diskVictims(owners, "req", 40, 40); v != nil {
 		t.Fatalf("victims = %v", victimIDs(v))
 	}
 }
@@ -150,7 +150,7 @@ func TestDiskVictimsRatioOrdering(t *testing.T) {
 		{Owner: "b", UsedBytes: 300, SliceBytes: 100, Paused: []diskLease{dl("b1", 10, false, time.Hour)}},
 		{Owner: "c", UsedBytes: 200, SliceBytes: 100, Paused: []diskLease{dl("c1", 10, false, time.Hour)}},
 	}
-	got := victimIDs(diskVictims(owners, "req", 30))
+	got := victimIDs(diskVictims(owners, "req", 30, 30))
 	want := []string{"b1", "c1", "a1"}
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("victims = %v, want %v", got, want)
@@ -163,7 +163,7 @@ func TestDiskVictimsRequesterRatioBlocks(t *testing.T) {
 		{Owner: "req", UsedBytes: 150, SliceBytes: 100},
 		{Owner: "a", UsedBytes: 150, SliceBytes: 100, Paused: []diskLease{dl("a1", 50, false, time.Hour)}},
 	}
-	if v := diskVictims(owners, "req", 50); v != nil {
+	if v := diskVictims(owners, "req", 50, 50); v != nil {
 		t.Fatalf("victims = %v", victimIDs(v))
 	}
 }
@@ -177,21 +177,21 @@ func TestDiskVictimsOldestFirstPinnedNever(t *testing.T) {
 			dl("old", 10, false, 5*time.Hour),
 		}},
 	}
-	got := victimIDs(diskVictims(owners, "req", 15))
+	got := victimIDs(diskVictims(owners, "req", 15, 15))
 	if len(got) != 2 || got[0] != "old" || got[1] != "new" {
 		t.Fatalf("victims = %v", got)
 	}
-	if v := diskVictims(owners, "req", 25); v != nil {
+	if v := diskVictims(owners, "req", 25, 25); v != nil {
 		t.Fatalf("pinned must never be chosen, got %v", victimIDs(v))
 	}
 }
 
 func TestDiskVictimsNilWhenImpossible(t *testing.T) {
-	if v := diskVictims(nil, "req", 10); v != nil {
+	if v := diskVictims(nil, "req", 10, 10); v != nil {
 		t.Fatal("want nil")
 	}
 	owners := []diskOwner{{Owner: "a", UsedBytes: 300, SliceBytes: 100, Paused: []diskLease{dl("a1", 5, false, time.Hour)}}}
-	if v := diskVictims(owners, "req", 10); v != nil {
+	if v := diskVictims(owners, "req", 10, 10); v != nil {
 		t.Fatal("want nil")
 	}
 }

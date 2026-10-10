@@ -189,14 +189,18 @@ func diskRatio(used, slice int64) float64 {
 	return float64(used) / float64(slice)
 }
 
-// diskVictims picks paused leases to release so needBytes become free for
-// requester. The owner with the highest disk ratio goes first, and only
-// while it stays above the requester's after-request ratio; its own
-// after-give-up ratio must too (the alignment with memVictims, FS2).
-// Within an owner the oldest unpinned paused lease goes first; pinned
-// leases never. Returns nil when the need cannot be met.
-func diskVictims(owners []diskOwner, requester string, needBytes int64) []diskVictim {
-	if needBytes <= 0 || len(owners) == 0 || !sawRequesterAmong(owners, requester) {
+// diskVictims picks paused leases to release so a request of needBytes
+// fits for requester. needBytes sets the requester's after-request
+// ratio (the bar every candidate must beat); coverBytes is how much must
+// actually be freed — the loop stops once the picks cover it, so a
+// shortfall smaller than the need is met by fewer releases. The owner
+// with the highest disk ratio goes first, and only while it stays above
+// the requester's after-request ratio; its own after-give-up ratio must
+// too (the alignment with memVictims, FS2). Within an owner the oldest
+// unpinned paused lease goes first; pinned leases never. Returns nil
+// when the cover cannot be met.
+func diskVictims(owners []diskOwner, requester string, needBytes, coverBytes int64) []diskVictim {
+	if coverBytes <= 0 || len(owners) == 0 || !sawRequesterAmong(owners, requester) {
 		return nil
 	}
 	type state struct {
@@ -224,7 +228,7 @@ func diskVictims(owners []diskOwner, requester string, needBytes int64) []diskVi
 	}
 	var out []diskVictim
 	var freed int64
-	for freed < needBytes {
+	for freed < coverBytes {
 		var best *state
 		var bestRatio float64
 		for _, st := range states {
@@ -352,6 +356,11 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 	s.takeDiskMu.Lock()
 	defer s.takeDiskMu.Unlock()
 	var freed int64
+	// stale holds ids this pass already offered and found changed at
+	// commitment (a resume or a pin that won the race). The candidate
+	// list reads the catalog and can still name them; they are skipped
+	// so the loop makes progress while the row lags the live state.
+	stale := map[string]bool{}
 	for {
 		room, ok := s.diskRoomNow(ctx)
 		if !ok {
@@ -363,7 +372,23 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 		// One lease-catalog read per pass, shared by every owner's view:
 		// the in-memory leases when loaded, the store rows otherwise.
 		rows := s.leasesOnce(ctx)
-		victims := diskVictims(s.diskOwnersAtView(ctx, rows), requester, needBytes)
+		owners := s.diskOwnersAtView(ctx, rows)
+		if len(stale) > 0 {
+			for i := range owners {
+				kept := owners[i].Paused[:0]
+				for _, l := range owners[i].Paused {
+					if !stale[l.ID] {
+						kept = append(kept, l)
+					}
+				}
+				owners[i].Paused = kept
+			}
+		}
+		// The selector is asked for the SHORTFALL (what the room is
+		// still missing), not the whole need: garbage or a first victim
+		// may already have closed most of the gap. The need itself stays
+		// the requester's after-request ratio bar.
+		victims := diskVictims(owners, requester, needBytes, needBytes-room.Usable)
 		if len(victims) == 0 {
 			// Nothing (left) to take: the good-citizen refusal (FS3b
 			// maps it to 429 box_full and raises the alert).
@@ -375,7 +400,8 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 		if !s.takeDiskVictim(ctx, victims[0], room.Free) {
 			// A stale pick — a resume or a pin won the race between the
 			// catalog read and the commitment. No event ever went out;
-			// go around and pick against the true state again.
+			// mark it so the next pass offers a fresh candidate.
+			stale[victims[0].ID] = true
 			continue
 		}
 		freed += victims[0].Bytes
