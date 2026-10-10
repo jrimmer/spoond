@@ -259,8 +259,9 @@ outside it that have been idle for an hour.
   dry-run, because it is a catalog correction, not a deletion:
   `GC_DELETE` controls candidate deletion, not the stale-row failure.
 - `GC_DELETE=1` makes the GC actually delete candidates, marking them
-  `deleted` and counting `spoond_gc_deleted_total{kind}`. Only enable it
-  after reading a week of dry-run logs.
+  `deleted` and counting `spoond_gc_deleted_total{kind}`. **Set it in
+  production**: a host whose GC only logs fills its snapshot disk with
+  hourly checkpoints. On a new host, read a week of dry-run logs first.
 - A build left in state `building` past twice the build timeout (the
   pipeline's `buildTimeout`, one hour by default) is failed by the pass
   and logged
