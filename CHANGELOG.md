@@ -100,6 +100,18 @@ summarised from README "Status".
   loop re-picks; a call that frees nothing returns a box-full error.
   One `disk.cleanup` event per call carries the bytes freed per
   category. Not wired into any request path yet.
+- **FS3b: create, resume, pause and every checkpoint must fit in the
+  snapshot disk.** `ensureDiskRoom` guards `grantLease` (the image's
+  `disk_mb`), `resumeLease` (the lease's `disk_mb`), `pauseLeaseBody`
+  (the memory size beyond the lease's own `disk_mb`, which the pause
+  gives back) and `checkpointLease` (the memory size as the snapshot
+  estimate) before any write, reserving the bytes until the request
+  finishes. An admin drain is never refused for disk.
+  When usable disk is short, disk take-back runs first — garbage, then
+  the biggest borrower's oldest paused lease — and a request that still
+  does not fit answers `429 box_full` (nothing reclaimable) or `503
+  capacity_wait` (a structural shortage), on create, resume, suspend,
+  checkpoint/keep and named save alike.
 
 ### Status code changes
 

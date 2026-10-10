@@ -93,6 +93,7 @@ func TestKeptCapUnpinFreesSlot(t *testing.T) {
 	svc.cfg.MaxKeptPerLease = 2
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the create and every keep must fit (FS3b)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
@@ -179,6 +180,7 @@ func TestKeptBudgetOverBudgetKeepNotPinned(t *testing.T) {
 	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, budget); err != nil {
 		t.Fatal(err)
 	}
+	roomyDisk(svc) // the create and the keeps must fit in the snapshot disk (FS3b)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})

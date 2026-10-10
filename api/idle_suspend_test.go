@@ -628,6 +628,7 @@ func TestIdleSuspendDiskFloorSkips(t *testing.T) {
 
 	base := time.Now()
 	svc.now = func() time.Time { return base }
+	roomyDisk(svc) // the create's root disk must fit in the snapshot disk (FS3b)
 	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)

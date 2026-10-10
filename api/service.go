@@ -2461,6 +2461,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if err != nil {
 		return nil, err
 	}
+	// The lease's root disk must fit in usable snapshot disk (FS3);
+	// the reservation is held until the grant returns.
+	diskRelease, err := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	defer diskRelease()
 	lease.Class = class
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
@@ -2827,6 +2834,20 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		return "", err
 	}
 	defer release()
+	// The snapshot must fit in usable snapshot disk (FS3). A pause gives
+	// back the lease's own disk_mb reservation, so only the snapshot
+	// beyond it (memory size as the estimate) needs room. An admin drain
+	// is never refused for disk: refusing would leave the lease running
+	// into the orchestrator stop and lose its memory state.
+	need := int64(l.MemoryMB-l.DiskMB) * 1024 * 1024
+	if drained {
+		need = 0
+	}
+	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, need)
+	if err != nil {
+		return "", err
+	}
+	defer diskRelease()
 	buildID, refs, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
 		return "", err
@@ -3050,6 +3071,12 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A resumed lease's root disk counts as reserved again (FS3).
+	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, int64(l.DiskMB)*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	defer diskRelease()
 	l.Class = class
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
@@ -3413,6 +3440,14 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		return store.BuildRow{}, err
 	}
 	defer release()
+	// Every checkpoint (keep, named save, automatic) must fit in usable
+	// snapshot disk (FS3); the memory size is the estimate. The
+	// kept_budget check needs the real size and still runs after.
+	diskRelease, err := s.ensureDiskRoom(ctx, src.Owner, int64(src.MemoryMB)*1024*1024)
+	if err != nil {
+		return store.BuildRow{}, err
+	}
+	defer diskRelease()
 	start := time.Now()
 	buildID, refs, err := s.sub.Checkpoint(ctx, src.SandboxID)
 	pause := time.Since(start)

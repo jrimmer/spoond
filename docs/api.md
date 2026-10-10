@@ -167,7 +167,11 @@ free hugepage memory for the image, or the node is not healthy, with
 `503` `no burst capacity` with `Retry-After: 30` when the lease is
 burst (asked for, or above the owner's `guaranteed_mib`) and the node's
 free hugepages would dip under `BURST_RESERVE_MIB` after it — see
-[Lease classes](#lease-classes). A **guaranteed** lease that cannot get
+[Lease classes](#lease-classes). The lease's root disk must fit in
+usable snapshot disk too (FS3): `429` with `code: box_full` when
+take-back had nothing to reclaim, `503` with `Retry-After: 30` and
+`code: capacity_wait` when take-back ran and the disk is still short. A
+**guaranteed** lease that cannot get
 its hugepages preempts burst leases instead (see
 [Preemption](#preemption)); when the snapshot disk is too full to pause
 one, the create answers `503`
@@ -1051,7 +1055,11 @@ not persistent.
 
 Persistent leases only (`400` otherwise). The sandbox is paused into a
 new build and stops; the lease stays, becomes `state: "suspended"`, and
-records `resume_build_id`. Response
+records `resume_build_id`. The snapshot must fit in usable snapshot
+disk (FS3): `429` with `code: box_full` when take-back had nothing to
+reclaim, `503` with `Retry-After: 30` and `code: capacity_wait` when
+take-back ran and the disk is still short — in both the lease stays
+running as it was. Response
 `{"id":"…","status":"suspended","message":"lease suspended; state snapshot kept (resume to restore)"}`.
 
 ### `POST /api/leases/{id}/resume` — start from the snapshot
@@ -1076,12 +1084,16 @@ quota_exceeded` when the charge would pass
 `max_mib` — the lease stays suspended. A resume that finds no room on
 the host answers `503` with `Retry-After: 30` and `code: capacity_wait`
 (one shape for every no-room refusal, whether the burst reserve, the
-preemption disk floor or the orchestrator's capacity) — the lease stays
+preemption disk floor, the snapshot disk, or the orchestrator's
+capacity) — the lease stays
 suspended. A resume whose class re-admission cannot get room because
 every take-back candidate is pinned answers `429` with `code:
 box_full` (the create body's refusal, not a 500) — the lease stays
-suspended, nothing was paused or released. The resume re-decides the
-lease's class too (#128 part 2): a burst lease coming back into a full
+suspended, nothing was paused or released. The same `429 box_full`
+answers a resume whose root disk does not fit in usable snapshot disk
+with nothing left to reclaim, and the `503 capacity_wait` one whose
+take-back ran and the snapshot disk is still short (FS3). The resume
+re-decides the lease's class too (#128 part 2): a burst lease coming back into a full
 burst reserve takes that same `503 capacity_wait`. Resuming a lease that
 a preemption suspended
 (#128 part 3, `preempted: true`) takes the same path; on success
@@ -1161,6 +1173,12 @@ Releasing the lease (any path) drops its kept builds, and
 
 `kept` mirrors the request (`false` when the body was empty; a
 malformed body is the usual `400`, not a silent "keep nothing").
+
+The checkpoint must fit in usable snapshot disk (FS3): the write waits
+until take-back has made room, and a disk that stays short answers
+`429` with `code: box_full` (nothing reclaimable) or `503` with
+`Retry-After: 30` and `code: capacity_wait` — in both nothing was
+written and the lease keeps running as it was.
 
 **Keep limits (#126).** Two caps govern `keep`:
 

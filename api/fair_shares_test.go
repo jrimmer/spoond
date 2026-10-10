@@ -48,6 +48,15 @@ func newFairShareService(t *testing.T) (*Service, *store.DB, *testSub, *identity
 	return svc, db, sub, ids
 }
 
+// roomyDisk re-stubs the service's disk capacity with a box big enough
+// for several of py-base's 10 GiB root disks plus the 5 % floor, so the
+// leases and checkpoints a test creates fit without take-back (FS3b).
+// Tests that assert slice sizes derived from the 1 GiB basis must not
+// call it.
+func roomyDisk(svc *Service) {
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 512 << 30, 256 << 30, nil }
+}
+
 // addIdentityUser adds a user directly to the identity store.
 func addIdentityUser(t *testing.T, ids *identity.Store, name string) *identity.User {
 	t.Helper()
@@ -384,6 +393,7 @@ func TestFairSharesActivitySaveKeepsCacheWarm(t *testing.T) {
 	svc, db, _, ids := newFairShareService(t)
 	freezeFairShareClock(svc, time.Now())
 	seedImage(t, db, "py-base", 256)
+	roomyDisk(svc) // the grants must fit in the snapshot disk (FS3b)
 	u := addIdentityUser(t, ids, "alice")
 	l, err := svc.grant(context.Background(), u.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
@@ -885,6 +895,7 @@ func TestFairSharesInvalidateOnLeaseRelease(t *testing.T) {
 	svc, db, _, ids := newFairShareService(t)
 	freezeFairShareClock(svc, time.Now())
 	seedImage(t, db, "py-base", 256)
+	roomyDisk(svc) // the grant must fit in the snapshot disk (FS3b)
 	u := addIdentityUser(t, ids, "alice")
 	l, err := svc.grant(context.Background(), u.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
@@ -908,6 +919,7 @@ func TestFairSharesInvalidateOnLeaseDelete(t *testing.T) {
 	svc, db, _, ids := newFairShareService(t)
 	freezeFairShareClock(svc, time.Now())
 	seedImage(t, db, "py-base", 256)
+	roomyDisk(svc) // the grant must fit in the snapshot disk (FS3b)
 	u := addIdentityUser(t, ids, "alice")
 	l, err := svc.grant(context.Background(), u.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
@@ -957,6 +969,7 @@ func TestFairSharesInvalidateOnKeep(t *testing.T) {
 	freezeFairShareClock(svc, time.Now())
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 256)
+	roomyDisk(svc) // the create and the kept checkpoint must fit (FS3b)
 	id := createLeaseAs(srv.Handler(), "legacy-tok")
 	if id == "" {
 		t.Fatal("could not create lease")
@@ -981,6 +994,7 @@ func TestFairSharesInvalidateOnNamedSaveAndDelete(t *testing.T) {
 	freezeFairShareClock(svc, time.Now())
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 256)
+	roomyDisk(svc) // the create and the named save must fit (FS3b)
 	id := createLeaseAs(srv.Handler(), "legacy-tok")
 	if id == "" {
 		t.Fatal("could not create lease")

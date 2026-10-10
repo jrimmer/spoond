@@ -94,6 +94,7 @@ func gcTestService(t *testing.T) (*Service, *bytes.Buffer, *store.DB, *testSub) 
 	t.Helper()
 	svc, db, sub := newTestService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
+	roomyDisk(svc) // a create's root disk must fit in the snapshot disk (FS3b)
 	svc.SetMetrics(metrics.NewBackendMetrics())
 	buf := &bytes.Buffer{}
 	svc.log = log.New(buf, "", 0)

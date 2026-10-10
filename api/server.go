@@ -1707,6 +1707,20 @@ func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
 			// is gone, so 404 like every unknown lease.
 			writeError(w, http.StatusNotFound, "lease not found")
 		default:
+			if isBoxFull(err) {
+				// The snapshot write could not fit and take-back had
+				// nothing to reclaim (FS3b): the same 429 box_full refusal
+				// a create is answered with. The lease stays as it was.
+				writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
+				return
+			}
+			if errors.Is(err, substrate.ErrCapacity) {
+				// A structural disk shortage take-back could not close is
+				// a wait, never a loss: 503 capacity_wait with a retry
+				// hint, the one no-room shape every path shares.
+				writeErrorCodeAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
+				return
+			}
 			s.svc.log.Printf("suspend %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "suspend failed")
 		}

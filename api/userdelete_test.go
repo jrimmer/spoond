@@ -21,6 +21,7 @@ func newUserDeleteServer(t *testing.T) (*httptest.Server, *Service, *store.DB, *
 	t.Helper()
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the victim's creates and snapshots must fit (FS3b)
 	ids, err := identity.NewStore("")
 	if err != nil {
 		t.Fatal(err)
