@@ -258,8 +258,13 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 	// again — it is suspended and leaves the running-lease views). The
 	// need it stops on is the SHORTFALL (memoryMB minus what is free
 	// now); the requester's after-request ratio is still computed for
-	// the whole memoryMB inside memVictims.
-	for {
+	// the whole memoryMB inside memVictims. A pass in which every
+	// candidate is refused (a pin or an exec won each one) re-plans on
+	// fresh views and fresh free memory, bounded — a plan that keeps
+	// being refused ends after this many rounds and the ordinary
+	// capacity check answers.
+	const maxRounds = 3
+	for rounds := 0; rounds < maxRounds; rounds++ {
 		freeMiB, err = s.cachedFreeHugepageMiB(ctx)
 		if err != nil {
 			// The node could not be re-read: leave with what the earlier
@@ -307,13 +312,22 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 			break
 		}
 		if !paused {
-			// Every candidate was refused (a race won each one): re-run
-			// the selector on fresh views rather than spinning forever
-			// on the same names. The re-read free figure at the top of
-			// the loop decides whether that can ever end.
-			return nil
+			// Every candidate was refused (a race won each one). The top
+			// of the loop re-plans: takeBackOwners returns fresh views
+			// (a refused name is either still there under new facts or
+			// gone), and the free figure and shortfall are re-read. A
+			// take-back that un-did itself (a pin mid-pause) is already
+			// debited back, so the fresh reading does not double-count
+			// it as free. A plan that is refused every round exhausts
+			// the bound and falls through below.
+			continue
 		}
 	}
+	// Still short after the bounded re-plans (every candidate was
+	// refused each round, or the node could not be read): nothing was
+	// gained by trying. The caller's debit and createSandbox's ordinary
+	// capacity check answer from here.
+	return nil
 }
 
 // pinnedFreeableMiB is the memory of the running burst leases that are

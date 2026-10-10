@@ -833,6 +833,87 @@ func TestPreemptionTakesOnlyTheShortfall(t *testing.T) {
 	}
 }
 
+// TestPreemptionPinMidPauseReplans: a lease pinned DURING its take-back
+// pause is un-done at once (the pin wins, FS5) and must not swallow the
+// pause's cache credit: the un-done resume debits the hugepages the
+// pause credited, and the admission re-plans on the next victim instead
+// of stopping at the refusal. heavy runs v1 (256 MiB, least recently
+// used), v2 (512), filler (512) and v3 (1024); 768 MiB free; a 1024 MiB
+// guaranteed request arrives and v1 is pinned inside its pause by the
+// pauseBeforeSuspend hook. Expect the grant to SUCCEED: v1 comes back
+// running and pinned (nothing taken from it), the re-planned round
+// takes v2 for real, and filler and v3 are never touched. Without the
+// debit (a) the cache still counts v1's pause credit, reads 1024 free
+// and stops — the create then fails on the real 768; without the
+// re-plan (b) the refused round ends the take-back and the create fails
+// at once — either revert fails this test.
+func TestPreemptionPinMidPauseReplans(t *testing.T) {
+	svc, db, sub, ctx := newTakeBackService(t)
+	seedImage(t, db, "small", 512)
+	seedImage(t, db, "q", 256)
+	seedImage(t, db, "giga", 1024)
+	// The fair snapshot's slices exist only when every capacity read
+	// works; this service shape needs the same disk stubs the preempt
+	// service gets.
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	var diskTotal uint64 = 100 << 30
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return diskTotal, diskTotal, nil }
+	svc.diskUsage = func(dir string) (int64, error) { return 1024 << 20, nil }
+	owner := preemptOwner(t, svc, "heavy")
+	v1 := burstLease(t, svc, ctx, owner, "q")
+	v2 := burstLease(t, svc, ctx, owner, "small")
+	filler := burstLease(t, svc, ctx, owner, "small")
+	v3 := burstLease(t, svc, ctx, owner, "giga")
+	// A definite LRU order: v1, then v2, then filler; v3 is newest and
+	// would only be reached if the take-back overshot the shortfall.
+	svc.store.mu.Lock()
+	base := time.Now().Add(-4 * time.Hour)
+	v1.LastActive = base
+	v2.LastActive = base.Add(time.Hour)
+	filler.LastActive = base.Add(2 * time.Hour)
+	v3.LastActive = base.Add(3 * time.Hour)
+	svc.saveLeaseLocked(v1)
+	svc.saveLeaseLocked(v2)
+	svc.saveLeaseLocked(filler)
+	svc.saveLeaseLocked(v3)
+	svc.store.mu.Unlock()
+
+	// 2432 pages of 2 MiB, 512 pages (1 GiB) per sandbox: the four
+	// sandboxes leave 768 MiB free, so the 1024 MiB request is 256
+	// short. The four box owners slice the 4864 MiB pool into 1216 MiB;
+	// heavy runs 2304 MiB — far over, and every give-up stays above the
+	// requester (a non-box owner, after-request ratio 0).
+	installDynamicNode(t, svc, sub, 2432, 0, 512)
+	warmFairShares(svc, ctx)
+	svc.pauseBeforeSuspend = func(l *Lease) {
+		svc.pauseBeforeSuspend = nil
+		if l.ID != v1.ID {
+			t.Errorf("pause reached %s before %s; want the least recently used lease first", l.ID, v1.ID)
+		}
+		if _, err := svc.setPinned(owner, v1.ID, true); err != nil {
+			t.Errorf("pin mid-pause: %v", err)
+		}
+	}
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "giga", ttl: time.Hour}); err != nil {
+		t.Fatalf("guaranteed create: %v (the pin un-does its pause; the take-back must move on)", err)
+	}
+	svc.pauseBeforeSuspend = nil
+
+	svc.store.mu.Lock()
+	v1Pinned, v1Suspended := v1.Pinned, v1.Suspended
+	svc.store.mu.Unlock()
+	if !v1Pinned || v1Suspended {
+		t.Fatalf("v1 pinned=%v suspended=%v, want pinned and running again (a pin un-does its pause)", v1Pinned, v1Suspended)
+	}
+	got := pausedIDs(svc)
+	if !got[v2.ID] {
+		t.Fatalf("paused %v, want %s taken for real after the pin un-did %s", got, v2.ID, v1.ID)
+	}
+	if got[filler.ID] || got[v3.ID] {
+		t.Fatalf("paused %v, want %s and %s never touched (v2 alone covered the shortfall)", got, filler.ID, v3.ID)
+	}
+}
+
 // TestPreemptionUndrainDefers: an undrain whose guaranteed lease needs
 // room it cannot preempt for (the snapshot disk is under the floor)
 // leaves the lease drained and suspended, not lost.

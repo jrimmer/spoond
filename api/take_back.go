@@ -247,9 +247,11 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 		if err := s.unTakeBackResume(ctx, l, buildID); err != nil {
 			// The box cannot host the lease again right now: the pin
 			// stands, the lease waits suspended for capacity like any
-			// pinned pause (the holder's next work call resumes it).
-			// The take-back stamp is still set, so the resume-on-use
-			// path carries the take_back detail.
+			// pinned pause (the holder's next work call resumes it) and
+			// it stays pinned and suspended, stamped for take-back so
+			// the resume-on-use path carries the detail. Nothing counts
+			// as freed: the pause's credit is still in the cache and
+			// covers the suspended lease's memory.
 			s.log.Printf("take back: lease %s pinned during its pause but not resumable: %v", l.ID, err)
 			return errLeaseBusy
 		}
@@ -280,12 +282,20 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 // It is the sub work of resumeLease with the memory re-check, minus the
 // busy handling takeBackPause already owns and the quota reservation it
 // does not need (no admission class change: the lease keeps what it
-// had).
+// had). Because it skips resumeLease's admission, it debits the cached
+// node reading itself: the pause credited the lease's hugepages, and the
+// sandbox is back now, so the cache must give them up again — the same
+// debit resumeLease's admitClass path performs. Without it the caller
+// believes more memory is free than the box has and refuses a request
+// that its next victim could have served.
 func (s *Service) unTakeBackResume(ctx context.Context, l *Lease, buildID string) error {
 	l.ResumeBuildID = buildID
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return err
 	}
+	s.nodeInfoMu.Lock()
+	s.debitNodeInfoLocked(l.MemoryMB)
+	s.nodeInfoMu.Unlock()
 	s.writeGeneration(l)
 	return nil
 }
