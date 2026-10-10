@@ -144,3 +144,78 @@ pinned or not. A pin protects only a running VM.
 - `git fetch origin`: `origin/main` is at `204623b` (release 2.9.2,
   plus spoond-58e6, spoond-hfko and spoond-638d); the branch is merged
   onto it and `git log HEAD..origin/main` is empty.
+
+## Round 3 (this round)
+
+Started from the rebase onto current `origin/main` (a52e18a, the FS1
+fair-shares merge). The rebase stopped on CHANGELOG.md and docs/api.md;
+both were resolved keeping the FS1 [Unreleased] section and every FS5
+entry, and the FS5 2.9.x sections were preserved verbatim.
+
+R3-1 (blocker, data loss at upgrade): in 2.9 a non-persistent lease with
+a holder was never TTL-swept while its hold lived, so migration 0022
+could pin a row whose `expires_at` was already past — the first 3.0
+sweep then released it. The migration now sets
+`expires_at = hold_expires_at` for every non-persistent row the hold
+conversion pins where the hold is later, before the hold columns clear.
+
+- **`TestMigration22PinsHoldsAndBackfillsPausedAt`** (store) extended
+  with the `lease-hold-ttl-past` row (past TTL, future hold → extended),
+  the `lease-hold-ttl-future` row (max() no-op) and the untouched
+  persistent row. Mutation: drop the R3-1 UPDATE.
+- **`TestSweepExpiredSparesMigratedPinnedTLLLease`** (api): a migrated,
+  pinned, non-persistent row with a past TTL and a future hold survives
+  `sweepExpired`. Mutation: load the row without the extension.
+- Docs: the pre-deploy gate (clients that kept leases alive with a
+  holder must create them `"pinned": true`, plus `"persistent"`, before
+  3.0 deploys) in `docs/operations.md` and `CHANGELOG.md`.
+
+R3-2 (should-fix): `box_full` on re-admission answered 500.
+`writeResumeRefusal` and the restart, clone, fork and restore error
+switches map `isBoxFull` to 429 with code `box_full` (same body as
+create), and `errBoxFull` is in `undrainAdmissionRefusal` so an undrain
+defers instead of reporting `resume_failed`.
+
+- **`TestResumeBoxFullHTTP429`**, **`TestExecResumeOnUseBoxFullHTTP429`**
+  (mutation: drop the `isBoxFull` case → 500 `resume failed`),
+  **`TestUndrainBoxFullDefers`** (mutation: drop `errBoxFull` from
+  `undrainAdmissionRefusal` → resume_failed stamp).
+
+R3-3 (should-fix, data loss): the one clock could release a RUNNING
+lease. `releasePausedLeases`/`notifyPausedExpiring` act only on
+suspended leases; the release goes through `releaseIfPausedExpired`,
+which re-checks unreleased/suspended/not busy/past deadline under the
+store lock immediately before releasing; `LoadState` clears
+`PausedAt`/`PausedExpiryNotified` on every non-suspended row and stamps
+`PausedAt` at load on a suspended row with none (persisted under the
+store lock).
+
+- **`TestRunningLeaseWithStalePausedAtSurvivesSweep`** (mutation: drop
+  the `l.Suspended` check → the running VM is deleted),
+  **`TestSuspendedRowWithZeroPausedAtGetsClockAtLoad`** (mutation: drop
+  the load-time stamp → the row never hits the clock),
+  **`TestReleasePausedRacesResume`** (mutation: replace
+  `releaseIfPausedExpired` with a plain `releaseBecause` → the resumed
+  lease is deleted),
+  **`TestRollForwardResumesRolledBackSuspend`** (the full
+  rollback/roll-forward scenario).
+
+R3-4: **`TestResumeRunningLeaseIsNoop`** restored (the 81c93a1
+regression test the round-2 work deleted with api/held_test.go).
+Proven: mutating `resumeForUse`'s `if !l.Suspended` early-return to
+`if false &&` fails this test (the running lease gets a pause build
+stamped) before the code was restored.
+
+R3-5 (docs): the rollback paragraph rewritten (2.9 honours no pins, its
+pauses carry no `paused_at`, the roll-forward repairs both); `PUT
+/holder` replacement under "Status code changes"; the stale "idle
+rule(s)" references fixed; a pinned lease reports `idle_suspend` 0 with
+the stored value back on unpin.
+
+Round-3 gates: build, vet, gofmt empty, `go test -p 2 -count=1 ./...`,
+`go test -race -count=1 -timeout 50m ./api/`, `go test -race -count=1
+./store/` — all green on the rebased branch. The rebase dropped hunks
+that only existed in the old branch's merge resolution; they were
+restored in dedicated commits (dash per-owner notice, migration
+fixture, create-pin wiring, idle-suspend guards, resume gate, box_full
+mapping, docs) and every gate re-run after each.
