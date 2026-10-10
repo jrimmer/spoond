@@ -347,9 +347,13 @@ func TestPreemptionDiskFloorRefusedHTTP(t *testing.T) {
 	svc.cfg.BurstReserveMiB = 0
 	svc.cfg.PreemptDiskFloorPct = 15
 	svc.cfg.TemplateStoragePath = t.TempDir()
-	var total uint64 = 100 << 30
+	// 12.5 % free: over the disk-room rule (a 10 GiB root disk fits even
+	// beside a running lease's reservation and the 5 % floor), under the
+	// 15 % preemption floor, so the disk-room guard answers and the
+	// refusal below comes from the preemption rule, not box_full.
+	var total uint64 = 400 << 30
 	svc.diskCapacity = func(string) (uint64, uint64, error) {
-		return total, total / 10, nil
+		return total, total / 8, nil
 	}
 	// A burst lease on the roomy node, then the node fills.
 	installDynamicNode(t, svc, sub, 4096, 0, 512)

@@ -73,6 +73,7 @@ func metricSample(t *testing.T, ts *httptest.Server, token, name string) (float6
 func TestKeptMetricsGauges(t *testing.T) {
 	ts, svc, db, _ := keptMetricsTestServer(t)
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the create and the keep must fit in the snapshot disk (FS3b)
 
 	if n, ok := metricSample(t, ts, "token-a", "spoond_kept_builds_bytes"); !ok || n != 0 {
 		t.Fatalf("fresh server: spoond_kept_builds_bytes = %v (present %v), want a 0 gauge (updateKeptMetrics runs on every scrape)", n, ok)
@@ -124,8 +125,9 @@ func TestKeptMetricsGauges(t *testing.T) {
 // kept_builds — build_id, size_bytes and kept_at each, oldest first
 // (#126). A lease with no keeps lists an empty array.
 func TestLeaseDetailListsKeptBuilds(t *testing.T) {
-	ts, _, db, _ := keptMetricsTestServer(t)
+	ts, svc, db, _ := keptMetricsTestServer(t)
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the create and the keeps must fit in the snapshot disk (FS3b)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
@@ -203,6 +205,7 @@ func TestKeptBudgetIsPerOwner(t *testing.T) {
 	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, 1); err != nil {
 		t.Fatal(err)
 	}
+	roomyDisk(svc) // the create and every checkpoint must fit (FS3b)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "solo-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
@@ -239,9 +242,9 @@ func TestKeptBudgetIsPerOwner(t *testing.T) {
 func TestKeptDiskProbeFeedsNotify(t *testing.T) {
 	ts, svc, db, _ := keptMetricsTestServer(t)
 	seedImage(t, db, "py-base", 2048)
-	// A tiny "disk": 100 bytes total. One kept build (≥ 8192 allocated
-	// bytes) is far past the 40 % warn level.
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 50, nil }
+	// A roomy "disk" while the lease is created and kept: the create's
+	// root disk and the checkpoint's snapshot estimate must fit (FS3b).
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 64 << 30, 32 << 30, nil }
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
@@ -252,6 +255,10 @@ func TestKeptDiskProbeFeedsNotify(t *testing.T) {
 		t.Fatalf("keep: status %d (%v)", resp.StatusCode, body)
 	}
 
+	// The probe reads the tiny disk the notifier alert levels are judged
+	// against: 100 bytes total. One kept build (≥ 8192 allocated bytes)
+	// is far past the 40 % warn level.
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 50, nil }
 	probe := svc.KeptDiskProbe(t.TempDir())
 	kept, total, err := probe()
 	if err != nil {

@@ -156,6 +156,7 @@ func TestTakeBackOwnersViews(t *testing.T) {
 	bob := addIdentityUser(t, ids, "bob")
 	ctx := context.Background()
 	seedImage(t, db, "mid", 1024)
+	roomyDisk(svc) // the grants and the suspend must fit in the snapshot disk (FS3b)
 
 	// Alice: two running leases (one pinned, one with a running job).
 	a1, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour, persistent: true})

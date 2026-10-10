@@ -46,6 +46,7 @@ func TestSnapshotStartByNameAndVersion(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 
 	v1 := saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
@@ -140,6 +141,7 @@ func TestSnapshotStartImageMismatch(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	seedImage(t, db, "go-base", 4096)
 	id := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", id, map[string]any{"name": "warm"})
@@ -169,6 +171,7 @@ func TestSnapshotStartMemoryQuota(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 
 	ids, err := identity.NewStore("")
 	if err != nil {
@@ -225,6 +228,7 @@ func TestSnapshotStartSecrets(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 
@@ -256,6 +260,7 @@ func TestSnapshotStartCannotStart(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 
@@ -312,6 +317,7 @@ func TestSnapshotStartHostVersionMismatch(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	// The host reports version v-host for every component.
 	sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 1 << 20, HugepageSizeBytes: 2 << 20,
 		Version: "orch-host", EnvdVersion: "envd-host", FirecrackerVersion: "fc-host"}, nil)
@@ -350,6 +356,7 @@ func TestSnapshotStartNonReadyBuild(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 	row, err := db.GetNamedSnapshot(context.Background(), "consumer-a", "warm", 1)
@@ -372,6 +379,7 @@ func TestSnapshotStartCopySideBeforeFirstExec(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 
@@ -425,6 +433,7 @@ func TestSnapshotStartCreatedEvent(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 	out := createFromSnapshot(t, ts.URL, "token-a", map[string]any{"snapshot": "warm"})
@@ -450,6 +459,7 @@ func TestSnapshotStartBypassesWarmPool(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 
@@ -472,6 +482,7 @@ func TestSnapshotStartLiveLeaseRetentionEndToEnd(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 
 	// First save pins keep=2 on the name.
@@ -526,6 +537,7 @@ func TestSnapshotStartCreateRefusalCodes(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	seedImage(t, db, "go-base", 4096)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
@@ -565,6 +577,7 @@ func TestSnapshotStartWindowProtected(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm", "keep": 1})
 
@@ -677,6 +690,7 @@ func TestSnapshotStartScrubsSourceSecrets(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", map[string]any{
 		"image":   "py-base",
 		"secrets": map[string]string{"SOURCE": "s"},
@@ -719,6 +733,7 @@ func TestSnapshotStartCrossOwnerNotFound(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 
@@ -735,6 +750,7 @@ func TestSnapshotStartMarkerWriteFailure(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
 	seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc) // the creates, saves and starts must fit in the snapshot disk (FS3b)
 	src := createLiveLease(t, ts.URL, "token-a", nil)
 	saveSnapshotOK(t, ts.URL, "token-a", src, map[string]any{"name": "warm"})
 

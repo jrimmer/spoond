@@ -35,6 +35,9 @@ func chainTestServer(t *testing.T) (*Service, *store.DB, *testSub) {
 		return id, substrate.BuildRefs{}, nil
 	}
 	t.Cleanup(func() { sub.pauseFn = nil })
+	// The pauses and resumes below must fit in usable snapshot disk
+	// (FS3b); the real statfs depends on the developer's box.
+	roomyDisk(svc)
 	return svc, db, sub
 }
 
@@ -125,6 +128,7 @@ func TestPauseChainMetrics(t *testing.T) {
 	ts, svc, _, _ := newTestServerWithService(t)
 	root := t.TempDir()
 	svc.cfg.TemplateStoragePath = root
+	roomyDisk(svc) // the create and the pause must fit (FS3b)
 
 	if n, ok := metricSample(t, ts, "token-a", "spoond_pause_chain_depth_count"); !ok || n != 0 {
 		t.Fatalf("fresh: spoond_pause_chain_depth_count = %v (present %v), want 0", n, ok)
@@ -213,6 +217,7 @@ func TestPauseChainObservedAfterSettle(t *testing.T) {
 	svc.SetMetrics(metrics.NewBackendMetrics())
 	root := t.TempDir()
 	svc.cfg.TemplateStoragePath = root
+	roomyDisk(svc) // the create and the pause must fit (FS3b)
 	svc.SetBuildSizeSettle(5*time.Millisecond, 3*time.Second)
 	svc.sizeSettleQuiet = 30 * time.Millisecond
 
