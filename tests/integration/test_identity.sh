@@ -67,16 +67,18 @@ assert_eq "identity: cross-owner rm denied" "$other_rm" "404"
 
 # --- quota (U5) ----------------------------------------------------------
 curl -sk -X POST "$BE_API/api/users/$U1_ID/quota" -H "Authorization: Bearer $ADMIN_TOK" \
-  -H "Content-Type: application/json" -d '{"max_leases":1,"max_ttl":10}' >/dev/null
+  -H "Content-Type: application/json" -d '{"max_ttl":10}' >/dev/null
 # first lease as U1 (TTL clamps 3600 -> 10)
 r1=$(curl -sk -w '\n%{http_code}' -X POST "$BE_API/api/sandboxes" -H "Authorization: Bearer $T1" \
   -H "Content-Type: application/json" -d '{"image":"dev-base","ttl":3600}')
 assert_contains "quota: first lease ok" "$r1" "201"
 assert_contains "quota: ttl clamped" "$r1" '"ttl":10'
-# second lease as U1 -> 429
-r2=$(curl -sk -o /dev/null -w '%{http_code}' -X POST "$BE_API/api/sandboxes" -H "Authorization: Bearer $T1" \
-  -H "Content-Type: application/json" -d '{"image":"dev-base","ttl":60}')
-assert_eq "quota: cap hit -> 429" "$r2" "429"
+# the per-owner caps are gone since 3.0: max_leases is accepted, ignored
+# and answered with a Deprecation header (lowercased: HTTP/2 headers are)
+r2=$(curl -sk -D - -o /dev/null -X POST "$BE_API/api/users/$U1_ID/quota" -H "Authorization: Bearer $ADMIN_TOK" \
+  -H "Content-Type: application/json" -d '{"max_leases":1,"max_ttl":10}' | tr 'A-Z' 'a-z')
+assert_contains "quota: deprecated max_leases accepted" "$r2" " 200"
+assert_contains "quota: deprecation header" "$r2" "deprecation: true"
 
 # --- trusted gateway impersonation (U6) ----------------------------------
 GWT=$(sed -n 's/.*backend-token \([^ ]*\).*/\1/p' /etc/systemd/system/spoond-sshd-gateway.service 2>/dev/null | head -1)

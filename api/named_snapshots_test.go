@@ -750,8 +750,8 @@ func TestNamedSnapshotDeleteCollidingPrefix(t *testing.T) {
 }
 
 // TestNamedSnapshotKeptBudget: named snapshot bytes count toward the
-// owner's max_kept_bytes; a save past it is 409 kept_budget and stores
-// nothing (the untested limit from the task's test list).
+// owner's kept budget, their fair disk slice (3.0, FS4); a save past it
+// is 409 kept_budget and stores nothing.
 func TestNamedSnapshotKeptBudget(t *testing.T) {
 	ts, svc, db, sub := newTestServerWithService(t)
 	root := t.TempDir()
@@ -768,13 +768,6 @@ func TestNamedSnapshotKeptBudget(t *testing.T) {
 		return id, substrate.BuildRefs{}, nil
 	}
 
-	// Measure one build's allocated size on this filesystem, then allow
-	// only one build's worth: the first save fits, the second does not.
-	probe := filepath.Join(t.TempDir(), "probe")
-	one, err := writeBuildDir(probe, 4096, 8192)
-	if err != nil || one <= 0 {
-		t.Fatalf("probe build size %d: %v", one, err)
-	}
 	ids, err := identity.NewStore("")
 	if err != nil {
 		t.Fatal(err)
@@ -784,14 +777,14 @@ func TestNamedSnapshotKeptBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, one+one/2); err != nil {
-		t.Fatal(err)
-	}
-	roomyDisk(svc) // the create and the saves must fit in the snapshot disk (FS3b)
+	sliceOf := keptBudgetSetup(t, svc) // the create and the saves must fit in the snapshot disk (FS3b)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
+	// Each build is 70% of the owner's slice: the first save fits, the
+	// second does not.
+	buildsMeasure(svc, sliceOf(u.ID)*7/10)
 
 	// First save lands under the budget.
 	if v := saveSnapshotOK(t, ts.URL, "keeper-tok", id, map[string]any{"name": "warm"}); v != 1 {

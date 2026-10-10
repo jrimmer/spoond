@@ -35,7 +35,7 @@ func sampleSnapshot() Snapshot {
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
 		ByState:   map[string]int{"running": 2, "suspended": 1},
 		ReqPerSec: 12.3, CreatesPerMin: 4, CreateMs: 250, ResumeMs: 4100,
-		FwConns: 9, AuthFails: 2, Quota: 1, Throttled: 0, Capacity: 3, BuildFails: 1,
+		FwConns: 9, AuthFails: 2, Throttled: 0, Capacity: 3, BuildFails: 1,
 		CPUPct: 37.5, Load1: 1.4, Cores: 16,
 		MemUsedPct: 49.3, MemTotalGiB: 19.7, MemUsedGiB: 9.7,
 		HugeUsedPct: 44.3, HugeFreeGiB: 23.9,
@@ -528,6 +528,22 @@ func TestNoticeTriggers(t *testing.T) {
 		if !found {
 			t.Errorf("%s: notices %+v lack %q", tc.name, rows, tc.want)
 		}
+	}
+}
+
+// TestPinnedIdleNoticeDaysText: the pinned-idle notice names the
+// configured PINNED_IDLE_NOTICE_DAYS (FS5), not a hardcoded 7.
+func TestPinnedIdleNoticeDaysText(t *testing.T) {
+	s := healthySnapshot()
+	s.PinnedIdle = 1
+	s.PinnedIdleByOwner = map[string]int{"alice": 1}
+	if rows := notices(s); len(rows) != 1 || !strings.Contains(rows[0].Text, "idle over 7 d") {
+		t.Fatalf("default pinned-idle text = %+v, want 7 d", rows)
+	}
+	t.Setenv("PINNED_IDLE_NOTICE_DAYS", "14")
+	rows := notices(s)
+	if len(rows) != 1 || !strings.Contains(rows[0].Text, "idle over 14 d") {
+		t.Fatalf("PINNED_IDLE_NOTICE_DAYS=14 text = %+v, want 14 d", rows)
 	}
 }
 

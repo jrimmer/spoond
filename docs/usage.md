@@ -325,13 +325,13 @@ curl -s -X POST https://sandbox.example.com/api/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name":"ci","kind":"agent","token":"<its-token>"}'
 
-# 3. List users, set quotas (admin)
+# 3. List users, cap a user's lease TTL (admin)
 ssh ctl@sandbox.example.com "ssh-key ls"
 curl -s -X POST https://sandbox.example.com/api/users/<alice-id>/quota \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"max_leases": 4, "max_ttl": 7200, "max_mib": 16384}'
-# max_mib caps the memory of alice's running leases (her charge shows
-# as used_mib on GET /api/users/me); 0 = uncapped.
+  -d '{"max_ttl": 7200}'
+# There are no per-user memory or lease caps since 3.0: every owner gets
+# an equal fair share (GET /api/users/me shows used_mib and the share).
 
 # 4. Everyone uses their own key; leases are ownership-scoped
 ssh alice@sandbox.example.com            # fresh lease, owned by alice

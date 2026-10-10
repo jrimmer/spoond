@@ -287,8 +287,8 @@ func TestAdmit(t *testing.T) {
 }
 
 // TestForkRollback: with count 3 and the 2nd fork create failing, the
-// first created sandbox is deleted and the quota reservations are
-// released (the caller can lease again up to the cap).
+// first created sandbox is deleted and the pending reservations are
+// released.
 func TestForkRollback(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
@@ -298,10 +298,6 @@ func TestForkRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ids.SetQuota(u.ID, 5, 0, 0, 0, 0); err != nil {
-		t.Fatal(err)
-	}
-
 	ctx := context.Background()
 	src, err := svc.grant(ctx, u.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
 	if err != nil {
@@ -324,15 +320,13 @@ func TestForkRollback(t *testing.T) {
 	if svc.lookup(u.ID, src.ID) == nil {
 		t.Fatal("fork rollback deleted the source lease")
 	}
-	// Quota released: with max_leases=5 and 1 active lease, 4 more fit
-	// and the 5th is refused.
-	for i := 0; i < 4; i++ {
-		if _, err := svc.grant(ctx, u.ID, "py-base", time.Minute, false, "", nil, "", "", nil); err != nil {
-			t.Fatalf("grant %d after rollback: %v", i, err)
-		}
-	}
-	if _, err := svc.grant(ctx, u.ID, "py-base", time.Minute, false, "", nil, "", "", nil); !errors.Is(err, errQuotaExceeded) {
-		t.Fatalf("grant past cap = %v, want errQuotaExceeded", err)
+	// The reservations are released: nothing stays pending for the
+	// owner, so fair-share usage does not keep counting the failed forks.
+	svc.store.mu.Lock()
+	pending, pendingMiB := svc.store.pending[u.ID], svc.store.pendingMiB[u.ID]
+	svc.store.mu.Unlock()
+	if pending != 0 || pendingMiB != 0 {
+		t.Fatalf("after rollback pending = %d, pendingMiB = %d; want 0, 0", pending, pendingMiB)
 	}
 }
 

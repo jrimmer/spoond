@@ -143,6 +143,16 @@ summarised from README "Status".
 
 ### Status code changes
 
+- **No per-owner `429` any more (FS4).** `429 quota_exceeded` and the
+  plain over-quota `429` are gone from every path: create, resume,
+  every resume-on-use work call, restart, clone, fork and restore. Room
+  is refused only by `429 box_full` (take-back can free nothing) or
+  waited on as `503 capacity_wait`. `docs/api.md` has a "Refusals"
+  section and a per-path "Changes from 2.9" table.
+- **`409 kept_budget` is measured against the owner's fair disk slice
+  (FS4)** on a checkpoint keep and a named save, instead of the
+  per-owner `max_kept_bytes`. While the box capacity is unknown there
+  is no budget.
 - **`429 box_full`** with JSON `code: box_full`: a request that needed
   room and could not get it because every take-back candidate is pinned
   (FS5). This is a refusal, not a wait: nothing is paused or released.
@@ -175,6 +185,18 @@ summarised from README "Status".
   to conflict with (v3.0).
 
 ### Changed
+
+- **Queued creates are served by fair-share ratio (FS4).** The owner
+  with the lowest ratio (usage over their equal slice) goes first, an
+  owner the fair-share view does not know after every known one, then
+  FIFO. `guaranteed_mib` headroom no longer orders the queue, and the
+  `queued` event's refusal is always `capacity`.
+- **`POST /api/users/{id}/quota` sets `max_ttl` only (FS4).** It still
+  accepts `max_leases`, `guaranteed_mib`, `max_mib` and
+  `max_kept_bytes` (no `400`, any value) and ignores them; a request
+  that sets any of them answers with `Deprecation: true` and
+  `Warning: 299 - "… ignored since 3.0 (fair shares)"`. The
+  `guaranteed_mib <= max_mib` check is gone.
 
 - **Pins replace holds; one clock for every paused lease (FS5, owner
   decision 2026-10-08).** spoond no longer does anything pre-emptively:
@@ -254,6 +276,17 @@ summarised from README "Status".
 
 ### Removed
 
+- **Per-owner caps (FS4).** `max_leases`, `max_mib`, `guaranteed_mib`
+  and `max_kept_bytes` no longer limit anything: every owner gets an
+  equal fair slice of memory and snapshot disk instead. The user views
+  (`GET /api/users`, `/api/users/me`, `/api/users/{id}`, the quota
+  response) and the lease detail no longer return them; the lease
+  detail keeps `charged_mib`. A create no longer waits on a lease-count
+  or memory cap. The users file drops the four fields on its next save
+  (an older file still loads). The metric
+  `spoond_quota_exceeded_total` and the dashboard's `quota` refusal
+  counter are removed.
+
 - **Every automatic hold/idle rule and every clock but one (FS5).**
   Removed: held rules 1 (idle 4 h), 3 (hold lapse), 4 (pressure) and 5
   (critical disk); rule 2 (7 d) and the k5m 30 d stale design; the
@@ -278,8 +311,8 @@ summarised from README "Status".
     `503 capacity: cannot preempt (snapshot disk low)` refusal.
   - the metrics `spoond_preemptions_total` and `spoond_preempted_leases`.
   The lease field `preempted` stays and is always `false`. The suspend
-  reason `preempt` is now `take_back`. `guaranteed_mib` and `max_mib`
-  stay for now.
+  reason `preempt` is now `take_back`. (`guaranteed_mib` and `max_mib`
+  went later, with the per-owner caps.)
 
 ## [2.9.3] - 2026-10-09
 

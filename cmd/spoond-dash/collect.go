@@ -67,7 +67,6 @@ type Snapshot struct {
 	ResumeMs   float64 `json:"resumeMs"`
 	FwConns    int     `json:"fwConns"` // active egress firewall connections
 	AuthFails  int     `json:"authFails"`
-	Quota      int     `json:"quota"` // quota rejections, cumulative
 	Throttled  int     `json:"throttled"`
 	Capacity   int     `json:"capacity"` // admission refusals, cumulative
 	BuildFails int     `json:"buildFails"`
@@ -519,7 +518,6 @@ func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, 
 	s.BuildsBusy = int(g("spoond_builds_in_flight"))
 	s.FwConns = int(g("orchestrator_tcpfirewall_connections_active"))
 	s.AuthFails = int(g("spoond_auth_failures_total"))
-	s.Quota = int(g("spoond_quota_exceeded_total"))
 	s.Throttled = int(g("spoond_auth_throttled_total"))
 	s.Capacity = int(g("spoond_capacity_rejections_total"))
 	s.BuildFails = int(g("spoond_builds_failed_total"))

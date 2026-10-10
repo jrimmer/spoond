@@ -18,33 +18,25 @@ type UserView struct {
 	Admin        bool          `json:"admin"`
 	Fingerprints []string      `json:"fingerprints"`
 	CreatedAt    string        `json:"created_at"`
-	MaxLeases    int           `json:"max_leases"`
 	MaxTTL       int           `json:"max_ttl"`
-	MaxKeptBytes int64         `json:"max_kept_bytes"`
-	// Memory quota (#128), MiB. UsedMiB is the user's current charge:
-	// the sum of memory_mb over their RUNNING leases (suspended ones
-	// hold no hugepages and are not charged). Both limits 0 = unset.
-	GuaranteedMiB int `json:"guaranteed_mib"`
-	MaxMiB        int `json:"max_mib"`
-	UsedMiB       int `json:"used_mib"`
+	// UsedMiB is the user's current memory charge (#128): the sum of
+	// memory_mb over their RUNNING leases (suspended ones hold no
+	// hugepages and are not charged).
+	UsedMiB int `json:"used_mib"`
 }
 
 // toUserView renders a user for the API. usedMiB is the user's current
 // running-lease memory charge in MiB (#128); the Service computes it.
 func toUserView(u *identity.User, usedMiB int) UserView {
 	return UserView{
-		ID:            u.ID,
-		Name:          u.Name,
-		Kind:          u.Kind,
-		Admin:         u.Admin,
-		Fingerprints:  u.Fingerprints,
-		CreatedAt:     u.CreatedAt,
-		MaxLeases:     u.MaxLeases,
-		MaxTTL:        u.MaxTTL,
-		MaxKeptBytes:  u.MaxKeptBytes,
-		GuaranteedMiB: u.GuaranteedMiB,
-		MaxMiB:        u.MaxMiB,
-		UsedMiB:       usedMiB,
+		ID:           u.ID,
+		Name:         u.Name,
+		Kind:         u.Kind,
+		Admin:        u.Admin,
+		Fingerprints: u.Fingerprints,
+		CreatedAt:    u.CreatedAt,
+		MaxTTL:       u.MaxTTL,
+		UsedMiB:      usedMiB,
 	}
 }
 
@@ -209,7 +201,20 @@ func (s *Server) handleUsersByKey(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-// handleUsersQuota updates a user's lease quota (admin only; T4/#31).
+// deprecatedQuotaWarning is the Warning header a quota request carries
+// when it sets one of the per-owner caps removed in 3.0 (FS4).
+const deprecatedQuotaWarning = `299 - "max_leases, guaranteed_mib, max_mib and max_kept_bytes are ignored since 3.0 (fair shares)"`
+
+// deprecatedQuotaFields are the quota request fields 3.0 (fair shares,
+// FS4) removed. A request may still carry them; they are ignored.
+var deprecatedQuotaFields = []string{"max_leases", "guaranteed_mib", "max_mib", "max_kept_bytes"}
+
+// handleUsersQuota updates a user's quota (admin only; T4/#31). Only
+// max_ttl is left. The per-owner caps max_leases, guaranteed_mib,
+// max_mib and max_kept_bytes were removed in 3.0 (fair shares, FS4):
+// a request may still send them, they are accepted and ignored, and
+// when any is set (non-zero) the response carries Deprecation: true and
+// a Warning naming them, so an old client learns without breaking.
 func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -219,35 +224,59 @@ func (s *Server) handleUsersQuota(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user id required")
 		return
 	}
-	var req struct {
-		MaxLeases     int   `json:"max_leases"`
-		MaxTTL        int   `json:"max_ttl"`
-		MaxKeptBytes  int64 `json:"max_kept_bytes"`
-		GuaranteedMiB int   `json:"guaranteed_mib"`
-		MaxMiB        int   `json:"max_mib"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if req.MaxLeases < 0 || req.MaxTTL < 0 || req.MaxKeptBytes < 0 || req.GuaranteedMiB < 0 || req.MaxMiB < 0 {
+	var maxTTL int
+	if v, ok := raw["max_ttl"]; ok {
+		if err := json.Unmarshal(v, &maxTTL); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid max_ttl: "+err.Error())
+			return
+		}
+	}
+	if maxTTL < 0 {
 		writeError(w, http.StatusBadRequest, "quota values must be >= 0")
 		return
 	}
-	// #128: the guarantee must fit inside the cap when both are set.
-	if req.GuaranteedMiB > 0 && req.MaxMiB > 0 && req.GuaranteedMiB > req.MaxMiB {
-		writeError(w, http.StatusBadRequest, "guaranteed_mib must be <= max_mib")
-		return
+	deprecated := false
+	for _, f := range deprecatedQuotaFields {
+		if v, ok := raw[f]; ok && setJSONValue(v) {
+			deprecated = true
+		}
 	}
-	if err := s.svc.identities.SetQuota(id, req.MaxLeases, req.MaxTTL, req.GuaranteedMiB, req.MaxMiB, req.MaxKeptBytes); err != nil {
+	if err := s.svc.identities.SetQuota(id, maxTTL); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	// A quota change can free room for a waiting create (#129 part 1):
-	// for example raising an owner's max_mib.
-	s.svc.wakeAdmissionQueue()
+	if deprecated {
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Warning", deprecatedQuotaWarning)
+	}
 	u := s.svc.identities.UserByID(id)
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserView(u, s.svc.usedMiB(u.ID))})
+}
+
+// setJSONValue reports whether a raw JSON value sets something: not
+// null, not a zero number, not false and not an empty string.
+func setJSONValue(v json.RawMessage) bool {
+	var x any
+	if err := json.Unmarshal(v, &x); err != nil {
+		return true
+	}
+	switch t := x.(type) {
+	case nil:
+		return false
+	case float64:
+		return t != 0
+	case bool:
+		return t
+	case string:
+		return t != ""
+	default:
+		return true
+	}
 }
 
 // handleUsersLLMKey sets or rotates a user's LLM gateway key (admin

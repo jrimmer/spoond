@@ -64,8 +64,7 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; restoring it brings a running sandbox back, and
 		// that sandbox runs the image's current memory_mb — the charge
-		// to re-admit before the sandbox is created (#128). A restore
-		// adds no lease, so only the memory cap applies. (A running
+		// to re-admit before the sandbox is created (#128). (A running
 		// restore is already charged, and with its own charge — no new
 		// admission.)
 		if err := s.reserveQuota(l.Owner, 1, img.MemoryMB, false); err != nil {
@@ -217,12 +216,6 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
 			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
-		case errors.Is(err, errQuotaExceeded):
-			// Restoring a suspended lease brings a running sandbox (and
-			// its hugepages) back, so it re-passes the memory check
-			// (#128): over max_mib answers 429 and the lease stays as it
-			// was.
-			writeError(w, http.StatusTooManyRequests, err.Error())
 		case errors.Is(err, errOwnerGone):
 			// The owner's identity was removed while the restore was in
 			// flight (spoond-q4j): the user is gone, so the restore is

@@ -490,6 +490,61 @@ func TestReleasePausedSkipsBusyLease(t *testing.T) {
 	}
 }
 
+// TestReleaseHookLandsBusyBeforeCommit: the release commit's re-check
+// runs inside the lock, but a state change can still land between a
+// caller's collection pass and releaseBecauseIf taking that lock. The
+// testBeforeReleaseCommit hook lands that change (a busy mark, or a
+// resume that clears Suspended), and the due lease must survive
+// (spoond-k0uz R3-3/R4-3).
+func TestReleaseHookLandsBusyBeforeCommit(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.pauseLease(ctx, l, false); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	due := l.PausedAt.Add(30 * 24 * time.Hour)
+
+	// A busy mark landing after collection: the predicate sees it inside
+	// the lock and abandons the release.
+	svc.testBeforeReleaseCommit = func(victim *Lease) {
+		svc.testBeforeReleaseCommit = nil
+		svc.store.mu.Lock()
+		victim.busy = true
+		svc.store.mu.Unlock()
+	}
+	if svc.releaseIfPausedExpired(ctx, l, due, "paused_expired") {
+		t.Fatal("the clock released a lease that turned busy before the commit")
+	}
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("the clock released a lease that turned busy before the commit")
+	}
+	svc.store.mu.Lock()
+	l.busy = false
+	svc.store.mu.Unlock()
+
+	// A resume landing after collection clears Suspended: the same
+	// abandonment must hold.
+	svc.testBeforeReleaseCommit = func(victim *Lease) {
+		svc.testBeforeReleaseCommit = nil
+		svc.store.mu.Lock()
+		victim.Suspended = false
+		victim.setState("running")
+		svc.store.mu.Unlock()
+	}
+	if svc.releaseIfPausedExpired(ctx, l, due, "paused_expired") {
+		t.Fatal("the clock released a lease that resumed before the commit")
+	}
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("the clock released a lease that resumed before the commit")
+	}
+}
+
 // TestResumeRunningLeaseIsNoop: resuming a lease that is already running
 // must not restore its pause build again (that would roll the guest's
 // memory back); it returns the lease unchanged. Restored regression test

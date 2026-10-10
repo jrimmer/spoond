@@ -1219,8 +1219,6 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// the refusal that queued the ticket, which would otherwise match
 		// (and answer) as if the owner were still there (N1).
 		status, msg = http.StatusForbidden, "owner deleted"
-	case errors.Is(err, errQuotaExceeded):
-		status, msg = http.StatusTooManyRequests, err.Error()
 	case errors.Is(err, errUnknownImage):
 		status, msg = http.StatusNotFound, "unknown image tag: "+image
 	case isBoxFull(err):
@@ -1596,7 +1594,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	// A suspended lease has no running sandbox to update, so it resumes
 	// on this work call (#145 D2) through the normal resume path. A
-	// refused resume answers capacity_wait/quota/lease_busy.
+	// refused resume answers capacity_wait/box_full/lease_busy.
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
@@ -1744,17 +1742,16 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "lease not found")
 		case errors.Is(err, errBadRestartMode):
 			writeError(w, http.StatusBadRequest, err.Error())
-		case errors.Is(err, errQuotaExceeded):
-			// Restarting a suspended lease brings its guest (and its
-			// hugepages) back, so it re-passes the memory check (#128):
-			// over max_mib answers 429 and the lease stays suspended.
-			writeError(w, http.StatusTooManyRequests, err.Error())
 		case isBoxFull(err):
 			// Restart re-admits a suspended lease like a resume; a node full
 			// of pinned leases refuses it with the create body's 429
 			// box_full, not a 500 (spoond-k0uz R3-2). The lease stays as it
 			// was.
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
+		case errors.Is(err, substrate.ErrCapacity):
+			// The restart's re-admission or sandbox start found no room:
+			// a wait like every other path, not a failed restart.
+			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
 			// The owner's identity was removed while the restart was in
 			// flight (spoond-q4j): the user is gone, so the restart is
@@ -2500,10 +2497,6 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errLeaseReleased):
 			writeError(w, http.StatusNotFound, "lease not found")
-		case errors.Is(err, errQuotaExceeded):
-			// Quota enforcement (security review #37 rescan F1): clone
-			// surfaces the same 429 as create, not a generic 500.
-			writeError(w, http.StatusTooManyRequests, err.Error())
 		case isBoxFull(err):
 			// The clone's own class admission is box_full when every
 			// take-back candidate is pinned (FS5): 429 like create, not a
@@ -2573,8 +2566,6 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 		case errors.Is(err, errLeaseReleased):
 			writeError(w, http.StatusNotFound, "lease not found")
-		case errors.Is(err, errQuotaExceeded):
-			writeError(w, http.StatusTooManyRequests, err.Error())
 		case isBoxFull(err):
 			// A fork child's class admission is box_full when every
 			// take-back candidate is pinned (FS5): 429 like create, not a
@@ -2727,7 +2718,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // writeErrorCode is writeError with a machine-readable code beside the
-// message (e.g. capacity_wait, quota_exceeded, lease_busy,
+// message (e.g. capacity_wait, box_full, lease_busy,
 // substrate_unavailable).
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})

@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/jrimmer/spoond/v2/identity"
@@ -137,46 +136,6 @@ func TestH3BootstrapToken(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("bootstrap with token should 201, got %d", rec.Code)
-	}
-}
-
-// TestH2QuotaConcurrent: max_leases=1 with 20 concurrent creates must
-// yield exactly 1 success (no TOCTOU blow-past).
-func TestH2QuotaConcurrent(t *testing.T) {
-	svc, db, _ := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
-	ids, _ := identity.NewStore("")
-	svc.SetIdentities(ids)
-	srv := NewServer(svc, NewImageRegistry(db))
-	h := srv.Handler()
-
-	doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"admin","fingerprints":["SHA256:fp-x"],"token":"admin-tok"}`)
-	_, body := doUsersReq(t, h, "POST", "/api/users", "admin-tok", `{"name":"u1","fingerprints":["SHA256:fp-1"],"token":"u1-tok"}`)
-	uid := body["user"].(map[string]any)["id"].(string)
-	doUsersReq(t, h, "POST", "/api/users/"+uid+"/quota", "admin-tok", `{"max_leases":1}`)
-
-	var wg sync.WaitGroup
-	codes := make([]int, 20)
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
-			req.Header.Set("Authorization", "Bearer u1-tok")
-			h.ServeHTTP(rec, req)
-			codes[i] = rec.Code
-		}(i)
-	}
-	wg.Wait()
-	ok := 0
-	for _, c := range codes {
-		if c == http.StatusCreated {
-			ok++
-		}
-	}
-	if ok != 1 {
-		t.Fatalf("concurrent creates with max_leases=1: %d succeeded, want 1 (codes=%v)", ok, codes)
 	}
 }
 

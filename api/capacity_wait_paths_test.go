@@ -32,7 +32,7 @@ func expectCapacityWait(t *testing.T, resp *http.Response, body map[string]any) 
 	}
 }
 
-// TestCapacityWaitEveryPath drives create, clone, fork, restore,
+// TestCapacityWaitEveryPath drives create, clone, fork, restore, restart,
 // checkpoint and a files call into a substrate capacity refusal and pins
 // the one answer they all owe.
 func TestCapacityWaitEveryPath(t *testing.T) {
@@ -89,6 +89,18 @@ func TestCapacityWaitEveryPath(t *testing.T) {
 		t.Cleanup(func() { sub.createFn = nil })
 		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/restore", "token-a",
 			map[string]any{"build_id": b.BuildID})
+		expectCapacityWait(t, resp, body)
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		ts, svc, _, sub := newTestServerWithService(t)
+		l, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil, "", "", nil)
+		if err != nil {
+			t.Fatalf("grant: %v", err)
+		}
+		sub.createFn = refuseCreate
+		t.Cleanup(func() { sub.createFn = nil })
+		resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l.ID+"/restart?mode=cold", "token-a", nil)
 		expectCapacityWait(t, resp, body)
 	})
 

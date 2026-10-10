@@ -186,9 +186,9 @@ func TestLeaseDetailListsKeptBuilds(t *testing.T) {
 	}
 }
 
-// TestKeptBudgetIsPerOwner: the budget reads the caller's own identity
-// row; a legacy consumer owner (no row) has no budget and a keep is
-// never refused for one (#126).
+// TestKeptBudgetIsPerOwner: the budget is the caller's own fair disk
+// slice (3.0, FS4): a build bigger than the whole slice is never kept,
+// and a retry without keep still checkpoints (#126).
 func TestKeptBudgetIsPerOwner(t *testing.T) {
 	ts, svc, db, _ := keptMetricsTestServer(t)
 	seedImage(t, db, "py-base", 2048)
@@ -201,20 +201,18 @@ func TestKeptBudgetIsPerOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A 1-byte budget: nothing fits, every keep is over budget.
-	if err := ids.SetQuota(u.ID, 0, 0, 0, 0, 1); err != nil {
-		t.Fatal(err)
-	}
-	roomyDisk(svc) // the create and every checkpoint must fit (FS3b)
+	sliceOf := keptBudgetSetup(t, svc) // the create and every checkpoint must fit (FS3b)
 
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "solo-tok",
 		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
 	id := create["id"].(string)
+	// Every build is twice the owner's slice: every keep is over budget.
+	buildsMeasure(svc, 2*sliceOf(u.ID))
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "solo-tok",
 		map[string]any{"keep": true})
 	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("keep under a 1-byte budget: status %d (%v), want 409", resp.StatusCode, body)
+		t.Fatalf("keep of a build over the slice: status %d (%v), want 409", resp.StatusCode, body)
 	}
 	buildID := body["build_id"].(string)
 	keeps, err := db.ListKeptBuilds(context.Background())
