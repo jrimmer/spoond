@@ -260,11 +260,15 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 	// now); the requester's after-request ratio is still computed for
 	// the whole memoryMB inside memVictims. A pass in which every
 	// candidate is refused (a pin or an exec won each one) re-plans on
-	// fresh views and fresh free memory, bounded — a plan that keeps
-	// being refused ends after this many rounds and the ordinary
-	// capacity check answers.
-	const maxRounds = 3
-	for rounds := 0; rounds < maxRounds; rounds++ {
+	// fresh views and fresh free memory. Only refused rounds count
+	// against the bound: a round that pauses something made progress,
+	// so an admission that needs several take-backs keeps going — one
+	// pause at a time, each pausing a different running lease — and a
+	// plan that keeps being refused ends after this many refused rounds
+	// and the ordinary capacity check answers.
+	const maxRefusedRounds = 3
+	refused := 0
+	for refused < maxRefusedRounds {
 		freeMiB, err = s.cachedFreeHugepageMiB(ctx)
 		if err != nil {
 			// The node could not be re-read: leave with what the earlier
@@ -319,8 +323,9 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 			// take-back that un-did itself (a pin mid-pause) is already
 			// debited back, so the fresh reading does not double-count
 			// it as free. A plan that is refused every round exhausts
-			// the bound and falls through below.
-			continue
+			// the bound and falls through below; a round that paused
+			// something made progress and does not count against it.
+			refused++
 		}
 	}
 	// Still short after the bounded re-plans (every candidate was

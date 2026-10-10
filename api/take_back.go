@@ -255,8 +255,9 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 			// it stays pinned and suspended, stamped for take-back so
 			// the resume-on-use path carries the detail. Nothing counts
 			// as freed: the pause's credit is still in the cache and
-			// covers the suspended lease's memory. unTakeBackResume
-			// already cleared busy (nothing changed that it protects).
+			// covers the suspended lease's memory. Busy is still set:
+			// the lease stays pinned and suspended, and the caller's
+			// defer keeps clearing busy.
 			s.log.Printf("take back: lease %s pinned during its pause but not resumable: %v", l.ID, err)
 			return errLeaseBusy
 		}
@@ -297,9 +298,10 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 // exec or release can slip in between the re-check that decided to
 // un-do the pause and the moment the lease is running again — the
 // caller's endBusy closes that window atomically with the lease
-// becoming running. It clears busy itself only when the resume failed
-// (the lease stays suspended, so nothing changed that a busy flag needs
-// to protect).
+// becoming running, and it is the ONLY endBusy on this path: neither
+// the failure return nor the success return clears busy here, so
+// takeBackPause's single defer owns it end to end and cannot clear a
+// busy flag a holder resume set in between.
 func (s *Service) unTakeBackResume(ctx context.Context, l *Lease, buildID string) error {
 	if s.leaseReleased(l) {
 		// A release slipped past the busy flag before it was set:
@@ -312,7 +314,10 @@ func (s *Service) unTakeBackResume(ctx context.Context, l *Lease, buildID string
 	}
 	l.ResumeBuildID = buildID
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
-		s.endBusy(l)
+		// Busy stays set: the lease is suspended and unchanged, and
+		// takeBackPause's single defer clears it. Clearing it here too
+		// would drop the flag early and open the busy window while this
+		// call is still on the stack.
 		return err
 	}
 	s.nodeInfoMu.Lock()
