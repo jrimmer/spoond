@@ -2461,8 +2461,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if err != nil {
 		return nil, err
 	}
-	// TODO(FS3b-1 step 2): call ensureDiskRoom here (need = int64(img.DiskMB)*1024*1024,
-	// owner = owner; defer release() so the reservation is held until the VM is running).
+	// The lease's root disk must fit in usable snapshot disk (FS3);
+	// the reservation is held until the grant returns.
+	diskRelease, err := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	defer diskRelease()
 	lease.Class = class
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
@@ -2828,10 +2833,14 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	if err != nil {
 		return "", err
 	}
-	// TODO(FS3b-1 step 2): call ensureDiskRoom here, before the snapshot write (need =
-	// int64(l.MemoryMB)*1024*1024 as the snapshot estimate, owner = l.Owner;
-	// defer release() once the pause write has finished).
 	defer release()
+	// The snapshot must fit in usable snapshot disk (FS3); its memory
+	// size is the estimate, held until the write has finished.
+	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, int64(l.MemoryMB)*1024*1024)
+	if err != nil {
+		return "", err
+	}
+	defer diskRelease()
 	buildID, refs, err := s.sub.Pause(ctx, l.SandboxID, l.TemplateID)
 	if err != nil {
 		return "", err
@@ -3055,8 +3064,12 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	if err != nil {
 		return nil, err
 	}
-	// TODO(FS3b-1 step 2): call ensureDiskRoom here (need = int64(l.DiskMB)*1024*1024,
-	// owner = l.Owner; defer release() until the resume has finished).
+	// A resumed lease's root disk counts as reserved again (FS3).
+	diskRelease, err := s.ensureDiskRoom(ctx, l.Owner, int64(l.DiskMB)*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	defer diskRelease()
 	l.Class = class
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
@@ -3420,6 +3433,14 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		return store.BuildRow{}, err
 	}
 	defer release()
+	// Every checkpoint (keep, named save, automatic) must fit in usable
+	// snapshot disk (FS3); the memory size is the estimate. The
+	// kept_budget check needs the real size and still runs after.
+	diskRelease, err := s.ensureDiskRoom(ctx, src.Owner, int64(src.MemoryMB)*1024*1024)
+	if err != nil {
+		return store.BuildRow{}, err
+	}
+	defer diskRelease()
 	start := time.Now()
 	buildID, refs, err := s.sub.Checkpoint(ctx, src.SandboxID)
 	pause := time.Since(start)
