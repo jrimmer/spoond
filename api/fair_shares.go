@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/jrimmer/spoond/v2/store"
 )
 
 // Fair shares (#145 FS1). Every owner gets an equal floating slice of
@@ -23,6 +25,13 @@ import (
 // ratio = usage / slice (0 when the slice is 0, e.g. a box with no
 // capacity or no owners). This task only computes and reports the
 // shares; the take-back policy that acts on them is a later unit.
+//
+// The disk slice basis is the snapshot volume's **usable** bytes: the
+// statfs free-to-unprivileged bytes plus the snapshot bytes spoond
+// already accounts for, so it is the space spoond can hand out (not the
+// raw filesystem total, which includes the root reserve). When the
+// node-info cache is cold or a store read fails the capacity is unknown:
+// CapacityKnown is false, the slices are 0 and the result is not cached.
 
 // FairShareOwner is one owner's slice and usage as the API reports it.
 type FairShareOwner struct {
@@ -46,6 +55,12 @@ type FairShareOwner struct {
 	// owner inside their slice is below 1; the owner furthest over is
 	// taken from first.
 	Ratio float64 `json:"ratio"`
+	// CapacityKnown reports whether the box totals behind this slice
+	// were readable: false means the node-info cache was cold or a store
+	// read failed, so the slices are not computed yet and only the usage
+	// buckets that were readable are meaningful. It is a box property
+	// copied onto each share so a share object is self-describing.
+	CapacityKnown bool `json:"capacity_known"`
 }
 
 // fairShareSnapshot is the computed per-owner view plus the box totals
@@ -62,10 +77,11 @@ type fairShareSnapshot struct {
 	diskTotalBytes int64
 	// at is when the snapshot was computed.
 	at time.Time
-	// ok reports whether every read behind the snapshot succeeded. A
-	// snapshot with ok false is still returned to the caller (it carries
-	// whatever was readable) but is never cached.
-	ok bool
+	// capacityKnown reports whether every capacity read behind the
+	// snapshot succeeded. A snapshot with capacityKnown false is still
+	// returned to the caller (it carries whatever was readable) but is
+	// never cached.
+	capacityKnown bool
 }
 
 // fairShareComputeTimeout bounds one computation of the box-wide view.
@@ -153,15 +169,22 @@ func (s *Service) totalHugepageMiB() (int, bool) {
 	return int(total / (1024 * 1024)), true
 }
 
-// totalSnapshotBytes reports the snapshot volume's usable bytes. A
-// statfs failure reports 0, false so the caller falls back to a 0 slice
-// rather than a wrong number.
-func (s *Service) totalSnapshotBytes() (int64, bool) {
-	total, _, err := s.diskCapacity(s.cfg.TemplateStoragePath)
+// usableSnapshotBytes reports the snapshot volume's usable bytes: the
+// statfs bytes available to an unprivileged writer (Bavail, the second
+// return of diskCapacity) plus the snapshot bytes spoond itself already
+// accounts for (the sum of every owner's recorded pause + kept + named
+// bytes, de-duplicated by build). That is the space spoond can hand out
+// to owners, not the raw filesystem total: the root-reserved blocks are
+// not spoond's to give, and the bytes spoond already holds are still
+// part of the pool the next snapshot can draw on once reclaimed. A
+// statfs failure reports 0, false so the caller reports unknown capacity
+// rather than a wrong slice.
+func (s *Service) usableSnapshotBytes(accounted int64) (int64, bool) {
+	_, free, err := s.diskCapacity(s.cfg.TemplateStoragePath)
 	if err != nil {
 		return 0, false
 	}
-	return int64(total), true
+	return int64(free) + accounted, true
 }
 
 // fairShares computes and caches every owner's slice and usage. It reads
@@ -190,7 +213,7 @@ func (s *Service) fairShares(ctx context.Context) *fairShareSnapshot {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fairShareComputeTimeout)
 	defer cancel()
 	snap := s.computeFairShares(cctx)
-	if !snap.ok {
+	if !snap.capacityKnown {
 		// A failed read must not be cached: the next caller retries.
 		return snap
 	}
@@ -206,20 +229,16 @@ func (s *Service) fairShares(ctx context.Context) *fairShareSnapshot {
 }
 
 // computeFairShares builds a fresh snapshot from the current state. The
-// snapshot's ok is false when any read failed; it then carries only the
-// values that were readable.
+// snapshot's capacityKnown is false when any capacity read failed; it
+// then carries only the values that were readable.
 func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 	owners := s.ownersOfBox()
 	n := len(owners)
 
-	ok := true
+	capacityKnown := true
 	memTotalMiB, memOK := s.totalHugepageMiB()
 	if !memOK {
-		ok = false
-	}
-	diskTotalBytes, diskOK := s.totalSnapshotBytes()
-	if !diskOK {
-		ok = false
+		capacityKnown = false
 	}
 
 	// Running-lease memory, under the store lock so a concurrent
@@ -235,35 +254,35 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 	}
 	s.store.mu.Unlock()
 
-	// Disk usage by recorded snapshot size, three queries for the box. A
-	// failed query must not be cached as zero disk.
-	pausedByOwner, err := s.db.PausedBytesByOwner(ctx)
+	// Disk usage by recorded snapshot size, one query for the box. A
+	// failed query must not be cached as zero disk. A build that is both
+	// kept and named counts once.
+	usageByOwner, err := s.db.DiskUsageByOwner(ctx)
 	if err != nil {
-		s.log.Printf("fair shares: paused bytes: %v", err)
-		ok = false
-		pausedByOwner = map[string]int64{}
+		s.log.Printf("fair shares: disk usage: %v", err)
+		capacityKnown = false
+		usageByOwner = map[string]store.OwnerUsage{}
 	}
-	keptByOwner, err := s.db.KeptBytesByOwner(ctx)
-	if err != nil {
-		s.log.Printf("fair shares: kept bytes: %v", err)
-		ok = false
-		keptByOwner = map[string]int64{}
+	var accounted int64
+	for _, u := range usageByOwner {
+		accounted += u.Used
 	}
-	namedByOwner, err := s.db.NamedSnapshotBytesByOwner(ctx)
-	if err != nil {
-		s.log.Printf("fair shares: named bytes: %v", err)
-		ok = false
-		namedByOwner = map[string]int64{}
+
+	// The disk slice basis is the volume's usable bytes: free-to-
+	// unprivileged plus the snapshot bytes spoond already accounts for.
+	diskTotalBytes, diskOK := s.usableSnapshotBytes(accounted)
+	if !diskOK {
+		capacityKnown = false
 	}
 
 	// Memory slice: 1/N of the pool, integer MiB. Disk slice: 1/N of the
-	// volume's usable bytes.
+	// volume's usable bytes. When the capacity was not readable the slices
+	// are not computed yet (capacity_known false) and stay 0, so a caller
+	// never reads a wrong number for a real one.
 	memSliceMiB := 0
-	if n > 0 {
-		memSliceMiB = memTotalMiB / n
-	}
 	var diskSliceBytes int64
-	if n > 0 {
+	if capacityKnown && n > 0 {
+		memSliceMiB = memTotalMiB / n
 		diskSliceBytes = diskTotalBytes / int64(n)
 	}
 
@@ -273,20 +292,21 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 		memoryTotalMiB: memTotalMiB,
 		diskTotalBytes: diskTotalBytes,
 		at:             s.now(),
-		ok:             ok,
+		capacityKnown:  capacityKnown,
 	}
 	for _, owner := range owners {
-		o := &FairShareOwner{Owner: owner, Name: s.ownerDisplayName(owner)}
+		o := &FairShareOwner{Owner: owner, Name: s.ownerDisplayName(owner), CapacityKnown: capacityKnown}
 		if n > 0 {
 			o.SlicePct = 100 / float64(n)
 		}
 		o.Memory.SliceMiB = memSliceMiB
 		o.Memory.UsedMiB = memUsed[owner]
 		o.Disk.SliceBytes = diskSliceBytes
-		o.Disk.PausedBytes = pausedByOwner[owner]
-		o.Disk.KeptBytes = keptByOwner[owner]
-		o.Disk.NamedBytes = namedByOwner[owner]
-		o.Disk.UsedBytes = o.Disk.PausedBytes + o.Disk.KeptBytes + o.Disk.NamedBytes
+		u := usageByOwner[owner]
+		o.Disk.PausedBytes = u.Paused
+		o.Disk.KeptBytes = u.Kept
+		o.Disk.NamedBytes = u.Named
+		o.Disk.UsedBytes = u.Used
 		o.Ratio = ratioOf(o, memSliceMiB, diskSliceBytes)
 		snap.owners = append(snap.owners, o)
 		snap.byID[owner] = o
@@ -326,6 +346,15 @@ func (s *Service) fairShareFor(ctx context.Context, owner string) (*FairShareOwn
 // fairShareOwners returns every owner's view, sorted by ratio descending
 // (the owner furthest over their slice first; ties by owner id).
 func (s *Service) fairShareOwners(ctx context.Context) []*FairShareOwner {
+	out, _ := s.fairSharesView(ctx)
+	return out
+}
+
+// fairSharesView returns the sorted owner list and the snapshot's
+// capacityKnown for the current box view. The owner list and the
+// capacity flag come from one snapshot, so a cold compute does not run
+// twice.
+func (s *Service) fairSharesView(ctx context.Context) ([]*FairShareOwner, bool) {
 	snap := s.fairShares(ctx)
 	out := append([]*FairShareOwner(nil), snap.owners...)
 	sort.SliceStable(out, func(i, j int) bool {
@@ -334,7 +363,7 @@ func (s *Service) fairShareOwners(ctx context.Context) []*FairShareOwner {
 		}
 		return out[i].Owner < out[j].Owner
 	})
-	return out
+	return out, snap.capacityKnown
 }
 
 // handleUserUsage is GET /api/users/{id} (admin only): one identity
@@ -370,6 +399,9 @@ func (s *Server) handleSharesList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	owners := s.svc.fairShareOwners(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"owners": owners})
+	owners, known := s.svc.fairSharesView(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"capacity_known": known,
+		"owners":         owners,
+	})
 }

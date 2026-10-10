@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +38,11 @@ func newFairShareService(t *testing.T) (*Service, *store.DB, *testSub, *identity
 	// does: the fair-share view reads the cache and never makes an RPC
 	// (R5), so a cold cache would report unknown capacity.
 	svc.updateNodeMetrics(context.Background())
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return 1 << 30, 1 << 29, nil }
+	// The disk basis is the volume's usable bytes: the statfs free-to-
+	// unprivileged bytes plus the snapshot bytes spoond already accounts
+	// for. This fake reports 1 GiB free and a nominal total the view
+	// ignores, so with no accounted builds the slice basis is 1 GiB.
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 1 << 31, 1 << 30, nil }
 	return svc, db, sub, ids
 }
 
@@ -371,6 +374,36 @@ func TestFairSharesCacheInvalidated(t *testing.T) {
 	}
 }
 
+// TestFairSharesActivitySaveKeepsCacheWarm: an activity-only lease save
+// (markActive moving LastActive, keepAlive extending a hold) does not
+// move an accounted quantity, so it leaves the cached snapshot in place
+// (R5-3). A create, which does, invalidates it.
+func TestFairSharesActivitySaveKeepsCacheWarm(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
+	seedImage(t, db, "py-base", 256)
+	u := addIdentityUser(t, ids, "alice")
+	l, err := svc.grant(context.Background(), u.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	before := svc.fairShares(context.Background())
+
+	// An activity touch persists LastActive only: the cache stays warm.
+	if !svc.markActive(l.ID) {
+		t.Fatal("markActive returned false")
+	}
+	if after := svc.fairShares(context.Background()); after != before {
+		t.Fatal("activity-only save invalidated the cache")
+	}
+
+	// A create changes the accounted set: the cache must be dropped.
+	if _, err := svc.grant(context.Background(), u.ID, "py-base", time.Minute, true, "", nil, "", "", nil); err != nil {
+		t.Fatalf("second grant: %v", err)
+	}
+	freshAfter(t, svc, before)
+}
+
 // TestFairSharesOwnerDeleteViaAPI: DELETE /api/users/{id} recomputes N.
 func TestFairSharesOwnerDeleteViaAPI(t *testing.T) {
 	srv, svc, _, ids := newFairShareServer(t)
@@ -511,13 +544,19 @@ func bootstrapAdmin(t *testing.T, srv *Server) (token, id string) {
 	return "admin-tok", u["id"].(string)
 }
 
-// TestSharesListJSONShape pins the exact JSON keys the endpoint returns.
+// TestSharesListJSONShape pins the exact JSON keys GET /api/fair-shares
+// returns (R5-4). It decodes with DisallowUnknownFields into a struct
+// listing every field, so renaming any field or adding an unlisted one
+// fails the test, and asserts the values that must be non-zero are.
 func TestSharesListJSONShape(t *testing.T) {
-	srv, _, _, ids := newFairShareServer(t)
+	srv, _, db, ids := newFairShareServer(t)
 	adminTok, _ := bootstrapAdmin(t, srv)
-	addIdentityUser(t, ids, "alice")
+	u := addIdentityUser(t, ids, "alice")
 	srvSvc := srv.svc
 	srvSvc.tokens = map[string]string{}
+	// Real usage and a ratio: alice holds a named snapshot larger than her
+	// slice, so used_bytes, slice_bytes, ratio and owners are all non-zero.
+	seedNamedSnapshot(t, db, u.ID, "big", 900<<20)
 	srvSvc.invalidateFairShares()
 
 	req := httptest.NewRequest("GET", "/api/fair-shares", nil)
@@ -527,32 +566,166 @@ func TestSharesListJSONShape(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	var got struct {
-		Owners []struct {
-			Owner    string  `json:"owner"`
-			SlicePct float64 `json:"slice_pct"`
-			Memory   struct {
-				SliceMiB int `json:"slice_mib"`
-				UsedMiB  int `json:"used_mib"`
-			} `json:"memory"`
-			Disk struct {
-				SliceBytes  int64 `json:"slice_bytes"`
-				UsedBytes   int64 `json:"used_bytes"`
-				PausedBytes int64 `json:"paused_bytes"`
-				KeptBytes   int64 `json:"kept_bytes"`
-				NamedBytes  int64 `json:"named_bytes"`
-			} `json:"disk"`
-			Ratio float64 `json:"ratio"`
-		} `json:"owners"`
+	type shareJSON struct {
+		Owner    string  `json:"owner"`
+		Name     string  `json:"name"`
+		SlicePct float64 `json:"slice_pct"`
+		Memory   struct {
+			SliceMiB int `json:"slice_mib"`
+			UsedMiB  int `json:"used_mib"`
+		} `json:"memory"`
+		Disk struct {
+			SliceBytes  int64 `json:"slice_bytes"`
+			UsedBytes   int64 `json:"used_bytes"`
+			PausedBytes int64 `json:"paused_bytes"`
+			KeptBytes   int64 `json:"kept_bytes"`
+			NamedBytes  int64 `json:"named_bytes"`
+		} `json:"disk"`
+		Ratio         float64 `json:"ratio"`
+		CapacityKnown bool    `json:"capacity_known"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
+	var got struct {
+		CapacityKnown bool        `json:"capacity_known"`
+		Owners        []shareJSON `json:"owners"`
+	}
+	dec := json.NewDecoder(rec.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("decode (unknown field or bad shape): %v", err)
+	}
+	if !got.CapacityKnown {
+		t.Fatalf("capacity_known = false, want true on a warm box")
 	}
 	if len(got.Owners) == 0 {
 		t.Fatal("no owners")
 	}
-	if !strings.Contains(rec.Body.String(), `"slice_bytes"`) {
-		t.Fatalf("missing disk keys: %s", rec.Body.String())
+	var alice *shareJSON
+	for i := range got.Owners {
+		if got.Owners[i].Owner == u.ID {
+			alice = &got.Owners[i]
+		}
+	}
+	if alice == nil {
+		t.Fatalf("alice missing from %+v", got.Owners)
+	}
+	if alice.Name != "alice" {
+		t.Fatalf("name = %q, want alice", alice.Name)
+	}
+	if alice.Disk.SliceBytes <= 0 {
+		t.Fatalf("slice_bytes = %d, want > 0", alice.Disk.SliceBytes)
+	}
+	if alice.Disk.UsedBytes <= 0 || alice.Disk.NamedBytes <= 0 {
+		t.Fatalf("used_bytes/named_bytes = %d/%d, want > 0", alice.Disk.UsedBytes, alice.Disk.NamedBytes)
+	}
+	if alice.Memory.UsedMiB < 0 {
+		t.Fatalf("used_mib = %d, want >= 0", alice.Memory.UsedMiB)
+	}
+	if alice.Ratio <= 0 {
+		t.Fatalf("ratio = %v, want > 0", alice.Ratio)
+	}
+}
+
+// TestFairSharesCapacityKnownStates: the share payload reports whether
+// the box totals were readable (R5-1). A cold node-info cache reports
+// capacity_known false with zero slices; a warm one reports true with a
+// real slice. Both must answer 200.
+func TestFairSharesCapacityKnownStates(t *testing.T) {
+	srv, svc, _, ids := newFairShareServer(t)
+	adminTok, adminID := bootstrapAdmin(t, srv)
+	addIdentityUser(t, ids, "alice")
+
+	readShare := func(path string) (bool, map[string]any) {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+adminTok)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s decode: %v", path, err)
+		}
+		if path == "/api/fair-shares" {
+			known, _ := body["capacity_known"].(bool)
+			return known, body
+		}
+		sh, _ := body["share"].(map[string]any)
+		if sh == nil {
+			t.Fatalf("%s missing share: %v", path, body)
+		}
+		known, _ := sh["capacity_known"].(bool)
+		return known, sh
+	}
+
+	// Cold node-info cache: unknown capacity, zero slice.
+	svc.nodeInfoMu.Lock()
+	svc.nodeInfoAt = time.Time{}
+	svc.nodeInfoMu.Unlock()
+	svc.invalidateFairShares()
+	known, body := readShare("/api/fair-shares")
+	if known {
+		t.Fatalf("cold cache reported capacity_known true: %v", body)
+	}
+	owners, _ := body["owners"].([]any)
+	if len(owners) == 0 {
+		t.Fatalf("cold cache dropped the owner list: %v", body)
+	}
+	if owners[0].(map[string]any)["slice_pct"].(float64) == 0 {
+		t.Fatalf("cold cache slice_pct = 0, want the 1/N share")
+	}
+	if owners[0].(map[string]any)["disk"].(map[string]any)["slice_bytes"].(float64) != 0 {
+		t.Fatalf("cold cache disk slice should be 0: %v", owners[0])
+	}
+
+	// Self-scoped /api/usage and /api/users/me carry the same flag.
+	known, sh := readShare("/api/usage")
+	if known {
+		t.Fatalf("cold /api/usage reported capacity_known true: %v", sh)
+	}
+	known, _ = readShare("/api/users/me")
+	if known {
+		t.Fatalf("cold /api/users/me reported capacity_known true")
+	}
+	_ = adminID
+
+	// Warm the cache: a real slice and capacity_known true.
+	svc.updateNodeMetrics(context.Background())
+	svc.invalidateFairShares()
+	known, body = readShare("/api/fair-shares")
+	if !known {
+		t.Fatalf("warm cache reported capacity_known false: %v", body)
+	}
+	owners = body["owners"].([]any)
+	if owners[0].(map[string]any)["disk"].(map[string]any)["slice_bytes"].(float64) <= 0 {
+		t.Fatalf("warm cache disk slice = 0, want > 0")
+	}
+}
+
+// TestFairSharesUsableDiskBasis: the disk slice basis is the statfs
+// free-to-unprivileged bytes plus the snapshot bytes spoond already
+// accounts for, and it moves as accounted bytes grow (R5-2).
+func TestFairSharesUsableDiskBasis(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	u := addIdentityUser(t, ids, "alice")
+	// 1 GiB free; nothing accounted yet → basis 1 GiB.
+	o, ok := svc.fairShareFor(context.Background(), u.ID)
+	if !ok {
+		t.Fatal("owner missing")
+	}
+	if o.Disk.SliceBytes != 1<<30 {
+		t.Fatalf("slice = %d, want %d", o.Disk.SliceBytes, int64(1<<30))
+	}
+	// A 200 MiB named snapshot is accounted, so the basis and slice grow
+	// by that much: spoond hands out the free space plus what it holds.
+	seedNamedSnapshot(t, db, u.ID, "warm", 200<<20)
+	svc.invalidateFairShares()
+	o, _ = svc.fairShareFor(context.Background(), u.ID)
+	if want := int64(1<<30) + 200<<20; o.Disk.SliceBytes != want {
+		t.Fatalf("slice after accounting = %d, want %d", o.Disk.SliceBytes, want)
+	}
+	if o.Disk.UsedBytes != 200<<20 {
+		t.Fatalf("used = %d, want %d", o.Disk.UsedBytes, int64(200<<20))
 	}
 }
 
@@ -713,7 +886,7 @@ func TestFairSharesFailedReadNotCached(t *testing.T) {
 		svc.nodeInfoMu.Unlock()
 		beforeCalls := calls(svc.sub.(*testSub).Fake, "NodeInfo")
 		snap := svc.fairShares(context.Background())
-		if snap.ok {
+		if snap.capacityKnown {
 			t.Fatal("cold NodeInfo snapshot marked ok")
 		}
 		if afterCalls := calls(svc.sub.(*testSub).Fake, "NodeInfo"); afterCalls != beforeCalls {
@@ -728,7 +901,7 @@ func TestFairSharesFailedReadNotCached(t *testing.T) {
 		// A warm cache then reads a real slice.
 		svc.updateNodeMetrics(context.Background())
 		again := svc.fairShares(context.Background())
-		if !again.ok {
+		if !again.capacityKnown {
 			t.Fatal("warm NodeInfo snapshot not marked ok")
 		}
 	})
@@ -741,7 +914,7 @@ func TestFairSharesFailedReadNotCached(t *testing.T) {
 			return 0, 0, context.DeadlineExceeded
 		}
 		snap := svc.fairShares(context.Background())
-		if snap.ok {
+		if snap.capacityKnown {
 			t.Fatal("failed statfs snapshot marked ok")
 		}
 		svc.fairShareCache.mu.Lock()
@@ -761,7 +934,7 @@ func TestFairSharesFailedReadNotCached(t *testing.T) {
 			t.Fatalf("close store: %v", err)
 		}
 		snap := svc.fairShares(context.Background())
-		if snap.ok {
+		if snap.capacityKnown {
 			t.Fatal("failed store snapshot marked ok")
 		}
 		svc.fairShareCache.mu.Lock()
@@ -783,7 +956,7 @@ func TestFairSharesCancelledRequestContextDetached(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	snap := svc.fairShares(ctx)
-	if !snap.ok {
+	if !snap.capacityKnown {
 		t.Fatal("cancelled request context produced a not-ok snapshot")
 	}
 	svc.fairShareCache.mu.Lock()

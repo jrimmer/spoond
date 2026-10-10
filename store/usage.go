@@ -10,51 +10,72 @@ import (
 // query for the whole box, so the per-request owner-usage view never
 // walks the filesystem.
 
-// PausedBytesByOwner sums the recorded size_bytes of each owner's
-// pause snapshots (builds of kind pause), per owner. Every pause build
-// stays on disk until the GC reclaims it, so a lease's whole pause chain
-// counts, not only the build it currently resumes from. A deleted build's
-// files are gone and is skipped.
-func (db *DB) PausedBytesByOwner(ctx context.Context) (map[string]int64, error) {
-	return db.bytesByOwner(ctx, `
-		SELECT owner, COALESCE(SUM(size_bytes), 0)
-		FROM builds
-		WHERE kind = 'pause' AND state <> 'deleted'
-		GROUP BY owner`)
+// OwnerUsage is one owner's recorded snapshot disk bytes by kind.
+// Used is the union of the three kinds: a build that is both a kept
+// checkpoint and a named snapshot is counted once (R5-5), while the
+// per-kind fields still report the bytes that kind holds.
+type OwnerUsage struct {
+	Paused int64
+	Kept   int64
+	Named  int64
+	Used   int64
 }
 
-// KeptBytesByOwner sums the recorded size_bytes of the builds each
-// owner's leases pinned with keep (lease_kept_builds), deleted builds
-// excluded: a pin on thin air holds no disk.
-func (db *DB) KeptBytesByOwner(ctx context.Context) (map[string]int64, error) {
-	return db.bytesByOwner(ctx, `
-		SELECT l.owner, COALESCE(SUM(b.size_bytes), 0)
-		FROM lease_kept_builds k
-		JOIN leases l ON l.id = k.lease_id
-		JOIN builds b ON b.build_id = k.build_id
-		WHERE b.state <> 'deleted'
-		GROUP BY l.owner`)
-}
-
-// bytesByOwner runs a (owner, bytes) query and returns it as a map. A
-// result error wraps err with what failed.
-func (db *DB) bytesByOwner(ctx context.Context, q string) (map[string]int64, error) {
-	rows, err := db.r.QueryContext(ctx, q)
+// DiskUsageByOwner returns every owner's recorded snapshot bytes for the
+// whole box in one query: pause snapshots, kept checkpoints and named
+// snapshots, from each build's recorded size_bytes. A deleted build's
+// files are gone and count for nothing in the kept and pause sets; a
+// named snapshot keeps its recorded size (its build is a GC root).
+//
+// The three sets overlap — a saved snapshot's checkpoint stays pinned by
+// the lease it was saved from — so a build is attributed to its owner
+// once in Used even when it is both kept and named. The per-kind fields
+// report each kind's raw bytes.
+func (db *DB) DiskUsageByOwner(ctx context.Context) (map[string]OwnerUsage, error) {
+	rows, err := db.r.QueryContext(ctx, `
+		SELECT owner, build_id, MAX(size_bytes), MAX(is_pause), MAX(is_kept), MAX(is_named)
+		FROM (
+			SELECT owner, build_id, size_bytes, 1 AS is_pause, 0 AS is_kept, 0 AS is_named
+			FROM builds
+			WHERE kind = 'pause' AND state <> 'deleted'
+			UNION ALL
+			SELECT l.owner, b.build_id, b.size_bytes, 0, 1, 0
+			FROM lease_kept_builds k
+			JOIN leases l ON l.id = k.lease_id
+			JOIN builds b ON b.build_id = k.build_id
+			WHERE b.state <> 'deleted'
+			UNION ALL
+			SELECT n.owner, n.build_id, COALESCE(b.size_bytes, n.size_bytes), 0, 0, 1
+			FROM named_snapshots n
+			LEFT JOIN builds b ON b.build_id = n.build_id
+		)
+		GROUP BY owner, build_id`)
 	if err != nil {
-		return nil, fmt.Errorf("store: bytes by owner: %w", err)
+		return nil, fmt.Errorf("store: disk usage by owner: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]int64{}
+	out := map[string]OwnerUsage{}
 	for rows.Next() {
-		var owner string
-		var bytes int64
-		if err := rows.Scan(&owner, &bytes); err != nil {
-			return nil, fmt.Errorf("store: bytes by owner: %w", err)
+		var owner, buildID string
+		var size, isPause, isKept, isNamed int64
+		if err := rows.Scan(&owner, &buildID, &size, &isPause, &isKept, &isNamed); err != nil {
+			return nil, fmt.Errorf("store: disk usage by owner: %w", err)
 		}
-		out[owner] = bytes
+		u := out[owner]
+		if isPause != 0 {
+			u.Paused += size
+		}
+		if isKept != 0 {
+			u.Kept += size
+		}
+		if isNamed != 0 {
+			u.Named += size
+		}
+		u.Used += size
+		out[owner] = u
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: bytes by owner: %w", err)
+		return nil, fmt.Errorf("store: disk usage by owner: %w", err)
 	}
 	return out, nil
 }

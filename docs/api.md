@@ -2139,13 +2139,15 @@ never exposed. `used_mib` is `0` on a fresh user.
 
 Self-service: `{"user": {id, name, kind, admin, max_leases, max_ttl,
 guaranteed_mib, max_mib, used_mib}, "share": {owner, name, slice_pct,
-memory {slice_mib, used_mib}, disk {slice_bytes, used_bytes,
-paused_bytes, kept_bytes, named_bytes}, ratio}}` (#128, #145 FS1).
+capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
+used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}}` (#128,
+#145 FS1).
 `used_mib` is the user's current memory charge — the sum of `memory_mb`
 over their running leases (suspended ones hold no hugepages);
 `guaranteed_mib` and `max_mib` are `0` when unset. `share` is the
 caller's fair-share slice and usage; see
-[Fair shares](#fair-shares) below.
+[Fair shares](#fair-shares) below. `capacity_known` is `false` when the
+box totals were not readable, so the slices are not computed yet.
 
 ### `GET /api/users/{id}` — one owner's usage (admin only)
 
@@ -2156,9 +2158,10 @@ non-admin caller.
 
 ### `GET /api/usage` — caller's own fair-share usage
 
-Any authenticated caller. `{"share": {owner, name, slice_pct, memory
-{slice_mib, used_mib}, disk {slice_bytes, used_bytes, paused_bytes,
-kept_bytes, named_bytes}, ratio}}`. Self-scoped: a legacy consumer
+Any authenticated caller. `{"share": {owner, name, slice_pct,
+capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
+used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}}`.
+Self-scoped: a legacy consumer
 token also has an owner, so its usage is available; a caller whose
 owner somehow does not exist answers `404`.
 
@@ -2294,11 +2297,11 @@ uses its service token).
 ## Fair shares
 
 Every owner gets an **equal floating slice** of the box: `1/N` of the
-hugepage memory pool and of the snapshot volume's usable bytes, where
-`N` is the number of owners that exist — every identity user, plus the
-legacy consumer token as one owner. There are no per-owner weights or
-settings; the slice is recomputed when an owner is added or deleted
-(`POST /api/users`, `DELETE /api/users/{id}`).
+hugepage memory pool and of the snapshot volume's **usable** bytes,
+where `N` is the number of owners that exist — every identity user,
+plus the legacy consumer token as one owner. There are no per-owner
+weights or settings; the slice is recomputed when an owner is added or
+deleted (`POST /api/users`, `DELETE /api/users/{id}`).
 
 The same fraction applies to both resources. Usage is measured from
 recorded state, never a filesystem walk per request:
@@ -2306,7 +2309,16 @@ recorded state, never a filesystem walk per request:
 - **memory** — the memory of the owner's *running* leases (a suspended
   lease holds no hugepages).
 - **disk** — the owner's pause snapshots + kept checkpoints + named
-  snapshots, from each build's recorded `size_bytes`.
+  snapshots, from each build's recorded `size_bytes`. A build that is
+  both a kept checkpoint and a named snapshot counts once.
+
+The **disk slice basis** is the snapshot volume's usable bytes: the
+`statfs` bytes available to an unprivileged writer (`Bavail`, not the
+raw filesystem total, which includes the root-only reserve) plus the
+snapshot bytes spoond itself already accounts for (kept + named +
+paused). That is the space spoond can hand out to owners: the free
+space plus what it currently holds and can reclaim. Memory uses the
+hugepage pool spoond admits against.
 
 The share object is:
 
@@ -2315,6 +2327,7 @@ The share object is:
   "owner": "u-…",
   "name": "jason",
   "slice_pct": 33.33,
+  "capacity_known": true,
   "memory": {"slice_mib": 341, "used_mib": 0},
   "disk": {"slice_bytes": 357913941, "used_bytes": 0,
            "paused_bytes": 0, "kept_bytes": 0, "named_bytes": 0},
@@ -2326,18 +2339,28 @@ The share object is:
 owner inside their slice is below `1`. When the box has no capacity (or
 no owners exist) every slice and ratio is `0` — no division by zero.
 
+`capacity_known` reports whether the box totals behind the slice were
+readable. `false` means the slices are **not computed yet** — the
+node-info cache that holds the hugepage pool was cold (about the first
+15 s after a restart) or a store read failed — so the endpoint does not
+serve a wrong zero for a real slice. The response is still `200` and
+carries the owner list with the usage buckets that were readable; the
+result is not cached, so the next request recomputes. The same flag is
+on every owner object in `GET /api/fair-shares` and on the self-scoped
+`share` payloads.
+
 Capacity is read from the node-info cache the admission path keeps warm
 (`updateNodeMetrics`); the fair-share routes never make a substrate RPC.
-When that cache is cold the capacity is unknown: the endpoint still
-answers `200` with the owner list, the slices are `0` and the result is
-not cached, so the next request retries. The same applies to a failed
-store read: the view is not cached and the next request recomputes.
+When that cache is cold, or on a failed store read, the slices are `0`,
+`capacity_known` is `false` and the view is not cached, so the next
+request retries.
 
 ### `GET /api/fair-shares` — every owner's slice and usage (admin only)
 
 `403` for non-admin callers. Read-only:
-`{"owners": [{owner, name?, slice_pct, memory {slice_mib, used_mib},
-disk {slice_bytes, used_bytes, paused_bytes, kept_bytes, named_bytes},
+`{"capacity_known": true|false, "owners": [{owner, name?,
+capacity_known, slice_pct, memory {slice_mib, used_mib}, disk
+{slice_bytes, used_bytes, paused_bytes, kept_bytes, named_bytes},
 ratio}]}`, sorted by `ratio` descending — the owner furthest over their
 slice first. Ties sort by owner id. This is the view the take-back
 policy (a later unit) reads; this version only reports it.

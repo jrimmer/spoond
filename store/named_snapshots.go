@@ -319,31 +319,6 @@ func (db *DB) NamedSnapshotBytesOfOwner(ctx context.Context, owner string) (int6
 	return bytes, nil
 }
 
-// NamedSnapshotBytesByOwner sums size_bytes per owner over every named
-// snapshot. The fair-share accounting (#145 FS1) reads it in one query
-// for the whole box instead of one query per owner.
-func (db *DB) NamedSnapshotBytesByOwner(ctx context.Context) (map[string]int64, error) {
-	rows, err := db.r.QueryContext(ctx,
-		`SELECT owner, COALESCE(SUM(size_bytes), 0) FROM named_snapshots GROUP BY owner`)
-	if err != nil {
-		return nil, fmt.Errorf("store: named snapshot bytes by owner: %w", err)
-	}
-	defer rows.Close()
-	out := map[string]int64{}
-	for rows.Next() {
-		var owner string
-		var bytes int64
-		if err := rows.Scan(&owner, &bytes); err != nil {
-			return nil, fmt.Errorf("store: named snapshot bytes by owner: %w", err)
-		}
-		out[owner] = bytes
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: named snapshot bytes by owner: %w", err)
-	}
-	return out, nil
-}
-
 // NamedSnapshotKeep returns the retention setting for (owner, name), or
 // ErrNotFound when the name has no settings row (and therefore no
 // version).

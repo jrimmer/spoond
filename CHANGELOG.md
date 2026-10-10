@@ -41,6 +41,22 @@ summarised from README "Status".
     failed read is never served as a real zero). Invalidations run
     after the store write, so a concurrent compute cannot cache the
     pre-write state.
+  - **Unknown capacity is explicit (`capacity_known`).** The
+    `/api/fair-shares`, `/api/usage` and `users/me` share payloads carry
+    a `capacity_known` boolean: `false` means the node-info cache was
+    cold or a store read failed, so the slices are not computed yet
+    (rather than a wrong zero). The endpoint still answers `200`.
+  - **Disk slice basis is the volume's usable bytes.** The slice is
+    1/N of the `statfs` free-to-unprivileged bytes (`Bavail`, not the
+    raw filesystem total) plus the snapshot bytes spoond already
+    accounts for (kept + named + paused) — the space spoond can hand
+    out. A build that is both a kept checkpoint and a named snapshot
+    counts once.
+  - **The cache does not churn on activity.** A lease save invalidates
+    the fair-share view only when an accounted quantity changes (a
+    lease is created/released/suspended/resumed, or its memory charge
+    changes); an activity-only save (`LastActive`, expiry, holder)
+    leaves it warm.
 
 ## [2.9.2] - 2026-10-09
 
