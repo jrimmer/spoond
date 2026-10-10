@@ -343,17 +343,11 @@ func (s *Service) fairShareFor(ctx context.Context, owner string) (*FairShareOwn
 	return o, ok
 }
 
-// fairShareOwners returns every owner's view, sorted by ratio descending
-// (the owner furthest over their slice first; ties by owner id).
-func (s *Service) fairShareOwners(ctx context.Context) []*FairShareOwner {
-	out, _ := s.fairSharesView(ctx)
-	return out
-}
-
 // fairSharesView returns the sorted owner list and the snapshot's
 // capacityKnown for the current box view. The owner list and the
 // capacity flag come from one snapshot, so a cold compute does not run
-// twice.
+// twice. The list is sorted by ratio descending (the owner furthest over
+// their slice first; ties by owner id).
 func (s *Service) fairSharesView(ctx context.Context) ([]*FairShareOwner, bool) {
 	snap := s.fairShares(ctx)
 	out := append([]*FairShareOwner(nil), snap.owners...)

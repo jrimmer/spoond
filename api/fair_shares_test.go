@@ -554,8 +554,10 @@ func TestSharesListJSONShape(t *testing.T) {
 	u := addIdentityUser(t, ids, "alice")
 	srvSvc := srv.svc
 	srvSvc.tokens = map[string]string{}
-	// Real usage and a ratio: alice holds a named snapshot larger than her
-	// slice, so used_bytes, slice_bytes, ratio and owners are all non-zero.
+	// Real usage and a ratio: alice holds a running lease (memory) and a
+	// named snapshot larger than her slice, so used_mib, used_bytes,
+	// slice_bytes, ratio and owners are all non-zero.
+	addRunningLease(srvSvc, "run-shape", u.ID, 64)
 	seedNamedSnapshot(t, db, u.ID, "big", 900<<20)
 	srvSvc.invalidateFairShares()
 
@@ -617,8 +619,11 @@ func TestSharesListJSONShape(t *testing.T) {
 	if alice.Disk.UsedBytes <= 0 || alice.Disk.NamedBytes <= 0 {
 		t.Fatalf("used_bytes/named_bytes = %d/%d, want > 0", alice.Disk.UsedBytes, alice.Disk.NamedBytes)
 	}
-	if alice.Memory.UsedMiB < 0 {
-		t.Fatalf("used_mib = %d, want >= 0", alice.Memory.UsedMiB)
+	if alice.Memory.UsedMiB <= 0 {
+		t.Fatalf("used_mib = %d, want > 0", alice.Memory.UsedMiB)
+	}
+	if alice.Memory.SliceMiB <= 0 {
+		t.Fatalf("slice_mib = %d, want > 0", alice.Memory.SliceMiB)
 	}
 	if alice.Ratio <= 0 {
 		t.Fatalf("ratio = %v, want > 0", alice.Ratio)
