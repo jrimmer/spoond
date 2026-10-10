@@ -118,12 +118,29 @@ summarised from README "Status".
     past its TTL and never protects it from take-back. `hold_ttl` is
     accepted and ignored for one release, with a `Deprecation` header;
     `hold_expires_at`, `hold_state` and hold renewal are removed.
+  - **`"pinned": true` on create pins the new lease.** The field was
+    decoded but dropped by the request path; it is now carried into the
+    grant (spoond-k0uz H1). A lease pinned on create is never paused by
+    the idle logic or take-back, and is still released at its own TTL.
+  - **A pinned lease is never idle-suspended.** The `idle_suspend`
+    sweep skips any pinned lease, whether its own `idle_suspend` or the
+    host `IDLE_SUSPEND_DEFAULT_SECS` would fire (spoond-k0uz H2). An
+    owner's explicit `POST /pause` still pauses a pinned lease.
+  - **A paused pinned lease is on the one clock (owner decision
+    2026-10-09).** Every paused lease is released 30 d after its pause
+    date, pinned or not: a pin protects only a running VM. This covers
+    an owner's own `POST /pause` on a pinned lease and a pinned lease a
+    failed drain resume left suspended; a running pinned lease is never
+    touched. A drained lease left suspended with `resume_failed` gets
+    `paused_at` at its drain pause time and so the clock.
   - **Pinned-idle visibility (no automatic action).** A pinned lease
     whose last API activity (`LastActive`; no heartbeat, no guest
     activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`) is
     flagged: GET returns `pinned_idle_since`, a `lease.pinned_idle`
-    event fires once per crossing, and one dashboard notification names
-    the count. Nothing is paused, unpinned or released because of it.
+    event fires once per crossing, and the dashboard shows one
+    aggregate notification, `N pinned leases idle over 7 d (owner:
+    count, ...)`, broken down per owner. Nothing is paused, unpinned or
+    released because of it.
   - **Migration 0022** turns every lease with an unexpired hold into a
     pin, adds `pinned`, `paused_at`, `pinned_idle_since` and
     `paused_expiry_notified`, backfills `paused_at` to the migration
@@ -133,8 +150,7 @@ summarised from README "Status".
     to that hold's expiry (the hold was what kept it alive in 2.9, so
     the first 3.0 sweep must not delete it at once — spoond-k0uz R3-1),
     and clears the old hold columns (`hold_expires_at`, `hold_set_at`,
-    `hold_ttl`). The 2.9
-    window's pool workers are held by `pool-spawn`,
+    `hold_ttl`). The 2.9 window's pool workers are held by `pool-spawn`,
     so `POST /api/admin/unpin-by-holder?holder_prefix=pool:` (admin
     token) unpins leases by holder label; `pool-spawn` needs no change.
     Clearing the hold columns is the **rollback story**: a 2.9 binary
