@@ -636,6 +636,10 @@ func (s *Service) settleBuildSize(buildID string, onSettled ...func()) {
 			if err := s.db.UpdateBuildSize(ctx, buildID, size); err != nil {
 				s.log.Printf("build size: %s: %v", buildID, err)
 			}
+			// A new reading moves the owner's recorded disk usage, so the
+			// fair-share cache must be dropped whether or not the metrics
+			// gauges are wired (FS1 follow-up c).
+			s.invalidateFairShares()
 			if s.metrics != nil {
 				s.UpdateKeptMetrics(context.Background())
 			}
