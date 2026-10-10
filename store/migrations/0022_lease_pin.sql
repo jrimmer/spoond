@@ -24,11 +24,14 @@ ALTER TABLE leases ADD COLUMN pinned_idle_since TEXT NOT NULL DEFAULT '';
 ALTER TABLE leases ADD COLUMN paused_expiry_notified INTEGER NOT NULL DEFAULT 0;
 
 -- A live hold becomes a pin. The empty hold_expires_at is the "unset"
--- marker, and RFC3339Nano strings compare correctly with strftime; a hold
--- that already lapsed (hold_expires_at in the past) does not pin.
+-- marker; julianday() reads RFC3339Nano in true time order (a
+-- whole-second "…:00Z" sorts after a same-second fractional
+-- "…:00.293Z" in plain string order), so a hold is compared by
+-- instant. A hold that already lapsed (hold_expires_at in the past) does
+-- not pin.
 UPDATE leases SET pinned = 1
  WHERE hold_expires_at <> ''
-   AND hold_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+   AND julianday(hold_expires_at) > julianday('now');
 
 -- A non-persistent lease the conversion pinned keeps its VM past the TTL
 -- its hold had already outlived (spoond-k0uz R3-1). In 2.9 a held lease
@@ -38,11 +41,12 @@ UPDATE leases SET pinned = 1
 -- the hold's expiry (only when that is later) gives the owner the window
 -- the hold promised; the first 3.0 sweep would otherwise release the VM
 -- at once, because the hold no longer protects anything. Pinned
--- persistent rows are not TTL-swept and need no extension.
+-- persistent rows are not TTL-swept and need no extension. Compared
+-- with julianday() for the same reason as the pin conversion above.
 UPDATE leases SET expires_at = hold_expires_at
  WHERE pinned = 1
    AND persistent = 0
-   AND hold_expires_at > expires_at;
+   AND julianday(hold_expires_at) > julianday(expires_at);
 
 -- Backfill the one clock: every lease already suspended when the upgrade
 -- runs is paused as of the migration time, so it gets a fresh

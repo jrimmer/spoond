@@ -916,6 +916,11 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
 	later := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339Nano)
 	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	// A whole-second expires_at and a hold 293 ms into the same second:
+	// in string order the expires_at sorts after the hold, in true time
+	// order the hold is later.
+	wholeSecondTTL := time.Now().Add(30 * time.Minute).UTC().Format("2006-01-02T15:04:05Z")
+	wholeSecondHold := time.Now().Add(30*time.Minute + 293*time.Millisecond).UTC().Format("2006-01-02T15:04:05.293Z")
 	for _, seed := range []struct {
 		id, state, holder, holdExpires string
 		suspended                      int
@@ -944,6 +949,12 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 		// extend (max() keeps the later value). The TTL is strictly later
 		// than the hold so the max() is really exercised (R4-4).
 		{"lease-hold-ttl-future", "running", "pool:honey/work-2", future, 0, 0, later},
+		// The hold lands in the same second as a whole-second expires_at,
+		// a fraction of a second later. Plain string order puts the
+		// whole-second stamp after the fractional one, so the extension
+		// would be skipped and the TTL would stay 293 ms short; the
+		// migration compares by instant instead.
+		{"lease-hold-ttl-fraction", "running", "pool:honey/work-3", wholeSecondHold, 0, 0, wholeSecondTTL},
 	} {
 		if _, err := db21.Exec(
 			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, persistent, holder, hold_expires_at, hold_set_at, hold_ttl)
@@ -1005,6 +1016,12 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 	// TTL is strictly later than the hold, so the max() is really tested.
 	if want, _ := time.Parse(time.RFC3339Nano, later); !got["lease-hold-ttl-future"].ExpiresAt.Equal(want) {
 		t.Fatalf("a pinned non-persistent lease with a later TTL had its expires_at changed to %v, want %v", got["lease-hold-ttl-future"].ExpiresAt, want)
+	}
+	// Same-second, sub-second-later hold: the extension still happens —
+	// the compare is by instant, not by string (the whole-second
+	// "…:00Z" string sorts after "…:00.293Z").
+	if want, _ := time.Parse(time.RFC3339Nano, wholeSecondHold); !got["lease-hold-ttl-fraction"].ExpiresAt.Equal(want) {
+		t.Fatalf("a whole-second TTL 293 ms before its hold stayed %v, want the hold expiry %v", got["lease-hold-ttl-fraction"].ExpiresAt, want)
 	}
 	// Persistent rows are never TTL-swept, so the conversion leaves their
 	// expires_at alone (the seed's past value, not the hold's future one).
