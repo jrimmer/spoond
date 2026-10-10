@@ -294,3 +294,22 @@ New/changed tests and the mutation each kills (round 4):
 | `TestReleasePausedRacesResume` (now fails the R4-3 mutation) | predicate made always-true → a lease resumed after collection is deleted |
 | `TestReleasePausedSkipsBusyLease` (new) | drop the `busy` check in `leasePausedExpiredLocked`, or make the predicate always-true → a busy lease is deleted mid-operation |
 | `TestAdminUnpinEventCarriesDashLeaseID` (new) | emit `""` instead of `"-"`, or store-first order → the event carries an empty lease id |
+
+## Round 5 (finding fixes)
+
+- BLOCKER: `TestAdminUnpinEventCarriesDashLeaseID` was claimed in the
+  round-4 DONE note but never committed. It now is (api/pin_test.go):
+  the `admin_unpin` event carries lease id `-` and no owner. Proven
+  again on the committed code: emit `""` instead of `"-"` → the test
+  fails (`admin_unpin event lease id = "", want "-"`); restored.
+  `TestAdminUnpinByHolderPrefix` now also subscribes to the bus and
+  asserts the `-` placeholder on the route-level event.
+- Stale "idle rules" phrasing (comment-only, missed in R3-5c) replaced
+  with the one paused-release clock: api/admin.go, api/events.go
+  (drain_gave_up), api/service.go (DrainResumeMaxAge field doc).
+- Dead code removed: the `held()` helper (no rule read it; the holder
+  tests now assert `Holder != ""` directly) and rule 5's leftover
+  `criticalGCAt`/`criticalDryRunLogged` Service fields.
+- Recorded, not a finding: cmd/spoond-dash/render.go's hardcoded
+  "7 d" is the round-3 follow-up bead (dash pinned-idle text uses
+  PINNED_IDLE_NOTICE_DAYS).

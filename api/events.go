@@ -142,7 +142,7 @@ const (
 	// LeaseDrainGaveUp marks the drain self-heal loop giving up on a
 	// drained lease whose resume stayed deferred past DRAIN_RESUME_MAX_AGE.
 	// The lease is left suspended (not lost: its snapshot is intact) for
-	// the owner or the idle rules to exit (spoond-52c B2).
+	// the owner or the one paused-release clock to exit (spoond-52c B2).
 	LeaseDrainGaveUp LeaseEventType = "drain_gave_up"
 	// LeaseUserDeleted marks the cleanup that follows DELETE
 	// /api/users/{id} (spoond-q4j): every lease of the removed identity

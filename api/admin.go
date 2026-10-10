@@ -184,7 +184,8 @@ const DefaultDrainMaxSecs = 900
 // retrying a lease whose resume is deferred when DRAIN_RESUME_MAX_AGE is
 // unset (DrainResumeMaxAge 0): 24 h. Past it the loop stops retrying,
 // keeps the lease suspended (its snapshot is intact) and emits a
-// drain_gave_up event, leaving the exit to the owner or the idle rules.
+// drain_gave_up event, leaving the exit to the owner or the one
+// paused-release clock (30 d after the pause date).
 const DefaultDrainResumeMaxAge = 24 * time.Hour
 
 // Drain self-heal backoff for a deferred resume: the first retry is the

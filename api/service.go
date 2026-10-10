@@ -511,9 +511,9 @@ type ServiceConfig struct {
 	// retrying a lease whose resume is deferred (DRAIN_RESUME_MAX_AGE,
 	// default DefaultDrainResumeMaxAge = 24h). Past it the loop stops,
 	// keeps the lease suspended (its snapshot is intact) and emits a
-	// drain_gave_up event, leaving the exit to the owner or the idle
-	// rules. 0 means the default; a negative value (tests only) disables
-	// the bound.
+	// drain_gave_up event, leaving the exit to the owner or the one
+	// paused-release clock. 0 means the default; a negative value (tests
+	// only) disables the bound.
 	DrainResumeMaxAge time.Duration
 }
 
@@ -702,11 +702,6 @@ type Service struct {
 	drainGate sync.RWMutex
 	// stopLoops cancels the background sweeper/refiller started by Start.
 	stopLoops context.CancelFunc
-
-	// Rule 5's guards (held-lease limits): when its GC last ran, and
-	// when it last logged that a dry-run GC stops it. Sweep goroutine only.
-	criticalGCAt         time.Time
-	criticalDryRunLogged time.Time
 	// bus is the lease event bus (2.2, #115): every lifecycle change
 	// emits one event here. Set in NewService; never nil.
 	bus *eventBus
@@ -3767,12 +3762,6 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	}
 	return created, b.BuildID, nil
 }
-
-// held reports whether the lease carries a holder label. Holder and
-// holder_url are plain labels with no lifecycle effect since FS5
-// (2026-10-08): only Pinned protects a lease. No rule reads this; it is
-// kept as a small convenience for tests.
-func (l *Lease) held() bool { return l.Holder != "" }
 
 // Checkpoint interval bounds (2.3, #122): the create field and the
 // policy PUT accept 0 (never) or 60..604800 seconds (a minute to a

@@ -150,7 +150,7 @@ func TestLeaseHolderPutSetAndClear(t *testing.T) {
 	if body["holder"] != "flight-7" || body["holder_url"] != "https://honey.example/flights/7" {
 		t.Fatalf("put response = %v / %v", body["holder"], body["holder_url"])
 	}
-	if l := svc.lookup("consumer-a", id); l == nil || l.Holder != "flight-7" || !l.held() {
+	if l := svc.lookup("consumer-a", id); l == nil || l.Holder != "flight-7" || l.Holder == "" {
 		t.Fatalf("lease not held after put: %+v", l)
 	}
 
@@ -172,7 +172,7 @@ func TestLeaseHolderPutSetAndClear(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("clear put = %d (%v), want 200", resp.StatusCode, body)
 	}
-	if l := svc.lookup("consumer-a", id); l == nil || l.held() || l.HolderUrl != "" {
+	if l := svc.lookup("consumer-a", id); l == nil || l.Holder != "" || l.HolderUrl != "" {
 		t.Fatalf("holder not cleared: %+v", l)
 	}
 }
@@ -194,7 +194,7 @@ func TestLeaseHolderPutOwnerOnly(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown lease put = %d, want 404", resp.StatusCode)
 	}
-	if l := svc.lookup("consumer-a", id); l != nil && l.held() {
+	if l := svc.lookup("consumer-a", id); l != nil && l.Holder != "" {
 		t.Fatalf("lease held despite 404s: %+v", l)
 	}
 }

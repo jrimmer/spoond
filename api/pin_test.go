@@ -542,6 +542,11 @@ func TestAdminUnpinByHolderPrefix(t *testing.T) {
 		t.Fatalf("non-admin unpin = %d, want 401", resp.StatusCode)
 	}
 
+	// The aggregate admin_unpin event carries the lease id "-" placeholder:
+	// it describes no single lease, and the SSE JSON's lease_id stays
+	// well-formed while a per-lease filter never matches it (spoond-k0uz L10).
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
 	resp, body := doReq(t, "POST", ts.URL+"/api/admin/unpin-by-holder?holder_prefix=pool:", "admin-tok", nil)
 	if resp.StatusCode != http.StatusOK || body["unpinned"] != float64(1) {
 		t.Fatalf("unpin by prefix = %d (%v), want 200 unpinned=1", resp.StatusCode, body)
@@ -551,5 +556,65 @@ func TestAdminUnpinByHolderPrefix(t *testing.T) {
 	}
 	if !svc.lookup("c", other.ID).Pinned {
 		t.Fatal("an unrelated pinned lease was unpinned")
+	}
+	var adminUnpin *LeaseEvent
+	deadline := time.Now().Add(3 * time.Second)
+	for adminUnpin == nil && time.Now().Before(deadline) {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseAdminUnpin {
+				e := ev
+				adminUnpin = &e
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if adminUnpin == nil {
+		t.Fatal("no admin_unpin event was emitted for the unpin-by-holder-prefix")
+	}
+	if adminUnpin.LeaseID != "-" {
+		t.Fatalf("admin_unpin event lease id = %q, want \"-\"", adminUnpin.LeaseID)
+	}
+	if adminUnpin.Owner != "" {
+		t.Fatalf("admin_unpin event owner = %q, want empty", adminUnpin.Owner)
+	}
+}
+
+// TestAdminUnpinEventCarriesDashLeaseID pins the event surface directly:
+// unpinning through the admin route emits exactly one admin_unpin event
+// and its lease id is "-", never "", so every consumer's lease_id field
+// stays well-formed (spoond-k0uz R4-1, L10).
+func TestAdminUnpinEventCarriesDashLeaseID(t *testing.T) {
+	ts, svc, _, _ := newAdminServer(t, "admin-tok")
+	events := svc.Subscribe(EventFilter{})
+	defer events.Close()
+	l, err := svc.grant(context.Background(), "c", "py-base", time.Hour, true, "", nil, "pool:honey/work-9", "", nil)
+	if err != nil {
+		t.Fatalf("grant worker: %v", err)
+	}
+	if _, err := svc.setPinned("c", l.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	resp, body := doReq(t, "POST", ts.URL+"/api/admin/unpin-by-holder?holder_prefix=pool:", "admin-tok", nil)
+	if resp.StatusCode != http.StatusOK || body["unpinned"] != float64(1) {
+		t.Fatalf("unpin by prefix = %d (%v), want 200 unpinned=1", resp.StatusCode, body)
+	}
+	var adminUnpin *LeaseEvent
+	deadline := time.Now().Add(3 * time.Second)
+	for adminUnpin == nil && time.Now().Before(deadline) {
+		select {
+		case ev := <-events.C:
+			if ev.Type == LeaseAdminUnpin {
+				e := ev
+				adminUnpin = &e
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if adminUnpin == nil {
+		t.Fatal("no admin_unpin event was emitted")
+	}
+	if adminUnpin.LeaseID != "-" {
+		t.Fatalf("admin_unpin event lease id = %q, want \"-\"", adminUnpin.LeaseID)
 	}
 }
