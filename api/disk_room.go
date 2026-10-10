@@ -416,8 +416,11 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 // mid-resume at the moment of commitment, so a resume or a pin that
 // landed between the pick and here wins and nothing is deleted. Only a
 // committed release emits lease.critical_release {owner, ratio,
-// free_pct} — a stale pick announces nothing. Afterwards the lease
-// answers 404 everywhere. ok is false when the release was abandoned;
+// free_pct} — a stale pick announces nothing. Event order (round 5,
+// accepted as is): the release's own event goes out first, from inside
+// releaseBecauseIf after commitment, and critical_release follows it —
+// both after the release is committed, never before the predicate.
+// Afterwards the lease answers 404 everywhere. ok is false when the release was abandoned;
 // the caller must not count its bytes as freed.
 func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick int64) bool {
 	s.store.mu.Lock()
