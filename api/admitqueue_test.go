@@ -270,6 +270,30 @@ func TestAdmitWaitCapacityTimesOut(t *testing.T) {
 	}
 }
 
+// TestAdmitWaitCapacityTimeoutAnswersCapacityWait: a queued create whose
+// wait times out for a structural capacity cause carries the same
+// capacity_wait code the immediate refusal does, not just the status and
+// the Retry-After (gkx2).
+func TestAdmitWaitCapacityTimeoutAnswersCapacityWait(t *testing.T) {
+	_, h, svc, sub, _ := newAdmitServer(t)
+	// The whole box is held outside spoond: no take-back candidate
+	// exists, so the create waits out its budget and times out on the
+	// capacity refusal that queued it.
+	installDynamicNode(t, svc, sub, 512, 512, 512)
+	svc.admitQ.tick = 20 * time.Millisecond
+
+	r := waitCreate(t, h, "tok-1", `{"image":"mid","ttl":60,"wait":1}`)
+	if r.code != http.StatusServiceUnavailable {
+		t.Fatalf("timed-out capacity create = %d, want 503 (%v)", r.code, r.body)
+	}
+	if ra := r.hdr.Get("Retry-After"); ra != "30" {
+		t.Fatalf("Retry-After = %q, want 30", ra)
+	}
+	if code, _ := r.body["code"].(string); code != "capacity_wait" {
+		t.Fatalf("code = %v, want capacity_wait: %v", r.body["code"], r.body)
+	}
+}
+
 // TestAdmitWakeWhilePassRunning: a release that frees room while an
 // admission pass is already running must still be retried, even when no
 // periodic tick can help (spoond-vbdj). The old wake-up dropped the

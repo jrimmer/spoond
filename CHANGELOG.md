@@ -169,6 +169,12 @@ summarised from README "Status".
   a client would read as a permanent lease failure; and an undrain in
   that state defers (the lease stays `drained`) instead of reporting
   `resume_failed` or losing the lease (spoond-k0uz R3-2).
+- **Every structural capacity refusal answers `503 capacity_wait`**
+  with `Retry-After: 30`: create, clone, fork, restore, checkpoint and
+  the files routes (and a queued create that times out on a capacity
+  cause) carry the JSON `code: capacity_wait` and body prefix
+  `capacity: …`, so no path refuses for a structural shortage with a
+  bare 503. `429 box_full` is unchanged.
 - **Resume no longer refuses an unpinned non-persistent lease.**
   `POST /api/leases/{id}/resume` and the SSH gateway's resume accept
   any suspended lease the caller owns, as resume-on-use already did; the

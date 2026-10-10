@@ -215,7 +215,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			// 500 (spoond-k0uz R3-2). The lease stays as it was.
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
 			// The owner's identity was removed while the restore was in
 			// flight (spoond-q4j): the user is gone, so the restore is

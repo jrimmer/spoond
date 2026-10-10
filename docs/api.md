@@ -76,7 +76,7 @@ Everything that refuses a request in 3.0:
 | `410` | `lease_lost` | the substrate lost the lease's sandbox |
 | `429` | `box_full` | a request needed room and take-back can free none: every candidate is pinned, or the requester is itself the biggest borrower; nothing was paused or released |
 | `503` | | `draining`: a planned restart is draining the node; `Retry-After` says when to come back |
-| `503` | `capacity_wait` | no room yet (hugepages, snapshot disk, orchestrator capacity) and take-back cannot close the gap now; carries `Retry-After: 30`; a wait, never a loss. A create answers it as `capacity: …` with `Retry-After` (and can wait it out with `wait`); clone, fork and restore answer `503 capacity: …` without a code |
+| `503` | `capacity_wait` | no room yet (hugepages, snapshot disk, orchestrator capacity) and take-back cannot close the gap now; carries `Retry-After: 30`; a wait, never a loss. The same shape on every path (create, resume, restart, clone, fork, restore, checkpoint, named save, files); a create can wait it out with `wait` |
 | `503` | `substrate_unavailable` | the orchestrator could not confirm the sandbox's state; carries `Retry-After: 5` |
 
 Smaller limits keep their own `409`/`429` answers (`snapshot_limit`,
@@ -91,13 +91,13 @@ The per-owner caps `max_leases`, `max_mib`, `guaranteed_mib` and
 
 | Path | 2.9 | 3.0 |
 |---|---|---|
-| create (`POST /api/leases`) | `429` over `max_leases` or `max_mib` (waitable with `wait`); `503 capacity` when the node is full | no per-owner refusal; `429 box_full` when take-back can free nothing; otherwise `503 capacity` with `Retry-After` (waitable with `wait`) |
+| create (`POST /api/leases`) | `429` over `max_leases` or `max_mib` (waitable with `wait`); `503 capacity` when the node is full | no per-owner refusal; `429 box_full` when take-back can free nothing; otherwise `503 capacity_wait` with `Retry-After` (waitable with `wait`) |
 | `POST /api/leases/{id}/resume` | `429 quota_exceeded` + `Retry-After` over `max_mib`; `503 capacity_wait` | `429 box_full`, or `503 capacity_wait` + `Retry-After` |
 | resume-on-use work calls (exec, stream, files, dial, proxy, jobs, LLM gateway, network, prompt) | `429 quota_exceeded` + `Retry-After` over `max_mib`; `503 capacity_wait` | `429 box_full`, or `503 capacity_wait` + `Retry-After` |
-| `POST /api/leases/{id}/restart` (suspended lease) | `429` over `max_mib` | `429 box_full`; a substrate capacity failure is still `500` |
-| `POST /api/leases/{id}/clone` | `429` over `max_leases` or `max_mib`; `503 capacity` | `429 box_full`, or `503 capacity` |
-| `POST /api/leases/{id}/fork` | `429` over `max_leases` or `max_mib` (all children reserved up front); `503 capacity` | `429 box_full`, or `503 capacity` |
-| `POST /api/leases/{id}/restore` (suspended lease) | `429` over `max_mib`; `503 capacity` | `429 box_full`, or `503 capacity` |
+| `POST /api/leases/{id}/restart` (suspended lease) | `429` over `max_mib` | `429 box_full`, or `503 capacity_wait` + `Retry-After` (was `500` on a capacity failure) |
+| `POST /api/leases/{id}/clone` | `429` over `max_leases` or `max_mib`; `503 capacity` | `429 box_full`, or `503 capacity_wait` + `Retry-After` (was `503` without a code or `Retry-After`) |
+| `POST /api/leases/{id}/fork` | `429` over `max_leases` or `max_mib` (all children reserved up front); `503 capacity` | `429 box_full`, or `503 capacity_wait` + `Retry-After` (was `503` without a code or `Retry-After`) |
+| `POST /api/leases/{id}/restore` (suspended lease) | `429` over `max_mib`; `503 capacity` | `429 box_full`, or `503 capacity_wait` + `Retry-After` (was `503` without a code or `Retry-After`) |
 | `POST /api/leases/{id}/checkpoint` `{"keep":true}` | `409 kept_budget` over `max_kept_bytes` (no budget when unset) | `409 kept_budget` over the owner's fair disk slice (no budget while the box capacity is unknown); `429 box_full` or `503 capacity_wait` when the checkpoint does not fit the snapshot disk (FS3) |
 | `POST /api/leases/{id}/snapshots` (named save) | `409 kept_budget` over `max_kept_bytes` | `409 kept_budget` over the owner's fair disk slice; `429 box_full` or `503 capacity_wait` when the checkpoint does not fit the snapshot disk (FS3) |
 
@@ -201,9 +201,9 @@ cannot_start` when the snapshot's build cannot start on this host (the
 body is `snapshot <name>@<v> cannot start on this host (<cause>); save
 it again`, and there is no retry loop),
 `429 box_full` when take-back can free nothing (see
-[Memory take-back](#memory-take-back)), `503` capacity (not enough
-free hugepage memory for the image, or the node is not healthy, with
-`Retry-After: 30`). When the lease's hugepages do not fit, take-back
+[Memory take-back](#memory-take-back)), `503 capacity_wait` with
+`Retry-After: 30` (not enough free hugepage memory for the image, or the
+node is not healthy). When the lease's hugepages do not fit, take-back
 runs first (see [Memory take-back](#memory-take-back)). The lease's root disk must fit in
 usable snapshot disk too (FS3): `429` with `code: box_full` when
 take-back had nothing to reclaim, `503` with `Retry-After: 30` and
@@ -252,8 +252,9 @@ immediate refusal exactly; a negative value is `400`.
 Only these refusals are **waitable** (the request is held open and
 retried):
 
-- `503 capacity: …` — hugepages full and take-back could not make room
-  (or the node is not healthy). The `queued` event names it `capacity`.
+- `503 capacity_wait` with `Retry-After: 30` — hugepages full and
+  take-back could not make room (or the node is not healthy). The
+  `queued` event names it `capacity`.
 
 There are no per-owner caps to wait on since 3.0; `429 box_full` is a
 refusal and answers at once.
@@ -283,7 +284,9 @@ Outcomes:
 - **Admitted** — the usual `201` body, plus `waited_ms` (the wait in
   milliseconds).
 - **Timed out** — the refusal the create would have got had it not
-  waited: the same status, body and `Retry-After`, plus `waited_ms`.
+  waited: the same status, body and `Retry-After` (a structural capacity
+  refusal times out as `503 capacity_wait` with `Retry-After: 30`), plus
+  `waited_ms`.
 - **Client gone** — the ticket is dropped; nothing is written.
 - **Drain** — a drain that starts answers every queued create `503
   draining` at once.
@@ -1188,7 +1191,7 @@ Works on a running or a suspended lease; a lease lost in a substrate
 crash answers `410` with `code: lease_lost` like every other route
 (restore does not resurrect it; see [Lost leases](#lost-leases)); `409`
 while another operation is in flight; a substrate capacity
-failure maps to `503`. Restoring a suspended lease brings a running
+failure maps to `503 capacity_wait` with `Retry-After: 30`. Restoring a suspended lease brings a running
 sandbox (and its hugepages) back, so it re-admits its memory like a
 resume: `429 box_full` when take-back can free nothing — the lease
 stays suspended, untouched. An `owner deleted` (`403`) refuses the restore
@@ -1351,8 +1354,8 @@ friendly *name*). Response `201 Created`:
 ```
 
 The clone admits the source image's `memory_mb` like any create:
-`429 box_full` when take-back can free nothing, `503` capacity when
-the node has no room. An `owner deleted` (`403`) refuses the clone when the owner's identity
+`429 box_full` when take-back can free nothing, `503 capacity_wait` with
+`Retry-After: 30` when the node has no room. An `owner deleted` (`403`) refuses the clone when the owner's identity
 was removed while the clone's checkpoint was in flight (spoond-q4j): the
 fresh sandbox is stopped and no lease is committed, so a deleted owner
 cannot acquire an ownerless copy.
@@ -1376,7 +1379,8 @@ Response `201 Created`:
 `{"source":"<id>","build_id":"<uuid>","ids":["…","…"]}`.
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
 suspended or busy, `429 box_full` when take-back can free nothing for
-a child (each fork costs its image's `memory_mb`), `503` capacity. An `owner deleted` (`403`) refuses a fork whose owner's identity was
+a child (each fork costs its image's `memory_mb`), `503 capacity_wait`
+with `Retry-After: 30`. An `owner deleted` (`403`) refuses a fork whose owner's identity was
 removed while the fork's checkpoint was in flight (spoond-q4j): every
 child created so far is rolled back (its sandbox stopped once) and the
 rest are refused, so a deleted owner cannot acquire ownerless copies.
