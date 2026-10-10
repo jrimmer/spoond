@@ -314,6 +314,15 @@ summarised from README "Status".
   reason `preempt` is now `take_back`. (`guaranteed_mib` and `max_mib`
   went later, with the per-owner caps.)
 
+### Fixed
+
+- **A memory admission that fails afterwards gives its cache debit
+  back.** `admitMemory` returns an undo that credits the cached
+  `NodeInfo` when the create or resume it admitted never took hold, so
+  for the rest of the cache TTL `fits()` no longer reads less free
+  memory than there is and take-back no longer pauses a lease for
+  memory that is free.
+
 ## [2.9.3] - 2026-10-09
 
 ### Added

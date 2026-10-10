@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // admitMemory admits memoryMB of guest memory for owner against the one
@@ -21,16 +22,25 @@ import (
 // for themselves: the first one's debit is visible to the second. A
 // resuming lease is suspended, so it is never its own victim; the
 // requester's own leases are skipped by memVictims.
-func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) error {
+//
+// On success admitMemory returns an undo function that gives the debit
+// back (creditNodeInfo) when the create or resume it admitted never
+// took hold: without it, for the rest of the cache TTL fits() reads
+// less free memory than there is and take-back may pause a lease for
+// memory that is free. undo credits exactly the admitted memoryMB and
+// is safe to call more than once (only the first call credits). On
+// error it returns a no-op undo, so a caller can always defer it.
+func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) (undo func(), err error) {
 	s.preemptMu.Lock()
 	defer s.preemptMu.Unlock()
 	if err := s.takeBackForAdmission(ctx, owner, memoryMB); err != nil {
-		return err
+		return func() {}, err
 	}
 	s.nodeInfoMu.Lock()
 	s.debitNodeInfoLocked(memoryMB)
 	s.nodeInfoMu.Unlock()
-	return nil
+	var once sync.Once
+	return func() { once.Do(func() { s.creditNodeInfo(memoryMB) }) }, nil
 }
 
 // takeBackForAdmission is the take-back loop of admitMemory. The caller
