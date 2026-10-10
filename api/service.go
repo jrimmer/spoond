@@ -2219,11 +2219,9 @@ func (e *snapshotStartError) Error() string {
 	return fmt.Sprintf("snapshot %s@%d cannot start on this host (%s); save it again", e.name, e.version, e.cause)
 }
 
-// grantLease is grant with the class admission (#128 part 2): the
-// lease's class is decided before the sandbox is created — guaranteed
-// within the owner's guaranteed_mib, burst above it or on an explicit
-// burst request, the burst held to the node's reserve — and stamped on
-// the lease with the requested priority.
+// grantLease is grant with memory admission against the one pool
+// (FS2b-1): take-back from the biggest borrower runs before the sandbox
+// is created, and the lease is stamped with the requested priority.
 func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, error) {
 	owner, image, ttl, persistent := req.owner, req.image, req.ttl, req.persistent
 	start := time.Now()
@@ -4284,9 +4282,8 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 // GET /api/sandboxes/{id}. The lease's kept checkpoints (#126) ride
 // along: build_id, size_bytes and kept_at each, oldest keep first —
 // what the caller may restore, and what unpins would free. The owner's
-// memory-quota view rides along too (#128): charged_mib, guaranteed_mib
-// and max_mib, the same numbers as GET /api/users/me scoped to this
-// lease's owner.
+// memory charge rides along too (#128): charged_mib, the same number as
+// used_mib in GET /api/users/me for this lease's owner.
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	m := leaseMap(l, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
 	m["state"] = l.State
@@ -4345,14 +4342,12 @@ func (s *Service) leaseDetailMap(l *Lease) map[string]any {
 	// Background jobs (2.6, #135): how many of the lease's jobs run and
 	// its most recent exit, for the lease view.
 	m["jobs"] = s.leaseJobsView(ctx, l.ID)
-	// Memory quota of the lease's owner (#128): the running-lease charge
-	// plus the user's limits, 0 = unset. Best effort: an identity-store
-	// hiccup leaves the fields off rather than failing the read.
+	// Memory charge of the lease's owner (#128): the running-lease sum.
+	// Best effort: an owner with no identity row leaves it off rather
+	// than failing the read.
 	if s.identities != nil {
 		if u := s.identities.UserByID(l.Owner); u != nil {
 			m["charged_mib"] = s.usedMiB(u.ID)
-			m["guaranteed_mib"] = u.GuaranteedMiB
-			m["max_mib"] = u.MaxMiB
 		}
 	}
 	return m

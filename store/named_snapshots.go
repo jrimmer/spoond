@@ -308,8 +308,8 @@ func (db *DB) NamedSnapshotMetrics(ctx context.Context) (versions int, bytes int
 }
 
 // NamedSnapshotBytesOfOwner sums size_bytes over one owner's named
-// snapshots: the owner's max_kept_bytes budget counts them alongside
-// kept checkpoints.
+// snapshots: the owner's kept budget (their fair disk slice since 3.0)
+// counts them alongside kept checkpoints.
 func (db *DB) NamedSnapshotBytesOfOwner(ctx context.Context, owner string) (int64, error) {
 	var bytes int64
 	if err := db.r.QueryRowContext(ctx,
