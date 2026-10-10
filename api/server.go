@@ -1234,9 +1234,10 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		status, msg, retryAfter = http.StatusServiceUnavailable, "draining", drainRetryAfterSecs
 	case errors.Is(err, substrate.ErrCapacity):
 		// Hugepages full and preemption could not make room (or the node
-		// is not healthy): 503 with a retry hint, so a client that did
-		// not send "wait" still knows when to come back.
+		// is not healthy): 503 capacity_wait with a retry hint, so a
+		// client that did not send "wait" still knows when to come back.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), capacityRetryAfterSecs
+		code = "capacity_wait"
 	default:
 		if snapshot != "" {
 			s.svc.log.Printf("create: grant snapshot %s: %v", snapshot, err)
@@ -2509,7 +2510,7 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// 500 (spoond-k0uz R3-2).
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
 			// The owner's identity was removed while the clone was in
 			// flight (spoond-q4j): the user is gone, so the clone is
@@ -2580,7 +2581,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			// 500 (spoond-k0uz R3-2).
 			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):
 			// The owner's identity was removed while the fork was in
 			// flight (spoond-q4j): the user is gone, so the fork is

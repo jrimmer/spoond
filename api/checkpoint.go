@@ -423,7 +423,7 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 				"kept":     false,
 			})
 		case errors.Is(err, substrate.ErrCapacity):
-			writeError(w, http.StatusServiceUnavailable, "capacity: "+err.Error())
+			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case isBoxFull(err):
 			// The checkpoint could not fit in usable snapshot disk and
 			// take-back had nothing to reclaim (FS3b): the same 429

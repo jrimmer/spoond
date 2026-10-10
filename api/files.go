@@ -119,7 +119,7 @@ func (s *Server) mapFileError(w http.ResponseWriter, lease *Lease, op string, er
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		if errors.Is(err, substrate.ErrCapacity) {
-			writeError(w, http.StatusServiceUnavailable, "node is not accepting work")
+			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: node is not accepting work")
 			return
 		}
 		s.svc.log.Printf("files: %s %s: %v", op, sandboxID, err)
