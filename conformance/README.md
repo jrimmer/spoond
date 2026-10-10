@@ -39,12 +39,12 @@ package directory. To run a single test, add `-run '^<TestName>$'` before
 Group R runs only with `CONFORMANCE_DESTRUCTIVE=1`; it restarts backend,
 gateway and orchestrator units, so it never runs against production traffic.
 
-Group C (preemption, #128 part 3) runs only with `CONFORMANCE_CAPACITY=1`
-because it fills the host. It also needs `CONFORMANCE_SECOND_TOKEN`, the
-token of a second, non-admin identity user: it creates the guaranteed
-lease as that second user (the conformance user is not admin and can
-neither create users nor set quotas), so it must be provisioned on the
-host like `CONFORMANCE_TOKEN`.
+Group C (3.0 fair shares: take-back and box_full) runs only with
+`CONFORMANCE_CAPACITY=1` because it fills the host. It also needs
+`CONFORMANCE_SECOND_TOKEN`, the token of a second, non-admin identity
+user: it fills the host as that user (the conformance user is not admin
+and cannot create users), so it must be provisioned on the host like
+`CONFORMANCE_TOKEN`.
 
 The crash-test case X1 (`TestX1_CrashTestRecovers`) runs only with
 `CONFORMANCE_CRASH_TEST=1`, against a backend started with

@@ -72,8 +72,8 @@ credentials) and `/etc/spoond-staging/conformance.env` for staging (U08).
 | `CONFORMANCE_SUBSTRATE` | yes | `forkd` or `e2b`. Selects the host-level check implementations |
 | `CONFORMANCE_BACKEND_UNIT` | yes | the systemd unit of the backend under test: `spoond-backend` (production) or `spoond-backend-staging` (staging). R3 restarts exactly this unit |
 | `CONFORMANCE_DESTRUCTIVE` | no | `1` enables group R (restarts and crashes). Default off |
-| `CONFORMANCE_CAPACITY` | no | `1` enables group C (preemption, #128 part 3). Default off: C1 fills the host |
-| `CONFORMANCE_SECOND_TOKEN` | group C | the token of a second, **non-admin** identity user. C1 creates its guaranteed lease as that user because the production conformance user is not admin and there is no promote API. Provisioned on the host beside `CONFORMANCE_TOKEN`; unset means C1 skips |
+| `CONFORMANCE_CAPACITY` | no | `1` enables group C (3.0 fair shares: take-back and box_full). Default off: C1 fills the host |
+| `CONFORMANCE_SECOND_TOKEN` | group C | the token of a second, **non-admin** identity user. C1 and C2 fill the host as that user because the production conformance user is not admin and there is no promote API. Provisioned on the host beside `CONFORMANCE_TOKEN`; unset means group C skips |
 | `CONFORMANCE_IMAGES` | no | comma list. Default `py-base,go-base,dev-base,elixir-base,elixir-release,llm-review,scylla` |
 | `CONFORMANCE_SSH_GATEWAY` | yes | `127.0.0.1:2222` (gateway `--listen :2222`, A1 §7.1) |
 | `CONFORMANCE_SSH_KEY` | yes | path to the conformance user's private key; its fingerprint was registered when the user was created |
