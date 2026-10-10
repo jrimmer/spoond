@@ -45,9 +45,8 @@ func (db *DB) DiskUsageByOwner(ctx context.Context) (map[string]OwnerUsage, erro
 			JOIN builds b ON b.build_id = k.build_id
 			WHERE b.state <> 'deleted'
 			UNION ALL
-			SELECT n.owner, n.build_id, COALESCE(b.size_bytes, n.size_bytes), 0, 0, 1
+			SELECT n.owner, n.build_id, n.size_bytes, 0, 0, 1
 			FROM named_snapshots n
-			LEFT JOIN builds b ON b.build_id = n.build_id
 		)
 		GROUP BY owner, build_id`)
 	if err != nil {

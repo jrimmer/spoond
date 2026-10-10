@@ -13,43 +13,52 @@ does **not** change any admission, preemption or take-back behaviour.
    `disk.slice_bytes = usable/N`. Usage is
    `memory.used_mib` = the owner's running leases' `memory_mb`, and
    `disk` split into `paused_bytes` + `kept_bytes` + `named_bytes` with
-   `used_bytes` their sum. `ratio` is the larger of the memory and disk
-   usage/slice ratios; a zero slice contributes no ratio (zero-capacity
-   guard: no division by zero, every slice and ratio 0).
+   `used_bytes` their de-duplicated sum. `ratio` is the larger of the
+   memory and disk usage/slice ratios; a zero slice contributes no ratio
+   (zero-capacity guard: no division by zero, every slice and ratio 0).
+   The disk basis is the volume's **usable** bytes: the statfs
+   free-to-unprivileged bytes (`Bavail`) plus the bytes spoond already
+   accounts for (kept + named + paused), i.e. what spoond can hand out.
 
 2. **Cached and invalidated on change.** `fairSharesCache` holds the last
    snapshot behind a mutex with an epoch, so a computation that races an
    invalidation is not stored. `invalidateFairShares` is called from
-   `saveLeaseLocked` and `deleteLeaseLocked` (every lease state change
-   that writes or removes a row, including create/suspend/resume/
-   release), from `UpdateKeptMetrics` and `UpdateNamedSnapshotMetrics`
-   (kept/named disk changes), from `unkeepBuilds`, and from
-   `POST /api/users` and `DELETE /api/users/{id}` (owner add/delete). A
-   5 s TTL is a backstop against a missed invalidation. Disk bytes come
-   from the store's recorded `size_bytes` (`PausedBytesByOwner`,
-   `KeptBytesByOwner`, `NamedSnapshotBytesByOwner`), three grouped
-   queries for the whole box — no filesystem walk per request.
+   `saveLeaseLocked` (only when a lease's accounted signature changes:
+   owner, running state or memory charge; an activity-only save leaves
+   the cache warm) and `deleteLeaseLocked`, from `UpdateKeptMetrics` and
+   `UpdateNamedSnapshotMetrics` (kept/named disk changes), from
+   `unkeepBuilds`, and from `POST /api/users` and
+   `DELETE /api/users/{id}` (owner add/delete). A 5 s TTL is a backstop
+   against a missed invalidation. Disk bytes come from the store's
+   recorded `size_bytes` (`DiskUsageByOwner`, one grouped query for the
+   whole box) — no filesystem walk per request.
 
 3. **API.**
    - `GET /api/users/{id}` (admin): `{"user": …, "share": …}`; `403` for
      a non-admin, `404` for an unknown id.
    - `GET /api/users/me` now also carries `"share"`.
    - `GET /api/usage` (self-scoped, any token): `{"share": …}`.
-   - `GET /api/fair-shares` (admin) is the fair-share view: `{"owners":
-     [...]}` sorted by `ratio` descending, ties by owner id.
+   - `GET /api/fair-shares` (admin) is the fair-share view:
+     `{"capacity_known": …,
+     "owners": [...]}` sorted by `ratio` descending, ties by owner id.
+   - Every share payload carries `capacity_known`: `false` means the box
+     totals were not readable (a cold node-info cache) and the slices are
+     not computed yet, so no caller reads a wrong zero for a real slice.
    - **`GET /api/shares` is unchanged.** It still lists the caller's
      lease grants, exactly as on `origin/main` (`handleShareList`,
      `{"shares": …}`); the fair-share admin view lives at `GET
      /api/fair-shares` instead, so no existing caller (the SSH
      gateway's `share ls`, clients) breaks.
 
-4. **Store helpers.** `store/usage.go` adds `PausedBytesByOwner`
-   (recorded `size_bytes` of each owner's `kind='pause'` builds, deleted
-   excluded), `KeptBytesByOwner` (the owner's `lease_kept_builds` pins
-   joined to their leases, deleted excluded) and the per-owner named
-   bytes (`NamedSnapshotBytesByOwner`, added next to the existing
-   single-owner `NamedSnapshotBytesOfOwner`). All exclude deleted builds,
-   whose files are gone.
+4. **Store helpers.** `store/usage.go` adds `DiskUsageByOwner`: one
+   query over pause builds, kept pins and named snapshots that
+   de-duplicates a build counted by more than one kind (a checkpoint
+   that is both kept and named counts once) and returns per-kind bytes
+   plus a de-duplicated `Used`. Deleted builds count for nothing in the
+   pause/kept sets.
+
+No per-owner settings or weights were added; the existing class/quota
+fields are untouched (removing them is later work).
 
 No per-owner settings or weights were added; the existing class/quota
 fields are untouched (removing them is later work).
@@ -79,11 +88,13 @@ fields are untouched (removing them is later work).
   - `TestUserUsageEndpointAdminOnly`, `TestUserMeCarriesShare`,
     `TestSharesListAdminOnly`, `TestSharesListJSONShape`,
     `TestFairSharesDeletedBuildNotCounted`.
-- `api/shares_test.go` is the `origin/main` lease-grant suite, untouched:
-  `TestShareGrantEnablesExec` still calls `GET /api/shares` and passes
-  unchanged, so the grant listing behaves exactly as before.
-- `store/usage_test.go` — `TestUsageBytesByOwner` (pause/kept/named sums
-  per owner, deleted builds excluded) and `TestUsageBytesEmptyStore`.
+- `api/shares_test.go` is the `origin/main` lease-grant suite (plus the
+  round-4 R1 pin): `TestShareGrantEnablesExec` still calls
+  `GET /api/shares` and passes unchanged, so the grant listing behaves
+  exactly as before.
+- `store/usage_test.go` — `TestUsageDiskByOwner` (pause/kept/named sums
+  per owner, deleted builds excluded, a kept+named build counted once),
+  `TestUsageDiskByOwnerDedupsNamedBuild` and `TestUsageDiskEmptyStore`.
 
 ## DONE note: computed slices for sb's current owners
 
@@ -222,16 +233,50 @@ request context still yields an ok, cached snapshot.
 `s.sub.NodeInfo`. `TestFairSharesFailedReadNotCached/cold_node_info`
 also asserts the fair-share path made no `NodeInfo` RPC.
 
+### R5 — unknown vs zero, disk basis, cache churn, shapes, dedup
+
+R5-1: every share payload (and `GET /api/fair-shares` at the top level)
+carries `capacity_known`. It is `false` when the node-info cache is cold
+or a store read failed; the slices are then `0` (not computed) and the
+snapshot is not cached. `TestFairSharesCapacityKnownStates` reads the
+cold state through `/api/fair-shares`, `/api/usage` and `/api/users/me`
+(all `capacity_known: false`, a 1/N `slice_pct`, a zero `slice_bytes`)
+and then the warm state (`true`, a non-zero slice).
+
+R5-2: `usableSnapshotBytes` returns the statfs free-to-unprivileged
+bytes plus the accounted snapshot bytes. `TestFairSharesUsableDiskBasis`
+seeds a 200 MiB named snapshot and asserts the slice grows from 1 GiB to
+1 GiB + 200 MiB.
+
+R5-3: `saveLeaseLocked` compares each lease's accounted signature
+(owner, running state, memory charge) and invalidates only on a change;
+`TestFairSharesActivitySaveKeepsCacheWarm` calls `markActive` (activity
+only) and asserts the snapshot is the same object, then a create and
+asserts a fresh one.
+
+R5-4: `TestSharesListJSONShape` decodes `GET /api/fair-shares` with
+`json.Decoder.DisallowUnknownFields` into a struct listing every field,
+including `capacity_known`, and asserts non-zero `slice_bytes`,
+`used_bytes`, `named_bytes`, `ratio` and a non-empty `owners`. Renaming
+any field or adding an unlisted one fails the decode.
+
+R5-5: `DiskUsageByOwner` groups by `(owner, build_id)` so a build that
+is both kept and named counts once. `TestUsageDiskByOwner` and
+`TestUsageDiskByOwnerDedupsNamedBuild` assert the de-duplicated `Used`
+while the per-kind fields still report each kind.
+
 ### Gates and origin/main
 
 All gates rerun on the branch: `go build ./...`, `go vet ./...`,
 `gofmt -l .` (empty), `go test -p 2 -count=1 ./...` and
-`go test -race -count=1 ./api/ ./store/`. The added tests pass as a
-non-root user (`user`, `HOME`/`GOCACHE` under `/home/user`) with
-`t.TempDir()` everywhere. `git fetch origin` shows `origin/main` gained
-the `work/spoond-qjsy` merge (`api/admitqueue.go`,
-`api/admitqueue_test.go`, `api/service.go` comment, `CHANGELOG.md`): a
-defensive compare-and-swap guard and an admission-test ordering fix in
-`tryAdmitQueued`, plus a comment on `admitPassHook`. None touches the
-fair-share files, no new step type, provider, restart, cancel or retry
-path; the branch adds no migration.
+`go test -race -count=3 -timeout 50m ./api/ ./store/` (the three
+`./api/` race passes take ~13 min, over Go's default 10 min). The added
+tests pass as a non-root user (`user`, `HOME`/`GOCACHE` under
+`/home/user`) with `t.TempDir()` everywhere. `git fetch origin` shows
+`origin/main` gained the 2.9.1/2.9.2 dash releases and the
+`work/spoond-hfko` merge: the dashboard i/o stall meter (`cmd/spoond-dash`)
+and the resume_failed event-on-change guard (`api/admin.go`). Neither
+touches the fair-share files, no new step type, provider, restart, cancel
+or retry path; the branch adds no migration. The rebase onto the latest
+`origin/main` leaves the branch building, vetting, gofmt-clean and
+passing the gates.
