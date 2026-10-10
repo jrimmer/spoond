@@ -84,7 +84,8 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 			`ALTER TABLE leases DROP COLUMN paused_at`,
 			`ALTER TABLE leases DROP COLUMN pinned`,
-			`DELETE FROM schema_migrations WHERE version = 22`,
+			`ALTER TABLE leases DROP COLUMN disk_mb`,
+			`DELETE FROM schema_migrations WHERE version IN (22, 23)`,
 		} {
 			if _, err := db21.Exec(stmt); err != nil {
 				t.Fatalf("rewind (%s): %v", stmt, err)

@@ -137,6 +137,12 @@ type Lease struct {
 	// lease so quota accounting never reads the image catalog; 0 =
 	// unknown (leases from before the stamp, or a vanished image row).
 	MemoryMB int `json:"-"`
+	// DiskMB is the lease's whole disk allowance in MiB, from the
+	// image's disk_mb, stamped beside MemoryMB (#145 FS3a): summed over
+	// the RUNNING leases it is the snapshot disk's running reservation —
+	// the bytes a new write must leave free. Whole allowance, not bytes
+	// written: conservative by design. 0 = unknown (no image row).
+	DiskMB int `json:"-"`
 	// Class is the lease's admission class (#128 part 2):
 	// "guaranteed" or "burst", decided once at admission and kept for
 	// the lease's life. Guaranteed: the owner's running charge with
@@ -860,6 +866,19 @@ type Service struct {
 	// its own width DRAIN_SNAPSHOT_CONCURRENCY and is used only by the
 	// admin drain's pauses.
 	snapshotLimiters snapshotLimiters
+
+	// diskInflight tracks the snapshot disk's in-flight bytes (FS3a):
+	// pending are bytes admitted requests have not written yet, freeing
+	// are bytes of deletions issued but not yet visible to statfs (ZFS
+	// frees late). diskTakeBack credits freeing so a lagging statfs does
+	// not cause a second deletion.
+	diskInflight diskInflight
+
+	// takeDiskMu serialises disk take-back: two calls (a create racing a
+	// named save) must not both reclaim for the same shortfall — the
+	// second re-reads the room under the mutex and finds the first's
+	// work.
+	takeDiskMu sync.Mutex
 }
 
 // NewService builds the lease service on sub. db is required: every
@@ -2383,6 +2402,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// number reserveQuota admitted with, so accounting and release
 		// always agree and quota sums never re-read the catalog.
 		MemoryMB: memoryMB,
+		// The disk allowance rides the image row too (FS3a): its disk_mb
+		// is the reservation this running lease holds on the snapshot
+		// disk while it runs.
+		DiskMB: img.DiskMB,
 		// Every lease starts on generation 1 (2.2) and on the host's
 		// checkpoint and idle-suspend defaults (-1), unless the create
 		// request carries its own (the API stamps it after grant).
@@ -3309,6 +3332,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	// lease's charge is re-stamped from that image row (#128) — the
 	// number the check above (or the running charge) was admitted with.
 	l.MemoryMB = img.MemoryMB
+	l.DiskMB = img.DiskMB
 	// The pause builds stop being the lease's resume point: the next
 	// suspend writes a fresh one.
 	l.ResumeBuildID = ""
@@ -3528,6 +3552,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		IdleSuspend:        src.IdleSuspend,
 		State:              "running",
 		MemoryMB:           img.MemoryMB, // the admitted charge (#128)
+		DiskMB:             img.DiskMB,   // the running reservation (FS3a)
 		Generation:         1,            // every lease starts on generation 1 (2.2)
 		TemplateID:         img.TemplateID,
 	}
@@ -3697,6 +3722,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			IdleSuspend:        idleSuspend,
 			State:              "running",
 			MemoryMB:           img.MemoryMB, // the admitted charge (#128)
+			DiskMB:             img.DiskMB,   // the running reservation (FS3a)
 			Generation:         1,            // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
@@ -4598,6 +4624,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		CheckpointInterval:    l.CheckpointInterval,
 		IdleSuspend:           l.IdleSuspend,
 		MemoryMB:              l.MemoryMB,
+		DiskMB:                l.DiskMB,
 		Class:                 leaseClassRow(l),
 		Priority:              l.Priority,
 		PreemptedAt:           l.PreemptedAt,
@@ -4659,6 +4686,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		CheckpointInterval:    r.CheckpointInterval,
 		IdleSuspend:           r.IdleSuspend,
 		MemoryMB:              r.MemoryMB,
+		DiskMB:                r.DiskMB,
 		Class:                 r.Class,
 		Priority:              r.Priority,
 		PreemptedAt:           r.PreemptedAt,

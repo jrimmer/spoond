@@ -323,7 +323,8 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -400,7 +401,8 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -428,6 +430,71 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 	}
 	if rows[0].Generation != 1 {
 		t.Fatalf("generation not defaulted to 1: %d", rows[0].Generation)
+	}
+}
+
+// TestMigration23DiskMBBackfill: the running-disk reservation charge
+// (FS3a) backfills disk_mb from the image row — and a lease whose image
+// row is gone stays 0 (unknown), like a new lease of a vanished image.
+func TestMigration23DiskMBBackfill(t *testing.T) {
+	db, path := openTestDB(t)
+	ctx := context.Background()
+	if err := db.UpsertImage(ctx, ImageRow{
+		Name: "py-base", TemplateID: "t-1", MemoryMB: 2048, DiskMB: 5120,
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed image: %v", err)
+	}
+	for _, id := range []string{"lease-with-image", "lease-without-image"} {
+		if err := db.UpsertLease(ctx, LeaseRow{
+			ID: id, Owner: "alice", Image: "py-base",
+			CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+			LastActive: time.Now(), State: "running", Class: "guaranteed",
+		}); err != nil {
+			t.Fatalf("seed lease %s: %v", id, err)
+		}
+	}
+	if _, err := db.w.ExecContext(ctx, `UPDATE leases SET image = 'gone' WHERE id = 'lease-without-image'`); err != nil {
+		t.Fatalf("detach image: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Rewind to version 22 so migration 0023 (the disk_mb backfill this
+	// test pins) applies for real.
+	db22, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version = 23`,
+	} {
+		if _, err := db22.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	db22.Close()
+
+	db, err = Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	rows, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]int{}
+	for _, r := range rows {
+		got[r.ID] = r.DiskMB
+	}
+	if got["lease-with-image"] != 5120 {
+		t.Fatalf("disk_mb not backfilled from the image row: %d", got["lease-with-image"])
+	}
+	if got["lease-without-image"] != 0 {
+		t.Fatalf("disk_mb of a lease with no image row should stay 0, got %d", got["lease-without-image"])
 	}
 }
 
@@ -481,7 +548,8 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
 		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
@@ -555,7 +623,8 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22, 23)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -619,7 +688,8 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22, 23)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -685,7 +755,8 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23)`,
 	} {
 		if _, err := db18.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -757,7 +828,8 @@ func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23)`,
 	} {
 		if _, err := db19.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -833,7 +905,8 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version IN (21, 22)`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (21, 22, 23)`,
 	} {
 		if _, err := db20.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -907,7 +980,8 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
 		`ALTER TABLE leases DROP COLUMN paused_at`,
 		`ALTER TABLE leases DROP COLUMN pinned`,
-		`DELETE FROM schema_migrations WHERE version = 22`,
+		`ALTER TABLE leases DROP COLUMN disk_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (22, 23)`,
 	} {
 		if _, err := db21.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)

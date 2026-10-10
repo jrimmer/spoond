@@ -67,6 +67,25 @@ summarised from README "Status".
   - **A settled build size invalidates the cache unconditionally.**
     `settleBuildSize` drops the fair-share cache even when the metrics
     gauges are not wired.
+- **FS3a: disk room accounting and disk take-back core (not yet wired
+  into requests).** `computeDiskRoom` is the pure room formula for the
+  snapshot volume: `Usable = Free - Reserved - Floor - Pending +
+  Freeing`, where Reserved is the whole `disk_mb` allowance of the
+  running leases, Floor the `DISK_RESERVE_PCT` (env, default 5, clamped
+  0–50) share of the volume, Pending the bytes of in-flight snapshot
+  writes and Freeing the bytes of deletions statfs has not reported
+  yet (the ZFS late-free guard, entries dropped once free grows by
+  their bytes or after 30 s). `diskTakeBack` is the request-driven
+  take-back: spoond's own garbage first (`reapOrphans`, the ORPHAN_REAP
+  and GC_DELETE guards unchanged), then the biggest disk borrower's
+  (usage/slice) oldest unpinned paused lease, one at a time — running
+  and pinned leases never, named snapshots and kept checkpoints never,
+  a candidate only while its owner's ratio after giving it up stays
+  above the requester's after-request ratio. The live lease is
+  re-checked at commitment, a stale pick announces nothing and the
+  loop re-picks; a call that frees nothing returns a box-full error.
+  One `disk.cleanup` event per call carries the bytes freed per
+  category. Not wired into any request path yet.
 
 ### Status code changes
 
