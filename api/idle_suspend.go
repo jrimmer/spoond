@@ -19,9 +19,9 @@ import (
 // default) is never idle-suspended, and a **pinned** lease is never
 // paused by spoond at all, whatever its idle_suspend says.
 //
-// Idle suspension shares preemption's snapshot-disk floor
-// (PREEMPT_DISK_FLOOR_PCT, api/preempt.go): a pause that would take the
-// disk under it is skipped this sweep and retried on the next one.
+// An idle pause must fit in usable snapshot disk like every pause
+// (ensureDiskRoom, FS3b): one that cannot is skipped this sweep and
+// retried on the next one.
 
 // idleSuspendRule is the recorded LastAction rule ("idle_suspend"): the
 // rule an idle-suspended lease carries. Since FS5 no held rule reads it
