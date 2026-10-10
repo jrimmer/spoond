@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [2.9.3] - 2026-10-09
+
+### Added
+
+- **Dashboard login toggle (`DASH_AUTH`).** The web dashboard's basic
+  auth can be turned off with `DASH_AUTH=off` for a dashboard on a
+  private network; `DASH_USER` and `DASH_PASSWORD_HASH` are then not
+  required, and the dashboard logs that it serves without a login.
+  The default stays on, and any value other than an off-word (`off`,
+  `0`, `false`, `no`) keeps the login.
+
 ## [2.9.2] - 2026-10-09
 
 ### Changed
