@@ -107,6 +107,84 @@ func TestDiskCheck(t *testing.T) {
 	}
 }
 
+// TestDiskLowCheck: capacity.disk_low alerts, Critical, when the
+// snapshot disk's free bytes fall below the reserve floor, resolves
+// when free comes back, stays silent on a broken probe, and only
+// watches — it never reports anything but the one event (it deletes
+// nothing).
+func TestDiskLowCheck(t *testing.T) {
+	total := uint64(1000)
+	usage := func(free uint64) DiskUsage {
+		return func() (uint64, uint64, error) { return total, free, nil }
+	}
+
+	// 5 % floor: 49 free of 1000 is below the 50-byte floor → alert.
+	evs := diskLowCheck(usage(49), DefaultDiskReservePct, checkNow)
+	if len(evs) != 1 {
+		t.Fatalf("below floor = %+v", evs)
+	}
+	ev := evs[0]
+	if ev.Key != KeyDiskLow || ev.Severity != Critical || ev.Resolved {
+		t.Fatalf("alert = %+v", ev)
+	}
+	if ev.Title != "Snapshot disk below its reserve floor" {
+		t.Fatalf("title = %q", ev.Title)
+	}
+	if !contains(ev.Body, "free") || !contains(ev.Body, "reserve floor") {
+		t.Fatalf("body %q must name free and the floor", ev.Body)
+	}
+
+	// Exactly at the floor is still room: resolved.
+	evs = diskLowCheck(usage(50), DefaultDiskReservePct, checkNow)
+	if len(evs) != 1 || !evs[0].Resolved || evs[0].Severity != Critical || evs[0].Key != KeyDiskLow {
+		t.Fatalf("at floor = %+v", evs)
+	}
+
+	// Back above the floor: resolved at the critical level.
+	evs = diskLowCheck(usage(500), DefaultDiskReservePct, checkNow)
+	if len(evs) != 1 || !evs[0].Resolved || evs[0].Severity != Critical {
+		t.Fatalf("above floor = %+v", evs)
+	}
+
+	// A custom reserve (DISK_RESERVE_PCT): 10 % floor, 99 free is below.
+	evs = diskLowCheck(usage(99), 10, checkNow)
+	if len(evs) != 1 || evs[0].Resolved {
+		t.Fatalf("custom reserve = %+v", evs)
+	}
+
+	// A reserve of 0 keeps no floor: never alerts.
+	evs = diskLowCheck(usage(0), 0, checkNow)
+	if len(evs) != 1 || !evs[0].Resolved {
+		t.Fatalf("reserve 0 = %+v", evs)
+	}
+
+	// A broken probe or a zero total is not an incident.
+	if evs := diskLowCheck(func() (uint64, uint64, error) { return 0, 0, errors.New("gone") }, DefaultDiskReservePct, checkNow); evs != nil {
+		t.Fatalf("broken probe = %+v, want silence", evs)
+	}
+	if evs := diskLowCheck(func() (uint64, uint64, error) { return 0, 0, nil }, DefaultDiskReservePct, checkNow); evs != nil {
+		t.Fatalf("zero total = %+v, want silence", evs)
+	}
+}
+
+// TestDiskReservePctFromEnv mirrors the backend's diskReservePct: 5
+// default, clamped to 0..50, unreadable values fall back to 5.
+func TestDiskReservePctFromEnv(t *testing.T) {
+	cases := []struct {
+		val  string
+		want float64
+	}{
+		{"", 5}, {"0", 0}, {"5", 5}, {"10.5", 10.5},
+		{"-3", 0}, {"80", 50}, {"abc", 5}, {"NaN", 5},
+	}
+	for _, c := range cases {
+		t.Setenv("DISK_RESERVE_PCT", c.val)
+		if got := DiskReservePctFromEnv(); got != c.want {
+			t.Fatalf("DISK_RESERVE_PCT=%q -> %v, want %v", c.val, got, c.want)
+		}
+	}
+}
+
 func TestHugepagesCheck(t *testing.T) {
 	total := uint64(1000)
 	usage := func(used, reserved uint64) HugepageUsage {
@@ -249,8 +327,8 @@ func TestCheckSourcesOrder(t *testing.T) {
 		LastBackup: func() (time.Time, error) { return time.Time{}, errors.New("skip") },
 		GCFailed:   func() error { return nil },
 	}
-	if got := len(src.Checks()); got != 5 {
-		t.Fatalf("checks = %d, want 5 (unit, disk, hugepages, backup, gc)", got)
+	if got := len(src.Checks()); got != 6 {
+		t.Fatalf("checks = %d, want 6 (unit, disk, disk-low, hugepages, backup, gc)", got)
 	}
 }
 

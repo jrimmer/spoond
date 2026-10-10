@@ -403,8 +403,30 @@ func (s *Server) handleSharesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owners, known := s.svc.fairSharesView(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"capacity_known": known,
 		"owners":         owners,
-	})
+	}
+	// The snapshot disk's room, when it can be read: the same numbers the
+	// take-back policy decides with, so an operator sees why a request may
+	// be refused before it is. Unknown capacity omits the field entirely.
+	if room, ok := s.svc.diskRoomNow(r.Context()); ok {
+		out["disk"] = diskRoomJSON(room)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// diskRoomJSON is one room snapshot as the GET /api/fair-shares "disk"
+// object: every size in bytes, named so a byte count is never mistaken
+// for a lease count.
+func diskRoomJSON(room diskRoom) map[string]int64 {
+	return map[string]int64{
+		"total_bytes":    room.Total,
+		"free_bytes":     room.Free,
+		"reserved_bytes": room.Reserved,
+		"floor_bytes":    room.Floor,
+		"pending_bytes":  room.Pending,
+		"freeing_bytes":  room.Freeing,
+		"usable_bytes":   room.Usable,
+	}
 }

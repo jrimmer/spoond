@@ -994,7 +994,15 @@ records `resume_build_id`. The snapshot must fit in usable snapshot
 disk (FS3): `429` with `code: box_full` when take-back had nothing to
 reclaim, `503` with `Retry-After: 30` and `code: capacity_wait` when
 take-back ran and the disk is still short — in both the lease stays
-running as it was. Response
+running as it was. A pause is charged only **beyond its own `disk_mb`**:
+the lease's reservation is released by the pause, so a lease whose own
+allowance covers its snapshot pauses even when usable disk is negative
+and nothing can be taken back. An **admin drain is never refused for
+disk**: a `POST /api/admin/drain` pauses leases through the normal path
+without a disk admission, regardless of how full the snapshot is. When
+the pause does take back a lease, the released bytes are charged to the
+**victim's owner** (the owner further over their slice), not to the
+pausing caller. Response
 `{"id":"…","status":"suspended","message":"lease suspended; state snapshot kept (resume to restore)"}`.
 
 ### `POST /api/leases/{id}/resume` — start from the snapshot
@@ -2332,9 +2340,31 @@ request retries.
 `{"capacity_known": true|false, "owners": [{owner, name?,
 capacity_known, slice_pct, memory {slice_mib, used_mib}, disk
 {slice_bytes, used_bytes, paused_bytes, kept_bytes, named_bytes},
-ratio}]}`, sorted by `ratio` descending — the owner furthest over their
-slice first. Ties sort by owner id. This is the view the take-back
-policy (a later unit) reads; this version only reports it.
+ratio}], "disk": {…}}`, sorted by `ratio` descending — the owner
+furthest over their slice first. Ties sort by owner id. This is the
+view the take-back policy reads; this version only reports it.
+
+When the snapshot disk can be read, the response also carries a `disk`
+object — the room the take-back policy decides with, every size in
+bytes:
+
+```json
+"disk": {"total_bytes": 0, "free_bytes": 0, "reserved_bytes": 0,
+         "floor_bytes": 0, "pending_bytes": 0, "freeing_bytes": 0,
+         "usable_bytes": 0}
+```
+
+`total_bytes` and `free_bytes` are the statfs totals, `reserved_bytes`
+the running leases' whole `disk_mb` allowance, `floor_bytes` the
+reserve kept free (`DISK_RESERVE_PCT`, default 5), `pending_bytes` the
+admitted requests that have not written yet, `freeing_bytes` the
+deletions issued but not yet visible in statfs, and `usable_bytes` the
+room a new request may actually use
+(`free − reserved − floor − pending + freeing`, negative when short).
+`disk` is **omitted** when the statfs read fails or the total is zero —
+an unknown disk is not a zero disk. See
+[Fair shares](#fair-shares) for the take-back rule that reads these
+numbers.
 
 `GET /api/shares` is unchanged: it still lists the caller's lease
 grants (see [Shares](#shares)).

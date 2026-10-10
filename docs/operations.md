@@ -133,6 +133,7 @@ What arrives, with its key and severity:
 | `pinned.idle.<lease-id>` | warn | a pinned lease's last API activity crossed `PINNED_IDLE_NOTICE_DAYS` (visibility only) |
 | `unit.inactive.<unit>` | critical | a watched systemd unit is not active. `NOTIFY_UNITS` lists them, comma-separated; the default is `e2b-orchestrator.service,spoond-sshd-gateway.service`, and `none` watches nothing (a host without systemd, where every probe would fail) |
 | `disk.warn` / `disk.danger` | warn / critical | the snapshot disk past 80 % / 90 % used |
+| `capacity.disk_low` | critical | the snapshot disk's free bytes below the reserve floor (`DISK_RESERVE_PCT`, default 5, of the disk). Below the floor `usable_bytes` on `GET /api/fair-shares` is negative, so creates and resumes answer `capacity_wait`. The alert is passive: it reads statfs and emits, and deletes nothing |
 | `disk.kept` | warn | kept checkpoints (#126) past `KEPT_DISK_WARN_PCT` (default 40) percent of the snapshot disk. The critical-disk rule never deletes a kept build, so only a person can unpin — that is what this alert asks for |
 | `hugepages.warn` / `hugepages.danger` | warn / critical | the hugepage pool past 80 % / 92 % used |
 | `gc.failed` | warn | the last snapshot catalog GC pass failed |
@@ -1360,7 +1361,7 @@ disk is saturated — PSI's `full` line measures the stall itself.
 The dashboard can only read: it has no write path to the backend, the
 database or the orchestrator, and the tokens it holds are refused
 everywhere except their own routes — `METRICS_TOKEN` on `/metrics`,
-`DASH_EVENTS_TOKEN` on `GET /api/leases/events`.
+and `DASH_EVENTS_TOKEN` on `GET /api/leases/events`.
 
 ### Setting up the events panel
 
@@ -1411,6 +1412,8 @@ marker. The substrate-specific series:
 | `spoond_kept_builds_bytes` | disk bytes held by kept checkpoints of live leases (recorded `size_bytes`; #126) |
 | `spoond_pause_chain_depth` | histogram of a lease's build-chain depth at each pause (the pause build and its ancestors to the template root; spoond-p9j) |
 | `spoond_pause_chain_bytes` | histogram of the lease's parent chain's recorded `size_bytes` summed at each pause, including shared ancestors (spoond-p9j) |
+| `spoond_snapshot_disk_reserved_bytes` | snapshot disk reserved for the running leases (their whole `disk_mb`; FS3b) |
+| `spoond_snapshot_disk_usable_bytes` | snapshot disk a new request may use: free − reserved − the `DISK_RESERVE_PCT` floor − pending + freeing; negative means short (FS3b) |
 | `spoond_box_full_total` | requests refused `box_full`: a request needed room and every take-back candidate was pinned (nothing unpinned could be taken; v3.0 FS5) |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |

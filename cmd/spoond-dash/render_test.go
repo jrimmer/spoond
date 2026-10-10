@@ -651,6 +651,42 @@ func TestKeptDiskPctFromCollect(t *testing.T) {
 	}
 }
 
+// TestHostPanelDiskRoomLine: the host panel draws one disk-room line
+// "disk reserved X · usable Y" when the backend exported
+// the room, and nothing when it did not (FS3b).
+func TestHostPanelDiskRoomLine(t *testing.T) {
+	s := healthySnapshot()
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if strings.Contains(p, "disk reserved") {
+		t.Fatalf("disk room line drawn without room data:\n%s", p)
+	}
+
+	s.DiskRoomKnown = true
+	s.DiskRoom = DiskRoom{Reserved: 8 << 30, Usable: 1536 << 20}
+	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	if !strings.Contains(p, "disk reserved 8.0 GiB · usable 1.5 GiB") {
+		t.Fatalf("disk room line missing:\n%s", p)
+	}
+}
+
+// TestHumanBytes: the disk-room line's size rendering, negative usable
+// included (a shortfall is shown with its sign).
+func TestHumanBytes(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{0, "0 B"}, {512, "512 B"}, {2048, "2 KiB"},
+		{1536 << 20, "1.5 GiB"}, {8 << 30, "8.0 GiB"},
+		{2 << 40, "2.0 TiB"}, {-1536 << 20, "-1.5 GiB"},
+	}
+	for _, c := range cases {
+		if got := humanBytes(c.n); got != c.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
 // TestHostPanelKeptRow: the host panel's GC row appends
 // " · kept N (X GiB)" when the pin count is over zero, and nothing
 // otherwise (#126).

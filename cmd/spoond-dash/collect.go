@@ -83,8 +83,14 @@ type Snapshot struct {
 	HugeFreeGiB float64 `json:"hugeFreeGiB"`
 	DiskUsedPct float64 `json:"diskUsedPct"`
 	DiskFreeGiB float64 `json:"diskFreeGiB"`
-	VCPUAlloc   int     `json:"vcpuAlloc"`
-	MemAllocGiB float64 `json:"memAllocGiB"`
+	// DiskRoom is the snapshot disk's room (FS3b) from the backend's
+	// spoond_snapshot_disk_{reserved,usable}_bytes gauges. DiskRoomKnown
+	// is false when the scrape did not carry them; the line is then not
+	// drawn.
+	DiskRoom      DiskRoom `json:"diskRoom"`
+	DiskRoomKnown bool     `json:"diskRoomKnown"`
+	VCPUAlloc     int      `json:"vcpuAlloc"`
+	MemAllocGiB   float64  `json:"memAllocGiB"`
 
 	// I/O pressure (PSI, /proc/pressure/io) and the snapshot disk's
 	// write throughput and busy share (/proc/diskstats, a delta between
@@ -138,6 +144,14 @@ type Snapshot struct {
 	Rows     []LeaseRow  `json:"-"`
 	Images   []ImageRow  `json:"-"`
 	Events   []EventLine `json:"-"` // the events panel, newest first
+}
+
+// DiskRoom is the snapshot disk's room as the backend's gauges report
+// it, in bytes: Reserved is the running leases' whole disk_mb allowance
+// and Usable the room a new request may actually use (negative = short).
+type DiskRoom struct {
+	Reserved int64 `json:"reserved_bytes"`
+	Usable   int64 `json:"usable_bytes"`
 }
 
 // EventLine is one line of the events panel: text plus the grid style
@@ -484,6 +498,14 @@ func byLabel(f *dto.MetricFamily, label string) map[string]int {
 
 func (c *collector) fromMetrics(s *Snapshot, fams map[string]*dto.MetricFamily, now time.Time) {
 	g := func(name string) float64 { return value(fams[name]) }
+	// The snapshot disk's room (FS3b), when the backend exports it.
+	if fams["spoond_snapshot_disk_usable_bytes"] != nil {
+		s.DiskRoom = DiskRoom{
+			Reserved: int64(g("spoond_snapshot_disk_reserved_bytes")),
+			Usable:   int64(g("spoond_snapshot_disk_usable_bytes")),
+		}
+		s.DiskRoomKnown = true
+	}
 	s.Leases = int(g("spoond_leases_active"))
 	s.ByState = byLabel(fams["spoond_leases"], "state")
 	s.Queued = int(g("spoond_leases_queued"))
