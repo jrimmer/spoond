@@ -3722,20 +3722,17 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		return nil, "", err
 	}
 
-	// The whole batch's memory is admitted at once, before any child
-	// exists: a refusal here leaves no earlier child and no other
-	// owner's take-back victim behind. The children then share this one
-	// debit, and rollback credits it while stopping their sandboxes
-	// (which frees the hugepages). A successful fork keeps the debit.
-	undo, err := s.admitMemory(ctx, owner, count*img.MemoryMB)
-	if err != nil {
-		s.releaseQuotaReservation(owner, count, memPer)
-		return nil, "", err
-	}
-
 	var created []*Lease
+	// undos holds each admitted child's admission undo: a rollback stops
+	// the children's sandboxes (freeing their hugepages), so it credits
+	// every admission back too. A child that is not rolled back keeps its
+	// debit.
+	var undos []func()
 	rollback := func(err error) ([]*Lease, string, error) {
-		undo()
+		for _, u := range undos {
+			u()
+		}
+		undos = nil
 		for _, l := range created {
 			_ = s.sub.Delete(ctx, l.SandboxID)
 			s.deleteSandboxRow(l.SandboxID)
@@ -3785,6 +3782,18 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			Generation:         1,            // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
+		// Memory admission (FS2b-1), per child: the whole batch was
+		// reserved above, but each child's charge lands
+		// on the one pool as the children are created — one at a time
+		// below, so each child admits in turn and the batch behaves as
+		// one. undo credits this child's debit; it is collected so a
+		// later rollback credits it (the child's sandbox is stopped
+		// there, freeing the memory).
+		undo, err := s.admitMemory(ctx, owner, img.MemoryMB)
+		if err != nil {
+			return rollback(err)
+		}
+		undos = append(undos, undo)
 		// Hold this child's egress memo in flight until it is in the store
 		// (or rolled back), so a refresh mid-create does not prune it
 		// (spoond-ob18).
