@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v2/store"
 	"github.com/jrimmer/spoond/v2/substrate/fake"
 )
 
@@ -271,6 +273,42 @@ func TestKeptBudgetInsideSliceKeeps(t *testing.T) {
 	keeps, err := db.ListKeptBuilds(context.Background())
 	if err != nil || len(keeps[id]) != 3 {
 		t.Fatalf("kept rows = %v (%v), want 3", keeps, err)
+	}
+}
+
+// TestKeptBudgetCountsNamedSnapshots: a keep is measured against the
+// owner's named snapshots plus kept checkpoints, the same sum a named
+// save checks: named bytes at 60% of the slice leave no room for a 50%
+// keep.
+func TestKeptBudgetCountsNamedSnapshots(t *testing.T) {
+	ts, svc, db, _ := newTestServerWithService(t)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	seedImage(t, db, "py-base", 2048)
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetIdentities(ids)
+	u, err := ids.AddUser("keeper", identity.KindPerson, []string{"SHA256:fp-k"}, "keeper-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sliceOf := keptBudgetSetup(t, svc)
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "keeper-tok",
+		map[string]any{"image": "py-base", "ttl": 300, "persistent": true})
+	id := create["id"].(string)
+	slice := sliceOf(u.ID)
+	if _, err := db.InsertNamedSnapshot(context.Background(), store.NamedSnapshotRow{
+		Owner: u.ID, Name: "big", BuildID: "named-big", SourceLeaseID: id, Image: "py-base",
+		ImageBuildID: "img-1", MemoryMB: 1024, SizeBytes: slice * 6 / 10, CreatedAt: time.Now(),
+	}, 1); err != nil {
+		t.Fatalf("insert named snapshot: %v", err)
+	}
+	buildsMeasure(svc, slice/2)
+	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+id+"/checkpoint", "keeper-tok",
+		map[string]any{"keep": true})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("keep past named+kept slice: status %d (%v), want 409 kept_budget", resp.StatusCode, body)
 	}
 }
 

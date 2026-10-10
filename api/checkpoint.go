@@ -239,7 +239,8 @@ func (s *Service) keptBudgetFor(ctx context.Context, owner string) int64 {
 
 // enforceKeptBudget is the owner-side half of the kept caps (#126). The
 // checkpoint is already written when this runs (the size is only known
-// then): when the fresh build would push the owner's kept bytes past
+// then): when the fresh build would push the owner's kept plus named
+// snapshot bytes past
 // maxKeptBytes (keptBudgetFor: the owner's fair disk slice), the pin is
 // refused — the build stays an ordinary, GC-able checkpoint — and a
 // keptBudgetError naming the build comes back, so the caller can retry
@@ -260,6 +261,13 @@ func (s *Service) enforceKeptBudget(ctx context.Context, owner, buildID string, 
 		// silently unkept on a catalog hiccup.
 		s.log.Printf("checkpoint: kept bytes of %s: %v", owner, err)
 		return nil
+	}
+	// The budget covers named snapshots and kept checkpoints together
+	// (3.0 fair shares), the same sum a named save checks.
+	if n, err := s.db.NamedSnapshotBytesOfOwner(ctx, owner); err != nil {
+		s.log.Printf("checkpoint: named bytes of %s: %v", owner, err)
+	} else {
+		kept += n
 	}
 	if kept+b.SizeBytes > maxKeptBytes {
 		return &keptBudgetError{budget: maxKeptBytes, kept: kept, build: b.SizeBytes, buildID: buildID}
