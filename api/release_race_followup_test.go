@@ -84,39 +84,40 @@ func TestPauseReleaseRaceUnderLock(t *testing.T) {
 	}
 }
 
-// TestPreemptReleaseRaceNoMetric: preemption skips a lease released while
-// its pause ran: no preemption stamp, counter or event.
-func TestPreemptReleaseRaceNoMetric(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
+// TestTakeBackReleaseRaceNoStamp: take-back skips a lease released while
+// its pause ran: no take-back stamp, counter or event.
+func TestTakeBackReleaseRaceNoStamp(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	svc.SetMetrics(metrics.NewBackendMetrics())
-	svc.cfg.BurstReserveMiB = 0
 	ctx := context.Background()
 
-	l, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Minute, persistent: true, burst: true})
+	l, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Minute, persistent: true})
 	if err != nil {
-		t.Fatalf("grant burst: %v", err)
+		t.Fatalf("grant: %v", err)
 	}
 	all := svc.Subscribe(EventFilter{LeaseID: l.ID})
 	defer all.Close()
 	clearHook := releaseDuringPause(svc, "released through the API")
 	defer clearHook()
 
-	err = svc.preemptLease(ctx, l, "guaranteed-owner")
-	if !errors.Is(err, errLeaseReleased) {
-		t.Fatalf("preemptLease error = %v, want errLeaseReleased", err)
+	err = svc.takeBackPause(ctx, l, "requester-owner", 1.5)
+	if !errors.Is(err, errLeaseReleased) && !errors.Is(err, errLeaseBusy) {
+		t.Fatalf("takeBackPause error = %v, want errLeaseReleased or errLeaseBusy", err)
 	}
-	if n := counterValue(t, svc.metrics.PreemptionsTotal); n != 0 {
-		t.Fatalf("spoond_preemptions_total = %g, want 0", n)
+	if n := counterValue(t, svc.metrics.TakeBacksTotal); n != 0 {
+		t.Fatalf("spoond_take_backs_total = %g, want 0", n)
 	}
-	if ids := preemptedIDs(svc); len(ids) != 0 {
-		t.Fatalf("lease was marked preempted after release: %v", ids)
+	svc.store.mu.Lock()
+	stamped := l.SuspendReason == suspendReasonTakeBack || l.TakeBackFor != ""
+	svc.store.mu.Unlock()
+	if stamped {
+		t.Fatal("lease was stamped take_back after release")
 	}
 	all.Close()
 	for _, ev := range collectEvents(all.C) {
-		if ev.Type == LeasePreempted {
-			t.Fatal("a preempted event was emitted for a released lease")
+		if ev.Type == LeaseTakeBack {
+			t.Fatal("a take_back event was emitted for a released lease")
 		}
 	}
 }
@@ -232,7 +233,7 @@ func TestUpdateLeaseLostAtDoesNotResurrectRow(t *testing.T) {
 	row := store.LeaseRow{
 		ID: "l-race", Owner: "c", Image: "py-base", SandboxID: "sb-x",
 		CreatedAt: now, ExpiresAt: now.Add(time.Minute), LastActive: now,
-		State: "lost", Class: ClassGuaranteed,
+		State: "lost",
 	}
 	if err := db.UpsertLease(ctx, row); err != nil {
 		t.Fatalf("plant lost row: %v", err)

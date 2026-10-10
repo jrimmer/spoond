@@ -44,7 +44,7 @@ func seedPinnedRow(t *testing.T, svc *Service, id string, expiresAt time.Time) {
 		ID: id, Owner: "consumer-a", Image: "py-base",
 		CreatedAt: now.Add(-2 * time.Hour), ExpiresAt: expiresAt,
 		LastActive: now.Add(-time.Hour), State: "running",
-		Class: ClassGuaranteed, Pinned: true,
+		Pinned: true,
 	}); err != nil {
 		t.Fatalf("seed %s: %v", id, err)
 	}
@@ -85,7 +85,7 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`ALTER TABLE leases DROP COLUMN paused_at`,
 			`ALTER TABLE leases DROP COLUMN pinned`,
 			`ALTER TABLE leases DROP COLUMN disk_mb`,
-			`DELETE FROM schema_migrations WHERE version IN (22, 23)`,
+			`DELETE FROM schema_migrations WHERE version >= 22`,
 		} {
 			if _, err := db21.Exec(stmt); err != nil {
 				t.Fatalf("rewind (%s): %v", stmt, err)
@@ -155,11 +155,10 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 	}
 }
 
-// boxFullNode builds a node where one pinned burst lease holds every
-// usable hugepage: any guaranteed admission — a create, or the
-// re-admission a resume runs — is box_full. The victim is granted and
-// paused before the filler fills the box, exactly the order a node
-// fills in production.
+// boxFullNode builds a node where one pinned lease holds every usable
+// hugepage: any admission — a create, or the re-admission a resume runs
+// — is box_full. The victim is granted and paused before the filler
+// fills the box, exactly the order a node fills in production.
 func boxFullNode(t *testing.T) (*httptest.Server, *Service, *Lease, *Lease) {
 	t.Helper()
 	ts, svc, sub, ctx := newPreemptServer(t)
@@ -167,8 +166,8 @@ func boxFullNode(t *testing.T) (*httptest.Server, *Service, *Lease, *Lease) {
 	// pages = 1024 MiB.
 	installDynamicNode(t, svc, sub, 768, 0, 512)
 
-	// The victim: a guaranteed lease, granted while there is room, then
-	// paused. Its resume needs its 1024 MiB back.
+	// The victim: granted while there is room, then paused. Its resume
+	// needs its 1024 MiB back.
 	victim, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-b", image: "mid", ttl: time.Hour, persistent: true})
 	if err != nil {
 		t.Fatalf("grant victim: %v", err)
@@ -180,32 +179,31 @@ func boxFullNode(t *testing.T) (*httptest.Server, *Service, *Lease, *Lease) {
 		t.Fatal("the victim lease did not suspend")
 	}
 
-	// The pinned burst lease that takes the room back while the victim
-	// is suspended: 1024 MiB free after the fill, and every take-back
+	// The pinned lease that takes the room back while the victim is
+	// suspended: 1024 MiB free after the fill, and every take-back
 	// candidate pinned.
-	filler, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: time.Hour, burst: true})
+	filler, err := svc.grantLease(ctx, leaseRequest{owner: "filler-a", image: "mid", ttl: time.Hour})
 	if err != nil {
 		t.Fatalf("grant filler: %v", err)
 	}
-	if _, err := svc.setPinned("burst-a", filler.ID, true); err != nil {
+	if _, err := svc.setPinned("filler-a", filler.ID, true); err != nil {
 		t.Fatalf("pin filler: %v", err)
 	}
 	// Sanity: a guaranteed admission of the victim's size is box_full now.
 	dropNodeCache(svc)
-	if err := svc.admitGuaranteed(ctx, "consumer-b", 1024); !isBoxFull(err) {
-		t.Fatalf("setup: guaranteed admission err = %v, want box_full", err)
+	if err := svc.admitMemory(ctx, "consumer-b", 1024); !isBoxFull(err) {
+		t.Fatalf("setup: memory admission err = %v, want box_full", err)
 	}
 	return ts, svc, victim, filler
 }
 
-// TestResumeBoxFullHTTP429: POST /resume of a suspended guaranteed lease
-// on a node full of pinned burst leases answers 429 box_full (the same
+// TestResumeBoxFullHTTP429: POST /resume of a suspended lease on a node
+// full of pinned leases answers 429 box_full (the same
 // body a create gets), not a 500 a client reads as a permanent lease
 // failure; the lease stays suspended and nothing was paused
 // (spoond-k0uz R3-2). Mutation: drop the isBoxFull case in
 // writeResumeRefusal, which answers 500 "resume failed".
 func TestResumeBoxFullHTTP429(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	ts, svc, victim, filler := boxFullNode(t)
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+victim.ID+"/resume", "token-b", nil)
@@ -229,7 +227,6 @@ func TestResumeBoxFullHTTP429(t *testing.T) {
 // the same as TestResumeBoxFullHTTP429 (the exec path answers through
 // writeResumeRefusal).
 func TestExecResumeOnUseBoxFullHTTP429(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	ts, svc, victim, _ := boxFullNode(t)
 
 	resp, body := doReq(t, "POST", ts.URL+"/api/leases/"+victim.ID+"/exec", "token-b",
@@ -251,15 +248,14 @@ func TestExecResumeOnUseBoxFullHTTP429(t *testing.T) {
 // Mutation: drop errBoxFull from undrainAdmissionRefusal, which runs the
 // failure through the resume_failed stamp (and would lose the lease).
 func TestUndrainBoxFullDefers(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
 	ts, svc, sub, ctx := newPreemptServer(t)
 	svc.cfg.UndrainResumeRetries = 0
 	// 1536 pages of 2 MiB = 3072 MiB, 1024 MiB of it held outside
 	// leases; each live sandbox counts 512 pages = 1024 MiB.
 	installDynamicNode(t, svc, sub, 1536, 512, 512)
 
-	// The lease to drain: guaranteed, 2048 MiB ("big"), so its
-	// re-admission needs 2048 MiB.
+	// The lease to drain: 2048 MiB ("big"), so its re-admission needs
+	// 2048 MiB.
 	target, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-a", image: "big", ttl: time.Hour, persistent: true})
 	if err != nil {
 		t.Fatalf("grant target: %v", err)
@@ -275,19 +271,19 @@ func TestUndrainBoxFullDefers(t *testing.T) {
 		t.Fatalf("drain left the target in the wrong shape: %+v", target)
 	}
 
-	// While it is suspended, a pinned burst lease takes half the room:
+	// While it is suspended, a pinned lease takes half the room:
 	// 1024 MiB free, every take-back candidate pinned, and the target's
 	// re-admission (2048 MiB) is box_full.
-	filler, err := svc.grantLease(ctx, leaseRequest{owner: "burst-a", image: "mid", ttl: time.Hour, burst: true})
+	filler, err := svc.grantLease(ctx, leaseRequest{owner: "filler-a", image: "mid", ttl: time.Hour})
 	if err != nil {
 		t.Fatalf("grant filler: %v", err)
 	}
-	if _, err := svc.setPinned("burst-a", filler.ID, true); err != nil {
+	if _, err := svc.setPinned("filler-a", filler.ID, true); err != nil {
 		t.Fatalf("pin filler: %v", err)
 	}
 	dropNodeCache(svc)
-	if err := svc.admitGuaranteed(ctx, "consumer-a", 2048); !isBoxFull(err) {
-		t.Fatalf("setup: guaranteed re-admission err = %v, want box_full", err)
+	if err := svc.admitMemory(ctx, "consumer-a", 2048); !isBoxFull(err) {
+		t.Fatalf("setup: memory re-admission err = %v, want box_full", err)
 	}
 
 	res2 := svc.undrain(ctx)
@@ -361,7 +357,6 @@ func TestSuspendedRowWithZeroPausedAtGetsClockAtLoad(t *testing.T) {
 		ID: "susp", Owner: "consumer-a", Image: "py-base",
 		CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
 		LastActive: now.Add(-time.Hour), State: "suspended", Suspended: true,
-		Class: ClassGuaranteed,
 	}); err != nil {
 		t.Fatalf("seed susp: %v", err)
 	}
@@ -370,7 +365,7 @@ func TestSuspendedRowWithZeroPausedAtGetsClockAtLoad(t *testing.T) {
 		ID: "run", Owner: "consumer-a", Image: "py-base",
 		CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
 		LastActive: now.Add(-time.Hour), State: "running",
-		PausedAt: now.Add(-40 * 24 * time.Hour), Class: ClassGuaranteed,
+		PausedAt: now.Add(-40 * 24 * time.Hour),
 	}); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

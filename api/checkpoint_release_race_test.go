@@ -269,7 +269,7 @@ func TestPruneStaleLeaseRows(t *testing.T) {
 	zombie := store.LeaseRow{
 		ID: "zombie", Owner: "c", Image: "py-base", SandboxID: "sb-gone",
 		CreatedAt: now, ExpiresAt: now.Add(time.Minute), LastActive: now,
-		State: "running", Class: ClassGuaranteed,
+		State: "running",
 	}
 	if err := db.UpsertLease(ctx, zombie); err != nil {
 		t.Fatalf("plant zombie: %v", err)
@@ -278,7 +278,7 @@ func TestPruneStaleLeaseRows(t *testing.T) {
 	present := store.LeaseRow{
 		ID: "still-present", Owner: "c", Image: "py-base", SandboxID: "sb-alive",
 		CreatedAt: now, ExpiresAt: now.Add(time.Minute), LastActive: now,
-		State: "running", Class: ClassGuaranteed,
+		State: "running",
 	}
 	if err := db.UpsertLease(ctx, present); err != nil {
 		t.Fatalf("plant present: %v", err)

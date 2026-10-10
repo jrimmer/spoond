@@ -34,7 +34,6 @@ func newAdmitServer(t *testing.T) (*Server, http.Handler, *Service, *testSub, *i
 	ids, _ := identity.NewStore("")
 	svc.SetIdentities(ids)
 	svc.SetMetrics(metrics.NewBackendMetrics())
-	svc.cfg.BurstReserveMiB = 0
 	svc.cfg.MaxAdmitWaitSecs = 60
 	srv := NewServer(svc, NewImageRegistry(db))
 	h := srv.Handler()
@@ -251,22 +250,31 @@ func TestAdmitWaitTimesOut(t *testing.T) {
 	}
 }
 
-// TestAdmitWaitBurstReserveTimesOut: a burst create waiting out
-// errBurstReserve times out with the 503 "no burst capacity" and its
-// Retry-After.
-func TestAdmitWaitBurstReserveTimesOut(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
+// TestAdmitWaitCapacityTimesOut: a create waiting out a capacity
+// refusal that take-back cannot serve (every candidate pinned: the
+// dynamic node makes the pinned lease hold the box) times out with the
+// original 503 and its Retry-After.
+func TestAdmitWaitCapacityTimesOut(t *testing.T) {
 	_, h, svc, sub, _ := newAdmitServer(t)
-	svc.cfg.BurstReserveMiB = 4096 // larger than the whole node
-	installDynamicNode(t, svc, sub, 1024, 0, 512)
+	// 512 pages of 2 MiB = 1024 MiB, each live sandbox counts 512 pages
+	// = 1024 MiB: the first (pinned) lease fills the box and every
+	// take-back candidate is pinned, so a second create can never be
+	// served and waits out its budget.
+	installDynamicNode(t, svc, sub, 512, 0, 512)
 	svc.admitQ.tick = 20 * time.Millisecond
 
-	r := waitCreate(t, h, "tok-1", `{"image":"mid","ttl":60,"burst":true,"wait":1}`)
-	if r.code != http.StatusServiceUnavailable {
-		t.Fatalf("burst-reserve timeout = %d, want 503 (%v)", r.code, r.body)
+	rec, m := createSandboxBody(t, h, "tok-1", `{"image":"mid","ttl":60,"pinned":true}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("pinned fill create: %d %v", rec.Code, m)
 	}
-	if msg, _ := r.body["error"].(string); !strings.Contains(msg, "no burst capacity") {
-		t.Fatalf("want no burst capacity, got %v", r.body)
+	dropNodeCache(svc)
+
+	r := waitCreate(t, h, "tok-1", `{"image":"mid","ttl":60,"wait":1}`)
+	if r.code != http.StatusServiceUnavailable {
+		t.Fatalf("pinned-full timeout = %d, want 503 (%v)", r.code, r.body)
+	}
+	if msg, _ := r.body["error"].(string); !strings.Contains(msg, "capacity") {
+		t.Fatalf("timed-out body should carry the original capacity refusal, got %v", r.body)
 	}
 	if ra := r.hdr.Get("Retry-After"); ra != "30" {
 		t.Fatalf("Retry-After = %q, want 30", ra)
@@ -698,8 +706,8 @@ func TestAdmitCapacityRefusalCarriesRetryAfter(t *testing.T) {
 	if r.code != http.StatusServiceUnavailable {
 		t.Fatalf("full-node create = %d, want 503 (%v)", r.code, r.body)
 	}
-	if ra := r.hdr.Get("Retry-After"); ra != strconv.Itoa(burstRetryAfterSecs) {
-		t.Fatalf("Retry-After = %q, want %d", ra, burstRetryAfterSecs)
+	if ra := r.hdr.Get("Retry-After"); ra != strconv.Itoa(capacityRetryAfterSecs) {
+		t.Fatalf("Retry-After = %q, want %d", ra, capacityRetryAfterSecs)
 	}
 }
 

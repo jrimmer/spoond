@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,7 +95,6 @@ func newPreemptService(t *testing.T) (*Service, *testSub, context.Context) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "mid", 1024)
 	seedImage(t, db, "big", 2048)
-	svc.cfg.BurstReserveMiB = 0
 	svc.SetMetrics(metrics.NewBackendMetrics())
 	// Huge initially, so burst leases admit without reserve pressure.
 	sub.SetNodeInfo(substrate.NodeInfo{
@@ -125,7 +123,6 @@ func newPreemptServer(t *testing.T) (*httptest.Server, *Service, *testSub, conte
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "mid", 1024)
 	seedImage(t, db, "big", 2048)
-	svc.cfg.BurstReserveMiB = 0
 	svc.SetMetrics(metrics.NewBackendMetrics())
 	sub.SetNodeInfo(substrate.NodeInfo{
 		Status:            "healthy",
@@ -302,72 +299,6 @@ func TestPreemptionFreesEnoughAndNoMore(t *testing.T) {
 	svc.store.mu.Unlock()
 	if running != 2 {
 		t.Fatalf("running burst leases = %d, want 2", running)
-	}
-}
-
-// TestPreemptionDiskFloorRefuses: when pausing a candidate would take
-// the snapshot disk under the floor, the guaranteed admission answers
-// 503 "capacity: cannot preempt (snapshot disk low)" with Retry-After,
-// and nothing is preempted.
-func TestPreemptionDiskFloorRefuses(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
-	svc, sub, ctx := newPreemptService(t)
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	l := burstLease(t, svc, ctx, "burst-a", "mid")
-
-	// The disk is at 10% free and the pause is estimated at 1024 MiB of
-	// a 100 GiB disk: far under the 15% floor.
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	svc.cfg.PreemptDiskFloorPct = 15
-	var total uint64 = 100 << 30
-	svc.diskCapacity = func(string) (uint64, uint64, error) {
-		return total, total / 10, nil
-	}
-	installDynamicNode(t, svc, sub, 2048, 2048-512, 512)
-
-	_, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour})
-	if !errors.Is(err, errPreemptCannot) {
-		t.Fatalf("guaranteed create err = %v, want errPreemptCannot", err)
-	}
-	if !strings.Contains(err.Error(), "cannot preempt (snapshot disk low)") {
-		t.Fatalf("error %q should name the disk floor", err.Error())
-	}
-	if l.Suspended || !l.PreemptedAt.IsZero() {
-		t.Fatal("disk-floor refusal must not preempt the burst lease")
-	}
-}
-
-// TestPreemptionDiskFloorRefusedHTTP maps the floor refusal to the
-// documented 503: "capacity: cannot preempt (snapshot disk low)" with
-// Retry-After: 30.
-func TestPreemptionDiskFloorRefusedHTTP(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
-	srv, h, sub, tok, _ := newClassServer(t, map[string]int{"mid": 1024}, `{"max_mib":8192}`)
-	svc := srv.svc
-	svc.cfg.BurstReserveMiB = 0
-	svc.cfg.PreemptDiskFloorPct = 15
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	var total uint64 = 100 << 30
-	svc.diskCapacity = func(string) (uint64, uint64, error) {
-		return total, total / 10, nil
-	}
-	// A burst lease on the roomy node, then the node fills.
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	code, body, _ := createBodyResp(t, h, tok, `{"image":"mid","ttl":60,"burst":true}`)
-	if code != http.StatusCreated {
-		t.Fatalf("burst create: %d %s", code, body)
-	}
-	installDynamicNode(t, svc, sub, 2048, 2048-512, 512)
-
-	code, body, hdr := createBodyResp(t, h, tok, `{"image":"mid","ttl":60}`)
-	if code != http.StatusServiceUnavailable {
-		t.Fatalf("guaranteed create = %d %s, want 503", code, body)
-	}
-	if !strings.Contains(body, "capacity: cannot preempt (snapshot disk low)") {
-		t.Fatalf("503 body = %s, want the preemption refusal", body)
-	}
-	if ra := hdr.Get("Retry-After"); ra != "30" {
-		t.Fatalf("Retry-After = %q, want 30", ra)
 	}
 }
 
@@ -551,111 +482,23 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 	}
 }
 
-// TestPreemptionCandidateOrderOverGuarantee: preemptionCandidates (the
-// FS2b gate that will restrict take-back to burst leases) still orders
-// its candidates by the pre-FS2a preemption rule: with equal priority
-// and age, the owner furthest over its guarantee is preempted first.
-// FS2b removes this function with the classes.
-func TestPreemptionCandidateOrderOverGuarantee(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
-	svc, sub, ctx := newPreemptService(t)
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-
-	ids, _ := identity.NewStore("")
-	svc.SetIdentities(ids)
-	// Two users, same guarantee; each with a lease.
-	under, err := ids.AddUser("under", identity.KindPerson, []string{"SHA256:u1"}, "tok-u1")
-	if err != nil {
-		t.Fatalf("add under: %v", err)
-	}
-	over, err := ids.AddUser("over", identity.KindPerson, []string{"SHA256:u2"}, "tok-u2")
-	if err != nil {
-		t.Fatalf("add over: %v", err)
-	}
-	if err := ids.SetQuota(under.ID, 0, 0, 4096, 0, 0); err != nil {
-		t.Fatalf("quota under: %v", err)
-	}
-	// The over user's guarantee is 512 MiB while it runs a 1024 MiB
-	// lease, so it sits 512 MiB over; the under user is within its own.
-	if err := ids.SetQuota(over.ID, 0, 0, 512, 0, 0); err != nil {
-		t.Fatalf("quota over: %v", err)
-	}
-
-	l1 := burstLease(t, svc, ctx, under.ID, "mid")
-	l2 := burstLease(t, svc, ctx, over.ID, "mid")
-	same := time.Now().Add(-time.Hour)
-	svc.store.mu.Lock()
-	l1.CreatedAt, l2.CreatedAt = same, same
-	l1.Priority, l2.Priority = 0, 0
-	svc.saveLeaseLocked(l1)
-	svc.saveLeaseLocked(l2)
-	svc.store.mu.Unlock()
-
-	cands := svc.preemptionCandidates()
-	if len(cands) < 2 {
-		t.Fatalf("candidates = %d, want at least 2", len(cands))
-	}
-	if cands[0].ID != l2.ID {
-		t.Fatalf("first candidate = %s, want the owner furthest over its guarantee (%s)", cands[0].ID, l2.ID)
-	}
-}
-
-// TestPreemptionDiskFloorMixedPreemptsNothing: when the disk-allowed
-// candidates cannot free enough but the disk-blocked ones would, the
-// disk floor is the only obstacle, so the admission answers
-// errPreemptCannot and suspends nothing.
-func TestPreemptionDiskFloorMixedPreemptsNothing(t *testing.T) {
-	t.Skip("TODO(FS2b-1 step 3): class behaviour removed")
-	svc, sub, ctx := newPreemptService(t)
-	installDynamicNode(t, svc, sub, 4096, 0, 512)
-	small := burstLease(t, svc, ctx, "burst-a", "mid") // 1024 MiB, disk-allowed
-	large := burstLease(t, svc, ctx, "burst-b", "big") // 2048 MiB, disk-blocked
-
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	svc.cfg.PreemptDiskFloorPct = 15
-	var total uint64 = 100 << 30
-	// 16.5 GiB free: a 1024 MiB pause leaves 15.5 GiB (>= 15%), a
-	// 2048 MiB one leaves 14.5 GiB (< 15%).
-	svc.diskCapacity = func(string) (uint64, uint64, error) {
-		return total, 16<<30 + 1<<29, nil
-	}
-	// The node has 512 MiB free: even pausing the small lease (1024) is
-	// not enough for a 2048 MiB guaranteed lease, but pausing the large
-	// one (2048) would be.
-	installDynamicNode(t, svc, sub, 1024, 512, 512)
-
-	_, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "big", ttl: time.Hour})
-	if !errors.Is(err, errPreemptCannot) {
-		t.Fatalf("guaranteed create err = %v, want errPreemptCannot", err)
-	}
-	if small.Suspended || !small.PreemptedAt.IsZero() {
-		t.Fatal("disk-floor refusal must not preempt the disk-allowed lease")
-	}
-	if large.Suspended || !large.PreemptedAt.IsZero() {
-		t.Fatal("disk-floor refusal must not preempt the disk-blocked lease")
-	}
-}
-
-// TestPreemptionUnfulfillablePreemptsNothing: when no combination of
-// candidates can free enough memory, preemption suspends nothing and
-// falls through to the ordinary capacity check (not errPreemptCannot).
-func TestPreemptionUnfulfillablePreemptsNothing(t *testing.T) {
+// TestPreemptionUnfulfillableTakesNothing: when no take-back can free
+// enough memory, admission suspends nothing and falls through to the
+// ordinary capacity check.
+func TestPreemptionUnfulfillableTakesNothing(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
 	victim := burstLease(t, svc, ctx, "burst-a", "mid")
 
-	// Zero MiB free and one 1024 MiB burst lease: a 2048 MiB guaranteed
-	// lease cannot be hosted even after pausing every candidate.
+	// Zero MiB free and one 1024 MiB lease: a 2048 MiB create cannot be
+	// hosted even after pausing every candidate.
 	installDynamicNode(t, svc, sub, 768, 256, 512)
 	_, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "big", ttl: time.Hour})
 	if err == nil {
 		t.Fatal("guaranteed create succeeded, want an ordinary capacity refusal")
 	}
-	if errors.Is(err, errPreemptCannot) {
-		t.Fatalf("unfulfillable admission = errPreemptCannot, want the ordinary capacity check: %v", err)
-	}
 	if victim.Suspended || !victim.PreemptedAt.IsZero() {
-		t.Fatalf("unfulfillable admission preempted a lease (err=%v)", err)
+		t.Fatalf("unfulfillable admission took a lease back (err=%v)", err)
 	}
 }
 
@@ -790,7 +633,6 @@ func TestPreemptionTakesOnlyTheShortfall(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "mid", 1024)
 	seedImage(t, db, "small", 512)
-	svc.cfg.BurstReserveMiB = 0
 	svc.SetMetrics(metrics.NewBackendMetrics())
 	sub.SetNodeInfo(substrate.NodeInfo{
 		Status:            "healthy",
@@ -935,12 +777,9 @@ func TestPreemptionUndrainDefers(t *testing.T) {
 	svc.store.mu.Unlock()
 	burstLease(t, svc, ctx, "burst-a", "mid")
 
-	// Full node, disk under the floor: the resume would have to preempt
-	// and cannot.
-	svc.cfg.TemplateStoragePath = t.TempDir()
-	svc.cfg.PreemptDiskFloorPct = 15
-	var total uint64 = 100 << 30
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return total, total / 10, nil }
+	// Full node: the resume cannot be served by take-back (the running
+	// lease is the only candidate and it is not over its slice), so the
+	// undrain defers with the ordinary capacity refusal.
 	installDynamicNode(t, svc, sub, 2048, 2048-512, 512)
 
 	res := svc.undrain(ctx)
@@ -952,15 +791,13 @@ func TestPreemptionUndrainDefers(t *testing.T) {
 	}
 }
 
-// TestGuaranteedUsesReserveWithoutPreempting: the burst reserve is room
-// kept for guaranteed work, so a guaranteed create that fits in free
-// memory is admitted without preempting anyone, even when that dips
-// into the reserve. Only a guaranteed lease that does not fit takes
-// memory back.
-func TestGuaranteedUsesReserveWithoutPreempting(t *testing.T) {
+// TestFitsAdmitsWithoutTakingBack: a create that fits the free hugepages
+// is admitted without taking anyone's lease back — take-back runs only
+// for a request that does not fit (FS2 scope). Only a create that does
+// not fit takes memory back.
+func TestFitsAdmitsWithoutTakingBack(t *testing.T) {
 	svc, sub, ctx := newPreemptService(t)
-	svc.cfg.BurstReserveMiB = 2048
-	// Room for the burst leases above the reserve: 16 GiB, nothing used.
+	// Room for the leases: 16 GiB, nothing used.
 	installDynamicNode(t, svc, sub, 8192, 0, 512)
 	owner := preemptOwner(t, svc, "heavy")
 	victim := burstLease(t, svc, ctx, owner, "mid")
@@ -982,16 +819,15 @@ func TestGuaranteedUsesReserveWithoutPreempting(t *testing.T) {
 	svc.store.mu.Unlock()
 
 	// Now 1 GiB free (5120 pages base + the five 1024 MiB leases on the
-	// 16 GiB pool): a 1 GiB guaranteed lease fits, though it takes the
-	// node under the 2 GiB reserve. Taking the owner's leases back
-	// would restore the reserve, and must not happen.
+	// 16 GiB pool): a 1 GiB create fits. Taking the owner's leases back
+	// would free room nobody needs, and must not happen.
 	installDynamicNode(t, svc, sub, 8192, 5120, 512)
 	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
 		t.Fatalf("guaranteed create: %v", err)
 	}
 	if victim.Suspended || victim.TakeBackFor != "" {
-		t.Fatal("a guaranteed lease that fits took a burst lease back to protect the reserve")
+		t.Fatal("a create that fit took a lease back")
 	}
 
 	// Full node (base + the five leases + grant1's sandbox = exactly
