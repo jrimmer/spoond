@@ -942,11 +942,11 @@ a value with a space, quote, equals sign or control character is quoted.
 bearer token the caller authenticated with; the line carries no secret.
 `reason` names why: for a release it is the owner-named API deletion
 (`deleted via API by <owner>`), `ttl`, `lost grace expired`,
-`user deleted`, `disk`, `idle`, `hold_lapsed` or the caller's own reason
+`user deleted`, `paused_expired` or the caller's own reason
 verbatim (the CI runner's reason says `ci job <id> …`); for a create
 it is `new`, `snapshot <name>@<version>`, `clone of <id>` or
-`fork of <id>`; for a suspend it is the automatic reason (`idle`,
-`idle_suspend`, `hold_lapsed`, `pressure`, `preempt`), `drain` or `hand`;
+`fork of <id>`; for a suspend it is the automatic reason
+(`idle_suspend`, `preempt`, `resume_failed`), `drain` or `hand`;
 for a lost lease it is the loss reason already carried by the `lost`
 event.
 
@@ -1042,17 +1042,25 @@ own `idle_suspend` opt-in, or `POST /api/leases/{id}/pause`. A paused
 lease resumes on the next call (exec, stream, files, proxy, jobs, the
 LLM gateway, a network change, a prompt, or an explicit `POST /resume`).
 - **One clock.** Every paused lease is released `PAUSED_RELEASE_DAYS`
-  (default `30`) days after its **pause date**, whatever paused it. A
-  `lease.paused_expiring` event is emitted 24 h before. Resuming clears
-  the date. Nothing else deletes on a timer. The GC still cleans
-  spoond's own garbage (orphan dirs, leftovers) as housekeeping.
+  (default `30`) days after its **pause date**, whatever paused it and
+  whatever its pin state. A `lease.paused_expiring` event is emitted
+  24 h before. Resuming clears the date. Nothing else deletes on a
+  timer. The GC still cleans spoond's own garbage (orphan dirs,
+  leftovers) as housekeeping.
 - **Pinned** (`pinned: true` on create, or `PUT
-  /api/leases/{id}/pin`) means spoond **never pauses or deletes** the
-  lease before its own expiry. The lease's **TTL still applies**: pin
-  and expiry collaborate, so a pinned lease is unpausable until it
-expires. A pinned **persistent** lease (which has no TTL) stays until
-the owner releases it. There is no limit on how many leases an owner
-pins. Only the owner (unpin, `DELETE`) changes a pin.
+  /api/leases/{id}/pin`) means spoond **never pauses or deletes the
+  lease before its own expiry**. A pin protects only a **running** VM:
+  once a lease is paused — the owner's own `POST /pause`, or a failed
+  drain resume that left it suspended — it is on the same one clock as
+  every other paused lease (owner decision 2026-10-09). The lease's
+  **TTL still applies**: pin and expiry collaborate, so a pinned lease
+  is unpausable until it expires. A pinned **persistent** lease (which
+  has no TTL) stays until the owner releases it. There is no limit on
+  how many leases an owner pins. Only the owner (unpin, `DELETE`)
+  changes a pin. A pinned lease is never paused by spoond's idle logic,
+  whether the lease's own `idle_suspend` or the host
+  `IDLE_SUSPEND_DEFAULT_SECS` set the threshold; a caller's explicit
+  `POST /pause` is the owner's own action and still works.
 - **`holder` and `holder_url` are plain labels** with no lifecycle
 effect. Setting a holder never pins. They are returned by the lease API
 and shown on the dashboard.
@@ -1060,8 +1068,9 @@ and shown on the dashboard.
 guest activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`)
   is **flagged, visibility only**: GET returns `pinned_idle_since`, one
   `lease.pinned_idle` event fires per crossing, and the dashboard shows
-  one aggregate notification. Nothing is paused, unpinned or released
-  because of it.
+  one aggregate notification, `N pinned leases idle over 7 d (owner:
+  count, ...)`, with a per-owner breakdown. Nothing is paused, unpinned
+  or released because of it.
 
 **Take-back touches only unpinned leases.** If nothing unpinned can be
 taken for a request, the request answers `429` with code `box_full` and

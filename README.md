@@ -179,8 +179,8 @@ root disk, with the warn/danger levels), a full-width throughput panel
 (running leases, requests per second, creates per minute, egress
 connections — each with its current value and a sparkline over the
 history), live leases (id, image, owner, run state, policy, age, time
-left, holder — on the page the holder is a link; a hold marks the
-holder ◆, or ◉ once lapsed), the image catalog beside the systemd
+left, holder — on the page the holder is a link; a pinned lease marks
+its holder ◆), the image catalog beside the systemd
 units, a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
