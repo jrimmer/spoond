@@ -16,7 +16,7 @@ import (
 // now can wait for room instead of failing: the waiting create holds its
 // HTTP request open, the queue lives in the backend process, and on each
 // wake-up the queued creates are retried in fair-share order — the owner
-// furthest under their guaranteed_mib first, then FIFO. The wait is
+// with the lowest fair-share ratio first, then FIFO. The wait is
 // bounded by MAX_ADMIT_WAIT_SECS (0 disables waiting).
 
 // DefaultMaxAdmitWaitSecs is the queued-admission wait cap when
@@ -58,35 +58,16 @@ func (s *Service) markOwnerDeleted(owner string) {
 }
 
 // waitRefusal reports whether err is one a create may wait out (#129):
-// substrate capacity (hugepages full and take-back could not help), and
-// the owner's quota caps — the memory cap and, since 2.5.1, the
-// lease-count cap (`max_leases`): a create at the cap waits for one of
-// the owner's own leases to go, which the wait bounds and which takes no
-// room from anyone else. Bad requests, auth and unknown images answer at
-// once.
+// substrate capacity (hugepages full and take-back could not help yet).
+// There are no per-owner caps to wait on any more (3.0 FS4); box_full,
+// bad requests, auth and unknown images answer at once.
 func waitRefusal(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, substrate.ErrCapacity) {
-		return true
-	}
-	return errors.Is(err, errQuotaExceeded) // memory cap or lease-count cap
+	return err != nil && errors.Is(err, substrate.ErrCapacity)
 }
 
-// waitRefusalDetail is the refusal the `queued` event names, e.g.
-// "memory cap" or "capacity".
+// waitRefusalDetail is the refusal the `queued` event names.
 func waitRefusalDetail(err error) string {
-	switch {
-	case errors.Is(err, substrate.ErrCapacity):
-		return "capacity"
-	case isMemoryQuotaRefusal(err):
-		return "memory cap"
-	case errors.Is(err, errQuotaExceeded):
-		return "lease cap"
-	default:
-		return "capacity"
-	}
+	return "capacity"
 }
 
 // admissionTicket is one waiting create. The lease id is allocated when
@@ -425,10 +406,9 @@ func (s *Service) tryAdmitQueued(ctx context.Context) {
 }
 
 // grantQueued retries one queued create through the normal admission
-// path, so classes, the burst reserve, quotas and preemption apply
-// unchanged. It re-checks the drain first: a drain starting answers
+// path, so admission and take-back apply unchanged. It re-checks the drain first: a drain starting answers
 // queued creates at once. A removed owner is refused the same way
-// (spoond-q4j): without the identity row the lease would be uncapped,
+// (spoond-q4j): without the identity row the lease would be ownerless,
 // which is exactly what deleting the user is meant to prevent.
 func (s *Service) grantQueued(ctx context.Context, t *admissionTicket) (*Lease, error) {
 	if s.draining.Load() {
@@ -437,51 +417,44 @@ func (s *Service) grantQueued(ctx context.Context, t *admissionTicket) (*Lease, 
 	return s.grantLease(ctx, t.leaseReq)
 }
 
-// orderedTickets snapshots the waiting tickets in fair-share order: the
-// owner furthest under its guaranteed_mib first, an owner with no
-// headroom (no guaranteed_mib, or already at it) after every owner with
-// headroom, then FIFO by queue sequence.
+// orderedTickets snapshots the waiting tickets in fair-share order
+// (3.0 FS4): the owner with the LOWEST fair-share ratio (usage over
+// their equal 1/N slice, the larger of memory and disk) first, owners
+// the fair-share view does not know after every known one, then FIFO by
+// queue sequence.
 func (s *Service) orderedTickets() []*admissionTicket {
 	s.admitQ.mu.Lock()
 	list := append([]*admissionTicket(nil), s.admitQ.tickets...)
 	s.admitQ.mu.Unlock()
+	if len(list) < 2 {
+		return list
+	}
 
-	headroom := map[string]int{}
-	has := map[string]bool{}
+	ctx := context.Background()
+	ratio := map[string]float64{}
+	known := map[string]bool{}
 	for _, t := range list {
-		if _, seen := headroom[t.owner]; seen {
+		if _, seen := known[t.owner]; seen {
 			continue
 		}
-		h, ok := s.ownerHeadroom(t.owner)
-		headroom[t.owner] = h
-		has[t.owner] = ok && h > 0
+		share, ok := s.fairShareFor(ctx, t.owner)
+		known[t.owner] = ok && share != nil
+		if known[t.owner] {
+			ratio[t.owner] = share.Ratio
+		}
 	}
 	sort.SliceStable(list, func(i, j int) bool {
 		a, b := list[i], list[j]
-		ah, bh := has[a.owner], has[b.owner]
-		if ah != bh {
-			return ah // an owner with headroom ahead of the rest
+		ak, bk := known[a.owner], known[b.owner]
+		if ak != bk {
+			return ak // a known owner ahead of an unknown one
 		}
-		if ah && headroom[a.owner] != headroom[b.owner] {
-			return headroom[a.owner] > headroom[b.owner]
+		if ak && ratio[a.owner] != ratio[b.owner] {
+			return ratio[a.owner] < ratio[b.owner]
 		}
 		return a.seq < b.seq
 	})
 	return list
-}
-
-// ownerHeadroom reports an owner's headroom under its guaranteed_mib:
-// guaranteed − used, and whether the owner has a guarantee at all. Only
-// headroom > 0 ranks an owner ahead of the no-guarantee crowd.
-func (s *Service) ownerHeadroom(owner string) (int, bool) {
-	if s.identities == nil {
-		return 0, false
-	}
-	u := s.identities.UserByID(owner)
-	if u == nil || u.GuaranteedMiB <= 0 {
-		return 0, false
-	}
-	return u.GuaranteedMiB - s.usedMiB(owner), true
 }
 
 // drainQueue answers every waiting ticket with the drain refusal at

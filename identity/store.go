@@ -48,24 +48,11 @@ type User struct {
 	// present the matching key; the API layer never exposes it.
 	LLMKeyHash string `json:"llm_key_hash"` // SHA256 of the LLM gateway key ("" = none)
 	CreatedAt  string `json:"created_at"`   // RFC3339
-	// Quota (T4/#31). 0 = no per-user cap (global defaults apply).
-	MaxLeases int `json:"max_leases"` // max concurrent leases (0 = unlimited)
-	MaxTTL    int `json:"max_ttl"`    // max lease TTL seconds (0 = global max applies)
-	// MaxKeptBytes is the user's kept-checkpoint byte budget (#126): the
-	// sum of size_bytes over their kept builds may not exceed it. A keep
-	// whose checkpoint build would push the total past the budget is not
-	// pinned (the build stays an ordinary, GC-able checkpoint). 0 = none.
-	MaxKeptBytes int64 `json:"max_kept_bytes"` // kept-build byte budget (0 = none)
-	// Memory quota (#128), in MiB. MaxMiB caps the sum of memory_mb over
-	// the user's RUNNING leases (a suspended one holds no hugepages and
-	// is not charged); a grant that would push the total past it answers
-	// 429. GuaranteedMiB is the user's floor of host memory; admission
-	// never counts it against them. Both 0 = unset. There is no
-	// automatic conversion from max_leases: an operator sets these
-	// explicitly via POST /api/users/{id}/quota, and a user with
-	// max_leases > 0 but no max_mib keeps working unchanged.
-	GuaranteedMiB int `json:"guaranteed_mib"` // guaranteed memory MiB (0 = unset)
-	MaxMiB        int `json:"max_mib"`        // max running-lease memory MiB (0 = unlimited)
+	// Quota (T4/#31): only the TTL cap is left. The per-owner caps
+	// max_leases, guaranteed_mib, max_mib and max_kept_bytes were removed
+	// in 3.0 (fair shares, FS4); a users file written before still loads
+	// (unknown JSON fields are ignored) and the next save drops them.
+	MaxTTL int `json:"max_ttl"` // max lease TTL seconds (0 = global max applies)
 }
 
 // Store is a thread-safe user registry with optional JSON persistence.
@@ -389,17 +376,12 @@ func (s *Store) Users() []*User {
 	return out
 }
 
-// SetQuota updates a user's lease quota (T4/#31). maxLeases 0 =
-// unlimited; maxTTL 0 = global default cap applies. maxKeptBytes is the
-// kept-checkpoint byte budget (#126); 0 = none. guaranteedMiB and
-// maxMiB are the memory quota (#128): 0 = unset, and guaranteedMiB
-// must not exceed maxMiB when both are set.
-func (s *Store) SetQuota(userID string, maxLeases, maxTTL, guaranteedMiB, maxMiB int, maxKeptBytes int64) error {
-	if maxLeases < 0 || maxTTL < 0 || guaranteedMiB < 0 || maxMiB < 0 || maxKeptBytes < 0 {
+// SetQuota updates a user's quota (T4/#31): the lease TTL cap in
+// seconds, 0 = the global default cap applies. It is the only per-user
+// quota left since 3.0 (fair shares, FS4).
+func (s *Store) SetQuota(userID string, maxTTL int) error {
+	if maxTTL < 0 {
 		return fmt.Errorf("quota values must be >= 0")
-	}
-	if guaranteedMiB > 0 && maxMiB > 0 && guaranteedMiB > maxMiB {
-		return fmt.Errorf("guaranteed_mib must be <= max_mib")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -407,11 +389,7 @@ func (s *Store) SetQuota(userID string, maxLeases, maxTTL, guaranteedMiB, maxMiB
 	if u == nil {
 		return fmt.Errorf("no such user")
 	}
-	u.MaxLeases = maxLeases
 	u.MaxTTL = maxTTL
-	u.GuaranteedMiB = guaranteedMiB
-	u.MaxMiB = maxMiB
-	u.MaxKeptBytes = maxKeptBytes
 	return s.save()
 }
 

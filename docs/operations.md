@@ -353,10 +353,11 @@ lease lives. Two caps keep pins from filling the disk (#126):
   lease. A keep on a lease at the cap answers `409` and takes no
   checkpoint; the owner unpins one build
   (`DELETE /api/snapshots/{build_id}`) to free a slot.
-- A user's `max_kept_bytes` (identity-store field, set via
-  `POST /api/users/{id}/quota`) bounds the bytes their kept builds hold.
-  An over-budget keep is written and then left unpinned (409 with the
-  build id), so it ages out like any unreferenced snapshot.
+- An owner's fair **disk slice** (3.0; it replaced the per-user
+  `max_kept_bytes`) bounds the bytes their kept builds and named
+  snapshots hold. An over-budget keep is written and then left unpinned
+  (409 with the build id), so it ages out like any unreferenced
+  snapshot. While the box capacity is unknown there is no budget.
 
 `GET /api/leases/{id}` lists a lease's kept builds (id, size, kept_at);
 `spoond_kept_builds` and `spoond_kept_builds_bytes` report the totals
@@ -657,8 +658,8 @@ deadline or any other retryable error counts against
 `RECOVERY_RETRY_ATTEMPTS` (default 3) and is bounded by
 `RECOVERY_RETRY_WINDOW` (default 30m) since the first failure. The only
 recovery failure that waits for room instead of counting is a substrate
-`ErrCapacity` (the node is full or draining); admission refusals (over
-quota) cannot reach a live
+`ErrCapacity` (the node is full or draining); admission refusals
+(`box_full`) cannot reach a live
 lease's recovery, which skips admission, so they are not in this path. A
 missing checkpoint build or image is permanent and loses the lease at
 once. Every transient failure emits a `recovery_retry` event naming the
@@ -817,13 +818,12 @@ of failing, by sending `"wait": N` (seconds) on `POST /api/leases` (see
 [api.md](api.md#queued-admission)). `MAX_ADMIT_WAIT_SECS` caps the wait
 (default `900`; `0` disables waiting — the request field is accepted and
 ignored). The queue lives in the backend process and is lost on restart.
-Waiting creates are served in fair-share order: the owner furthest under
-their `guaranteed_mib` first (an owner with no `guaranteed_mib`, or
-already at it, ranks after every owner with headroom), then FIFO; each
+Waiting creates are served in fair-share order: the owner with the
+lowest fair-share ratio first (an owner the fair-share view does not
+know after every known one), then FIFO; each
 wake-up admits every queued create that fits, so a smaller one may pass
 a larger one. The queue is retried whenever capacity may have freed (a
-lease released, suspended, taken back and resumed, or a quota changed)
-and on a 5 s tick. The metrics: `spoond_leases_queued` (current queue
+lease released, suspended, taken back and resumed) and on a 5 s tick. The metrics: `spoond_leases_queued` (current queue
 depth), `spoond_leases_queued_oldest_seconds` (the oldest ticket's age),
 `spoond_admit_wait_seconds` (histogram of the wait of admitted creates)
 and `spoond_admit_timeouts_total` (waits that ended without a lease —
@@ -1174,9 +1174,9 @@ clock, unless it is resumed first.
 The **next call resumes it** — and every other kind of suspend too
 (#145 D2). Exec, stream, files, proxy, jobs, the LLM gateway, a network
 change and a prompt resume a suspended lease first through the normal
-resume path (admission, class and quota apply) and then serve the call,
-whatever suspended it; a refused resume answers the shared shapes (`429`
-over the owner's quota, `503 capacity_wait` with `Retry-After` when the
+resume path (admission and take-back apply) and then serve the call,
+whatever suspended it; a refused resume answers the shared shapes (`429
+box_full` when take-back can free nothing, `503 capacity_wait` with `Retry-After` when the
 host has no room, `409 lease_busy` while a pause or another resume is in
 flight) and the lease stays suspended. GET, status, events and SSE never
 resume. Only a path with nothing to resume — the `stat` probe, forking a
@@ -1190,36 +1190,17 @@ spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
 - **Revoking access** = `DELETE /api/users/{id}` (or `ssh-key rm
   <user-id>`); the gateway treats the identity store as authoritative, so
   removal is immediate — no key-dir cleanup needed.
-- **Quotas** are per-user (`max_leases`/`max_ttl` via `POST
-  /api/users/{id}/quota`); over-cap creates and forks return `429`. A
-  user with `max_leases: 0` is unlimited.
-- **Memory quotas** (#128) are per-user too (`guaranteed_mib`/
-  `max_mib`, same endpoint). A lease costs its image's `memory_mb`;
-  the sum over a user's **running** leases may not pass `max_mib` — a
-  suspended lease holds no hugepages and is not charged, so suspending
-  frees the budget and resuming re-checks it (an over-budget resume
-  answers `429` and the lease stays suspended). The same re-check runs
-  before any operation that turns a suspended lease back into a running
-  one: warm and cold restart, restore to a kept checkpoint, the crash
-  reconcile and undrain. Resuming adds no lease, so only `max_mib`
-  applies on those paths — a user at their `max_leases` cap can still
-  resume their own suspended (or drained) lease, and an over-budget
-  undrain leaves the lease drained (reported in `failed`) instead of
-  losing it. Create, clone and fork (each child's `memory_mb`, reserved
-  up front, all or nothing) are checked under the same lock as
-  `max_leases`, so races cannot blow past either cap. `guaranteed_mib`
-  stays settable for now; it no longer decides a lease class.
-  Watch a user's charge as `used_mib` on `GET /api/users/me` (and `charged_mib` on the lease detail).
-  - **Migration:** none, by design. A user with `max_leases > 0` and no
-    `max_mib` keeps working unchanged — no count is converted into a
-    memory number. To cap a user's memory, set it explicitly, sizing it
-    from their current charge: `GET /api/users/me` (or `GET
-    /api/users`) for `used_mib`, then `POST /api/users/{id}/quota` with
-    `"max_mib": <MiB>` (and `"guaranteed_mib"` at most that). Setting a
-    quota deletes nothing, but it bites on the next grant, resume,
-    restart, restore, recovery or undrain — size `max_mib` before a
-    drain; an undrain whose resume fails the check leaves the lease
-    drained (reported in `failed`) instead of losing it.
+- **Quotas:** only `max_ttl` is left per user (`POST
+  /api/users/{id}/quota`). The per-owner caps `max_leases`,
+  `guaranteed_mib`, `max_mib` and `max_kept_bytes` were removed in 3.0:
+  every owner gets an equal fair slice of memory and snapshot disk
+  instead, admission takes back from the biggest borrower, and the kept
+  budget is the owner's disk slice. The quota route still accepts the
+  removed fields, ignores them and answers with `Deprecation: true` and
+  a `Warning` header; values already in the users file are ignored on
+  load and dropped on the next save. Watch a user's memory charge as
+  `used_mib` on `GET /api/users/me` (and `charged_mib` on the lease
+  detail), and their slice and ratio on `GET /api/fair-shares`.
 - **Token/key hashes** are HMAC-SHA256 with a per-store salt (sidecar
   `<users-file>.salt`); back the salt up alongside the store or existing
   hashes become unverifiable on restore.
@@ -1253,7 +1234,7 @@ leave no blank run and the freed width goes to the owner then the
 holder, and the ◆ pinned legend sits on one dim line under the
 table when a row is pinned), the image catalog (shape, live leases, lifetime
 uses, baked-at) beside the systemd units, a refusals-and-failures row
-(auth, quota, throttled, capacity, build fails, lost leases — non-zero
+(auth, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and
 the events panel (the backend's lease event stream) — plus
 a **Notifications** panel below the header (only when there is a

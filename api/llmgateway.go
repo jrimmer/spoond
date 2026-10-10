@@ -46,7 +46,7 @@ type llmGateway struct {
 	// resumeLease resumes a suspended lease on its holder's next LLM call
 	// (#145 D2). It is the same normal resume path every work call uses,
 	// so a refusal is answered by writeResumeRefusal (503 capacity_wait /
-	// 429 quota_exceeded / 409 lease_busy); get, status, events and SSE
+	// 429 box_full / 409 lease_busy); get, status, events and SSE
 	// never call it.
 	resume       func(context.Context, *Lease) (*Lease, error)
 	users        *identity.Store // per-user LLM keys (U8/T8); nil = legacy open mode
@@ -194,7 +194,7 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if lease.Suspended {
 		// Every suspended lease resumes on its holder's next gateway call
 		// (#145 D2), after authentication. A refused resume answers 503
-		// capacity_wait / 429 quota / 409 lease_busy and the gateway stops
+		// capacity_wait / 429 box_full / 409 lease_busy and the gateway stops
 		// here.
 		if _, err := g.resume(r.Context(), lease); err != nil {
 			writeResumeRefusal(w, g.log, leaseID, err)

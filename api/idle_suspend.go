@@ -131,12 +131,12 @@ func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 }
 
 // ensureRunning serves the next work call on a suspended lease: it
-// resumes the lease through the normal resume path (admission, class and
-// quota apply) and then lets the caller serve. Every suspension resumes
+// resumes the lease through the normal resume path (admission and
+// take-back apply) and then lets the caller serve. Every suspension resumes
 // this way (#145 D2, one rule for every kind of suspend): a lease
 // suspended by pressure, preemption, idle_suspend, take-back or the
 // admin drain, and one its owner suspended by hand. A refusal
-// answers what resume would: 429 for the owner's own memory quota, 503
+// answers what resume would: 429 box_full when take-back can free nothing, 503
 // capacity_wait with Retry-After when the node has no room (a structural
 // shortage never refuses: the caller waits), 409 lease_busy while its
 // pause or another caller's resume is in flight, 410 lease_lost when its
@@ -154,8 +154,7 @@ func (s *Server) ensureRunning(w http.ResponseWriter, r *http.Request, l *Lease)
 }
 
 // writeResumeRefusal maps a failed resume onto the response the resume
-// route would give: a quota refusal is 429 with Retry-After and code
-// quota_exceeded, a lease busy with its pause or another resume is 409
+// route would give: box_full is 429, a lease busy with its pause or another resume is 409
 // lease_busy, a lost sandbox 410 lease_lost with the reason, and every
 // structural no-room refusal is 503 with Retry-After and code
 // capacity_wait. It is shared by the resume route and every resume-on-use
@@ -167,8 +166,7 @@ func (s *Server) writeResumeRefusal(w http.ResponseWriter, id string, err error)
 // resumeNoRoom reports whether a failed resume was refused for a
 // structural shortage of host resources (hugepages, a draining node).
 // Per the 2026-10-08 owner contract such a refusal is a wait, never a
-// loss: the caller gets 503 capacity_wait with a Retry-After. Only
-// per-owner quota refuses otherwise (memory quota 429).
+// loss: the caller gets 503 capacity_wait with a Retry-After.
 func resumeNoRoom(err error) bool {
 	return errors.Is(err, substrate.ErrCapacity) || errors.Is(err, errDraining)
 }
@@ -208,11 +206,6 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 		// is answered with, not a 500 a client would read as a permanent
 		// lease failure (spoond-k0uz R3-2). Nothing was paused or released.
 		writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
-	case errors.Is(err, errQuotaExceeded):
-		// The owner's own quota frees when the owner releases its own
-		// leases, so this is a retryable wait, not a loss: 429 with
-		// code quota_exceeded and a Retry-After, like capacity_wait.
-		writeErrorCodeAfter(w, http.StatusTooManyRequests, capacityRetryAfterSecs, "quota_exceeded", err.Error())
 	case resumeNoRoom(err):
 		writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", resumeNoRoomMessage(err))
 	case errors.Is(err, substrate.ErrUnavailable):

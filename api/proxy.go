@@ -239,7 +239,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	s.svc.touch(lease.ID) // proxied web traffic is activity for the idle sweeper
 	// Every suspended lease — whatever suspended it — resumes on its
 	// holder's next work call (#145 D2). A refused resume answers 503
-	// capacity_wait / 429 quota / 409 lease_busy and the caller stops here.
+	// capacity_wait / 429 box_full / 409 lease_busy and the caller stops here.
 	if !s.ensureRunning(w, r, lease) {
 		return
 	}

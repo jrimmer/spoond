@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,11 @@ import (
 
 	"github.com/jrimmer/spoond/v2/substrate"
 )
+
+// errTestResumeRefused is an admission refusal (box_full: take-back
+// could free nothing) that keeps a drained lease drained for a later
+// retry. Before 3.0 the per-owner quota refusal played this part.
+var errTestResumeRefused = fmt.Errorf("test: resume refused: %w", errBoxFull)
 
 // TestUndrainDetachedContextIsUsed pins H1: the admin handlers run on a
 // context detached from the request, so a client that goes away does not
@@ -158,7 +164,7 @@ func TestDrainDeferredEvent(t *testing.T) {
 
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		if req.Resume {
-			return substrate.Sandbox{}, errQuotaExceeded
+			return substrate.Sandbox{}, errTestResumeRefused
 		}
 		return sub.Fake.Create(ctx, req)
 	}
@@ -192,7 +198,7 @@ func TestSelfHealResumesDrainedLeases(t *testing.T) {
 	refuse.Store(true)
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		if req.Resume && req.SandboxID == target.SandboxID && refuse.Load() {
-			return substrate.Sandbox{}, errQuotaExceeded
+			return substrate.Sandbox{}, errTestResumeRefused
 		}
 		return sub.Fake.Create(ctx, req)
 	}
@@ -706,7 +712,7 @@ func TestHealBackoffAndGivesUp(t *testing.T) {
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		if req.Resume {
 			creates.Add(1)
-			return substrate.Sandbox{}, errQuotaExceeded
+			return substrate.Sandbox{}, errTestResumeRefused
 		}
 		return sub.Fake.Create(ctx, req)
 	}
@@ -818,7 +824,7 @@ func TestHealDeletedHalfSandbox(t *testing.T) {
 
 	sub.createFn = func(ctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		if req.Resume {
-			return substrate.Sandbox{}, errQuotaExceeded
+			return substrate.Sandbox{}, errTestResumeRefused
 		}
 		return sub.Fake.Create(ctx, req)
 	}
@@ -906,7 +912,7 @@ func TestHealStateDoesNotLeakAcrossRestarts(t *testing.T) {
 	refuse.Store(true)
 	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		if req.Resume && refuse.Load() {
-			return substrate.Sandbox{}, errQuotaExceeded
+			return substrate.Sandbox{}, errTestResumeRefused
 		}
 		return sub.Fake.Create(cctx, req)
 	}
@@ -988,7 +994,7 @@ func TestHealPrunesStaleState(t *testing.T) {
 	svc.cfg.DrainResumeMaxAge = -1
 	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		if req.Resume {
-			return substrate.Sandbox{}, errQuotaExceeded
+			return substrate.Sandbox{}, errTestResumeRefused
 		}
 		return sub.Fake.Create(cctx, req)
 	}
@@ -1192,7 +1198,7 @@ func TestAdminUndrainClearsStaleGiveUp(t *testing.T) {
 	refuse.Store(true)
 	sub.createFn = func(cctx context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
 		if req.Resume && refuse.Load() {
-			return substrate.Sandbox{}, errQuotaExceeded
+			return substrate.Sandbox{}, errTestResumeRefused
 		}
 		return sub.Fake.Create(cctx, req)
 	}

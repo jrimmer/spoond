@@ -306,64 +306,13 @@ func TestResumeOnUseNoRoomEveryPath(t *testing.T) {
 	}
 }
 
-// TestResumeOnUseQuotaEveryPath: the owner's own memory quota refusal
-// is the one shape every resume-on-use path shares too — 429 with a
-// Retry-After header and JSON code quota_exceeded — and never 409
-// lease_suspended (review R7). Deleting the code or the header from
-// writeResumeRefusal's quota case makes this fail.
-func TestResumeOnUseQuotaEveryPath(t *testing.T) {
-	for _, p := range resumeOnUseWorkPaths() {
-		t.Run(p.name, func(t *testing.T) {
-			// Two big leases under a max_mib that fits one: the second
-			// fills the cap so the suspended first cannot re-admit.
-			srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
-			svc := srv.svc
-			rec, first := createPersistentAs(t, h, tok, "big")
-			if rec.Code != http.StatusCreated {
-				t.Fatalf("first create: %d %s", rec.Code, rec.Body.String())
-			}
-			id := first["id"].(string)
-			l := svc.lookup(uid, id)
-			if _, err := svc.suspend(context.Background(), ownerIDFor(t, h, tok), id); err != nil {
-				t.Fatalf("suspend: %v", err)
-			}
-			if rec2, _ := createSandboxAs(t, h, tok, "big"); rec2.Code != http.StatusCreated {
-				t.Fatalf("second create: %d %s", rec2.Code, rec2.Body.String())
-			}
-
-			ts := httptest.NewServer(h)
-			t.Cleanup(ts.Close)
-			resp, body, hdr := p.do(t, ts, srv, id, tok)
-			if resp.StatusCode != http.StatusTooManyRequests {
-				t.Fatalf("%s quota refusal = %d, want 429: %s", p.name, resp.StatusCode, body)
-			}
-			if ra := hdr.Get("Retry-After"); ra != "30" {
-				t.Fatalf("%s quota Retry-After = %q, want 30", p.name, ra)
-			}
-			var doc map[string]any
-			if err := json.Unmarshal([]byte(body), &doc); err != nil {
-				t.Fatalf("%s body is not JSON: %v (%s)", p.name, err, body)
-			}
-			if doc["code"] != "quota_exceeded" {
-				t.Fatalf("%s code = %v, want quota_exceeded: %s", p.name, doc["code"], body)
-			}
-			if _, ok := doc["error"]; !ok {
-				t.Fatalf("%s body has no error: %s", p.name, body)
-			}
-			if !l.Suspended {
-				t.Fatalf("%s resumed the lease despite the quota", p.name)
-			}
-		})
-	}
-}
-
 // TestResumeOnUseBusyEveryPath: while its pause or another caller's
 // resume is in flight every work path answers 409 with code lease_busy
 // (retryable), never 409 lease_suspended.
 func TestResumeOnUseBusyEveryPath(t *testing.T) {
 	for _, p := range resumeOnUseWorkPaths() {
 		t.Run(p.name, func(t *testing.T) {
-			srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 2048}, `{"max_mib":65536}`)
+			srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 2048})
 			svc := srv.svc
 			rec, first := createPersistentAs(t, h, tok, "big")
 			if rec.Code != http.StatusCreated {

@@ -43,10 +43,8 @@ particular means two different things depending on the code:
 | `409` | `secrets_in_use` | a background job with staged secrets blocks the save |
 | `409` | `snapshot_in_use` | a live lease started from the named snapshot |
 | `409` | `snapshot_limit` | the owner's `MAX_NAMED_SNAPSHOTS` cap is reached |
-| `409` | `kept_budget` | the owner's `max_kept_bytes` budget would be exceeded |
+| `409` | `kept_budget` | the owner's kept checkpoints and named snapshots would pass their fair disk slice (3.0; was `max_kept_bytes`) |
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
-| `429` | `quota` | the owner is over their own memory quota (`max_mib`); the body names the limit |
-| `429` | `quota_exceeded` | the same memory quota on a resume (a resume-on-use or `POST /resume`); carries `Retry-After: 30` and the lease stays suspended |
 | `429` | `box_full` | a request needed room and take-back can free none for it: every candidate is pinned (v3.0 FS5), or the requester is itself the biggest borrower — over its fair slice after the request with no other owner further over (FS2b); nothing was paused or released — unpin or release leases to make room. Answers a create, and (since the round-3 fix) any re-admission: resume, resume-on-use, restart, clone, fork, restore |
 | `503` | `substrate_unavailable` | the substrate could not confirm the sandbox's state (the orchestrator was unreachable); retry; see [Substrate unavailable](#substrate-unavailable) |
 | `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
@@ -58,8 +56,54 @@ every path (exec, exec stream, files, proxy, jobs, the LLM gateway). Per
 the owner contract (2026-10-08) a **host-structural** shortage — disk,
 hugepages, the snapshot store, orchestrator capacity —
 never refuses for good: spoond acts (reclaims or FIFO-cleanup) and the
-caller waits. Only per-owner quota refuses with `429` (memory) or `409`
-(`kept_budget`):
+caller waits. There are no per-owner caps since 3.0 (fair shares): the
+only refusals for room are `429 box_full` (take-back can free nothing)
+and `409 kept_budget` (the owner's disk slice).
+
+### Refusals
+
+Everything that refuses a request in 3.0:
+
+| Status | `code` | When |
+|---|---|---|
+| `400` | `bad_request` (or a plain `error`) | validation: malformed JSON, out-of-range or unknown values, `image_mismatch` |
+| `401` | | no or unknown token |
+| `403` | | not allowed: an admin route, a share that does not grant it, a port the guest reserves, or `owner deleted` (the owner's identity was removed while the request was in flight) |
+| `404` | `not_found` | unknown lease, name, snapshot, build, image or user — and any lease the caller cannot see |
+| `409` | `lease_busy` | another lifecycle operation (pause, resume, restart, checkpoint, save) is in flight; retry |
+| `409` | `kept_budget` | a keep or named save would push the owner's kept + named bytes past their fair disk slice |
+| `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (stat probe, fork, crash test, guest heartbeat) |
+| `410` | `lease_lost` | the substrate lost the lease's sandbox |
+| `429` | `box_full` | a request needed room and take-back can free none: every candidate is pinned, or the requester is itself the biggest borrower; nothing was paused or released |
+| `503` | | `draining`: a planned restart is draining the node; `Retry-After` says when to come back |
+| `503` | `capacity_wait` | no room yet (hugepages, snapshot disk, orchestrator capacity) and take-back cannot close the gap now; carries `Retry-After: 30`; a wait, never a loss. A create answers it as `capacity: …` with `Retry-After` (and can wait it out with `wait`); clone, fork and restore answer `503 capacity: …` without a code |
+| `503` | `substrate_unavailable` | the orchestrator could not confirm the sandbox's state; carries `Retry-After: 5` |
+
+Smaller limits keep their own `409`/`429` answers (`snapshot_limit`,
+the per-lease kept cap, the per-owner exec, dial and file-transfer
+concurrency caps, the auth throttle); see each route.
+
+#### Changes from 2.9
+
+The per-owner caps `max_leases`, `max_mib`, `guaranteed_mib` and
+`max_kept_bytes` are gone, and with them every `429` they caused
+(`quota_exceeded` and the plain over-quota `429`). Per path:
+
+| Path | 2.9 | 3.0 |
+|---|---|---|
+| create (`POST /api/leases`) | `429` over `max_leases` or `max_mib` (waitable with `wait`); `503 capacity` when the node is full | no per-owner refusal; `429 box_full` when take-back can free nothing; otherwise `503 capacity` with `Retry-After` (waitable with `wait`) |
+| `POST /api/leases/{id}/resume` | `429 quota_exceeded` + `Retry-After` over `max_mib`; `503 capacity_wait` | `429 box_full`, or `503 capacity_wait` + `Retry-After` |
+| resume-on-use work calls (exec, stream, files, dial, proxy, jobs, LLM gateway, network, prompt) | `429 quota_exceeded` + `Retry-After` over `max_mib`; `503 capacity_wait` | `429 box_full`, or `503 capacity_wait` + `Retry-After` |
+| `POST /api/leases/{id}/restart` (suspended lease) | `429` over `max_mib` | `429 box_full`; a substrate capacity failure is still `500` |
+| `POST /api/leases/{id}/clone` | `429` over `max_leases` or `max_mib`; `503 capacity` | `429 box_full`, or `503 capacity` |
+| `POST /api/leases/{id}/fork` | `429` over `max_leases` or `max_mib` (all children reserved up front); `503 capacity` | `429 box_full`, or `503 capacity` |
+| `POST /api/leases/{id}/restore` (suspended lease) | `429` over `max_mib`; `503 capacity` | `429 box_full`, or `503 capacity` |
+| `POST /api/leases/{id}/checkpoint` `{"keep":true}` | `409 kept_budget` over `max_kept_bytes` (no budget when unset) | `409 kept_budget` over the owner's fair disk slice (no budget while the box capacity is unknown); `429 box_full` or `503 capacity_wait` when the checkpoint does not fit the snapshot disk (FS3) |
+| `POST /api/leases/{id}/snapshots` (named save) | `409 kept_budget` over `max_kept_bytes` | `409 kept_budget` over the owner's fair disk slice; `429 box_full` or `503 capacity_wait` when the checkpoint does not fit the snapshot disk (FS3) |
+
+`POST /api/users/{id}/quota` still accepts the removed fields (no `400`)
+and ignores them; see
+[`POST /api/users/{id}/quota`](#post-apiusersidquota--set-the-ttl-cap-admin-only).
 
 ---
 
@@ -72,7 +116,7 @@ Request:
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `image` | string | *(required unless `snapshot`)* | image name; must have a current build in the catalog (`GET /api/images`). With `snapshot` it may be omitted; when given it must equal the snapshot's image (`400 image_mismatch`) |
-| `snapshot` | string | *(none)* | start the lease from a named snapshot version instead of the image's current build: `name` (latest) or `name@v`. The version must exist for the caller (`404 not_found`). The lease is never served from the warm pool, its memory is the snapshot's `memory_mb` for quota and admission, and it is stamped with the version so retention never drops it — see [Start from a snapshot](#start-from-a-snapshot). A version that cannot run on this host answers `409 cannot_start` |
+| `snapshot` | string | *(none)* | start the lease from a named snapshot version instead of the image's current build: `name` (latest) or `name@v`. The version must exist for the caller (`404 not_found`). The lease is never served from the warm pool, its memory is the snapshot's `memory_mb` for admission, and it is stamped with the version so retention never drops it — see [Start from a snapshot](#start-from-a-snapshot). A version that cannot run on this host answers `409 cannot_start` |
 | `ttl` | int | `DEFAULT_TTL_SECS` | seconds; capped at `MAX_TTL_SECS` and at the user's `max_ttl` |
 | `persistent` | bool | `false` | not TTL-swept; supports keepalive, suspend/resume, checkpoint |
 | `memory_mib` | int | `0` | **must be `0` or exactly the image's `memory_mb`** — memory is fixed per image (a snapshot restores with its build's RAM). For a create with `snapshot`, memory is fixed by the snapshot: `0` or exactly the snapshot's `memory_mb`, else `400`. Any other value is `400`. |
@@ -156,8 +200,8 @@ image_mismatch` when an explicit `image` differs from the snapshot's,
 cannot_start` when the snapshot's build cannot start on this host (the
 body is `snapshot <name>@<v> cannot start on this host (<cause>); save
 it again`, and there is no retry loop),
-`429` quota — the user's concurrent-lease cap or their memory cap
-(#128, see `POST /api/users/{id}/quota`), `503` capacity (not enough
+`429 box_full` when take-back can free nothing (see
+[Memory take-back](#memory-take-back)), `503` capacity (not enough
 free hugepage memory for the image, or the node is not healthy, with
 `Retry-After: 30`). When the lease's hugepages do not fit, take-back
 runs first (see [Memory take-back](#memory-take-back)). The lease's root disk must fit in
@@ -188,8 +232,9 @@ needed instead of deleting and recreating it.
 
 Two refusals tell the caller what is in the way:
 
-- `429` `box_full` — only pinned leases stand in the way; nothing
-  unpinned can be taken.
+- `429` `box_full` — only pinned leases stand in the way (nothing
+  unpinned can be taken), or the requester is itself the biggest
+  borrower.
 - `503` `capacity_wait` with `Retry-After: 30` — a structural shortfall
   that take-back cannot close.
 
@@ -208,12 +253,10 @@ Only these refusals are **waitable** (the request is held open and
 retried):
 
 - `503 capacity: …` — hugepages full and take-back could not make room
-  (or the node is not healthy).
-- `429 … memory limit of N MiB exceeded` — the owner's `max_mib` cap
-  refused it.
-- `429 lease quota exceeded` — the owner is at its lease-count cap
-  (`max_leases`); the create waits for one of the owner's own leases to
-  be released (since 2.5.1). The `queued` event names it `lease cap`.
+  (or the node is not healthy). The `queued` event names it `capacity`.
+
+There are no per-owner caps to wait on since 3.0; `429 box_full` is a
+refusal and answers at once.
 
 Everything else answers at once: bad requests, auth failures and
 unknown images are **not** waitable.
@@ -223,17 +266,17 @@ waiting and the field is accepted and ignored — see
 [operations.md](operations.md)). The queue lives in the backend process
 and is lost on restart (a waiting client sees its connection go and
 retries). Waiting creates are served in **fair-share order**: the owner
-furthest under its `guaranteed_mib` first (an owner with no
-`guaranteed_mib`, or already at it, ranks after every owner with
-headroom), then FIFO. Each wake-up admits every queued create that fits,
+with the lowest fair-share ratio (usage over their equal slice, see
+[Fair shares](#fair-shares)) first, an owner the fair-share view does
+not know after every known owner, then FIFO. Each wake-up admits every queued create that fits,
 so a smaller create may pass a larger one that still does not fit. The
 order is re-read before every attempt; it is best-effort only when room
 frees in the middle of a pass (a create tried just before may miss room
 that one tried just after gets).
 Admissions from the queue go through the normal admission path, so
-quotas and take-back apply unchanged. The
+take-back applies unchanged. The
 queue is retried whenever capacity may have freed (a release, suspend,
-resume, take-back or quota change) and on a 5 s tick.
+resume or take-back) and on a 5 s tick.
 
 Outcomes:
 
@@ -246,7 +289,7 @@ Outcomes:
   draining` at once.
 
 The `queued` event names the refusal being waited out and the create's
-place in the fair-share order at that moment, e.g. `memory cap; position
+place in the fair-share order at that moment, e.g. `capacity; position
 2 of 3`; the lease id is allocated when the create is queued and the
 created lease keeps it. On admission a `created` event follows as usual;
 a wait that ends without a lease emits `timed_out` with detail `waited
@@ -293,7 +336,7 @@ the **one clock** — `PAUSED_RELEASE_DAYS` (default 30) after its pause
 date — unless a resume clears the date first.
 
 **Resume on next use (#145 D2):** every work call resumes a suspended
-lease first through the normal resume path (admission and quota
+lease first through the normal resume path (admission and take-back
 apply) and then serves the call — whatever suspended it: the lease's own
 `idle_suspend`, take-back, or the owner's hand suspend. This
 is one rule for every kind of suspend, not just
@@ -305,10 +348,9 @@ refusal shapes below, during a drain too (see
 the SSH gateway's resume on attach takes the same path.
 
 While its pause or another caller's resume is in flight, a work call
-answers `409` with `code: lease_busy` (retryable). A resume refused for
-the owner's own memory quota answers `429` with `Retry-After: 30` and
-`code: quota_exceeded` (the quota frees when the owner releases its own
-leases); a resume that finds no room
+answers `409` with `code: lease_busy` (retryable). A resume whose
+re-admission take-back cannot serve answers `429` with `code: box_full`;
+a resume that finds no room
 on the host — including one during a planned-restart drain, which must
 not resurrect a `Drained` lease the drain's quiesce wait depends on —
 answers the one shared no-room shape, `503` with `Retry-After: 30` and
@@ -320,19 +362,19 @@ in every refusal. Resuming does not renew a hold: there is no hold any
 more, only labels.
 
 **Per-path status (resume-on-use).** Every path is listed; the
-`capacity_wait` and `quota_exceeded` rows are the same on all of them:
+`capacity_wait` and `box_full` columns are the same on all of them:
 
-| Path | Resumes on use | No room | Owner over `max_mib` | In-flight pause/resume | Lost sandbox |
+| Path | Resumes on use | No room | Take-back frees nothing | In-flight pause/resume | Lost sandbox |
 |---|---|---|---|---|---|
-| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` (`429 box_full` when every take-back candidate is pinned or the caller is the biggest borrower) | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| `GET /api/leases/{id}/stream` (exec stream) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| the HTTP proxy (`<lease>-<port>.<suffix>`) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| background jobs (`POST .../exec` `background:true`, `POST .../jobs/{job}/signal`) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
-| `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429 quota_exceeded` + `Retry-After` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/exec` | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}/stream` (exec stream) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| `GET`/`PUT`/`POST`/`DELETE /api/leases/{id}/files/...` (read, write, stat, list, mkdir, remove) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| `GET /api/leases/{id}/ports/{port}/dial` | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| the HTTP proxy (`<lease>-<port>.<suffix>`) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| background jobs (`POST .../exec` `background:true`, `POST .../jobs/{job}/signal`) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| the LLM gateway (`/llm/{lease-id}/...`) | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/network` | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
+| `POST /api/leases/{id}/prompt` | yes | `503 capacity_wait` + `Retry-After` | `429 box_full` | `409 lease_busy` | `410 lease_lost` |
 | `GET /api/leases/{id}` (lease detail) | **no** | `200` (suspended details returned) | `200` | `200` | `200` (carries `lost_at`/`lost_reason`) |
 | `GET /api/leases/{id}/stat` (the stat probe runs an exec) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
 | `POST /api/leases/{id}/fork` (needs a running source) | **no** | `409 lease_suspended` | `409 lease_suspended` | `409 lease_busy` | `410 lease_lost` |
@@ -405,10 +447,10 @@ fields show what that chain costs. A lease with no build yet omits both
 fields.
 
 A lease with an identity-store owner also carries its owner's memory
-quota (#128): `charged_mib` (the owner's current running-lease charge —
-what this lease contributes to while it runs), `guaranteed_mib` and
-`max_mib` (`0` = unset) — the same numbers as `GET /api/users/me`,
-scoped to this lease's owner.
+charge (#128): `charged_mib` (the owner's current running-lease charge —
+what this lease contributes to while it runs), the same number as
+`used_mib` on `GET /api/users/me`. `guaranteed_mib` and `max_mib` are
+gone since 3.0.
 
 `state` is `running`, `suspended`, `recovered` or `lost`. `recovered`
 behaves exactly like `running` — it marks a lease the crash reconcile
@@ -514,7 +556,7 @@ orphan, and also deletes any substrate sandbox no lease and no pool
 entry claims once it has been seen unclaimed on two consecutive passes;
 a creation's sandbox is never swept while the creation is in flight.
 A failed **resume-on-use** never loses a lease (#145 D2):
-its error goes to the caller (the shared `429 quota_exceeded`/`503
+its error goes to the caller (the shared `429 box_full`/`503
 capacity_wait`/`409 lease_busy` shapes) and the lease stays suspended with its snapshot
 intact. Undrain's bounded resume no longer marks a lease lost for a
 retryable or indeterminate failure either (spoond-638d): a resume that
@@ -647,8 +689,7 @@ work path — and this one is work — resumes a suspended lease on use
 (#145 D2) first, then serves the exec: whatever suspended it (the lease's
 own `idle_suspend`, take-back, or a hand suspend). A refused
 resume answers the shared shapes: `429`
-`quota_exceeded` with `Retry-After` over the
-owner's quota, `503 capacity_wait` with `Retry-After` when the host has
+`box_full` when take-back can free nothing, `503 capacity_wait` with `Retry-After` when the host has
 no room, `409 lease_busy` while its pause or another resume is in
 flight. `410` if it is
 `lost` (`code: lease_lost`, see [Lost leases](#lost-leases)) or the
@@ -826,7 +867,7 @@ who may act on any lease); a grantee's `http` share does **not** carry
 file content, and anyone else gets the usual `404`. Every call counts
 as activity for the idle sweeper. A suspended lease — whatever suspended
 it — is resumed first on every file route and then served (#145 D2); a
-refused resume answers the shared shapes (`429 quota_exceeded`, `503
+refused resume answers the shared shapes (`429 box_full`, `503
 capacity_wait` with `Retry-After`, `409 lease_busy`). A `lost` lease
 answers `410`
 with `code: lease_lost` (see [Lost leases](#lost-leases)). File
@@ -944,7 +985,7 @@ Closing the WebSocket stops the relay but does **not** kill the process;
 send `stop` or `kill` for that. A stream attach — a work call — resumes a
 suspended lease first, whatever suspended it (#145 D2), and then starts
 the process; a refused resume answers the shared shapes (`429
-quota_exceeded`, `503 capacity_wait` with `Retry-After`, `409
+box_full`, `503 capacity_wait` with `Retry-After`, `409
 lease_busy`).
 
 ### `GET /api/leases/{id}/ports/{port}/dial` — raw TCP to a guest port (WebSocket)
@@ -971,7 +1012,7 @@ every guest port, a step past what an `http` share grants.
 
 Errors: `400` port out of range or not a number, `403` port 49983 (envd,
 the guest's management port), `404` unknown lease or not the owner's,
-`429` quota (`quota_exceeded` on a resume) and `503 capacity_wait` with `Retry-After` if a suspended
+`429 box_full` and `503 capacity_wait` with `Retry-After` if a suspended
 lease cannot resume on use (a dial is work, #145 D2), `409 lease_busy`
 while its pause or another resume is in flight; `410` with
 `code: lease_lost`
@@ -1021,10 +1062,8 @@ clear), `POST /resume` answers `503` with `Retry-After: 30` and `code:
 capacity_wait` and the lease stays suspended; the SSH gateway's resume
 on attach takes the same path, so neither can race a resume into a
 node that is stopping.
-A suspended lease holds no hugepages, so resuming one re-passes the
-owner's memory quota (#128): `429` with `Retry-After: 30` and `code:
-quota_exceeded` when the charge would pass
-`max_mib` — the lease stays suspended. A resume that finds no room on
+A suspended lease holds no hugepages, so resuming one re-admits its
+memory like a create. A resume that finds no room on
 the host answers `503` with `Retry-After: 30` and `code: capacity_wait`
 (one shape for every no-room refusal, whether the
 snapshot disk, or the orchestrator's
@@ -1081,8 +1120,8 @@ and a suspended lease restarted cold comes back running.
 Response `{"id":"…","status":"running","message":"lease restarted"}`.
 `404` unknown, `400` for an unknown mode, `409` when busy; restarting a
 suspended lease brings its guest (and its hugepages) back, so it
-re-passes the owner's memory quota (#128): `429` when the charge would
-pass `max_mib` — the lease stays suspended, untouched. A substrate failure on the fresh-guest path (which does create a sandbox) surfaces
+re-admits its memory like a resume: `429 box_full` when take-back can
+free nothing — the lease stays suspended, untouched. A substrate failure on the fresh-guest path (which does create a sandbox) surfaces
 as `500`, not `503` — unlike create, fork and clone, restart does not
 map capacity errors to `503`.
 
@@ -1122,11 +1161,13 @@ written and the lease keeps running as it was.
   `{"error":"kept checkpoint limit reached (4 per lease); unpin one with
   DELETE /api/snapshots/{build_id}"}`. Nothing is evicted and **no
   checkpoint is taken**; unpin a build to free a slot.
-- **Per owner** — an optional `max_kept_bytes` on the user record (set
-  via `POST /api/users/{id}/quota`). The build's size is only known
-  after it is written, so an over-budget keep **takes the checkpoint**
-  and then refuses the pin: `409` naming the budget with the new build's
-  `build_id` and `"kept":false`. The build stays an ordinary,
+- **Per owner** — the owner's fair **disk slice** (3.0; it replaced
+  `max_kept_bytes`): the owner's kept builds may not pass it. The
+  build's size is only known after it is written, so an over-budget
+  keep **takes the checkpoint** and then refuses the pin: `409` naming
+  the budget with the new build's `build_id` and `"kept":false`. While
+  the box capacity is unknown (`capacity_known: false`) there is no
+  budget. The build stays an ordinary,
   GC-able checkpoint — retry without `keep`, or unpin builds to make
   room.
 
@@ -1148,8 +1189,8 @@ crash answers `410` with `code: lease_lost` like every other route
 (restore does not resurrect it; see [Lost leases](#lost-leases)); `409`
 while another operation is in flight; a substrate capacity
 failure maps to `503`. Restoring a suspended lease brings a running
-sandbox (and its hugepages) back, so it re-passes the owner's memory
-quota (#128): `429` when the charge would pass `max_mib` — the lease
+sandbox (and its hugepages) back, so it re-admits its memory like a
+resume: `429 box_full` when take-back can free nothing — the lease
 stays suspended, untouched. An `owner deleted` (`403`) refuses the restore
 when the owner's identity was removed while it was in flight
 (spoond-q4j): the user is gone, so the restore is not run ownerless.
@@ -1309,19 +1350,19 @@ friendly *name*). Response `201 Created`:
 {"id":"…","image":"…","source":"<source-id>","branch_tag":"<build id>","persistent":true,"expires_at":"…"}
 ```
 
-The clone costs the source image's `memory_mb` against the owner's
-memory quota like any create (#128); `429` when it would pass
-`max_mib`. An `owner deleted` (`403`) refuses the clone when the owner's identity
+The clone admits the source image's `memory_mb` like any create:
+`429 box_full` when take-back can free nothing, `503` capacity when
+the node has no room. An `owner deleted` (`403`) refuses the clone when the owner's identity
 was removed while the clone's checkpoint was in flight (spoond-q4j): the
 fresh sandbox is stopped and no lease is committed, so a deleted owner
-cannot acquire an ownerless, uncapped copy.
+cannot acquire an ownerless copy.
 
 ### `POST /api/leases/{id}/fork` — N copies of a running lease
 
 Owner only, as clone (shares are not honoured). Checkpoints the source
 once and creates `count` leases from that build, each its own lease
-owned by the caller, with the source's policy copied. Quota is reserved
-for all of them up front (all or nothing); if any create fails, every
+owned by the caller, with the source's policy copied. Their memory is
+reserved for all of them up front (all or nothing); if any create fails, every
 lease created in the call is deleted.
 
 Request `{"count":1..20,"persistent":false,"ttl":300,"holder":"ci-job"}`
@@ -1334,13 +1375,11 @@ a `Deprecation` header).
 Response `201 Created`:
 `{"source":"<id>","build_id":"<uuid>","ids":["…","…"]}`.
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
-suspended or busy, `429` quota — including the memory cap (#128): each
-fork costs its image's `memory_mb`, `count` times, reserved up front,
-all or nothing — `503` capacity. An `owner deleted` (`403`) refuses a fork whose owner's identity was
+suspended or busy, `429 box_full` when take-back can free nothing for
+a child (each fork costs its image's `memory_mb`), `503` capacity. An `owner deleted` (`403`) refuses a fork whose owner's identity was
 removed while the fork's checkpoint was in flight (spoond-q4j): every
 child created so far is rolled back (its sandbox stopped once) and the
-rest are refused, so a deleted owner cannot acquire ownerless, uncapped
-copies.
+rest are refused, so a deleted owner cannot acquire ownerless copies.
 
 ### `POST /api/leases/{id}/network` — change egress policy live
 
@@ -1352,7 +1391,7 @@ Request `{"network_policy":"none|lan|internet|restricted","egress_allowlist":[�
 Response `200` `{"id","network_policy","egress_allowlist"}`. `400` on an
 invalid policy, `404` unknown. A suspended lease resumes on this work
 call (#145 D2) before the policy is applied; a refused resume answers
-the shared shapes (`429 quota_exceeded`, `503 capacity_wait` with
+the shared shapes (`429 box_full`, `503 capacity_wait` with
 `Retry-After`, `409 lease_busy`).
 
 ### `POST /api/leases/{id}/tag` — friendly name
@@ -1796,8 +1835,9 @@ and inserts the version. Response `201`:
   longer knows their values, so it cannot re-stage them. It logs the
   lease id and how many removed files it no longer knew about (R4);
   re-send the secrets on the next exec.
-- **Limits.** Named snapshot bytes count toward the owner's
-  `max_kept_bytes` alongside kept checkpoints (`409 kept_budget`), and a
+- **Limits.** Named snapshot bytes count toward the owner's kept
+  budget — their fair disk slice since 3.0 — alongside kept checkpoints
+  (`409 kept_budget`), and a
   save that would add a name past `MAX_NAMED_SNAPSHOTS` (`0` = no cap)
   answers `409 snapshot_limit`. An existing name is always savable.
 - **Snapshot disk.** The save's checkpoint must fit in usable snapshot
@@ -1858,11 +1898,11 @@ or `"snapshot": "spoond/warm@3"` (a pinned one) in place of a fresh
 lease from the image's current build. `image` may be omitted; when given
 it must equal the snapshot's image (`400 image_mismatch`). Everything
 else is a normal create — TTL, persistence, network policy and
-allowlist, holder, create-time `secrets`, `wait`, quotas and class all
-come from the request, not the source lease.
+allowlist, holder, create-time `secrets` and `wait` all come from the
+request, not the source lease.
 
-- **Memory** is the snapshot's `memory_mb`, for quota and admission
-alike.
+- **Memory** is the snapshot's `memory_mb`, for admission and the
+  owner's fair-share usage alike.
 - The lease gets a **new lease id and generation `1`**. Its create
   response and `GET /api/leases/{id}` carry
   `"snapshot":{"name":"spoond/warm","version":3,"build_id":"…"}` —
@@ -2103,7 +2143,7 @@ user becomes admin. After that, admin only.
   entry, but bound to the identity).
 
 Response `201 Created`: `{"user": {id, name, kind, admin, fingerprints,
-max_leases, max_ttl, guaranteed_mib, max_mib, used_mib, created_at}}` —
+max_ttl, used_mib, created_at}}` —
 the token hash and LLM key hash are
 never exposed. `used_mib` is `0` on a fresh user.
 
@@ -2113,14 +2153,15 @@ never exposed. `used_mib` is `0` on a fresh user.
 
 ### `GET /api/users/me` — current user
 
-Self-service: `{"user": {id, name, kind, admin, max_leases, max_ttl,
-guaranteed_mib, max_mib, used_mib}, "share": {owner, name, slice_pct,
+Self-service: `{"user": {id, name, kind, admin, fingerprints,
+created_at, max_ttl, used_mib}, "share": {owner, name, slice_pct,
 capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
 used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}}` (#128,
 #145 FS1).
 `used_mib` is the user's current memory charge — the sum of `memory_mb`
-over their running leases (suspended ones hold no hugepages);
-`guaranteed_mib` and `max_mib` are `0` when unset. `share` is the
+over their running leases (suspended ones hold no hugepages).
+`max_leases`, `guaranteed_mib`, `max_mib` and `max_kept_bytes` are no
+longer returned (3.0). `share` is the
 caller's fair-share slice and usage; see
 [Fair shares](#fair-shares) below. `capacity_known` is `false` when the
 box totals were not readable, so the slices are not computed yet.
@@ -2172,14 +2213,12 @@ The answer is `200` with what was removed:
 The lists are always present (empty when there was nothing to remove).
 A create of the deleted user that is still waiting in the admission
 queue (or that raced the delete) is refused with `403 owner deleted`
-rather than granted: an owner with no identity row has no quota, so
-granting it would recreate exactly the uncapped state the delete
-removes. Removing the identity is what actually revokes SSH access —
+rather than granted: granting it would recreate exactly the ownerless
+state the delete removes. Removing the identity is what actually revokes SSH access —
 the gateway treats the identity store as authoritative when present, so
 removing the user invalidates all their keys immediately. Before
 spoond-q4j the delete answered `204` and left the leases, snapshots,
-kept builds and jobs behind, uncapped (an owner with no user has no
-quota).
+kept builds and jobs behind, ownerless.
 
 An id that is neither a known identity nor has any remaining state
 answers `404 user not found`; deleting the same real user twice is
@@ -2219,40 +2258,31 @@ the delete answers `500` with `read state: …` rather than a `404` that
 would hide the leftover rows; retry once the store is readable
 (spoond-y0jj T2).
 
-### `POST /api/users/{id}/quota` — set lease quota (admin only)
+### `POST /api/users/{id}/quota` — set the TTL cap (admin only)
 
-Request `{"max_leases": N, "max_ttl": S, "max_kept_bytes": B,
-"guaranteed_mib": G, "max_mib": M}` — concurrent-lease cap, per-user
-TTL ceiling, the kept-checkpoint byte budget (#126), and the memory
-quota (#128): the sum of `memory_mb` over the user's **running** leases
-may not pass `M` (`0` = no cap; a suspended lease holds no hugepages
-and is not charged). All five default to `0` =
-unlimited/unset. `guaranteed_mib` is the user's guaranteed-memory
-floor, kept for now. It must be
-`<= max_mib` when both are set (`400` otherwise). Over-cap
-creates, forks and clones return `429`; so does any operation that
-brings a suspended lease's guest back over the cap — resume, restart,
-restore, crash recovery, undrain — leaving the lease suspended (or
-drained, for undrain) instead. **Crash recovery of a suspended lease
-re-passes the check against the image's current `memory_mb`, and a
-successful recovery re-stamps `charged_mib` to that value** (a warm
-restart or restore of a suspended lease does the same), so the detail
-row's charge moves to what the recovered sandbox actually runs. An
-over-budget keep answers `409` on the checkpoint route with the
-unpinned build's id (see
-[Keep limits](#post-apileasesidcheckpoint--snapshot-a-running-lease)).
+Request `{"max_ttl": S}` — the user's lease TTL ceiling in seconds
+(`0` = the global maximum applies; negative is `400`). Response
+`{"user": {…}}` as `GET /api/users`.
 
-There is no automatic conversion from `max_leases` to a memory limit: a
-user with `max_leases > 0` and no `max_mib` keeps working unchanged. To
-cap a user's memory, set `max_mib` explicitly:
+**Deprecated fields.** `max_leases`, `guaranteed_mib`, `max_mib` and
+`max_kept_bytes` were removed in 3.0 (fair shares): every owner gets an
+equal slice instead, and the kept budget is the owner's disk slice. A
+request may still send them — any value is accepted (no `400`, and the
+old `guaranteed_mib <= max_mib` rule is gone) and ignored. When any of
+them is set to a non-zero value, the `200` carries:
+
+```
+Deprecation: true
+Warning: 299 - "max_leases, guaranteed_mib, max_mib and max_kept_bytes are ignored since 3.0 (fair shares)"
+```
 
 ```sh
 curl -fsS -X POST "$SPOOND_URL/api/users/$UID/quota" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"max_leases":4,"max_mib":16384}'
+  -d '{"max_ttl":3600}'
 ```
 
-Their in-flight usage is `used_mib` on `GET /api/users/me`.
+The user's memory charge is `used_mib` on `GET /api/users/me`.
 
 ### `POST /api/users/{id}/llm-key` — set/rotate/revoke a user's LLM gateway key
 

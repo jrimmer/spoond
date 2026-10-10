@@ -3,6 +3,7 @@ package identity
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -217,23 +218,25 @@ func TestMissingFileIsEmpty(t *testing.T) {
 func TestSetQuota(t *testing.T) {
 	s, _ := NewStore("")
 	u, _ := s.AddUser("jason", KindPerson, []string{"SHA256:fp"}, "tok")
-	if err := s.SetQuota(u.ID, 3, 120, 0, 0, 0); err != nil {
+	if err := s.SetQuota(u.ID, 120); err != nil {
 		t.Fatal(err)
 	}
-	got := s.UserByID(u.ID)
-	if got.MaxLeases != 3 || got.MaxTTL != 120 {
-		t.Fatalf("quota = %d/%d, want 3/120", got.MaxLeases, got.MaxTTL)
+	if got := s.UserByID(u.ID); got.MaxTTL != 120 {
+		t.Fatalf("max_ttl = %d, want 120", got.MaxTTL)
 	}
-	// zero = unlimited
-	if err := s.SetQuota(u.ID, 0, 0, 0, 0, 0); err != nil {
+	// zero = the global cap applies
+	if err := s.SetQuota(u.ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	got = s.UserByID(u.ID)
-	if got.MaxLeases != 0 || got.MaxTTL != 0 {
-		t.Fatalf("reset quota = %d/%d, want 0/0", got.MaxLeases, got.MaxTTL)
+	if got := s.UserByID(u.ID); got.MaxTTL != 0 {
+		t.Fatalf("reset max_ttl = %d, want 0", got.MaxTTL)
+	}
+	// negative is refused
+	if err := s.SetQuota(u.ID, -1); err == nil {
+		t.Fatal("expected error for a negative max_ttl")
 	}
 	// unknown user
-	if err := s.SetQuota("u-nope", 1, 1, 0, 0, 0); err == nil {
+	if err := s.SetQuota("u-nope", 1); err == nil {
 		t.Fatal("expected error for unknown user")
 	}
 	// persistence round-trip
@@ -241,10 +244,43 @@ func TestSetQuota(t *testing.T) {
 	file := filepath.Join(dir, "users.json")
 	s2, _ := NewStore(file)
 	u2, _ := s2.AddUser("agent1", KindAgent, []string{"SHA256:fp2"}, "tok2")
-	_ = s2.SetQuota(u2.ID, 5, 60, 0, 0, 0)
+	_ = s2.SetQuota(u2.ID, 60)
 	s3, _ := NewStore(file)
-	got3 := s3.UserByID(u2.ID)
-	if got3.MaxLeases != 5 || got3.MaxTTL != 60 {
-		t.Fatalf("persisted quota = %d/%d, want 5/60", got3.MaxLeases, got3.MaxTTL)
+	if got3 := s3.UserByID(u2.ID); got3.MaxTTL != 60 {
+		t.Fatalf("persisted max_ttl = %d, want 60", got3.MaxTTL)
+	}
+}
+
+// TestLoadIgnoresRemovedQuotaFields: a users file written before 3.0
+// still carries max_leases, guaranteed_mib, max_mib and max_kept_bytes.
+// It loads (the fields are ignored), max_ttl survives, and the next save
+// drops the removed fields.
+func TestLoadIgnoresRemovedQuotaFields(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "users.json")
+	old := `[{"id":"u-old","name":"old","kind":"person","admin":true,"fingerprints":["SHA256:fp-old"],` +
+		`"token_hash":"","llm_key_hash":"","created_at":"2026-01-01T00:00:00Z",` +
+		`"max_leases":3,"max_ttl":600,"max_kept_bytes":1073741824,"guaranteed_mib":1024,"max_mib":4096}]`
+	if err := os.WriteFile(file, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(file)
+	if err != nil {
+		t.Fatalf("load pre-3.0 users file: %v", err)
+	}
+	u := s.UserByID("u-old")
+	if u == nil || u.MaxTTL != 600 || !u.Admin {
+		t.Fatalf("loaded user = %+v, want u-old admin with max_ttl 600", u)
+	}
+	if err := s.SetQuota("u-old", 300); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"max_leases", "guaranteed_mib", "max_mib", "max_kept_bytes"} {
+		if strings.Contains(string(data), f) {
+			t.Errorf("saved users file still carries %s: %s", f, data)
+		}
 	}
 }

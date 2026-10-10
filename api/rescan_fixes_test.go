@@ -27,28 +27,6 @@ func secServer2(t *testing.T) (http.Handler, string) {
 	return h, "jason-tok"
 }
 
-// TestF1CloneQuota: clone must NOT bypass max_leases (rescan finding 1).
-func TestF1CloneQuota(t *testing.T) {
-	h, jasonTok := secServer2(t)
-	// set jason's quota to 1
-	_, body := doUsersReq(t, h, "GET", "/api/users/me", jasonTok, "")
-	jid := body["user"].(map[string]any)["id"].(string)
-	doUsersReq(t, h, "POST", "/api/users/"+jid+"/quota", "admin-tok", `{"max_leases":1}`)
-
-	// create one lease (uses the quota slot)
-	rec, cb := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create: %d", rec.Code)
-	}
-	lid := cb["id"].(string)
-
-	// clone: must be 429, not 201
-	rec2, _ := doUsersReq(t, h, "POST", "/api/sandboxes/"+lid+"/clone", jasonTok, "")
-	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("clone over quota should 429, got %d", rec2.Code)
-	}
-}
-
 // TestF2ProxyStripsGateHeaders: gate headers must not reach the guest
 // app (rescan finding 2). We can't run a full orchestrator proxy in unit
 // tests, so assert the Rewrite strips them via a direct call through the

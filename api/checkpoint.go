@@ -160,18 +160,13 @@ func (s *Service) checkpointLeaseBusy(ctx context.Context, l *Lease, keep bool) 
 			s.log.Printf("checkpoint: lease %s was released during its checkpoint; not keeping build %s", l.ID, b.BuildID)
 			return b, errLeaseReleased
 		}
-		// The owner's byte budget (#126) runs before the pin: the build's
-		// size is only known now that it is written. Over budget, the pin
-		// is refused and the error names the build — the checkpoint stays
-		// written but unpinned (GC-able), and the route answers 409 with
-		// the build_id so the caller can retry without keep.
-		var budget int64
-		if s.identities != nil {
-			if u := s.identities.UserByID(l.Owner); u != nil {
-				budget = u.MaxKeptBytes
-			}
-		}
-		if berr := s.enforceKeptBudget(ctx, l.Owner, b.BuildID, budget); berr != nil {
+		// The owner's byte budget (#126; since 3.0 the owner's fair disk
+		// slice) runs before the pin: the build's size is only known now
+		// that it is written. Over budget, the pin is refused and the
+		// error names the build — the checkpoint stays written but
+		// unpinned (GC-able), and the route answers 409 with the build_id
+		// so the caller can retry without keep.
+		if berr := s.enforceKeptBudget(ctx, l.Owner, b.BuildID, s.keptBudgetFor(ctx, l.Owner)); berr != nil {
 			return b, berr
 		}
 		if kerr := s.keepBuild(ctx, l.ID, b.BuildID); kerr != nil {
@@ -229,13 +224,27 @@ func (s *Service) keptBytesOfOwner(ctx context.Context, owner string) (int64, er
 	return total, nil
 }
 
+// keptBudgetFor is the owner's kept-bytes budget: their fair DISK slice
+// (3.0 fair shares, FS4), which replaced the per-owner max_kept_bytes.
+// It is 0 (no budget) when the owner is not in the fair-share view or
+// the box capacity is not known yet — an unreadable capacity must not
+// refuse every keep.
+func (s *Service) keptBudgetFor(ctx context.Context, owner string) int64 {
+	share, ok := s.fairShareFor(ctx, owner)
+	if !ok || share == nil || !share.CapacityKnown || share.Disk.SliceBytes <= 0 {
+		return 0
+	}
+	return share.Disk.SliceBytes
+}
+
 // enforceKeptBudget is the owner-side half of the kept caps (#126). The
 // checkpoint is already written when this runs (the size is only known
-// then): when the fresh build would push the owner's kept bytes past
-// maxKeptBytes, the pin is refused — the build stays an ordinary,
-// GC-able checkpoint — and a keptBudgetError naming the build comes
-// back, so the caller can retry without keep. maxKeptBytes 0 = no
-// budget; a caller with no identity row is governed by nothing.
+// then): when the fresh build would push the owner's kept plus named
+// snapshot bytes past
+// maxKeptBytes (keptBudgetFor: the owner's fair disk slice), the pin is
+// refused — the build stays an ordinary, GC-able checkpoint — and a
+// keptBudgetError naming the build comes back, so the caller can retry
+// without keep. maxKeptBytes 0 = no budget.
 func (s *Service) enforceKeptBudget(ctx context.Context, owner, buildID string, maxKeptBytes int64) error {
 	if maxKeptBytes <= 0 {
 		return nil
@@ -252,6 +261,13 @@ func (s *Service) enforceKeptBudget(ctx context.Context, owner, buildID string, 
 		// silently unkept on a catalog hiccup.
 		s.log.Printf("checkpoint: kept bytes of %s: %v", owner, err)
 		return nil
+	}
+	// The budget covers named snapshots and kept checkpoints together
+	// (3.0 fair shares), the same sum a named save checks.
+	if n, err := s.db.NamedSnapshotBytesOfOwner(ctx, owner); err != nil {
+		s.log.Printf("checkpoint: named bytes of %s: %v", owner, err)
+	} else {
+		kept += n
 	}
 	if kept+b.SizeBytes > maxKeptBytes {
 		return &keptBudgetError{budget: maxKeptBytes, kept: kept, build: b.SizeBytes, buildID: buildID}

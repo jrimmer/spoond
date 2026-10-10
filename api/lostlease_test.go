@@ -491,12 +491,11 @@ func TestGCLostGraceLeavesRecoveredLease(t *testing.T) {
 	}
 }
 
-// TestGCLostGraceReleasesAndFreesQuota: a lost lease past its grace
-// still counted against its owner's lease cap, so a create was refused
-// 429; the GC pass releases it (emitting a released event with reason
-// lost_expired) and the next create succeeds.
-func TestGCLostGraceReleasesAndFreesQuota(t *testing.T) {
-	srv, h, tok, _ := newMemQuotaServer(t, map[string]int{"py-base": 2048}, `{"max_leases":1}`)
+// TestGCLostGraceReleases: a lost lease past its grace is released by
+// the GC pass (emitting a released event with reason lost_expired), so
+// it no longer counts toward its owner's fair-share usage.
+func TestGCLostGraceReleases(t *testing.T) {
+	srv, h, tok, _ := newMemQuotaServer(t, map[string]int{"py-base": 2048})
 	svc := srv.svc
 
 	rec, body := createSandboxAs(t, h, tok, "py-base")
@@ -514,12 +513,6 @@ func TestGCLostGraceReleasesAndFreesQuota(t *testing.T) {
 	l.LostAt = time.Now().Add(-25 * time.Hour)
 	svc.saveLeaseLocked(l)
 	svc.store.mu.Unlock()
-
-	// The lost lease still holds the count quota.
-	rec, _ = createSandboxAs(t, h, tok, "py-base")
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("create while lost lease held quota = %d, want 429", rec.Code)
-	}
 
 	// The GC pass releases it and says why on the event stream.
 	all := svc.Subscribe(EventFilter{LeaseID: id})
@@ -541,9 +534,11 @@ func TestGCLostGraceReleasesAndFreesQuota(t *testing.T) {
 		t.Fatal("no released event for the grace-expired lost lease")
 	}
 
-	// The quota is free now.
-	rec, _ = createSandboxAs(t, h, tok, "py-base")
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create after the release = %d, want 201", rec.Code)
+	// The lease is released now.
+	svc.store.mu.Lock()
+	gone := l.released
+	svc.store.mu.Unlock()
+	if !gone {
+		t.Fatal("the grace-expired lost lease is not released")
 	}
 }

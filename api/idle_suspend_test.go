@@ -814,48 +814,6 @@ func TestIdleSuspendExecAutoResumes(t *testing.T) {
 	}
 }
 
-// TestIdleSuspendExecResumeRefusalQuota: an auto-resume refused by the
-// memory quota answers what resume would — 429 naming the limit — and
-// leaves the lease suspended.
-func TestIdleSuspendExecResumeRefusalQuota(t *testing.T) {
-	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"big": 4096}, `{"max_mib":4096}`)
-	svc := srv.svc
-	owner := ownerIDFor(t, h, tok)
-	ctx := context.Background()
-
-	rec, first := createPersistentAs(t, h, tok, "big")
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
-	}
-	id := first["id"].(string)
-	l := svc.lookup(uid, id)
-	if _, err := svc.setIdlePolicy(l, 60); err != nil {
-		t.Fatalf("setIdlePolicy: %v", err)
-	}
-	if _, err := svc.suspend(ctx, owner, id); err != nil {
-		t.Fatalf("suspend: %v", err)
-	}
-	svc.store.mu.Lock()
-	l.LastAction, l.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, time.Now()
-	svc.store.mu.Unlock()
-	// Spend the budget on a second lease so the resume cannot re-admit.
-	rec, _ = createSandboxAs(t, h, tok, "big")
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
-	}
-
-	rec2 := postLeaseAction(t, h, tok, "/api/leases/"+id+"/exec", `{"cmd":"echo hi"}`)
-	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("exec auto-resume quota refusal = %d, want 429: %s", rec2.Code, rec2.Body.String())
-	}
-	if !strings.Contains(rec2.Body.String(), "memory") {
-		t.Fatalf("429 should name the memory limit, got %s", rec2.Body.String())
-	}
-	if !l.Suspended {
-		t.Fatal("a refused auto-resume left the lease running")
-	}
-}
-
 // TestIdleSuspendExecResumeRefusalCapacity: an auto-resume refused for
 // no room (the one pool is full and take-back cannot help: the only
 // other lease is pinned) answers what resume would — 503 with code
