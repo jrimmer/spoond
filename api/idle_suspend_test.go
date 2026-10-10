@@ -273,15 +273,15 @@ func TestIdleSuspendForkNonPersistentDefault(t *testing.T) {
 	}
 }
 
-// TestIdleSuspendNonPersistentHeldRule1: with a non-zero host default, a
-// non-persistent held lease still falls to held rule 1 — the host
-// default must not silently disable it (2.5, #129 part 2).
-func TestIdleSuspendNonPersistentHeldRule1(t *testing.T) {
+// TestIdleSuspendNonPersistentNeverSuspended: a non-persistent lease
+// can never be idle-suspended (there is no snapshot to resume from),
+// whatever the host default; the held rules that once covered held
+// non-persistent leases are gone (FS5).
+func TestIdleSuspendNonPersistentNeverSuspended(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 	svc.cfg.IdleSuspendDefault = 300
-	svc.cfg.HeldIdleTimeout = time.Minute
 
 	base := time.Now()
 	svc.now = func() time.Time { return base }
@@ -296,12 +296,10 @@ func TestIdleSuspendNonPersistentHeldRule1(t *testing.T) {
 	if got := svc.effectiveIdleSuspend(l); got != 0 {
 		t.Fatalf("non-persistent effective idle_suspend = %d, want 0", got)
 	}
-	svc.runHeldRules(ctx, base.Add(2*time.Minute))
-	if !l.Suspended {
-		t.Fatal("held rule 1 did not suspend a non-persistent held lease")
-	}
-	if l.LastAction != heldRuleIdle+"/"+heldActionSuspendIdle {
-		t.Fatalf("suspended by %q, want held rule 1", l.LastAction)
+	svc.suspendIdleLeases(ctx, base.Add(2*time.Minute))
+	svc.sweepExpired(ctx)
+	if l.Suspended {
+		t.Fatal("a non-persistent lease was idle-suspended")
 	}
 }
 
@@ -560,15 +558,14 @@ func TestIdleSuspendGuestDialCountsAsActivity(t *testing.T) {
 	}
 }
 
-// TestIdleSuspendOverridesIdleTimeout both ways: with a per-lease
-// value, the plain IDLE_TIMEOUT_SECS sweep does not touch it — a
-// shorter idle_suspend suspends before IDLE_TIMEOUT_SECS would, and a
-// longer idle_suspend keeps it running past IDLE_TIMEOUT_SECS.
+// TestIdleSuspendOverridesIdleTimeout: a lease's own idle_suspend is
+// the only idle threshold — there is no plain idle sweep left (FS5) —
+// so a shorter value suspends at its own threshold and a longer one is
+// untouched by a sweep at a shorter time.
 func TestIdleSuspendOverridesIdleTimeout(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
-	svc.cfg.IdleTimeout = time.Hour
 
 	base := time.Now()
 	svc.now = func() time.Time { return base }
@@ -600,13 +597,13 @@ func TestIdleSuspendOverridesIdleTimeout(t *testing.T) {
 	if long.Suspended {
 		t.Fatal("the longer per-lease idle_suspend suspended early")
 	}
-	// The plain IDLE_TIMEOUT_SECS sweep (svc.now returns 61 min) does not
-	// collect the long lease: it has its own (longer) value.
+	// A sweep 61 min in does not touch the long lease: it has its own
+	// (longer) value, and no plain idle sweep exists.
 	cur := base.Add(61 * time.Minute)
 	svc.now = func() time.Time { return cur }
 	svc.sweepExpired(ctx)
 	if long.Suspended {
-		t.Fatal("IDLE_TIMEOUT_SECS suspended a lease with its own idle_suspend")
+		t.Fatal("a sweep suspended a lease before its own idle_suspend")
 	}
 	// 2 h+: the long lease's own threshold fires.
 	svc.suspendIdleLeases(ctx, base.Add(3*time.Hour))
@@ -615,66 +612,9 @@ func TestIdleSuspendOverridesIdleTimeout(t *testing.T) {
 	}
 }
 
-// TestIdleSuspendOverridesHeldRule1: a held lease with its own
-// idle_suspend is reclaimed on its own value, not rule 1's (shorter and
-// longer), and rule 4's pressure shortening does not reach it.
-func TestIdleSuspendOverridesHeldRule1(t *testing.T) {
-	svc, db, _ := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
-	ctx := context.Background()
-	svc.cfg.HeldIdleTimeout = time.Hour
-	svc.cfg.PressureDiskFreePct = 15
-	svc.cfg.PressureHeldIdle = 10 * time.Minute
-
-	base := time.Now()
-	svc.now = func() time.Time { return base }
-	short, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "ci-job", "", nil)
-	if err != nil {
-		t.Fatalf("grant short: %v", err)
-	}
-	long, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "ci-job-2", "", nil)
-	if err != nil {
-		t.Fatalf("grant long: %v", err)
-	}
-	if _, err := svc.setIdlePolicy(short, 60); err != nil { // shorter than rule 1
-		t.Fatalf("setIdlePolicy short: %v", err)
-	}
-	if _, err := svc.setIdlePolicy(long, 7200); err != nil { // longer than rule 1
-		t.Fatalf("setIdlePolicy long: %v", err)
-	}
-	svc.store.mu.Lock()
-	short.LastActive = base
-	long.LastActive = base
-	svc.store.mu.Unlock()
-
-	// Rule 1 at 61 min must not suspend the long lease (its own value is
-	// 2 h) and must not suspend the short one (already gone at 61 s via
-	// its own value, but rule 1 must not be the suspender).
-	svc.suspendIdleLeases(ctx, base.Add(61*time.Second))
-	if !short.Suspended {
-		t.Fatal("the shorter per-lease idle_suspend did not fire before rule 1")
-	}
-	if short.LastAction != idleSuspendRule+"/"+heldActionSuspendIdle {
-		t.Fatalf("short lease suspended by %q, want the idle_suspend rule", short.LastAction)
-	}
-	svc.runHeldRules(ctx, base.Add(61*time.Minute))
-	if long.Suspended {
-		t.Fatal("rule 1 suspended a held lease with its own longer idle_suspend")
-	}
-	// Rule 4 pressure would shorten rule 1 to 10 min; the lease's own 2 h
-	// wins, so a disk-pressure reading does not suspend it at 11 min.
-	var total, free uint64 = 100, 5
-	svc.diskCapacity = func(string) (uint64, uint64, error) { return total, free, nil }
-	svc.runHeldRules(ctx, base.Add(11*time.Minute))
-	if long.Suspended {
-		t.Fatal("rule 4's pressure shortening reached a lease with its own idle_suspend")
-	}
-	// Its own 2 h threshold still fires.
-	svc.suspendIdleLeases(ctx, base.Add(3*time.Hour))
-	if !long.Suspended {
-		t.Fatal("the held lease's own longer idle_suspend did not fire")
-	}
-}
+// TestIdleSuspendOverridesHeldRule1 is removed with the held rules
+// (FS5); TestIdleSuspendOverridesIdleTimeout covers the caller-chosen
+// threshold.
 
 // TestIdleSuspendDiskFloorSkips: a pause that would take the snapshot
 // disk under the shared PREEMPT_DISK_FLOOR_PCT is skipped this sweep and
@@ -714,57 +654,84 @@ func TestIdleSuspendDiskFloorSkips(t *testing.T) {
 	}
 }
 
-// TestIdleSuspendedStaleRelease: an idle-suspended lease (held or not)
-// with a holder is released by the stale-release rule once it has stayed
-// untouched long enough. A preempted lease is subject to the same rule
-// (#145 D2, review R3): the old resume-queue exemption is gone.
-func TestIdleSuspendedStaleRelease(t *testing.T) {
+// TestPausedLeaseReleasedByOneClock: a lease paused through the pause
+// path is released PAUSED_RELEASE_DAYS after its pause date, not before
+// (FS5 one clock).
+func TestPausedLeaseReleasedByOneClock(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
-	svc.cfg.HeldSuspendedRelease = time.Hour
 
 	base := time.Now()
 	svc.now = func() time.Time { return base }
-	held, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "ci-job", "", nil)
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "ci-job", "", nil)
 	if err != nil {
-		t.Fatalf("grant held: %v", err)
+		t.Fatalf("grant: %v", err)
 	}
-	preempted, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "ci-job-2", "", nil)
+	if _, err := svc.pauseLease(ctx, l, false); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if l.PausedAt.IsZero() {
+		t.Fatal("a pause did not stamp paused_at")
+	}
+
+	// One day short of the 30-day clock: still kept.
+	cur := base.Add(29 * 24 * time.Hour)
+	svc.releasePausedLeases(ctx, cur)
+	if svc.lookup("c", l.ID) == nil {
+		t.Fatal("a paused lease was released before PAUSED_RELEASE_DAYS")
+	}
+	// Past 30 days: released with reason paused_expired.
+	cur = base.Add(30*24*time.Hour + time.Minute)
+	svc.releasePausedLeases(ctx, cur)
+	if svc.lookup("c", l.ID) != nil {
+		t.Fatal("a paused lease was not released at PAUSED_RELEASE_DAYS")
+	}
+}
+
+// TestPauseExpiringWarningOnce: the lease.paused_expiring warning is
+// emitted once 24 h before release, and not repeated.
+func TestPauseExpiringWarningOnce(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
 	if err != nil {
-		t.Fatalf("grant preempted: %v", err)
+		t.Fatalf("grant: %v", err)
 	}
-	// Suspend both through the pause path, then stamp the recorded
-	// actions: an idle_suspend suspension for the first, a preemption
-	// for the second.
-	for _, l := range []*Lease{held, preempted} {
-		if _, err := svc.pauseLease(ctx, l, false); err != nil {
-			t.Fatalf("pause %s: %v", l.ID, err)
+	if _, err := svc.pauseLease(ctx, l, false); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	// Before the 24 h window: no warning. Collect each pass's events
+	// without closing the subscription (Close drains and ends it).
+	all := svc.Subscribe(EventFilter{LeaseID: l.ID})
+	defer all.Close()
+	svc.notifyPausedExpiring(ctx, base.Add(28*24*time.Hour))
+	select {
+	case ev := <-all.C:
+		t.Fatalf("paused_expiring emitted before the 24 h window: %v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// Inside the window: one warning, then none on a second pass.
+	svc.notifyPausedExpiring(ctx, base.Add(30*24*time.Hour-12*time.Hour))
+	svc.notifyPausedExpiring(ctx, base.Add(30*24*time.Hour-6*time.Hour))
+	var n int
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		select {
+		case ev := <-all.C:
+			if ev.Type == LeasePausedExpiring {
+				n++
+			}
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	svc.store.mu.Lock()
-	held.LastAction, held.LastActionAt = idleSuspendRule+"/"+heldActionSuspendIdle, base.Add(-2*time.Hour)
-	held.LastActive = base.Add(-3 * time.Hour)
-	preempted.LastAction, preempted.LastActionAt = pauseActionPreempt, base.Add(-2*time.Hour)
-	preempted.LastActive = base.Add(-3 * time.Hour)
-	preempted.PreemptedAt = base.Add(-2 * time.Hour)
-	svc.saveLeaseLocked(held)
-	svc.saveLeaseLocked(preempted)
-	svc.store.mu.Unlock()
-
-	if at, ok := suspendedByRule(held); !ok || !at.Equal(base.Add(-2*time.Hour)) {
-		t.Fatalf("idle_suspended lease not seen as rule-suspended: at=%v ok=%v", at, ok)
-	}
-	if at, ok := suspendedByRule(preempted); !ok || !at.Equal(base.Add(-2*time.Hour)) {
-		t.Fatalf("a preempted lease must be seen as rule-suspended: at=%v ok=%v", at, ok)
-	}
-
-	svc.releaseStaleHeld(ctx, base)
-	if svc.lookup("c", held.ID) != nil {
-		t.Fatal("an idle-suspended held lease was not stale-released")
-	}
-	if svc.lookup("c", preempted.ID) != nil {
-		t.Fatal("a preempted lease was not stale-released")
+	if n != 1 {
+		t.Fatalf("paused_expiring emitted %d times, want 1", n)
 	}
 }
 

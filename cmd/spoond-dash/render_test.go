@@ -57,11 +57,11 @@ func sampleSnapshot() Snapshot {
 			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet",
 				Burst: true, Age: "5m", Left: "10m"},
 			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "running", Policy: "restricted",
-				Holder: "forgejo/job-42", HolderURL: "https://git.example.com/job/42", HoldState: "active",
+				Holder: "forgejo/job-42", HolderURL: "https://git.example.com/job/42", Pinned: true,
 				Age: "2h31m", Left: "∞"},
 			{ID: "fedcba0987", Image: "go-base", Owner: "agent", State: "suspended", Policy: "lan",
-				Name: "scratch space", Holder: "nightly", HoldState: "lapsed",
-				LastAction: "expiry/expire", LastActionAt: fixedNow.Add(-3 * time.Hour),
+				Name: "scratch space", Holder: "nightly",
+				LastAction: "idle_suspend/suspend_idle", LastActionAt: fixedNow.Add(-3 * time.Hour),
 				Burst: true, Age: "1d", Left: "due"},
 		},
 		Images: []ImageRow{
@@ -500,6 +500,10 @@ func TestNoticeTriggers(t *testing.T) {
 		{"kept bytes past warn pct", func(s *Snapshot) {
 			s.KeptDiskPct = 41.0
 		}, "kept-disk", "warn", "kept checkpoints use 41% of the snapshot disk"},
+		{"pinned idle", func(s *Snapshot) {
+			s.PinnedIdle = 3
+			s.PinnedIdleByOwner = map[string]int{"alice": 2, "bob": 1}
+		}, "pinned-idle", "warn", "3 pinned leases idle over 7 d (alice: 2, bob: 1)"},
 	}
 	for _, tc := range cases {
 		s := healthySnapshot()
@@ -703,8 +707,8 @@ func TestStateGlyphAndStyle(t *testing.T) {
 		{LeaseRow{State: "recovered"}, '⭘', "ok"},
 		{LeaseRow{State: "suspended"}, '‖', "warn"},
 		{LeaseRow{State: "lost"}, '■', "bad"},
-		{LeaseRow{State: "running", HoldState: "active"}, '▶', "ok"},
-		{LeaseRow{State: "suspended", HoldState: "lapsed"}, '‖', "warn"},
+		{LeaseRow{State: "running", Pinned: true}, '▶', "ok"},
+		{LeaseRow{State: "suspended", Pinned: true}, '‖', "warn"},
 	}
 	for _, tc := range cases {
 		if got := stateGlyph(tc.r); got != tc.glyph {
@@ -716,51 +720,45 @@ func TestStateGlyphAndStyle(t *testing.T) {
 	}
 }
 
-// TestLeasesShowHoldMarks: the holder column carries the hold — ◆
-// before a held lease's holder, ◉ before a lapsed hold's — and the run
-// state stays in the state column.
-func TestLeasesShowHoldMarks(t *testing.T) {
+// TestLeasesShowPinMark: the holder column carries the pin — ◆ before a
+// pinned lease's holder — and the run state stays in the state column.
+func TestLeasesShowPinMark(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
 	lines := strings.Split(p, "\n")
-	var held, lapsed, plain string
+	var pinned, plain string
 	for _, r := range lines {
 		switch {
 		case strings.Contains(r, "◆ forgejo/job-42"):
-			held = r
-		case strings.Contains(r, "◉ nightly"):
-			lapsed = r
+			pinned = r
 		case strings.Contains(r, "abcdef0123"):
 			plain = r
 		}
 	}
-	if held == "" || lapsed == "" || plain == "" {
+	if pinned == "" || plain == "" {
 		t.Fatalf("lease rows missing:\n%s", p)
 	}
-	if !strings.Contains(held, "◆ forgejo/job-42") || strings.Contains(held, "◆ running") {
-		t.Errorf("held lease's holder not marked ◆:\n%s", held)
+	if !strings.Contains(pinned, "◆ forgejo/job-42") || strings.Contains(pinned, "◆ running") {
+		t.Errorf("pinned lease's holder not marked ◆:\n%s", pinned)
 	}
-	if !strings.Contains(lapsed, "◉ nightly") || strings.Contains(lapsed, "◉ suspended") {
-		t.Errorf("lapsed hold's holder not marked ◉:\n%s", lapsed)
+	if strings.Contains(plain, "◆") {
+		t.Errorf("unpinned lease marked pinned:\n%s", plain)
 	}
-	if strings.Contains(plain, "◆") || strings.Contains(plain, "◉") {
-		t.Errorf("unheld lease marked held:\n%s", plain)
-	}
-	if !strings.Contains(held, "▶ running") || !strings.Contains(lapsed, "‖ suspended") {
-		t.Errorf("state column must always show the run state:\n%s\n%s", held, lapsed)
+	if !strings.Contains(pinned, "▶ running") {
+		t.Errorf("state column must always show the run state:\n%s", pinned)
 	}
 
-	// A holder without a hold draws unmarked (holder set, HoldState
-	// ""), and its plain name is still visible in the holder column.
+	// A holder without a pin draws unmarked (holder set, Pinned false),
+	// and its plain name is still visible in the holder column.
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running",
 		Holder: "someone", Age: "5m", Left: "10m"}}
 	p2 := Draw(s, DefaultWidth, fixedNow, "h").Plain()
 	if !strings.Contains(p2, "someone") {
-		t.Fatalf("unheld holder missing:\n%s", p2)
+		t.Fatalf("holder label missing:\n%s", p2)
 	}
 	for _, r := range strings.Split(p2, "\n") {
-		if strings.Contains(r, "someone") && (strings.Contains(r, "◆") || strings.Contains(r, "◉")) {
-			t.Errorf("unheld holder marked held:\n%s", r)
+		if strings.Contains(r, "someone") && strings.Contains(r, "◆") {
+			t.Errorf("an unpinned holder label drew the pin mark:\n%s", r)
 		}
 	}
 }
@@ -816,18 +814,18 @@ func TestStateWordsNarrow(t *testing.T) {
 	}
 }
 
-// TestLeasesLeftShowsHoldExpiry: a held lease's left column is the time
-// left on its hold; a persistent lease without a hold shows ∞.
-func TestLeasesLeftShowsHoldExpiry(t *testing.T) {
+// TestLeasesLeftShowsLeaseExpiry: a lease's left column is its own
+// remaining time; a pin does not change it (FS5). A persistent lease
+// shows ∞.
+func TestLeasesLeftShowsLeaseExpiry(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{
-		{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m",
-			Holder: "forgejo/job-42", HoldState: "active", HoldExpires: "49m"},
+		{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m", Pinned: true},
 		{ID: "1234567890", State: "running", Age: "5m", Left: "∞"},
 	}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "49m") {
-		t.Fatalf("held lease's left is not the hold's time:\n%s", p)
+	if !strings.Contains(p, "10m") {
+		t.Fatalf("pinned lease's left is not its own expiry:\n%s", p)
 	}
 	if !strings.Contains(p, "∞") {
 		t.Fatalf("persistent lease's left is not ∞:\n%s", p)
@@ -1683,8 +1681,8 @@ func TestLeaseColumnsGiveFreedWidthToOwner(t *testing.T) {
 }
 
 // TestLeaseHolderHeaderAndLegend: the holder column's header is plain
-// "holder"; the ◆/◉ legend is one dim line directly under the table's
-// last row, and only when a shown row carries a hold.
+// "holder"; the ◆ pin legend is one dim line directly under the table's
+// last row, and only when a shown row is pinned.
 func TestLeaseHolderHeaderAndLegend(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
 	lines := strings.Split(p, "\n")
@@ -1704,7 +1702,7 @@ func TestLeaseHolderHeaderAndLegend(t *testing.T) {
 		t.Errorf("holder header = %q", lines[header])
 	}
 	if legendAt < 0 {
-		t.Fatalf("legend line missing with held/lapsed rows:\n%s", p)
+		t.Fatalf("legend line missing with a pinned row:\n%s", p)
 	}
 	// The legend sits on the row directly under the last lease row: the
 	// sample's last row holds the last lease id.

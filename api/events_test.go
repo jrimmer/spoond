@@ -114,14 +114,14 @@ func TestEventLifecyclePerPath(t *testing.T) {
 	}
 }
 
-// TestEventForkHolderPaths covers the fork, holder set/clear and
-// held-action emissions (fork emits one created per forked lease;
-// the holder paths emit holder_set/holder_cleared/held_action).
+// TestEventForkHolderPaths covers the fork, holder label set/clear and
+// pin/unpin emissions (fork emits one created per forked lease; the
+// holder paths emit holder_set/holder_cleared; the pin route emits
+// pinned/unpinned).
 func TestEventForkHolderPaths(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
-	svc.cfg.HeldIdleTimeout = time.Hour
 
 	all := svc.Subscribe(EventFilter{})
 
@@ -137,24 +137,21 @@ func TestEventForkHolderPaths(t *testing.T) {
 		t.Fatalf("forked %d leases, want 2", len(forks))
 	}
 
-	// Holder set, held-action, holder clear.
-	base := time.Now()
-	svc.now = func() time.Time { return base }
-	if _, err := svc.setHolderWithTTL("c", src.ID, "ci-job", "", 0); err != nil {
+	// Holder label set, pin, unpin, holder clear. A holder label never
+	// pins (FS5).
+	if _, err := svc.setHolder("c", src.ID, "ci-job", ""); err != nil {
 		t.Fatalf("setHolder: %v", err)
 	}
-	svc.store.mu.Lock()
-	src.LastActive = base.Add(-2 * time.Hour)
-	svc.store.mu.Unlock()
-	svc.runHeldRules(ctx, base.Add(2*time.Hour)) // rule 1 idle suspend + held_action
-	svc.store.mu.Lock()
-	src.HoldExpiresAt = base.Add(-time.Second) // force a lapse on the next pass
-	svc.store.mu.Unlock()
-	svc.runHeldRules(ctx, base.Add(2*time.Hour+time.Minute))
-	if _, err := svc.renewHolder("c", src.ID, "ci-job", "", 0); err != nil {
-		t.Fatalf("renewHolder: %v", err)
+	if l := svc.lookup("c", src.ID); l == nil || l.Pinned {
+		t.Fatalf("a holder label pinned the lease: %+v", l)
 	}
-	if _, err := svc.setHolderWithTTL("c", src.ID, "", "", 0); err != nil {
+	if _, err := svc.setPinned("c", src.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if _, err := svc.setPinned("c", src.ID, false); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if _, err := svc.setHolder("c", src.ID, "", ""); err != nil {
 		t.Fatalf("clear holder: %v", err)
 	}
 	all.Close()
@@ -163,27 +160,19 @@ func TestEventForkHolderPaths(t *testing.T) {
 	var got []LeaseEventType
 	for _, ev := range mine {
 		switch ev.Type {
-		case LeaseCreated, LeaseHolderSet, LeaseHeldAction, LeaseHolderCleared:
+		case LeaseCreated, LeaseHolderSet, LeasePinned, LeaseUnpinned, LeaseHolderCleared:
 			got = append(got, ev.Type)
 		}
 	}
-	want := []LeaseEventType{LeaseCreated, LeaseHolderSet, LeaseHeldAction, LeaseHeldAction, LeaseHolderSet, LeaseHolderCleared}
+	want := []LeaseEventType{LeaseCreated, LeaseHolderSet, LeasePinned, LeaseUnpinned, LeaseHolderCleared}
 	if len(got) != len(want) {
-		t.Fatalf("holder-path events = %v, want %v", got, want)
+		t.Fatalf("holder/pin-path events = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("holder-path events = %v, want %v", got, want)
+			t.Fatalf("holder/pin-path events = %v, want %v", got, want)
 		}
 	}
-	// A held_action detail names the rule and action; the lapse pass's
-	// suspend_lapsed action is the one this test looks at.
-	for _, ev := range mine {
-		if ev.Type == LeaseHeldAction && strings.HasPrefix(ev.Detail, heldRuleIdle+"/"+heldActionSuspendIdle) {
-			return
-		}
-	}
-	t.Fatal("no held_action event naming idle/suspend_idle")
 }
 
 // TestEventCloneEmitsCreated: the clone path grants a brand-new lease,
@@ -851,23 +840,28 @@ func TestSSEHeartbeat(t *testing.T) {
 // renders as its documented string.
 func TestEventTypesDocumented(t *testing.T) {
 	for typ, want := range map[LeaseEventType]string{
-		LeaseCreated:       "created",
-		LeaseReleased:      "released",
-		LeaseSuspended:     "suspended",
-		LeaseResumed:       "resumed",
-		LeaseCheckpointed:  "checkpointed",
-		LeaseSnapshotSaved: "snapshot_saved",
-		LeaseRecovered:     "recovered",
-		LeaseLost:          "lost",
-		LeaseRestarted:     "restarted",
-		LeaseHolderSet:     "holder_set",
-		LeaseHolderCleared: "holder_cleared",
-		LeaseHeldAction:    "held_action",
-		LeaseCrashTest:     "crash_test",
-		LeaseRetry:         "recovery_retry",
-		LeaseRootfsDead:    "rootfs_dead",
-		LeaseUserDeleted:   "user_deleted",
-		LeaseStreamGap:     "gap",
+		LeaseCreated:        "created",
+		LeaseReleased:       "released",
+		LeaseSuspended:      "suspended",
+		LeaseResumed:        "resumed",
+		LeaseCheckpointed:   "checkpointed",
+		LeaseSnapshotSaved:  "snapshot_saved",
+		LeaseRecovered:      "recovered",
+		LeaseLost:           "lost",
+		LeaseRestarted:      "restarted",
+		LeaseHolderSet:      "holder_set",
+		LeaseHolderCleared:  "holder_cleared",
+		LeasePinned:         "pinned",
+		LeaseUnpinned:       "unpinned",
+		LeasePausedExpiring: "paused_expiring",
+		LeasePinnedIdle:     "pinned_idle",
+		LeaseBoxFull:        "box_full",
+		LeaseAdminUnpin:     "admin_unpin",
+		LeaseCrashTest:      "crash_test",
+		LeaseRetry:          "recovery_retry",
+		LeaseRootfsDead:     "rootfs_dead",
+		LeaseUserDeleted:    "user_deleted",
+		LeaseStreamGap:      "gap",
 	} {
 		if string(typ) != want {
 			t.Fatalf("type %q drifted from its documented value %q", typ, want)

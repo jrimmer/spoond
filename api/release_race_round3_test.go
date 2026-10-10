@@ -174,37 +174,8 @@ func TestIdleSuspendReleaseAfterPauseNoMetric(t *testing.T) {
 	}
 }
 
-// TestHeldActionReleaseAfterPauseNoMetric: the held rules do not bump
-// spoond_held_actions_total or emit held_action for a lease released
-// after the rule's pause succeeded.
-func TestHeldActionReleaseAfterPauseNoMetric(t *testing.T) {
-	svc, db, _ := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
-	svc.SetMetrics(metrics.NewBackendMetrics())
-	ctx := context.Background()
-
-	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
-	if err != nil {
-		t.Fatalf("grant: %v", err)
-	}
-	all := svc.Subscribe(EventFilter{LeaseID: l.ID})
-	defer all.Close()
-
-	svc.releaseBecause(ctx, l, "released through the API")
-	svc.store.mu.Lock()
-	svc.heldAction(ctx, l, heldRuleIdle, heldActionSuspendIdle, "idle", time.Now())
-	svc.store.mu.Unlock()
-
-	if n := heldCounter(t, svc, heldRuleIdle, heldActionSuspendIdle); n != 0 {
-		t.Fatalf("held_actions_total{idle,suspend_idle} = %g, want 0", n)
-	}
-	all.Close()
-	for _, ev := range collectEvents(all.C) {
-		if ev.Type == LeaseHeldAction {
-			t.Fatal("a held_action event was emitted for a released lease")
-		}
-	}
-}
+// TestHeldActionReleaseAfterPauseNoMetric is removed with the held
+// rules (FS5).
 
 // TestRecoveryDoesNotDoubleDeleteHalfSandbox: a recovery whose Create
 // fails deletes the half-started sandbox exactly once (createSandbox's

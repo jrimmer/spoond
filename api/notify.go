@@ -2,13 +2,13 @@
 // person-relevant events are forwarded to the notifier configured by
 // the process (SetNotifier), and the GC records its outcome for the
 // notify checks. Everything else on the bus is lifecycle churn that
-// the SSE event stream serves; only a lost lease and a held-lease
-// rule action need a person.
+// the SSE event stream serves; only a lost lease, a box_full refusal,
+// a paused lease nearing its release and a pinned-idle notice need a
+// person.
 package api
 
 import (
 	"context"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -75,9 +75,9 @@ type NotifySink interface {
 
 // runNotifyLoop forwards lease events to the notifier until ctx ends:
 // a lease lost (its sandbox died in a substrate crash, or a recovery
-// failed) is critical; a held-lease rule action is warn — critical
-// when the action released the lease, taking the holder's work with
-// it. Each event's key carries the lease id (and rule), so a
+// failed) is critical; a box_full refusal (every take-back candidate was
+// pinned) is critical, and a lease.paused_expiring warning is warn. Each
+// event's key carries the lease id (or, for box_full, nothing), so a
 // flapping condition is at most hourly per condition and lease.
 func (s *Service) runNotifyLoop(ctx context.Context) {
 	if s.notifier == nil {
@@ -113,16 +113,37 @@ func (s *Service) notifyLeaseEvent(ev LeaseEvent) {
 			}),
 			At: ev.At,
 		})
-	case LeaseHeldAction:
-		rule, action := parseHeldDetail(ev.Detail)
-		severity := notify.Warn
-		if action == "release" {
-			severity = notify.Critical
-		}
+	case LeaseBoxFull:
+		// Take-back could not make room: every candidate was pinned. A
+		// person must free room (unpin or release leases); nothing was
+		// paused or released by spoond.
 		s.notifier.Enqueue(notify.Event{
-			Key:      "held." + rule + "." + ev.LeaseID,
-			Severity: severity,
-			Title:    "Held lease " + shortID(ev.LeaseID) + ": " + rule + "/" + action,
+			Key:      "box.full",
+			Severity: notify.Critical,
+			Title:    "spoond box full",
+			Body:     joinBody([]string{ev.Detail, "nothing was paused or released; unpin or release leases to make room"}),
+			At:       ev.At,
+		})
+	case LeasePausedExpiring:
+		// A paused lease is 24 h from release by the one clock (FS5).
+		s.notifier.Enqueue(notify.Event{
+			Key:      "paused.expiring." + ev.LeaseID,
+			Severity: notify.Warn,
+			Title:    "Lease " + shortID(ev.LeaseID) + " pauses expiring",
+			Body: joinBody([]string{
+				"lease " + ev.LeaseID + " (owner " + ev.Owner + ")",
+				ev.Detail,
+			}),
+			At: ev.At,
+		})
+	case LeasePinnedIdle:
+		// A pinned lease's last API activity passed the notice threshold
+		// (FS5, visibility only). Warn once per crossing; a person may
+		// want to release it.
+		s.notifier.Enqueue(notify.Event{
+			Key:      "pinned.idle." + ev.LeaseID,
+			Severity: notify.Warn,
+			Title:    "Pinned lease " + shortID(ev.LeaseID) + " idle",
 			Body: joinBody([]string{
 				"lease " + ev.LeaseID + " (owner " + ev.Owner + ")",
 				ev.Detail,
@@ -134,19 +155,8 @@ func (s *Service) notifyLeaseEvent(ev LeaseEvent) {
 	}
 }
 
-// parseHeldDetail splits a held_action event's "rule/action: numbers"
-// detail. An unparseable detail still yields a stable key.
-func parseHeldDetail(detail string) (rule, action string) {
-	head := detail
-	if i := strings.IndexByte(head, ':'); i >= 0 {
-		head = head[:i]
-	}
-	rule, action, ok := strings.Cut(head, "/")
-	if !ok || rule == "" || action == "" {
-		return "held", "action"
-	}
-	return rule, action
-}
+// parseHeldDetail and its held-rule wiring are removed with the held
+// rules (FS5).
 
 // shortID renders a lease id for titles: first segment, shortened.
 // Cutting is rune-safe: a split multi-byte rune would garble titles.

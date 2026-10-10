@@ -51,7 +51,7 @@ const leaseSuspendedMessage = "lease is suspended; resume it first"
 // writeLeaseSuspended answers 409 lease_suspended for a suspended lease.
 // When reason is non-empty the suspension was automatic and the body
 // also carries "reason"
-// (idle|idle_suspend|hold_lapsed|pressure|preempt|resume_failed)
+// (idle_suspend|preempt|resume_failed)
 // so a client learns why it was suspended without reading the event
 // stream (#145 D6). A hand or drain suspend has no reason and the field
 // is omitted. Callers read the reason through Service.leaseSuspendReason

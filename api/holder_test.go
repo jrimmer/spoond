@@ -150,7 +150,7 @@ func TestLeaseHolderPutSetAndClear(t *testing.T) {
 	if body["holder"] != "flight-7" || body["holder_url"] != "https://honey.example/flights/7" {
 		t.Fatalf("put response = %v / %v", body["holder"], body["holder_url"])
 	}
-	if l := svc.lookup("consumer-a", id); l == nil || l.Holder != "flight-7" || !l.held() {
+	if l := svc.lookup("consumer-a", id); l == nil || l.Holder != "flight-7" || l.Holder == "" {
 		t.Fatalf("lease not held after put: %+v", l)
 	}
 
@@ -172,7 +172,7 @@ func TestLeaseHolderPutSetAndClear(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("clear put = %d (%v), want 200", resp.StatusCode, body)
 	}
-	if l := svc.lookup("consumer-a", id); l == nil || l.held() || l.HolderUrl != "" {
+	if l := svc.lookup("consumer-a", id); l == nil || l.Holder != "" || l.HolderUrl != "" {
 		t.Fatalf("holder not cleared: %+v", l)
 	}
 }
@@ -194,14 +194,15 @@ func TestLeaseHolderPutOwnerOnly(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown lease put = %d, want 404", resp.StatusCode)
 	}
-	if l := svc.lookup("consumer-a", id); l != nil && l.held() {
+	if l := svc.lookup("consumer-a", id); l != nil && l.Holder != "" {
 		t.Fatalf("lease held despite 404s: %+v", l)
 	}
 }
 
-// TestHeldLeaseSurvivesTTLSweep: a plain lease with a holder is not
-// released by sweepExpired even long past its TTL.
-func TestHeldLeaseSurvivesTTLSweep(t *testing.T) {
+// TestHolderLabelDoesNotSurviveTTLSweep: since FS5 a holder label has
+// no lifecycle effect, so a lease with a holder is swept at its TTL
+// exactly like one without. Only a pin protects it.
+func TestHolderLabelDoesNotSurviveTTLSweep(t *testing.T) {
 	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
@@ -213,82 +214,67 @@ func TestHeldLeaseSurvivesTTLSweep(t *testing.T) {
 	time.Sleep(80 * time.Millisecond) // pass the expiry
 
 	svc.sweepExpired(ctx)
-	if svc.lookup("c", l.ID) == nil {
-		t.Fatal("held lease was swept despite its holder")
-	}
-
-	// The unheld control is swept.
-	plain, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "", nil)
-	if err != nil {
-		t.Fatalf("grant control: %v", err)
-	}
-	time.Sleep(80 * time.Millisecond)
-	svc.sweepExpired(ctx)
-	if svc.lookup("c", plain.ID) != nil {
-		t.Fatal("unheld lease was not swept")
+	if svc.lookup("c", l.ID) != nil {
+		t.Fatal("a holder label kept a lease past its TTL; only a pin may")
 	}
 }
 
-// TestClearedHolderRestoresSweeping: clearing the holder through the
-// route puts the lease back under the TTL sweeper.
-func TestClearedHolderRestoresSweeping(t *testing.T) {
+// TestPinnedNonPersistentReleasedAtItsTTL: a pinned lease still has its
+// own TTL (FS5: "pin and expiry work together"): the pin keeps take-back
+// from pausing it, not the TTL sweep from releasing it.
+func TestPinnedNonPersistentReleasedAtItsTTL(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	l, err := svc.grant(ctx, "c", "py-base", 50*time.Millisecond, false, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setPinned("c", l.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	svc.sweepExpired(ctx)
+	if svc.lookup("c", l.ID) != nil {
+		t.Fatal("a pinned lease was not released at its own TTL")
+	}
+}
+
+// TestUnpinnedLeaseSweptAfterUnpin: pinning a non-persistent lease does
+// not change its own TTL; unpinning does not either. Both are swept at
+// expiry (a pin only stops take-back).
+func TestUnpinnedLeaseSweptAfterUnpin(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	l, err := svc.grant(ctx, "consumer-a", "py-base", 50*time.Millisecond, false, "", nil, "ci-job", "", nil)
+	l, err := svc.grant(ctx, "consumer-a", "py-base", 50*time.Millisecond, false, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
 	}
+	if _, err := svc.setPinned("consumer-a", l.ID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
 	time.Sleep(80 * time.Millisecond)
 
-	// Still held: survives.
-	svc.sweepExpired(ctx)
-	if svc.lookup("consumer-a", l.ID) == nil {
-		t.Fatal("held lease swept before clearing")
-	}
-
-	// Clear through the route; the next sweep takes it.
-	resp, body := doReq(t, "PUT", ts.URL+"/api/leases/"+l.ID+"/holder", "token-a", map[string]any{"holder": "", "holder_url": ""})
+	// Unpin through the route; the sweep takes it at its TTL.
+	resp, body := doReq(t, "DELETE", ts.URL+"/api/leases/"+l.ID+"/pin", "token-a", nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("clear = %d (%v), want 200", resp.StatusCode, body)
+		t.Fatalf("unpin = %d (%v), want 200", resp.StatusCode, body)
 	}
 	svc.sweepExpired(ctx)
 	if svc.lookup("consumer-a", l.ID) != nil {
-		t.Fatal("lease survived the sweep after its holder was cleared")
+		t.Fatal("lease survived the sweep after it was unpinned")
 	}
 }
 
-// TestHeldLeaseNotIdleSuspended: a persistent lease with a holder idle
-// far past IdleTimeout is not suspended by the idle sweep.
-func TestHeldLeaseNotIdleSuspended(t *testing.T) {
-	svc, db, sub := newTestService(t)
-	seedImage(t, db, "py-base", 2048)
-	svc.cfg.IdleTimeout = 50 * time.Millisecond
-	ctx := context.Background()
-
-	held, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "ci-job", "", nil)
-	if err != nil {
-		t.Fatalf("grant held: %v", err)
-	}
-	plain, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
-	if err != nil {
-		t.Fatalf("grant control: %v", err)
-	}
-
-	time.Sleep(80 * time.Millisecond) // both idle past the timeout
-	svc.sweepExpired(ctx)
-
-	if held.Suspended {
-		t.Fatal("held lease was idle-suspended")
-	}
-	if got := calls(sub.Fake, "Pause "+held.SandboxID); got != 0 {
-		t.Fatalf("held lease paused %d times, want 0", got)
-	}
-	if !plain.Suspended {
-		t.Fatal("unheld idle lease was not suspended")
-	}
-}
+// TestHolderLabelNeverIdleSuspends is removed: a holder label has no
+// lifecycle effect since FS5, so a holder label neither protects a
+// lease from idle_suspend nor causes a suspension. The caller-chosen
+// idle_suspend is the only idle threshold. TestHolderLabelHasNoLifecycle
+// Effect in the pin tests covers the contract.
 
 // TestHeldPlainLeaseCheckpointed: a held lease without an interval is
 // not on the periodic pass (being held no longer means being

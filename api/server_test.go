@@ -647,47 +647,51 @@ func TestTTLSweeper(t *testing.T) {
 	}
 }
 
-// TestIdleSweeper verifies persistent leases are auto-suspended (not
-// deleted) after IdleTimeout without activity, and that touch() keeps
-// them alive.
-func TestIdleSweeper(t *testing.T) {
+// TestIdleSuspendSweeper verifies a persistent lease with its own
+// idle_suspend is auto-suspended (not deleted) after that long without
+// activity, and that touch() keeps it alive. The plain idle sweep is
+// gone (FS5): the caller-chosen idle_suspend is the only idle threshold.
+func TestIdleSuspendSweeper(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
-	svc.cfg.IdleTimeout = 400 * time.Millisecond
 	srv := NewServer(svc, NewImageRegistry(db))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	// Persistent lease; idle timeout is 400ms.
+	// Persistent lease with an idle_suspend of 1 s (the smallest accepted
+	// value is 60 s, so set it on the lease directly after create).
 	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
 	id := create["id"].(string)
+	svc.store.mu.Lock()
+	svc.store.leases[id].IdleSuspend = 1
+	svc.store.mu.Unlock()
 
 	// Keep it alive with periodic touches (exec counts as activity).
 	ctx, cancel := context.WithCancel(context.Background())
 	svc.sweepInterval = 50 * time.Millisecond
 	svc.Start(ctx)
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 10; i++ {
 		time.Sleep(150 * time.Millisecond)
 		svc.touch(id)
 	}
 	cancel()
 
-	// Still alive: touches outpace the idle timeout.
+	// Still alive: touches outpace the idle_suspend threshold.
 	if got := calls(sub.Fake, "Pause"); got != 0 {
 		t.Fatalf("expected 0 pauses while touched, got %d", got)
 	}
 
 	// Now stop touching; the sweeper should suspend the lease within
-	// ~1s. The lease is suspended, not deleted.
+	// ~2s. The lease is suspended, not deleted.
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	svc.Start(ctx2)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) && calls(sub.Fake, "Pause") == 0 {
 		time.Sleep(100 * time.Millisecond)
 	}
 	cancel2()
 	if got := calls(sub.Fake, "Pause"); got != 1 {
-		t.Fatalf("expected 1 idle pause, got %d", got)
+		t.Fatalf("expected 1 idle_suspend pause, got %d", got)
 	}
 	if got := calls(sub.Fake, "Delete"); got != 0 {
 		t.Fatalf("expected 0 deletes on idle, got %d (suspended lease should stay)", got)

@@ -177,7 +177,8 @@ func TestJournalCreateReason(t *testing.T) {
 }
 
 // TestJournalReleaseReason pins the canonical reason tokens, including
-// the owner-named API deletion and a CI job's own free-text reason.
+// the owner-named API deletion, the one paused-release clock and a CI
+// job's own free-text reason.
 func TestJournalReleaseReason(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -189,11 +190,8 @@ func TestJournalReleaseReason(t *testing.T) {
 		{"ttl", &Lease{}, "TTL expired", "ttl"},
 		{"lost", &Lease{}, lostReleaseReason, "lost grace expired"},
 		{"user", &Lease{}, userDeleteReason, "user deleted"},
+		{"paused_expired", &Lease{}, "paused_expired", "paused_expired"},
 		{"ci", &Lease{}, "ci job 3609 ✓ 11m02s", "ci job 3609 ✓ 11m02s"},
-		{"held-critical", &Lease{LastAction: heldRuleCritical + "/release"}, "released by a held-lease rule", "disk"},
-		{"held-stale", &Lease{LastAction: heldRuleStale + "/release"}, "released by a held-lease rule", "idle"},
-		{"held-expiry", &Lease{LastAction: heldRuleExpiry + "/expire"}, "released by a held-lease rule", "hold_lapsed"},
-		{"held-other", &Lease{}, "released by a held-lease rule", "held rule"},
 	}
 	for _, c := range cases {
 		if got := journalReleaseReason(c.lease, c.reason); got != c.want {
@@ -210,10 +208,7 @@ func TestJournalSuspendReason(t *testing.T) {
 		drained bool
 		want    string
 	}{
-		{suspendPolicy{reason: suspendReasonIdle}, false, "idle"},
 		{suspendPolicy{reason: suspendReasonIdleSuspend}, false, "idle_suspend"},
-		{suspendPolicy{reason: suspendReasonHoldLapsed}, false, "hold_lapsed"},
-		{suspendPolicy{reason: suspendReasonPressure}, false, "pressure"},
 		{suspendPolicy{reason: suspendReasonPreempt}, false, "preempt"},
 		{suspendPolicy{}, true, "drain"},
 		{suspendPolicy{}, false, "hand"},

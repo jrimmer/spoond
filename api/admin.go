@@ -101,6 +101,28 @@ func (s *Server) handleAdminReconcile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.reconcileCrash(r.Context()))
 }
 
+// handleAdminUnpinByHolder clears the pinned flag of every lease whose
+// holder label starts with the prefix (FS5 migration window: migration
+// 0022 turns every live hold into a pin, and pool-spawn held its worker
+// leases by holder label). Admin only. The prefix is a required query
+// parameter; an empty one is refused so it cannot unpin every lease.
+func (s *Server) handleAdminUnpinByHolder(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	prefix := r.URL.Query().Get("holder_prefix")
+	if prefix == "" {
+		writeError(w, http.StatusBadRequest, "holder_prefix is required")
+		return
+	}
+	n, err := s.svc.unpinByHolderPrefix(r.Context(), prefix)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unpin failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"unpinned": n})
+}
+
 // drainConcurrency bounds the concurrent pauses of the drain.
 const drainConcurrency = 4
 
@@ -162,7 +184,8 @@ const DefaultDrainMaxSecs = 900
 // retrying a lease whose resume is deferred when DRAIN_RESUME_MAX_AGE is
 // unset (DrainResumeMaxAge 0): 24 h. Past it the loop stops retrying,
 // keeps the lease suspended (its snapshot is intact) and emits a
-// drain_gave_up event, leaving the exit to the owner or the idle rules.
+// drain_gave_up event, leaving the exit to the owner or the one
+// paused-release clock (30 d after the pause date).
 const DefaultDrainResumeMaxAge = 24 * time.Hour
 
 // Drain self-heal backoff for a deferred resume: the first retry is the
@@ -461,11 +484,14 @@ func undrainReadyStatus(status string) bool {
 }
 
 // undrainAdmissionRefusal reports whether err is one of the transient
-// admission answers (over quota, no burst room, no preemption room): they
-// keep the lease drained for a later undrain and must not be retried in a
-// tight loop here.
+// admission answers (over quota, no burst room, no preemption room, or
+// box_full: every take-back candidate is pinned, FS5): they keep the
+// lease drained for a later undrain and must not be retried in a tight
+// loop here. A box_full undrain must never report resume_failed or lose
+// the lease — nothing spoond can pause will ever make room
+// (spoond-k0uz R3-2).
 func undrainAdmissionRefusal(err error) bool {
-	return errors.Is(err, errQuotaExceeded) || errors.Is(err, errBurstReserve) || errors.Is(err, errPreemptCannot)
+	return errors.Is(err, errQuotaExceeded) || errors.Is(err, errBurstReserve) || errors.Is(err, errPreemptCannot) || isBoxFull(err)
 }
 
 // resumeRetryable reports whether a failed undrain resume is worth

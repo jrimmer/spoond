@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 )
 
@@ -119,7 +120,7 @@ func (s *Service) preemptionCandidates() []*Lease {
 	s.store.mu.Lock()
 	var out []*Lease
 	for _, l := range s.store.leases {
-		if l.released || l.busy || l.Suspended || !l.live() || l.Class != ClassBurst {
+		if l.released || l.busy || l.Suspended || !l.live() || l.Class != ClassBurst || l.Pinned {
 			continue
 		}
 		out = append(out, l)
@@ -235,6 +236,13 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 			// without suspending any lease.
 			return errPreemptCannot
 		}
+		// Pinned candidates are not take-back victims (FS5). If the
+		// pinned ones alone would free enough, the request is
+		// box_full: nothing unpinned can be taken for it.
+		if freeMiB+freeable+s.pinnedFreeableMiB() >= need {
+			s.boxFullAlert(owner, memoryMB)
+			return errBoxFull
+		}
 		// Not enough memory exists at all: preempting would only
 		// suspend leases for an admission that cannot succeed.
 		return nil
@@ -261,6 +269,34 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 	return nil
 }
 
+// pinnedFreeableMiB is the memory of the running burst leases that are
+// pinned and would otherwise be take-back candidates. It lets the
+// preemptor tell "no room exists" from "every candidate is pinned".
+func (s *Service) pinnedFreeableMiB() uint64 {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	var n uint64
+	for _, l := range s.store.leases {
+		if l.released || l.busy || l.Suspended || !l.live() || l.Class != ClassBurst || !l.Pinned {
+			continue
+		}
+		n += uint64(l.MemoryMB)
+	}
+	return n
+}
+
+// boxFullAlert logs and announces the box_full refusal (FS5): a request
+// needed room and every take-back candidate was pinned. Nothing was
+// paused or released; an operator can free room by unpinning or
+// releasing leases.
+func (s *Service) boxFullAlert(owner string, memoryMB int) {
+	s.log.Printf("box_full: %d MiB request for %q cannot be admitted: every take-back candidate is pinned; nothing was paused or released", memoryMB, owner)
+	if s.metrics != nil {
+		s.metrics.BoxFullTotal.Inc()
+	}
+	s.emitLeaseEvent("-", "", LeaseBoxFull, fmt.Sprintf("%d MiB request for %q: every take-back candidate is pinned", memoryMB, owner))
+}
+
 // cachedFreeHugepageMiB reads the node's free hugepage memory in MiB from
 // the service's cache (filling it on demand), without the healthy-status
 // short-circuit guaranteedFits applies.
@@ -278,7 +314,7 @@ func (s *Service) cachedFreeHugepageMiB(ctx context.Context) (uint64, error) {
 // the snapshot (a release, a resume, a concurrent operation) skips it.
 func (s *Service) preemptLease(ctx context.Context, l *Lease, targetOwner string) error {
 	s.store.mu.Lock()
-	if l.released || l.busy || l.Suspended || !l.live() || l.Class != ClassBurst {
+	if l.released || l.busy || l.Suspended || !l.live() || l.Class != ClassBurst || l.Pinned {
 		s.store.mu.Unlock()
 		return errLeaseBusy
 	}

@@ -235,6 +235,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
+	// FS5 migration window: unpin every lease whose holder label starts
+	// with a prefix (pool-spawn held its workers by label).
+	s.mux.HandleFunc("POST /api/admin/unpin-by-holder", s.handleAdminUnpinByHolder)
 	// Lease event streams (2.2, #115): Server-Sent Events of every lease
 	// lifecycle change, the caller's leases (admins see all) or one
 	// lease. The /api/leases alias covers both via rewriteLeasePath; the
@@ -242,10 +245,16 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// GET /api/leases/events only (api/server.go).
 	s.mux.HandleFunc("GET /api/sandboxes/events", s.handleLeaseEvents)
 	s.mux.HandleFunc("GET /api/sandboxes/{id}/events", s.handleLeaseEventsOne)
-	// Held leases (2.1): set or clear what holds a lease later. Owner or
-	// admin; the handler 404s for anyone else, like the other lease
-	// routes.
+	// Held leases (2.1): since FS5 (2026-10-08) the holder and holder_url
+	// labels have no lifecycle effect; only a pin does. Setting a holder
+	// never pins. Owner or admin; the handler 404s for anyone else, like
+	// the other lease routes.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/holder", s.handleHolder)
+	// Pin (FS5): a pinned lease is never paused or deleted before its own
+	// expiry. PUT pins, DELETE unpins; owner or admin, 404 for anyone
+	// else.
+	s.mux.HandleFunc("PUT /api/sandboxes/{id}/pin", s.handlePin)
+	s.mux.HandleFunc("DELETE /api/sandboxes/{id}/pin", s.handleUnpin)
 	// Per-lease checkpoint interval (2.3, #122): owner or admin, 404 for
 	// anyone else.
 	s.mux.HandleFunc("PUT /api/sandboxes/{id}/checkpoint-policy", s.handleCheckpointPolicy)
@@ -953,13 +962,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// reach (each peer's egress policy decides reachability).
 		ExposePorts []int `json:"expose_ports"`
 		// Holder names what holds the lease (a CI job, a person's
-		// scratch work) and HolderURL links to it. A non-empty holder
-		// keeps the lease out of the TTL and idle sweeps. HoldTTL bounds
-		// the hold (2.1): it expires on its own so a forgotten hold
-		// cannot pin the lease forever.
+		// scratch work) and HolderURL links to it. Since FS5 these are
+		// plain labels with no lifecycle effect; they never pin. Pinned
+		// asks spoond never to pause or delete the lease before its own
+		// expiry. HoldTTL is removed (pins replace holds); it is
+		// accepted and ignored for one release, with a Deprecation
+		// header.
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
-		HoldTTL   int    `json:"hold_ttl"`
+		HoldTTL   *int   `json:"hold_ttl"`
+		// Pinned pins the new lease (FS5): spoond never pauses or deletes
+		// it before its own expiry. A persistent pinned lease stays until
+		// the owner releases it.
+		Pinned bool `json:"pinned"`
 		// CheckpointInterval is the lease's own periodic checkpoint
 		// interval in seconds (2.3, #122): 0 = never; omitted (nil) =
 		// the host default (CHECKPOINT_INTERVAL_MINS).
@@ -1032,9 +1047,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.HoldTTL < 0 {
-		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
-		return
+	if req.HoldTTL != nil {
+		writeDeprecatedHoldTTL(w)
 	}
 	// Per-lease checkpoint interval (2.3, #122): omitted (nil) is the
 	// host default; otherwise 0 (never) or 60..604800 seconds.
@@ -1135,6 +1149,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	leaseReq := leaseRequest{
 		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
+		pinned:        req.Pinned,
 		createSecrets: secrets, exposePorts: expose, burst: req.Burst, priority: priority,
 		snapshot: start,
 	}
@@ -1174,7 +1189,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				s.svc.releaseBecause(context.Background(), lease, "client_gone")
 				return
 			}
-			s.writeCreatedLease(w, r, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+			s.writeCreatedLease(w, r, lease, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 			return
 		}
 	}
@@ -1189,7 +1204,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Wait > 0 {
 		waited = time.Since(grantStart)
 	}
-	s.writeCreatedLease(w, r, lease, req.Holder, req.HolderURL, req.HoldTTL, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+	s.writeCreatedLease(w, r, lease, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
 }
 
 // writeCreateRefusal writes the failure response for a refused create,
@@ -1224,6 +1239,10 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 		// A guaranteed lease that could not preempt (#128 part 3): the
 		// snapshot disk is too full to pause a burst lease.
 		status, msg, retryAfter = http.StatusServiceUnavailable, "capacity: "+err.Error(), burstRetryAfterSecs
+	case isBoxFull(err):
+		// Take-back could not make room: every candidate was pinned
+		// (FS5). 429 box_full: nothing was paused or released.
+		status, msg, code = http.StatusTooManyRequests, err.Error(), "box_full"
 	case errors.Is(err, errBurstReserve):
 		// A burst lease that would dip the node under its reserve
 		// (#128 part 2): 503 with a retry hint, not a generic capacity
@@ -1260,14 +1279,11 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 }
 
 // writeCreatedLease writes the 201 for a granted create (both the
-// immediate and the queued path): it stamps the hold and the request's
-// checkpoint interval and idle_suspend, then the usual body plus waited_ms when the
+// immediate and the queued path): it stamps the request's checkpoint
+// interval and idle_suspend, then the usual body plus waited_ms when the
 // create waited for admission.
-func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease *Lease, holder, holderURL string, holdTTL int, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration) {
+func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease *Lease, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration) {
 	s.svc.store.mu.Lock()
-	if holder != "" {
-		s.svc.setHoldLocked(lease, holder, holderURL, time.Duration(holdTTL)*time.Second, s.svc.now())
-	}
 	if ckptSet {
 		lease.CheckpointInterval = ckptSecs
 	}
@@ -1284,10 +1300,9 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease
 		"ttl":                 int(ttl.Seconds()),
 		"persistent":          lease.Persistent,
 		"expires_at":          lease.ExpiresAt.UTC().Format(time.RFC3339),
+		"pinned":              lease.Pinned,
 		"holder":              lease.Holder,
 		"holder_url":          lease.HolderUrl,
-		"hold_expires_at":     formatRFC3339(lease.HoldExpiresAt),
-		"hold_state":          holdState(lease),
 		"exposed":             exposedMap(lease),
 		"generation":          lease.Generation,
 		"checkpoint_interval": s.svc.effectiveCheckpointInterval(lease),
@@ -1746,6 +1761,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// Restart re-admits a suspended lease like a resume; a node full
+			// of pinned leases refuses it with the create body's 429
+			// box_full, not a 500 (spoond-k0uz R3-2). The lease stays as it
+			// was.
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, errBurstReserve):
 			// Restart re-admits a suspended lease like a resume, so a
 			// burst lease restarting into a full reserve answers 503
@@ -1831,30 +1852,27 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleHolder sets or clears what holds a lease, or renews the hold
-// (2.1): request {"holder":"…","holder_url":"…","hold_ttl":secs}.
-// Both holder fields empty clears. The same holder renews the hold for
-// another HOLD_TTL_SECS (or the explicit, capped hold_ttl) from now; a
-// different holder is refused with 409. A held lease is not released
-// at its TTL and not idle-suspended (periodic checkpoints follow its
-// checkpoint_interval); its hold expires on its own and the automatic
-// limits act regardless. Owner or admin; anyone else gets the same 404
-// as the other lease routes (no existence leak).
+// handleHolder sets or clears a lease's holder label and link. Since FS5
+// (owner decision 2026-10-08) these are plain labels: they have no effect
+// on the lease's lifecycle and never pin. request
+// {"holder":"…","holder_url":"…"}. Both fields empty clears the
+// label. Owner or admin; anyone else gets the same 404 as the other
+// lease routes (no existence leak). The deprecated hold_ttl field is
+// accepted and ignored for one release, with a Deprecation header.
 func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
 	var req struct {
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
-		HoldTTL   int    `json:"hold_ttl"`
+		HoldTTL   *int   `json:"hold_ttl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.HoldTTL < 0 {
-		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
-		return
+	if req.HoldTTL != nil {
+		writeDeprecatedHoldTTL(w)
 	}
 	lease := s.svc.lookup(owner, id)
 	if lease == nil && isAdmin(r) {
@@ -1864,28 +1882,12 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "lease not found")
 		return
 	}
-	var (
-		updated *Lease
-		err     error
-	)
-	// Validation first (400 naming the field), then the holder match:
-	// a malformed request is rejected as malformed even if the holder
-	// would not match either.
+	// Validation first (400 naming the field).
 	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Holder != "" && lease.Holder != "" && req.Holder != lease.Holder {
-		// A different holder takes the lease away from the one holding
-		// it: refused instead of silently replacing.
-		writeError(w, http.StatusConflict, errHolderMismatch.Error())
-		return
-	}
-	if lease.Holder != "" && req.Holder == lease.Holder {
-		updated, err = s.svc.renewHolder(lease.Owner, id, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second)
-	} else {
-		updated, err = s.svc.setHolderWithTTL(lease.Owner, id, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second)
-	}
+	updated, err := s.svc.setHolder(lease.Owner, id, req.Holder, req.HolderURL)
 	if err != nil {
 		if writeLeaseLostErr(w, err) {
 			return
@@ -1898,13 +1900,59 @@ func (s *Server) handleHolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":              updated.ID,
-		"holder":          updated.Holder,
-		"holder_url":      updated.HolderUrl,
-		"hold_expires_at": formatRFC3339(updated.HoldExpiresAt),
-		"hold_state":      holdState(updated),
-		"ok":              true,
+		"id":         updated.ID,
+		"holder":     updated.Holder,
+		"holder_url": updated.HolderUrl,
+		"ok":         true,
 	})
+}
+
+// handlePin pins a lease (FS5): PUT /api/leases/{id}/pin. Owner or admin.
+func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
+	s.setPinnedRoute(w, r, true)
+}
+
+// handleUnpin unpins a lease (FS5): DELETE /api/leases/{id}/pin. Owner or
+// admin.
+func (s *Server) handleUnpin(w http.ResponseWriter, r *http.Request) {
+	s.setPinnedRoute(w, r, false)
+}
+
+// setPinnedRoute is the shared body of the pin and unpin routes: it
+// resolves the lease owner-or-admin, 404s otherwise, and writes the
+// lease's pin state.
+func (s *Server) setPinnedRoute(w http.ResponseWriter, r *http.Request, pinned bool) {
+	owner := ownerFrom(r.Context())
+	id := r.PathValue("id")
+	lease := s.svc.lookup(owner, id)
+	if lease == nil && isAdmin(r) {
+		lease = s.svc.lookupAny(id)
+	}
+	if lease == nil {
+		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	updated, err := s.svc.setPinned(lease.Owner, id, pinned)
+	if err != nil {
+		if writeLeaseLostErr(w, err) {
+			return
+		}
+		writeError(w, http.StatusNotFound, "lease not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":     updated.ID,
+		"pinned": updated.Pinned,
+		"ok":     true,
+	})
+}
+
+// writeDeprecatedHoldTTL marks a request that still sends the removed
+// hold_ttl field: accepted and ignored for one release, with a
+// Deprecation header so a caller can see it must stop sending it.
+func writeDeprecatedHoldTTL(w http.ResponseWriter) {
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Warning", `299 - "hold_ttl is removed; pins replace holds"`)
 }
 
 // handlePrompt sends a message to the Shelley coding agent running inside
@@ -2478,6 +2526,11 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// The clone's own class admission is box_full when every
+			// take-back candidate is pinned (FS5): 429 like create, not a
+			// 500 (spoond-k0uz R3-2).
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, errBurstReserve):
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
@@ -2515,7 +2568,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		TTL        int    `json:"ttl"` // seconds
 		Holder     string `json:"holder"`
 		HolderURL  string `json:"holder_url"`
-		HoldTTL    int    `json:"hold_ttl"`
+		HoldTTL    *int   `json:"hold_ttl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -2525,9 +2578,8 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.HoldTTL < 0 {
-		writeError(w, http.StatusBadRequest, "hold_ttl must be >= 0")
-		return
+	if req.HoldTTL != nil {
+		writeDeprecatedHoldTTL(w)
 	}
 	leases, buildID, err := s.svc.fork(r.Context(), owner, id, req.Count, req.Persistent, time.Duration(req.TTL)*time.Second, req.Holder, req.HolderURL)
 	if err != nil {
@@ -2551,6 +2603,11 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// A fork child's class admission is box_full when every
+			// take-back candidate is pinned (FS5): 429 like create, not a
+			// 500 (spoond-k0uz R3-2).
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, errBurstReserve):
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
@@ -2570,19 +2627,11 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	ids := make([]string, len(leases))
 	for i, l := range leases {
 		ids[i] = l.ID
-		if req.Holder != "" {
-			s.svc.store.mu.Lock()
-			s.svc.setHoldLocked(l, req.Holder, req.HolderURL, time.Duration(req.HoldTTL)*time.Second, s.svc.now())
-			s.svc.saveLeaseLocked(l)
-			s.svc.store.mu.Unlock()
-		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"source":          id,
-		"build_id":        buildID,
-		"ids":             ids,
-		"hold_expires_at": formatRFC3339(leases[0].HoldExpiresAt),
-		"hold_state":      holdState(leases[0]),
+		"source":   id,
+		"build_id": buildID,
+		"ids":      ids,
 	})
 }
 

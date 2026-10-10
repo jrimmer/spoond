@@ -77,23 +77,36 @@ type Lease struct {
 	// Drained marks a lease the admin drain paused (U10): undrain
 	// resumes exactly the drained leases.
 	Drained bool
-	// Holder names what holds the lease (a CI job, an orchestrator's
-	// flight, a person's scratch work) and HolderUrl links to it. A
-	// non-empty holder makes the lease held: not released at its TTL and
-	// not idle-suspended. (Periodic checkpoints follow the lease's own
-	// checkpoint_interval since 2.3, not the hold.) "" = unheld.
+	// Pinned marks a lease its owner pinned (FS5, owner decision
+	// 2026-10-08): spoond never pauses or deletes a pinned lease before
+	// its own expiry. The lease's TTL still applies; a persistent pinned
+	// lease stays until the owner releases it. Pin and expiry work
+	// together. Only the owner (unpin, DELETE) changes a pin. A create's
+	// holder/holder_url labels never pin; only "pinned": true or the pin
+	// route does. Reported as "pinned".
+	Pinned bool `json:"pinned"`
+	// PausedAt is when the lease was paused, whatever paused it
+	// (take-back, its own idle_suspend, POST /pause). One clock releases
+	// a paused lease PAUSED_RELEASE_DAYS after this instant; resuming
+	// clears it. Zero = not paused. Reported as "paused_at".
+	PausedAt time.Time `json:"paused_at,omitempty"`
+	// PinnedIdleSince is when a pinned lease's LastActive first passed
+	// PINNED_IDLE_NOTICE_DAYS (FS5): visibility only — GET returns it as
+	// "pinned_idle_since", a lease.pinned_idle event fires once per
+	// crossing, and nothing is paused, unpinned or released because of
+	// it. Zero = not flagged.
+	PinnedIdleSince time.Time `json:"pinned_idle_since,omitempty"`
+	// PausedExpiryNotified marks the lease.paused_expiring warning (24 h
+	// before a paused lease is released) as sent.
+	PausedExpiryNotified bool `json:"-"`
+	// Holder and HolderUrl are plain labels naming what holds the lease
+	// (a CI job, an orchestrator's flight, a person's scratch work) and a
+	// link to it. They have no effect on the lease's lifecycle: only
+	// Pinned does. "" = no label.
 	Holder    string `json:"holder,omitempty"`
 	HolderUrl string `json:"holder_url,omitempty"`
-	// HoldSetAt/HoldExpiresAt bound the hold (2.1): it lasts HoldTTL
-	// from when it was set or renewed, at most HoldTTLMax for an
-	// explicit hold_ttl. Past HoldExpiresAt the holder fields are
-	// cleared and the lease follows the normal TTL and idle rules.
-	// HoldTTL mirrors the requested explicit hold_ttl (0 = the default).
-	HoldSetAt     time.Time     `json:"hold_set_at,omitempty"`
-	HoldExpiresAt time.Time     `json:"hold_expires_at,omitempty"`
-	HoldTTL       time.Duration `json:"-"`
-	// LastAction/LastActionAt record the last automatic held-lease
-	// action ("rule/action", e.g. "idle/suspend_idle") and when it
+	// LastAction/LastActionAt record the last automatic action
+	// ("rule/action", e.g. "idle_suspend/suspend_idle") and when it
 	// happened; both are returned by the lease API.
 	LastAction   string    `json:"last_action,omitempty"`
 	LastActionAt time.Time `json:"last_action_at,omitempty"`
@@ -147,7 +160,7 @@ type Lease struct {
 	SnapshotBuildID string `json:"-"`
 	// SuspendReason, SuspendPolicyStep, SuspendBuildID and SuspendedAt
 	// record an automatic suspend (#145 D6): reason is one of
-	// idle|idle_suspend|hold_lapsed|pressure|preempt|resume_failed, policy
+	// idle_suspend|preempt|resume_failed, policy
 	// step is the pressure order's step name ("" until it names steps), the
 	// build is the pause build written and suspended_at is when. A hand or
 	// drain suspend carries none of them. Reported by the lease API as
@@ -214,6 +227,10 @@ func (l *Lease) setState(state string) {
 		// D6): a resume, restore, restart or loss must not leave a stale
 		// reason, policy step, build or time behind.
 		clearSuspendFactsLocked(l)
+		// The one clock (FS5): leaving the suspended state clears the
+		// pause date and its expiring-notified flag. A pause stamps them
+		// again.
+		resumeClock(l)
 	}
 	if state == "lost" {
 		if l.LostAt.IsZero() {
@@ -323,10 +340,11 @@ func newID() string {
 
 // ServiceConfig carries the constructor tunables.
 type ServiceConfig struct {
-	PoolSize                        int
-	DefaultTTL, MaxTTL, IdleTimeout time.Duration
-	HostGuestAddr                   string // HOST_GUEST_SERVICE_ADDR
-	HostGuestPort                   int    // HOST_GUEST_SERVICE_PORT
+	PoolSize      int
+	DefaultTTL    time.Duration
+	MaxTTL        time.Duration
+	HostGuestAddr string // HOST_GUEST_SERVICE_ADDR
+	HostGuestPort int    // HOST_GUEST_SERVICE_PORT
 	// GuestDNSAddr is the guest's DNS resolver address or addresses
 	// (SPOOND_GUEST_DNS_ADDR, comma-separated). Each is granted to every
 	// lease's egress policy on port 53. Empty = no resolver allowance
@@ -366,21 +384,15 @@ type ServiceConfig struct {
 	// enough to be reclaimed by hand. Zero falls back to the defaults.
 	LostGracePersistent time.Duration
 	LostGrace           time.Duration
-	// Held-lease limits (2.1, owner decision 2026-10-03): how long a
-	// held lease may sit idle before it is suspended (0 disables), how
-	// long it may stay suspended before it is released (0 disables),
-	// how long a hold lasts and how long an explicit hold_ttl may be,
-	// and the disk-free percentages that shorten the idle threshold
-	// (pressure) or release suspended held leases (critical). Zero
-	// falls back to the Default* constants in api/held.go.
-	HeldIdleTimeout        time.Duration
-	HeldSuspendedRelease   time.Duration
-	HoldTTL                time.Duration
-	HoldTTLMax             time.Duration
-	PressureDiskFreePct    float64
-	PressureHeldIdle       time.Duration
-	CriticalDiskFreePct    float64
-	CriticalDiskRecoverPct float64
+	// Pins and one clock (FS5, owner decision 2026-10-08):
+	// PausedReleaseDays is PAUSED_RELEASE_DAYS, how many days after its
+	// pause date every paused lease is released (0 = the 30-day
+	// default). PinnedIdleNoticeDays is PINNED_IDLE_NOTICE_DAYS, after
+	// how many days a pinned lease's last API activity flags it
+	// (visibility only; 0 = the 7-day default). Every automatic hold and
+	// disk rule is removed; take-back touches only unpinned leases.
+	PausedReleaseDays    int
+	PinnedIdleNoticeDays int
 	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
 	// keep on a lease already holding this many kept builds answers 409
 	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default
@@ -499,9 +511,9 @@ type ServiceConfig struct {
 	// retrying a lease whose resume is deferred (DRAIN_RESUME_MAX_AGE,
 	// default DefaultDrainResumeMaxAge = 24h). Past it the loop stops,
 	// keeps the lease suspended (its snapshot is intact) and emits a
-	// drain_gave_up event, leaving the exit to the owner or the idle
-	// rules. 0 means the default; a negative value (tests only) disables
-	// the bound.
+	// drain_gave_up event, leaving the exit to the owner or the one
+	// paused-release clock. 0 means the default; a negative value (tests
+	// only) disables the bound.
 	DrainResumeMaxAge time.Duration
 }
 
@@ -690,11 +702,6 @@ type Service struct {
 	drainGate sync.RWMutex
 	// stopLoops cancels the background sweeper/refiller started by Start.
 	stopLoops context.CancelFunc
-
-	// Rule 5's guards (held-lease limits): when its GC last ran, and
-	// when it last logged that a dry-run GC stops it. Sweep goroutine only.
-	criticalGCAt         time.Time
-	criticalDryRunLogged time.Time
 	// bus is the lease event bus (2.2, #115): every lifecycle change
 	// emits one event here. Set in NewService; never nil.
 	bus *eventBus
@@ -1722,92 +1729,49 @@ func (s *Service) refillPool(ctx context.Context) {
 	}
 }
 
-// sweepExpired releases leases whose TTL has passed. Persistent leases
-// are not TTL-swept (the consumer keeps them alive via keep-alive and
-// disposes via delete), but when IdleTimeout is set every persistent
-// lease is auto-suspended after that long without activity
-// (exec/stream/proxy/keep-alive all bump LastActive). A suspended
-// sandbox keeps its state snapshot and is cheap to resume.
+// sweepExpired releases leases whose TTL has passed and runs the one
+// paused-lease clock. Persistent leases are not TTL-swept (the consumer
+// keeps them alive via keep-alive and disposes via delete). A pinned
+// lease is still released at its own TTL (owner decision 2026-10-08:
+// "PIN and Expiry collaborate as it is unpausable until the
+// expiration"); a pinned persistent lease stays until the owner
+// releases it. There is no idle sweep: spoond acts only when a request
+// needs room, or on the one paused-release clock.
 func (s *Service) sweepExpired(ctx context.Context) {
-	// Draining pauses every lease and undrain resumes it; the idle sweep
-	// must not fight the drain (U10). The held-lease limits (2.1) skip
-	// with it.
+	// Draining pauses every lease and undrain resumes it; the sweep must
+	// not fight the drain (U10).
 	if s.draining.Load() {
 		return
 	}
 	s.store.mu.Lock()
 	s.flushLastActiveLocked(ctx)
 	var expired []*Lease
-	var idleSuspend []*Lease
 	now := s.now()
 	for _, l := range s.store.leases {
 		if l.released {
 			continue
 		}
-		// A held lease (non-empty holder) is left alone by both sweeps:
-		// not released at its TTL, not idle-suspended. Its own limits
-		// (hold expiry, idle suspend, stale release, pressure, critical)
-		// run in runHeldRules below.
-		if !l.Persistent && !l.held() && now.After(l.ExpiresAt) {
+		if !l.Persistent && now.After(l.ExpiresAt) {
 			expired = append(expired, l)
-			continue
-		}
-		if l.Persistent && !l.held() && s.effectiveIdleSuspend(l) <= 0 && s.cfg.IdleTimeout > 0 && !l.Suspended && !s.hasRunningJobLocked(l.ID) && now.After(l.LastActive.Add(s.cfg.IdleTimeout)) {
-			s.log.Printf("idle sweep: suspending persistent lease %s (idle since %s)", l.ID, l.LastActive.Format(time.RFC3339))
-			idleSuspend = append(idleSuspend, l)
 		}
 	}
 	s.store.mu.Unlock()
-	// Held-lease limits (2.1): hold expiry, stale release, idle suspend
-	// (shortened under pressure) and the critical-disk release — in that
-	// order. A hold expiring this tick clears the holder, so an
-	// already-expired TTL releases the lease in the second pass below;
-	// seenNow keeps leases already collected out of it.
-	s.runHeldRules(ctx, now)
-	// Per-lease idle reclamation (2.5, #129 part 2): leases with their own
-	// idle_suspend are suspended on that threshold and not on the plain
-	// idle timeout or held rule 1 (both skipped such leases above and in
-	// suspendIdleHeld).
+	// The one paused-lease clock (FS5): every paused lease is released
+	// PAUSED_RELEASE_DAYS after its pause date, preceded by a
+	// lease.paused_expiring event 24 h before. A paused pinned lease is on
+	// the same clock (a pin protects only a running VM).
+	s.notifyPausedExpiring(ctx, now)
+	s.releasePausedLeases(ctx, now)
+	// A lease's own idle_suspend opt-in is unchanged (FS5): a persistent,
+	// unpinned lease with an effective idle_suspend > 0 is paused on that
+	// threshold. There is no plain idle sweep any more and a pinned lease
+	// is never idle-suspended.
 	s.suspendIdleLeases(ctx, now)
-	seenNow := make(map[*Lease]bool, len(expired))
-	for _, l := range expired {
-		seenNow[l] = true
-	}
-	s.store.mu.Lock()
-	now = s.now()
-	for _, l := range s.store.leases {
-		if l.released || l.held() || l.Persistent || seenNow[l] {
-			continue
-		}
-		if now.After(l.ExpiresAt) {
-			expired = append(expired, l)
-		}
-	}
-	s.store.mu.Unlock()
-	// Suspend idle leases in small, staggered batches. Each suspend is a
-	// snapshot write on the node; a large backlog (e.g. after a long test
-	// session) must not produce one big burst. Cap per tick and space
-	// them out — with the 5s sweep tick, 13 idle leases clear in ~25s
-	// instead of a single burst. When the process-wide snapshot limiter is
-	// busy (a hand suspend, a checkpoint or the drain is writing), stand
-	// down for this tick and retry next tick rather than queue the batch
-	// behind the running write (spoond-t1s).
-	const maxSuspendPerTick = 3
-	suspended := 0
-	for _, l := range idleSuspend {
-		if suspended >= maxSuspendPerTick {
-			break
-		}
-		if s.snapshotBusy() {
-			break
-		}
-		if _, err := s.suspendWith(ctx, l.Owner, l.ID, suspendPolicy{reason: suspendReasonIdle}); err != nil {
-			s.log.Printf("idle sweep: suspend %s: %v", l.ID, err)
-			continue
-		}
-		suspended++
-		time.Sleep(500 * time.Millisecond)
-	}
+	// The pinned-idle notice (FS5, visibility only): flag a pinned lease
+	// whose last API activity passed PINNED_IDLE_NOTICE_DAYS and emit
+	// one lease.pinned_idle event per crossing. Nothing is paused,
+	// unpinned or released because of it.
+	s.noticePinnedIdle(ctx, now)
 	for _, l := range expired {
 		s.releaseBecause(ctx, l, "TTL expired")
 	}
@@ -1916,8 +1880,25 @@ func (s *Service) release(ctx context.Context, l *Lease) {
 // releaseBecause is release with the reason its released event carries
 // (the dashboard's events panel and SSE clients read it).
 func (s *Service) releaseBecause(ctx context.Context, l *Lease, reason string) {
+	s.releaseBecauseIf(ctx, l, reason, nil)
+}
+
+// releaseBecauseIf releases l with the given reason, running ok inside
+// the same store-lock section that marks the lease released. When ok is
+// non-nil and returns false there, the release is abandoned — the lease
+// was no longer releasable at the moment of commitment (a resume that
+// landed between the caller's collection pass and this call, a lease
+// that turned busy) and nothing else happens. This closes the gap
+// releaseBecause's own released re-check leaves: it re-checks under the
+// lock, but the sandbox teardown after the unlock still runs against a
+// lease that changed since the caller decided (spoond-k0uz R4-3).
+func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string, ok func(l *Lease) bool) {
 	s.store.mu.Lock()
 	if l.released {
+		s.store.mu.Unlock()
+		return
+	}
+	if ok != nil && !ok(l) {
 		s.store.mu.Unlock()
 		return
 	}
@@ -2215,10 +2196,13 @@ type leaseRequest struct {
 	netPolicy         string
 	netAllow          []string
 	holder, holderURL string
-	createSecrets     map[string]string
-	exposePorts       []int
-	burst             bool
-	priority          int
+	// pinned asks spoond never to pause or delete the new lease before
+	// its own expiry (FS5). The holder labels never pin.
+	pinned        bool
+	createSecrets map[string]string
+	exposePorts   []int
+	burst         bool
+	priority      int
 	// snapshot, when set, starts the lease from a named snapshot version
 	// (2.7, #83 task 2) instead of the image's current build. The image
 	// is the version's image and the memory charge is the version's
@@ -2393,6 +2377,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		ExposePorts: req.exposePorts,
 		Holder:      req.holder,
 		HolderUrl:   req.holderURL,
+		Pinned:      req.pinned,
 		State:       "running",
 		// The lease's MiB charge (#128): the image's memory_mb, the very
 		// number reserveQuota admitted with, so accounting and release
@@ -2730,17 +2715,12 @@ const (
 
 // Suspend reasons (#145 D6): the "reason" field of an automatic
 // lease.suspended event, the lease's suspend_reason and the 409
-// lease_suspended body. idle is the plain IDLE_TIMEOUT_SECS sweep;
-// idle_suspend is the per-lease idle_suspend threshold; hold_lapsed is a
-// hold that expired; pressure is held rule 1 shortened under pressure
-// (rule 4) and, from the pressure order on, its eviction steps; preempt
-// is the resume queue reclaiming hugepages for a guaranteed admission.
-// A hand or drain suspend has no reason ("").
+// lease_suspended body. idle_suspend is the per-lease idle_suspend
+// threshold; preempt is a take-back suspension freeing hugepages for a
+// guaranteed admission. A hand or drain suspend has no reason ("").
+// The old plain-idle, hold_lapsed and pressure rules are removed (FS5).
 const (
-	suspendReasonIdle        = "idle"
 	suspendReasonIdleSuspend = "idle_suspend"
-	suspendReasonHoldLapsed  = "hold_lapsed"
-	suspendReasonPressure    = "pressure"
 	suspendReasonPreempt     = "preempt"
 	// suspendReasonResumeFailed marks a lease the admin undrain could not
 	// bring back and left suspended (its snapshot intact) instead of
@@ -2866,8 +2846,12 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		l.LastAction = pauseActionDrain
 	}
 	l.LastActionAt = s.now()
+	// The one clock (FS5): every pause stamps PausedAt, whatever paused
+	// it. releasePausedLeases releases the lease PAUSED_RELEASE_DAYS
+	// later; resumeClock clears it.
+	s.pauseClock(l, l.LastActionAt)
 	// The structured suspension facts (#145 D6): the reason
-	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
+	// (idle_suspend|preempt|resume_failed), the pressure
 	// order's step, the pause build it wrote and when describe an
 	// automatic suspend. A hand or drain pause has no automatic reason,
 	// so all four stay empty and the GET omits them; the lease still
@@ -2900,8 +2884,11 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	return buildID, nil
 }
 
-// resume restores a suspended persistent lease: create with snapshot
-// from the pause build, same sandbox id.
+// resume restores a suspended lease: create with snapshot from the
+// pause build, same sandbox id. Any suspended lease the caller owns can
+// be explicitly resumed, as resume-on-use already allows; persistence is
+// not required (a non-persistent lease the drain left suspended is the
+// case that matters).
 func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
@@ -2909,29 +2896,20 @@ func (s *Service) resume(ctx context.Context, owner, id string) (*Lease, error) 
 		s.store.mu.Unlock()
 		return nil, errNotFound
 	}
-	if !l.Persistent && !l.held() {
-		s.store.mu.Unlock()
-		return nil, errNotPersistent
-	}
 	s.store.mu.Unlock()
 	return s.resumeForUse(ctx, l)
 }
 
 // resumeAny is resume without the owner check, for the SSH gateway's
 // service token: before a session starts, the gateway resumes a
-// suspended lease the connecting user is already authorised for (a held
-// lease suspended by an idle rule resumes on next use this way).
-// Persistent and held leases only, as for resume.
+// suspended lease the connecting user is already authorised for. Any
+// suspended lease, as for resume.
 func (s *Service) resumeAny(ctx context.Context, id string) (*Lease, error) {
 	s.store.mu.Lock()
 	l := s.store.leases[id]
 	if l == nil || l.released {
 		s.store.mu.Unlock()
 		return nil, errNotFound
-	}
-	if !l.Persistent && !l.held() {
-		s.store.mu.Unlock()
-		return nil, errNotPersistent
 	}
 	s.store.mu.Unlock()
 	return s.resumeForUse(ctx, l)
@@ -3785,11 +3763,6 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	return created, b.BuildID, nil
 }
 
-// held reports whether the lease is held by something that must outlive
-// the sweepers: a non-empty holder keeps it past its TTL and out of the
-// idle sweep.
-func (l *Lease) held() bool { return l.Holder != "" }
-
 // Checkpoint interval bounds (2.3, #122): the create field and the
 // policy PUT accept 0 (never) or 60..604800 seconds (a minute to a
 // week). -1 on the stored lease alone means "the host default".
@@ -3840,10 +3813,14 @@ func validateIdleSuspend(secs int64) error {
 // (IdleSuspendDefault; 0 = never). A non-persistent lease can never be
 // idle-suspended — there is no snapshot to resume from — so its
 // effective value is always 0 (never), whatever the host default is.
-// This also keeps held rule 1 in force for non-persistent held leases
-// (2.5, #129 part 2).
+//
+// A pinned lease is never paused by spoond (FS5, owner: "Pins don't
+// pause"), so its effective value is always 0 (never) too: a caller's
+// explicit POST /pause is the owner's own action and still works, but
+// the idle sweep skips a pinned lease whatever the host default or the
+// lease's own value says.
 func (s *Service) effectiveIdleSuspend(l *Lease) int64 {
-	if !l.Persistent {
+	if !l.Persistent || l.Pinned {
 		return 0
 	}
 	if l.IdleSuspend != idleSuspendHost {
@@ -3930,11 +3907,31 @@ func validateHolder(holder, holderURL string) error {
 	return nil
 }
 
-// setHolder sets or clears a lease's holder fields. Both empty clears
-// the holder and restores normal sweeping. The route admits the owner
-// and admins; the hold clock lives in api/held.go (setHolder there).
+// setHolder sets or clears a lease's holder label and link. Both have
+// no effect on the lease's lifecycle (FS5): setting them never pins.
+// The route admits the owner and admins.
 func (s *Service) setHolder(owner, id, holder, holderURL string) (*Lease, error) {
-	return s.setHolderWithTTL(owner, id, holder, holderURL, 0)
+	if err := validateHolder(holder, holderURL); err != nil {
+		return nil, err
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	l := s.store.leases[id]
+	if l == nil || l.Owner != owner || l.released {
+		return nil, errNotFound
+	}
+	if err := lostErr(l); err != nil {
+		return nil, err
+	}
+	l.Holder = holder
+	l.HolderUrl = holderURL
+	s.saveLeaseLocked(l)
+	if holder == "" {
+		s.emitLeaseEvent(id, owner, LeaseHolderCleared, "holder label cleared")
+	} else {
+		s.emitLeaseEvent(id, owner, LeaseHolderSet, fmt.Sprintf("holder label %q", holder))
+	}
+	return l, nil
 }
 
 // setName assigns a friendly name to a lease. Names must be non-empty,
@@ -4240,19 +4237,8 @@ func (s *Service) leaseSuspendReason(id string) string {
 	return l.SuspendReason
 }
 
-// holdState is "active" while a hold runs until hold_expires_at,
-// "lapsed" once it ran out unrenewed (the lease was suspended and is
-// released by the stale rule unless renewed or used), and "" for an
-// unheld lease.
-func holdState(l *Lease) string {
-	if !l.held() {
-		return ""
-	}
-	if l.HoldExpiresAt.IsZero() {
-		return "lapsed"
-	}
-	return "active"
-}
+// holdState is gone with the held-lease rules (FS5). The holder and
+// holder_url labels are returned as-is and have no lifecycle effect.
 
 // leaseMap renders a lease as one GET /api/sandboxes row. The
 // checkpointInterval and idleSuspend arguments are the lease's effective
@@ -4292,15 +4278,20 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 		"class":    leaseClassRow(l),
 		"priority": l.Priority,
 		// Preemption (#128 part 3): true when this burst lease was
-		// suspended to make room for a guaranteed lease; the resume
-		// queue brings it back when capacity allows.
+		// suspended to make room for a guaranteed lease; it comes back
+		// on its holder's next work call.
 		"preempted": !l.PreemptedAt.IsZero(),
+		// Pin (FS5): true when the owner pinned this lease; spoond never
+		// pauses or deletes it before its own expiry. A pinned lease
+		// reports pinned_idle_since once its last API activity passed
+		// PINNED_IDLE_NOTICE_DAYS (visibility only).
+		"pinned": l.Pinned,
 	}
-	if !l.HoldExpiresAt.IsZero() {
-		m["hold_expires_at"] = l.HoldExpiresAt.UTC().Format(time.RFC3339)
+	if !l.PausedAt.IsZero() {
+		m["paused_at"] = formatRFC3339(l.PausedAt)
 	}
-	if st := holdState(l); st != "" {
-		m["hold_state"] = st
+	if !l.PinnedIdleSince.IsZero() {
+		m["pinned_idle_since"] = formatRFC3339(l.PinnedIdleSince)
 	}
 	if l.LastAction != "" {
 		m["last_action"] = l.LastAction
@@ -4308,7 +4299,7 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 	}
 	// Structured suspension facts (#145 D6), additive and omitted while
 	// the lease is not suspended: why an automatic suspend happened
-	// (idle|idle_suspend|hold_lapsed|pressure|preempt), the pressure
+	// (idle_suspend|preempt|resume_failed), the pressure
 	// order's step ("" until it names steps), the pause build and when.
 	// A hand or drain suspend carries none of them and the fields stay
 	// off.
@@ -4595,11 +4586,12 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		LostAt:                l.LostAt,
 		LostReason:            l.LostReason,
 		Drained:               l.Drained,
+		Pinned:                l.Pinned,
+		PausedAt:              l.PausedAt,
+		PinnedIdleSince:       l.PinnedIdleSince,
+		PausedExpiryNotified:  l.PausedExpiryNotified,
 		Holder:                l.Holder,
 		HolderUrl:             l.HolderUrl,
-		HoldSetAt:             l.HoldSetAt,
-		HoldExpiresAt:         l.HoldExpiresAt,
-		HoldTTL:               int64(l.HoldTTL / time.Second),
 		LastAction:            l.LastAction,
 		LastActionAt:          l.LastActionAt,
 		Generation:            l.Generation,
@@ -4655,11 +4647,12 @@ func rowToLease(r store.LeaseRow) *Lease {
 		LostAt:                r.LostAt,
 		LostReason:            r.LostReason,
 		Drained:               r.Drained,
+		Pinned:                r.Pinned,
+		PausedAt:              r.PausedAt,
+		PinnedIdleSince:       r.PinnedIdleSince,
+		PausedExpiryNotified:  r.PausedExpiryNotified,
 		Holder:                r.Holder,
 		HolderUrl:             r.HolderUrl,
-		HoldSetAt:             r.HoldSetAt,
-		HoldExpiresAt:         r.HoldExpiresAt,
-		HoldTTL:               time.Duration(r.HoldTTL) * time.Second,
 		LastAction:            r.LastAction,
 		LastActionAt:          r.LastActionAt,
 		Generation:            r.Generation,
@@ -4981,8 +4974,29 @@ func (s *Service) LoadState(ctx context.Context) error {
 		return fmt.Errorf("load pool: %w", err)
 	}
 	loaded := make(map[string]*Lease, len(leases))
+	loadedAt := time.Now()
+	var repairs []*Lease
 	for _, r := range leases {
 		l := rowToLease(r)
+		// One-clock hygiene at load (spoond-k0uz R3-3c): the clock may
+		// only ever fire on a lease that is actually suspended. A running
+		// row with a pause date is stale — a rolled-back 2.9 binary never
+		// writes paused_at and its resume does not clear it — and would
+		// otherwise get a running VM deleted 30 d after an old pause. A
+		// suspended row with no pause date (a pause a rolled-back 2.9
+		// took) gets the clock stamped at load: a fresh 30 d from now.
+		// The corrected rows are saved below under the store lock.
+		if !l.Suspended {
+			if !l.PausedAt.IsZero() || l.PausedExpiryNotified {
+				l.PausedAt = time.Time{}
+				l.PausedExpiryNotified = false
+				repairs = append(repairs, l)
+			}
+		} else if l.PausedAt.IsZero() {
+			l.PausedAt = loadedAt
+			l.PausedExpiryNotified = false
+			repairs = append(repairs, l)
+		}
 		if img, err := s.db.GetImage(ctx, l.Image); err == nil {
 			l.TemplateID = img.TemplateID
 		}
@@ -4996,6 +5010,11 @@ func (s *Service) LoadState(ctx context.Context) error {
 	s.store.leases = loaded
 	for id, l := range loaded {
 		s.store.accounted[id] = leaseAccountedOf(l)
+	}
+	// Persist the one-clock repairs under the lock, so a racing save sees
+	// the corrected row.
+	for _, l := range repairs {
+		s.saveLeaseLocked(l)
 	}
 	for _, r := range shareRows {
 		if s.store.shares[r.LeaseID] == nil {

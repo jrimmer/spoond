@@ -83,12 +83,14 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     `/run/spoond/generation` and `/run/spoond/started-from`, so a
     restored process can tell which side it is on — see
     [api.md](docs/api.md#identity-in-a-restored-guest).
-  - **Holders**: `holder` and `holder_url` say what holds a lease (a CI
-    job, an orchestrator's run, someone's scratch work). A held lease
-    outlives its TTL until its hold lapses, and automatic limits (idle
-    suspend, release after a week suspended, pressure and critical-disk
-    rules) keep held leases bounded; nothing running is ever released
-    automatically.
+  - **Holders and pins**: `holder` and `holder_url` are plain labels
+    saying what holds a lease (a CI job, an orchestrator's run,
+    someone's scratch work). A **pinned** lease (`pinned` on create, or
+    `PUT/DELETE /api/leases/{id}/pin`) is never paused or deleted by
+    spoond before its own expiry; take-back touches only unpinned
+    leases, and every paused lease is released 30 days after its pause
+    date by one clock. See
+    [operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 - **Multi-user tenancy**: people and agents are first-class identities,
   with per-user SSH keys, per-user tokens, quotas
   (`max_leases`/`max_ttl`, memory: `guaranteed_mib`/`max_mib`), admin roles, lease sharing with expiry,
@@ -109,8 +111,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   on capacity, the memory cap or the lease-count cap, served in
   fair-share order; a persistent lease
   may set `idle_suspend` to give its memory back when idle.
-- **Resume on use**: a suspended lease, whatever suspended it (idle,
-  `idle_suspend`, a held-lease rule, preemption or its holder), resumes
+- **Resume on use**: a suspended lease, whatever suspended it
+  (`idle_suspend`, take-back, preemption or its owner), resumes
   on its holder's next work call: exec, exec stream, files, guest dial,
   the proxy, jobs, the LLM gateway, a network change or a prompt. A
   resume that finds no room answers `503` `capacity_wait` with
@@ -159,7 +161,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   database, disk and hugepage checks; an example config is in
   [docs/operations.md](docs/operations.md#uptime-monitoring-gatus)).
 - **Notifications**: with `NOTIFY_WEBHOOKS` set, the backend pushes what
-  needs a person (a lost lease, a held-lease rule acting, a unit down,
+  needs a person (a lost lease, a box_full refusal, a paused lease
+  nearing its release, a pinned-idle notice, a unit down,
   disk or hugepages past their levels, a failed GC, a stale backup) to ntfy, Slack/Discord or any JSON
   receiver, with hourly dedupe, resolved messages, retries and a rate
   limit. `spoond notify test` checks the setup; see
@@ -176,8 +179,8 @@ root disk, with the warn/danger levels), a full-width throughput panel
 (running leases, requests per second, creates per minute, egress
 connections — each with its current value and a sparkline over the
 history), live leases (id, image, owner, run state, policy, age, time
-left, holder — on the page the holder is a link; a hold marks the
-holder ◆, or ◉ once lapsed), the image catalog beside the systemd
+left, holder — on the page the holder is a link; a pinned lease marks
+its holder ◆), the image catalog beside the systemd
 units, a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
@@ -336,8 +339,7 @@ operators.
 layer, `spoond acp`, the cfos adapter) moved to the separate Honey
 project. The dashboard is drawn on a character grid, the same in the
 browser and in the terminal (`spoond top`), on the public `grid`
-package. Leases can name their holder, and held leases are bounded by
-automatic limits.
+package. Leases can name their holder.
 
 **v2.0: E2B substrate.** spoond runs on a patch-queue fork of E2B's
 orchestrator instead of forkd: warm memory-snapshot starts,
@@ -419,9 +421,9 @@ snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
 `MAX_EXEC_BODY_BYTES`, the runner's `RUNNER_ADMIT_WAIT_SECS` and
 `RUNNER_JOB_TIMEOUT`, `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
-the held-lease
-limits (`HOLD_TTL_SECS` and the rest, in
-[docs/operations.md](docs/operations.md)).
+the one paused-release clock (`PAUSED_RELEASE_DAYS`) and
+pinned-idle notice (`PINNED_IDLE_NOTICE_DAYS`) in
+[docs/operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 
 ## Tests
 

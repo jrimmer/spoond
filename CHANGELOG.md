@@ -68,6 +68,124 @@ summarised from README "Status".
     `settleBuildSize` drops the fair-share cache even when the metrics
     gauges are not wired.
 
+### Status code changes
+
+- **`429 box_full`** with JSON `code: box_full`: a request that needed
+  room and could not get it because every take-back candidate is pinned
+  (FS5). This is a refusal, not a wait: nothing is paused or released.
+  `PUT /api/leases/{id}/pin` and `DELETE
+  /api/leases/{id}/pin` answer the lease's pin state, and the
+  `pinned`, `paused_at` and `pinned_idle_since` fields appear on the
+  lease API. `hold_expires_at` and `hold_state` are gone. The
+  `box_full` and `admin_unpin` events carry lease id `-` (a placeholder
+  for a lease-less event), documented in `docs/api.md`. **Every
+  re-admission path answers it too:** `POST /resume`, every resume-on-use
+  work call (exec, stream, files, proxy, jobs, the LLM gateway, the SSH
+  gateway), restart, clone, fork and restore map a box_full class
+  re-admission to the same `429 box_full` body a create gets, not a 500
+  a client would read as a permanent lease failure; and an undrain in
+  that state defers (the lease stays `drained`) instead of reporting
+  `resume_failed` or losing the lease (spoond-k0uz R3-2).
+- **Resume no longer refuses an unpinned non-persistent lease.**
+  `POST /api/leases/{id}/resume` and the SSH gateway's resume accept
+  any suspended lease the caller owns, as resume-on-use already did; the
+  `400` for a non-persistent lease is gone. A suspended non-persistent
+  lease the drain left suspended resumes normally.
+- **`PUT /holder` with a different holder replaces it** instead of
+  answering `409`: a holder is a plain label now, so there is nothing
+  to conflict with (v3.0).
+
+### Changed
+
+- **Pins replace holds; one clock for every paused lease (FS5, owner
+  decision 2026-10-08).** spoond no longer does anything pre-emptively:
+  there is no auto idle pause, no pressure sweep and no different
+  clocks. A lease gains a **`pinned`** flag (`"pinned": true` on create,
+  or `PUT /api/leases/{id}/pin`; unpin with `DELETE`). A pinned lease
+  is never paused or deleted by spoond before its own expiry — the TTL
+  still applies (pin and expiry collaborate), and a pinned persistent
+  lease stays until the owner releases it. There is no limit on how
+  many leases an owner pins. **Take-back (memory and disk) touches only
+  unpinned leases**; if nothing unpinned can be taken, the request
+  answers `429 box_full` and raises an alert. **One clock:** every
+  paused lease is released `PAUSED_RELEASE_DAYS` (default `30`) days
+  after its pause date, whatever paused it, preceded by a
+  `lease.paused_expiring` event 24 h before; resuming clears the date.
+  A lease's own TTL and its own `idle_suspend` opt-in are unchanged.
+
+  - **`holder` and `holder_url` are plain labels now.** They have no
+    lifecycle effect: setting a holder never pins, never keeps a lease
+    past its TTL and never protects it from take-back. `hold_ttl` is
+    accepted and ignored for one release, with a `Deprecation` header;
+    `hold_expires_at`, `hold_state` and hold renewal are removed.
+  - **`"pinned": true` on create pins the new lease.** The field was
+    decoded but dropped by the request path; it is now carried into the
+    grant (spoond-k0uz H1). A lease pinned on create is never paused by
+    the idle logic or take-back, and is still released at its own TTL.
+  - **A pinned lease is never idle-suspended.** The `idle_suspend`
+    sweep skips any pinned lease, whether its own `idle_suspend` or the
+    host `IDLE_SUSPEND_DEFAULT_SECS` would fire (spoond-k0uz H2). An
+    owner's explicit `POST /pause` still pauses a pinned lease.
+  - **A paused pinned lease is on the one clock (owner decision
+    2026-10-09).** Every paused lease is released 30 d after its pause
+    date, pinned or not: a pin protects only a running VM. This covers
+    an owner's own `POST /pause` on a pinned lease and a pinned lease a
+    failed drain resume left suspended; a running pinned lease is never
+    touched. A drained lease left suspended with `resume_failed` gets
+    `paused_at` at its drain pause time and so the clock.
+  - **Pinned-idle visibility (no automatic action).** A pinned lease
+    whose last API activity (`LastActive`; no heartbeat, no guest
+    activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`) is
+    flagged: GET returns `pinned_idle_since`, a `lease.pinned_idle`
+    event fires once per crossing, and the dashboard shows one
+    aggregate notification, `N pinned leases idle over 7 d (owner:
+    count, ...)`, broken down per owner. Nothing is paused, unpinned or
+    released because of it.
+  - **Migration 0022** turns every lease with an unexpired hold into a
+    pin, adds `pinned`, `paused_at`, `pinned_idle_since` and
+    `paused_expiry_notified`, backfills `paused_at` to the migration
+    time for every lease already `suspended` (a fresh 30 d from the
+    upgrade; no lease is released sooner), extends the `expires_at` of
+    every pinned non-persistent lease whose hold had outlived its TTL
+    to that hold's expiry (the hold was what kept it alive in 2.9, so
+    the first 3.0 sweep must not delete it at once — spoond-k0uz R3-1),
+    and clears the old hold columns (`hold_expires_at`, `hold_set_at`,
+    `hold_ttl`). The 2.9 window's pool workers are held by `pool-spawn`,
+    so `POST /api/admin/unpin-by-holder?holder_prefix=pool:` (admin
+    token) unpins leases by holder label; `pool-spawn` needs no change.
+    Clearing the hold columns is the **rollback story**: a 2.9 binary
+    rolled back onto this database reads every row as unheld instead of
+    treating an unexpired hold as live again (spoond-k0uz M6, see
+    `docs/operations.md`).
+  - **Pre-deploy gate:** clients that kept leases alive with a holder
+    (Honey) must create them with `"pinned": true` (plus
+    `"persistent": true` if they must outlive `MaxTTL`) before 3.0
+    deploys — `PUT /holder` no longer renews anything, and a
+    non-persistent lease cannot be extended (spoond-k0uz R3-1).
+  - **The one clock only ever releases a suspended lease
+    (spoond-k0uz R3-3).** A running lease with a stale `paused_at` (the
+    mark of a rollback to 2.9, which resumes without clearing the
+    column) is not deleted 30 d after the old pause: the clock's sweep
+    and its pre-release re-check both require the lease to still be
+    suspended, unreleased and not busy, and `LoadState` clears the
+    stale date (and stamps a fresh one on a suspended row with none) at
+    load. This also closes the race where a resume landing between the
+    sweep's collection pass and the release deleted a lease that had
+    just come back.
+
+### Removed
+
+- **Every automatic hold/idle rule and every clock but one (FS5).**
+  Removed: held rules 1 (idle 4 h), 3 (hold lapse), 4 (pressure) and 5
+  (critical disk); rule 2 (7 d) and the k5m 30 d stale design; the
+  `IDLE_TIMEOUT_SECS` auto-suspend of unheld persistent leases; and the
+  environment variables `HELD_IDLE_TIMEOUT_SECS`,
+  `HELD_SUSPENDED_RELEASE_SECS`, `HOLD_TTL_SECS`, `HOLD_TTL_MAX_SECS`,
+  `PRESSURE_HELD_IDLE_SECS` and `IDLE_TIMEOUT_SECS`. A set variable is
+  logged as removed and ignored at startup. `spoond_held_actions_total`
+  is replaced by `spoond_box_full_total`. Only the lease's own
+  `idle_suspend` opt-in suspends a lease for idleness now.
+
 ## [2.9.3] - 2026-10-09
 
 ### Added

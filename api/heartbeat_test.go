@@ -246,20 +246,18 @@ func TestLeaseHeartbeatWriteLimit(t *testing.T) {
 	}
 }
 
-// TestLeaseHeartbeatKeepsIdleSweepAway pins the reason the endpoint
-// exists: an idle persistent lease is suspended by the idle sweep, while
-// an otherwise identical one whose guest heartbeats is not. Both leases
-// start equally idle; only one receives a heartbeat before the sweep.
-// (The heartbeat's write floor is 60 s, so the idle timeout in play here
-// is an hour — the shape production uses.)
-func TestLeaseHeartbeatKeepsIdleSweepAway(t *testing.T) {
+// TestLeaseHeartbeatKeepsIdleSuspendAway pins the reason the endpoint
+// exists: with the caller-chosen idle_suspend the only idle threshold,
+// a lease whose guest heartbeats stays running while an otherwise
+// identical silent one is suspended.
+func TestLeaseHeartbeatKeepsIdleSuspendAway(t *testing.T) {
 	ts, _, svc, _, sub, _ := newHeartbeatTestServer(t)
-	svc.cfg.IdleTimeout = time.Hour
 	ctx := context.Background()
 
-	// Two persistent leases, both idle for two hours.
-	_, a := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true})
-	_, b := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-b", map[string]any{"image": "py-base", "persistent": true})
+	// Two persistent leases with a 60 s idle_suspend, both idle for two
+	// hours.
+	_, a := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
+	_, b := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-b", map[string]any{"image": "py-base", "persistent": true, "idle_suspend": 60})
 	idA, idB := a["id"].(string), b["id"].(string)
 	stale := time.Now().Add(-2 * time.Hour)
 	svc.store.mu.Lock()
@@ -273,7 +271,7 @@ func TestLeaseHeartbeatKeepsIdleSweepAway(t *testing.T) {
 	}
 
 	// Sweep: the heartbeating lease survives, the silent one suspends.
-	svc.sweepExpired(ctx)
+	svc.suspendIdleLeases(ctx, time.Now())
 	if l := svc.lookup("consumer-a", idA); l == nil {
 		t.Fatalf("lease %s vanished", idA)
 	} else if l.Suspended {

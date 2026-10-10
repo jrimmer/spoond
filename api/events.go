@@ -32,7 +32,25 @@ const (
 	LeaseRestarted     LeaseEventType = "restarted"
 	LeaseHolderSet     LeaseEventType = "holder_set"
 	LeaseHolderCleared LeaseEventType = "holder_cleared"
-	LeaseHeldAction    LeaseEventType = "held_action"
+	// LeasePinned and LeaseUnpinned mark a pin change (FS5, owner
+	// decision 2026-10-09): a pin protects only a running VM — spoond
+	// never pauses or releases a running pinned lease before its own
+	// expiry, and a paused pinned lease is released 30 d after its pause
+	// date like every paused lease. A holder or holder_url label never
+	// pins.
+	LeasePinned   LeaseEventType = "pinned"
+	LeaseUnpinned LeaseEventType = "unpinned"
+	// LeasePausedExpiring marks the warning 24 h before a paused lease is
+	// released by the one clock (FS5).
+	LeasePausedExpiring LeaseEventType = "paused_expiring"
+	// LeasePinnedIdle marks a pinned lease crossing the
+	// PINNED_IDLE_NOTICE_DAYS threshold (FS5, visibility only): nothing is
+	// paused, unpinned or released because of it.
+	LeasePinnedIdle LeaseEventType = "pinned_idle"
+	// LeaseAdminUnpin marks the admin route that unpins leases by holder
+	// prefix for the 2.9→3.0 migration window. It carries lease id "-"
+	// (a lease-less placeholder).
+	LeaseAdminUnpin LeaseEventType = "admin_unpin"
 	// LeaseCheckpointPolicy marks a per-lease checkpoint interval change
 	// (2.3, #122): the detail carries the new effective seconds.
 	LeaseCheckpointPolicy LeaseEventType = "checkpoint_policy"
@@ -119,10 +137,15 @@ const (
 	// lease ran on into the orchestrator stop. The detail names the
 	// pause error (spoond-52c R2).
 	LeaseDrainFailed LeaseEventType = "drain_failed"
+	// LeaseBoxFull marks a request that needed room but could not be
+	// admitted because every take-back candidate was pinned (FS5).
+	// Nothing was paused or released. It carries no lease id; the detail
+	// names the request's memory and owner.
+	LeaseBoxFull LeaseEventType = "box_full"
 	// LeaseDrainGaveUp marks the drain self-heal loop giving up on a
 	// drained lease whose resume stayed deferred past DRAIN_RESUME_MAX_AGE.
 	// The lease is left suspended (not lost: its snapshot is intact) for
-	// the owner or the idle rules to exit (spoond-52c B2).
+	// the owner or the one paused-release clock to exit (spoond-52c B2).
 	LeaseDrainGaveUp LeaseEventType = "drain_gave_up"
 	// LeaseUserDeleted marks the cleanup that follows DELETE
 	// /api/users/{id} (spoond-q4j): every lease of the removed identity
@@ -147,9 +170,9 @@ type LeaseEvent struct {
 	Owner   string         `json:"owner"`
 	Type    LeaseEventType `json:"type"`
 	Detail  string         `json:"detail,omitempty"`
-	// Reason is one of idle|idle_suspend|hold_lapsed|pressure|preempt
-	// on a suspended event (and resume_failed when an undrain left a lease
-	// suspended it could not resume); "" elsewhere.
+	// Reason is idle_suspend|preempt|resume_failed on a suspended
+	// event (resume_failed when an undrain left a lease suspended it
+	// could not resume); "" for a hand or drain suspend.
 	Reason string `json:"reason,omitempty"`
 	// PolicyStep is the pressure order's step name that ordered the
 	// suspend, or "" when none did.
@@ -434,7 +457,10 @@ func (s *Service) Subscribe(f EventFilter) *EventSubscription {
 
 // emitLeaseEvent records one lifecycle change on the bus. Safe to call
 // with s.store.mu held (the bus never takes the store lock); the SSE
-// streams and in-process subscribers are fed from here.
+// streams and in-process subscribers are fed from here. A lease-less
+// event (box_full, admin_unpin) passes lease id "-", a placeholder so
+// the SSE JSON's lease_id is always well-formed and a per-lease filter
+// never matches it.
 func (s *Service) emitLeaseEvent(leaseID, owner string, typ LeaseEventType, detail string) {
 	s.bus.emit(leaseID, owner, typ, detail)
 }

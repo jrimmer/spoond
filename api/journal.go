@@ -86,7 +86,8 @@ func journalCreateReason(snapshot, clonedFrom, forkedFrom string) string {
 // canonical one. The event keeps its free text; the journal prefers a
 // short, stable token so a release can be counted and grepped, except
 // for a caller-supplied reason (a CI job names itself), which is kept
-// verbatim because it is the most useful thing on the line.
+// verbatim because it is the most useful thing on the line, and the
+// owner-named API deletion.
 func journalReleaseReason(l *Lease, reason string) string {
 	switch reason {
 	case "deleted through the API":
@@ -99,34 +100,19 @@ func journalReleaseReason(l *Lease, reason string) string {
 		return "lost grace expired"
 	case userDeleteReason:
 		return "user deleted"
-	case "released by a held-lease rule":
-		return journalHeldReleaseReason(l)
+	case "paused_expired":
+		return "paused_expired"
 	default:
 		return reason
 	}
 }
 
-// journalHeldReleaseReason names which held-lease rule released the
-// lease, read from the last_action the rule stamped just before the
-// release: critical disk pressure is "disk" and the stale rule (a
-// suspension that stayed untouched) is "idle". Anything else is the
-// generic held release.
-func journalHeldReleaseReason(l *Lease) string {
-	switch {
-	case strings.HasPrefix(l.LastAction, heldRuleCritical+"/"):
-		return "disk"
-	case strings.HasPrefix(l.LastAction, heldRuleStale+"/"):
-		return "idle"
-	case strings.HasPrefix(l.LastAction, heldRuleExpiry+"/"):
-		return "hold_lapsed"
-	default:
-		return "held rule"
-	}
-}
+// journalHeldReleaseReason and its held-rule tokens are removed with
+// the held-lease rules (FS5).
 
 // journalSuspendReason names why a lease was suspended: the structured
-// automatic reason when there is one (idle, idle_suspend, hold_lapsed,
-// pressure, preempt), else "drain" for the admin drain and "hand" for an
+// automatic reason when there is one (idle_suspend, preempt or
+// resume_failed), else "drain" for the admin drain and "hand" for an
 // owner's own suspend.
 func journalSuspendReason(pol suspendPolicy, drained bool) string {
 	if pol.reason != "" {

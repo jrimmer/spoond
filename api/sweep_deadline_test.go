@@ -70,13 +70,15 @@ func TestSweepStageBoundFreesBusy(t *testing.T) {
 	sub := newBlockingPauseSub(t)
 	svc, db := testServiceWithSub(t, sub)
 	seedImage(t, db, "py-base", 2048)
-	svc.cfg.IdleTimeout = time.Millisecond
 	svc.sweepTimeout = 100 * time.Millisecond
 
 	ctx := context.Background()
 	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(l, 1); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
 	}
 	svc.store.mu.Lock()
 	l.LastActive = time.Now().Add(-time.Minute)
@@ -116,13 +118,15 @@ func TestSweepStageBoundReturns(t *testing.T) {
 	sub := newBlockingPauseSub(t)
 	svc, db := testServiceWithSub(t, sub)
 	seedImage(t, db, "py-base", 2048)
-	svc.cfg.IdleTimeout = time.Millisecond
 	svc.sweepTimeout = 100 * time.Millisecond
 
 	ctx := context.Background()
 	l, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.setIdlePolicy(l, 1); err != nil {
+		t.Fatalf("setIdlePolicy: %v", err)
 	}
 	svc.store.mu.Lock()
 	l.LastActive = time.Now().Add(-time.Minute)

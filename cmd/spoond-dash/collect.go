@@ -124,6 +124,15 @@ type Snapshot struct {
 	KeptBuildsBytes int64   `json:"keptBuildsBytes"`
 	KeptDiskPct     float64 `json:"keptDiskPct"`
 
+	// PinnedIdle is the count of pinned leases whose last API activity
+	// passed PINNED_IDLE_NOTICE_DAYS (FS5, from leases.pinned_idle_since
+	// <> ''): visibility only, for the Notifications panel's one
+	// aggregate message. PinnedIdleByOwner breaks that count down by
+	// owner label (display name where known), for the message's
+	// per-owner detail. Nothing is paused, unpinned or released.
+	PinnedIdle        int            `json:"pinnedIdle"`
+	PinnedIdleByOwner map[string]int `json:"-"`
+
 	// Rendered as HTML element patches, not sent as signals.
 	Services []Service   `json:"-"`
 	Rows     []LeaseRow  `json:"-"`
@@ -223,7 +232,9 @@ func jobExitedStyle(detail string) string {
 // are the live lease table the same tick built; a lease that has left
 // it (released) falls through to the event's owner.
 func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string {
-	if ev.LeaseID == "" {
+	// A lease-less event (the catalog gc, box_full, admin_unpin) carries
+	// no lease id or the placeholder "-", so it names spoond.
+	if ev.LeaseID == "" || ev.LeaseID == "-" {
 		return "spoond"
 	}
 	for _, r := range rows {
@@ -251,26 +262,26 @@ type Service struct {
 	State string `json:"state"`
 }
 
-// LeaseRow is one live lease for the table. Holder/HolderURL/HoldState
-// name what holds the lease (HoldState "" when unheld, "active" or
-// "lapsed"); HoldExpires is the hold's remaining time ("" without a
-// hold) — a held lease's time left is the hold's, not the lease's.
-// LastAction/LastActionAt record the last automatic held-lease action
-// ("rule/action", e.g. "idle/suspend_idle"). Comment is the lease's
-// own note: the holder column shows it, dim, on a CI job lease with no
-// holder and no name (e.g. "forgejo: example.com/site #218"). Burst is
-// the lease's admission class (#128 part 2): the state cell shows it
-// as "·b". Preempted marks a burst lease suspended by preemption (#128
-// part 3): the state cell shows it as "·p". IdleSuspended marks a
-// persistent lease suspended by its own idle_suspend threshold (2.5,
-// #129 part 2): the state cell shows it as "·i".
+// LeaseRow is one live lease for the table. Holder/HolderURL are the
+// lease's plain holder label and link (no lifecycle effect since FS5);
+// Pinned marks a pinned lease (the state cell and the holder column
+// show it). LastAction/LastActionAt record the last automatic action
+// ("rule/action", e.g. "idle_suspend/suspend_idle"). Comment is the
+// lease's own note: the holder column shows it, dim, on a CI job lease
+// with no holder and no name (e.g. "forgejo: example.com/site #218").
+// Burst is the lease's admission class (#128 part 2): the state cell
+// shows it as "·b". Preempted marks a burst lease suspended by
+// preemption (#128 part 3): the state cell shows it as "·p".
+// IdleSuspended marks a persistent lease suspended by its own
+// idle_suspend threshold (2.5, #129 part 2): the state cell shows it as
+// "·i".
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name, Comment string
 	Burst                                          bool
 	Preempted                                      bool
 	IdleSuspended                                  bool
-	Holder, HolderURL, HoldState                   string
-	HoldExpires                                    string
+	Pinned                                         bool
+	Holder, HolderURL                              string
 	LastAction                                     string
 	LastActionAt                                   time.Time
 	Age, Left                                      string
@@ -1023,7 +1034,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	names := c.userNames()
 
 	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, comment, created_at, expires_at, persistent,
-		holder, holder_url, hold_expires_at, last_action, last_action_at, class, preempted_at
+		holder, holder_url, pinned, last_action, last_action_at, class, preempted_at
 		FROM leases ORDER BY created_at DESC LIMIT 40`)
 	if err != nil {
 		return err
@@ -1033,12 +1044,12 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		var r LeaseRow
 		var owner, created, expires string
 		var comment string
-		var holder, holderURL, holdExpires, lastAction, lastActionAt string
-		var persistent int
+		var holder, holderURL, lastAction, lastActionAt string
+		var persistent, pinned int
 		var class string
 		var preemptedAt string
 		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &comment, &created, &expires, &persistent,
-			&holder, &holderURL, &holdExpires, &lastAction, &lastActionAt, &class, &preemptedAt); err != nil {
+			&holder, &holderURL, &pinned, &lastAction, &lastActionAt, &class, &preemptedAt); err != nil {
 			return err
 		}
 		r.Comment = comment
@@ -1050,6 +1061,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			r.Policy = "restricted"
 		}
 		r.Burst = class == "burst"
+		r.Pinned = pinned == 1
 		// A preempted lease shows the "·p" mark only while it is live
 		// (suspended, running or recovered). A lost row keeps its
 		// preempted_at in the store but must not claim to be waiting for
@@ -1069,16 +1081,6 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			r.Left = until(now, expires)
 		}
 		r.Holder, r.HolderURL = holder, holderURL
-		if holder != "" {
-			// The API's hold_state: a held lease with no hold_expires_at is
-			// a lapsed hold (it ran out unrenewed and stays held).
-			if holdExpires == "" {
-				r.HoldState = "lapsed"
-			} else {
-				r.HoldState = "active"
-				r.HoldExpires = until(now, holdExpires)
-			}
-		}
 		r.LastAction = lastAction
 		if t, err := time.Parse(time.RFC3339Nano, lastActionAt); err == nil {
 			r.LastActionAt = t
@@ -1133,6 +1135,36 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		s.Preempted = 0
 		return fmt.Errorf("count preempted leases: %w", err)
 	}
+	// The pinned-idle count (FS5): pinned leases the backend has flagged
+	// (pinned_idle_since set), counted per owner so the one aggregate
+	// message can name the count by owner. Visibility only; the
+	// Notifications panel shows one aggregate message.
+	s.PinnedIdle = 0
+	s.PinnedIdleByOwner = map[string]int{}
+	idleRows, err := db.Query(`SELECT owner, COUNT(*) FROM leases
+		WHERE pinned = 1 AND pinned_idle_since != '' GROUP BY owner`)
+	if err != nil {
+		return fmt.Errorf("count pinned-idle leases: %w", err)
+	}
+	for idleRows.Next() {
+		var owner string
+		var n int
+		if err := idleRows.Scan(&owner, &n); err != nil {
+			idleRows.Close()
+			return fmt.Errorf("count pinned-idle leases: %w", err)
+		}
+		name := names[owner]
+		if name == "" {
+			name = owner
+		}
+		s.PinnedIdleByOwner[name] += n
+		s.PinnedIdle += n
+	}
+	if err := idleRows.Err(); err != nil {
+		idleRows.Close()
+		return fmt.Errorf("count pinned-idle leases: %w", err)
+	}
+	idleRows.Close()
 
 	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
 	if err != nil {

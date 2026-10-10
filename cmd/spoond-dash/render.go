@@ -40,16 +40,16 @@ const (
 // rule, ┄ the rules inside the capacity and host panels, ■ a lost lease,
 // ∞ a persistent lease's remaining time, and the leases panel's marks —
 // the run-state glyphs ▶ running, ‖ suspended and ⭘ recovered, and the
-// hold marks ◆ held and ◉ lapsed hold. It is passed to grid.Check by
-// every renderer, and every rune is asserted to be in the shipped
-// JetBrains Mono (TestExtraGlyphsInFont). The Notifications panel's ×
-// dismiss control is injected by the page's JS, not drawn on the grid,
-// so it is not in this set.
-const Extra = "✓✗·═┄■∞◉⭘" + stateGlyphs
+// pin mark ◆. It is passed to grid.Check by every renderer, and every
+// rune is asserted to be in the shipped JetBrains Mono
+// (TestExtraGlyphsInFont). The Notifications panel's × dismiss control
+// is injected by the page's JS, not drawn on the grid, so it is not in
+// this set.
+const Extra = "✓✗·═┄■∞⭘" + stateGlyphs
 
-// stateGlyphs are the leases panel's run-state and hold glyphs: ▶ ‖ for
-// the states with one of their own, ◆ ◉ for the hold marks that lead
-// the holder column.
+// stateGlyphs are the leases panel's run-state and pin glyphs: ▶ ‖ for
+// the states with one of their own, ◆ for the pin mark that leads the
+// holder column.
 const stateGlyphs = "▶‖◆"
 
 // glyphs is the full set every renderer checks against: the grid
@@ -57,8 +57,8 @@ const stateGlyphs = "▶‖◆"
 func glyphs() string { return grid.Glyphs + Extra }
 
 // stateGlyph names a lease's run state: ▶ running, ‖ suspended,
-// ■ lost, ⭘ recovered (which acts like running). A hold is not a state:
-// it marks the holder column (◆, or ◉ once lapsed).
+// ■ lost, ⭘ recovered (which acts like running). A pin is not a state:
+// it marks the holder column (◆).
 func stateGlyph(r LeaseRow) rune {
 	switch r.State {
 	case "lost":
@@ -136,12 +136,15 @@ type Notice struct {
 //   - free hugepages or snapshot disk past the danger level,
 //   - the snapshot disk's I/O stall past DASH_IO_FULL_BAD_PCT,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
-//     (#126).
+//     (#126),
+//   - pinned leases past PINNED_IDLE_NOTICE_DAYS, as one aggregate
+//     message (FS5, visibility only).
 //
 // Each message's ID comes from its trigger ("unit:<name>", "hugepages",
-// "disk", "io-pressure", "kept-disk"), so a viewer's dismissal can
+// "disk", "io-pressure", "kept-disk", "pinned-idle"), so a viewer's
+// dismissal can
 // follow one trigger across refreshes. The leases table still shows a
-// lost lease (■ lost), a preempted burst lease and a lapsed hold; those
+// lost lease (■ lost) and a preempted burst lease; those
 // are not messages here.
 func notices(s Snapshot) []Notice {
 	var out []Notice
@@ -170,7 +173,41 @@ func notices(s Snapshot) []Notice {
 		out = append(out, Notice{ID: "kept-disk", Severity: "warn",
 			Text: fmt.Sprintf("kept checkpoints use %.0f%% of the snapshot disk", s.KeptDiskPct)})
 	}
+	// One aggregate message for pinned leases past the idle notice
+	// (FS5, visibility only): the lease holders' to deal with, so the
+	// panel names the count and the per-owner breakdown, not each lease.
+	if s.PinnedIdle > 0 {
+		out = append(out, Notice{ID: "pinned-idle", Severity: "warn",
+			Text: fmt.Sprintf("%d pinned lease%s idle over 7 d (%s)", s.PinnedIdle, plural(s.PinnedIdle), pinnedIdleOwnerCounts(s.PinnedIdleByOwner))})
+	}
 	return out
+}
+
+// pinnedIdleOwnerCounts renders the per-owner breakdown of the
+// pinned-idle notice: "owner: count" pairs, ordered by owner name, with
+// a stable fallback when the collector could not break the count down.
+func pinnedIdleOwnerCounts(byOwner map[string]int) string {
+	if len(byOwner) == 0 {
+		return "owner: count"
+	}
+	names := make([]string, 0, len(byOwner))
+	for name := range byOwner {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s: %d", name, byOwner[name]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// plural returns "s" for a count other than one.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // reconcileDismissed is the pure core of the browser's dismissal logic
@@ -1416,14 +1453,14 @@ func leaseValueWidths(rows []LeaseRow) (id, img, own, st, pol, left int) {
 }
 
 // leaseLegend is the dim line under the leases table that explains the
-// holder column's marks; it is drawn only when a shown row carries one.
-const leaseLegend = "◆ held · ◉ lapsed"
+// pinned column's mark; it is drawn only when a shown row is pinned.
+const leaseLegend = "◆ pinned"
 
-// hasLeaseLegend reports whether any shown lease carries a hold mark, so
-// the legend line belongs under the table.
+// hasLeaseLegend reports whether any shown lease is pinned, so the
+// legend line belongs under the table.
 func (l *layout) hasLeaseLegend() bool {
 	for _, r := range l.shownRows() {
-		if r.Holder != "" && (r.HoldState == "active" || r.HoldState == "lapsed") {
+		if r.Pinned {
 			return true
 		}
 	}
@@ -1606,38 +1643,28 @@ func fitWord(forms []string, n int) string {
 	return ellipsize(forms[len(forms)-1], n)
 }
 
-// leaseLeft is the row's left column: a held lease shows the time left
-// on its hold, a persistent lease without a hold ∞, the rest the
-// lease's own expiry ("due" when it has passed).
+// leaseLeft is the row's left column: a persistent lease shows ∞, the
+// rest the lease's own expiry ("due" when it has passed). A pin does
+// not change it (FS5: pin and expiry work together).
 func leaseLeft(r LeaseRow) string {
-	if r.HoldState != "" && r.HoldExpires != "" {
-		return r.HoldExpires
-	}
 	return r.Left
 }
 
-// holder draws the holder column: ◆ before a held lease's holder, ◉
-// when the hold has lapsed; a lease's name when there is no holder; a
-// lease's comment — dim, a CI job lease usually — when there is neither;
-// a dash when nothing at all. Cut with … so nothing reaches the border.
+// holder draws the holder column: ◆ before a pinned lease's holder (a
+// pin is the only lifecycle mark a lease carries now); a lease's name
+// when there is no holder; a lease's comment — dim, a CI job lease
+// usually — when there is neither; a dash when nothing at all. Cut with
+// … so nothing reaches the border.
 func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
 	room := c.holdW - 1 // one column clear of the border
+	if r.Pinned {
+		g.Segs(c.hold, yy, []grid.Seg{{Text: "◆ ", Style: "state"}}, room)
+		room -= 2
+		g.Segs(c.hold+2, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: "link"}}, room)
+		return
+	}
 	if r.Holder != "" {
-		mark, style := "", "link"
-		switch r.HoldState {
-		case "active":
-			mark = "◆ "
-		case "lapsed":
-			mark = "◉ "
-		}
-		if mark != "" {
-			mw := len([]rune(mark))
-			g.Segs(c.hold, yy, []grid.Seg{{Text: mark, Style: "state"}}, room)
-			room -= mw
-			g.Segs(c.hold+mw, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: style}}, room)
-			return
-		}
-		g.Segs(c.hold, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: style}}, room)
+		g.Segs(c.hold, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: "link"}}, room)
 		return
 	}
 	if r.Name != "" {

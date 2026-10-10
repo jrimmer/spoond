@@ -319,7 +319,11 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
 		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -392,7 +396,11 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
 		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21)`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -473,8 +481,12 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
 		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21)`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
 		`DELETE FROM schema_migrations WHERE version = 12`,
 	} {
 		if _, err := db11.Exec(stmt); err != nil {
@@ -539,7 +551,11 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
 		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21)`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -599,7 +615,11 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
 		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
 		`ALTER TABLE lease_jobs DROP COLUMN reason`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21)`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -661,7 +681,11 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
 		`ALTER TABLE lease_jobs DROP COLUMN max_runtime_secs`,
 		`ALTER TABLE lease_jobs DROP COLUMN reason`,
-		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21)`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22)`,
 	} {
 		if _, err := db18.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -729,7 +753,11 @@ func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
 		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
-		`DELETE FROM schema_migrations WHERE version IN (20, 21)`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22)`,
 	} {
 		if _, err := db19.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -801,7 +829,11 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN suspend_policy_step`,
 		`ALTER TABLE leases DROP COLUMN suspend_build_id`,
 		`ALTER TABLE leases DROP COLUMN suspended_at`,
-		`DELETE FROM schema_migrations WHERE version = 21`,
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version IN (21, 22)`,
 	} {
 		if _, err := db20.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -841,5 +873,210 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 	}
 	if again.SuspendReason != "idle" || again.SuspendPolicyStep != "pressure/disk" || again.SuspendBuildID != "b-1" || !again.SuspendedAt.Equal(row.SuspendedAt) {
 		t.Fatalf("suspend facts after upsert = %+v", again)
+	}
+}
+
+// TestMigration22PinsHoldsAndBackfillsPausedAt builds a database at
+// version 21 with a live-hold lease, a lapsed-hold lease, an
+// unheld-suspended lease, a held-suspended lease and a lost lease, and
+// opens it. Migration 22 must apply: every unexpired hold becomes a pin,
+// every row already suspended (held or not) gets paused_at backfilled to
+// the migration time so the one clock starts a fresh 30 d from the
+// upgrade, and the hold columns are cleared for rollback (FS5,
+// spoond-k0uz H3/M6).
+func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v21.db")
+	{
+		db, err := Open(path) // applies every migration
+		if err != nil {
+			t.Fatalf("open fresh: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+	// Rewind to version 21: drop what migration 22 added and its row, so
+	// the next Open applies 0022 for real. The hold columns stay (0008
+	// created them), so the UPDATE's columns exist.
+	db21, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
+		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
+		`ALTER TABLE leases DROP COLUMN paused_at`,
+		`ALTER TABLE leases DROP COLUMN pinned`,
+		`DELETE FROM schema_migrations WHERE version = 22`,
+	} {
+		if _, err := db21.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	later := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339Nano)
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	// A whole-second expires_at and a hold 293 ms into the same second:
+	// in string order the expires_at sorts after the hold, in true time
+	// order the hold is later.
+	wholeSecondTTL := time.Now().Add(30 * time.Minute).UTC().Format("2006-01-02T15:04:05Z")
+	wholeSecondHold := time.Now().Add(30*time.Minute + 293*time.Millisecond).UTC().Format("2006-01-02T15:04:05.293Z")
+	for _, seed := range []struct {
+		id, state, holder, holdExpires string
+		suspended                      int
+		persistent                     int
+		expiresAt                      string
+	}{
+		{"lease-hold", "running", "ci-job", future, 0, 1, past},
+		{"lease-lapsed", "running", "ci-job", past, 0, 1, past},
+		{"lease-plain", "running", "", "", 0, 1, past},
+		// Already suspended with no hold: the backfill gives it the one
+		// clock (it would otherwise never be released).
+		{"lease-suspended", "suspended", "", "", 1, 1, past},
+		// Suspended and held: pinned by the hold conversion and given the
+		// same clock.
+		{"lease-held-suspended", "suspended", "ci-job", future, 1, 1, past},
+		// A lost lease is suspended too; the backfill applies, so it is
+		// never released sooner than 30 d after the upgrade.
+		{"lease-lost", "lost", "", "", 1, 1, past},
+		// spoond-k0uz R3-1: a non-persistent lease with a live hold. In
+		// 2.9 the hold kept it past its TTL (held() is Holder != ""), so
+		// its expires_at may already be past when the upgrade pins it; the
+		// migration must extend the TTL to the hold's expiry or the first
+		// 3.0 sweep deletes the VM at once.
+		{"lease-hold-ttl-past", "running", "pool:honey/work-1", future, 0, 0, past},
+		// The same shape whose TTL is not later than its hold: nothing to
+		// extend (max() keeps the later value). The TTL is strictly later
+		// than the hold so the max() is really exercised (R4-4).
+		{"lease-hold-ttl-future", "running", "pool:honey/work-2", future, 0, 0, later},
+		// The hold lands in the same second as a whole-second expires_at,
+		// a fraction of a second later. Plain string order puts the
+		// whole-second stamp after the fractional one, so the extension
+		// would be skipped and the TTL would stay 293 ms short; the
+		// migration compares by instant instead.
+		{"lease-hold-ttl-fraction", "running", "pool:honey/work-3", wholeSecondHold, 0, 0, wholeSecondTTL},
+	} {
+		if _, err := db21.Exec(
+			`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, suspended, persistent, holder, hold_expires_at, hold_set_at, hold_ttl)
+			 VALUES (?, 'alice', 'py-base', '2026-01-01T00:00:00Z', ?, '2026-01-01T00:30:00Z', ?, ?, ?, ?, ?, ?, 3600)`,
+			seed.id, seed.expiresAt, seed.state, seed.suspended, seed.persistent, seed.holder, seed.holdExpires, seed.holdExpires); err != nil {
+			t.Fatalf("seed %s: %v", seed.id, err)
+		}
+	}
+	db21.Close()
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open v21 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	rows, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]LeaseRow{}
+	for _, r := range rows {
+		got[r.ID] = r
+	}
+	// A live hold becomes a pin; a lapsed or absent hold does not.
+	if !got["lease-hold"].Pinned {
+		t.Fatal("a lease with an unexpired hold was not pinned by migration 22")
+	}
+	if got["lease-lapsed"].Pinned {
+		t.Fatal("a lease with a lapsed hold was pinned by migration 22")
+	}
+	if got["lease-plain"].Pinned {
+		t.Fatal("a plain lease was pinned by migration 22")
+	}
+	if !got["lease-held-suspended"].Pinned {
+		t.Fatal("a suspended lease with an unexpired hold was not pinned by migration 22")
+	}
+	// Every row already suspended gets the paused_at backfill, pinned or
+	// not, lost included.
+	for _, id := range []string{"lease-suspended", "lease-held-suspended", "lease-lost"} {
+		if got[id].PausedAt.IsZero() {
+			t.Fatalf("%s (suspended) did not get paused_at backfilled", id)
+		}
+		if age := time.Since(got[id].PausedAt); age < 0 || age > time.Minute {
+			t.Fatalf("%s paused_at = %v, want the migration time", id, got[id].PausedAt)
+		}
+	}
+	// A row that was not suspended gets no clock.
+	if !got["lease-hold"].PausedAt.IsZero() || !got["lease-plain"].PausedAt.IsZero() {
+		t.Fatal("a running lease was given a pause date by migration 22")
+	}
+	// spoond-k0uz R3-1: the pinned non-persistent row whose TTL the hold
+	// had already outlived gets expires_at = its hold_expires_at, so the
+	// first 3.0 sweep does not delete a lease the hold was keeping alive.
+	if want, _ := time.Parse(time.RFC3339Nano, future); !got["lease-hold-ttl-past"].ExpiresAt.Equal(want) {
+		t.Fatalf("a pinned non-persistent lease with a past TTL kept expires_at %v, want the hold expiry %v", got["lease-hold-ttl-past"].ExpiresAt, want)
+	}
+	// max(): a TTL already past the hold expiry is left alone; the seed's
+	// TTL is strictly later than the hold, so the max() is really tested.
+	if want, _ := time.Parse(time.RFC3339Nano, later); !got["lease-hold-ttl-future"].ExpiresAt.Equal(want) {
+		t.Fatalf("a pinned non-persistent lease with a later TTL had its expires_at changed to %v, want %v", got["lease-hold-ttl-future"].ExpiresAt, want)
+	}
+	// Same-second, sub-second-later hold: the extension still happens —
+	// the compare is by instant, not by string (the whole-second
+	// "…:00Z" string sorts after "…:00.293Z").
+	if want, _ := time.Parse(time.RFC3339Nano, wholeSecondHold); !got["lease-hold-ttl-fraction"].ExpiresAt.Equal(want) {
+		t.Fatalf("a whole-second TTL 293 ms before its hold stayed %v, want the hold expiry %v", got["lease-hold-ttl-fraction"].ExpiresAt, want)
+	}
+	// Persistent rows are never TTL-swept, so the conversion leaves their
+	// expires_at alone (the seed's past value, not the hold's future one).
+	if want, _ := time.Parse(time.RFC3339Nano, past); !got["lease-hold"].ExpiresAt.Equal(want) {
+		t.Fatalf("a persistent pinned lease's expires_at was rewritten to %v, want %v", got["lease-hold"].ExpiresAt, want)
+	}
+	// Rollback: the hold columns are cleared after conversion, so a 2.9
+	// binary re-reads every row as unheld (spoond-k0uz M6).
+	for _, id := range []string{"lease-hold", "lease-held-suspended", "lease-lapsed"} {
+		var holdExpires, holdSetAt string
+		var holdTTL int
+		if err := db.r.QueryRowContext(ctx,
+			`SELECT hold_expires_at, hold_set_at, hold_ttl FROM leases WHERE id = ?`, id).
+			Scan(&holdExpires, &holdSetAt, &holdTTL); err != nil {
+			t.Fatalf("read hold columns for %s: %v", id, err)
+		}
+		if holdExpires != "" || holdSetAt != "" || holdTTL != 0 {
+			t.Fatalf("migration 22 left hold columns on %s: expires=%q set=%q ttl=%d", id, holdExpires, holdSetAt, holdTTL)
+		}
+	}
+}
+
+// TestUnpinLeasesByHolderPrefix: the migration-window helper clears only
+// the matching pinned leases and refuses an empty prefix.
+func TestUnpinLeasesByHolderPrefix(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	for _, r := range []LeaseRow{
+		{ID: "worker", Owner: "o", Image: "i", State: "running", Class: "guaranteed", Holder: "pool:honey/work-1", Pinned: true},
+		{ID: "other", Owner: "o", Image: "i", State: "running", Class: "guaranteed", Holder: "ci-job", Pinned: true},
+		{ID: "wild", Owner: "o", Image: "i", State: "running", Class: "guaranteed", Holder: "poolX", Pinned: true},
+	} {
+		if err := db.UpsertLease(ctx, r); err != nil {
+			t.Fatalf("upsert %s: %v", r.ID, err)
+		}
+	}
+	if _, err := db.UnpinLeasesByHolderPrefix(ctx, ""); err == nil {
+		t.Fatal("an empty prefix was accepted")
+	}
+	n, err := db.UnpinLeasesByHolderPrefix(ctx, "pool:")
+	if err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("unpinned %d leases, want 1", n)
+	}
+	rows, err := db.ListLeases(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.ID] = r.Pinned
+	}
+	if got["worker"] || !got["other"] || !got["wild"] {
+		t.Fatalf("unpin by prefix hit the wrong rows: %v", got)
 	}
 }

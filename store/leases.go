@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -27,17 +28,32 @@ type LeaseRow struct {
 	// "" for a lease lost before the column existed.
 	LostReason string
 	Drained    bool // paused by the admin drain, resumed by undrain (U10)
-	// Holder names what holds the lease (a CI job, a person) and
-	// HolderUrl links to it. A non-empty holder keeps the lease out of
-	// every sweeper (TTL, idle); checkpoints follow checkpoint_interval.
-	// HoldSetAt/HoldExpiresAt bound the hold (2.1): past HoldExpiresAt
-	// the holder is cleared and normal sweeping resumes. HoldTTL is the
-	// requested explicit hold_ttl in seconds (0 = the default). The
-	// Last* fields record the last automatic held-lease action.
+	// Pinned marks a lease its owner pinned (FS5, owner decision
+	// 2026-10-08): spoond never pauses or deletes a pinned lease before
+	// its own expiry. The lease's TTL still applies; a persistent pinned
+	// lease stays until the owner releases it. Only the owner (unpin,
+	// DELETE) changes a pin.
+	Pinned bool
+	// PausedAt is when the lease was paused, whatever paused it
+	// (take-back, its own idle_suspend, POST /pause). One clock releases
+	// a paused lease PAUSED_RELEASE_DAYS after this instant; resuming
+	// clears it. Zero = not paused.
+	PausedAt time.Time
+	// PinnedIdleSince is when a pinned lease's LastActive first passed
+	// PINNED_IDLE_NOTICE_DAYS (FS5 visibility only): GET returns it as
+	// pinned_idle_since, a lease.pinned_idle event fires once per
+	// crossing, and nothing is paused, unpinned or released because of
+	// it. Zero = not flagged.
+	PinnedIdleSince time.Time
+	// PausedExpiryNotified marks that the lease.paused_expiring warning
+	// (24 h before a paused lease is released) has been emitted, so a
+	// restart does not repeat it.
+	PausedExpiryNotified bool
+	// Holder and HolderUrl are plain labels naming what holds the lease
+	// (a CI job, a person) and a link to it. They have no effect on the
+	// lease's lifecycle; only Pinned does. LastAction/LastActionAt record
+	// the last automatic action (idle_suspend, preempt, paused_expired).
 	Holder, HolderUrl string
-	HoldSetAt         time.Time
-	HoldExpiresAt     time.Time
-	HoldTTL           int64
 	LastAction        string
 	LastActionAt      time.Time
 	// Generation is the lease's current continuity generation (2.2):
@@ -90,12 +106,16 @@ type LeaseRow struct {
 	SuspendedAt       time.Time
 }
 
+// leaseColumns is the leases table's column list in row order. It must
+// hold exactly as many names as UpsertLease passes values (the test
+// suite pins the count): the FS5 columns live next to drained/lost.
 const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires_at,
 	persistent, last_active, workspace, suspended, name, net_policy, net_allow,
 	expose_ports, exposed_ip, comment, state, resume_build_id,
 	last_checkpoint_build_id, last_checkpoint_at, recovered_from, drained, lost_at,
 	lost_reason,
-	holder, holder_url, hold_set_at, hold_expires_at, hold_ttl,
+	pinned, paused_at, pinned_idle_since, paused_expiry_notified,
+	holder, holder_url,
 	last_action, last_action_at, generation, checkpoint_interval, idle_suspend,
 	memory_mb, class, priority, preempted_at, snapshot_build_id,
 	suspend_reason, suspend_policy_step, suspend_build_id, suspended_at`
@@ -113,9 +133,11 @@ func (db *DB) UpsertLease(ctx context.Context, l LeaseRow) error {
 	}
 	_, err = db.w.ExecContext(ctx, `
 INSERT INTO leases (`+leaseColumns+`) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -142,11 +164,12 @@ ON CONFLICT(id) DO UPDATE SET
   drained=excluded.drained,
   lost_at=excluded.lost_at,
   lost_reason=excluded.lost_reason,
+  pinned=excluded.pinned,
+  paused_at=excluded.paused_at,
+  pinned_idle_since=excluded.pinned_idle_since,
+  paused_expiry_notified=excluded.paused_expiry_notified,
   holder=excluded.holder,
   holder_url=excluded.holder_url,
-  hold_set_at=excluded.hold_set_at,
-  hold_expires_at=excluded.hold_expires_at,
-  hold_ttl=excluded.hold_ttl,
   last_action=excluded.last_action,
   last_action_at=excluded.last_action_at,
   generation=excluded.generation,
@@ -167,8 +190,9 @@ ON CONFLICT(id) DO UPDATE SET
 		l.NetPolicy, string(netAllow), string(exposePorts), l.ExposedIP,
 		l.Comment, l.State, l.ResumeBuildID, l.LastCheckpointBuildID,
 		formatTime(l.LastCheckpointAt), formatTime(l.RecoveredFrom), l.Drained,
-		formatTime(l.LostAt), l.LostReason, l.Holder, l.HolderUrl,
-		formatTime(l.HoldSetAt), formatTime(l.HoldExpiresAt), l.HoldTTL,
+		formatTime(l.LostAt), l.LostReason, l.Pinned, formatTime(l.PausedAt),
+		formatTime(l.PinnedIdleSince), l.PausedExpiryNotified,
+		l.Holder, l.HolderUrl,
 		l.LastAction, formatTime(l.LastActionAt), l.Generation,
 		l.CheckpointInterval, l.IdleSuspend, l.MemoryMB, l.Class, l.Priority,
 		formatTime(l.PreemptedAt), l.SnapshotBuildID,
@@ -203,6 +227,36 @@ func (db *DB) DeleteLease(ctx context.Context, id string) error {
 		return fmt.Errorf("store: delete lease %s: %w", id, err)
 	}
 	return nil
+}
+
+// UnpinLeasesByHolderPrefix clears the pinned flag of every lease whose
+// holder starts with prefix, returning how many rows changed. It exists
+// for the 2.9→3.0 migration window: migration 0022 turns every live
+// hold into a pin, and pool-spawn held its worker leases with a holder
+// label (e.g. "pool:"), so an operator can unpin exactly those. An
+// empty prefix refuses (it would unpin every lease).
+func (db *DB) UnpinLeasesByHolderPrefix(ctx context.Context, prefix string) (int64, error) {
+	if prefix == "" {
+		return 0, fmt.Errorf("store: unpin by holder prefix: prefix is empty")
+	}
+	res, err := db.w.ExecContext(ctx,
+		`UPDATE leases SET pinned = 0 WHERE pinned = 1 AND holder LIKE ? ESCAPE '\'`,
+		escapeLikePrefix(prefix)+"%")
+	if err != nil {
+		return 0, fmt.Errorf("store: unpin leases by holder prefix %q: %w", prefix, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: unpin leases by holder prefix %q: %w", prefix, err)
+	}
+	return n, nil
+}
+
+// escapeLikePrefix escapes the LIKE wildcards in a literal prefix so it
+// matches only itself; the caller appends "%" and uses ESCAPE '\'.
+func escapeLikePrefix(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // GetLease returns one lease row by id (store.ErrNotFound when the id
@@ -265,7 +319,7 @@ func (db *DB) UpdateLastActive(ctx context.Context, ids map[string]time.Time) er
 func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	var r LeaseRow
 	var createdAt, expiresAt, lastActive, lastCheckpointAt, recoveredFrom, lostAt string
-	var holdSetAt, holdExpiresAt, lastActionAt, preemptedAt string
+	var pausedAt, pinnedIdleSince, lastActionAt, preemptedAt string
 	var suspendedAt string
 	var netAllow, exposePorts string
 	err := scan(&r.ID, &r.Owner, &r.Image, &r.SandboxID, &r.Address,
@@ -273,8 +327,8 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&r.Suspended, &r.Name, &r.NetPolicy, &netAllow, &exposePorts,
 		&r.ExposedIP, &r.Comment, &r.State, &r.ResumeBuildID,
 		&r.LastCheckpointBuildID, &lastCheckpointAt, &recoveredFrom, &r.Drained,
-		&lostAt, &r.LostReason, &r.Holder, &r.HolderUrl,
-		&holdSetAt, &holdExpiresAt, &r.HoldTTL,
+		&lostAt, &r.LostReason, &r.Pinned, &pausedAt,
+		&pinnedIdleSince, &r.PausedExpiryNotified, &r.Holder, &r.HolderUrl,
 		&r.LastAction, &lastActionAt, &r.Generation, &r.CheckpointInterval,
 		&r.IdleSuspend, &r.MemoryMB, &r.Class, &r.Priority, &preemptedAt,
 		&r.SnapshotBuildID, &r.SuspendReason, &r.SuspendPolicyStep,
@@ -291,8 +345,8 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	r.LastCheckpointAt = parseTime(lastCheckpointAt)
 	r.RecoveredFrom = parseTime(recoveredFrom)
 	r.LostAt = parseTime(lostAt)
-	r.HoldSetAt = parseTime(holdSetAt)
-	r.HoldExpiresAt = parseTime(holdExpiresAt)
+	r.PausedAt = parseTime(pausedAt)
+	r.PinnedIdleSince = parseTime(pinnedIdleSince)
 	r.LastActionAt = parseTime(lastActionAt)
 	r.PreemptedAt = parseTime(preemptedAt)
 	r.SuspendedAt = parseTime(suspendedAt)
