@@ -35,7 +35,7 @@ func sampleSnapshot() Snapshot {
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
 		ByState:   map[string]int{"running": 2, "suspended": 1},
 		ReqPerSec: 12.3, CreatesPerMin: 4, CreateMs: 250, ResumeMs: 4100,
-		FwConns: 9, AuthFails: 2, Quota: 1, Throttled: 0, Capacity: 3, BuildFails: 1,
+		FwConns: 9, AuthFails: 2, Throttled: 0, Capacity: 3, BuildFails: 1,
 		CPUPct: 37.5, Load1: 1.4, Cores: 16,
 		MemUsedPct: 49.3, MemTotalGiB: 19.7, MemUsedGiB: 9.7,
 		HugeUsedPct: 44.3, HugeFreeGiB: 23.9,

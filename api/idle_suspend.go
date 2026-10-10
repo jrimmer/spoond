@@ -124,12 +124,12 @@ func (s *Service) recordIdleSuspend(l *Lease, lastActive, now time.Time) {
 }
 
 // ensureRunning serves the next work call on a suspended lease: it
-// resumes the lease through the normal resume path (admission, class and
-// quota apply) and then lets the caller serve. Every suspension resumes
+// resumes the lease through the normal resume path (admission and
+// take-back apply) and then lets the caller serve. Every suspension resumes
 // this way (#145 D2, one rule for every kind of suspend): a lease
 // suspended by pressure, preemption, idle_suspend, take-back or the
 // admin drain, and one its owner suspended by hand. A refusal
-// answers what resume would: 429 for the owner's own memory quota, 503
+// answers what resume would: 429 box_full when take-back can free nothing, 503
 // capacity_wait with Retry-After when the node has no room (a structural
 // shortage never refuses: the caller waits), 409 lease_busy while its
 // pause or another caller's resume is in flight, 410 lease_lost when its

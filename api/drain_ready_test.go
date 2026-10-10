@@ -256,7 +256,7 @@ func TestUndrainNotReadyClassification(t *testing.T) {
 	ready := []error{
 		errors.New("failed to init envd: syncing took too long"),
 		fmt.Errorf("load build b: %w", store.ErrNotFound),
-		errQuotaExceeded,
+		errTestResumeRefused,
 	}
 	for _, err := range ready {
 		if undrainNotReady(err) {

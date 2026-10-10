@@ -50,7 +50,7 @@ SPOOND · spoond.example.com                              up 9m, 12:00:00
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ refusals and failures ──────────────────────────────────────────────┐
-│ auth 2  quota 1  throttled 0  capacity 3  build fails 1              │
+│ auth 2  throttled 0  capacity 3  build fails 1  lost leases 0        │
 │ create 250 ms  resume 4.1 s                                          │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ events ─────────────────────────────────────────────────────────────┐

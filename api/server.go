@@ -1593,7 +1593,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	// A suspended lease has no running sandbox to update, so it resumes
 	// on this work call (#145 D2) through the normal resume path. A
-	// refused resume answers capacity_wait/quota/lease_busy.
+	// refused resume answers capacity_wait/box_full/lease_busy.
 	lease := s.svc.lookup(owner, id)
 	if lease == nil {
 		writeError(w, http.StatusNotFound, "lease not found")
@@ -2713,7 +2713,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // writeErrorCode is writeError with a machine-readable code beside the
-// message (e.g. capacity_wait, quota_exceeded, lease_busy,
+// message (e.g. capacity_wait, box_full, lease_busy,
 // substrate_unavailable).
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg, "code": code})

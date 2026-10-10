@@ -64,8 +64,7 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; restoring it brings a running sandbox back, and
 		// that sandbox runs the image's current memory_mb — the charge
-		// to re-admit before the sandbox is created (#128). A restore
-		// adds no lease, so only the memory cap applies. (A running
+		// to re-admit before the sandbox is created (#128). (A running
 		// restore is already charged, and with its own charge — no new
 		// admission.)
 		if err := s.reserveQuota(l.Owner, 1, img.MemoryMB, false); err != nil {

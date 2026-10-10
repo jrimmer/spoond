@@ -1,9 +1,10 @@
 package api
 
 // Round-3 review follow-ups for spoond-q4j (user delete cleanup):
-// N1 the queued-create refusal must answer 403 even when the ticket was
-// queued on a quota cap, N1b a ticket parked after the queue cancel is
-// still refused early, N2 a repeated delete of the same real user is
+// N1 the queued-create refusal must answer 403 (its quota-cap case went
+// with the caps in 3.0; TestUserDeleteRefusesQueuedCreate covers the
+// capacity case), N1b a ticket parked after the queue cancel is still
+// refused early, N2 a repeated delete of the same real user is
 // idempotent and answers 200, N3 restore maps errOwnerGone to 403, and
 // N4 the owner-deleted grant path drops its egress memo.
 
@@ -17,39 +18,6 @@ import (
 	"github.com/jrimmer/spoond/v2/identity"
 	"github.com/jrimmer/spoond/v2/substrate"
 )
-
-// TestUserDeleteRefusesQueuedCreateQuotaCap: a create queued on the
-// owner's own quota cap must answer 403 owner deleted when the owner is
-// deleted, not the cap's 429 (spoond-q4j N1).
-func TestUserDeleteRefusesQueuedCreateQuotaCap(t *testing.T) {
-	ts, svc, _, _, ids, victimID := newUserDeleteServer(t)
-	setQuota(t, ids, victimID, 1, 0, 0) // one lease only
-	svc.cfg.MaxAdmitWaitSecs = 60
-	svc.admitQ.tick = time.Hour // the delete answers the ticket, not the tick
-	h := ts.Config.Handler
-
-	if r := waitCreate(t, h, "victim-tok", `{"image":"py-base","ttl":60}`); r.code != http.StatusCreated {
-		t.Fatalf("filler create: %d %v", r.code, r.body)
-	}
-	res := startCreate(t, h, context.Background(), "victim-tok", `{"image":"py-base","ttl":60,"wait":60}`)
-	waitDepth(t, svc, 1)
-
-	resp, removed := doReq(t, "DELETE", ts.URL+"/api/users/"+victimID, "admin-tok", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("delete user: %d %v", resp.StatusCode, removed)
-	}
-
-	out := waitResult(t, res)
-	if out.code != http.StatusForbidden {
-		t.Fatalf("queued-on-quota create after user delete = %d, want 403 (%v)", out.code, out.body)
-	}
-	if msg, _ := out.body["error"].(string); msg != "owner deleted" {
-		t.Fatalf("refusal = %q, want %q", msg, "owner deleted")
-	}
-	if l := svc.leasesOfOwner(victimID); len(l) != 0 {
-		t.Fatalf("queued create recreated %d lease(s) for the deleted owner", len(l))
-	}
-}
 
 // TestUserDeleteTicketQueuedAfterCancelRefused: a ticket that raced the
 // owner-delete mark and parked just before it is still refused at its
@@ -75,7 +43,7 @@ func TestUserDeleteTicketQueuedAfterCancelRefused(t *testing.T) {
 	// path, then set the mark: exactly the production race.
 	tk := svc.newAdmissionTicket(u.ID, leaseRequest{
 		owner: u.ID, image: "py-base", ttl: time.Minute,
-	}, errQuotaExceeded, time.Minute)
+	}, substrate.ErrCapacity, time.Minute)
 	if tk == nil {
 		t.Fatal("ticket for a live owner = nil, want a parked ticket")
 	}
@@ -101,7 +69,7 @@ func TestUserDeleteTicketQueuedAfterCancelRefused(t *testing.T) {
 	svc.cancelQueuedForOwner(u.ID)
 	if late := svc.newAdmissionTicket(u.ID, leaseRequest{
 		owner: u.ID, image: "py-base", ttl: time.Minute,
-	}, errQuotaExceeded, time.Minute); late != nil {
+	}, substrate.ErrCapacity, time.Minute); late != nil {
 		t.Fatalf("ticket for deleted owner = %+v, want nil (refused before parking)", late)
 	}
 	if svc.queueDepth() != 0 {

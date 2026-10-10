@@ -72,7 +72,6 @@ type BackendMetrics struct {
 	IdentityAdmins prometheus.Gauge     // admin count
 	AuthFailures   prometheus.Counter   // cumulative auth failures
 	AuthThrottled  prometheus.Counter   // 429s from rate limiter
-	QuotaExceeded  prometheus.Counter   // quota rejections
 	QuotaReserved  prometheus.Gauge     // pending reservations
 	SharesActive   prometheus.Gauge     // active share grants
 	BusySlots      *prometheus.GaugeVec // {owner}: exec/stream concurrency
@@ -333,10 +332,6 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "auth_throttled_total",
 		Help: "Requests rejected by auth rate limiter (429).",
 	})
-	m.QuotaExceeded = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "spoond", Name: "quota_exceeded_total",
-		Help: "Lease quota rejections.",
-	})
 	m.QuotaReserved = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "quota_reservations",
 		Help: "Pending lease quota reservations.",
@@ -554,7 +549,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.ProxyReqs, m.ProxyAuthRes,
 		m.NetpolApply, m.NetpolErrors, m.NetpolDur,
 		m.IdentityUsers, m.IdentityAdmins, m.AuthFailures,
-		m.AuthThrottled, m.QuotaExceeded, m.QuotaReserved,
+		m.AuthThrottled, m.QuotaReserved,
 		m.SharesActive, m.BusySlots,
 		m.StoreErrors,
 		m.Notifications, m.StartTime,

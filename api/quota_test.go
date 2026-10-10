@@ -10,7 +10,8 @@ import (
 	"github.com/jrimmer/spoond/v2/identity"
 )
 
-// newQuotaTestServer bootstraps admin (legacy token) + a limited user.
+// newQuotaTestServer bootstraps admin (legacy token) + a user whose
+// max_ttl is 10s (the one quota knob left since 3.0).
 func newQuotaTestServer(t *testing.T) (http.Handler, string) {
 	t.Helper()
 	svc, db, _ := newTestService(t)
@@ -31,8 +32,8 @@ func newQuotaTestServer(t *testing.T) (http.Handler, string) {
 		t.Fatalf("create limited: %d", rec.Code)
 	}
 	uid := body["user"].(map[string]any)["id"].(string)
-	// set quota: max 2 leases, max TTL 10s
-	rec2, _ := doUsersReq(t, h, "POST", "/api/users/"+uid+"/quota", "admin-tok", `{"max_leases":2,"max_ttl":10}`)
+	// set quota: max TTL 10s
+	rec2, _ := doUsersReq(t, h, "POST", "/api/users/"+uid+"/quota", "admin-tok", `{"max_ttl":10}`)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("set quota: %d %s", rec2.Code, rec2.Body.String())
 	}
@@ -46,55 +47,6 @@ func createAs(h http.Handler, token string) int {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec.Code
-}
-
-func TestQuotaCapReturns429(t *testing.T) {
-	h, tok := newQuotaTestServer(t)
-	// two leases fit under the cap of 2
-	if c := createAs(h, tok); c != http.StatusCreated {
-		t.Fatalf("first create: %d", c)
-	}
-	if c := createAs(h, tok); c != http.StatusCreated {
-		t.Fatalf("second create: %d", c)
-	}
-	// third must be 429
-	if c := createAs(h, tok); c != http.StatusTooManyRequests {
-		t.Fatalf("third create should 429, got %d", c)
-	}
-}
-
-func TestQuotaReleaseFreesCap(t *testing.T) {
-	h, tok := newQuotaTestServer(t)
-	// create 2, delete 1, create again OK
-	req := httptest.NewRequest("POST", "/api/sandboxes", strings.NewReader(`{"image":"py-base","ttl":60}`))
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create: %d", rec.Code)
-	}
-	var created map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &created)
-	id, _ := created["id"].(string)
-	if id == "" {
-		t.Fatalf("no id: %s", rec.Body.String())
-	}
-	if c := createAs(h, tok); c != http.StatusCreated {
-		t.Fatalf("second create: %d", c)
-	}
-	// delete one
-	del := httptest.NewRecorder()
-	dreq := httptest.NewRequest("DELETE", "/api/sandboxes/"+id, nil)
-	dreq.Header.Set("Authorization", "Bearer "+tok)
-	h.ServeHTTP(del, dreq)
-	if del.Code != http.StatusNoContent {
-		t.Fatalf("delete: %d", del.Code)
-	}
-	// cap freed
-	if c := createAs(h, tok); c != http.StatusCreated {
-		t.Fatalf("create after release should 201, got %d", c)
-	}
 }
 
 func TestQuotaTTLClamp(t *testing.T) {
@@ -120,7 +72,7 @@ func TestQuotaAdminOnly(t *testing.T) {
 	h, tok := newQuotaTestServer(t)
 	// non-admin cannot set quota
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/users/u-nope/quota", strings.NewReader(`{"max_leases":5}`))
+	req := httptest.NewRequest("POST", "/api/users/u-nope/quota", strings.NewReader(`{"max_ttl":5}`))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)

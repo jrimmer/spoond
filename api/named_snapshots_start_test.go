@@ -166,7 +166,7 @@ func TestSnapshotStartImageMismatch(t *testing.T) {
 }
 
 // TestSnapshotStartMemoryQuota: the snapshot's memory_mb, not the
-// image's, is the admission and quota charge.
+// image's, is the admission and fair-share charge.
 func TestSnapshotStartMemoryQuota(t *testing.T) {
 	ts, svc, db, _ := newTestServerWithService(t)
 	svc.cfg.TemplateStoragePath = t.TempDir()
@@ -192,8 +192,7 @@ func TestSnapshotStartMemoryQuota(t *testing.T) {
 	}
 
 	// Change the image's memory to 4096 after saving: the snapshot keeps
-	// the 2048 it was saved at. A max_mib of 3000 refuses a plain create
-	// but admits the snapshot start.
+	// the 2048 it was saved at, and that is what the start charges.
 	img, err := db.GetImage(context.Background(), "py-base")
 	if err != nil {
 		t.Fatalf("image: %v", err)
@@ -202,16 +201,8 @@ func TestSnapshotStartMemoryQuota(t *testing.T) {
 	if err := db.UpsertImage(context.Background(), img); err != nil {
 		t.Fatalf("bump image memory: %v", err)
 	}
-	if err := ids.SetQuota(u.ID, 0, 0, 0, 3000, 0); err != nil {
-		t.Fatal(err)
-	}
 
-	// A plain create of py-base (now 4096 MiB) is over max_mib.
-	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes", "m-tok", map[string]any{"image": "py-base"})
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("plain create: status %d (%v), want 429", resp.StatusCode, body)
-	}
-	// A create from the 2048 MiB snapshot fits.
+	// A create from the 2048 MiB snapshot is charged 2048.
 	out := createFromSnapshot(t, ts.URL, "m-tok", map[string]any{"snapshot": "warm"})
 	newID := out["id"].(string)
 	if got := svc.store.leases[newID].MemoryMB; got != 2048 {

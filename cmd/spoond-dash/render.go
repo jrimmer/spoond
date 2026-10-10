@@ -1867,7 +1867,6 @@ func (l *layout) refusalItems() []struct {
 		n     int
 	}{
 		{"auth", l.s.AuthFails},
-		{"quota", l.s.Quota},
 		{"throttled", l.s.Throttled},
 		{"capacity", l.s.Capacity},
 		{"build fails", l.s.BuildFails},

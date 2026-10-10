@@ -502,8 +502,7 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		// restartCold and restore. Reserving with the lease's stale stamp
 		// would admit an outdated charge (and leak the difference). A
 		// running lease is already charged with its own stamp and
-		// re-admits nothing. A recovery adds no lease, so only the
-		// memory cap applies.
+		// re-admits nothing.
 		if err := s.reserveQuota(l.Owner, 1, img.MemoryMB, false); err != nil {
 			return err
 		}

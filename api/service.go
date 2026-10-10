@@ -288,7 +288,7 @@ type Store struct {
 	pending map[string]int
 	// pendingMiB is the memory twin of pending (#128): the MiB reserved
 	// by in-flight creations per owner, under the same store lock, so
-	// two racing creates cannot both pass max_mib.
+	// fair-share usage counts an in-flight lease exactly once.
 	pendingMiB map[string]int
 	// lastActiveDirty batches touch() updates; the sweeper flushes them
 	// to the store once per tick instead of writing on every activity.
@@ -2905,11 +2905,11 @@ func (s *Service) resumeForUse(ctx context.Context, l *Lease) (*Lease, error) {
 // marks the lease busy (a second operation on a busy lease returns
 // errLeaseBusy) and runs the resume.
 //
-// A resuming lease needs its hugepages back, so it passes the memory
-// check like any create (#128): only running leases are charged, and
-// the charge returns when the sandbox comes back. A nil error has
-// already dropped the (zero-cost) reservation; errQuotaExceeded leaves
-// the lease suspended.
+// A resuming lease needs its hugepages back, so it passes admission
+// like any create: only running leases are charged, and the charge
+// returns when the sandbox comes back. A nil error has already dropped
+// the in-flight reservation; an admission refusal (box_full, capacity)
+// leaves the lease suspended.
 func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	s.store.mu.Lock()
 	if l.busy {
@@ -2935,8 +2935,7 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	defer s.endBusy(l)
 	// The lease's own stamp is the charge to re-acquire (#128): the
 	// number admission reserved with is the number released when the
-	// lease suspends again. A resume adds no lease, so only the memory
-	// cap applies — the lease keeps its max_leases slot.
+	// lease suspends again.
 	memPer := l.MemoryMB
 	if err := s.reserveQuota(l.Owner, 1, memPer, false); err != nil {
 		return nil, err
@@ -3099,8 +3098,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; warm-restarting it brings the guest back, so it
 		// re-passes the memory check before the sandbox comes back,
-		// exactly like a resume (#128). The restart adds no lease, so
-		// only the memory cap applies.
+		// exactly like a resume (#128).
 		if err := s.reserveQuota(owner, 1, l.MemoryMB, false); err != nil {
 			return nil, err
 		}
@@ -3208,7 +3206,6 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	// The fresh guest runs the image's current memory_mb, so that is the
 	// charge to re-admit for a suspended lease (#128) — fetched before
 	// anything else, so a catalog failure answers before any change. A
-	// cold restart adds no lease, so only the memory cap applies. A
 	// running lease is already charged; its stamp is re-set below.
 	img, b, err := s.imageBuild(ctx, l.Image)
 	if err != nil {
@@ -3672,7 +3669,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			TemplateID:         img.TemplateID,
 		}
 		// Memory admission (FS2b-1), per child: the whole batch was
-		// reserved against max_mib above, but each child's charge lands
+		// reserved above, but each child's charge lands
 		// on the one pool as the children are created — one at a time
 		// below, so each child admits in turn and the batch behaves as
 		// one.
