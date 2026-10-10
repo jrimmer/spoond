@@ -196,6 +196,15 @@ type LeaseEvent struct {
 	PolicyStep string `json:"policy_step,omitempty"`
 	// BuildID is the pause build a suspended event wrote.
 	BuildID string `json:"build_id,omitempty"`
+	// TakeBackRatio is the victim owner's usage/slice ratio when a
+	// suspended event's reason is take_back (FS2a spoond-pxsn): how far
+	// over their fair slice the owner was when the lease was taken.
+	// Zero otherwise. The take_back event names the requester in its
+	// detail; the suspended event carries the ratio itself.
+	TakeBackRatio float64 `json:"take_back_ratio,omitempty"`
+	// TakeBackFor is the owner the take-back made room for when a
+	// suspended event's reason is take_back; "" otherwise.
+	TakeBackFor string `json:"take_back_for,omitempty"`
 }
 
 const (
@@ -257,6 +266,13 @@ func (b *eventBus) emit(leaseID, owner string, typ LeaseEventType, detail string
 // emitStructured is emit with the structured suspension fields a
 // `suspended` event carries (#145 D6).
 func (b *eventBus) emitStructured(leaseID, owner string, typ LeaseEventType, detail, reason, policyStep, buildID string) LeaseEvent {
+	return b.emitTakeBack(leaseID, owner, typ, detail, reason, policyStep, buildID, 0, "")
+}
+
+// emitTakeBack is emitStructured with the take-back fields a suspended
+// event with reason take_back carries (FS2a): the victim owner's ratio
+// and the requester. All other callers pass the zero values.
+func (b *eventBus) emitTakeBack(leaseID, owner string, typ LeaseEventType, detail, reason, policyStep, buildID string, takeBackRatio float64, takeBackFor string) LeaseEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.seq++
@@ -271,6 +287,8 @@ func (b *eventBus) emitStructured(leaseID, owner string, typ LeaseEventType, det
 		Reason:     reason,
 		PolicyStep: policyStep,
 		BuildID:    buildID,
+		TakeBackRatio: takeBackRatio,
+		TakeBackFor:   takeBackFor,
 	}
 	if len(b.ring) < leaseEventRingSize {
 		b.ring = append(b.ring, ev)
@@ -495,6 +513,14 @@ func (s *Service) emitSuspendEvent(leaseID, owner, buildID, reason, policyStep s
 		evBuild = buildID
 	}
 	s.bus.emitStructured(leaseID, owner, LeaseSuspended, "paused into build "+buildID, reason, policyStep, evBuild)
+}
+
+// emitTakeBackSuspendEvent records a `suspended` event with reason
+// take_back and the take-back's own structured fields (FS2a spoond-pxsn):
+// the victim owner's usage/slice ratio and the requester ride on the
+// event itself, next to reason and build id.
+func (s *Service) emitTakeBackSuspendEvent(leaseID, owner, buildID string, ratio float64, requester string) {
+	s.bus.emitTakeBack(leaseID, owner, LeaseSuspended, "paused into build "+buildID, suspendReasonTakeBack, "", buildID, ratio, requester)
 }
 
 // emitGCEvent records one catalog GC maintenance event: a pass that

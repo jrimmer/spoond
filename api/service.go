@@ -2788,6 +2788,11 @@ const (
 type suspendPolicy struct {
 	reason     string
 	policyStep string
+	// takeBackRatio/takeBackFor ride on the suspended event when reason
+	// is take_back (FS2a): the victim owner's usage/slice ratio and the
+	// owner the take-back made room for.
+	takeBackRatio float64
+	takeBackFor   string
 }
 
 func (s *Service) pauseLease(ctx context.Context, l *Lease, drained bool) (string, error) {
@@ -2920,7 +2925,11 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.deleteSandboxRow(l.SandboxID)
-	s.emitSuspendEvent(l.ID, l.Owner, buildID, pol.reason, pol.policyStep)
+	if pol.reason == suspendReasonTakeBack {
+		s.emitTakeBackSuspendEvent(l.ID, l.Owner, buildID, pol.takeBackRatio, pol.takeBackFor)
+	} else {
+		s.emitSuspendEvent(l.ID, l.Owner, buildID, pol.reason, pol.policyStep)
+	}
 	s.journalLease(journalOpSuspend, l, journalSuspendReason(pol, drained))
 	// A pause frees the lease's hugepages and quota: retry waiting
 	// creates (#129).

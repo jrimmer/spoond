@@ -772,6 +772,63 @@ func TestBoxFullWhenOnlyPinnedCandidates(t *testing.T) {
 	}
 }
 
+// TestPreemptionTakesOnlyTheShortfall: the need the selector stops on
+// is the shortfall (request minus what is already free), not the whole
+// request — but the requester's after-request ratio is still computed
+// for the whole request. Free 512, request 1024, one over-slice owner
+// with a single takeable 512 lease: exactly that one pause and the
+// create succeeds. Asking the selector to free the whole 1024 would
+// make it give up (one 512 lease is all the owner can spare) and the
+// create would fail on capacity.
+func TestPreemptionTakesOnlyTheShortfall(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "mid", 1024)
+	seedImage(t, db, "small", 512)
+	svc.cfg.BurstReserveMiB = 0
+	svc.SetMetrics(metrics.NewBackendMetrics())
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    1 << 20,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	var diskTotal uint64 = 100 << 30
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return diskTotal, diskTotal, nil }
+	svc.diskUsage = func(dir string) (int64, error) { return 1024 << 20, nil }
+	ctx := context.Background()
+	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	owner := preemptOwner(t, svc, "heavy")
+	victim := burstLease(t, svc, ctx, owner, "small")
+	filler := burstLease(t, svc, ctx, owner, "mid")
+	svc.store.mu.Lock()
+	victim.LastActive = time.Now().Add(-2 * time.Hour)
+	filler.LastActive = time.Now().Add(-time.Hour)
+	svc.saveLeaseLocked(victim)
+	svc.saveLeaseLocked(filler)
+	svc.store.mu.Unlock()
+
+	// 512 MiB free (2816 total pages − 1536 base pages − two leases at
+	// 512 pages each = 256 free pages): a 1024 MiB guaranteed lease is
+	// 512 MiB short. The owner runs 1536 MiB; on the 5632 MiB pool with
+	// four box owners that is over the 1408 MiB slice, and giving up the
+	// 512 MiB lease leaves 1024/1408 — above the requester (not a box
+	// owner, after-request ratio 0), so the lease can go. Giving up the
+	// 1024 filler instead would drop the owner inside their slice:
+	// never.
+	installDynamicNode(t, svc, sub, 2816, 1536, 512)
+	warmFairShares(svc, ctx)
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("guaranteed create: %v", err)
+	}
+	got := pausedIDs(svc)
+	if len(got) != 1 || !got[victim.ID] {
+		t.Fatalf("paused %v, want exactly the 512 MiB LRU lease %s (the shortfall takes one lease)", got, victim.ID)
+	}
+	if filler.Suspended {
+		t.Fatal("more than the shortfall was taken")
+	}
+}
+
 // TestPreemptionUndrainDefers: an undrain whose guaranteed lease needs
 // room it cannot preempt for (the snapshot disk is under the floor)
 // leaves the lease drained and suspended, not lost.

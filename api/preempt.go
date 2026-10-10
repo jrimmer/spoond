@@ -255,9 +255,24 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 	// The selector works in MiB of freed hugepages and is re-run after
 	// every pause: earlier pauses moved usage, so the biggest borrower
 	// may have changed (and a taken-back lease must never be picked
-	// again — it is suspended and leaves the running-lease views).
+	// again — it is suspended and leaves the running-lease views). The
+	// need it stops on is the SHORTFALL (memoryMB minus what is free
+	// now); the requester's after-request ratio is still computed for
+	// the whole memoryMB inside memVictims.
 	for {
-		victims := memVictims(s.takeBackOwners(ctx), owner, memoryMB)
+		freeMiB, err = s.cachedFreeHugepageMiB(ctx)
+		if err != nil {
+			// The node could not be re-read: leave with what the earlier
+			// pauses freed. The caller's debit and createSandbox's own
+			// capacity check answer from here.
+			s.log.Printf("preempt: node info: %v", err)
+			return nil
+		}
+		shortfall := memoryMB - int(freeMiB)
+		if shortfall <= 0 {
+			return nil
+		}
+		victims := memVictims(s.takeBackOwners(ctx), owner, shortfall, memoryMB)
 		if len(victims) == 0 {
 			// Take-back can free nothing: either everyone is inside
 			// their slice or the requester is itself the biggest
@@ -292,12 +307,10 @@ func (s *Service) preemptForGuaranteed(ctx context.Context, owner string, memory
 			break
 		}
 		if !paused {
-			// Every candidate was refused (a race won each one) or was
-			// disk-blocked: re-run the selector on fresh views rather
-			// than spinning forever on the same names.
-			if fits, err = s.guaranteedFits(ctx, memoryMB); err != nil || fits {
-				return nil
-			}
+			// Every candidate was refused (a race won each one): re-run
+			// the selector on fresh views rather than spinning forever
+			// on the same names. The re-read free figure at the top of
+			// the loop decides whether that can ever end.
 			return nil
 		}
 	}

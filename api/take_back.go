@@ -47,20 +47,27 @@ func tbRatio(used, slice int) float64 {
 // memVictims picks the leases to pause so requester can have needMiB.
 //
 // It repeats: take the owner with the highest used/slice ratio who is
-// over their slice (used > slice, so an owner inside their slice is never
-// touched) and whose ratio after giving up the candidate lease still
-// stays above the requester's ratio after the request ((used+need)/slice
-// of the requester). The point is to never push an owner below the
-// requester, only to even them out. Within the owner the candidate is the
-// least recently used unpinned lease; leases that are busy rank after
-// every non-busy one; pinned leases are never taken. The owner's used is
-// reduced after each pick. It stops as soon as the freed total reaches
-// needMiB and returns nil when the need cannot be met (nothing is
-// partially returned). A zero or negative slice has no ratio and is never
-// a source. The requester is never its own victim.
-func memVictims(owners []takeBackOwner, requester string, needMiB int) []takeBackVictim {
+// over their slice (used > slice, so an owner inside their slice is
+// never touched) and whose ratio after giving up the candidate lease
+// still stays above the requester's ratio after their whole request
+// ((used+requestMiB)/slice of the requester — the take-back is for the
+// request, even when only the needMiB shortfall is still missing). The
+// point is to never push an owner below the requester, only to even
+// them out. Within the owner the candidate is the least recently used
+// unpinned lease; leases that are busy rank after every non-busy one;
+// pinned leases are never taken. The owner's used is reduced after each
+// pick. It stops as soon as the freed total reaches needMiB and returns
+// nil when the need cannot be met (nothing is partially returned). A
+// zero or negative slice has no ratio and is never a source. The
+// requester is never its own victim.
+func memVictims(owners []takeBackOwner, requester string, needMiB, requestMiB int) []takeBackVictim {
 	if needMiB <= 0 {
 		return nil
+	}
+	if requestMiB < needMiB {
+		// The ratio must never assume less work for the requester than
+		// the take-back is actually for.
+		requestMiB = needMiB
 	}
 	// Work on copies so the caller's views stay untouched.
 	work := make([]takeBackOwner, len(owners))
@@ -69,7 +76,7 @@ func memVictims(owners []takeBackOwner, requester string, needMiB int) []takeBac
 		o.Leases = append([]takeBackLease(nil), o.Leases...)
 		work[i] = o
 		if o.Owner == requester {
-			reqAfter = tbRatio(o.UsedMiB+needMiB, o.SliceMiB)
+			reqAfter = tbRatio(o.UsedMiB+requestMiB, o.SliceMiB)
 		}
 	}
 	sort.SliceStable(work, func(i, j int) bool { return work[i].Owner < work[j].Owner })
@@ -185,12 +192,20 @@ func tbPickLease(ls []takeBackLease) int {
 // so a pin, release, resume or job that landed between victim selection
 // and this call wins and the pause is refused (errLeaseBusy). Setting
 // busy under the same lock closes the gap: a later pin or exec sees
-// busy and waits or fails instead of racing the pause. Then it runs the
-// pause sub-work (pauseLeaseBody, reason take_back — takeBackPause owns
-// the busy window), emits lease.suspended
-// with reason take_back carrying the victim owner's ratio and the
-// requester, and stamps the lease so no auto-resume brings it back into
-// a take-back of the lease that displaced it (no ping-pong).
+// busy and waits or fails instead of racing the pause.
+//
+// A pin that lands DURING the pause body still wins: after the pause
+// returns, the same lock re-checks pinned and running jobs, and a lease
+// that became pinned (or gained a job) while paused for take-back is
+// resumed at once and counted as NOT freed — a pin protects a running
+// VM, so it un-does the pause (FS5). The re-resume fails only when the
+// box cannot host the lease again; the pin survives suspended then, and
+// the caller's free-memory re-check sees the smaller credit.
+//
+// The successful pause emits lease.suspended with reason take_back
+// carrying the victim owner's ratio and the requester, and stamps the
+// lease so no auto-resume brings it back into a take-back of the lease
+// that displaced it (no ping-pong).
 func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string, ratio float64) error {
 	s.store.mu.Lock()
 	if l.released || l.busy || l.Suspended || !l.live() || l.Pinned ||
@@ -202,19 +217,43 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 	s.store.mu.Unlock()
 	defer s.endBusy(l)
 
-	if _, err := s.pauseLeaseBody(ctx, l, false, suspendPolicy{reason: suspendReasonTakeBack}); err != nil {
+	buildID, err := s.pauseLeaseBody(ctx, l, false, suspendPolicy{reason: suspendReasonTakeBack, takeBackRatio: ratio, takeBackFor: requester})
+	if err != nil {
 		return err
 	}
 
 	// Record the take-back like preemptLease records a preemption: the
 	// stamp is re-checked under the lock, so a concurrent resume that
 	// already brought the lease back leaves no stale record (the same
-	// shape spoond-d76 pinned for the preemption stamp). We still own
-	// the busy window here (busy is ours until endBusy), so busy being
-	// set is expected; only a release or a resumed lease skips the stamp.
+	// shape spoond-d76 pinned for the preemption stamp). This critical
+	// section also settles the pin-during-pause race: busy is still
+	// ours, so a pin that landed while the pause ran is visible here and
+	// un-does the pause (a pinned lease is never left suspended for
+	// take-back). We still own the busy window (until endBusy), so busy
+	// being set is expected; only a release or a resumed lease skips it.
 	s.store.mu.Lock()
 	if !l.Suspended || l.released {
 		s.store.mu.Unlock()
+		return errLeaseBusy
+	}
+	if l.Pinned || s.hasRunningJobLocked(l.ID) {
+		// The owner pinned the lease (or started a job on it) while the
+		// pause was in flight: the pin wins, the lease is brought back at
+		// once and the caller counts nothing as freed. The immediate
+		// resume stays inside this critical section's protection: busy
+		// blocks every other operation until endBusy below, so nothing
+		// can interleave on the lease between this check and the resume.
+		s.store.mu.Unlock()
+		if err := s.unTakeBackResume(ctx, l, buildID); err != nil {
+			// The box cannot host the lease again right now: the pin
+			// stands, the lease waits suspended for capacity like any
+			// pinned pause (the holder's next work call resumes it).
+			// The take-back stamp is still set, so the resume-on-use
+			// path carries the take_back detail.
+			s.log.Printf("take back: lease %s pinned during its pause but not resumable: %v", l.ID, err)
+			return errLeaseBusy
+		}
+		s.log.Printf("take back: lease %s was pinned mid-pause; resumed at once, nothing taken", l.ID)
 		return errLeaseBusy
 	}
 	l.TakeBackAt = s.now()
@@ -232,6 +271,22 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 		fmt.Sprintf("for %s: owner %.2f over their slice; it resumes on the holder's next work call", requester, ratio))
 	// The pause already credited this lease's hugepages to the cached
 	// reading and woke the admission queue (pauseLeaseBody).
+	return nil
+}
+
+// unTakeBackResume brings a lease paused for take-back back at once,
+// inside the caller's busy window: a pin that landed mid-pause must
+// leave the lease running again, not suspended (FS5: pins don't pause).
+// It is the sub work of resumeLease with the memory re-check, minus the
+// busy handling takeBackPause already owns and the quota reservation it
+// does not need (no admission class change: the lease keeps what it
+// had).
+func (s *Service) unTakeBackResume(ctx context.Context, l *Lease, buildID string) error {
+	l.ResumeBuildID = buildID
+	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
+		return err
+	}
+	s.writeGeneration(l)
 	return nil
 }
 

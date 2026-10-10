@@ -42,7 +42,7 @@ func TestMemVictimsInsideSliceNeverChosen(t *testing.T) {
 		{Owner: "req", UsedMiB: 0, SliceMiB: 8192},
 		{Owner: "in", UsedMiB: 8192, SliceMiB: 8192, Leases: []takeBackLease{tbL("a", 4096, time.Hour)}},
 	}
-	if got := memVictims(owners, "req", 1024); got != nil {
+	if got := memVictims(owners, "req", 1024, 1024); got != nil {
 		t.Fatalf("got %v, want nil", got)
 	}
 }
@@ -53,7 +53,7 @@ func TestMemVictimsRatioNotAbsolute(t *testing.T) {
 		{Owner: "honey", UsedMiB: 28672, SliceMiB: 12288, Leases: []takeBackLease{tbL("h1", 4096, time.Hour)}},
 		{Owner: "pool", UsedMiB: 20480, SliceMiB: 8192, Leases: []takeBackLease{tbL("p1", 4096, time.Hour)}},
 	}
-	got := memVictims(owners, "req", 4096)
+	got := memVictims(owners, "req", 4096, 4096)
 	if !eqStrs(ids(got), []string{"p1"}) {
 		t.Fatalf("got %v, want [p1]", ids(got))
 	}
@@ -69,7 +69,7 @@ func TestMemVictimsLRUWithinOwner(t *testing.T) {
 			tbL("new", 4096, time.Minute), tbL("old", 4096, 3*time.Hour), tbL("mid", 4096, time.Hour), tbL("x", 4096, time.Minute),
 		}},
 	}
-	got := memVictims(owners, "req", 4096)
+	got := memVictims(owners, "req", 4096, 4096)
 	if !eqStrs(ids(got), []string{"old"}) {
 		t.Fatalf("got %v, want [old]", ids(got))
 	}
@@ -82,7 +82,7 @@ func TestMemVictimsBusyAfterIdle(t *testing.T) {
 		{Owner: "req", SliceMiB: 8192},
 		{Owner: "o", UsedMiB: 16384, SliceMiB: 8192, Leases: []takeBackLease{busy, tbL("idle", 4096, time.Minute), tbL("k", 4096, time.Minute)}},
 	}
-	got := memVictims(owners, "req", 4096)
+	got := memVictims(owners, "req", 4096, 4096)
 	if !eqStrs(ids(got), []string{"idle"}) {
 		t.Fatalf("got %v, want [idle]", ids(got))
 	}
@@ -95,12 +95,12 @@ func TestMemVictimsPinnedNever(t *testing.T) {
 		{Owner: "req", SliceMiB: 8192},
 		{Owner: "o", UsedMiB: 12288, SliceMiB: 8192, Leases: []takeBackLease{pin, tbL("free", 4096, time.Minute), tbL("k", 4096, time.Minute)}},
 	}
-	got := memVictims(owners, "req", 4096)
+	got := memVictims(owners, "req", 4096, 4096)
 	if !eqStrs(ids(got), []string{"free"}) {
 		t.Fatalf("got %v, want [free]", ids(got))
 	}
 	owners[1].Leases = []takeBackLease{pin}
-	if got := memVictims(owners, "req", 4096); got != nil {
+	if got := memVictims(owners, "req", 4096, 4096); got != nil {
 		t.Fatalf("only pinned: got %v, want nil", got)
 	}
 }
@@ -110,7 +110,7 @@ func TestMemVictimsRequesterFurtherOverGetsNil(t *testing.T) {
 		{Owner: "req", UsedMiB: 16384, SliceMiB: 8192},
 		{Owner: "o", UsedMiB: 12288, SliceMiB: 8192, Leases: []takeBackLease{tbL("a", 4096, time.Hour), tbL("b", 4096, time.Hour), tbL("c", 4096, time.Hour)}},
 	}
-	if got := memVictims(owners, "req", 4096); got != nil {
+	if got := memVictims(owners, "req", 4096, 4096); got != nil {
 		t.Fatalf("got %v, want nil", got)
 	}
 }
@@ -122,7 +122,7 @@ func TestMemVictimsStopsOnceNeedFits(t *testing.T) {
 			tbL("a", 4096, 4*time.Hour), tbL("b", 4096, 3*time.Hour), tbL("c", 4096, 2*time.Hour), tbL("d", 4096, time.Hour),
 		}},
 	}
-	got := memVictims(owners, "req", 6000)
+	got := memVictims(owners, "req", 6000, 6000)
 	if !eqStrs(ids(got), []string{"a", "b"}) {
 		t.Fatalf("got %v, want [a b]", ids(got))
 	}
@@ -137,7 +137,7 @@ func TestMemVictimsZeroSliceSafe(t *testing.T) {
 		{Owner: "req"},
 		{Owner: "o", UsedMiB: 4096, SliceMiB: 0, Leases: []takeBackLease{tbL("a", 4096, time.Hour)}},
 	}
-	if got := memVictims(owners, "req", 1024); got != nil {
+	if got := memVictims(owners, "req", 1024, 1024); got != nil {
 		t.Fatalf("got %v, want nil", got)
 	}
 }
@@ -460,14 +460,61 @@ func TestTakeBackPauseRefusesIllegalVictims(t *testing.T) {
 }
 
 // TestTakeBackPauseGuardRace: takeBackPause re-checks running, unpinned
-// and not-busy in the same critical section where it sets busy. The race
-// to cover: after a victim is selected, the owner pins the lease (or a
-// job starts) before takeBackPause runs; the pause must then be refused,
-// nothing paused, no event emitted. Both orders are exercised, the pin
-// landing first must always win, under -race.
+// and not-busy in the same critical section where it sets busy. The
+// races it must survive:
+//
+//  1. a pin (or a job start) that lands AFTER the victim was chosen but
+//     BEFORE takeBackPause runs: the pause is refused, nothing paused.
+//  2. a pin that lands DURING the pause body: the lease would otherwise
+//     end pinned-and-suspended; takeBackPause re-checks under the lock
+//     after the pause and resumes it at once — a pin un-does the pause
+//     and nothing counts as freed (FS5: pins don't pause).
+//
+// Both orders are exercised under -race; the pin always wins.
 func TestTakeBackPauseGuardRace(t *testing.T) {
 	svc, _, _, ctx := newTakeBackService(t)
 
+	// Race 2: the pin lands inside pauseLeaseBody, before the suspended
+	// save takes the lock (deterministic through the pause hook).
+	t.Run("pin during the pause", func(t *testing.T) {
+		victim, err := svc.grantLease(ctx, leaseRequest{owner: "victim-owner", image: "mid", ttl: time.Hour, persistent: true})
+		if err != nil {
+			t.Fatalf("grant: %v", err)
+		}
+		svc.pauseBeforeSuspend = func(l *Lease) {
+			svc.pauseBeforeSuspend = nil
+			if _, err := svc.setPinned("victim-owner", victim.ID, true); err != nil {
+				t.Errorf("pin mid-pause: %v", err)
+			}
+		}
+		if err := svc.takeBackPause(ctx, victim, "req-owner", 2.0); !errors.Is(err, errLeaseBusy) {
+			t.Fatalf("takeBackPause err = %v, want errLeaseBusy (the pin must un-do the pause)", err)
+		}
+		svc.store.mu.Lock()
+		pinned, suspended := victim.Pinned, victim.Suspended
+		svc.store.mu.Unlock()
+		if !pinned {
+			t.Fatal("the pin did not survive")
+		}
+		if suspended {
+			t.Fatal("a lease pinned mid-pause stayed suspended: the pin must un-do the pause")
+		}
+		if victim.TakeBackFor != "" || !victim.TakeBackAt.IsZero() {
+			t.Fatalf("an un-done pause left a take-back stamp: %v/%q", victim.TakeBackAt, victim.TakeBackFor)
+		}
+		// Clean up for the outer test's bookkeeping.
+		if _, err := svc.setPinned("victim-owner", victim.ID, false); err != nil {
+			t.Fatalf("unpin: %v", err)
+		}
+		svc.store.mu.Lock()
+		delete(svc.store.leases, victim.ID)
+		svc.store.mu.Unlock()
+	})
+
+	// Race 1, both interleavings, repeated: the pause and the pin run
+	// concurrently; whenever the pin lands first, the pause must be
+	// refused; whenever the pause sets busy first, the lease may be
+	// suspended — but never pinned-and-suspended (race 2's re-check).
 	for i := 0; i < 50; i++ {
 		victim, err := svc.grantLease(ctx, leaseRequest{owner: "victim-owner", image: "mid", ttl: time.Hour, persistent: true})
 		if err != nil {
@@ -486,17 +533,12 @@ func TestTakeBackPauseGuardRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-pinned
-			// The pause must lose whenever the pin landed first: the
-			// guard re-checks Pinned under the same lock that sets busy.
 			if err := svc.takeBackPause(ctx, victim, "req-owner", 2.0); err != nil {
 				if !errors.Is(err, errLeaseBusy) {
 					t.Errorf("takeBackPause: %v", err)
 				}
 				return
 			}
-			// The pause won the race: the lease must have been unpinned
-			// at the moment busy was set, so it may be suspended — but
-			// never pinned-and-suspended.
 			svc.store.mu.Lock()
 			defer svc.store.mu.Unlock()
 			if victim.Pinned && victim.Suspended {
@@ -504,12 +546,16 @@ func TestTakeBackPauseGuardRace(t *testing.T) {
 			}
 		}()
 		wg.Wait()
+		svc.store.mu.Lock()
+		if victim.Pinned && victim.Suspended {
+			t.Error("a pinned lease stayed suspended after a lost take-back")
+		}
+		svc.store.mu.Unlock()
 		// Whatever the outcome, unpin so the next round can grant cleanly.
 		if _, err := svc.setPinned("victim-owner", victim.ID, false); err != nil {
 			t.Fatalf("unpin: %v", err)
 		}
 		svc.store.mu.Lock()
-		svc.store.leases[victim.ID].released = true
 		delete(svc.store.leases, victim.ID)
 		svc.store.mu.Unlock()
 	}
@@ -528,8 +574,31 @@ func TestMemVictimsFallbackSkipsPinned(t *testing.T) {
 		{Owner: "req", UsedMiB: 4096, SliceMiB: 4096},
 		{Owner: "o", UsedMiB: 8192, SliceMiB: 4096, Leases: []takeBackLease{big, pin}},
 	}
-	if got := memVictims(owners, "req", 512); got != nil {
+	if got := memVictims(owners, "req", 512, 512); got != nil {
 		t.Fatalf("got %v, want nil (the pinned lease must never be the fall-through pick)", ids(got))
+	}
+}
+
+// TestMemVictimsRequestRatioUsesWholeRequest: the requester's
+// after-request ratio is computed for the WHOLE request even when only
+// a smaller shortfall is still missing (the admission loop's shape:
+// free memory already covers part of the request). A 512 shortfall for
+// a 4096 request on a 4096-slice with 4096 used makes the after-request
+// ratio 2, so the only other owner (8192/4096, ratio 2, giving up 1024
+// would leave 7168/4096 = 1.75 < 2) must not be touched — the answer is
+// nil, not a pause of the least-recently-used lease.
+func TestMemVictimsRequestRatioUsesWholeRequest(t *testing.T) {
+	owners := []takeBackOwner{
+		{Owner: "req", UsedMiB: 4096, SliceMiB: 4096},
+		{Owner: "o", UsedMiB: 8192, SliceMiB: 4096, Leases: []takeBackLease{tbL("a", 1024, 2*time.Hour)}},
+	}
+	if got := memVictims(owners, "req", 512, 4096); got != nil {
+		t.Fatalf("got %v, want nil (the whole request sets the requester's ratio)", ids(got))
+	}
+	// The same box with the request equal to the shortfall does take the
+	// lease: 1.75 > (4096+512)/4096 = 1.125.
+	if got := memVictims(owners, "req", 512, 512); !eqStrs(ids(got), []string{"a"}) {
+		t.Fatalf("got %v, want [a] when request == need", ids(got))
 	}
 }
 
@@ -549,7 +618,7 @@ func TestMemVictimsFallsThroughToSmallerLease(t *testing.T) {
 		{Owner: "req", UsedMiB: 4096, SliceMiB: 4096},
 		{Owner: "o", UsedMiB: 8192, SliceMiB: 4096, Leases: []takeBackLease{big, small}},
 	}
-	got := memVictims(owners, "req", 512)
+	got := memVictims(owners, "req", 512, 512)
 	if !eqStrs(ids(got), []string{"small"}) {
 		t.Fatalf("got %v, want [small] (the LRU lease is too big to give up)", ids(got))
 	}
@@ -557,7 +626,7 @@ func TestMemVictimsFallsThroughToSmallerLease(t *testing.T) {
 	// No lease of the owner passes: nothing is taken.
 	huge := tbL("huge", 4096, time.Hour)
 	owners[1].Leases = []takeBackLease{huge}
-	if got := memVictims(owners, "req", 512); got != nil {
+	if got := memVictims(owners, "req", 512, 512); got != nil {
 		t.Fatalf("got %v, want nil (every lease of the owner drops them below the requester)", ids(got))
 	}
 
@@ -566,7 +635,7 @@ func TestMemVictimsFallsThroughToSmallerLease(t *testing.T) {
 	tiny := tbL("tiny", 512, 2*time.Hour)
 	other := tbL("other", 1024, time.Hour)
 	owners[1].Leases = []takeBackLease{tiny, other}
-	if got := memVictims(owners, "req", 512); !eqStrs(ids(got), []string{"tiny"}) {
+	if got := memVictims(owners, "req", 512, 512); !eqStrs(ids(got), []string{"tiny"}) {
 		t.Fatalf("got %v, want [tiny]", ids(got))
 	}
 }
