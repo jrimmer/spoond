@@ -347,9 +347,11 @@ func TestTakeBackPausePausesVictim(t *testing.T) {
 		t.Fatal("no cached node reading after the pause")
 	}
 
-	// Both events arrive: suspended with the structured reason and the
+	// Both events arrive: suspended with the structured reason, the
+	// take-back ratio and requester on the event itself, and the
 	// take_back event naming the requester.
 	sawSuspend, sawTakeBack := false, false
+	var leaseEvent LeaseEvent
 	deadline := time.After(2 * time.Second)
 	for !sawSuspend || !sawTakeBack {
 		select {
@@ -359,6 +361,13 @@ func TestTakeBackPausePausesVictim(t *testing.T) {
 				if ev.Reason != suspendReasonTakeBack {
 					t.Fatalf("suspended reason = %q, want take_back", ev.Reason)
 				}
+				if ev.TakeBackRatio != 2.5 || ev.TakeBackFor != "req-owner" {
+					t.Fatalf("suspended take-back fields = %v/%q, want 2.5/req-owner", ev.TakeBackRatio, ev.TakeBackFor)
+				}
+				if ev.BuildID == "" {
+					t.Fatal("suspended event carries no build id")
+				}
+				leaseEvent = ev
 				sawSuspend = true
 			case LeaseTakeBack:
 				if !strings.Contains(ev.Detail, "req-owner") {
@@ -372,6 +381,15 @@ func TestTakeBackPausePausesVictim(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("events: suspended=%v take_back=%v", sawSuspend, sawTakeBack)
 		}
+	}
+
+	// The SSE data line carries the same fields, so an event-stream
+	// consumer sees the ratio without another API call.
+	line := marshalLeaseEvent(&leaseEvent)
+	if !strings.Contains(line, `"reason":"take_back"`) ||
+		!strings.Contains(line, `"take_back_ratio":2.5`) ||
+		!strings.Contains(line, `"take_back_for":"req-owner"`) {
+		t.Fatalf("SSE line = %s, want the take_back structured fields", line)
 	}
 
 	// A resume clears the stamp: the lease comes back with no trace of
