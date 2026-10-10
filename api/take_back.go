@@ -198,9 +198,13 @@ func tbPickLease(ls []takeBackLease) int {
 // returns, the same lock re-checks pinned and running jobs, and a lease
 // that became pinned (or gained a job) while paused for take-back is
 // resumed at once and counted as NOT freed — a pin protects a running
-// VM, so it un-does the pause (FS5). The re-resume fails only when the
-// box cannot host the lease again; the pin survives suspended then, and
-// the caller's free-memory re-check sees the smaller credit.
+// VM, so it un-does the pause (FS5). The un-doing resume leaves busy
+// set, so the pin that won the race cannot be answered by a busy
+// refusal in the gap before the lease is running again: the caller's
+// endBusy clears busy in the same breath the lease becomes running.
+// The re-resume fails only when the box cannot host the lease again;
+// the pin survives suspended then, and the caller's free-memory
+// re-check sees the smaller credit.
 //
 // The successful pause emits lease.suspended with reason take_back
 // carrying the victim owner's ratio and the requester, and stamps the
@@ -251,7 +255,8 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 			// it stays pinned and suspended, stamped for take-back so
 			// the resume-on-use path carries the detail. Nothing counts
 			// as freed: the pause's credit is still in the cache and
-			// covers the suspended lease's memory.
+			// covers the suspended lease's memory. unTakeBackResume
+			// already cleared busy (nothing changed that it protects).
 			s.log.Printf("take back: lease %s pinned during its pause but not resumable: %v", l.ID, err)
 			return errLeaseBusy
 		}
@@ -280,23 +285,42 @@ func (s *Service) takeBackPause(ctx context.Context, l *Lease, requester string,
 // inside the caller's busy window: a pin that landed mid-pause must
 // leave the lease running again, not suspended (FS5: pins don't pause).
 // It is the sub work of resumeLease with the memory re-check, minus the
-// busy handling takeBackPause already owns and the quota reservation it
-// does not need (no admission class change: the lease keeps what it
-// had). Because it skips resumeLease's admission, it debits the cached
-// node reading itself: the pause credited the lease's hugepages, and the
-// sandbox is back now, so the cache must give them up again — the same
-// debit resumeLease's admitClass path performs. Without it the caller
-// believes more memory is free than the box has and refuses a request
-// that its next victim could have served.
+// quota reservation it does not need (no admission class change: the
+// lease keeps what it had). Because it skips resumeLease's admission, it
+// debits the cached node reading itself: the pause credited the lease's
+// hugepages, and the sandbox is back now, so the cache must give them up
+// again — the same debit resumeLease's admitClass path performs. Without
+// it the caller believes more memory is free than the box has and
+// refuses a request that its next victim could have served.
+//
+// On success it leaves the lease busy: the whole point is that no pin,
+// exec or release can slip in between the re-check that decided to
+// un-do the pause and the moment the lease is running again — the
+// caller's endBusy closes that window atomically with the lease
+// becoming running. It clears busy itself only when the resume failed
+// (the lease stays suspended, so nothing changed that a busy flag needs
+// to protect).
 func (s *Service) unTakeBackResume(ctx context.Context, l *Lease, buildID string) error {
+	if s.leaseReleased(l) {
+		// A release slipped past the busy flag before it was set:
+		// pauseLeaseBody will return errLeaseReleased at its own
+		// re-check and endBusy is already the release's. Un-dosing the
+		// pause would stop the fresh sandbox of a lease the owner no
+		// longer has (the lease's own busy must not gate the cleanup of
+		// a released lease, spoond-775).
+		return errLeaseReleased
+	}
 	l.ResumeBuildID = buildID
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
+		s.endBusy(l)
 		return err
 	}
 	s.nodeInfoMu.Lock()
 	s.debitNodeInfoLocked(l.MemoryMB)
 	s.nodeInfoMu.Unlock()
 	s.writeGeneration(l)
+	// busy stays set: the caller's endBusy clears it now that the lease
+	// is running, so no operation can interleave on it in between.
 	return nil
 }
 
