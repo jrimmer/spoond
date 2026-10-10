@@ -1760,6 +1760,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// Restart re-admits a suspended lease like a resume; a node full
+			// of pinned leases refuses it with the create body's 429
+			// box_full, not a 500 (spoond-k0uz R3-2). The lease stays as it
+			// was.
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, errBurstReserve):
 			// Restart re-admits a suspended lease like a resume, so a
 			// burst lease restarting into a full reserve answers 503
@@ -2519,6 +2525,11 @@ func (s *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// The clone's own class admission is box_full when every
+			// take-back candidate is pinned (FS5): 429 like create, not a
+			// 500 (spoond-k0uz R3-2).
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, errBurstReserve):
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):
@@ -2591,6 +2602,11 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// A fork child's class admission is box_full when every
+			// take-back candidate is pinned (FS5): 429 like create, not a
+			// 500 (spoond-k0uz R3-2).
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, errBurstReserve):
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, err.Error())
 		case errors.Is(err, substrate.ErrCapacity):

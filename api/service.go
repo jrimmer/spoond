@@ -4969,8 +4969,28 @@ func (s *Service) LoadState(ctx context.Context) error {
 		return fmt.Errorf("load pool: %w", err)
 	}
 	loaded := make(map[string]*Lease, len(leases))
+	loadedAt := time.Now()
 	for _, r := range leases {
 		l := rowToLease(r)
+		// One-clock hygiene at load (spoond-k0uz R3-3c): the clock may
+		// only ever fire on a lease that is actually suspended. A running
+		// row with a pause date is stale — a rolled-back 2.9 binary never
+		// writes paused_at and its resume does not clear it — and would
+		// otherwise get a running VM deleted 30 d after an old pause. A
+		// suspended row with no pause date (a pause a rolled-back 2.9
+		// took) gets the clock stamped at load: a fresh 30 d from now.
+		// Either correction is persisted, so the store and memory agree.
+		if !l.Suspended {
+			if !l.PausedAt.IsZero() || l.PausedExpiryNotified {
+				l.PausedAt = time.Time{}
+				l.PausedExpiryNotified = false
+				s.saveLeaseLocked(l)
+			}
+		} else if l.PausedAt.IsZero() {
+			l.PausedAt = loadedAt
+			l.PausedExpiryNotified = false
+			s.saveLeaseLocked(l)
+		}
 		if img, err := s.db.GetImage(ctx, l.Image); err == nil {
 			l.TemplateID = img.TemplateID
 		}

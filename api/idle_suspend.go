@@ -205,6 +205,12 @@ func writeResumeRefusal(w http.ResponseWriter, log interface{ Printf(string, ...
 		writeErrorCode(w, http.StatusConflict, "lease_busy", err.Error())
 	case errors.Is(err, errLeaseReleased):
 		writeError(w, http.StatusNotFound, "lease not found")
+	case isBoxFull(err):
+		// The resume's class re-admission needed room and every take-back
+		// candidate is pinned (FS5): the same 429 box_full refusal a create
+		// is answered with, not a 500 a client would read as a permanent
+		// lease failure (spoond-k0uz R3-2). Nothing was paused or released.
+		writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 	case errors.Is(err, errQuotaExceeded):
 		// The owner's own quota frees when the owner releases its own
 		// leases, so this is a retryable wait, not a loss: 429 with

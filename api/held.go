@@ -138,11 +138,41 @@ func hasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
+// leasePausedExpiredLocked reports whether l is due for its
+// paused-release: unreleased, actually suspended, not busy, past its
+// pause deadline. Call with s.store.mu held.
+func (s *Service) leasePausedExpiredLocked(l *Lease, now time.Time, release time.Duration) bool {
+	return !l.released && l.Suspended && !l.busy && !l.PausedAt.IsZero() &&
+		!now.Before(l.PausedAt.Add(release))
+}
+
+// releaseIfPausedExpired releases l with the given reason only if it is
+// still a suspended, unreleased, unbusy lease past its pause deadline —
+// re-checked under the store lock at the moment of the release, so a
+// resume (or a pause that never finished) landing between a sweep's
+// collection pass and this call cannot delete a running lease
+// (spoond-k0uz R3-3). It reports whether the release ran.
+func (s *Service) releaseIfPausedExpired(ctx context.Context, l *Lease, now time.Time, reason string) bool {
+	s.store.mu.Lock()
+	due := s.leasePausedExpiredLocked(l, now, s.pausedRelease())
+	s.store.mu.Unlock()
+	if !due {
+		return false
+	}
+	s.releaseBecause(ctx, l, reason)
+	return true
+}
+
 // releasePausedLeases implements the one clock: every lease paused at
 // least PAUSED_RELEASE_DAYS ago is released with reason paused_expired.
 // The pause date is PausedAt, set by every pause (take-back, the lease's
-// own idle_suspend, POST /pause); resuming clears it. Pinned leases are
-// never paused, so they never hit it. It does not run while draining.
+// own idle_suspend, the admin drain and POST /pause); resuming clears
+// it. A pin protects only a running VM: a paused pinned lease (the
+// owner's own POST /pause, or a pinned lease a failed drain resume left
+// suspended) is on the same clock, per the 2026-10-09 owner decision.
+// Only a lease that is still suspended is acted on: a running lease with
+// a stale PausedAt (a row a rolled-back 2.9 resumed) is never deleted
+// for its pause date (spoond-k0uz R3-3). It does not run while draining.
 func (s *Service) releasePausedLeases(ctx context.Context, now time.Time) {
 	release := s.pausedRelease()
 	if release <= 0 {
@@ -151,23 +181,24 @@ func (s *Service) releasePausedLeases(ctx context.Context, now time.Time) {
 	var due []*Lease
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
-		if l.released || l.PausedAt.IsZero() || l.Pinned {
+		if !s.leasePausedExpiredLocked(l, now, release) {
 			continue
 		}
-		if !now.Before(l.PausedAt.Add(release)) {
-			due = append(due, l)
-		}
+		due = append(due, l)
 	}
 	s.store.mu.Unlock()
 	for _, l := range due {
-		s.releaseBecause(ctx, l, "paused_expired")
+		s.releaseIfPausedExpired(ctx, l, now, "paused_expired")
 	}
 }
 
 // notifyPausedExpiring emits one lease.paused_expiring event 24 h before
-// a paused lease is released, once per pause. The lease's
-// PausedExpiryNotified flag keeps a restart from repeating it; resuming
-// clears the pause date and the flag.
+// a paused lease is released, once per pause. A paused pinned lease is on
+// the same clock, so it gets the same warning. Only a lease still
+// suspended is announced (spoond-k0uz R3-3): a running lease's stale
+// PausedAt warns about nothing. The lease's PausedExpiryNotified flag
+// keeps a restart from repeating it; resuming clears the pause date and
+// the flag.
 func (s *Service) notifyPausedExpiring(ctx context.Context, now time.Time) {
 	release := s.pausedRelease()
 	if release <= pausedExpiringLead {
@@ -177,7 +208,7 @@ func (s *Service) notifyPausedExpiring(ctx context.Context, now time.Time) {
 	var due []*Lease
 	s.store.mu.Lock()
 	for _, l := range s.store.leases {
-		if l.released || l.PausedAt.IsZero() || l.Pinned || l.PausedExpiryNotified {
+		if l.released || !l.Suspended || l.PausedAt.IsZero() || l.PausedExpiryNotified {
 			continue
 		}
 		elapsed := now.Sub(l.PausedAt)

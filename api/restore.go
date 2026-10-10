@@ -216,6 +216,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			// A guaranteed lease that could not preempt (#128 part 3):
 			// the snapshot disk is too full to pause a burst lease.
 			writeErrorAfter(w, http.StatusServiceUnavailable, burstRetryAfterSecs, "capacity: "+err.Error())
+		case isBoxFull(err):
+			// A restore's class re-admission is box_full when every
+			// take-back candidate is pinned (FS5): 429 like create, not a
+			// 500 (spoond-k0uz R3-2). The lease stays as it was.
+			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
 		case errors.Is(err, errBurstReserve):
 			// A burst lease restored into a full reserve (#128 part 2):
 			// 503 with a retry hint, the lease stays as it was.
