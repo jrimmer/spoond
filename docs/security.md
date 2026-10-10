@@ -111,7 +111,8 @@ root runs belongs in a root-owned `0755` path all the way up to `/`.
 ## Rescan fixes (second pass, commit after 35540b5)
 
 - **F1 clone quota** — clone reserves and releases quota like create; it
-  surfaces `429` and cannot bypass `max_leases`.
+  surfaces `429` and cannot bypass `max_leases`. (3.0 removed the
+  per-owner caps; clone still reserves its memory like create.)
 - **F2 proxy header leak** — the reverse proxy strips `X-Proxy-Auth`,
   `Remote-User`, `X-Spoond-User-Id`, `X-Bootstrap-Token` and every
   `E2b-*` routing header before the guest app sees them, then sets its
@@ -178,6 +179,8 @@ Known/accepted residuals:
 - **Quotas are reservation-based** (`reserveQuota` under the store lock +
   release on completion): concurrent creates cannot exceed `max_leases`
   (TOCTOU closed). `fork` reserves for every child before creating any.
+  Since 3.0 the caps are gone; the reservation stays, so fair-share
+  usage counts an in-flight lease exactly once.
 - **Bootstrap**: set `BOOTSTRAP_TOKEN` on the backend so the first-user
   creation requires `X-Bootstrap-Token`; without it, any token holder
   could claim admin on a fresh store.

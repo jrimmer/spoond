@@ -92,8 +92,9 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     date by one clock. See
     [operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 - **Multi-user tenancy**: people and agents are first-class identities,
-  with per-user SSH keys, per-user tokens, quotas
-  (`max_leases`/`max_ttl`, memory: `guaranteed_mib`/`max_mib`), admin roles, lease sharing with expiry,
+  with per-user SSH keys, per-user tokens, a per-user `max_ttl`, an
+  equal fair share of memory and snapshot disk per owner (no per-owner
+  caps since 3.0), admin roles, lease sharing with expiry,
   per-user LLM gateway keys, and per-user proxy hostnames
   (`<label>.<user>.sandbox.example`). See
   [docs/security.md](docs/security.md) and the [Users & identity API
@@ -106,9 +107,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   priority, then newest); a preempted lease resumes on its holder's
   next work call (`preempted`/`resumed` events; the memory continues). A user without
   a `guaranteed_mib` keeps every lease guaranteed. A create may
-  **wait** for room or for one of its owner's own leases to go
-  (`"wait": <seconds>`, up to `MAX_ADMIT_WAIT_SECS`) instead of failing
-  on capacity, the memory cap or the lease-count cap, served in
+  **wait** for room (`"wait": <seconds>`, up to
+  `MAX_ADMIT_WAIT_SECS`) instead of failing on capacity, served in
   fair-share order; a persistent lease
   may set `idle_suspend` to give its memory back when idle.
 - **Resume on use**: a suspended lease, whatever suspended it
