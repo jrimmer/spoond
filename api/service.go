@@ -143,6 +143,11 @@ type Lease struct {
 	// fork, restore, recovery) keeps it. Never accounted; 0 = unknown
 	// (a lease from before the stamp, read as the image default).
 	VCPU int `json:"-"`
+	// Start is how the lease's current VM started (#151 Z4): "warm"
+	// (resumed a memory snapshot) or "cold" (booted its image's root
+	// filesystem at a size no warm build has). In memory only: "" after
+	// a backend restart until the next start.
+	Start string `json:"-"`
 	// DiskMB is the lease's whole disk allowance in MiB, from the
 	// image's disk_mb, stamped beside MemoryMB (#145 FS3a): summed over
 	// the RUNNING leases it is the snapshot disk's running reservation —
@@ -1442,7 +1447,8 @@ func (s *Service) runRefreshPeers(ctx context.Context) {
 // part 2) happened earlier on the path that owns the lease, and the
 // plain capacity check stays with the sandbox it sizes.
 func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store.BuildRow, resume bool, sandboxID string, l *Lease) (sb substrate.Sandbox, err error) {
-	if err := s.admit(ctx, b.MemoryMB); err != nil {
+	vcpu, memoryMB, coldBoot := s.startShape(b, resume, l)
+	if err := s.admit(ctx, memoryMB); err != nil {
 		return substrate.Sandbox{}, err
 	}
 	if sandboxID == "" {
@@ -1476,10 +1482,11 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		KernelVersion:      b.KernelVersion,
 		FirecrackerVersion: b.FirecrackerVersion,
 		EnvdVersion:        b.EnvdVersion,
-		VCPU:               uint32(b.VCPU),
-		MemoryMB:           uint32(b.MemoryMB),
+		VCPU:               uint32(vcpu),
+		MemoryMB:           uint32(memoryMB),
 		DiskSizeMB:         uint32(b.DiskMB),
 		Resume:             resume,
+		FilesystemBoot:     coldBoot,
 		EnvVars:            env,
 		Metadata:           map[string]string{"lease_id": l.ID, "owner": l.Owner},
 		EndAt:              l.ExpiresAt,
@@ -1499,6 +1506,14 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 			s.deleteHalfSandbox(ctx, l, sandboxID)
 		}
 		return substrate.Sandbox{}, err
+	}
+	if l != nil && l.ID != "pool" {
+		s.store.mu.Lock()
+		l.Start = "warm"
+		if coldBoot {
+			l.Start = "cold"
+		}
+		s.store.mu.Unlock()
 	}
 	// A substrate may mint the id rather than honour the requested one;
 	// track the returned id from here on so the caller's endCreatingSandbox
@@ -2129,6 +2144,53 @@ func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	} else {
 		s.store.pendingMiB[owner] -= n * memoryMB
 	}
+}
+
+// sizedStart picks the build a fresh guest for lease l boots from and
+// the size it runs (#151 Z4): the lease's own size (the build's where
+// the lease has none stamped) and its disk allowance (the image's where
+// none). A size equal to the image's current build starts warm from it;
+// another size starts warm from the image's build for that size when
+// one exists (a warm preset), else cold from the current build
+// (startShape sees the difference and sets filesystem_boot).
+func (s *Service) sizedStart(ctx context.Context, l *Lease, img store.ImageRow, b store.BuildRow) (store.BuildRow, int, int, int) {
+	vcpu, memoryMB, diskMB := s.leaseSize(l, store.ImageRow{VCPU: b.VCPU, MemoryMB: b.MemoryMB, DiskMB: img.DiskMB})
+	if vcpu == b.VCPU && memoryMB == b.MemoryMB {
+		return b, vcpu, memoryMB, diskMB
+	}
+	if wb, ok := s.warmSizeBuild(ctx, img, vcpu, memoryMB); ok {
+		return wb, vcpu, memoryMB, diskMB
+	}
+	return b, vcpu, memoryMB, diskMB
+}
+
+// warmSizeBuild returns the image's ready warm build of exactly this
+// size, if one exists (#151 Z3 warm_sizes).
+func (s *Service) warmSizeBuild(ctx context.Context, img store.ImageRow, vcpu, memoryMB int) (store.BuildRow, bool) {
+	return store.BuildRow{}, false // filled in when Z3's image_sizes lands
+}
+
+// startShape is the size createSandbox starts a VM at, and whether it
+// must cold-boot to get it (#151 Z4). A template build started fresh
+// for a lease stamped with another size boots the build's root
+// filesystem at the lease's size (filesystem_boot): seconds rather than
+// milliseconds, with no guest memory to lose. Every other start runs
+// the build's own size: a pause, checkpoint or snapshot build resumes
+// its memory snapshot, which keeps the size it was taken at (they record
+// the lease's size, Z1), and a pool placeholder or an unstamped lease
+// takes the build's.
+func (s *Service) startShape(b store.BuildRow, resume bool, l *Lease) (vcpu, memoryMB int, coldBoot bool) {
+	vcpu, memoryMB = b.VCPU, b.MemoryMB
+	if resume || b.Kind != "template" || l == nil || l.ID == "pool" {
+		return vcpu, memoryMB, false
+	}
+	s.store.mu.Lock()
+	lv, lm := l.VCPU, l.MemoryMB
+	s.store.mu.Unlock()
+	if lv <= 0 || lm <= 0 || (lv == vcpu && lm == memoryMB) {
+		return vcpu, memoryMB, false
+	}
+	return lv, lm, true
 }
 
 // imageBuild loads an image row and its current build. An image without
@@ -3298,6 +3360,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	if err != nil {
 		return nil, err
 	}
+	// The lease keeps its own size (#151 Z4): warm from a build of that
+	// size, else cold from the current build.
+	b, vcpu, memoryMB, diskMB := s.sizedStart(ctx, l, img, b)
 	sb, err := s.createSandbox(ctx, img, b, false, "", l)
 	if err != nil {
 		return nil, err
@@ -3333,11 +3398,11 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = b.BuildID
-	// The fresh guest runs the image's current build: stamp its size
-	// (#151 Z1), as restartCold does, so the charge matches the VM.
-	l.MemoryMB = b.MemoryMB
-	l.VCPU = b.VCPU
-	l.DiskMB = img.DiskMB
+	// The lease keeps its own size (#151 Z4), as restartCold does; an
+	// unstamped one takes the build's, so the charge matches the VM.
+	l.MemoryMB = memoryMB
+	l.VCPU = vcpu
+	l.DiskMB = diskMB
 	l.setState("running")
 	l.Suspended = false
 	l.LastActive = time.Now()
@@ -3373,15 +3438,17 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 // longer its resume point (the next suspend sets it as usual). A
 // suspended lease comes back running.
 func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lease, error) {
-	// The fresh guest runs the image's current build, so that build's
-	// memory is the charge to re-admit for a suspended lease (#128,
-	// #151 Z1) — fetched before
-	// anything else, so a catalog failure answers before any change. A
-	// running lease is already charged; its stamp is re-set below.
+	// The fresh guest boots the image's current build at the lease's
+	// own size (#151 Z4): warm from a build of that size when one
+	// exists, cold otherwise. That size is the charge to re-admit for a
+	// suspended lease (#128) — fetched before anything else, so a catalog
+	// failure answers before any change. A running lease is already
+	// charged with it.
 	img, b, err := s.imageBuild(ctx, l.Image)
 	if err != nil {
 		return nil, err
 	}
+	b, vcpu, memoryMB, diskMB := s.sizedStart(ctx, l, img, b)
 	// ok guards a suspended lease's admission debit: until it is set true
 	// on a success return, the deferred undo gives the memory back (a
 	// failed cold restart never took the hugepages). A running lease
@@ -3397,22 +3464,22 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; the fresh guest needs it back, so the cold restart
 		// re-passes the memory check before any sandbox is created.
-		if err := s.reserveQuota(owner, 1, b.MemoryMB, false); err != nil {
+		if err := s.reserveQuota(owner, 1, memoryMB, false); err != nil {
 			return nil, err
 		}
-		defer func() { s.releaseQuotaReservation(owner, 1, b.MemoryMB) }()
+		defer func() { s.releaseQuotaReservation(owner, 1, memoryMB) }()
 		// Memory re-admission (FS2b-1) against the current build's
 		// charge — the number the fresh guest runs (and is stamped with
 		// below), as for the memory check above.
 		// The running lease reserves its whole disk_mb (FS3): it must fit in
 		// usable snapshot disk, checked before memory so a memory take-back
 		// never pauses a lease for a request the disk then refuses.
-		diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
+		diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(diskMB)*1024*1024)
 		if derr != nil {
 			return nil, derr
 		}
 		defer diskRelease()
-		undo, err = s.admitMemory(ctx, owner, b.MemoryMB)
+		undo, err = s.admitMemory(ctx, owner, memoryMB)
 		if err != nil {
 			return nil, err
 		}
@@ -3456,13 +3523,11 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
-	// The fresh guest comes from the image's current build, so the
-	// lease's size is re-stamped from that build (#128, #151 Z1) — the
-	// number the check above (or the running charge) was admitted with —
-	// and its disk allowance from the image row.
-	l.MemoryMB = b.MemoryMB
-	l.VCPU = b.VCPU
-	l.DiskMB = img.DiskMB
+	// The lease keeps its own size (#151 Z4); an unstamped one takes the
+	// build's — the number the check above was admitted with.
+	l.MemoryMB = memoryMB
+	l.VCPU = vcpu
+	l.DiskMB = diskMB
 	// The pause builds stop being the lease's resume point: the next
 	// suspend writes a fresh one.
 	l.ResumeBuildID = ""
@@ -4494,6 +4559,10 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 	}
 	if l.DiskMB > 0 {
 		m["disk_mb"] = l.DiskMB
+	}
+	// How the current VM started (#151 Z4): "warm" or "cold".
+	if l.Start != "" {
+		m["start"] = l.Start
 	}
 	if !l.PausedAt.IsZero() {
 		m["paused_at"] = formatRFC3339(l.PausedAt)
