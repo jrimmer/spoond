@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+Upgrading from 2.9? See [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
+
 ### Added
 
 - **Named saves answer disk refusals like every other path.** A save
@@ -186,6 +188,12 @@ summarised from README "Status".
 
 ### Changed
 
+- **The dashboard drops the burst and preempted marks for taken-back
+  leases.** The 3.0 dashboard no longer shows the removed burst class or
+  preemption: the capacity panel's `taken back N` count and the leases
+  table's "taken back" state name the leases suspended by memory
+  take-back (`suspend_reason = 'take_back'`).
+
 - **Queued creates are served by fair-share ratio (FS4).** The owner
   with the lowest ratio (usage over their equal slice) goes first, an
   owner the fair-share view does not know after every known one, then
@@ -320,6 +328,12 @@ summarised from README "Status".
   admits its whole batch's memory once, before any child is created, so
   a refusal cannot leave an earlier child's take-back behind: the
   children share one admission and a rollback credits it.
+
+- **A disk-full failure from the orchestrator is a 503
+  `capacity_wait`, not a 500.** Create, pause, resume and checkpoint
+  errors whose message reports `no space left on device`, `ENOSPC` or
+  `disk quota exceeded` are mapped to `substrate.ErrCapacity` even when
+  the orchestrator sends them as `Internal`/`Unknown`.
 
 - **A memory admission that fails afterwards gives its cache debit
   back.** `admitMemory` returns an undo that credits the cached

@@ -31,7 +31,7 @@ var fixedNow = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 func sampleSnapshot() Snapshot {
 	return Snapshot{
 		At: "12:00:00", Version: "0.4.2", BackendUp: 9 * time.Minute,
-		Leases: 3, Queued: 1, Granted: 1234, Swept: 17, Burst: 2,
+		Leases: 3, Queued: 1, Granted: 1234, Swept: 17, TakenBack: 1,
 		Running: 3, Limit: 64, Shares: 2, Users: 7, BuildsBusy: 1,
 		ByState:   map[string]int{"running": 2, "suspended": 1},
 		ReqPerSec: 12.3, CreatesPerMin: 4, CreateMs: 250, ResumeMs: 4100,
@@ -55,14 +55,14 @@ func sampleSnapshot() Snapshot {
 		},
 		Rows: []LeaseRow{
 			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet",
-				Burst: true, Age: "5m", Left: "10m"},
+				Age: "5m", Left: "10m"},
 			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "running", Policy: "restricted",
 				Holder: "forgejo/job-42", HolderURL: "https://git.example.com/job/42", Pinned: true,
 				Age: "2h31m", Left: "∞"},
 			{ID: "fedcba0987", Image: "go-base", Owner: "agent", State: "suspended", Policy: "lan",
 				Name: "scratch space", Holder: "nightly",
-				LastAction: "idle_suspend/suspend_idle", LastActionAt: fixedNow.Add(-3 * time.Hour),
-				Burst: true, Age: "1d", Left: "due"},
+				LastAction: "take_back/suspend", LastActionAt: fixedNow.Add(-3 * time.Hour),
+				TakenBack: true, Age: "1d", Left: "due"},
 		},
 		Images: []ImageRow{
 			{Name: "go-base", Live: 2, Uses: 51, VCPU: 2, MemMB: 2048, Updated: "2d ago"},
@@ -625,14 +625,14 @@ func TestNoticePanelAbsentWhenNoMessages(t *testing.T) {
 	}
 }
 
-// TestNoticesDropLeaseTriggers: a lost lease, a preempted burst count and
+// TestNoticesDropLeaseTriggers: a lost lease, a taken-back count and
 // a lapsed-hold suspended lease are NOT system messages; they stay
-// visible in the leases table with their state (■ lost, ·p / preempted,
+// visible in the leases table with their state (■ lost, taken back,
 // lapsed hold) and draw no notification row.
 func TestNoticesDropLeaseTriggers(t *testing.T) {
 	s := healthySnapshot()
 	s.ByState = map[string]int{"running": 1, "lost": 1}
-	s.Preempted = 3
+	s.TakenBack = 3
 	s.Rows = []LeaseRow{
 		{ID: "lostlease01", Owner: "honey", State: "lost"},
 		{ID: "heldlease01", Owner: "agent", State: "suspended",
@@ -816,19 +816,18 @@ func TestLeasesShowPinMark(t *testing.T) {
 }
 
 // TestLeasesShowStateWords: the state cell spells out the run state and
-// its qualifier (#128, #129) at full width: "running, burst",
-// "preempted", "idle-suspended", "suspended, burst"; never a ·b/·p/·i
-// suffix.
+// its qualifier (#128, #129) at full width: "running", "taken back",
+// "idle-suspended"; never a ·b/·p/·i suffix.
 func TestLeasesShowStateWords(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{
-		{ID: "preempt0001", Image: "py-base", State: "suspended", Burst: true, Preempted: true, Age: "5m", Left: "∞"},
-		{ID: "burst00001", Image: "py-base", State: "running", Burst: true, Age: "5m", Left: "10m"},
+		{ID: "takenback01", Image: "py-base", State: "suspended", TakenBack: true, Age: "5m", Left: "∞"},
+		{ID: "running0001", Image: "py-base", State: "running", Age: "5m", Left: "10m"},
 		{ID: "idlesusp001", Image: "py-base", State: "suspended", IdleSuspended: true, Age: "5m", Left: "∞"},
-		{ID: "suspburst01", Image: "py-base", State: "suspended", Burst: true, Age: "5m", Left: "∞"},
+		{ID: "suspended001", Image: "py-base", State: "suspended", Age: "5m", Left: "∞"},
 	}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	for _, want := range []string{"‖ preempted", "▶ running, burst", "‖ idle-suspended", "‖ suspended, burst"} {
+	for _, want := range []string{"‖ taken back", "▶ running", "‖ idle-suspended", "‖ suspended"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("state cell %q missing:\n%s", want, p)
 		}
@@ -848,12 +847,9 @@ func TestStateWordsNarrow(t *testing.T) {
 		n    int
 		want string
 	}{
-		{LeaseRow{State: "running", Burst: true}, 16, "running, burst"},
-		{LeaseRow{State: "running", Burst: true}, 10, "run, burst"},
-		{LeaseRow{State: "running", Burst: true}, 7, "running"},
-		{LeaseRow{State: "running", Burst: true}, 4, "run"},
-		{LeaseRow{State: "suspended", Preempted: true}, 7, "preempt"},
-		{LeaseRow{State: "suspended", Preempted: true}, 5, "susp"},
+		{LeaseRow{State: "suspended", TakenBack: true}, 10, "taken back"},
+		{LeaseRow{State: "suspended", TakenBack: true}, 7, "taken"},
+		{LeaseRow{State: "suspended", TakenBack: true}, 4, "susp"},
 		{LeaseRow{State: "suspended", IdleSuspended: true}, 9, "idle-susp"},
 		{LeaseRow{State: "suspended"}, 8, "susp"},
 		{LeaseRow{State: "recovered"}, 6, "recov"},
@@ -1253,7 +1249,7 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		{"checkpointed", "title"},
 		{"recovered", "title"},
 		{"suspended", "warn"},
-		{"preempted", "warn"},
+		{"take_back", "warn"},
 		{"idle_suspended", "warn"},
 		{"queued", "warn"},
 		{"recovery_retry", "warn"},
@@ -1512,7 +1508,7 @@ func TestServicesFillTallerPanel(t *testing.T) {
 }
 
 // TestNoticesDropLeaseStates: what is a lease's own business stays off the
-// panel: a rule-suspended lease running again, preempted leases, a
+// panel: a rule-suspended lease running again, taken-back leases, a
 // hand/drain/idle_suspend pause and a lapsed hold all raise nothing.
 func TestNoticesDropLeaseStates(t *testing.T) {
 	cases := []struct {
@@ -1523,8 +1519,8 @@ func TestNoticesDropLeaseStates(t *testing.T) {
 			s.ByState = map[string]int{"lost": 1}
 			s.Rows = []LeaseRow{{ID: "abc123", Owner: "honey", State: "lost"}}
 		}},
-		{"preempted leases", func(s *Snapshot) {
-			s.Preempted = 3
+		{"taken-back leases", func(s *Snapshot) {
+			s.TakenBack = 3
 		}},
 		{"lapsed hold suspended", func(s *Snapshot) {
 			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "expiry/suspend_lapsed", LastActionAt: fixedNow.Add(-time.Hour)}}
@@ -1532,8 +1528,8 @@ func TestNoticesDropLeaseStates(t *testing.T) {
 		{"rule-suspended lease running again", func(s *Snapshot) {
 			s.Rows = []LeaseRow{{ID: "abc123", State: "running", LastAction: "idle/suspend_idle", LastActionAt: fixedNow.Add(-time.Hour)}}
 		}},
-		{"preempted then resumed", func(s *Snapshot) {
-			s.Rows = []LeaseRow{{ID: "f959ca027f", State: "running", LastAction: "preempt/suspend", LastActionAt: fixedNow.Add(-time.Minute)}}
+		{"taken back then resumed", func(s *Snapshot) {
+			s.Rows = []LeaseRow{{ID: "f959ca027f", State: "running", LastAction: "take_back/suspend", LastActionAt: fixedNow.Add(-time.Minute)}}
 		}},
 		{"suspended by hand", func(s *Snapshot) {
 			s.Rows = []LeaseRow{{ID: "abc123", State: "suspended", LastAction: "suspend/hand", LastActionAt: fixedNow.Add(-time.Minute)}}
@@ -1653,7 +1649,7 @@ func TestLeaseColumnsFitContent(t *testing.T) {
 	// has room above the short value; at the narrow minimum the base clamps
 	// to ten and both fit there already.
 	long := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "suspended",
-		Burst: true, Age: "5m", Left: "10m"}}
+		TakenBack: true, Age: "5m", Left: "10m"}}
 	for _, w := range []int{DefaultWidth, minW} {
 		cs := leaseLayout(w, short)
 		if cs.stW >= 19 {
@@ -1675,7 +1671,7 @@ func TestLeaseColumnsStayInPanel(t *testing.T) {
 	sets := map[string][]LeaseRow{
 		"sample": {
 			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet", Age: "5m", Left: "10m"},
-			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "suspended", Burst: true, Policy: "none", Age: "2h31m", Left: "∞"},
+			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "suspended", TakenBack: true, Policy: "none", Age: "2h31m", Left: "∞"},
 		},
 		"long owner": {{ID: "x", Owner: strings.Repeat("long", 20), State: "running", Age: "1m", Left: "1m"}},
 		"empty":      nil,

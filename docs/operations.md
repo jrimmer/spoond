@@ -259,8 +259,9 @@ outside it that have been idle for an hour.
   dry-run, because it is a catalog correction, not a deletion:
   `GC_DELETE` controls candidate deletion, not the stale-row failure.
 - `GC_DELETE=1` makes the GC actually delete candidates, marking them
-  `deleted` and counting `spoond_gc_deleted_total{kind}`. Only enable it
-  after reading a week of dry-run logs.
+  `deleted` and counting `spoond_gc_deleted_total{kind}`. **Set it in
+  production**: a host whose GC only logs fills its snapshot disk with
+  hourly checkpoints. On a new host, read a week of dry-run logs first.
 - A build left in state `building` past twice the build timeout (the
   pipeline's `buildTimeout`, one hour by default) is failed by the pass
   and logged
@@ -1395,7 +1396,8 @@ marker. The substrate-specific series:
 | `spoond_pause_chain_bytes` | histogram of the lease's parent chain's recorded `size_bytes` summed at each pause, including shared ancestors (spoond-p9j) |
 | `spoond_snapshot_disk_reserved_bytes` | snapshot disk reserved for the running leases (their whole `disk_mb`; FS3b) |
 | `spoond_snapshot_disk_usable_bytes` | snapshot disk a new request may use: free − reserved − the `DISK_RESERVE_PCT` floor − pending + freeing; negative means short (FS3b) |
-| `spoond_box_full_total` | requests refused `box_full`: a request needed room and every take-back candidate was pinned (nothing unpinned could be taken; v3.0 FS5) |
+| `spoond_box_full_total` | requests refused `box_full`: a request needed room and take-back could free none — every candidate was pinned, or the requester was itself the biggest borrower (v3.0 FS5, FS2b) |
+| `spoond_take_backs_total` | leases paused by memory take-back so another owner's request could fit (v3.0 FS2a) |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |

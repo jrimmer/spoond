@@ -1540,7 +1540,10 @@ data: {"seq":43,…,"type":"suspended","detail":"paused into build 9e1f2ab3…",
 are gone with the held rules (FS5). `policy_step` is the pressure
 order's step name,
 empty until that order names steps. `build_id` is the pause build the
-suspend wrote. A suspend taken by hand or by the drain carries no
+suspend wrote. A `take_back` suspension also carries
+`take_back_ratio` (the paused lease's owner's usage/slice ratio when it
+was taken) and `take_back_for` (the owner whose request it made room
+for). A suspend taken by hand or by the drain carries no
 `reason`, `policy_step` or `build_id` — it has no automatic reason, so
 the human `detail` still names the pause build.
 
@@ -1554,6 +1557,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
 | `released` | the lease is deleted (TTL sweep, `DELETE`, the one paused-release clock, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `paused_expired` (the one clock released a paused lease 30 d after its pause date), `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released` |
 | `suspended` | the sandbox is paused into a build (suspend, drain, the lease's own idle_suspend, take-back) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
+| `take_back` | the lease was paused by memory take-back so another owner's request could fit; it always follows the lease's `suspended` event with reason `take_back`, and the lease resumes on its holder's next work call | `for <owner>: owner <ratio> over their slice; it resumes on the holder's next work call` |
 | `resumed` | the lease starts from a pause build (resume, undrain, gateway resume, resume on use) | the resume build id; a taken-back lease its holder's work call brought back |
 | `checkpointed` | a running lease is checkpointed | the duration and the checkpoint build id, e.g. `540 ms · build 9e1f2ab3…` |
 | `snapshot_saved` | `POST /api/leases/{id}/snapshots` saved the lease as a named snapshot (2.7, #83) | `saved as <name>@<version> · <size> · <duration>`, e.g. `saved as spoond/warm@4 · 2.1 GiB · 820 ms` |

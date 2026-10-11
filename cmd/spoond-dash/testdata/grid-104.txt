@@ -2,13 +2,13 @@ SPOOND · spoond.example.com                                                    
                                                                                                         
 ┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
 │ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
-│ 3 leases · 2 running (2 burst) · 1 susp · 0 lost│  │ i/o stall     ░░░░░░░░░░░░╎░░░    0.0% stalled  │
-│ queued 1 · granted 1,234 · swept 17             │  │ nvme0n1 busy  ██░░░░░░░░░░╎░░░ 18% · 12 MB/s w  │
-│ shares 2 · users 7 · builds busy 1              │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
-│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │
-│ go-base        ███······             1 running  │  │ snapshot disk █████████░░░╎░░░  121.5 GiB free  │
-│ py-base        ███······             1 running  │  │ root disk     ██████░░░░░░╎░░░   30.2 GiB free  │
-│                                                 │  │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
+│ 3 leases · 2 running · 1 susp · 1 taken back    │  │ i/o stall     ░░░░░░░░░░░░╎░░░    0.0% stalled  │
+│ 0 lost                                          │  │ nvme0n1 busy  ██░░░░░░░░░░╎░░░ 18% · 12 MB/s w  │
+│ queued 1 · granted 1,234 · swept 17             │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
+│ shares 2 · users 7 · builds busy 1              │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ snapshot disk █████████░░░╎░░░  121.5 GiB free  │
+│ go-base        ███······             1 running  │  │ root disk     ██████░░░░░░╎░░░   30.2 GiB free  │
+│ py-base        ███······             1 running  │  │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
 │                                                 │  │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB         │
 │                                                 │  │ gc dry-run                                      │
 └─────────────────────────────────────────────────┘  └─────────────────────────────────────────────────┘
@@ -17,11 +17,11 @@ SPOOND · spoond.example.com                                                    
 │ ▃▅▇▅█▇                   ▅▇█▆██                   ▁▃▁▅██                   ▅▆█▇██                    │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ leases ─────────────────────────────────────────────────────────────────────────────────────────────┐
-│ id         image   owner state              access     age    left holder                            │
-│ abcdef0123 go-base jason ▶ running, burst   internet   5m     10m  -                                 │
-│ 1234567890 py-base ci    ▶ running          restricted 2h31m  ∞    ◆ forgejo/job-42                  │
-│ fedcba0987 go-base agent ‖ suspended, burst lan        1d     due  nightly                           │
-│                                                                    ◆ pinned                          │
+│ id         image   owner state        access     age    left holder                                  │
+│ abcdef0123 go-base jason ▶ running    internet   5m     10m  -                                       │
+│ 1234567890 py-base ci    ▶ running    restricted 2h31m  ∞    ◆ forgejo/job-42                        │
+│ fedcba0987 go-base agent ‖ taken back lan        1d     due  nightly                                 │
+│                                                              ◆ pinned                                │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ images ──────────────────────────────────────────────────┐  ┌─ services ────────────────────────────┐
 │ image            vcpu  mem      live  uses   baked        │  │ spoond-backend        ✓ active        │

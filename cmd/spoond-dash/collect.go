@@ -35,17 +35,12 @@ type Snapshot struct {
 	// Leases and sandboxes.
 	Leases  int            `json:"leases"`
 	ByState map[string]int `json:"byState"`
-	// Burst is the live leases (running, suspended, recovered) in the
-	// burst class, counted in the store: the hugepages burst holds now.
-	// It is deliberately not the same set the leases panel's ·b marker
-	// shows, which is the stored class of the displayed rows, lost
-	// rows included (#128 part 2).
-	Burst int `json:"burst"`
-	// Preempted is the live leases suspended by preemption (#128 part
-	// 3), counted in the store: burst leases the resume queue will bring
-	// back when capacity allows, shown by the leases table's preempted
-	// mark.
-	Preempted int `json:"preempted"`
+	// TakenBack is the leases suspended by memory take-back (FS2a),
+	// counted in the store: state suspended with suspend_reason
+	// 'take_back'. They stay paused (no auto-resume) until their next
+	// use, so the capacity panel names them and the leases table marks
+	// the rows taken back.
+	TakenBack int `json:"takenBack"`
 	Queued    int `json:"queued"`
 	// QueuedOldest is the age in seconds of the oldest create waiting for
 	// admission (#129 part 1); 0 when nothing waits.
@@ -282,16 +277,13 @@ type Service struct {
 // ("rule/action", e.g. "idle_suspend/suspend_idle"). Comment is the
 // lease's own note: the holder column shows it, dim, on a CI job lease
 // with no holder and no name (e.g. "forgejo: example.com/site #218").
-// Burst is the lease's admission class (#128 part 2): the state cell
-// shows it as "·b". Preempted marks a burst lease suspended by
-// preemption (#128 part 3): the state cell shows it as "·p".
-// IdleSuspended marks a persistent lease suspended by its own
-// idle_suspend threshold (2.5, #129 part 2): the state cell shows it as
-// "·i".
+// TakenBack marks a lease suspended by memory take-back (FS2a): the
+// state cell names it "taken back". IdleSuspended marks a persistent
+// lease suspended by its own idle_suspend threshold (2.5, #129 part 2):
+// the state cell names it "idle-suspended".
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name, Comment string
-	Burst                                          bool
-	Preempted                                      bool
+	TakenBack                                      bool
 	IdleSuspended                                  bool
 	Pinned                                         bool
 	Holder, HolderURL                              string
@@ -1054,7 +1046,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	names := c.userNames()
 
 	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, comment, created_at, expires_at, persistent,
-		holder, holder_url, pinned, last_action, last_action_at, class, preempted_at
+		holder, holder_url, pinned, last_action, last_action_at, suspend_reason
 		FROM leases ORDER BY created_at DESC LIMIT 40`)
 	if err != nil {
 		return err
@@ -1066,10 +1058,9 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		var comment string
 		var holder, holderURL, lastAction, lastActionAt string
 		var persistent, pinned int
-		var class string
-		var preemptedAt string
+		var suspendReason string
 		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &comment, &created, &expires, &persistent,
-			&holder, &holderURL, &pinned, &lastAction, &lastActionAt, &class, &preemptedAt); err != nil {
+			&holder, &holderURL, &pinned, &lastAction, &lastActionAt, &suspendReason); err != nil {
 			return err
 		}
 		r.Comment = comment
@@ -1080,16 +1071,17 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		if r.Policy == "" {
 			r.Policy = "restricted"
 		}
-		r.Burst = class == "burst"
 		r.Pinned = pinned == 1
-		// A preempted lease shows the "·p" mark only while it is live
-		// (suspended, running or recovered). A lost row keeps its
-		// preempted_at in the store but must not claim to be waiting for
-		// a resume, and the leases table marks lost rows on their own.
-		r.Preempted = preemptedAt != "" && (r.State == "suspended" || r.State == "running" || r.State == "recovered")
-		// An idle-suspended lease shows the "·i" mark while it is
-		// suspended and no preemption claims the row (2.5, #129 part 2).
-		r.IdleSuspended = r.State == "suspended" && preemptedAt == "" &&
+		// A take-back suspension (FS2a) shows while the lease is
+		// suspended: it stays paused until its next use. A row in any
+		// other state has already been resumed (the store clears
+		// suspend_reason then), so only a suspended row carries the mark.
+		r.TakenBack = r.State == "suspended" && suspendReason == "take_back"
+		// An idle-suspended lease is suspended by its own idle_suspend
+		// threshold (2.5, #129 part 2): suspend_reason idle_suspend and the
+		// recorded rule. A take-back suspension carries its own reason, so
+		// the two never collide.
+		r.IdleSuspended = r.State == "suspended" && suspendReason == "idle_suspend" &&
 			lastAction == "idle_suspend/suspend_idle"
 		if len(r.ID) > 10 {
 			r.ID = r.ID[:10]
@@ -1138,22 +1130,13 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	c.lastRow = s.Rows
 	c.rowsMu.Unlock()
 
-	// The capacity panel's burst count (#128 part 2): every live lease
-	// in the burst class, counted in the store — not over the ≤40 rows
-	// the leases panel displays, where an older burst lease would go
-	// missing. The same live set the per-image counts read (running,
-	// suspended and recovered hold or will hold hugepages).
+	// The capacity panel's taken-back count (FS2a): every lease suspended
+	// by memory take-back, counted in the store — not over the ≤40 rows
+	// the leases panel displays, where an older victim would go missing.
 	if err := db.QueryRow(`SELECT COUNT(*) FROM leases
-		WHERE class = 'burst' AND state IN ('running','suspended','recovered')`).Scan(&s.Burst); err != nil {
-		s.Burst = 0
-		return fmt.Errorf("count burst leases: %w", err)
-	}
-	// The preempted count (#128 part 3): live leases the resume queue is
-	// holding until capacity allows, wherever they sit in the row window.
-	if err := db.QueryRow(`SELECT COUNT(*) FROM leases
-		WHERE preempted_at != '' AND state IN ('running','suspended','recovered')`).Scan(&s.Preempted); err != nil {
-		s.Preempted = 0
-		return fmt.Errorf("count preempted leases: %w", err)
+		WHERE state = 'suspended' AND suspend_reason = 'take_back'`).Scan(&s.TakenBack); err != nil {
+		s.TakenBack = 0
+		return fmt.Errorf("count taken-back leases: %w", err)
 	}
 	// The pinned-idle count (FS5): pinned leases the backend has flagged
 	// (pinned_idle_since set), counted per owner so the one aggregate
