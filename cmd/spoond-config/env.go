@@ -14,8 +14,6 @@ package spoondconfig
 
 import (
 	"bufio"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -177,34 +175,37 @@ func unitEnv(show map[string]string, read func(path string) (string, error)) []e
 
 // parseEnvironmentFiles reads the EnvironmentFiles= property: a
 // whitespace-separated list of `path (ignore_errors=yes|no)` entries.
-// The backend unit lists a single file; a path with spaces arrives
-// quoted.
+// Each entry ends at its "(ignore_errors=…)" annotation — split on
+// that, not on whitespace (a path may contain spaces, quoted). The
+// backend unit lists a single file.
 func parseEnvironmentFiles(s string) []string {
 	var out []string
-	for _, item := range splitEnvs(s) {
-		item = strings.TrimSpace(item)
-		item = strings.TrimSuffix(item, " (ignore_errors=no)")
-		item = strings.TrimSuffix(item, " (ignore_errors=yes)")
-		item = strings.TrimSpace(item)
+	var cur strings.Builder
+	inParen := false
+	flush := func() {
+		item := strings.TrimSpace(cur.String())
+		cur.Reset()
 		if item == "" {
-			continue
+			return
 		}
 		if len(item) > 1 && item[0] == '"' && item[len(item)-1] == '"' {
 			item = item[1 : len(item)-1]
 		}
 		out = append(out, item)
 	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '(':
+			inParen = true
+		case c == ')':
+			inParen = false
+			flush()
+		default:
+			if !inParen {
+				cur.WriteByte(c)
+			}
+		}
+	}
+	flush() // a trailing path without the annotation
 	return out
-}
-
-// absPath makes a relative file source absolute against the working
-// directory, so SOURCE names a findable file in the table.
-func absPath(p string) string {
-	if filepath.IsAbs(p) {
-		return p
-	}
-	if wd, err := os.Getwd(); err == nil {
-		return filepath.Join(wd, p)
-	}
-	return p
 }

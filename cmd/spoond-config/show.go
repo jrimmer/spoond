@@ -145,14 +145,52 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 		apiURL = defaultAPIURL(effective("BIND_ADDR", DefaultBindAddr))
 	}
 	rc, rcErr := fetch(apiURLFor(apiURL), effective("ADMIN_TOKEN", ""))
+	unreached := rcErr != nil
 
 	if jsonOut {
-		renderJSON(stdout, unit, apiURL, byName, rc, rcErr)
+		renderJSON(stdout, unit, apiURL, byName, rc, rcErr, unreached)
 		return 0
 	}
-	rows := buildRows(byName, rc)
+	rows := buildRows(byName, rc, unreached)
 	printTable(stdout, rows, rcErr, apiURL)
 	return 0
+}
+
+// buildRowsUnreached assembles the rows when the backend did not answer:
+// every known row runs "?" (nothing can be classified) with the unit's
+// value and source, unknown keys keep their note.
+func buildRowsUnreached(byName map[string]entry) []row {
+	var rows []row
+	for _, name := range settings.Known {
+		rows = append(rows, unknownRow(name, byName, true))
+	}
+	var unknown []string
+	for name := range byName {
+		if !settings.IsKnown(name) {
+			unknown = append(unknown, name)
+		}
+	}
+	slices.Sort(unknown)
+	for _, name := range unknown {
+		rows = append(rows, unknownRow(name, byName, false))
+	}
+	return rows
+}
+
+// unknownRow builds one row with the runUnknown RUNNING cell.
+func unknownRow(name string, byName map[string]entry, known bool) row {
+	e, setHere := byName[name]
+	src := fromDefault
+	if setHere {
+		src = e.source
+	}
+	return row{
+		name:    name,
+		value:   settings.HideIfSecret(name, e.value),
+		source:  src,
+		running: runUnknown,
+		note:    rowNote(setHere, known),
+	}
 }
 
 // buildRows assembles the rows: every settings.Known name in its sorted
@@ -160,8 +198,13 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 // source default — then any unknown key the unit env sets (sorted, with
 // the "(unknown setting)" note; a typo or a removed setting, the same
 // class settings.CheckEnvFile warns about). Values are masked here so
-// no rendering path can print a secret.
-func buildRows(byName map[string]entry, rc runningConfig) []row {
+// no rendering path can print a secret. With unreached set the backend
+// did not answer: every RUNNING cell becomes "?" and nothing counts as
+// drift.
+func buildRows(byName map[string]entry, rc runningConfig, unreached bool) []row {
+	if unreached {
+		return buildRowsUnreached(byName)
+	}
 	run := runningValues(rc)
 	var rows []row
 	for _, name := range settings.Known {
@@ -300,7 +343,7 @@ type jsonSetting struct {
 // renderJSON writes the machine-readable document: every resolved
 // setting (masked), the running backend's answer when it could be
 // fetched, else the error. Secrets stay masked in --json too.
-func renderJSON(stdout io.Writer, unit, apiURL string, byName map[string]entry, rc runningConfig, rcErr error) {
+func renderJSON(stdout io.Writer, unit, apiURL string, byName map[string]entry, rc runningConfig, rcErr error, unreached bool) {
 	out := struct {
 		Unit     string         `json:"unit"`
 		API      string         `json:"api"`
@@ -308,7 +351,7 @@ func renderJSON(stdout io.Writer, unit, apiURL string, byName map[string]entry, 
 		Running  *runningConfig `json:"running,omitempty"`
 		RunErr   string         `json:"running_error,omitempty"`
 	}{Unit: unit, API: apiURL, Settings: []jsonSetting{}}
-	for _, r := range buildRows(byName, rc) {
+	for _, r := range buildRows(byName, rc, unreached) {
 		out.Settings = append(out.Settings, jsonSetting{
 			Name:   r.name,
 			Set:    r.source != fromDefault,
