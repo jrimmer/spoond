@@ -29,6 +29,12 @@ What the substrate is and why it behaves this way is
 `spoond dash` (below) is the watching surface; `spoond doctor` is the
 triage one; Gatus (above) is the machine that watches on its own.
 
+`spoond doctor` also reads every `*.env` file in `/etc/spoond`
+(`SPOOND_ENV_DIR` overrides the directory) and warns, by key name only,
+about a key no spoond binary reads — a typo or a removed setting, which
+would otherwise be ignored in silence — and a key set twice, where the
+last line wins (#137). Run it before restarting after an env change.
+
 ## Uptime monitoring (Gatus)
 
 For an external watcher, `/readyz` is the endpoint to poll: unlike
