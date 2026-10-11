@@ -5,11 +5,16 @@
 //
 //	FORGEJO_URL       Forgejo instance base URL (e.g. https://code.example.com)
 //	                   (required)
-//	RUNNER_TOKEN       Runner registration token
+//	RUNNER_TOKEN       Runner registration token (required; or
+//	                   RUNNER_TOKEN_FILE naming a 0600 file that carries
+//	                   it — #137 C2; setting both forms, or naming an
+//	                   unreadable file, fails startup, like a missing
+//	                   token)
 //	RUNNER_NAME        Runner name prefix (default "spoond-runner")
 //	RUNNER_LABELS      Comma-separated labels (default "ubuntu-latest")
 //	LEASE_URL          Lease API base URL (default http://127.0.0.1:8890)
-//	LEASE_TOKEN        Lease API bearer token
+//	LEASE_TOKEN        Lease API bearer token (required; or
+//	                   LEASE_TOKEN_FILE, same file rules)
 //	IMAGE_MAP          runs-on label -> image tag, comma-separated
 //	                   (e.g. "ubuntu-latest=py-base")
 //	DEFAULT_IMAGE      Image tag when no label maps (default "py-base")
@@ -58,6 +63,7 @@ import (
 
 	"github.com/jrimmer/spoond/v3/metrics"
 	"github.com/jrimmer/spoond/v3/runner"
+	"github.com/jrimmer/spoond/v3/settings"
 )
 
 func envOr(key, def string) string {
@@ -109,17 +115,33 @@ func Main(args []string) int {
 	if forgejoURL == "" {
 		log.Fatal("FORGEJO_URL is required (the Forgejo instance base URL, e.g. https://code.example.com)")
 	}
-	token := os.Getenv("RUNNER_TOKEN")
+	// The runner's secrets (#137 C2) resolve through settings.Get:
+	// NAME= in the environment, or NAME_FILE= naming a value file (0600,
+	// content with one trailing newline trimmed). Both forms set, or an
+	// unreadable file, is the startup error, like a missing token.
+	token, err := settings.Get("RUNNER_TOKEN", os.Getenv, os.ReadFile)
+	if err != nil {
+		log.Fatal(err)
+	}
 	if token == "" {
-		log.Fatal("RUNNER_TOKEN is required")
+		log.Fatal("RUNNER_TOKEN is required (or RUNNER_TOKEN_FILE)")
+	}
+	leaseToken, err := settings.Get("LEASE_TOKEN", os.Getenv, os.ReadFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if leaseToken == "" {
+		log.Fatal("LEASE_TOKEN is required (or LEASE_TOKEN_FILE)")
+	}
+	// The Forgejo admin token is optional (the adaptive pool's admin
+	// surface); it takes the file form too (#137 C2).
+	adminToken, err := settings.Get("FORGEJO_ADMIN_TOKEN", os.Getenv, os.ReadFile)
+	if err != nil {
+		log.Fatal(err)
 	}
 	name := envOr("RUNNER_NAME", "spoond-runner")
 	labels := strings.Split(envOr("RUNNER_LABELS", "ubuntu-latest"), ",")
 	leaseURL := envOr("LEASE_URL", "http://127.0.0.1:8890")
-	leaseToken := os.Getenv("LEASE_TOKEN")
-	if leaseToken == "" {
-		log.Fatal("LEASE_TOKEN is required")
-	}
 	defaultImage := envOr("DEFAULT_IMAGE", "py-base")
 	ttl := 600
 	if v := os.Getenv("LEASE_TTL"); v != "" {
@@ -172,7 +194,7 @@ func Main(args []string) int {
 		ScaleDownDelay: envDurOr("SCALE_DOWN_DELAY", 60*time.Second),
 		PollInterval:   5 * time.Second,
 		StateFile:      envOr("RUNNER_STATE_FILE", "/var/lib/spoond/runner-state.json"),
-		AdminToken:     os.Getenv("FORGEJO_ADMIN_TOKEN"),
+		AdminToken:     adminToken,
 		ForgejoURL:     forgejoURL,
 		Leases:         leaseClient,
 		StopGrace:      envDurOr("RUNNER_STOP_GRACE", runner.DefaultStopGrace),

@@ -41,6 +41,7 @@ import (
 
 	"github.com/jrimmer/spoond/v3/identity"
 	"github.com/jrimmer/spoond/v3/internal/env"
+	"github.com/jrimmer/spoond/v3/settings"
 )
 
 // envOr returns the value of env key or def when unset/empty. Used for
@@ -69,8 +70,11 @@ var (
 	// backendTok: the spoond-backend consumer token (required, admin-equivalent).
 	// Read from --backend-token flag or SPOOND_GATEWAY_TOKEN env so the
 	// value never needs to appear in ExecStart (security review #37 rescan
-	// F7: /proc/<pid>/cmdline must not expose the token).
-	backendTok = flags.String("backend-token", envOr("SPOOND_GATEWAY_TOKEN", ""), "spoond-backend consumer token (required; or $SPOOND_GATEWAY_TOKEN)")
+	// F7: /proc/<pid>/cmdline must not expose the token). The env value
+	// itself may be a file reference: SPOOND_GATEWAY_TOKEN_FILE (0600,
+	// #137 C2) is read when the flag default is computed, so the flag and
+	// the env both accept the file spelling.
+	backendTok = flags.String("backend-token", gatewayDefaultToken(), "spoond-backend consumer token (required; or $SPOOND_GATEWAY_TOKEN, or $SPOOND_GATEWAY_TOKEN_FILE)")
 	// DEPRECATED/ignored (security review #37 rescan F7): the gateway
 	// must NOT forward the bootstrap token — bootstrap is an operator
 	// action against the backend directly. The flag is accepted so
@@ -118,6 +122,21 @@ var (
 	// → full-tag aliases without code changes. Format: short=full,short=full.
 	extraImageAliases = flags.String("image-aliases", envOr("GATEWAY_IMAGE_ALIASES", ""), "comma-separated short=full image aliases (e.g. rust=rust-base,js=js-base)")
 )
+
+// gatewayDefaultToken is --backend-token's default: the environment's
+// SPOOND_GATEWAY_TOKEN, or the content of SPOOND_GATEWAY_TOKEN_FILE with
+// one trailing newline trimmed (#137 C2, resolved through settings.Get).
+// Both forms set, or an unreadable file, is a startup error (the fatal
+// fires when the flag set is built, before Main runs); the flag itself
+// still overrides whatever the environment carried. Returns "" for the
+// unset case, so the required check keeps its message.
+func gatewayDefaultToken() string {
+	v, err := settings.Get("SPOOND_GATEWAY_TOKEN", os.Getenv, os.ReadFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return v
+}
 
 func Main(args []string) int {
 	flags.Parse(args)
