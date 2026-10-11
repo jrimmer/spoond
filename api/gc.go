@@ -398,6 +398,14 @@ func (s *Service) keptPins(ctx context.Context) (pins, bytes int64, err error) {
 // builds are still kept (they are never candidates: only builds rows
 // are).
 func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
+	return s.keptBuildsExcept(ctx, "")
+}
+
+// keptBuildsExcept is keptBuilds as if lease exceptLease were already
+// gone: its resume, checkpoint, snapshot and kept builds are not roots.
+// Disk take-back uses it to learn, before releasing a paused lease,
+// whether releasing it would let its pause build be deleted at all.
+func (s *Service) keptBuildsExcept(ctx context.Context, exceptLease string) (map[string]bool, error) {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gc: list builds: %w", err)
@@ -468,6 +476,9 @@ func (s *Service) keptBuilds(ctx context.Context) (map[string]bool, error) {
 	}
 	now := s.now()
 	for _, l := range leases {
+		if exceptLease != "" && l.ID == exceptLease {
+			continue
+		}
 		if l.State == "lost" {
 			// A lease lost before lost_at was recorded counts as lost at
 			// this pass and only this one: the stamp fixes the start of
