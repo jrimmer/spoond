@@ -17,7 +17,7 @@ SPOOND · spoond.example.com                                                    
 │ ▃▅▇▅█▇                   ▅▇█▆██                   ▁▃▁▅██                   ▅▆█▇██                    │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ leases ─────────────────────────────────────────────────────────────────────────────────────────────┐
-│ id         image   size    owner state access     age    left holder                                 │
+│ id         image   size    owner state policy     age    left holder                                 │
 │ abcdef0123 go-base 2G/2V   jason ▶     internet   5m     10m  -                                      │
 │ 1234567890 py-base 1.5G/1V ci    ▶◆    restricted 2h31m  ∞    forgejo/job-42                         │
 │ fedcba0987 go-base -       agent ‖     lan        1d     due  nightly                                │
