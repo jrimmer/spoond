@@ -16,16 +16,17 @@ import (
 // Start(ctx) with a cancellable context standing in for the signal
 // context, then Stop.
 type drainingWorker struct {
-	mu       sync.Mutex
-	regs     int
-	busy     bool
-	lease    string          // created while a job is "running"
-	jobDur   time.Duration   // how long a job runs before ending on its own
-	runCnt   int             // jobs Run was called for
-	cancel   bool            // a job's context was cancelled under it
-	runCtx   context.Context // the live job context, for liveness probes
-	releases []string        // lease ids released so far, in order
-	release  chan struct{}   // closed on the first release
+	mu        sync.Mutex
+	regs      int
+	busy      bool
+	lease     string          // created while a job is "running"
+	jobDur    time.Duration   // how long a job runs before ending on its own
+	runCnt    int             // jobs Run was called for
+	cancel    bool            // a job's context was cancelled under it
+	runCtx    context.Context // the live job context, for liveness probes
+	runEndErr error           // the job context's Err() when its run ended
+	releases  []string        // lease ids released so far, in order
+	release   chan struct{}   // closed on the first release
 
 	// Events a test can wait on, so ordering a step against the job's
 	// start or end never sleeps out an interval (which flakes under
@@ -79,8 +80,15 @@ func (f *drainingWorker) Run(ctx context.Context, job *Job) error {
 	f.mu.Unlock()
 	f.startOnce.Do(func() { close(f.started) })
 	defer func() {
+		// Sample the job context's liveness at the moment the run ends,
+		// before the loop's post-Run bookkeeping (cancel) can touch it:
+		// a nil Err proves the run finished on its own, its context
+		// never cancelled during the run — including by the shutdown
+		// signal, which is what "signal killed the running job" would
+		// mean.
 		f.mu.Lock()
 		f.lease = ""
+		f.runEndErr = ctx.Err()
 		f.releases = append(f.releases, id)
 		first := len(f.releases) == 1
 		f.mu.Unlock()
@@ -149,6 +157,17 @@ func (f *drainingWorker) wasCancelled() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.cancel
+}
+
+// runEndedCancelled reports whether the job's context was already
+// cancelled when its run ended — sampled at release time, before the
+// worker loop's post-Run cancel, so a finished-on-its-own job with a
+// live context can never read as killed (and the loop's own
+// bookkeeping cancel never shows up here).
+func (f *drainingWorker) runEndedCancelled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runEndErr != nil
 }
 
 func (f *drainingWorker) ranJobs() int {
@@ -304,8 +323,18 @@ func TestStopGraceLetsJobFinishThenReleasesLease(t *testing.T) {
 	//      on its own, well inside the grace window, never cancelled.
 	w.runStartWait(t)
 	cancel()
+	//	1. the job is running on the jobs context (waitBusy has polled
+	//	   its lease) when the signal arrives;
+	//	2. the job ends on its own and its deferred Delete releases the
+	//	   lease. Only Stop can cancel the jobs context and Stop has not
+	//	   been called, so a release this early proves the job finished
+	//	   on its own, well inside the grace window, never cancelled.
 	waitReleased(t, w)
-	if !w.runContextAlive() {
+	// The liveness that matters was sampled at release time: the job's
+	// context was still live when its run ended. (A post-release
+	// runContextAlive probe would race the worker loop's normal post-Run
+	// cancel and blame the signal for plain bookkeeping.)
+	if w.runEndedCancelled() {
 		t.Fatal("signal killed the running job")
 	}
 	if w.wasCancelled() {
