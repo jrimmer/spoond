@@ -215,7 +215,7 @@ func TestDrainContinuesPastFailedPause(t *testing.T) {
 // user-admin-tok) and a non-admin ("alice", token user-alice-tok).
 func newAdminServerWithIdentities(t *testing.T) (*httptest.Server, *Service, *identity.Store) {
 	t.Helper()
-	svc, db, sub := newTestService(t)
+	svc, db, _ := newTestService(t)
 	seedImage(t, db, "py-base", 2048)
 	ids, err := identity.NewStore("")
 	if err != nil {
@@ -236,7 +236,6 @@ func newAdminServerWithIdentities(t *testing.T) (*httptest.Server, *Service, *id
 	srv.SetAdminToken("admin-tok")
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	_ = sub
 	return ts, svc, ids
 }
 
