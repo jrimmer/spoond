@@ -55,15 +55,14 @@ const (
 // measured used bytes and the highest seen since the lease's current VM
 // started (reset when l.SandboxID changes, e.g. recovery or replace),
 // plus the total the sandbox reported when last seen, and how many
-// fresh used values this VM has contributed.
+// fresh used values this VM has contributed (the size_hint floor).
 type memSample struct {
-	usedBytes   float64
-	peakBytes   float64
-	totalBytes  float64
-	hasTotal    bool
-	samples     int
-	sandboxID   string
-	lastFetched time.Time
+	usedBytes  float64
+	peakBytes  float64
+	totalBytes float64
+	hasTotal   bool
+	samples    int
+	sandboxID  string
 }
 
 // memSampler holds the per-lease measured memory behind the lease
@@ -84,7 +83,7 @@ func newMemSampler() *memSampler {
 // their last numbers (a series lagging one tick is normal). A lease
 // whose SandboxID changed starts a new peak. Released leases are
 // dropped, as are entries for which nothing is left to show.
-func (ms *memSampler) record(leases map[string]*Lease, usedBySandbox, totalBySandbox map[string]float64, at time.Time) {
+func (ms *memSampler) record(leases map[string]*Lease, usedBySandbox, totalBySandbox map[string]float64) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	for id, l := range leases {
@@ -107,7 +106,6 @@ func (ms *memSampler) record(leases map[string]*Lease, usedBySandbox, totalBySan
 				e.peakBytes = used
 			}
 			e.samples++
-			e.lastFetched = at
 		}
 		if totalOK {
 			e.totalBytes = total
@@ -337,5 +335,5 @@ func (s *Service) sampleMemOnce(ctx context.Context) {
 			}
 		}
 	}
-	s.memSamples.record(live, used, total, s.now())
+	s.memSamples.record(live, used, total)
 }

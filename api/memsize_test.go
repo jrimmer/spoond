@@ -12,7 +12,7 @@ import (
 func seedMemEntries(svc *Service, l *Lease, used []float64) {
 	live := map[string]*Lease{l.ID: l}
 	for _, u := range used {
-		svc.memSamples.record(live, map[string]float64{l.SandboxID: u}, nil, svc.now())
+		svc.memSamples.record(live, map[string]float64{l.SandboxID: u}, nil)
 	}
 }
 
@@ -81,7 +81,7 @@ func TestLeaseMapSizeHintRules(t *testing.T) {
 	big := addSandboxedLease(svc, "big", "consumer-a", "sb_big", 4096)
 	seedMemEntries(svc, big, make([]float64, 10))
 	svc.memSamples.record(map[string]*Lease{big.ID: big},
-		map[string]float64{big.SandboxID: 3600 * 1024 * 1024}, nil, svc.now())
+		map[string]float64{big.SandboxID: 3600 * 1024 * 1024}, nil)
 	if _, ok := svc.memSamples.peak(big.ID); !ok {
 		t.Fatal("peak missing after record")
 	}
@@ -94,7 +94,7 @@ func TestLeaseMapSizeHintRules(t *testing.T) {
 	unknown := addSandboxedLease(svc, "unknown", "consumer-a", "sb_u", 0)
 	seedMemEntries(svc, unknown, make([]float64, 10))
 	svc.memSamples.record(map[string]*Lease{unknown.ID: unknown},
-		map[string]float64{unknown.SandboxID: 100 * 1024 * 1024}, nil, svc.now())
+		map[string]float64{unknown.SandboxID: 100 * 1024 * 1024}, nil)
 	m4 := svc.leaseMap(unknown, svc.memSamples, 0, 0)
 	if got, ok := m4["size_hint"]; ok {
 		t.Fatalf("size_hint without a stamped size = %v, want omitted", got)
@@ -118,7 +118,7 @@ func TestLeaseMapSizeHintSmallestPreset(t *testing.T) {
 	lease := addSandboxedLease(svc, "pick", "consumer-a", "sb_p", 4096)
 	seedMemEntries(svc, lease, make([]float64, 10))
 	svc.memSamples.record(map[string]*Lease{lease.ID: lease},
-		map[string]float64{lease.SandboxID: 500 * 1024 * 1024}, nil, svc.now())
+		map[string]float64{lease.SandboxID: 500 * 1024 * 1024}, nil)
 	m := svc.leaseMap(lease, svc.memSamples, 0, 0)
 	if got := m["size_hint"]; got != "mid" {
 		t.Fatalf("size_hint = %v, want mid (tiny's 512 < 625)", got)
@@ -128,7 +128,7 @@ func TestLeaseMapSizeHintSmallestPreset(t *testing.T) {
 	exact := addSandboxedLease(svc, "exact", "consumer-a", "sb_e", 4096)
 	seedMemEntries(svc, exact, make([]float64, 10))
 	svc.memSamples.record(map[string]*Lease{exact.ID: exact},
-		map[string]float64{exact.SandboxID: 4096 * 1024 * 1024 / 10}, nil, svc.now())
+		map[string]float64{exact.SandboxID: 4096 * 1024 * 1024 / 10}, nil)
 	m2 := svc.leaseMap(exact, svc.memSamples, 0, 0)
 	if got := m2["size_hint"]; got != "tiny" {
 		t.Fatalf("size_hint = %v, want tiny (1.25×409.6 = 512)", got)
@@ -150,7 +150,7 @@ func TestLeaseSizeHintHTTP(t *testing.T) {
 	lease := addSandboxedLease(svc, "hint-http", uid2, "sb_http", 4096)
 	seedMemEntries(svc, lease, make([]float64, 10))
 	svc.memSamples.record(map[string]*Lease{lease.ID: lease},
-		map[string]float64{lease.SandboxID: 700 * 1024 * 1024}, nil, svc.now())
+		map[string]float64{lease.SandboxID: 700 * 1024 * 1024}, nil)
 
 	rec2, got := doUsersReq(t, h, "GET", "/api/leases/hint-http", tok, "")
 	if rec2.Code != http.StatusOK {
