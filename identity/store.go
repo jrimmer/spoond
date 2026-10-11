@@ -44,6 +44,9 @@ const (
 	defaultTokenName = "default"
 	// legacyTokenID is the stable id of that presented legacy token.
 	legacyTokenID = "t-default"
+	// lastUsedResolution is how stale a token's last-used stamp may get
+	// before an authentication refreshes it (and writes the users file).
+	lastUsedResolution = 5 * time.Minute
 )
 
 // TokenRecord is one named bearer token of a user (A2, unified auth
@@ -102,10 +105,9 @@ type User struct {
 	MaxTTL int `json:"max_ttl"` // max lease TTL seconds (0 = global max applies)
 }
 
-// ErrTokenOtherUser reports that a token id exists but belongs to
-// another user (RevokeToken); revoking it from the wrong user is
-// refused instead of silently succeeding.
-var ErrTokenOtherUser = errors.New("token belongs to another user")
+// ErrTokenNotFound is RevokeToken's answer for a token id the user does
+// not have: never minted, already revoked, or another user's.
+var ErrTokenNotFound = errors.New("token not found")
 
 // Store is a thread-safe user registry with optional JSON persistence.
 type Store struct {
@@ -370,14 +372,18 @@ func (s *Store) hashTokenIndex(h string) (string, bool) {
 	if u == nil {
 		return "", false
 	}
+	// The stamp moves only when the stored one is older than
+	// lastUsedResolution: every request authenticates through here, and
+	// a users-file write per second per token would serialise them.
 	now := nowRFC3339()
+	stale := nowUTC().Add(-lastUsedResolution).Format(time.RFC3339)
 	stamped := false
-	if u.TokenHash == h && u.LastUsedAt < now {
+	if u.TokenHash == h && u.LastUsedAt < stale {
 		u.LastUsedAt = now
 		stamped = true
 	}
 	for i := range u.Tokens {
-		if u.Tokens[i].Hash == h && u.Tokens[i].LastUsedAt < now {
+		if u.Tokens[i].Hash == h && u.Tokens[i].LastUsedAt < stale {
 			u.Tokens[i].LastUsedAt = now
 			stamped = true
 		}
@@ -656,8 +662,9 @@ func (s *Store) ListTokens(userID string) ([]TokenRecord, error) {
 // RevokeToken removes one of a user's tokens by id (A2). Revoking the
 // legacy "default" token clears the user's legacy TokenHash field
 // (their original single token stops working immediately); revoking a
-// named token drops its record. Idempotent: an unknown token id is not
-// an error, so a double revoke succeeds, but an unknown user is.
+// named token drops its record. An unknown token id — never minted,
+// already revoked, or another user's — is ErrTokenNotFound, so the API
+// answers all three alike and no caller can probe another user's ids.
 func (s *Store) RevokeToken(userID, tokenID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -672,7 +679,7 @@ func (s *Store) RevokeToken(userID, tokenID string) error {
 			u.LastUsedAt = ""
 			return s.save()
 		}
-		return nil
+		return ErrTokenNotFound
 	}
 	for i := range u.Tokens {
 		if u.Tokens[i].ID != tokenID {
@@ -684,13 +691,7 @@ func (s *Store) RevokeToken(userID, tokenID string) error {
 		delete(s.byTokenID, tokenID)
 		return s.save()
 	}
-	// No matching token. Not an error, unless the id belongs to another
-	// user's token — the API revokes would otherwise answer 204 and
-	// tell a caller which foreign token ids exist.
-	if s.byTokenID[tokenID] != "" && s.byTokenID[tokenID] != userID {
-		return ErrTokenOtherUser
-	}
-	return nil
+	return ErrTokenNotFound
 }
 
 // Count returns the number of users (used for the bootstrap check).

@@ -210,8 +210,10 @@ func TestTokensAuthMatrix(t *testing.T) {
 	// auth shape — a self/admin caller gets 204 (idempotent), others
 	// keep their refusal.
 	for _, c := range []case0{
-		{"self revokes", "t-user", http.StatusNoContent},
-		{"admin revokes for anyone", "t-admin", http.StatusNoContent},
+		// An id the user does not have is 404 even for a caller that may
+		// manage the user: unknown, revoked and foreign ids look alike.
+		{"self revokes an unknown id", "t-user", http.StatusNotFound},
+		{"admin revokes an unknown id", "t-admin", http.StatusNotFound},
 		{"another user is 404", "t-mallory", http.StatusNotFound},
 		{"legacy consumer token is 403", "legacy-tok", http.StatusForbidden},
 	} {

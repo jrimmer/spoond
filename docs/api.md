@@ -2556,9 +2556,10 @@ authenticates a request.
 minted one cannot be resurrected — mint a new one under the same name.
 Revoking `default` (id `t-default`) takes away the user's original
 single token, the same thing rotating `token` via
-`POST /api/users` used to be the only way to do. Revoking an unknown
-or already-revoked id is idempotent (`204`); a token id that belongs to
-another user reads `404`, like an unknown one.
+`POST /api/users` used to be the only way to do. An id the user does
+not have — never minted, already revoked, or another user's — answers
+`404 token not found` alike. A token's `last_used_at` is refreshed at
+most every 5 minutes.
 
 An **expired** token authenticates nobody (`401`) and cannot be
 revived; it still shows on the list with its expiry until revoked.

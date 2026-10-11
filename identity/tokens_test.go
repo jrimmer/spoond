@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,13 +200,13 @@ func TestRevokeToken(t *testing.T) {
 	if len(toks) != 1 || toks[0].Name != defaultTokenName {
 		t.Fatalf("after revoke the list = %+v, want only default", toks)
 	}
-	// Idempotent revoke.
-	if err := s.RevokeToken(u.ID, rec.ID); err != nil {
-		t.Fatalf("repeat revoke: %v", err)
+	// A repeat revoke, an unknown id and another user's id all answer
+	// ErrTokenNotFound alike, so none can be told apart.
+	if err := s.RevokeToken(u.ID, rec.ID); !errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("repeat revoke = %v, want ErrTokenNotFound", err)
 	}
-	// Unknown token id: fine (idempotent). Unknown user: not.
-	if err := s.RevokeToken(u.ID, "t-nope"); err != nil {
-		t.Fatalf("unknown token id must be idempotent: %v", err)
+	if err := s.RevokeToken(u.ID, "t-nope"); !errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("unknown token id = %v, want ErrTokenNotFound", err)
 	}
 	if err := s.RevokeToken("u-nope", "t-nope"); err == nil {
 		t.Fatal("unknown user must error")
@@ -363,5 +364,55 @@ func TestTokenHashHexLength(t *testing.T) {
 	}
 	if _, err := hex.DecodeString(raw); err != nil {
 		t.Fatalf("secret suffix is not hex: %v", err)
+	}
+}
+
+// TestLastUsedThrottled: an authentication refreshes a token's
+// last-used stamp only once it is older than lastUsedResolution, so a
+// busy token does not rewrite the users file on every request.
+func TestLastUsedThrottled(t *testing.T) {
+	s, err := NewStore(filepath.Join(t.TempDir(), "users.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.AddUser("alice", KindPerson, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, rec, err := s.AddToken(u.ID, "ci", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := func(at string) {
+		s.mu.Lock()
+		for i := range s.users[u.ID].Tokens {
+			if s.users[u.ID].Tokens[i].ID == rec.ID {
+				s.users[u.ID].Tokens[i].LastUsedAt = at
+			}
+		}
+		s.mu.Unlock()
+	}
+	read := func() string {
+		toks, _ := s.ListTokens(u.ID)
+		for _, tk := range toks {
+			if tk.ID == rec.ID {
+				return tk.LastUsedAt
+			}
+		}
+		return ""
+	}
+	recent := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	stamp(recent)
+	if s.UserByToken(secret) == nil {
+		t.Fatal("token did not authenticate")
+	}
+	if got := read(); got != recent {
+		t.Fatalf("a 1 min old stamp was rewritten: %s -> %s", recent, got)
+	}
+	old := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	stamp(old)
+	s.UserByToken(secret)
+	if got := read(); got <= old {
+		t.Fatalf("a 10 min old stamp was not refreshed: %s", got)
 	}
 }
