@@ -534,6 +534,14 @@ type ServiceConfig struct {
 	// MaxLeaseMemoryMB is the most memory one lease's VM may be given
 	// (MAX_LEASE_MEMORY_MB). 0 means DefaultMaxLeaseMemoryMB.
 	MaxLeaseMemoryMB int
+	// SaturationIOFullPct and SaturationCPUSomePct are the saturation
+	// gate's targets (#136 stage 2; SATURATION_IO_FULL_PCT,
+	// SATURATION_CPU_SOME_PCT): new work waits while the host's 10 s I/O
+	// full or CPU some pressure is at or over them. 0 turns a check off;
+	// the backend sets the defaults (DefaultSaturation*), so a zero
+	// config has no gate.
+	SaturationIOFullPct  float64
+	SaturationCPUSomePct float64
 }
 
 // Service is the lease API backend.
@@ -755,6 +763,10 @@ type Service struct {
 	// It is invalidated on every lease state change and every owner
 	// add/delete (see invalidateFairShares).
 	fairShareCache fairSharesCache
+
+	// pressure caches the host's PSI readings for the saturation gate
+	// (#136 stage 2, see api/saturation.go).
+	pressure pressureGate
 
 	// preemptMu serialises memory take-back: one admission takes back
 	// at a time, so two concurrent creates cannot each pause a
@@ -1786,12 +1798,29 @@ func (s *Service) updateNodeMetrics(ctx context.Context) {
 	}
 }
 
+// poolCanServe reports whether a create may be served from a pooled
+// sandbox (a default-size create of an image with one waiting): it then
+// boots nothing, so the saturation gate lets it pass (#136).
+func (s *Service) poolCanServe(image string, sized bool, snap *snapshotStart) bool {
+	if s.cfg.PoolSize <= 0 || sized || snap != nil {
+		return false
+	}
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	return len(s.store.pool[image]) > 0
+}
+
 // refillPool pre-creates cfg.PoolSize sandboxes for every image with a
 // current build so grants can be served from the warm pool instead of
 // cold-creating.
 func (s *Service) refillPool(ctx context.Context) {
 	// The drain pauses everything; refill stays off until undrain (U10).
 	if s.cfg.PoolSize <= 0 || s.draining.Load() {
+		return
+	}
+	// A saturated host starts no pool sandboxes either (#136 stage 2):
+	// the next pass refills once the pressure falls.
+	if s.checkSaturation(true) != nil {
 		return
 	}
 	imgs, err := s.db.ListImages(ctx)
@@ -2402,6 +2431,9 @@ type leaseRequest struct {
 	// stamped, so retention never drops a version a live lease runs
 	// from.
 	snapshot *snapshotStart
+	// retry marks the admission queue's replay of a queued create: the
+	// saturation gate does not count it as a new refusal (#136).
+	retry bool
 	// vcpu and memoryMB are the size the caller asked for (#151 Z4),
 	// already validated by the API; 0 takes the image default. A named
 	// snapshot keeps its own size and ignores them.
@@ -2556,6 +2588,15 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				b = wb
 			}
 			sized, sizedVCPU, memoryMB = true, vcpu, mb
+		}
+	}
+	// New work waits while the host is saturated (#136 stage 2):
+	// after the request is known valid (a bad image must not wait), and
+	// before any reservation or take-back. A create the warm pool can
+	// serve costs almost no I/O or boot work, so it passes.
+	if !s.poolCanServe(image, sized, snap) {
+		if err := s.checkSaturation(req.retry); err != nil {
+			return nil, err
 		}
 	}
 	// The lease costs the memory its VM runs with (#128, #151 Z1):
@@ -3868,6 +3909,12 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	s.store.mu.Unlock()
 	defer s.endBusy(src)
 
+	// New work waits while the host is saturated (#136 stage 2), once
+	// the source is known good and before any reservation or checkpoint.
+	if err := s.checkSaturation(false); err != nil {
+		return nil, "", err
+	}
+
 	// ok guards the clone's admission debit: until it is set true on a
 	// success return, the deferred undo gives the memory back (a failed
 	// clone never took the hugepages).
@@ -4024,6 +4071,12 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 				ttl = userMax
 			}
 		}
+	}
+
+	// New work waits while the host is saturated (#136 stage 2), once
+	// the request is known good and before any reservation or checkpoint.
+	if err := s.checkSaturation(false); err != nil {
+		return nil, "", err
 	}
 
 	// Every fork child runs the source's size (#151 Z1) and costs its

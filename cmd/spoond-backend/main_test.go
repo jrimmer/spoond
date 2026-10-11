@@ -229,3 +229,24 @@ type captureLogger struct{ lines *[]string }
 func (c captureLogger) Printf(format string, args ...any) {
 	*c.lines = append(*c.lines, format)
 }
+
+// TestSaturationConfig (#136 stage 2): unset targets take the defaults,
+// 0 is accepted (that check off), and anything not a percentage fails
+// startup.
+func TestSaturationConfig(t *testing.T) {
+	io, cpu, err := saturationConfig(func(string) string { return "" })
+	if err != nil || io != api.DefaultSaturationIOFullPct || cpu != api.DefaultSaturationCPUSomePct {
+		t.Fatalf("defaults = %v, %v, %v", io, cpu, err)
+	}
+	env := map[string]string{"SATURATION_IO_FULL_PCT": "0", "SATURATION_CPU_SOME_PCT": "62.5"}
+	io, cpu, err = saturationConfig(func(k string) string { return env[k] })
+	if err != nil || io != 0 || cpu != 62.5 {
+		t.Fatalf("set = %v, %v, %v", io, cpu, err)
+	}
+	for _, bad := range []string{"-1", "101", "lots"} {
+		env := map[string]string{"SATURATION_CPU_SOME_PCT": bad}
+		if _, _, err := saturationConfig(func(k string) string { return env[k] }); err == nil {
+			t.Fatalf("SATURATION_CPU_SOME_PCT=%q accepted", bad)
+		}
+	}
+}

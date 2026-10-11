@@ -67,6 +67,9 @@ func waitRefusal(err error) bool {
 
 // waitRefusalDetail is the refusal the `queued` event names.
 func waitRefusalDetail(err error) string {
+	if d := saturationDetail(err); d != "" {
+		return d
+	}
 	return "capacity"
 }
 
@@ -414,7 +417,9 @@ func (s *Service) grantQueued(ctx context.Context, t *admissionTicket) (*Lease, 
 	if s.draining.Load() {
 		return nil, fmt.Errorf("draining: %w", errDraining)
 	}
-	return s.grantLease(ctx, t.leaseReq)
+	req := t.leaseReq
+	req.retry = true
+	return s.grantLease(ctx, req)
 }
 
 // orderedTickets snapshots the waiting tickets in fair-share order

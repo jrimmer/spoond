@@ -271,6 +271,12 @@ immediate refusal exactly; a negative value is `400`.
 Only these refusals are **waitable** (the request is held open and
 retried):
 
+- `503 capacity_wait` with `Retry-After: 30`, the host saturated (3.1+,
+  #136): a create, clone or fork waits while the host's I/O or CPU
+  pressure is over its target (`SATURATION_IO_FULL_PCT`,
+  `SATURATION_CPU_SOME_PCT`). The error and the `queued` event name the
+  resource, e.g. `host saturated (io 30%)`. Running leases, resumes and
+  restores are never held by it.
 - `503 capacity_wait` with `Retry-After: 30` — hugepages full and
   take-back could not make room (or the node is not healthy). The
   `queued` event names it `capacity`.
