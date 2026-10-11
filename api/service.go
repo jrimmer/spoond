@@ -137,6 +137,12 @@ type Lease struct {
 	// lease so quota accounting never reads the image catalog; 0 =
 	// unknown (leases from before the stamp, or a vanished image row).
 	MemoryMB int `json:"-"`
+	// VCPU is the vCPU count the lease's VM runs with (#151 Z1), stamped
+	// with MemoryMB from the build its VM was started from. The lease
+	// owns its size: every later path (pause, resume, restart, clone,
+	// fork, restore, recovery) keeps it. Never accounted; 0 = unknown
+	// (a lease from before the stamp, read as the image default).
+	VCPU int `json:"-"`
 	// DiskMB is the lease's whole disk allowance in MiB, from the
 	// image's disk_mb, stamped beside MemoryMB (#145 FS3a): summed over
 	// the RUNNING leases it is the snapshot disk's running reservation —
@@ -2145,32 +2151,44 @@ func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow,
 	return img, b, nil
 }
 
-// imageMemoryMB returns the image's memory_mb for the checkpoint pause
-// log line (2.3, #122); 0 when the catalog cannot answer.
-func (s *Service) imageMemoryMB(ctx context.Context, image string) (int, error) {
-	img, err := s.db.GetImage(ctx, image)
-	if err != nil {
-		return 0, err
+// leaseSize is the size a VM started from lease l's own snapshot runs
+// with (#151 Z1): the lease's stamped vCPU, memory and disk, read under
+// the store lock, with the image row's values for any field a lease
+// from before the stamps left 0. A clone or fork child starts from the
+// source's checkpoint build, which copies the source's running build,
+// so the source's own size is the child's size and its charge.
+func (s *Service) leaseSize(l *Lease, img store.ImageRow) (vcpu, memoryMB, diskMB int) {
+	s.store.mu.Lock()
+	vcpu, memoryMB, diskMB = l.VCPU, l.MemoryMB, l.DiskMB
+	s.store.mu.Unlock()
+	if vcpu == 0 {
+		vcpu = img.VCPU
 	}
-	return img.MemoryMB, nil
+	if memoryMB == 0 {
+		memoryMB = img.MemoryMB
+	}
+	if diskMB == 0 {
+		diskMB = img.DiskMB
+	}
+	return vcpu, memoryMB, diskMB
 }
 
-// imageMiB is imageMemoryMB with its own bounded context: the memory
-// charge of one lease of the image (#128). The value is stamped on the
-// lease so accounting and release use the same number the admission
-// check reserved with. 0 when the catalog cannot answer: an uncharged
-// lease, and admission never blocks on a catalog hiccup — but it is
-// logged, so an operator can see the cap is not being enforced for
-// that image.
-func (s *Service) imageMiB(image string) int {
-	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
-	defer cancel()
-	mb, err := s.imageMemoryMB(ctx, image)
-	if err != nil {
-		s.log.Printf("memory quota: no memory_mb for image %s, leasing it uncharged: %v", image, err)
-		return 0
+// snapshotSize is the size a pause or checkpoint build of lease l
+// records (#151 Z1): the lease's own vCPU and memory — the size its VM
+// runs at, which a cold-booted lease does not share with its parent
+// template build — with the parent build's values for a field the
+// lease has not stamped.
+func (s *Service) snapshotSize(l *Lease, parent store.BuildRow) (vcpu, memoryMB int) {
+	s.store.mu.Lock()
+	vcpu, memoryMB = l.VCPU, l.MemoryMB
+	s.store.mu.Unlock()
+	if vcpu == 0 {
+		vcpu = parent.VCPU
 	}
-	return mb
+	if memoryMB == 0 {
+		memoryMB = parent.MemoryMB
+	}
+	return vcpu, memoryMB
 }
 
 // grant creates a new lease for owner: served from the warm pool when
@@ -2341,12 +2359,15 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		if err != nil {
 			return nil, err
 		}
-		memoryMB = img.MemoryMB
+		// The VM runs the build's size, so the build is what the lease
+		// is charged (#151 Z1); the image row normally says the same.
+		memoryMB = b.MemoryMB
 	}
-	// The lease costs its image's memory_mb (#128): admission checks the
-	// user's running-lease memory before the sandbox is created, and the
-	// deferred release below drops the same number it reserved. A
-	// snapshot start charges the version's memory_mb.
+	// The lease costs the memory its VM runs with (#128, #151 Z1):
+	// admission checks the user's running-lease memory before the
+	// sandbox is created, and the deferred release below drops the same
+	// number it reserved. A snapshot start charges the version's
+	// memory_mb.
 	if err := s.reserveQuota(owner, 1, memoryMB, true); err != nil {
 		return nil, err
 	}
@@ -2380,10 +2401,12 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		HolderUrl:   req.holderURL,
 		Pinned:      req.pinned,
 		State:       "running",
-		// The lease's MiB charge (#128): the image's memory_mb, the very
-		// number reserveQuota admitted with, so accounting and release
-		// always agree and quota sums never re-read the catalog.
+		// The lease's MiB charge (#128): the very number reserveQuota
+		// admitted with, so accounting and release always agree and quota
+		// sums never re-read the catalog. The lease owns its size from
+		// here on (#151 Z1): vCPU rides with it.
 		MemoryMB: memoryMB,
+		VCPU:     b.VCPU,
 		// The disk allowance rides the image row too (FS3a): its disk_mb
 		// is the reservation this running lease holds on the snapshot
 		// disk while it runs.
@@ -2839,13 +2862,15 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	if err != nil {
 		return "", err
 	}
-	// The pause build records what was snapshotted: versions and sizes
-	// copied from the parent build row. Its own size_bytes is measured
-	// at write time (2.3 #125), like a checkpoint build's.
+	// The pause build records what was snapshotted: versions copied
+	// from the parent build row, and the lease's own size (#151 Z1).
+	// Its own size_bytes is measured at write time (2.3 #125), like a
+	// checkpoint build's.
 	parent, err := s.db.GetBuild(ctx, l.BuildID)
 	if err != nil {
 		return "", fmt.Errorf("load parent build %s: %w", l.BuildID, err)
 	}
+	vcpu, memoryMB := s.snapshotSize(l, parent)
 	now := time.Now()
 	if err := s.db.InsertBuild(ctx, store.BuildRow{
 		BuildID:            buildID,
@@ -2859,8 +2884,8 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		KernelVersion:      parent.KernelVersion,
 		FirecrackerVersion: parent.FirecrackerVersion,
 		EnvdVersion:        parent.EnvdVersion,
-		VCPU:               parent.VCPU,
-		MemoryMB:           parent.MemoryMB,
+		VCPU:               vcpu,
+		MemoryMB:           memoryMB,
 		DiskMB:             parent.DiskMB,
 		SizeBytes:          s.measureNewBuildOnDisk(buildID),
 		CreatedAt:          now,
@@ -3308,6 +3333,11 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = b.BuildID
+	// The fresh guest runs the image's current build: stamp its size
+	// (#151 Z1), as restartCold does, so the charge matches the VM.
+	l.MemoryMB = b.MemoryMB
+	l.VCPU = b.VCPU
+	l.DiskMB = img.DiskMB
 	l.setState("running")
 	l.Suspended = false
 	l.LastActive = time.Now()
@@ -3343,8 +3373,9 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 // longer its resume point (the next suspend sets it as usual). A
 // suspended lease comes back running.
 func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lease, error) {
-	// The fresh guest runs the image's current memory_mb, so that is the
-	// charge to re-admit for a suspended lease (#128) — fetched before
+	// The fresh guest runs the image's current build, so that build's
+	// memory is the charge to re-admit for a suspended lease (#128,
+	// #151 Z1) — fetched before
 	// anything else, so a catalog failure answers before any change. A
 	// running lease is already charged; its stamp is re-set below.
 	img, b, err := s.imageBuild(ctx, l.Image)
@@ -3366,11 +3397,11 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; the fresh guest needs it back, so the cold restart
 		// re-passes the memory check before any sandbox is created.
-		if err := s.reserveQuota(owner, 1, img.MemoryMB, false); err != nil {
+		if err := s.reserveQuota(owner, 1, b.MemoryMB, false); err != nil {
 			return nil, err
 		}
-		defer func() { s.releaseQuotaReservation(owner, 1, img.MemoryMB) }()
-		// Memory re-admission (FS2b-1) against the image's current
+		defer func() { s.releaseQuotaReservation(owner, 1, b.MemoryMB) }()
+		// Memory re-admission (FS2b-1) against the current build's
 		// charge — the number the fresh guest runs (and is stamped with
 		// below), as for the memory check above.
 		// The running lease reserves its whole disk_mb (FS3): it must fit in
@@ -3381,7 +3412,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 			return nil, derr
 		}
 		defer diskRelease()
-		undo, err = s.admitMemory(ctx, owner, img.MemoryMB)
+		undo, err = s.admitMemory(ctx, owner, b.MemoryMB)
 		if err != nil {
 			return nil, err
 		}
@@ -3426,9 +3457,11 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	l.setState("running")
 	l.Suspended = false
 	// The fresh guest comes from the image's current build, so the
-	// lease's charge is re-stamped from that image row (#128) — the
-	// number the check above (or the running charge) was admitted with.
-	l.MemoryMB = img.MemoryMB
+	// lease's size is re-stamped from that build (#128, #151 Z1) — the
+	// number the check above (or the running charge) was admitted with —
+	// and its disk allowance from the image row.
+	l.MemoryMB = b.MemoryMB
+	l.VCPU = b.VCPU
 	l.DiskMB = img.DiskMB
 	// The pause builds stop being the lease's resume point: the next
 	// suspend writes a fresh one.
@@ -3486,7 +3519,9 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	// The pause is what guests feel (2.3, #122): one line per checkpoint
 	// with the lease, how long the guest was frozen and how much memory
 	// had to be snapshotted.
-	memMB, _ := s.imageMemoryMB(ctx, src.Image) // 0 when the catalog cannot say
+	s.store.mu.Lock()
+	memMB := src.MemoryMB
+	s.store.mu.Unlock()
 	s.log.Printf("checkpoint: lease %s paused %.3fs (memory_mb %d, err %v)", src.ID, pause.Seconds(), memMB, err)
 	if err != nil {
 		return store.BuildRow{}, err
@@ -3495,6 +3530,9 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	if err != nil {
 		return store.BuildRow{}, fmt.Errorf("load parent build %s: %w", src.BuildID, err)
 	}
+	// The checkpoint records the lease's own size (#151 Z1), not its
+	// parent template build's.
+	vcpu, memoryMB := s.snapshotSize(src, parent)
 	now := time.Now()
 	b := store.BuildRow{
 		BuildID:            buildID,
@@ -3508,8 +3546,8 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		KernelVersion:      parent.KernelVersion,
 		FirecrackerVersion: parent.FirecrackerVersion,
 		EnvdVersion:        parent.EnvdVersion,
-		VCPU:               parent.VCPU,
-		MemoryMB:           parent.MemoryMB,
+		VCPU:               vcpu,
+		MemoryMB:           memoryMB,
 		DiskMB:             parent.DiskMB,
 		SizeBytes:          s.measureNewBuildOnDisk(buildID),
 		CreatedAt:          now,
@@ -3636,17 +3674,17 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		}
 	}()
 
-	// The clone costs its image's memory_mb like any create (#128).
-	memPer := s.imageMiB(src.Image)
-	if err := s.reserveQuota(owner, 1, memPer, true); err != nil {
-		return nil, "", err
-	}
-	defer func() { s.releaseQuotaReservation(owner, 1, memPer) }()
-
+	// The clone runs the source's size (#151 Z1) and costs its memory
+	// like any create (#128).
 	img, _, err := s.imageBuild(ctx, src.Image)
 	if err != nil {
 		return nil, "", err
 	}
+	vcpu, memPer, diskMB := s.leaseSize(src, img)
+	if err := s.reserveQuota(owner, 1, memPer, true); err != nil {
+		return nil, "", err
+	}
+	defer func() { s.releaseQuotaReservation(owner, 1, memPer) }()
 	b, err := s.checkpointLease(ctx, src)
 	if err != nil {
 		return nil, "", err
@@ -3668,9 +3706,10 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		CheckpointInterval: src.CheckpointInterval,
 		IdleSuspend:        src.IdleSuspend,
 		State:              "running",
-		MemoryMB:           img.MemoryMB, // the admitted charge (#128)
-		DiskMB:             img.DiskMB,   // the running reservation (FS3a)
-		Generation:         1,            // every lease starts on generation 1 (2.2)
+		MemoryMB:           memPer, // the admitted charge (#128)
+		VCPU:               vcpu,   // the source's size (#151 Z1)
+		DiskMB:             diskMB, // the running reservation (FS3a)
+		Generation:         1,      // every lease starts on generation 1 (2.2)
 		TemplateID:         img.TemplateID,
 	}
 	// Memory admission (FS2b-1): the clone takes its own charge against
@@ -3678,12 +3717,12 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	// The running lease reserves its whole disk_mb (FS3): it must fit in
 	// usable snapshot disk, checked before memory so a memory take-back
 	// never pauses a lease for a request the disk then refuses.
-	diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
+	diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(diskMB)*1024*1024)
 	if derr != nil {
 		return nil, "", derr
 	}
 	defer diskRelease()
-	undo, err = s.admitMemory(ctx, owner, img.MemoryMB)
+	undo, err = s.admitMemory(ctx, owner, memPer)
 	if err != nil {
 		return nil, "", err
 	}
@@ -3781,16 +3820,15 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		}
 	}
 
-	// Every fork child costs the image's memory_mb, count times (#128);
-	// the whole batch is reserved up front, all or nothing.
-	memPer := s.imageMiB(src.Image)
-	if err := s.reserveQuota(owner, count, memPer, true); err != nil {
-		return nil, "", err
-	}
-
+	// Every fork child runs the source's size (#151 Z1) and costs its
+	// memory, count times (#128); the whole batch is reserved up front,
+	// all or nothing.
 	img, _, err := s.imageBuild(ctx, src.Image)
 	if err != nil {
-		s.releaseQuotaReservation(owner, count, memPer)
+		return nil, "", err
+	}
+	vcpu, memPer, diskMB := s.leaseSize(src, img)
+	if err := s.reserveQuota(owner, count, memPer, true); err != nil {
 		return nil, "", err
 	}
 	b, err := s.checkpointLease(ctx, src)
@@ -3807,13 +3845,13 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	// The running lease reserves its whole disk_mb (FS3): it must fit in
 	// usable snapshot disk, checked before memory so a memory take-back
 	// never pauses a lease for a request the disk then refuses.
-	diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(count)*int64(img.DiskMB)*1024*1024)
+	diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(count)*int64(diskMB)*1024*1024)
 	if derr != nil {
 		s.releaseQuotaReservation(owner, count, memPer)
 		return nil, "", derr
 	}
 	defer diskRelease()
-	undo, err := s.admitMemory(ctx, owner, count*img.MemoryMB)
+	undo, err := s.admitMemory(ctx, owner, count*memPer)
 	if err != nil {
 		s.releaseQuotaReservation(owner, count, memPer)
 		return nil, "", err
@@ -3866,9 +3904,10 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			CheckpointInterval: src.CheckpointInterval,
 			IdleSuspend:        idleSuspend,
 			State:              "running",
-			MemoryMB:           img.MemoryMB, // the admitted charge (#128)
-			DiskMB:             img.DiskMB,   // the running reservation (FS3a)
-			Generation:         1,            // every lease starts on generation 1 (2.2)
+			MemoryMB:           memPer, // the admitted charge (#128)
+			VCPU:               vcpu,   // the source's size (#151 Z1)
+			DiskMB:             diskMB, // the running reservation (FS3a)
+			Generation:         1,      // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
 		// Hold this child's egress memo in flight until it is in the store
@@ -4444,6 +4483,18 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 		// PINNED_IDLE_NOTICE_DAYS (visibility only).
 		"pinned": l.Pinned,
 	}
+	// The lease's own size (#151 Z1): what its VM runs with and what it
+	// is charged. Omitted while unknown (a lease from before the stamps
+	// over a vanished image).
+	if l.VCPU > 0 {
+		m["vcpu"] = l.VCPU
+	}
+	if l.MemoryMB > 0 {
+		m["memory_mb"] = l.MemoryMB
+	}
+	if l.DiskMB > 0 {
+		m["disk_mb"] = l.DiskMB
+	}
 	if !l.PausedAt.IsZero() {
 		m["paused_at"] = formatRFC3339(l.PausedAt)
 	}
@@ -4752,6 +4803,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		CheckpointInterval:    l.CheckpointInterval,
 		IdleSuspend:           l.IdleSuspend,
 		MemoryMB:              l.MemoryMB,
+		VCPU:                  l.VCPU,
 		DiskMB:                l.DiskMB,
 		PreemptedAt:           l.PreemptedAt,
 		SnapshotBuildID:       l.SnapshotBuildID,
@@ -4802,6 +4854,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		CheckpointInterval:    r.CheckpointInterval,
 		IdleSuspend:           r.IdleSuspend,
 		MemoryMB:              r.MemoryMB,
+		VCPU:                  r.VCPU,
 		DiskMB:                r.DiskMB,
 		PreemptedAt:           r.PreemptedAt,
 		SnapshotBuildID:       r.SnapshotBuildID,

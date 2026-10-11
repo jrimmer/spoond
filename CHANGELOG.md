@@ -16,6 +16,7 @@ summarised from README "Status".
 - **`GET /api/usage` lists the caller's waiting creates.** `waiting` gives each queued create's place in the whole admission queue, how long it has waited and the reason, the same entries as `GET /api/leases/queue` (#140 U2).
 - **`GET /api/usage` lists the caller's recent refusals and reclaims.** `recent` gives the caller's newest 20 `box_full`, `take_back`, `queued`, `suspended`, `critical_release` and `paused_expiring` events, newest first. It is kept in memory, so it starts empty after a backend restart (#140 U3).
 - **`box_full` events name the refused requester as their owner**, so the requester now receives them on its own event stream (`GET /api/leases/events`); before, they carried no owner and only admins saw them.
+- **A lease reports its own size and keeps it (#151).** Lease rows carry `vcpu`, `memory_mb` and `disk_mb`. Clone, fork, restore and recovery now run and charge the size the lease actually has; before, they charged the image's current `memory_mb`, so after an image was rebuilt at another size a restored lease could be charged one size while its VM ran another. Migration 25 adds the lease's `vcpu`.
 - **Usage history (#140 U4).** spoond records each owner's usage every 15 minutes and keeps 7 days; `GET /api/usage/history?hours=N` (default 24, cap 168) returns the caller's own samples, oldest first. Migration 24 only adds the `usage_samples` table (schema 23 → 24), so a 3.0.0 binary can still open the database.
 
 ## [3.0.0] - 2026-10-10

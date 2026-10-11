@@ -77,6 +77,10 @@ type LeaseRow struct {
 	// the row so quota accounting never reads the image catalog under
 	// the lease store's lock; 0 = unknown (the image row is gone).
 	MemoryMB int
+	// VCPU is the vCPU count the lease's VM runs with (#151 Z1), stamped
+	// beside MemoryMB from the build the VM was started from. Never
+	// accounted; 0 = unknown (read as the image default).
+	VCPU int
 	// DiskMB is the image's disk_mb stamped when the lease was granted
 	// (FS3a): the whole disk allowance whose bytes join the snapshot
 	// disk's running reservation while the lease runs. 0 = unknown (the
@@ -122,7 +126,7 @@ const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires
 	holder, holder_url,
 	last_action, last_action_at, generation, checkpoint_interval, idle_suspend,
 	memory_mb, disk_mb, class, priority, preempted_at, snapshot_build_id,
-	suspend_reason, suspend_policy_step, suspend_build_id, suspended_at`
+	suspend_reason, suspend_policy_step, suspend_build_id, suspended_at, vcpu`
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -145,7 +149,7 @@ INSERT INTO leases (`+leaseColumns+`) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?
+  ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -192,7 +196,8 @@ ON CONFLICT(id) DO UPDATE SET
   suspend_reason=excluded.suspend_reason,
   suspend_policy_step=excluded.suspend_policy_step,
   suspend_build_id=excluded.suspend_build_id,
-  suspended_at=excluded.suspended_at`,
+  suspended_at=excluded.suspended_at,
+  vcpu=excluded.vcpu`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
@@ -206,7 +211,7 @@ ON CONFLICT(id) DO UPDATE SET
 		l.CheckpointInterval, l.IdleSuspend, l.MemoryMB, l.DiskMB, l.Class, l.Priority,
 		formatTime(l.PreemptedAt), l.SnapshotBuildID,
 		l.SuspendReason, l.SuspendPolicyStep, l.SuspendBuildID,
-		formatTime(l.SuspendedAt))
+		formatTime(l.SuspendedAt), l.VCPU)
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -341,7 +346,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&r.LastAction, &lastActionAt, &r.Generation, &r.CheckpointInterval,
 		&r.IdleSuspend, &r.MemoryMB, &r.DiskMB, &r.Class, &r.Priority, &preemptedAt,
 		&r.SnapshotBuildID, &r.SuspendReason, &r.SuspendPolicyStep,
-		&r.SuspendBuildID, &suspendedAt)
+		&r.SuspendBuildID, &suspendedAt, &r.VCPU)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}

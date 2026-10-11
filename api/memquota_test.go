@@ -336,11 +336,12 @@ func TestMemQuotaRecoveryNoReservationLeak(t *testing.T) {
 	}
 }
 
-// TestMemQuotaRecoveryRestampsCurrentMemory: recovery re-admits (and
-// re-stamps) the image's CURRENT memory_mb — if the image's memory_mb
-// grew between grant and recovery, the recovered sandbox runs (and is
-// charged) the new value, not the stale stamp it was granted with.
-func TestMemQuotaRecoveryRestampsCurrentMemory(t *testing.T) {
+// TestMemQuotaRecoveryKeepsCheckpointSize: recovery resumes the
+// lease's checkpoint build, which runs at the size it was taken at, so
+// that build's memory is what recovery re-admits and stamps (#151 Z1)
+// — not the image's current memory_mb, even when the image grew while
+// the lease was suspended (the VM would run 1024 while charged 2048).
+func TestMemQuotaRecoveryKeepsCheckpointSize(t *testing.T) {
 	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024})
 	svc := srv.svc
 	owner := ownerIDFor(t, h, tok)
@@ -362,14 +363,14 @@ func TestMemQuotaRecoveryRestampsCurrentMemory(t *testing.T) {
 	if err := svc.recoverFromCheckpoint(context.Background(), l); err != nil {
 		t.Fatalf("recovery: %v", err)
 	}
-	if l.MemoryMB != 2048 {
-		t.Fatalf("recovered lease charge = %d, want the image's current 2048", l.MemoryMB)
+	if l.MemoryMB != 1024 {
+		t.Fatalf("recovered lease charge = %d, want the checkpoint build's 1024", l.MemoryMB)
 	}
 	rec, body := doUsersReq(t, h, "GET", "/api/users/me", tok, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("users/me: %d %s", rec.Code, rec.Body.String())
 	}
-	if got := int(body["user"].(map[string]any)["used_mib"].(float64)); got != 2048 {
-		t.Fatalf("used_mib after recovery = %d, want the re-stamped 2048", got)
+	if got := int(body["user"].(map[string]any)["used_mib"].(float64)); got != 1024 {
+		t.Fatalf("used_mib after recovery = %d, want the checkpoint build's 1024", got)
 	}
 }

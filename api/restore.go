@@ -73,14 +73,14 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	if l.Suspended {
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; restoring it brings a running sandbox back, and
-		// that sandbox runs the image's current memory_mb — the charge
-		// to re-admit before the sandbox is created (#128). (A running
-		// restore is already charged, and with its own charge — no new
-		// admission.)
-		if err := s.reserveQuota(l.Owner, 1, img.MemoryMB, false); err != nil {
+		// that sandbox runs the checkpoint build's size — the charge to
+		// re-admit before the sandbox is created (#128, #151 Z1). (A
+		// running restore is already charged, and with its own charge —
+		// no new admission.)
+		if err := s.reserveQuota(l.Owner, 1, b.MemoryMB, false); err != nil {
 			return err
 		}
-		defer func() { s.releaseQuotaReservation(l.Owner, 1, img.MemoryMB) }()
+		defer func() { s.releaseQuotaReservation(l.Owner, 1, b.MemoryMB) }()
 		// Class re-admission (#128 part 2), as for a resume: a
 		// demand-burst lease stays burst and re-passes the reserve; a
 		// guarantee-burst one may fall back to guaranteed.
@@ -92,7 +92,7 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 			return derr
 		}
 		defer diskRelease()
-		undo, err = s.admitMemory(ctx, l.Owner, img.MemoryMB)
+		undo, err = s.admitMemory(ctx, l.Owner, b.MemoryMB)
 		if err != nil {
 			return err
 		}
@@ -141,9 +141,11 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
-	// The restored sandbox runs the image's current memory_mb: the lease
-	// keeps the charge it was admitted with (#128).
-	l.MemoryMB = img.MemoryMB
+	// The restored sandbox runs the checkpoint build's size, which the
+	// build copied from the lease's own running build (#151 Z1): stamp
+	// it, the charge it was admitted with (#128).
+	l.MemoryMB = b.MemoryMB
+	l.VCPU = b.VCPU
 	// A drained lease paused into its pause build; the restore replaced
 	// that sandbox with a running one, so the flag would linger and
 	// undrain would later try to resume a running lease. Clear it.

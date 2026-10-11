@@ -506,17 +506,15 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		// A suspended lease is uncharged (no hugepages), so turning its
 		// sandbox back on here passes the memory check like any resume
 		// (#128) — before the sandbox is created. The charge is the
-		// image's CURRENT memory_mb (stamped below): the recovered
-		// sandbox runs that value, so it is both what admission reserves
-		// with and what the deferred release drops — the same rule as
-		// restartCold and restore. Reserving with the lease's stale stamp
-		// would admit an outdated charge (and leak the difference). A
-		// running lease is already charged with its own stamp and
-		// re-admits nothing.
-		if err := s.reserveQuota(l.Owner, 1, img.MemoryMB, false); err != nil {
+		// checkpoint build's size (stamped below): the recovered sandbox
+		// runs that build, so it is both what admission reserves with
+		// and what the deferred release drops — the same rule as
+		// restartCold and restore (#151 Z1). A running lease is already
+		// charged with its own stamp and re-admits nothing.
+		if err := s.reserveQuota(l.Owner, 1, b.MemoryMB, false); err != nil {
 			return err
 		}
-		defer s.releaseQuotaReservation(l.Owner, 1, img.MemoryMB)
+		defer s.releaseQuotaReservation(l.Owner, 1, b.MemoryMB)
 		// Class re-admission removed (FS2b-1): recovery brings hugepages
 		// back, so it re-passes the one-pool admission like a resume.
 		// The running lease reserves its whole disk_mb (FS3): it must fit in
@@ -527,7 +525,7 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 			return derr
 		}
 		defer diskRelease()
-		undo, err = s.admitMemory(ctx, l.Owner, img.MemoryMB)
+		undo, err = s.admitMemory(ctx, l.Owner, b.MemoryMB)
 		if err != nil {
 			return err
 		}
@@ -566,10 +564,10 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	l.BuildID = l.LastCheckpointBuildID
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
-	// The recovered sandbox runs the image's current memory_mb: the
-	// lease keeps the charge it was admitted with (#128) — stamped 0
-	// rows (pre-quota leases over a vanished image) stay uncharged.
-	l.MemoryMB = img.MemoryMB
+	// The recovered sandbox runs the checkpoint build's size (#151 Z1):
+	// stamp it, the charge it was admitted with (#128).
+	l.MemoryMB = b.MemoryMB
+	l.VCPU = b.VCPU
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
