@@ -10,6 +10,16 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-10-11
+
+3.5 measures what each lease's VM really uses: every running lease
+reports its current and peak memory, and a size hint names the smallest
+preset that would hold its peak with headroom, so an owner can pick a
+smaller size. `GET /api/usage` adds the owner's measured memory. The
+backend now checks every setting's type at startup and refuses to start
+on a bad value, naming each one. The dashboard's columns read `state`
+and `policy`. No breaking changes and no schema change.
+
 ### Added
 
 - **The backend validates its typed settings at startup (#137 C1).**

@@ -206,7 +206,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.4.1 (2026-10-11) · GitHub` — with the
+line — `Spoond v3.5.0 (2026-10-11) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -281,6 +281,13 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.5: measured memory.** Every running lease reports its current and
+peak memory use (`memory_used_mb`, `memory_peak_mb`) and a `size_hint`
+when a smaller preset would hold its peak with headroom; `GET
+/api/usage` adds the owner's measured memory. The backend checks every
+setting's type at startup and refuses a bad value, naming it. No
+breaking changes.
 
 **v3.4: config show.** `spoond config show` lists every setting of a
 unit with its value (secrets masked), the file it came from and
