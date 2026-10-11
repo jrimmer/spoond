@@ -65,6 +65,10 @@ type Server struct {
 	// authFails (security review #37 L5) throttles repeated failed
 	// token auths per client IP.
 	authFails *authFailLimiter
+	// startedAt is when this server was built, answered as started_at by
+	// GET /api/admin/config (#137) so a caller can tell whether the
+	// backend restarted since the unit env changed.
+	startedAt time.Time
 	// busy (security review #37 rescan F9) caps concurrent exec/stream
 	// operations per owner so a tenant can't saturate the controller
 	// with in-flight activity (quota covers lease count, not activity).
@@ -169,7 +173,8 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
 		busyCount: map[string]int{}, busyMax: 8, fileXfer: make(chan struct{}, maxFileTransfers),
-		dialCount: map[string]int{}, metrics: metrics.NewBackendMetrics()}
+		dialCount: map[string]int{}, metrics: metrics.NewBackendMetrics(),
+		startedAt: time.Now()}
 	// The guest heartbeat lives only on the guest-service listener
 	// (ProxyHandler); the lease id in the path is the capability.
 	s.heartbeat = newLeaseHeartbeat(svc)
@@ -240,6 +245,9 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("POST /api/admin/drain", s.handleAdminDrain)
 	s.mux.HandleFunc("POST /api/admin/undrain", s.handleAdminUndrain)
 	s.mux.HandleFunc("POST /api/admin/reconcile", s.handleAdminReconcile)
+	// Read-only echo of this process's env (#137), what `spoond config
+	// show` compares the unit files against.
+	s.mux.HandleFunc("GET /api/admin/config", s.handleAdminConfig)
 	// FS5 migration window: unpin every lease whose holder label starts
 	// with a prefix (pool-spawn held its workers by label).
 	s.mux.HandleFunc("POST /api/admin/unpin-by-holder", s.handleAdminUnpinByHolder)

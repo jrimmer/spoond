@@ -198,6 +198,57 @@ var known = func() map[string]bool {
 // IsKnown reports whether some spoond binary reads key.
 func IsKnown(key string) bool { return known[key] }
 
+// HideIfSecret is the masking rule for showing a setting's value
+// (#137): a name carrying TOKEN, KEY, SECRET, PASSWORD, HASH or SEED
+// (case-insensitive) is a secret and its value is never shown —
+// "(hidden)" stands in for it. The admin config endpoint (api) masks
+// the values it serves with this, and `spoond config show`
+// (cmd/spoond-config) masks the same way, so a secret value exists
+// nowhere in any config display that uses it.
+//
+// Two more cases hide a value whatever its name: a setting listed in
+// secretValued (whole values that are secrets without saying so, like
+// webhook URLs whose path is the credential), and any value carrying a
+// URL with credentials or a query string (user:pass@host, ?token=…).
+func HideIfSecret(name, value string) string {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"TOKEN", "KEY", "SECRET", "PASSWORD", "HASH", "SEED"} {
+		if strings.Contains(upper, marker) {
+			return "(hidden)"
+		}
+	}
+	if secretValued[upper] || urlCarriesSecret(value) {
+		return "(hidden)"
+	}
+	return value
+}
+
+// secretValued are settings whose whole value is a secret though the
+// name does not say so: NOTIFY_WEBHOOKS lists Slack, Discord and ntfy
+// URLs, and their paths are the credential.
+var secretValued = map[string]bool{"NOTIFY_WEBHOOKS": true}
+
+// urlCarriesSecret reports whether value holds a URL with credentials
+// (scheme://user:pass@host) or a query string (?…=…), the two places a
+// URL setting carries a token.
+func urlCarriesSecret(value string) bool {
+	for _, f := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == ';' }) {
+		i := strings.Index(f, "://")
+		if i < 0 {
+			continue
+		}
+		rest := f[i+3:]
+		host := rest
+		if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+			host = rest[:j]
+		}
+		if strings.Contains(host, "@") || strings.Contains(rest, "?") {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckEnvFile reads a systemd EnvironmentFile and returns, sorted, the
 // keys no spoond binary reads and the keys set more than once (where
 // the last one silently wins). Values are never returned.

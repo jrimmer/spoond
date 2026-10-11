@@ -7,6 +7,8 @@
 //	spoond runner     Forgejo Actions runner (adaptive pool)
 //	spoond ctl        control-plane CLI (thin ssh ctl@ wrapper)
 //	spoond drain      orchestrator drain/undrain hook (U10)
+//	spoond config     show unit env settings per name: value, source,
+//	                  and whether the running backend has it
 //	spoond dash       read-only live dashboard (basic auth)
 //	spoond top        the dashboard grid in the terminal
 //	spoond notify     webhook notification tools (`spoond notify test`)
@@ -23,7 +25,8 @@
 //	go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond
 //
 // Supported exclusion tags: nobackend, nogateway, nomcp, norunner,
-// noctl, noimages, nodoctor, nodrain, nodash (dash and top together).
+// noctl, noimages, nodoctor, nodrain, noconfig, nodash (dash and top
+// together).
 package main
 
 import (
@@ -66,10 +69,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "doctor", "drain", "dash", "top", "notify", "version"} {
+	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "doctor", "drain", "config", "dash", "top", "notify", "version"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}
 	}
-	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nodoctor, nodrain, nodash, nonotify\n")
+	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nodoctor, nodrain, noconfig, nodash, nonotify\n")
 }

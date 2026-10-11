@@ -10,6 +10,27 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/admin/config` (#137): read-only echo of the backend's
+  environment — every `settings.Known` name with whether it is set and
+  its value, masked to `(hidden)` for any name carrying `TOKEN`, `KEY`,
+  `SECRET`, `PASSWORD`, `HASH` or `SEED`, for `NOTIFY_WEBHOOKS`, and for
+  any value holding a URL with credentials or a query string, plus the process's
+  `started_at` (RFC3339) — so an operator can see what the running
+  backend was started with. Admin auth like the other `/api/admin`
+  routes.
+- `spoond config show` (#137): resolves the backend unit's effective
+  environment (`systemctl show <unit> -p EnvironmentFiles -p
+  Environment`; `Environment=` first, then each env file, later wins),
+  masks secrets with the same rule, and prints NAME / VALUE / SOURCE /
+  RUNNING — the running-backend column comes from the new admin config
+  endpoint, fetched with the merged env's own token and bind address —
+  classifying each setting `same`, `differs — restart to apply`, `not
+  set in running backend`, `?` (unreachable) or `n/a`; unknown keys
+  carry a `(unknown setting)` note. `--json` for the raw document;
+  read-only.
+
 ### Fixed
 
 - **`spoond images build` prunes docker build cache older than three days** after each build, so repeated image builds no longer fill the host's root filesystem.

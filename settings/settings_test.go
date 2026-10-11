@@ -18,6 +18,29 @@ var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|env
 // the conformance harness lists its required variables.
 var envTable = regexp.MustCompile(`\{"([A-Z][A-Z0-9_]{2,})", &`)
 
+// TestHideIfSecret (#137): a name carrying TOKEN, KEY, SECRET,
+// PASSWORD, HASH or SEED (case-insensitive, anywhere in the name) is
+// masked to "(hidden)"; a plain name passes its value through.
+func TestHideIfSecret(t *testing.T) {
+	cases := []struct {
+		name, value, want string
+	}{
+		{"ADMIN_TOKEN", "sekrit", "(hidden)"},
+		{"LLM_UPSTREAM_KEY", "sk-1", "(hidden)"},
+		{"proxy_auth_secret", "s", "(hidden)"}, // case-insensitive
+		{"DASH_PASSWORD_HASH", "h", "(hidden)"},
+		{"E2B_TOKEN_SEED_FILE", "/x", "(hidden)"}, // SEED-only marker
+		{"NOTIONAL_PASSWORD", "p", "(hidden)"},
+		{"BIND_ADDR", "127.0.0.1:8890", "127.0.0.1:8890"},
+		{"", "x", "x"},
+	}
+	for _, c := range cases {
+		if got := HideIfSecret(c.name, c.value); got != c.want {
+			t.Errorf("HideIfSecret(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestKnownMatchesSource: Known is exactly the settings the source reads
 // — a new setting must be added to it, and a removed one dropped.
 func TestKnownMatchesSource(t *testing.T) {
@@ -100,5 +123,23 @@ SIZE_PRESET=small=1:2048
 	}
 	if !slices.Equal(dup, []string{"POOL_SIZE"}) {
 		t.Fatalf("duplicate = %v", dup)
+	}
+}
+
+// TestHideIfSecretValues: values that carry a secret without a telling
+// name are hidden — webhook lists and URLs with credentials or a query
+// string — while a plain URL or path still shows.
+func TestHideIfSecretValues(t *testing.T) {
+	for _, c := range []struct{ name, value, want string }{
+		{"NOTIFY_WEBHOOKS", "https://hooks.slack.com/services/T0/B0/xyz", "(hidden)"},
+		{"LLM_UPSTREAM_URL", "https://user:pw@llm.example.com/v1", "(hidden)"},
+		{"OTEL_PROM_URL", "http://127.0.0.1:19464/metrics?auth=abc", "(hidden)"},
+		{"LLM_UPSTREAM_URL", "https://llm.example.com/v1", "https://llm.example.com/v1"},
+		{"SPOOND_DB_PATH", "/var/lib/spoond/spoond.db", "/var/lib/spoond/spoond.db"},
+		{"BIND_ADDR", "0.0.0.0:8890", "0.0.0.0:8890"},
+	} {
+		if got := HideIfSecret(c.name, c.value); got != c.want {
+			t.Errorf("HideIfSecret(%s, %q) = %q, want %q", c.name, c.value, got, c.want)
+		}
 	}
 }
