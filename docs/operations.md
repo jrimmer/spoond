@@ -1305,15 +1305,19 @@ full-width throughput panel (running leases, requests per second,
 creates per minute and egress connections, each with its current value
 and a sparkline over the history, titled with the window the history
 covers), live leases (id, image, the size — memory then vCPUs, `4G/2V`,
-`1.5G/1V`, `512M/1V`, `-` when unknown —, owner, the run state — ▶ running,
-‖ suspended, ■ lost, ⭘ recovered —, the access policy (`isolated` when
+`1.5G/1V`, `512M/1V`, `-` when unknown —, owner, the state cell — the
+run-state glyph ▶ ‖ ■ ⭘ then ◆ on a pinned lease, no words; a suspended
+lease's glyph is recoloured by its suspend reason (taken back warn,
+idle-suspended dim, any other suspend warn) —, the access policy
+(`isolated` when
 the API's `network_policy` is `none`, else `lan`/`restricted`/
-`internet`), age, time left and the holder, with ◆ before a pinned
-lease's holder; on the page the holder is a link; the table's
-fixed columns are sized to the values actually shown, so short states
+`internet`), age, time left and the holder; on the page the holder is a
+link; the table's fixed columns are sized to the values actually shown
+(the state column alone is a fixed two-glyph width), so short values
 leave no blank run and the freed width goes to the owner then the
-holder, and the ◆ pinned legend sits on one dim line under the
-table when a row is pinned), the image catalog (shape, live leases, lifetime
+holder, and one dim legend under the table — `▶ running ‖ suspended
+⭘ recovered ■ lost ◆ pinned` — spells the glyphs out whenever rows are
+shown), the image catalog (shape, live leases, lifetime
 uses, baked-at) beside the systemd units, a refusals-and-failures row
 (auth, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and

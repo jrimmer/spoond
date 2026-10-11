@@ -1488,7 +1488,7 @@ work-call and keepalive activity moves `LastActive`. `hold_ttl` is
 removed (accepted and ignored for one
 release, with a `Deprecation` header). To keep a lease, use the pin
 routes below. The label is shown on the dashboard (a pinned lease's
-holder is marked ◆), and a lease with a holder that has its own
+state cell carries the ◆ pin mark), and a lease with a holder that has its own
 `checkpoint_interval` follows it.
 
 ### `PUT /api/leases/{id}/pin` and `DELETE /api/leases/{id}/pin` — pin or unpin
