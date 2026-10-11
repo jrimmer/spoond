@@ -588,19 +588,37 @@ var usageRecentTypes = map[LeaseEventType]bool{
 	LeasePausedExpiring:  true,
 }
 
+// usageRecentReleases are the release reasons "recent" lists (#140,
+// Honey's ask): releases spoond made on its own clock, which an owner
+// may not expect — not one the owner asked for.
+var usageRecentReleases = map[string]bool{
+	"TTL expired":     true,
+	"paused_expired":  true,
+	lostReleaseReason: true,
+}
+
+// usageRecentEvent reports whether "recent" lists ev: a listed type, or
+// a release spoond made on its own clock.
+func usageRecentEvent(ev *LeaseEvent) bool {
+	if usageRecentTypes[ev.Type] {
+		return true
+	}
+	return ev.Type == LeaseReleased && usageRecentReleases[ev.Detail]
+}
+
 // usageRecentLimit is how many events "recent" lists at most.
 const usageRecentLimit = 20
 
-// recentFor copies the owner's newest ring events whose type is in
-// types, newest first, at most n. The ring is in memory, so the list
+// recentFor copies the owner's newest ring events that keep accepts,
+// newest first, at most n. The ring is in memory, so the list
 // starts empty after a backend restart.
-func (b *eventBus) recentFor(owner string, types map[LeaseEventType]bool, n int) []LeaseEvent {
+func (b *eventBus) recentFor(owner string, keep func(*LeaseEvent) bool, n int) []LeaseEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := []LeaseEvent{}
 	for i := len(b.ring) - 1; i >= 0 && len(out) < n; i-- {
 		ev := b.ring[(b.start+i)%len(b.ring)]
-		if ev.Owner == owner && types[ev.Type] {
+		if ev.Owner == owner && keep(&ev) {
 			out = append(out, ev)
 		}
 	}

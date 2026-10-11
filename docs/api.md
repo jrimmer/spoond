@@ -149,6 +149,10 @@ anything starts. A create with `snapshot` keeps the snapshot's size:
 `size` or `vcpu`, or a `memory_mb` other than the snapshot's, is `400
 invalid_size`.
 
+A create whose lease is not persistent answers with a `Warning:`
+header naming its TTL when the TTL was not given, or a pin or holder is
+set, since neither keeps a lease past its TTL.
+
 Response `201 Created`:
 
 ```json
@@ -2257,7 +2261,10 @@ first, at most 20: `box_full` (the caller's refused requests),
 the caller's own leases) and `queued`, each in the lease event shape
 (`seq`, `at`, `lease_id`, `type`, `detail`, `reason`, …). A take-back
 appears for the owner whose lease was taken, not for the owner it made
-room for. It reads the backend's in-memory event ring, so it starts
+room for. It also lists the caller's leases spoond released on its own
+clock (`released` for a TTL expiry, the paused-release clock or a lost
+lease's grace; not a release the owner asked for). It reads the
+backend's in-memory event ring, so it starts
 empty after a backend restart (#140 U3).
 Self-scoped: a legacy consumer
 token also has an owner, so its usage is available; a caller whose

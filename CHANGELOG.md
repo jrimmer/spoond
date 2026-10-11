@@ -10,6 +10,11 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **A create that will expire says so.** A non-persistent create answers with a `Warning:` header naming its TTL when the TTL was defaulted or a pin or holder is set (neither keeps a lease past its TTL since 3.0).
+- **`GET /api/usage` "recent" lists leases spoond released on its own clock**: a TTL expiry, the paused-release clock or a lost lease's grace, as `released` events.
+
 ### Fixed
 
 - **The gateway's `ssh-key add` takes a real public key (#72).** The whole authorized-keys line (`<type> <base64> [comment]`) followed by the user name, or the name first; before, the command was split on whitespace and every real key was refused.
