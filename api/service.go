@@ -2057,6 +2057,47 @@ func (s *Service) usedMiBLocked(owner string) int {
 	return used
 }
 
+// LeaseCounts is an owner's live lease tally as the usage API reports
+// it: how many of the owner's leases are running, paused, pinned and
+// lost, plus how many background jobs they have running. Read from the
+// in-memory lease map, so it costs no store query.
+type LeaseCounts struct {
+	Running     int `json:"running"`
+	Paused      int `json:"paused"`
+	Pinned      int `json:"pinned"`
+	Lost        int `json:"lost"`
+	RunningJobs int `json:"running_jobs"`
+}
+
+// leaseCounts tallies the owner's leases from the in-memory map
+// (#140 U1). Released leases are gone from the map, so every entry
+// counts. A lease can be both running and pinned (the pin is a
+// lifecycle protection, not a state); paused is the suspended state;
+// lost leases are still held until their owner releases them.
+func (s *Service) leaseCounts(owner string) LeaseCounts {
+	var c LeaseCounts
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	for _, l := range s.store.leases {
+		if l.Owner != owner || l.released {
+			continue
+		}
+		switch {
+		case l.State == "lost":
+			c.Lost++
+		case l.live():
+			c.Running++
+		case l.Suspended:
+			c.Paused++
+		}
+		if l.Pinned {
+			c.Pinned++
+		}
+		c.RunningJobs += s.store.runningJobs[l.ID]
+	}
+	return c
+}
+
 // releaseQuotaReservation drops n reservations made by reserveQuota.
 func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	if s.identities == nil {
