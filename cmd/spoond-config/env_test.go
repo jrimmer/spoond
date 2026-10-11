@@ -715,15 +715,19 @@ func TestResolveFileSecrets(t *testing.T) {
 	}
 
 	// Both forms set: the _FILE row names the both-set refusal (no value
-	// in it), the base row keeps the env value, masking handles the
-	// secret at print time.
+	// in it), the base row keeps the env value (masked at print time —
+	// the "from file" constant would lie about a secret Get refuses to
+	// resolve).
 	both := []entry{
 		{name: "ADMIN_TOKEN", value: "env-tok", source: "/etc/spoond/backend.env"},
 		{name: "ADMIN_TOKEN_FILE", value: "/etc/spoond/secrets/admin-token", source: "/etc/spoond/secrets.env"},
 	}
 	got = resolveFileSecrets(both)
-	if len(got) != 2 || got[0].name != "ADMIN_TOKEN" || got[1].name != "ADMIN_TOKEN_FILE" || !strings.HasPrefix(got[1].value, refBothPrefix) || !strings.Contains(got[1].value, "ADMIN_TOKEN_FILE") {
-		t.Fatalf("both forms = %+v, want the base row first and the _FILE row naming both spellings", got)
+	if len(got) != 2 || got[0].name != "ADMIN_TOKEN" || got[0].value != "env-tok" || got[1].name != "ADMIN_TOKEN_FILE" || !strings.HasPrefix(got[1].value, refBothPrefix) || !strings.Contains(got[1].value, "ADMIN_TOKEN_FILE") {
+		t.Fatalf("both forms = %+v, want the base row's env value kept and the _FILE row naming both spellings", got)
+	}
+	if got[0].value == settings.HiddenFromFile {
+		t.Fatalf("the both-set base row claims \"from file\": %+v", got[0])
 	}
 	if strings.Contains(got[1].value, "env-tok") {
 		t.Fatalf("_FILE row leaks the env value: %+v", got[1])
@@ -1011,5 +1015,24 @@ func TestFileSecretJSONPathRow(t *testing.T) {
 	}
 	if !gotFile || !gotBase {
 		t.Fatalf("the _FILE and base rows both missing:\n%s", out.String())
+	}
+}
+
+// TestResolveFileSecretsDecoratesEnvSetBase (#137 C2): a secret the env
+// sets directly (no _FILE anywhere) keeps its own row verbatim — the
+// decoration machinery must not touch a plain env-set secret's row.
+func TestResolveFileSecretsDecoratesEnvSetBase(t *testing.T) {
+	env := []entry{
+		{name: "METRICS_TOKEN", value: "mtok-raw", source: "/etc/spoond/backend.env"},
+		{name: "POOL_SIZE", value: "2", source: "/etc/spoond/backend.env"},
+	}
+	got := resolveFileSecrets(env)
+	if len(got) != 2 || got[0].name != "METRICS_TOKEN" || got[0].value != "mtok-raw" {
+		t.Fatalf("plain env touched: %+v", got)
+	}
+	// An unknown (non-secret) name keeps its row too.
+	env = []entry{{name: "TOTALLY_BOGUS", value: "1", source: "f"}}
+	if got := resolveFileSecrets(env); len(got) != 1 || got[0].name != "TOTALLY_BOGUS" || got[0].value != "1" {
+		t.Fatalf("unknown row touched: %+v", got)
 	}
 }

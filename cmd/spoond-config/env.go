@@ -268,9 +268,14 @@ func resolveFileSecrets(env []entry) []entry {
 		base, isFile := strings.CutSuffix(e.name, "_FILE")
 		switch {
 		case !isFile:
-			if fileKey[e.name] && filePath[e.name] {
-				// The secret is file-resolved: the base row shows the
-				// hidden-from-file constant, never the env value.
+			if fileKey[e.name] && filePath[e.name] && !envSet[e.name] {
+				// The secret resolves from the file (the env NAME= is unset
+				// or empty): the base row shows the hidden-from-file
+				// constant, never the env value. With NAME= also non-empty
+				// the resolution refuses (the _FILE row says so), and the
+				// base row keeps its own env value, masked at print time —
+				// "from file" would lie about a secret Get refuses to
+				// resolve.
 				out = append(out, entry{name: e.name, value: settings.HiddenFromFile, source: e.source})
 				continue
 			}
