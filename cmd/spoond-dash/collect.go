@@ -280,12 +280,14 @@ type Service struct {
 // TakenBack marks a lease suspended by memory take-back (FS2a): the
 // state cell names it "taken back". IdleSuspended marks a persistent
 // lease suspended by its own idle_suspend threshold (2.5, #129 part 2):
-// the state cell names it "idle-suspended".
+// the state cell names it "idle-suspended". VCPU and MemoryMB are the
+// size the lease's VM runs at (3.1, #151); 0 is unknown.
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name, Comment string
 	TakenBack                                      bool
 	IdleSuspended                                  bool
 	Pinned                                         bool
+	VCPU, MemoryMB                                 int
 	Holder, HolderURL                              string
 	LastAction                                     string
 	LastActionAt                                   time.Time
@@ -1046,7 +1048,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	names := c.userNames()
 
 	rows, err := db.Query(`SELECT id, image, owner, state, net_policy, name, comment, created_at, expires_at, persistent,
-		holder, holder_url, pinned, last_action, last_action_at, suspend_reason
+		holder, holder_url, pinned, last_action, last_action_at, suspend_reason, vcpu, memory_mb
 		FROM leases ORDER BY created_at DESC LIMIT 40`)
 	if err != nil {
 		return err
@@ -1060,7 +1062,7 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		var persistent, pinned int
 		var suspendReason string
 		if err := rows.Scan(&r.ID, &r.Image, &owner, &r.State, &r.Policy, &r.Name, &comment, &created, &expires, &persistent,
-			&holder, &holderURL, &pinned, &lastAction, &lastActionAt, &suspendReason); err != nil {
+			&holder, &holderURL, &pinned, &lastAction, &lastActionAt, &suspendReason, &r.VCPU, &r.MemoryMB); err != nil {
 			return err
 		}
 		r.Comment = comment

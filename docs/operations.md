@@ -1263,7 +1263,8 @@ wide frame, stacked below it at a narrow one — then a
 full-width throughput panel (running leases, requests per second,
 creates per minute and egress connections, each with its current value
 and a sparkline over the history, titled with the window the history
-covers), live leases (id, image, owner, the run state — ▶ running,
+covers), live leases (id, image, the size — memory then vCPUs, `4G/2V`,
+`1.5G/1V`, `512M/1V`, `-` when unknown —, owner, the run state — ▶ running,
 ‖ suspended, ■ lost, ⭘ recovered —, the access policy (`isolated` when
 the API's `network_policy` is `none`, else `lan`/`restricted`/
 `internet`), age, time left and the holder, with ◆ before a pinned
