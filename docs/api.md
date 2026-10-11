@@ -1574,7 +1574,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `unpinned` | a lease is unpinned (`DELETE /api/leases/{id}/pin`) | the unpin |
 | `paused_expiring` | a paused lease is 24 h from release by the one clock (FS5) | the pause date and the release time |
 | `pinned_idle` | a pinned lease's last API activity crossed `PINNED_IDLE_NOTICE_DAYS` (visibility only) | the idle-since time, or `activity; pinned-idle notice cleared` |
-| `box_full` | a request needed room and every take-back candidate was pinned (FS5); carries lease id `-` | the request's memory and owner |
+| `box_full` | a request needed room and take-back could free none for it (FS5, FS2b); carries lease id `-` and the refused requester as `owner`, so it reaches the requester's own stream | the request's memory and owner |
 | `admin_unpin` | `POST /api/admin/unpin-by-holder` unpinned leases by holder prefix; carries lease id `-` | the count and prefix |
 | `job_started` | a background exec job started (2.6, #135) | the command, cut to 120 chars |
 | `job_exited` | a background exec job ended (2.6, #135) | `exit <code>` and the last 10 stderr lines (at most 1 KiB); for a job killed by the max runtime, `timed out: exit 124` and the stderr excerpt (spoond-wb5) |
@@ -2193,7 +2193,21 @@ non-admin caller.
 Any authenticated caller. `{"share": {owner, name, slice_pct,
 capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
 used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}, "leases":
-{running, paused, pinned, lost, running_jobs}}`.
+{running, paused, pinned, lost, running_jobs}, "waiting": [{id, owner,
+image, position, waited_s, reason}], "recent": [event]}`. `waiting` lists the caller's
+creates queued for admission, the same entries as
+[`GET /api/leases/queue`](#get-apileasesqueue--creates-waiting-for-admission):
+`position` is the place in the whole queue (1 is tried first), so it
+counts other owners' waiting creates too. Empty when nothing waits
+(#140 U2).
+`recent` lists the caller's newest refusal and reclaim events, newest
+first, at most 20: `box_full` (the caller's refused requests),
+`take_back`, `suspended`, `critical_release` and `paused_expiring` (on
+the caller's own leases) and `queued`, each in the lease event shape
+(`seq`, `at`, `lease_id`, `type`, `detail`, `reason`, …). A take-back
+appears for the owner whose lease was taken, not for the owner it made
+room for. It reads the backend's in-memory event ring, so it starts
+empty after a backend restart (#140 U3).
 Self-scoped: a legacy consumer
 token also has an owner, so its usage is available; a caller whose
 owner somehow does not exist answers `404`.
