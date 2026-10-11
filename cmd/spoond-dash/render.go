@@ -1325,23 +1325,35 @@ func (l *layout) drawHost(g *grid.Grid, x, y, w, h int) int {
 		row++
 	}
 
-	// The build GC's mode — bold ok when deletion is on, dim when it
-	// only logs candidates — and its lifetime count, left out at zero.
-	// The kept checkpoints ride the same row (#126): "kept N (X GiB)"
-	// when N > 0.
+	g.Segs(x+2, row, l.gcSegs(inner), inner)
+	return y
+}
+
+// gcSegs is the host panel's GC row fitted to w cells: the build GC's
+// mode — bold ok when deletion is on, dim when it only logs candidates
+// — then the kept checkpoints (#126), "kept N (X GiB)" when N > 0, then
+// the lifetime deleted count, left out at zero. The order is by
+// importance (the kept builds are what an operator can act on), so a
+// narrow panel drops the deleted count first (#148); a row still too
+// wide ends in ….
+func (l *layout) gcSegs(w int) []grid.Seg {
 	segs := []grid.Seg{{Text: "gc ", Style: "dim"}, gcSeg(l.s.GCMode)}
-	if l.s.GCDeleted > 0 {
-		segs = append(segs,
-			grid.Seg{Text: " · ", Style: "dim"},
-			grid.Seg{Text: fmt.Sprintf("%s builds deleted", thousands(l.s.GCDeleted)), Style: "text"})
-	}
 	if l.s.KeptBuilds > 0 {
 		segs = append(segs,
 			grid.Seg{Text: " · ", Style: "dim"},
 			grid.Seg{Text: fmt.Sprintf("kept %s (%s GiB)", thousands(l.s.KeptBuilds), thousands(int(l.s.KeptBuildsBytes/(1<<30)))), Style: "text"})
 	}
-	g.Segs(x+2, row, segs, inner)
-	return y
+	if l.s.GCDeleted > 0 {
+		segs = append(segs,
+			grid.Seg{Text: " · ", Style: "dim"},
+			grid.Seg{Text: fmt.Sprintf("%s builds deleted", thousands(l.s.GCDeleted)), Style: "text"})
+	}
+	segs = fitItems(segs, w)
+	if over := segWidth(segs) - w; over > 0 {
+		last := &segs[len(segs)-1]
+		last.Text = ellipsize(last.Text, len([]rune(last.Text))-over)
+	}
+	return segs
 }
 
 // throughput panel: running leases, requests/s, creates/min, egress
@@ -2020,7 +2032,9 @@ func (l *layout) events(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, 0, y, l.w, l.eventsH(), "events", "events")
 	for i, e := range l.s.Events {
-		segs := splitSegs(sanitize(e.Text), e.Style)
+		// Cut to the panel's inner width with …, so a detail too long
+		// for the row says so instead of stopping at the edge (#149).
+		segs := splitSegs(ellipsize(sanitize(e.Text), l.w-4), e.Style)
 		l.writeRow(g, 2, top+1+i, segs)
 	}
 	return y

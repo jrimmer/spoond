@@ -808,7 +808,7 @@ func devMajorMinor(dev uint64) (major, minor uint32) {
 
 // eventSubjectMax caps the events panel's subject column (holder,
 // comment or owner); longer subjects end in ….
-const eventSubjectMax = 24
+const eventSubjectMax = 20
 
 // eventPanelRows is how many events the panel shows.
 const eventPanelRows = 5

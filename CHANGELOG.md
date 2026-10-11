@@ -19,6 +19,12 @@ summarised from README "Status".
 - **A lease reports its own size and keeps it (#151).** Lease rows carry `vcpu`, `memory_mb` and `disk_mb`. Clone, fork, restore and recovery now run and charge the size the lease actually has; before, they charged the image's current `memory_mb`, so after an image was rebuilt at another size a restored lease could be charged one size while its VM ran another. Migration 25 adds the lease's `vcpu`.
 - **Usage history (#140 U4).** spoond records each owner's usage every 15 minutes and keeps 7 days; `GET /api/usage/history?hours=N` (default 24, cap 168) returns the caller's own samples, oldest first. Migration 24 only adds the `usage_samples` table (schema 23 → 24), so a 3.0.0 binary can still open the database.
 
+### Fixed
+
+- **Event durations between one second and a minute read to two decimals (#147).** A checkpoint that took 17.2689333 s now reads "17.27 s"; one that rounds up to a minute reads "1m0s", never "60 s".
+- **The dashboard's host panel GC row fits its panel (#148).** The kept builds now come right after the GC mode, before the lifetime deleted count; a part that does not fit is dropped whole, and the row ends in … as a last resort, instead of running past the panel's edge.
+- **The dashboard's events panel no longer cuts a detail silently (#149).** A row too long for the panel ends in …, and the subject column is capped at 20 characters instead of 24, so more of the detail fits.
+
 ## [3.0.0] - 2026-10-10
 
 3.0 replaces guaranteed and burst classes, preemption, holds and
