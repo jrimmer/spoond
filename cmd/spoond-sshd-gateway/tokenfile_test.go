@@ -87,6 +87,17 @@ func TestGatewayTokenFailsAfterFlagsParse(t *testing.T) {
 	if n := takeExit(); n != 1 {
 		t.Fatalf("unreadable file: %d exits, want exactly 1 (nothing re-takes the exit)", n)
 	}
+	// The exit code is pinned too: startup refusals exit 1.
+	firstCode := 0
+	logExit = func(code int) {
+		exits++
+		firstCode = code
+		panic(errGatewayTokenExit)
+	}
+	takeExit()
+	if firstCode != 1 {
+		t.Fatalf("exit code = %d, want 1 (the startup-refusal code)", firstCode)
+	}
 
 	// Both forms with a real file: the same one-exit shape.
 	t.Setenv("SPOOND_GATEWAY_TOKEN", "both")
