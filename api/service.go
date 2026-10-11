@@ -3958,6 +3958,10 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	if err != nil {
 		return nil, "", err
 	}
+	// Read under the store lock: markHadSecrets writes it there (#141).
+	s.store.mu.Lock()
+	srcHadSecrets := src.HadSecrets
+	s.store.mu.Unlock()
 	now := time.Now()
 	lease := &Lease{
 		ID:          newID(),
@@ -3978,9 +3982,9 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		MemoryMB:           memPer, // the admitted charge (#128)
 		VCPU:               vcpu,   // the source's size (#151 Z1)
 		Sized:              src.Sized,
-		HadSecrets:         src.HadSecrets, // a clone carries the source's memory (#141)
-		DiskMB:             diskMB,         // the running reservation (FS3a)
-		Generation:         1,              // every lease starts on generation 1 (2.2)
+		HadSecrets:         srcHadSecrets, // a clone carries the source's memory (#141)
+		DiskMB:             diskMB,        // the running reservation (FS3a)
+		Generation:         1,             // every lease starts on generation 1 (2.2)
 		TemplateID:         img.TemplateID,
 	}
 	// Memory admission (FS2b-1): the clone takes its own charge against
@@ -4113,6 +4117,10 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.releaseQuotaReservation(owner, count, memPer)
 		return nil, "", err
 	}
+	// Read under the store lock: markHadSecrets writes it there (#141).
+	s.store.mu.Lock()
+	srcHadSecrets := src.HadSecrets
+	s.store.mu.Unlock()
 
 	// The whole batch's memory is admitted at once, before any child
 	// exists: a refusal here leaves no earlier child and no other
@@ -4184,9 +4192,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			MemoryMB:           memPer, // the admitted charge (#128)
 			VCPU:               vcpu,   // the source's size (#151 Z1)
 			Sized:              src.Sized,
-			HadSecrets:         src.HadSecrets, // a fork carries the source's memory (#141)
-			DiskMB:             diskMB,         // the running reservation (FS3a)
-			Generation:         1,              // every lease starts on generation 1 (2.2)
+			HadSecrets:         srcHadSecrets, // a fork carries the source's memory (#141)
+			DiskMB:             diskMB,        // the running reservation (FS3a)
+			Generation:         1,             // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
 		// Hold this child's egress memo in flight until it is in the store

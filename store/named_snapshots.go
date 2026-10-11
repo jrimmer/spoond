@@ -221,6 +221,17 @@ func likePrefix(prefix string) string {
 	return string(out) + "%"
 }
 
+// dropGrantsIfEmptyTx deletes a name's grants once its last version is
+// gone (#141): a grant covers the name, so a later save under the same
+// name must not reach an old grantee without a new grant.
+func dropGrantsIfEmptyTx(ctx context.Context, tx *sql.Tx, owner, name string) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM named_snapshot_grants
+		WHERE owner = ? AND name = ?
+		AND NOT EXISTS (SELECT 1 FROM named_snapshots WHERE owner = ? AND name = ?)`,
+		owner, name, owner, name)
+	return err
+}
+
 // DeleteNamedSnapshot removes one version row. It returns ErrNotFound
 // when the row does not exist. The name's settings row (and its
 // last_version high-water mark) is kept even when this was the last
@@ -244,6 +255,10 @@ func (db *DB) DeleteNamedSnapshot(ctx context.Context, owner, name string, versi
 	if n == 0 {
 		tx.Rollback()
 		return ErrNotFound
+	}
+	if err := dropGrantsIfEmptyTx(ctx, tx, owner, name); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("store: delete named snapshot %s/%s@%d: grants: %w", owner, name, version, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: delete named snapshot %s/%s@%d: %w", owner, name, version, err)
@@ -269,6 +284,10 @@ func (db *DB) DeleteNamedSnapshotName(ctx context.Context, owner, name string) (
 	if err != nil {
 		tx.Rollback()
 		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)
+	}
+	if err := dropGrantsIfEmptyTx(ctx, tx, owner, name); err != nil {
+		tx.Rollback()
+		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: grants: %w", owner, name, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)

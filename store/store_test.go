@@ -1525,20 +1525,21 @@ func TestMigration28GrantsAndSecretFacts(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 	got, err := db.GetLease(ctx, "lease-v27")
-	if err != nil || got.HadSecrets {
-		t.Fatalf("lease after migration: had_secrets = %v (%v), want false", got.HadSecrets, err)
+	// Existing leases' secret history is unknown: all are marked.
+	if err != nil || !got.HadSecrets {
+		t.Fatalf("lease after migration: had_secrets = %v (%v), want true", got.HadSecrets, err)
 	}
 	v, err := db.GetNamedSnapshotLatest(ctx, "alice", "warm")
 	if err != nil || v.SecretFree {
 		t.Fatalf("version after migration: secret_free = %v (%v), want false", v.SecretFree, err)
 	}
 
-	got.HadSecrets = true
+	got.HadSecrets = false
 	if err := db.UpsertLease(ctx, got); err != nil {
 		t.Fatalf("upsert had_secrets: %v", err)
 	}
-	if again, err := db.GetLease(ctx, "lease-v27"); err != nil || !again.HadSecrets {
-		t.Fatalf("had_secrets round trip = %v (%v), want true", again.HadSecrets, err)
+	if again, err := db.GetLease(ctx, "lease-v27"); err != nil || again.HadSecrets {
+		t.Fatalf("had_secrets round trip = %v (%v), want false", again.HadSecrets, err)
 	}
 	clean := namedRow("alice", "warm", "b-v28")
 	clean.SecretFree = true

@@ -1752,7 +1752,11 @@ from a marked lease is not secret-free (`secret_free: false`): the save
 scrubs `/run/secrets`, but a secret may live on elsewhere in the
 guest's memory, so such a version can never be granted to another
 user. Exec `env` values are **not** secrets and never set the mark, so
-keep credentials out of `env` on a lease you mean to share.
+keep credentials out of `env` on a lease you mean to share. The mark
+covers spoond's secret channels only: a credential written into the
+guest any other way (a file `PUT`, a command that logs in) is invisible
+to it, so a lease meant for sharing must never be given one. Leases
+that existed before 3.2 are all marked, since their history is unknown.
 
 ```bash
 curl -X POST https://backend/api/leases \
@@ -2077,7 +2081,15 @@ lease's memory; the snapshot's disk stays in the owner's budget, and
 retention, `in_use` and delete-in-use count the grantee's leases like
 the owner's. A grantee's lease shows the owner in its `snapshot` object
 and may [restore to the start snapshot](#post-apileasesidrestore--roll-back-to-a-kept-checkpoint).
-Deleting a user removes the grants it gave and received.
+Deleting a user removes the grants it gave and received, and deleting a
+name's last version removes the name's grants: a later save under the
+same name is private until granted again.
+
+Because a grantee's running leases keep a version alive, a grantee can
+hold versions past the name's `keep`, against the owner's disk budget.
+The owner's remedy is to revoke the grant and then delete with
+`?force=1`; the grantee's running leases keep running. Grant only to
+users you trust with that.
 
 #### `POST /api/named-snapshot-grants` — grant
 
@@ -2107,8 +2119,9 @@ lease that never had a secret, then grant.
 #### `DELETE /api/named-snapshot-grants?name=<name>&grantee=<user>` — revoke
 
 Owner only. `204`; `404 not_found` when there is no such grant.
-Revoking stops new starts at once (they answer `404`); it never touches
-a lease already running from the snapshot.
+Revoking stops new starts and restores to the start snapshot at once
+(they answer `404`); it never touches a lease already running from the
+snapshot.
 
 ### Identity in a restored guest
 

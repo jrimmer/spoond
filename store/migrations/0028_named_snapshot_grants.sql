@@ -15,9 +15,12 @@ CREATE INDEX named_snapshot_grants_grantee ON named_snapshot_grants(grantee);
 -- had_secrets marks a lease that ever held a secret: create-time,
 -- exec-time or job secrets, or one inherited from the lease or tainted
 -- version it was cloned, forked or started from. It is never cleared.
--- Existing leases read 0; their saves before this migration stay
--- ungrantable anyway (below).
+-- Create-time secrets were held only in memory before this migration,
+-- so an existing lease's history is unknown: every existing lease is
+-- marked, and no save from it (or its clones and forks) can ever be
+-- granted. New leases start at 0.
 ALTER TABLE leases ADD COLUMN had_secrets INTEGER NOT NULL DEFAULT 0;
+UPDATE leases SET had_secrets = 1;
 
 -- secret_free marks a version saved from a lease that never had a
 -- secret. Existing versions read 0 (not grantable until re-saved): their

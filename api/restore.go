@@ -47,6 +47,18 @@ func (s *Service) restoreableBuild(ctx context.Context, l *Lease, buildID string
 		return store.BuildRow{}, false
 	}
 	if l.SnapshotBuildID != "" && b.BuildID == l.SnapshotBuildID {
+		// Another owner's version needs the grant still in place, and
+		// the version itself: revoking or deleting it ends restores to
+		// it as it ends new starts (running leases are untouched).
+		if b.Owner != l.Owner {
+			row, err := s.db.GetNamedSnapshotByBuildAny(ctx, b.BuildID)
+			if err != nil || row.Owner == l.Owner {
+				return b, err == nil
+			}
+			if s.checkNamedSnapshotGrant(ctx, row.Owner, row.Name, l.Owner) != nil {
+				return store.BuildRow{}, false
+			}
+		}
 		return b, true
 	}
 	if b.Owner != l.Owner {

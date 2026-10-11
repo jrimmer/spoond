@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -282,6 +283,37 @@ func TestSnapshotGrantRevoke(t *testing.T) {
 	resp, _ = doReq(t, "DELETE", ts+"/api/named-snapshot-grants?name=warm&grantee=consumer-b", "token-a", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("second revoke = %d, want 404", resp.StatusCode)
+	}
+	// Revoking also ends restores to the start snapshot.
+	row, err := svc.db.GetNamedSnapshotLatest(context.Background(), "consumer-a", "warm")
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	resp, _ = doReq(t, "POST", ts+"/api/sandboxes/"+running+"/restore", "token-b", map[string]any{"build_id": row.BuildID})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("restore to start after revoke = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestSnapshotGrantGoesWithTheName: deleting a name's last version drops
+// its grants, so a later save under the same name is private until
+// granted again.
+func TestSnapshotGrantGoesWithTheName(t *testing.T) {
+	ts, _, db, _ := newGrantServer(t)
+	src := createLiveLease(t, ts, "token-a", nil)
+	saveSnapshotOK(t, ts, "token-a", src, map[string]any{"name": "warm"})
+	grantSnapshotOK(t, ts, "token-a", "warm", "consumer-b")
+	resp, body := doReq(t, "DELETE", ts+"/api/named-snapshots/warm", "token-a", nil)
+	if resp.StatusCode/100 != 2 {
+		t.Fatalf("delete name = %d %v", resp.StatusCode, body)
+	}
+	if _, err := db.GetNamedSnapshotGrant(context.Background(), "consumer-a", "warm", "consumer-b"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("grant after the name was deleted = %v, want gone", err)
+	}
+	saveSnapshotOK(t, ts, "token-a", src, map[string]any{"name": "warm"})
+	resp, body = doReq(t, "POST", ts+"/api/sandboxes", "token-b", map[string]any{"snapshot": "warm", "snapshot_owner": "consumer-a"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("start of the re-saved name without a new grant = %d %v, want 404", resp.StatusCode, body)
 	}
 }
 
