@@ -1200,7 +1200,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				s.svc.releaseBecause(context.Background(), lease, "client_gone")
 				return
 			}
-			s.writeCreatedLease(w, r, lease, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+			s.writeCreatedLease(w, r, lease, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited, req.TTL <= 0)
 			return
 		}
 	}
@@ -1215,7 +1215,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Wait > 0 {
 		waited = time.Since(grantStart)
 	}
-	s.writeCreatedLease(w, r, lease, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited)
+	s.writeCreatedLease(w, r, lease, ckptSet, ckptSecs, idleSet, idleSecs, ttl, waited, req.TTL <= 0)
 }
 
 // writeCreateRefusal writes the failure response for a refused create,
@@ -1283,7 +1283,14 @@ func (s *Server) writeCreateRefusal(w http.ResponseWriter, image, snapshot strin
 // immediate and the queued path): it stamps the request's checkpoint
 // interval and idle_suspend, then the usual body plus waited_ms when the
 // create waited for admission.
-func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease *Lease, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration) {
+func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease *Lease, ckptSet bool, ckptSecs int64, idleSet bool, idleSecs int64, ttl, waited time.Duration, ttlDefaulted bool) {
+	// A non-persistent lease is released at its TTL whatever else it
+	// carries. Say so on the create when the caller may not expect it
+	// (Honey, 3.0): the TTL was not given, or a pin or holder is set
+	// (neither keeps a lease past its TTL since 3.0).
+	if !lease.Persistent && (ttlDefaulted || lease.Pinned || lease.Holder != "") {
+		w.Header().Set("Warning", fmt.Sprintf(`299 spoond "not persistent: released when its ttl of %d s runs out; send \"persistent\": true to keep it"`, int(ttl.Seconds())))
+	}
 	s.svc.store.mu.Lock()
 	if ckptSet {
 		lease.CheckpointInterval = ckptSecs
