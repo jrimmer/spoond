@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"sort"
@@ -904,6 +905,30 @@ type Service struct {
 	// release that credits room mid-pass is never lost to the periodic
 	// tick (#spoond-vbdj).
 	wakePending atomic.Bool
+
+	// memSamples holds the measured lease memory (#130 R1): per live
+	// lease the latest used bytes its sandbox reported and the peak
+	// since the current VM started, recorded by the memory sampler from
+	// the orchestrator metrics (OTEL_PROM_URL). In memory only: a
+	// backend restart re-measures from the next tick.
+	memSamples *memSampler
+	// memSamplerFetch fetches the orchestrator metrics document for the
+	// memory sampler. Set in NewService from OTEL_PROM_URL; nil disables
+	// the sampler (the loop is not started and the lease API reports no
+	// measured memory).
+	memSamplerFetch memSamplerFetch
+	// memSampleInterval is how often the memory sampler fetches the
+	// orchestrator metrics (default memSampleInterval = 30 s). A field so
+	// tests shrink it.
+	memSampleInterval time.Duration
+	// memSampleFailed is true while the last fetch failed; the next
+	// success clears it. It rate-limits the sampler's failure log to one
+	// line per outage rather than one per 30 s tick.
+	memSampleFailed bool
+	// memSampleClient fetches the OTEL_PROM_URL document when the sampler
+	// is enabled; its timeout keeps a slow collector from holding the
+	// loop.
+	memSampleClient *http.Client
 	// admitPassHook, when set by a test, runs inside tryAdmitQueued once
 	// the pass has judged every queued ticket and is about to return. It
 	// lets a test hold a pass mid-flight while it frees room and wakes,
@@ -982,9 +1007,15 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		secretsGate:               secretsGate{saving: map[string]int{}, staging: map[string]int{}},
 		deletedOwners:             map[string]bool{},
 		jobStarts:                 map[string]*jobStartLock{},
+		memSamples:                newMemSampler(),
+		memSampleInterval:         memSampleInterval,
+		memSampleClient:           &http.Client{Timeout: memSampleHTTPTimeout},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
 	svc.cfg.SizePresets, svc.cfg.MaxLeaseVCPU, svc.cfg.MaxLeaseMemoryMB = sizeLimitsOrDefault(cfg)
+	if url := os.Getenv("OTEL_PROM_URL"); url != "" {
+		svc.memSamplerFetch = memSampleHTTPGetter(url, svc.memSampleClient)
+	}
 	svc.snapshotLimiters = snapshotLimiters{
 		def:   newSnapshotLimiter(cfg.SnapshotWriteConcurrency, svc.now, svc.log.Printf),
 		drain: newSnapshotLimiter(cfg.DrainSnapshotConcurrency, svc.now, svc.log.Printf),
@@ -1756,6 +1787,12 @@ func (s *Service) Start(ctx context.Context) {
 	// Usage history (#140 U4): one usage_samples row per owner every
 	// sample interval, old rows pruned past the retention window.
 	go s.runUsageHistoryLoop(ctx)
+	// Measured lease memory (#130 R1): every 30 s, when OTEL_PROM_URL is
+	// set, read the orchestrator's per-sandbox ram gauges for the live
+	// leases and keep latest/peak in memory.
+	if s.memSamplerFetch != nil {
+		go s.startMemSampler(ctx)
+	}
 	// Drain self-heal (spoond-52c): undrain a drain that outlived
 	// DRAIN_MAX_SECS on a healthy node, and resume any lease left
 	// Drained by a failed or deferred undrain.
@@ -2034,10 +2071,12 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	// were staged into goes with the release (#80).
 	s.clearCreateSecrets(l.ID)
 	// The per-lease in-memory maps go too: the applied-egress memo
-	// (spoond-966 L1) and any deferred exec-time secret removals, whose
-	// files went with the sandbox (spoond-966 L1).
+	// (spoond-966 L1), any deferred exec-time secret removals, whose
+	// files went with the sandbox (spoond-966 L1), and the measured
+	// memory entry (#130).
 	s.forgetAppliedEgress(l.ID)
 	s.clearPendingSecretRemovals(l.ID)
+	s.memSamples.forget(l.ID)
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
