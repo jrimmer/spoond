@@ -55,9 +55,9 @@ func sampleSnapshot() Snapshot {
 		},
 		Rows: []LeaseRow{
 			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet",
-				Age: "5m", Left: "10m"},
+				VCPU: 2, MemoryMB: 2048, Age: "5m", Left: "10m"},
 			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "running", Policy: "restricted",
-				Holder: "forgejo/job-42", HolderURL: "https://git.example.com/job/42", Pinned: true,
+				VCPU: 1, MemoryMB: 1536, Holder: "forgejo/job-42", HolderURL: "https://git.example.com/job/42", Pinned: true,
 				Age: "2h31m", Left: "∞"},
 			{ID: "fedcba0987", Image: "go-base", Owner: "agent", State: "suspended", Policy: "lan",
 				Name: "scratch space", Holder: "nightly",
@@ -1740,6 +1740,7 @@ func TestLeaseColumnsStayInPanel(t *testing.T) {
 			{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet", Age: "5m", Left: "10m"},
 			{ID: "1234567890", Image: "py-base", Owner: "ci", State: "suspended", TakenBack: true, Policy: "none", Age: "2h31m", Left: "∞"},
 		},
+		"wide size":  {{ID: "x", VCPU: 16, MemoryMB: 1536, State: "running", Age: "1m", Left: "1m"}},
 		"long owner": {{ID: "x", Owner: strings.Repeat("long", 20), State: "running", Age: "1m", Left: "1m"}},
 		"empty":      nil,
 	}
@@ -1749,7 +1750,7 @@ func TestLeaseColumnsStayInPanel(t *testing.T) {
 			cols := []struct {
 				name string
 				x, w int
-			}{{"id", c.id, c.idW}, {"image", c.img, c.imgW}, {"owner", c.own, c.ownW},
+			}{{"id", c.id, c.idW}, {"image", c.img, c.imgW}, {"size", c.size, c.sizeW}, {"owner", c.own, c.ownW},
 				{"state", c.st, c.stW}, {"access", c.pol, c.polW}, {"age", c.age, ageW},
 				{"left", c.left, c.leftW}, {"holder", c.hold, c.holdW}}
 			for i, col := range cols {
@@ -1771,6 +1772,69 @@ func TestLeaseColumnsStayInPanel(t *testing.T) {
 				if got := cutHeaders(hc.hdr, hc.w); len([]rune(got)) >= hc.w {
 					t.Errorf("%s w=%d: %s header %q fills all %d cells, no separator", name, w, hc.hdr, got, hc.w)
 				}
+			}
+		}
+	}
+}
+
+// TestSizeWords: a lease's size is memory then vCPUs, the memory in
+// GiB with one decimal only when not whole, in MiB below 1 GiB; an
+// unknown size is "-".
+func TestSizeWords(t *testing.T) {
+	for _, tc := range []struct {
+		mb, vcpu int
+		want     []string
+	}{
+		{4096, 2, []string{"4G/2V", "4G"}},
+		{1536, 1, []string{"1.5G/1V", "1.5G"}},
+		{512, 1, []string{"512M/1V", "512M"}},
+		{16384, 8, []string{"16G/8V", "16G"}},
+		{0, 2, []string{"-"}},
+		{2048, 0, []string{"-"}},
+		{0, 0, []string{"-"}},
+	} {
+		got := sizeWords(LeaseRow{MemoryMB: tc.mb, VCPU: tc.vcpu})
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("sizeWords(%d MiB, %d vCPU) = %q, want %q", tc.mb, tc.vcpu, got, tc.want)
+		}
+	}
+}
+
+// TestLeasesShowSize: the size column sits right after the image at the
+// wide and the minimum frame, rows stay inside the panel, and at the
+// minimum a size too wide for the column drops its vCPUs rather than
+// being cut; an unknown size is a dash.
+func TestLeasesShowSize(t *testing.T) {
+	s := healthySnapshot()
+	s.Rows = []LeaseRow{
+		{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Policy: "internet",
+			VCPU: 2, MemoryMB: 4096, Age: "5m", Left: "10m"},
+		{ID: "1234567890", Image: "py-base", Owner: "ci", State: "running", Policy: "internet",
+			VCPU: 1, MemoryMB: 1536, Age: "5m", Left: "10m"},
+		{ID: "fedcba0987", Image: "go-base", Owner: "agent", State: "running", Policy: "internet",
+			Age: "5m", Left: "10m"},
+	}
+	for _, tc := range []struct {
+		w     int
+		cells []string // what follows "<image> " on each row
+	}{
+		{DefaultWidth, []string{"go-base 4G/2V ", "py-base 1.5G/1V ", "go-base -       agent"}},
+		{minW, []string{"go-base 4G/2V ", "py-base 1.5G ", "go-base -     agent"}},
+	} {
+		lines := strings.Split(Draw(s, tc.w, fixedNow, "h").Plain(), "\n")
+		for _, r := range lines {
+			if n := len([]rune(r)); n != tc.w {
+				t.Fatalf("w=%d: row is %d cells:\n%s", tc.w, n, r)
+			}
+		}
+		h := leaseHeaderLine(lines)
+		if i, j := strings.Index(h, "image"), strings.Index(h, "size"); i < 0 || j < i || strings.Index(h, "owner") < j {
+			t.Errorf("w=%d: size header not between image and owner: %q", tc.w, h)
+		}
+		p := strings.Join(lines, "\n")
+		for _, want := range tc.cells {
+			if !strings.Contains(p, want) {
+				t.Errorf("w=%d: missing %q:\n%s", tc.w, want, p)
 			}
 		}
 	}

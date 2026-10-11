@@ -379,6 +379,47 @@ func TestFromDBTakenBackCountsOutsideTheWindow(t *testing.T) {
 	}
 }
 
+// TestFromDBLeaseSize: a lease row carries the vcpu and memory_mb the
+// store stamped on it (3.1); a lease whose size is unknown reads 0.
+func TestFromDBLeaseSize(t *testing.T) {
+	cfg := testConfig(t, "")
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	raw, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339Nano) }
+	for _, q := range []string{
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state, vcpu, memory_mb, disk_mb) VALUES ('sized','u-1','go-base','` + ts(-time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','running',2,1536,6144)`,
+		`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state) VALUES ('unknown','u-1','gone','` + ts(-2*time.Minute) + `','` + ts(time.Hour) + `','` + ts(0) + `','running')`,
+	} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	raw.Close()
+
+	var s Snapshot
+	if err := (&collector{cfg: cfg}).fromDB(&s, now); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][2]int{}
+	for _, r := range s.Rows {
+		got[r.ID] = [2]int{r.VCPU, r.MemoryMB}
+	}
+	if got["sized"] != [2]int{2, 1536} {
+		t.Errorf("sized lease = %v, want vcpu 2, memory 1536", got["sized"])
+	}
+	if v, ok := got["unknown"]; !ok || v != [2]int{0, 0} {
+		t.Errorf("unknown-size lease = %v (present %v), want 0/0", v, ok)
+	}
+}
+
 // TestFromDBLostTakenBackNotMarked: a lost row may keep its suspend_reason
 // in the store, but it is not suspended, so neither the row mark nor the
 // capacity count applies.

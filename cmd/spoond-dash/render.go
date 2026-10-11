@@ -1448,31 +1448,32 @@ func (l *layout) imagesServices(g *grid.Grid, y int) int {
 // (up to its own widest value), then to the holder, so more of the owner
 // and holder is visible before truncation.
 type leaseCols struct {
-	id, img, own, st, pol, age, left, hold int // column start cells
-	idW, imgW, ownW, stW, polW, leftW      int
-	holdW                                  int
+	id, img, size, own, st, pol, age, left, hold int // column start cells
+	idW, imgW, sizeW, ownW, stW, polW, leftW     int
+	holdW                                        int
 }
 
 // leaseLayout picks the leases panel's column layout for width w and the
 // rows actually shown. At the wide frame the base widths are the
 // mockup's (id(11) image(16) owner(10) state(19) access(11) age(7)
-// left(7)); below 104 the flexible clamps give. Either way the columns
+// left(7)) with size(9) after the image; below 104 the flexible clamps give. Either way the columns
 // shrink to their visible content and the slack lands on owner and
 // holder.
 func leaseLayout(w int, rows []LeaseRow) leaseCols {
 	// Header widths (with the trailing separator cell): the least a
 	// column may shrink to, so a header always keeps a gap after it.
 	const (
-		hID, hImg, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 6, 6, 7, 5, 7
+		hID, hImg, hSize, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 5, 6, 6, 7, 5, 7
 	)
 	// Base widths before content fitting: the widest the non-owner
 	// columns ever get.
-	var idW, imgW, ownW, stW, polW, leftW int
+	var idW, imgW, sizeW, ownW, stW, polW, leftW int
 	if w >= maxW {
-		idW, imgW, ownW, stW, polW, leftW = 11, 16, 10, 19, 11, 7
+		idW, imgW, sizeW, ownW, stW, polW, leftW = 11, 16, 9, 10, 19, 11, 7
 	} else {
 		idW = clamp(w/10, 6, 12)
 		imgW = clamp(w/7, 8, 17)
+		sizeW = clamp(w/12, 6, 9)
 		ownW = clamp(w/12, 5, 10)
 		stW = clamp(w/7, 6, 17)
 		polW = clamp(w/14, 5, 12)
@@ -1481,9 +1482,10 @@ func leaseLayout(w int, rows []LeaseRow) leaseCols {
 	// Content-fit each column to what the rows show: never narrower than
 	// its header (so a header always keeps a gap after it), never wider
 	// than its base (a value longer than the base still truncates).
-	cID, cImg, cOwn, cSt, cPol, cLeft := leaseValueWidths(rows)
+	cID, cImg, cSize, cOwn, cSt, cPol, cLeft := leaseValueWidths(rows)
 	idW = max(hID, min(idW, cID))
 	imgW = max(hImg, min(imgW, cImg))
+	sizeW = max(hSize, min(sizeW, cSize))
 	ownW = max(hOwn, min(ownW, cOwn))
 	stW = max(hSt, min(stW, cSt))
 	polW = max(hPol, min(polW, cPol))
@@ -1492,19 +1494,20 @@ func leaseLayout(w int, rows []LeaseRow) leaseCols {
 	avail := w - 4
 	// The owner claims freed width first, up to its own widest value; the
 	// holder gets the rest and fills the row.
-	sum := idW + imgW + ownW + stW + polW + ageW + leftW
+	sum := idW + imgW + sizeW + ownW + stW + polW + ageW + leftW
 	if room := avail - sum - hHold; room > 0 && ownW < max(hOwn, cOwn) {
 		grow := min(room, max(hOwn, cOwn)-ownW)
 		ownW += grow
 		sum += grow
 	}
 	c := leaseCols{
-		idW: idW, imgW: imgW, ownW: ownW, stW: stW, polW: polW,
+		idW: idW, imgW: imgW, sizeW: sizeW, ownW: ownW, stW: stW, polW: polW,
 		leftW: leftW, holdW: avail - sum,
 	}
 	c.id = 2
 	c.img = c.id + c.idW
-	c.own = c.img + c.imgW
+	c.size = c.img + c.imgW
+	c.own = c.size + c.sizeW
 	c.st = c.own + c.ownW
 	c.pol = c.st + c.stW
 	c.age = c.pol + c.polW
@@ -1516,18 +1519,19 @@ func leaseLayout(w int, rows []LeaseRow) leaseCols {
 // leaseValueWidths is how wide each non-holder column must be to draw the
 // rows' values whole, each including its trailing separator cell. The
 // state adds cells for its glyph, the space and the trailing separator;
-// the access column uses the full policy label. A column's own header is
-// a floor, applied by the caller.
-func leaseValueWidths(rows []LeaseRow) (id, img, own, st, pol, left int) {
+// the access and size columns use their full labels. A column's own
+// header is a floor, applied by the caller.
+func leaseValueWidths(rows []LeaseRow) (id, img, size, own, st, pol, left int) {
 	for _, r := range rows {
 		id = max(id, len([]rune(sanitize(r.ID)))+1)
 		img = max(img, len([]rune(sanitize(r.Image)))+1)
+		size = max(size, len([]rune(sizeWords(r)[0]))+1)
 		own = max(own, len([]rune(sanitize(r.Owner)))+1)
 		st = max(st, len([]rune(stateWords(r)[0]))+3)
 		pol = max(pol, len([]rune(policyWords(r.Policy)[0]))+1)
 		left = max(left, len([]rune(leaseLeft(r)))+1)
 	}
-	return id, img, own, st, pol, left
+	return id, img, size, own, st, pol, left
 }
 
 // leaseLegend is the dim line under the leases table that explains the
@@ -1588,7 +1592,7 @@ func ellipsize(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// leases panel: id, image, owner, run state with its glyph, policy,
+// leases panel: id, image, size (memory/vCPUs), owner, run state with its glyph, policy,
 // age, time left (the hold's time when held, ∞ for a persistent lease
 // with no hold) and the holder — ◆ before a held lease's holder, ◉
 // when the hold has lapsed. On the page the holder is a link.
@@ -1601,7 +1605,7 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	headers := []struct {
 		x, w int
 		text string
-	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.own, c.ownW, "owner"},
+	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.size, c.sizeW, "size"}, {c.own, c.ownW, "owner"},
 		{c.st, c.stW, "state"}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
 		{c.left, c.leftW, "left"}, {c.hold, c.holdW, "holder"}}
 	for _, h := range headers {
@@ -1618,6 +1622,13 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		// prefix), so it is cut without an ellipsis.
 		g.Text(c.id, yy, sanitize(r.ID), "id", c.idW-1)
 		g.Text(c.img, yy, cell(sanitize(r.Image), c.imgW), "text", c.imgW)
+		// The size drops its vCPUs before it is cut; an unknown size
+		// is a dim dash, as the holder's.
+		if sw := sizeWords(r); sw[0] == "-" {
+			g.Text(c.size, yy, "-", "dim", 1)
+		} else {
+			g.Text(c.size, yy, fitWord(sw, c.sizeW-1), "text", c.sizeW)
+		}
 		g.Text(c.own, yy, cell(sanitize(r.Owner), c.ownW), "owner", c.ownW)
 		// The state cell (#128, #129): the glyph always carries the run
 		// state (▶ ‖ ■ ⭘, explained by the legend), and the word spells
@@ -1672,6 +1683,25 @@ func stateWords(r LeaseRow) []string {
 	default:
 		return []string{r.State}
 	}
+}
+
+// sizeWords is a lease row's size, longest form first: memory then
+// vCPUs ("4G/2V", "1.5G/1V", "512M/1V"), then the memory alone. An
+// unknown size (either part 0, e.g. a lease from before 3.1 whose
+// image is gone) is "-".
+func sizeWords(r LeaseRow) []string {
+	if r.MemoryMB <= 0 || r.VCPU <= 0 {
+		return []string{"-"}
+	}
+	mem := fmt.Sprintf("%dM", r.MemoryMB)
+	if tenths := (r.MemoryMB*10 + 512) / 1024; r.MemoryMB >= 1024 {
+		if tenths%10 == 0 {
+			mem = fmt.Sprintf("%dG", tenths/10)
+		} else {
+			mem = fmt.Sprintf("%d.%dG", tenths/10, tenths%10)
+		}
+	}
+	return []string{fmt.Sprintf("%s/%dV", mem, r.VCPU), mem}
 }
 
 // policyWords is a network policy, longest form first. The API value
