@@ -324,6 +324,11 @@ Upgrading from 2.9? See [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 ### Fixed
 
+- **A refused fork batch leaves no take-back victim paused.** A fork
+  admits its whole batch's memory once, before any child is created, so
+  a refusal cannot leave an earlier child's take-back behind: the
+  children share one admission and a rollback credits it.
+
 - **A disk-full failure from the orchestrator is a 503
   `capacity_wait`, not a 500.** Create, pause, resume and checkpoint
   errors whose message reports `no space left on device`, `ENOSPC` or

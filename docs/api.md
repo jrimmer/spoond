@@ -1365,8 +1365,10 @@ cannot acquire an ownerless copy.
 Owner only, as clone (shares are not honoured). Checkpoints the source
 once and creates `count` leases from that build, each its own lease
 owned by the caller, with the source's policy copied. Their memory is
-reserved for all of them up front (all or nothing); if any create fails, every
-lease created in the call is deleted.
+reserved for all of them up front (all or nothing); the batch's memory
+is admitted at once, before any child is created, so a refusal leaves
+no earlier child and no other owner's take-back victim behind; if any
+create fails, every lease created in the call is deleted.
 
 Request `{"count":1..20,"persistent":false,"ttl":300,"holder":"ci-job"}`
 (`ttl` 0 = the default TTL, capped at the maximum and the user's
@@ -1379,7 +1381,7 @@ Response `201 Created`:
 `{"source":"<id>","build_id":"<uuid>","ids":["…","…"]}`.
 Errors: `400` bad count or bad holder fields, `404` unknown, `409`
 suspended or busy, `429 box_full` when take-back can free nothing for
-a child (each fork costs its image's `memory_mb`), `503 capacity_wait`
+the batch (each fork costs its image's `memory_mb`), `503 capacity_wait`
 with `Retry-After: 30`. An `owner deleted` (`403`) refuses a fork whose owner's identity was
 removed while the fork's checkpoint was in flight (spoond-q4j): every
 child created so far is rolled back (its sandbox stopped once) and the
