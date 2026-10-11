@@ -418,17 +418,20 @@ func TestSecretGetWarnsMode(t *testing.T) {
 	}
 	get := func(k string) string { return env[k] }
 	fileFrom := map[string]string{}
+	warned := map[string]bool{} // names whose file mode already warned (once per name)
 	var warns int
 	secret := func(name string) string {
 		v, err := settings.Get(name, get, os.ReadFile)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", name, err)
 		}
-		file := settings.SecretFileOf(name)
-		if _, fromFile := fileFrom[name]; !fromFile && file != "" && get(name) == "" && get(file) != "" {
+		if file := settings.SecretFileOf(name); file != "" && get(name) == "" && get(file) != "" {
 			fileFrom[name] = get(file)
-			if w := settings.FileModeWarning(get(file)); w != "" {
-				warns++
+			if !warned[name] {
+				warned[name] = true
+				if w := settings.FileModeWarning(get(file)); w != "" {
+					warns++
+				}
 			}
 		}
 		return v

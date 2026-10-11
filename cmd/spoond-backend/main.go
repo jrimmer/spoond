@@ -558,16 +558,19 @@ func Main(args []string) int {
 	// warned about once. fileFrom records which secrets came from files,
 	// so GET /api/admin/config reports them set ("(hidden, from file)").
 	fileFrom := map[string]string{}
+	warned := map[string]bool{} // names whose file mode already warned (once per name)
 	secret := func(name string) string {
 		v, err := settings.Get(name, os.Getenv, os.ReadFile)
 		if err != nil {
 			log.Fatal(err)
 		}
-		file := settings.SecretFileOf(name)
-		if _, fromFile := fileFrom[name]; !fromFile && file != "" && os.Getenv(name) == "" && os.Getenv(file) != "" {
+		if file := settings.SecretFileOf(name); file != "" && os.Getenv(name) == "" && os.Getenv(file) != "" {
 			fileFrom[name] = os.Getenv(file)
-			if w := settings.FileModeWarning(os.Getenv(file)); w != "" {
-				log.Printf("warning: %s", w)
+			if !warned[name] {
+				warned[name] = true
+				if w := settings.FileModeWarning(os.Getenv(file)); w != "" {
+					log.Printf("warning: %s", w)
+				}
 			}
 		}
 		return v
