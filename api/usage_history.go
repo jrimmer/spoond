@@ -57,13 +57,6 @@ func (s *Service) runUsageHistoryLoop(ctx context.Context) {
 	}
 }
 
-// leaseCounts is one owner's lease tally: how many are running (holding
-// hugepages) and how many are paused.
-type leaseCounts struct {
-	running int
-	paused  int
-}
-
 // sampleUsage writes one usage_samples row per owner from the current
 // fair-share snapshot, then prunes rows older than the retention window.
 // It fails soft: a read error is logged and the pass writes nothing
@@ -89,8 +82,8 @@ func (s *Service) sampleUsage(ctx context.Context) {
 			At:            at,
 			MemoryUsedMiB: o.Memory.UsedMiB,
 			DiskUsedBytes: o.Disk.UsedBytes,
-			Running:       c.running,
-			Paused:        c.paused,
+			Running:       c.Running,
+			Paused:        c.Paused,
 		}); err != nil {
 			s.log.Printf("usage history: sample %s: %v", o.Owner, err)
 			return
@@ -111,8 +104,8 @@ func (s *Service) sampleUsage(ctx context.Context) {
 // in its own critical section, so a lease that changes state between the
 // fair-share snapshot and this read can make one tick's count and memory
 // disagree by one lease; that is at most one cosmetic sample.
-func (s *Service) countLeasesByOwner() map[string]leaseCounts {
-	out := map[string]leaseCounts{}
+func (s *Service) countLeasesByOwner() map[string]LeaseCounts {
+	out := map[string]LeaseCounts{}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	for _, l := range s.store.leases {
@@ -122,9 +115,9 @@ func (s *Service) countLeasesByOwner() map[string]leaseCounts {
 		c := out[l.Owner]
 		switch {
 		case l.live():
-			c.running++
+			c.Running++
 		case l.Suspended:
-			c.paused++
+			c.Paused++
 		}
 		out[l.Owner] = c
 	}
