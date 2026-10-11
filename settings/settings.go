@@ -198,6 +198,23 @@ var known = func() map[string]bool {
 // IsKnown reports whether some spoond binary reads key.
 func IsKnown(key string) bool { return known[key] }
 
+// HideIfSecret is the masking rule for showing a setting's value
+// (#137): a name carrying TOKEN, KEY, SECRET, PASSWORD, HASH or SEED
+// (case-insensitive) is a secret and its value is never shown —
+// "(hidden)" stands in for it. The admin config endpoint (api) masks
+// the values it serves with this, and `spoond config show`
+// (cmd/spoond-config) masks the same way, so a secret value exists
+// nowhere in any config display that uses it.
+func HideIfSecret(name, value string) string {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"TOKEN", "KEY", "SECRET", "PASSWORD", "HASH", "SEED"} {
+		if strings.Contains(upper, marker) {
+			return "(hidden)"
+		}
+	}
+	return value
+}
+
 // CheckEnvFile reads a systemd EnvironmentFile and returns, sorted, the
 // keys no spoond binary reads and the keys set more than once (where
 // the last one silently wins). Values are never returned.

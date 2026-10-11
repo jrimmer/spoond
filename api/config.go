@@ -3,7 +3,6 @@ package api
 import (
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/jrimmer/spoond/v3/settings"
@@ -59,24 +58,11 @@ type configSetting struct {
 }
 
 // maskSetting masks a setting's value when the name says it is a
-// secret. When ok is false the value is empty regardless.
+// secret: settings.HideIfSecret decides (the same rule the CLI's table
+// masks with).
 func maskSetting(name, value string, ok bool) string {
 	if !ok {
 		return ""
 	}
-	return HideIfSecret(name, value)
-}
-
-// HideIfSecret is the masking rule (#137): a setting whose name
-// carries TOKEN, KEY, SECRET, PASSWORD, HASH or SEED is never shown —
-// "(hidden)" stands in for its value. Every surface that prints setting
-// values (this endpoint and `spoond config show`) masks through it.
-func HideIfSecret(name, value string) string {
-	upper := strings.ToUpper(name)
-	for _, marker := range []string{"TOKEN", "KEY", "SECRET", "PASSWORD", "HASH", "SEED"} {
-		if strings.Contains(upper, marker) {
-			return "(hidden)"
-		}
-	}
-	return value
+	return settings.HideIfSecret(name, value)
 }
