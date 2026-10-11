@@ -841,9 +841,9 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		}
 		return strings.TrimSpace(string(b))
 	case "ssh-key", "keys":
-		// Identity management (T1). ssh-key ls / ssh-key add <pubkey> <name> / ssh-key rm <user-id>
+		// Identity management (T1). ssh-key ls / ssh-key add <key line> <name> / ssh-key rm <user-id>
 		if len(fields) < 2 {
-			return `{"error":"usage: ssh-key ls | ssh-key add <pubkey> <name> | ssh-key rm <user-id>"}`
+			return `{"error":"usage: ssh-key ls | ssh-key add <type> <base64> [comment] <name> | ssh-key rm <user-id>"}`
 		}
 		sub := fields[1]
 		switch sub {
@@ -889,17 +889,14 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			}
 			return strings.TrimSuffix(sb.String(), "\n")
 		case "add":
-			if len(fields) < 4 {
-				return `{"error":"usage: ssh-key add <pubkey> <name>"}`
-			}
 			// Verify + fingerprint the provided public key.
-			pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(fields[2]))
+			pub, name, err := parseSSHKeyAdd(fields[2:])
 			if err != nil {
-				return fmt.Sprintf(`{"error":"bad public key: %v"}`, err)
+				return fmt.Sprintf(`{"error":"%v"}`, err)
 			}
 			fp := identity.FingerprintSHA256(pub.Marshal())
 			p, _ := json.Marshal(map[string]any{
-				"name":         fields[3],
+				"name":         name,
 				"kind":         "person",
 				"fingerprints": []string{fp},
 			})
@@ -910,7 +907,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			if jsonMode {
 				return strings.TrimSpace(string(b))
 			}
-			return fmt.Sprintf("added user %q with key %s", fields[3], fp)
+			return fmt.Sprintf("added user %q with key %s", name, fp)
 		case "rm":
 			if len(fields) < 3 {
 				return `{"error":"usage: ssh-key rm <user-id>"}`
@@ -1677,4 +1674,35 @@ func loadKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 	return ssh.ParsePrivateKey(data)
+}
+
+// parseSSHKeyAdd reads the arguments of `ssh-key add` (#72). SSH hands
+// the gateway the raw command string, which runControlCommand splits on
+// whitespace, so an authorized-keys line (`<type> <base64> [comment]`)
+// arrives as several fields and quoting cannot keep it whole. Two forms
+// are accepted: the key line then the user name (`ssh-key add
+// ssh-ed25519 AAAA… [comment] <name>`, the name being the last field),
+// or the name first (`ssh-key add <name> ssh-ed25519 AAAA… [comment]`).
+// Quotes a caller put around the key line are dropped.
+func parseSSHKeyAdd(args []string) (ssh.PublicKey, string, error) {
+	const usage = "usage: ssh-key add <type> <base64> [comment] <name>  (or: ssh-key add <name> <type> <base64> [comment])"
+	if len(args) < 2 {
+		return nil, "", errors.New(usage)
+	}
+	unquote := func(parts []string) string {
+		return strings.Trim(strings.Join(parts, " "), "\"'")
+	}
+	// The form is chosen by whether the first argument is a key type:
+	// trying both would misread the name-first form, since an
+	// authorized-keys line may start with options and "<name> <type>
+	// <base64>" parses with the name taken as options.
+	keyLine, name := args[1:], args[0]
+	if t := strings.TrimLeft(args[0], "\"'"); strings.HasPrefix(t, "ssh-") || strings.HasPrefix(t, "ecdsa-") || strings.HasPrefix(t, "sk-") {
+		keyLine, name = args[:len(args)-1], args[len(args)-1]
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(unquote(keyLine)))
+	if err != nil {
+		return nil, "", fmt.Errorf("bad public key (%v); %s", err, usage)
+	}
+	return pub, strings.Trim(name, "\"'"), nil
 }

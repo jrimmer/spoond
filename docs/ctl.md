@@ -44,7 +44,7 @@ only.
 | `tag` | `tag <id> <name>` | friendly name (then `ssh <name>@…`) |
 | `comment` | `comment <id> [text…]` | annotate; no text clears |
 | `share` | `share add <id> <user> [ssh\|http] [ttl]` / `share ls` / `share rm <id> <user>` | grant/list/revoke lease access (`share ls` lists every share on your leases; mode defaults to `http`) |
-| `ssh-key` | `ssh-key ls` / `ssh-key add <pubkey> <name>` / `ssh-key rm <user-id>` (alias `keys`) | manage users & SSH keys (`ls`/`add` are admin after bootstrap) |
+| `ssh-key` | `ssh-key ls` / `ssh-key add <type> <base64> [comment] <name>` (the whole authorized-keys line, then the user name; or the name first) / `ssh-key rm <user-id>` (alias `keys`) | manage users & SSH keys (`ls`/`add` are admin after bootstrap) |
 | `shelly` | `shelly <id>` (alias `agent`) | start the in-lease Shelley coding agent |
 | `prompt` | `prompt <id> <message…>` | message the Shelley agent (waits for reply) |
 
