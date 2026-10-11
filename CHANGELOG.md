@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-10-11
+
+3.3 brings authorization into one simple model (#138): users and admin
+users, plus two read-only service tokens and the host's break-glass
+`ADMIN_TOKEN`. An admin user's own token now reaches `/api/admin/*`; a
+user can mint several named tokens, each revocable and optionally
+expiring; root on the host can mint a short-lived token for any user
+during a maintenance window. The dashboard's leases table shows each
+lease's state and pin as two glyphs. No breaking changes and no schema
+change.
+
 ### Changed
 
 - **The dashboard's leases table reads its state in two cells** instead
