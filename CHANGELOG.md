@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+Upgrading from 2.9? See [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
+
 ### Added
 
 - **Named saves answer disk refusals like every other path.** A save
