@@ -35,6 +35,30 @@ about a key no spoond binary reads — a typo or a removed setting, which
 would otherwise be ignored in silence — and a key set twice, where the
 last line wins (#137). Run it before restarting after an env change.
 
+`spoond config show` answers the same question with values: it resolves
+the backend unit's effective environment the way systemd does
+(`systemctl show <unit> -p EnvironmentFiles -p Environment`, the unit's
+`Environment=` lines first, then each env file in order — a file's
+assignment overrides the unit line, per systemd.exec(5)), masks every
+name carrying `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `HASH` or `SEED` to
+`(hidden)`, and prints NAME / VALUE / SOURCE / RUNNING. SOURCE is the
+file (or `unit Environment=`, or `default`) the value came from;
+RUNNING compares against the running backend's `GET /api/admin/config`,
+fetched with the merged env's own `ADMIN_TOKEN` and `BIND_ADDR` (not
+the caller's shell, so it authenticates against the exact backend those
+files start): `same`, `differs — restart to apply`, `not set in running
+backend`, `?` when the API is unreachable, `n/a` for a known name. An
+unknown key from the unit env still prints, trailing "(unknown
+setting)" (a typo; the same class `spoond doctor` warns about). A
+restart note at the bottom counts the drift. `--json` prints the raw
+document (secrets stay masked); `--unit` selects the unit (default
+`spoond-backend`), `--api` overrides the base URL. Read-only; exit 0
+with the table, 1 when the unit env cannot be resolved.
+
+```bash
+/opt/spoond/spoond config show          # table; --json for the raw answer
+```
+
 ## Uptime monitoring (Gatus)
 
 For an external watcher, `/readyz` is the endpoint to poll: unlike
