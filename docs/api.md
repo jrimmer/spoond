@@ -6,7 +6,8 @@ lives under `/api/leases/…`. `/api/sandboxes/…` is a permanent alias for
 the same routes — identical behavior, auth and responses — kept for
 every client written before 2.0; new code should use `/api/leases/…`.
 All endpoints except `/healthz`, `/readyz`, the
-`/api/admin/*` routes (which carry their own `ADMIN_TOKEN`) and the
+`/api/admin/*` routes (which carry their own `ADMIN_TOKEN`, or an admin
+user's token — see [Admin API](#admin-api)) and the
 `/llm/` prefix (where the lease id in the path is the capability)
 require a bearer token (`/metrics` also accepts the scrape-only
 `METRICS_TOKEN`):
@@ -2195,8 +2196,13 @@ in [operations.md](operations.md).
 
 Routes under `/api/admin/*` are authenticated with
 `Authorization: Bearer <ADMIN_TOKEN>` — a dedicated token, not a user or
-consumer token. With no `ADMIN_TOKEN` configured they answer `404`; a
-wrong or missing token answers `401`.
+consumer token — or with an **admin user's** bearer token (an
+identity-store user with `admin: true`): both reach drain, undrain,
+reconcile and unpin-by-holder. With no `ADMIN_TOKEN` configured the
+routes still answer an admin user's token; with neither — no configured
+`ADMIN_TOKEN` and no admin user matching the presented token — they
+answer `404` (the routes stay disabled). A wrong or missing token
+answers `401`.
 
 | Route | Effect |
 |---|---|

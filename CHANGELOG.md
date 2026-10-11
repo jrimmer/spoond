@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Admin users reach `/api/admin/*` (#138 A1).** The admin routes (`drain`, `undrain`, `reconcile`, `unpin-by-holder`) accept an identity-store admin user's bearer token as well as `ADMIN_TOKEN`; a non-admin user's token stays `401` and `ADMIN_TOKEN` works unchanged.
+
 ## [3.2.0] - 2026-10-11
 
 3.2 makes a saturated host make new work wait, lets an owner share a
