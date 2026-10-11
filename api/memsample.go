@@ -38,8 +38,8 @@ const (
 	// must not hold the sampler.
 	memSampleHTTPTimeout = 5 * time.Second
 	// memSampleMaxBytes caps how much of the metrics document the
-	// sampler reads (256 MiB of gauges would be a hostile collector, not
-	// a real one).
+	// sampler reads; a bigger document is a hostile collector, not a
+	// real one.
 	memSampleMaxBytes = 8 << 20
 	// sizeHintSamples is the sample count that makes a lease's peak
 	// "measured enough to advise on": 10 ticks at the sample interval —
@@ -151,23 +151,6 @@ func (ms *memSampler) entry(leaseID string) (memSample, bool) {
 	defer ms.mu.Unlock()
 	e, ok := ms.entries[leaseID]
 	return e, ok
-}
-
-// measuredByOwner reports whether the owner has any live lease with a
-// fresh measurement; leaseCounts sums per lease itself so it can share
-// the store lock.
-func (ms *memSampler) measuredByOwner(leases map[string]*Lease, owner string) bool {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	for id, l := range leases {
-		if l.released || l.Owner != owner || !l.live() {
-			continue
-		}
-		if e, ok := ms.entries[id]; ok && e.samples > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // parseOpenMetrics pulls the two ram families out of a Prometheus
