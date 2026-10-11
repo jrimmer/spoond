@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -17,12 +18,23 @@ import (
 // keeps its id, holder, name, network policy and exposed ports. Unlike
 // a cold restart, the source build is a checkpoint the owner pinned, so
 // the lease's work since it is what gets thrown away.
+//
+// Restore to the start snapshot (#141): a lease started from a named
+// snapshot version may also restore to that version's build (its
+// snapshot.build_id), whoever owns the version — a grantee goes back to
+// the shared warm-up without starting a new lease. The restore then
+// does what a snapshot start does to a copy: the lease-id and
+// started-from markers name this lease, and /run/secrets is emptied
+// before the lease's own create-time secrets are re-staged.
 
 // restoreableBuild reports whether the lease may restore to the build:
 // it must be one of the lease's own checkpoints (its newest checkpoint,
 // or any checkpoint it pinned with keep) or one of its kept builds. A
 // pause build, another lease's checkpoint or another owner's build is
-// not restorable.
+// not restorable. The one cross-owner exception is the build the lease
+// started from (restore to the start snapshot, #141): l.SnapshotBuildID
+// is set only by a snapshot start, which already passed the owner or
+// grant check, and clones and forks never inherit it.
 func (s *Service) restoreableBuild(ctx context.Context, l *Lease, buildID string) (store.BuildRow, bool) {
 	if buildID == "" {
 		return store.BuildRow{}, false
@@ -31,7 +43,13 @@ func (s *Service) restoreableBuild(ctx context.Context, l *Lease, buildID string
 	if err != nil {
 		return store.BuildRow{}, false
 	}
-	if b.Owner != l.Owner || b.State == "deleted" {
+	if b.State == "deleted" {
+		return store.BuildRow{}, false
+	}
+	if l.SnapshotBuildID != "" && b.BuildID == l.SnapshotBuildID {
+		return b, true
+	}
+	if b.Owner != l.Owner {
 		return store.BuildRow{}, false
 	}
 	// The lease's own newest checkpoint is always restorable.
@@ -119,6 +137,18 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		s.endCreatingSandbox(sb.ID)
 		return errLeaseReleased
 	}
+	// Restore to the start snapshot (#141): the fresh guest is the
+	// version's memory, which knows the saving lease, not this one.
+	// Prepare it as a snapshot start prepares a copy, on the new sandbox
+	// before the swap, so a failure leaves the lease as it was.
+	if l.SnapshotBuildID != "" && b.BuildID == l.SnapshotBuildID {
+		if err := s.prepareRestoreToStart(ctx, l, sb.ID); err != nil {
+			_ = s.sub.Delete(ctx, sb.ID)
+			s.deleteSandboxRow(sb.ID)
+			s.endCreatingSandbox(sb.ID)
+			return err
+		}
+	}
 	if old := l.SandboxID; old != "" && old != sb.ID {
 		_ = s.sub.Delete(ctx, old)
 		s.deleteSandboxRow(old)
@@ -177,6 +207,44 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseRestored, "restored from build "+b.BuildID)
 	ok = true
+	return nil
+}
+
+// prepareRestoreToStart readies sandboxID, a fresh sandbox from the
+// lease's start snapshot, before restore swaps it in (#141): the
+// lease-id and started-from markers name this lease (the generation
+// file is rewritten after the swap, as for every restore), and
+// /run/secrets is emptied so the guest holds no secret file from the
+// saving lease before restore re-stages the lease's own create-time
+// secrets. Any failure fails the restore, as it fails a snapshot start.
+func (s *Service) prepareRestoreToStart(ctx context.Context, l *Lease, sandboxID string) error {
+	name, version, owner := l.SnapshotName, l.SnapshotVersion, l.SnapshotOwner
+	if name == "" || version == 0 || owner == "" {
+		if row, err := s.db.GetNamedSnapshotByBuildAny(ctx, l.SnapshotBuildID); err == nil {
+			name, version, owner = row.Name, row.Version, row.Owner
+		}
+	}
+	copySide := &Lease{
+		ID:              l.ID,
+		SandboxID:       sandboxID,
+		SnapshotBuildID: l.SnapshotBuildID,
+		SnapshotName:    name,
+		SnapshotVersion: version,
+	}
+	wctx, cancel := context.WithTimeout(ctx, storeWriteTimeout)
+	defer cancel()
+	if err := s.writeGuestFileAtomic(wctx, copySide, leaseIDPath, []byte(l.ID+"\n"), leaseIDMode); err != nil {
+		return fmt.Errorf("write lease-id marker: %w", err)
+	}
+	if err := s.writeStartedFromMarker(copySide); err != nil {
+		return fmt.Errorf("write started-from marker: %w", err)
+	}
+	if _, err := s.scrubAllSecrets(ctx, sandboxID, nil); err != nil {
+		return fmt.Errorf("scrub secrets on restore to start: %w", err)
+	}
+	s.store.mu.Lock()
+	l.SnapshotName, l.SnapshotVersion, l.SnapshotOwner = name, version, owner
+	s.store.mu.Unlock()
 	return nil
 }
 

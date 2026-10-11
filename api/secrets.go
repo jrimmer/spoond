@@ -204,6 +204,28 @@ func (s *Service) setCreateSecrets(leaseID string, secrets map[string]string) {
 	s.createSecrets[leaseID] = secrets
 }
 
+// markHadSecrets records that lease l holds, or is about to hold, an
+// exec-time or job secret (#141). It is called inside the secrets gate
+// before the files are written, so a named-snapshot save (which holds
+// the gate) never misses it; the flag is persisted and never cleared.
+// Exec `env` values are not secrets and never come here.
+func (s *Service) markHadSecrets(l *Lease) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	if l.HadSecrets {
+		return
+	}
+	l.HadSecrets = true
+	s.saveLeaseLocked(l)
+}
+
+// leaseHadSecrets reads l.HadSecrets under the store lock.
+func (s *Service) leaseHadSecrets(l *Lease) bool {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	return l.HadSecrets
+}
+
 // createSecretsFor returns a copy of a lease's create-time secrets
 // (nil when it has none).
 func (s *Service) createSecretsFor(leaseID string) map[string]string {

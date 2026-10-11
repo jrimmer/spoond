@@ -43,6 +43,7 @@ particular means two different things depending on the code:
 | `409` | `secrets_in_use` | a background job with staged secrets blocks the save |
 | `409` | `snapshot_in_use` | a live lease started from the named snapshot |
 | `409` | `snapshot_limit` | the owner's `MAX_NAMED_SNAPSHOTS` cap is reached |
+| `409` | `not_secret_free` | a named-snapshot version saved from a lease that had a secret, on a grant or a start through a grant; re-save it from a lease that never had one (see [Snapshot grants](#snapshot-grants)) |
 | `409` | `kept_budget` | the owner's kept checkpoints and named snapshots would pass their fair disk slice (3.0; was `max_kept_bytes`) |
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
 | `429` | `box_full` | a request needed room and take-back can free none for it: every candidate is pinned (v3.0 FS5), or the requester is itself the biggest borrower — over its fair slice after the request with no other owner further over (FS2b); nothing was paused or released — unpin or release leases to make room. Answers a create, and (since the round-3 fix) any re-admission: resume, resume-on-use, restart, clone, fork, restore |
@@ -117,6 +118,7 @@ Request:
 |---|---|---|---|
 | `image` | string | *(required unless `snapshot`)* | image name; must have a current build in the catalog (`GET /api/images`). With `snapshot` it may be omitted; when given it must equal the snapshot's image (`400 image_mismatch`) |
 | `snapshot` | string | *(none)* | start the lease from a named snapshot version instead of the image's current build: `name` (latest) or `name@v`. The version must exist for the caller (`404 not_found`). The lease is never served from the warm pool, its memory is the snapshot's `memory_mb` for admission, and it is stamped with the version so retention never drops it — see [Start from a snapshot](#start-from-a-snapshot). A version that cannot run on this host answers `409 cannot_start` |
+| `snapshot_owner` | string | *(the caller)* | with `snapshot`: start from another user's named snapshot (user name or id) through a grant that user gave the caller — see [Snapshot grants](#snapshot-grants). Without a grant it answers `404 not_found`, the same as an unknown name; a version that is not secret-free answers `409 not_secret_free`. Without `snapshot` it is `400` |
 | `ttl` | int | `DEFAULT_TTL_SECS` | seconds; capped at `MAX_TTL_SECS` and at the user's `max_ttl` |
 | `persistent` | bool | `false` | not TTL-swept; supports keepalive, suspend/resume, checkpoint |
 | `size` | string | *(image default)* | a size preset by name (`GET /api/sizes`, e.g. `small`, `medium`, `large`, `xlarge`). Not with `vcpu`/`memory_mb` (`400 invalid_size`) |
@@ -210,8 +212,11 @@ A create with `snapshot` answers with a `snapshot` object carrying what
 it used, and `GET /api/leases/{id}` shows the same object:
 
 ```json
-"snapshot": {"name": "spoond/warm", "version": 3, "build_id": "…"}
+"snapshot": {"name": "spoond/warm", "version": 3, "owner": "u-…", "build_id": "…"}
 ```
+
+`owner` is the version's owner: the caller, or the user who granted it
+(see [Snapshot grants](#snapshot-grants)).
 
 Errors: `400` bad policy/ports/memory/holder/secret fields, `400
 image_mismatch` when an explicit `image` differs from the snapshot's,
@@ -1249,6 +1254,21 @@ usual). Response `200`:
 {"id":"…","build_id":"<uuid>","generation":2,"status":"running","build_created_at":"2026-10-06T09:12:30Z"}
 ```
 
+**Restore to the start snapshot (#141).** A lease started from a named
+snapshot may also restore to that version's build — its
+`snapshot.build_id` — whoever owns the version, so a lease started
+through a [grant](#snapshot-grants) can go back to the shared warm-up
+without a new lease. No other lease may use that build: not a clone or
+fork of the started lease (they do not inherit the start), and not any
+lease of the owner that did not start from it. A revoked grant does
+not stop it; the lease already runs from the version. On top of the
+usual restore, the fresh guest is prepared as a snapshot start prepares
+a copy: `/run/spoond/lease-id` and `/run/spoond/started-from` name this
+lease and the version, and everything under `/run/secrets` is removed
+before the lease's own create-time secrets are re-written. If either
+marker cannot be written or the scrub fails, the restore answers `500`
+and the lease stays on its old sandbox.
+
 ### `PUT /api/leases/{id}/checkpoint-policy` — set the checkpoint interval
 
 Owner or admin (anyone else gets the usual `404`). Sets the lease's own
@@ -1722,6 +1742,18 @@ backend would re-stage, and the same names are removed again when the
 command finishes). See also the security notes in
 [security.md](security.md).
 
+**Had secrets (#141).** A lease that ever held a secret is marked for
+good: the first create-time `secrets`, exec-time `secrets` or
+background job `secrets` sets the mark (it is stored with the lease,
+before the files are written, and never cleared). A clone or fork
+carries its source's mark, and a lease started from a named-snapshot
+version that is not secret-free starts marked. A named snapshot saved
+from a marked lease is not secret-free (`secret_free: false`): the save
+scrubs `/run/secrets`, but a secret may live on elsewhere in the
+guest's memory, so such a version can never be granted to another
+user. Exec `env` values are **not** secrets and never set the mark, so
+keep credentials out of `env` on a lease you mean to share.
+
 ```bash
 curl -X POST https://backend/api/leases \
   -H "Authorization: Bearer $TOKEN" -d '{
@@ -1880,8 +1912,13 @@ and inserts the version. Response `201`:
 
 ```json
 {"name":"spoond/warm","version":1,"build_id":"<uuid>","image":"py-base",
- "memory_mb":2048,"size_bytes":2254857830,"created_at":"2026-10-06T09:12:30Z"}
+ "memory_mb":2048,"size_bytes":2254857830,"created_at":"2026-10-06T09:12:30Z",
+ "secret_free":true}
 ```
+
+`secret_free` is `true` when the source lease never had a secret (see
+[Secrets](#secrets)); only a secret-free version can be granted.
+Versions saved before grants existed read `false` until saved again.
 
 - **Idempotent replay.** A save whose `(name, idempotency_key)` already
   exists answers `200` with that version and takes **no** checkpoint.
@@ -1947,7 +1984,8 @@ stops mid-save writes no version: at startup a `checkpoint` build still
 ```json
 {"snapshots":[{"name":"spoond/warm","latest":4,"versions":[
   {"version":4,"build_id":"…","image":"go-base-worker","memory_mb":4096,
-   "size_bytes":2254857830,"created_at":"…","in_use":1,"stale":false}]}]}
+   "size_bytes":2254857830,"created_at":"…","in_use":1,"stale":false,
+   "secret_free":true}]}]}
 ```
 
 `in_use` counts the live leases started from that version (`0` while
@@ -1994,7 +2032,18 @@ request, not the source lease.
 
 A version spared by retention only because a lease ran from it is
 dropped once that lease is released (delete, TTL, lost cleanup):
-releasing the lease re-runs the name's retention.
+releasing the lease re-runs the name's retention — the owner's, also
+when the lease was another user's started through a grant.
+
+**From another user's snapshot.** With `"snapshot_owner": "<user name
+or id>"` the create starts from that user's name through a grant (see
+[Snapshot grants](#snapshot-grants)). Without a grant — or for an
+unknown user or name — it answers `404 not_found`, the same body as an
+unknown name, so a caller learns nothing about names it was not
+granted. A granted version that is not secret-free answers `409
+not_secret_free`. Everything else is a normal snapshot start: the
+caller is charged the version's memory, and the snapshot's disk stays
+the owner's.
 
 ### `DELETE /api/named-snapshots/{name}[@v]` — delete
 
@@ -2016,6 +2065,50 @@ applies it at once (the live-lease rule still holds). Response `200
 {"name":"…","keep":3,"ok":true}`; `404 not_found` for an unknown
 name. `keep` is set per name, so a `@version` in the path is `400
 bad_request` (`"keep is set per name; drop the @version"`).
+
+### Snapshot grants
+
+An owner can let another user start leases from one of its names
+(#141), so one warm-up — a checkout plus build caches — serves both.
+A grant covers the name, not a version. Only **secret-free** versions
+(saved from a lease that never had a secret, see [Secrets](#secrets))
+can be granted or started through a grant. The grantee is charged the
+lease's memory; the snapshot's disk stays in the owner's budget, and
+retention, `in_use` and delete-in-use count the grantee's leases like
+the owner's. A grantee's lease shows the owner in its `snapshot` object
+and may [restore to the start snapshot](#post-apileasesidrestore--roll-back-to-a-kept-checkpoint).
+Deleting a user removes the grants it gave and received.
+
+#### `POST /api/named-snapshot-grants` — grant
+
+```json
+{"name": "honey/warm", "grantee": "honey"}
+```
+
+`grantee` is a user name or id; it must exist and differ from the
+caller (`400 bad_request`). Response `201`, also on a repeat (the first
+grant is kept):
+
+```json
+{"owner":"u-…","name":"honey/warm","grantee":"u-…","created_at":"…"}
+```
+
+`404 not_found` when the caller has no such name; `409 not_secret_free`
+when the name's latest version is not secret-free — re-save it from a
+lease that never had a secret, then grant.
+
+#### `GET /api/named-snapshot-grants` — list
+
+```json
+{"given":[{"owner":"u-pool","name":"honey/warm","grantee":"u-honey","created_at":"…"}],
+ "received":[]}
+```
+
+#### `DELETE /api/named-snapshot-grants?name=<name>&grantee=<user>` — revoke
+
+Owner only. `204`; `404 not_found` when there is no such grant.
+Revoking stops new starts at once (they answer `404`); it never touches
+a lease already running from the snapshot.
 
 ### Identity in a restored guest
 

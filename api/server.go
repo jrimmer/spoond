@@ -229,6 +229,11 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/named-snapshots/{name...}", s.handleNamedSnapshotShow)
 	s.mux.HandleFunc("PUT /api/named-snapshots/{name...}", s.handleNamedSnapshotKeep)
 	s.mux.HandleFunc("DELETE /api/named-snapshots/{name...}", s.handleNamedSnapshotDelete)
+	// Named-snapshot grants (#141): share a secret-free name with
+	// another user, list given/received, revoke.
+	s.mux.HandleFunc("POST /api/named-snapshot-grants", s.handleNamedSnapshotGrantCreate)
+	s.mux.HandleFunc("GET /api/named-snapshot-grants", s.handleNamedSnapshotGrantList)
+	s.mux.HandleFunc("DELETE /api/named-snapshot-grants", s.handleNamedSnapshotGrantDelete)
 	// Admin endpoints (U10): drain, undrain and crash reconcile. Auth is
 	// done in api/admin.go (ADMIN_TOKEN is not a consumer token, so
 	// authMiddleware lets /api/admin/ through).
@@ -969,6 +974,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// image then may be omitted; when given it must equal the
 		// snapshot's image (400).
 		Snapshot string `json:"snapshot"`
+		// SnapshotOwner (#141) starts from another user's named snapshot
+		// (user name or id) through a grant that user gave the caller.
+		// Without a grant it answers 404, like an unknown name.
+		SnapshotOwner string `json:"snapshot_owner"`
 		// ExposePorts publishes guest TCP ports for other sandboxes to
 		// reach (each peer's egress policy decides reachability).
 		ExposePorts []int `json:"expose_ports"`
@@ -1016,6 +1025,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "image is required")
 		return
 	}
+	if req.SnapshotOwner != "" && req.Snapshot == "" {
+		writeErrorCode(w, http.StatusBadRequest, "bad_request", "snapshot_owner needs snapshot")
+		return
+	}
 	// A create from a named snapshot (2.7, #83): resolve the version
 	// owner-scoped before anything else. The image is the snapshot's
 	// image; an explicit image must match it.
@@ -1033,7 +1046,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Snapshot != "" {
 		owner := ownerFrom(r.Context())
 		var serr *namedSnapshotError
-		start, serr = s.svc.snapshotStartFromRequest(r.Context(), owner, req.Snapshot, req.Image)
+		start, serr = s.svc.snapshotStartFromRequest(r.Context(), owner, req.SnapshotOwner, req.Snapshot, req.Image)
 		if serr != nil {
 			serr.write(w)
 			return
@@ -2223,6 +2236,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer s.svc.secretsGate.endStaging(lease.ID)
+		// The lease has had a secret from here on (#141), recorded
+		// before the files exist and inside the gate, so a later save
+		// sees it.
+		s.svc.markHadSecrets(lease)
 		// The cleanup runs inside the gate: it is registered after
 		// beginStaging, and its re-stage of shadowed create-time secrets
 		// takes the gate itself, so it cannot race a save's scrub (R2). The
