@@ -1706,17 +1706,18 @@ func TestLeasesAccessIsolated(t *testing.T) {
 // separator at every width.
 func TestLeaseColumnsFitContent(t *testing.T) {
 	short := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Age: "5m", Left: "10m"}}
-	// The state column is two glyph cells and their separator, at every
-	// width, whatever the rows show.
+	// The state column is fixed at its header word plus a separator,
+	// at every width, whatever the rows show.
+	fixed := len(stateHeader) + 1
 	for _, w := range []int{DefaultWidth, minW} {
-		if got := leaseLayout(w, short).stW; got != stateCell {
-			t.Errorf("width %d: state column = %d, not the fixed %d", w, got, stateCell)
+		if got := leaseLayout(w, short).stW; got != fixed {
+			t.Errorf("width %d: state column = %d, not the fixed %d", w, got, fixed)
 		}
 	}
 	long := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "suspended",
 		TakenBack: true, Age: "5m", Left: "10m"}}
-	if got := leaseLayout(DefaultWidth, long).stW; got != stateCell {
-		t.Errorf("state column with a suspend reason = %d, not the fixed %d", got, stateCell)
+	if got := leaseLayout(DefaultWidth, long).stW; got != fixed {
+		t.Errorf("state column with a suspend reason = %d, not the fixed %d", got, fixed)
 	}
 	// No column drops below its header.
 	empty := leaseLayout(DefaultWidth, nil)
@@ -1890,8 +1891,8 @@ func TestLeaseHolderHeaderAndLegend(t *testing.T) {
 	if !strings.Contains(lines[header], "holder") || strings.Contains(lines[header], "◆") {
 		t.Errorf("holder header = %q", lines[header])
 	}
-	if !strings.Contains(lines[header], "ST ") {
-		t.Errorf("state header is not ST: %q", lines[header])
+	if !strings.Contains(lines[header], " state ") {
+		t.Errorf("state header is not the word state: %q", lines[header])
 	}
 	// The legend sits on the row directly under the last lease row: the
 	// sample's last row holds the last lease id.
