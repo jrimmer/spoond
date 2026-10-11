@@ -184,15 +184,19 @@ func parseOpenMetrics(body []byte) (used, total map[string]float64) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Only `name{labels} value` lines are interesting (both
-		// families always carry labels in the collector's output; a bare
-		// sample without an id says nothing about a sandbox).
+		// Only `name{labels} value [timestamp]` lines are interesting
+		// (both families always carry labels and a timestamp in the
+		// collector's output; a bare sample without an id says nothing
+		// about a sandbox).
 		i := strings.LastIndex(line, "} ")
 		if i < 0 {
 			continue
 		}
-		text := strings.TrimSpace(line[i+2:])
-		value, err := strconv.ParseFloat(text, 64)
+		fields := strings.Fields(line[i+2:])
+		if len(fields) == 0 || len(fields) > 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[0], 64)
 		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 			continue
 		}
@@ -205,7 +209,8 @@ func parseOpenMetrics(body []byte) (used, total map[string]float64) {
 		if sid == "" {
 			continue
 		}
-		switch family(name[:lb]) {
+		fam := name[:lb]
+		switch fam {
 		case ramUsedMetric:
 			used[sid] = value
 		case ramTotalMetric:
@@ -214,11 +219,6 @@ func parseOpenMetrics(body []byte) (used, total map[string]float64) {
 	}
 	return used, total
 }
-
-// family strips a Prometheus text suffix (a trailing unit or
-// _total-like suffix is never present on these two, but ignore a
-// sample-rate suffix defensively).
-func family(name string) string { return name }
 
 // parseLabels splits a label block `a="1",b="2"` into a map. Values use
 // Prometheus escaping: \\ → \, \" → ", \n → newline.
