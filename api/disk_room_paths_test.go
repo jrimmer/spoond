@@ -63,7 +63,7 @@ func (h *diskPathHarness) seedSuspendedLease(t *testing.T, id string) {
 		t.Fatalf("seed %s: %v", id, err)
 	}
 	build := store.BuildRow{
-		BuildID: "pause-" + id, Kind: "pause", ParentBuildID: id,
+		BuildID: "pause-" + id, Kind: "pause", ParentBuildID: "run-" + id,
 		Owner: "consumer-a", State: "ready", MemoryMB: 2048, DiskMB: 10240,
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}

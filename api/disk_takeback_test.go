@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,7 +75,9 @@ func (h *diskTBHarness) seedPausedLease(t *testing.T, id, owner string, size int
 	now := time.Now()
 	buildID := "pause-" + id
 	if err := h.db.InsertBuild(ctx, store.BuildRow{
-		BuildID: buildID, Kind: "pause", ParentBuildID: id, Owner: owner,
+		// A pause build's parent is the build the lease ran from, not
+		// the lease: the lease finds it through its ResumeBuildID.
+		BuildID: buildID, Kind: "pause", ParentBuildID: "run-" + id, Owner: owner,
 		State: "ready", SizeBytes: size, CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("insert pause build: %v", err)
@@ -543,6 +546,14 @@ func TestDiskTakeBackShortfallSizing(t *testing.T) {
 	if _, err := h.db.GetLease(context.Background(), "vict-1"); err == nil {
 		t.Fatal("vict-1 should have been released (the shortfall pick)")
 	}
+	// The release alone frees nothing on disk: the victim's pause build
+	// is deleted at once, not left for the hourly GC.
+	if b, err := h.db.GetBuild(context.Background(), "pause-vict-1"); err != nil || b.State != "deleted" {
+		t.Fatalf("victim pause build = %+v (%v), want deleted by the take-back", b, err)
+	}
+	if b, err := h.db.GetBuild(context.Background(), "pause-fat"); err != nil || b.State == "deleted" {
+		t.Fatalf("pause-fat = %+v (%v), want it kept (a live lease still names it)", b, err)
+	}
 	if r := h.leaseRowMust(t, "fat-run"); r.State != "running" {
 		t.Fatalf("fat-run = %v, want it intact (the gap was already closed)", r)
 	}
@@ -669,4 +680,21 @@ func containsAll(s string, subs ...string) bool {
 func orphanName(t *testing.T) string {
 	t.Helper()
 	return uuid.NewString()
+}
+
+// An unknown box capacity (the node-info cache cold, so every fair slice
+// reads 0 and no owner can be judged) is a wait, not box_full: the same
+// nothing-reclaimable shortfall answers capacity_wait.
+func TestDiskTakeBackUnknownCapacityWaits(t *testing.T) {
+	h := newDiskTBHarness(t, 1<<30)
+	h.seedNamedAndKept(t, "consumer-b", 0, 900<<20)
+	h.tightBox(t, 100<<20, 60, "5")
+	h.sub.SetNodeInfo(substrate.NodeInfo{}, errors.New("orchestrator down"))
+	dropNodeCache(h.svc)
+	h.svc.invalidateFairShares()
+
+	_, err := h.svc.diskTakeBack(context.Background(), 1<<20, "consumer-a")
+	if isBoxFull(err) || !errors.Is(err, errDiskCapacityWait) {
+		t.Fatalf("err = %v, want the capacity_wait wait (capacity unknown)", err)
+	}
 }

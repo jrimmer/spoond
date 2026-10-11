@@ -403,21 +403,28 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 		// the requester's after-request ratio bar.
 		victims := diskVictims(owners, requester, needBytes, needBytes-room.Usable)
 		if len(victims) == 0 {
-			// Nothing (left) to take: the good-citizen refusal (FS3b
-			// maps it to 429 box_full and raises the alert).
-			if req, ok := s.fairShareFor(ctx, requester); ok {
-				return freed, &boxFullError{Owner: requester, UsedBytes: req.Disk.UsedBytes, SliceBytes: req.Disk.SliceBytes}
+			// Nothing (left) to take. On disk the owner's rule is the
+			// good-citizen one: when nothing unpinned can be reaped for
+			// the request, it is 429 box_full plus the alert (FS3). Two
+			// cases are waits instead (503 capacity_wait): this call
+			// already freed bytes (statfs may not show them yet), and an
+			// unknown box capacity (every slice reads 0, so no owner can
+			// be judged).
+			req, known := s.fairShareFor(ctx, requester)
+			if freed > 0 || !known || req == nil || !req.CapacityKnown {
+				return freed, errDiskCapacityWait
 			}
-			return freed, errBoxFull
+			return freed, &boxFullError{Owner: requester, UsedBytes: req.Disk.UsedBytes, SliceBytes: req.Disk.SliceBytes}
 		}
-		if !s.takeDiskVictim(ctx, victims[0], room.Free) {
+		got, ok := s.takeDiskVictim(ctx, victims[0], room.Free)
+		if !ok {
 			// A stale pick — a resume or a pin won the race between the
 			// catalog read and the commitment. No event ever went out;
 			// mark it so the next pass offers a fresh candidate.
 			stale[victims[0].ID] = true
 			continue
 		}
-		freed += victims[0].Bytes
+		freed += got
 	}
 }
 
@@ -435,12 +442,22 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 // both after the release is committed, never before the predicate.
 // Afterwards the lease answers 404 everywhere. ok is false when the release was abandoned;
 // the caller must not count its bytes as freed.
-func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick int64) bool {
+//
+// The release alone frees nothing on disk: the lease's pause build would
+// wait for the hourly GC (and only with GC_DELETE=1). So the pause build
+// is deleted here, at once, once the release has dropped the lease's
+// reference — unless something else still keeps it (the GC's kept set).
+// freed is the bytes actually deleted; only those are noted as freeing.
+func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick int64) (freed int64, ok bool) {
 	s.store.mu.Lock()
 	l, ok := s.store.leases[v.ID]
+	var pauseBuild string
+	if ok {
+		pauseBuild = l.ResumeBuildID
+	}
 	s.store.mu.Unlock()
 	if !ok {
-		return false
+		return 0, false
 	}
 	released := false
 	total, _, err := s.diskCapacity(s.cfg.TemplateStoragePath)
@@ -453,15 +470,54 @@ func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick i
 		return released
 	})
 	if !released {
-		return false
+		return 0, false
 	}
 	s.emitLeaseEvent(v.ID, v.Owner, LeaseCriticalRelease,
 		fmt.Sprintf("owner %q at %.0f%% of its disk slice; %.1f%% of the snapshot disk free; reclaiming paused lease %s",
 			v.Owner, v.Ratio*100, freePct, shortID(v.ID)))
 	s.log.Printf("disk reclaim: releasing paused lease %s of %q (ratio %.2f, %s) for a request that does not fit",
 		v.ID, v.Owner, v.Ratio, formatEventBytes(v.Bytes))
-	s.noteDiskFreeing(v.Bytes, freeAtPick)
-	return true
+	freed = s.deleteReleasedPauseBuild(ctx, pauseBuild)
+	if freed > 0 {
+		s.noteDiskFreeing(freed, freeAtPick)
+	}
+	return freed, true
+}
+
+// deleteReleasedPauseBuild deletes a released lease's pause build now,
+// for disk take-back, when nothing else keeps it (the GC's kept set: a
+// live lease, a kept pin, a named snapshot or a child build). It returns
+// the bytes the build's row recorded, or 0 when it was kept, unknown or
+// the delete failed — the caller then counts nothing as freed and the
+// take-back loop moves to the next candidate.
+func (s *Service) deleteReleasedPauseBuild(ctx context.Context, buildID string) int64 {
+	if buildID == "" {
+		return 0
+	}
+	b, err := s.db.GetBuild(ctx, buildID)
+	if err != nil || b.State == "deleted" {
+		return 0
+	}
+	kept, err := s.keptBuilds(ctx)
+	if err != nil {
+		s.log.Printf("disk reclaim: kept set: %v", err)
+		return 0
+	}
+	if kept[buildID] {
+		s.log.Printf("disk reclaim: pause build %s is still kept; not deleted", buildID)
+		return 0
+	}
+	if err := s.sub.DeleteBuild(ctx, b.TemplateID, b.BuildID); err != nil {
+		s.log.Printf("disk reclaim: delete %s: %v", b.BuildID, err)
+		return 0
+	}
+	if err := s.db.UpdateBuildState(ctx, b.BuildID, "deleted", "", nil); err != nil {
+		s.log.Printf("disk reclaim: mark %s deleted: %v", b.BuildID, err)
+	}
+	if s.metrics != nil {
+		s.metrics.GCDeleted.WithLabelValues(b.Kind).Inc()
+	}
+	return b.SizeBytes
 }
 
 // diskOwners builds the selector's view of every owner: disk used and
@@ -492,11 +548,11 @@ func (s *Service) diskOwnersAtView(ctx context.Context, rows []store.LeaseRow) [
 	return owners
 }
 
-// pauseBuildsByLease maps lease id → pause build row for every lease's
-// resume build, from one catalog read. A pause build names the lease it
-// was snapshotted from as its parent (pauseLeaseBody writes
-// ParentBuildID = l.ID), so the key is the parent. ok is false when the
-// read failed (no candidate is built from a half-read catalog).
+// pauseBuildsByLease maps build id → pause build row, from one catalog
+// read; a paused lease finds its own through its ResumeBuildID (a pause
+// build's ParentBuildID is the build the lease ran from, not the lease).
+// ok is false when the read failed (no candidate is built from a
+// half-read catalog).
 func (s *Service) pauseBuildsByLease(ctx context.Context) (map[string]store.BuildRow, bool) {
 	builds, err := s.db.ListBuilds(ctx)
 	if err != nil {
@@ -506,7 +562,7 @@ func (s *Service) pauseBuildsByLease(ctx context.Context) (map[string]store.Buil
 	out := make(map[string]store.BuildRow)
 	for _, b := range builds {
 		if b.Kind == "pause" && b.State != "deleted" {
-			out[b.ParentBuildID] = b
+			out[b.BuildID] = b
 		}
 	}
 	return out, true
@@ -536,7 +592,7 @@ func (s *Service) pausedLeaseList(rows []store.LeaseRow, owner string, byPauseBu
 		if r.Owner != owner || r.State != "suspended" || r.ResumeBuildID == "" {
 			continue
 		}
-		b, ok := byPauseBuild[r.ID]
+		b, ok := byPauseBuild[r.ResumeBuildID]
 		if !ok || b.SizeBytes <= 0 {
 			continue
 		}
