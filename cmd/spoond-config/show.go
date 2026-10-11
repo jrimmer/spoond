@@ -155,6 +155,10 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 		fmt.Fprintf(os.Stderr, "spoond config: %s sets no environment\n", unit)
 		return 1
 	}
+	// A <SECRET>_FILE= line folds onto its base name's row (value
+	// "(hidden, from file)", #137 C2); the folded rows are what the table,
+	// the --json document and the admin call's own token go through.
+	env = resolveFileSecrets(env)
 	byName := map[string]entry{}
 	for _, e := range env {
 		byName[e.name] = e
@@ -169,7 +173,29 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 	if apiURL == "" {
 		apiURL = defaultAPIURL(effective("BIND_ADDR", DefaultBindAddr))
 	}
-	rc, rcErr := fetch(apiURLFor(apiURL)+adminConfigPath, effective("ADMIN_TOKEN", ""))
+	// The admin token authenticates the way the backend resolves it
+	// (#137 C2): a unit env carrying ADMIN_TOKEN_FILE means the token is
+	// that file's content; settings.Get reads it here (both spellings
+	// set, or an unreadable file, is this command's error rather than a
+	// bogus 401). Without a file reference the folded value is the env
+	// token as before; with a file-backed token, the folded value is the
+	// hidden-from-file constant and the fetch below needs the content.
+	adminToken := effective("ADMIN_TOKEN", "")
+	if adminToken == settings.HiddenFromFile {
+		// The value-file read goes through the same injected reader as the
+		// env files (os.ReadFile in production), so tests fake both.
+		readValue := func(path string) ([]byte, error) {
+			s, err := read(path)
+			return []byte(s), err
+		}
+		v, err := settings.Get("ADMIN_TOKEN", mergedGet(unitEnv(show, read)), readValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "spoond config: %v\n", err)
+			return 1
+		}
+		adminToken = v
+	}
+	rc, rcErr := fetch(apiURLFor(apiURL)+adminConfigPath, adminToken)
 	unreached := rcErr != nil
 
 	if jsonOut {
@@ -205,7 +231,6 @@ func buildRowsUnreached(byName map[string]entry) []row {
 	return rows
 }
 
-// unknownRow builds one row with the runUnknown RUNNING cell.
 func unknownRow(name string, byName map[string]entry, known bool) row {
 	e, setHere := byName[name]
 	src := fromDefault
@@ -214,12 +239,25 @@ func unknownRow(name string, byName map[string]entry, known bool) row {
 	}
 	return row{
 		name:    name,
-		value:   settings.HideIfSecret(name, e.value),
+		value:   maskForDisplay(name, e.value),
 		source:  src,
 		running: runUnknown,
 		note:    rowNote(setHere, known),
 	}
 }
+
+// maskForDisplay masks a row's value the usual way (settings.HideIfSecret)
+// except for the folded file-secret constant (#137 C2): its value is
+// masked by construction and names its own source, so the generic rule
+// must not strip it back to the bare "(hidden)".
+func maskForDisplay(name, value string) string {
+	if value == settings.HiddenFromFile {
+		return value
+	}
+	return settings.HideIfSecret(name, value)
+}
+
+// buildRows assembles the rows: every settings.Known name in its sorted
 
 // buildRows assembles the rows: every settings.Known name in its sorted
 // order — set ones with their resolved value and source, unset ones with
@@ -261,7 +299,7 @@ func oneRow(name string, byName map[string]entry, run map[string]runningValue, k
 	}
 	r := row{
 		name:   name,
-		value:  settings.HideIfSecret(name, value),
+		value:  maskForDisplay(name, value),
 		source: src,
 		note:   rowNote(setHere, known),
 	}

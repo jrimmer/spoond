@@ -10,11 +10,19 @@
 // comparison and the admin call's own env, so what config show reports
 // and what it authenticates with are the same values the unit starts
 // the backend with.
+//
+// A secret may be spelled <NAME>_FILE=/path in those files (#137 C2):
+// resolveFileSecrets folds every such line onto its base name's row
+// after the merge (value "(hidden, from file)", source the env file),
+// so the table and the --json document talk about the settings the
+// backend resolves, not the spellings.
 package spoondconfig
 
 import (
 	"bufio"
 	"strings"
+
+	"github.com/jrimmer/spoond/v3/settings"
 )
 
 // source names where an effective value came from. Values are stable
@@ -171,6 +179,73 @@ func mergeFiles(files []string, envLine string, read func(path string) (string, 
 func unitEnv(show map[string]string, read func(path string) (string, error)) []entry {
 	files := parseEnvironmentFiles(show["EnvironmentFiles"])
 	return mergeFiles(files, show["Environment"], read)
+}
+
+// mergedGet builds settings.Get's get over resolved unit-env entries:
+
+// NAME=name pairs, in apply order (the last wins, as the merge does).
+func mergedGet(env []entry) func(string) string {
+	m := make(map[string]string, len(env))
+	for _, e := range env {
+		m[e.name] = e.value
+	}
+	return func(name string) string { return m[name] }
+}
+
+// resolveFileSecrets folds every <SECRET>_FILE= assignment into its
+// base name's row (#137 C2): a secret the unit hands the backend as a
+// file reference is displayed as the base setting — value
+// settings.HiddenFromFile (never the file's content), source the env
+// file the _FILE spelling came from. A base NAME= and its FILE form
+// both set is reported as the both-value error the backend will refuse
+// to start with, and a lone _FILE name that is not a known secret's
+// (BIND_ADDR_FILE) stays its own unknown row, the same note the
+// backend's doctor gives it. The merged entries arrive in first
+// appearance order; the folded rows keep the _FILE spelling's slot, so
+// source and order follow the line the operator actually wrote.
+func resolveFileSecrets(env []entry) []entry {
+	fold := map[string]entry{}   // base name → its file-form row
+	hasEnv := map[string]bool{}  // base names set by NAME=
+	fileKey := map[string]bool{} // every NAME_FILE name seen
+	for _, e := range env {
+		if base, ok := strings.CutSuffix(e.name, "_FILE"); ok && settings.IsKnown(e.name) {
+			fileKey[base] = true
+			fold[base] = entry{name: base, value: settings.HiddenFromFile, source: e.source}
+			continue
+		}
+		if e.value != "" {
+			hasEnv[e.name] = true
+		}
+	}
+	if len(fold) == 0 {
+		return env
+	}
+	out := make([]entry, 0, len(env))
+	seen := map[string]bool{}
+	for _, e := range env {
+		base, isFile := strings.CutSuffix(e.name, "_FILE")
+		if isFile {
+			if !settings.IsKnown(e.name) {
+				out = append(out, e) // not a secret's file: keep the unknown row
+				continue
+			}
+			if !seen[base] {
+				seen[base] = true
+				f := fold[base]
+				if hasEnv[base] {
+					// NAME= also set: the backend refuses to start with
+					// settings.Get's both-forms error; show it as the value.
+					f.value = "both set — " + base + " and " + e.name + " refuse to start"
+				}
+				out = append(out, f)
+			}
+			continue
+		}
+		if !fileKey[e.name] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // parseEnvironmentFiles reads the EnvironmentFiles= property: a

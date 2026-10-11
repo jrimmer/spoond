@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -42,6 +43,17 @@ func fileMap(files map[string]string) reader {
 		}
 		return "", fmt.Errorf("no such file: %s", path)
 	}
+}
+
+// writeFileSecret creates dir's secret value file at path with content
+// and returns the path.
+func writeFileSecret(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // okFetch answers the admin config endpoint.
@@ -663,5 +675,170 @@ func TestRunShowsOnlySetOrDrifting(t *testing.T) {
 	}
 	if strings.Contains(got, "DASH_ADDR") || strings.Contains(got, "CONFORMANCE_API") {
 		t.Fatalf("unset, matching settings listed without --all:\n%s", got)
+	}
+}
+
+// TestResolveFileSecrets (#137 C2): a <SECRET>_FILE= line in the unit
+// env folds onto its base name's row — value settings.HiddenFromFile,
+// source the env file the _FILE spelling came from, position where the
+// _FILE line sat; the base name's own row disappears; a non-secret's
+// _FILE (BIND_ADDR_FILE) stays its own row; and a _FILE name that is
+// not a setting at all stays unknown.
+func TestResolveFileSecrets(t *testing.T) {
+	env := []entry{
+		{name: "BIND_ADDR", value: "127.0.0.1:8890", source: "/etc/spoond/backend.env"},
+		{name: "ADMIN_TOKEN_FILE", value: "/etc/spoond/secrets/admin-token", source: "/etc/spoond/secrets.env"},
+		{name: "POOL_SIZE", value: "2", source: "/etc/spoond/backend.env"},
+		{name: "BIND_ADDR_FILE", value: "/x", source: "/etc/spoond/backend.env"},
+	}
+	got := resolveFileSecrets(env)
+	var names []string
+	for _, e := range got {
+		names = append(names, e.name)
+	}
+	if !slices.Equal(names, []string{"BIND_ADDR", "ADMIN_TOKEN", "POOL_SIZE", "BIND_ADDR_FILE"}) {
+		t.Fatalf("names = %v", names)
+	}
+	a := got[1]
+	if a.value != settings.HiddenFromFile || a.source != "/etc/spoond/secrets.env" {
+		t.Fatalf("ADMIN_TOKEN row = %+v, want the hidden-from-file value with its env-file source", a)
+	}
+	// The non-secret's _FILE stays as-is (unknown elsewhere).
+	if got[3].value != "/x" {
+		t.Fatalf("BIND_ADDR_FILE row = %+v, want it kept verbatim", got[3])
+	}
+
+	// Both forms set: the both-set refusal becomes the base row's value;
+	// the row still shows (the operator must see it before restarting).
+	both := []entry{
+		{name: "ADMIN_TOKEN", value: "env-tok", source: "/etc/spoond/backend.env"},
+		{name: "ADMIN_TOKEN_FILE", value: "/etc/spoond/secrets/admin-token", source: "/etc/spoond/secrets.env"},
+	}
+	got = resolveFileSecrets(both)
+	if len(got) != 1 || got[0].name != "ADMIN_TOKEN" || !strings.Contains(got[0].value, "both set") || !strings.Contains(got[0].value, "ADMIN_TOKEN_FILE") {
+		t.Fatalf("both forms folded = %+v, want one ADMIN_TOKEN row naming both spellings", got)
+	}
+	if strings.Contains(got[0].value, "env-tok") {
+		t.Fatalf("folded row leaks the env value: %+v", got[0])
+	}
+
+	// No _FILE line: the env passes through unchanged.
+	plain := []entry{{name: "POOL_SIZE", value: "2", source: "f"}}
+	if got := resolveFileSecrets(plain); len(got) != 1 || got[0].name != "POOL_SIZE" || got[0].value != "2" {
+		t.Fatalf("plain env changed: %+v", got)
+	}
+}
+
+// TestFileSecretRowEndToEnd (#137 C2): a unit env carrying
+// ADMIN_TOKEN_FILE shows the folded row in the table and in --json, the
+// admin call authenticates with the file-backed token (effective reads
+// the folded base name), and the running backend's "(hidden, from
+// file)" classifies same.
+func TestFileSecretRowEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "admin-token", "file-admin-tok\n")
+	files := map[string]string{
+		envFile: "ADMIN_TOKEN_FILE=" + tokPath + "\nBIND_ADDR=127.0.0.1:8890\n",
+		tokPath: "file-admin-tok\n",
+	}
+	rc := running("ADMIN_TOKEN="+settings.HiddenFromFile, "BIND_ADDR=127.0.0.1:8890")
+	var gotTok, gotURL string
+	fetch := func(url, token string) (runningConfig, error) {
+		gotTok, gotURL = token, url
+		return rc, nil
+	}
+	_ = gotURL
+	var out strings.Builder
+	code := run("spoond-backend", "", false, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), fetch)
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(gotTok, "file-admin-tok") {
+		t.Fatalf("admin token presented = %q, want the file's content (the backend resolves it the same way)", gotTok)
+	}
+	got := out.String()
+	if strings.Contains(got, "sekrit") || strings.Contains(got, "admin-token-content") {
+		t.Fatalf("output leaks a secret value:\n%s", got)
+	}
+	if !strings.Contains(got, "ADMIN_TOKEN") || !strings.Contains(got, settings.HiddenFromFile) {
+		t.Fatalf("folded row missing:\n%s", got)
+	}
+	// RUNNING agrees (the endpoint answered the same constant): no drift
+	// for the folded row.
+	if strings.Contains(got, "every setting matches the running backend") {
+		return
+	}
+	t.Fatalf("expected the all-match footer:\n%s", got)
+}
+
+// TestFileSecretRowUnreached: with the backend unreachable, the folded
+// row still shows the hidden-from-file value and "?" RUNNING.
+func TestFileSecretRowUnreached(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "admin-token", "file-admin-tok\n")
+	files := map[string]string{envFile: "ADMIN_TOKEN_FILE=" + tokPath + "\n", tokPath: "file-admin-tok\n"}
+	showAll = true
+	t.Cleanup(func() { showAll = false })
+	var out strings.Builder
+	code := run("spoond-backend", "", false, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), errFetch("refused"))
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, settings.HiddenFromFile) {
+		t.Fatalf("folded row missing while unreached:\n%s", got)
+	}
+}
+
+// TestFileSecretJSON (#137 C2): the --json document carries the folded
+// ADMIN_TOKEN row (set:true, hidden-from-file value, its env-file
+// source) and no ADMIN_TOKEN_FILE row — the doc reports the base
+// setting, like the table.
+func TestFileSecretJSON(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "admin-token", "file-admin-tok\n")
+	files := map[string]string{envFile: "ADMIN_TOKEN_FILE=" + tokPath + "\n", tokPath: "file-admin-tok\n"}
+	var out strings.Builder
+	code := run("spoond-backend", "", true, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), okFetch(running()))
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var doc struct {
+		Settings []struct {
+			Name   string `json:"name"`
+			Set    bool   `json:"set"`
+			Value  string `json:"value"`
+			Source string `json:"source"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &doc); err != nil {
+		t.Fatalf("json decode: %v\n%s", err, out.String())
+	}
+	var found bool
+	for _, s := range doc.Settings {
+		switch s.Name {
+		case "ADMIN_TOKEN_FILE":
+			t.Fatalf("ADMIN_TOKEN_FILE must fold onto ADMIN_TOKEN: %+v", s)
+		case "ADMIN_TOKEN":
+			found = true
+			if !s.Set || s.Value != settings.HiddenFromFile || s.Source != envFile {
+				t.Fatalf("ADMIN_TOKEN = %+v, want set, hidden-from-file, from %s", s, envFile)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no ADMIN_TOKEN row in the json document")
 	}
 }
