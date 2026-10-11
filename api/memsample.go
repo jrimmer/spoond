@@ -159,6 +159,15 @@ func (ms *memSampler) peak(leaseID string) (float64, bool) {
 	return e.peakBytes, ok && e.samples > 0
 }
 
+// entry returns a copy of the lease's entry; zero and ok=false when
+// the lease has none (the caller checks samples for freshness).
+func (ms *memSampler) entry(leaseID string) (memSample, bool) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	e, ok := ms.entries[leaseID]
+	return e, ok
+}
+
 // measuredByOwner sums the latest used bytes over the owner's live
 // leases, in whole MiB, rounding up so a partially-used MiB still
 // counts.

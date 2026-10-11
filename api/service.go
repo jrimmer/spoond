@@ -2203,6 +2203,11 @@ type LeaseCounts struct {
 	Pinned      int `json:"pinned"`
 	Lost        int `json:"lost"`
 	RunningJobs int `json:"running_jobs"`
+	// MemoryUsedMiB is the measured memory of the owner's running
+	// leases (#130 R1): their latest sampled used MiB summed. Omitted
+	// when none of them has a measurement (the sampler off, or nothing
+	// measured yet).
+	MemoryUsedMiB int `json:"memory_used_mib,omitempty"`
 }
 
 // leaseCounts tallies the owner's leases from the in-memory map
@@ -2212,6 +2217,7 @@ type LeaseCounts struct {
 // lost leases are still held until their owner releases them.
 func (s *Service) leaseCounts(owner string) LeaseCounts {
 	var c LeaseCounts
+	ms := s.memSamples
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	for _, l := range s.store.leases {
@@ -2230,6 +2236,14 @@ func (s *Service) leaseCounts(owner string) LeaseCounts {
 			c.Pinned++
 		}
 		c.RunningJobs += s.store.runningJobs[l.ID]
+		// Measured memory (#130 R1): the sum of the running leases' own
+		// latest usage. When no live lease has data yet (OTEL_PROM_URL
+		// unset, or no tick since they started) the field stays off.
+		if l.live() {
+			if used, ok := ms.latest(l.ID); ok {
+				c.MemoryUsedMiB += mibCeil(used)
+			}
+		}
 	}
 	return c
 }
@@ -4766,9 +4780,12 @@ func (s *Service) leaseSuspendReason(id string) string {
 // holder_url labels are returned as-is and have no lifecycle effect.
 
 // leaseMap renders a lease as one GET /api/sandboxes row. The
-// checkpointInterval and idleSuspend arguments are the lease's effective
-// values in seconds (the host default already resolved; 0 = never).
-func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
+// checkpointInterval and idleSuspend arguments are the lease's
+// effective values in seconds (the host default already resolved;
+// 0 = never). ms is the measured-memory sampler and s the Service —
+// s.sizePresets() reads for size_hint; s may be nil in tests, which
+// leaves the size fields off.
+func (s *Service) leaseMap(l *Lease, ms *memSampler, checkpointInterval, idleSuspend int64) map[string]any {
 	m := map[string]any{
 		"id":               l.ID,
 		"owner":            l.Owner,
@@ -4835,6 +4852,13 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 		m["last_action"] = l.LastAction
 		m["last_action_at"] = formatRFC3339(l.LastActionAt)
 	}
+	// Measured memory (#130 R1): what the sandbox actually used at the
+	// last sampler tick and its high-water mark since the current VM
+	// started, in whole MiB (ceil; a partially used MiB counts).
+	// Omitted while the sampler has nothing (OTEL_PROM_URL unset, the
+	// lease not live, the series not seen yet). size_hint is the
+	// advisory part; see memsize.go.
+	leaseSizeHints(m, l, ms, s.sizePresets())
 	// Structured suspension facts (#145 D6), additive and omitted while
 	// the lease is not suspended: why an automatic suspend happened
 	// (idle_suspend|preempt|resume_failed), the pressure
@@ -4863,7 +4887,8 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 // memory charge rides along too (#128): charged_mib, the same number as
 // used_mib in GET /api/users/me for this lease's owner.
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
-	m := leaseMap(l, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
+	ms := s.memSamples
+	m := s.leaseMap(l, ms, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
 	m["state"] = l.State
 	m["recovered_from"] = formatRFC3339(l.RecoveredFrom)
 	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
@@ -4956,9 +4981,10 @@ func (s *Service) list(owner string) []map[string]any {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	var out []map[string]any
+	ms := s.memSamples
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
-			m := leaseMap(l, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
+			m := s.leaseMap(l, ms, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
 			m["jobs"] = jobsSummaryView(running[l.ID], exits[l.ID])
 			out = append(out, m)
 		}
