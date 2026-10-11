@@ -10,6 +10,18 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **The dashboard's leases table reads its state in two cells** instead
+  of the glyph-plus-word: the run-state glyph (`▶` running,
+  `‖` suspended, `⭘` recovered, `■` lost) then `◆` on a pinned lease,
+  with the pin mark removed from the holder column, the column headed
+  `ST`, and the suspend reason carried by the glyph's colour — taken
+  back warn, idle-suspended dim, any other suspend warn. A dim legend
+  under the table — `▶ running ‖ suspended ⭘ recovered ■ lost ◆ pinned`
+  — now spells the glyphs out on every table with rows, and the freed
+  column width goes to the owner then the holder.
+
 ### Added
 
 - **The break-glass `ADMIN_TOKEN` mints a user token (#138 A3).**

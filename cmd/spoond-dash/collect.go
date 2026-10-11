@@ -272,16 +272,16 @@ type Service struct {
 
 // LeaseRow is one live lease for the table. Holder/HolderURL are the
 // lease's plain holder label and link (no lifecycle effect since FS5);
-// Pinned marks a pinned lease (the state cell and the holder column
-// show it). LastAction/LastActionAt record the last automatic action
+// Pinned marks a pinned lease (the state cell's second glyph shows it).
+// LastAction/LastActionAt record the last automatic action
 // ("rule/action", e.g. "idle_suspend/suspend_idle"). Comment is the
 // lease's own note: the holder column shows it, dim, on a CI job lease
 // with no holder and no name (e.g. "forgejo: example.com/site #218").
-// TakenBack marks a lease suspended by memory take-back (FS2a): the
-// state cell names it "taken back". IdleSuspended marks a persistent
+// TakenBack marks a lease suspended by memory take-back (FS2a): its
+// state glyph draws in the warn style. IdleSuspended marks a persistent
 // lease suspended by its own idle_suspend threshold (2.5, #129 part 2):
-// the state cell names it "idle-suspended". VCPU and MemoryMB are the
-// size the lease's VM runs at (3.1, #151); 0 is unknown.
+// its state glyph draws dim. VCPU and MemoryMB are the size the lease's
+// VM runs at (3.1, #151); 0 is unknown.
 type LeaseRow struct {
 	ID, Image, Owner, State, Policy, Name, Comment string
 	TakenBack                                      bool
