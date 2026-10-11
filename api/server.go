@@ -523,6 +523,16 @@ func (s *Server) Handler() http.Handler {
 			authed.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxEventsToken{}, true)))
 			return
 		}
+		// Break-glass mint (#138 A3): the env ADMIN_TOKEN authenticates
+		// POST /api/users/{id}/tokens alone. The gate is evaluated once
+		// here (the handler must see the same verdict the middleware
+		// exemption was granted on) and its verdict travels as a marker;
+		// a request that never earned it — including ADMIN_TOKEN on any
+		// user route but this one — authenticates the ordinary way.
+		adminMint := s.IsAdminBearerToken(r) && isAdminTokenMintPath(r.URL.Path) && r.Method == http.MethodPost
+		if adminMint {
+			r = r.WithContext(context.WithValue(r.Context(), ctxAdminMint{}, true))
+		}
 		if p := rewriteLeasePath(r.URL.Path); p != r.URL.Path {
 			r.URL.Path = p
 		}
@@ -660,6 +670,10 @@ func isHexPath(p string) bool {
 // hold no consumer token.
 // /api/admin/ is exempt because ADMIN_TOKEN is not a user/consumer
 // token; api/admin.go authenticates those routes itself.
+// The break-glass mint (#138 A3) is exempt the same way: Handler has
+// already bound the ADMIN_TOKEN to POST /api/users/{id}/tokens and
+// marked the request; everything else must authenticate as a consumer
+// or user token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
@@ -684,6 +698,14 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				writeError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The break-glass token, marked for the mint route by Handler:
+		// pass through untouched (no consumer id, no identity user).
+		// The mint handler's adminMintExemption re-checks the marker, the
+		// path and the method; any other route refuses the token below.
+		if r.Context().Value(ctxAdminMint{}) == true {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -747,6 +769,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 type ctxOwnerKey struct{}
 type ctxUserKey struct{}
 type ctxEventsToken struct{} // set when the caller authenticated with the events-only EVENTS_TOKEN
+type ctxAdminMint struct{}   // set when the request was exempted for the break-glass token mint (#138 A3)
 
 // authFailLimiter throttles repeated failed token auths per client IP
 // (security review #37 L5). Tokens are high-entropy so brute force is

@@ -7,6 +7,29 @@ E2B-specific posture first, then the tenant boundaries, then the state of
 the adversarial review findings (issue #37) after the fix pass and the
 independent clean-room rescan.
 
+## Who can do what
+
+Two roles and two narrow service tokens, nothing more (#138, the
+2026-10-11 unified-auth design — no scope lists, and the 2.x tokens all
+keep working unchanged):
+
+| Credential | Who holds it | Can do |
+|---|---|---|
+| user token | any identity user (named, revocable, optionally expiring — [api.md](api.md#post-apiusersidtokens--mint-a-named-api-token-138-a2)) | its own leases, snapshots, usage, its own tokens |
+| admin user token | a user with `admin: true` | everything a user can, every user's resources, `/api/users`, `/api/admin/*`, `/metrics`, the full event stream |
+| `ADMIN_TOKEN` (env, root-only file) | the host's root | `/api/admin/*`, and minting a token for any user on `POST /api/users/{id}/tokens` (A3, the [break-glass](api.md#the-break-glass-mint-admin_token-on-the-mint-route-138-a3) for maintenance windows) — nothing else |
+| `METRICS_TOKEN`, `EVENTS_TOKEN` | scrapers, the dashboard | `GET /metrics`, `GET /api/leases/events`, read-only, unchanged |
+
+The one-route rule on the break-glass is deliberate: root can mint a
+token **for** a user during a window but gets no user's listing or
+revocation power, no user's leases and no user routes beyond the mint
+(they answer `401`), so a leaked `ADMIN_TOKEN` cannot read or rebind
+the directory — it can mint new credentials, which are logged,
+optionally expiring, and revocable by the very users it minted for.
+Legacy consumer tokens (`CONSUMER_TOKENS`) stay single-tenant owners; a
+legacy consumer token manages nobody's tokens and admin routes only
+read what the capability model always allowed.
+
 ## The substrate's posture
 
 **Firecracker runs as root, without the jailer.** E2B's orchestrator is a

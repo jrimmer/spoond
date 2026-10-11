@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -14,8 +15,64 @@ import (
 // beside the user's original single token, each with a name, revocable,
 // optionally expiring. The secret is shown once at mint and stored only
 // as the store's hashed form. The user itself and an admin manage a
-// user's tokens; anyone else gets the same 403/404 the other user
-// routes answer.
+// user's tokens; since A3 the env ADMIN_TOKEN also mints for any user
+// on the POST route (the host root's break-glass). Anyone else gets the
+// same 403/404 the other user routes answer.
+
+// IsAdminBearerToken reports whether a request presents the configured
+// ADMIN_TOKEN as its bearer token (constant time): the break-glass
+// credential (#138 A3). False when unset, missing or wrong — the
+// request then authenticates, or is refused, as whatever else it
+// carries.
+func (s *Server) IsAdminBearerToken(r *http.Request) bool {
+	if s.adminToken == "" {
+		return false
+	}
+	auth := r.Header.Get("Authorization")
+	tok := strings.TrimPrefix(auth, "Bearer ")
+	return tok != "" && tok != auth &&
+		subtle.ConstantTimeCompare([]byte(tok), []byte(s.adminToken)) == 1
+}
+
+// isAdminTokenMintPath reports whether p is the mint route's path shape
+// — /api/users/{id}/tokens with exactly one path id — the only user
+// route the ADMIN_TOKEN may authenticate (#138 A3). The GET list and
+// DELETE revoke routes are addressed by the same path with other
+// methods; the caller checks the method, so the break-glass stays on
+// POST alone.
+func isAdminTokenMintPath(p string) bool {
+	const prefix = "/api/users/"
+	if !strings.HasPrefix(p, prefix) || !strings.HasSuffix(p, "/tokens") {
+		return false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(p, prefix), "/tokens")
+	return id != "" && !strings.Contains(id, "/")
+}
+
+// adminMintExemption decides, once per request, whether the
+// authMiddleware exemption for the break-glass mint applies. It checks
+// the token first, then binds the verdict to the mint route alone: the
+// exemption was granted only when the shape matched, and a request
+// whose path or method does not must never see the marker.
+func (s *Server) adminMintExemption(r *http.Request) bool {
+	if r.Context().Value(ctxAdminMint{}) != true {
+		return false
+	}
+	if r.Method != http.MethodPost || !isAdminTokenMintPath(r.URL.Path) {
+		// A stale marker (Handler cleared the common mismatches; keep
+		// the guard for any future wiring).
+		return false
+	}
+	if userFrom(r.Context()) != nil {
+		// Admitted because a consumer token matched. That identity, not
+		// the break-glass, answers this request (it can only have been
+		// the mint route, which the middleware exempted it for).
+		if !s.IsAdminBearerToken(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // tokenView is one listing row: everything but the secret. A token
 // with no expiry carries expires_at "".
@@ -96,6 +153,11 @@ func (s *Server) tokenTargetUser(w http.ResponseWriter, r *http.Request, id stri
 // 201 {id,name,token,created_at,expires_at}. 403 admin required when
 // the caller has no identity user at all; 404 for an unknown target
 // user and for a known one the caller may not see (owner-scoped shape).
+// #138 A3: the env ADMIN_TOKEN (the host root's break-glass) also
+// mints, for any user — during a maintenance window ttl_secs is
+// recommended so the handed-out token dies with the window. GET and
+// DELETE keep the A2 rules: break-glass there is the plain 401 any
+// invalid token gets.
 func (s *Server) handleUsersTokensCreate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -122,8 +184,31 @@ func (s *Server) handleUsersTokensCreate(w http.ResponseWriter, r *http.Request)
 		}
 		ttl = time.Duration(*req.TTLSecs) * time.Second
 	}
-	owner := s.tokenTargetUser(w, r, id)
-	if owner == nil {
+	// Who may manage the target: the user itself or an admin user
+	// (A2); the break-glass ADMIN_TOKEN for any user (A3); a legacy
+	// consumer token nobody. 404 for a target the caller may not see,
+	// like every other owner-scoped user route.
+	var owner *identity.User
+	adminMint := false
+	switch caller := userFrom(r.Context()); {
+	case s.adminMintExemption(r):
+		adminMint = true
+		if owner = s.svc.identities.UserByID(id); owner == nil {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+	case caller != nil:
+		if !caller.Admin && caller.ID != id {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		owner = s.svc.identities.UserByID(id)
+		if owner == nil {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+	default:
+		writeError(w, http.StatusForbidden, "admin required")
 		return
 	}
 	secret, rec, err := s.svc.identities.AddToken(owner.ID, req.Name, ttl)
@@ -132,8 +217,15 @@ func (s *Server) handleUsersTokensCreate(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	s.svc.log.Printf("token minted: user %s (%s) token %q id %s, expires_at %q",
-		owner.Name, owner.ID, rec.Name, rec.ID, rec.ExpiresAt)
+	if adminMint {
+		// The break-glass audit line: who got a token, which one —
+		// never the secret.
+		s.svc.log.Printf("token minted with ADMIN_TOKEN: user %s (%s) token %q id %s, expires_at %q",
+			owner.Name, owner.ID, rec.Name, rec.ID, rec.ExpiresAt)
+	} else {
+		s.svc.log.Printf("token minted: user %s (%s) token %q id %s, expires_at %q",
+			owner.Name, owner.ID, rec.Name, rec.ID, rec.ExpiresAt)
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         rec.ID,
 		"name":       rec.Name,
