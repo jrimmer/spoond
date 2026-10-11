@@ -583,17 +583,39 @@ func validateOne(s Spec, v string) error {
 			return bad("not an integer")
 		}
 	case TypeBool:
+		// LLM_OPEN_LEGACY turns the legacy keyless mode on for any
+		// non-empty value (the code tests == ""), so no spelling is
+		// wrong for it — every value passes.
+		if s.Name == "LLM_OPEN_LEGACY" {
+			return nil
+		}
+		// The readers' spellings, unioned: envBoolOr counts 0/false/no
+		// off and 1/true/yes/on on; the == "1" readers (GC_DELETE,
+		// SPOOND_DRAIN_INSECURE, the conformance flags) count only "1";
+		// authOn adds "off" to the off words. A value outside the union
+		// is either silently true (envBoolOr) or silently false (== "1")
+		// in the code — the typo this check exists to catch.
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "0", "false", "no", "off", "1", "true", "yes", "on":
 		default:
 			return bad("not a boolean (want 0/1, false/true, no/yes or off/on)")
 		}
 	case TypeDuration:
-		if _, err := time.ParseDuration(v); err != nil {
-			if _, err2 := strconv.Atoi(strings.TrimSpace(v)); err2 != nil {
-				return bad("not a duration (seconds or a Go duration like 5m)")
+		if _, err := time.ParseDuration(v); err == nil {
+			return nil
+		}
+		// Every duration setting except DASH_INTERVAL also reads a bare
+		// whole number as seconds (envDuration and envDurationOrZero try
+		// strconv.Atoi first; SPOOND_BUILD_TIMEOUT, JOB_MAX_RUNTIME too).
+		// DASH_INTERVAL is read only as a Go duration, so a bare integer
+		// would fail dash's own startup check — refuse it here with the
+		// reason, not after the dashboard has bound its listener.
+		if s.Name != "DASH_INTERVAL" {
+			if _, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				return nil
 			}
 		}
+		return bad("not a duration (seconds or a Go duration like 5m)")
 	case TypePercent:
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
