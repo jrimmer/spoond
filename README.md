@@ -191,8 +191,8 @@ leases per image), host meters (CPU, memory, hugepages, snapshot and
 root disk, with the warn/danger levels), a full-width throughput panel
 (running leases, requests per second, creates per minute, egress
 connections — each with its current value and a sparkline over the
-history), live leases (id, image, owner, run state, policy, age, time
-left, holder — on the page the holder is a link; a pinned lease marks
+history), live leases (id, image, size as memory/vCPUs, owner, run
+state, policy, age, time left, holder — on the page the holder is a link; a pinned lease marks
 its holder ◆), the image catalog beside the systemd
 units, a refusals-and-failures row with the mean create and resume
 times, and the newest lease events (from the lease event stream,
