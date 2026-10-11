@@ -528,9 +528,9 @@ func (s *Service) emitGCEvent(detail string) {
 // verbatim and an operator reads it, so "61 ms" beats "0.061".
 
 // eventDuration renders a duration for an event detail: sub-second in
-// whole milliseconds, else a decimal with up to three places for the
-// short ones and a whole-second form for the long ones. A zero or
-// negative duration (clock skew) reads as 0 ms.
+// whole milliseconds, else seconds rounded to two places for the short
+// ones and a whole-second form for the long ones. A zero or negative
+// duration (clock skew) reads as 0 ms.
 func eventDuration(d time.Duration) string {
 	if d < 0 {
 		d = 0
@@ -538,8 +538,11 @@ func eventDuration(d time.Duration) string {
 	if d < time.Second {
 		return strconv.FormatInt(d.Milliseconds(), 10) + " ms"
 	}
-	if d < time.Minute {
-		return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + " s"
+	// Rounded to hundredths before formatting, so 17.2689333 s reads
+	// "17.27 s" (#147); one that rounds up to a minute takes the minute
+	// form instead of reading "60 s".
+	if r := d.Round(10 * time.Millisecond); r < time.Minute {
+		return strconv.FormatFloat(r.Seconds(), 'f', -1, 64) + " s"
 	}
 	return d.Round(time.Second).String()
 }

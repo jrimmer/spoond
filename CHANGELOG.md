@@ -21,6 +21,12 @@ summarised from README "Status".
 - **Warm sizes per image (#151).** A manifest entry's `warm_sizes: [medium, large]` makes `spoond images build` build one more memory snapshot per listed preset from the same image, so a VM of that size can start warm. `min_memory_mb` sets the smallest memory a lease of the image may ask for (default 512, or the image's own memory when smaller); a warm preset below it, or an unknown preset name, fails the build before it starts. Both are inherited through `from:`. `GET /api/images?detail=1` rows gain `min_memory_mb` and `warm_sizes`. The GC keeps each image's warm builds like its current build. Migration 26 adds the `image_sizes` table and `images.min_memory_mb`.
 - **Usage history (#140 U4).** spoond records each owner's usage every 15 minutes and keeps 7 days; `GET /api/usage/history?hours=N` (default 24, cap 168) returns the caller's own samples, oldest first. Migration 24 only adds the `usage_samples` table (schema 23 → 24), so a 3.0.0 binary can still open the database.
 
+### Fixed
+
+- **Event durations between one second and a minute read to two decimals (#147).** A checkpoint that took 17.2689333 s now reads "17.27 s"; one that rounds up to a minute reads "1m0s", never "60 s".
+- **The dashboard's host panel GC row fits its panel (#148).** The kept builds now come right after the GC mode, before the lifetime deleted count; a part that does not fit is dropped whole, and the row ends in … as a last resort, instead of running past the panel's edge.
+- **The dashboard's events panel no longer cuts a detail silently (#149).** A row too long for the panel ends in …, and the subject column is capped at 20 characters instead of 24, so more of the detail fits.
+
 ## [3.0.0] - 2026-10-10
 
 3.0 replaces guaranteed and burst classes, preemption, holds and
