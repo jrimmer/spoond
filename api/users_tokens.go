@@ -1,0 +1,199 @@
+package api
+
+import (
+	"encoding/json"
+	"math"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/jrimmer/spoond/v3/identity"
+)
+
+// Named per-user tokens (A2, unified auth #138): several credentials
+// beside the user's original single token, each with a name, revocable,
+// optionally expiring. The secret is shown once at mint and stored only
+// as the store's hashed form. The user itself and an admin manage a
+// user's tokens; anyone else gets the same 403/404 the other user
+// routes answer.
+
+// tokenView is one listing row: everything but the secret. A token
+// with no expiry carries expires_at "".
+type tokenView struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"created_at"`
+	ExpiresAt  string `json:"expires_at"`
+	LastUsedAt string `json:"last_used_at"`
+}
+
+func toTokenView(t identity.TokenRecord) tokenView {
+	return tokenView{
+		ID:         t.ID,
+		Name:       t.Name,
+		CreatedAt:  t.CreatedAt,
+		ExpiresAt:  t.ExpiresAt,
+		LastUsedAt: t.LastUsedAt,
+	}
+}
+
+// handleUserSubtreeGet dispatches the GET subtree under
+// /api/users/{id}/: exactly the trailing segment "tokens" is the token
+// list; every other tail is a plain 404, so the dispatcher cannot turn
+// a typo into another route. It exists because Go's ServeMux refuses to
+// register "GET /api/users/{id}/tokens" beside "GET
+// /api/users/by-name/{name}" — neither pattern is more specific —
+// while both documented routes must keep their shapes.
+func (s *Server) handleUserSubtreeGet(w http.ResponseWriter, r *http.Request) {
+	// r.URL.Path starts with "/api/users/" exactly when the mux matched
+	// this pattern; a prefix mismatch means the route was reached
+	// through some other mount, so fall through to the plain 404.
+	const prefix = "/api/users/"
+	rest, ok := strings.CutPrefix(r.URL.Path, prefix)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	tail := ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		tail = strings.Trim(rest[i+1:], "/")
+	}
+	switch tail {
+	case "tokens":
+		s.handleUsersTokensList(w, r)
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
+
+// tokenTargetUser resolves the path user for the token routes and
+// checks the caller may manage it: the user itself or an admin. Anyone
+// else is answered like the other owner-scoped user routes: an
+// authenticated caller without permission gets 404 (a user they cannot
+// see must look like one that does not exist); a caller with no
+// identity user in context (a legacy consumer token) gets 403, as the
+// admin-gated routes answer it.
+func (s *Server) tokenTargetUser(w http.ResponseWriter, r *http.Request, id string) *identity.User {
+	caller := userFrom(r.Context())
+	owner := s.svc.identities.UserByID(id)
+	if owner == nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return nil
+	}
+	if caller != nil {
+		if caller.Admin || caller.ID == owner.ID {
+			return owner
+		}
+		writeError(w, http.StatusNotFound, "user not found")
+		return nil
+	}
+	writeError(w, http.StatusForbidden, "admin required")
+	return nil
+}
+
+// handleUsersTokensCreate is POST /api/users/{id}/tokens
+// {"name","ttl_secs"?}: mints a named token, answers the secret once.
+// 201 {id,name,token,created_at,expires_at}. 403 admin required when
+// the caller has no identity user at all; 404 for an unknown target
+// user and for a known one the caller may not see (owner-scoped shape).
+func (s *Server) handleUsersTokensCreate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	var req struct {
+		Name    string `json:"name"`
+		TTLSecs *int64 `json:"ttl_secs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	ttl := time.Duration(0)
+	if req.TTLSecs != nil {
+		if *req.TTLSecs < 0 || *req.TTLSecs > math.MaxInt64/int64(time.Second) {
+			writeError(w, http.StatusBadRequest, "ttl_secs out of range")
+			return
+		}
+		ttl = time.Duration(*req.TTLSecs) * time.Second
+	}
+	owner := s.tokenTargetUser(w, r, id)
+	if owner == nil {
+		return
+	}
+	secret, rec, err := s.svc.identities.AddToken(owner.ID, req.Name, ttl)
+	if err != nil {
+		// A duplicate/reserved name exists on the target user.
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.svc.log.Printf("token minted: user %s (%s) token %q id %s, expires_at %q",
+		owner.Name, owner.ID, rec.Name, rec.ID, rec.ExpiresAt)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":         rec.ID,
+		"name":       rec.Name,
+		"token":      secret,
+		"created_at": rec.CreatedAt,
+		"expires_at": rec.ExpiresAt,
+	})
+}
+
+// handleUsersTokensList is GET /api/users/{id}/tokens: the user's
+// tokens with name, id, created, expires and last used — never
+// secrets. The legacy single token is listed as the token named
+// "default".
+func (s *Server) handleUsersTokensList(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	owner := s.tokenTargetUser(w, r, id)
+	if owner == nil {
+		return
+	}
+	toks, err := s.svc.identities.ListTokens(owner.ID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	out := make([]tokenView, 0, len(toks))
+	for _, t := range toks {
+		out = append(out, toTokenView(t))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": out})
+}
+
+// handleUsersTokenRevoke is DELETE /api/users/{id}/tokens/{token_id}:
+// revokes one token, 204. Revoking the "default" token takes away the
+// user's original single token. Unknown token id is idempotent (204),
+// like an unknown fingerprint on the key routes.
+func (s *Server) handleUsersTokenRevoke(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	tokenID := strings.TrimSpace(r.PathValue("token_id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "user id required")
+		return
+	}
+	if tokenID == "" {
+		writeError(w, http.StatusBadRequest, "token id required")
+		return
+	}
+	owner := s.tokenTargetUser(w, r, id)
+	if owner == nil {
+		return
+	}
+	if err := s.svc.identities.RevokeToken(owner.ID, tokenID); err != nil {
+		// A foreign token id answers the same 404 as an unknown one,
+		// so no caller can probe which ids exist on other users.
+		writeError(w, http.StatusNotFound, "token not found")
+		return
+	}
+	s.svc.log.Printf("token revoked: user %s (%s) token id %s", owner.Name, owner.ID, tokenID)
+	w.WriteHeader(http.StatusNoContent)
+}

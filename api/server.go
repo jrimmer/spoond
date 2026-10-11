@@ -300,14 +300,23 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 		s.mux.HandleFunc("GET /api/users", s.handleUsersList)
 		s.mux.HandleFunc("GET /api/users/me", s.handleUsersMe)
 		// GET /api/users/{id} is the admin per-owner usage view (#145
-		// FS1); the literal "me" above wins over this wildcard.
+		// FS1); the literal "me" below wins over this wildcard.
 		s.mux.HandleFunc("GET /api/users/{id}", s.handleUserUsage)
 		s.mux.HandleFunc("GET /api/users/by-name/{name}", s.handleUsersByName)
 		s.mux.HandleFunc("GET /api/users/by-key", s.handleUsersByKey)
 		s.mux.HandleFunc("GET /api/identity-status", s.handleIdentityStatus)
+		// Named per-user tokens (A2, unified auth #138), GET list. The
+		// Go mux refuses to register this beside "by-name/{name}"
+		// (neither pattern is more specific), so the GET route is a
+		// subtree dispatcher that answers exactly "/api/users/{id}/tokens"
+		// and 404s every other tail; see the comment on
+		// handleUserSubtreeGet in api/users_tokens.go.
+		s.mux.HandleFunc("GET /api/users/{id}/", s.handleUserSubtreeGet)
 		s.mux.HandleFunc("POST /api/users", s.handleUsersCreate)
 		s.mux.HandleFunc("POST /api/users/{id}/quota", s.handleUsersQuota)
 		s.mux.HandleFunc("POST /api/users/{id}/llm-key", s.handleUsersLLMKey) // U8/T8
+		s.mux.HandleFunc("POST /api/users/{id}/tokens", s.handleUsersTokensCreate)
+		s.mux.HandleFunc("DELETE /api/users/{id}/tokens/{token_id}", s.handleUsersTokenRevoke)
 		s.mux.HandleFunc("DELETE /api/users/{id}", s.handleUsersDelete)
 	}
 	// The caller's own fair-share usage (#145 FS1); available with or

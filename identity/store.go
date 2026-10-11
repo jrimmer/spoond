@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -35,6 +36,46 @@ const (
 	KindAgent  Kind = "agent"
 )
 
+const (
+	// defaultTokenName is the name every legacy TokenHash is presented as
+	// (A2, unified auth #138): a user's existing single token keeps working
+	// unchanged and shows up in ListTokens under this name, revocable like
+	// any other token.
+	defaultTokenName = "default"
+	// legacyTokenID is the stable id of that presented legacy token.
+	legacyTokenID = "t-default"
+	// lastUsedResolution is how stale a token's last-used stamp may get
+	// before an authentication refreshes it (and writes the users file).
+	lastUsedResolution = 5 * time.Minute
+)
+
+// TokenRecord is one named bearer token of a user (A2, unified auth
+// #138). Only the HMAC/SHA256 hash of the secret is stored, never the
+// secret itself. ExpiresAt "" means the token never expires; LastUsedAt
+// "" means it has never authenticated anyone.
+type TokenRecord struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Hash       string `json:"hash,omitempty"`
+	CreatedAt  string `json:"created_at"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+}
+
+// expired reports whether the token's expiry has passed (or the
+// record carries an unparseable expiry, which is treated as expired:
+// an unreadable date must not extend access).
+func (t TokenRecord) expired(now time.Time) bool {
+	if t.ExpiresAt == "" {
+		return false
+	}
+	d, err := time.Parse(time.RFC3339, t.ExpiresAt)
+	if err != nil {
+		return true
+	}
+	return !d.After(now)
+}
+
 // User is a first-class identity: a person or an agent.
 type User struct {
 	ID           string   `json:"id"`           // stable user id (e.g. "u-<hex>")
@@ -42,7 +83,16 @@ type User struct {
 	Kind         Kind     `json:"kind"`         // person | agent
 	Admin        bool     `json:"admin"`        // KTD-2: first user is admin
 	Fingerprints []string `json:"fingerprints"` // SHA256 fingerprints of SSH keys
-	TokenHash    string   `json:"token_hash"`   // SHA256 of the bearer token ("" = none)
+	TokenHash    string   `json:"token_hash"`   // SHA256 of the bearer token ("" = none); presented as the token named "default"
+	// Tokens are the named per-user tokens (A2, unified auth #138). The
+	// legacy token keeps TokenHash; new tokens append here. A file
+	// written before this field existed loads unchanged with nil Tokens.
+	Tokens []TokenRecord `json:"tokens,omitempty"`
+	// LastUsedAt backs the legacy TokenHash's presented "default"
+	// token record: it is refreshed by UserByToken when the legacy
+	// token authenticates. Named tokens carry their own stamps in
+	// their TokenRecord.
+	LastUsedAt string `json:"last_used_at,omitempty"`
 	// LLMKeyHash is the SHA256 of the user's LLM gateway key (U8/T8,
 	// "" = none). When set, /llm/ requests on this user's leases must
 	// present the matching key; the API layer never exposes it.
@@ -55,14 +105,19 @@ type User struct {
 	MaxTTL int `json:"max_ttl"` // max lease TTL seconds (0 = global max applies)
 }
 
+// ErrTokenNotFound is RevokeToken's answer for a token id the user does
+// not have: never minted, already revoked, or another user's.
+var ErrTokenNotFound = errors.New("token not found")
+
 // Store is a thread-safe user registry with optional JSON persistence.
 type Store struct {
-	mu      sync.RWMutex
-	users   map[string]*User  // by id
-	byFP    map[string]string // fingerprint -> user id
-	byToken map[string]string // token hash -> user id
-	byName  map[string]string // name -> user id
-	file    string
+	mu        sync.RWMutex
+	users     map[string]*User  // by id
+	byFP      map[string]string // fingerprint -> user id
+	byToken   map[string]string // token hash -> user id
+	byName    map[string]string // name -> user id
+	byTokenID map[string]string // token id -> user id (named tokens)
+	file      string
 	// salt (security review #37 M1) makes stored token/LLM-key hashes
 	// HMAC-SHA256(salt, secret) instead of unsalted SHA256, defeating
 	// offline dictionary attacks if the users file leaks. It is loaded
@@ -75,11 +130,12 @@ type Store struct {
 // NewStore creates an empty store. filename may be "" for in-memory-only.
 func NewStore(filename string) (*Store, error) {
 	s := &Store{
-		users:   map[string]*User{},
-		byFP:    map[string]string{},
-		byToken: map[string]string{},
-		byName:  map[string]string{},
-		file:    filename,
+		users:     map[string]*User{},
+		byFP:      map[string]string{},
+		byToken:   map[string]string{},
+		byName:    map[string]string{},
+		byTokenID: map[string]string{},
+		file:      filename,
 	}
 	if filename != "" {
 		if err := s.load(); err != nil {
@@ -165,6 +221,25 @@ func (s *Store) index(u *User) {
 	}
 	if u.TokenHash != "" {
 		s.byToken[u.TokenHash] = u.ID
+	}
+	// Every named token's hash resolves to its owner too (A2); every
+	// token id is indexed for cross-user revoke checks.
+	for i := range u.Tokens {
+		if h := u.Tokens[i].Hash; h != "" {
+			s.byToken[h] = u.ID
+		}
+		if id := u.Tokens[i].ID; id != "" {
+			s.byTokenID[id] = u.ID
+		}
+	}
+}
+
+// deindexToken removes one token's hash from byToken. Caller holds the
+// lock. A hash that is another user's active hash is never seen here:
+// AddToken refuses duplicates across users.
+func (s *Store) deindexToken(u *User, h string) {
+	if h != "" && s.byToken[h] == u.ID {
+		delete(s.byToken, h)
 	}
 }
 
@@ -284,20 +359,91 @@ func (s *Store) UserByFingerprint(fp string) *User {
 	return &cp
 }
 
-// UserByToken resolves a bearer token to a user by its hash.
-func (s *Store) UserByToken(token string) *User {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	id, ok := s.byToken[s.hashSecret(token)]
+// hashTokenIndex looks up the user id for a token hash and updates the
+// matching token's last-used stamp when it is later than the stored one
+// (an earlier stamp must never move back). Caller holds the lock.
+// Returns the user id; ok is false when the hash resolves to nothing.
+func (s *Store) hashTokenIndex(h string) (string, bool) {
+	id, ok := s.byToken[h]
 	if !ok {
-		return nil
+		return "", false
 	}
 	u := s.users[id]
 	if u == nil {
+		return "", false
+	}
+	// The stamp moves only when the stored one is older than
+	// lastUsedResolution: every request authenticates through here, and
+	// a users-file write per second per token would serialise them.
+	now := nowRFC3339()
+	stale := nowUTC().Add(-lastUsedResolution).Format(time.RFC3339)
+	stamped := false
+	if u.TokenHash == h && u.LastUsedAt < stale {
+		u.LastUsedAt = now
+		stamped = true
+	}
+	for i := range u.Tokens {
+		if u.Tokens[i].Hash == h && u.Tokens[i].LastUsedAt < stale {
+			u.Tokens[i].LastUsedAt = now
+			stamped = true
+		}
+	}
+	if stamped && s.file != "" {
+		// Best-effort: a failed write must not fail the auth this call
+		// answered; the stamp is retried on the next use.
+		_ = s.save()
+	}
+	return id, true
+}
+
+// UserByToken resolves a bearer token to a user by its hash. An expired
+// token (ExpiresAt set and past, A2) authenticates nobody; its record is
+// never updated.
+func (s *Store) UserByToken(token string) *User {
+	s.mu.RLock()
+	id, ok := s.byToken[s.hashSecret(token)]
+	var u *User
+	if ok {
+		u = s.users[id]
+		if u == nil {
+			ok = false
+		}
+	}
+	s.mu.RUnlock()
+	if !ok || u == nil {
 		return nil
 	}
-	cp := *u
-	return &cp
+	if s.tokenHashExpired(u, s.hashSecret(token)) {
+		return nil
+	}
+	s.mu.Lock()
+	id, _ = s.hashTokenIndex(s.hashSecret(token))
+	s.mu.Unlock()
+	if id == "" {
+		return nil
+	}
+	return s.UserByID(id)
+}
+
+// tokenHashExpired reports whether the given hash belongs to a token
+// (the legacy one or a named one of u) whose ExpiresAt has passed.
+// Caller holds no lock; it re-reads under RLock.
+func (s *Store) tokenHashExpired(u *User, hash string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now().UTC()
+	if u.TokenHash == hash {
+		// The legacy token never expires.
+		return false
+	}
+	for _, t := range u.Tokens {
+		if t.Hash == hash {
+			return t.expired(now)
+		}
+	}
+	// Not found: treat as expired so a stale index entry never
+	// authenticates after a revoke raced the lookup.
+	return true
 }
 
 // AddFingerprint attaches another SSH key to a user.
@@ -357,6 +503,14 @@ func (s *Store) RemoveUser(userID string) error {
 	}
 	if u.TokenHash != "" {
 		delete(s.byToken, u.TokenHash)
+	}
+	for _, t := range u.Tokens {
+		if t.Hash != "" {
+			delete(s.byToken, t.Hash)
+		}
+		if t.ID != "" {
+			delete(s.byTokenID, t.ID)
+		}
 	}
 	delete(s.byName, u.Name)
 	delete(s.users, userID)
@@ -426,6 +580,120 @@ func (s *Store) LLMKeyOK(userID, llmKey string) bool {
 	return subtle.ConstantTimeCompare([]byte(u.LLMKeyHash), []byte(s.hashSecret(llmKey))) == 1
 }
 
+// AddToken mints a new named token for a user (A2, unified auth #138).
+// It returns the secret, which the caller must show exactly once — only
+// its hash is stored, computed with the store's hashSecret like every
+// other secret. A positive ttl gives the token an expiry (ExpiresAt;
+// ttl <= 0 means it never expires). The name is unique per user; the
+// legacy field's name is reserved while the legacy token (TokenHash)
+// is still set, so its ListTokens entry cannot be shadowed.
+func (s *Store) AddToken(userID, name string, ttl time.Duration) (string, TokenRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.users[userID]
+	if u == nil {
+		return "", TokenRecord{}, fmt.Errorf("no such user")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", TokenRecord{}, fmt.Errorf("token name is required")
+	}
+	if len(name) > 64 {
+		return "", TokenRecord{}, fmt.Errorf("token name too long (max 64)")
+	}
+	if name == defaultTokenName && u.TokenHash != "" {
+		return "", TokenRecord{}, fmt.Errorf("token name %q is reserved for the user's existing token", defaultTokenName)
+	}
+	for _, t := range u.Tokens {
+		if t.Name == name {
+			return "", TokenRecord{}, fmt.Errorf("token name %q already exists", name)
+		}
+	}
+	var secretB [32]byte
+	if _, err := rand.Read(secretB[:]); err != nil {
+		return "", TokenRecord{}, fmt.Errorf("generate token: %w", err)
+	}
+	secret := "sdt-" + hex.EncodeToString(secretB[:])
+	rec := TokenRecord{
+		ID:        newTokenID(),
+		Name:      name,
+		Hash:      s.hashSecret(secret),
+		CreatedAt: nowRFC3339(),
+	}
+	if ttl > 0 {
+		rec.ExpiresAt = nowUTC().Add(ttl).Format(time.RFC3339)
+	}
+	u.Tokens = append(u.Tokens, rec)
+	s.byToken[rec.Hash] = u.ID
+	s.byTokenID[rec.ID] = u.ID
+	if err := s.save(); err != nil {
+		// Do not leave a half-registered token behind: index and record
+		// are rolled back so a retry cannot fail with "already exists".
+		u.Tokens = u.Tokens[:len(u.Tokens)-1]
+		delete(s.byToken, rec.Hash)
+		delete(s.byTokenID, rec.ID)
+		return "", TokenRecord{}, err
+	}
+	return secret, rec, nil
+}
+
+// ListTokens returns a user's named tokens (A2), sorted by creation
+// order (the store's), oldest first. The legacy TokenHash field is
+// presented as the token named "default". Hash is never populated.
+// An unknown user returns an error.
+func (s *Store) ListTokens(userID string) ([]TokenRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	u := s.users[userID]
+	if u == nil {
+		return nil, fmt.Errorf("no such user")
+	}
+	out := make([]TokenRecord, 0, len(u.Tokens)+1)
+	if u.TokenHash != "" {
+		out = append(out, TokenRecord{
+			ID: legacyTokenID, Name: defaultTokenName, CreatedAt: u.CreatedAt,
+			LastUsedAt: u.LastUsedAt,
+		})
+	}
+	out = append(out, u.Tokens...)
+	return out, nil
+}
+
+// RevokeToken removes one of a user's tokens by id (A2). Revoking the
+// legacy "default" token clears the user's legacy TokenHash field
+// (their original single token stops working immediately); revoking a
+// named token drops its record. An unknown token id — never minted,
+// already revoked, or another user's — is ErrTokenNotFound, so the API
+// answers all three alike and no caller can probe another user's ids.
+func (s *Store) RevokeToken(userID, tokenID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.users[userID]
+	if u == nil {
+		return fmt.Errorf("no such user")
+	}
+	if tokenID == legacyTokenID {
+		if u.TokenHash != "" {
+			s.deindexToken(u, u.TokenHash)
+			u.TokenHash = ""
+			u.LastUsedAt = ""
+			return s.save()
+		}
+		return ErrTokenNotFound
+	}
+	for i := range u.Tokens {
+		if u.Tokens[i].ID != tokenID {
+			continue
+		}
+		h := u.Tokens[i].Hash
+		u.Tokens = append(u.Tokens[:i], u.Tokens[i+1:]...)
+		s.deindexToken(u, h)
+		delete(s.byTokenID, tokenID)
+		return s.save()
+	}
+	return ErrTokenNotFound
+}
+
 // Count returns the number of users (used for the bootstrap check).
 func (s *Store) Count() int {
 	s.mu.RLock()
@@ -437,6 +705,18 @@ func newID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return "u-" + hex.EncodeToString(b)
+}
+
+// newTokenID mints a named token's public identifier (A2). It is not a
+// secret; the secret is returned by AddToken and shown once.
+func newTokenID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "t-" + hex.EncodeToString(b)
+}
+
+func nowUTC() time.Time {
+	return time.Now().UTC()
 }
 
 func nowRFC3339() string {

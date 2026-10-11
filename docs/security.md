@@ -197,6 +197,14 @@ Known/accepted residuals:
 - **Shares** are scoped by mode (`ssh` = SSH attach, `/endpoint` and
   `/prompt`; `http` = exec/stream/stat/proxy and `GET` of the lease),
   expire, and are revocable on the spot.
+- **Named per-user tokens (#138 A2)** are stored the same way as the
+  single token they extend: only the store's salted hash of each secret
+  is kept in `users.json`, the secret itself is answered once at mint
+  and never again — by the API, by the logs (which record a mint or a
+  revoke with the token's name and id only) or by the token listing.
+  A token may carry an expiry; an expired one authenticates nobody.
+  Revoking one (or the original "default" token) takes effect
+  immediately, everywhere the store is consulted.
 
 ## Token/key storage
 
