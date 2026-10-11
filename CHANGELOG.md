@@ -279,17 +279,15 @@ serve answers `429 box_full`. Upgrading from 2.9? See
     to that hold's expiry (the hold was what kept it alive in 2.9, so
     the first 3.0 sweep must not delete it at once — spoond-k0uz R3-1),
     and clears the old hold columns (`hold_expires_at`, `hold_set_at`,
-    `hold_ttl`). The 2.9 window's pool workers are held by `pool-spawn`,
-    so `POST /api/admin/unpin-by-holder?holder_prefix=pool:` (admin
-    token) unpins leases by holder label; `pool-spawn` needs no change.
+    `hold_ttl`). An admin can unpin leases by holder label with
+    `POST /api/admin/unpin-by-holder?holder_prefix=<prefix>`.
     Clearing the hold columns is the **rollback story**: a 2.9 binary
     rolled back onto this database reads every row as unheld instead of
     treating an unexpired hold as live again (spoond-k0uz M6, see
     `docs/operations.md`).
-  - **Pre-deploy gate:** clients that kept leases alive with a holder
-    (Honey) must create them with `"pinned": true` (plus
-    `"persistent": true` if they must outlive `MaxTTL`) before 3.0
-    deploys — `PUT /holder` no longer renews anything, and a
+  - **Before upgrading:** clients that kept leases alive with a holder
+    must create them with `"pinned": true` (plus `"persistent": true`
+    if they must outlive `MaxTTL`) — `PUT /holder` no longer renews anything, and a
     non-persistent lease cannot be extended (spoond-k0uz R3-1).
   - **The one clock only ever releases a suspended lease
     (spoond-k0uz R3-3).** A running lease with a stale `paused_at` (the
