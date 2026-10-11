@@ -12,7 +12,24 @@ summarised from README "Status".
 
 ### Added
 
-- **Admin users reach `/api/admin/*` (#138 A1).** The admin routes (`drain`, `undrain`, `reconcile`, `unpin-by-holder`) accept an identity-store admin user's bearer token as well as `ADMIN_TOKEN`; a non-admin user's token stays `401` and `ADMIN_TOKEN` works unchanged.
+- **Named, revocable, expiring API tokens per user (#138 A2).** A user
+  can hold several named bearer tokens beside its original one:
+  `POST /api/users/{id}/tokens {"name","ttl_secs"?}` mints one and
+  answers the secret once (`201 {id,name,token,created_at,
+  expires_at}`), `GET /api/users/{id}/tokens` lists id, name, created,
+  expires and last used — never secrets — and
+  `DELETE /api/users/{id}/tokens/{token_id}` revokes (`204`). The user
+  itself and an admin manage a user's tokens; another user gets `404`,
+  a legacy consumer token `403`, like the other user routes. A token
+  with a `ttl_secs` expiry stops authenticating the moment it passes.
+  Every mint and revoke is logged with the token's name and id, never
+  its secret.
+- Names are unique per user and `default` is reserved while the
+  original token is still set (`409` otherwise).
+- **Admin users reach `/api/admin/*` (#138 A1).** The admin routes
+  (`drain`, `undrain`, `reconcile`, `unpin-by-holder`) accept an
+  identity-store admin user's bearer token as well as `ADMIN_TOKEN`; a
+  non-admin user's token stays `401` and `ADMIN_TOKEN` works unchanged.
 
 ## [3.2.0] - 2026-10-11
 

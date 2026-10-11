@@ -2518,6 +2518,63 @@ revokes (the owner's leases revert to the open gateway). The key is
 stored as a salted hash and never returned in responses. `404` unknown
 user; `403` non-admin.
 
+### `POST /api/users/{id}/tokens` — mint a named API token (#138 A2)
+
+Mints one more named bearer token for a user and answers its secret
+exactly once — only the hash is stored. Request:
+`{"name": "ci"}`, `"ttl_secs"` optional (0 or omitted = never
+expires; negative or absurd is `400`). Response `201 Created`:
+
+```json
+{"id": "t-…", "name": "ci", "token": "sdt-…",
+ "created_at": "2026-10-11T12:00:00Z", "expires_at": ""}
+```
+
+A name is unique per user (`409` "already exists"); the name `default`
+is reserved (`409`) while the user's original token is still set — see
+below. The secret is never stored in the clear, never logged and never
+returned again: lose it, mint another.
+
+**Who.** The user itself and an admin. Another authenticated user gets
+`404`, the same answer as an unknown id (they must not learn whether
+the user exists); a legacy consumer token (no identity user) gets
+`403`; a missing or unknown bearer token is `401`. The same rules
+apply to the two routes below.
+
+### `GET /api/users/{id}/tokens` — list a user's tokens
+
+`{"tokens": [{"id","name","created_at","expires_at","last_used_at"}]}` —
+oldest first, **never any secret**. The user's original single token
+(the `token` field `POST /api/users` set, or the SSH-era per-user
+token) is listed as the token named `default` with the id `t-default`,
+created when the user was. `last_used_at` is stamped when the token
+authenticates a request.
+
+### `DELETE /api/users/{id}/tokens/{token_id}` — revoke a token
+
+`204 No Content`. The token stops authenticating immediately, and a
+minted one cannot be resurrected — mint a new one under the same name.
+Revoking `default` (id `t-default`) takes away the user's original
+single token, the same thing rotating `token` via
+`POST /api/users` used to be the only way to do. Revoking an unknown
+or already-revoked id is idempotent (`204`); a token id that belongs to
+another user reads `404`, like an unknown one.
+
+An **expired** token authenticates nobody (`401`) and cannot be
+revived; it still shows on the list with its expiry until revoked.
+Mints and revokes are logged with the token's name and id, never its
+secret.
+
+```sh
+curl -fsS -X POST "$SPOOND_URL/api/users/$UID/tokens" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"ci","ttl_secs":86400}'
+curl -fsS "$SPOOND_URL/api/users/$UID/tokens" \
+  -H "Authorization: Bearer $TOKEN"
+curl -fsS -X DELETE "$SPOOND_URL/api/users/$UID/tokens/$TOKEN_ID" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ### `GET /api/identity-status`
 
 `{"identity_store": true|false}` — tells the SSH gateway whether the

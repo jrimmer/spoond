@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -104,6 +105,11 @@ type User struct {
 	// (unknown JSON fields are ignored) and the next save drops them.
 	MaxTTL int `json:"max_ttl"` // max lease TTL seconds (0 = global max applies)
 }
+
+// ErrTokenOtherUser reports that a token id exists but belongs to
+// another user (RevokeToken); revoking it from the wrong user is
+// refused instead of silently succeeding.
+var ErrTokenOtherUser = errors.New("token belongs to another user")
 
 // Store is a thread-safe user registry with optional JSON persistence.
 type Store struct {
@@ -684,10 +690,10 @@ func (s *Store) RevokeToken(userID, tokenID string) error {
 		return s.save()
 	}
 	// No matching token. Not an error, unless the id belongs to another
-	// user's token — revoking across users would be surprising to treat
-	// as success.
+	// user's token — the API revokes would otherwise answer 204 and
+	// tell a caller which foreign token ids exist.
 	if s.byTokenID[tokenID] != "" && s.byTokenID[tokenID] != userID {
-		return fmt.Errorf("token %s belongs to another user", tokenID)
+		return ErrTokenOtherUser
 	}
 	return nil
 }
