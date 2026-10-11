@@ -815,7 +815,7 @@ func TestSanitizeReplacesControlChars(t *testing.T) {
 
 // TestStateGlyphAndStyle: the glyphs the leases panel draws per run
 // state, and the styles they carry — the suspend reason recolours a
-// suspended glyph (taken back warn, idle-suspended dim), the pin is
+// suspended glyph (taken back warn, idle-suspended dim, any other plain), the pin is
 // not a state.
 func TestStateGlyphAndStyle(t *testing.T) {
 	cases := []struct {
@@ -825,10 +825,10 @@ func TestStateGlyphAndStyle(t *testing.T) {
 	}{
 		{LeaseRow{State: "running"}, '▶', "ok"},
 		{LeaseRow{State: "recovered"}, '⭘', "ok"},
-		{LeaseRow{State: "suspended"}, '‖', "warn"},
+		{LeaseRow{State: "suspended"}, '‖', "text"},
 		{LeaseRow{State: "lost"}, '■', "bad"},
 		{LeaseRow{State: "running", Pinned: true}, '▶', "ok"},
-		{LeaseRow{State: "suspended", Pinned: true}, '‖', "warn"},
+		{LeaseRow{State: "suspended", Pinned: true}, '‖', "text"},
 		{LeaseRow{State: "suspended", TakenBack: true}, '‖', "warn"},
 		{LeaseRow{State: "suspended", IdleSuspended: true}, '‖', "dim"},
 	}

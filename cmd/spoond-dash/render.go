@@ -82,9 +82,10 @@ func stateGlyph(r LeaseRow) rune {
 }
 
 // stateGlyphStyle is the style the state glyph is drawn in. The run
-// states keep their colours (running/recovered ok, suspended warn, lost
-// bad); the suspend reason recolours a suspended lease's glyph: taken
-// back warn, idle-suspended dim, any other suspend warn.
+// states keep their colours (running/recovered ok, lost bad); the
+// suspend reason colours a suspended lease's glyph, so the one spoond
+// did on its own stands out: taken back warn, idle-suspended dim, any
+// other suspend (its owner's, a drain) plain text.
 func stateGlyphStyle(r LeaseRow) string {
 	switch {
 	case r.TakenBack:
@@ -96,7 +97,7 @@ func stateGlyphStyle(r LeaseRow) string {
 	case "lost":
 		return "bad"
 	case "suspended":
-		return "warn"
+		return "text"
 	default:
 		return "ok"
 	}
