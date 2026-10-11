@@ -119,7 +119,9 @@ Request:
 | `snapshot` | string | *(none)* | start the lease from a named snapshot version instead of the image's current build: `name` (latest) or `name@v`. The version must exist for the caller (`404 not_found`). The lease is never served from the warm pool, its memory is the snapshot's `memory_mb` for admission, and it is stamped with the version so retention never drops it — see [Start from a snapshot](#start-from-a-snapshot). A version that cannot run on this host answers `409 cannot_start` |
 | `ttl` | int | `DEFAULT_TTL_SECS` | seconds; capped at `MAX_TTL_SECS` and at the user's `max_ttl` |
 | `persistent` | bool | `false` | not TTL-swept; supports keepalive, suspend/resume, checkpoint |
-| `memory_mib` | int | `0` | **must be `0` or exactly the image's `memory_mb`** — memory is fixed per image (a snapshot restores with its build's RAM). For a create with `snapshot`, memory is fixed by the snapshot: `0` or exactly the snapshot's `memory_mb`, else `400`. Any other value is `400`. |
+| `size` | string | *(image default)* | a size preset by name (`GET /api/sizes`, e.g. `small`, `medium`, `large`, `xlarge`). Not with `vcpu`/`memory_mb` (`400 invalid_size`) |
+| `vcpu` | int | image default | the VM's vCPU count: `1` or even, at most `MAX_LEASE_VCPU`. Never charged: fair shares count memory only |
+| `memory_mb` | int | image default | the VM's memory in MiB: even, at least the image's `min_memory_mb` (`GET /api/images?detail=1`), at most `MAX_LEASE_MEMORY_MB` and the box's VM memory. It is the lease's charge for admission and fair shares. `memory_mib` is accepted as its old name |
 | `network` | string | *(ignored)* | accepted for compatibility |
 | `init_cmd` | string | *(ignored)* | accepted for compatibility |
 | `network_policy` | string | `restricted` | `none` \| `lan` \| `internet` \| `restricted` |
@@ -133,6 +135,16 @@ Request:
 | `idle_suspend` | int | host default | the lease's own idle reclamation threshold in seconds: `0` = never; `60`–`604800` = suspend the lease after that long without activity (exec, stream, proxy, keepalive, guest heartbeat, files, guest port dial), resuming it on the next call. Omitted = the host default (`IDLE_SUSPEND_DEFAULT_SECS`, itself `0` = never — see [Idle reclamation](#idle-reclamation)). Anything else is `400`, and a non-zero value needs a persistent lease (`400`) — a non-persistent lease has nothing to suspend into |
 | `wait` | int | `0` | seconds a create refused for a **waitable** reason may wait for room instead of failing (see [Queued admission](#queued-admission)). `0` keeps the immediate refusal; above `0` it is capped at `MAX_ADMIT_WAIT_SECS` (`0` disables waiting, the field is accepted and ignored); negative is `400` |
 | `secrets` | object | *(none)* | `{name: value}` delivered as files under `/run/secrets` in the guest — see [Secrets](#secrets). At most 32 secrets and 64 KiB of values per request; names match `[A-Za-z0-9_.-]{1,64}`. Values are never stored, logged or returned: they live in the backend's memory for the lease's life and are lost on a backend restart |
+
+A lease keeps its size for life (pause, resume, restart, clone, fork,
+restore, recovery). A size with a warm build (the image default, or a
+preset listed in the image's `warm_sizes`) starts in milliseconds from
+its memory snapshot (`"start": "warm"`). Any other size boots the
+image's root filesystem at that size in a few seconds (`"start":
+"cold"`). A bad size answers `400` with `code: invalid_size` before
+anything starts. A create with `snapshot` keeps the snapshot's size:
+`size` or `vcpu`, or a `memory_mb` other than the snapshot's, is `400
+invalid_size`.
 
 Response `201 Created`:
 

@@ -2178,8 +2178,22 @@ func (s *Service) sizedStart(ctx context.Context, l *Lease, img store.ImageRow, 
 
 // warmSizeBuild returns the image's ready warm build of exactly this
 // size, if one exists (#151 Z3 warm_sizes).
+// A failed lookup, or a recorded build that is gone or not ready, falls
+// back to a cold boot: the size is still served, only slower.
 func (s *Service) warmSizeBuild(ctx context.Context, img store.ImageRow, vcpu, memoryMB int) (store.BuildRow, bool) {
-	return store.BuildRow{}, false // filled in when Z3's image_sizes lands
+	row, err := s.db.ImageSizeFor(ctx, img.Name, vcpu, memoryMB)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log.Printf("sizes: warm build lookup for %s %d/%d: %v; starting cold", img.Name, vcpu, memoryMB, err)
+		}
+		return store.BuildRow{}, false
+	}
+	b, err := s.db.GetBuild(ctx, row.BuildID)
+	if err != nil || b.State != "ready" || b.VCPU != vcpu || b.MemoryMB != memoryMB {
+		s.log.Printf("sizes: warm build %s for %s/%s unusable (state %q, err %v); starting cold", row.BuildID, img.Name, row.Size, b.State, err)
+		return store.BuildRow{}, false
+	}
+	return b, true
 }
 
 // startShape is the size createSandbox starts a VM at, and whether it
@@ -2639,6 +2653,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 			lease.HostIP = row.HostIP
 			lease.ExposedIP = row.HostIP
 			lease.BuildID = row.BuildID
+			lease.Start = "warm" // a pooled sandbox resumed the image's snapshot (#151)
 			lease.pooled = true
 			// The lease row will claim the sandbox below; keep it safe
 			// until then, then release the in-flight hold.

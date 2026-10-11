@@ -264,3 +264,23 @@ func TestGrantAtRequestedSize(t *testing.T) {
 		t.Fatalf("default-size grant: filesystem_boot %v start %q, want warm", req.FilesystemBoot, l3.Start)
 	}
 }
+
+// TestNamedSnapshotRecordsLeaseSize (#151 Z4): a named snapshot of a
+// lease running at a custom size records that size, not its root
+// template build's, so a start from it is charged what it resumes at.
+func TestNamedSnapshotRecordsLeaseSize(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "mid", 1024)
+	ctx := context.Background()
+	l, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, persistent: true, memoryMB: 3072})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	row, _, nerr := svc.saveNamedSnapshot(ctx, l, "big", "", 0)
+	if nerr != nil {
+		t.Fatalf("save: %v", nerr)
+	}
+	if row.MemoryMB != 3072 {
+		t.Fatalf("named snapshot memory_mb = %d, want the lease's 3072", row.MemoryMB)
+	}
+}

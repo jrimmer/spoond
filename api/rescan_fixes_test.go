@@ -87,23 +87,22 @@ func TestF4CapabilityNoFriendlyNames(t *testing.T) {
 	}
 }
 
-// TestF6MemoryFixedPerImage: memory_mib must be 0 or the image's memory
-// (D16); anything else is a 400.
+// TestF6MemoryFixedPerImage (superseded by #151): memory is no longer
+// fixed per image, but a malformed memory_mib is still a 400, now with
+// code invalid_size, and the image's own memory and 0 still create.
 func TestF6MemoryFixedPerImage(t *testing.T) {
 	h, jasonTok := secServer2(t)
 	rec, body := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":999999}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("create with wrong memory: %d %v", rec.Code, body)
+	if rec.Code != http.StatusBadRequest || body["code"] != "invalid_size" {
+		t.Fatalf("create with malformed memory: %d %v", rec.Code, body)
 	}
-	if !strings.Contains(body["error"].(string), "memory is fixed per image") {
+	if !strings.Contains(body["error"].(string), "must be even") {
 		t.Fatalf("error body: %v", body["error"])
 	}
-	// The image's own memory is accepted.
 	rec2, body2 := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":2048}`)
 	if rec2.Code != http.StatusCreated {
 		t.Fatalf("create with the image's memory: %d %v", rec2.Code, body2)
 	}
-	// And 0 (unset) is fine.
 	rec3, body3 := doUsersReq(t, h, "POST", "/api/sandboxes", jasonTok, `{"image":"py-base","ttl":60,"memory_mib":0}`)
 	if rec3.Code != http.StatusCreated {
 		t.Fatalf("create without memory: %d %v", rec3.Code, body3)

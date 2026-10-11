@@ -342,13 +342,11 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 		s.log.Printf("snapshot: lease %s was released during its save; build %s left unreferenced", l.ID, b.BuildID)
 		return store.NamedSnapshotRow{}, false, errLeaseNotFound()
 	}
-	// Walk to the template build at the root for the image_build_id and
-	// the versions.
-	imageBuildID, rootBuild, err := s.namedSnapshotBuildRoot(ctx, b.BuildID)
+	// Walk to the template build at the root for the image_build_id.
+	imageBuildID, _, err := s.namedSnapshotBuildRoot(ctx, b.BuildID)
 	if err != nil {
 		s.log.Printf("snapshot: build chain of %s: %v", b.BuildID, err)
 		imageBuildID = b.BuildID
-		rootBuild = b
 	}
 	// Enforce the owner's byte budget against the named snapshot's size,
 	// alongside kept checkpoints.
@@ -371,14 +369,17 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 		s.saveBeforeInsert(l.Owner, name, key)
 	}
 	row := store.NamedSnapshotRow{
-		Owner:               l.Owner,
-		Name:                name,
-		BuildID:             b.BuildID,
-		IdempotencyKey:      key,
-		SourceLeaseID:       l.ID,
-		Image:               l.Image,
-		ImageBuildID:        imageBuildID,
-		MemoryMB:            rootBuild.MemoryMB,
+		Owner:          l.Owner,
+		Name:           name,
+		BuildID:        b.BuildID,
+		IdempotencyKey: key,
+		SourceLeaseID:  l.ID,
+		Image:          l.Image,
+		ImageBuildID:   imageBuildID,
+		// The snapshot build records the lease's own size (#151 Z1),
+		// which a custom-sized lease does not share with its root
+		// template build: a start from this version resumes at it.
+		MemoryMB:            b.MemoryMB,
 		SizeBytes:           b.SizeBytes,
 		EnvdVersion:         b.EnvdVersion,
 		FirecrackerVersion:  b.FirecrackerVersion,
