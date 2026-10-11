@@ -535,6 +535,35 @@ func (s metricsSink) Notification(webhook, severity, result string) {
 	s.m.Notifications.WithLabelValues(webhook, severity, result).Inc()
 }
 
+// newMainSecretReader builds Main's secret closure (#137 C2): the value
+// comes from settings.Get — NAME= in the environment, or NAME_FILE=
+// naming a value file whose content, one trailing newline trimmed, is
+// the value — and a failure (both forms set, unreadable file) goes to
+// fatal, failing startup like the type check. A file-resolved secret is
+// recorded in fileFrom (GET /api/admin/config reports it set with the
+// hidden-from-file constant) and its file's mode is warned about once
+// per name through settings.FileModeWarning. printf and fatal are
+// injected (log.Printf and log.Fatal in production) so tests can pin
+// the behavior without killing the process.
+func newMainSecretReader(fileFrom map[string]string, warned map[string]bool, printf func(string, ...any), fatal func(...any)) func(string) string {
+	return func(name string) string {
+		v, err := settings.Get(name, os.Getenv, os.ReadFile)
+		if err != nil {
+			fatal(err)
+		}
+		if file := settings.SecretFileOf(name); file != "" && os.Getenv(name) == "" && os.Getenv(file) != "" {
+			fileFrom[name] = os.Getenv(file)
+			if !warned[name] {
+				warned[name] = true
+				if w := settings.FileModeWarning(os.Getenv(file)); w != "" {
+					printf("warning: %s", w)
+				}
+			}
+		}
+		return v
+	}
+}
+
 func Main(args []string) int {
 	// Typed settings, checked before anything else (2026-10-11
 	// validated-config design item 1): every backend setting that is set
@@ -559,22 +588,7 @@ func Main(args []string) int {
 	// so GET /api/admin/config reports them set ("(hidden, from file)").
 	fileFrom := map[string]string{}
 	warned := map[string]bool{} // names whose file mode already warned (once per name)
-	secret := func(name string) string {
-		v, err := settings.Get(name, os.Getenv, os.ReadFile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if file := settings.SecretFileOf(name); file != "" && os.Getenv(name) == "" && os.Getenv(file) != "" {
-			fileFrom[name] = os.Getenv(file)
-			if !warned[name] {
-				warned[name] = true
-				if w := settings.FileModeWarning(os.Getenv(file)); w != "" {
-					log.Printf("warning: %s", w)
-				}
-			}
-		}
-		return v
-	}
+	secret := newMainSecretReader(fileFrom, warned, log.Printf, log.Fatal)
 	// Every secret resolves here, before anything else runs — a broken
 	// one (both forms, unreadable file) fails startup like the type
 	// check, and the mode warnings land before any listener opens.

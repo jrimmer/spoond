@@ -3,6 +3,7 @@ package spoondbackend
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v3/api"
-	"github.com/jrimmer/spoond/v3/settings"
 	"github.com/jrimmer/spoond/v3/sizes"
 )
 
@@ -393,14 +393,12 @@ func TestBackendValidateEntryChildren(t *testing.T) {
 	}
 }
 
-// TestSecretGetWarnsMode (#137 C2, helper level): the Main secret
-// closure's registry and warning behavior — Get's result passed
-// through, a NAME_FILE-resolved value recorded in fileFrom, a
-// group-readable file warned about once, an env-set secret recorded
-// nowhere. The closure itself is inline in Main (it log.Fatal's), so
-// this test reconstructs it over settings.Get/FileModeWarning exactly
-// as Main wires them and asserts the pieces the child tests cannot see
-// (the registry contents, the warning's once-per-name).
+// TestSecretGetWarnsMode (#137 C2, helper level): Main's own secret
+// reader — newMainSecretReader, the closure Main wires — passes Get's
+// result through, records a NAME_FILE-resolved secret in fileFrom,
+// warns about a group-readable file once, records an env-set secret
+// nowhere, and fatal's on a both-set spelling (the injected fatal is
+// counted; production's log.Fatal would exit).
 func TestSecretGetWarnsMode(t *testing.T) {
 	dir := t.TempDir()
 	tokFile := filepath.Join(dir, "admin-token")
@@ -411,31 +409,21 @@ func TestSecretGetWarnsMode(t *testing.T) {
 	if err := os.WriteFile(looseFile, []byte("loose\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env := map[string]string{
-		"ADMIN_TOKEN_FILE":   tokFile,
-		"METRICS_TOKEN_FILE": looseFile,
-		"EVENTS_TOKEN":       "env-tok",
-	}
-	get := func(k string) string { return env[k] }
+	t.Setenv("ADMIN_TOKEN", "")
+	t.Setenv("ADMIN_TOKEN_FILE", tokFile)
+	t.Setenv("METRICS_TOKEN", "")
+	t.Setenv("METRICS_TOKEN_FILE", looseFile)
+	t.Setenv("EVENTS_TOKEN", "env-tok")
+	t.Setenv("EVENTS_TOKEN_FILE", "")
 	fileFrom := map[string]string{}
 	warned := map[string]bool{} // names whose file mode already warned (once per name)
 	var warns int
-	secret := func(name string) string {
-		v, err := settings.Get(name, get, os.ReadFile)
-		if err != nil {
-			t.Fatalf("Get(%s): %v", name, err)
-		}
-		if file := settings.SecretFileOf(name); file != "" && get(name) == "" && get(file) != "" {
-			fileFrom[name] = get(file)
-			if !warned[name] {
-				warned[name] = true
-				if w := settings.FileModeWarning(get(file)); w != "" {
-					warns++
-				}
-			}
-		}
-		return v
-	}
+	var fatals int
+	var fatalMsg string
+	secret := newMainSecretReader(fileFrom, warned,
+		func(format string, args ...any) { warns++ },
+		func(args ...any) { fatals++; fatalMsg = fmt.Sprint(args...) })
+
 	if got := secret("ADMIN_TOKEN"); got != "from-file" {
 		t.Fatalf("ADMIN_TOKEN = %q, want the file's trimmed value", got)
 	}
@@ -458,6 +446,17 @@ func TestSecretGetWarnsMode(t *testing.T) {
 	secret("METRICS_TOKEN")
 	if warns != 1 {
 		t.Fatalf("warnings after re-read = %d, want still 1", warns)
+	}
+	if fatals != 0 {
+		t.Fatalf("%d fatals for the three working secrets, want 0", fatals)
+	}
+
+	// Both forms set: the fatal fires with settings.Get's message.
+	t.Setenv("ADMIN_TOKEN", "env-tok")
+	t.Setenv("ADMIN_TOKEN_FILE", tokFile)
+	secret("ADMIN_TOKEN")
+	if fatals != 1 || !strings.Contains(fatalMsg, "ADMIN_TOKEN and ADMIN_TOKEN_FILE are both set") {
+		t.Fatalf("both forms fatal = %d %q, want 1 naming both spellings", fatals, fatalMsg)
 	}
 }
 
