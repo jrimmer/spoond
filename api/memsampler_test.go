@@ -15,13 +15,13 @@ import (
 // in the collector's output shape, plus one unrelated family and a
 // gone-sandbox series.
 func memMetricsDoc(samples map[string]float64) string {
-	out := "# HELP e2b_sandbox_ram_used_bytes used.\n# TYPE e2b_sandbox_ram_used_bytes gauge\n"
+	out := "# HELP e2b_sandbox_ram_used used.\n# TYPE e2b_sandbox_ram_used gauge\n"
 	for sid, v := range samples {
-		out += fmt.Sprintf("e2b_sandbox_ram_used_bytes{node_id=\"node-a\",sandbox_id=%q,team_id=\"t1\"} %g\n", sid, v)
+		out += fmt.Sprintf("e2b_sandbox_ram_used{node_id=\"node-a\",sandbox_id=%q,team_id=\"t1\"} %g\n", sid, v)
 	}
-	out += "# HELP e2b_sandbox_ram_total_bytes total.\n# TYPE e2b_sandbox_ram_total_bytes gauge\n"
+	out += "# HELP e2b_sandbox_ram_total total.\n# TYPE e2b_sandbox_ram_total gauge\n"
 	for sid := range samples {
-		out += fmt.Sprintf("e2b_sandbox_ram_total_bytes{node_id=\"node-a\",sandbox_id=%q,team_id=\"t1\"} 4294967296\n", sid)
+		out += fmt.Sprintf("e2b_sandbox_ram_total{node_id=\"node-a\",sandbox_id=%q,team_id=\"t1\"} 4294967296\n", sid)
 	}
 	return out
 }

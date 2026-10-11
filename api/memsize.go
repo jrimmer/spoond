@@ -24,7 +24,10 @@ func mibCeil(bytes float64) int {
 
 // sizePresets returns the service's size presets (SIZE_PRESETS as
 // resolved at construction). Used by the lease row's size_hint.
-func (s *Service) sizePresets() []sizes.Preset { return s.cfg.SizePresets }
+func (s *Service) sizePresets() []sizes.Preset {
+	presets, _, _ := sizeLimitsOrDefault(s.cfg) // the defaults when unset
+	return presets
+}
 
 // leaseSizeHints computes the fields a lease row carries from its
 // measured memory: memory_used_mb, memory_peak_mb and size_hint (see

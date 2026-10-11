@@ -13,8 +13,10 @@ import (
 )
 
 // Measured memory (#130 R1): the orchestrator's OTEL collector serves
-// per-sandbox gauges `e2b_sandbox_ram_used_bytes{...,sandbox_id="…"}`
-// and `e2b_sandbox_ram_total_bytes{...}` in its Prometheus text output
+// per-sandbox gauges `e2b_sandbox_ram_used{...,sandbox_id="…"}` and
+// `e2b_sandbox_ram_total{...}` (bytes; an OTEL exporter that adds unit
+// suffixes names them `…_bytes`, which is accepted too) in its
+// Prometheus text output
 // (the same document OTEL_PROM_URL already feeds the /metrics
 // passthrough). A background sampler reads that document every
 // memSampleInterval (30 s), keeps the two families' per-sandbox values
@@ -30,8 +32,8 @@ const (
 	memSampleInterval = 30 * time.Second
 	// ramUsedMetric and ramTotalMetric are the two metric families the
 	// sampler parses; every other line is skipped.
-	ramUsedMetric  = "e2b_sandbox_ram_used_bytes"
-	ramTotalMetric = "e2b_sandbox_ram_total_bytes"
+	ramUsedMetric  = "e2b_sandbox_ram_used"
+	ramTotalMetric = "e2b_sandbox_ram_total"
 	// sandboxIDLabel is the label series carry that names the sandbox.
 	sandboxIDLabel = "sandbox_id"
 	// memSampleHTTPTimeout bounds one metrics fetch; a stuck collector
@@ -192,9 +194,9 @@ func parseOpenMetrics(body []byte) (used, total map[string]float64) {
 		}
 		fam := name[:lb]
 		switch fam {
-		case ramUsedMetric:
+		case ramUsedMetric, ramUsedMetric + "_bytes":
 			used[sid] = value
-		case ramTotalMetric:
+		case ramTotalMetric, ramTotalMetric + "_bytes":
 			total[sid] = value
 		}
 	}
