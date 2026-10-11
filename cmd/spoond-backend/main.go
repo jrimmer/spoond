@@ -149,6 +149,14 @@
 //	                  which crashes one lease and runs it through crash
 //	                  recovery (owner or admin; default off, the route
 //	                  then answers 404). For hosts that run crash suites.
+//	SIZE_PRESETS     the named VM sizes a lease may ask for, as
+//	                  name=vcpu:memory_mb,... (#151; default
+//	                  small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384;
+//	                  a malformed spec fails startup)
+//	MAX_LEASE_VCPU   the most vCPUs one lease's VM may be given (#151;
+//	                  default the host's CPU count)
+//	MAX_LEASE_MEMORY_MB  the most memory one lease's VM may be given
+//	                  (#151; default 32768)
 package spoondbackend
 
 import (
@@ -160,6 +168,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -171,6 +180,7 @@ import (
 	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
 	"github.com/jrimmer/spoond/v3/metrics"
 	"github.com/jrimmer/spoond/v3/notify"
+	"github.com/jrimmer/spoond/v3/sizes"
 	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate"
 	"github.com/jrimmer/spoond/v3/substrate/e2b"
@@ -290,6 +300,41 @@ func keptDiskWarnPct() float64 {
 		}
 	}
 	return notify.DefaultKeptDiskWarnPct
+}
+
+// sizeConfig reads the lease size settings (#151): SIZE_PRESETS (default
+// sizes.DefaultSpec), MAX_LEASE_VCPU (default the host's CPU count) and
+// MAX_LEASE_MEMORY_MB (default api.DefaultMaxLeaseMemoryMB). get reads
+// the environment (os.Getenv in production, a fake in tests). A
+// malformed preset spec or a limit that is not a positive integer is an
+// error, so a typo fails startup rather than silently sizing VMs by the
+// defaults.
+func sizeConfig(get func(string) string) (presets []sizes.Preset, maxVCPU, maxMemoryMB int, err error) {
+	spec := strings.TrimSpace(get("SIZE_PRESETS"))
+	if spec == "" {
+		spec = sizes.DefaultSpec
+	}
+	if presets, err = sizes.Parse(spec); err != nil {
+		return nil, 0, 0, fmt.Errorf("SIZE_PRESETS: %w", err)
+	}
+	limit := func(key string, def int) (int, error) {
+		v := strings.TrimSpace(get(key))
+		if v == "" {
+			return def, nil
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("%s: %q is not a positive integer", key, v)
+		}
+		return n, nil
+	}
+	if maxVCPU, err = limit("MAX_LEASE_VCPU", runtime.NumCPU()); err != nil {
+		return nil, 0, 0, err
+	}
+	if maxMemoryMB, err = limit("MAX_LEASE_MEMORY_MB", api.DefaultMaxLeaseMemoryMB); err != nil {
+		return nil, 0, 0, err
+	}
+	return presets, maxVCPU, maxMemoryMB, nil
 }
 
 // parseGuestDNS validates SPOOND_GUEST_DNS_ADDR: a comma-separated list
@@ -591,6 +636,13 @@ func Main(args []string) int {
 		log.Fatalf("JOB_MAX_RUNTIME: %v", err)
 	}
 
+	// Lease sizes (#151): the named presets a create may ask for, and the
+	// most vCPU and memory one lease's VM may be given.
+	sizePresets, maxLeaseVCPU, maxLeaseMemoryMB, err := sizeConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("lease sizes: %v", err)
+	}
+
 	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
 		PoolSize:                  poolSize,
 		DefaultTTL:                defaultTTL,
@@ -638,6 +690,9 @@ func Main(args []string) int {
 		DrainMaxSecs:      drainMaxSecs,
 		DrainResumeMaxAge: drainResumeMaxAge,
 		CrashTest:         os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		SizePresets:       sizePresets,
+		MaxLeaseVCPU:      maxLeaseVCPU,
+		MaxLeaseMemoryMB:  maxLeaseMemoryMB,
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).

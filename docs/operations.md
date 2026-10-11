@@ -247,7 +247,8 @@ Every pause, checkpoint and template build is a directory under
 never be deleted while a descendant or a referencing build is kept.
 
 The GC runs 10 minutes after the backend starts and then hourly. It
-computes the kept set — every image's current build, every lease's resume
+computes the kept set — every image's current build and warm size builds
+(`image_sizes`, #151), every lease's resume
 and last-checkpoint builds, every sandbox's build (the warm pool
 included), every in-flight build, and the transitive closure of their
 parents and references — and considers only `ready`/`failed` builds
@@ -830,6 +831,28 @@ depth), `spoond_leases_queued_oldest_seconds` (the oldest ticket's age),
 and `spoond_admit_timeouts_total` (waits that ended without a lease —
 timeout, client gone or drain). The dashboard's capacity panel shows
 this as `queued N (oldest Ms)`.
+
+**Lease sizes** (#151). Three settings bound what size of VM a lease
+can get:
+
+- The named sizes a lease may ask for, and which shape each name gives
+  its VM: `SIZE_PRESETS`, as `name=vcpu:memory_mb,…` (default
+  `small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384`). A preset
+  needs vCPU 1 or even and memory even and at least 128 MiB, and names
+  are lower-case letters, digits and dashes; a malformed value stops the
+  backend at startup. Set the same value in the environment of
+  `spoond images build`: an image's `warm_sizes` name these presets, and
+  each listed preset gets its own memory snapshot so a VM of that size
+  starts warm. A preset no image lists warm still works, from a cold
+  boot of the image's root filesystem.
+- The most vCPUs one lease's VM may be given: `MAX_LEASE_VCPU` (default
+  the host's CPU count).
+- The most memory one lease's VM may be given: `MAX_LEASE_MEMORY_MB`
+  (default `32768`). Admission still needs that much free hugepage
+  memory.
+
+Both limits must be positive integers; anything else stops the backend
+at startup. `GET /api/sizes` shows what is in effect.
 
 `POOL_SIZE` pre-creates that many sandboxes per image with a current
 build so grants are served without a cold restore. Production runs

@@ -26,6 +26,7 @@ import (
 
 	"github.com/jrimmer/spoond/v3/identity"
 	"github.com/jrimmer/spoond/v3/metrics"
+	"github.com/jrimmer/spoond/v3/sizes"
 	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate"
 	"github.com/jrimmer/spoond/v3/substrate/e2b"
@@ -518,6 +519,16 @@ type ServiceConfig struct {
 	// paused-release clock. 0 means the default; a negative value (tests
 	// only) disables the bound.
 	DrainResumeMaxAge time.Duration
+	// SizePresets are the named lease sizes (SIZE_PRESETS, #151): a
+	// create may ask for one by name, and GET /api/sizes lists them.
+	// nil means sizes.Default().
+	SizePresets []sizes.Preset
+	// MaxLeaseVCPU is the most vCPUs one lease's VM may be given
+	// (MAX_LEASE_VCPU). 0 means the host's CPU count.
+	MaxLeaseVCPU int
+	// MaxLeaseMemoryMB is the most memory one lease's VM may be given
+	// (MAX_LEASE_MEMORY_MB). 0 means DefaultMaxLeaseMemoryMB.
+	MaxLeaseMemoryMB int
 }
 
 // Service is the lease API backend.
@@ -946,6 +957,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		jobStarts:                 map[string]*jobStartLock{},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
+	svc.cfg.SizePresets, svc.cfg.MaxLeaseVCPU, svc.cfg.MaxLeaseMemoryMB = sizeLimitsOrDefault(cfg)
 	svc.snapshotLimiters = snapshotLimiters{
 		def:   newSnapshotLimiter(cfg.SnapshotWriteConcurrency, svc.now, svc.log.Printf),
 		drain: newSnapshotLimiter(cfg.DrainSnapshotConcurrency, svc.now, svc.log.Printf),
