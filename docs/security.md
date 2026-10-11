@@ -231,6 +231,11 @@ Known/accepted residuals:
 
 ## Token/key storage
 
+- **Secrets may be kept out of the env files (#137 C2)**: every secret
+  setting takes a `<NAME>_FILE=/path` spelling (0600 value file, one
+  trailing newline trimmed) read once at startup — see
+  [operations.md](operations.md#moving-a-secret-to-a-file) for the
+  procedure, and `spoond doctor` for the mode check.
 - Token and LLM-key hashes are **HMAC-SHA256 with a per-store random
   salt** (sidecar `<users-file>.salt`, 0600) since the fix pass. A
   pre-existing store without a sidecar stays in legacy plain-SHA256 mode
