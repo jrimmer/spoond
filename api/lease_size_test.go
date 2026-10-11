@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 	"github.com/jrimmer/spoond/v3/substrate/e2b"
 )
 
@@ -292,5 +295,89 @@ func TestNamedSnapshotRecordsLeaseSize(t *testing.T) {
 	}
 	if row.MemoryMB != 3072 {
 		t.Fatalf("named snapshot memory_mb = %d, want the lease's 3072", row.MemoryMB)
+	}
+}
+
+// TestColdBootRunsStartCommand (#151): a cold boot restores no memory,
+// so spoond launches the image's start command in the guest and waits
+// for its ready command before the lease gets the sandbox; a guest that
+// never gets ready is deleted and the create fails. A warm start runs
+// neither.
+func TestColdBootRunsStartCommand(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	img := seedImage(t, db, "mid", 1024)
+	img.StartCmd, img.ReadyCmd = "/usr/local/bin/spoond-guest-init", "test -f /run/spoond-guest-ready"
+	if err := db.UpsertImage(context.Background(), img); err != nil {
+		t.Fatalf("image: %v", err)
+	}
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var cmds []string
+	readyAfter := 3 // the ready command fails twice, then passes
+	sub.SetExecHandler(func(id string, req substrate.ExecRequest) substrate.ExecResult {
+		mu.Lock()
+		defer mu.Unlock()
+		cmd := strings.Join(req.Args, " ")
+		if strings.Contains(cmd, "PROBE_OK") {
+			return substrate.ExecResult{Stdout: "PROBE_OK"} // the integrity probe
+		}
+		if !strings.Contains(cmd, "spoond-guest") {
+			return substrate.ExecResult{Stdout: cmd}
+		}
+		cmds = append(cmds, cmd)
+		if strings.Contains(cmd, "spoond-guest-ready") {
+			readyAfter--
+			if readyAfter > 0 {
+				return substrate.ExecResult{ExitCode: 1}
+			}
+		}
+		return substrate.ExecResult{}
+	})
+
+	l, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, memoryMB: 2048})
+	if err != nil {
+		t.Fatalf("cold grant: %v", err)
+	}
+	mu.Lock()
+	if len(cmds) != 4 || !strings.Contains(cmds[0], "setsid nohup /usr/local/bin/spoond-guest-init") || readyAfter != 0 {
+		t.Fatalf("cold boot ran %q, want the start command then the ready check until it passed", cmds)
+	}
+	cmds = nil
+	mu.Unlock()
+	if l.Start != "cold" {
+		t.Fatalf("start = %q, want cold", l.Start)
+	}
+
+	// A warm start runs neither command.
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("warm grant: %v", err)
+	}
+	mu.Lock()
+	if len(cmds) != 0 {
+		t.Fatalf("warm start ran %q, want nothing", cmds)
+	}
+	mu.Unlock()
+
+	// A guest that never gets ready is deleted and the create fails.
+	old := coldBootReadyTimeout
+	coldBootReadyTimeout = 600 * time.Millisecond
+	defer func() { coldBootReadyTimeout = old }()
+	mu.Lock()
+	readyAfter = 1 << 30
+	mu.Unlock()
+	count := func() int {
+		sbs, err := sub.List(ctx)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		return len(sbs)
+	}
+	before := count()
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, memoryMB: 2048}); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("never-ready cold grant = %v, want a not-ready error", err)
+	}
+	if after := count(); after != before {
+		t.Fatalf("sandboxes %d -> %d: the never-ready guest was not deleted", before, after)
 	}
 }
