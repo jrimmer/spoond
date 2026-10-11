@@ -10,6 +10,16 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-10-11
+
+3.4 adds `spoond config show`: every setting of a unit with its value
+(secrets masked), the file it came from, and whether the running
+backend has the same value — so a changed env file waiting for a
+restart, or a setting no file sets, shows at a glance. The backend
+answers its own view at `GET /api/admin/config` (admin). `spoond images
+build` now prunes old docker build cache. No breaking changes and no
+schema change.
+
 ### Added
 
 - `GET /api/admin/config` (#137): read-only echo of the backend's

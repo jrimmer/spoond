@@ -206,7 +206,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.3.0 (2026-10-11) · GitHub` — with the
+line — `Spoond v3.4.0 (2026-10-11) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -281,6 +281,13 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.4: config show.** `spoond config show` lists every setting of a
+unit with its value (secrets masked), the file it came from and
+whether the running backend matches, so an env change waiting for a
+restart shows at a glance (`GET /api/admin/config` is the backend's own
+view). `spoond doctor` still flags unknown and repeated keys. No
+breaking changes.
 
 **v3.3: one authorization model.** Users and admin users, two
 read-only service tokens (`METRICS_TOKEN`, `EVENTS_TOKEN`) and the
