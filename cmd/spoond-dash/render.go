@@ -56,6 +56,12 @@ const stateGlyphs = "▶‖◆"
 // the legend line under the table.
 const stateCell = 3
 
+// stateHeader is the state column's header: a plain word a reader new to
+// spoond can scan (the glyphs are explained in the legend line). The
+// column is as wide as the header plus its separator, wider than the
+// two glyph cells.
+const stateHeader = "state"
+
 // pinMark is the pinned-lease glyph shown as the state cell's second
 // cell; an unpinned lease draws a space there.
 const pinMark = "◆"
@@ -1484,12 +1490,12 @@ func leaseLayout(w int, rows []LeaseRow) leaseCols {
 	// Header widths (with the trailing separator cell): the least a
 	// column may shrink to, so a header always keeps a gap after it.
 	const (
-		hID, hImg, hSize, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 5, 6, 3, 7, 5, 7
+		hID, hImg, hSize, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 5, 6, 6, 7, 5, 7
 	)
 	// Base widths before content fitting: the widest the columns ever
 	// get. The state column holds two glyph cells and a separator, fixed.
 	var idW, imgW, sizeW, ownW, polW, leftW int
-	stW := stateCell
+	stW := max(stateCell, len(stateHeader)+1)
 	if w >= maxW {
 		idW, imgW, sizeW, ownW, polW, leftW = 11, 16, 9, 10, 11, 7
 	} else {
@@ -1621,7 +1627,7 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		x, w int
 		text string
 	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.size, c.sizeW, "size"}, {c.own, c.ownW, "owner"},
-		{c.st, c.stW, "ST"}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
+		{c.st, c.stW, stateHeader}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
 		{c.left, c.leftW, "left"}, {c.hold, c.holdW, "holder"}}
 	for _, h := range headers {
 		draw := cutHeaders(h.text, h.w)

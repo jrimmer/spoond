@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **The dashboard's state column is headed `state`**, not `ST`, so a reader new to spoond can scan it; the column widens by three cells.
+
 ## [3.4.1] - 2026-10-11
 
 ### Fixed
