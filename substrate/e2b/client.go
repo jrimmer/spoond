@@ -169,15 +169,25 @@ func (c *Client) Create(ctx context.Context, req substrate.CreateRequest) (subst
 			Ingress: &orchestrator.SandboxNetworkIngressConfig{TrafficAccessToken: proto.String(c.TrafficToken(id))},
 		},
 	}
-	callCtx, cancel := bound(ctx, c.cfg.CreateTimeout)
-	defer cancel()
-	resp, err := c.sandbox.Create(callCtx, &orchestrator.SandboxCreateRequest{
+	createReq := &orchestrator.SandboxCreateRequest{
 		Sandbox:   config,
 		StartTime: start,
 		EndTime:   timestamppb.New(req.EndAt),
-	})
+	}
+	if req.FilesystemBoot {
+		createReq.FilesystemBoot = proto.Bool(true)
+	}
+	callCtx, cancel := bound(ctx, c.cfg.CreateTimeout)
+	defer cancel()
+	resp, err := c.sandbox.Create(callCtx, createReq)
 	if err != nil {
 		return substrate.Sandbox{}, mapError(err)
+	}
+	// An orchestrator that ignores filesystem_boot resumes the snapshot
+	// at the snapshot's size. Never hand that out as the requested size.
+	if req.FilesystemBoot && !resp.GetFilesystemBootApplied() {
+		_ = c.Delete(context.WithoutCancel(ctx), id)
+		return substrate.Sandbox{}, fmt.Errorf("e2b: create %s: filesystem boot asked but not applied by the orchestrator", id)
 	}
 
 	// Poll envd health until the sandbox answers, then hand it out.
@@ -210,6 +220,8 @@ func (c *Client) Create(ctx context.Context, req substrate.CreateRequest) (subst
 		MemoryMB:    req.MemoryMB,
 		StartedAt:   start.AsTime(),
 		EndAt:       req.EndAt,
+
+		FilesystemBootApplied: resp.GetFilesystemBootApplied(),
 	}, nil
 }
 

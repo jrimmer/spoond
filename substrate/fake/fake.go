@@ -47,8 +47,11 @@ type Fake struct {
 	// pin that exec env reaches the command and never argv.
 	execRunner bool
 
-	execHandler  func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult
-	lastExec     substrate.ExecRequest
+	execHandler func(sandboxID string, req substrate.ExecRequest) substrate.ExecResult
+	lastExec    substrate.ExecRequest
+	// lastCreate is the most recent successful Create's request, kept so
+	// tests can pin what a lease start asked for (FilesystemBoot, size).
+	lastCreate   substrate.CreateRequest
 	startHandler func(sandboxID string, req substrate.StartRequest) (substrate.Process, error)
 	// startCtx is the context of the most recent Start, kept so tests can
 	// pin that a background job's start context outlives its HTTP request
@@ -251,6 +254,14 @@ func (f *Fake) LastExec() substrate.ExecRequest {
 	return f.lastExec
 }
 
+// LastCreate returns the most recent successful Create request, so tests
+// can observe the size and FilesystemBoot a lease start asked for.
+func (f *Fake) LastCreate() substrate.CreateRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastCreate
+}
+
 // SetNodeInfo fixes what NodeInfo returns.
 func (f *Fake) SetNodeInfo(info substrate.NodeInfo, err error) {
 	f.mu.Lock()
@@ -342,8 +353,11 @@ func (f *Fake) Create(ctx context.Context, req substrate.CreateRequest) (substra
 		MemoryMB:    req.MemoryMB,
 		StartedAt:   time.Now(),
 		EndAt:       req.EndAt,
+
+		FilesystemBootApplied: req.FilesystemBoot,
 	}
 	f.sandboxes[sb.ID] = sb
+	f.lastCreate = req
 	return sb, nil
 }
 

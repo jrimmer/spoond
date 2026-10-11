@@ -97,12 +97,22 @@ type CreateRequest struct {
 	EnvVars, Metadata                              map[string]string
 	EndAt                                          time.Time
 	Egress                                         Egress
+	// FilesystemBoot boots the build's root filesystem fresh at VCPU and
+	// MemoryMB instead of resuming its memory snapshot, so a lease can
+	// start at a size other than the snapshot's. Guest memory and
+	// processes are not restored, and the start takes seconds instead of
+	// milliseconds (3.1, #151 Z2).
+	FilesystemBoot bool
 }
 
 type Sandbox struct {
 	ID, ExecutionID, TemplateID, BuildID, HostIP string
 	VCPU, MemoryMB                               uint32
 	StartedAt, EndAt                             time.Time
+	// FilesystemBootApplied reports that Create booted the root
+	// filesystem fresh as CreateRequest.FilesystemBoot asked. Create
+	// fails rather than return a sandbox that asked and was not applied.
+	FilesystemBootApplied bool
 }
 
 type NodeInfo struct {

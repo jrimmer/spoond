@@ -44,3 +44,27 @@ func TestCallLog(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateFilesystemBoot: the fake keeps the request's FilesystemBoot
+// for tests to read and reports it applied, as a capable orchestrator does.
+func TestCreateFilesystemBoot(t *testing.T) {
+	f := New()
+	sb, err := f.Create(t.Context(), substrate.CreateRequest{SandboxID: "i0123456789abcdefghij", VCPU: 4, MemoryMB: 8192, FilesystemBoot: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !sb.FilesystemBootApplied {
+		t.Fatal("FilesystemBootApplied = false, want true")
+	}
+	if got := f.LastCreate(); !got.FilesystemBoot || got.VCPU != 4 || got.MemoryMB != 8192 {
+		t.Fatalf("LastCreate = %+v, want FilesystemBoot at 4 vCPU / 8192 MB", got)
+	}
+
+	sb, err = f.Create(t.Context(), substrate.CreateRequest{SandboxID: "i1123456789abcdefghij"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if sb.FilesystemBootApplied || f.LastCreate().FilesystemBoot {
+		t.Fatal("snapshot resume reported FilesystemBoot")
+	}
+}
