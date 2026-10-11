@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **The gateway's `ssh-key add` takes a real public key (#72).** The whole authorized-keys line (`<type> <base64> [comment]`) followed by the user name, or the name first; before, the command was split on whitespace and every real key was refused.
+
 ## [3.1.0] - 2026-10-11
 
 3.1 lets a create choose its lease's size and shows owners what they
