@@ -59,23 +59,52 @@ type undrainResult struct {
 func (s *Server) adminOK(w http.ResponseWriter, r *http.Request) bool {
 	auth := r.Header.Get("Authorization")
 	token := strings.TrimPrefix(auth, "Bearer ")
-	// The identity-store user is resolved before the ADMIN_TOKEN compare
-	// (both are constant-time paths; UserByToken hashes) so an admin
-	// user reaches the routes even without ADMIN_TOKEN configured.
-	if s.svc.identities != nil && token != "" && token != auth {
-		if u := s.svc.identities.UserByToken(token); u != nil && u.Admin {
-			return true
+	// /api/admin/ skips authMiddleware, so the failed-auth throttle is
+	// applied here: since A1 a user token can be guessed on these
+	// routes too.
+	ip := clientIP(r.RemoteAddr)
+	ok := s.adminAuth(token, auth)
+	if ok {
+		s.authFails.clear(ip)
+		return true
+	}
+	if s.adminToken == "" && s.svc.identities == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return false
+	}
+	if s.metrics != nil {
+		s.metrics.AuthFailures.Inc()
+	}
+	if s.authFails.hit(ip) {
+		if s.metrics != nil {
+			s.metrics.AuthThrottled.Inc()
 		}
+		writeError(w, http.StatusTooManyRequests, "too many failed auth attempts; try again shortly")
+		return false
 	}
 	if s.adminToken == "" {
 		writeError(w, http.StatusNotFound, "not found")
 		return false
 	}
-	if token == "" || token == auth || subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, "invalid admin token")
+	writeError(w, http.StatusUnauthorized, "invalid admin token")
+	return false
+}
+
+// adminAuth reports whether a bearer token is the ADMIN_TOKEN or an
+// admin identity-store user's token (#138 A1).
+func (s *Server) adminAuth(token, auth string) bool {
+	if token == "" || token == auth {
 		return false
 	}
-	return true
+	// The identity-store user is resolved before the ADMIN_TOKEN compare
+	// (both are constant-time paths; UserByToken hashes) so an admin
+	// user reaches the routes even without ADMIN_TOKEN configured.
+	if s.svc.identities != nil {
+		if u := s.svc.identities.UserByToken(token); u != nil && u.Admin {
+			return true
+		}
+	}
+	return s.adminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) == 1
 }
 
 func (s *Server) handleAdminDrain(w http.ResponseWriter, r *http.Request) {

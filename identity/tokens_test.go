@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -414,5 +415,53 @@ func TestLastUsedThrottled(t *testing.T) {
 	s.UserByToken(secret)
 	if got := read(); got <= old {
 		t.Fatalf("a 10 min old stamp was not refreshed: %s", got)
+	}
+}
+
+// TestTokenCapAndListingAndRevokeRollback (#138 review): a user holds at
+// most maxTokensPerUser tokens; a listing never carries a hash; a revoke
+// whose save fails is rolled back, so the token still works and the
+// error is not "not found".
+func TestTokenCapAndListingAndRevokeRollback(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(filepath.Join(dir, "users.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.AddUser("alice", KindPerson, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secret string
+	var rec TokenRecord
+	for i := 0; i < maxTokensPerUser; i++ {
+		if secret, rec, err = s.AddToken(u.ID, fmt.Sprintf("t%d", i), 0); err != nil {
+			t.Fatalf("mint %d: %v", i, err)
+		}
+	}
+	if _, _, err := s.AddToken(u.ID, "one-too-many", 0); !errors.Is(err, ErrTooManyTokens) {
+		t.Fatalf("mint past the cap = %v, want ErrTooManyTokens", err)
+	}
+	toks, _ := s.ListTokens(u.ID)
+	for _, tk := range toks {
+		if tk.Hash != "" {
+			t.Fatalf("listing carries a hash: %+v", tk)
+		}
+	}
+
+	// The users file cannot be written: the revoke must roll back.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if os.WriteFile(filepath.Join(dir, "probe"), nil, 0o600) == nil {
+		t.Skip("directory still writable (running as root?)")
+	}
+	err = s.RevokeToken(u.ID, rec.ID)
+	if err == nil || errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("revoke with an unwritable file = %v, want a save error", err)
+	}
+	if s.UserByToken(secret) == nil {
+		t.Fatal("a revoke that was not saved must leave the token working")
 	}
 }

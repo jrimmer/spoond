@@ -2532,7 +2532,10 @@ expires; negative or absurd is `400`). Response `201 Created`:
 
 A name is unique per user (`409` "already exists"); the name `default`
 is reserved (`409`) while the user's original token is still set — see
-below. The secret is never stored in the clear, never logged and never
+below. A user holds at most 50 tokens (`409 too_many_tokens`; revoke
+one first). A mint with `ADMIN_TOKEN` (the host's break-glass) must set
+`ttl_secs` (`400` otherwise). A revoke the users file could not save is
+rolled back and answers `500`; retry it. The secret is never stored in the clear, never logged and never
 returned again: lose it, mint another.
 
 **Who.** The user itself, an admin, and — since A3 — the env

@@ -44,6 +44,10 @@ const (
 	defaultTokenName = "default"
 	// legacyTokenID is the stable id of that presented legacy token.
 	legacyTokenID = "t-default"
+	// maxTokensPerUser caps a user's named tokens: each mint rewrites the
+	// users file under the store's lock, so an unbounded list would let
+	// one user slow every login.
+	maxTokensPerUser = 50
 	// lastUsedResolution is how stale a token's last-used stamp may get
 	// before an authentication refreshes it (and writes the users file).
 	lastUsedResolution = 5 * time.Minute
@@ -104,6 +108,10 @@ type User struct {
 	// (unknown JSON fields are ignored) and the next save drops them.
 	MaxTTL int `json:"max_ttl"` // max lease TTL seconds (0 = global max applies)
 }
+
+// ErrTooManyTokens is AddToken's answer once a user holds
+// maxTokensPerUser named tokens.
+var ErrTooManyTokens = fmt.Errorf("a user may hold at most %d tokens; revoke one first", maxTokensPerUser)
 
 // ErrTokenNotFound is RevokeToken's answer for a token id the user does
 // not have: never minted, already revoked, or another user's.
@@ -400,37 +408,50 @@ func (s *Store) hashTokenIndex(h string) (string, bool) {
 // token (ExpiresAt set and past, A2) authenticates nobody; its record is
 // never updated.
 func (s *Store) UserByToken(token string) *User {
+	h := s.hashSecret(token)
 	s.mu.RLock()
-	id, ok := s.byToken[s.hashSecret(token)]
-	var u *User
-	if ok {
-		u = s.users[id]
-		if u == nil {
-			ok = false
-		}
+	id, ok := s.byToken[h]
+	u := s.users[id]
+	if !ok || u == nil || s.tokenHashExpiredLocked(u, h) {
+		s.mu.RUnlock()
+		return nil
 	}
+	cp := *u
+	due := s.stampDueLocked(u, h)
 	s.mu.RUnlock()
-	if !ok || u == nil {
-		return nil
+	// Most logins only read: the exclusive lock (and a users-file write)
+	// is taken only when this token's last-used stamp is due.
+	if due {
+		s.mu.Lock()
+		if _, ok := s.hashTokenIndex(h); !ok {
+			s.mu.Unlock()
+			return nil // revoked between the two locks
+		}
+		s.mu.Unlock()
 	}
-	if s.tokenHashExpired(u, s.hashSecret(token)) {
-		return nil
-	}
-	s.mu.Lock()
-	id, _ = s.hashTokenIndex(s.hashSecret(token))
-	s.mu.Unlock()
-	if id == "" {
-		return nil
-	}
-	return s.UserByID(id)
+	return &cp
 }
 
-// tokenHashExpired reports whether the given hash belongs to a token
-// (the legacy one or a named one of u) whose ExpiresAt has passed.
-// Caller holds no lock; it re-reads under RLock.
-func (s *Store) tokenHashExpired(u *User, hash string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// stampDueLocked reports whether the token with hash h has a last-used
+// stamp older than lastUsedResolution. Caller holds the lock.
+func (s *Store) stampDueLocked(u *User, h string) bool {
+	stale := nowUTC().Add(-lastUsedResolution).Format(time.RFC3339)
+	if u.TokenHash == h {
+		return u.LastUsedAt < stale
+	}
+	for _, t := range u.Tokens {
+		if t.Hash == h {
+			return t.LastUsedAt < stale
+		}
+	}
+	return false
+}
+
+// tokenHashExpiredLocked reports whether the given hash belongs to a
+// token (the legacy one or a named one of u) whose ExpiresAt has passed,
+// or to none of u's tokens (a revoke raced the lookup). Caller holds the
+// lock.
+func (s *Store) tokenHashExpiredLocked(u *User, hash string) bool {
 	now := time.Now().UTC()
 	if u.TokenHash == hash {
 		// The legacy token never expires.
@@ -441,8 +462,6 @@ func (s *Store) tokenHashExpired(u *User, hash string) bool {
 			return t.expired(now)
 		}
 	}
-	// Not found: treat as expired so a stale index entry never
-	// authenticates after a revoke raced the lookup.
 	return true
 }
 
@@ -609,6 +628,9 @@ func (s *Store) AddToken(userID, name string, ttl time.Duration) (string, TokenR
 			return "", TokenRecord{}, fmt.Errorf("token name %q already exists", name)
 		}
 	}
+	if len(u.Tokens) >= maxTokensPerUser {
+		return "", TokenRecord{}, ErrTooManyTokens
+	}
 	var secretB [32]byte
 	if _, err := rand.Read(secretB[:]); err != nil {
 		return "", TokenRecord{}, fmt.Errorf("generate token: %w", err)
@@ -655,7 +677,10 @@ func (s *Store) ListTokens(userID string) ([]TokenRecord, error) {
 			LastUsedAt: u.LastUsedAt,
 		})
 	}
-	out = append(out, u.Tokens...)
+	for _, t := range u.Tokens {
+		t.Hash = "" // a listing never carries a hash
+		out = append(out, t)
+	}
 	return out, nil
 }
 
@@ -674,10 +699,18 @@ func (s *Store) RevokeToken(userID, tokenID string) error {
 	}
 	if tokenID == legacyTokenID {
 		if u.TokenHash != "" {
-			s.deindexToken(u, u.TokenHash)
+			h, last := u.TokenHash, u.LastUsedAt
+			s.deindexToken(u, h)
 			u.TokenHash = ""
 			u.LastUsedAt = ""
-			return s.save()
+			if err := s.save(); err != nil {
+				// Not on disk: put it back, so memory and file agree and
+				// the caller can retry.
+				u.TokenHash, u.LastUsedAt = h, last
+				s.byToken[h] = u.ID
+				return err
+			}
+			return nil
 		}
 		return ErrTokenNotFound
 	}
@@ -685,11 +718,20 @@ func (s *Store) RevokeToken(userID, tokenID string) error {
 		if u.Tokens[i].ID != tokenID {
 			continue
 		}
-		h := u.Tokens[i].Hash
+		rec := u.Tokens[i]
+		before := append([]TokenRecord(nil), u.Tokens...)
 		u.Tokens = append(u.Tokens[:i], u.Tokens[i+1:]...)
-		s.deindexToken(u, h)
+		s.deindexToken(u, rec.Hash)
 		delete(s.byTokenID, tokenID)
-		return s.save()
+		if err := s.save(); err != nil {
+			// Not on disk: put it back, so memory and file agree and the
+			// caller can retry.
+			u.Tokens = before
+			s.byToken[rec.Hash] = u.ID
+			s.byTokenID[tokenID] = u.ID
+			return err
+		}
+		return nil
 	}
 	return ErrTokenNotFound
 }
