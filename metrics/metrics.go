@@ -472,7 +472,7 @@ func NewBackendMetrics() *BackendMetrics {
 	})
 	m.BoxFullTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "box_full_total",
-		Help: "Requests refused box_full: every take-back candidate was pinned (nothing unpinned could be taken).",
+		Help: "Requests refused box_full: take-back could free nothing (every candidate pinned, or the requester is the biggest borrower).",
 	})
 
 	// Memory take-back (FS2a, spoond-pxsn): the biggest borrower's

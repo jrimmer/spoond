@@ -1396,7 +1396,8 @@ marker. The substrate-specific series:
 | `spoond_pause_chain_bytes` | histogram of the lease's parent chain's recorded `size_bytes` summed at each pause, including shared ancestors (spoond-p9j) |
 | `spoond_snapshot_disk_reserved_bytes` | snapshot disk reserved for the running leases (their whole `disk_mb`; FS3b) |
 | `spoond_snapshot_disk_usable_bytes` | snapshot disk a new request may use: free − reserved − the `DISK_RESERVE_PCT` floor − pending + freeing; negative means short (FS3b) |
-| `spoond_box_full_total` | requests refused `box_full`: a request needed room and every take-back candidate was pinned (nothing unpinned could be taken; v3.0 FS5) |
+| `spoond_box_full_total` | requests refused `box_full`: a request needed room and take-back could free none — every candidate was pinned, or the requester was itself the biggest borrower (v3.0 FS5, FS2b) |
+| `spoond_take_backs_total` | leases paused by memory take-back so another owner's request could fit (v3.0 FS2a) |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |

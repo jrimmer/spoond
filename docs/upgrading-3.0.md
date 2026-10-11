@@ -92,7 +92,8 @@ not a `500`.
 
 - Removed: `preempted` and `promoted`.
 - Take-back appears as `suspended` with `reason: take_back`,
-  `take_back_ratio` and `take_back_for`. The reason `preempt` is now
+  `take_back_ratio` and `take_back_for`, followed by a `take_back` event
+  whose detail names the requesting owner. The reason `preempt` is now
   `take_back`. The `reason` values `idle`, `hold_lapsed` and `pressure`
   are gone; `idle_suspend` remains for a lease's own `idle_suspend`.
 - Added: `box_full` (lease id `-`, all-leases stream only), `pinned`,
