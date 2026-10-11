@@ -721,6 +721,73 @@ func TestHostPanelKeptRow(t *testing.T) {
 	}
 }
 
+// TestHostPanelGCRowFits: the GC row keeps to the host panel's inner
+// width at the default and the minimum frame (#148): the kept builds
+// come before the lifetime deleted count, a segment that does not fit is
+// dropped whole, and a row still too wide ends in ….
+func TestHostPanelGCRowFits(t *testing.T) {
+	s := healthySnapshot()
+	s.GCMode = "delete"
+	s.GCDeleted = 1_234_567
+	s.KeptBuilds = 1
+	s.KeptBuildsBytes = 1 << 30
+	for _, w := range []int{DefaultWidth, minW} {
+		p := Draw(s, w, fixedNow, "h").Plain()
+		var row string
+		for _, r := range strings.Split(p, "\n") {
+			if strings.Contains(r, "gc delete on") {
+				row = r
+			}
+		}
+		if row == "" {
+			t.Fatalf("width %d: gc row missing:\n%s", w, p)
+		}
+		if !strings.Contains(row, "gc delete on · kept 1 (1 GiB)") {
+			t.Fatalf("width %d: kept builds not whole after the mode:\n%s", w, row)
+		}
+		// The deleted count is whole or gone, never cut at the border.
+		if strings.Contains(row, "1,234") && !strings.Contains(row, "1,234,567 builds deleted") {
+			t.Fatalf("width %d: deleted count clipped:\n%s", w, row)
+		}
+	}
+	// A panel too narrow for even the mode ends the row in ….
+	l := &layout{w: DefaultWidth, host: "h", s: s}
+	segs := l.gcSegs(10)
+	if got := segWidth(segs); got > 10 {
+		t.Fatalf("gcSegs(10) is %d cells wide", got)
+	}
+	if last := segs[len(segs)-1].Text; !strings.HasSuffix(last, "…") {
+		t.Fatalf("gcSegs(10) not ellipsized: %+v", segs)
+	}
+}
+
+// TestEventsPanelDetailEllipsized: a row with a long subject and type
+// ends its detail in … when the panel's edge cuts it, instead of
+// stopping mid-word silently (#149).
+func TestEventsPanelDetailEllipsized(t *testing.T) {
+	c := newCollector(Config{EventsToken: "events-tok"})
+	at := time.Unix(1_800_000_000, 0)
+	c.lastRow = []LeaseRow{{ID: "abcdef0123", Holder: "forgejo/honey-job-123456"}} // 24 runes
+	detail := "granted from image honey-go-worker in 118 ms"
+	c.events.add(dashEvent{At: at, Type: "checkpointed", LeaseID: "abcdef0123", Detail: detail})
+	s := sampleSnapshot()
+	s.Events = c.eventLines(at)
+	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
+	var row string
+	for _, r := range strings.Split(p, "\n") {
+		if strings.Contains(r, "checkpointed") {
+			row = r
+		}
+	}
+	if row == "" {
+		t.Fatalf("checkpointed row missing:\n%s", p)
+	}
+	tail := strings.TrimRight(strings.TrimSuffix(strings.TrimRight(row, " "), "│"), " ")
+	if !strings.HasSuffix(tail, detail) && !strings.HasSuffix(tail, "…") {
+		t.Fatalf("detail cut silently:\n%s", row)
+	}
+}
+
 // TestSanitizeReplacesControlChars: user-derived strings cannot inject
 // terminal escapes (anything below 0x20 and 0x7f) or C1 runes into the
 // frame.

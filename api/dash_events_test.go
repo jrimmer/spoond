@@ -49,6 +49,14 @@ func TestEventDurationFormat(t *testing.T) {
 		{999 * time.Millisecond, "999 ms"},
 		{1500 * time.Millisecond, "1.5 s"},
 		{540 * time.Millisecond, "540 ms"},
+		// Seconds round to hundredths (#147); one that rounds up to a
+		// minute takes the minute form, never "60 s".
+		{time.Second, "1 s"},
+		{2500 * time.Millisecond, "2.5 s"},
+		{17268933300 * time.Nanosecond, "17.27 s"},
+		{59990 * time.Millisecond, "59.99 s"},
+		{59999600 * time.Microsecond, "1m0s"},
+		{time.Minute, "1m0s"},
 		{90 * time.Second, "1m30s"},
 		{-time.Second, "0 ms"},
 	}
