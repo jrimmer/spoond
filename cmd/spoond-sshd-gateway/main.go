@@ -68,13 +68,15 @@ var (
 	hostKeyPath = flags.String("host-key", "/etc/spoond-gateway/ssh_host_ed25519_key", "path to SSH host key (generated if missing)")
 	backendURL  = flags.String("backend", "https://127.0.0.1:8890", "spoond-backend base URL")
 	// backendTok: the spoond-backend consumer token (required, admin-equivalent).
-	// Read from --backend-token flag or SPOOND_GATEWAY_TOKEN env so the
-	// value never needs to appear in ExecStart (security review #37 rescan
-	// F7: /proc/<pid>/cmdline must not expose the token). The env value
-	// itself may be a file reference: SPOOND_GATEWAY_TOKEN_FILE (0600,
-	// #137 C2) is read when the flag default is computed, so the flag and
-	// the env both accept the file spelling.
-	backendTok = flags.String("backend-token", gatewayDefaultToken(), "spoond-backend consumer token (required; or $SPOOND_GATEWAY_TOKEN, or $SPOOND_GATEWAY_TOKEN_FILE)")
+	// Resolved in Main — after flag parsing — from --backend-token (when
+	// provided) or the environment so the value never needs to appear in
+	// ExecStart (security review #37 rescan F7: /proc/<pid>/cmdline must not
+	// expose the token). The env value itself may be a file reference:
+	// SPOOND_GATEWAY_TOKEN_FILE (0600, #137 C2) is read through gatewayToken
+	// there; the flag default stays empty so a broken secret cannot kill
+	// flag parsing (a package-var init log.Fatal'ed before flag parsing —
+	// even --help died) — the failure surfaces as ErrGatewayToken instead.
+	backendTok = flags.String("backend-token", "", "spoond-backend consumer token (required; or $SPOOND_GATEWAY_TOKEN, or $SPOOND_GATEWAY_TOKEN_FILE)")
 	// DEPRECATED/ignored (security review #37 rescan F7): the gateway
 	// must NOT forward the bootstrap token — bootstrap is an operator
 	// action against the backend directly. The flag is accepted so
@@ -123,23 +125,50 @@ var (
 	extraImageAliases = flags.String("image-aliases", envOr("GATEWAY_IMAGE_ALIASES", ""), "comma-separated short=full image aliases (e.g. rust=rust-base,js=js-base)")
 )
 
-// gatewayDefaultToken is --backend-token's default: the environment's
-// SPOOND_GATEWAY_TOKEN, or the content of SPOOND_GATEWAY_TOKEN_FILE with
-// one trailing newline trimmed (#137 C2, resolved through settings.Get).
-// Both forms set, or an unreadable file, is a startup error (the fatal
-// fires when the flag set is built, before Main runs); the flag itself
-// still overrides whatever the environment carried. Returns "" for the
-// unset case, so the required check keeps its message.
-func gatewayDefaultToken() string {
+// ErrGatewayToken reports gatewayToken's failure — the environment
+// spells both SPOOND_GATEWAY_TOKEN and SPOOND_GATEWAY_TOKEN_FILE, or
+// names a file that cannot be read (settings.Get's error, #137 C2).
+// gatewayToken logs it and exits in production; the exported value lets
+// a test pin the failed resolution without killing the test process.
+var ErrGatewayToken = errors.New("the backend token cannot be resolved")
+
+// logExit is the exit a failed secret resolution takes: os.Exit in
+// production, swappable in tests so the one-exit-after-flags-parse
+// property is pinned without killing the test process (the old
+// package-var init call path log.Fatal'ed with an unhookable os.Exit —
+// and killed even --help).
+var logExit = os.Exit
+
+// gatewayToken resolves Main's backend token from the environment when
+// --backend-token is not provided: the environment's SPOOND_GATEWAY_TOKEN,
+// or the content of SPOOND_GATEWAY_TOKEN_FILE with one trailing newline
+// trimmed (#137 C2, resolved through settings.Get). Both forms set, or an
+// unreadable file, is a startup error — the exit fires here, after flags
+// have parsed, so even `spoond-sshd-gateway --help` works with a broken
+// secret in the environment. Returns "" for the unset case, so the
+// required check keeps its message.
+func gatewayToken() string {
 	v, err := settings.Get("SPOOND_GATEWAY_TOKEN", os.Getenv, os.ReadFile)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("%s: %v", ErrGatewayToken, err)
+		logExit(1)
+		return "" // unreachable in production (logExit is os.Exit)
 	}
 	return v
 }
 
+// Main resolves the backend token first: --backend-token (provided)
+// wins; otherwise gatewayToken resolves the environment's
+// SPOOND_GATEWAY_TOKEN / _FILE spelling — a both-set or unreadable-file
+// failure exits here, after flag parsing, where --help still works.
 func Main(args []string) int {
 	flags.Parse(args)
+
+	// The backend token (#137 C2, resolved through settings.Get in
+	// gatewayToken; the flag wins when provided on the command line).
+	if *backendTok == "" {
+		*backendTok = gatewayToken()
+	}
 
 	// Start metrics endpoint (issue #20).
 	var gwMetrics *metrics.GatewayMetrics
@@ -153,7 +182,7 @@ func Main(args []string) int {
 		}()
 	}
 	if *backendTok == "" {
-		log.Fatal("--backend-token is required")
+		log.Fatal("--backend-token is required (or $SPOOND_GATEWAY_TOKEN, or $SPOOND_GATEWAY_TOKEN_FILE)")
 	}
 
 	// Parse the set of images that support interactive SSH (have sshd
