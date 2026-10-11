@@ -17,7 +17,7 @@ summarised from README "Status".
   `‖` suspended, `⭘` recovered, `■` lost) then `◆` on a pinned lease,
   with the pin mark removed from the holder column, the column headed
   `ST`, and the suspend reason carried by the glyph's colour — taken
-  back warn, idle-suspended dim, any other suspend warn. A dim legend
+  back warn, idle-suspended dim, any other suspend plain. A dim legend
   under the table — `▶ running ‖ suspended ⭘ recovered ■ lost ◆ pinned`
   — now spells the glyphs out on every table with rows, and the freed
   column width goes to the owner then the holder.
