@@ -730,6 +730,10 @@ type Service struct {
 	// different lease for themselves. Held across the whole take-back
 	// and admit sequence (see admitMemory).
 	preemptMu sync.Mutex
+	// diskAdmitMu makes the disk room check and its reservation one step
+	// (reserveIfRoom), so concurrent snapshot writes cannot both take the
+	// same free bytes.
+	diskAdmitMu sync.Mutex
 
 	// jobStartMu guards the jobStarts map: one start lock per lease,
 	// held across the per-lease running-job cap check-then-insert (2.6,

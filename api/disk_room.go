@@ -682,15 +682,15 @@ func (s *Service) ensureDiskRoom(ctx context.Context, owner string, needBytes in
 	if needBytes <= 0 {
 		return noop, nil
 	}
-	room, ok := s.diskRoomNow(ctx) // settles the inflight tracker
-	if !ok {
+	release, fits, known := s.reserveIfRoom(ctx, needBytes)
+	if !known {
 		diskNoInfoOnce.Do(func() {
 			s.log.Printf("disk room: capacity unreadable; admitting requests without a disk check")
 		})
 		return noop, nil
 	}
-	if room.Usable >= needBytes {
-		return s.diskInflight.reserve(needBytes), nil
+	if fits {
+		return release, nil
 	}
 	if _, err := s.diskTakeBack(ctx, needBytes, owner); err != nil {
 		var bf *boxFullError
@@ -702,12 +702,26 @@ func (s *Service) ensureDiskRoom(ctx context.Context, owner string, needBytes in
 		}
 		return nil, err
 	}
-	room, ok = s.diskRoomNow(ctx)
-	if !ok {
+	release, fits, known = s.reserveIfRoom(ctx, needBytes)
+	if !known || !fits {
 		return nil, errDiskCapacityWait
+	}
+	return release, nil
+}
+
+// reserveIfRoom reads the room and, when Usable covers needBytes,
+// reserves it — both under diskAdmitMu, so two concurrent requests
+// cannot each see room for one and both reserve it. known is false when
+// the capacity could not be read. Take-back runs outside this lock.
+func (s *Service) reserveIfRoom(ctx context.Context, needBytes int64) (release func(), fits, known bool) {
+	s.diskAdmitMu.Lock()
+	defer s.diskAdmitMu.Unlock()
+	room, ok := s.diskRoomNow(ctx) // settles the inflight tracker
+	if !ok {
+		return nil, false, false
 	}
 	if room.Usable < needBytes {
-		return nil, errDiskCapacityWait
+		return nil, false, true
 	}
-	return s.diskInflight.reserve(needBytes), nil
+	return s.diskInflight.reserve(needBytes), true, true
 }
