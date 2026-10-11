@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -250,5 +251,40 @@ func TestAdminTokenUnconfigured(t *testing.T) {
 	rec2, _ := doUsersReq(t, h, "POST", "/api/users/"+alice.ID+"/tokens", "root-admin-tok", `{"name":"y"}`)
 	if rec2.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown token with no ADMIN_TOKEN = %d, want 401", rec2.Code)
+	}
+}
+
+// TestAdminRoutesThrottleGuesses (#138 review): /api/admin/* skips the
+// auth middleware, so adminOK applies the failed-auth limiter itself —
+// since A1 an admin user's token can be guessed there.
+func TestAdminRoutesThrottleGuesses(t *testing.T) {
+	srv, _, _, _ := newAdminMintServer(t)
+	h := srv.Handler()
+	var last int
+	for i := 0; i < 10; i++ {
+		rec, _ := doUsersReqAddr(t, h, "POST", "/api/admin/reconcile", fmt.Sprintf("guess-%d", i), "", "192.0.2.77:1234")
+		last = rec.Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("10th wrong admin token = %d, want 429", last)
+	}
+	// Another client is unaffected, and the right token still works there.
+	if rec, _ := doUsersReqAddr(t, h, "POST", "/api/admin/reconcile", "t-admin", "", "192.0.2.78:1234"); rec.Code == http.StatusTooManyRequests || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("admin user from a fresh address = %d", rec.Code)
+	}
+}
+
+// TestAdminMintNeedsTTL (#138 review): a break-glass token is for a
+// window, so an ADMIN_TOKEN mint without ttl_secs is refused.
+func TestAdminMintNeedsTTL(t *testing.T) {
+	srv, _, aliceID, _ := newAdminMintServer(t)
+	h := srv.Handler()
+	rec, body := doUsersReq(t, h, "POST", "/api/users/"+aliceID+"/tokens", "root-admin-tok", `{"name":"window"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(body["error"].(string), "ttl_secs") {
+		t.Fatalf("break-glass mint without ttl = %d %v, want 400 naming ttl_secs", rec.Code, body)
+	}
+	// The user's own mint may still be permanent.
+	if rec, body := doUsersReq(t, h, "POST", "/api/users/"+aliceID+"/tokens", "t-user", `{"name":"laptop"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("own permanent mint = %d %v", rec.Code, body)
 	}
 }

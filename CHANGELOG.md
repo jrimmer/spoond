@@ -16,8 +16,8 @@ summarised from README "Status".
   `POST /api/users/{id}/tokens` now accepts the env `ADMIN_TOKEN` (the
   host root's token) as well as the user's or an admin's, so root on
   the host can mint a short-lived token for **any** user during a
-  maintenance window (`ttl_secs` recommended; the response still
-  answers the secret once). The mint is logged with the user, the
+  maintenance window (`ttl_secs` is required, so the token always
+  expires; the response answers the secret once). The mint is logged with the user, the
   token's name and id — never the secret. The break-glass stays on
   that one route: GET/DELETE on the tokens and every other user route
   still refuse it (`401`), so root cannot list, revoke or read a
@@ -25,6 +25,7 @@ summarised from README "Status".
   [operations.md](docs/operations.md#maintenance-windows-and-the-break-glass-token-mint)
   and the who-can-do-what table in
   [security.md](docs/security.md#who-can-do-what).
+- **Tokens are capped and admin routes are throttled (#138 review).** A user holds at most 50 tokens (`409 too_many_tokens`); a token's `last_used_at` refreshes at most every 5 minutes, so logins rarely take the store's write lock; a revoke the users file could not save is rolled back and answers `500`; wrong tokens on `/api/admin/*` hit the per-address failed-auth throttle (`429`).
 - **Named, revocable, expiring API tokens per user (#138 A2).** A user
   can hold several named bearer tokens beside its original one:
   `POST /api/users/{id}/tokens {"name","ttl_secs"?}` mints one and

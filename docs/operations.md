@@ -437,11 +437,13 @@ with the window — the whole point of the break-glass staying narrow:
 the mint is logged with the user, the token's name and its id, never
 the secret, and the user can revoke the token (`DELETE
 /api/users/{id}/tokens/{token_id}`) the moment they hold their own.
-Without a `ttl_secs` the token never expires; revoke it explicitly when
-the window ends. `GET` and `DELETE` on the token routes still want the
-user or an admin user — the break-glass cannot list or revoke, so it
-cannot clean up after itself; keep the window's `ttl_secs` short
-instead.
+`ttl_secs` is required with `ADMIN_TOKEN` (`400` without it), so a
+break-glass token always dies on its own. `GET` and `DELETE` on the
+token routes still want the user or an admin user — the break-glass
+cannot list or revoke, so it cannot clean up after itself; keep the
+window's `ttl_secs` short. Wrong guesses at `ADMIN_TOKEN` or an admin
+user's token on `/api/admin/*` hit the same per-address failed-auth
+throttle as every other route (`429`).
 
 ## Restarting the orchestrator (planned)
 

@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"strings"
@@ -197,6 +198,11 @@ func (s *Server) handleUsersTokensCreate(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusNotFound, "user not found")
 			return
 		}
+		// A break-glass token is for a window: it must expire.
+		if ttl <= 0 {
+			writeError(w, http.StatusBadRequest, "a token minted with ADMIN_TOKEN needs ttl_secs > 0")
+			return
+		}
 	case caller != nil:
 		if !caller.Admin && caller.ID != id {
 			writeError(w, http.StatusNotFound, "user not found")
@@ -213,8 +219,12 @@ func (s *Server) handleUsersTokensCreate(w http.ResponseWriter, r *http.Request)
 	}
 	secret, rec, err := s.svc.identities.AddToken(owner.ID, req.Name, ttl)
 	if err != nil {
-		// A duplicate/reserved name exists on the target user.
-		writeError(w, http.StatusConflict, err.Error())
+		// A duplicate or reserved name, or the per-user cap.
+		code := ""
+		if errors.Is(err, identity.ErrTooManyTokens) {
+			code = "too_many_tokens"
+		}
+		writeErrorCode(w, http.StatusConflict, code, err.Error())
 		return
 	}
 	if adminMint {
@@ -282,8 +292,15 @@ func (s *Server) handleUsersTokenRevoke(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := s.svc.identities.RevokeToken(owner.ID, tokenID); err != nil {
 		// A foreign token id answers the same 404 as an unknown one,
-		// so no caller can probe which ids exist on other users.
-		writeError(w, http.StatusNotFound, "token not found")
+		// so no caller can probe which ids exist on other users. Any
+		// other error is the users file failing to save: the revoke
+		// was rolled back, so say so (500), never "not found".
+		if errors.Is(err, identity.ErrTokenNotFound) {
+			writeError(w, http.StatusNotFound, "token not found")
+			return
+		}
+		s.svc.log.Printf("token revoke: user %s token id %s: %v", owner.ID, tokenID, err)
+		writeError(w, http.StatusInternalServerError, "revoke not saved; retry")
 		return
 	}
 	s.svc.log.Printf("token revoked: user %s (%s) token id %s", owner.Name, owner.ID, tokenID)
