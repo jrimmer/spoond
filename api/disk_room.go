@@ -451,14 +451,31 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick int64) (freed int64, ok bool) {
 	s.store.mu.Lock()
 	l, ok := s.store.leases[v.ID]
+	var want string
+	if ok {
+		want = l.ResumeBuildID
+	}
 	s.store.mu.Unlock()
-	// pauseBuild is read inside the release predicate, under the same
-	// lock that commits the release: a resume-and-pause that lands
-	// before then is the build actually released.
-	var pauseBuild string
 	if !ok {
 		return 0, false
 	}
+	// Release only a lease whose pause build would then be deletable: a
+	// build something else still keeps (another build names it as its
+	// parent, a named snapshot, a kept pin) frees nothing, and the lease
+	// would be lost for no room.
+	if want != "" {
+		kept, err := s.keptBuildsExcept(ctx, v.ID)
+		if err != nil || kept[want] {
+			if err != nil {
+				s.log.Printf("disk reclaim: kept set: %v", err)
+			}
+			return 0, false
+		}
+	}
+	// pauseBuild is read inside the release predicate, under the same
+	// lock that commits the release, and must still be the build checked
+	// above: a resume-and-pause that lands in between abandons the pick.
+	var pauseBuild string
 	released := false
 	total, _, err := s.diskCapacity(s.cfg.TemplateStoragePath)
 	freePct := -1.0
@@ -466,7 +483,7 @@ func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick i
 		freePct = float64(freeAtPick) / float64(total) * 100
 	}
 	s.releaseBecauseIf(ctx, l, "disk_reclaim", func(c *Lease) bool {
-		released = !c.released && c.Suspended && !c.busy && !c.Pinned && c.ID == v.ID
+		released = !c.released && c.Suspended && !c.busy && !c.Pinned && c.ID == v.ID && c.ResumeBuildID == want
 		if released {
 			pauseBuild = c.ResumeBuildID
 		}

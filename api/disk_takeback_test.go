@@ -698,3 +698,42 @@ func TestDiskTakeBackUnknownCapacityWaits(t *testing.T) {
 		t.Fatalf("err = %v, want the capacity_wait wait (capacity unknown)", err)
 	}
 }
+
+// A paused lease whose pause build something else still keeps (here a
+// later build names it as its parent) is not released for disk: the
+// release would free nothing and lose the lease for no room.
+func TestDiskTakeBackSkipsVictimWhoseBuildStaysKept(t *testing.T) {
+	h := newDiskTBHarness(t, 1<<30)
+	// consumer-b is far over its slice: a running lease whose 14 GiB
+	// pause build still counts for it (as in the shortfall test).
+	now := time.Now()
+	if err := h.db.InsertBuild(context.Background(), store.BuildRow{
+		BuildID: "pause-fat", Kind: "pause", ParentBuildID: "fat-run", Owner: "consumer-b",
+		State: "ready", SizeBytes: 14 << 30, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert fat build: %v", err)
+	}
+	if err := h.db.UpsertLease(context.Background(), store.LeaseRow{
+		ID: "fat-run", Owner: "consumer-b", Image: "py-base", State: "running",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastActive: now,
+		ResumeBuildID: "pause-fat", Class: "guaranteed",
+	}); err != nil {
+		t.Fatalf("insert fat lease: %v", err)
+	}
+	h.seedPausedLease(t, "vict-1", "consumer-b", 2<<30, 2*time.Hour, false)
+	if err := h.db.InsertBuild(context.Background(), store.BuildRow{
+		BuildID: "child-of-vict", Kind: "checkpoint", ParentBuildID: "pause-vict-1", Owner: "consumer-b",
+		State: "ready", SizeBytes: 1 << 20, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("insert child build: %v", err)
+	}
+	h.tightBox(t, 9<<30, 0, "0")
+
+	freed, _ := h.svc.diskTakeBack(context.Background(), 10<<30, "consumer-a")
+	if freed != 0 {
+		t.Fatalf("freed = %d, want 0 (the only victim's build stays kept)", freed)
+	}
+	if r := h.leaseRowMust(t, "vict-1"); r.State != "suspended" {
+		t.Fatalf("vict-1 = %v, want it intact", r)
+	}
+}
