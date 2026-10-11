@@ -234,9 +234,12 @@ const (
 	// net.SplitHostPort, which requires a port.
 	TypeAddr
 	// TypeList is comma-separated values (pairs, paths, names);
-	// the readers split on "," and the entries' shape is the value's
-	// own business (SIZE_PRESETS or SPOOND_GUEST_DNS_ADDR, which are
-	// TypeString here, already fail startup on a malformed value).
+	// the readers split on "," and the shape of the entries is the
+	// value's own business. The two lists whose entries are already
+	// validated with a startup error — SIZE_PRESETS (a name=vcpu:mem_mb
+	// spec) and SPOOND_GUEST_DNS_ADDR (bare IPs) — are TypeString here:
+	// their real check is stricter than "splits on commas", and it
+	// already refuses to start.
 	TypeList
 	// TypeString is anything else: a path, a name, a token, a unit
 	// name, an enum the reader switches on — read verbatim, so

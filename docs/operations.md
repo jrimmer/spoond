@@ -45,7 +45,7 @@ dial addresses, a boolean spelling for the switches), and a bad value
 refuses startup at once with one message naming every problem:
 
 ```text
-config: MAX_TTL_SECS="2h": not an integer; config: BIND_ADDR="8890": missing port in address
+config: BIND_ADDR="8890-only": address 8890-only: missing port in address; config: MAX_TTL_SECS="2h": not an integer
 ```
 
 Before this check a typo was found only after a restart, when the
