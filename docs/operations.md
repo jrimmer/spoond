@@ -57,7 +57,7 @@ document (secrets stay masked); `--unit` selects the unit (default
 with the table, 1 when the unit env cannot be resolved.
 
 ```bash
-/opt/spoond/spoond config show          # table; --json for the raw answer
+/opt/spoond/spoond config show          # what the unit sets, and any drift; --all for every known setting; --json for the raw answer
 ```
 
 ## Uptime monitoring (Gatus)

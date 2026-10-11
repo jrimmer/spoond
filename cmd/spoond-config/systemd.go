@@ -16,13 +16,24 @@ var systemctlProps = func(unit string, props ...string) (map[string]string, erro
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+	return parseShow(string(b)), nil
+}
+
+// parseShow reads `systemctl show -p …` output into property -> value.
+// A property can come on several lines — a unit with two
+// EnvironmentFile= lines prints EnvironmentFiles= twice — so repeated
+// lines join with a space, in order, instead of the last one winning.
+func parseShow(out string) map[string]string {
+	m := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line == "" {
 			continue
 		}
 		k, v, _ := strings.Cut(line, "=")
-		out[k] = v
+		if prev, ok := m[k]; ok && prev != "" {
+			v = prev + " " + v
+		}
+		m[k] = v
 	}
-	return out, nil
+	return m
 }
