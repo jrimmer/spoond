@@ -66,9 +66,9 @@ type memSample struct {
 	lastFetched time.Time
 }
 
-// memSampler holds the per-lease measured memory behind LeaseMemory
-// views. Guarded by its own mutex; entries are dropped when the lease
-// is released.
+// memSampler holds the per-lease measured memory behind the lease
+// API's memory_used_mb/memory_peak_mb (#130 R1). Guarded by its own
+// mutex; entries are dropped when the lease is released.
 type memSampler struct {
 	mu      sync.Mutex
 	entries map[string]memSample // by lease id
@@ -128,21 +128,6 @@ func (ms *memSampler) forget(leaseID string) {
 	delete(ms.entries, leaseID)
 }
 
-// forgetSandbox clears the entry of a lease whose sandbox is about to
-// be replaced (crash recovery, resume into a new sandbox), so a stale
-// sample is never reported against a different VM. Not strictly needed
-// — record() also resets on an id change — it just makes the window
-// between the swap and the next tick honest.
-func (ms *memSampler) forgetSandbox(leaseID string) {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	if e, ok := ms.entries[leaseID]; ok {
-		e.sandboxID = ""
-		e.usedBytes, e.peakBytes, e.totalBytes, e.hasTotal, e.samples = 0, 0, 0, false, 0
-		ms.entries[leaseID] = e
-	}
-}
-
 // latest reports the lease's latest measured used bytes.
 func (ms *memSampler) latest(leaseID string) (float64, bool) {
 	ms.mu.Lock()
@@ -168,34 +153,30 @@ func (ms *memSampler) entry(leaseID string) (memSample, bool) {
 	return e, ok
 }
 
-// measuredByOwner sums the latest used bytes over the owner's live
-// leases, in whole MiB, rounding up so a partially-used MiB still
-// counts.
-func (ms *memSampler) measuredByOwner(leases map[string]*Lease, owner string) (int, bool) {
+// measuredByOwner reports whether the owner has any live lease with a
+// fresh measurement; leaseCounts sums per lease itself so it can share
+// the store lock.
+func (ms *memSampler) measuredByOwner(leases map[string]*Lease, owner string) bool {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	sum, any := 0.0, false
 	for id, l := range leases {
 		if l.released || l.Owner != owner || !l.live() {
 			continue
 		}
 		if e, ok := ms.entries[id]; ok && e.samples > 0 {
-			sum += e.usedBytes
-			any = true
+			return true
 		}
 	}
-	if !any {
-		return 0, false
-	}
-	return int(math.Ceil(sum / (1024 * 1024))), true
+	return false
 }
 
-// parseOpenMetrics pulls the two ram families out of a Prometheus text
-// document: family lines and sample lines only, labels parsed with
-// commas or quotes escaped, values as floats (including exponent form),
-// NaN skipped. Other families are ignored. Unknown shapes are skipped,
-// not errors: the collector outgrew the sampler's grammar once and a
-// hard failure would silence every lease.
+// parseOpenMetrics pulls the two ram families out of a Prometheus
+// text document: sample lines only, labels parsed with the usual
+// comma-separated quoted-value form and escapes, values as floats
+// (including exponent form), NaN and ±Inf skipped, other families
+// ignored. A line of a shape it does not understand is skipped, not
+// an error: an unknown enrichment of the document must not silence
+// every lease.
 func parseOpenMetrics(body []byte) (used, total map[string]float64) {
 	used, total = map[string]float64{}, map[string]float64{}
 	for _, line := range strings.Split(string(body), "\n") {
@@ -203,36 +184,41 @@ func parseOpenMetrics(body []byte) (used, total map[string]float64) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// Only `name{labels} value` lines are interesting (both
+		// families always carry labels in the collector's output; a bare
+		// sample without an id says nothing about a sandbox).
 		i := strings.LastIndex(line, "} ")
 		if i < 0 {
 			continue
 		}
-		value, err := strconv.ParseFloat(strings.TrimSpace(line[i+2:]), 64)
+		text := strings.TrimSpace(line[i+2:])
+		value, err := strconv.ParseFloat(text, 64)
 		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 			continue
 		}
-		name, rest := line[:i], line[i+2:]
-		_ = rest
-		name = strings.TrimSpace(name)
-		rest = strings.TrimSpace(line[i+2:])
-		value, err = strconv.ParseFloat(rest, 64)
-		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		name := strings.TrimSpace(line[:i+1])
+		lb := strings.Index(name, "{")
+		if lb < 0 || !strings.HasSuffix(name, "}") {
 			continue
 		}
-		labels := parseLabels(name[strings.Index(name, "{")+1 : len(name)-1])
-		sid := labels[sandboxIDLabel]
+		sid := parseLabels(name[lb+1 : len(name)-1])[sandboxIDLabel]
 		if sid == "" {
 			continue
 		}
-		switch {
-		case strings.HasPrefix(name, ramUsedMetric+"{"):
+		switch family(name[:lb]) {
+		case ramUsedMetric:
 			used[sid] = value
-		case strings.HasPrefix(name, ramTotalMetric+"{"):
+		case ramTotalMetric:
 			total[sid] = value
 		}
 	}
 	return used, total
 }
+
+// family strips a Prometheus text suffix (a trailing unit or
+// _total-like suffix is never present on these two, but ignore a
+// sample-rate suffix defensively).
+func family(name string) string { return name }
 
 // parseLabels splits a label block `a="1",b="2"` into a map. Values use
 // Prometheus escaping: \\ → \, \" → ", \n → newline.
@@ -288,8 +274,9 @@ func parseLabels(s string) map[string]string {
 	return out
 }
 
-// memSamplerFetch, a field so tests install a stub without an HTTP
-// server.
+// memSamplerFetch is the sampler's source: an HTTP GET of the
+// OTEL_PROM_URL document in production. A field on Service so tests
+// install a stub without an HTTP server.
 type memSamplerFetch func(ctx context.Context) ([]byte, error)
 
 // memSampleHTTPGetter returns a fetch of the orchestrator's Prometheus
@@ -332,8 +319,9 @@ func (s *Service) startMemSampler(ctx context.Context) {
 	}
 }
 
-// sampleMemOnce fetches and records one pass, with one log line when
-// consecutive passes fail.
+// sampleMemOnce fetches and records one pass; consecutive failures
+// log once and keep the last values (the failure flag clears on the
+// next success).
 func (s *Service) sampleMemOnce(ctx context.Context) {
 	body, err := s.memSamplerFetch(ctx)
 	if err != nil {
@@ -345,9 +333,9 @@ func (s *Service) sampleMemOnce(ctx context.Context) {
 	}
 	s.memSampleFailed = false
 	used, total := parseOpenMetrics(body)
-	// One snapshot of the live leases, then the sampler's own lock: no
-	// lock order with the store lock, and the sampler never waits on a
-	// substrate call while holding it.
+	// One snapshot of the live leases under the store lock, released
+	// before the sampler's own lock: no lock order with the store, and
+	// the sampler never waits on anything while holding its lock.
 	s.store.mu.Lock()
 	live := make(map[string]*Lease, len(s.store.leases))
 	for id, l := range s.store.leases {
@@ -356,10 +344,12 @@ func (s *Service) sampleMemOnce(ctx context.Context) {
 		}
 	}
 	s.store.mu.Unlock()
-	for id := range live {
-		l := live[id]
+	// Only leases the document says anything about pass through: series
+	// of sandboxes that are gone, and other hosts' sandboxes, are
+	// invisible.
+	for id, l := range live {
 		if _, ok := used[l.SandboxID]; !ok {
-			if _, ok2 := total[l.SandboxID]; !ok2 {
+			if _, ok := total[l.SandboxID]; !ok {
 				delete(live, id)
 			}
 		}
