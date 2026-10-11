@@ -18,6 +18,29 @@ var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|env
 // the conformance harness lists its required variables.
 var envTable = regexp.MustCompile(`\{"([A-Z][A-Z0-9_]{2,})", &`)
 
+// TestHideIfSecret (#137): a name carrying TOKEN, KEY, SECRET,
+// PASSWORD, HASH or SEED (case-insensitive, anywhere in the name) is
+// masked to "(hidden)"; a plain name passes its value through.
+func TestHideIfSecret(t *testing.T) {
+	cases := []struct {
+		name, value, want string
+	}{
+		{"ADMIN_TOKEN", "sekrit", "(hidden)"},
+		{"LLM_UPSTREAM_KEY", "sk-1", "(hidden)"},
+		{"proxy_auth_secret", "s", "(hidden)"}, // case-insensitive
+		{"DASH_PASSWORD_HASH", "h", "(hidden)"},
+		{"E2B_TOKEN_SEED_FILE", "/x", "(hidden)"}, // SEED-only marker
+		{"NOTIONAL_PASSWORD", "p", "(hidden)"},
+		{"BIND_ADDR", "127.0.0.1:8890", "127.0.0.1:8890"},
+		{"", "x", "x"},
+	}
+	for _, c := range cases {
+		if got := HideIfSecret(c.name, c.value); got != c.want {
+			t.Errorf("HideIfSecret(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestKnownMatchesSource: Known is exactly the settings the source reads
 // — a new setting must be added to it, and a removed one dropped.
 func TestKnownMatchesSource(t *testing.T) {
