@@ -85,15 +85,11 @@ type User struct {
 	// legacy token keeps TokenHash; new tokens append here. A file
 	// written before this field existed loads unchanged with nil Tokens.
 	Tokens []TokenRecord `json:"tokens,omitempty"`
-	// LastUsedAt and LegacyTokenExpiresAt back the legacy TokenHash's
-	// presented "default" token record. LastUsedAt is refreshed by
-	// UserByToken when the legacy token authenticates;
-	// LegacyTokenExpiresAt is always "" (the legacy token never
-	// expires) and is kept so a revoked default cannot be made to read
-	// as expired by stale data. Named tokens carry their own stamps in
+	// LastUsedAt backs the legacy TokenHash's presented "default"
+	// token record: it is refreshed by UserByToken when the legacy
+	// token authenticates. Named tokens carry their own stamps in
 	// their TokenRecord.
-	LastUsedAt           string `json:"last_used_at,omitempty"`
-	LegacyTokenExpiresAt string `json:"-"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
 	// LLMKeyHash is the SHA256 of the user's LLM gateway key (U8/T8,
 	// "" = none). When set, /llm/ requests on this user's leases must
 	// present the matching key; the API layer never exposes it.
@@ -650,7 +646,7 @@ func (s *Store) ListTokens(userID string) ([]TokenRecord, error) {
 	if u.TokenHash != "" {
 		out = append(out, TokenRecord{
 			ID: legacyTokenID, Name: defaultTokenName, CreatedAt: u.CreatedAt,
-			ExpiresAt: u.LegacyTokenExpiresAt, LastUsedAt: u.LastUsedAt,
+			LastUsedAt: u.LastUsedAt,
 		})
 	}
 	out = append(out, u.Tokens...)
@@ -674,7 +670,6 @@ func (s *Store) RevokeToken(userID, tokenID string) error {
 			s.deindexToken(u, u.TokenHash)
 			u.TokenHash = ""
 			u.LastUsedAt = ""
-			u.LegacyTokenExpiresAt = ""
 			return s.save()
 		}
 		return nil
