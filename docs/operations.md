@@ -410,6 +410,39 @@ This is measured, not yet compacted:
 A follow-up decides on automatic compaction after these numbers have
 been read on the deployment.
 
+## Maintenance windows and the break-glass token mint
+
+A **maintenance window** is when the host root does API work on behalf
+of a user — most often during the orchestrator restart above, or when
+a user is locked out (their token lost, their holder gone) and cannot
+mint one. `ADMIN_TOKEN` (the root-only break-glass) mints a short-lived
+bearer token for any user on
+[`POST /api/users/{id}/tokens`](api.md#the-break-glass-mint-admin_token-on-the-mint-route-138-a3);
+everywhere else on the API it is refused as the unknown token it is.
+
+Find the user's id with `GET /api/users` (an admin user token, or have
+the mint answer carry it), then mint:
+
+```bash
+UID=$(curl -fsS -H "Authorization: Bearer $ADMIN_USER_TOKEN" \
+  "$SPOOND_URL/api/users" | jq -r '.users[] | select(.name=="alice") | .id')
+curl -fsS -X POST "$SPOOND_URL/api/users/$UID/tokens" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"maintenance-window","ttl_secs":3600}'
+```
+
+The response carries the secret **once** (`{"id":"t-…","name":"…",
+"token":"sdt-…","expires_at":"…"}`). Set `ttl_secs` so the token dies
+with the window — the whole point of the break-glass staying narrow:
+the mint is logged with the user, the token's name and its id, never
+the secret, and the user can revoke the token (`DELETE
+/api/users/{id}/tokens/{token_id}`) the moment they hold their own.
+Without a `ttl_secs` the token never expires; revoke it explicitly when
+the window ends. `GET` and `DELETE` on the token routes still want the
+user or an admin user — the break-glass cannot list or revoke, so it
+cannot clean up after itself; keep the window's `ttl_secs` short
+instead.
+
 ## Restarting the orchestrator (planned)
 
 `systemctl restart e2b-orchestrator` is safe: the unit's drain hooks make

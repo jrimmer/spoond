@@ -2535,11 +2535,16 @@ is reserved (`409`) while the user's original token is still set — see
 below. The secret is never stored in the clear, never logged and never
 returned again: lose it, mint another.
 
-**Who.** The user itself and an admin. Another authenticated user gets
-`404`, the same answer as an unknown id (they must not learn whether
-the user exists); a legacy consumer token (no identity user) gets
-`403`; a missing or unknown bearer token is `401`. The same rules
-apply to the two routes below.
+**Who.** The user itself, an admin, and — since A3 — the env
+`ADMIN_TOKEN` (the host root's break-glass, below). Another
+authenticated user gets `404`, the same answer as an unknown id (they
+must not learn whether the user exists); a legacy consumer token (no
+identity user) gets `403`; a missing, unknown or wrong bearer token is
+`401`. The same rules apply to the two routes below, except that there
+the `ADMIN_TOKEN` is refused like any unknown token: **the break-glass
+mints, it does not manage** — the host root mints a user a new token
+but cannot list or revoke that user's tokens, cannot see or rotate the
+user's own, and cannot touch anything else of theirs.
 
 ### `GET /api/users/{id}/tokens` — list a user's tokens
 
@@ -2564,7 +2569,8 @@ most every 5 minutes.
 An **expired** token authenticates nobody (`401`) and cannot be
 revived; it still shows on the list with its expiry until revoked.
 Mints and revokes are logged with the token's name and id, never its
-secret.
+secret — an `ADMIN_TOKEN` mint additionally names the break-glass in
+the line (`token minted with ADMIN_TOKEN: …`).
 
 ```sh
 curl -fsS -X POST "$SPOOND_URL/api/users/$UID/tokens" \
@@ -2574,6 +2580,32 @@ curl -fsS "$SPOOND_URL/api/users/$UID/tokens" \
   -H "Authorization: Bearer $TOKEN"
 curl -fsS -X DELETE "$SPOOND_URL/api/users/$UID/tokens/$TOKEN_ID" \
   -H "Authorization: Bearer $TOKEN"
+```
+
+#### The break-glass mint (`ADMIN_TOKEN` on the mint route, #138 A3)
+
+`POST /api/users/{id}/tokens` accepts `Authorization: Bearer
+$ADMIN_TOKEN` as well: the host's root — who can read the backend's
+env file and so holds `ADMIN_TOKEN` anyway — can mint a token for any
+user without holding a user token of their own. The intended use is
+the **maintenance window**: during a planned stop or an incident, root
+mints a short-lived token (with `ttl_secs`) and hands it to the
+affected user (or runs API calls as them); when the window ends the
+expiry takes the token away on its own, and if it does not, the user
+(or an admin) revokes it. With no `ADMIN_TOKEN` configured the route
+just keeps its A2 rules; a **wrong** `ADMIN_TOKEN` on the mint route
+answers the same `401` an unknown token gets.
+
+Keep it on that one route: the break-glass is accepted nowhere else on
+`/api/users/**` (the other user routes answer `401` for it) and
+nothing else about the lease API changes. `GET` and `DELETE` on the
+tokens stay self/admin-user. For the who-can-do-what table see
+[security.md](security.md#who-can-do-what).
+
+```sh
+curl -fsS -X POST "$SPOOND_URL/api/users/$UID/tokens" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"maintenance-window","ttl_secs":3600}'
 ```
 
 ### `GET /api/identity-status`
