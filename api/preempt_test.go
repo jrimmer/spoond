@@ -455,7 +455,7 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 		t.Fatalf("take-back paused the wrong lease: v=%v f=%v f2=%v", victim.Suspended, filler.Suspended, filler2.Suspended)
 	}
 
-	m := leaseMap(victim, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim))
+	m := svc.leaseMap(victim, nil, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim))
 	if got := m["preempted"]; got != false {
 		t.Fatalf("preempted field = %v, want false (take-back does not stamp preempted)", got)
 	}
@@ -535,7 +535,7 @@ func TestTakenBackColdRestartRunsAgain(t *testing.T) {
 	if victim.State != "running" || victim.TakeBackFor != "" {
 		t.Fatalf("after a cold restart state=%s takeBackFor=%q, want running and no take-back stamp", victim.State, victim.TakeBackFor)
 	}
-	if m := leaseMap(victim, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim)); m["preempted"] != false {
+	if m := svc.leaseMap(victim, nil, svc.effectiveCheckpointInterval(victim), svc.effectiveIdleSuspend(victim)); m["preempted"] != false {
 		t.Fatalf("preempted field = %v, want false", m["preempted"])
 	}
 }

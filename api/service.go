@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"sort"
@@ -904,6 +905,30 @@ type Service struct {
 	// release that credits room mid-pass is never lost to the periodic
 	// tick (#spoond-vbdj).
 	wakePending atomic.Bool
+
+	// memSamples holds the measured lease memory (#130 R1): per live
+	// lease the latest used bytes its sandbox reported and the peak
+	// since the current VM started, recorded by the memory sampler from
+	// the orchestrator metrics (OTEL_PROM_URL). In memory only: a
+	// backend restart re-measures from the next tick.
+	memSamples *memSampler
+	// memSamplerFetch fetches the orchestrator metrics document for the
+	// memory sampler. Set in NewService from OTEL_PROM_URL; nil disables
+	// the sampler (the loop is not started and the lease API reports no
+	// measured memory).
+	memSamplerFetch memSamplerFetch
+	// memSampleInterval is how often the memory sampler fetches the
+	// orchestrator metrics (default memSampleInterval = 30 s). A field so
+	// tests shrink it.
+	memSampleInterval time.Duration
+	// memSampleFailed is true while the last fetch failed; the next
+	// success clears it. It rate-limits the sampler's failure log to one
+	// line per outage rather than one per 30 s tick.
+	memSampleFailed bool
+	// memSampleClient fetches the OTEL_PROM_URL document when the sampler
+	// is enabled; its timeout keeps a slow collector from holding the
+	// loop.
+	memSampleClient *http.Client
 	// admitPassHook, when set by a test, runs inside tryAdmitQueued once
 	// the pass has judged every queued ticket and is about to return. It
 	// lets a test hold a pass mid-flight while it frees room and wakes,
@@ -982,9 +1007,15 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		secretsGate:               secretsGate{saving: map[string]int{}, staging: map[string]int{}},
 		deletedOwners:             map[string]bool{},
 		jobStarts:                 map[string]*jobStartLock{},
+		memSamples:                newMemSampler(),
+		memSampleInterval:         memSampleInterval,
+		memSampleClient:           &http.Client{Timeout: memSampleHTTPTimeout},
 	}
 	svc.rootfsProbeInterval.Store(int64(time.Duration(DefaultRootfsProbeSecs) * time.Second))
 	svc.cfg.SizePresets, svc.cfg.MaxLeaseVCPU, svc.cfg.MaxLeaseMemoryMB = sizeLimitsOrDefault(cfg)
+	if url := os.Getenv("OTEL_PROM_URL"); url != "" {
+		svc.memSamplerFetch = memSampleHTTPGetter(url, svc.memSampleClient)
+	}
 	svc.snapshotLimiters = snapshotLimiters{
 		def:   newSnapshotLimiter(cfg.SnapshotWriteConcurrency, svc.now, svc.log.Printf),
 		drain: newSnapshotLimiter(cfg.DrainSnapshotConcurrency, svc.now, svc.log.Printf),
@@ -1756,6 +1787,12 @@ func (s *Service) Start(ctx context.Context) {
 	// Usage history (#140 U4): one usage_samples row per owner every
 	// sample interval, old rows pruned past the retention window.
 	go s.runUsageHistoryLoop(ctx)
+	// Measured lease memory (#130 R1): every 30 s, when OTEL_PROM_URL is
+	// set, read the orchestrator's per-sandbox ram gauges for the live
+	// leases and keep latest/peak in memory.
+	if s.memSamplerFetch != nil {
+		go s.startMemSampler(ctx)
+	}
 	// Drain self-heal (spoond-52c): undrain a drain that outlived
 	// DRAIN_MAX_SECS on a healthy node, and resume any lease left
 	// Drained by a failed or deferred undrain.
@@ -2034,10 +2071,12 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	// were staged into goes with the release (#80).
 	s.clearCreateSecrets(l.ID)
 	// The per-lease in-memory maps go too: the applied-egress memo
-	// (spoond-966 L1) and any deferred exec-time secret removals, whose
-	// files went with the sandbox (spoond-966 L1).
+	// (spoond-966 L1), any deferred exec-time secret removals, whose
+	// files went with the sandbox (spoond-966 L1), and the measured
+	// memory entry (#130).
 	s.forgetAppliedEgress(l.ID)
 	s.clearPendingSecretRemovals(l.ID)
+	s.memSamples.forget(l.ID)
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
@@ -2164,6 +2203,11 @@ type LeaseCounts struct {
 	Pinned      int `json:"pinned"`
 	Lost        int `json:"lost"`
 	RunningJobs int `json:"running_jobs"`
+	// MemoryUsedMiB is the measured memory of the owner's running
+	// leases (#130 R1): their latest sampled used MiB summed. Omitted
+	// when none of them has a measurement (the sampler off, or nothing
+	// measured yet).
+	MemoryUsedMiB int `json:"memory_used_mib,omitempty"`
 }
 
 // leaseCounts tallies the owner's leases from the in-memory map
@@ -2173,6 +2217,7 @@ type LeaseCounts struct {
 // lost leases are still held until their owner releases them.
 func (s *Service) leaseCounts(owner string) LeaseCounts {
 	var c LeaseCounts
+	ms := s.memSamples
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	for _, l := range s.store.leases {
@@ -2191,6 +2236,14 @@ func (s *Service) leaseCounts(owner string) LeaseCounts {
 			c.Pinned++
 		}
 		c.RunningJobs += s.store.runningJobs[l.ID]
+		// Measured memory (#130 R1): the sum of the running leases' own
+		// latest usage. When no live lease has data yet (OTEL_PROM_URL
+		// unset, or no tick since they started) the field stays off.
+		if l.live() {
+			if used, ok := ms.latest(l.ID); ok {
+				c.MemoryUsedMiB += mibCeil(used)
+			}
+		}
 	}
 	return c
 }
@@ -4727,9 +4780,12 @@ func (s *Service) leaseSuspendReason(id string) string {
 // holder_url labels are returned as-is and have no lifecycle effect.
 
 // leaseMap renders a lease as one GET /api/sandboxes row. The
-// checkpointInterval and idleSuspend arguments are the lease's effective
-// values in seconds (the host default already resolved; 0 = never).
-func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
+// checkpointInterval and idleSuspend arguments are the lease's
+// effective values in seconds (the host default already resolved;
+// 0 = never). ms is the measured-memory sampler and s the Service —
+// s.sizePresets() reads for size_hint; s may be nil in tests, which
+// leaves the size fields off.
+func (s *Service) leaseMap(l *Lease, ms *memSampler, checkpointInterval, idleSuspend int64) map[string]any {
 	m := map[string]any{
 		"id":               l.ID,
 		"owner":            l.Owner,
@@ -4796,6 +4852,13 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 		m["last_action"] = l.LastAction
 		m["last_action_at"] = formatRFC3339(l.LastActionAt)
 	}
+	// Measured memory (#130 R1): what the sandbox actually used at the
+	// last sampler tick and its high-water mark since the current VM
+	// started, in whole MiB (ceil; a partially used MiB counts).
+	// Omitted while the sampler has nothing (OTEL_PROM_URL unset, the
+	// lease not live, the series not seen yet). size_hint is the
+	// advisory part; see memsize.go.
+	leaseSizeHints(m, l, ms, s.sizePresets())
 	// Structured suspension facts (#145 D6), additive and omitted while
 	// the lease is not suspended: why an automatic suspend happened
 	// (idle_suspend|preempt|resume_failed), the pressure
@@ -4824,7 +4887,8 @@ func leaseMap(l *Lease, checkpointInterval, idleSuspend int64) map[string]any {
 // memory charge rides along too (#128): charged_mib, the same number as
 // used_mib in GET /api/users/me for this lease's owner.
 func (s *Service) leaseDetailMap(l *Lease) map[string]any {
-	m := leaseMap(l, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
+	ms := s.memSamples
+	m := s.leaseMap(l, ms, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
 	m["state"] = l.State
 	m["recovered_from"] = formatRFC3339(l.RecoveredFrom)
 	m["last_checkpoint_at"] = formatRFC3339(l.LastCheckpointAt)
@@ -4917,9 +4981,10 @@ func (s *Service) list(owner string) []map[string]any {
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	var out []map[string]any
+	ms := s.memSamples
 	for _, l := range s.store.leases {
 		if l.Owner == owner && !l.released {
-			m := leaseMap(l, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
+			m := s.leaseMap(l, ms, s.effectiveCheckpointInterval(l), s.effectiveIdleSuspend(l))
 			m["jobs"] = jobsSummaryView(running[l.ID], exits[l.ID])
 			out = append(out, m)
 		}

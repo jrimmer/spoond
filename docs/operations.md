@@ -1478,6 +1478,25 @@ panel reads the same secret the backend checks), and a new deployment
 sets it alongside `METRICS_TOKEN` when writing the env files — see
 [install.md](install.md).
 
+## Measured lease memory
+
+What a lease actually uses (#130): when `OTEL_PROM_URL` is set, the
+backend reads the orchestrator's Prometheus output (the document its
+own `/metrics` already appends) every 30 s, parses only the two
+per-sandbox ram families (`e2b_sandbox_ram_used_bytes`,
+`e2b_sandbox_ram_total_bytes`) and keeps, in memory only, each running
+lease's latest `memory_used_mb` and the high-water mark
+`memory_peak_mb` since its current VM started (reset on the lease's
+next VM), matched by `sandbox_id` — series of sandboxes that are gone
+are ignored, released leases' entries are dropped, a failed fetch or
+parse logs once and keeps the last values. A lease row's `size_hint`
+(GET /api/leases/{id}, see [api.md](api.md#get-apileases-list-leases))
+then names the smallest preset whose memory fits 1.25 × the measured
+peak, once the lease has at least 10 samples — the measured right-sizing
+nudge for owners who picked a size blind. Nothing is persisted: a
+backend restart re-measures from the next tick, and the feature is off
+entirely without `OTEL_PROM_URL`.
+
 ## Metrics
 
 `GET /metrics` (admin user, or the scrape-only `METRICS_TOKEN`) serves

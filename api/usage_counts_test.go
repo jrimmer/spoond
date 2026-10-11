@@ -17,6 +17,16 @@ func addLease(svc *Service, id, owner, state string, pinned bool) {
 	svc.store.mu.Unlock()
 }
 
+// addSandboxedLease is addLease with a sandbox id and memory charge, so
+// measured-memory tests can seed entries through ms.record.
+func addSandboxedLease(svc *Service, id, owner, sandboxID string, memoryMB int) *Lease {
+	svc.store.mu.Lock()
+	l := &Lease{ID: id, Owner: owner, State: "running", SandboxID: sandboxID, MemoryMB: memoryMB}
+	svc.store.leases[id] = l
+	svc.store.mu.Unlock()
+	return l
+}
+
 // TestUsageLeaseCounts: GET /api/usage and GET /api/users/me carry the
 // caller's lease counts beside "share" (#140 U1): running, paused,
 // pinned, lost and running jobs, owner-scoped from the in-memory map.

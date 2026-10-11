@@ -15,6 +15,19 @@ summarised from README "Status".
 - **The dashboard's `access` column is headed `policy`**: it shows the network policy today, and more lease policy is coming.
 - **The dashboard's state column is headed `state`**, not `ST`, so a reader new to spoond can scan it; the column widens by three cells.
 
+### Added
+
+- Measured lease memory (#130): when `OTEL_PROM_URL` is set, the backend
+  samples the orchestrator's per-sandbox ram gauges every 30 s and each
+  live lease's row (GET /api/leases, GET /api/leases/{id}) gains
+  `memory_used_mb` (latest) and `memory_peak_mb` (max since the current
+  VM started), plus `size_hint` — the smallest size preset whose memory
+  fits 1.25 × the measured peak, once at least 10 samples are in and it
+  would actually save memory. `GET /api/usage`'s `leases` object gains
+  `memory_used_mib`, the summed latest usage of the caller's running
+  leases. In memory only (nothing persisted, nothing without
+  `OTEL_PROM_URL`).
+
 ## [3.4.1] - 2026-10-11
 
 ### Fixed

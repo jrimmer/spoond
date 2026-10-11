@@ -445,6 +445,23 @@ keeps it too for a lease created at a chosen size, and otherwise takes
 the image's current default (see [create](#post-apileases--create-a-lease)).
 The size fields are omitted for an old lease whose image row is gone.
 
+When the backend can measure it (OTEL_PROM_URL set; see
+[operations.md](operations.md#measured-lease-memory)), a live lease's
+row also carries what the sandbox actually used (#130):
+`memory_used_mb` (whole MiB, at the latest sampler tick — about 30 s
+behind) and `memory_peak_mb` (the high-water mark since the lease's
+current VM started; a pause/resume that continues the VM keeps it, a
+crash recovery or replace resets it). It also carries `size_hint`, the
+name of the smallest size preset (`GET /api/sizes`) whose `memory_mb`
+still fits the measured peak with a 25 % margin — only once the
+measurement spans at least 10 samples (about 5 min) and only when that
+preset is smaller than the lease's own `memory_mb` (a hint that would
+not save memory is no hint). Both measured fields are omitted while the
+sampler has nothing on the lease (a fresh create, the series not seen
+yet, or `OTEL_PROM_URL` unset); `size_hint` is advisory only, nothing
+acts on it. See [GET /api/leases](#get-apileases--list-leases) for the
+rest of the row.
+
 A pinned lease's row adds `pinned_idle_since` (RFC 3339) once its last
 API activity passes `PINNED_IDLE_NOTICE_DAYS` (visibility only; cleared
 when activity returns). A lease that was ever automatically executed
@@ -2367,8 +2384,14 @@ non-admin caller.
 Any authenticated caller. `{"share": {owner, name, slice_pct,
 capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
 used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}, "leases":
-{running, paused, pinned, lost, running_jobs}, "waiting": [{id, owner,
-image, position, waited_s, reason}], "recent": [event]}`. `waiting` lists the caller's
+{running, paused, pinned, lost, running_jobs, memory_used_mib},
+"waiting": [{id, owner, image, position, waited_s, reason}], "recent":
+[event]}`. `leases.memory_used_mib` (#130) is the summed latest measured
+usage of the caller's running leases (the same measurement the lease
+rows' `memory_used_mb` carries); it is omitted when none of them has a
+measurement yet (the sampler off or no tick since they started) — the
+charged `share.memory.used_mib` is the leases' full `memory_mb`, not
+this measured number. `waiting` lists the caller's
 creates queued for admission, the same entries as
 [`GET /api/leases/queue`](#get-apileasesqueue--creates-waiting-for-admission):
 `position` is the place in the whole queue (1 is tried first), so it
