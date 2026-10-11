@@ -10,6 +10,24 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Secrets from files (#137 C2).** Every secret setting (`ADMIN_TOKEN`,
+  `METRICS_TOKEN`, `EVENTS_TOKEN`, `CONSUMER_TOKENS`, `GATEWAY_TOKEN`,
+  `BOOTSTRAP_TOKEN`, `LLM_UPSTREAM_KEY`, `PROXY_AUTH_SECRET`,
+  `DASH_PASSWORD_HASH`, `DASH_EVENTS_TOKEN`, `RUNNER_TOKEN`,
+  `LEASE_TOKEN`, `FORGEJO_ADMIN_TOKEN`, `SPOOND_GATEWAY_TOKEN`) may be
+  given as `<NAME>_FILE=/path` (a 0600 file whose content — one
+  trailing newline trimmed — is the value): the processes read it once
+  at startup. Setting both forms, or naming an unreadable file, refuses
+  startup; a file readable by group or others logs a warning and
+  `spoond doctor` flags it. `spoond config show` keeps the file
+  spelling as its own row (the path shown, the content never) beside
+  the secret's row (`(hidden, from file)`, source the env file), and
+  `GET /api/admin/config` reports such a secret set, so the two
+  surfaces still agree. The procedure is docs/operations.md, "Moving a
+  secret to a file".
+
 ## [3.5.0] - 2026-10-11
 
 3.5 measures what each lease's VM really uses: every running lease
@@ -34,21 +52,6 @@ and `policy`. No breaking changes and no schema change.
   The settings package (`settings.Specs`, `settings.Validate`) holds
   the per-setting type and owner binary behind the same
   `settings.Known` list `spoond doctor` checks env files against.
-- **Secrets from files (#137 C2).** Every secret setting (`ADMIN_TOKEN`,
-  `METRICS_TOKEN`, `EVENTS_TOKEN`, `CONSUMER_TOKENS`, `GATEWAY_TOKEN`,
-  `BOOTSTRAP_TOKEN`, `LLM_UPSTREAM_KEY`, `PROXY_AUTH_SECRET`,
-  `DASH_PASSWORD_HASH`, `DASH_EVENTS_TOKEN`, `RUNNER_TOKEN`,
-  `LEASE_TOKEN`, `FORGEJO_ADMIN_TOKEN`, `SPOOND_GATEWAY_TOKEN`) may be
-  given as `<NAME>_FILE=/path` (a 0600 file whose content — one
-  trailing newline trimmed — is the value): the processes read it once
-  at startup. Setting both forms, or naming an unreadable file, refuses
-  startup; a file readable by group or others logs a warning and
-  `spoond doctor` flags it. `spoond config show` folds the file
-  spelling onto the secret's row (`(hidden, from file)`, source the env
-  file, the content never displayed) and `GET /api/admin/config`
-  reports such a secret set, so the two surfaces still agree. The
-  procedure is docs/operations.md, "Moving a secret to a file".
-
 ### Changed
 
 - **The dashboard's `access` column is headed `policy`**: it shows the network policy today, and more lease policy is coming.

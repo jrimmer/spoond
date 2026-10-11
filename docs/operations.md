@@ -74,9 +74,9 @@ through the `_FILE` spelling when the env files carry one (#137 C2) —
 and `BIND_ADDR` (not the caller's shell, so it authenticates against
 the exact backend those files start): `same`, `differs — restart to
 apply`, `not set in running backend`, `?` when the API is unreachable,
-`n/a` for a known name. A secret moved to a file shows
-`(hidden, from file)` as its VALUE (never the content) and the fold
-never disagrees with the endpoint's answer; see
+`n/a` for a known name. A secret moved to a file shows two rows: the
+`<NAME>_FILE` row's VALUE is the file's path (never the content) and
+the base setting's row beside it shows `(hidden, from file)`; see
 [Moving a secret to a file](#moving-a-secret-to-a-file). An
 unknown key from the unit env still prints, trailing "(unknown
 setting)" (a typo; the same class `spoond doctor` warns about). A
@@ -111,17 +111,18 @@ chown root:root /etc/spoond/secrets/admin-token            # the unit's User mus
 #   ADMIN_TOKEN_FILE=/etc/spoond/secrets/admin-token
 /opt/spoond/spoond doctor                                 # checks the file exists and is 0600 (WARN otherwise)
 systemctl restart spoond-backend
-/opt/spoond/spoond config show                            # ADMIN_TOKEN shows "(hidden, from file)", source the env file
+/opt/spoond/spoond config show                            # ADMIN_TOKEN_FILE shows the path, ADMIN_TOKEN "(hidden, from file)"
 ```
 
 `spoond config show` never shows a file secret's content — the
-`<NAME>_FILE` line's row displays the base setting with
-`(hidden, from file)` as the value and the env file as the source, and
-`GET /api/admin/config` reports the same (`set: true`, value
-`(hidden, from file)`), so the running-backend comparison stays honest.
-A value file readable by group or others is warned about: the backend
-logs it once at startup, `spoond doctor` flags it, and the file's mode
-should read `600` (`stat -c '%a' <path>`). The env file itself keeps
+`<NAME>_FILE` line keeps its own row showing the path (never the
+content) with the env file as the source, and the base setting's row
+beside it shows `(hidden, from file)`. `GET /api/admin/config` reports
+the same (`set: true`, value `(hidden, from file)`, no path), so the
+running-backend comparison stays honest. A value file readable by group
+or others is warned about: the backend logs it once at startup,
+`spoond doctor` flags it, and the file's mode should read `600`
+(`stat -c '%a' <path>`). The env file itself keeps
 only the path, so it may move to whatever revision control the rest of
 the deployment's configuration already trusts.
 
