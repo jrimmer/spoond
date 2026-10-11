@@ -53,12 +53,17 @@ proposals the owner can change; each is one setting.
 
 ## Work
 
-- Z1 lease owns its size: migration 25 (`leases.vcpu`, `builds.size`,
-  `images.min_memory_mb`), every path uses the lease's size, GET lease
-  shows `vcpu`, `memory_mb`, `disk_mb`.
+- Z1 lease owns its size: migration 25 (`leases.vcpu`, and existing
+  stamps corrected from each VM's sandbox row or resume build), every
+  path charges and stamps the size its VM runs, pause and checkpoint
+  builds record the lease's size, GET lease shows `vcpu`, `memory_mb`,
+  `disk_mb`. Until Z4, a cold restart (and a non-persistent warm
+  restart) takes the image's current build and its size.
 - Z2 substrate: `CreateRequest.FilesystemBoot`, the e2b client sets it
   and reads `filesystem_boot_applied`; the fake records it.
-- Z3 presets: `SIZE_PRESETS`, `MAX_LEASE_*`, `GET /api/sizes`;
-  `spoond images build` builds each `warm_sizes` preset.
+- Z3 presets: migration 26 (`image_sizes` warm builds per preset, GC
+  roots; `images.min_memory_mb`), `SIZE_PRESETS`, `MAX_LEASE_*`,
+  `GET /api/sizes`; `spoond images build` builds each `warm_sizes`
+  preset.
 - Z4 create API: `size`/`memory_mb`/`vcpu`, warm-or-cold resolution,
   validation, `start` on the lease, docs and status codes for Honey.

@@ -105,3 +105,69 @@ func TestLeaseOwnsItsSize(t *testing.T) {
 		t.Fatalf("used_mib = %d, want 4 x 1024", got)
 	}
 }
+
+// TestSnapshotBuildsRecordTheLeaseSize (#151 Z1): a checkpoint and a
+// pause build record the lease's own size, not its parent template
+// build's — a lease cold-booted at another size snapshots at that size.
+func TestSnapshotBuildsRecordTheLeaseSize(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024})
+	svc := srv.svc
+	ctx := context.Background()
+	owner := ownerIDFor(t, h, tok)
+	rec, body := createPersistentAs(t, h, tok, "mid")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := body["id"].(string)
+	l := svc.lookup(uid, id)
+	// As if cold-booted at 6 vCPU / 3072 MiB off the 2/1024 template.
+	svc.store.mu.Lock()
+	l.VCPU, l.MemoryMB = 6, 3072
+	svc.store.mu.Unlock()
+
+	cp, err := svc.checkpointLease(ctx, l)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if cp.VCPU != 6 || cp.MemoryMB != 3072 {
+		t.Fatalf("checkpoint build size = %d/%d, want the lease's 6/3072", cp.VCPU, cp.MemoryMB)
+	}
+	if _, err := svc.suspend(ctx, owner, id); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	svc.store.mu.Lock()
+	pauseID := l.ResumeBuildID
+	svc.store.mu.Unlock()
+	pb, err := svc.db.GetBuild(ctx, pauseID)
+	if err != nil {
+		t.Fatalf("pause build: %v", err)
+	}
+	if pb.VCPU != 6 || pb.MemoryMB != 3072 {
+		t.Fatalf("pause build size = %d/%d, want the lease's 6/3072", pb.VCPU, pb.MemoryMB)
+	}
+}
+
+// TestWarmRestartRestampsSize (#151 Z1): a non-persistent lease's warm
+// restart boots the image's current build and is stamped with its size.
+func TestWarmRestartRestampsSize(t *testing.T) {
+	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024})
+	svc := srv.svc
+	ctx := context.Background()
+	owner := ownerIDFor(t, h, tok)
+	rec, body := createSandboxBody(t, h, tok, `{"image":"mid","ttl":600}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	id := body["id"].(string)
+	regrowImage(t, svc.db, "mid", 4, 2048, 10240)
+	if _, err := svc.restart(ctx, owner, id, "warm"); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	l := svc.lookup(uid, id)
+	svc.store.mu.Lock()
+	v, m := l.VCPU, l.MemoryMB
+	svc.store.mu.Unlock()
+	if v != 4 || m != 2048 {
+		t.Fatalf("warm-restarted lease size = %d/%d, want the current build's 4/2048", v, m)
+	}
+}

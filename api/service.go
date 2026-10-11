@@ -2151,34 +2151,6 @@ func (s *Service) imageBuild(ctx context.Context, image string) (store.ImageRow,
 	return img, b, nil
 }
 
-// imageMemoryMB returns the image's memory_mb for the checkpoint pause
-// log line (2.3, #122); 0 when the catalog cannot answer.
-func (s *Service) imageMemoryMB(ctx context.Context, image string) (int, error) {
-	img, err := s.db.GetImage(ctx, image)
-	if err != nil {
-		return 0, err
-	}
-	return img.MemoryMB, nil
-}
-
-// imageMiB is imageMemoryMB with its own bounded context: the memory
-// charge of one lease of the image (#128). The value is stamped on the
-// lease so accounting and release use the same number the admission
-// check reserved with. 0 when the catalog cannot answer: an uncharged
-// lease, and admission never blocks on a catalog hiccup — but it is
-// logged, so an operator can see the cap is not being enforced for
-// that image.
-func (s *Service) imageMiB(image string) int {
-	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
-	defer cancel()
-	mb, err := s.imageMemoryMB(ctx, image)
-	if err != nil {
-		s.log.Printf("memory quota: no memory_mb for image %s, leasing it uncharged: %v", image, err)
-		return 0
-	}
-	return mb
-}
-
 // leaseSize is the size a VM started from lease l's own snapshot runs
 // with (#151 Z1): the lease's stamped vCPU, memory and disk, read under
 // the store lock, with the image row's values for any field a lease
@@ -2199,6 +2171,24 @@ func (s *Service) leaseSize(l *Lease, img store.ImageRow) (vcpu, memoryMB, diskM
 		diskMB = img.DiskMB
 	}
 	return vcpu, memoryMB, diskMB
+}
+
+// snapshotSize is the size a pause or checkpoint build of lease l
+// records (#151 Z1): the lease's own vCPU and memory — the size its VM
+// runs at, which a cold-booted lease does not share with its parent
+// template build — with the parent build's values for a field the
+// lease has not stamped.
+func (s *Service) snapshotSize(l *Lease, parent store.BuildRow) (vcpu, memoryMB int) {
+	s.store.mu.Lock()
+	vcpu, memoryMB = l.VCPU, l.MemoryMB
+	s.store.mu.Unlock()
+	if vcpu == 0 {
+		vcpu = parent.VCPU
+	}
+	if memoryMB == 0 {
+		memoryMB = parent.MemoryMB
+	}
+	return vcpu, memoryMB
 }
 
 // grant creates a new lease for owner: served from the warm pool when
@@ -2872,13 +2862,15 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	if err != nil {
 		return "", err
 	}
-	// The pause build records what was snapshotted: versions and sizes
-	// copied from the parent build row. Its own size_bytes is measured
-	// at write time (2.3 #125), like a checkpoint build's.
+	// The pause build records what was snapshotted: versions copied
+	// from the parent build row, and the lease's own size (#151 Z1).
+	// Its own size_bytes is measured at write time (2.3 #125), like a
+	// checkpoint build's.
 	parent, err := s.db.GetBuild(ctx, l.BuildID)
 	if err != nil {
 		return "", fmt.Errorf("load parent build %s: %w", l.BuildID, err)
 	}
+	vcpu, memoryMB := s.snapshotSize(l, parent)
 	now := time.Now()
 	if err := s.db.InsertBuild(ctx, store.BuildRow{
 		BuildID:            buildID,
@@ -2892,8 +2884,8 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 		KernelVersion:      parent.KernelVersion,
 		FirecrackerVersion: parent.FirecrackerVersion,
 		EnvdVersion:        parent.EnvdVersion,
-		VCPU:               parent.VCPU,
-		MemoryMB:           parent.MemoryMB,
+		VCPU:               vcpu,
+		MemoryMB:           memoryMB,
 		DiskMB:             parent.DiskMB,
 		SizeBytes:          s.measureNewBuildOnDisk(buildID),
 		CreatedAt:          now,
@@ -3341,6 +3333,11 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	l.HostIP = sb.HostIP
 	l.ExposedIP = sb.HostIP
 	l.BuildID = b.BuildID
+	// The fresh guest runs the image's current build: stamp its size
+	// (#151 Z1), as restartCold does, so the charge matches the VM.
+	l.MemoryMB = b.MemoryMB
+	l.VCPU = b.VCPU
+	l.DiskMB = img.DiskMB
 	l.setState("running")
 	l.Suspended = false
 	l.LastActive = time.Now()
@@ -3522,7 +3519,9 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	// The pause is what guests feel (2.3, #122): one line per checkpoint
 	// with the lease, how long the guest was frozen and how much memory
 	// had to be snapshotted.
-	memMB, _ := s.imageMemoryMB(ctx, src.Image) // 0 when the catalog cannot say
+	s.store.mu.Lock()
+	memMB := src.MemoryMB
+	s.store.mu.Unlock()
 	s.log.Printf("checkpoint: lease %s paused %.3fs (memory_mb %d, err %v)", src.ID, pause.Seconds(), memMB, err)
 	if err != nil {
 		return store.BuildRow{}, err
@@ -3531,6 +3530,9 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 	if err != nil {
 		return store.BuildRow{}, fmt.Errorf("load parent build %s: %w", src.BuildID, err)
 	}
+	// The checkpoint records the lease's own size (#151 Z1), not its
+	// parent template build's.
+	vcpu, memoryMB := s.snapshotSize(src, parent)
 	now := time.Now()
 	b := store.BuildRow{
 		BuildID:            buildID,
@@ -3544,8 +3546,8 @@ func (s *Service) checkpointLease(ctx context.Context, src *Lease) (store.BuildR
 		KernelVersion:      parent.KernelVersion,
 		FirecrackerVersion: parent.FirecrackerVersion,
 		EnvdVersion:        parent.EnvdVersion,
-		VCPU:               parent.VCPU,
-		MemoryMB:           parent.MemoryMB,
+		VCPU:               vcpu,
+		MemoryMB:           memoryMB,
 		DiskMB:             parent.DiskMB,
 		SizeBytes:          s.measureNewBuildOnDisk(buildID),
 		CreatedAt:          now,

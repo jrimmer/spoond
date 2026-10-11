@@ -1250,6 +1250,32 @@ func TestMigration25VCPUBackfill(t *testing.T) {
 	if _, err := db.w.ExecContext(ctx, `UPDATE leases SET image = 'gone' WHERE id = 'lease-without-image'`); err != nil {
 		t.Fatalf("detach image: %v", err)
 	}
+	// A running lease whose stamp (2048, the image's) is not what its VM
+	// runs (its sandboxes row: 6 vCPU, 3072 MiB), and a paused one whose
+	// resume build is 8 vCPU / 1536 MiB: both stamps are corrected.
+	now := time.Now()
+	if err := db.UpsertSandbox(ctx, SandboxRow{
+		SandboxID: "sb-run", LeaseID: "lease-running", BuildID: "b-run", ExecutionID: "x",
+		VCPU: 6, MemoryMB: 3072, StartedAt: now, EndAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+	if err := db.InsertBuild(ctx, BuildRow{
+		BuildID: "b-pause", Kind: "pause", TemplateID: "t-1", Image: "py-base", State: "ready",
+		VCPU: 8, MemoryMB: 1536, DiskMB: 5120, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed pause build: %v", err)
+	}
+	for _, r := range []LeaseRow{
+		{ID: "lease-running", SandboxID: "sb-run", MemoryMB: 2048},
+		{ID: "lease-paused", Suspended: true, ResumeBuildID: "b-pause", MemoryMB: 2048},
+	} {
+		r.Owner, r.Image, r.State, r.Class = "alice", "py-base", "running", "guaranteed"
+		r.CreatedAt, r.ExpiresAt, r.LastActive = now, now.Add(time.Hour), now
+		if err := db.UpsertLease(ctx, r); err != nil {
+			t.Fatalf("seed lease %s: %v", r.ID, err)
+		}
+	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -1279,11 +1305,19 @@ func TestMigration25VCPUBackfill(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 	got := map[string]int{}
+	mem := map[string]int{}
 	for _, r := range rows {
 		got[r.ID] = r.VCPU
+		mem[r.ID] = r.MemoryMB
 	}
 	if got["lease-with-image"] != 4 {
 		t.Fatalf("vcpu not backfilled from the image row: %d", got["lease-with-image"])
+	}
+	if got["lease-running"] != 6 || mem["lease-running"] != 3072 {
+		t.Fatalf("running lease size = %d/%d, want its sandbox's 6/3072", got["lease-running"], mem["lease-running"])
+	}
+	if got["lease-paused"] != 8 || mem["lease-paused"] != 1536 {
+		t.Fatalf("paused lease size = %d/%d, want its resume build's 8/1536", got["lease-paused"], mem["lease-paused"])
 	}
 	if got["lease-without-image"] != 0 {
 		t.Fatalf("vcpu of a lease with no image row should stay 0, got %d", got["lease-without-image"])
