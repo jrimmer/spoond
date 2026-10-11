@@ -519,6 +519,14 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 		defer s.releaseQuotaReservation(l.Owner, 1, img.MemoryMB)
 		// Class re-admission removed (FS2b-1): recovery brings hugepages
 		// back, so it re-passes the one-pool admission like a resume.
+		// The running lease reserves its whole disk_mb (FS3): it must fit in
+		// usable snapshot disk, checked before memory so a memory take-back
+		// never pauses a lease for a request the disk then refuses.
+		diskRelease, derr := s.ensureDiskRoom(ctx, l.Owner, int64(l.DiskMB)*1024*1024)
+		if derr != nil {
+			return derr
+		}
+		defer diskRelease()
 		undo, err = s.admitMemory(ctx, l.Owner, img.MemoryMB)
 		if err != nil {
 			return err

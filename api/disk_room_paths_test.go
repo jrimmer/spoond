@@ -10,6 +10,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -318,5 +319,39 @@ func TestDiskRoomDrainNeverRefusedForDisk(t *testing.T) {
 	}
 	if r := h.leaseRowMust(t, "a-run"); r.State != "suspended" {
 		t.Fatalf("a-run = %v, want it paused by the drain", r)
+	}
+}
+
+// Clone and fork create running leases that each reserve their whole
+// disk_mb, so they pass the same disk room check as a create: on a
+// snapshot disk with no room and nothing reclaimable they are refused
+// (box_full or capacity_wait) and no lease is created.
+func TestDiskRoomCloneAndForkChecked(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.TemplateStoragePath = t.TempDir()
+	roomyDisk(svc)
+	ctx := context.Background()
+	src, err := svc.grant(ctx, "consumer-a", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// 41 GiB free of 512 GiB: minus the 25.6 GiB floor and the source's
+	// 10 GiB reservation leaves ~5 GiB usable — room for the source's
+	// 2 GiB checkpoint, not for a new lease's 10 GiB root disk.
+	svc.diskCapacity = func(string) (uint64, uint64, error) { return 512 << 30, 41 << 30, nil }
+	svc.invalidateFairShares()
+	before := len(svc.leasesOfOwner("consumer-a"))
+
+	_, _, cerr := svc.clone(ctx, "consumer-a", src.ID)
+	if !isBoxFull(cerr) && !errors.Is(cerr, substrate.ErrCapacity) {
+		t.Fatalf("clone on a full disk = %v, want box_full or capacity_wait", cerr)
+	}
+	_, _, ferr := svc.fork(ctx, "consumer-a", src.ID, 2, false, time.Hour, "", "")
+	if !isBoxFull(ferr) && !errors.Is(ferr, substrate.ErrCapacity) {
+		t.Fatalf("fork on a full disk = %v, want box_full or capacity_wait", ferr)
+	}
+	if after := len(svc.leasesOfOwner("consumer-a")); after != before {
+		t.Fatalf("leases %d -> %d: a refused clone/fork created a lease", before, after)
 	}
 }

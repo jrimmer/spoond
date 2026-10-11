@@ -3185,6 +3185,14 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 		defer func() { s.releaseQuotaReservation(owner, 1, l.MemoryMB) }()
 		// Memory re-admission (FS2b-1), as for a resume: bringing the
 		// guest back re-passes the one-pool admission.
+		// The running lease reserves its whole disk_mb (FS3): it must fit in
+		// usable snapshot disk, checked before memory so a memory take-back
+		// never pauses a lease for a request the disk then refuses.
+		diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(l.DiskMB)*1024*1024)
+		if derr != nil {
+			return nil, derr
+		}
+		defer diskRelease()
 		undo, err = s.admitMemory(ctx, owner, l.MemoryMB)
 		if err != nil {
 			return nil, err
@@ -3316,6 +3324,14 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 		// Memory re-admission (FS2b-1) against the image's current
 		// charge — the number the fresh guest runs (and is stamped with
 		// below), as for the memory check above.
+		// The running lease reserves its whole disk_mb (FS3): it must fit in
+		// usable snapshot disk, checked before memory so a memory take-back
+		// never pauses a lease for a request the disk then refuses.
+		diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
+		if derr != nil {
+			return nil, derr
+		}
+		defer diskRelease()
 		undo, err = s.admitMemory(ctx, owner, img.MemoryMB)
 		if err != nil {
 			return nil, err
@@ -3610,6 +3626,14 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	}
 	// Memory admission (FS2b-1): the clone takes its own charge against
 	// the one pool, like every lease.
+	// The running lease reserves its whole disk_mb (FS3): it must fit in
+	// usable snapshot disk, checked before memory so a memory take-back
+	// never pauses a lease for a request the disk then refuses.
+	diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
+	if derr != nil {
+		return nil, "", derr
+	}
+	defer diskRelease()
 	undo, err = s.admitMemory(ctx, owner, img.MemoryMB)
 	if err != nil {
 		return nil, "", err
@@ -3731,6 +3755,15 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	// owner's take-back victim behind. The children then share this one
 	// debit, and rollback credits it while stopping their sandboxes
 	// (which frees the hugepages). A successful fork keeps the debit.
+	// The running lease reserves its whole disk_mb (FS3): it must fit in
+	// usable snapshot disk, checked before memory so a memory take-back
+	// never pauses a lease for a request the disk then refuses.
+	diskRelease, derr := s.ensureDiskRoom(ctx, owner, int64(count)*int64(img.DiskMB)*1024*1024)
+	if derr != nil {
+		s.releaseQuotaReservation(owner, count, memPer)
+		return nil, "", derr
+	}
+	defer diskRelease()
 	undo, err := s.admitMemory(ctx, owner, count*img.MemoryMB)
 	if err != nil {
 		s.releaseQuotaReservation(owner, count, memPer)
