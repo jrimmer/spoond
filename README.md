@@ -32,8 +32,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
 
 ## What it gives you
 
-- **Lease API**: `POST /api/leases` (image, TTL, persistent, network
-  policy, exposed ports, holder, secrets; `/api/sandboxes` is kept as an
+- **Lease API**: `POST /api/leases` (image, size, TTL, persistent,
+  network policy, exposed ports, holder, secrets; `/api/sandboxes` is kept as an
   alias), then exec, stream (WebSocket PTY), keepalive, suspend/resume,
   restart (warm or cold), checkpoint, restore, fork, clone, tag, comment,
   delete. Auth via bearer
@@ -108,11 +108,22 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   answers `503 capacity_wait` with `Retry-After`; a request take-back
   cannot serve (every candidate pinned, or the caller is itself the
   biggest borrower) answers `429 box_full`. `GET /api/usage` shows an
-  owner's slice and ratio, and `GET /api/fair-shares` (admin) every
-  owner's. A create may **wait** for room (`"wait": <seconds>`, up to
+  owner's slice and ratio, lease and job counts, its creates waiting for
+  room with their place in the queue, and its recent refusals and
+  take-backs; `GET /api/usage/history` keeps 7 days of 15-minute
+  samples. `GET /api/fair-shares` (admin) shows every owner's. A create may **wait** for room (`"wait": <seconds>`, up to
   `MAX_ADMIT_WAIT_SECS`), served lowest ratio first; a persistent lease
   may set `idle_suspend` to give its memory back when idle. See
   [upgrading-3.0.md](docs/upgrading-3.0.md).
+- **Per-lease sizes**: a create picks its VM's size by preset
+  (`"size": "large"`, listed by `GET /api/sizes`) or by `vcpu` and
+  `memory_mb`; the image gives the default and a minimum. Sizes with a
+  warm build (the image default and the presets an image lists in
+  `warm_sizes`) start in milliseconds from a memory snapshot; any other
+  size boots in a few seconds (`"start": "cold"`). Memory is the lease's
+  charge for fair shares; vCPU is never charged. A lease keeps its size
+  through pause, resume, clone, fork, restore and recovery, and a chosen
+  size survives restarts too.
 - **Resume on use**: a suspended lease, whatever suspended it
   (`idle_suspend`, take-back or its owner), resumes
   on its holder's next work call: exec, exec stream, files, guest dial,
@@ -263,6 +274,14 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.1: sizes and usage.** A lease's size is chosen per create (a
+preset, or vCPU and memory), no longer fixed by its image: warm sizes
+start from a memory snapshot and any other size cold-boots. Every lease
+reports its size and how it started, and clone, fork, restore and
+recovery now charge the size the VM actually runs. Owners see their
+lease counts, waiting creates, recent refusals and a 7-day usage
+history in `GET /api/usage`. No breaking changes.
 
 **v3.0: fair shares.** Guaranteed and burst classes, preemption, holds
 and per-owner caps are gone. Every owner gets an equal slice of memory
@@ -435,7 +454,10 @@ snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
 `MAX_EXEC_BODY_BYTES`, the runner's `RUNNER_ADMIT_WAIT_SECS` and
 `RUNNER_JOB_TIMEOUT`, `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
-the one paused-release clock (`PAUSED_RELEASE_DAYS`, default 30) and
+the lease sizes (`SIZE_PRESETS`, default
+`small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384`;
+`MAX_LEASE_VCPU`, default the host's cores; `MAX_LEASE_MEMORY_MB`,
+default 32768), the one paused-release clock (`PAUSED_RELEASE_DAYS`, default 30) and
 the pinned-idle notice (`PINNED_IDLE_NOTICE_DAYS`, default 7) in
 [docs/operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 
