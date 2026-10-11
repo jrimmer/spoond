@@ -277,7 +277,7 @@ func TestBackendValidateEntry(t *testing.T) {
 func BuildTestBinary(t *testing.T, pkg string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "spoond")
-	cmd := exec.Command("go", "build", "-o", bin, pkg)
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, pkg)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if execErr, ok := err.(*exec.Error); ok && execErr.Err == exec.ErrNotFound {
 			t.Skipf("no go toolchain: %v", err)
