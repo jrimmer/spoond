@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spoond images build` prunes docker build cache older than three days** after each build, so repeated image builds no longer fill the host's root filesystem.
+
 ## [3.3.0] - 2026-10-11
 
 3.3 brings authorization into one simple model (#138): users and admin
