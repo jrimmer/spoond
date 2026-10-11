@@ -433,6 +433,13 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	if err := runCmd(ctx, stdout, "docker", "image", "prune", "-f"); err != nil {
 		fmt.Fprintf(stdout, "warning: docker image prune: %v\n", err)
 	}
+	// Build cache older than three days goes too: every image build adds
+	// layers to it and nothing else removes them (on 2026-10-11 it had
+	// filled the host's root filesystem with 22 GB). Recent cache stays,
+	// so a rebuild soon after is still fast. Best effort, like above.
+	if err := runCmd(ctx, stdout, "docker", "builder", "prune", "-f", "--filter", "until=72h"); err != nil {
+		fmt.Fprintf(stdout, "warning: docker builder prune: %v\n", err)
+	}
 
 	// The image row (and its template id) is created before the first
 	// template build; it is stable for the life of the image name.
