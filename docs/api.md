@@ -456,7 +456,10 @@ name of the smallest size preset (`GET /api/sizes`) whose `memory_mb`
 still fits the measured peak with a 25 % margin — only once the
 measurement spans at least 10 samples (about 5 min) and only when that
 preset is smaller than the lease's own `memory_mb` (a hint that would
-not save memory is no hint). Both measured fields are omitted while the
+not save memory is no hint) and has at least the lease's `vcpu`. Beside
+it, `memory_hint_mb` is the `memory_mb` that holds the peak with the
+same 25 % margin, rounded up to 512 MiB — what a create keeping the
+lease's vCPUs could ask for. Both measured fields are omitted while the
 sampler has nothing on the lease (a fresh create, the series not seen
 yet, or `OTEL_PROM_URL` unset); `size_hint` is advisory only, nothing
 acts on it. See [GET /api/leases](#get-apileases--list-leases) for the
