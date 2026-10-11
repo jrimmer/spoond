@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **`size_hint` never names a preset with fewer vCPUs than the lease runs** (a 2-vCPU lease was told `small`, 1 vCPU), and a lease also reports `memory_hint_mb`: the memory that holds its measured peak with the same 25 % margin, for a create that keeps its vCPUs.
+
 ## [3.5.0] - 2026-10-11
 
 3.5 measures what each lease's VM really uses: every running lease

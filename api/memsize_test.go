@@ -181,3 +181,33 @@ func toF(t *testing.T, v any) float64 {
 		return 0
 	}
 }
+
+// TestSizeHintKeepsVCPUAndMemoryHint (3.5.1): the size hint never names
+// a preset with fewer vCPUs than the lease runs (on sb a 2-vCPU worker
+// was told "small", 1 vCPU), and memory_hint_mb gives the memory_mb that
+// holds the peak with the same headroom, for a create keeping the vCPUs.
+func TestSizeHintKeepsVCPUAndMemoryHint(t *testing.T) {
+	presets := []sizes.Preset{
+		{Name: "tiny", VCPU: 1, MemoryMB: 512},
+		{Name: "mid", VCPU: 1, MemoryMB: 1024},
+		{Name: "pair", VCPU: 2, MemoryMB: 2048},
+	}
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	svc.cfg.SizePresets = presets
+	lease := addSandboxedLease(svc, "two", "consumer-a", "sb_two", 4096)
+	svc.store.mu.Lock()
+	lease.VCPU = 2
+	svc.store.mu.Unlock()
+	seedMemEntries(svc, lease, make([]float64, 10))
+	svc.memSamples.record(map[string]*Lease{lease.ID: lease},
+		map[string]float64{lease.SandboxID: 500 * 1024 * 1024}, nil)
+	m := svc.leaseMap(lease, svc.memSamples, 0, 0)
+	if got := m["size_hint"]; got != "pair" {
+		t.Fatalf("size_hint = %v, want pair (mid has 1 vCPU, the lease 2)", got)
+	}
+	// 500 × 1.25 = 625 MiB, rounded up to 512 MiB steps: 1024.
+	if got := m["memory_hint_mb"]; got != 1024 {
+		t.Fatalf("memory_hint_mb = %v, want 1024", got)
+	}
+}

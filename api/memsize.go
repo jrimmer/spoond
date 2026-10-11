@@ -48,6 +48,27 @@ func leaseSizeHints(m map[string]any, l *Lease, ms *memSampler, presets []sizes.
 	if name, ok := sizeHint(l, ms, presets); ok {
 		m["size_hint"] = name
 	}
+	if mb, ok := memoryHint(l, ms); ok {
+		m["memory_hint_mb"] = mb
+	}
+}
+
+// memoryHint is the memory_mb that would hold the lease's measured peak
+// with the same headroom as size_hint (peak × 1.25), rounded up to
+// 512 MiB — what a create with memory_mb (keeping the lease's vcpu)
+// could ask for. Answered only once the measurement is trusted and when
+// it would save memory.
+func memoryHint(l *Lease, ms *memSampler) (int, bool) {
+	e, ok := ms.entry(l.ID)
+	if !ok || e.samples < sizeHintSamples || l.MemoryMB <= 0 {
+		return 0, false
+	}
+	want := mibCeil(e.peakBytes * sizeHintMargin)
+	want = (want + 511) / 512 * 512
+	if want >= l.MemoryMB {
+		return 0, false
+	}
+	return want, true
 }
 
 // sizeHint names the smallest preset whose memory still holds the
@@ -71,7 +92,9 @@ func sizeHint(l *Lease, ms *memSampler, presets []sizes.Preset) (string, bool) {
 	want := mibCeil(e.peakBytes * sizeHintMargin)
 	best, name := -1, ""
 	for _, p := range presets {
-		if p.MemoryMB >= want && p.MemoryMB < l.MemoryMB {
+		// Never fewer vCPUs than the lease runs: the hint is about memory,
+		// and a preset that also halved the CPUs would be a worse lease.
+		if p.MemoryMB >= want && p.MemoryMB < l.MemoryMB && (l.VCPU <= 0 || p.VCPU >= l.VCPU) {
 			if best < 0 || p.MemoryMB < best {
 				best, name = p.MemoryMB, p.Name
 			}
