@@ -194,3 +194,47 @@ func TestBoxFullCountsOnlyTakeableOwners(t *testing.T) {
 		}
 	})
 }
+
+// TestTakeBackCountsInFlightMemory: an owner's admitted creates that are
+// still in flight (store.pendingMiB) count toward its usage, so it
+// cannot read a falsely low ratio and take back from an owner who is in
+// fact no further over the slice than it is. Box 5120 MiB, two 2560 MiB
+// slices: bob runs 4096 (1.6); alice runs 1024 with 2048 more in flight
+// and asks for 1024 (its own reservation is pending too). Counted
+// honestly alice would sit at 1.6 after the request, so bob is not
+// taken from.
+func TestTakeBackCountsInFlightMemory(t *testing.T) {
+	svc, db, sub, ids := newFairShareService(t)
+	alice := addIdentityUser(t, ids, "alice")
+	bob := addIdentityUser(t, ids, "bob")
+	ctx := context.Background()
+	seedImage(t, db, "mid", 1024)
+	roomyDisk(svc)
+	installDynamicNode(t, svc, sub, 2560, 0, 512)
+	var bl []*Lease
+	for i := 0; i < 4; i++ {
+		l, err := svc.grantLease(ctx, leaseRequest{owner: bob.ID, image: "mid", ttl: time.Hour, persistent: true})
+		if err != nil {
+			t.Fatalf("grant bob %d: %v", i, err)
+		}
+		bl = append(bl, l)
+	}
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "mid", ttl: time.Hour}); err != nil {
+		t.Fatalf("grant alice: %v", err)
+	}
+	dropNodeCache(svc)
+	warmFairShares(svc, ctx)
+	svc.store.mu.Lock()
+	svc.store.pendingMiB[alice.ID] = 3072 // 2048 in flight + this request's 1024
+	svc.store.mu.Unlock()
+
+	undo, err := svc.admitMemory(ctx, alice.ID, 1024)
+	if err == nil {
+		undo()
+	}
+	for _, l := range bl {
+		if l.Suspended {
+			t.Fatalf("bob's lease %s was taken back for an owner whose in-flight memory puts it as far over its slice", l.ID)
+		}
+	}
+}

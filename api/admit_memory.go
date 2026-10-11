@@ -64,7 +64,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		return nil
 	}
 	need := uint64(memoryMB)
-	owners := s.takeBackOwners(ctx)
+	owners := s.takeBackOwnersFor(ctx, owner, memoryMB)
 	takeable, pinned := takeBackPool(owners, owner)
 	if freeMiB+takeable < need {
 		// Pinned leases are not take-back victims (FS5). If the pinned
@@ -117,7 +117,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		if shortfall <= 0 {
 			return nil
 		}
-		owners = s.takeBackOwners(ctx)
+		owners = s.takeBackOwnersFor(ctx, owner, memoryMB)
 		victims := memVictims(owners, owner, shortfall, memoryMB)
 		if len(victims) == 0 {
 			// Take-back can free nothing. When the requester would be
