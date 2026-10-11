@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v3/api"
+	"github.com/jrimmer/spoond/v3/settings"
 	"github.com/jrimmer/spoond/v3/sizes"
 )
 
@@ -389,5 +390,188 @@ func TestBackendValidateEntryChildren(t *testing.T) {
 	}
 	if strings.Contains(stderr, "config: ") {
 		t.Fatalf("sb-like env refused at validation:\n%s", stderr)
+	}
+}
+
+// TestSecretGetWarnsMode (#137 C2, helper level): the Main secret
+// closure's registry and warning behavior — Get's result passed
+// through, a NAME_FILE-resolved value recorded in fileFrom, a
+// group-readable file warned about once, an env-set secret recorded
+// nowhere. The closure itself is inline in Main (it log.Fatal's), so
+// this test reconstructs it over settings.Get/FileModeWarning exactly
+// as Main wires them and asserts the pieces the child tests cannot see
+// (the registry contents, the warning's once-per-name).
+func TestSecretGetWarnsMode(t *testing.T) {
+	dir := t.TempDir()
+	tokFile := filepath.Join(dir, "admin-token")
+	if err := os.WriteFile(tokFile, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	looseFile := filepath.Join(dir, "metrics-token")
+	if err := os.WriteFile(looseFile, []byte("loose\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"ADMIN_TOKEN_FILE":   tokFile,
+		"METRICS_TOKEN_FILE": looseFile,
+		"EVENTS_TOKEN":       "env-tok",
+	}
+	get := func(k string) string { return env[k] }
+	fileFrom := map[string]string{}
+	var warns int
+	secret := func(name string) string {
+		v, err := settings.Get(name, get, os.ReadFile)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", name, err)
+		}
+		file := settings.SecretFileOf(name)
+		if _, fromFile := fileFrom[name]; !fromFile && file != "" && get(name) == "" && get(file) != "" {
+			fileFrom[name] = get(file)
+			if w := settings.FileModeWarning(get(file)); w != "" {
+				warns++
+			}
+		}
+		return v
+	}
+	if got := secret("ADMIN_TOKEN"); got != "from-file" {
+		t.Fatalf("ADMIN_TOKEN = %q, want the file's trimmed value", got)
+	}
+	if got := secret("METRICS_TOKEN"); got != "loose" {
+		t.Fatalf("METRICS_TOKEN = %q, want the loose file's value", got)
+	}
+	if got := secret("EVENTS_TOKEN"); got != "env-tok" {
+		t.Fatalf("EVENTS_TOKEN = %q, want the env value", got)
+	}
+	if fileFrom["ADMIN_TOKEN"] != tokFile || fileFrom["METRICS_TOKEN"] != looseFile {
+		t.Fatalf("fileFrom = %+v, want both file paths recorded", fileFrom)
+	}
+	if _, ok := fileFrom["EVENTS_TOKEN"]; ok {
+		t.Fatalf("EVENTS_TOKEN recorded as file-resolved though it came from the env")
+	}
+	if warns != 1 {
+		t.Fatalf("%d mode warnings, want 1 (the 0644 file; the 0600 one is clean)", warns)
+	}
+	// A second read of the same name does not warn again (once per name).
+	secret("METRICS_TOKEN")
+	if warns != 1 {
+		t.Fatalf("warnings after re-read = %d, want still 1", warns)
+	}
+}
+
+// TestBackendSecretFileStartupChildren (#137 C2): the child-process
+// proof that startup actually reads a token from a file — a backend
+// with only ADMIN_TOKEN_FILE set (no ADMIN_TOKEN= anywhere) gets past
+// the validation gate ("config:" would name unset required settings
+// otherwise) and reports the file-resolved token. Both forms set fails
+// startup with the settings.Get message; a group-readable file logs the
+// mode warning; an unreadable file fails startup naming it.
+func TestBackendSecretFileStartupChildren(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode: no child builds")
+	}
+	spoondBin := BuildTestBinary(t, "../../cmd/spoond")
+	dir := t.TempDir()
+	tokFile := filepath.Join(dir, "admin-token")
+	if err := os.WriteFile(tokFile, []byte("file-admin-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loose := filepath.Join(dir, "loose-token")
+	if err := os.WriteFile(loose, []byte("loose-token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Common env that lets Main through the config gates (CONSUMER_TOKENS
+	// and HOST_GUEST_SERVICE_ADDR are required) but dies later on the
+	// token seed — a file-served token proves itself by the absence of a
+	// "config:" line, as in TestBackendValidateEntryChildren.
+	base := map[string]string{
+		"CONSUMER_TOKENS":           "abc=forgejo",
+		"HOST_GUEST_SERVICE_ADDR":   "10.1.0.11",
+		"SPOOND_DB_PATH":            filepath.Join(dir, "spoond.db"),
+		"SPOOND_BACKUP_DIR":         dir,
+		"E2B_TEMPLATE_STORAGE_PATH": dir,
+		"E2B_TOKEN_SEED_FILE":       filepath.Join(dir, "seed"),
+	}
+	runChild := func(env map[string]string) (code int, stderr string) {
+		cmd := exec.Command(spoondBin, "backend")
+		cmd.Env = append(os.Environ(), "SPOOND_TEST_VALIDATE_MAIN=1")
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		var buf bytes.Buffer
+		cmd.Stderr = &buf
+		err := cmd.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode(), buf.String()
+		}
+		if err != nil {
+			t.Fatalf("run child: %v\nstderr:\n%s", err, buf.String())
+		}
+		return 0, buf.String()
+	}
+
+	// A token from a file only: past the config gate (no "config: "
+	// lines) and no mode warning for the 0600 file.
+	one := map[string]string{}
+	for k, v := range base {
+		one[k] = v
+	}
+	one["ADMIN_TOKEN_FILE"] = tokFile
+	code, stderr := runChild(one)
+	if code != 1 {
+		t.Fatalf("file token: exit %d, want 1 (Main proceeds past config and dies later); stderr:\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, "config: ") {
+		t.Fatalf("file token refused at config:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "file-admin-token") {
+		t.Fatalf("file token leaked:\n%s", stderr)
+	}
+
+	// A group-readable token file: the mode warning is logged, startup
+	// still proceeds past the config gate.
+	looseEnv := map[string]string{}
+	for k, v := range base {
+		looseEnv[k] = v
+	}
+	looseEnv["ADMIN_TOKEN_FILE"] = loose
+	code, stderr = runChild(looseEnv)
+	if code != 1 || strings.Contains(stderr, "config: ") {
+		t.Fatalf("loose file: exit %d, stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "mode 0644, want 600") {
+		t.Fatalf("loose file: no mode warning:\n%s", stderr)
+	}
+
+	// Both forms set: the settings.Get error refuses startup.
+	both := map[string]string{}
+	for k, v := range base {
+		both[k] = v
+	}
+	both["ADMIN_TOKEN"] = "env-token"
+	both["ADMIN_TOKEN_FILE"] = tokFile
+	code, stderr = runChild(both)
+	if code != 1 {
+		t.Fatalf("both forms: exit %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "ADMIN_TOKEN and ADMIN_TOKEN_FILE are both set") {
+		t.Fatalf("both forms: stderr =\n%s", stderr)
+	}
+	if strings.Contains(stderr, "env-token") || strings.Contains(stderr, "file-admin-token") {
+		t.Fatalf("both forms: a value leaked:\n%s", stderr)
+	}
+
+	// An unreadable (missing) file: the read error refuses startup.
+	missing := map[string]string{}
+	for k, v := range base {
+		missing[k] = v
+	}
+	missing["ADMIN_TOKEN_FILE"] = filepath.Join(dir, "gone")
+	code, stderr = runChild(missing)
+	if code != 1 {
+		t.Fatalf("missing file: exit %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "ADMIN_TOKEN: read "+filepath.Join(dir, "gone")) {
+		t.Fatalf("missing file: stderr =\n%s", stderr)
 	}
 }
