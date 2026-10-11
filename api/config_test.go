@@ -167,7 +167,7 @@ func TestAdminConfigStartsAtMoves(t *testing.T) {
 
 // TestAdminConfigFileSecret (#137 C2): a secret the backend resolved
 // from a <NAME>_FILE value file is reported set with value
-// "(hidden, from file)" — the env does not name it, and reporting it
+// settings.HiddenFromFile — the env does not name it, and reporting it
 // unset would make config show cry drift where the value matches. An
 // env-set secret stays plainly "(hidden)", an absent one stays unset,
 // and no resolved value ever reaches the wire (SetFileSecrets drops
@@ -186,10 +186,10 @@ func TestAdminConfigFileSecret(t *testing.T) {
 		t.Fatalf("admin token = %d, want 200", resp.StatusCode)
 	}
 	m := configByName(t, body)
-	if s := m["ADMIN_TOKEN"]; !s.Set || s.Value != "(hidden, from file)" {
+	if s := m["ADMIN_TOKEN"]; !s.Set || s.Value != settings.HiddenFromFile {
 		t.Fatalf("ADMIN_TOKEN = %+v, want set, \u0022(hidden, from file)\u0022", s)
 	}
-	if s := m["EVENTS_TOKEN"]; !s.Set || s.Value != "(hidden, from file)" {
+	if s := m["EVENTS_TOKEN"]; !s.Set || s.Value != settings.HiddenFromFile {
 		t.Fatalf("EVENTS_TOKEN = %+v, want set from its file too", s)
 	}
 	if s := m["METRICS_TOKEN"]; !s.Set || s.Value != "(hidden)" {

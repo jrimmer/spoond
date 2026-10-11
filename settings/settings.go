@@ -657,6 +657,14 @@ func validateOne(s Spec, v string) error {
 	return nil
 }
 
+// HiddenFromFile is the VALUE both display surfaces use for a secret
+// resolved from a <NAME>_FILE value file (#137 C2): reported set,
+// hidden, with the source named. GET /api/admin/config (api) sends it
+// and `spoond config show` (cmd/spoond-config) prints and compares it —
+// one constant so the two cannot drift out of step. A secret's actual
+// content never appears in either surface.
+const HiddenFromFile = "(hidden, from file)"
+
 // IsSecret reports whether name names a spec whose value is a secret
 // (SpecOf's Secret flag) — HideIfSecret's name rule, as data. The C2
 // design's secret list: every name whose upper case carries TOKEN, KEY,
@@ -795,7 +803,9 @@ func urlCarriesSecret(value string) bool {
 
 // CheckEnvFile reads a systemd EnvironmentFile and returns, sorted, the
 // keys no spoond binary reads and the keys set more than once (where
-// the last one silently wins). Values are never returned.
+// the last one silently wins). Values are never returned. A known
+// secret's <NAME>_FILE spelling counts as known (IsKnown's rule): the
+// env files carry it and Get resolves it, though no os.Getenv names it.
 func CheckEnvFile(content string) (unknown, duplicate []string) {
 	seen := map[string]int{}
 	sc := bufio.NewScanner(strings.NewReader(content))
@@ -812,7 +822,7 @@ func CheckEnvFile(content string) (unknown, duplicate []string) {
 		seen[strings.TrimSpace(key)]++
 	}
 	for k, n := range seen {
-		if !known[k] {
+		if !IsKnown(k) {
 			unknown = append(unknown, k)
 		}
 		if n > 1 {

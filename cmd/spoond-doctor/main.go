@@ -14,6 +14,7 @@
 package spoonddoctor
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -178,9 +179,12 @@ func envFileDir() string {
 
 // checkEnvFiles reports, for each spoond env file in dir (*.env), the
 // keys no spoond binary reads — a typo or a setting that no longer
-// exists, ignored in silence otherwise — and keys set twice, where the
-// last line silently wins (#137). Only key names are printed, never
-// values. Both are WARN: the backend still starts.
+// exists, ignored in silence otherwise — keys set twice, where the
+// last line silently wins (#137), and the <SECRET>_FILE value files
+// every secret setting may be moved into (#137 C2): a missing or
+// unreadable one is the error the backend will refuse to start with
+// (FAIL), and a file readable by group or others (a mode past 0600) is
+// the leak the file form exists to avoid (WARN).
 func checkEnvFiles(dir string) []checkResult {
 	paths, _ := filepath.Glob(filepath.Join(dir, "*.env"))
 	var out []checkResult
@@ -192,6 +196,7 @@ func checkEnvFiles(dir string) []checkResult {
 			continue
 		}
 		unknown, dup := settings.CheckEnvFile(string(b))
+		fileNotes := checkFileSecrets(string(b))
 		var notes []string
 		if len(unknown) > 0 {
 			notes = append(notes, "not read by any spoond binary: "+strings.Join(unknown, ", "))
@@ -199,13 +204,67 @@ func checkEnvFiles(dir string) []checkResult {
 		if len(dup) > 0 {
 			notes = append(notes, "set more than once (the last wins): "+strings.Join(dup, ", "))
 		}
-		if len(notes) == 0 {
-			out = append(out, checkResult{name, "PASS", "every key is a known setting"})
-			continue
+		notes = append(notes, fileNotes...)
+		status := "PASS"
+		if len(notes) > 0 {
+			status = "WARN"
 		}
-		out = append(out, checkResult{name, "WARN", strings.Join(notes, "; ")})
+		for _, n := range fileNotes {
+			if strings.Contains(n, "cannot be read") {
+				status = "FAIL"
+				break
+			}
+		}
+		if status == "PASS" {
+			notes = []string{"every key is a known setting"}
+		}
+		out = append(out, checkResult{name, status, strings.Join(notes, "; ")})
 	}
 	return out
+}
+
+// checkFileSecrets checks the <SECRET>_FILE= assignments of one env
+// file's content: each names a value file that must exist and be
+// readable only by its owner (mode 0600 or stricter), because the
+// file's content is a credential the backend will come up holding. The
+// notes name the variable and the path, never a value; a non-secret's
+// _FILE name (a typo like BIND_ADDR_FILE) is left to the unknown-key
+// check that runs beside this. An empty path is noted; a file that
+// cannot be read at all is the backend's startup failure, so the env
+// file FAILs on it; a merely loose mode is WARN — the process still
+// starts.
+func checkFileSecrets(content string) []string {
+	var notes []string
+	sc := bufio.NewScanner(strings.NewReader(content))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		base, isFile := strings.CutSuffix(key, "_FILE")
+		if !isFile || !settings.IsSecret(base) {
+			continue
+		}
+		if value == "" {
+			notes = append(notes, key+": set with an empty path")
+			continue
+		}
+		info, err := os.Stat(value)
+		if err != nil {
+			notes = append(notes, key+": "+value+" cannot be read: "+err.Error())
+			continue
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			notes = append(notes, key+": "+value+" readable by group or others (mode "+fmt.Sprintf("%04o", perm)+", want 600)")
+		}
+	}
+	return notes
 }
 
 // checkOrchestrator pings the orchestrator's HTTP /health and reads its

@@ -43,7 +43,7 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 			// Resolved from a <NAME>_FILE value file (C2): the env does
 			// not name the secret, but the process has it — report set
 			// with the value still hidden.
-			out.Settings = append(out.Settings, configSetting{Name: name, Set: true, Value: configFromFileValue})
+			out.Settings = append(out.Settings, configSetting{Name: name, Set: true, Value: settings.HiddenFromFile})
 			continue
 		}
 		out.Settings = append(out.Settings, configSetting{
@@ -54,12 +54,6 @@ func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
-
-// configFromFileValue is the VALUE the admin config endpoint sends for
-// a secret it resolved from a value file: set, hidden, and the source
-// named — config show compares set-ness, not content, and the content
-// never crosses the wire (#137 C2).
-const configFromFileValue = "(hidden, from file)"
 
 // fileSecretsSnapshot copies the file-secret registry's names (a nil
 // map before SetFileSecrets — no setting came from a file). The values

@@ -43,8 +43,11 @@ func TestSpecsMatchKnown(t *testing.T) {
 	}
 }
 
-// envRead matches the ways spoond code reads a setting by name.
-var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|envDuration|envDurationOr|envDurationOrZero|envBoolOr|pct|limit|get|envInt|envBool|getenv|mustEnv|envFloat|env|envPct)\("([A-Z][A-Z0-9_]{2,})"`)
+// envRead matches the ways spoond code reads a setting by name —
+// including the secret() closure the backend wraps settings.Get in and
+// the dash's sec() (#137 C2; their NAME_FILE spellings are never a
+// match: Get builds those names from the spec).
+var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|envDuration|envDurationOr|envDurationOrZero|envBoolOr|pct|limit|get|envInt|envBool|getenv|mustEnv|envFloat|env|envPct|secret|settings\.Get)\("([A-Z][A-Z0-9_]{2,})"`)
 
 // envTable matches a setting named in a {"NAME", &dst} table, the way
 // the conformance harness lists its required variables.
