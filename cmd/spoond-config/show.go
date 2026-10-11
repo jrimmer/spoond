@@ -70,13 +70,14 @@ func configShowFlags() *flag.FlagSet {
 	fs.String("unit", "spoond-backend", "systemd unit whose environment is resolved")
 	fs.String("api", "", "backend base URL (default: the unit's BIND_ADDR or https://127.0.0.1:8890)")
 	fs.Bool("json", false, "machine-readable JSON output")
+	fs.Bool("all", false, "list every known setting, not just the ones set or drifting")
 	return fs
 }
 
 // Main is the entry point of `spoond config show`.
 func Main(args []string) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprintf(os.Stderr, "usage: spoond config show [--unit spoond-backend] [--api URL] [--json]\n\n  show   each setting's value (masked), where it came from and whether the\n         running backend has it (GET /api/admin/config)\n")
+		fmt.Fprintf(os.Stderr, "usage: spoond config show [--unit spoond-backend] [--api URL] [--all] [--json]\n\n  show   each setting's value (masked), where it came from and whether the\n         running backend has it (GET /api/admin/config)\n")
 		if len(args) == 0 {
 			return 2
 		}
@@ -97,11 +98,31 @@ func Main(args []string) int {
 	unit := fs.Lookup("unit").Value.String()
 	apiFlag := fs.Lookup("api").Value.String()
 	jsonOut := fs.Lookup("json").Value.String() == "true"
+	showAll = fs.Lookup("all").Value.String() == "true"
 	read := func(path string) (string, error) {
 		b, err := os.ReadFile(path)
 		return string(b), err
 	}
 	return run(unit, apiFlag, jsonOut, os.Stdout, systemctlProps, read, fetchRunning)
+}
+
+// showAll lists every known setting (--all). By default the table
+// shows only what the unit sets or what differs from the running
+// backend: most of the 172 known settings belong to other binaries
+// (the dashboard, the runner, the conformance suite) and would bury
+// the few that matter.
+var showAll bool
+
+// setOrDrifting keeps the rows a file or the unit sets, plus any whose
+// value differs from the running backend.
+func setOrDrifting(rows []row) []row {
+	var out []row
+	for _, r := range rows {
+		if r.source != fromDefault || r.drift {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // runner is the `systemctl show` command runner (injected in tests).
@@ -156,6 +177,9 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 		return 0
 	}
 	rows := buildRows(byName, rc, unreached)
+	if !showAll {
+		rows = setOrDrifting(rows)
+	}
 	printTable(stdout, rows, rcErr, apiURL)
 	return 0
 }

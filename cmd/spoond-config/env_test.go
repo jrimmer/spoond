@@ -319,6 +319,8 @@ func TestRunTable(t *testing.T) {
 // RUNNING cell "?" (an unset-in-unit setting included), keeps printing
 // the unit's view and exits 0.
 func TestRunUnreachable(t *testing.T) {
+	showAll = true // this test reads every known row
+	t.Cleanup(func() { showAll = false })
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, "backend.env")
 	files := map[string]string{envFile: "BIND_ADDR=127.0.0.1:8890\n"}
@@ -624,3 +626,42 @@ func equalSlices(a, b []string) bool {
 var (
 	_ = os.Getenv
 )
+
+// TestParseShowRepeatedFiles: a unit with two EnvironmentFile= lines
+// (sb's spoond-backend: llm.env then backend.env) prints
+// EnvironmentFiles= twice; both files are read, in order.
+func TestParseShowRepeatedFiles(t *testing.T) {
+	m := parseShow("EnvironmentFiles=/etc/spoond/llm.env (ignore_errors=no)\nEnvironmentFiles=/etc/spoond/backend.env (ignore_errors=yes)\nEnvironment=BIND_ADDR=0.0.0.0:8890 IDLE_TIMEOUT_SECS=1800\n")
+	files := parseEnvironmentFiles(m["EnvironmentFiles"])
+	if len(files) != 2 || files[0] != "/etc/spoond/llm.env" || files[1] != "/etc/spoond/backend.env" {
+		t.Fatalf("files = %q, want llm.env then backend.env", files)
+	}
+	if m["Environment"] != "BIND_ADDR=0.0.0.0:8890 IDLE_TIMEOUT_SECS=1800" {
+		t.Fatalf("Environment = %q", m["Environment"])
+	}
+}
+
+// TestRunShowsOnlySetOrDrifting: without --all the table lists what the
+// unit sets and what differs from the running backend, not the 170
+// known settings nobody set.
+func TestRunShowsOnlySetOrDrifting(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	files := map[string]string{envFile: "BIND_ADDR=127.0.0.1:8890\n"}
+	// POOL_SIZE is set in the process, not in the unit: drift.
+	rc := running("BIND_ADDR=127.0.0.1:8890", "POOL_SIZE=2")
+	var out strings.Builder
+	if code := run("spoond-backend", "", false, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), okFetch(rc)); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, "BIND_ADDR") || !strings.Contains(got, "POOL_SIZE") {
+		t.Fatalf("set and drifting rows missing:\n%s", got)
+	}
+	if strings.Contains(got, "DASH_ADDR") || strings.Contains(got, "CONFORMANCE_API") {
+		t.Fatalf("unset, matching settings listed without --all:\n%s", got)
+	}
+}
