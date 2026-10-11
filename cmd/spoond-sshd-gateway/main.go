@@ -25,7 +25,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/jrimmer/spoond/v2/metrics"
+	"github.com/jrimmer/spoond/v3/metrics"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"net/url"
 	"os"
@@ -39,8 +39,8 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/jrimmer/spoond/v2/identity"
-	"github.com/jrimmer/spoond/v2/internal/env"
+	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v3/internal/env"
 )
 
 // envOr returns the value of env key or def when unset/empty. Used for

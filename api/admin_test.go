@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v3/store"
 )
 
 // newAdminServer builds a lease API server with an admin token and

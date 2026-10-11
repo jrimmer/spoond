@@ -25,8 +25,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // diskTBHarness is one Service with a 1 GiB snapshot volume (total and

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // nodeInfoCacheTTL bounds how long freeHugepageMiBLocked trusts its cached

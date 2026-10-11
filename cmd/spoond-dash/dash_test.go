@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v3/store"
 	"golang.org/x/crypto/bcrypt"
 )
 

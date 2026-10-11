@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jrimmer/spoond/v2/runner"
+	"github.com/jrimmer/spoond/v3/runner"
 )
 
 // fakeSandbox is an in-memory SandboxProvider for tests.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v2/internal/env"
+	"github.com/jrimmer/spoond/v3/internal/env"
 )
 
 // Each renamed variable this command reads proves the three-way

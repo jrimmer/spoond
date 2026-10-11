@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/identity"
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 func tbL(id string, mem int, age time.Duration) takeBackLease {

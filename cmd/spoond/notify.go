@@ -11,7 +11,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/notify"
+	"github.com/jrimmer/spoond/v3/notify"
 )
 
 func init() {

@@ -1,4 +1,4 @@
-module github.com/jrimmer/spoond/v2
+module github.com/jrimmer/spoond/v3
 
 go 1.27.1
 

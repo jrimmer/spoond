@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v3/identity"
 )
 
 // newSecServer builds a server with two users (admin + jason) and a

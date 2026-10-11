@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/notify"
+	"github.com/jrimmer/spoond/v3/notify"
 )
 
 // sink records what the service forwards to the notifier. Mutex-

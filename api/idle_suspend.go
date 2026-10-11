@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Per-lease idle reclamation (2.5, #129 part 2): a persistent lease whose

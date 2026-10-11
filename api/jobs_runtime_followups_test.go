@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
-	"github.com/jrimmer/spoond/v2/substrate/fake"
+	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v3/substrate/fake"
 )
 
 // This file covers the max-runtime follow-ups (spoond-wb5): a kill whose

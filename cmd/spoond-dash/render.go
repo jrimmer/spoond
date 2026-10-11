@@ -22,7 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jrimmer/spoond/v2/grid"
+	"github.com/jrimmer/spoond/v3/grid"
 )
 
 // Frame width limits: DefaultWidth is what a page shows (the golden

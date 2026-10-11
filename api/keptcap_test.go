@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/identity"
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate/fake"
+	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate/fake"
 )
 
 // sub2 digs the fake substrate out of the service for call counting:

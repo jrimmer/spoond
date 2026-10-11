@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Readiness knobs: each check is bounded to 2 s (a hung substrate or

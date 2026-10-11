@@ -67,8 +67,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/grid"
-	"github.com/jrimmer/spoond/v2/internal/tlsfiles"
+	"github.com/jrimmer/spoond/v3/grid"
+	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )

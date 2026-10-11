@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // These tests run the real guest wrapper through the fake's job runner:

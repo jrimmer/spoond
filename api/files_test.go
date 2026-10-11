@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/identity"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // filesDo performs a raw request (no JSON encoding) and returns the

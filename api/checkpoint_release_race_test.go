@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // The spoond-775 class: an asynchronous operation (checkpoint, pause,

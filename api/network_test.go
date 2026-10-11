@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // insertLease places a hand-built lease in the service's live store so

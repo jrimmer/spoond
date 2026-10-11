@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Queued admission (#129 part 1). A create that cannot be admitted right

@@ -36,7 +36,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/runner"
+	"github.com/jrimmer/spoond/v3/runner"
 )
 
 // Server is the MCP server. It reads JSON-RPC messages from in and

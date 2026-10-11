@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Round 2 of spoond-638d: the layer-3 review found three gaps in the

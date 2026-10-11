@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Lease file operations (#114): the API surface of the substrate file

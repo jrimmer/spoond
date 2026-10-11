@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/metrics"
-	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v3/metrics"
+	"github.com/jrimmer/spoond/v3/store"
 )
 
 // newHeartbeatTestServer builds a lease API server whose heartbeat

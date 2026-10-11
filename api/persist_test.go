@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
+	"github.com/jrimmer/spoond/v3/store"
 )
 
 // TestPersistRoundTrip grants a lease, names it and shares it on a

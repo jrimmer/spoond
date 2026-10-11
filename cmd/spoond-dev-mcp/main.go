@@ -52,9 +52,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jrimmer/spoond/v2/internal/env"
-	"github.com/jrimmer/spoond/v2/mcp"
-	"github.com/jrimmer/spoond/v2/runner"
+	"github.com/jrimmer/spoond/v3/internal/env"
+	"github.com/jrimmer/spoond/v3/mcp"
+	"github.com/jrimmer/spoond/v3/runner"
 )
 
 // agentToken resolves the credential for the lease client. The per-agent

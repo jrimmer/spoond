@@ -15,9 +15,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"github.com/jrimmer/spoond/v2/substrate"
-	info "github.com/jrimmer/spoond/v2/substrate/e2b/gen/info"
-	orchestrator "github.com/jrimmer/spoond/v2/substrate/e2b/gen/orchestrator"
+	"github.com/jrimmer/spoond/v3/substrate"
+	info "github.com/jrimmer/spoond/v3/substrate/e2b/gen/info"
+	orchestrator "github.com/jrimmer/spoond/v3/substrate/e2b/gen/orchestrator"
 )
 
 // blockingOrchestrator is a gRPC stand-in whose methods never return on

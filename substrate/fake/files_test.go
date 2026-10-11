@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // newFileSandbox returns a Fake with one running sandbox.

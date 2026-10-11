@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // TestLeaseGrantDurationObservedOnGrant: a grant against the fake

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Bounded retry of crash recovery (spoond-dxq). A lease whose sandbox

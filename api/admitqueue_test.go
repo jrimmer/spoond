@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/identity"
-	"github.com/jrimmer/spoond/v2/metrics"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v3/metrics"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Queued-admission tests (#129 part 1). The fake substrate's NodeInfo is

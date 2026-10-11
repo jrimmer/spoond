@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/identity"
+	"github.com/jrimmer/spoond/v3/identity"
 )
 
 // newShareTestServer: admin + users a (owner) + b (grantee).

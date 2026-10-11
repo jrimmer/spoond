@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // HTTP surface of background exec jobs (2.6, #135):

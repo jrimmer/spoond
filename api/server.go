@@ -22,9 +22,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/common/expfmt"
 
-	"github.com/jrimmer/spoond/v2/identity"
-	"github.com/jrimmer/spoond/v2/metrics"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/identity"
+	"github.com/jrimmer/spoond/v3/metrics"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Server is the HTTP lease API.

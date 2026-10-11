@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/jrimmer/spoond/v2/cmd/spoond-doctor"
+	"github.com/jrimmer/spoond/v3/cmd/spoond-doctor"
 )
 
 func init() {

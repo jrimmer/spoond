@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jrimmer/spoond/v2/store"
-	"github.com/jrimmer/spoond/v2/substrate"
+	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // Periodic and manual checkpoints (U10): persistent leases are

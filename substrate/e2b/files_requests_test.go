@@ -15,8 +15,8 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/jrimmer/spoond/v2/substrate"
-	"github.com/jrimmer/spoond/v2/substrate/e2b/gen/envd/filesystem"
+	"github.com/jrimmer/spoond/v3/substrate"
+	"github.com/jrimmer/spoond/v3/substrate/e2b/gen/envd/filesystem"
 )
 
 func TestWriteFileRequestShape(t *testing.T) {

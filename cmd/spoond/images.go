@@ -3,7 +3,7 @@
 package main
 
 import (
-	spoondimages "github.com/jrimmer/spoond/v2/cmd/spoond-images"
+	spoondimages "github.com/jrimmer/spoond/v3/cmd/spoond-images"
 )
 
 func init() {
