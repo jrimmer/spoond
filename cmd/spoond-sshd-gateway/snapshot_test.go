@@ -113,6 +113,20 @@ func TestParseCreateArgs(t *testing.T) {
 			t.Fatal("want a usage error")
 		}
 	})
+	t.Run("shared snapshot and size", func(t *testing.T) {
+		body, errMsg := parseCreateArgs([]string{"--snapshot", "honey/warm", "--snapshot-owner", "pool", "--size", "large"})
+		if errMsg != "" {
+			t.Fatalf("unexpected error: %s", errMsg)
+		}
+		if body["snapshot_owner"] != "pool" || body["size"] != "large" {
+			t.Fatalf("body = %v", body)
+		}
+	})
+	t.Run("owner without snapshot", func(t *testing.T) {
+		if _, errMsg := parseCreateArgs([]string{"py-base", "--snapshot-owner", "pool"}); errMsg == "" {
+			t.Fatal("want a usage error")
+		}
+	})
 	t.Run("two images", func(t *testing.T) {
 		if _, errMsg := parseCreateArgs([]string{"a", "b"}); errMsg == "" {
 			t.Fatal("want an unexpected-argument error")

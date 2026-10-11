@@ -151,9 +151,9 @@ func Main(args []string) int {
 		printJSON(runCtl(host, port, key, cmd))
 		return 0
 	case "create":
-		// create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]
+		// create [image] [--snapshot <name[@v]> [--snapshot-owner <user>]] [--size <preset>] [--ttl N] [--persistent]
 		if len(rest) == 0 {
-			fmt.Fprintln(os.Stderr, "usage: spoondctl create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]")
+			fmt.Fprintln(os.Stderr, "usage: spoondctl create [image] [--snapshot <name[@v]> [--snapshot-owner <user>]] [--size <preset>] [--ttl N] [--persistent]")
 			return 1
 		}
 		cmd := "create " + strings.Join(rest, " ")
@@ -270,7 +270,7 @@ usage:
   spoondctl restart <id>           persistent: pause + resume (state kept); plain: fresh guest
   spoondctl restart <id> --cold    fresh guest from the image's current build, lease id kept
   spoondctl cp <id> [tag]          clone a lease
-  spoondctl create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]
+  spoondctl create [image] [--snapshot <name[@v]> [--snapshot-owner <user>]] [--size <preset>] [--ttl N] [--persistent]
                                    create a lease, optionally from a named snapshot
   spoondctl snapshot save <lease> <name> [--key K] [--keep N]
                                    save a lease as a named snapshot
