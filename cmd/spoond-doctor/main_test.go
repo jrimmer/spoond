@@ -365,6 +365,15 @@ func TestCheckFileSecrets(t *testing.T) {
 		t.Fatalf("empty-path notes = %v", notes)
 	}
 
+	// A quoted path (systemd EnvironmentFile values may be quoted) stats
+	// the real file: no spurious cannot-be-read note for a valid, 0600
+	// file, and the loose file inside quotes still warns.
+	quoted := "ADMIN_TOKEN_FILE=\"" + good + "\"\nMETRICS_TOKEN_FILE='" + loose + "'\n"
+	notes = checkFileSecrets(quoted)
+	if len(notes) != 1 || !strings.Contains(notes[0], "METRICS_TOKEN_FILE") || !strings.Contains(notes[0], "mode 0640") {
+		t.Fatalf("quoted-path notes = %v, want only the loose mode warning", notes)
+	}
+
 	// Through checkEnvFiles: the missing file FAILs the whole env file,
 	// the mode warning rides along, and a clean one stays PASS.
 	goodEnv := filepath.Join(dir, "good.env")

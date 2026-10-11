@@ -229,10 +229,13 @@ func checkEnvFiles(dir string) []checkResult {
 // file's content is a credential the backend will come up holding. The
 // notes name the variable and the path, never a value; a non-secret's
 // _FILE name (a typo like BIND_ADDR_FILE) is left to the unknown-key
-// check that runs beside this. An empty path is noted; a file that
-// cannot be read at all is the backend's startup failure, so the env
-// file FAILs on it; a merely loose mode is WARN — the process still
-// starts.
+// check that runs beside this. The value is parsed like an
+// EnvironmentFile line (config show's parseEnvLine shape: quotes strip,
+// `export ` tolerated), because systemd strips quotes and the check
+// would otherwise stat a quoted path and fail a valid file. An empty
+// path is noted; a file that cannot be read at all is the backend's
+// startup failure, so the env file FAILs on it; a merely loose mode is
+// WARN — the process still starts.
 func checkFileSecrets(content string) []string {
 	var notes []string
 	sc := bufio.NewScanner(strings.NewReader(content))
@@ -247,6 +250,13 @@ func checkFileSecrets(content string) []string {
 			continue
 		}
 		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
 		base, isFile := strings.CutSuffix(key, "_FILE")
 		if !isFile || !settings.IsSecret(base) {
 			continue
