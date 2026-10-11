@@ -215,3 +215,52 @@ func TestSnapshotStartsNeverColdBoot(t *testing.T) {
 		t.Fatalf("restore create = filesystem_boot %v %d/%d, want a resume at the build's 2/1024", req.FilesystemBoot, req.VCPU, req.MemoryMB)
 	}
 }
+
+// TestGrantAtRequestedSize (#151 Z4): a grant at a size no build has
+// cold-boots the image's current build at that size, is stamped and
+// charged with it, reports start "cold", and a default-size grant still
+// starts warm.
+func TestGrantAtRequestedSize(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "mid", 1024)
+	ctx := context.Background()
+
+	l, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, vcpu: 4, memoryMB: 3072})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	req := sub.LastCreate()
+	if !req.FilesystemBoot || req.VCPU != 4 || req.MemoryMB != 3072 {
+		t.Fatalf("create = filesystem_boot %v %d/%d, want a cold boot at 4/3072", req.FilesystemBoot, req.VCPU, req.MemoryMB)
+	}
+	svc.store.mu.Lock()
+	v, m, start := l.VCPU, l.MemoryMB, l.Start
+	svc.store.mu.Unlock()
+	if v != 4 || m != 3072 || start != "cold" {
+		t.Fatalf("lease = %d/%d start %q, want 4/3072 cold", v, m, start)
+	}
+	svc.store.mu.Lock()
+	used := svc.usedMiBLocked("alice")
+	svc.store.mu.Unlock()
+	if used != 3072 {
+		t.Fatalf("charged = %d, want 3072", used)
+	}
+
+	// Memory alone: vCPU stays the image default.
+	l2, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, memoryMB: 2048})
+	if err != nil {
+		t.Fatalf("grant memory only: %v", err)
+	}
+	if l2.VCPU != 2 || l2.MemoryMB != 2048 || l2.Start != "cold" {
+		t.Fatalf("memory-only lease = %d/%d %q, want 2/2048 cold", l2.VCPU, l2.MemoryMB, l2.Start)
+	}
+
+	// The image default is warm.
+	l3, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, vcpu: 2, memoryMB: 1024})
+	if err != nil {
+		t.Fatalf("grant default: %v", err)
+	}
+	if req := sub.LastCreate(); req.FilesystemBoot || l3.Start != "warm" {
+		t.Fatalf("default-size grant: filesystem_boot %v start %q, want warm", req.FilesystemBoot, l3.Start)
+	}
+}

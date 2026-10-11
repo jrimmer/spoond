@@ -2293,6 +2293,10 @@ type leaseRequest struct {
 	// stamped, so retention never drops a version a live lease runs
 	// from.
 	snapshot *snapshotStart
+	// vcpu and memoryMB are the size the caller asked for (#151 Z4),
+	// already validated by the API; 0 takes the image default. A named
+	// snapshot keeps its own size and ignores them.
+	vcpu, memoryMB int
 	// leaseID is the id the caller already allocated and announced —
 	// the queued-admission path (#129) reserves it when the create is
 	// queued so the `queued` and `created` events name the same lease.
@@ -2386,6 +2390,9 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	var img store.ImageRow
 	var b store.BuildRow
 	memoryMB := 0
+	// sized is a lease created at a requested size (#151 Z4): it never
+	// takes a pooled sandbox, which runs the image default.
+	sized, sizedVCPU := false, 0
 	if snap != nil {
 		image = snap.row.Image
 		var err error
@@ -2424,6 +2431,22 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		// The VM runs the build's size, so the build is what the lease
 		// is charged (#151 Z1); the image row normally says the same.
 		memoryMB = b.MemoryMB
+		// A requested size (#151 Z4) starts warm from the image's build
+		// of that size when one exists, else cold from the current build
+		// (createSandbox's startShape boots it at the lease's size).
+		if want := (req.vcpu > 0 && req.vcpu != b.VCPU) || (req.memoryMB > 0 && req.memoryMB != b.MemoryMB); want {
+			vcpu, mb := b.VCPU, b.MemoryMB
+			if req.vcpu > 0 {
+				vcpu = req.vcpu
+			}
+			if req.memoryMB > 0 {
+				mb = req.memoryMB
+			}
+			if wb, ok := s.warmSizeBuild(ctx, img, vcpu, mb); ok {
+				b = wb
+			}
+			sized, sizedVCPU, memoryMB = true, vcpu, mb
+		}
 	}
 	// The lease costs the memory its VM runs with (#128, #151 Z1):
 	// admission checks the user's running-lease memory before the
@@ -2496,6 +2519,9 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		lease.SnapshotName = snap.row.Name
 		lease.SnapshotVersion = snap.row.Version
 	}
+	if sized {
+		lease.VCPU = sizedVCPU
+	}
 	// The lease's root disk must fit in usable snapshot disk (FS3);
 	// the reservation is held until the grant returns.
 	diskRelease, err := s.ensureDiskRoom(ctx, owner, int64(img.DiskMB)*1024*1024)
@@ -2536,7 +2562,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// discarded and the next one is tried. A create from a named
 	// snapshot never uses the pool (the pooled sandbox is the image's
 	// current build, not the version's).
-	if s.cfg.PoolSize > 0 && snap == nil {
+	if s.cfg.PoolSize > 0 && snap == nil && !sized {
 		for {
 			s.store.mu.Lock()
 			pool := s.store.pool[image]
