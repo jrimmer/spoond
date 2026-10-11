@@ -60,6 +60,10 @@ type row struct {
 // BIND_ADDR: the backend's own built-in default.
 const DefaultBindAddr = "127.0.0.1:8890"
 
+// adminConfigPath is the endpoint the comparison fetches, appended to
+// the base --api / BIND_ADDR URL.
+const adminConfigPath = "/api/admin/config"
+
 // configShowFlags is the flag set of `spoond config show`.
 func configShowFlags() *flag.FlagSet {
 	fs := flag.NewFlagSet("config show", flag.ExitOnError)
@@ -144,7 +148,7 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 	if apiURL == "" {
 		apiURL = defaultAPIURL(effective("BIND_ADDR", DefaultBindAddr))
 	}
-	rc, rcErr := fetch(apiURLFor(apiURL), effective("ADMIN_TOKEN", ""))
+	rc, rcErr := fetch(apiURLFor(apiURL)+adminConfigPath, effective("ADMIN_TOKEN", ""))
 	unreached := rcErr != nil
 
 	if jsonOut {

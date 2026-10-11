@@ -3,6 +3,7 @@ package spoondconfig
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -414,12 +415,13 @@ func TestRunSystemctlFails(t *testing.T) {
 }
 
 // TestFetchRunningWithLiveServer drives the real fetcher over a real
-// HTTP server (no systemctl involved): the token is presented, a 401
-// reports and 200 decodes.
+// HTTP server (no systemctl involved): the token is presented, the
+// request path is /api/admin/config, a 401 reports and 200 decodes.
 func TestFetchRunningWithLiveServer(t *testing.T) {
-	var gotTok string
+	var gotTok, gotPath string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotTok = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
 		if r.Header.Get("Authorization") != "Bearer shh" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -442,6 +444,27 @@ func TestFetchRunningWithLiveServer(t *testing.T) {
 	_, err = fetchRunningWith(ts.Client(), ts.URL, "wrong")
 	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("wrong token err = %v, want HTTP 401", err)
+	}
+	_ = gotPath // the path assertion lives in TestRunFetchURL below
+}
+
+// TestRunFetchURL: run() fetches base + /api/admin/config — a bug that
+// drops the path would answer a 401 from the root's auth middleware
+// instead of the admin surface (found in the live round-trip).
+func TestRunFetchURL(t *testing.T) {
+	var gotURL string
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	files := map[string]string{envFile: "ADMIN_TOKEN=t\n"}
+	run("spoond-backend", "https://base.example:8890", false, io.Discard, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), func(url, token string) (runningConfig, error) {
+		gotURL = url
+		return running(), nil
+	})
+	if gotURL != "https://base.example:8890/api/admin/config" {
+		t.Fatalf("fetch url = %q, want base + /api/admin/config", gotURL)
 	}
 }
 
