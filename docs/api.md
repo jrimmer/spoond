@@ -143,7 +143,7 @@ through pause, resume, clone, fork, restore and recovery, and takes the
 image's current default when a restart boots a fresh guest. A size with a warm build (the image default, or a
 preset listed in the image's `warm_sizes`) starts in milliseconds from
 its memory snapshot (`"start": "warm"`). Any other size boots the
-image's root filesystem at that size in a few seconds (`"start":
+image's root filesystem at that size in about a second (`"start":
 "cold"`). A bad size answers `400` with `code: invalid_size` before
 anything starts. A create with `snapshot` keeps the snapshot's size:
 `size` or `vcpu`, or a `memory_mb` other than the snapshot's, is `400

@@ -10,13 +10,25 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-10-11
+
+3.1 lets a create choose its lease's size and shows owners what they
+use. A create takes a size preset (`GET /api/sizes`) or `vcpu` and
+`memory_mb`; sizes with a warm build start from a memory snapshot as
+before, and any other size boots in about a second. Every lease reports
+its size and how it started, and clone, fork, restore and recovery now
+charge the size the VM actually runs. `GET /api/usage` adds lease
+counts, waiting creates and recent refusals, and
+`GET /api/usage/history` keeps 7 days. No breaking changes; the schema
+moves from 23 to 27 with additive migrations.
+
 ### Added
 
 - **`GET /api/usage` and `GET /api/users/me` report the caller's lease counts.** A `leases` object beside `share` gives the owner's running, paused, pinned and lost lease counts plus how many background jobs those leases run (#140 U1).
 - **`GET /api/usage` lists the caller's waiting creates.** `waiting` gives each queued create's place in the whole admission queue, how long it has waited and the reason, the same entries as `GET /api/leases/queue` (#140 U2).
 - **`GET /api/usage` lists the caller's recent refusals and reclaims.** `recent` gives the caller's newest 20 `box_full`, `take_back`, `queued`, `suspended`, `critical_release` and `paused_expiring` events, newest first. It is kept in memory, so it starts empty after a backend restart (#140 U3).
 - **`box_full` events name the refused requester as their owner**, so the requester now receives them on its own event stream (`GET /api/leases/events`); before, they carried no owner and only admins saw them.
-- **Choose a lease's size per create (#151).** A create takes `size` (a preset from `GET /api/sizes`) or `vcpu` and `memory_mb`; the image gives the default. A size with a warm build starts warm as before; any other size cold-boots in a few seconds, and the lease reports `start: "warm"` or `"cold"`. A lease created at a chosen size keeps it through restarts; one created at the default size takes the image's current default when restarted, as before. The lease's memory is its charge for admission and fair shares; vCPU is never charged. A cold-booted guest runs its image's start command (spoond-guest-init and its init hooks) and passes the image's ready check before the lease gets it, as a template build does. A bad size is `400 invalid_size`. `memory_mib` stays as the old name of `memory_mb`; it no longer has to equal the image's memory. Named snapshots record the size of the lease they were saved from.
+- **Choose a lease's size per create (#151).** A create takes `size` (a preset from `GET /api/sizes`) or `vcpu` and `memory_mb`; the image gives the default. A size with a warm build starts warm as before; any other size cold-boots in about a second, and the lease reports `start: "warm"` or `"cold"`. A lease created at a chosen size keeps it through restarts; one created at the default size takes the image's current default when restarted, as before. The lease's memory is its charge for admission and fair shares; vCPU is never charged. A cold-booted guest runs its image's start command (spoond-guest-init and its init hooks) and passes the image's ready check before the lease gets it, as a template build does. A bad size is `400 invalid_size`. `memory_mib` stays as the old name of `memory_mb`; it no longer has to equal the image's memory. Named snapshots record the size of the lease they were saved from.
 - **A lease reports its own size and keeps it (#151).** Lease rows carry `vcpu`, `memory_mb` and `disk_mb`. Clone, fork, restore and recovery now run and charge the size the lease actually has; before, they charged the image's current `memory_mb`, so after an image was rebuilt at another size a restored lease could be charged one size while its VM ran another. Migrations 25 and 27 add the lease's `vcpu` and whether its size was chosen.
 - **Size presets and per-lease limits (#151).** `SIZE_PRESETS` names VM sizes (default `small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384`, as `name=vcpu:memory_mb`); `MAX_LEASE_VCPU` (default the host's CPU count) and `MAX_LEASE_MEMORY_MB` (default 32768) cap one lease's VM. A malformed value stops the backend at startup. `GET /api/sizes` lists the presets and the limits to any authenticated caller.
 - **Warm sizes per image (#151).** A manifest entry's `warm_sizes: [medium, large]` makes `spoond images build` build one more memory snapshot per listed preset from the same image, so a VM of that size can start warm. `min_memory_mb` sets the smallest memory a lease of the image may ask for (default 512, or the image's own memory when smaller); a warm preset below it, or an unknown preset name, fails the build before it starts. Both are inherited through `from:`. `GET /api/images?detail=1` rows gain `min_memory_mb` and `warm_sizes`. The GC keeps each image's warm builds like its current build. Migration 26 adds the `image_sizes` table and `images.min_memory_mb`.

@@ -120,7 +120,7 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   `memory_mb`; the image gives the default and a minimum. Sizes with a
   warm build (the image default and the presets an image lists in
   `warm_sizes`) start in milliseconds from a memory snapshot; any other
-  size boots in a few seconds (`"start": "cold"`). Memory is the lease's
+  size boots in about a second (`"start": "cold"`). Memory is the lease's
   charge for fair shares; vCPU is never charged. A lease keeps its size
   through pause, resume, clone, fork, restore and recovery, and a chosen
   size survives restarts too.
@@ -199,7 +199,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.0.0 (2026-10-10) · GitHub` — with the
+line — `Spoond v3.1.0 (2026-10-11) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
