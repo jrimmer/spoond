@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // addUsageSample inserts one usage_samples row straight into the store.
@@ -225,5 +226,50 @@ func TestUsageHistorySamplerFakeClock(t *testing.T) {
 	svc.sampleUsage(context.Background())
 	if rows, err := db.ListUsageHistory(context.Background(), alice.ID, time.Time{}); err != nil || len(rows) != 2 {
 		t.Fatalf("after second pass: %d rows, %v; want 2", len(rows), err)
+	}
+}
+
+// TestUsageHistorySamplerSkipsOnUnknownCapacity: a pass whose capacity
+// read failed must write nothing, so the zeroed buckets of a partial
+// snapshot are never persisted as real history. The next pass with a
+// readable capacity writes again.
+func TestUsageHistorySamplerSkipsOnUnknownCapacity(t *testing.T) {
+	svc, db, sub, ids := newFairShareService(t)
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+
+	alice := addIdentityUser(t, ids, "alice")
+	addRunningLease(svc, "run-a", alice.ID, 64)
+	seedNamedSnapshot(t, db, alice.ID, "big", 300<<20)
+
+	// A cold node-info cache makes totalHugepageMiB fail, so the
+	// snapshot's capacityKnown is false and its disk bucket is zero.
+	svc.nodeInfoAt = time.Time{}
+	svc.sampleUsage(context.Background())
+	rows, err := db.ListUsageHistory(context.Background(), alice.ID, time.Time{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("wrote %d row(s) on unknown capacity, want 0: %+v", len(rows), rows)
+	}
+
+	// Warm the cache and retry: the pass now writes the real numbers.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    512,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	svc.updateNodeMetrics(context.Background())
+	svc.sampleUsage(context.Background())
+	rows, err = db.ListUsageHistory(context.Background(), alice.ID, time.Time{})
+	if err != nil {
+		t.Fatalf("list after retry: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("after retry: %d rows, want 1", len(rows))
+	}
+	if rows[0].DiskUsedBytes != 300<<20 || rows[0].MemoryUsedMiB != 64 {
+		t.Fatalf("retry row wrong: %+v", rows[0])
 	}
 }

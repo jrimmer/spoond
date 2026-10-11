@@ -67,14 +67,21 @@ type leaseCounts struct {
 // sampleUsage writes one usage_samples row per owner from the current
 // fair-share snapshot, then prunes rows older than the retention window.
 // It fails soft: a read error is logged and the pass writes nothing
-// rather than a wrong zero.
+// rather than persisting invalid numbers, which would be served as real
+// history for the full retention window. A snapshot whose capacityKnown
+// is false had a failed read (memory or disk); it carries partial usage
+// with zeroed buckets, so the pass is skipped and the next tick retries.
 func (s *Service) sampleUsage(ctx context.Context) {
-	// The running/paused counts and the snapshot's memory are read under
-	// the store lock, where lease state cannot tear. The snapshot carries
-	// the disk and memory usage; the counts are collected beside it.
+	// One snapshot carries both the counted memory and disk usage, per
+	// owner. A snapshot with capacityKnown false means at least one read
+	// failed and its zeroed buckets are not real, so nothing is written.
 	at := s.now()
-	counts := s.countLeasesByOwner()
 	snap := s.fairShares(ctx)
+	if !snap.capacityKnown {
+		s.log.Printf("usage history: sample skipped: capacity read failed")
+		return
+	}
+	counts := s.countLeasesByOwner()
 	for _, o := range snap.owners {
 		c := counts[o.Owner]
 		if err := s.db.InsertUsageSample(ctx, store.UsageSampleRow{
@@ -100,8 +107,10 @@ func (s *Service) sampleUsage(ctx context.Context) {
 }
 
 // countLeasesByOwner tallies the non-released leases per owner: running
-// (or recovered) ones and suspended ones. It is read under the store
-// lock, the same critical section the fair-share memory usage uses.
+// (or recovered) ones and suspended ones. It takes the store lock, but
+// in its own critical section, so a lease that changes state between the
+// fair-share snapshot and this read can make one tick's count and memory
+// disagree by one lease; that is at most one cosmetic sample.
 func (s *Service) countLeasesByOwner() map[string]leaseCounts {
 	out := map[string]leaseCounts{}
 	s.store.mu.Lock()
@@ -141,13 +150,13 @@ func (s *Server) handleUsageHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]usageSampleJSON, 0, len(rows))
-	for _, r := range rows {
+	for _, row := range rows {
 		out = append(out, usageSampleJSON{
-			At:            formatRFC3339(r.At),
-			MemoryUsedMiB: r.MemoryUsedMiB,
-			DiskUsedBytes: r.DiskUsedBytes,
-			Running:       r.Running,
-			Paused:        r.Paused,
+			At:            formatRFC3339(row.At),
+			MemoryUsedMiB: row.MemoryUsedMiB,
+			DiskUsedBytes: row.DiskUsedBytes,
+			Running:       row.Running,
+			Paused:        row.Paused,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"hours": hours, "samples": out})
