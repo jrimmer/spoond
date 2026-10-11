@@ -26,10 +26,19 @@ type drainingWorker struct {
 	runCtx   context.Context // the live job context, for liveness probes
 	releases []string        // lease ids released so far, in order
 	release  chan struct{}   // closed on the first release
+
+	// Events a test can wait on, so ordering a step against the job's
+	// start or end never sleeps out an interval (which flakes under
+	// host load).
+	started   chan struct{} // closed once, when the first job's Run begins
+	startOnce sync.Once
 }
 
 func newDrainingWorker() *drainingWorker {
-	return &drainingWorker{release: make(chan struct{})}
+	return &drainingWorker{
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
 }
 
 func (f *drainingWorker) Register(ctx context.Context, name, token string, labels []string) (int64, error) {
@@ -68,6 +77,7 @@ func (f *drainingWorker) Run(ctx context.Context, job *Job) error {
 	f.runCnt++
 	f.runCtx = ctx
 	f.mu.Unlock()
+	f.startOnce.Do(func() { close(f.started) })
 	defer func() {
 		f.mu.Lock()
 		f.lease = ""
@@ -147,6 +157,17 @@ func (f *drainingWorker) ranJobs() int {
 	return f.runCnt
 }
 
+// runStartWait waits for the job to start, bounded (no sleeps over
+// 1 s); a job that never starts is a fatal.
+func (f *drainingWorker) runStartWait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the job never started")
+	}
+}
+
 // waitReleased waits for the lease release, bounded (no sleeps over 1 s).
 func waitReleased(t *testing.T, f *drainingWorker) {
 	t.Helper()
@@ -224,10 +245,13 @@ func TestSignalDoesNotKillRunningJob(t *testing.T) {
 		Leases:       &sw,
 	}, w)
 
-	// The signal arrives (this is exactly what SIGTERM does to the
-	// Start context in cmd/spoond-runner).
+	// The job is running (waitBusy has polled its lease), then the
+	// signal arrives (this is exactly what SIGTERM does to the Start
+	// context in cmd/spoond-runner). The checks that follow are
+	// point-in-time and the job cannot end on its own for another 5s,
+	// so no sleep is needed before them.
+	w.runStartWait(t)
 	cancel()
-	time.Sleep(50 * time.Millisecond)
 	if !w.runContextAlive() {
 		t.Fatal("the job's context died with the signal context; RUNNER_STOP_GRACE can never be honoured")
 	}
@@ -266,22 +290,38 @@ func TestStopGraceLetsJobFinishThenReleasesLease(t *testing.T) {
 	}, w)
 	defer cancel()
 
-	// Signal first, as production does: the drain must still let the
-	// job finish.
+	// Signal first, as production does, then hold the two ordering
+	// events the test is about instead of sleeping out an interval (a
+	// sleep flakes under host load: the job loses the CPU for longer
+	// than the interval and Stop's grace can cancel it — a false
+	// failure):
+	//
+	//   1. the job is running on the jobs context (waitBusy has polled
+	//      its lease) when the signal arrives;
+	//   2. the job ends on its own and its deferred Delete releases the
+	//      lease. Only Stop can cancel the jobs context and Stop has not
+	//      been called, so a release this early proves the job finished
+	//      on its own, well inside the grace window, never cancelled.
+	w.runStartWait(t)
 	cancel()
-	time.Sleep(10 * time.Millisecond)
+	waitReleased(t, w)
 	if !w.runContextAlive() {
 		t.Fatal("signal killed the running job")
 	}
+	if w.wasCancelled() {
+		t.Fatal("the signal ended the job; the grace was never honoured")
+	}
 
+	// Stop must return without waiting out the grace: the only running
+	// job has already finished, so the drain has nothing left to wait
+	// for.
 	start := time.Now()
 	p.Stop()
-	waitReleased(t, w)
-	if w.wasCancelled() {
-		t.Fatal("a job inside the grace window was cancelled instead of being allowed to finish")
-	}
 	if elapsed := time.Since(start); elapsed > 450*time.Millisecond {
 		t.Fatalf("Stop took %s; the job fits the grace, so Stop must not wait it out", elapsed)
+	}
+	if w.wasCancelled() {
+		t.Fatal("a job inside the grace window was cancelled instead of being allowed to finish")
 	}
 	if w.releasedCount() == 0 {
 		t.Fatal("lease never released")
