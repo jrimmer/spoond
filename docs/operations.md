@@ -1333,7 +1333,7 @@ covers), live leases (id, image, the size — memory then vCPUs, `4G/2V`,
 `1.5G/1V`, `512M/1V`, `-` when unknown —, owner, the state cell — the
 run-state glyph ▶ ‖ ■ ⭘ then ◆ on a pinned lease, no words; a suspended
 lease's glyph is recoloured by its suspend reason (taken back warn,
-idle-suspended dim, any other suspend plain) —, the access policy
+idle-suspended dim, any other suspend plain) —, the policy
 (`isolated` when
 the API's `network_policy` is `none`, else `lan`/`restricted`/
 `internet`), age, time left and the holder; on the page the holder is a

@@ -1627,7 +1627,7 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		x, w int
 		text string
 	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.size, c.sizeW, "size"}, {c.own, c.ownW, "owner"},
-		{c.st, c.stW, stateHeader}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
+		{c.st, c.stW, stateHeader}, {c.pol, c.polW, "policy"}, {c.age, ageW, "age"},
 		{c.left, c.leftW, "left"}, {c.hold, c.holdW, "holder"}}
 	for _, h := range headers {
 		draw := cutHeaders(h.text, h.w)
@@ -1721,15 +1721,15 @@ func policyWords(p string) []string {
 }
 
 // cutHeaders fits a column header into w cells: the forms step down
-// from the full word ("access" to "acc"/"net", "holder" to
+// from the full word ("policy" to "pol", "holder" to
 // "hold"/"hld") until one fits the w-1 content cells, and the chosen
 // form is cut to w-1 runes. The spare cell is the column's separator,
 // so a header never touches the next header even when it exactly fills
 // its column's content width.
 func cutHeaders(word string, w int) string {
 	switch word {
-	case "access":
-		return cell(fitWord([]string{"access", "acc", "net"}, w-1), w)
+	case "policy":
+		return cell(fitWord([]string{"policy", "pol"}, w-1), w)
 	case "holder":
 		return cell(fitWord([]string{"holder", "hold", "hld"}, w-1), w)
 	}

@@ -1680,9 +1680,10 @@ func TestLeasesAccessIsolated(t *testing.T) {
 	if !strings.Contains(p, "isolated") {
 		t.Errorf("access value for policy none is not isolated:\n%s", p)
 	}
-	// The column header is "access" (not "policy").
-	if h := leaseHeaderLine(strings.Split(p, "\n")); !strings.Contains(h, "access") {
-		t.Errorf("leases header is not named access: %q", h)
+	// The column header is "policy": it will govern more than network
+	// access.
+	if h := leaseHeaderLine(strings.Split(p, "\n")); !strings.Contains(h, "policy") {
+		t.Errorf("leases header is not named policy: %q", h)
 	}
 	if s.Rows[0].Policy != "none" {
 		t.Errorf("rendering changed the stored policy to %q", s.Rows[0].Policy)
@@ -1726,7 +1727,7 @@ func TestLeaseColumnsFitContent(t *testing.T) {
 		got, floor int
 	}{
 		{"id", empty.idW, 3}, {"image", empty.imgW, 6}, {"owner", empty.ownW, 6},
-		{"state", empty.stW, 3}, {"access", empty.polW, 7}, {"left", empty.leftW, 5},
+		{"state", empty.stW, 3}, {"policy", empty.polW, 7}, {"left", empty.leftW, 5},
 	} {
 		if tc.got < tc.floor {
 			t.Errorf("empty %s column = %d, below its header %d", tc.name, tc.got, tc.floor)
@@ -1762,7 +1763,7 @@ func TestLeaseColumnsStayInPanel(t *testing.T) {
 				name string
 				x, w int
 			}{{"id", c.id, c.idW}, {"image", c.img, c.imgW}, {"size", c.size, c.sizeW}, {"owner", c.own, c.ownW},
-				{"state", c.st, c.stW}, {"access", c.pol, c.polW}, {"age", c.age, ageW},
+				{"state", c.st, c.stW}, {"policy", c.pol, c.polW}, {"age", c.age, ageW},
 				{"left", c.left, c.leftW}, {"holder", c.hold, c.holdW}}
 			for i, col := range cols {
 				if col.w < 1 {
@@ -1779,7 +1780,7 @@ func TestLeaseColumnsStayInPanel(t *testing.T) {
 			for _, hc := range []struct {
 				hdr string
 				w   int
-			}{{"access", c.polW}, {"holder", c.holdW}} {
+			}{{"policy", c.polW}, {"holder", c.holdW}} {
 				if got := cutHeaders(hc.hdr, hc.w); len([]rune(got)) >= hc.w {
 					t.Errorf("%s w=%d: %s header %q fills all %d cells, no separator", name, w, hc.hdr, got, hc.w)
 				}
