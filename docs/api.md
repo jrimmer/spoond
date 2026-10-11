@@ -2198,6 +2198,27 @@ Self-scoped: a legacy consumer
 token also has an owner, so its usage is available; a caller whose
 owner somehow does not exist answers `404`.
 
+### `GET /api/usage/history?hours=N` — the caller's 7-day usage history
+
+Any authenticated caller. Returns the caller's own recorded samples,
+oldest first, from the backend's sampler: one row per owner every 15
+minutes (memory used in MiB, disk used in bytes, and the running and
+paused lease counts). `hours` selects the window — default `24`, minimum
+`1`, and values above `168` (7 days, the retention) are clamped rather
+than refused. A non-integer or a value below `1` is a `400`. An owner
+with no samples reads an empty list.
+
+```json
+{"hours": 24, "samples": [
+  {"at": "2026-06-01T12:00:00Z", "memory_used_mib": 2048,
+   "disk_used_bytes": 31457280, "running": 1, "paused": 2}
+]}
+```
+
+Storage is `usage_samples` (migration 0024): `owner`, `at`,
+`memory_used_mib`, `disk_used_bytes`, `running`, `paused`, indexed by
+`(owner, at)`; rows older than 7 days are pruned by the sampler.
+
 ### `GET /api/users/by-name/{name}` — minimal lookup
 
 `{"user": {id, name}}` — the shape for share-granting and gateway name

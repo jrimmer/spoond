@@ -308,6 +308,8 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// The caller's own fair-share usage (#145 FS1); available with or
 	// without an identity store (a legacy consumer token has an owner).
 	s.mux.HandleFunc("GET /api/usage", s.handleUsage)
+	// The caller's own 7-day usage history (#140 U4), oldest first.
+	s.mux.HandleFunc("GET /api/usage/history", s.handleUsageHistory)
 	if s.llm != nil {
 		// The LLM gateway is auth-exempt (lease id in path is the
 		// capability); it MUST be mounted on the outer handler after

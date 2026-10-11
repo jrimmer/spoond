@@ -618,6 +618,10 @@ type Service struct {
 	// and the unclaimed sandboxes seen on the previous pass. See
 	// api/orphan_sweep.go.
 	orphanSweep orphanSweepState
+	// usageSampleInterval is how often the usage-history sampler writes
+	// one row per owner (#140 U4). Defaults to
+	// defaultUsageSampleInterval; tests shrink it.
+	usageSampleInterval time.Duration
 	// now is the service clock. Tests replace it to age a lease's
 	// lost_at without sleeping; the GC's grace periods read it.
 	now func() time.Time
@@ -914,6 +918,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		orphanSweepInterval:       defaultOrphanSweepInterval,
 		orphanSandboxIDs:          map[string]struct{}{},
 		orphanSweep:               newOrphanSweepState(),
+		usageSampleInterval:       defaultUsageSampleInterval,
 		drainHeal:                 map[string]*drainHealState{},
 		bus:                       newEventBus(),
 		gcErr:                     newGCTracker(),
@@ -1676,6 +1681,9 @@ func (s *Service) Start(ctx context.Context) {
 	// Queued admission (#129 part 1): retry waiting creates every 5 s
 	// even when nothing signalled.
 	go s.runAdmitQueueLoop(ctx)
+	// Usage history (#140 U4): one usage_samples row per owner every
+	// sample interval, old rows pruned past the retention window.
+	go s.runUsageHistoryLoop(ctx)
 	// Drain self-heal (spoond-52c): undrain a drain that outlived
 	// DRAIN_MAX_SECS on a healthy node, and resume any lease left
 	// Drained by a failed or deferred undrain.
