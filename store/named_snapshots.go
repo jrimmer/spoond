@@ -32,11 +32,16 @@ type NamedSnapshotRow struct {
 	FirecrackerVersion  string
 	OrchestratorVersion string
 	CreatedAt           time.Time
+	// SecretFree records that the lease the version was saved from never
+	// had a secret (#141): no create-time, exec-time or job secret ever
+	// reached it, nor any lease it was cloned, forked or started from.
+	// Only a secret-free version may be granted to another owner.
+	SecretFree bool
 }
 
 const namedSnapshotColumns = `owner, name, version, build_id, idempotency_key,
 	source_lease_id, image, image_build_id, memory_mb, size_bytes,
-	envd_version, firecracker_version, orchestrator_version, created_at`
+	envd_version, firecracker_version, orchestrator_version, created_at, secret_free`
 
 // InsertNamedSnapshot inserts a version row for (owner, name), assigning
 // version = max(version)+1 for that name inside one transaction. keep is
@@ -78,10 +83,10 @@ func insertNamedSnapshotTx(ctx context.Context, tx *sql.Tx, r *NamedSnapshotRow,
 	// saving again never reuses its number (S4).
 	r.Version = max(maxVersion.Int64, highWater.Int64) + 1
 	if _, err := tx.ExecContext(ctx, `INSERT INTO named_snapshots (`+namedSnapshotColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Owner, r.Name, r.Version, r.BuildID, r.IdempotencyKey,
 		r.SourceLeaseID, r.Image, r.ImageBuildID, r.MemoryMB, r.SizeBytes,
-		r.EnvdVersion, r.FirecrackerVersion, r.OrchestratorVersion, formatTime(r.CreatedAt)); err != nil {
+		r.EnvdVersion, r.FirecrackerVersion, r.OrchestratorVersion, formatTime(r.CreatedAt), r.SecretFree); err != nil {
 		return fmt.Errorf("store: insert named snapshot %s/%s@%d: %w", r.Owner, r.Name, r.Version, err)
 	}
 	// The name's retention is a first-save setting: keep is stored only
@@ -117,6 +122,20 @@ func (db *DB) GetNamedSnapshotByBuild(ctx context.Context, owner, buildID string
 	row := db.r.QueryRowContext(ctx,
 		`SELECT `+namedSnapshotColumns+` FROM named_snapshots WHERE owner = ? AND build_id = ?`,
 		owner, buildID)
+	return scanNamedSnapshot(row.Scan)
+}
+
+// GetNamedSnapshotByBuildAny returns the version row carrying buildID
+// whatever its owner, or ErrNotFound. build_id is unique across owners,
+// so the answer is one row. A lease started from a snapshot another
+// owner granted (#141) resolves its "snapshot" view and its retention
+// re-run through it; callers must never use it to authorize access.
+func (db *DB) GetNamedSnapshotByBuildAny(ctx context.Context, buildID string) (NamedSnapshotRow, error) {
+	if buildID == "" {
+		return NamedSnapshotRow{}, ErrNotFound
+	}
+	row := db.r.QueryRowContext(ctx,
+		`SELECT `+namedSnapshotColumns+` FROM named_snapshots WHERE build_id = ?`, buildID)
 	return scanNamedSnapshot(row.Scan)
 }
 
@@ -202,6 +221,17 @@ func likePrefix(prefix string) string {
 	return string(out) + "%"
 }
 
+// dropGrantsIfEmptyTx deletes a name's grants once its last version is
+// gone (#141): a grant covers the name, so a later save under the same
+// name must not reach an old grantee without a new grant.
+func dropGrantsIfEmptyTx(ctx context.Context, tx *sql.Tx, owner, name string) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM named_snapshot_grants
+		WHERE owner = ? AND name = ?
+		AND NOT EXISTS (SELECT 1 FROM named_snapshots WHERE owner = ? AND name = ?)`,
+		owner, name, owner, name)
+	return err
+}
+
 // DeleteNamedSnapshot removes one version row. It returns ErrNotFound
 // when the row does not exist. The name's settings row (and its
 // last_version high-water mark) is kept even when this was the last
@@ -225,6 +255,10 @@ func (db *DB) DeleteNamedSnapshot(ctx context.Context, owner, name string, versi
 	if n == 0 {
 		tx.Rollback()
 		return ErrNotFound
+	}
+	if err := dropGrantsIfEmptyTx(ctx, tx, owner, name); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("store: delete named snapshot %s/%s@%d: grants: %w", owner, name, version, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: delete named snapshot %s/%s@%d: %w", owner, name, version, err)
@@ -250,6 +284,10 @@ func (db *DB) DeleteNamedSnapshotName(ctx context.Context, owner, name string) (
 	if err != nil {
 		tx.Rollback()
 		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)
+	}
+	if err := dropGrantsIfEmptyTx(ctx, tx, owner, name); err != nil {
+		tx.Rollback()
+		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: grants: %w", owner, name, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: delete named snapshot name %s/%s: %w", owner, name, err)
@@ -539,7 +577,7 @@ func scanNamedSnapshot(scan func(dest ...any) error) (NamedSnapshotRow, error) {
 	var createdAt string
 	err := scan(&r.Owner, &r.Name, &r.Version, &r.BuildID, &r.IdempotencyKey,
 		&r.SourceLeaseID, &r.Image, &r.ImageBuildID, &r.MemoryMB, &r.SizeBytes,
-		&r.EnvdVersion, &r.FirecrackerVersion, &r.OrchestratorVersion, &createdAt)
+		&r.EnvdVersion, &r.FirecrackerVersion, &r.OrchestratorVersion, &createdAt, &r.SecretFree)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NamedSnapshotRow{}, ErrNotFound
 	}

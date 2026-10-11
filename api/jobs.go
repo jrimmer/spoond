@@ -388,6 +388,9 @@ func (s *Service) startJob(ctx context.Context, lease *Lease, owner, cmd, cwd st
 			return "", time.Time{}, nil, errLeaseBusySave
 		}
 		defer s.secretsGate.endStaging(lease.ID)
+		// The lease has had a secret from here on (#141), recorded
+		// inside the gate before the files exist.
+		s.markHadSecrets(lease)
 		s.recordJobSecrets(lease.ID, jobID, secretNames)
 		if err := s.stageSecrets(ctx, lease.SandboxID, secrets); err != nil {
 			s.forgetJobSecrets(jobID)

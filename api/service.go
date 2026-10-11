@@ -149,6 +149,13 @@ type Lease struct {
 	// every restart; an unsized one follows its image's current default
 	// when a restart boots a fresh guest. Clones and forks inherit it.
 	Sized bool `json:"-"`
+	// HadSecrets marks a lease that ever held a secret (#141): the first
+	// create-time secrets, exec-time secret staging or job secrets set
+	// it, and clones, forks and starts from a version that is not
+	// secret-free inherit it. Never cleared. A named snapshot saved from
+	// such a lease is not secret-free, so it cannot be granted. Exec
+	// `env` values are not secrets and never set it.
+	HadSecrets bool `json:"-"`
 	// Start is how the lease's current VM started (#151 Z4): "warm"
 	// (resumed a memory snapshot) or "cold" (booted its image's root
 	// filesystem at a size no warm build has). In memory only: "" after
@@ -206,6 +213,9 @@ type Lease struct {
 	// its version up by SnapshotBuildID when the API needs it.
 	SnapshotName    string `json:"-"`
 	SnapshotVersion int64  `json:"-"`
+	// SnapshotOwner is the version's owner (#141): another user when the
+	// lease started through a grant. Not persisted, like the name.
+	SnapshotOwner string `json:"-"`
 	// pooled marks a lease served from the warm pool: the sandbox's envd
 	// default SPOOND_LEASE_ID is "pool" (env vars cannot be updated after
 	// create), so exec/stream/stat/prompt add the lease id per request.
@@ -2669,6 +2679,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		lease.SnapshotBuildID = snap.row.BuildID
 		lease.SnapshotName = snap.row.Name
 		lease.SnapshotVersion = snap.row.Version
+		lease.SnapshotOwner = snap.row.Owner
+		// A version saved from a lease that ever had a secret carries
+		// that memory (#141): a lease started from it had secrets too.
+		lease.HadSecrets = !snap.row.SecretFree
 	}
 	if sized {
 		lease.VCPU = sizedVCPU
@@ -2865,6 +2879,9 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// registered, so a staging failure cannot hand out (or strand) a
 	// lease without its secrets.
 	if len(req.createSecrets) > 0 {
+		// The lease is not registered yet: the flag is written with its
+		// first row below (#141).
+		lease.HadSecrets = true
 		if err := s.stageSecrets(ctx, lease.SandboxID, req.createSecrets); err != nil {
 			_ = s.sub.Delete(ctx, lease.SandboxID)
 			s.deleteSandboxRow(lease.SandboxID)
@@ -3941,6 +3958,10 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	if err != nil {
 		return nil, "", err
 	}
+	// Read under the store lock: markHadSecrets writes it there (#141).
+	s.store.mu.Lock()
+	srcHadSecrets := src.HadSecrets
+	s.store.mu.Unlock()
 	now := time.Now()
 	lease := &Lease{
 		ID:          newID(),
@@ -3961,8 +3982,9 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		MemoryMB:           memPer, // the admitted charge (#128)
 		VCPU:               vcpu,   // the source's size (#151 Z1)
 		Sized:              src.Sized,
-		DiskMB:             diskMB, // the running reservation (FS3a)
-		Generation:         1,      // every lease starts on generation 1 (2.2)
+		HadSecrets:         srcHadSecrets, // a clone carries the source's memory (#141)
+		DiskMB:             diskMB,        // the running reservation (FS3a)
+		Generation:         1,             // every lease starts on generation 1 (2.2)
 		TemplateID:         img.TemplateID,
 	}
 	// Memory admission (FS2b-1): the clone takes its own charge against
@@ -4095,6 +4117,10 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.releaseQuotaReservation(owner, count, memPer)
 		return nil, "", err
 	}
+	// Read under the store lock: markHadSecrets writes it there (#141).
+	s.store.mu.Lock()
+	srcHadSecrets := src.HadSecrets
+	s.store.mu.Unlock()
 
 	// The whole batch's memory is admitted at once, before any child
 	// exists: a refusal here leaves no earlier child and no other
@@ -4166,8 +4192,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			MemoryMB:           memPer, // the admitted charge (#128)
 			VCPU:               vcpu,   // the source's size (#151 Z1)
 			Sized:              src.Sized,
-			DiskMB:             diskMB, // the running reservation (FS3a)
-			Generation:         1,      // every lease starts on generation 1 (2.2)
+			HadSecrets:         srcHadSecrets, // a fork carries the source's memory (#141)
+			DiskMB:             diskMB,        // the running reservation (FS3a)
+			Generation:         1,             // every lease starts on generation 1 (2.2)
 			TemplateID:         img.TemplateID,
 		}
 		// Hold this child's egress memo in flight until it is in the store
@@ -5069,6 +5096,7 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		MemoryMB:              l.MemoryMB,
 		VCPU:                  l.VCPU,
 		Sized:                 l.Sized,
+		HadSecrets:            l.HadSecrets,
 		DiskMB:                l.DiskMB,
 		PreemptedAt:           l.PreemptedAt,
 		SnapshotBuildID:       l.SnapshotBuildID,
@@ -5121,6 +5149,7 @@ func rowToLease(r store.LeaseRow) *Lease {
 		MemoryMB:              r.MemoryMB,
 		VCPU:                  r.VCPU,
 		Sized:                 r.Sized,
+		HadSecrets:            r.HadSecrets,
 		DiskMB:                r.DiskMB,
 		PreemptedAt:           r.PreemptedAt,
 		SnapshotBuildID:       r.SnapshotBuildID,

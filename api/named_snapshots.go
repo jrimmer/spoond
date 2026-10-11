@@ -87,6 +87,10 @@ func errSnapshotLimit(msg string) *namedSnapshotError {
 func errSnapshotInUse(msg string) *namedSnapshotError {
 	return &namedSnapshotError{status: http.StatusConflict, code: "snapshot_in_use", msg: msg}
 }
+func errNotSecretFree(name string, version int64) *namedSnapshotError {
+	return &namedSnapshotError{status: http.StatusConflict, code: "not_secret_free",
+		msg: fmt.Sprintf("snapshot %s@%d was saved from a lease that had a secret; re-save it from a lease that never had one", name, version)}
+}
 func errNamedNotFound() *namedSnapshotError {
 	return &namedSnapshotError{status: http.StatusNotFound, code: "not_found", msg: "snapshot not found"}
 }
@@ -385,6 +389,12 @@ func (s *Service) saveNamedSnapshot(ctx context.Context, l *Lease, name, key str
 		FirecrackerVersion:  b.FirecrackerVersion,
 		OrchestratorVersion: s.orchestratorVersion(ctx),
 		CreatedAt:           s.now(),
+		// Secret-free only when no secret ever reached the source (#141):
+		// the scrub above removes the files, but a secret may live on in
+		// the guest's memory, so a lease that had one never saves a
+		// grantable version. Read under the gate this save holds, so a
+		// staging that marks the lease cannot slip past it.
+		SecretFree: !s.leaseHadSecrets(l),
 	}
 	// A user delete that ran after the leaseReleased check above must not
 	// leave this row behind (spoond-q4j S1): retention keeps the newest
@@ -610,15 +620,19 @@ func (s *Service) snapshotView(ctx context.Context, l *Lease) map[string]any {
 	if l.SnapshotBuildID == "" {
 		return nil
 	}
-	name, version := l.SnapshotName, l.SnapshotVersion
-	if name == "" || version == 0 {
-		if row, err := s.db.GetNamedSnapshotByBuild(ctx, l.Owner, l.SnapshotBuildID); err == nil {
-			name, version = row.Name, row.Version
+	name, version, owner := l.SnapshotName, l.SnapshotVersion, l.SnapshotOwner
+	if name == "" || version == 0 || owner == "" {
+		// By build id across owners (#141): a lease started from a
+		// version another owner granted names that owner, so the grantee
+		// sees what it runs. The build id came from the lease itself.
+		if row, err := s.db.GetNamedSnapshotByBuildAny(ctx, l.SnapshotBuildID); err == nil {
+			name, version, owner = row.Name, row.Version, row.Owner
 		}
 	}
 	return map[string]any{
 		"name":     name,
 		"version":  version,
+		"owner":    owner,
 		"build_id": l.SnapshotBuildID,
 	}
 }
@@ -630,12 +644,35 @@ func (s *Service) snapshotView(ctx context.Context, l *Lease) map[string]any {
 // It takes a reference on the resolved build (B1) so the version and its
 // build cannot be deleted or pruned while the create is in flight; the
 // caller releases it with endStartingBuild once the create finishes.
-func (s *Service) snapshotStartFromRequest(ctx context.Context, owner, ref, image string) (*snapshotStart, *namedSnapshotError) {
+//
+// snapshotOwner is the create body's "snapshot_owner" (#141), a user
+// name or id; "" or the caller means the caller's own names. Another
+// owner's name starts only through a grant (owner, name, caller): an
+// unknown owner, a missing grant and an unknown name all answer the same
+// 404, so a caller learns nothing about names it was not granted. A
+// granted version that is not secret-free answers 409 not_secret_free.
+func (s *Service) snapshotStartFromRequest(ctx context.Context, caller, snapshotOwner, ref, image string) (*snapshotStart, *namedSnapshotError) {
 	name, version, err := parseSnapshotRef(ref)
 	if err != nil {
 		return nil, &namedSnapshotError{status: http.StatusBadRequest, code: "bad_request", msg: err.Error()}
 	}
-	row, err := s.resolveNamedSnapshot(ctx, owner, name, version)
+	owner, granted := caller, false
+	if snapshotOwner != "" {
+		if id, ok := s.resolveUserRef(snapshotOwner); !ok {
+			owner, granted = "", true // no such user: not found below
+		} else if id != caller {
+			owner, granted = id, true
+		}
+	}
+	var row store.NamedSnapshotRow
+	err = store.ErrNotFound
+	if !granted {
+		row, err = s.resolveNamedSnapshot(ctx, owner, name, version)
+	} else if owner != "" {
+		if err = s.checkNamedSnapshotGrant(ctx, owner, name, caller); err == nil {
+			row, err = s.resolveNamedSnapshot(ctx, owner, name, version)
+		}
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		if version > 0 {
 			return nil, &namedSnapshotError{status: http.StatusNotFound, code: "not_found", msg: fmt.Sprintf("snapshot %s@%d not found", name, version)}
@@ -650,7 +687,25 @@ func (s *Service) snapshotStartFromRequest(ctx context.Context, owner, ref, imag
 	// GC for the whole create. Re-read the row afterwards, so a start
 	// that lost a race with a forced delete answers cannot_start rather
 	// than starting from a version that no longer exists (B1).
+	if granted && !row.SecretFree {
+		return nil, errNotSecretFree(row.Name, row.Version)
+	}
 	s.beginStartingBuild(row.BuildID)
+	// A revoke that raced the resolve wins: the re-check answers the
+	// same 404 as a start that never had a grant.
+	if granted {
+		if gerr := s.checkNamedSnapshotGrant(ctx, owner, name, caller); gerr != nil {
+			s.endStartingBuild(row.BuildID)
+			if errors.Is(gerr, store.ErrNotFound) {
+				if version > 0 {
+					return nil, &namedSnapshotError{status: http.StatusNotFound, code: "not_found", msg: fmt.Sprintf("snapshot %s@%d not found", name, version)}
+				}
+				return nil, errNamedNotFound()
+			}
+			s.log.Printf("create: re-check snapshot grant %s: %v", ref, gerr)
+			return nil, &namedSnapshotError{status: http.StatusInternalServerError, code: "internal", msg: "failed to read snapshot"}
+		}
+	}
 	if _, rerr := s.db.GetNamedSnapshot(ctx, owner, row.Name, row.Version); errors.Is(rerr, store.ErrNotFound) {
 		s.endStartingBuild(row.BuildID)
 		return nil, &namedSnapshotError{status: http.StatusNotFound, code: "not_found",
@@ -721,7 +776,10 @@ func (s *Service) rerunSnapshotRetention(ctx context.Context, l *Lease) {
 	if l.SnapshotBuildID == "" {
 		return
 	}
-	row, err := s.db.GetNamedSnapshotByBuild(ctx, l.Owner, l.SnapshotBuildID)
+	// By build id across owners (#141): a grantee's lease runs from a
+	// version its owner holds, and the owner's retention is what the
+	// release may now let through.
+	row, err := s.db.GetNamedSnapshotByBuildAny(ctx, l.SnapshotBuildID)
 	if errors.Is(err, store.ErrNotFound) {
 		return
 	}
@@ -729,10 +787,10 @@ func (s *Service) rerunSnapshotRetention(ctx context.Context, l *Lease) {
 		s.log.Printf("snapshot retention: build %s of %s: %v", l.SnapshotBuildID, l.ID, err)
 		return
 	}
-	keep := s.effectiveKeep(ctx, l.Owner, row.Name)
-	deleted, err := s.db.PruneNamedSnapshotsKeeping(ctx, l.Owner, row.Name, keep, s.startingBuildSet())
+	keep := s.effectiveKeep(ctx, row.Owner, row.Name)
+	deleted, err := s.db.PruneNamedSnapshotsKeeping(ctx, row.Owner, row.Name, keep, s.startingBuildSet())
 	if err != nil {
-		s.log.Printf("snapshot retention: prune %s/%s after release of %s: %v", l.Owner, row.Name, l.ID, err)
+		s.log.Printf("snapshot retention: prune %s/%s after release of %s: %v", row.Owner, row.Name, l.ID, err)
 		return
 	}
 	if len(deleted) > 0 {
@@ -864,6 +922,8 @@ func (s *Server) writeSavedSnapshot(w http.ResponseWriter, status int, row store
 		"memory_mb":  row.MemoryMB,
 		"size_bytes": row.SizeBytes,
 		"created_at": formatRFC3339(row.CreatedAt),
+		// secret_free (#141): only a secret-free version can be granted.
+		"secret_free": row.SecretFree,
 	})
 }
 
@@ -913,14 +973,15 @@ func (s *Server) handleNamedSnapshotsList(w http.ResponseWriter, r *http.Request
 		}
 		stale := currentImageBuild[row.Image] != "" && currentImageBuild[row.Image] != row.ImageBuildID
 		g.versions = append(g.versions, map[string]any{
-			"version":    row.Version,
-			"build_id":   row.BuildID,
-			"image":      row.Image,
-			"memory_mb":  row.MemoryMB,
-			"size_bytes": row.SizeBytes,
-			"created_at": formatRFC3339(row.CreatedAt),
-			"in_use":     inUseByBuild[row.BuildID],
-			"stale":      stale,
+			"version":     row.Version,
+			"build_id":    row.BuildID,
+			"image":       row.Image,
+			"memory_mb":   row.MemoryMB,
+			"size_bytes":  row.SizeBytes,
+			"created_at":  formatRFC3339(row.CreatedAt),
+			"in_use":      inUseByBuild[row.BuildID],
+			"stale":       stale,
+			"secret_free": row.SecretFree,
 		})
 	}
 	out := []map[string]any{}
@@ -1016,15 +1077,16 @@ func (s *Server) snapshotDetail(ctx context.Context, row store.NamedSnapshotRow)
 		stale = img.CurrentBuildID != "" && img.CurrentBuildID != row.ImageBuildID
 	}
 	return map[string]any{
-		"name":       row.Name,
-		"version":    row.Version,
-		"build_id":   row.BuildID,
-		"image":      row.Image,
-		"memory_mb":  row.MemoryMB,
-		"size_bytes": row.SizeBytes,
-		"created_at": formatRFC3339(row.CreatedAt),
-		"in_use":     inUse,
-		"stale":      stale,
+		"name":        row.Name,
+		"version":     row.Version,
+		"build_id":    row.BuildID,
+		"image":       row.Image,
+		"memory_mb":   row.MemoryMB,
+		"size_bytes":  row.SizeBytes,
+		"created_at":  formatRFC3339(row.CreatedAt),
+		"in_use":      inUse,
+		"stale":       stale,
+		"secret_free": row.SecretFree,
 	}
 }
 

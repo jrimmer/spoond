@@ -41,6 +41,7 @@ const (
 	userDeleteStepListKeptBuilds = "list_kept_builds"
 	userDeleteStepUnpinBuilds    = "unpin_kept_builds"
 	userDeleteStepDropSnapshots  = "drop_named_snapshots"
+	userDeleteStepDropGrants     = "drop_named_snapshot_grants"
 	// userDeleteStepOwnerState is not a cleanup step: it is the pre-check
 	// read of whether an unknown id still has state. A failure there is
 	// reported by the handler as a plain 500, never a 404 (spoond-y0jj).
@@ -191,6 +192,15 @@ func (s *Service) deleteUserData(ctx context.Context, owner string) (userDeleteR
 			res.Snapshots = append(res.Snapshots, fmt.Sprintf("%s@%d", r.Name, r.Version))
 		}
 	}
+	// Named-snapshot grants the user gave or received go too (#141): a
+	// grant names a user that no longer exists either way.
+	if err := s.userDeleteStoreError(userDeleteStepDropGrants); err != nil {
+		s.log.Printf("user delete: drop named snapshot grants of %s: %v", owner, err)
+		record(userDeleteStepDropGrants, err)
+	} else if err := s.db.DeleteNamedSnapshotGrantsOfUser(ctx, owner); err != nil {
+		s.log.Printf("user delete: drop named snapshot grants of %s: %v", owner, err)
+		record(userDeleteStepDropGrants, err)
+	}
 	sort.Strings(res.KeptBuilds)
 	s.UpdateKeptMetrics(ctx)
 	s.UpdateNamedSnapshotMetrics(ctx)
@@ -331,6 +341,20 @@ func (s *Service) ownerHasState(ctx context.Context, owner string) (bool, error)
 		s.log.Printf("user delete: list kept builds of %s: %v", owner, err)
 		return false, err
 	} else if len(kept) > 0 {
+		return true, nil
+	}
+	// A grant given or received is state too (#141), so a retry after a
+	// failed grants step still cleans it up.
+	if given, err := s.db.NamedSnapshotGrantsGiven(ctx, owner); err != nil {
+		s.log.Printf("user delete: list grants of %s: %v", owner, err)
+		return false, err
+	} else if len(given) > 0 {
+		return true, nil
+	}
+	if received, err := s.db.NamedSnapshotGrantsReceived(ctx, owner); err != nil {
+		s.log.Printf("user delete: list grants to %s: %v", owner, err)
+		return false, err
+	} else if len(received) > 0 {
 		return true, nil
 	}
 	return false, nil
