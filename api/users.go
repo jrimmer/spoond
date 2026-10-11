@@ -116,6 +116,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		"share":   share,
 		"leases":  s.svc.leaseCounts(owner),
 		"waiting": s.svc.queuedCreates(owner),
+		"recent":  s.svc.bus.recentFor(owner, usageRecentTypes, usageRecentLimit),
 	})
 }
 

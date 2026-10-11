@@ -2194,12 +2194,18 @@ Any authenticated caller. `{"share": {owner, name, slice_pct,
 capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
 used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}, "leases":
 {running, paused, pinned, lost, running_jobs}, "waiting": [{id, owner,
-image, position, waited_s, reason}]}`. `waiting` lists the caller's
+image, position, waited_s, reason}], "recent": [event]}`. `waiting` lists the caller's
 creates queued for admission, the same entries as
 [`GET /api/leases/queue`](#get-apileasesqueue--creates-waiting-for-admission):
 `position` is the place in the whole queue (1 is tried first), so it
 counts other owners' waiting creates too. Empty when nothing waits
 (#140 U2).
+`recent` lists the caller's newest refusal and reclaim events, newest
+first, at most 20: `box_full`, `take_back`, `queued`, `suspended`,
+`critical_release`, `disk_cleanup` and `paused_expiring`, each in the
+lease event shape (`seq`, `at`, `lease_id`, `type`, `detail`, `reason`,
+…). It reads the backend's in-memory event ring, so it starts empty
+after a backend restart (#140 U3).
 Self-scoped: a legacy consumer
 token also has an owner, so its usage is available; a caller whose
 owner somehow does not exist answers `404`.

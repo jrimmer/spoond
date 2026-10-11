@@ -568,3 +568,35 @@ func formatEventBytes(n int64) string {
 		return strconv.FormatInt(n>>10, 10) + " KiB"
 	}
 }
+
+// usageRecentTypes are the event types GET /api/usage lists under
+// "recent" (#140 U3): the refusals and reclaims that explain why an
+// owner's work waited, was refused or lost its memory or disk.
+var usageRecentTypes = map[LeaseEventType]bool{
+	LeaseBoxFull:         true,
+	LeaseTakeBack:        true,
+	LeaseQueued:          true,
+	LeaseSuspended:       true,
+	LeaseCriticalRelease: true,
+	LeaseDiskCleanup:     true,
+	LeasePausedExpiring:  true,
+}
+
+// usageRecentLimit is how many events "recent" lists at most.
+const usageRecentLimit = 20
+
+// recentFor copies the owner's newest ring events whose type is in
+// types, newest first, at most n. The ring is in memory, so the list
+// starts empty after a backend restart.
+func (b *eventBus) recentFor(owner string, types map[LeaseEventType]bool, n int) []LeaseEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := []LeaseEvent{}
+	for i := len(b.ring) - 1; i >= 0 && len(out) < n; i-- {
+		ev := b.ring[(b.start+i)%len(b.ring)]
+		if ev.Owner == owner && types[ev.Type] {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
