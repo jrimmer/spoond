@@ -66,8 +66,8 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     restore), so a client can tell its processes were restored.
   - **Checkpoints on request**: no periodic checkpoints unless the lease
     asks (`checkpoint_interval`); `POST /checkpoint` any time, with
-    `keep: true` to pin it (at most `MAX_KEPT_PER_LEASE`, default 4, and
-    an optional per-owner byte budget), and `POST /restore` puts the lease
+    `keep: true` to pin it (at most `MAX_KEPT_PER_LEASE`, default 4,
+    within the owner's fair disk slice), and `POST /restore` puts the lease
     back to a kept checkpoint in place. `restart?mode=cold` gives the lease a fresh
     guest from its image, keeping its id.
   - **Named snapshots**: `POST /api/leases/{id}/snapshots` saves a live
@@ -99,20 +99,22 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   (`<label>.<user>.sandbox.example`). See
   [docs/security.md](docs/security.md) and the [Users & identity API
   section](docs/api.md#users--identity).
-- **Capacity classes**: a lease is **guaranteed** while its owner's
-  running memory stays within their `guaranteed_mib`, and **burst** past
-  it or when asked (`"burst": true`, with a `priority`). Burst leases
-  are admitted only while `BURST_RESERVE_MIB` of hugepages stays free,
-  and when guaranteed work needs room spoond suspends them (lowest
-  priority, then newest); a preempted lease resumes on its holder's
-  next work call (`preempted`/`resumed` events; the memory continues). A user without
-  a `guaranteed_mib` keeps every lease guaranteed. A create may
-  **wait** for room (`"wait": <seconds>`, up to
-  `MAX_ADMIT_WAIT_SECS`) instead of failing on capacity, served in
-  fair-share order; a persistent lease
-  may set `idle_suspend` to give its memory back when idle.
+- **Fair shares**: every owner gets an equal, floating 1/N slice of
+  memory and snapshot disk; an owner may borrow past it while the box
+  has room. When a request does not fit, spoond takes room back from
+  the biggest borrower (highest usage over slice): memory take-back
+  pauses that owner's least recently used unpinned lease, and disk
+  take-back releases their oldest unpinned paused lease. A shortage
+  answers `503 capacity_wait` with `Retry-After`; a request take-back
+  cannot serve (every candidate pinned, or the caller is itself the
+  biggest borrower) answers `429 box_full`. `GET /api/usage` shows an
+  owner's slice and ratio, and `GET /api/fair-shares` (admin) every
+  owner's. A create may **wait** for room (`"wait": <seconds>`, up to
+  `MAX_ADMIT_WAIT_SECS`), served lowest ratio first; a persistent lease
+  may set `idle_suspend` to give its memory back when idle. See
+  [upgrading-3.0.md](docs/upgrading-3.0.md).
 - **Resume on use**: a suspended lease, whatever suspended it
-  (`idle_suspend`, take-back, preemption or its owner), resumes
+  (`idle_suspend`, take-back or its owner), resumes
   on its holder's next work call: exec, exec stream, files, guest dial,
   the proxy, jobs, the LLM gateway, a network change or a prompt. A
   resume that finds no room answers `503` `capacity_wait` with
@@ -262,6 +264,17 @@ stack does not exist yet.
 
 ## Status
 
+**v3.0: fair shares.** Guaranteed and burst classes, preemption, holds
+and per-owner caps are gone. Every owner gets an equal slice of memory
+and snapshot disk, and spoond takes room back from the biggest borrower
+by pausing its least recently used unpinned lease (memory) or releasing
+its oldest unpinned paused lease (disk). Pins protect a lease, one clock
+releases every paused lease 30 days after its pause date, and a
+taken-back lease resumes on its next work call. Every capacity refusal
+is `503 capacity_wait` or `429 box_full`; `429 quota_exceeded` is gone.
+The Go module path is `github.com/jrimmer/spoond/v3`. Clients moving
+from 2.9 read [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
+
 **v2.9: resume on use.** A suspended lease comes back on its holder's
 next work call, whatever suspended it, and every refusal has one shape
 (`503 capacity_wait`, `429 quota_exceeded`, `409 lease_busy`). An
@@ -408,8 +421,8 @@ deployment are listed in
 Notable settings: `HOST_GUEST_SERVICE_ADDR` (where guests reach host
 services), `HOST_API_PORT` (the lease API port `internet`/`lan` guests
 may reach), `METRICS_TOKEN`, `LLM_UPSTREAM_URL`, `SPOOND_DB_PATH`,
-`NOTIFY_WEBHOOKS`, the capacity settings (`BURST_RESERVE_MIB`,
-`PREEMPT_DISK_FLOOR_PCT`, `MAX_ADMIT_WAIT_SECS`,
+`NOTIFY_WEBHOOKS`, the capacity settings (`DISK_RESERVE_PCT`, the
+share of snapshot disk kept free, default 5; `MAX_ADMIT_WAIT_SECS`,
 `IDLE_SUSPEND_DEFAULT_SECS`, `SNAPSHOT_WRITE_CONCURRENCY`,
 `DRAIN_SNAPSHOT_CONCURRENCY`, `UNDRAIN_CONCURRENCY`,
 `UNDRAIN_RESUME_RETRIES`, `UNDRAIN_READY_TIMEOUT`,
@@ -422,8 +435,8 @@ snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
 `MAX_EXEC_BODY_BYTES`, the runner's `RUNNER_ADMIT_WAIT_SECS` and
 `RUNNER_JOB_TIMEOUT`, `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
-the one paused-release clock (`PAUSED_RELEASE_DAYS`) and
-pinned-idle notice (`PINNED_IDLE_NOTICE_DAYS`) in
+the one paused-release clock (`PAUSED_RELEASE_DAYS`, default 30) and
+the pinned-idle notice (`PINNED_IDLE_NOTICE_DAYS`, default 7) in
 [docs/operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 
 ## Tests

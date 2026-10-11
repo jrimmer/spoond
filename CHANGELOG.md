@@ -10,7 +10,27 @@ summarised from README "Status".
 
 ## [Unreleased]
 
-Upgrading from 2.9? See [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
+## [3.0.0] - 2026-10-10
+
+3.0 replaces guaranteed and burst classes, preemption, holds and
+per-owner caps with fair shares: every owner gets an equal, floating 1/N
+slice of memory and snapshot disk. When a request does not fit, spoond
+takes room back from the biggest borrower: for memory it pauses that
+owner's least recently used unpinned lease, and for disk it deletes the
+owner's oldest unpinned paused lease. A pin keeps a lease from being
+paused or deleted, and one clock releases every paused lease 30 days
+after its pause date. Every capacity shortage answers one shape,
+`503 capacity_wait` with `Retry-After`, and a request take-back cannot
+serve answers `429 box_full`. Upgrading from 2.9? See
+[docs/upgrading-3.0.md](docs/upgrading-3.0.md).
+
+### Breaking
+
+- **The Go module path is now `github.com/jrimmer/spoond/v3`.** Go
+  requires the major version in the module path from v2 on, so 3.0
+  moves the path from `/v2` to `/v3`. Code that imports
+  `github.com/jrimmer/spoond/v2` stays on 2.x until it changes the
+  import.
 
 ### Added
 
