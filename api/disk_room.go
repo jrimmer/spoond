@@ -451,11 +451,11 @@ func (s *Service) reclaimLeasesForRoom(ctx context.Context, requester string, ne
 func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick int64) (freed int64, ok bool) {
 	s.store.mu.Lock()
 	l, ok := s.store.leases[v.ID]
-	var pauseBuild string
-	if ok {
-		pauseBuild = l.ResumeBuildID
-	}
 	s.store.mu.Unlock()
+	// pauseBuild is read inside the release predicate, under the same
+	// lock that commits the release: a resume-and-pause that lands
+	// before then is the build actually released.
+	var pauseBuild string
 	if !ok {
 		return 0, false
 	}
@@ -467,6 +467,9 @@ func (s *Service) takeDiskVictim(ctx context.Context, v diskVictim, freeAtPick i
 	}
 	s.releaseBecauseIf(ctx, l, "disk_reclaim", func(c *Lease) bool {
 		released = !c.released && c.Suspended && !c.busy && !c.Pinned && c.ID == v.ID
+		if released {
+			pauseBuild = c.ResumeBuildID
+		}
 		return released
 	})
 	if !released {
