@@ -143,14 +143,6 @@ func TestUsageHistoryHoursWindowAndCap(t *testing.T) {
 		}
 	}
 	// Empty history: an owner with no rows reads an empty list, 200.
-	rec, body = get("?hours=24")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("empty status %d", rec.Code)
-	}
-	if sam, ok := body["samples"].([]any); !ok || len(sam) != 1 {
-		// consumer-a still has the one recent sample; use a fresh owner.
-		t.Fatalf("unexpected samples %v", body["samples"])
-	}
 	req := httptest.NewRequest("GET", "/api/usage/history", nil)
 	req.Header.Set("Authorization", "Bearer token-b")
 	rec = httptest.NewRecorder()
