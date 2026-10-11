@@ -38,9 +38,9 @@ const (
 // ✓ an active unit and ✗ one that is not, · separator, ═ the header's
 // rule, ┄ the rules inside the capacity and host panels, ■ a lost lease,
 // ∞ a persistent lease's remaining time, and the leases panel's marks —
-// the run-state glyphs ▶ running, ‖ suspended and ⭘ recovered, and the
-// pin mark ◆. It is passed to grid.Check by every renderer, and every
-// rune is asserted to be in the shipped JetBrains Mono
+// the run-state glyphs ▶ running, ‖ suspended, ■ lost and ⭘ recovered,
+// and the pin mark ◆. It is passed to grid.Check by every renderer, and
+// every rune is asserted to be in the shipped JetBrains Mono
 // (TestExtraGlyphsInFont). The Notifications panel's × dismiss control
 // is injected by the page's JS, not drawn on the grid, so it is not in
 // this set.
