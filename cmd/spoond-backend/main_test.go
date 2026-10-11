@@ -1,6 +1,11 @@
 package spoondbackend
 
 import (
+	"bytes"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -248,5 +253,141 @@ func TestSaturationConfig(t *testing.T) {
 		if _, _, err := saturationConfig(func(k string) string { return env[k] }); err == nil {
 			t.Fatalf("SATURATION_CPU_SOME_PCT=%q accepted", bad)
 		}
+	}
+}
+
+// TestBackendValidateEntry (#137 C1) checks the backend's validation
+// entry as Main wires it: a bad int (MAX_TTL_SECS=2h, which every TTL
+// reader would silently fall back from) refuses startup, the fatal
+// message names every bad setting joined with "; " and never echoes a
+// secret-named setting's value, and the sb-like environment (the
+// production host's /etc/spoond/backend.env) passes clean. A child
+// process is the only way to observe a log.Fatalf: Main runs there and
+// the exit status and stderr are the assertion.
+func TestBackendValidateEntry(t *testing.T) {
+	if os.Getenv("SPOOND_TEST_VALIDATE_MAIN") == "" {
+		return // the assertions run in the child processes, below
+	}
+	Main(nil) // must log.Fatalf and never return
+}
+
+// BuildTestBinary builds the umbrella spoond binary into t.TempDir()
+// once per test and returns its path (skipping the test when no Go
+// toolchain is available, e.g. cross-built test runs).
+func BuildTestBinary(t *testing.T, pkg string) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "spoond")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, pkg)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if execErr, ok := err.(*exec.Error); ok && execErr.Err == exec.ErrNotFound {
+			t.Skipf("no go toolchain: %v", err)
+		}
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	return bin
+}
+
+func TestBackendValidateEntryChildren(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode: no child builds")
+	}
+	spoondBin := BuildTestBinary(t, "../../cmd/spoond")
+	runChild := func(env map[string]string) (code int, stderr string) {
+		cmd := exec.Command(spoondBin, "backend")
+		cmd.Env = append(os.Environ(), "SPOOND_TEST_VALIDATE_MAIN=1")
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		var buf bytes.Buffer
+		cmd.Stderr = &buf
+		err := cmd.Run()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode(), buf.String()
+		}
+		if err != nil {
+			t.Fatalf("run child: %v\nstderr:\n%s", err, buf.String())
+		}
+		return 0, buf.String()
+	}
+
+	// A bad int and a bad address: both named, joined with "; ".
+	code, stderr := runChild(map[string]string{
+		"MAX_TTL_SECS":            "2h",
+		"BIND_ADDR":               "8890-only",
+		"CONSUMER_TOKENS":         "abc=forgejo",
+		"HOST_GUEST_SERVICE_ADDR": "10.1.0.11",
+	})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, `config: MAX_TTL_SECS="2h": not an integer`) {
+		t.Fatalf("stderr = %q, want the MAX_TTL_SECS message", stderr)
+	}
+	if !strings.Contains(stderr, `config: BIND_ADDR="8890-only":`) {
+		t.Fatalf("stderr = %q, want the BIND_ADDR message in the same fatal line", stderr)
+	}
+	if strings.Count(stderr, "config: ") != 2 {
+		t.Fatalf("stderr = %q, want both problems in one message", stderr)
+	}
+
+	// The process environment carries a secret too (METRICS_TOKEN, as
+	// the real deploy does): it must not appear in the fatal line, which
+	// only echoes a plain-typed setting's value. (Every token-typed
+	// setting is a TypeString, so it never errors — and if a typed
+	// secret ever fails, settings.Validate masks it to "(hidden)".)
+	code, stderr = runChild(map[string]string{
+		"METRICS_TOKEN":           "sekrit-value",
+		"MAX_TTL_SECS":            "soon",
+		"CONSUMER_TOKENS":         "abc=forgejo",
+		"HOST_GUEST_SERVICE_ADDR": "10.1.0.11",
+	})
+	if code != 1 || !strings.Contains(stderr, "MAX_TTL_SECS") || strings.Contains(stderr, "sekrit-value") {
+		t.Fatalf("secret leak: exit %d stderr %q, want no METRICS_TOKEN value in the fatal line", code, stderr)
+	}
+
+	// The sb-like environment passes validation: Main gets past the
+	// config gate (it then fails later on the token seed, whose absence
+	// proves nothing about config; the assertion is no "config: " line).
+	code, stderr = runChild(map[string]string{
+		"CONSUMER_TOKENS":           "changeme=forgejo",
+		"HOST_GUEST_SERVICE_ADDR":   "10.1.0.11",
+		"HOST_GUEST_SERVICE_PORT":   "8891",
+		"SPOOND_GUEST_DNS_ADDR":     "10.1.0.2",
+		"SPOOND_PROXY_HOST_SUFFIX":  ".sandbox.lacy.casa",
+		"E2B_GRPC_ADDR":             "127.0.0.1:5008",
+		"E2B_PROXY_URL":             "http://127.0.0.1:5007",
+		"E2B_TEMPLATE_STORAGE_PATH": t.TempDir(),
+		"BIND_ADDR":                 "127.0.0.1:8890",
+		"PROXY_ADDR":                "0.0.0.0:8891",
+		"SPOOND_DB_PATH":            filepath.Join(t.TempDir(), "spoond.db"),
+		"SPOOND_BACKUP_DIR":         t.TempDir(),
+		"IMAGE_REGISTRY":            "localhost:5000",
+		"E2B_TOKEN_SEED_FILE":       filepath.Join(t.TempDir(), "seed"),
+		"PAUSED_RELEASE_DAYS":       "30",
+		"PINNED_IDLE_NOTICE_DAYS":   "7",
+		"RECOVERY_RETRY_WINDOW":     "30m",
+		"UNDRAIN_READY_TIMEOUT":     "180s",
+		"UNDRAIN_RESUME_WINDOW":     "5m",
+		"SWEEP_TIMEOUT":             "15m",
+		"SPOOND_BUILD_TIMEOUT":      "90m",
+		"BACKUP_MAX_AGE_SECS":       "93600",
+		"KEPT_DISK_WARN_PCT":        "40",
+		"DISK_RESERVE_PCT":          "5",
+		"SATURATION_IO_FULL_PCT":    "20",
+		"SATURATION_CPU_SOME_PCT":   "75",
+		"JOB_MAX_RUNTIME":           "24h",
+		"DRAIN_RESUME_MAX_AGE":      "24h",
+		"GC_LOST_GRACE":             "24h",
+		"GC_LOST_GRACE_PERSISTENT":  "168h",
+		"SANDBOX_PROBE":             "1",
+		"NOTIFY_WEBHOOKS":           `[{"url":"https://hooks.example/T0/B0/x","format":"json"}]`,
+		"NOTIFY_UNITS":              "none",
+	})
+	if code != 1 {
+		t.Fatalf("sb-like env: exit %d, want 1 (Main proceeds past validation and dies later); stderr:\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, "config: ") {
+		t.Fatalf("sb-like env refused at validation:\n%s", stderr)
 	}
 }
