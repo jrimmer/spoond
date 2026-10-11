@@ -10,6 +10,21 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **The backend validates its typed settings at startup (#137 C1).**
+  Every setting it reads that is set must parse as the type the code
+  reads it as — integer, boolean, duration (Go duration or seconds),
+  percentage 0–100, URL with a scheme, `host:port`, or a
+  comma-separated list — and one bad value refuses startup with a
+  single message naming every problem
+  (`config: MAX_TTL_SECS="2h": not an integer; …`), with
+  secret-named settings' values masked to `(hidden)`. Unset settings
+  keep their defaults; unknown keys stay `spoond doctor`'s warning.
+  The settings package (`settings.Specs`, `settings.Validate`) holds
+  the per-setting type and owner binary behind the same
+  `settings.Known` list `spoond doctor` checks env files against.
+
 ### Changed
 
 - **The dashboard's `access` column is headed `policy`**: it shows the network policy today, and more lease policy is coming.

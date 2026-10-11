@@ -35,6 +35,30 @@ about a key no spoond binary reads — a typo or a removed setting, which
 would otherwise be ignored in silence — and a key set twice, where the
 last line wins (#137). Run it before restarting after an env change.
 
+**Startup validation.** The backend checks its settings before doing
+anything else: every variable it reads that is set in its environment
+must parse as the type the code reads it as (an integer for the
+`*_SECS`/`*_PORT`/`*DAYS` knobs, a Go duration or whole seconds for the
+duration knobs, a percentage 0–100 for the `*_PCT` shares, a
+scheme'd URL for the `*_URL` bases, a `host:port` for the listen and
+dial addresses, a boolean spelling for the switches), and a bad value
+refuses startup at once with one message naming every problem:
+
+```text
+config: MAX_TTL_SECS="2h": not an integer; config: BIND_ADDR="8890": missing port in address
+```
+
+Before this check a typo was found only after a restart, when the
+readers silently fell back to their defaults — a wrong `MAX_TTL_SECS`
+meant the default 3600 with nothing in the log. The message never
+echoes a secret-named setting's value (`(hidden)` stands in for it).
+An unset setting keeps its default, an unknown key is still only
+`spoond doctor`'s warning (the process environment also holds systemd's
+own variables), and the settings that already fail startup on a
+malformed value — `SIZE_PRESETS`, `MAX_LEASE_VCPU`,
+`MAX_LEASE_MEMORY_MB`, the `SATURATION_*` percentages,
+`SPOOND_GUEST_DNS_ADDR`, `NOTIFY_WEBHOOKS` — are unaffected.
+
 `spoond config show` answers the same question with values: it resolves
 the backend unit's effective environment the way systemd does
 (`systemctl show <unit> -p EnvironmentFiles -p Environment`, the unit's
