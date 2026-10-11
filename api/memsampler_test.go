@@ -221,3 +221,42 @@ func TestStartMemSamplerDisabledWithoutURL(t *testing.T) {
 		t.Fatal("sampler interval and client not defaulted")
 	}
 }
+
+// TestSampleMemOnceRacesConcurrentPass: a pass that runs alongside the
+// loop's own pass must not fail — forget and record interleave safely
+// (the shape of a release racing a sampler tick).
+func TestSampleMemOnceRacesConcurrentPass(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	lease, err := svc.grantLease(context.Background(), leaseRequest{owner: "consumer-a", image: "py-base", ttl: time.Hour})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc.store.mu.Lock()
+	lease.SandboxID, lease.HostIP = "sb_A", "10.0.0.1"
+	svc.store.mu.Unlock()
+
+	svc.memSamplerFetch = func(ctx context.Context) ([]byte, error) {
+		return []byte(memMetricsDoc(map[string]float64{"sb_A": 42 * 1024 * 1024})), nil
+	}
+	svc.memSampleInterval = time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	// The sampler's goroutine, as Start runs it; a panic (a write racing
+	// forget) fails the test through the race-safe go test machinery.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.startMemSampler(ctx)
+	}()
+	for i := 0; i < 20; i++ {
+		time.Sleep(5 * time.Millisecond)
+		svc.memSamples.forget(lease.ID)
+		svc.sampleMemOnce(ctx)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sampler loop did not stop on cancel")
+	}
+}
