@@ -310,6 +310,8 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	s.mux.HandleFunc("GET /api/usage", s.handleUsage)
 	// The caller's own 7-day usage history (#140 U4), oldest first.
 	s.mux.HandleFunc("GET /api/usage/history", s.handleUsageHistory)
+	// The size presets and per-lease size limits (#151).
+	s.mux.HandleFunc("GET /api/sizes", s.handleSizes)
 	if s.llm != nil {
 		// The LLM gateway is auth-exempt (lease id in path is the
 		// capability); it MUST be mounted on the outer handler after
@@ -2614,7 +2616,8 @@ func (s *Server) handleGetSandbox(w http.ResponseWriter, r *http.Request) {
 
 // handleImages lists the images with a current build. Without a detail
 // query it returns their names; with ?detail=1 it returns the full
-// catalog rows.
+// catalog rows, each with its effective min_memory_mb and the presets it
+// has a warm build for (warm_sizes, #151).
 func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	imgs, err := s.svc.db.ListImages(r.Context())
 	if err != nil {
@@ -2627,15 +2630,26 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			if img.CurrentBuildID == "" {
 				continue
 			}
+			warm, err := s.svc.db.ListImageSizes(r.Context(), img.Name)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "image catalog unavailable")
+				return
+			}
+			warmSizes := []string{}
+			for _, ws := range warm {
+				warmSizes = append(warmSizes, ws.Size)
+			}
 			out = append(out, map[string]any{
-				"name":        img.Name,
-				"build_id":    img.CurrentBuildID,
-				"template_id": img.TemplateID,
-				"digest":      img.Digest,
-				"vcpu":        img.VCPU,
-				"memory_mb":   img.MemoryMB,
-				"disk_mb":     img.DiskMB,
-				"updated_at":  img.UpdatedAt.UTC().Format(time.RFC3339),
+				"name":          img.Name,
+				"build_id":      img.CurrentBuildID,
+				"template_id":   img.TemplateID,
+				"digest":        img.Digest,
+				"vcpu":          img.VCPU,
+				"memory_mb":     img.MemoryMB,
+				"disk_mb":       img.DiskMB,
+				"min_memory_mb": effectiveMinMemoryMB(img),
+				"warm_sizes":    warmSizes,
+				"updated_at":    img.UpdatedAt.UTC().Format(time.RFC3339),
 			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"images": out})

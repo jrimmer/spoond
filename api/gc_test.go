@@ -424,6 +424,55 @@ func TestGCKeepsReferencedBuild(t *testing.T) {
 	}
 }
 
+// TestGCKeepsWarmSizeBuild: an image's warm size build (#151 Z3) is a
+// root like its current build, for both the catalog GC and the orphan
+// reap, while the warm build it replaced is an ordinary candidate.
+// Mutation: drop the image_sizes roots from keptBuildsExcept and the
+// warm build is logged as deletable; drop them from orphanRoots and it
+// is not needed.
+func TestGCKeepsWarmSizeBuild(t *testing.T) {
+	svc, buf, db, _ := gcTestService(t)
+	ctx := context.Background()
+	seedGCChain(t, db, "py-base")
+	img, err := db.GetImage(ctx, "py-base")
+	if err != nil {
+		t.Fatalf("get image: %v", err)
+	}
+	// `spoond images build` writes a warm build like the default one: a
+	// template build of the image's template, no parent, no owner.
+	replaced, warm := e2b.NewUUID(), e2b.NewUUID()
+	seedGCBuild(t, db, replaced, "template", "", "", "ready", img.TemplateID)
+	seedGCBuild(t, db, warm, "template", "", "", "ready", img.TemplateID)
+	if err := db.UpsertImageSize(ctx, store.ImageSizeRow{
+		Image: "py-base", Size: "large", BuildID: warm, VCPU: 4, MemoryMB: 8192, UpdatedAt: gcOld,
+	}); err != nil {
+		t.Fatalf("upsert image size: %v", err)
+	}
+
+	if err := svc.gcOnce(ctx); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	lines := buf.String()
+	if strings.Contains(lines, warm) {
+		t.Errorf("warm size build logged as deletable:\n%s", lines)
+	}
+	if !strings.Contains(lines, "would delete "+replaced) {
+		t.Errorf("replaced warm build not a candidate:\n%s", lines)
+	}
+	// Every non-deleted build row is an orphan root on its own, so mark
+	// the warm build deleted: only the image_sizes row can keep it.
+	if err := db.UpdateBuildState(ctx, warm, "deleted", "", nil); err != nil {
+		t.Fatalf("mark warm deleted: %v", err)
+	}
+	roots, err := svc.orphanRoots(ctx)
+	if err != nil {
+		t.Fatalf("orphanRoots: %v", err)
+	}
+	if !roots[warm] {
+		t.Errorf("orphan roots lack the warm size build")
+	}
+}
+
 // TestGCSkipsWhileDraining: no GC pass runs while the admin drain is
 // active (U10).
 func TestGCSkipsWhileDraining(t *testing.T) {

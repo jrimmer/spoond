@@ -158,9 +158,9 @@ func listOrphanDirs(root string) ([]orphanDir, error) {
 }
 
 // orphanRoots computes the directly needed build ids from the catalog:
-// every non-deleted build row, every image's current build, every
-// lease's resume and last-checkpoint builds, every kept build, and every
-// sandbox's build. A read failure fails the whole walk, and the caller
+// every non-deleted build row, every image's current and warm size
+// builds, every lease's resume and last-checkpoint builds, every kept
+// build, and every sandbox's build. A read failure fails the whole walk, and the caller
 // refuses to reap anything (rather than treating an unreadable catalog as
 // "nothing is needed").
 func (s *Service) orphanRoots(ctx context.Context) (map[string]bool, error) {
@@ -183,6 +183,13 @@ func (s *Service) orphanRoots(ctx context.Context) (map[string]bool, error) {
 	}
 	for _, img := range imgs {
 		needed[img.CurrentBuildID] = true
+	}
+	warm, err := s.db.ImageSizeBuilds(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list image size builds: %w", err)
+	}
+	for id := range warm {
+		needed[id] = true
 	}
 	leases, err := s.db.ListLeases(ctx)
 	if err != nil {

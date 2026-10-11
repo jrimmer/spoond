@@ -87,6 +87,8 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`ALTER TABLE leases DROP COLUMN disk_mb`,
 			`ALTER TABLE leases DROP COLUMN vcpu`,
 			`DROP TABLE IF EXISTS usage_samples`,
+			`DROP TABLE IF EXISTS image_sizes`,
+			`ALTER TABLE images DROP COLUMN min_memory_mb`,
 			`DELETE FROM schema_migrations WHERE version >= 22`,
 		} {
 			if _, err := db21.Exec(stmt); err != nil {

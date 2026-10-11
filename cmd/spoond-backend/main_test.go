@@ -2,8 +2,13 @@ package spoondbackend
 
 import (
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jrimmer/spoond/v3/api"
+	"github.com/jrimmer/spoond/v3/sizes"
 )
 
 // TestParseGuestDNS pins the startup validation of SPOOND_GUEST_DNS_ADDR:
@@ -171,6 +176,50 @@ func TestWarnRemovedEnv(t *testing.T) {
 	warnRemovedEnv(logf, func(string) string { return "" })
 	if len(lines) != 0 {
 		t.Fatalf("warnRemovedEnv logged with nothing set: %v", lines)
+	}
+}
+
+// TestSizeConfig pins the lease size settings (#151): unset reads as the
+// default presets, the host's CPU count and 32768 MiB; set values are
+// used; a malformed preset spec or a limit that is not a positive
+// integer is a startup error.
+func TestSizeConfig(t *testing.T) {
+	presets, vcpu, mem, err := sizeConfig(func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	if !reflect.DeepEqual(presets, sizes.Default()) || vcpu != runtime.NumCPU() || mem != api.DefaultMaxLeaseMemoryMB {
+		t.Fatalf("defaults = %+v %d %d", presets, vcpu, mem)
+	}
+
+	env := map[string]string{
+		"SIZE_PRESETS":        "small=1:1024,big=4:6144",
+		"MAX_LEASE_VCPU":      "8",
+		"MAX_LEASE_MEMORY_MB": "16384",
+	}
+	presets, vcpu, mem, err = sizeConfig(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	want := []sizes.Preset{{Name: "small", VCPU: 1, MemoryMB: 1024}, {Name: "big", VCPU: 4, MemoryMB: 6144}}
+	if !reflect.DeepEqual(presets, want) || vcpu != 8 || mem != 16384 {
+		t.Fatalf("set = %+v %d %d", presets, vcpu, mem)
+	}
+
+	for key, bad := range map[string]string{
+		"SIZE_PRESETS":        "small=3:1024",
+		"MAX_LEASE_VCPU":      "0",
+		"MAX_LEASE_MEMORY_MB": "32g",
+	} {
+		_, _, _, err := sizeConfig(func(k string) string {
+			if k == key {
+				return bad
+			}
+			return ""
+		})
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("%s=%q: err = %v, want a startup error naming it", key, bad, err)
+		}
 	}
 }
 

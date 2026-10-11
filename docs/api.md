@@ -1751,10 +1751,36 @@ the catalog entries with a current build. With `?detail=1`:
 
 ```json
 {"images":[{"name":"py-base","build_id":"…","template_id":"…","digest":"…@sha256:…",
-            "vcpu":2,"memory_mb":1024,"disk_mb":4096,"updated_at":"…"}]}
+            "vcpu":2,"memory_mb":1024,"disk_mb":4096,"min_memory_mb":512,
+            "warm_sizes":["large","medium"],"updated_at":"…"}]}
 ```
 
+`vcpu` and `memory_mb` are the image's default size. `min_memory_mb` is
+the smallest memory a lease of the image may ask for: the manifest's
+`min_memory_mb`, or when unset 512, or the image's own `memory_mb` when
+that is smaller. `warm_sizes` names the size presets (see
+[`GET /api/sizes`](#get-apisizes--size-presets-and-limits)) the image has
+a memory snapshot for, sorted; `[]` when only the default size is warm
+(#151).
+
 Images are built with `spoond images build` (see [ci-jobs.md](ci-jobs.md)).
+
+### `GET /api/sizes` — size presets and limits
+
+Any authenticated caller. The named VM sizes a lease may ask for, in
+`SIZE_PRESETS` order, and the most vCPU and memory one lease may be
+given (`MAX_LEASE_VCPU`, `MAX_LEASE_MEMORY_MB`) (#151):
+
+```json
+{"presets":[{"name":"small","vcpu":1,"memory_mb":2048},
+            {"name":"medium","vcpu":2,"memory_mb":4096},
+            {"name":"large","vcpu":4,"memory_mb":8192},
+            {"name":"xlarge","vcpu":8,"memory_mb":16384}],
+ "max_vcpu":16,"max_memory_mb":32768}
+```
+
+A preset is a global name for a shape; an image starts warm at a preset
+only when its `warm_sizes` (in `GET /api/images?detail=1`) lists it.
 
 ### `GET /api/snapshots` — list your snapshot builds
 
