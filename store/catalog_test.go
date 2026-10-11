@@ -34,10 +34,11 @@ func TestImageUpsertGetList(t *testing.T) {
 		t.Fatalf("got %+v, want %+v", got, first)
 	}
 
-	// A new build: current build id, digest and updated_at move; the
-	// template id is passed back unchanged.
+	// A new build: current build id, digest, min_memory_mb and
+	// updated_at move; the template id is passed back unchanged.
 	second := first
 	second.CurrentBuildID = "b-build-2"
+	second.MinMemoryMB = 768
 	second.Digest = "localhost:5000/py-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	second.UpdatedAt = first.UpdatedAt.Add(time.Minute)
 	if err := db.UpsertImage(ctx, second); err != nil {

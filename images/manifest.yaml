@@ -21,6 +21,16 @@
 #   memory_mb   even, >= 128
 #   disk_mb     free disk space (MB) guaranteed in the guest rootfs; sent as
 #               diskSizeMB. The final rootfs size is rootfsSizeKey
+#   min_memory_mb  the smallest memory a lease of this image may ask for
+#               (optional; default 512, or memory_mb when that is smaller)
+#   warm_sizes  size presets (SIZE_PRESETS names, e.g. [medium, large])
+#               built as extra memory snapshots, so a lease at that size
+#               starts warm instead of cold-booting (optional). vcpu and
+#               memory_mb above are the image's default size, always warm.
+#               Each preset's memory must be >= the effective min_memory_mb.
+#   from        catalog image this one is built on (BASE build arg); vcpu,
+#               memory_mb, disk_mb, min_memory_mb, warm_sizes and env are
+#               inherited unless set here (warm_sizes: [] builds none)
 #   env         env vars passed on every sandbox create (process defaults)
 #   notes       freeform
 

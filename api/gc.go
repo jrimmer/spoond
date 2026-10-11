@@ -382,7 +382,7 @@ func (s *Service) keptPins(ctx context.Context) (pins, bytes int64, err error) {
 }
 
 // keptBuilds computes the GC keep set. Roots are every image's current
-// build, every live lease's resume and checkpoint builds, every kept
+// build and warm size builds, every live lease's resume and checkpoint builds, every kept
 // build of a live lease (2.3, #121), every live sandbox's build (pool
 // sandboxes included), and every in-flight build. A lost lease's resume
 // and checkpoint builds stay roots for a grace period after the loss —
@@ -465,6 +465,15 @@ func (s *Service) keptBuildsExcept(ctx context.Context, exceptLease string) (map
 	}
 	for _, img := range imgs {
 		keep(img.CurrentBuildID)
+	}
+	// Each image's warm size builds (#151 Z3) are roots like its current
+	// build: a create at a warm preset starts from them.
+	warm, err := s.db.ImageSizeBuilds(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gc: list image size builds: %w", err)
+	}
+	for id := range warm {
+		keep(id)
 	}
 	leases, err := s.db.ListLeases(ctx)
 	if err != nil {

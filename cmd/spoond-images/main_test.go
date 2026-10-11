@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v3/sizes"
 	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate"
 	"github.com/jrimmer/spoond/v3/substrate/fake"
@@ -24,6 +25,7 @@ import (
 type stubSubstrate struct {
 	*fake.Fake
 	req         substrate.BuildRequest
+	reqs        []substrate.BuildRequest // every request, in order
 	res         substrate.BuildResult
 	err         error
 	storageRoot string
@@ -40,6 +42,7 @@ func (s *stubSubstrate) BuildTemplate(ctx context.Context, req substrate.BuildRe
 		return substrate.BuildResult{}, err
 	}
 	s.req = req
+	s.reqs = append(s.reqs, req)
 	if s.storageRoot != "" {
 		dir := filepath.Join(s.storageRoot, req.BuildID)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -104,7 +107,7 @@ func TestBuildOneSuccess(t *testing.T) {
 	ctx := context.Background()
 
 	out := &bytes.Buffer{}
-	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", out); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", out); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 
@@ -177,7 +180,7 @@ func TestTemplateBuildSizeAtWriteTime(t *testing.T) {
 	db := setup(t, sub)
 	ctx := context.Background()
 
-	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
 
@@ -219,7 +222,7 @@ func TestBuildOneFailureKeepsImageRow(t *testing.T) {
 	}
 
 	sub.err = errors.New("template build failed: last logs:\nstep 3 died")
-	err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{})
+	err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("buildOne succeeded, want failure")
 	}
@@ -258,7 +261,7 @@ func TestBuildOneFailureUpdateDetached(t *testing.T) {
 	ctx, c := context.WithCancel(context.Background())
 	cancel = c
 
-	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err == nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err == nil {
 		t.Fatal("buildOne succeeded, want a cancelled build to fail")
 	}
 
@@ -281,7 +284,7 @@ func TestTemplateIDStableAcrossBuilds(t *testing.T) {
 	db := setup(t, sub)
 	ctx := context.Background()
 
-	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
 		t.Fatalf("first buildOne: %v", err)
 	}
 	firstTID := sub.req.TemplateID
@@ -293,7 +296,7 @@ func TestTemplateIDStableAcrossBuilds(t *testing.T) {
 		t.Fatalf("GetImage 1: %v", err)
 	}
 
-	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
 		t.Fatalf("second buildOne: %v", err)
 	}
 	if sub.req.TemplateID != firstTID {
@@ -317,7 +320,7 @@ func TestBuildOneNoDockerfile(t *testing.T) {
 	db := setup(t, sub)
 	img := testImage
 	img.Dockerfile = ""
-	if err := buildOne(context.Background(), db, sub, img, "localhost:5000", "images", &bytes.Buffer{}); err == nil {
+	if err := buildOne(context.Background(), db, sub, img, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err == nil {
 		t.Fatal("buildOne succeeded without a dockerfile, want error")
 	}
 }
@@ -329,7 +332,7 @@ func TestBuildOneFromBase(t *testing.T) {
 	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
 	db := setup(t, sub)
 	ctx := context.Background()
-	if err := buildOne(ctx, db, sub, testImage, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
 		t.Fatalf("base build: %v", err)
 	}
 	cmdLog = nil
@@ -339,7 +342,7 @@ func TestBuildOneFromBase(t *testing.T) {
 		Env:       map[string]string{"HOME": "/root"},
 		BuildArgs: map[string]string{"WARM": "true", "A": "1"},
 	}
-	if err := buildOne(ctx, db, sub, layer, "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+	if err := buildOne(ctx, db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
 		t.Fatalf("layer build: %v", err)
 	}
 	want := "docker build --pull --build-arg A=1 --build-arg BASE=" + wantDigest +
@@ -395,12 +398,191 @@ func TestResolveBaseGuestDNS(t *testing.T) {
 	}
 }
 
+// TestBuildOneWarmSizes: an entry with warm_sizes gets its default build
+// and then one template build per preset, from the same digest at the
+// preset's shape and the image's disk, each recorded as a ready template
+// build and as the image's warm size; min_memory_mb lands on the image
+// row. A rebuild that drops a preset stops serving it. Mutation: skip
+// the warm loop (no extra builds, no rows), or build it at the image's
+// shape (requests mismatch).
+func TestBuildOneWarmSizes(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	ctx := context.Background()
+	img := testImage
+	img.MinMemoryMB = 1024
+	img.WarmSizes = []string{"medium", "large"}
+
+	out := &bytes.Buffer{}
+	if err := buildOne(ctx, db, sub, img, sizes.Default(), "localhost:5000", "images", out); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	row, err := db.GetImage(ctx, "py-base")
+	if err != nil {
+		t.Fatalf("GetImage: %v", err)
+	}
+	if row.MinMemoryMB != 1024 || row.VCPU != 2 || row.MemoryMB != 1024 {
+		t.Fatalf("image row = %+v", row)
+	}
+	if len(sub.reqs) != 3 {
+		t.Fatalf("BuildTemplate calls = %d, want default + 2 warm sizes", len(sub.reqs))
+	}
+	for i, want := range [][2]uint32{{2, 1024}, {2, 4096}, {4, 8192}} {
+		r := sub.reqs[i]
+		if r.VCPU != want[0] || r.MemoryMB != want[1] || r.DiskSizeMB != 4096 ||
+			r.FromImage != wantDigest || r.TemplateID != row.TemplateID {
+			t.Fatalf("BuildTemplate %d = %+v, want %d/%d from the image's digest", i, r, want[0], want[1])
+		}
+	}
+	if sub.reqs[0].BuildID != row.CurrentBuildID {
+		t.Fatalf("current build %s is not the default-size build %s", row.CurrentBuildID, sub.reqs[0].BuildID)
+	}
+	warm, err := db.ListImageSizes(ctx, "py-base")
+	if err != nil {
+		t.Fatalf("ListImageSizes: %v", err)
+	}
+	if len(warm) != 2 || warm[0].Size != "large" || warm[0].BuildID != sub.reqs[2].BuildID ||
+		warm[0].VCPU != 4 || warm[0].MemoryMB != 8192 ||
+		warm[1].Size != "medium" || warm[1].BuildID != sub.reqs[1].BuildID ||
+		warm[1].VCPU != 2 || warm[1].MemoryMB != 4096 {
+		t.Fatalf("image sizes = %+v", warm)
+	}
+	for _, w := range warm {
+		b, err := db.GetBuild(ctx, w.BuildID)
+		if err != nil {
+			t.Fatalf("GetBuild %s: %v", w.BuildID, err)
+		}
+		if b.Kind != "template" || b.State != "ready" || b.Image != "py-base" || b.TemplateID != row.TemplateID ||
+			b.VCPU != w.VCPU || b.MemoryMB != w.MemoryMB || b.DiskMB != 5000 {
+			t.Fatalf("warm build row = %+v", b)
+		}
+	}
+	if !strings.Contains(out.String(), "built py-base size=large build="+sub.reqs[2].BuildID+"\n") {
+		t.Fatalf("stdout = %q", out.String())
+	}
+
+	// warm_sizes now [large]: medium is no longer served, large is the
+	// new build.
+	img.WarmSizes = []string{"large"}
+	sub.reqs = nil
+	if err := buildOne(ctx, db, sub, img, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	warm, err = db.ListImageSizes(ctx, "py-base")
+	if err != nil {
+		t.Fatalf("ListImageSizes: %v", err)
+	}
+	if len(sub.reqs) != 2 || len(warm) != 1 || warm[0].Size != "large" || warm[0].BuildID != sub.reqs[1].BuildID {
+		t.Fatalf("after rebuild: %d builds, sizes %+v", len(sub.reqs), warm)
+	}
+}
+
+// TestBuildOneWarmSizeRejected: an unknown preset, or one whose memory
+// is below the image's effective minimum, fails before docker or any
+// template build runs. Mutation: drop either check in warmPresets.
+func TestBuildOneWarmSizeRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		minMB int
+		warm  []string
+		want  string
+	}{
+		{"unknown preset", 0, []string{"huge"}, `warm size "huge" is not a size preset`},
+		{"below min_memory_mb", 4096, []string{"small"}, "below the image's min_memory_mb 4096"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := &stubSubstrate{}
+			db := setup(t, sub)
+			img := testImage
+			img.MinMemoryMB = tc.minMB
+			img.WarmSizes = tc.warm
+			err := buildOne(context.Background(), db, sub, img, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if len(cmdLog) != 0 || len(sub.reqs) != 0 {
+				t.Fatalf("built anyway: docker %v, templates %d", cmdLog, len(sub.reqs))
+			}
+		})
+	}
+}
+
+// TestBuildOneFromBaseInheritsSizes: a layer built From a catalog image
+// inherits its min_memory_mb and warm sizes unless it sets its own; an
+// explicit empty warm_sizes builds none.
+func TestBuildOneFromBaseInheritsSizes(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	ctx := context.Background()
+	base := testImage
+	base.MinMemoryMB = 768
+	base.WarmSizes = []string{"large"}
+	if err := buildOne(ctx, db, sub, base, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("base build: %v", err)
+	}
+
+	layer := manifestImage{Name: "py-base-worker", Baked: true, Dockerfile: "worker.dockerfile", From: "py-base"}
+	if err := buildOne(ctx, db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("layer build: %v", err)
+	}
+	row, err := db.GetImage(ctx, "py-base-worker")
+	if err != nil {
+		t.Fatalf("get layer: %v", err)
+	}
+	warm, err := db.ListImageSizes(ctx, "py-base-worker")
+	if err != nil {
+		t.Fatalf("ListImageSizes: %v", err)
+	}
+	if row.MinMemoryMB != 768 || len(warm) != 1 || warm[0].Size != "large" {
+		t.Fatalf("layer min_memory_mb %d, warm sizes %+v; want the base's", row.MinMemoryMB, warm)
+	}
+
+	layer.WarmSizes = []string{}
+	if err := buildOne(ctx, db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("layer rebuild: %v", err)
+	}
+	if warm, _ := db.ListImageSizes(ctx, "py-base-worker"); len(warm) != 0 {
+		t.Fatalf("explicit empty warm_sizes kept %+v", warm)
+	}
+}
+
+// TestCmdBuildUnknownWarmSize: `spoond images build` reads warm_sizes
+// from the manifest and refuses an unknown preset before opening the
+// catalog or running docker.
+func TestCmdBuildUnknownWarmSize(t *testing.T) {
+	setup(t, &stubSubstrate{})
+	t.Setenv("SIZE_PRESETS", "") // the default presets: medium, not huge
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "manifest.yaml")
+	if err := os.WriteFile(manifestPath, []byte(`images:
+  - name: py-base
+    baked: true
+    dockerfile: py-base.dockerfile
+    vcpu: 2
+    memory_mb: 1024
+    disk_mb: 4096
+    warm_sizes: [medium, huge]
+`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	dbPath := filepath.Join(dir, "never.db")
+	if code := cmdBuild(context.Background(), []string{"py-base"}, false, manifestPath, "images", dbPath, "localhost:5000"); code != 1 {
+		t.Fatalf("exit code %d, want 1", code)
+	}
+	if len(cmdLog) != 0 {
+		t.Fatalf("docker ran: %v", cmdLog)
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("catalog opened before the preset check: %v", err)
+	}
+}
+
 // A From naming an image with no build is refused before docker runs.
 func TestBuildOneFromUnknownBase(t *testing.T) {
 	sub := &stubSubstrate{}
 	db := setup(t, sub)
 	layer := manifestImage{Name: "x-worker", Dockerfile: "worker.dockerfile", From: "nope"}
-	err := buildOne(context.Background(), db, sub, layer, "localhost:5000", "images", &bytes.Buffer{})
+	err := buildOne(context.Background(), db, sub, layer, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "base image nope is not in the catalog") {
 		t.Fatalf("err = %v", err)
 	}

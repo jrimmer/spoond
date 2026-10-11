@@ -326,7 +326,9 @@ func TestMigration7HolderOnV6Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db6.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -406,7 +408,9 @@ func TestMigration9GenerationOnV8Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db8.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -475,7 +479,9 @@ func TestMigration23DiskMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (23, 24, 25, 26)`,
 	} {
 		if _, err := db22.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -528,7 +534,9 @@ func TestMigration24UsageSamplesOnV23Database(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (24, 25, 26)`,
 	} {
 		if _, err := db23.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -608,7 +616,9 @@ func TestMigration12MemoryMBBackfill(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)`,
 		`ALTER TABLE leases DROP COLUMN memory_mb`,
 		`ALTER TABLE leases DROP COLUMN paused_expiry_notified`,
 		`ALTER TABLE leases DROP COLUMN pinned_idle_since`,
@@ -685,7 +695,9 @@ func TestMigration15IdleSuspendOnV14Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db14.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -752,7 +764,9 @@ func TestMigration17NamedSnapshotsOnV16Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (17, 18, 19, 20, 21, 22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db16.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -821,7 +835,9 @@ func TestMigration19LostReasonOnV18Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (19, 20, 21, 22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db18.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -896,7 +912,9 @@ func TestMigration20JobMaxRuntimeOnV19Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (20, 21, 22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db19.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -975,7 +993,9 @@ func TestMigration21SuspendFactsOnV20Database(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (21, 22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db20.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1052,7 +1072,9 @@ func TestMigration22PinsHoldsAndBackfillsPausedAt(t *testing.T) {
 		`ALTER TABLE leases DROP COLUMN disk_mb`,
 		`ALTER TABLE leases DROP COLUMN vcpu`,
 		`DROP TABLE IF EXISTS usage_samples`,
-		`DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25)`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (22, 23, 24, 25, 26)`,
 	} {
 		if _, err := db21.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1287,7 +1309,9 @@ func TestMigration25VCPUBackfill(t *testing.T) {
 	}
 	for _, stmt := range []string{
 		`ALTER TABLE leases DROP COLUMN vcpu`,
-		`DELETE FROM schema_migrations WHERE version = 25`,
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version IN (25, 26)`,
 	} {
 		if _, err := db24.Exec(stmt); err != nil {
 			t.Fatalf("rewind (%s): %v", stmt, err)
@@ -1334,5 +1358,74 @@ func TestMigration25VCPUBackfill(t *testing.T) {
 	r, err := db.GetLease(ctx, "lease-stamped")
 	if err != nil || r.VCPU != 8 {
 		t.Fatalf("vcpu round trip = %d (%v), want 8", r.VCPU, err)
+	}
+}
+
+// TestMigration26ImageSizesOnV25Database: a version-25 database with an
+// image row opens at 26 with the image_sizes table and
+// images.min_memory_mb, the existing row reading min_memory_mb 0
+// (unset), and both round-trip through the store helpers (#151 Z3).
+func TestMigration26ImageSizesOnV25Database(t *testing.T) {
+	db, path := openTestDB(t)
+	ctx := context.Background()
+	img := ImageRow{
+		Name: "go-base", TemplateID: "tpl0123456789abcdefgh",
+		CurrentBuildID: "5f0c3e9a-4b1d-4c2e-9a77-1d2e3f405162",
+		VCPU:           2, MemoryMB: 2048, DiskMB: 6144,
+		StartCmd:  "/usr/local/bin/spoond-guest-init",
+		ReadyCmd:  "test -f /run/spoond-guest-ready",
+		Env:       map[string]string{"GOPATH": "/root/go"},
+		UpdatedAt: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC),
+	}
+	if err := db.UpsertImage(ctx, img); err != nil {
+		t.Fatalf("seed image: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Rewind to version 25 so migration 0026 applies for real.
+	db25, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS image_sizes`,
+		`ALTER TABLE images DROP COLUMN min_memory_mb`,
+		`DELETE FROM schema_migrations WHERE version = 26`,
+	} {
+		if _, err := db25.Exec(stmt); err != nil {
+			t.Fatalf("rewind (%s): %v", stmt, err)
+		}
+	}
+	db25.Close()
+
+	db, err = Open(path) // migration 26 applies here
+	if err != nil {
+		t.Fatalf("open v25 database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	got, err := db.GetImage(ctx, "go-base")
+	if err != nil {
+		t.Fatalf("get image: %v", err)
+	}
+	if !reflect.DeepEqual(got, img) {
+		t.Fatalf("image after migration = %+v, want %+v (min_memory_mb 0)", got, img)
+	}
+	got.MinMemoryMB = 1024
+	if err := db.UpsertImage(ctx, got); err != nil {
+		t.Fatalf("upsert min_memory_mb: %v", err)
+	}
+	if again, err := db.GetImage(ctx, "go-base"); err != nil || again.MinMemoryMB != 1024 {
+		t.Fatalf("min_memory_mb round trip = %d (%v), want 1024", again.MinMemoryMB, err)
+	}
+	if err := db.UpsertImageSize(ctx, ImageSizeRow{
+		Image: "go-base", Size: "large", BuildID: "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+		VCPU: 4, MemoryMB: 8192, UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("upsert image size after migration: %v", err)
+	}
+	if r, err := db.ImageSizeFor(ctx, "go-base", 4, 8192); err != nil || r.Size != "large" {
+		t.Fatalf("image size after migration = %+v, %v", r, err)
 	}
 }

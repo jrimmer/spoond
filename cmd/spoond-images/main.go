@@ -16,6 +16,10 @@
 //	--db        SQLite database path (default $SPOOND_DB_PATH)
 //	--registry  registry to push to (default $IMAGE_REGISTRY, localhost:5000)
 //
+// An entry's warm_sizes name presets from $SIZE_PRESETS (the backend's
+// setting; default sizes.DefaultSpec): each gets one more template build
+// at that preset's vcpu and memory.
+//
 // Runs on the E2B host as root and talks to the orchestrator via
 // substrate/e2b.FromEnv().
 package spoondimages
@@ -37,6 +41,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/jrimmer/spoond/v3/sizes"
 	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate"
 	"github.com/jrimmer/spoond/v3/substrate/e2b"
@@ -97,10 +102,19 @@ type manifestImage struct {
 	DiskMB      int               `yaml:"disk_mb"`
 	Env         map[string]string `yaml:"env"`
 	Notes       string            `yaml:"notes"`
+	// MinMemoryMB is the smallest memory a lease of this image may ask
+	// for (#151). 0 = unset: 512, or memory_mb when that is smaller.
+	MinMemoryMB int `yaml:"min_memory_mb"`
+	// WarmSizes names the SIZE_PRESETS presets built as extra memory
+	// snapshots beside the default size (#151), so a lease at one of
+	// them starts warm. Unset (as opposed to an empty list) inherits
+	// the base's.
+	WarmSizes []string `yaml:"warm_sizes"`
 	// From names a catalog image this one is built on: its current
-	// digest is passed as the BASE build argument, and its env and
-	// shape (vcpu, memory, disk) are inherited unless set here. Used for
-	// layers such as a worker or tooling layer on a base image.
+	// digest is passed as the BASE build argument, and its env, shape
+	// (vcpu, memory, disk), min_memory_mb and warm sizes are inherited
+	// unless set here. Used for layers such as a worker or tooling
+	// layer on a base image.
 	From string `yaml:"from"`
 	// BuildArgs are passed to docker build as --build-arg KEY=VALUE.
 	BuildArgs map[string]string `yaml:"build_args"`
@@ -215,6 +229,24 @@ func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, conte
 		}
 	}
 
+	// The size presets (#151) an entry's warm_sizes names, from the same
+	// SIZE_PRESETS the backend reads. Unknown names fail every target
+	// before the first build; the memory check needs the entry's
+	// resolved shape and runs in buildOne, still before its docker build.
+	presets, err := sizes.Parse(envOr("SIZE_PRESETS", sizes.DefaultSpec))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "spoond images: SIZE_PRESETS: %v\n", err)
+		return 1
+	}
+	for _, img := range targets {
+		for _, name := range img.WarmSizes {
+			if _, ok := sizes.Lookup(presets, name); !ok {
+				fmt.Fprintf(os.Stderr, "spoond images: %s: warm size %q is not a size preset (SIZE_PRESETS)\n", img.Name, name)
+				return 1
+			}
+		}
+	}
+
 	db, err := store.Open(dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "spoond images: %v\n", err)
@@ -229,7 +261,7 @@ func cmdBuild(ctx context.Context, names []string, all bool, manifestPath, conte
 
 	fmt.Fprintf(os.Stderr, "spoond images: build timeout is %s (SPOOND_BUILD_TIMEOUT)\n", buildTimeout)
 	for _, img := range targets {
-		if err := buildOne(ctx, db, sub, img, registry, contextDir, os.Stdout); err != nil {
+		if err := buildOne(ctx, db, sub, img, presets, registry, contextDir, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "spoond images: %s: %v\n", img.Name, err)
 			return 1
 		}
@@ -253,10 +285,11 @@ func templateBuildSize(buildID string) int64 {
 
 // resolveBase applies a manifest entry's From and BuildArgs: it looks up
 // the base image's current digest (passed as BASE), fills vcpu, memory,
-// disk and env from the base where the entry leaves them unset (entry
-// env keys win), passes that env as WARM_ENV, injects the deployment's
-// guest DNS resolver (SPOOND_GUEST_DNS_ADDR) unless the entry sets it,
-// and returns the docker --build-arg flags, sorted.
+// disk, min_memory_mb, warm sizes and env from the base where the entry
+// leaves them unset (entry env keys win), passes that env as WARM_ENV,
+// injects the deployment's guest DNS resolver (SPOOND_GUEST_DNS_ADDR)
+// unless the entry sets it, and returns the docker --build-arg flags,
+// sorted.
 func resolveBase(ctx context.Context, db *store.DB, img manifestImage) (manifestImage, []string, error) {
 	vals := map[string]string{}
 	for k, v := range img.BuildArgs {
@@ -292,6 +325,18 @@ func resolveBase(ctx context.Context, db *store.DB, img manifestImage) (manifest
 		if img.DiskMB == 0 {
 			img.DiskMB = base.DiskMB
 		}
+		if img.MinMemoryMB == 0 {
+			img.MinMemoryMB = base.MinMemoryMB
+		}
+		if img.WarmSizes == nil {
+			warm, err := db.ListImageSizes(ctx, img.From)
+			if err != nil {
+				return img, nil, err
+			}
+			for _, w := range warm {
+				img.WarmSizes = append(img.WarmSizes, w.Size)
+			}
+		}
 		env := map[string]string{}
 		for k, v := range base.Env {
 			env[k] = v
@@ -326,17 +371,40 @@ func resolveBase(ctx context.Context, db *store.DB, img manifestImage) (manifest
 	return img, flags, nil
 }
 
+// warmPresets resolves an image's warm_sizes against the presets. An
+// unknown name, or a preset whose memory is below the image's effective
+// minimum, is an error, so a bad manifest entry fails before any build.
+func warmPresets(img manifestImage, presets []sizes.Preset) ([]sizes.Preset, error) {
+	minMB := sizes.EffectiveMinMemoryMB(img.MinMemoryMB, img.MemoryMB)
+	var out []sizes.Preset
+	for _, name := range img.WarmSizes {
+		p, ok := sizes.Lookup(presets, name)
+		if !ok {
+			return nil, fmt.Errorf("warm size %q is not a size preset (SIZE_PRESETS)", name)
+		}
+		if p.MemoryMB < minMB {
+			return nil, fmt.Errorf("warm size %s: %d MiB is below the image's min_memory_mb %d", name, p.MemoryMB, minMB)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 // buildOne builds and pushes one image, then starts and waits for its
-// E2B template build, recording everything in the catalog. On failure
-// the build row is marked failed and the image row keeps describing the
-// last good build.
-func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img manifestImage, registry, contextDir string, stdout io.Writer) error {
+// E2B template build at the image's default size and one more per warm
+// size, recording everything in the catalog. On failure the build row is
+// marked failed and the image row keeps describing the last good build.
+func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img manifestImage, presets []sizes.Preset, registry, contextDir string, stdout io.Writer) error {
 	if img.Dockerfile == "" {
 		return errors.New("manifest entry has no dockerfile")
 	}
 	ref := registry + "/" + img.Name + ":latest"
 
 	img, buildArgs, err := resolveBase(ctx, db, img)
+	if err != nil {
+		return err
+	}
+	warm, err := warmPresets(img, presets)
 	if err != nil {
 		return err
 	}
@@ -388,32 +456,84 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		return err
 	}
 
+	buildID, err := templateBuild(ctx, db, sub, row.TemplateID, img.Name, digest, img.VCPU, img.MemoryMB, img.DiskMB)
+	if err != nil {
+		return err
+	}
+	if err := db.UpsertImage(ctx, store.ImageRow{
+		Name:           img.Name,
+		TemplateID:     row.TemplateID,
+		CurrentBuildID: buildID,
+		Digest:         digest,
+		VCPU:           img.VCPU,
+		MemoryMB:       img.MemoryMB,
+		DiskMB:         img.DiskMB,
+		MinMemoryMB:    img.MinMemoryMB,
+		StartCmd:       startCmd,
+		ReadyCmd:       readyCmd,
+		Env:            img.Env,
+		UpdatedAt:      time.Now(),
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "built %s build=%s digest=%s\n", img.Name, buildID, digest)
+
+	// The warm sizes (#151): one more template build per preset from the
+	// same digest. The previous warm builds hold the previous image, so
+	// they stop being served first; until its new build is ready, a
+	// preset cold-boots from the current build. A preset left out of
+	// warm_sizes stays out, and the GC reclaims its old build.
+	if err := db.DeleteImageSizesExcept(ctx, img.Name, nil); err != nil {
+		return err
+	}
+	for _, p := range warm {
+		id, err := templateBuild(ctx, db, sub, row.TemplateID, img.Name, digest, p.VCPU, p.MemoryMB, img.DiskMB)
+		if err != nil {
+			return fmt.Errorf("warm size %s: %w", p.Name, err)
+		}
+		if err := db.UpsertImageSize(ctx, store.ImageSizeRow{
+			Image: img.Name, Size: p.Name, BuildID: id,
+			VCPU: p.VCPU, MemoryMB: p.MemoryMB, UpdatedAt: time.Now(),
+		}); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "built %s size=%s build=%s\n", img.Name, p.Name, id)
+	}
+	return nil
+}
+
+// templateBuild starts and waits for one E2B template build of the
+// image's template from digest at the given shape, recording it in the
+// catalog: the row is written building first, then ready with what the
+// orchestrator produced and its header refs, or failed. It returns the
+// new build id; the caller points the image or a warm size at it.
+func templateBuild(ctx context.Context, db *store.DB, sub substrate.Substrate, templateID, image, digest string, vcpu, memoryMB, diskMB int) (string, error) {
 	buildID := e2b.NewUUID()
 	now := time.Now()
 	if err := db.InsertBuild(ctx, store.BuildRow{
 		BuildID:    buildID,
 		Kind:       "template",
-		TemplateID: row.TemplateID,
-		Image:      img.Name,
+		TemplateID: templateID,
+		Image:      image,
 		State:      "building",
-		VCPU:       img.VCPU,
-		MemoryMB:   img.MemoryMB,
-		DiskMB:     img.DiskMB,
+		VCPU:       vcpu,
+		MemoryMB:   memoryMB,
+		DiskMB:     diskMB,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}); err != nil {
-		return err
+		return "", err
 	}
 
 	bctx, cancel := context.WithTimeout(ctx, buildTimeout)
 	defer cancel()
 	res, err := sub.BuildTemplate(bctx, substrate.BuildRequest{
-		TemplateID: row.TemplateID,
+		TemplateID: templateID,
 		BuildID:    buildID,
 		FromImage:  digest,
-		VCPU:       uint32(img.VCPU),
-		MemoryMB:   uint32(img.MemoryMB),
-		DiskSizeMB: uint32(img.DiskMB),
+		VCPU:       uint32(vcpu),
+		MemoryMB:   uint32(memoryMB),
+		DiskSizeMB: uint32(diskMB),
 		StartCmd:   startCmd,
 		ReadyCmd:   readyCmd,
 	})
@@ -427,9 +547,9 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		uctx, ucancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer ucancel()
 		if uerr := db.UpdateBuildState(uctx, buildID, "failed", err.Error(), nil); uerr != nil {
-			return errors.Join(err, uerr)
+			return "", errors.Join(err, uerr)
 		}
-		return err
+		return "", err
 	}
 
 	// The ready write deliberately uses the caller's ctx, unlike the
@@ -450,30 +570,14 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 		// stat; the hourly disk accounting pass corrects it.
 		SizeBytes: templateBuildSize(buildID),
 	}); err != nil {
-		return err
+		return "", err
 	}
 	// The build's headers reference the blocks of other builds (A3 C3);
 	// GC keeps them (U11).
 	if err := db.AddBuildRefs(ctx, buildID, append(res.Refs.RootfsBuildIDs, res.Refs.MemfileBuildIDs...)); err != nil {
-		return err
+		return "", err
 	}
-	if err := db.UpsertImage(ctx, store.ImageRow{
-		Name:           img.Name,
-		TemplateID:     row.TemplateID,
-		CurrentBuildID: buildID,
-		Digest:         digest,
-		VCPU:           img.VCPU,
-		MemoryMB:       img.MemoryMB,
-		DiskMB:         img.DiskMB,
-		StartCmd:       startCmd,
-		ReadyCmd:       readyCmd,
-		Env:            img.Env,
-		UpdatedAt:      time.Now(),
-	}); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "built %s build=%s digest=%s\n", img.Name, buildID, digest)
-	return nil
+	return buildID, nil
 }
 
 func cmdList(ctx context.Context, dbPath string) int {
