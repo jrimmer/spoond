@@ -716,7 +716,7 @@ func Get(name string, get func(string) string, readFile func(string) ([]byte, er
 		if err != nil {
 			return "", fmt.Errorf("%s: read %s: %v", name, fileV, err)
 		}
-		return strings.TrimRight(string(b), "\n"), nil
+		return strings.TrimSuffix(string(b), "\n"), nil
 	}
 	return "", nil
 }

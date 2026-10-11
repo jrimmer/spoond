@@ -569,10 +569,20 @@ func TestGetResolvesSecret(t *testing.T) {
 		t.Fatalf("file only: (%q, %v), want (filetok, nil)", v, err)
 	}
 
-	// Several trailing newlines would NOT all be trimmed (the trim is
-	// one trailing newline's worth, so a value may itself end in a
-	// newline); a file without one is untouched.
-	p2 := write("bare", "baretok")
+	// Exactly one trailing newline is trimmed: several would NOT all go
+	// (a value may itself end in a newline), and a file without one is
+	// untouched.
+	p2 := write("several", "multitok\n\n\n")
+	v, err = Get("METRICS_TOKEN", func(k string) string {
+		if k == "METRICS_TOKEN_FILE" {
+			return p2
+		}
+		return ""
+	}, file)
+	if err != nil || v != "multitok\n\n" {
+		t.Fatalf("file with several trailing newlines: (%q, %v), want (\"multitok\\n\\n\", nil) — one newline trimmed, exactly", v, err)
+	}
+	p2 = write("bare", "baretok")
 	v, err = Get("METRICS_TOKEN", func(k string) string {
 		if k == "METRICS_TOKEN_FILE" {
 			return p2

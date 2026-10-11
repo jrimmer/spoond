@@ -155,17 +155,27 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 		fmt.Fprintf(os.Stderr, "spoond config: %s sets no environment\n", unit)
 		return 1
 	}
-	// A <SECRET>_FILE= line folds onto its base name's row (value
-	// "(hidden, from file)", #137 C2); the folded rows are what the table,
-	// the --json document and the admin call's own token go through.
+	// The <SECRET>_FILE= lines stay their own rows — design item 2:
+	// "config show shows the path for a _FILE setting (never the
+	// content)" — each with the secret's base row (hidden-from-file
+	// value) beside it (resolveFileSecrets). The raw merge (rawEnv) —
+	// not these display entries — supplies the admin call's own
+	// ADMIN_TOKEN below and BIND_ADDR to dial, so the comparison is
+	// against the backend these very files start, not the caller's
+	// shell.
+	rawEnv := env
 	env = resolveFileSecrets(env)
 	byName := map[string]entry{}
 	for _, e := range env {
 		byName[e.name] = e
 	}
 	effective := func(name, def string) string {
-		if e, ok := byName[name]; ok {
-			return e.value
+		// Reads the raw merge, never the resolved display env: the latter
+		// carries decorated rows (a _FILE row's path, the
+		// hidden-from-file constant) whose values are never a setting's
+		// usable value.
+		if v := mergedGet(rawEnv)(name); v != "" {
+			return v
 		}
 		return def
 	}
@@ -174,26 +184,21 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 		apiURL = defaultAPIURL(effective("BIND_ADDR", DefaultBindAddr))
 	}
 	// The admin token authenticates the way the backend resolves it
-	// (#137 C2): a unit env carrying ADMIN_TOKEN_FILE means the token is
-	// that file's content; settings.Get reads it here (both spellings
-	// set, or an unreadable file, is this command's error rather than a
-	// bogus 401). Without a file reference the folded value is the env
-	// token as before; with a file-backed token, the folded value is the
-	// hidden-from-file constant and the fetch below needs the content.
-	adminToken := effective("ADMIN_TOKEN", "")
-	if adminToken == settings.HiddenFromFile {
-		// The value-file read goes through the same injected reader as the
-		// env files (os.ReadFile in production), so tests fake both.
-		readValue := func(path string) ([]byte, error) {
-			s, err := read(path)
-			return []byte(s), err
-		}
-		v, err := settings.Get("ADMIN_TOKEN", mergedGet(unitEnv(show, read)), readValue)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "spoond config: %v\n", err)
-			return 1
-		}
-		adminToken = v
+	// (#137 C2, settings.Get as the backend runs it): NAME= in the env,
+	// else NAME_FILE= naming a value file. Both forms set, or an
+	// unreadable file, is this command's own error right here rather
+	// than a bogus 401 against the running backend — the display rows
+	// (a decorated token row) are never sent as the bearer token.
+	readValue := func(path string) ([]byte, error) {
+		// The value-file read goes through the same injected reader as
+		// the env files (os.ReadFile in production), so tests fake both.
+		s, err := read(path)
+		return []byte(s), err
+	}
+	adminToken, err := settings.Get("ADMIN_TOKEN", mergedGet(rawEnv), readValue)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "spoond config: %v\n", err)
+		return 1
 	}
 	rc, rcErr := fetch(apiURLFor(apiURL)+adminConfigPath, adminToken)
 	unreached := rcErr != nil
@@ -210,21 +215,36 @@ func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, re
 	return 0
 }
 
+// hasSpec reports whether name is a real spec (settings.Known's own
+// entry, like SPOOND_ADMIN_TOKEN_FILE): a setting whose name happens to
+// end in _FILE, not a secret's IsKnown-rule spelling.
+func hasSpec(name string) bool {
+	_, ok := settings.SpecOf(name)
+	return ok
+}
+
 // buildRowsUnreached assembles the rows when the backend did not answer:
 // every known row runs "?" (nothing can be classified) with the unit's
-// value and source, unknown keys keep their note.
+// value and source, the known secrets' _FILE spellings beside them,
+// unknown keys keep their note.
 func buildRowsUnreached(byName map[string]entry) []row {
 	var rows []row
 	for _, name := range settings.Known {
 		rows = append(rows, unknownRow(name, byName, true))
 	}
-	var unknown []string
+	var fileForms, unknown []string
 	for name := range byName {
 		if !settings.IsKnown(name) {
 			unknown = append(unknown, name)
+		} else if _, isFile := strings.CutSuffix(name, "_FILE"); isFile && !hasSpec(name) {
+			fileForms = append(fileForms, name)
 		}
 	}
+	slices.Sort(fileForms)
 	slices.Sort(unknown)
+	for _, name := range fileForms {
+		rows = append(rows, unknownRow(name, byName, true))
+	}
 	for _, name := range unknown {
 		rows = append(rows, unknownRow(name, byName, false))
 	}
@@ -247,26 +267,34 @@ func unknownRow(name string, byName map[string]entry, known bool) row {
 }
 
 // maskForDisplay masks a row's value the usual way (settings.HideIfSecret)
-// except for the folded file-secret constant (#137 C2): its value is
-// masked by construction and names its own source, so the generic rule
-// must not strip it back to the bare "(hidden)".
+// except for the file-secret display values (#137 C2): the _FILE row's
+// path is not a secret, and the decorations (hidden-from-file, a
+// both-set refusal, an unset marker) are masked by construction — the
+// generic rule must not strip any of them back to the bare "(hidden)".
 func maskForDisplay(name, value string) string {
-	if value == settings.HiddenFromFile {
+	if _, isFile := strings.CutSuffix(name, "_FILE"); isFile && settings.IsKnown(name) {
+		// A <SECRET>_FILE row for a known secret: its value is the
+		// resolved path (never the secret's content) or one of the
+		// decorations — display it verbatim.
+		return value
+	}
+	if value == settings.HiddenFromFile || refDecorated(value) {
 		return value
 	}
 	return settings.HideIfSecret(name, value)
 }
 
 // buildRows assembles the rows: every settings.Known name in its sorted
-
-// buildRows assembles the rows: every settings.Known name in its sorted
 // order — set ones with their resolved value and source, unset ones with
 // source default — then any unknown key the unit env sets (sorted, with
 // the "(unknown setting)" note; a typo or a removed setting, the same
-// class settings.CheckEnvFile warns about). Values are masked here so
-// no rendering path can print a secret. With unreached set the backend
-// did not answer: every RUNNING cell becomes "?" and nothing counts as
-// drift.
+// class settings.CheckEnvFile warns about) and, sorted among themselves,
+// every known secret's <NAME>_FILE spelling the unit or the env
+// carried (resolveFileSecrets's path row must survive to the table —
+// the design's "the path for a _FILE setting"). Values are masked here
+// so no rendering path can print a secret. With unreached set the
+// backend did not answer: every RUNNING cell becomes "?" and nothing
+// counts as drift.
 func buildRows(byName map[string]entry, rc runningConfig, unreached bool) []row {
 	if unreached {
 		return buildRowsUnreached(byName)
@@ -276,13 +304,23 @@ func buildRows(byName map[string]entry, rc runningConfig, unreached bool) []row 
 	for _, name := range settings.Known {
 		rows = append(rows, oneRow(name, byName, run, true))
 	}
-	var unknown []string
+	var fileForms, unknown []string
 	for name := range byName {
 		if !settings.IsKnown(name) {
 			unknown = append(unknown, name)
+		} else if _, isFile := strings.CutSuffix(name, "_FILE"); isFile && !hasSpec(name) {
+			// A secret's _FILE spelling from IsKnown's rule: not its own
+			// spec (settings.Known carries the real _FILE-named settings,
+			// like SPOOND_ADMIN_TOKEN_FILE), but the path row belongs
+			// beside its base name's row.
+			fileForms = append(fileForms, name)
 		}
 	}
+	slices.Sort(fileForms)
 	slices.Sort(unknown)
+	for _, name := range fileForms {
+		rows = append(rows, oneRow(name, byName, run, true))
+	}
 	for _, name := range unknown {
 		rows = append(rows, oneRow(name, byName, run, false))
 	}
@@ -337,12 +375,32 @@ func runningValues(rc runningConfig) map[string]runningValue {
 // exact, and for a secret it can at least prove both-sides-set (the
 // endpoint masks with the same rule, so neither side ever holds a raw
 // value). One-sided set flags are not masked, so a secret only the unit
-// or only the backend has is still classified as drift.
+// or only the backend has is still classified as drift. A
+// <SECRET>_FILE row does not participate beyond set-ness: the endpoint
+// reports the base setting only (a file-resolved one set, with the
+// same hidden-from-file constant), so the path row — set here, absent
+// there — reads runNotSet without counting drift (the base name's row
+// carries the comparison); a <SECRET>_FILE row standing alone (no base
+// row) means the spelling is all there is, so it counts drift.
 func classify(name, maskedHere string, setHere bool, run map[string]runningValue, known bool) (string, bool) {
 	if !known {
 		// No spoond binary reads this name; the endpoint reports known
 		// names only, so there is nothing to compare against.
 		return runSkip, false
+	}
+	if base, isFile := strings.CutSuffix(name, "_FILE"); isFile && !hasSpec(name) {
+		// A secret's _FILE spelling (the rule's name, no spec of its own):
+		// the endpoint never reports it. A real _FILE-named setting
+		// (SPOOND_ADMIN_TOKEN_FILE) takes the plain path below.
+		if setHere {
+			// The _FILE spelling the operator wrote: expected — the base
+			// setting (and its drift) lives one row up, where it is
+			// reported. Not drift of this row itself.
+			if run[base].reported {
+				return runNotSet, false
+			}
+		}
+		return runNotSet, true
 	}
 	rs, reported := run[name]
 	switch {
