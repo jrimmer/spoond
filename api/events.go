@@ -571,14 +571,17 @@ func formatEventBytes(n int64) string {
 
 // usageRecentTypes are the event types GET /api/usage lists under
 // "recent" (#140 U3): the refusals and reclaims that explain why an
-// owner's work waited, was refused or lost its memory or disk.
+// owner's work waited, was refused or lost its memory or disk. Only
+// events owned by the caller are listed: box_full names the refused
+// requester, while take_back, suspended and critical_release name the
+// lease's owner (the victim), never the owner the room was made for.
+// disk_cleanup is host-wide (no owner), so it is not listed.
 var usageRecentTypes = map[LeaseEventType]bool{
 	LeaseBoxFull:         true,
 	LeaseTakeBack:        true,
 	LeaseQueued:          true,
 	LeaseSuspended:       true,
 	LeaseCriticalRelease: true,
-	LeaseDiskCleanup:     true,
 	LeasePausedExpiring:  true,
 }
 

@@ -17,10 +17,14 @@ func TestUsageRecentEvents(t *testing.T) {
 	one, two := uid(t, ids, "tok-1"), uid(t, ids, "tok-2")
 
 	svc.bus.emit("l-1", one, LeaseCreated, "not listed")
+	// box_full through the production path, which names the requester.
 	for i := 0; i < usageRecentLimit+5; i++ {
-		svc.bus.emit(fmt.Sprintf("l-%d", i), one, LeaseBoxFull, fmt.Sprintf("refusal %d", i))
+		svc.boxFullAlert(one, 1024+i, "every take-back candidate is pinned")
 	}
+	svc.boxFullAlert(two, 2048, "another owner's refusal")
 	svc.bus.emit("l-two", two, LeaseTakeBack, "another owner's")
+	// disk_cleanup is host-wide (owner ""): never listed.
+	svc.emitDiskCleanup(1<<30, 0)
 	svc.bus.emitStructured("l-last", one, LeaseSuspended, "taken back", "take_back", "", "b-1")
 	svc.bus.emit("l-2", one, LeaseResumed, "not listed")
 
@@ -36,7 +40,8 @@ func TestUsageRecentEvents(t *testing.T) {
 	if first["type"] != string(LeaseSuspended) || first["reason"] != "take_back" || first["lease_id"] != "l-last" {
 		t.Fatalf("newest recent event = %v, want the take-back suspend", first)
 	}
-	if second := recent[1].(map[string]any); second["detail"] != fmt.Sprintf("refusal %d", usageRecentLimit+4) {
+	if second := recent[1].(map[string]any); second["type"] != string(LeaseBoxFull) ||
+		second["detail"] != fmt.Sprintf("%d MiB request for %q: every take-back candidate is pinned", 1024+usageRecentLimit+4, one) {
 		t.Fatalf("second recent event = %v, want the newest box_full", second)
 	}
 	for _, e := range recent {

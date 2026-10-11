@@ -73,7 +73,9 @@ func (s *Service) boxFullAlert(owner string, memoryMB int, why string) {
 	if s.metrics != nil {
 		s.metrics.BoxFullTotal.Inc()
 	}
-	s.emitLeaseEvent("-", "", LeaseBoxFull, fmt.Sprintf("%d MiB request for %q: %s", memoryMB, owner, why))
+	// The refused requester owns the event, so it reaches the requester's
+	// own event stream and GET /api/usage "recent" (#140 U3).
+	s.emitLeaseEvent("-", owner, LeaseBoxFull, fmt.Sprintf("%d MiB request for %q: %s", memoryMB, owner, why))
 }
 
 // cachedFreeHugepageMiB reads the node's free hugepage memory in MiB from
