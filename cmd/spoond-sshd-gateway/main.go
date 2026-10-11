@@ -601,7 +601,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 
 	switch fields[0] {
 	case "help", "--help", "-h":
-		return "commands: new [dev|go|py|elixir|llm], create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id> [--cold], cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, snapshot save <lease> <name> [--key K] [--keep N], snapshot ls [prefix], snapshot show <name[@v]>, snapshot rm <name[@v]> [--force], whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
+		return "commands: new [dev|go|py|elixir|llm], create [image] [--snapshot <name[@v]> [--snapshot-owner <user>]] [--size <preset>] [--ttl N] [--persistent], ls [--json], stat <id> [--json], rm <id>, keepalive <id>, suspend <id>, resume <id>, restart <id> [--cold], cp <id> [tag], shelly <id>, tag <id> <name>, comment <id> <text>, snapshot save <lease> <name> [--key K] [--keep N], snapshot ls [prefix], snapshot show <name[@v]>, snapshot rm <name[@v]> [--force], whoami, prompt <id> <message>, ssh-key ls|add <pubkey> <name>|rm <id>, share add <id> <user> [ssh|http] [ttl]|ls|rm <id> <user> — add --json for raw output"
 	case "whoami":
 		if keyID == "" {
 			if jsonMode {

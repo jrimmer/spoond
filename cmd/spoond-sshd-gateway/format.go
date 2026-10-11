@@ -126,6 +126,14 @@ func parseCreateArgs(args []string) (map[string]any, string) {
 			}
 			snapshot = args[i+1]
 			i++
+		case "--snapshot-owner", "--size":
+			// --snapshot-owner starts from another user's named snapshot
+			// through a grant (#141); --size picks a size preset (#151).
+			if i+1 >= len(args) {
+				return nil, fmt.Sprintf("usage: %s needs a value", args[i])
+			}
+			body[strings.ReplaceAll(strings.TrimPrefix(args[i], "--"), "-", "_")] = args[i+1]
+			i++
 		case "--ttl":
 			if i+1 >= len(args) {
 				return nil, `usage: --ttl needs a value`
@@ -151,13 +159,16 @@ func parseCreateArgs(args []string) (map[string]any, string) {
 		}
 	}
 	if image == "" && snapshot == "" {
-		return nil, `usage: create [image] [--snapshot <name[@v]>] [--ttl N] [--persistent]`
+		return nil, `usage: create [image] [--snapshot <name[@v]> [--snapshot-owner <user>]] [--size <preset>] [--ttl N] [--persistent]`
 	}
 	if image != "" {
 		body["image"] = image
 	}
 	if snapshot != "" {
 		body["snapshot"] = snapshot
+	}
+	if _, ok := body["snapshot_owner"]; ok && snapshot == "" {
+		return nil, `usage: --snapshot-owner needs --snapshot`
 	}
 	return body, ""
 }
