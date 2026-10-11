@@ -62,11 +62,13 @@ func sizeHint(l *Lease, ms *memSampler, presets []sizes.Preset) (string, bool) {
 	if !ok || e.samples < sizeHintSamples {
 		return "", false
 	}
-	want := e.peakBytes * sizeHintMargin
-	best := -1
-	name := ""
+	// The margin in whole MiB: a preset's memory_mb holds the lease
+	// when it is at least the peak × 1.25, rounded up to the MiB the
+	// presets are counted in.
+	want := mibCeil(e.peakBytes * sizeHintMargin)
+	best, name := -1, ""
 	for _, p := range presets {
-		if float64(p.MemoryMB) >= want && p.MemoryMB < l.MemoryMB {
+		if p.MemoryMB >= want && p.MemoryMB < l.MemoryMB {
 			if best < 0 || p.MemoryMB < best {
 				best, name = p.MemoryMB, p.Name
 			}
