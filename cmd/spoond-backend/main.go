@@ -186,6 +186,7 @@ import (
 	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
 	"github.com/jrimmer/spoond/v3/metrics"
 	"github.com/jrimmer/spoond/v3/notify"
+	"github.com/jrimmer/spoond/v3/settings"
 	"github.com/jrimmer/spoond/v3/sizes"
 	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate"
@@ -524,6 +525,20 @@ func (s metricsSink) Notification(webhook, severity, result string) {
 }
 
 func Main(args []string) int {
+	// Typed settings, checked before anything else (2026-10-11
+	// validated-config design item 1): every backend setting that is set
+	// is checked against its type, so a value the readers would silently
+	// ignore (2h in MAX_TTL_SECS) fails startup with one message naming
+	// every problem. Unset settings keep their defaults; unknown keys and
+	// removed variables stay the warnings below, not startup failures —
+	// the process environment also holds systemd's own variables.
+	if errs := settings.Validate("backend", os.Getenv); len(errs) > 0 {
+		msgs := make([]string, len(errs))
+		for i, e := range errs {
+			msgs[i] = e.Error()
+		}
+		log.Fatalf("%s", strings.Join(msgs, "; "))
+	}
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
 	proxyAddr := envOr("PROXY_ADDR", "") // e.g. 0.0.0.0:8891 (Caddy wildcard front)
 	// TLS_CERT and TLS_KEY may list several pairs (comma-separated, paired by
