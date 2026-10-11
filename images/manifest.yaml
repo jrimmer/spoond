@@ -30,7 +30,10 @@
 #               Each preset's memory must be >= the effective min_memory_mb.
 #   from        catalog image this one is built on (BASE build arg); vcpu,
 #               memory_mb, disk_mb, min_memory_mb, warm_sizes and env are
-#               inherited unless set here (warm_sizes: [] builds none)
+#               inherited unless set here (warm_sizes: [] builds none).
+#               Inherited warm_sizes are the base's warm builds in the
+#               catalog at build time; while the base is rebuilding its
+#               own, list warm_sizes here to not depend on that.
 #   env         env vars passed on every sandbox create (process defaults)
 #   notes       freeform
 

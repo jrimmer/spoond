@@ -9,6 +9,7 @@ import (
 
 	"github.com/jrimmer/spoond/v3/sizes"
 	"github.com/jrimmer/spoond/v3/store"
+	"github.com/jrimmer/spoond/v3/substrate"
 	"github.com/jrimmer/spoond/v3/substrate/e2b"
 )
 
@@ -71,6 +72,33 @@ func TestCreateAtSize(t *testing.T) {
 		t.Fatalf("medium started from build %s, want the warm build %s", got, warm.BuildID)
 	}
 	ok(`{"image":"mid","ttl":60,"vcpu":2,"memory_mb":4096}`, 2, 4096, "warm")
+
+	// While a create starts from the warm build, the GC sees it as in
+	// use (an image rebuild may drop its warm row mid-start).
+	held := false
+	sub.createFn = func(c context.Context, req substrate.CreateRequest) (substrate.Sandbox, error) {
+		held = svc.startingBuild(warm.BuildID)
+		return sub.Fake.Create(c, req)
+	}
+	ok(`{"image":"mid","ttl":60,"size":"medium"}`, 2, 4096, "warm")
+	sub.createFn = nil
+	if !held || svc.startingBuild(warm.BuildID) {
+		t.Fatalf("warm build held during start = %v, still held after = %v; want true, false", held, svc.startingBuild(warm.BuildID))
+	}
+
+	// A clone of a sized lease is sized too: it keeps the size on restart.
+	code, b := create(`{"image":"mid","ttl":600,"persistent":true,"memory_mb":1536}`)
+	if code != http.StatusCreated {
+		t.Fatalf("sized create: %d %v", code, b)
+	}
+	owner := ownerIDFor(t, h, tok)
+	c, _, err := svc.clone(ctx, owner, b["id"].(string))
+	if err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+	if !c.Sized || c.MemoryMB != 1536 {
+		t.Fatalf("clone sized %v memory %d, want a sized 1536 clone", c.Sized, c.MemoryMB)
+	}
 
 	bad := func(body, want string) {
 		t.Helper()

@@ -148,39 +148,49 @@ func TestSnapshotBuildsRecordTheLeaseSize(t *testing.T) {
 }
 
 // TestRestartKeepsLeaseSize (#151 Z4): after the image is rebuilt at
-// another size, a warm restart of a non-persistent lease and a cold
-// restart both boot the image's current build at the lease's own size —
-// a cold boot (filesystem_boot), since no build of that size is current
-// — and the lease reports start "cold".
+// another size, a restart (warm of a non-persistent lease, or cold) of a
+// lease created at the default size follows the image's new default and
+// starts warm, as before 3.1; a lease created at a chosen size keeps it
+// and cold-boots, since no build of that size is current.
 func TestRestartKeepsLeaseSize(t *testing.T) {
-	for _, mode := range []string{"warm", "cold"} {
-		t.Run(mode, func(t *testing.T) {
+	cases := []struct {
+		name, body, mode string
+		vcpu, mem        int
+		start            string
+	}{
+		{"unsized warm", `{"image":"mid","ttl":600}`, "warm", 4, 2048, "warm"},
+		{"unsized cold", `{"image":"mid","ttl":600}`, "cold", 4, 2048, "warm"},
+		{"sized warm", `{"image":"mid","ttl":600,"memory_mb":1536}`, "warm", 2, 1536, "cold"},
+		{"sized cold", `{"image":"mid","ttl":600,"memory_mb":1536}`, "cold", 2, 1536, "cold"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
 			srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024})
 			svc := srv.svc
 			ctx := context.Background()
 			owner := ownerIDFor(t, h, tok)
-			rec, body := createSandboxBody(t, h, tok, `{"image":"mid","ttl":600}`)
+			rec, body := createSandboxBody(t, h, tok, c.body)
 			if rec.Code != http.StatusCreated {
 				t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 			}
 			id := body["id"].(string)
 			regrowImage(t, svc.db, "mid", 4, 2048, 10240)
-			if _, err := svc.restart(ctx, owner, id, mode); err != nil {
+			if _, err := svc.restart(ctx, owner, id, c.mode); err != nil {
 				t.Fatalf("restart: %v", err)
 			}
 			l := svc.lookup(uid, id)
 			svc.store.mu.Lock()
 			v, m, start := l.VCPU, l.MemoryMB, l.Start
 			svc.store.mu.Unlock()
-			if v != 2 || m != 1024 || start != "cold" {
-				t.Fatalf("restarted lease = %d/%d start %q, want its own 2/1024 started cold", v, m, start)
+			if v != c.vcpu || m != c.mem || start != c.start {
+				t.Fatalf("restarted lease = %d/%d start %q, want %d/%d %s", v, m, start, c.vcpu, c.mem, c.start)
 			}
 			req := svc.sub.(*testSub).LastCreate()
-			if !req.FilesystemBoot || req.VCPU != 2 || req.MemoryMB != 1024 {
-				t.Fatalf("create request = filesystem_boot %v %d/%d, want a cold boot at 2/1024", req.FilesystemBoot, req.VCPU, req.MemoryMB)
+			if req.FilesystemBoot != (c.start == "cold") || int(req.VCPU) != c.vcpu || int(req.MemoryMB) != c.mem {
+				t.Fatalf("create request = filesystem_boot %v %d/%d", req.FilesystemBoot, req.VCPU, req.MemoryMB)
 			}
-			if got := svc.usedMiB(owner); got != 1024 {
-				t.Fatalf("used_mib = %d, want the lease's 1024", got)
+			if got := svc.usedMiB(owner); got != c.mem {
+				t.Fatalf("used_mib = %d, want %d", got, c.mem)
 			}
 		})
 	}

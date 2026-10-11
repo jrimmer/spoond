@@ -22,9 +22,12 @@ proposals the owner can change; each is one setting.
 ## Decisions
 
 1. **The lease owns its size.** A lease stores its vCPU, memory and disk
-   at create. Every later path — pause, resume, warm and cold restart,
-   clone, fork, restore, recovery — uses the lease's stored size, never
-   the image row. (Today clone, fork, restore, recovery and cold restart
+   at create. Every later path — pause, resume, clone, fork, restore,
+   recovery — uses the lease's stored size, never the image row. A
+   restart boots a fresh guest: a lease created at a chosen size
+   (`leases.sized`, migration 27) keeps its size, and any other lease
+   takes the image's current default, as before 3.1 (review: keeping a
+   default size forever would cold-boot old leases on every restart). (Today clone, fork, restore, recovery and cold restart
    re-read the image row, so a rebuilt image changes what an old lease is
    charged while its VM keeps the old size.)
 2. **Presets are global names for sizes**, from `SIZE_PRESETS`
