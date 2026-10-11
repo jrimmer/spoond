@@ -109,6 +109,12 @@
 //	MAX_ADMIT_WAIT_SECS  how long a create may wait for admission when
 //	                  it sends "wait" (#129 part 1; default 600; 0
 //	                  disables waiting)
+//	SATURATION_IO_FULL_PCT / SATURATION_CPU_SOME_PCT  new creates,
+//	                  clones and forks wait (503 capacity_wait or the
+//	                  admission queue) while the host's 10 s I/O full or
+//	                  CPU some pressure is at or over this percentage;
+//	                  running leases are not affected (#136; defaults 20
+//	                  and 75; 0 turns a check off)
 //	SNAPSHOT_WRITE_CONCURRENCY  how many memory-snapshot writes
 //	                  (substrate Pause/Checkpoint) may run at once,
 //	                  process-wide (spoond-t1s; default 1; 0 = unlimited,
@@ -335,6 +341,33 @@ func sizeConfig(get func(string) string) (presets []sizes.Preset, maxVCPU, maxMe
 		return nil, 0, 0, err
 	}
 	return presets, maxVCPU, maxMemoryMB, nil
+}
+
+// saturationConfig reads the saturation gate's targets (#136 stage 2):
+// SATURATION_IO_FULL_PCT (default api.DefaultSaturationIOFullPct) and
+// SATURATION_CPU_SOME_PCT (default api.DefaultSaturationCPUSomePct), in
+// percent of the host's 10 s PSI average. 0 turns a check off. A value
+// that is not a number from 0 to 100 is an error, so a typo fails
+// startup rather than silently gating every create or none.
+func saturationConfig(get func(string) string) (ioFullPct, cpuSomePct float64, err error) {
+	pct := func(key string, def float64) (float64, error) {
+		v := strings.TrimSpace(get(key))
+		if v == "" {
+			return def, nil
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || f > 100 {
+			return 0, fmt.Errorf("%s: %q is not a percentage from 0 to 100", key, v)
+		}
+		return f, nil
+	}
+	if ioFullPct, err = pct("SATURATION_IO_FULL_PCT", api.DefaultSaturationIOFullPct); err != nil {
+		return 0, 0, err
+	}
+	if cpuSomePct, err = pct("SATURATION_CPU_SOME_PCT", api.DefaultSaturationCPUSomePct); err != nil {
+		return 0, 0, err
+	}
+	return ioFullPct, cpuSomePct, nil
 }
 
 // parseGuestDNS validates SPOOND_GUEST_DNS_ADDR: a comma-separated list
@@ -642,6 +675,10 @@ func Main(args []string) int {
 	if err != nil {
 		log.Fatalf("lease sizes: %v", err)
 	}
+	satIOFull, satCPUSome, err := saturationConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("saturation gate: %v", err)
+	}
 
 	svc := api.NewService(sub, db, tokens, api.ServiceConfig{
 		PoolSize:                  poolSize,
@@ -686,13 +723,15 @@ func Main(args []string) int {
 		RecoveryRetryWindow:      recoveryRetryWindow,
 		// spoond-j3a: bound one background sweep stage so a hung
 		// substrate RPC frees the loop and the lease's busy flag.
-		SweepTimeout:      envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
-		DrainMaxSecs:      drainMaxSecs,
-		DrainResumeMaxAge: drainResumeMaxAge,
-		CrashTest:         os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
-		SizePresets:       sizePresets,
-		MaxLeaseVCPU:      maxLeaseVCPU,
-		MaxLeaseMemoryMB:  maxLeaseMemoryMB,
+		SweepTimeout:         envDurationOr("SWEEP_TIMEOUT", api.DefaultSweepTimeout),
+		DrainMaxSecs:         drainMaxSecs,
+		DrainResumeMaxAge:    drainResumeMaxAge,
+		CrashTest:            os.Getenv("CRASH_TEST") == "1" || os.Getenv("CRASH_TEST") == "true",
+		SizePresets:          sizePresets,
+		MaxLeaseVCPU:         maxLeaseVCPU,
+		MaxLeaseMemoryMB:     maxLeaseMemoryMB,
+		SaturationIOFullPct:  satIOFull,
+		SaturationCPUSomePct: satCPUSome,
 	})
 	// A fresh build's memory file lands after Checkpoint/Pause return:
 	// re-measure it until its size settles (#125).

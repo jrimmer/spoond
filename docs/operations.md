@@ -815,6 +815,21 @@ admission path; a call that finds the node still full answers `503`
 never lost. `429 box_full` means only pinned leases stand in the way.
 See [api.md](api.md#memory-take-back).
 
+**Saturation gate** (#136 stage 2): spoond admits by memory, but a box
+can be saturated with memory to spare — parallel snapshot work pins the
+disk, and CPU-heavy guests overcommit the cores. While the host's I/O
+full pressure is at or over `SATURATION_IO_FULL_PCT` (default `20`) or
+its CPU some pressure at or over `SATURATION_CPU_SOME_PCT` (default
+`75`), both the Linux PSI 10 s average in percent, new creates, clones
+and forks wait with `503 capacity_wait` (or in the admission queue).
+Running leases keep running, and resumes and restores are not held. A
+create the warm pool can serve passes (it boots nothing), and the pool
+is not refilled while the host is saturated.
+`0` turns a check off; unreadable `/proc/pressure` leaves the gate
+open. `spoond_host_pressure_pct{resource}` shows what the gate last
+read and `spoond_saturation_refusals_total{resource}` how often it held
+new work.
+
 **Queued admission** (#129 part 1): a create can wait for room instead
 of failing, by sending `"wait": N` (seconds) on `POST /api/leases` (see
 [api.md](api.md#queued-admission)). `MAX_ADMIT_WAIT_SECS` caps the wait

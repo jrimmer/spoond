@@ -132,6 +132,12 @@ type BackendMetrics struct {
 	// Take-back (FS5): the box_full refusals (a request needed room and
 	// every take-back candidate was pinned).
 	BoxFullTotal prometheus.Counter // cumulative box_full refusals
+	// HostPressure is the host's 10 s PSI pressure the saturation gate
+	// last read, by resource (io: full, cpu: some), in percent (#136).
+	HostPressure *prometheus.GaugeVec
+	// SaturationRefusals counts new work the saturation gate made wait,
+	// by the resource over its target (#136).
+	SaturationRefusals *prometheus.CounterVec
 
 	// Snapshot disk room (FS3b): the running leases' reserved disk_mb
 	// and the room a new request may use (Usable may be negative).
@@ -470,6 +476,14 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "snapshot_disk_usable_bytes",
 		Help: "Snapshot disk a new request may use: free - reserved - floor - pending + freeing (negative = short).",
 	})
+	m.HostPressure = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "host_pressure_pct",
+		Help: "Host PSI pressure the saturation gate last read, 10 s average, percent (io: full, cpu: some).",
+	}, []string{"resource"})
+	m.SaturationRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "saturation_refusals_total",
+		Help: "Creates, clones and forks made to wait because host pressure was over the saturation target.",
+	}, []string{"resource"})
 	m.BoxFullTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "spoond", Name: "box_full_total",
 		Help: "Requests refused box_full: take-back could free nothing (every candidate pinned, or the requester is the biggest borrower).",
@@ -574,7 +588,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.KeptBuildsBytes, m.KeptBuilds,
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
-		m.BoxFullTotal, m.TakeBacksTotal,
+		m.BoxFullTotal, m.TakeBacksTotal, m.HostPressure, m.SaturationRefusals,
 		m.SnapshotDiskReserved, m.SnapshotDiskUsable,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,

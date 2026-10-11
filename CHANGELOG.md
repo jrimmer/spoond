@@ -12,6 +12,7 @@ summarised from README "Status".
 
 ### Added
 
+- **New work waits while the host is saturated (#136 stage 2).** A create, clone or fork answers `503 capacity_wait` (or waits in the admission queue) while the host's I/O full or CPU some pressure (PSI, 10 s average) is at or over `SATURATION_IO_FULL_PCT` (default 20) or `SATURATION_CPU_SOME_PCT` (default 75). Running leases, resumes and restores are not held. Metrics `spoond_host_pressure_pct` and `spoond_saturation_refusals_total`.
 - **A create that will expire says so.** A non-persistent create answers with a `Warning:` header naming its TTL when the TTL was defaulted or a pin or holder is set (neither keeps a lease past its TTL since 3.0).
 - **`GET /api/usage` "recent" lists leases spoond released on its own clock**: a TTL expiry, the paused-release clock or a lost lease's grace, as `released` events.
 
