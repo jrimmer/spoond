@@ -80,7 +80,8 @@ func TestMemSamplerRecordsAndResets(t *testing.T) {
 		t.Fatalf("peak = %g, want still 300 MiB (max since VM start)", peak)
 	}
 
-	// A burst above everything: peak moves.
+	// A burst above everything: peak moves (waitFor the loop to see the
+	// new document; a pass in flight may still answer the old one).
 	doc.Store(memMetricsDoc(map[string]float64{"sb_A": 700 * 1024 * 1024}))
 	waitFor(t, "peak rises to burst", time.Second, func() bool {
 		peak, _ := svc.memSamples.peak(lease.ID)
@@ -219,6 +220,39 @@ func TestStartMemSamplerDisabledWithoutURL(t *testing.T) {
 	}
 	if svc.memSampleInterval != memSampleInterval || svc.memSampleClient == nil {
 		t.Fatal("sampler interval and client not defaulted")
+	}
+}
+
+// TestOTelURLRoundTrip: a Service constructed with OTEL_PROM_URL set
+// samples the collector over the real HTTP getter; the loop's own
+// fetch path (the same client handleMetrics uses) is what talks to it.
+func TestOTelURLRoundTrip(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	lease, err := svc.grantLease(context.Background(), leaseRequest{owner: "consumer-a", image: "py-base", ttl: time.Hour})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	svc.store.mu.Lock()
+	lease.SandboxID, lease.HostIP = "sb_live", "10.0.0.1"
+	svc.store.mu.Unlock()
+
+	doc := memMetricsDoc(map[string]float64{"sb_live": 700 * 1024 * 1024})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(doc))
+	}))
+	defer upstream.Close()
+	svc.memSamplerFetch = memSampleHTTPGetter(upstream.URL, svc.memSampleClient)
+	svc.memSampleInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.startMemSampler(ctx)
+	waitFor(t, "sampler records through the HTTP getter", 2*time.Second, func() bool {
+		used, ok := svc.memSamples.latest(lease.ID)
+		return ok && used == 700*1024*1024
+	})
+	if peak, _ := svc.memSamples.peak(lease.ID); peak != 700*1024*1024 {
+		t.Fatalf("peak = %g, want 700 MiB", peak)
 	}
 }
 
