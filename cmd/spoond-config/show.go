@@ -137,7 +137,10 @@ type fetcher func(url, token string) (runningConfig, error)
 // run resolves the unit env, asks the running backend, and prints the
 // table or the --json document. It returns the exit code: 0 when the
 // config is shown (an unreachable running backend still shows the unit's
-// view), 1 when the unit env cannot be resolved at all.
+// view), 1 when the unit env cannot be resolved — or the admin token
+// cannot be (a both-set ADMIN_TOKEN/ADMIN_TOKEN_FILE spelling, an
+// unreadable value file: the same refusal the backend will exit with,
+// so the comparison never authenticates with a broken token).
 func run(unit, apiFlag string, jsonOut bool, stdout io.Writer, sysctl runner, read reader, fetch fetcher) int {
 	show, err := sysctl(unit, "EnvironmentFiles", "Environment")
 	if err != nil {

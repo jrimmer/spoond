@@ -201,9 +201,9 @@ const refUnsetMarker = "(unset — no path)"
 // refBothPrefix prefixes refBothMarker's stable both-set refusal text:
 // a <SECRET>_FILE row whose value starts with it reports a both-set
 // refusal rather than a real path, which could itself spell "both set
-// —". refDecorated and refSetHereButUnread (below, and show.go's row
-// logic through mergedGet) test for the decorations through these
-// values instead of a string drift between the files.
+// —". refDecorated (below; show.go's effective and maskForDisplay
+// call it) tests for the decorations through these values instead of a
+// string drift between the files.
 const refBothPrefix = "both set — "
 
 // refBothMarker is the _FILE row's value when the base NAME= is spelled
