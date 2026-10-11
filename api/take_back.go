@@ -375,3 +375,43 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 	}
 	return out
 }
+
+// takeBackOwnersFor is takeBackOwners plus the memory still in flight:
+// every owner's admitted-but-not-yet-live reservation (store.pendingMiB)
+// counts toward its usage, so an owner whose creates are mid-flight
+// cannot read a falsely low ratio and take back from others (or slip
+// past the biggest-borrower refusal). The requester's own pending
+// reservation already holds this request's requestMiB (reserveQuota runs
+// before admission) and memVictims / biggestBorrowerRefusal add the
+// request themselves, so that much is left out for the requester. A
+// lease just granted is briefly counted twice (pending and live) until
+// its creator releases the reservation; that over-states an owner by
+// one lease for that moment, never under-states it.
+func (s *Service) takeBackOwnersFor(ctx context.Context, requester string, requestMiB int) []takeBackOwner {
+	owners := s.takeBackOwners(ctx)
+	s.store.mu.Lock()
+	pending := make(map[string]int, len(s.store.pendingMiB))
+	for o, n := range s.store.pendingMiB {
+		pending[o] = n
+	}
+	s.store.mu.Unlock()
+	if own := pending[requester]; own > 0 {
+		if requestMiB > own {
+			requestMiB = own
+		}
+		pending[requester] = own - requestMiB
+	}
+	byOwner := make(map[string]int, len(owners))
+	for i, o := range owners {
+		byOwner[o.Owner] = i
+	}
+	for o, n := range pending {
+		if n <= 0 {
+			continue
+		}
+		if i, ok := byOwner[o]; ok {
+			owners[i].UsedMiB += n
+		}
+	}
+	return owners
+}

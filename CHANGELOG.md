@@ -324,6 +324,11 @@ Upgrading from 2.9? See [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 ### Fixed
 
+- **Take-back counts memory still in flight.** An owner's admitted
+  creates that have not started yet count toward its usage, so it cannot
+  read a falsely low ratio and take back from an owner who is no further
+  over its slice.
+
 - **Disk take-back works.** It now finds a paused lease's pause build
   (it was looked up by the wrong key, so no paused lease was ever
   reclaimed), deletes that build at once instead of leaving it for the
