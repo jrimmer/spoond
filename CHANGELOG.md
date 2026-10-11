@@ -12,6 +12,7 @@ summarised from README "Status".
 
 ### Added
 
+- **`spoond doctor` checks the env files (#137).** Every `*.env` in `/etc/spoond` is read by key name: a key no spoond binary reads (a typo or a removed setting) or a key set twice is a warning. A test keeps the list of known settings equal to what the code reads.
 - **`spoond create` / `spoondctl create` take `--size <preset>` and `--snapshot-owner <user>`**, for a lease at a chosen size (#151) or from another user's granted snapshot (#141).
 - **Named-snapshot grants (#141).** An owner shares one of its named snapshots with another user: `POST /api/named-snapshot-grants {"name","grantee"}`, `GET` (given and received), `DELETE ?name=&grantee=`. The grantee starts from it with the new create field `snapshot_owner` (user name or id); without a grant the answer is `404 not_found`, the same as an unknown name. The grantee is charged the lease's memory; the snapshot's disk stays the owner's, and releasing the grantee's lease re-runs the owner's retention. Revoking stops new starts and leaves running leases alone. A lease's `snapshot` object names the version's `owner`.
 - **Secret-free snapshots (#141).** A lease that ever held a secret (create-time, exec-time or job `secrets`, or one inherited through clone, fork or a start from a tainted version) is marked for good; a named snapshot saved from it reports `secret_free: false` and can never be granted (`409 not_secret_free`). Exec `env` values are not secrets. Versions saved before this release read `secret_free: false` until saved again.

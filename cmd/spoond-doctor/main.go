@@ -40,6 +40,7 @@ import (
 
 	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
 	"github.com/jrimmer/spoond/v3/notify"
+	"github.com/jrimmer/spoond/v3/settings"
 	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate/e2b"
 
@@ -124,6 +125,7 @@ func runChecks(manifestPath string) []checkResult {
 	cfg, cfgErr := e2b.FromEnv()
 	var out []checkResult
 	out = append(out, checkConfig()...)
+	out = append(out, checkEnvFiles(envFileDir())...)
 	out = append(out, checkOrchestrator(cfg, cfgErr)...)
 	out = append(out, checkRegistry()...)
 	out = append(out, checkTokenSeed()...)
@@ -161,6 +163,47 @@ func checkConfig() []checkResult {
 		out = append(out, checkResult{"config: BIND_ADDR", "WARN", "unset — defaulting to " + bind})
 	} else {
 		out = append(out, checkResult{"config: BIND_ADDR", "PASS", bind})
+	}
+	return out
+}
+
+// envFileDir is where spoond's systemd EnvironmentFiles live
+// (SPOOND_ENV_DIR overrides it for tests and other layouts).
+func envFileDir() string {
+	if d := os.Getenv("SPOOND_ENV_DIR"); d != "" {
+		return d
+	}
+	return "/etc/spoond"
+}
+
+// checkEnvFiles reports, for each spoond env file in dir (*.env), the
+// keys no spoond binary reads — a typo or a setting that no longer
+// exists, ignored in silence otherwise — and keys set twice, where the
+// last line silently wins (#137). Only key names are printed, never
+// values. Both are WARN: the backend still starts.
+func checkEnvFiles(dir string) []checkResult {
+	paths, _ := filepath.Glob(filepath.Join(dir, "*.env"))
+	var out []checkResult
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		name := "config: " + filepath.Base(p)
+		if err != nil {
+			out = append(out, checkResult{name, "WARN", "unreadable: " + err.Error()})
+			continue
+		}
+		unknown, dup := settings.CheckEnvFile(string(b))
+		var notes []string
+		if len(unknown) > 0 {
+			notes = append(notes, "not read by any spoond binary: "+strings.Join(unknown, ", "))
+		}
+		if len(dup) > 0 {
+			notes = append(notes, "set more than once (the last wins): "+strings.Join(dup, ", "))
+		}
+		if len(notes) == 0 {
+			out = append(out, checkResult{name, "PASS", "every key is a known setting"})
+			continue
+		}
+		out = append(out, checkResult{name, "WARN", strings.Join(notes, "; ")})
 	}
 	return out
 }

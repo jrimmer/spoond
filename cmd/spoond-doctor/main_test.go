@@ -298,3 +298,26 @@ func TestCheckNotifyFailures(t *testing.T) {
 		t.Fatalf("detail = %q", res[0].detail)
 	}
 }
+
+// TestCheckEnvFiles (#137): each *.env file is checked by key name; an
+// unknown or repeated key is a WARN naming the key and never its value.
+func TestCheckEnvFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "backend.env"), []byte("ADMIN_TOKEN=s3cret-value\nPOOL_SIZE=2\nHOLD_TTL_SECS=600\nPOOL_SIZE=3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dash.env"), []byte("# dash\nDASH_USER=admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]checkResult{}
+	for _, r := range checkEnvFiles(dir) {
+		got[r.name] = r
+	}
+	b := got["config: backend.env"]
+	if b.status != "WARN" || !strings.Contains(b.detail, "HOLD_TTL_SECS") || !strings.Contains(b.detail, "POOL_SIZE") || strings.Contains(b.detail, "s3cret") {
+		t.Fatalf("backend.env = %+v", b)
+	}
+	if d := got["config: dash.env"]; d.status != "PASS" {
+		t.Fatalf("dash.env = %+v", d)
+	}
+}
