@@ -1524,6 +1524,14 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		}
 		return substrate.Sandbox{}, err
 	}
+	// A substrate may mint the id rather than honour the requested one;
+	// track the returned id from here on so the caller's endCreatingSandbox
+	// matches and the sweep keys on the id the substrate reports.
+	if sb.ID != "" && sb.ID != sandboxID {
+		s.endCreatingSandbox(sandboxID)
+		sandboxID = sb.ID
+		s.beginCreatingSandbox(sandboxID)
+	}
 	if coldBoot {
 		// A cold boot restores no memory: the template's start command
 		// (spoond-guest-init: init hooks, the ready marker) never ran in
@@ -1543,14 +1551,6 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 			l.Start = "cold"
 		}
 		s.store.mu.Unlock()
-	}
-	// A substrate may mint the id rather than honour the requested one;
-	// track the returned id from here on so the caller's endCreatingSandbox
-	// matches and the sweep keys on the id the substrate reports.
-	if sb.ID != "" && sb.ID != sandboxID {
-		s.endCreatingSandbox(sandboxID)
-		sandboxID = sb.ID
-		s.beginCreatingSandbox(sandboxID)
 	}
 	// The create can take minutes on a saturated host. If the lease was
 	// released while this one was starting, the sandbox must not become
@@ -2226,9 +2226,14 @@ func (s *Service) warmSizeBuild(ctx context.Context, img store.ImageRow, vcpu, m
 }
 
 // coldBootReadyTimeout bounds how long a cold-booted guest may take to
-// pass its image's ready check after its start command is launched (a
-// variable so tests can shorten it).
-var coldBootReadyTimeout = 3 * time.Minute
+// pass its image's ready check after its start command is launched: the
+// scylla image's init hook alone may take 150 s (a variable so tests can
+// shorten it).
+var coldBootReadyTimeout = 5 * time.Minute
+
+// guestInitFailedMarker is what spoond-guest-init touches when an init
+// hook fails (it then sleeps forever, never reaching ready).
+const guestInitFailedMarker = "/run/spoond-guest-failed"
 
 // coldBootInit runs the image's start command in a freshly cold-booted
 // guest, detached, then polls the image's ready command until it passes
@@ -2256,6 +2261,10 @@ func (s *Service) coldBootInit(ctx context.Context, img store.ImageRow, sandboxI
 		res, err := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/sh", "-c", img.ReadyCmd}, Timeout: 10 * time.Second})
 		if err == nil && res.ExitCode == 0 {
 			return nil
+		}
+		// A failed init hook never gets ready: fail now, not at the cap.
+		if f, ferr := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/sh", "-c", "test -f " + guestInitFailedMarker}, Timeout: 10 * time.Second}); ferr == nil && f.ExitCode == 0 {
+			return fmt.Errorf("start command reported a failed init hook (%s; see /var/log/spoond-guest-init.log)", guestInitFailedMarker)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("not ready after %s (ready command %q)", coldBootReadyTimeout, img.ReadyCmd)

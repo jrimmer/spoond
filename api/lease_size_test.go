@@ -315,10 +315,17 @@ func TestColdBootRunsStartCommand(t *testing.T) {
 	var mu sync.Mutex
 	var cmds []string
 	readyAfter := 3 // the ready command fails twice, then passes
+	hookFailed := false
 	sub.SetExecHandler(func(id string, req substrate.ExecRequest) substrate.ExecResult {
 		mu.Lock()
 		defer mu.Unlock()
 		cmd := strings.Join(req.Args, " ")
+		if strings.Contains(cmd, "spoond-guest-failed") {
+			if hookFailed {
+				return substrate.ExecResult{}
+			}
+			return substrate.ExecResult{ExitCode: 1}
+		}
 		if strings.Contains(cmd, "PROBE_OK") {
 			return substrate.ExecResult{Stdout: "PROBE_OK"} // the integrity probe
 		}
@@ -357,6 +364,21 @@ func TestColdBootRunsStartCommand(t *testing.T) {
 	if len(cmds) != 0 {
 		t.Fatalf("warm start ran %q, want nothing", cmds)
 	}
+	mu.Unlock()
+
+	// A failed init hook fails the create at once, not at the cap.
+	mu.Lock()
+	readyAfter, hookFailed = 1<<30, true
+	mu.Unlock()
+	t0 := time.Now()
+	if _, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, memoryMB: 2048}); err == nil || !strings.Contains(err.Error(), "failed init hook") {
+		t.Fatalf("failed-hook cold grant = %v, want a failed-init-hook error", err)
+	}
+	if d := time.Since(t0); d > 30*time.Second {
+		t.Fatalf("failed hook took %s to fail", d)
+	}
+	mu.Lock()
+	hookFailed = false
 	mu.Unlock()
 
 	// A guest that never gets ready is deleted and the create fails.
