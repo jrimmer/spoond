@@ -19,10 +19,13 @@ import (
 // /api/admin/reconcile recovers leases after an orchestrator crash.
 //
 // Authentication is Authorization: Bearer <ADMIN_TOKEN>, compared in
-// constant time. ADMIN_TOKEN is not a user or consumer token, so
-// authMiddleware lets the /api/admin/ prefix through and this file does
-// the check. With no ADMIN_TOKEN configured the routes answer 404; a
-// wrong or missing token answers 401.
+// constant time, or an admin identity-store user's bearer token
+// (#138 A1: the admin user's own token reaches /api/admin/* too).
+// ADMIN_TOKEN is not a user or consumer token, so authMiddleware lets
+// the /api/admin/ prefix through and this file does the whole check.
+// With no ADMIN_TOKEN configured the routes still answer an admin
+// user's token; with neither configured they answer 404. A wrong or
+// missing token answers 401.
 
 // drainFailure is one lease the drain or undrain could not handle.
 // Attempts is how many resume attempts undrain made before giving up
@@ -47,16 +50,27 @@ type undrainResult struct {
 	Failed  []drainFailure `json:"failed"`
 }
 
-// adminOK authenticates an admin request. 404 when no ADMIN_TOKEN is
-// configured (the routes are disabled), 401 on a wrong or missing
-// token.
+// adminOK authenticates an admin request: the env ADMIN_TOKEN compared
+// in constant time, or an admin identity-store user's bearer token
+// (#138 A1). A non-admin user's token is refused. 404 when the routes
+// are disabled (no ADMIN_TOKEN configured and no admin user the token
+// could belong to — with no identity store the ADMIN_TOKEN check alone
+// sets that), 401 on a wrong or missing token.
 func (s *Server) adminOK(w http.ResponseWriter, r *http.Request) bool {
+	auth := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(auth, "Bearer ")
+	// The identity-store user is resolved before the ADMIN_TOKEN compare
+	// (both are constant-time paths; UserByToken hashes) so an admin
+	// user reaches the routes even without ADMIN_TOKEN configured.
+	if s.svc.identities != nil && token != "" && token != auth {
+		if u := s.svc.identities.UserByToken(token); u != nil && u.Admin {
+			return true
+		}
+	}
 	if s.adminToken == "" {
 		writeError(w, http.StatusNotFound, "not found")
 		return false
 	}
-	auth := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(auth, "Bearer ")
 	if token == "" || token == auth || subtle.ConstantTimeCompare([]byte(token), []byte(s.adminToken)) != 1 {
 		writeError(w, http.StatusUnauthorized, "invalid admin token")
 		return false
