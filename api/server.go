@@ -69,6 +69,14 @@ type Server struct {
 	// GET /api/admin/config (#137) so a caller can tell whether the
 	// backend restarted since the unit env changed.
 	startedAt time.Time
+	// fileSecrets (#137 C2): the secrets this process resolved from a
+	// <NAME>_FILE value file rather than the environment. The backend
+	// sets nothing in its own env, so GET /api/admin/config would report
+	// those names unset and `spoond config show` would cry drift where
+	// the value matches; the registry reports them set. Guarded by
+	// fileSecretsMu; written once at startup before the listeners open.
+	fileSecretsMu sync.Mutex
+	fileSecrets   map[string]string
 	// busy (security review #37 rescan F9) caps concurrent exec/stream
 	// operations per owner so a tenant can't saturate the controller
 	// with in-flight activity (quota covers lease count, not activity).
@@ -122,6 +130,22 @@ func (s *Server) SetBootstrapToken(tok string) {
 // required on every admin request and compared in constant time.
 func (s *Server) SetAdminToken(tok string) {
 	s.adminToken = tok
+}
+
+// SetFileSecrets records the secrets the process resolved from a
+// <NAME>_FILE value file (#137 C2), so GET /api/admin/config reports
+// those names set — with the value still hidden ("(hidden, from file)")
+// — although nothing in this process's environment names the secret.
+// names maps the setting name (e.g. ADMIN_TOKEN) to its file's value;
+// only the set names are recorded, and the values are dropped here:
+// the endpoint needs one boolean, never the content.
+func (s *Server) SetFileSecrets(names map[string]string) {
+	s.fileSecretsMu.Lock()
+	defer s.fileSecretsMu.Unlock()
+	s.fileSecrets = make(map[string]string, len(names))
+	for name := range names {
+		s.fileSecrets[name] = ""
+	}
 }
 
 // Metrics exposes the server's Prometheus collector, for wiring that

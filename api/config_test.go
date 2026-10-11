@@ -164,3 +164,49 @@ func TestAdminConfigStartsAtMoves(t *testing.T) {
 		t.Fatalf("started_at %q is not this test's instant (off by %s)", body1.StartedAt, d)
 	}
 }
+
+// TestAdminConfigFileSecret (#137 C2): a secret the backend resolved
+// from a <NAME>_FILE value file is reported set with value
+// "(hidden, from file)" — the env does not name it, and reporting it
+// unset would make config show cry drift where the value matches. An
+// env-set secret stays plainly "(hidden)", an absent one stays unset,
+// and no resolved value ever reaches the wire (SetFileSecrets drops
+// them).
+func TestAdminConfigFileSecret(t *testing.T) {
+	t.Setenv("METRICS_TOKEN", "env-tok") // set in env: plainly hidden
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
+	srv.SetAdminToken("shh")
+	srv.SetFileSecrets(map[string]string{"ADMIN_TOKEN": "never-shown", "EVENTS_TOKEN": "also-not-shown"})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	resp, body := getAdminConfig(t, ts, "shh")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin token = %d, want 200", resp.StatusCode)
+	}
+	m := configByName(t, body)
+	if s := m["ADMIN_TOKEN"]; !s.Set || s.Value != "(hidden, from file)" {
+		t.Fatalf("ADMIN_TOKEN = %+v, want set, \u0022(hidden, from file)\u0022", s)
+	}
+	if s := m["EVENTS_TOKEN"]; !s.Set || s.Value != "(hidden, from file)" {
+		t.Fatalf("EVENTS_TOKEN = %+v, want set from its file too", s)
+	}
+	if s := m["METRICS_TOKEN"]; !s.Set || s.Value != "(hidden)" {
+		t.Fatalf("METRICS_TOKEN = %+v, want set in env, plainly hidden", s)
+	}
+	if s := m["LEASE_TOKEN"]; s.Set {
+		t.Fatalf("LEASE_TOKEN = %+v, want unset (not resolved from a file)", s)
+	}
+	for _, s := range body.Settings {
+		for _, leak := range []string{"never-shown", "also-not-shown", "env-tok"} {
+			if s.Value == leak {
+				t.Fatalf("%s value %q crosses the wire", s.Name, leak)
+			}
+		}
+	}
+	// The response keeps its shape: every known name, sorted.
+	if got := len(body.Settings); got != len(settings.Known) {
+		t.Fatalf("%d settings, want %d", got, len(settings.Known))
+	}
+}
