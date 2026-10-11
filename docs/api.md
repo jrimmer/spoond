@@ -404,6 +404,13 @@ the idle sweep, and the lease's stored value comes back on unpin),
 `preempted` (always `false`) and `pinned`
 (see [Memory take-back](#memory-take-back) and [Pins and the paused-release clock](operations.md#pins-and-the-paused-release-clock)).
 
+Every row also carries the lease's own size (3.1, #151): `vcpu`,
+`memory_mb` (what its VM runs with and what it is charged) and `disk_mb`
+(its disk allowance). A lease keeps its size for life: pause, resume,
+restart, clone, fork, restore and recovery all run it at the same size,
+even after its image is rebuilt at another size. The fields are omitted
+for an old lease whose image row is gone.
+
 A pinned lease's row adds `pinned_idle_since` (RFC 3339) once its last
 API activity passes `PINNED_IDLE_NOTICE_DAYS` (visibility only; cleared
 when activity returns). A lease that was ever automatically executed
