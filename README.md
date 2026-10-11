@@ -77,7 +77,12 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     `1`). Saves are idempotent by an `idempotency_key`, the `/run/secrets`
     files are scrubbed before the checkpoint, and a name keeps its last
     `SNAPSHOT_KEEP_VERSIONS` versions. `GET`/`DELETE
-    /api/named-snapshots/{name}[@v]` list, show and delete them. On the
+    /api/named-snapshots/{name}[@v]` list, show and delete them. An
+    owner may grant a name to another user
+    (`/api/named-snapshot-grants`), who starts from it with
+    `"snapshot_owner"`; only versions saved from a lease that never had
+    a secret can be shared, and a lease started from a snapshot can
+    restore back to it. On the
     source, spoond writes `/run/spoond/last-save`; on a lease started
     from a snapshot it writes `/run/spoond/lease-id`,
     `/run/spoond/generation` and `/run/spoond/started-from`, so a
@@ -199,7 +204,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.1.0 (2026-10-11) · GitHub` — with the
+line — `Spoond v3.2.0 (2026-10-11) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -274,6 +279,15 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.2: saturation and sharing.** New creates, clones and forks wait
+while the host's I/O or CPU pressure is high (`SATURATION_IO_FULL_PCT`,
+`SATURATION_CPU_SOME_PCT`); running leases are never held. An owner can
+grant a named snapshot to another user, but only a version saved from
+a lease that never had a secret; a lease started from a snapshot can
+restore back to it. A create that will expire carries a `Warning`
+header, `spoond doctor` checks the env files, and the dashboard shows
+each lease's size. No breaking changes.
 
 **v3.1: sizes and usage.** A lease's size is chosen per create (a
 preset, or vCPU and memory), no longer fixed by its image: warm sizes
@@ -454,7 +468,9 @@ snapshots (`MAX_NAMED_SNAPSHOTS`, `SNAPSHOT_KEEP_VERSIONS`), background jobs
 `MAX_EXEC_BODY_BYTES`, the runner's `RUNNER_ADMIT_WAIT_SECS` and
 `RUNNER_JOB_TIMEOUT`, `CRASH_TEST`, the
 orphan-build reaper (`ORPHAN_REAP`, default `dryrun`), and
-the lease sizes (`SIZE_PRESETS`, default
+the saturation gate (`SATURATION_IO_FULL_PCT`, default 20;
+`SATURATION_CPU_SOME_PCT`, default 75; new work waits while host
+pressure is over them), the lease sizes (`SIZE_PRESETS`, default
 `small=1:2048,medium=2:4096,large=4:8192,xlarge=8:16384`;
 `MAX_LEASE_VCPU`, default the host's cores; `MAX_LEASE_MEMORY_MB`,
 default 32768), the one paused-release clock (`PAUSED_RELEASE_DAYS`, default 30) and

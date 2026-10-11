@@ -10,6 +10,20 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-10-11
+
+3.2 makes a saturated host make new work wait, lets an owner share a
+secret-free named snapshot with another user, and makes leases that
+are about to expire say so. A create, clone or fork waits (`503
+capacity_wait`) while the host's I/O or CPU pressure is over its target;
+running leases are never held. A named snapshot saved from a lease that
+never had a secret can be granted to another user, who starts leases
+from it and may restore back to it. `spoond doctor` checks the env
+files for unknown and repeated keys, and the dashboard shows each
+lease's size. No breaking changes; the schema moves from 27 to 28.
+Every lease that exists before the upgrade counts as having had a
+secret, so a snapshot meant for sharing is saved from a new lease.
+
 ### Added
 
 - **`spoond doctor` checks the env files (#137).** Every `*.env` in `/etc/spoond` is read by key name: a key no spoond binary reads (a typo or a removed setting) or a key set twice is a warning. A test keeps the list of known settings equal to what the code reads.
