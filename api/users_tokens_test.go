@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,10 +16,20 @@ import (
 
 // newTokenTestServer builds a Server with an identity store, a
 // bootstrapped admin (token t-admin) and a plain user (token t-user).
-// Returns the handler, the identity store and the plain user.
-func newTokenTestServer(t *testing.T) (http.Handler, *identity.Store, *identity.User) {
+// Returns the handler, the identity store and the plain user. The log
+// goes to a buffer the test can assert on (a mint or revoke names the
+// token, never its secret).
+func newTokenTestServer(t *testing.T) (http.Handler, *identity.Store, *identity.User, *bytes.Buffer) {
 	t.Helper()
-	srv, ids := newTestServerWithIdentities(t)
+	svc, db, _ := newTestService(t)
+	ids, err := identity.NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetIdentities(ids)
+	srv := NewServer(svc, NewImageRegistry(db))
+	var logs bytes.Buffer
+	svc.log = log.New(&logs, "", 0)
 	h := srv.Handler()
 	if rec, body := doUsersReq(t, h, "POST", "/api/users", "legacy-tok", `{"name":"jason","fingerprints":["SHA256:fp-admin"],"token":"t-admin"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("bootstrap: %d %s", rec.Code, body)
@@ -27,7 +39,7 @@ func newTokenTestServer(t *testing.T) (http.Handler, *identity.Store, *identity.
 		t.Fatalf("alice create: %d %s", rec2.Code, rec2.Body.String())
 	}
 	alice := body2["user"].(map[string]any)
-	return h, ids, &identity.User{ID: alice["id"].(string), Name: "alice"}
+	return h, ids, &identity.User{ID: alice["id"].(string), Name: "alice"}, &logs
 }
 
 // mintNamed mints a named token over the HTTP API and returns the
@@ -52,7 +64,7 @@ func tokenSecret(body map[string]any) string {
 // (secret once), authenticate with it, list (no secret), revoke
 // (204), and the revoked secret stops authenticating.
 func TestTokensMintListRevoke(t *testing.T) {
-	h, ids, alice := newTokenTestServer(t)
+	h, ids, alice, _ := newTokenTestServer(t)
 	secret, body, status := mintNamed(t, h, "t-user", alice.ID, "ci", `"ttl_secs":0`)
 	if status != http.StatusCreated {
 		t.Fatalf("mint status %d: %v", status, body)
@@ -127,7 +139,7 @@ func TestTokensMintListRevoke(t *testing.T) {
 // TestTokensExpiryOverHTTP: a short-ttl token works, then stops
 // authenticating once its expiry passes.
 func TestTokensExpiryOverHTTP(t *testing.T) {
-	h, _, alice := newTokenTestServer(t)
+	h, _, alice, _ := newTokenTestServer(t)
 	secret, body, status := mintNamed(t, h, "t-user", alice.ID, "flash", `"ttl_secs":1`)
 	if status != http.StatusCreated {
 		t.Fatalf("mint: %d %v", status, body)
@@ -155,7 +167,7 @@ func TestTokensExpiryOverHTTP(t *testing.T) {
 // itself and an admin yes; another plain user 404; a legacy consumer
 // token 403; and the store's routes need an identity user for self.
 func TestTokensAuthMatrix(t *testing.T) {
-	h, _, alice := newTokenTestServer(t)
+	h, _, alice, _ := newTokenTestServer(t)
 	// A second plain user.
 	rec0, body0 := doUsersReq(t, h, "POST", "/api/users", "t-admin", `{"name":"mallory","fingerprints":["SHA256:fp-m"],"token":"t-mallory"}`)
 	if rec0.Code != http.StatusCreated {
@@ -225,7 +237,7 @@ func TestTokensAuthMatrix(t *testing.T) {
 // TestTokensMintBodyValidation covers the request shape: invalid JSON,
 // a missing name, a negative and an absurd ttl_secs.
 func TestTokensMintBodyValidation(t *testing.T) {
-	h, _, alice := newTokenTestServer(t)
+	h, _, alice, _ := newTokenTestServer(t)
 	for _, tt := range []struct {
 		desc, body string
 		code       int
@@ -259,7 +271,7 @@ func TestTokensMintBodyValidation(t *testing.T) {
 // TestTokensAdminManagesOtherUser: the admin mints for a plain user and
 // that user's new token works; the admin also revokes it.
 func TestTokensAdminManagesOtherUser(t *testing.T) {
-	h, _, alice := newTokenTestServer(t)
+	h, _, alice, _ := newTokenTestServer(t)
 	secret, body, status := mintNamed(t, h, "t-admin", alice.ID, "ops", `"ttl_secs":0`)
 	if status != http.StatusCreated {
 		t.Fatalf("admin mint: %d %v", status, body)
@@ -287,7 +299,7 @@ func TestTokensAdminManagesOtherUser(t *testing.T) {
 // TestTokensDefaultRevocable: revoking the "default" token takes away
 // the user's original single token; minted ones keep working.
 func TestTokensDefaultRevocable(t *testing.T) {
-	h, _, alice := newTokenTestServer(t)
+	h, _, alice, _ := newTokenTestServer(t)
 	// Find the default row's id (t-default).
 	_, body := doUsersReq(t, h, "GET", "/api/users/"+alice.ID+"/tokens", "t-user", "")
 	toks := body["tokens"].([]any)
@@ -325,7 +337,7 @@ func TestTokensDefaultRevocable(t *testing.T) {
 // TestTokensLastUsedTracked: authenticating with a named token stamps
 // its last_used_at in the listing.
 func TestTokensLastUsedTracked(t *testing.T) {
-	h, _, alice := newTokenTestServer(t)
+	h, _, alice, _ := newTokenTestServer(t)
 	secret, body, status := mintNamed(t, h, "t-user", alice.ID, "tracked", `"ttl_secs":0`)
 	if status != http.StatusCreated {
 		t.Fatalf("mint: %d", status)
@@ -362,4 +374,30 @@ func findTokenRow(t *testing.T, body map[string]any, tokenID string) map[string]
 	}
 	t.Fatalf("token %s not in listing: %v", tokenID, body)
 	return nil
+}
+
+// TestTokensLogsNameNotSecret: mint and revoke are logged with the
+// token's name and id, never its secret.
+func TestTokensLogsNameNotSecret(t *testing.T) {
+	h, _, alice, logs := newTokenTestServer(t)
+	secret, body, status := mintNamed(t, h, "t-user", alice.ID, "logged", `"ttl_secs":3600`)
+	if status != http.StatusCreated {
+		t.Fatalf("mint: %d", status)
+	}
+	mintLine := logs.String()
+	if !strings.Contains(mintLine, "logged") || !strings.Contains(mintLine, body["id"].(string)) {
+		t.Fatalf("mint log missing name/id: %q", mintLine)
+	}
+	if strings.Contains(mintLine, secret) {
+		t.Fatalf("mint log carries the secret: %q", mintLine)
+	}
+	logs.Reset()
+	rec, _ := doUsersReq(t, h, "DELETE", "/api/users/"+alice.ID+"/tokens/"+body["id"].(string), "t-user", "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke: %d", rec.Code)
+	}
+	revokeLine := logs.String()
+	if !strings.Contains(revokeLine, body["id"].(string)) || strings.Contains(revokeLine, secret) {
+		t.Fatalf("revoke log = %q (want id, no secret)", revokeLine)
+	}
 }
