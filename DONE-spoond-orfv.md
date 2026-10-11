@@ -29,7 +29,9 @@ whether the running backend has it — kept simple and read-only.
    `EnvironmentFile=` in listed order after it, so a file's value
    overrides the unit line and a later file overrides an earlier one
    (the order is pinned by `TestUnitEnvMergeOrder`). It then GETs
-   `<api>/api/admin/config` with the merged env's own `ADMIN_TOKEN`
+   `<api>/api/admin/config` — the base URL plus that path, pinned by
+   `TestRunFetchURL` (a first cut hit the bare base URL and read a 401
+   from the root's auth middleware) — with the merged env's own `ADMIN_TOKEN`
    (default api: the merged env's `BIND_ADDR`, else
    `https://127.0.0.1:8890`; TLS on a loopback address skips
    verification, matching how the drain hook reaches the local
@@ -81,6 +83,9 @@ whether the running backend has it — kept simple and read-only.
 - drift flag hardwired false — caught by the footer count.
 - unreachable exit flipped to 1 — caught by TestRunUnreachable.
 - raw secret printed in the table/JSON — caught by the leak-guards.
+- the `/api/admin/config` path dropped from the fetch URL (a
+  regression the earlier tests missed because they passed the full
+  endpoint to the fetcher directly) — caught by `TestRunFetchURL`.
 
 ## Gates
 
