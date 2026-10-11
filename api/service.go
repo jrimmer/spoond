@@ -1524,14 +1524,6 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		}
 		return substrate.Sandbox{}, err
 	}
-	if l != nil && l.ID != "pool" {
-		s.store.mu.Lock()
-		l.Start = "warm"
-		if coldBoot {
-			l.Start = "cold"
-		}
-		s.store.mu.Unlock()
-	}
 	// A substrate may mint the id rather than honour the requested one;
 	// track the returned id from here on so the caller's endCreatingSandbox
 	// matches and the sweep keys on the id the substrate reports.
@@ -1539,6 +1531,26 @@ func (s *Service) createSandbox(ctx context.Context, img store.ImageRow, b store
 		s.endCreatingSandbox(sandboxID)
 		sandboxID = sb.ID
 		s.beginCreatingSandbox(sandboxID)
+	}
+	if coldBoot {
+		// A cold boot restores no memory: the template's start command
+		// (spoond-guest-init: init hooks, the ready marker) never ran in
+		// this guest. Run it and wait for the image's ready check, as the
+		// template build did, before the lease gets the sandbox.
+		if ierr := s.coldBootInit(ctx, img, sb.ID); ierr != nil {
+			s.log.Printf("create: cold boot of %s for lease %s: %v; deleting it", sb.ID, l.ID, ierr)
+			s.deleteSandboxWithRetries(sb.ID, l.ID, "cold boot init failed")
+			s.deleteSandboxRow(sb.ID)
+			return substrate.Sandbox{}, fmt.Errorf("cold boot: %w", ierr)
+		}
+	}
+	if l != nil && l.ID != "pool" {
+		s.store.mu.Lock()
+		l.Start = "warm"
+		if coldBoot {
+			l.Start = "cold"
+		}
+		s.store.mu.Unlock()
 	}
 	// The create can take minutes on a saturated host. If the lease was
 	// released while this one was starting, the sandbox must not become
@@ -2211,6 +2223,58 @@ func (s *Service) warmSizeBuild(ctx context.Context, img store.ImageRow, vcpu, m
 		return store.BuildRow{}, nil, false
 	}
 	return b, release, true
+}
+
+// coldBootReadyTimeout bounds how long a cold-booted guest may take to
+// pass its image's ready check after its start command is launched: the
+// scylla image's init hook alone may take 150 s (a variable so tests can
+// shorten it).
+var coldBootReadyTimeout = 5 * time.Minute
+
+// guestInitFailedMarker is what spoond-guest-init touches when an init
+// hook fails (it then sleeps forever, never reaching ready).
+const guestInitFailedMarker = "/run/spoond-guest-failed"
+
+// coldBootInit runs the image's start command in a freshly cold-booted
+// guest, detached, then polls the image's ready command until it passes
+// (#151). A memory snapshot carries the start command's effects; a cold
+// boot of the root filesystem keeps only its disk writes, so processes
+// it starts (init hooks) and its ready marker under /run must be made
+// again. An image with no start command needs nothing.
+func (s *Service) coldBootInit(ctx context.Context, img store.ImageRow, sandboxID string) error {
+	if img.StartCmd == "" {
+		return nil
+	}
+	launch := "setsid nohup " + img.StartCmd + " </dev/null >/var/log/spoond-guest-init.log 2>&1 &"
+	res, err := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/sh", "-c", launch}, Timeout: 30 * time.Second})
+	if err != nil {
+		return fmt.Errorf("start command: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("start command exited %d: %s", res.ExitCode, tailStr(res.Stderr, 200))
+	}
+	if img.ReadyCmd == "" {
+		return nil
+	}
+	deadline := time.Now().Add(coldBootReadyTimeout)
+	for {
+		res, err := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/sh", "-c", img.ReadyCmd}, Timeout: 10 * time.Second})
+		if err == nil && res.ExitCode == 0 {
+			return nil
+		}
+		// A failed init hook never gets ready: fail now, not at the cap.
+		if f, ferr := s.sub.Exec(ctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/sh", "-c", "test -f " + guestInitFailedMarker}, Timeout: 10 * time.Second}); ferr == nil && f.ExitCode == 0 {
+			return fmt.Errorf("start command reported a failed init hook (%s; see /var/log/spoond-guest-init.log)", guestInitFailedMarker)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("not ready after %s (ready command %q)", coldBootReadyTimeout, img.ReadyCmd)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // startShape is the size createSandbox starts a VM at, and whether it
