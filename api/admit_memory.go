@@ -23,6 +23,16 @@ import (
 // resuming lease is suspended, so it is never its own victim; the
 // requester's own leases are skipped by memVictims.
 //
+// preemptMu is held across a take-back pause, which writes a whole
+// snapshot (about 9 s for a 4 GiB lease on sb, up to 35 s under I/O
+// load), so every admission on the box waits for it. That wait is
+// inherent rather than a lock artefact (spoond-kbqo): take-back runs
+// only when the request does not fit, and the paused lease's memory is
+// freed only when its snapshot completes, so no other admission could
+// be granted that memory sooner without taking it from the request
+// that paused for it. Answering the others at once instead would turn
+// a wait of seconds into a 503 with a 30 s Retry-After.
+//
 // On success admitMemory returns an undo function that gives the debit
 // back (creditNodeInfo) when the create or resume it admitted never
 // took hold: without it, for the rest of the cache TTL fits() reads
