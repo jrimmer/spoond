@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,4 +170,36 @@ func TestEnsureDiskRoomReleaseIdempotent(t *testing.T) {
 	if got := h.pending(); got != 0 {
 		t.Fatalf("pending = %d, want 0", got)
 	}
+}
+
+// The room check and its reservation are one step: with room for exactly
+// one request, concurrent requests reserve it once; the rest fall to
+// take-back (here nothing is reclaimable) and are refused.
+func TestEnsureDiskRoomConcurrentReservesOnce(t *testing.T) {
+	h := newDiskTBHarness(t, 1<<30)
+	// 100 MiB free, no reservation, no floor: room for one 60 MiB write.
+	h.tightBox(t, 100<<20, 0, "0")
+	const need = 60 << 20
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var releases []func()
+	start := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if rel, err := h.svc.ensureDiskRoom(context.Background(), "consumer-a", need); err == nil {
+				mu.Lock()
+				releases = append(releases, rel)
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if len(releases) != 1 {
+		t.Fatalf("%d concurrent requests reserved room for one, want exactly 1", len(releases))
+	}
+	releases[0]()
 }

@@ -84,6 +84,14 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 		// Class re-admission (#128 part 2), as for a resume: a
 		// demand-burst lease stays burst and re-passes the reserve; a
 		// guarantee-burst one may fall back to guaranteed.
+		// The running lease reserves its whole disk_mb (FS3): it must fit in
+		// usable snapshot disk, checked before memory so a memory take-back
+		// never pauses a lease for a request the disk then refuses.
+		diskRelease, derr := s.ensureDiskRoom(ctx, l.Owner, int64(l.DiskMB)*1024*1024)
+		if derr != nil {
+			return derr
+		}
+		defer diskRelease()
 		undo, err = s.admitMemory(ctx, l.Owner, img.MemoryMB)
 		if err != nil {
 			return err

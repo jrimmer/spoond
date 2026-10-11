@@ -324,6 +324,16 @@ Upgrading from 2.9? See [docs/upgrading-3.0.md](docs/upgrading-3.0.md).
 
 ### Fixed
 
+- **Disk take-back works.** It now finds a paused lease's pause build
+  (it was looked up by the wrong key, so no paused lease was ever
+  reclaimed), deletes that build at once instead of leaving it for the
+  hourly GC, and counts only bytes actually deleted. The room check and
+  its reservation are one step, so concurrent writes cannot share the
+  same free bytes. Restart, clone, fork, restore and recovery now check
+  usable snapshot disk for the lease's `disk_mb` like a create. A box
+  whose capacity is unknown, or a pass that already freed bytes, answers
+  `503 capacity_wait` instead of `box_full`.
+
 - **A refused fork batch leaves no take-back victim paused.** A fork
   admits its whole batch's memory once, before any child is created, so
   a refusal cannot leave an earlier child's take-back behind: the
