@@ -125,3 +125,21 @@ SIZE_PRESET=small=1:2048
 		t.Fatalf("duplicate = %v", dup)
 	}
 }
+
+// TestHideIfSecretValues: values that carry a secret without a telling
+// name are hidden — webhook lists and URLs with credentials or a query
+// string — while a plain URL or path still shows.
+func TestHideIfSecretValues(t *testing.T) {
+	for _, c := range []struct{ name, value, want string }{
+		{"NOTIFY_WEBHOOKS", "https://hooks.slack.com/services/T0/B0/xyz", "(hidden)"},
+		{"LLM_UPSTREAM_URL", "https://user:pw@llm.example.com/v1", "(hidden)"},
+		{"OTEL_PROM_URL", "http://127.0.0.1:19464/metrics?auth=abc", "(hidden)"},
+		{"LLM_UPSTREAM_URL", "https://llm.example.com/v1", "https://llm.example.com/v1"},
+		{"SPOOND_DB_PATH", "/var/lib/spoond/spoond.db", "/var/lib/spoond/spoond.db"},
+		{"BIND_ADDR", "0.0.0.0:8890", "0.0.0.0:8890"},
+	} {
+		if got := HideIfSecret(c.name, c.value); got != c.want {
+			t.Errorf("HideIfSecret(%s, %q) = %q, want %q", c.name, c.value, got, c.want)
+		}
+	}
+}

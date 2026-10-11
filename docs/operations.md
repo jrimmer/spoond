@@ -40,7 +40,8 @@ the backend unit's effective environment the way systemd does
 (`systemctl show <unit> -p EnvironmentFiles -p Environment`, the unit's
 `Environment=` lines first, then each env file in order — a file's
 assignment overrides the unit line, per systemd.exec(5)), masks every
-name carrying `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `HASH` or `SEED` to
+name carrying `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `HASH` or `SEED`,
+`NOTIFY_WEBHOOKS`, or a URL with credentials or a query string to
 `(hidden)`, and prints NAME / VALUE / SOURCE / RUNNING. SOURCE is the
 file (or `unit Environment=`, or `default`) the value came from;
 RUNNING compares against the running backend's `GET /api/admin/config`,

@@ -15,7 +15,8 @@ summarised from README "Status".
 - `GET /api/admin/config` (#137): read-only echo of the backend's
   environment — every `settings.Known` name with whether it is set and
   its value, masked to `(hidden)` for any name carrying `TOKEN`, `KEY`,
-  `SECRET`, `PASSWORD`, `HASH` or `SEED`, plus the process's
+  `SECRET`, `PASSWORD`, `HASH` or `SEED`, for `NOTIFY_WEBHOOKS`, and for
+  any value holding a URL with credentials or a query string, plus the process's
   `started_at` (RFC3339) — so an operator can see what the running
   backend was started with. Admin auth like the other `/api/admin`
   routes.
