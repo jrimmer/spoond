@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /api/usage` and `GET /api/users/me` report the caller's lease counts.** A `leases` object beside `share` gives the owner's running, paused, pinned and lost lease counts plus how many background jobs those leases run (#140 U1).
+
 ## [3.0.0] - 2026-10-10
 
 3.0 replaces guaranteed and burst classes, preemption, holds and

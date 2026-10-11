@@ -95,8 +95,9 @@ func (s *Server) handleUsersMe(w http.ResponseWriter, r *http.Request) {
 	}
 	share, _ := s.svc.fairShareFor(r.Context(), u.ID)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user":  toUserView(u, s.svc.usedMiB(u.ID)),
-		"share": share,
+		"user":   toUserView(u, s.svc.usedMiB(u.ID)),
+		"share":  share,
+		"leases": s.svc.leaseCounts(u.ID),
 	})
 }
 
@@ -111,7 +112,10 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no usage for this owner")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"share": share})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"share":  share,
+		"leases": s.svc.leaseCounts(owner),
+	})
 }
 
 // handleUsersByName resolves a username to a minimal identity (id +

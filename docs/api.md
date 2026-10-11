@@ -2166,8 +2166,9 @@ never exposed. `used_mib` is `0` on a fresh user.
 Self-service: `{"user": {id, name, kind, admin, fingerprints,
 created_at, max_ttl, used_mib}, "share": {owner, name, slice_pct,
 capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
-used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}}` (#128,
-#145 FS1).
+used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}, "leases":
+{running, paused, pinned, lost, running_jobs}}` (#128, #145 FS1, #140
+U1).
 `used_mib` is the user's current memory charge — the sum of `memory_mb`
 over their running leases (suspended ones hold no hugepages).
 `max_leases`, `guaranteed_mib`, `max_mib` and `max_kept_bytes` are no
@@ -2175,6 +2176,10 @@ longer returned (3.0). `share` is the
 caller's fair-share slice and usage; see
 [Fair shares](#fair-shares) below. `capacity_known` is `false` when the
 box totals were not readable, so the slices are not computed yet.
+`leases` counts the caller's leases from the in-memory map: `running`
+(including recovered), `paused`, `pinned`, `lost`, and `running_jobs`
+the background jobs those leases run (#140 U1). A pinned running lease
+counts in both `running` and `pinned`.
 
 ### `GET /api/users/{id}` — one owner's usage (admin only)
 
@@ -2187,7 +2192,8 @@ non-admin caller.
 
 Any authenticated caller. `{"share": {owner, name, slice_pct,
 capacity_known, memory {slice_mib, used_mib}, disk {slice_bytes,
-used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}}`.
+used_bytes, paused_bytes, kept_bytes, named_bytes}, ratio}, "leases":
+{running, paused, pinned, lost, running_jobs}}`.
 Self-scoped: a legacy consumer
 token also has an owner, so its usage is available; a caller whose
 owner somehow does not exist answers `404`.
