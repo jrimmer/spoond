@@ -10,6 +10,10 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Usage history (#140 U4).** A sampler writes one `usage_samples` row per owner every 15 minutes from the fair-share snapshot and prunes rows older than 7 days; `GET /api/usage/history?hours=N` (default 24, cap 168) returns the caller's own samples oldest first. Migration 0024 adds the `usage_samples` table (additive, 23 → 24): the deploy window runs the new binary against a database that the old binary can still read.
+
 ## [3.0.0] - 2026-10-10
 
 3.0 replaces guaranteed and burst classes, preemption, holds and
