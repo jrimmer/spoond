@@ -182,9 +182,10 @@ func envFileDir() string {
 // exists, ignored in silence otherwise — keys set twice, where the
 // last line silently wins (#137), and the <SECRET>_FILE value files
 // every secret setting may be moved into (#137 C2): a missing or
-// unreadable one is the error the backend will refuse to start with
-// (FAIL), and a file readable by group or others (a mode past 0600) is
-// the leak the file form exists to avoid (WARN).
+// unreadable one is noted (the backend will refuse to start with it),
+// and a file readable by group or others (a mode past 0600) is the leak
+// the file form exists to avoid — both WARN (see "Moving a secret to a
+// file" in docs/operations.md).
 func checkEnvFiles(dir string) []checkResult {
 	paths, _ := filepath.Glob(filepath.Join(dir, "*.env"))
 	var out []checkResult
@@ -205,15 +206,13 @@ func checkEnvFiles(dir string) []checkResult {
 			notes = append(notes, "set more than once (the last wins): "+strings.Join(dup, ", "))
 		}
 		notes = append(notes, fileNotes...)
+		// Warnings only (the task's shape for the _FILE checks, and every
+		// other note here): an unreadable value file FAILs nothing by
+		// itself — the backend's own startup refusal is the hard failure,
+		// and doctor reports the condition for the operator to fix.
 		status := "PASS"
 		if len(notes) > 0 {
 			status = "WARN"
-		}
-		for _, n := range fileNotes {
-			if strings.Contains(n, "cannot be read") {
-				status = "FAIL"
-				break
-			}
 		}
 		if status == "PASS" {
 			notes = []string{"every key is a known setting"}
@@ -233,9 +232,12 @@ func checkEnvFiles(dir string) []checkResult {
 // EnvironmentFile line (config show's parseEnvLine shape: quotes strip,
 // `export ` tolerated), because systemd strips quotes and the check
 // would otherwise stat a quoted path and fail a valid file. An empty
-// path is noted; a file that cannot be read at all is the backend's
-// startup failure, so the env file FAILs on it; a merely loose mode is
-// WARN — the process still starts.
+// path is noted; a file that cannot be read at all is noted too (the
+// backend will refuse to start, so the note says what will fail); a
+// merely loose mode is noted (the process still starts). Every note
+// lands as a WARN in the table (checkEnvFiles) — the task's severity
+// for this check — leaving the exit-code FAILs to the connectivity
+// checks.
 func checkFileSecrets(content string) []string {
 	var notes []string
 	sc := bufio.NewScanner(strings.NewReader(content))
@@ -267,7 +269,7 @@ func checkFileSecrets(content string) []string {
 		}
 		info, err := os.Stat(value)
 		if err != nil {
-			notes = append(notes, key+": "+value+" cannot be read: "+err.Error())
+			notes = append(notes, key+": "+value+" is missing or unreadable ("+err.Error()+") — the backend refuses to start")
 			continue
 		}
 		if perm := info.Mode().Perm(); perm&0o077 != 0 {

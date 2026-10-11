@@ -325,9 +325,11 @@ func TestCheckEnvFiles(t *testing.T) {
 // TestCheckFileSecrets (#137 C2): every <SECRET>_FILE= line in an env
 // file is checked against the file it names — present, owner-only
 // (0600 or stricter). A group-readable value file is a WARN naming the
-// variable and path (never a value); a missing one FAILs the env file
-// (the backend will refuse to start); a non-secret's _FILE name is left
-// to the unknown-key check; a clean file keeps the PASS.
+// variable and path (never a value); a missing or unreadable one notes
+// the backend's start refusal and WARNs too (the task's severity for
+// this check; the backend's own startup is the hard failure); a
+// non-secret's _FILE name is left to the unknown-key check; a clean
+// file keeps the PASS.
 func TestCheckFileSecrets(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good-token")
@@ -354,7 +356,7 @@ func TestCheckFileSecrets(t *testing.T) {
 	if !strings.Contains(notes[0], "METRICS_TOKEN_FILE") || !strings.Contains(notes[0], "mode 0640") || strings.Contains(notes[0], "shh") {
 		t.Fatalf("loose note = %q", notes[0])
 	}
-	if !strings.Contains(notes[1], "EVENTS_TOKEN_FILE") || !strings.Contains(notes[1], "cannot be read") {
+	if !strings.Contains(notes[1], "EVENTS_TOKEN_FILE") || !strings.Contains(notes[1], "missing or unreadable") || !strings.Contains(notes[1], "refuses to start") {
 		t.Fatalf("missing note = %q", notes[1])
 	}
 
@@ -374,8 +376,9 @@ func TestCheckFileSecrets(t *testing.T) {
 		t.Fatalf("quoted-path notes = %v, want only the loose mode warning", notes)
 	}
 
-	// Through checkEnvFiles: the missing file FAILs the whole env file,
-	// the mode warning rides along, and a clean one stays PASS.
+	// Through checkEnvFiles: the missing file and the loose mode both
+	// WARN (the task's severity for this check), and a clean one stays
+	// PASS.
 	goodEnv := filepath.Join(dir, "good.env")
 	if err := os.WriteFile(goodEnv, []byte("ADMIN_TOKEN_FILE="+good+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -391,7 +394,7 @@ func TestCheckFileSecrets(t *testing.T) {
 	if g := got["config: good.env"]; g.status != "PASS" {
 		t.Fatalf("good.env = %+v, want PASS", g)
 	}
-	if b := got["config: bad.env"]; b.status != "FAIL" || !strings.Contains(b.detail, "cannot be read") || !strings.Contains(b.detail, "mode 0640") {
-		t.Fatalf("bad.env = %+v, want FAIL naming both files with the warning riding along", b)
+	if b := got["config: bad.env"]; b.status != "WARN" || !strings.Contains(b.detail, "missing or unreadable") || !strings.Contains(b.detail, "mode 0640") {
+		t.Fatalf("bad.env = %+v, want WARN naming both files", b)
 	}
 }

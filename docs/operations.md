@@ -291,7 +291,7 @@ set -a; . /etc/spoond/backend.env; set +a
 |---|---|
 | `config: CONSUMER_TOKENS` | FAIL when unset (the backend refuses to start) |
 | `config: BIND_ADDR` | WARN when unset (defaults to `127.0.0.1:8890`) |
-| `config: <env file>` | WARN on a key no spoond binary reads, or one set twice (the last wins); the `<SECRET>_FILE=` lines are checked directly: a missing value file FAILs (the backend refuses to start), a file readable by group or others WARNs — see [Moving a secret to a file](#moving-a-secret-to-a-file) |
+| `config: <env file>` | WARN on a key no spoond binary reads, or one set twice (the last wins); the `<SECRET>_FILE=` lines are checked directly: a missing value file warns (the backend will refuse to start — that is where the failure shows), so does a file readable by group or others — see [Moving a secret to a file](#moving-a-secret-to-a-file) |
 | `orchestrator: /health` | `GET http://$E2B_GRPC_ADDR/health` must answer `"status":"healthy"` |
 | `orchestrator: node info` | status, running sandboxes and free hugepages; WARN when the status is not `healthy` or free hugepage memory is below 4 GiB |
 | `registry: /v2/` | the local registry answers `200` |
