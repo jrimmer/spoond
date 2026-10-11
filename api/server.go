@@ -949,9 +949,16 @@ const drainRetryAfterSecs = 30
 // handleCreate grants a new sandbox lease.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Image      string   `json:"image"`
-		TTL        int      `json:"ttl"` // seconds
-		MemoryMiB  int      `json:"memory_mib"`
+		Image     string `json:"image"`
+		TTL       int    `json:"ttl"`        // seconds
+		MemoryMiB int    `json:"memory_mib"` // alias of memory_mb
+		// Size (#151): a preset name (GET /api/sizes), or memory_mb and
+		// vcpu (either alone; the image default fills the other). The
+		// image default when none is given. A size with no warm build
+		// cold-boots (start "cold").
+		Size       string   `json:"size"`
+		MemoryMB   int      `json:"memory_mb"`
+		VCPU       int      `json:"vcpu"`
 		Network    string   `json:"network"`  // ignored
 		InitCmd    string   `json:"init_cmd"` // ignored
 		Persistent bool     `json:"persistent"`
@@ -1013,6 +1020,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// owner-scoped before anything else. The image is the snapshot's
 	// image; an explicit image must match it.
 	var start *snapshotStart
+	// memory_mib is the old name of memory_mb (#151): either may be
+	// sent; both must then agree.
+	if req.MemoryMiB != 0 {
+		if req.MemoryMB != 0 && req.MemoryMB != req.MemoryMiB {
+			writeErrorCode(w, http.StatusBadRequest, "invalid_size", "memory_mb and memory_mib disagree")
+			return
+		}
+		req.MemoryMB = req.MemoryMiB
+	}
+	sizeVCPU, sizeMemoryMB := 0, 0
 	if req.Snapshot != "" {
 		owner := ownerFrom(r.Context())
 		var serr *namedSnapshotError
@@ -1099,23 +1116,24 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
 			return
 		}
-		// Memory is fixed per image (D16): a snapshot restores with its
-		// build's RAM, so a per-lease memory override is impossible.
-		if req.MemoryMiB != 0 {
+		// The lease's size (#151 Z4): a preset or vcpu/memory_mb,
+		// checked against the image and the host's limits.
+		if req.Size != "" || req.VCPU != 0 || req.MemoryMB != 0 {
 			img, err := s.svc.db.GetImage(r.Context(), req.Image)
 			if err != nil {
 				writeError(w, http.StatusNotFound, "unknown image tag: "+req.Image)
 				return
 			}
-			if req.MemoryMiB != img.MemoryMB {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf(
-					"memory is fixed per image on this backend: %s has %d MiB", req.Image, img.MemoryMB))
+			sizeVCPU, sizeMemoryMB, err = s.requestedSize(r.Context(), img, req.Size, req.VCPU, req.MemoryMB)
+			if err != nil {
+				writeErrorCode(w, http.StatusBadRequest, "invalid_size", err.Error())
 				return
 			}
 		}
-	} else if req.MemoryMiB != 0 && req.MemoryMiB != start.row.MemoryMB {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf(
-			"memory is fixed by the snapshot: %s@%d has %d MiB", start.row.Name, start.row.Version, start.row.MemoryMB))
+	} else if req.Size != "" || req.VCPU != 0 || (req.MemoryMB != 0 && req.MemoryMB != start.row.MemoryMB) {
+		// A named snapshot resumes at the size it was saved at.
+		writeErrorCode(w, http.StatusBadRequest, "invalid_size", fmt.Sprintf(
+			"a snapshot keeps its own size: %s@%d runs %d MiB", start.row.Name, start.row.Version, start.row.MemoryMB))
 		return
 	}
 	// Cap the requested TTL in seconds BEFORE converting to a duration,
@@ -1144,6 +1162,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		pinned:        req.Pinned,
 		createSecrets: secrets, exposePorts: expose,
 		snapshot: start,
+		vcpu:     sizeVCPU, memoryMB: sizeMemoryMB,
 	}
 	grantStart := time.Now()
 	lease, err := s.svc.grantLease(r.Context(), leaseReq)
@@ -1300,6 +1319,22 @@ func (s *Server) writeCreatedLease(w http.ResponseWriter, r *http.Request, lease
 	if waited > 0 {
 		body["waited_ms"] = waited.Milliseconds()
 	}
+	// The lease's size and how it started (#151): "warm" resumed a
+	// memory snapshot, "cold" booted at a size no warm build has.
+	s.svc.store.mu.Lock()
+	if lease.VCPU > 0 {
+		body["vcpu"] = lease.VCPU
+	}
+	if lease.MemoryMB > 0 {
+		body["memory_mb"] = lease.MemoryMB
+	}
+	if lease.DiskMB > 0 {
+		body["disk_mb"] = lease.DiskMB
+	}
+	if lease.Start != "" {
+		body["start"] = lease.Start
+	}
+	s.svc.store.mu.Unlock()
 	writeJSON(w, http.StatusCreated, body)
 }
 

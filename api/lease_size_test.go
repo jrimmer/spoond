@@ -147,27 +147,150 @@ func TestSnapshotBuildsRecordTheLeaseSize(t *testing.T) {
 	}
 }
 
-// TestWarmRestartRestampsSize (#151 Z1): a non-persistent lease's warm
-// restart boots the image's current build and is stamped with its size.
-func TestWarmRestartRestampsSize(t *testing.T) {
+// TestRestartKeepsLeaseSize (#151 Z4): after the image is rebuilt at
+// another size, a restart (warm of a non-persistent lease, or cold) of a
+// lease created at the default size follows the image's new default and
+// starts warm, as before 3.1; a lease created at a chosen size keeps it
+// and cold-boots, since no build of that size is current.
+func TestRestartKeepsLeaseSize(t *testing.T) {
+	cases := []struct {
+		name, body, mode string
+		vcpu, mem        int
+		start            string
+	}{
+		{"unsized warm", `{"image":"mid","ttl":600}`, "warm", 4, 2048, "warm"},
+		{"unsized cold", `{"image":"mid","ttl":600}`, "cold", 4, 2048, "warm"},
+		{"sized warm", `{"image":"mid","ttl":600,"memory_mb":1536}`, "warm", 2, 1536, "cold"},
+		{"sized cold", `{"image":"mid","ttl":600,"memory_mb":1536}`, "cold", 2, 1536, "cold"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024})
+			svc := srv.svc
+			ctx := context.Background()
+			owner := ownerIDFor(t, h, tok)
+			rec, body := createSandboxBody(t, h, tok, c.body)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+			}
+			id := body["id"].(string)
+			regrowImage(t, svc.db, "mid", 4, 2048, 10240)
+			if _, err := svc.restart(ctx, owner, id, c.mode); err != nil {
+				t.Fatalf("restart: %v", err)
+			}
+			l := svc.lookup(uid, id)
+			svc.store.mu.Lock()
+			v, m, start := l.VCPU, l.MemoryMB, l.Start
+			svc.store.mu.Unlock()
+			if v != c.vcpu || m != c.mem || start != c.start {
+				t.Fatalf("restarted lease = %d/%d start %q, want %d/%d %s", v, m, start, c.vcpu, c.mem, c.start)
+			}
+			req := svc.sub.(*testSub).LastCreate()
+			if req.FilesystemBoot != (c.start == "cold") || int(req.VCPU) != c.vcpu || int(req.MemoryMB) != c.mem {
+				t.Fatalf("create request = filesystem_boot %v %d/%d", req.FilesystemBoot, req.VCPU, req.MemoryMB)
+			}
+			if got := svc.usedMiB(owner); got != c.mem {
+				t.Fatalf("used_mib = %d, want %d", got, c.mem)
+			}
+		})
+	}
+}
+
+// TestSnapshotStartsNeverColdBoot (#151 Z4): only a template build may
+// cold-boot. A restore from a checkpoint build starts with resume=false,
+// yet must resume its memory snapshot at the build's size even when the
+// lease's stamp says otherwise — a cold boot would lose the guest's
+// memory.
+func TestSnapshotStartsNeverColdBoot(t *testing.T) {
 	srv, h, tok, uid := newMemQuotaServer(t, map[string]int{"mid": 1024})
 	svc := srv.svc
 	ctx := context.Background()
-	owner := ownerIDFor(t, h, tok)
-	rec, body := createSandboxBody(t, h, tok, `{"image":"mid","ttl":600}`)
+	rec, body := createPersistentAs(t, h, tok, "mid")
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
-	id := body["id"].(string)
-	regrowImage(t, svc.db, "mid", 4, 2048, 10240)
-	if _, err := svc.restart(ctx, owner, id, "warm"); err != nil {
-		t.Fatalf("restart: %v", err)
+	l := svc.lookup(uid, body["id"].(string))
+	b, err := svc.checkpointLease(ctx, l)
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
 	}
-	l := svc.lookup(uid, id)
 	svc.store.mu.Lock()
-	v, m := l.VCPU, l.MemoryMB
+	l.VCPU, l.MemoryMB = 6, 3072 // a stamp that disagrees with the build
 	svc.store.mu.Unlock()
-	if v != 4 || m != 2048 {
-		t.Fatalf("warm-restarted lease size = %d/%d, want the current build's 4/2048", v, m)
+	if err := svc.restore(ctx, l, b); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	req := svc.sub.(*testSub).LastCreate()
+	if req.FilesystemBoot || req.VCPU != 2 || req.MemoryMB != 1024 {
+		t.Fatalf("restore create = filesystem_boot %v %d/%d, want a resume at the build's 2/1024", req.FilesystemBoot, req.VCPU, req.MemoryMB)
+	}
+}
+
+// TestGrantAtRequestedSize (#151 Z4): a grant at a size no build has
+// cold-boots the image's current build at that size, is stamped and
+// charged with it, reports start "cold", and a default-size grant still
+// starts warm.
+func TestGrantAtRequestedSize(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	seedImage(t, db, "mid", 1024)
+	ctx := context.Background()
+
+	l, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, vcpu: 4, memoryMB: 3072})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	req := sub.LastCreate()
+	if !req.FilesystemBoot || req.VCPU != 4 || req.MemoryMB != 3072 {
+		t.Fatalf("create = filesystem_boot %v %d/%d, want a cold boot at 4/3072", req.FilesystemBoot, req.VCPU, req.MemoryMB)
+	}
+	svc.store.mu.Lock()
+	v, m, start := l.VCPU, l.MemoryMB, l.Start
+	svc.store.mu.Unlock()
+	if v != 4 || m != 3072 || start != "cold" {
+		t.Fatalf("lease = %d/%d start %q, want 4/3072 cold", v, m, start)
+	}
+	svc.store.mu.Lock()
+	used := svc.usedMiBLocked("alice")
+	svc.store.mu.Unlock()
+	if used != 3072 {
+		t.Fatalf("charged = %d, want 3072", used)
+	}
+
+	// Memory alone: vCPU stays the image default.
+	l2, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, memoryMB: 2048})
+	if err != nil {
+		t.Fatalf("grant memory only: %v", err)
+	}
+	if l2.VCPU != 2 || l2.MemoryMB != 2048 || l2.Start != "cold" {
+		t.Fatalf("memory-only lease = %d/%d %q, want 2/2048 cold", l2.VCPU, l2.MemoryMB, l2.Start)
+	}
+
+	// The image default is warm.
+	l3, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, vcpu: 2, memoryMB: 1024})
+	if err != nil {
+		t.Fatalf("grant default: %v", err)
+	}
+	if req := sub.LastCreate(); req.FilesystemBoot || l3.Start != "warm" {
+		t.Fatalf("default-size grant: filesystem_boot %v start %q, want warm", req.FilesystemBoot, l3.Start)
+	}
+}
+
+// TestNamedSnapshotRecordsLeaseSize (#151 Z4): a named snapshot of a
+// lease running at a custom size records that size, not its root
+// template build's, so a start from it is charged what it resumes at.
+func TestNamedSnapshotRecordsLeaseSize(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "mid", 1024)
+	ctx := context.Background()
+	l, err := svc.grantLease(ctx, leaseRequest{owner: "alice", image: "mid", ttl: time.Hour, persistent: true, memoryMB: 3072})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	row, _, nerr := svc.saveNamedSnapshot(ctx, l, "big", "", 0)
+	if nerr != nil {
+		t.Fatalf("save: %v", nerr)
+	}
+	if row.MemoryMB != 3072 {
+		t.Fatalf("named snapshot memory_mb = %d, want the lease's 3072", row.MemoryMB)
 	}
 }

@@ -480,8 +480,9 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 
 	// The warm sizes (#151): one more template build per preset from the
 	// same digest. The previous warm builds hold the previous image, so
-	// they stop being served first; until its new build is ready, a
-	// preset cold-boots from the current build. A preset left out of
+	// their rows go as soon as the new default is current (a create in
+	// the moment between may still start from one); until its new build
+	// is ready, a preset cold-boots from the current build. A preset left out of
 	// warm_sizes stays out, and the GC reclaims its old build.
 	if err := db.DeleteImageSizesExcept(ctx, img.Name, nil); err != nil {
 		return err

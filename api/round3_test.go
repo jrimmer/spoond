@@ -85,6 +85,7 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`ALTER TABLE leases DROP COLUMN paused_at`,
 			`ALTER TABLE leases DROP COLUMN pinned`,
 			`ALTER TABLE leases DROP COLUMN disk_mb`,
+			`ALTER TABLE leases DROP COLUMN sized`,
 			`ALTER TABLE leases DROP COLUMN vcpu`,
 			`DROP TABLE IF EXISTS usage_samples`,
 			`DROP TABLE IF EXISTS image_sizes`,
