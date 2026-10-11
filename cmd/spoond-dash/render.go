@@ -20,7 +20,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jrimmer/spoond/v3/grid"
 )
@@ -47,18 +46,28 @@ const (
 // this set.
 const Extra = "✓✗·═┄■∞⭘" + stateGlyphs
 
-// stateGlyphs are the leases panel's run-state and pin glyphs: ▶ ‖ for
-// the states with one of their own, ◆ for the pin mark that leads the
-// holder column.
+// stateGlyphs are the leases panel's glyphs: ▶ ‖ ■ ⭘ for the run states
+// and ◆ the pin mark beside the state glyph.
 const stateGlyphs = "▶‖◆"
+
+// stateCell is the leases table's state column: two glyph cells — the
+// run-state glyph, then ◆ on a pinned lease or a space — plus the
+// separator cell the columns share. The words behind the glyphs live in
+// the legend line under the table.
+const stateCell = 3
+
+// pinMark is the pinned-lease glyph shown as the state cell's second
+// cell; an unpinned lease draws a space there.
+const pinMark = "◆"
 
 // glyphs is the full set every renderer checks against: the grid
 // package's own glyphs plus the dashboard's extras.
 func glyphs() string { return grid.Glyphs + Extra }
 
 // stateGlyph names a lease's run state: ▶ running, ‖ suspended,
-// ■ lost, ⭘ recovered (which acts like running). A pin is not a state:
-// it marks the holder column (◆).
+// ■ lost, ⭘ recovered (which acts like running). The glyph carries the
+// state whole — the words live in the legend under the table. A pin is
+// not a state: it is the state cell's second glyph (◆).
 func stateGlyph(r LeaseRow) rune {
 	switch r.State {
 	case "lost":
@@ -72,8 +81,17 @@ func stateGlyph(r LeaseRow) rune {
 	}
 }
 
-// stateGlyphStyle is the style a lease's glyph and state are drawn in.
+// stateGlyphStyle is the style the state glyph is drawn in. The run
+// states keep their colours (running/recovered ok, suspended warn, lost
+// bad); the suspend reason recolours a suspended lease's glyph: taken
+// back warn, idle-suspended dim, any other suspend warn.
 func stateGlyphStyle(r LeaseRow) string {
+	switch {
+	case r.TakenBack:
+		return "warn"
+	case r.IdleSuspended:
+		return "dim"
+	}
 	switch r.State {
 	case "lost":
 		return "bad"
@@ -1454,40 +1472,41 @@ type leaseCols struct {
 }
 
 // leaseLayout picks the leases panel's column layout for width w and the
-// rows actually shown. At the wide frame the base widths are the
-// mockup's (id(11) image(16) owner(10) state(19) access(11) age(7)
-// left(7)) with size(9) after the image; below 104 the flexible clamps give. Either way the columns
-// shrink to their visible content and the slack lands on owner and
+// rows actually shown. The state column is a fixed three cells (two
+// glyph cells plus the separator) at every width. The other columns'
+// base widths: at the wide frame the mockup's (id(11) image(16)
+// owner(10) access(11) age(7) left(7)) with size(9) after the image;
+// below 104 the flexible clamps give. Either way the columns
+// shrink to their visible content and the slack lands on owner then
 // holder.
 func leaseLayout(w int, rows []LeaseRow) leaseCols {
 	// Header widths (with the trailing separator cell): the least a
 	// column may shrink to, so a header always keeps a gap after it.
 	const (
-		hID, hImg, hSize, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 5, 6, 6, 7, 5, 7
+		hID, hImg, hSize, hOwn, hSt, hPol, hLeft, hHold = 3, 6, 5, 6, 3, 7, 5, 7
 	)
-	// Base widths before content fitting: the widest the non-owner
-	// columns ever get.
-	var idW, imgW, sizeW, ownW, stW, polW, leftW int
+	// Base widths before content fitting: the widest the columns ever
+	// get. The state column holds two glyph cells and a separator, fixed.
+	var idW, imgW, sizeW, ownW, polW, leftW int
+	stW := stateCell
 	if w >= maxW {
-		idW, imgW, sizeW, ownW, stW, polW, leftW = 11, 16, 9, 10, 19, 11, 7
+		idW, imgW, sizeW, ownW, polW, leftW = 11, 16, 9, 10, 11, 7
 	} else {
 		idW = clamp(w/10, 6, 12)
 		imgW = clamp(w/7, 8, 17)
 		sizeW = clamp(w/12, 6, 9)
 		ownW = clamp(w/12, 5, 10)
-		stW = clamp(w/7, 6, 17)
 		polW = clamp(w/14, 5, 12)
 		leftW = clamp(w/12, 4, 9)
 	}
 	// Content-fit each column to what the rows show: never narrower than
 	// its header (so a header always keeps a gap after it), never wider
 	// than its base (a value longer than the base still truncates).
-	cID, cImg, cSize, cOwn, cSt, cPol, cLeft := leaseValueWidths(rows)
+	cID, cImg, cSize, cOwn, cPol, cLeft := leaseValueWidths(rows)
 	idW = max(hID, min(idW, cID))
 	imgW = max(hImg, min(imgW, cImg))
 	sizeW = max(hSize, min(sizeW, cSize))
 	ownW = max(hOwn, min(ownW, cOwn))
-	stW = max(hSt, min(stW, cSt))
 	polW = max(hPol, min(polW, cPol))
 	leftW = max(hLeft, min(leftW, cLeft))
 
@@ -1516,37 +1535,33 @@ func leaseLayout(w int, rows []LeaseRow) leaseCols {
 	return c
 }
 
-// leaseValueWidths is how wide each non-holder column must be to draw the
-// rows' values whole, each including its trailing separator cell. The
-// state adds cells for its glyph, the space and the trailing separator;
-// the access and size columns use their full labels. A column's own
-// header is a floor, applied by the caller.
-func leaseValueWidths(rows []LeaseRow) (id, img, size, own, st, pol, left int) {
+// leaseValueWidths is how wide each flexible non-holder column must be
+// to draw the rows' values whole, each including its trailing separator
+// cell. The state column is not among them: its two glyph cells are the
+// fixed width (stateCell, separator included). The access and size
+// columns use their full labels. A column's own header is a floor,
+// applied by the caller.
+func leaseValueWidths(rows []LeaseRow) (id, img, size, own, pol, left int) {
 	for _, r := range rows {
 		id = max(id, len([]rune(sanitize(r.ID)))+1)
 		img = max(img, len([]rune(sanitize(r.Image)))+1)
 		size = max(size, len([]rune(sizeWords(r)[0]))+1)
 		own = max(own, len([]rune(sanitize(r.Owner)))+1)
-		st = max(st, len([]rune(stateWords(r)[0]))+3)
 		pol = max(pol, len([]rune(policyWords(r.Policy)[0]))+1)
 		left = max(left, len([]rune(leaseLeft(r)))+1)
 	}
-	return id, img, size, own, st, pol, left
+	return id, img, size, own, pol, left
 }
 
-// leaseLegend is the dim line under the leases table that explains the
-// pinned column's mark; it is drawn only when a shown row is pinned.
-const leaseLegend = "◆ pinned"
+// leaseLegend is the dim line under the leases table that spells the
+// state glyphs and the pin out; it is drawn whenever the table has rows
+// (the state cell itself carries only the glyphs).
+const leaseLegend = "▶ running ‖ suspended ⭘ recovered ■ lost ◆ pinned"
 
-// hasLeaseLegend reports whether any shown lease is pinned, so the
-// legend line belongs under the table.
+// hasLeaseLegend reports whether the leases table shows rows, so the
+// legend line belongs under it.
 func (l *layout) hasLeaseLegend() bool {
-	for _, r := range l.shownRows() {
-		if r.Pinned {
-			return true
-		}
-	}
-	return false
+	return len(l.shownRows()) > 0
 }
 
 // shownRows is the leases table's rows after the row cap.
@@ -1563,10 +1578,8 @@ func (l *layout) leasesH() int {
 	if n == 0 {
 		return 4 // title + header + the "no live leases" row (+ frame)
 	}
-	if l.hasLeaseLegend() {
-		return 4 + n // title + header + rows + the legend line
-	}
-	return 3 + n // title + header + rows (+ frame handled by panel)
+	// The legend line sits under the table whenever rows are shown.
+	return 4 + n // title + header + rows + the legend line
 }
 
 // maxLeaseRows bounds the leases panel: at least eight rows even at the
@@ -1592,10 +1605,11 @@ func ellipsize(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// leases panel: id, image, size (memory/vCPUs), owner, run state with its glyph, policy,
+// leases panel: id, image, size (memory/vCPUs), owner, the state cell —
+// two glyph cells, the run-state glyph then ◆ on a pinned lease — policy,
 // age, time left (the hold's time when held, ∞ for a persistent lease
-// with no hold) and the holder — ◆ before a held lease's holder, ◉
-// when the hold has lapsed. On the page the holder is a link.
+// with no hold) and the holder (the lease's name, comment or dash; on
+// the page a holder is a link).
 func (l *layout) leases(g *grid.Grid, y int) int {
 	top := y
 	y = l.panel(g, 0, y, l.w, l.leasesH(), "leases", "leases")
@@ -1606,7 +1620,7 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 		x, w int
 		text string
 	}{{c.id, c.idW, "id"}, {c.img, c.imgW, "image"}, {c.size, c.sizeW, "size"}, {c.own, c.ownW, "owner"},
-		{c.st, c.stW, "state"}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
+		{c.st, c.stW, "ST"}, {c.pol, c.polW, "access"}, {c.age, ageW, "age"},
 		{c.left, c.leftW, "left"}, {c.hold, c.holdW, "holder"}}
 	for _, h := range headers {
 		draw := cutHeaders(h.text, h.w)
@@ -1630,18 +1644,14 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 			g.Text(c.size, yy, fitWord(sw, c.sizeW-1), "text", c.sizeW)
 		}
 		g.Text(c.own, yy, cell(sanitize(r.Owner), c.ownW), "owner", c.ownW)
-		// The state cell (#128, #129): the glyph always carries the run
-		// state (▶ ‖ ■ ⭘, explained by the legend), and the word spells
-		// it out with any qualifier — "taken back", "idle-suspended".
-		// When the column is narrow the word steps down
-		// through fixed shorter forms (stateWords), so the state is never
-		// a cryptic suffix or a word cut mid-way.
-		word := fitWord(stateWords(r), c.stW-2)
-		segs := []grid.Seg{
-			{Text: string(stateGlyph(r)), Style: stateGlyphStyle(r)},
-			{Text: " " + word, Style: stateGlyphStyle(r)},
-		}
-		g.Segs(c.st, yy, segs, c.stW)
+		// The state cell: exactly two glyph cells, written one Put per
+		// cell (Segs would run the second run over the separator as well
+		// and restyle it) — the run-state glyph (▶ ‖ ■ ⭘, coloured by the
+		// state and, when suspended, by the suspend reason: taken back
+		// warn, idle-suspended dim), then ◆ on a pinned lease or a space.
+		// The words behind the glyphs are the legend line under the table.
+		g.Put(c.st, yy, stateGlyph(r), stateGlyphStyle(r))
+		g.Put(c.st+1, yy, rune(pinOrSpace(r)), "state")
 		g.Text(c.pol, yy, fitWord(policyWords(r.Policy), c.polW-1), "dim", c.polW)
 		g.Text(c.age, yy, cell(r.Age, ageW), "dim", ageW)
 		g.Text(c.left, yy, cell(leaseLeft(r), c.leftW), "text", c.leftW)
@@ -1649,40 +1659,23 @@ func (l *layout) leases(g *grid.Grid, y int) int {
 	}
 	if len(rows) == 0 {
 		g.Text(2, top+2, "no live leases", "dim", l.w-4)
-	} else if l.hasLeaseLegend() {
-		// The holder marks, spelled out directly under the table's last
-		// row rather than crammed into the header, starting under the
-		// holder column it explains (pulled left only when the frame is
-		// too narrow to fit it there).
-		x := c.hold
-		if lw := utf8.RuneCountInString(leaseLegend); x+lw > l.w-2 {
-			x = max(2, l.w-2-lw)
-		}
-		g.Text(x, top+2+len(rows), leaseLegend, "dim", l.w-2-x)
+	} else {
+		// The glyphs, spelled out directly under the table's last row,
+		// dim. The legend starts at the left margin, and at a width too
+		// narrow for it whole it ellipsizes rather than reaching the
+		// border.
+		g.Text(2, top+2+len(rows), ellipsize(leaseLegend, l.w-4), "dim", l.w-4)
 	}
 	return y
 }
 
-// stateWords is a lease row's state word, longest form first, each next
-// one shorter: the run state with its qualifier (take-back, idle
-// suspension).
-func stateWords(r LeaseRow) []string {
-	// The qualifier goes first as the column narrows; the state word
-	// (or its short form) stays to the end.
-	switch {
-	case r.TakenBack:
-		return []string{"taken back", "taken-back", "taken", "susp"}
-	case r.IdleSuspended:
-		return []string{"idle-suspended", "idle-susp", "susp"}
-	case r.State == "running":
-		return []string{"running", "run"}
-	case r.State == "suspended":
-		return []string{"suspended", "susp"}
-	case r.State == "recovered":
-		return []string{"recovered", "recov"}
-	default:
-		return []string{r.State}
+// pinOrSpace is the state cell's second glyph: ◆ on a pinned lease,
+// a space on any other.
+func pinOrSpace(r LeaseRow) rune {
+	if r.Pinned {
+		return '◆'
 	}
+	return ' '
 }
 
 // sizeWords is a lease row's size, longest form first: memory then
@@ -1754,19 +1747,14 @@ func leaseLeft(r LeaseRow) string {
 	return r.Left
 }
 
-// holder draws the holder column: ◆ before a pinned lease's holder (a
-// pin is the only lifecycle mark a lease carries now); a lease's name
-// when there is no holder; a lease's comment — dim, a CI job lease
-// usually — when there is neither; a dash when nothing at all. Cut with
-// … so nothing reaches the border.
+// holder draws the holder column: a lease's holder when there is one; a
+// lease's name — dim, a personal lease usually — when there is no
+// holder; a lease's comment — dim, a CI job lease usually — when there
+// is neither; a dash when nothing at all. The pin mark is not here: it
+// is the state cell's second glyph. Cut with … so nothing reaches the
+// border.
 func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
 	room := c.holdW - 1 // one column clear of the border
-	if r.Pinned {
-		g.Segs(c.hold, yy, []grid.Seg{{Text: "◆ ", Style: "state"}}, room)
-		room -= 2
-		g.Segs(c.hold+2, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: "link"}}, room)
-		return
-	}
 	if r.Holder != "" {
 		g.Segs(c.hold, yy, []grid.Seg{{Text: ellipsize(sanitize(r.Holder), room), Style: "link"}}, room)
 		return

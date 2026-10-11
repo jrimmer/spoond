@@ -627,8 +627,8 @@ func TestNoticePanelAbsentWhenNoMessages(t *testing.T) {
 
 // TestNoticesDropLeaseTriggers: a lost lease, a taken-back count and
 // a lapsed-hold suspended lease are NOT system messages; they stay
-// visible in the leases table with their state (■ lost, taken back,
-// lapsed hold) and draw no notification row.
+// visible in the leases table with their state glyphs (■ lost, ‖)
+// and draw no notification row.
 func TestNoticesDropLeaseTriggers(t *testing.T) {
 	s := healthySnapshot()
 	s.ByState = map[string]int{"running": 1, "lost": 1}
@@ -642,7 +642,7 @@ func TestNoticesDropLeaseTriggers(t *testing.T) {
 		t.Fatalf("per-lease triggers must not raise notifications: %+v", rows)
 	}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "lostlease0") || !strings.Contains(p, "■ lost") {
+	if !strings.Contains(p, "lostlease0") || !strings.ContainsAny(p, "■") {
 		t.Fatalf("lost lease left the leases table:\n%s", p)
 	}
 }
@@ -814,8 +814,9 @@ func TestSanitizeReplacesControlChars(t *testing.T) {
 }
 
 // TestStateGlyphAndStyle: the glyphs the leases panel draws per run
-// state, and the styles they carry. A hold is not a state — it marks
-// the holder column.
+// state, and the styles they carry — the suspend reason recolours a
+// suspended glyph (taken back warn, idle-suspended dim), the pin is
+// not a state.
 func TestStateGlyphAndStyle(t *testing.T) {
 	cases := []struct {
 		r     LeaseRow
@@ -828,6 +829,8 @@ func TestStateGlyphAndStyle(t *testing.T) {
 		{LeaseRow{State: "lost"}, '■', "bad"},
 		{LeaseRow{State: "running", Pinned: true}, '▶', "ok"},
 		{LeaseRow{State: "suspended", Pinned: true}, '‖', "warn"},
+		{LeaseRow{State: "suspended", TakenBack: true}, '‖', "warn"},
+		{LeaseRow{State: "suspended", IdleSuspended: true}, '‖', "dim"},
 	}
 	for _, tc := range cases {
 		if got := stateGlyph(tc.r); got != tc.glyph {
@@ -839,15 +842,16 @@ func TestStateGlyphAndStyle(t *testing.T) {
 	}
 }
 
-// TestLeasesShowPinMark: the holder column carries the pin — ◆ before a
-// pinned lease's holder — and the run state stays in the state column.
+// TestLeasesShowPinMark: the pin is the state cell's second glyph —
+// ◆ right after the state glyph — and the holder column carries no pin
+// mark.
 func TestLeasesShowPinMark(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
 	lines := strings.Split(p, "\n")
 	var pinned, plain string
 	for _, r := range lines {
 		switch {
-		case strings.Contains(r, "◆ forgejo/job-42"):
+		case strings.Contains(r, "forgejo/job-42"):
 			pinned = r
 		case strings.Contains(r, "abcdef0123"):
 			plain = r
@@ -856,14 +860,14 @@ func TestLeasesShowPinMark(t *testing.T) {
 	if pinned == "" || plain == "" {
 		t.Fatalf("lease rows missing:\n%s", p)
 	}
-	if !strings.Contains(pinned, "◆ forgejo/job-42") || strings.Contains(pinned, "◆ running") {
-		t.Errorf("pinned lease's holder not marked ◆:\n%s", pinned)
+	if !strings.Contains(pinned, "▶◆") {
+		t.Errorf("pinned lease's state cell does not carry ◆ next to the glyph:\n%s", pinned)
 	}
 	if strings.Contains(plain, "◆") {
 		t.Errorf("unpinned lease marked pinned:\n%s", plain)
 	}
-	if !strings.Contains(pinned, "▶ running") {
-		t.Errorf("state column must always show the run state:\n%s", pinned)
+	if strings.Contains(pinned, "◆ forgejo") {
+		t.Errorf("holder column still leads with the pin mark:\n%s", pinned)
 	}
 
 	// A holder without a pin draws unmarked (holder set, Pinned false),
@@ -882,10 +886,11 @@ func TestLeasesShowPinMark(t *testing.T) {
 	}
 }
 
-// TestLeasesShowStateWords: the state cell spells out the run state and
-// its qualifier (#128, #129) at full width: "running", "taken back",
-// "idle-suspended"; never a ·b/·p/·i suffix.
-func TestLeasesShowStateWords(t *testing.T) {
+// TestLeasesStateCellIsGlyphs: the state cell is exactly two glyph
+// cells — the state glyph, then the pin or a space — with no state
+// words beside the glyphs; the words live only in the legend line under
+// the table.
+func TestLeasesStateCellIsGlyphs(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{
 		{ID: "takenback01", Image: "py-base", State: "suspended", TakenBack: true, Age: "5m", Left: "∞"},
@@ -893,39 +898,52 @@ func TestLeasesShowStateWords(t *testing.T) {
 		{ID: "idlesusp001", Image: "py-base", State: "suspended", IdleSuspended: true, Age: "5m", Left: "∞"},
 		{ID: "suspended001", Image: "py-base", State: "suspended", Age: "5m", Left: "∞"},
 	}
-	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	for _, want := range []string{"‖ taken back", "▶ running", "‖ idle-suspended", "‖ suspended"} {
-		if !strings.Contains(p, want) {
-			t.Errorf("state cell %q missing:\n%s", want, p)
+	g := Draw(s, DefaultWidth, fixedNow, "h")
+	p := g.Plain()
+	rows := 0
+	for _, r := range strings.Split(p, "\n") {
+		for _, id := range []string{"takenback0", "running000", "idlesusp00", "suspended0"} {
+			if strings.Contains(r, id) && strings.Contains(r, "py-base") {
+				rows++
+			}
 		}
 	}
-	for _, bad := range []string{"·b", "·p", "·i"} {
-		if strings.Contains(p, bad) {
-			t.Errorf("state cell still carries the %q suffix:\n%s", bad, p)
+	if rows != 4 {
+		t.Fatalf("lease rows missing:\n%s", p)
+	}
+	// Each row draws exactly two glyph cells in the ST column — the
+	// state glyph, then a space on these unpinned leases — and nothing
+	// else: no state words, no cut suffixes. The row line's tail (the
+	// events panel shares no row with the leases panel here) repeats the
+	// check at the glyphs' own addresses so a word beside the table
+	// cannot pass for a state.
+	c := leaseLayout(DefaultWidth, s.Rows)
+	for _, id := range []string{"takenback0", "running000", "idlesusp00", "suspended0"} {
+		yy, st := -1, ""
+		for y := 0; y < g.Rows(); y++ {
+			line := ""
+			for x := 0; x < g.Cols(); x++ {
+				line += string(g.At(x, y).Rune)
+			}
+			if strings.Contains(line, id) && strings.Contains(line, "py-base") {
+				yy = y
+				st = string(g.At(c.st, yy).Rune) + string(g.At(c.st+1, yy).Rune)
+				break
+			}
+		}
+		if yy < 0 {
+			t.Fatalf("row for %s missing", id)
+		}
+		if want := "‖ "; st != want && st != "▶ " {
+			t.Errorf("%s state cell = %q, want a glyph then a space:\n%s", id, st, p)
+		}
+		if !strings.HasPrefix(st, "‖") && !strings.HasPrefix(st, "▶") {
+			t.Errorf("%s state cell has no state glyph: %q", id, st)
 		}
 	}
-}
-
-// TestStateWordsNarrow: as the column narrows the qualifier goes first
-// and the state word (or its short form) stays; no word is cut mid-way.
-func TestStateWordsNarrow(t *testing.T) {
-	cases := []struct {
-		r    LeaseRow
-		n    int
-		want string
-	}{
-		{LeaseRow{State: "suspended", TakenBack: true}, 10, "taken back"},
-		{LeaseRow{State: "suspended", TakenBack: true}, 7, "taken"},
-		{LeaseRow{State: "suspended", TakenBack: true}, 4, "susp"},
-		{LeaseRow{State: "suspended", IdleSuspended: true}, 9, "idle-susp"},
-		{LeaseRow{State: "suspended"}, 8, "susp"},
-		{LeaseRow{State: "recovered"}, 6, "recov"},
-		{LeaseRow{State: "lost"}, 4, "lost"},
-	}
-	for _, c := range cases {
-		if got := fitWord(stateWords(c.r), c.n); got != c.want {
-			t.Errorf("%+v in %d cells = %q, want %q", c.r, c.n, got, c.want)
-		}
+	// The legend spells the glyphs out under the table.
+	if !strings.Contains(p, leaseLegend) {
+		t.Errorf("legend missing:\n%s", p)
 	}
 }
 
@@ -1626,14 +1644,14 @@ func TestNoticesDropLeaseStates(t *testing.T) {
 // TestLeaseCellsNeverRunTogether: a fixed-width column whose values are
 // short gives its slack to the owner and holder, so a long owner shows
 // more before it is cut, and an over-long owner still ends in … with a
-// space before the state. A long age ("10h37m") always shows whole.
+// space before the state cell. A long age ("10h37m") always shows whole.
 func TestLeaseCellsNeverRunTogether(t *testing.T) {
 	s := healthySnapshot()
 	s.Rows = []LeaseRow{{ID: "038f2ef4c5", Image: "go-base", Owner: "test-consumer", State: "running", Policy: "internet", Age: "10h37m", Left: "2h29m"}}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
 	// The short columns hand their slack to the owner, so this one fits
 	// whole instead of being cut at the old fixed width.
-	if !strings.Contains(p, "test-consumer ▶ running") {
+	if !strings.Contains(p, "test-consumer ▶ ") {
 		t.Errorf("short columns did not free the owner its width:\n%s", p)
 	}
 	if !strings.Contains(p, "10h37m") {
@@ -1644,7 +1662,7 @@ func TestLeaseCellsNeverRunTogether(t *testing.T) {
 	// space before the state cell.
 	s.Rows[0].Owner = strings.Repeat("long-owner", 8)
 	p = Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if !strings.Contains(p, "… ▶ running") {
+	if !strings.Contains(p, "… ▶ ") {
 		t.Errorf("over-long owner should end in … with a space before the state:\n%s", p)
 	}
 }
@@ -1683,20 +1701,22 @@ func TestLeasesAccessIsolated(t *testing.T) {
 
 // TestLeaseColumnsFitContent: the fixed non-holder columns shrink to the
 // widest value actually shown (never below their header), so short
-// states leave no blank run and the freed width goes to the owner and
-// holder. A longer state widens the state column again.
+// values leave no blank run and the freed width goes to the owner and
+// holder. The state column alone is fixed: two glyph cells plus the
+// separator at every width.
 func TestLeaseColumnsFitContent(t *testing.T) {
 	short := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "running", Age: "5m", Left: "10m"}}
-	cShort := leaseLayout(DefaultWidth, short)
-	// "▶ running" (9) plus its trailing separator, and no wider than the
-	// header floor would force anyway.
-	if cShort.stW != 10 {
-		t.Errorf("short state column = %d, not content-fit (10)", cShort.stW)
+	// The state column is two glyph cells and their separator, at every
+	// width, whatever the rows show.
+	for _, w := range []int{DefaultWidth, minW} {
+		if got := leaseLayout(w, short).stW; got != stateCell {
+			t.Errorf("width %d: state column = %d, not the fixed %d", w, got, stateCell)
+		}
 	}
-	// The state column is narrower than the wide base (19), so short
-	// states leave no blank run.
-	if cShort.stW >= 19 {
-		t.Errorf("short state column kept the base width %d", cShort.stW)
+	long := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "suspended",
+		TakenBack: true, Age: "5m", Left: "10m"}}
+	if got := leaseLayout(DefaultWidth, long).stW; got != stateCell {
+		t.Errorf("state column with a suspend reason = %d, not the fixed %d", got, stateCell)
 	}
 	// No column drops below its header.
 	empty := leaseLayout(DefaultWidth, nil)
@@ -1705,27 +1725,17 @@ func TestLeaseColumnsFitContent(t *testing.T) {
 		got, floor int
 	}{
 		{"id", empty.idW, 3}, {"image", empty.imgW, 6}, {"owner", empty.ownW, 6},
-		{"state", empty.stW, 6}, {"access", empty.polW, 7}, {"left", empty.leftW, 5},
+		{"state", empty.stW, 3}, {"access", empty.polW, 7}, {"left", empty.leftW, 5},
 	} {
 		if tc.got < tc.floor {
 			t.Errorf("empty %s column = %d, below its header %d", tc.name, tc.got, tc.floor)
 		}
 	}
-
-	// A long state widens the state column at a wide frame, where the base
-	// has room above the short value; at the narrow minimum the base clamps
-	// to ten and both fit there already.
-	long := []LeaseRow{{ID: "abcdef0123", Image: "go-base", Owner: "jason", State: "suspended",
-		TakenBack: true, Age: "5m", Left: "10m"}}
-	for _, w := range []int{DefaultWidth, minW} {
-		cs := leaseLayout(w, short)
-		if cs.stW >= 19 {
-			t.Errorf("width %d: short state column kept the base width %d", w, cs.stW)
-		}
-	}
-	if leaseLayout(DefaultWidth, long).stW <= cShort.stW {
-		t.Errorf("long state column = %d, not wider than short %d",
-			leaseLayout(DefaultWidth, long).stW, cShort.stW)
+	// The width the old word column freed lands on the owner first: with
+	// a long owner visible, the owner column grows past its 10-cell base.
+	longOwner := []LeaseRow{{ID: "abcdefghij", Image: "go-base", Owner: "test-consumer", State: "running", Age: "5m", Left: "10m"}}
+	if c := leaseLayout(DefaultWidth, longOwner); c.ownW < len("test-consumer")+1 {
+		t.Errorf("owner column = %d, does not hold the freed state width", c.ownW)
 	}
 }
 
@@ -1860,8 +1870,8 @@ func TestLeaseColumnsGiveFreedWidthToOwner(t *testing.T) {
 }
 
 // TestLeaseHolderHeaderAndLegend: the holder column's header is plain
-// "holder"; the ◆ pin legend is one dim line directly under the table's
-// last row, and only when a shown row is pinned.
+// "holder" and carries no ◆; the glyph legend is one dim line directly
+// under the table's last row, shown whenever the table has rows.
 func TestLeaseHolderHeaderAndLegend(t *testing.T) {
 	p := drawSample(DefaultWidth).Plain()
 	lines := strings.Split(p, "\n")
@@ -1874,26 +1884,26 @@ func TestLeaseHolderHeaderAndLegend(t *testing.T) {
 			legendAt = i
 		}
 	}
-	if header < 0 {
-		t.Fatalf("leases panel not found:\n%s", p)
+	if header < 0 || legendAt < 0 {
+		t.Fatalf("leases panel or legend missing:\n%s", p)
 	}
 	if !strings.Contains(lines[header], "holder") || strings.Contains(lines[header], "◆") {
 		t.Errorf("holder header = %q", lines[header])
 	}
-	if legendAt < 0 {
-		t.Fatalf("legend line missing with a pinned row:\n%s", p)
+	if !strings.Contains(lines[header], "ST ") {
+		t.Errorf("state header is not ST: %q", lines[header])
 	}
 	// The legend sits on the row directly under the last lease row: the
 	// sample's last row holds the last lease id.
 	if !strings.Contains(lines[legendAt-1], "fedcba0987") {
 		t.Errorf("legend is not directly under the last lease row:\n%s", p)
 	}
-
-	// The legend starts under the holder column it explains.
-	hx := strings.Index(lines[header], "holder")
+	// The legend starts at the panel's left margin (the line's leading
+	// cells are the border and one space, so the legend's byte offset
+	// lands two runes in).
 	lx := strings.Index(lines[legendAt], leaseLegend)
-	if len([]rune(lines[header][:hx])) != len([]rune(lines[legendAt][:lx])) {
-		t.Errorf("legend is not under the holder column:\n%s\n%s", lines[header], lines[legendAt])
+	if got := len([]rune(lines[legendAt][:lx])); got != 2 {
+		t.Errorf("legend starts at rune %d, want the left margin 2:\n%s", got, lines[legendAt])
 	}
 
 	// The legend line is dim on the grid.
@@ -1906,17 +1916,27 @@ func TestLeaseHolderHeaderAndLegend(t *testing.T) {
 		}
 	}
 
-	// No held or lapsed row: no legend line, and the panel is one row
-	// shorter.
+	// Any one-row table draws the legend too, and the panel is one row
+	// taller for it.
 	s := sampleSnapshot()
 	s.Rows = []LeaseRow{{ID: "abcdef0123", State: "running", Age: "5m", Left: "10m"}}
 	without := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if strings.Contains(without, leaseLegend) {
-		t.Errorf("legend drawn without a held or lapsed row:\n%s", without)
+	if !strings.Contains(without, leaseLegend) {
+		t.Errorf("legend not drawn with rows:\n%s", without)
 	}
 	l := &layout{w: DefaultWidth, s: s}
-	if l.leasesH() != 4 {
-		t.Errorf("one-row table without holds = %d rows, not 4", l.leasesH())
+	if l.leasesH() != 5 {
+		t.Errorf("one-row table with legend = %d rows, not 5", l.leasesH())
+	}
+
+	// No rows: no legend line at all, and no legend row in the height.
+	s.Rows = nil
+	empty := &layout{w: DefaultWidth, s: s}
+	if empty.hasLeaseLegend() {
+		t.Errorf("legend with an empty table")
+	}
+	if empty.leasesH() != 4 {
+		t.Errorf("empty table = %d rows, not 4", empty.leasesH())
 	}
 }
 
