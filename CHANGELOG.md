@@ -13,6 +13,7 @@ summarised from README "Status".
 ### Added
 
 - **`GET /api/usage` and `GET /api/users/me` report the caller's lease counts.** A `leases` object beside `share` gives the owner's running, paused, pinned and lost lease counts plus how many background jobs those leases run (#140 U1).
+- **`GET /api/usage` lists the caller's waiting creates.** `waiting` gives each queued create's place in the whole admission queue, how long it has waited and the reason, the same entries as `GET /api/leases/queue` (#140 U2).
 - **Usage history (#140 U4).** spoond records each owner's usage every 15 minutes and keeps 7 days; `GET /api/usage/history?hours=N` (default 24, cap 168) returns the caller's own samples, oldest first. Migration 24 only adds the `usage_samples` table (schema 23 → 24), so a 3.0.0 binary can still open the database.
 
 ## [3.0.0] - 2026-10-10
