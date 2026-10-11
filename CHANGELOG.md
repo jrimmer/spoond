@@ -14,7 +14,7 @@ summarised from README "Status".
 
 ### Fixed
 
-- **`spoond config show` reads every env file of the unit.** A unit with two `EnvironmentFile=` lines (sb's backend: `llm.env` then `backend.env`) prints `EnvironmentFiles=` twice; only the last was read, so settings from the first showed as drift.
+- **`spoond config show` reads every env file of the unit.** A unit with two `EnvironmentFile=` lines prints `EnvironmentFiles=` twice; only the last was read, so settings from the first showed as drift.
 - **`spoond config show` lists only what the unit sets and what drifts** from the running backend; `--all` lists every known setting (most belong to other binaries).
 
 ## [3.4.0] - 2026-10-11
