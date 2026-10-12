@@ -158,7 +158,7 @@ func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (st
 // the default when absent). A fresh body reader is built per call so a
 // retry never reuses a consumed one.
 func (c *HTTPLeaseClient) createOnce(ctx context.Context, body []byte) (id string, retryAfter time.Duration, capacity bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/sandboxes", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/leases", bytes.NewReader(body))
 	if err != nil {
 		return "", 0, false, err
 	}
@@ -264,7 +264,7 @@ func (c *HTTPLeaseClient) Exec(ctx context.Context, id, cmd, cwd string, env map
 		}
 		// Fresh reader each attempt — reusing a consumed body reader
 		// produces "ContentLength=N with Body length 0" on retry.
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/sandboxes/"+id+"/exec", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/leases/"+id+"/exec", bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}

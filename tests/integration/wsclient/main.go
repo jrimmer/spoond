@@ -35,7 +35,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	wsURL := strings.TrimRight(*url, "/") + "/api/sandboxes/" + *lease + "/stream"
+	wsURL := strings.TrimRight(*url, "/") + "/api/leases/" + *lease + "/stream"
 	wsURL = "wss://" + strings.TrimPrefix(strings.TrimPrefix(wsURL, "https://"), "http://")
 	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	headers := map[string][]string{"Authorization": {"Bearer " + *token}}

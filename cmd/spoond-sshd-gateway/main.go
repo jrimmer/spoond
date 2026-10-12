@@ -4,7 +4,7 @@
 // sandboxes: `ssh <lease-id>@<gateway-host>`. It authenticates the
 // caller with a public key, resolves the lease id to a sandbox, and
 // relays the SSH session onto a process in the sandbox through the
-// backend's /api/sandboxes/{id}/stream WebSocket (dev-base attaches to
+// backend's /api/leases/{id}/stream WebSocket (dev-base attaches to
 // tmux on login).
 //
 // The lease id in the username is the capability: it is unguessable
@@ -548,7 +548,7 @@ func createSandbox(ctx context.Context, user string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	b, err := backendJSONRetry(ctx, http.MethodPost, "/api/sandboxes", payload)
+	b, err := backendJSONRetry(ctx, http.MethodPost, "/api/leases", payload)
 	if err != nil {
 		return "", "", err
 	}
@@ -676,7 +676,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			return fmt.Sprintf(`{"error":%q}`, errMsg)
 		}
 		payload, _ := json.Marshal(body)
-		b, err := backendJSONRetry(ctx, http.MethodPost, "/api/sandboxes", payload)
+		b, err := backendJSONRetry(ctx, http.MethodPost, "/api/leases", payload)
 		if err != nil {
 			return fmt.Sprintf(`{"error":%q}`, err.Error())
 		}
@@ -695,7 +695,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			payload, _ := json.Marshal(body)
 			// No transport retry for a save: a retried POST without an
 			// idempotency key would make a second version.
-			b, err := backendJSONOnce(ctx, http.MethodPost, "/api/sandboxes/"+fields[2]+"/snapshots", payload)
+			b, err := backendJSONOnce(ctx, http.MethodPost, "/api/leases/"+fields[2]+"/snapshots", payload)
 			if err != nil {
 				return fmt.Sprintf(`{"error":%q}`, err.Error())
 			}
@@ -755,7 +755,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		}
 		return fmt.Sprintf(`{"id":%q,"image":%q,"created":true}`, id, img)
 	case "ls":
-		b, err := backendJSON(ctx, http.MethodGet, "/api/sandboxes", nil)
+		b, err := backendJSON(ctx, http.MethodGet, "/api/leases", nil)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -767,7 +767,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		if len(fields) < 2 {
 			return `{"error":"usage: stat <lease-id>"}`
 		}
-		b, err := backendJSON(ctx, http.MethodGet, "/api/sandboxes/"+fields[1]+"/stat", nil)
+		b, err := backendJSON(ctx, http.MethodGet, "/api/leases/"+fields[1]+"/stat", nil)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -779,7 +779,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		if len(fields) < 2 {
 			return `{"error":"usage: rm <lease-id>"}`
 		}
-		if err := backendJSONErr(ctx, http.MethodDelete, "/api/sandboxes/"+fields[1], nil); err != nil {
+		if err := backendJSONErr(ctx, http.MethodDelete, "/api/leases/"+fields[1], nil); err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
 		return fmt.Sprintf(`{"id":%q,"deleted":true}`, fields[1])
@@ -787,7 +787,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		if len(fields) < 2 {
 			return `{"error":"usage: keepalive <lease-id>"}`
 		}
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/keepalive", nil)
+		b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+fields[1]+"/keepalive", nil)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -796,7 +796,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		if len(fields) < 2 {
 			return `{"error":"usage: suspend <lease-id>"}`
 		}
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/suspend", nil)
+		b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+fields[1]+"/suspend", nil)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -805,7 +805,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		if len(fields) < 2 {
 			return `{"error":"usage: resume <lease-id>"}`
 		}
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/resume", nil)
+		b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+fields[1]+"/resume", nil)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -819,7 +819,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			p, _ := json.Marshal(map[string]string{"tag": fields[2]})
 			payload = p
 		}
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/clone", payload)
+		b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+fields[1]+"/clone", payload)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -848,7 +848,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		if cold {
 			payload = []byte(`{"mode":"cold"}`)
 		}
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+args[0]+"/restart", payload)
+		b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+args[0]+"/restart", payload)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -858,7 +858,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			return `{"error":"usage: tag <lease-id> <name>"}`
 		}
 		p, _ := json.Marshal(map[string]string{"name": fields[2]})
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/tag", p)
+		b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+fields[1]+"/tag", p)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -872,7 +872,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			text = strings.Join(fields[2:], " ")
 		}
 		p, _ := json.Marshal(map[string]string{"comment": text})
-		b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[1]+"/comment", p)
+		b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+fields[1]+"/comment", p)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -886,7 +886,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 		// The in-guest agent can take minutes to reply; backendJSON's
 		// default client would drop the response at 10s. Use the
 		// long-timeout client for this verb only.
-		b, err := backendJSONWith(ctx, backendClientLong(), http.MethodPost, "/api/sandboxes/"+fields[1]+"/prompt", p)
+		b, err := backendJSONWith(ctx, backendClientLong(), http.MethodPost, "/api/leases/"+fields[1]+"/prompt", p)
 		if err != nil {
 			return fmt.Sprintf(`{"error":"%v"}`, err)
 		}
@@ -1014,7 +1014,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 				grantee = ru.User.ID
 			}
 			p, _ := json.Marshal(map[string]any{"grantee": grantee, "mode": mode, "ttl": ttl})
-			b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+fields[2]+"/share", p)
+			b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+fields[2]+"/share", p)
 			if err != nil {
 				return fmt.Sprintf(`{"error":"%v"}`, err)
 			}
@@ -1056,7 +1056,7 @@ func runControlCommand(ctx context.Context, cmd string, gatewayKey ssh.Signer, k
 			if len(fields) < 4 {
 				return `{"error":"usage: share rm <lease-id> <user-id>"}`
 			}
-			if err := backendJSONErr(ctx, http.MethodDelete, "/api/sandboxes/"+fields[2]+"/share/"+fields[3], nil); err != nil {
+			if err := backendJSONErr(ctx, http.MethodDelete, "/api/leases/"+fields[2]+"/share/"+fields[3], nil); err != nil {
 				return fmt.Sprintf(`{"error":"%v"}`, err)
 			}
 			return fmt.Sprintf(`{"revoked":%q,"grantee":%q}`, fields[2], fields[3])
@@ -1153,7 +1153,7 @@ func sessionEnv(collected map[string]string, term, clientIP, clientPort, serverA
 
 // handleSession relays one SSH session channel onto a process in the
 // sandbox, started through the backend's
-// /api/sandboxes/{id}/stream WebSocket (U09). Client requests are
+// /api/leases/{id}/stream WebSocket (U09). Client requests are
 // collected until shell, exec or subsystem; the chosen command runs with
 // a PTY iff the client sent pty-req; channel stdin and output stream
 // over the WebSocket in binary mode.
@@ -1263,7 +1263,7 @@ collect:
 	// starts (U09): SSH attach used to fail after a restore. A pinned
 	// lease suspended by the idle rule resumes for the holder's session
 	// with the gateway token, as for any suspended lease (2.1).
-	if b, err := backendJSON(gwCtx, http.MethodGet, "/api/sandboxes/"+leaseID, nil); err == nil {
+	if b, err := backendJSON(gwCtx, http.MethodGet, "/api/leases/"+leaseID, nil); err == nil {
 		var st struct {
 			State string `json:"state"`
 		}
@@ -1303,7 +1303,7 @@ collect:
 		log.Printf("session %s: unsupported backend scheme %q", leaseID, u.Scheme)
 		return
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/api/sandboxes/" + leaseID + "/stream"
+	u.Path = strings.TrimRight(u.Path, "/") + "/api/leases/" + leaseID + "/stream"
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+*backendTok)
 	if userID != "" {
@@ -1650,7 +1650,7 @@ func resolveName(ctx context.Context, name string) (string, bool) {
 func runShelly(ctx context.Context, leaseID string) string {
 	// The lease must exist (and be the caller's): the endpoint route is
 	// gone from the gateway's vocabulary (U09).
-	if _, err := backendJSON(ctx, http.MethodGet, "/api/sandboxes/"+leaseID, nil); err != nil {
+	if _, err := backendJSON(ctx, http.MethodGet, "/api/leases/"+leaseID, nil); err != nil {
 		return fmt.Sprintf(`{"error":"%v"}`, err)
 	}
 	gw := *llmGatewayURL + leaseID
@@ -1673,7 +1673,7 @@ fi`, *shellyBinaryURL, gw, *shellyModel)
 	if err != nil {
 		return fmt.Sprintf(`{"error":"%v"}`, err)
 	}
-	b, err := backendJSON(ctx, http.MethodPost, "/api/sandboxes/"+leaseID+"/exec", payload)
+	b, err := backendJSON(ctx, http.MethodPost, "/api/leases/"+leaseID+"/exec", payload)
 	if err != nil {
 		return fmt.Sprintf(`{"error":"%v"}`, err)
 	}

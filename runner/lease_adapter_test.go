@@ -13,6 +13,48 @@ import (
 	"time"
 )
 
+// TestHTTPLeaseClientUsesLeasePaths (#139): the client's own calls go to
+// the primary /api/leases spelling — create POSTs /api/leases and exec
+// POSTs /api/leases/{id}/exec — so the backend's alias-usage counter
+// measures outside callers only.
+func TestHTTPLeaseClientUsesLeasePaths(t *testing.T) {
+	var got []string // "METHOD path" per call, in order
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/leases":
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"id":"sb-1"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/leases/sb-1/exec":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"stdout":"","stderr":"","exit":0}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewHTTPLeaseClient(srv.URL, "tok")
+	ctx := context.Background()
+	id, err := c.Create(ctx, "dev-base", 600)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := c.Exec(ctx, id, "echo hi", "", nil, 10); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	want := []string{"POST /api/leases", "POST /api/leases/sb-1/exec"}
+	if len(got) != len(want) {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("call %d = %s, want %s", i, got[i], w)
+		}
+	}
+}
+
 // TestHTTPLeaseClientAgentToken asserts the lease client authenticates
 // with the per-agent bearer token it was constructed with (U4: agents as
 // users, epic #26 ticket #30). The backend resolves that token to the
@@ -24,7 +66,7 @@ func TestHTTPLeaseClientAgentToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = append(got, r.Header.Get("Authorization"))
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/leases":
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"id":"sb-1"}`))
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec"):
@@ -73,7 +115,7 @@ func TestHTTPLeaseClientCreateLabel(t *testing.T) {
 	commented := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/leases":
 			json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"id":"sb-1"}`))
@@ -110,7 +152,7 @@ func TestHTTPLeaseClientCreateLabel(t *testing.T) {
 func TestHTTPLeaseClientCreateLabelConsumedPerCreate(t *testing.T) {
 	var bodies []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/leases" {
 			var b map[string]any
 			json.NewDecoder(r.Body).Decode(&b)
 			bodies = append(bodies, b)
@@ -139,7 +181,7 @@ func TestHTTPLeaseClientCreateLabelConsumedPerCreate(t *testing.T) {
 func TestHTTPLeaseClientCreateNoLabel(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/leases" {
 			json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"id":"sb-plain"}`))
@@ -298,7 +340,7 @@ func TestHTTPLeaseClientDeleteReason(t *testing.T) {
 func TestHTTPLeaseClientCreateSendsAdmitWait(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/leases" {
 			json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"id":"sb-1"}`))
@@ -346,7 +388,7 @@ func TestHTTPLeaseClientCreateRetriesCapacity503(t *testing.T) {
 	var attempts int
 	var waits []time.Duration
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/sandboxes" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/leases" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}

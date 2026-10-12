@@ -13,8 +13,9 @@ import (
 	"time"
 )
 
-// prettySandboxTable renders the /api/leases JSON (the /api/sandboxes
-// alias serves the same shape) as a columnar table (ticket #27). IDs
+// prettySandboxTable renders the /api/leases JSON (the deprecated
+// /api/sandboxes alias serves the same shape) as a columnar table
+// (ticket #27). IDs
 // show as a 12-char prefix (full id via --json).
 func prettySandboxTable(b []byte) string {
 	var resp struct {

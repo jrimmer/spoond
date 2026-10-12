@@ -77,6 +77,18 @@ summarised from README "Status".
   field with the comment route's own 512-character cap. No schema
   change.
 
+### Changed
+
+- **spoond's own clients request `/api/leases`, not the alias (#139
+  follow-up).** The runner's lease HTTP client, the SSH gateway's backend
+  calls (create through delete, exec, stream) and the integration
+  wsclient moved every request from the deprecated `/api/sandboxes`
+  spelling onto the primary `/api/leases` one (identical behavior via
+  the rewrite). The MCP servers already went through the runner client,
+  and `spoondctl` is pure SSH, so the alias-usage counter
+  (`spoond_deprecated_requests_total{kind="sandboxes_alias"}`) now
+  measures outside callers only.
+
 ## [3.6.1] - 2026-10-12
 
 3.6.1 fixes file writes into sticky directories such as `/tmp` on images

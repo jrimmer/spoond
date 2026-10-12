@@ -39,7 +39,7 @@ func withFakeBackend(t *testing.T, answer func(w http.ResponseWriter, r *http.Re
 }
 
 // TestCtlCreateSnapshot exercises `create --snapshot` through the real
-// runControlCommand: it POSTs /api/sandboxes with the snapshot field and
+// runControlCommand: it POSTs /api/leases with the snapshot field and
 // prints the created lease JSON.
 func TestCtlCreateSnapshot(t *testing.T) {
 	reqs := withFakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
@@ -54,8 +54,8 @@ func TestCtlCreateSnapshot(t *testing.T) {
 		t.Fatalf("requests = %d, want 1", len(*reqs))
 	}
 	got := (*reqs)[0]
-	if got.Method != http.MethodPost || got.Path != "/api/sandboxes" {
-		t.Fatalf("request = %s %s, want POST /api/sandboxes", got.Method, got.Path)
+	if got.Method != http.MethodPost || got.Path != "/api/leases" {
+		t.Fatalf("request = %s %s, want POST /api/leases", got.Method, got.Path)
 	}
 	var body map[string]any
 	if err := json.Unmarshal([]byte(got.Body), &body); err != nil {
@@ -81,7 +81,7 @@ func TestCtlSnapshotSave(t *testing.T) {
 		t.Fatalf("requests = %d, want 1", len(*reqs))
 	}
 	got := (*reqs)[0]
-	if got.Method != http.MethodPost || got.Path != "/api/sandboxes/lease123/snapshots" {
+	if got.Method != http.MethodPost || got.Path != "/api/leases/lease123/snapshots" {
 		t.Fatalf("request = %s %s", got.Method, got.Path)
 	}
 	var body map[string]any

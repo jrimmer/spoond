@@ -174,7 +174,7 @@ func (f *fakeLeaseAPI) release() {
 
 func (f *fakeLeaseAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
-	case r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes":
+	case r.Method == http.MethodPost && r.URL.Path == "/api/leases":
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
@@ -183,7 +183,7 @@ func (f *fakeLeaseAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte(`{"id":"sb-job"}`))
-	case r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes/sb-job/exec":
+	case r.Method == http.MethodPost && r.URL.Path == "/api/leases/sb-job/exec":
 		// The job's one step: run until the runner's job context ends —
 		// exactly what a long CI step under graceful shutdown does.
 		close(f.execInFlight)
