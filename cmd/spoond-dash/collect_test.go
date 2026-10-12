@@ -427,6 +427,15 @@ func TestEventLinesSweepSummary(t *testing.T) {
 	if l.Style != "dim" {
 		t.Fatalf("sweep line style = %q, want dim", l.Style)
 	}
+
+	// The lease id column is empty for the lease-less summary, like the
+	// gc line's (TestEventLinesGC): the padded empty id column leaves one
+	// 2-space gap around a 10-space id field between the columns.
+	i := strings.Index(l.Text, "idle sweep")
+	j := strings.Index(l.Text, "spoond")
+	if i < 0 || j < 0 || j-i-10 != 14 {
+		t.Fatalf("the lease id column is not collapsed for a lease-less sweep: %q", l.Text)
+	}
 }
 
 // TestEventLinesLeaseLessPlaceholder: the box_full and admin_unpin
