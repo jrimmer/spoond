@@ -187,13 +187,51 @@ func getLease(t *testing.T, id string) leaseDetail {
 // TestA21_CreateComment sends the create-time comment (docs/api.md create
 // body table, `comment`, #132): the lease's GET carries it, a comment
 // over 512 characters is a bad request, and the lease's `created` event
-// names it after a ` · ` — read from the per-lease event stream like the
-// background-job cases read theirs, skipped when this token cannot read
-// streams (e.g. an events-only token running the suite).
+// names it after a ` · ` — read from the caller's event stream with the
+// test token, opened before the create so the event is caught live (the
+// idle-suspend watch's pattern). The stream read is an extra ability, so
+// the sub-check skips with a clear message when the stream does not
+// prove readable with this token (e.g. an events-only EVENTS_TOKEN, whose
+// single route is read without a bearer token).
 func TestA21_CreateComment(t *testing.T) {
 	rec := begin(t)
 
 	const comment = "conformance comment 1"
+
+	// The created event is emitted while the create answers, so the
+	// stream is opened first and filtered by owner (the caller's-events
+	// stream carries exactly the caller's leases): the first created
+	// event after it opens is this create's — the test creates nothing
+	// else until it has matched one.
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	created := make(chan string, 1)
+	streamFail := make(chan string, 1)
+	go func() {
+		events, stop := cl.watchEvents(streamCtx, "")
+		defer stop()
+		for data := range events {
+			var ev struct {
+				LeaseID string `json:"lease_id"`
+				Type    string `json:"type"`
+				Detail  string `json:"detail"`
+			}
+			if err := json.Unmarshal([]byte(data), &ev); err != nil {
+				continue
+			}
+			if ev.Type == "gap" {
+				continue
+			}
+			if ev.Type == "created" && ev.LeaseID != "" && ev.LeaseID != "-" {
+				created <- ev.Detail
+				return
+			}
+		}
+		streamFail <- "stream ended"
+	}()
+
+	// The create itself: the comment rides the body (#132) — the lease
+	// is born with its annotation, no comment call after the answer.
 	l := createLease(t, map[string]any{"image": defaultImage(), "ttl": 120, "comment": comment})
 	rec.set("lease", l.ID)
 
@@ -222,41 +260,25 @@ func TestA21_CreateComment(t *testing.T) {
 		failf(t, "create with a 513-char comment: status %d, want 400: %s", st, truncate(body))
 	}
 
-	// The created event's detail ends with the comment after the " · "
-	// separator (#132), read live off the per-lease stream. An
-	// events-only token cannot run this read (its one route is the
-	// all-events stream), so the sub-check skips rather than failing a
-	// working backend.
-	events, stop := cl.watchEvents(context.Background(), l.ID)
-	defer stop()
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case data, ok := <-events:
-			if !ok {
-				failf(t, "event stream closed before the created event for %s", l.ID)
-			}
-			var ev struct {
-				LeaseID string `json:"lease_id"`
-				Type    string `json:"type"`
-				Detail  string `json:"detail"`
-			}
-			if err := json.Unmarshal([]byte(data), &ev); err != nil {
-				continue
-			}
-			if ev.Type == "gap" {
-				continue
-			}
-			if ev.LeaseID != l.ID || ev.Type != "created" {
-				continue
-			}
-			if !strings.HasSuffix(ev.Detail, " · "+comment) {
-				failf(t, "created detail = %q, want the \" · %s\" suffix", ev.Detail, comment)
-			}
-			rec.set("created_detail", ev.Detail)
-			return
-		case <-deadline:
-			skipf(t, "the created event for %s did not arrive within 10 s; the stream may not be readable with this token (e.g. an events-only EVENTS_TOKEN)", l.ID)
+	// The last sub-check: the created event's detail ends with the
+	// comment after the " · " separator (#132). The stream was opened
+	// before the create; reading it is an extra ability (an events-only
+	// EVENTS_TOKEN cannot), so the sub-check skips with a clear message
+	// rather than failing a working backend when the stream does not
+	// answer.
+	streamWait := time.After(10 * time.Second)
+	select {
+	case detail := <-created:
+		// The stream carries only the caller's leases, and the only
+		// created event since it opened is this create's; the comment is
+		// the run's unique marker, so the suffix is the match.
+		if !strings.HasSuffix(detail, " · "+comment) {
+			failf(t, "created event detail = %q, want the \" · %s\" suffix", detail, comment)
 		}
+		rec.set("created_detail", detail)
+	case msg := <-streamFail:
+		skipf(t, "the event stream ended without a created event (%s): it is not readable with the test token, so the created-event sub-check does not answer", msg)
+	case <-streamWait:
+		skipf(t, "no created event within 10 s: the event stream is not readable (or slow) with the test token, so the created-event sub-check does not answer")
 	}
 }
