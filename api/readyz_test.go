@@ -80,19 +80,6 @@ func findCheck(r readyzResult, name string) (readyCheck, bool) {
 	return readyCheck{}, false
 }
 
-// fsPathsShareDevice reports whether two paths sit on one filesystem
-// (same st_dev device), the condition under which the readyz root-disk
-// check drops itself.
-func fsPathsShareDevice(t *testing.T, a, b string) bool {
-	t.Helper()
-	devA, okA := rootDiskDevice(a)
-	devB, okB := rootDiskDevice(b)
-	if !okA || !okB {
-		t.Fatalf("stat %q or %q failed: cannot compare devices", a, b)
-	}
-	return devA == devB
-}
-
 // A healthy backend is ready: 200, status ok, and every named check
 // passing. No bearer token is sent — the endpoint is auth-exempt. The
 // root-disk check's own verdicts have their tests (healthy on another
