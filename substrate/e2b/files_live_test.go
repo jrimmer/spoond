@@ -13,6 +13,8 @@ package e2b
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +143,50 @@ func TestLiveFiles(t *testing.T) {
 	}
 	if _, err := c.Stat(ctx, id, "/root/live-dirs"); !errors.Is(err, substrate.ErrNotFound) {
 		t.Errorf("Stat after recursive Remove: %v, want ErrNotFound", err)
+	}
+}
+
+// TestLiveWriteFileSticky writes into an EXISTING sandbox (E2B_LIVE_SANDBOX,
+// e.g. a rust-qt-base lease's sandbox id) where /tmp is sticky and
+// fs.protected_regular=1 (Arch, systemd's default): a new file, an
+// overwrite of that file (envd used to reopen it as root and get EACCES),
+// and a file under /root, each read back with its mode.
+func TestLiveWriteFileSticky(t *testing.T) {
+	id := os.Getenv("E2B_LIVE_SANDBOX")
+	if id == "" {
+		t.Skip("E2B_LIVE_SANDBOX unset")
+	}
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv: %v", err)
+	}
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	for i, tc := range []struct {
+		path, body string
+		mode       os.FileMode
+	}{
+		{"/tmp/spoond-live-sticky.txt", "first\n", 0o644},
+		{"/tmp/spoond-live-sticky.txt", "second, overwriting\n", 0o600},
+		{"/root/spoond-live-sticky/deep/f.txt", "under root\n", 0o640},
+	} {
+		if err := c.WriteFile(ctx, id, tc.path, []byte(tc.body), tc.mode); err != nil {
+			t.Fatalf("%d: WriteFile %s: %v", i, tc.path, err)
+		}
+		got, err := c.ReadFile(ctx, id, tc.path, 1<<20)
+		if err != nil || string(got) != tc.body {
+			t.Fatalf("%d: ReadFile %s = %q, %v; want %q", i, tc.path, got, err, tc.body)
+		}
+		info, err := c.Stat(ctx, id, tc.path)
+		if err != nil || info.Mode.Perm() != tc.mode {
+			t.Fatalf("%d: Stat %s = %+v, %v; want mode %o", i, tc.path, info, err, tc.mode)
+		}
+	}
+	r, err := c.Exec(ctx, id, substrate.ExecRequest{Args: []string{"/bin/sh", "-c", "ls -a /tmp /root/spoond-live-sticky/deep | grep -c spoond-upload || true"}})
+	if err != nil || strings.TrimSpace(r.Stdout) != "0" {
+		t.Fatalf("upload directories left behind: %q, %v", r.Stdout, err)
 	}
 }
