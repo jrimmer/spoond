@@ -162,6 +162,8 @@ func TestCapabilitiesTableRegistersCapabilities(t *testing.T) {
 // user's data (it is static host description; nothing here varies by
 // caller).
 func TestCapabilitiesEndpoint(t *testing.T) {
+	t.Setenv("GATEWAY_ADDR", "")
+	t.Setenv("IMAGE_MAP", "")
 	ts, _ := newTestServer(t)
 	// Any valid user token.
 	resp, body := doReq(t, "GET", ts.URL+"/api/capabilities", "token-a", nil)
@@ -279,6 +281,7 @@ func TestCapabilitiesNoTokenUnauthenticated(t *testing.T) {
 // from the mcp package's tool table.
 func TestCapabilitiesSurfacesConfigured(t *testing.T) {
 	t.Setenv("GATEWAY_ADDR", "ssh.example.com:2222")
+	t.Setenv("IMAGE_MAP", "")
 	ts, _ := newTestServer(t)
 	resp, body := doReq(t, "GET", ts.URL+"/api/capabilities", "token-a", nil)
 	if resp.StatusCode != 200 {
