@@ -1012,7 +1012,7 @@ func cutDetail(s string, n int) string {
 	if n <= 3 {
 		return cutToRunes(s, n)
 	}
-	return cutToRunes(s, n-4) + "..."
+	return cutToRunes(s, n-3) + "..."
 }
 
 // runJobReconcileLoop reconciles running jobs every 10 s while any job

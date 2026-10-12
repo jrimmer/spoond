@@ -419,11 +419,6 @@ func (s *Service) grantQueued(ctx context.Context, t *admissionTicket) (*Lease, 
 	}
 	req := t.leaseReq
 	req.retry = true
-	// The retry is the admission the queued create waits for: point the
-	// label seam at it first, so a WithLabel during this admission still
-	// binds to the right create (the id was set for the failed try). The
-	// grant clears the binding as admitMemory returns.
-	s.setAdmittingLeaseID(req.leaseID)
 	return s.grantLease(ctx, req)
 }
 
