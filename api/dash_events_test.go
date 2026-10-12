@@ -1,7 +1,9 @@
 package api
 
-// Release reasons, grant and checkpoint durations, and the lease-less gc
-// event (2.5, #132 part 2).
+// Release reasons, grant and checkpoint durations, and the lease-less
+// gc event (2.5, #132 part 2). The #132 additions' tests live here too:
+// the created event's appended job label, and the sweep summary's
+// one-event-per-suspending-pass rule (in idle_suspend_test.go).
 
 import (
 	"context"
