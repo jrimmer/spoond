@@ -105,6 +105,132 @@ func TestGrantEventCarriesDuration(t *testing.T) {
 	}
 }
 
+// TestCreatedEventCarriesJobLabel: the runner labels the job's lease
+// before its create answers (#119) — WithLabel during the create's
+// admission — and the comment must be on the created event for the
+// dashboard to re-label the line (#132). The label binds to that
+// create's lease id: the next (unlabelled) create's event carries no
+// comment, and a comment that never matched a committing create does
+// not leak onto a later one.
+func TestCreatedEventCarriesJobLabel(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	// Label while the first create's admission is in flight, as the
+	// runner does; the fake substrate's admission is synchronous, so the
+	// call replays the WithLabel-before-Create sequence.
+	all := svc.Subscribe(EventFilter{})
+	svc.setAdmittingLeaseID("pending") // no create yet: the label binds to nothing
+	svc.WithLabel("forgejo job 42 https://code.example.com/site/actions/runs/9/jobs/42")
+	svc.setAdmittingLeaseID("")
+	l1, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// A later create of the same lease: label during ITS admission.
+	l2, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant 2: %v", err)
+	}
+	all.Close()
+
+	ev := func(id string) *LeaseEvent {
+		for _, e := range eventsFor(collectEvents(all.C), id) {
+			if e.Type == LeaseCreated {
+				e := e
+				return &e
+			}
+		}
+		return nil
+	}
+	// The stale label (bound to no admitting create) landed on neither.
+	for _, id := range []string{l1.ID, l2.ID} {
+		if e := ev(id); e != nil && strings.Contains(e.Detail, "forgejo job") {
+			t.Fatalf("created detail %q carries a label that was not this create's", e.Detail)
+		}
+	}
+}
+
+// TestCreatedEventJobLabelBindsToItsCreate: a label set while a create
+// is admitting lands on that create's lease and its created event — and
+// on no later create's.
+func TestCreatedEventJobLabelBindsToItsCreate(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	all := svc.Subscribe(EventFilter{})
+	// The create's admission is bracketed by the binding; the test's
+	// WithLabel call lands in that bracket, as the runner's does.
+	svc.setAdmittingLeaseID("lease-bound")
+	svc.WithLabel("forgejo job 42 https://code.example.com/site/actions/runs/9/jobs/42")
+	svc.setAdmittingLeaseID("")
+	// This create's grant claims the label by its id.
+	l1, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Minute,
+		persistent: true, leaseID: "lease-bound"})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// A second, unlabelled create must not inherit the consumed label.
+	l2, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant 2: %v", err)
+	}
+	all.Close()
+
+	if l1.Comment != "forgejo job 42 https://code.example.com/site/actions/runs/9/jobs/42" {
+		t.Fatalf("labelled lease comment = %q, want the job label", l1.Comment)
+	}
+	if l2.Comment != "" {
+		t.Fatalf("unlabelled lease comment = %q, want empty", l2.Comment)
+	}
+	events := collectEvents(all.C)
+	var d1, d2 string
+	for _, e := range eventsFor(events, l1.ID) {
+		if e.Type == LeaseCreated {
+			d1 = e.Detail
+		}
+	}
+	for _, e := range eventsFor(events, l2.ID) {
+		if e.Type == LeaseCreated {
+			d2 = e.Detail
+		}
+	}
+	if !strings.Contains(d1, "forgejo job 42 https://code.example.com/site/actions/runs/9/jobs/42") {
+		t.Fatalf("labelled create's detail = %q, want the comment", d1)
+	}
+	if strings.Contains(d2, "forgejo job") {
+		t.Fatalf("unlabelled create's detail = %q, want no label", d2)
+	}
+	// The appended label respects the 120-rune cap with an ellipsis.
+	long := "forgejo job 43 " + strings.Repeat("u", 200)
+	svc.setAdmittingLeaseID("lease-bound-2")
+	svc.WithLabel(long)
+	svc.setAdmittingLeaseID("")
+	all2 := svc.Subscribe(EventFilter{})
+	l3, err := svc.grantLease(ctx, leaseRequest{owner: "c", image: "py-base", ttl: time.Minute,
+		persistent: true, leaseID: "lease-bound-2"})
+	if err != nil {
+		t.Fatalf("grant 3: %v: %+v", err, l3)
+	}
+	all2.Close()
+	var d3 string
+	for _, e := range eventsFor(collectEvents(all2.C), l3.ID) {
+		e := e
+		if e.Type == LeaseCreated {
+			d3 = e.Detail
+		}
+	}
+	if !strings.HasPrefix(d3, "granted from image py-base in ") || !strings.Contains(d3, "forgejo job 43") ||
+		!strings.HasSuffix(d3, "...") {
+		t.Fatalf("over-long label detail = %q, want a cut ending in ...", d3)
+	}
+	if got := []rune(d3[strings.Index(d3, " · ")+3:]); len(got) > 120 {
+		t.Fatalf("appended label is %d runes, want at most 120", len(got))
+	}
+}
+
 // TestCheckpointEventCarriesDurationAndBuild: the checkpointed event's
 // detail names the duration and the short build id.
 func TestCheckpointEventCarriesDurationAndBuild(t *testing.T) {

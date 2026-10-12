@@ -571,6 +571,12 @@ type Service struct {
 	// names no pending label.
 	nextLabel     string
 	nextLabelText string
+	// admittingLeaseID is the lease id the create whose admission is in
+	// flight reserved (set just before the admission run, cleared by its
+	// unwind): the label seam reads it to bind a WithLabel call to that
+	// create, so the label never lands on the next create's lease
+	// (spoond-0amq). Guarded by the store lock; "" when none is admitting.
+	admittingLeaseID string
 	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
 	// ownerDeleteMu guards deletedOwners (spoond-q4j): the owners whose
@@ -2778,8 +2784,22 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// hugepages). The warm-pool path below calls it too, because a
 	// pooled sandbox already holds its memory and so needs no new debit.
 	ok := false
+	// The create's lease id is bound to its admission before admitMemory
+	// runs, so the label seam (WithLabel during the admission, #119)
+	// binds to this grant and is cleared when the grant unwinds; a
+	// queued replay re-points it (waitForAdmission → grant with the
+	// reserved id).
+	s.setAdmittingLeaseID(lease.ID)
 	undo, err := s.admitMemory(ctx, owner, memoryMB)
+	s.setAdmittingLeaseID("")
 	if err != nil {
+		// The label binding is spent: nothing further binds to this
+		// admission (the queued retry re-points it from grantQueued).
+		s.store.mu.Lock()
+		if s.nextLabel == lease.ID {
+			s.nextLabel, s.nextLabelText = "", ""
+		}
+		s.store.mu.Unlock()
 		return nil, err
 	}
 	defer func() {
@@ -2976,14 +2996,10 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	}
 
 	s.store.mu.Lock()
-	// The pending label's create is committing: the label hook (admitted
-	// while this create was waiting for room, #119) names a comment for
-	// exactly this lease, so it lands on the lease now and on its
-	// `created` event's detail — never on the next lease (#132).
-	if s.nextLabel != "" && s.nextLabel == lease.ID {
-		lease.Comment = s.nextLabelText
-		s.nextLabel, s.nextLabelText = "", ""
-	}
+	// The pending label's create is committing: when the label admitted
+	// for this lease (the #119 seam), the comment lands on the lease now
+	// and on its `created` event's detail — never on the next lease.
+	lease.Comment = s.takePendingLabel(lease.ID)
 	// Final guard against a delete that raced this grant (spoond-q4j). A
 	// grant that passed reserveQuota before the owner was marked deleted
 	// holds the store lock across its commit, and deleteUserData sets the
