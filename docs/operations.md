@@ -1064,18 +1064,24 @@ lease went can be reconstructed from `journalctl` alone — even after the
 dashboard's 50-event ring has rolled over and the lease row is gone:
 
 ```
-lease journal: op=release lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason="ci job 3609 ✓ 11m02s"
-lease journal: op=suspend lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason=take_back
-lease journal: op=create  lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason=new
-lease journal: op=lost    lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base reason="no checkpoint to recover from"
+lease journal: op=release lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 peak_mib=412 reason="ci job 3609 ✓ 11m02s"
+lease journal: op=suspend lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 reason=take_back
+lease journal: op=create  lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 reason=new
+lease journal: op=lost    lease_id=0f3c… owner=ci-runner sandbox=6a91… image=py-base memory_mib=2048 reason="no checkpoint to recover from"
 ```
 
 The fields are always present, in that order; an empty value is `""` and
 a value with a space, quote, equals sign or control character is quoted.
 `owner` is the identity (a user id or legacy consumer id), never the
 bearer token the caller authenticated with; the line carries no secret.
-`reason` names why: for a release it is the owner-named API deletion
-(`deleted via API by <owner>`), `ttl`, `lost grace expired`,
+For a release with a measured lease (#130), `peak_mib` rides between
+`memory_mib` and `reason`: the VM's measured high-water mark in whole
+MiB (see
+[Measured lease memory](#measured-lease-memory)); a release without a
+measurement (no `OTEL_PROM_URL`, no sample, and the other ops entirely)
+has no `peak_mib` field. `reason` names why: for a release it is the
+owner-named API deletion (`deleted via API by <owner>`), `ttl`,
+`lost grace expired`,
 `user deleted`, `paused_expired` or the caller's own reason
 verbatim (the CI runner's reason says `ci job <id> …`); for a create
 it is `new`, `snapshot <name>@<version>`, `clone of <id>` or
@@ -1562,13 +1568,18 @@ lease's latest `memory_used_mb` and the high-water mark
 `memory_peak_mb` since its current VM started (reset on the lease's
 next VM), matched by `sandbox_id` — series of sandboxes that are gone
 are ignored, released leases' entries are dropped, a failed fetch or
-parse logs once and keeps the last values. A lease row's `size_hint`
+parse logs once and keeps the last values. A release reads the lease's
+peak before the entry is dropped and reports it on the `released`
+event (`· peak N MiB`) and the lease journal (`peak_mib=`, see
+[api.md](api.md#event-types) and [the lease journal](#the-lease-journal))
+— what a week of CI and worker data then shows per image, before any
+size is touched. A lease row's `size_hint`
 (GET /api/leases/{id}, see [api.md](api.md#get-apileases-list-leases))
 then names the smallest preset whose memory fits 1.25 × the measured
-peak, once the lease has at least 10 samples — the measured right-sizing
-nudge for owners who picked a size blind. Nothing is persisted: a
-backend restart re-measures from the next tick, and the feature is off
-entirely without `OTEL_PROM_URL`.
+peak, once the lease has at least 10 samples — the measured
+right-sizing nudge for owners who picked a size blind. Nothing is
+persisted: a backend restart re-measures from the next tick, and the
+feature is off entirely without `OTEL_PROM_URL`.
 
 ## Metrics
 

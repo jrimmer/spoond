@@ -11,7 +11,11 @@
 //
 // The line is logfmt-shaped so an operator can grep it:
 //
-//	lease journal: op=<op> lease_id=<id> owner=<owner> sandbox=<sandbox> image=<image> memory_mib=<n> reason=<reason>
+//	lease journal: op=<op> lease_id=<id> owner=<owner> sandbox=<sandbox> image=<image> memory_mib=<n> [peak_mib=<n>] reason=<reason>
+//
+// The peak_mib field rides only the release line (#130 step 1), between
+// memory_mib and reason: the measured peak the lease's VM held, when it
+// was measured at all.
 //
 // A value with a space, quote, equals sign or control character is
 // quoted with Go's %q so the fields stay parseable; the reason is the
@@ -20,6 +24,7 @@
 package api
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -41,10 +46,36 @@ func (s *Service) journalLease(op string, l *Lease, reason string) {
 	if s == nil || s.log == nil || l == nil {
 		return
 	}
-	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s memory_mib=%d reason=%s",
+	s.journalPrint(op, l, reason, "")
+}
+
+// journalLeaseRelease writes the release line, the one op that carries
+// the measured-memory field (#130 step 1): peakMib is the lease's
+// measured peak in whole MiB (ceil — the same rendering the lease row's
+// memory_peak_mb uses), read before the sampler dropped the entry, and
+// hasPeak gates the field, written between memory_mib and reason so the
+// documented parse order (operations.md) holds. Without a measurement
+// (the sampler off — no OTEL_PROM_URL — or a lease that never got a
+// sample) hasPeak is false and the line reads exactly as before.
+func (s *Service) journalLeaseRelease(l *Lease, reason string, peakMib int, hasPeak bool) {
+	peakField := ""
+	if hasPeak {
+		peakField = fmt.Sprintf("peak_mib=%d ", peakMib)
+	}
+	s.journalPrint(journalOpRelease, l, reason, peakField)
+}
+
+// journalPrint prints one lease journal line. peakField is empty, or
+// the `peak_mib=<n>` field with its trailing space, which is why it
+// lands between memory_mib and reason.
+func (s *Service) journalPrint(op string, l *Lease, reason, peakField string) {
+	if s == nil || s.log == nil || l == nil {
+		return
+	}
+	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s memory_mib=%d %sreason=%s",
 		journalValue(op), journalValue(l.ID), journalValue(l.Owner),
 		journalValue(l.SandboxID), journalValue(l.Image), l.MemoryMB,
-		journalValue(reason))
+		peakField, journalValue(reason))
 }
 
 // journalValue renders one journal field: bare when it is a simple
