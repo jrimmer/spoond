@@ -10,6 +10,12 @@ Restart=on-failure
 RestartSec=3
 Environment=BIND_ADDR=127.0.0.1:8890
 # Consumer tokens: token=consumer,comma-separated. Set via EnvironmentFile.
+# llm.env first, backend.env second: a later file wins, so backend.env is
+# the operator's file and any key set in both takes its value; either
+# file still overrides the Environment= fallback above. Both carry the
+# leading - so a missing file (llm.env is optional) still starts the
+# unit; the backend itself refuses to serve without CONSUMER_TOKENS.
+EnvironmentFile=-/etc/spoond/llm.env
 EnvironmentFile=-/etc/spoond/backend.env
 User=root
 Group=root

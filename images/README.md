@@ -84,7 +84,7 @@ spoond images build <name> --manifest images/manifest.yaml --context images
 ```
 
 Then:
-1. Add `<label>=<name>` to `IMAGE_MAP` in `/etc/spoond-runner.env`
+1. Add `<label>=<name>` to `IMAGE_MAP` in `/etc/spoond/runner.env`
 2. Mark `baked: true` in `images/manifest.yaml`
 
 ### Building Rust images

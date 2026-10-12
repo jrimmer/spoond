@@ -194,9 +194,11 @@ export TLS_CERT=/etc/spoond/tls/fullchain.pem TLS_KEY=/etc/spoond/tls/privkey.pe
 ### systemd unit
 
 See `deploy/spoond-backend.service`. The shipped unit reads
-`EnvironmentFile=-/etc/spoond/backend.env` (`chmod 600`), the same file
-the backend sources and the operator snippets in
-[install.md](install.md) and [operations.md](operations.md) read.
+`EnvironmentFile=-/etc/spoond/llm.env` then
+`EnvironmentFile=-/etc/spoond/backend.env` (`chmod 600`; a later file
+wins, so the LLM pair may live in its own `llm.env` and `backend.env`
+is the file the backend sources and the operator snippets in
+[install.md](install.md) and [operations.md](operations.md) read).
 
 `SPOOND_BUILD_TIMEOUT` is read by two processes from two environments:
 the backend (for the GC's stale-row sweep) and `spoond images build`

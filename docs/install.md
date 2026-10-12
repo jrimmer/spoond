@@ -120,12 +120,15 @@ install -D -m 644 deploy/spoond-backend.service deploy/spoond-sshd-gateway.servi
 ```
 
 The shipped backend unit is usable as installed: `deploy/spoond-backend.service`
-reads its environment from `EnvironmentFile=-/etc/spoond/backend.env` (the
-leading `-` lets the unit start even when the file is absent) and orders
-after `e2b-orchestrator.service` (`After=`/`Wants=`) so the backend comes
-up with the orchestrator it depends on. Keep the leading `-` so a missing
+reads its environment from `EnvironmentFile=-/etc/spoond/llm.env` then
+`EnvironmentFile=-/etc/spoond/backend.env` (the leading `-` lets the unit
+start even when a file is absent; a later file wins, so `backend.env`
+overrides anything `llm.env` sets) and orders after
+`e2b-orchestrator.service` (`After=`/`Wants=`) so the backend comes up
+with the orchestrator it depends on. Keep the leading `-` so a missing
 file cannot block unit startup; the backend itself refuses to serve
-without `CONSUMER_TOKENS`, which is the failure you want. The installed
+without `CONSUMER_TOKENS`, which is the failure you want — omit
+`llm.env` entirely and the unit still starts. The installed
 `[Unit]`/`[Service]` heads look like:
 
 ```ini
@@ -136,14 +139,21 @@ Wants=network-online.target e2b-orchestrator.service
 Type=simple
 ExecStart=/opt/spoond/spoond backend
 Environment=BIND_ADDR=127.0.0.1:8890
+EnvironmentFile=-/etc/spoond/llm.env
 EnvironmentFile=-/etc/spoond/backend.env
 ```
 
 `BIND_ADDR` stays `127.0.0.1:8890` unless the gateway or runner needs
-the backend on another address (the env file can override it — entries
-in `EnvironmentFile` win over `Environment=`).
+the backend on another address (an env file can override it — entries
+in an `EnvironmentFile` win over `Environment=`).
 
-The backend sources `/etc/spoond/backend.env` (0600). Generate the
+Optional `llm.env`: on hosts that keep the per-lease LLM gateway's key
+pair apart from the lease API's tokens, write that pair
+(`LLM_UPSTREAM_URL`, `LLM_UPSTREAM_KEY`, `LLM_DEFAULT_MODEL`) to
+`/etc/spoond/llm.env` (0600) instead of `backend.env`; nothing here
+requires the file, and a key set in both files takes `backend.env`'s
+value (later files win). The backend sources `/etc/spoond/backend.env`
+(0600) — the main operator file. Generate the
 secrets and the TLS pair **first** — an `EnvironmentFile` is parsed
 literally by systemd, so a `$(openssl rand …)` written into it stays an
 unexpanded string and never matches anything:
@@ -315,7 +325,7 @@ curl -s -X POST https://$FQDN:8890/api/users --cacert /etc/spoond/tls/cert.pem \
 Then the runner and the dashboard, if you want them:
 
 ```bash
-systemctl enable --now spoond-runner        # needs /etc/spoond-runner.env
+systemctl enable --now spoond-runner        # needs /etc/spoond/runner.env
 /opt/spoond/spoond dash hash '<password>'    # bcrypt hash for DASH_PASSWORD_HASH
 # /etc/spoond/dash.env: DASH_USER, DASH_PASSWORD_HASH, METRICS_TOKEN,
 #                      DASH_EVENTS_TOKEN (the EVENTS_TOKEN above),

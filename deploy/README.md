@@ -53,7 +53,13 @@ reference is in [docs/setup.md](../docs/setup.md) and
 [docs/install.md](../docs/install.md). Example files for every unit live
 beside the units: `deploy/spoond-backend.env.example`,
 `deploy/spoond-gateway.env.example`, `deploy/spoond-runner.env.example`
-and `deploy/e2b/spoond-netwatch.env.example`. The minimum:
+and `deploy/e2b/spoond-netwatch.env.example` — their headers name the
+installed target paths (`/etc/spoond/backend.env`,
+`/etc/spoond-gateway.env`, `/etc/spoond/runner.env`). An optional
+`/etc/spoond/llm.env` (0600) may hold the per-lease LLM gateway's key
+pair (`LLM_UPSTREAM_URL`, `LLM_UPSTREAM_KEY`, `LLM_DEFAULT_MODEL`) when
+an operator keeps it apart from the backend file; the backend unit
+reads llm.env then backend.env, and `backend.env` wins. The minimum:
 
 ```bash
 cat > /etc/spoond/backend.env <<'EOF'
@@ -113,7 +119,9 @@ into the dir + restart, or `ssh-key add` via the ctl plane.
 The backend credential lives in `/etc/spoond-gateway.env` (mode 0600) as
 `SPOOND_GATEWAY_TOKEN` — never in `ExecStart`, so `/proc/<pid>/cmdline`
 cannot expose it (it is admin-equivalent: the gateway impersonates the
-authenticated SSH user via `X-Spoond-User-Id`).
+authenticated SSH user via `X-Spoond-User-Id`). This is the one env
+file left outside `/etc/spoond/`, matching the unit's single
+`EnvironmentFile=` line.
 
 ### Verify
 
@@ -135,10 +143,10 @@ go build -o /opt/spoond/spoond ./cmd/spoond
 install -m 644 deploy/spoond-runner.service /etc/systemd/system/
 ```
 
-On host, create `/etc/spoond-runner.env` (mode 0600):
+On host, create `/etc/spoond/runner.env` (mode 0600):
 
 ```bash
-cat > /etc/spoond-runner.env <<'EOF'
+cat > /etc/spoond/runner.env <<'EOF'
 FORGEJO_URL=https://git.example.com
 RUNNER_TOKEN=<registration token>
 RUNNER_NAME=spoond-runner
@@ -154,7 +162,7 @@ SCALE_UP_DELAY=10s
 SCALE_DOWN_DELAY=60s
 JOB_RECORD_DIR=/var/lib/spoond/jobs
 EOF
-chmod 600 /etc/spoond-runner.env
+chmod 600 /etc/spoond/runner.env
 ```
 
 Pool tuning (`RUNNER_FLOOR`, `RUNNER_MAX`, `RUNNER_SCALE_STEP`,
