@@ -2497,8 +2497,10 @@ type leaseRequest struct {
 	// (#132): the runner sends its job label ("forgejo job <id> <url>")
 	// with the create, so the lease and its `created` event name the job
 	// from the first moment — no separate comment call after the answer
-	// (which would leave the event silent). Capped by the comment route's
-	// validity: longer is refused like that route's.
+	// (which would leave the event silent). Held to the comment route's
+	// whole validity: handleCreate runs the shared comment validator
+	// (api/comment.go) on it before grantLease, so a create and a later
+	// set accept exactly the same text.
 	comment string
 	// pinned asks spoond never to pause or delete the new lease before
 	// its own expiry (FS5). The holder labels never pin.
@@ -4534,10 +4536,12 @@ func (s *Service) setName(owner, id, name string) (*Lease, error) {
 
 // setComment sets or clears the free-text annotation on a lease.
 // Empty string clears it; comments are informational only (no
-// uniqueness constraint, unlike names).
+// uniqueness constraint, unlike names). The create body's `comment`
+// field and the comment route share one validator (api/comment.go);
+// this call is the route's backend, so it runs the same check.
 func (s *Service) setComment(owner, id, comment string) (*Lease, error) {
-	if len(comment) > 512 {
-		return nil, fmt.Errorf("comment must be <= 512 chars")
+	if err := validateComment(comment); err != nil {
+		return nil, err
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()

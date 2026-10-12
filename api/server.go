@@ -728,8 +728,11 @@ func isHexPath(p string) bool {
 // or user token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// originalPath is the path the client asked for, before any
-		// rewrite: the alias deprecation keys on the requested spelling.
+		// originalPath is the path as it reaches the middleware: Handler
+		// has already rewritten /api/leases onto /api/sandboxes above, so
+		// an alias request and a rewritten primary one look alike here;
+		// the apiRewrittenKey marker is what distinguishes them — the
+		// alias deprecation below counts only a request without it.
 		originalPath := r.URL.Path
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
 			strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
@@ -1092,8 +1095,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// itself (#132): the runner sends its job label
 		// ("forgejo job <id> <url>", runner/executor.go) with the create,
 		// so the lease and its `created` event name the job from the first
-		// moment. The comment route's own cap applies (512; longer is a
-		// bad request).
+		// moment. The comment route's whole validity applies (the shared
+		// validator in api/comment.go: 512 bytes, no control characters;
+		// a violation is a bad request).
 		Comment string `json:"comment"`
 		// Pinned pins the new lease (FS5): spoond never pauses or deletes
 		// it before its own expiry. A persistent pinned lease stays until
@@ -1181,10 +1185,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// The comment rides the create (#132); the comment route's cap
-	// applies to it like to any later set.
-	if len(req.Comment) > 512 {
-		writeError(w, http.StatusBadRequest, "comment must be <= 512 chars")
+	// The comment rides the create (#132); the comment route's whole
+	// validity applies to it like to any later set — one shared
+	// validator (api/comment.go) answers for both routes.
+	if err := validateComment(req.Comment); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.HoldTTL != nil {
@@ -1971,7 +1976,9 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleComment sets or clears the free-text annotation on a lease.
-// An empty comment clears it.
+// An empty comment clears it. The create body's `comment` field answers
+// to the same validator (api/comment.go), so the two routes never
+// disagree on what a comment is.
 func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
@@ -1980,6 +1987,10 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := validateComment(req.Comment); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	lease, err := s.svc.setComment(owner, id, req.Comment)

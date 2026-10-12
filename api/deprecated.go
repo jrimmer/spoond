@@ -97,15 +97,13 @@ func aliasSuccessorPath(p string) string {
 }
 
 // markDeprecatedAliasHeaders sets the RFC 8594 headers on a request
-// still on the /api/sandboxes alias. It runs in Handler before auth, on
-// the path the client asked for, so even a refused request learns the
-// surface goes away. A request rewritten from /api/leases (or the
-// events token's documented route) carries the apiRewrittenKey marker
-// and is skipped, so the primary path never reports the alias.
+// still on the /api/sandboxes alias. It runs in Handler before auth and
+// before the /api/leases rewrite, on the path the client asked for, so
+// even a refused request learns the surface goes away. No apiRewrittenKey
+// check is needed here: the only call site runs before that marker can
+// exist (Handler sets it later, for a primary-path request), so every
+// request reaching this point is on the alias spelling.
 func markDeprecatedAliasHeaders(w http.ResponseWriter, r *http.Request) {
-	if r.Context().Value(apiRewrittenKey{}) == true {
-		return
-	}
 	setDeprecatedHeaders(w, aliasSuccessorPath(r.URL.Path))
 }
 
