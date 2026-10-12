@@ -954,7 +954,10 @@ fake) from a file.
 
 **`PUT`** replaces the file with the request body (parents are created;
 an existing file is replaced, an existing directory in the way is a
-`409`). The mode comes from `?mode=0644` — octal, default `0644` —
+`409`). The body lands in a private directory beside the target and is
+renamed into place, so readers never see a partial file and a secret is
+never readable by others while it lands; an existing file is replaced,
+not truncated (hard links and open handles keep the old content). The mode comes from `?mode=0644` — octal, default `0644` —
 and is applied to the created file. Response `201` with the new file's
 stat document (as above).
 

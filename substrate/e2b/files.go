@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -51,10 +52,12 @@ func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, data []b
 		return err
 	}
 	if err := uploadFile(ctx, c.envdClient(sandboxID, ""), c.cfg.ProxyURL, tmp, data); err != nil {
-		c.discard(ctx, sandboxID, tmpDir)
+		// A gone or unreachable sandbox has nothing to clean up (and a
+		// cleanup exec would only repeat the orchestrator probe).
 		if serr := c.sandboxListed(ctx, sandboxID); serr != nil {
 			return fmt.Errorf("%w: %v", serr, err)
 		}
+		c.discard(ctx, sandboxID, tmpDir)
 		return err
 	}
 	if err := c.shExec(ctx, sandboxID, "place "+path, writePlaceScript, strconv.FormatUint(uint64(mode.Perm()), 8), tmp, path, tmpDir); err != nil {
@@ -64,19 +67,26 @@ func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, data []b
 	return nil
 }
 
+// errIsDirExit is the stage and place scripts' exit status for a target
+// that is a directory: WriteFile answers it as substrate.ErrInvalidOp.
+const errIsDirExit = 3
+
 // writeStageScript refuses a directory target, creates the target's
 // missing parents (0755) and the private upload directory (0700).
 // $1 target, $2 its directory, $3 the upload directory.
 const writeStageScript = `set -e
-[ ! -d "$1" ] || { echo "$1: is a directory" >&2; exit 1; }
+[ ! -d "$1" ] || { echo "$1: is a directory" >&2; exit 3; }
 mkdir -p -- "$2"
 mkdir -m 700 -- "$3"`
 
 // writePlaceScript applies the mode, renames the upload over the target
-// and removes the upload directory. $1 mode, $2 upload, $3 target, $4 the
-// upload directory.
+// (replacing the file, not truncating it: hard links and open handles keep
+// the old content) and removes the upload directory. A target that became
+// a directory since the stage is refused, not written into. $1 mode, $2
+// upload, $3 target, $4 the upload directory.
 const writePlaceScript = `set -e
 chmod "$1" -- "$2"
+[ ! -d "$3" ] || { echo "$3: is a directory" >&2; exit 3; }
 mv -f -- "$2" "$3"
 rmdir -- "$4"`
 
@@ -90,6 +100,9 @@ func (c *Client) shExec(ctx context.Context, sandboxID, what, script string, arg
 	if err != nil {
 		return err
 	}
+	if r.ExitCode == errIsDirExit {
+		return fmt.Errorf("e2b: %s %s: %s: %w", what, sandboxID, strings.TrimSpace(r.Stderr), substrate.ErrInvalidOp)
+	}
 	if r.ExitCode != 0 {
 		return fmt.Errorf("e2b: %s %s: exit %d: %s", what, sandboxID, r.ExitCode, strings.TrimSpace(r.Stderr))
 	}
@@ -98,8 +111,12 @@ func (c *Client) shExec(ctx context.Context, sandboxID, what, script string, arg
 
 // discard removes a failed write's upload directory, best effort: the
 // write's own error is what the caller reports.
+// It runs detached from ctx: a client that hung up mid-upload cancels the
+// request, and the half-written upload directory must still go.
 func (c *Client) discard(ctx context.Context, sandboxID, tmpDir string) {
-	_, _ = c.Exec(ctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/rm", "-rf", "--", tmpDir}})
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_, _ = c.Exec(dctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/rm", "-rf", "--", tmpDir}})
 }
 
 // uploadDir names a fresh private upload directory inside dir.

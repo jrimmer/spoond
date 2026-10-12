@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -393,5 +394,104 @@ func TestWriteFileRefusesDirectoryPath(t *testing.T) {
 	}
 	if len(e.execs) != 0 || len(e.uploads) != 0 {
 		t.Fatalf("a refused path touched the guest: execs %v, uploads %d", e.execs, len(e.uploads))
+	}
+}
+
+// TestWriteFilePlaceErrorDiscards: when the final rename fails, the
+// upload directory is removed rather than left holding the content.
+func TestWriteFilePlaceErrorDiscards(t *testing.T) {
+	e := &filesTestEnvd{failPlace: true}
+	c := newFilesEnvd(t, e)
+	defer e.close()
+	if err := c.WriteFile(context.Background(), filesSandboxID, "/tmp/x.txt", []byte("x"), 0o644); err == nil {
+		t.Fatal("WriteFile with a failing place succeeded")
+	}
+	tmpDir := strings.TrimSuffix(e.uploads[0].path, "/x.txt")
+	if want := "/bin/rm -rf -- " + tmpDir; len(e.execs) != 3 || e.execs[2] != want {
+		t.Fatalf("execs = %v, want stage, place, then %q", e.execs, want)
+	}
+}
+
+// TestWriteFileUploadErrorGoneSandbox: a failed upload whose sandbox the
+// orchestrator cannot confirm answers the probe's error without a cleanup
+// exec (there is nothing reachable to clean).
+func TestWriteFileUploadErrorGoneSandbox(t *testing.T) {
+	e := &filesTestEnvd{uploadErr: true}
+	c := newFilesEnvd(t, e)
+	defer e.close()
+	if err := c.WriteFile(context.Background(), filesSandboxID, "/tmp/x.txt", []byte("x"), 0o644); err == nil {
+		t.Fatal("WriteFile with a failing upload succeeded")
+	}
+	if len(e.execs) != 1 {
+		t.Fatalf("execs = %v, want only the stage", e.execs)
+	}
+}
+
+// TestWriteFileScripts runs the stage and place scripts for real (/bin/sh,
+// a temp dir standing in for the guest): the upload dir is private, the
+// mode lands, an existing name or a directory target is refused, and
+// nothing is left behind.
+func TestWriteFileScripts(t *testing.T) {
+	root := t.TempDir()
+	sh := func(script string, args ...string) (int, string) {
+		cmd := exec.Command("/bin/sh", append([]string{"-c", script, "sh"}, args...)...)
+		out, err := cmd.CombinedOutput()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode(), string(out)
+		}
+		if err != nil {
+			t.Fatalf("sh: %v", err)
+		}
+		return 0, string(out)
+	}
+	target := root + "/a/b/f.txt"
+	dir := root + "/a/b"
+	tmpDir := dir + "/.spoond-upload-0123456789abcdef"
+	if rc, out := sh(writeStageScript, target, dir, tmpDir); rc != 0 {
+		t.Fatalf("stage: exit %d: %s", rc, out)
+	}
+	if st, err := os.Stat(tmpDir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("upload dir = %v, %v; want mode 700", st, err)
+	}
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm()&0o055 != 0o055 {
+		t.Fatalf("parent = %v, %v; want it traversable by others", st, err)
+	}
+	// A planted name (or symlink) makes the stage fail instead of reusing it.
+	if rc, _ := sh(writeStageScript, target, dir, tmpDir); rc == 0 {
+		t.Fatal("stage reused an existing upload directory")
+	}
+	if err := os.WriteFile(tmpDir+"/f.txt", []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rc, out := sh(writePlaceScript, "600", tmpDir+"/f.txt", target, tmpDir); rc != 0 {
+		t.Fatalf("place: exit %d: %s", rc, out)
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "hello" {
+		t.Fatalf("target = %q, %v", b, err)
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o600 {
+		t.Fatalf("target mode = %o, want 600", st.Mode().Perm())
+	}
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatalf("upload dir left behind: %v", err)
+	}
+	// A directory target: the stage refuses it with the is-a-directory
+	// status, and so does the place if it appeared after the stage.
+	if rc, _ := sh(writeStageScript, dir, root+"/a", root+"/a/.spoond-upload-x"); rc != errIsDirExit {
+		t.Fatalf("stage of a directory target: exit %d, want %d", rc, errIsDirExit)
+	}
+	d2 := root + "/a/.spoond-upload-y"
+	if err := os.Mkdir(d2, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(d2+"/b", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rc, _ := sh(writePlaceScript, "644", d2+"/b", dir, d2); rc != errIsDirExit {
+		t.Fatalf("place onto a directory: exit %d, want %d", rc, errIsDirExit)
+	}
+	if _, err := os.Stat(dir + "/b"); !os.IsNotExist(err) {
+		t.Fatal("place wrote into a directory target")
 	}
 }

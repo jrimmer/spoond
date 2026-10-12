@@ -39,6 +39,8 @@ type filesTestEnvd struct {
 	protoErr  connect.Code          // nonzero: Stat/MakeDir/Remove fail with it
 	fileData  []byte                // GET /files body
 	fileErr   bool                  // GET /files returns 404
+	uploadErr bool                  // POST /files answers 500
+	failPlace bool                  // the WriteFile place exec exits 1
 	execEnvs  []map[string]string   // process env of each Start, in order
 }
 
@@ -88,6 +90,10 @@ func newFilesEnvd(t *testing.T, e *filesTestEnvd) *Client {
 			rec.file = file
 		}
 		e.uploads = append(e.uploads, rec)
+		if r.Method == http.MethodPost && e.uploadErr {
+			http.Error(w, "upload failed", http.StatusInternalServerError)
+			return
+		}
 		if r.Method == http.MethodGet {
 			if e.fileErr {
 				http.NotFound(w, r)
@@ -187,7 +193,11 @@ func (h *execHandler) Start(ctx context.Context, r *connect.Request[process.Star
 	if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_Start{Start: &process.ProcessEvent_StartEvent{Pid: 1}}}}); err != nil {
 		return err
 	}
-	return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true}}}})
+	code := int32(0)
+	if h.e.failPlace && len(args) > 2 && args[2] == writePlaceScript {
+		code = 1
+	}
+	return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: code, Exited: true}}}})
 }
 
 func (h *execHandler) SendInput(ctx context.Context, r *connect.Request[process.SendInputRequest]) (*connect.Response[process.SendInputResponse], error) {

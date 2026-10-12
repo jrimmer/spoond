@@ -432,4 +432,19 @@ func TestSecretsScrubScriptRealShell(t *testing.T) {
 	if len(left) != 1 || left[0] != "nested" {
 		t.Fatalf("subdir left = %v, want [nested]", left)
 	}
+
+	// A write's leftover upload directory (cut off mid-upload, holding a
+	// partial secret) is removed with its content, so it neither survives
+	// into the snapshot nor blocks the save.
+	up := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(up, ".spoond-upload-0123456789abcdef"), 0o700); err != nil {
+		t.Fatalf("seed upload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(up, ".spoond-upload-0123456789abcdef", "tok"), []byte("partial"), 0o600); err != nil {
+		t.Fatalf("seed upload file: %v", err)
+	}
+	_, left = parseScrubOutput(runScrubScript(t, up))
+	if len(left) != 0 {
+		t.Fatalf("upload dir left = %v, want none", left)
+	}
 }
