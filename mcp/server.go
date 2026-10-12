@@ -83,6 +83,10 @@ type Tool struct {
 	Handler     func(ctx context.Context, args map[string]any) (any, error) `json:"-"`
 }
 
+// DefaultBinary is the MCP server binary this tree ships, as a host's
+// user would run it (cmd/spoond-dev-mcp, stdio newline-delimited JSON-RPC).
+const DefaultBinary = "spoond-dev-mcp"
+
 // New builds the MCP server.
 func New(cfg Config) *Server {
 	if cfg.TTL == 0 {
@@ -106,7 +110,44 @@ func New(cfg Config) *Server {
 		in:      cfg.In,
 		out:     cfg.Out,
 	}
-	s.tools = []Tool{
+	s.tools = defaultToolTable()
+	for i := range s.tools {
+		switch s.tools[i].Name {
+		case "shell":
+			s.tools[i].Handler = s.toolShell
+		case "read_file":
+			s.tools[i].Handler = s.toolReadFile
+		case "write_file":
+			s.tools[i].Handler = s.toolWriteFile
+		case "edit_file":
+			s.tools[i].Handler = s.toolEditFile
+		case "list_files":
+			s.tools[i].Handler = s.toolListFiles
+		case "status":
+			s.tools[i].Handler = s.toolStatus
+		}
+	}
+	return s
+}
+
+// DefaultToolNames lists the tools New registers, without building a
+// server. The capability document reads this so its MCP surface never
+// hand-copies names that could drift from the registry.
+var DefaultToolNames = func() []string {
+	names := []string{}
+	for _, t := range defaultToolTable() {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
+// defaultToolTable is the tool registry, in registration order: what
+// New puts into s.tools. The table's Handler fields close over a
+// *Server, so the plain table is built handler-free and New attaches
+// the receivers; DefaultToolNames therefore reads the same table with
+// no server.
+func defaultToolTable() []Tool {
+	return []Tool{
 		{
 			Name:        "shell",
 			Description: "Run a shell command in an isolated microVM sandbox. Returns stdout, stderr and exit code. Use for any command execution.",
@@ -119,7 +160,7 @@ func New(cfg Config) *Server {
 				},
 				"required": []string{"command"},
 			},
-			Handler: s.toolShell,
+			Handler: nil,
 		},
 		{
 			Name:        "read_file",
@@ -131,7 +172,7 @@ func New(cfg Config) *Server {
 				},
 				"required": []string{"path"},
 			},
-			Handler: s.toolReadFile,
+			Handler: nil,
 		},
 		{
 			Name:        "write_file",
@@ -144,7 +185,7 @@ func New(cfg Config) *Server {
 				},
 				"required": []string{"path", "content"},
 			},
-			Handler: s.toolWriteFile,
+			Handler: nil,
 		},
 		{
 			Name:        "edit_file",
@@ -158,7 +199,7 @@ func New(cfg Config) *Server {
 				},
 				"required": []string{"path", "old_string", "new_string"},
 			},
-			Handler: s.toolEditFile,
+			Handler: nil,
 		},
 		{
 			Name:        "list_files",
@@ -169,16 +210,15 @@ func New(cfg Config) *Server {
 					"path": map[string]any{"type": "string", "description": "Directory to list (default: /root)"},
 				},
 			},
-			Handler: s.toolListFiles,
+			Handler: nil,
 		},
 		{
 			Name:        "status",
 			Description: "Report sandbox status: OS, kernel, architecture, lease info. No arguments.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-			Handler:     s.toolStatus,
+			Handler:     nil,
 		},
 	}
-	return s
 }
 
 // Run serves until the input stream closes.
