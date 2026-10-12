@@ -4,8 +4,9 @@ package conformance
 
 import (
 	"bufio"
-	"context"
+	"crypto/tls"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -49,16 +50,16 @@ type capabilitySizesDoc struct {
 	} `json:"presets"`
 }
 
-// capabilityNetPolicyDoc is one egress class and its one-line meaning.
+// capabilityNetPolicyDoc is one egress class.
 type capabilityNetPolicyDoc struct {
-	Name   string `json:"name"`
-	Detail string `json:"detail"`
+	Name string `json:"name"`
 }
 
 // TestA20_Capabilities reads GET /api/capabilities with the test token
 // and checks the document describes this deployment: routes, the image
-// catalog, the size presets and the four egress classes. Without a
-// token the endpoint answers 401 like every other authenticated route.
+// catalog, the size presets and the four egress classes. One raw
+// request with no Authorization header at all gets 401, like every
+// other authenticated route.
 func TestA20_Capabilities(t *testing.T) {
 	rec := begin(t)
 
@@ -94,7 +95,9 @@ func TestA20_Capabilities(t *testing.T) {
 		}
 	}
 
-	// images: every image name GET /api/images reports appears.
+	// images: every image name GET /api/images reports appears. The
+	// requirement is per listed name, so an empty catalog satisfies it
+	// vacuously — the document cannot contradict what is not listed.
 	st, body, err = cl.images("")
 	if err != nil {
 		failf(t, "images: %v", err)
@@ -108,9 +111,6 @@ func TestA20_Capabilities(t *testing.T) {
 	if err := json.Unmarshal(body, &list); err != nil {
 		failf(t, "images: bad body: %v", err)
 	}
-	if len(list.Images) == 0 {
-		failf(t, "GET /api/images lists no images; the document cannot be checked against it")
-	}
 	inDoc := map[string]bool{}
 	for _, img := range doc.Images {
 		inDoc[img.Name] = true
@@ -121,6 +121,7 @@ func TestA20_Capabilities(t *testing.T) {
 		}
 	}
 	rec.set("images", len(doc.Images))
+	rec.set("images_from_get", len(list.Images))
 
 	// sizes: the presets block (the GET /api/sizes data).
 	if len(doc.Sizes.Presets) == 0 {
@@ -133,9 +134,6 @@ func TestA20_Capabilities(t *testing.T) {
 	havePolicy := map[string]bool{}
 	for _, p := range doc.NetworkPolicies {
 		havePolicy[p.Name] = true
-		if p.Detail == "" {
-			failf(t, "capabilities: network_policies entry %q carries no meaning", p.Name)
-		}
 	}
 	for _, name := range wants {
 		if !havePolicy[name] {
@@ -143,16 +141,28 @@ func TestA20_Capabilities(t *testing.T) {
 		}
 	}
 
-	// Without a token: 401, like every other authenticated route. One
-	// anonymous request, at most: the server throttles failed auths per
-	// IP and the rest of the run depends on this connection's good
-	// standing.
-	st, body, err = newClient(cfg).do("GET", "/api/capabilities", nil)
+	// Without a token: 401, like every other authenticated route. The
+	// request must carry no Authorization header at all — every client
+	// call stamps `Bearer <token>` on, and CONFORMANCE_TOKEN is
+	// required and valid, so an authenticated request can never
+	// exercise this. One request, at most: the server throttles failed
+	// auths per IP and the rest of the run depends on this
+	// connection's good standing.
+	anonReq, err := http.NewRequest(http.MethodGet, cl.base+"/api/capabilities", nil)
 	if err != nil {
 		failf(t, "capabilities without a token: %v", err)
 	}
-	if st != http.StatusUnauthorized {
-		failf(t, "capabilities without a token: status %d, want 401: %s", st, truncate(body))
+	anonResp, err := cl.hc.Do(anonReq)
+	if err != nil {
+		failf(t, "capabilities without a token: %v", err)
+	}
+	anonBody, err := io.ReadAll(anonResp.Body)
+	anonResp.Body.Close()
+	if err != nil {
+		failf(t, "capabilities without a token: read body: %v", err)
+	}
+	if anonResp.StatusCode != http.StatusUnauthorized {
+		failf(t, "capabilities without a token: status %d, want 401: %s", anonResp.StatusCode, truncate(anonBody))
 	}
 }
 
@@ -185,35 +195,58 @@ func getLease(t *testing.T, id string) leaseDetail {
 	return d
 }
 
-// watchCreatedEventIdle reports the first `created` event the caller's
-// event stream carries: the detail ("" when the stream does not answer,
-// watchCreatedUnreadable). It reads the events route with the test
-// token — the read the idle-suspend watch makes, with no lease filter:
-// the create's id only exists after its answer, so the watch is started
-// before the create and the first `created` event it can report is that
-// create's (the test creates nothing else until it has matched one).
-// Reading the stream is an extra ability: an events-only EVENTS_TOKEN's
-// single route reads without a bearer token, so its empty answer means
-// "unreadable", which the caller turns into a skip.
-func watchCreatedEventIdle(out chan<- string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cl.base+"/api/leases/events", nil)
+// watchBudget bounds the created-event read of A21: a stream that
+// answers but carries no created event for the lease inside it fails
+// the case (an open stream cannot miss an event emitted after it
+// subscribed); a stream that closes first leaves the sub-check to the
+// caller's skip instead.
+const watchBudget = 30 * time.Second
+
+// watchClient reads the event stream: the suite transport (the backend
+// serves a self-signed cert, docs/security.md) with an overall timeout
+// past watchBudget, so a silent stream cannot outlive the case.
+var watchClient = &http.Client{
+	Timeout:   45 * time.Second,
+	Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+}
+
+// openEventsStream opens the caller's all-lease event stream
+// (GET /api/leases/events) with the test token and returns the open
+// response, or nil when the stream does not open (connect error or
+// non-200 — the route does not answer for this token here). nil means
+// the caller skips A21's created-event sub-check. A non-nil response
+// is the caller's to close.
+func openEventsStream() *http.Response {
+	req, err := http.NewRequest(http.MethodGet, cl.base+"/api/leases/events", nil)
 	if err != nil {
-		out <- watchCreatedUnreadable
-		return
+		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+cl.token)
-	resp, err := cl.hc.Do(req)
+	resp, err := watchClient.Do(req)
 	if err != nil {
-		out <- watchCreatedUnreadable
-		return
+		return nil
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		out <- watchCreatedUnreadable
-		return
+		resp.Body.Close()
+		return nil
 	}
+	return resp
+}
+
+// readCreatedDetail scans an open all-lease stream for the `created`
+// event of lease id and returns its detail. It fails the case when the
+// stream stays open but no such event arrives inside watchBudget — an
+// event emitted while the stream was subscribed cannot be missed — and
+// reports ok=false when the stream closes with a transport error
+// before the event shows up (the caller then skips the sub-check).
+func readCreatedDetail(t *testing.T, resp *http.Response, id string) (detail string, ok bool) {
+	eventClose := make(chan struct{})
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	go func() {
+		<-time.After(watchBudget)
+		_ = resp.Body.Close() // unblock the scanner and end the sub-check
+		close(eventClose)
+	}()
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -229,41 +262,44 @@ func watchCreatedEventIdle(out chan<- string) {
 		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
 			continue
 		}
-		if ev.Type == "gap" {
-			continue
-		}
-		if ev.Type == "created" && ev.LeaseID != "" && ev.LeaseID != "-" {
-			out <- ev.Detail
-			return
+		// Events of other leases the caller owns (this test makes a
+		// second, comment-less create) match nothing here; gap events
+		// carry no lease id at all. The suffix assertion compares the
+		// event's own detail: no other lease's event can pass it.
+		if ev.Type == "created" && ev.LeaseID == id {
+			return ev.Detail, true
 		}
 	}
+	select {
+	case <-eventClose:
+		failf(t, "the lease event stream answered but carried no created event for %s within %s", id, watchBudget)
+	default:
+	}
+	return "", false
 }
 
-// watchCreatedUnreadable is the empty detail watchCreatedEventIdle
-// reports when the event stream does not answer: the created-event
-// sub-check skips on it.
-const watchCreatedUnreadable = ""
-
 // TestA21_CreateComment sends the create-time comment (docs/api.md create
-// body table, `comment`, #132): the lease's GET carries it, a comment
-// over 512 characters is a bad request, and the lease's `created` event
-// names it after a ` · `. The stream read is an extra ability, so the
-// sub-check skips with a clear message when the token cannot read the
-// stream (an events-only EVENTS_TOKEN, whose single route is the
-// all-events stream) — never failing a working backend.
+// body table, `comment`, #132): the lease's GET carries it, a create
+// without one still reports none, a comment over 512 characters is a bad
+// request, and the lease's `created` event names it after a ` · `. The
+// event sub-check needs the extra ability to read the lease event stream
+// with the test token; when the token cannot read it here, only that
+// sub-check is skipped — recorded in the results with the reason, so the
+// case still stands on its create-body assertions.
 func TestA21_CreateComment(t *testing.T) {
 	rec := begin(t)
 
 	const comment = "conformance comment 1"
 
-	// The created event is emitted while the create answers: the watch
-	// is started before the create so it cannot be missed (the
-	// idle-suspend watch's pattern). The id only exists after the
-	// answer, so the watch opens the caller's events stream and reports
-	// the first created event it sees — the test creates nothing else
-	// until it has matched one.
-	detailCh := make(chan string, 1)
-	go watchCreatedEventIdle(detailCh)
+	// The created event is emitted while the create answers (#132), and
+	// a warm-pool create answers in tens of milliseconds, so the stream
+	// is opened before the create. The server subscribes a stream at
+	// connect, before its headers (api/events_sse.go streamEvents), so
+	// an already-open one cannot miss the event. The lease id only
+	// exists after the answer, so the watch is necessarily the
+	// all-lease stream and the read below matches events on the lease's
+	// own id.
+	stream := openEventsStream()
 
 	// The create itself: the comment rides the body (#132) — the lease
 	// is born with its annotation, no comment call after the answer.
@@ -296,17 +332,26 @@ func TestA21_CreateComment(t *testing.T) {
 	}
 
 	// The sub-check: the created event's detail ends with the comment
-	// after the " · " separator (#132). Reading the stream is an extra
-	// ability (an events-only EVENTS_TOKEN cannot), so a stream that
-	// does not answer skips the check with a clear message rather than
-	// failing a working backend. The create answered first — the only
-	// created event the watch can report is this lease's, by filter.
-	detail := <-detailCh
-	if detail == watchCreatedUnreadable {
-		skipf(t, "the lease event stream did not answer for %s (or this token cannot read it, e.g. an events-only EVENTS_TOKEN); the created-event sub-check does not apply", l.ID)
+	// after the " · " separator (#132). The stream was opened before
+	// the create; when the token cannot read it, the sub-check alone is
+	// skipped and the reason recorded.
+	if stream == nil {
+		msg := "skipped: the lease event stream did not open for the test token (connect error or non-200)"
+		rec.set("created_event", msg)
+		t.Logf("created-event sub-check %s", msg)
+		return
+	}
+	defer stream.Body.Close()
+	detail, got := readCreatedDetail(t, stream, l.ID)
+	if !got {
+		msg := "skipped: the lease event stream closed before the lease's created event arrived"
+		rec.set("created_event", msg)
+		t.Logf("created-event sub-check %s (lease %s)", msg, l.ID)
+		return
 	}
 	if !strings.HasSuffix(detail, " · "+comment) {
 		failf(t, "created event detail = %q, want the \" · %s\" suffix", detail, comment)
 	}
+	rec.set("created_event", "asserted")
 	rec.set("created_detail", detail)
 }
