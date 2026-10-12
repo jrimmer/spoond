@@ -1170,6 +1170,7 @@ sets `TimeoutStopSec=660` for the 600 s default):
 # /etc/systemd/system/spoond-runner.service
 [Service]
 Environment=RUNNER_STOP_GRACE=10m
+EnvironmentFile=/etc/spoond/runner.env
 TimeoutStopSec=660   # must exceed RUNNER_STOP_GRACE
 ```
 
