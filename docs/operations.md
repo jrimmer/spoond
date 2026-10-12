@@ -142,10 +142,14 @@ its answer for 5 s, the dashboard answers live.
 
 - Lease API (`:8890`): `200 {"status":"ok"}` only when the
   orchestrator reports the node healthy, the catalog answers a trivial
-  query, and the snapshot disk (danger ≥ 90 % used) and hugepage pool
+  query, and the snapshot disk (danger ≥ 90 % used), the host's root
+  filesystem (`root disk`, danger ≥ 90 % used — the watch the
+  forkd-era soak timer owned until 2026-10-12) and the hugepage pool
   (danger ≥ 92 % used) are below the dashboard's danger levels;
   otherwise `503 {"status":"fail","checks":[{name, ok, detail}…]}`
-  names what failed (see [api.md](api.md)).
+  names what failed (see [api.md](api.md)). When the snapshot store
+  and `/` share one filesystem only the snapshot disk's check is
+  reported.
 - Web dashboard (`:8893`): `200` only when the metrics scrape, the
   catalog and the identity store all answer.
 
@@ -1654,3 +1658,11 @@ states and the runner's job results of the last 24 h read-only from
 SQLite, and appends one JSON line to `/var/lib/spoond/soak.log`. The
 unit fails (so `systemctl --failed` shows it) when doctor reports a
 FAIL or any lease is `lost`.
+
+The soak timer's one beyond-healthz catch — the root disk filling past
+its danger level, as on 2026-10-11 when docker's image-build cache took
+the root disk to 94 % — is /readyz's job now: its lease-API readiness
+report includes a `root disk` check against those levels (see "Uptime
+monitoring (Gatus)" above), so an external monitor pages on it instead
+of waiting up to a day for the timer. The timer remains for the doctor
+and lost-lease counts it alone keeps.

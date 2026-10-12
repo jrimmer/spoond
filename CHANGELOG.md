@@ -10,6 +10,24 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **`/readyz` watches the host's root filesystem too (replaces the
+  soak timer's root-disk watch; owner-approved 2026-10-12).** The
+  lease API's readiness report gains a second disk check, `root disk`,
+  beside the snapshot disk's: the host's root filesystem (`/`)
+  against the same 90 % used danger level, the same 2 s bound on its
+  own goroutine, named in the 503 body's `checks` list like every
+  other check. When the snapshot store and `/` sit on one filesystem
+  (same st_dev) the root check drops itself, so a filesystem is never
+  counted twice. This takes over the forkd-era
+  `spoond-soak.timer`'s one still-owned catch — the root disk at 94 %
+  on 2026-10-11 when docker's image-build cache filled it — so the
+  external uptime monitor pages on a filling root disk within a poll
+  instead of up to a day later; the timer keeps the soak run's doctor
+  and lost-lease counts. The path is overridable only for tests,
+  through `E2B_ROOT_FS_PATH`.
+
 ### Changed
 
 - **Lease comments refuse control characters (3.7 review nit).** The
