@@ -10,6 +10,19 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added (tests)
+
+- **Conformance: the lease API from guests and guest DNS (spoond-ndh).**
+  `conformance/guest_dns_test.go`: N10 checks that an `internet` and a
+  `lan` lease reach `GET /healthz` on the API's base URL and round-trip
+  a create+delete with the test token (passed as an exec-time secret
+  file, never env or argv), while a `restricted` lease cannot reach it.
+  N12 checks every policy's `/etc/resolv.conf` names no public resolver
+  and, for every policy but `none`, that the API's host name resolves
+  to the LAN address. Both skip unless `CONFORMANCE_LAN_DNS` (the
+  expected LAN address) is set. The mixed restricted allowlist stays
+  N9's.
+
 ## [3.6.0] - 2026-10-11
 
 3.6 keeps secrets out of the environment: every secret setting may name
