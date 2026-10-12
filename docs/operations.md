@@ -1507,7 +1507,14 @@ the backend's lease event stream (`/api/leases/events`, resuming by
 `Last-Event-ID` and backing off when the backend refuses it) and keeps
 the last 50 events; the events panel shows the newest 5 — `HH:MM:SS`,
 the type, the lease id and the holder (else the comment, else the
-owner), lost events highlighted, releases dim. Without
+owner), lost events highlighted, releases dim. A CI job lease's
+`created` line is re-labelled from the lease's comment (#119): `ci job
+N started · lease <short id>` with the job id in the subject column and
+the lease id in the text, not the id column — the runner's job starting
+instead of a plain lease-create line. The idle-sweep pass summary (one
+`sweep` event per pass that suspended leases) draws
+`idle sweep · N suspended`, dim, its subject spoond — the news is on
+the per-lease `idle_suspended` lines beside it. Without
 the token the panel says `events need DASH_EVENTS_TOKEN` instead.
 Configuration lives in `cmd/spoond-dash/dash.go`; the notable
 variables:

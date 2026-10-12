@@ -1345,6 +1345,7 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		{"gc", "ok"},
 		{"holder_set", "dim"},
 		{"sweep", "dim"},
+		{"idle sweep", "dim"},
 		{"ci job 3609 started · lease abcdef0123", "ok"},
 	}
 	for _, tc := range cases {
@@ -1375,7 +1376,7 @@ func TestEventsPanelTypeColour(t *testing.T) {
 func TestEventsPanelNewEventColours(t *testing.T) {
 	s := healthySnapshot()
 	s.Events = []EventLine{
-		{Text: "07:19:02  sweep                                  spoond  2 suspended", Style: "dim"},
+		{Text: "07:19:02  idle sweep                          spoond  2 suspended", Style: "dim"},
 		{Text: "07:18:44  ci job 3609 started · lease abcdef0123              ci job 3609  granted from image py-base in 61 ms", Style: "ok"},
 	}
 	rows := strings.Split(Draw(s, DefaultWidth, fixedNow, "h").HTML(), "\n")
@@ -1391,7 +1392,8 @@ func TestEventsPanelNewEventColours(t *testing.T) {
 	// The sweep's dim type run merges with the dim time before it (same
 	// style, unlike lost's bad): the span carries both, then the subject
 	// (the id style) and the dim tail.
-	if sweep == "" || !strings.Contains(sweep, `g-dim" data-id="events">07:19:02  sweep`) {
+	if sweep == "" || !strings.Contains(sweep, `g-dim" data-id="events">07:19:02  idle sweep`) ||
+		!strings.Contains(sweep, "2 suspended") {
 		t.Fatalf("sweep type not drawn dim:\n%s", sweep)
 	}
 	if started == "" || !strings.Contains(started, `g-ok" data-id="events">ci job 3609 started`) {

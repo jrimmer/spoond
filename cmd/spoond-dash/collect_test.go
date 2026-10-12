@@ -406,8 +406,11 @@ func TestEventLinesCIJobStart(t *testing.T) {
 
 // TestEventLinesSweepSummary: one sweep event (the backend's #132
 // summary of an idle-sweep pass that suspended leases) draws
-// "idle sweep · N suspended", lease-less, subject spoond, its type word
-// and line dim — the news is the per-lease idle_suspended lines.
+// "idle sweep · N suspended" (the drawn word, not the bus's bare
+// "sweep"), lease-less, subject spoond, its type word and line dim — the
+// news is the per-lease idle_suspended lines. The idle sweep's
+// suspension column is the detail, and the drawn type word sizes the
+// type column ("idle sweep", 10 runes) for the other lines too.
 func TestEventLinesSweepSummary(t *testing.T) {
 	c := newCollector(Config{EventsToken: "t"})
 	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
@@ -417,9 +420,9 @@ func TestEventLinesSweepSummary(t *testing.T) {
 		t.Fatalf("got %d lines, want 1", len(lines))
 	}
 	l := lines[0]
-	if !strings.Contains(l.Text, "sweep") || !strings.Contains(l.Text, "spoond") ||
-		!strings.Contains(l.Text, "2 suspended") {
-		t.Fatalf("sweep line = %+v, want type, spoond subject and detail", l)
+	want := "04:15:59  idle sweep              spoond  2 suspended"
+	if l.Text != want {
+		t.Fatalf("sweep line =\n%q\nwant\n%q", l.Text, want)
 	}
 	if l.Style != "dim" {
 		t.Fatalf("sweep line style = %q, want dim", l.Style)

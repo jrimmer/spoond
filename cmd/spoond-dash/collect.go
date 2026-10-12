@@ -946,7 +946,11 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 		if ev.Type == "gap" {
 			continue
 		}
-		typeW = max(typeW, len([]rune(ev.Type)))
+		typ := ev.Type
+		if ev.Type == "sweep" {
+			typ = "idle sweep" // the drawn word, as below
+		}
+		typeW = max(typeW, len([]rune(typ)))
 		subjW = max(subjW, len([]rune(eventSubject(ev, rows, names))))
 	}
 	subjW = min(subjW, eventSubjectMax)
@@ -959,7 +963,13 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 			lines = append(lines, EventLine{Text: at + "  ┄ events missed while reconnecting", Style: "warn"})
 			continue
 		}
-		text := strings.TrimRight(fmt.Sprintf("%s  %-*s  %-10s  %-*s  %s", at, typeW, ev.Type, ev.LeaseID,
+		typ := ev.Type
+		if ev.Type == "sweep" {
+			// The idle-sweep pass summary: its word on the line is the
+			// full "idle sweep" (#132), not the bus's bare "sweep".
+			typ = "idle sweep"
+		}
+		text := strings.TrimRight(fmt.Sprintf("%s  %-*s  %-10s  %-*s  %s", at, typeW, typ, ev.LeaseID,
 			subjW, ellipsize(eventSubject(ev, rows, names), subjW), shortBuildIDs(ev.Detail)), " ")
 		style := eventStyle(ev)
 		if ev.Type == "job_exited" {
