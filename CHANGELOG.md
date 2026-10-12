@@ -10,6 +10,18 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Released leases carry their measured peak memory (#130 step 1).**
+  When `OTEL_PROM_URL` is set the backend has sampled every
+  running lease's guest memory since 3.5; a release now reports what
+  the VM actually held: the `released` event's detail appends
+  `· peak N MiB` after the release reason (the runner's
+  `ci job 3609 ✓ 11m02s · peak 412 MiB`), whole MiB rounded up, and the
+  release lease journal line gains `peak_mib=N` beside `memory_mib`. A
+  release with no measurement (no `OTEL_PROM_URL`, or a lease that
+  never got a sample) adds nothing on either line.
+
 ## [3.6.1] - 2026-10-12
 
 3.6.1 fixes file writes into sticky directories such as `/tmp` on images
