@@ -453,3 +453,18 @@ func TestCapabilitiesSummaryLinesMatchDocHeadings(t *testing.T) {
 		}
 	}
 }
+
+// TestCapabilitiesNeedsAToken: the document is for authenticated callers
+// (like GET /api/images); no token is a 401, never the document.
+func TestCapabilitiesNeedsAToken(t *testing.T) {
+	ts, _ := newTestServer(t)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/capabilities", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /api/capabilities without a token = %d, want 401", resp.StatusCode)
+	}
+}

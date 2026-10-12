@@ -191,11 +191,11 @@ var Known = []string{
 	"SPOOND_GUEST_DNS_ADDR",
 	"SPOOND_PROXY_HOST_SUFFIX",
 	"SPOOND_SSH_CONNECTION_ADDR",
+	"SPOOND_TOKEN",
 	"SPOOND_URL",
 	"SWEEP_TIMEOUT",
 	"TLS_CERT",
 	"TLS_KEY",
-	"TOKEN",
 	"UNDRAIN_CONCURRENCY",
 	"UNDRAIN_READY_TIMEOUT",
 	"UNDRAIN_RESUME_RETRIES",
@@ -512,11 +512,11 @@ var Specs = []Spec{
 	{"SPOOND_GUEST_DNS_ADDR", TypeList, Backend, false}, // bare IPs; parseGuestDNS fails startup on a non-IP
 	{"SPOOND_PROXY_HOST_SUFFIX", TypeString, Backend, false},
 	{"SPOOND_SSH_CONNECTION_ADDR", TypeString, Gateway, false}, // the bare host reported in SSH_CONNECTION
+	{"SPOOND_TOKEN", TypeString, Doctor, true},                 // the bearer `spoond capabilities` sends; secret-valued
 	{"SPOOND_URL", TypeURL, Doctor, false},                     // the backend base URL `spoond capabilities` reads
 	{"SWEEP_TIMEOUT", TypeDuration, Backend, false},
 	{"TLS_CERT", TypeList, Backend, false}, // certificate paths, paired with TLS_KEY
 	{"TLS_KEY", TypeList, Backend, false},  // key paths, paired with TLS_CERT
-	{"TOKEN", TypeString, Doctor, true},    // the bearer `spoond capabilities` sends; secret-valued
 	{"UNDRAIN_CONCURRENCY", TypeInt, Backend, false},
 	{"UNDRAIN_READY_TIMEOUT", TypeDuration, Backend, false},
 	{"UNDRAIN_RESUME_RETRIES", TypeInt, Backend, false},

@@ -7,7 +7,7 @@
 //
 // The backend URL comes from SPOOND_URL (default
 // https://127.0.0.1:8890, scheme http when TLS_CERT is unset — the same
-// defaults `spoond doctor` probes with) and the token from TOKEN or
+// defaults `spoond doctor` probes with) and the token from SPOOND_TOKEN or
 // CONSUMER_TOKENS (the first token= side, so an operator's usual env
 // already carries a working credential; one-off overrides go through
 // --token). TLS trusts the backend's own cert file from TLS_CERT, like
@@ -93,7 +93,7 @@ type doc struct {
 func Main(args []string) int {
 	fs := flag.NewFlagSet("capabilities", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "print the raw JSON document")
-	tokenFlag := fs.String("token", "", "bearer token (default TOKEN, else the first CONSUMER_TOKENS token side)")
+	tokenFlag := fs.String("token", "", "bearer token (default SPOOND_TOKEN, else the first CONSUMER_TOKENS token side)")
 	urlFlag := fs.String("url", "", "backend base URL (default SPOOND_URL, else https://127.0.0.1:8890, or http with no TLS_CERT)")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
@@ -111,9 +111,9 @@ func Main(args []string) int {
 	if baseURL == "" {
 		baseURL = defaultBaseURL()
 	}
-	doctok, derr := settings.Get("TOKEN", os.Getenv, os.ReadFile)
+	doctok, derr := settings.Get("SPOOND_TOKEN", os.Getenv, os.ReadFile)
 	if derr != nil {
-		fmt.Fprintf(os.Stderr, "spoond capabilities: TOKEN: %v\n", derr)
+		fmt.Fprintf(os.Stderr, "spoond capabilities: SPOOND_TOKEN: %v\n", derr)
 		return 2
 	}
 	consumers, cerr := settings.Get("CONSUMER_TOKENS", os.Getenv, os.ReadFile)
@@ -129,7 +129,7 @@ func Main(args []string) int {
 		token = firstConsumerToken(consumers)
 	}
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "spoond capabilities: no token — set TOKEN or CONSUMER_TOKENS (token=consumer), or pass --token")
+		fmt.Fprintln(os.Stderr, "spoond capabilities: no token — set SPOOND_TOKEN or CONSUMER_TOKENS (token=consumer), or pass --token")
 		return 2
 	}
 

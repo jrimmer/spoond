@@ -171,7 +171,7 @@ spoond capabilities --json     # the raw document
 
 The subcommand resolves the backend like `spoond doctor` probes it:
 `SPOOND_URL` (else `https://127.0.0.1:8890`, or `http` when `TLS_CERT`
-is unset) and the token from `--token`, `TOKEN`, or the first
+is unset) and the token from `--token`, `SPOOND_TOKEN` (or `SPOOND_TOKEN_FILE`), or the first
 `CONSUMER_TOKENS` pair.
 
 ---

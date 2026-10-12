@@ -98,14 +98,14 @@ func TestMainFetchesAndPrints(t *testing.T) {
 // TestMainNeedsToken: no token anywhere is a usage error, exit 2, and
 // it names the env knobs rather than hitting the network unauthenticated.
 func TestMainNeedsToken(t *testing.T) {
-	t.Setenv("TOKEN", "")
+	t.Setenv("SPOOND_TOKEN", "")
 	t.Setenv("CONSUMER_TOKENS", "")
 	body, code := runMain(t, nil, true)
 	if code != 2 {
 		t.Fatalf("exit %d, want 2, output:\n%s", code, body)
 	}
-	if !strings.Contains(body, "TOKEN") {
-		t.Errorf("error should name TOKEN:\n%s", body)
+	if !strings.Contains(body, "SPOOND_TOKEN") {
+		t.Errorf("error should name SPOOND_TOKEN:\n%s", body)
 	}
 }
 
