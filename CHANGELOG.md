@@ -61,6 +61,18 @@ summarised from README "Status".
   killed, not paused; see Restarting the orchestrator), FAIL when the
   unit is `failed`/`inactive`. Prompted by the 2026-10-12 03:08 PT
   restart-during-activating loss.
+- **The dashboard's last two events (#132).** A CI job lease's `created`
+  line is re-labelled as the job's start: the runner labels the lease
+  before its create answers (#119), the comment rides the `created`
+  event's detail (cut to 120 characters), and the events panel draws
+  `ci job N started · lease <short id>` with the job id in the subject
+  column, the lease id in the text, and the type word in the green ok
+  role — no new backend event. An idle-sweep pass that suspended at
+  least one lease emits one lease-less `sweep` event next to the pass's
+  per-lease `idle_suspended` events, detail `N suspended`; a pass that
+  suspended nothing emits nothing. The panel draws it
+  `idle sweep · N suspended` with the type word dim, its subject
+  `spoond`. No schema change.
 
 ## [3.6.1] - 2026-10-12
 
