@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -62,23 +63,22 @@ func TestHTTPLeaseClientAgentToken(t *testing.T) {
 	}
 }
 
-// TestHTTPLeaseClientCreateLabel (#119): a labelled Create sends no
-// holder fields (the lease must not be held: held leases are
-// checkpointed periodically) and sets the label as the lease's comment
-// right after the create.
+// TestHTTPLeaseClientCreateLabel (#119, #132): a labelled Create sends
+// no holder fields (the lease must not be held: held leases are
+// checkpointed periodically) and carries the label as the create body's
+// comment — the lease is born with it; the `created` event names the
+// job and no comment call follows the answer.
 func TestHTTPLeaseClientCreateLabel(t *testing.T) {
 	var body map[string]any
-	var comment map[string]string
+	commented := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes":
 			json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"id":"sb-1"}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/api/leases/sb-1/comment":
-			json.NewDecoder(r.Body).Decode(&comment)
-			w.Write([]byte(`{"id":"sb-1","ok":true}`))
 		default:
+			commented = true
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
@@ -94,42 +94,57 @@ func TestHTTPLeaseClientCreateLabel(t *testing.T) {
 			t.Errorf("%s sent on create: the job lease must not be held", k)
 		}
 	}
-	if comment["comment"] != "forgejo job 42 https://code.example.com/actions/runs/7/jobs/42" {
-		t.Errorf("comment = %q, want the job label", comment["comment"])
+	if body["comment"] != "forgejo job 42 https://code.example.com/actions/runs/7/jobs/42" {
+		t.Errorf("create body comment = %v, want the job label", body["comment"])
+	}
+	// No comment call after the answer: the create carried the label.
+	if commented {
+		t.Error("a comment call followed the create; the label rides the create body")
 	}
 }
 
-// TestHTTPLeaseClientCreateLabelFailureIsNotFatal: a comment the backend
-// refuses leaves the lease created (the job runs; only the sweep misses
-// it if the runner dies).
-func TestHTTPLeaseClientCreateLabelFailureIsNotFatal(t *testing.T) {
+// TestHTTPLeaseClientCreateLabelConsumedPerCreate: the pending label is
+// spent by the Create that reads it (#132) — the next Create sends no
+// comment, so a following lease is never labelled with the first job's
+// label.
+func TestHTTPLeaseClientCreateLabelConsumedPerCreate(t *testing.T) {
+	var bodies []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes" {
+			var b map[string]any
+			json.NewDecoder(r.Body).Decode(&b)
+			bodies = append(bodies, b)
 			w.WriteHeader(http.StatusCreated)
-			w.Write([]byte(`{"id":"sb-2"}`))
+			fmt.Fprintf(w, `{"id":"sb-%d"}`, len(bodies))
 			return
 		}
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()
 	c := NewHTTPLeaseClient(srv.URL, "tok")
 	c.WithLabel("forgejo job 1 x")
-	if id, err := c.Create(context.Background(), "py-base", 600); err != nil || id != "sb-2" {
-		t.Fatalf("Create = %q, %v; want sb-2, nil", id, err)
+	if _, err := c.Create(context.Background(), "py-base", 600); err != nil {
+		t.Fatalf("Create 1: %v", err)
+	}
+	if _, err := c.Create(context.Background(), "py-base", 600); err != nil {
+		t.Fatalf("Create 2: %v", err)
+	}
+	if bodies[1]["comment"] != "" {
+		t.Errorf("second create's comment = %v, want none (the label is spent)", bodies[1]["comment"])
 	}
 }
 
-// TestHTTPLeaseClientCreateNoLabel: without WithLabel there is no
-// comment call (other callers of the client must be unaffected).
+// TestHTTPLeaseClientCreateNoLabel: without WithLabel the create body's
+// comment is empty (other callers of the client must be unaffected).
 func TestHTTPLeaseClientCreateNoLabel(t *testing.T) {
-	commented := false
+	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes" {
+			json.NewDecoder(r.Body).Decode(&body)
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"id":"sb-plain"}`))
 			return
 		}
-		commented = true
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()
@@ -137,8 +152,8 @@ func TestHTTPLeaseClientCreateNoLabel(t *testing.T) {
 	if _, err := c.Create(context.Background(), "py-base", 600); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if commented {
-		t.Error("comment call made without a label")
+	if body["comment"] != "" {
+		t.Errorf("create body comment = %v, want empty without WithLabel", body["comment"])
 	}
 }
 

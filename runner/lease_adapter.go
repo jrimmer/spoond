@@ -95,9 +95,11 @@ func (c *HTTPLeaseClient) SetAdmitWait(secs int) {
 	}
 }
 
-// WithLabel sets the comment the lease the next Create grants gets:
+// WithLabel sets the comment the next Create sends with its body:
 // "forgejo job <id> <url>", the job it runs. Implements LeaseLabeler.
-// The orphan sweep finds the runner's leases by it.
+// The orphan sweep finds the runner's leases by it, and the `created`
+// event carries it (the backend appends the create's comment to the
+// event's detail), so the dashboard can mark the line.
 func (c *HTTPLeaseClient) WithLabel(label string) {
 	c.labelMu.Lock()
 	defer c.labelMu.Unlock()
@@ -105,6 +107,12 @@ func (c *HTTPLeaseClient) WithLabel(label string) {
 }
 
 // Create grants a new sandbox lease.
+//
+// It sends the pending label (WithLabel) as the create body's
+// "comment" (#132), so the lease is born with it — the `created` event
+// carries it and no separate comment call follows the answer. The slot
+// is emptied once read, so a later Create is never labelled with this
+// job's comment.
 //
 // It sends "wait" (AdmitWaitSecs, RUNNER_ADMIT_WAIT_SECS) so a full
 // node's admission queue can hold the create instead of refusing it, and
@@ -117,8 +125,9 @@ func (c *HTTPLeaseClient) WithLabel(label string) {
 func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (string, error) {
 	c.labelMu.Lock()
 	label := c.label
+	c.label = ""
 	c.labelMu.Unlock()
-	payload := map[string]any{"image": image, "ttl": ttl}
+	payload := map[string]any{"image": image, "ttl": ttl, "comment": label}
 	if c.NetPolicy != "" {
 		payload["network_policy"] = c.NetPolicy
 	}
@@ -135,17 +144,7 @@ func (c *HTTPLeaseClient) Create(ctx context.Context, image string, ttl int) (st
 	for attempt := 0; ; attempt++ {
 		id, retryAfter, capacity, err := c.createOnce(ctx, body)
 		if !capacity {
-			if err != nil {
-				return "", err
-			}
-			if label != "" {
-				// The label is best effort: a lease without it still runs its
-				// job; it only escapes the orphan sweep if the runner then dies.
-				if err := c.comment(ctx, id, label); err != nil {
-					log.Printf("lease %s: label %q: %v", id, label, err)
-				}
-			}
-			return id, nil
+			return id, err
 		}
 		log.Printf("create sandbox: %v; waiting %s then retrying (attempt %d)", err, retryAfter, attempt+1)
 		if err := c.waitForRetry(ctx, retryAfter); err != nil {
