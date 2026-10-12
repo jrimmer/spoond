@@ -343,8 +343,8 @@ func TestDeprecatedNoticeThrottled(t *testing.T) {
 	doReq(t, "GET", ts.URL+"/api/sandboxes", "token-b", nil)
 
 	logs := logBuf.String()
-	if n := strings.Count(logs, "deprecated /api/sandboxes request"); n != 3 {
-		t.Fatalf("%d deprecated-alias notice lines, want 3 (one per caller+path):\n%s", n, logs)
+	if n := strings.Count(logs, "deprecated /api/sandboxes request"); n != 2 {
+		t.Fatalf("%d deprecated-alias notice lines, want 2 (one per caller per hour):\n%s", n, logs)
 	}
 	if !strings.Contains(logs, "caller=consumer-a") || !strings.Contains(logs, "caller=consumer-b") {
 		t.Fatalf("notices must name the caller id, never the token:\n%s", logs)

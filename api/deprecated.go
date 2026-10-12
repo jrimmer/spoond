@@ -40,20 +40,27 @@ const deprecationNoticeWindow = time.Hour
 
 // deprecationLogger throttles the per-caller notice to one line per
 // window. The key is the caller identity (user id or legacy consumer
-// id) plus the kind, never a token. Guards are per-kind so the alias
-// gate and the LLM gate do not share a window.
+// id) — never a token, and never the path: paths carry lease ids, so
+// the map must stay bounded by callers, not requests. Each kind (the
+// Server's alias gate, the LLM gateway's keyless gate) holds its own
+// logger so the two notices do not share a window.
 type deprecationLogger struct {
 	mu     sync.Mutex
-	last   map[string]time.Time // caller (or caller+path) -> last notice
+	last   map[string]time.Time // caller -> last notice
 	window time.Duration
 }
+
+// pruneOver sweeps callers whose notice has fully aged out once the map
+// grows past this many entries; callers arrive under valid tokens, so
+// this mostly matters for long-lived deployments with churn.
+const pruneOver = 4096
 
 func newDeprecationLogger() *deprecationLogger {
 	return &deprecationLogger{last: map[string]time.Time{}, window: deprecationNoticeWindow}
 }
 
-// allow reports whether a notice for this key is due now, recording the
-// stamp when it is.
+// allow reports whether a notice for this caller is due now, recording
+// the stamp when it is.
 func (d *deprecationLogger) allow(key string, now time.Time) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -61,6 +68,13 @@ func (d *deprecationLogger) allow(key string, now time.Time) bool {
 		return false
 	}
 	d.last[key] = now
+	if len(d.last) > pruneOver {
+		for k, t := range d.last {
+			if now.Sub(t) >= d.window {
+				delete(d.last, k)
+			}
+		}
+	}
 	return true
 }
 
@@ -108,7 +122,7 @@ func callerLabel(u *identity.User, owner string) string {
 // the caller identity; the headers have already gone on before auth.
 func (s *Server) noteDeprecatedAlias(r *http.Request, u *identity.User, owner string) {
 	s.metrics.DeprecatedReqs.WithLabelValues(depKindsandboxesAlias).Inc()
-	if s.depLog.allow(owner+"|"+r.URL.Path, time.Now()) {
+	if s.depLog.allow(owner, time.Now()) {
 		s.svc.log.Printf("deprecated /api/sandboxes request (removed in 4.0); use %s: caller=%s path=%s", aliasSuccessorPath(r.URL.Path), callerLabel(u, owner), r.URL.Path)
 	}
 }
