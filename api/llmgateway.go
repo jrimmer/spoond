@@ -67,6 +67,9 @@ type llmGateway struct {
 	// silently open. Set via LLM_OPEN_LEGACY=1 to keep the pre-U8
 	// capability model for keyless owners.
 	requireKey bool
+	// depLog (#139 groundwork) throttles the keyless notice to one line
+	// per owner per hour.
+	depLog *deprecationLogger
 	// metrics (issue #20): LLM gateway Prometheus metrics.
 	metrics *metrics.BackendMetrics
 }
@@ -97,6 +100,7 @@ func newLLMGateway(log *log.Logger, lookup func(string) *Lease, resumeLease func
 		modelMap:     modelMap,
 		defaultModel: defaultModel,
 		inflight:     map[string]int{},
+		depLog:       newDeprecationLogger(),
 	}
 }
 
@@ -188,6 +192,16 @@ func (g *llmGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// model: the operator controls those tokens.)
 			http.Error(w, "LLM access requires the lease owner to configure an LLM key (admin: POST /api/users/{id}/llm-key)", http.StatusUnauthorized)
 			return
+		} else if owner != nil {
+			// Identity-store user WITHOUT a key, served anyway: only
+			// the legacy-open opt-out keeps this request from the
+			// denial above. Deprecation groundwork (#139): this is
+			// the keyless access 4.0 removes — counted and noticed
+			// once an hour per owner; the answer is unchanged. Legacy
+			// consumer-owned leases (owner not in the store) stay
+			// out: legacy-open did not enable them, so their traffic
+			// says nothing about removing the opt-out.
+			g.noteDeprecatedKeylessLLM(leaseID, owner.ID)
 		}
 	}
 

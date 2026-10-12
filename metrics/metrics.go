@@ -166,6 +166,14 @@ type BackendMetrics struct {
 	RootfsProbeFailuresTotal prometheus.Counter // probe failures (transport, timeout or EIO)
 	RootfsDeadTotal          prometheus.Counter // leases declared dead after consecutive probe failures
 
+	// Deprecation (4.0 groundwork): requests served through a surface
+	// the 4.0 release removes. kind is `sandboxes_alias` (the
+	// /api/sandboxes spelling of the lease API) or `llm_keyless`
+	// (a request the LLM gateway served only because LLM_OPEN_LEGACY
+	// kept a keyless owner open). Reading these tells whether removing
+	// either in 4.0 would break callers.
+	DeprecatedReqs *prometheus.CounterVec // {kind}: deprecated-surface requests
+
 	// Substrate (U11)
 	LeasesByState     *prometheus.GaugeVec     // {state}: leases per state
 	LeasesByImage     *prometheus.GaugeVec     // {image}: live leases per image
@@ -532,6 +540,14 @@ func NewBackendMetrics() *BackendMetrics {
 		Help: "Leases declared dead because their root disk was unreadable.",
 	})
 
+	// Deprecation (4.0 groundwork): one counter, the two removal
+	// candidates as kinds. The backend sets the label; see
+	// api/deprecated.go.
+	m.DeprecatedReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "deprecated_requests_total",
+		Help: "Requests served through a surface 4.0 removes, by kind: sandboxes_alias (the /api/sandboxes spelling of the lease API) or llm_keyless (keyless LLM access under LLM_OPEN_LEGACY).",
+	}, []string{"kind"})
+
 	// Substrate (U11)
 	m.LeasesByState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "spoond", Name: "leases",
@@ -594,6 +610,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.GuestDialsActive, m.GuestDialsTotal,
 		m.JobsRunning, m.JobsExitedTotal,
 		m.RootfsProbeFailuresTotal, m.RootfsDeadTotal,
+		m.DeprecatedReqs,
 		m.LeasesByState, m.LeasesByImage, m.NodeRunning, m.NodeHugepagesFree, m.NodeWork,
 		m.CreateDur, m.CapacityRej,
 	)

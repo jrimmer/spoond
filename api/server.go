@@ -69,6 +69,9 @@ type Server struct {
 	// GET /api/admin/config (#137) so a caller can tell whether the
 	// backend restarted since the unit env changed.
 	startedAt time.Time
+	// depLog (#139 groundwork) throttles the deprecated-surface notice
+	// to one line per caller per hour.
+	depLog *deprecationLogger
 	// fileSecrets (#137 C2): the secrets this process resolved from a
 	// <NAME>_FILE value file rather than the environment. The backend
 	// sets nothing in its own env, so GET /api/admin/config would report
@@ -196,6 +199,7 @@ func NewServer(svc *Service, reg *ImageRegistry) *Server {
 // exe.dev catalog model ids to upstream ids.
 func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRouterKey, defaultModel string, modelMap map[string]string) *Server {
 	s := &Server{svc: svc, reg: reg, mux: http.NewServeMux(), authFails: newAuthFailLimiter(),
+		depLog:    newDeprecationLogger(),
 		busyCount: map[string]int{}, busyMax: 8, fileXfer: make(chan struct{}, maxFileTransfers),
 		dialCount: map[string]int{}, metrics: metrics.NewBackendMetrics(),
 		startedAt: time.Now()}
@@ -547,6 +551,15 @@ func rewriteLeasePath(p string) string {
 func (s *Server) Handler() http.Handler {
 	authed := s.authMiddleware(s.mux)
 	rewrite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Deprecation groundwork (#139): a request still on the
+		// /api/sandboxes alias gets the 4.0 headers before anything
+		// else answers it, so even a refused request learns the
+		// surface goes away. It is skipped for a path just rewritten
+		// from /api/leases (or the events token's documented route)
+		// below, so the primary path never reports the alias.
+		if isAPISandboxesPath(r.URL.Path) {
+			markDeprecatedAliasHeaders(w, r)
+		}
 		if eventsPath(r.URL.Path) && s.isEventsToken(r) {
 			if !s.allowEventsToken(w, r) {
 				return
@@ -556,7 +569,9 @@ func (s *Server) Handler() http.Handler {
 			// path or spelling carries the token no further than
 			// authMiddleware's refusal.
 			r.URL.Path = apiSandboxPathPrefix + "/events"
-			authed.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxEventsToken{}, true)))
+			r = r.WithContext(context.WithValue(r.Context(), ctxEventsToken{}, true))
+			r = r.WithContext(context.WithValue(r.Context(), apiRewrittenKey{}, true))
+			authed.ServeHTTP(w, r)
 			return
 		}
 		// Break-glass mint (#138 A3): the env ADMIN_TOKEN authenticates
@@ -571,6 +586,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		if p := rewriteLeasePath(r.URL.Path); p != r.URL.Path {
 			r.URL.Path = p
+			r = r.WithContext(context.WithValue(r.Context(), apiRewrittenKey{}, true))
 		}
 		authed.ServeHTTP(w, r)
 	})
@@ -712,6 +728,9 @@ func isHexPath(p string) bool {
 // or user token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// originalPath is the path the client asked for, before any
+		// rewrite: the alias deprecation keys on the requested spelling.
+		originalPath := r.URL.Path
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
 			strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
 			next.ServeHTTP(w, r)
@@ -797,6 +816,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 					}
 				}
 			}
+		}
+		// Deprecation groundwork (#139): count and notice alias usage —
+		// after the caller is fully resolved (identity user, impersonated
+		// user or legacy consumer), so the measured usage carries an
+		// identity for the throttled notice and the counter measures real
+		// (authorized) usage; the headers already went on before auth.
+		// A path rewritten from the primary /api/leases spelling carries
+		// the apiRewrittenKey marker and stays out.
+		if r.Context().Value(apiRewrittenKey{}) != true && isAPISandboxesPath(originalPath) {
+			s.noteDeprecatedAlias(r, userFrom(ctx), ownerFrom(ctx))
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
