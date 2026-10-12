@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/jrimmer/spoond/v3/sizes"
@@ -20,6 +21,22 @@ func mibCeil(bytes float64) int {
 		return 0
 	}
 	return int(math.Ceil(bytes / (1024 * 1024)))
+}
+
+// releasePeakDetail is the released event's measured-memory suffix
+// (#130 step 1): "· peak N MiB" appended after the release reason, in
+// whole MiB (ceil, the same rendering memory_peak_mb uses). No peak —
+// the sampler off (no OTEL_PROM_URL) or a lease that never got a
+// sample — appends nothing, and an empty reason leaves just the peak.
+func releasePeakDetail(reason string, hasPeak bool, peakBytes float64) string {
+	if !hasPeak {
+		return reason
+	}
+	suffix := fmt.Sprintf(" · peak %d MiB", mibCeil(peakBytes))
+	if reason == "" {
+		return suffix[1:] // drops the leading separator's space
+	}
+	return reason + suffix
 }
 
 // sizePresets returns the service's size presets (SIZE_PRESETS as

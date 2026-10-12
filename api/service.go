@@ -2060,6 +2060,17 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 		return
 	}
 	l.released = true
+	// The measured peak (#130 step 1) is read before the sampler forgets
+	// the lease — the entry is gone after this, so the released event's
+	// detail and its journal line can carry how much memory the VM
+	// actually held (peak_mib). peakRelease reads and forgets under one
+	// lock: a sampler tick in flight cannot slip in between. When the
+	// sampler has nothing (no OTEL_PROM_URL, or a lease that never got a
+	// sample), leasePeakMiB stays -1: nothing is added anywhere.
+	releasePeak, leasePeakMiB := 0.0, -1
+	if peakBytes, hasPeak := s.memSamples.peakRelease(l.ID); hasPeak {
+		releasePeak, leasePeakMiB = peakBytes, mibCeil(peakBytes)
+	}
 	// A running lease's hugepages come back with the release; a
 	// suspended one holds none.
 	freedMiB := 0
@@ -2076,7 +2087,6 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	// memory entry (#130).
 	s.forgetAppliedEgress(l.ID)
 	s.clearPendingSecretRemovals(l.ID)
-	s.memSamples.forget(l.ID)
 
 	if err := s.sub.Delete(ctx, l.SandboxID); err != nil {
 		s.log.Printf("release: delete %s: %v", l.SandboxID, err)
@@ -2118,8 +2128,8 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, reason)
-	s.journalLease(journalOpRelease, l, journalReleaseReason(l, reason))
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, releasePeakDetail(reason, leasePeakMiB >= 0, releasePeak))
+	s.journalLease(journalOpRelease, l, journalReleaseReason(l, reason), leasePeakMiB)
 	s.creditNodeInfo(freedMiB)
 	// A release frees hugepages and quota: retry waiting creates (#129).
 	s.wakeAdmissionQueue()

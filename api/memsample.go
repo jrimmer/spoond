@@ -128,6 +128,20 @@ func (ms *memSampler) forget(leaseID string) {
 	delete(ms.entries, leaseID)
 }
 
+// peakRelease takes the lease's measured peak at release time and drops
+// the entry in the same step (#130 step 1): one sampler lock, no window a
+// concurrent tick could forget the entry through, no leftover entry
+// should the release fail after reading. A lease with no recorded
+// sample answers ok=false (the sampler off — no OTEL_PROM_URL — or a
+// lease that never got a sample).
+func (ms *memSampler) peakRelease(leaseID string) (float64, bool) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	e, ok := ms.entries[leaseID]
+	delete(ms.entries, leaseID)
+	return e.peakBytes, ok && e.samples > 0
+}
+
 // latest reports the lease's latest measured used bytes.
 func (ms *memSampler) latest(leaseID string) (float64, bool) {
 	ms.mu.Lock()

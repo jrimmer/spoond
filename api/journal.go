@@ -11,7 +11,10 @@
 //
 // The line is logfmt-shaped so an operator can grep it:
 //
-//	lease journal: op=<op> lease_id=<id> owner=<owner> sandbox=<sandbox> image=<image> memory_mib=<n> reason=<reason>
+//	lease journal: op=<op> lease_id=<id> owner=<owner> sandbox=<sandbox> image=<image> memory_mib=<n> [peak_mib=<n>] reason=<reason>
+//
+// The peak_mib field rides only the release line (#130 step 1): the
+// measured peak the lease's VM held, when it was measured at all.
 //
 // A value with a space, quote, equals sign or control character is
 // quoted with Go's %q so the fields stay parseable; the reason is the
@@ -20,6 +23,7 @@
 package api
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -37,14 +41,27 @@ const (
 // names the lease as it stood: the sandbox id is present even when the
 // release or loss is about to delete the sandbox. A nil lease writes
 // nothing.
-func (s *Service) journalLease(op string, l *Lease, reason string) {
+//
+// peakMib, when set, adds the release line's measured-memory field
+// (#130 step 1): the lease's measured peak in whole MiB, read before the
+// sampler dropped the entry. The field is ` peak_mib=<n>`, whole MiB
+// (ceil — the same rendering the lease row's memory_peak_mb uses), so a
+// journal reader sees what the VM actually held. Not set — every other
+// op, or a release with no sample (the sampler off, no OTEL_PROM_URL,
+// a lease that never got one) — leaves the line exactly as it reads
+// without the field.
+func (s *Service) journalLease(op string, l *Lease, reason string, peakMib ...int) {
 	if s == nil || s.log == nil || l == nil {
 		return
 	}
-	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s memory_mib=%d reason=%s",
+	peakField := ""
+	if len(peakMib) > 0 {
+		peakField = fmt.Sprintf(" peak_mib=%d", peakMib[0])
+	}
+	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s memory_mib=%d reason=%s%s",
 		journalValue(op), journalValue(l.ID), journalValue(l.Owner),
 		journalValue(l.SandboxID), journalValue(l.Image), l.MemoryMB,
-		journalValue(reason))
+		journalValue(reason), peakField)
 }
 
 // journalValue renders one journal field: bare when it is a simple
