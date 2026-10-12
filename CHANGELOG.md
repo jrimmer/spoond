@@ -88,6 +88,23 @@ summarised from README "Status".
   and `spoondctl` is pure SSH, so the alias-usage counter
   (`spoond_deprecated_requests_total{kind="sandboxes_alias"}`) now
   measures outside callers only.
+- **The deploy units point at the real env-file paths
+  (spoond-uzs prerequisite, review finding B8).**
+  `deploy/spoond-runner.service` reads
+  `EnvironmentFile=/etc/spoond/runner.env` (was
+  `/etc/spoond-runner.env`), and `deploy/spoond-backend.service` reads
+  `EnvironmentFile=-/etc/spoond/llm.env` then
+  `EnvironmentFile=-/etc/spoond/backend.env` — a later file wins, so
+  `backend.env` stays the operator's file and may override the optional
+  `llm.env` (the per-lease LLM gateway's `LLM_UPSTREAM_URL`/`KEY`
+  pair) — with `Environment=BIND_ADDR=127.0.0.1:8890` kept as the
+  fallback default. Installing a canonical unit over a host's forkd-era
+  one no longer depends on a drop-in naming the old paths; the gateway
+  unit's `EnvironmentFile=/etc/spoond-gateway.env` already matched
+  docs/install.md and docs/operations.md and is unchanged. Docs that
+  name these paths (install.md, operations.md, deploy/README.md,
+  PRODUCTION-ENV-2.7.md, images/README.md, the runner env.example's
+  header) now agree with the units.
 
 ## [3.6.1] - 2026-10-12
 
