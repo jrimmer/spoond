@@ -42,6 +42,17 @@ type config struct {
 	ProxySecret  string
 	ProxySuffix  string
 	GuestService string
+	// LANDNS is the LAN address a guest's /etc/resolv.conf resolver
+	// answers for a *.LanDNSZone name (TestN12, spoond-ndh): the host's
+	// own address (e.g. 10.1.0.11, the one the API and the guest service
+	// are reachable on). It has no default: TestN10 and TestN12 skip when
+	// unset, so a run never probes an assumed LAN address. Set it as
+	// CONFORMANCE_LAN_DNS (e.g. 10.1.0.11 on sb).
+	LANDNS string
+	// LanDNSZone is the domain the guest resolver answers from the LAN
+	// (TestN12): the deployment's wildcard zone. Defaults to
+	// example.com; set CONFORMANCE_LAN_DNS_ZONE (e.g. lacy.casa on sb).
+	LanDNSZone string
 	// LANTarget is a private (LAN) host:port that answers on the host
 	// from a lease under the internet and lan policies (TestN1). It has
 	// no default: CONFORMANCE_LAN_TARGET sets it and N1 skips when it is
@@ -408,8 +419,8 @@ func urlQueryEscape(s string) string {
 	return b.String()
 }
 
-// execReq is the exec body: {"cmd","cwd","env","timeout"} (A1 §5).
-// Background (2.6, #135) starts the command as a tracked job;
+// execReq is the exec body: {"cmd","cwd","env","timeout","secrets"} (A1 §5);
+// background (2.6, #135) starts the command as a tracked job;
 // max_runtime_secs (spoond-wb5) shortens the host cap for that job.
 type execReq struct {
 	Cmd            string            `json:"cmd"`
@@ -418,6 +429,9 @@ type execReq struct {
 	Timeout        int               `json:"timeout,omitempty"`
 	Background     bool              `json:"background,omitempty"`
 	MaxRuntimeSecs int64             `json:"max_runtime_secs,omitempty"`
+	// Secrets ride as exec-time secrets (/run/secrets, files never env
+	// or argv — docs/api.md §Secrets).
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 // jobInfo is the background-job record shape (2.6, #135).
