@@ -208,3 +208,21 @@ func TestParseError(t *testing.T) {
 		t.Fatalf("expected error, got %v", resp)
 	}
 }
+
+// TestEveryToolHasAHandler: New attaches each table tool's handler by
+// name; a tool added to defaultToolTable without its case in New would
+// otherwise be advertised with a nil handler and crash when called.
+func TestEveryToolHasAHandler(t *testing.T) {
+	s := New(Config{})
+	if len(s.tools) == 0 {
+		t.Fatal("no tools registered")
+	}
+	for _, tool := range s.tools {
+		if tool.Handler == nil {
+			t.Errorf("tool %q has no handler", tool.Name)
+		}
+	}
+	if got, want := len(DefaultToolNames()), len(s.tools); got != want {
+		t.Errorf("DefaultToolNames() = %d names, New registered %d tools", got, want)
+	}
+}

@@ -246,6 +246,10 @@ func NewServerWithLLM(svc *Service, reg *ImageRegistry, openRouterURL, openRoute
 	// Every owner's fair-share slice and usage, admin-only (#145 FS1).
 	s.mux.HandleFunc("GET /api/fair-shares", s.handleSharesList)
 	s.mux.HandleFunc("GET /api/images", s.handleImages)
+	// Self-description (#52): the endpoint table, this host's images,
+	// sizes, network policies and surfaces. Any valid user token, like
+	// the images route; see api/capabilities.go.
+	s.mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	s.mux.HandleFunc("GET /api/names/{name}", s.handleByName)
 	// Snapshot catalog (U11): list and delete the caller's builds.
 	s.mux.HandleFunc("GET /api/snapshots", s.handleSnapshots)

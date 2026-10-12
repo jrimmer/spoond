@@ -12,6 +12,24 @@ summarised from README "Status".
 
 ### Added
 
+- **`GET /api/capabilities` self-description (#52).** One endpoint
+  where any valid user token (the same grant as `GET /api/images`)
+  reads what this spoond offers: the binary `version`, the `api` block
+  (base, primary/alias lease paths, the auth model), `endpoints` (one
+  row — method, path, one-line summary, admin flag — per route the
+  backend registers; a test scans `api/server.go`'s registrations so a
+  new route without a table row, or a stale row, fails the build),
+  `images` (the catalog's current builds with the manifest's
+  capability/description and default shape, the same rows
+  `GET /api/images?detail=1` reads), `sizes` (the `GET /api/sizes`
+  data), `network_policies` (the four egress classes with one-line
+  meanings) and `surfaces` (only what this host configures: the SSH
+  gateway address `GATEWAY_ADDR`, the `/llm/{lease-id}/` prefix when
+  the LLM gateway is built, the stdio MCP server `spoond-dev-mcp` with
+  the tool names from its own registry, and the CI runner's
+  `IMAGE_MAP` labels). Never secrets, never other users' data. New
+  `spoond capabilities` subcommand prints the summary or `--json` the
+  raw document; endpoint documented in docs/api.md (Self-description).
 - **Released leases carry their measured peak memory (#130 step 1).**
   When `OTEL_PROM_URL` is set the backend has sampled every
   running lease's guest memory since 3.5; a release now reports what
