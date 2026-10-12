@@ -105,7 +105,6 @@ images:
     disk_mb: 12288
     env:
       PATH: /usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-      RUSTUP_HOME: /usr/local/rustup
       CARGO_HOME: /usr/local/cargo
       LANG: C.UTF-8
     notes: |
@@ -181,6 +180,45 @@ images:
         spoond images build rust-base
 
       python3 is required by the guest init hooks.
+
+  - name: rust-qt-base
+    capability: rust-qt
+    labels: [rust-qt, qt6, qml]
+    description: "Rust 1.99.0 from Arch (rustfmt, clippy, cargo-deny, sccache, mold) + Qt 6.12 (base, declarative, svg, multimedia, shadertools, tools) on Arch (archive 2026/10/10); headless GUI tests (offscreen/llvmpipe, xvfb-run), dbus + gnome-keyring, pinned fonts"
+    baked: true
+    dockerfile: rust-qt-base.dockerfile
+    vcpu: 2
+    memory_mb: 4096
+    disk_mb: 8192
+    warm_sizes: []
+    env:
+      PATH: /root/.cargo/bin:/usr/lib/qt6/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+      CARGO_HOME: /root/.cargo
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /root/.cache/sccache
+      LANG: C.UTF-8
+      TZ: UTC
+      QT_QPA_PLATFORM: offscreen
+    notes: |
+      Generic Rust + Qt Quick image (owner 2026-10-11: generic, not one
+      project's). Sized by measurement, not request: medium (2 vCPU /
+      4 GiB, 8 GiB disk headroom). Validated 2026-10-12 on sb with
+      lacy.casa/rust-qt-smoke bin/smoke (SMOKE OK): clippy 305 s / peak
+      325 MiB, release build 334 s / 327 MiB, unit tests 335 s / 220 MiB,
+      QML tests 6 s; target/ 1.2 GB, sccache 270 MB, rootfs 47% used;
+      fmt + clippy then passed with the lease's network off. The lean env (line-tables-only
+      debuginfo, no incremental, mold, sccache) keeps target/ and link
+      memory small; a project's own Cargo profile still wins. Implement
+      loops should run cargo check/clippy + affected tests; full
+      build/test/screenshots belong at the merge gate. Raise the size only
+      on measured memory_peak_mb / size_hint. No QtWebEngine (QtPdf): a
+      layered rust-qt-pdf variant if needed. Validated with
+      lacy.casa/rust-qt-smoke (bin/smoke). Rebuild in place to move the
+      snapshot date, which moves Rust and Qt together (ARCH_SNAPSHOT
+      build arg). No rustup: Arch's rust package, offline-safe.
 
   - name: scylla
     capability: cql-database
