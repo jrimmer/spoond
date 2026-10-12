@@ -2060,14 +2060,15 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 		return
 	}
 	l.released = true
-	// The measured peak (#130 step 1) is read before the sampler forgets
-	// the lease — the entry is gone after this, so the released event's
-	// detail and its journal line can carry how much memory the VM
-	// actually held (peak_mib). peakRelease reads and forgets under one
-	// lock: a sampler tick in flight cannot slip in between. When the
-	// sampler has nothing (no OTEL_PROM_URL, or a lease that never got a
-	// sample), leasePeakMiB stays -1: nothing is added anywhere.
-	releasePeak, leasePeakMiB := 0.0, -1
+	// The measured peak (#130 step 1) is read before the sampler loses
+	// the lease's entry: peakRelease reads and forgets under one lock, so
+	// a sampler tick in flight cannot slip in between and a later forget
+	// cannot outrun this read. When the sampler has nothing (no
+	// OTEL_PROM_URL, or a lease that never got a sample), leasePeakMiB
+	// stays -1: the released event's detail and its journal line gain
+	// nothing.
+	var releasePeak float64
+	leasePeakMiB := -1
 	if peakBytes, hasPeak := s.memSamples.peakRelease(l.ID); hasPeak {
 		releasePeak, leasePeakMiB = peakBytes, mibCeil(peakBytes)
 	}
@@ -2128,8 +2129,13 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	if len(l.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
-	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased, releasePeakDetail(reason, leasePeakMiB >= 0, releasePeak))
-	s.journalLease(journalOpRelease, l, journalReleaseReason(l, reason), leasePeakMiB)
+	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased,
+		releasePeakDetail(reason, leasePeakMiB >= 0, releasePeak))
+	if leasePeakMiB >= 0 {
+		s.journalLease(journalOpRelease, l, journalReleaseReason(l, reason), leasePeakMiB)
+	} else {
+		s.journalLease(journalOpRelease, l, journalReleaseReason(l, reason))
+	}
 	s.creditNodeInfo(freedMiB)
 	// A release frees hugepages and quota: retry waiting creates (#129).
 	s.wakeAdmissionQueue()

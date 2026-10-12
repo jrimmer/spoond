@@ -32,11 +32,10 @@ func releasePeakDetail(reason string, hasPeak bool, peakBytes float64) string {
 	if !hasPeak {
 		return reason
 	}
-	suffix := fmt.Sprintf(" · peak %d MiB", mibCeil(peakBytes))
 	if reason == "" {
-		return suffix[1:] // drops the leading separator's space
+		return fmt.Sprintf("peak %d MiB", mibCeil(peakBytes))
 	}
-	return reason + suffix
+	return fmt.Sprintf("%s · peak %d MiB", reason, mibCeil(peakBytes))
 }
 
 // sizePresets returns the service's size presets (SIZE_PRESETS as
