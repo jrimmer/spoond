@@ -10,6 +10,16 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-10-11
+
+3.6 keeps secrets out of the environment: every secret setting may name
+a 0600 file holding its value instead (`<NAME>_FILE=/path`), and each
+spoond process reads it once at startup, refusing to start on a missing,
+unreadable or empty file or on both spellings at once. `spoond config
+show` and `spoond doctor` understand the file form. A lease's
+`size_hint` now keeps its vCPUs and comes with `memory_hint_mb`. No
+breaking changes and no schema change.
+
 ### Added
 
 - **Secrets from files (#137 C2).** Every secret setting (`ADMIN_TOKEN`,
