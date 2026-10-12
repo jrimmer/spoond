@@ -2498,7 +2498,7 @@ type leaseRequest struct {
 	// with the create, so the lease and its `created` event name the job
 	// from the first moment — no separate comment call after the answer
 	// (which would leave the event silent). Held to the comment route's
-	// whole validity: Handler runs the shared comment validator
+	// whole validity: handleCreate runs the shared comment validator
 	// (api/comment.go) on it before grantLease, so a create and a later
 	// set accept exactly the same text.
 	comment string
