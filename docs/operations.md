@@ -1113,8 +1113,12 @@ journalctl -u spoond-backend | grep 'op=release' | tail -20
 
 `spoond-runner` (the `runner` subcommand) runs Forgejo Actions jobs in
 sandboxes leased from the backend. Each job lease is labelled with its
-job (#119): right after the create, the runner sets the lease's comment
-to `forgejo job <id> <job URL>`. The lease is deliberately **unpinned**:
+job (#119): the runner sets the lease's comment to
+`forgejo job <id> <job URL>` while its create waits for admission, and
+the `created` event's detail carries the label — so the dashboard's
+events panel draws the job's lease as `ci job N started · lease <short
+id>` (2.6, #132) rather than a plain lease-create line. The lease is
+deliberately **unpinned**:
 an unpinned lease is reclaimed by the TTL sweep when it is taken back,
 and since 2.3 a holder label no
 longer brings periodic checkpointing with it anyway (a lease is
