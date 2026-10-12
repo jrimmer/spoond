@@ -269,7 +269,7 @@ stack does not exist yet.
 | Doc | Contents |
 |---|---|
 | [E2B substrate spec](docs/plans/2026-09-30-e2b-substrate/00-README.md) | the current platform: architecture, decisions, per-unit specs, ops appendices |
-| [API reference](docs/api.md) | every endpoint: auth, request/response, errors |
+| [API reference](docs/api.md) | every endpoint: auth, request/response, errors; `GET /api/capabilities` self-describes the deployment |
 | [Upgrading to 3.0](docs/upgrading-3.0.md) | what API clients change moving from 2.9 to 3.0 |
 | [ctl reference](docs/ctl.md) | control-plane verbs, output contract, examples |
 | [Usage guide](docs/usage.md) | SSH, exec, persistent/suspend, clones, proxy, LLM, agents, policies, multi-user |
