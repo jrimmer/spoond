@@ -364,10 +364,9 @@ func TestEventLinesGC(t *testing.T) {
 
 // TestEventLinesCIJobStart: a created event whose lease's comment is the
 // runner's job label ("forgejo job <id> <url>", executor.go) is
-// re-labelled as the job's start (2.6, #132): "ci job N started · lease
-// <short id>" instead of the plain lease-create line, with the green
-// ok style, the subject column naming the job and the lease-id column
-// left empty (the id is in the text). A created event for any other
+// re-labelled as the job's start (2.6, #132): the type word "runner" in
+// the green ok style, the short lease id in its own column, the subject
+// naming the job ("ci job N started"). A created event for any other
 // lease stays a plain created line.
 func TestEventLinesCIJobStart(t *testing.T) {
 	c := newCollector(Config{EventsToken: "t"})
@@ -380,18 +379,12 @@ func TestEventLinesCIJobStart(t *testing.T) {
 		t.Fatalf("got %d lines, want 1", len(lines))
 	}
 	l := lines[0]
-	want := "04:15:59  ci job 3609 started · lease abcdef0123              ci job 3609  granted from image py-base in 61 ms"
+	want := "04:15:59  runner  abcdef0123  ci job 3609 started  granted from image py-base in 61 ms"
 	if l.Text != want {
 		t.Fatalf("ci job start line =\n%q\nwant\n%q", l.Text, want)
 	}
 	if l.Style != "ok" {
 		t.Fatalf("ci job start style = %q, want ok", l.Style)
-	}
-
-	// The id column is empty: the short id is already in the text, so
-	// the line does not name the lease twice.
-	if strings.Contains(l.Text, "  abcdef0123  ") {
-		t.Fatalf("the id column repeats the lease id: %q", l.Text)
 	}
 
 	// A created event for any other lease stays a plain created line,

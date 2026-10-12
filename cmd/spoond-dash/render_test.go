@@ -1346,7 +1346,7 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		{"holder_set", "dim"},
 		{"sweep", "dim"},
 		{"idle sweep", "dim"},
-		{"ci job 3609 started · lease abcdef0123", "ok"},
+		{"runner", "ok"},
 	}
 	for _, tc := range cases {
 		line := "07:19:02  " + tc.typ + "  abcdef0123  jason"
@@ -1371,13 +1371,13 @@ func TestEventsPanelTypeColour(t *testing.T) {
 
 // TestEventsPanelNewEventColours draws the events panel with the two
 // #132 lines and checks the type words reach the page with their kind's
-// class, beside their tail's own style: the re-labelled CI job start
+// class, beside their tail's own style: the CI job start's word "runner"
 // green (ok), the idle-sweep summary dim.
 func TestEventsPanelNewEventColours(t *testing.T) {
 	s := healthySnapshot()
 	s.Events = []EventLine{
 		{Text: "07:19:02  idle sweep                          spoond  2 suspended", Style: "dim"},
-		{Text: "07:18:44  ci job 3609 started · lease abcdef0123              ci job 3609  granted from image py-base in 61 ms", Style: "ok"},
+		{Text: "07:18:44  runner  abcdef0123  ci job 3609 started  granted from image py-base in 61 ms", Style: "ok"},
 	}
 	rows := strings.Split(Draw(s, DefaultWidth, fixedNow, "h").HTML(), "\n")
 	var sweep, started string
@@ -1396,11 +1396,13 @@ func TestEventsPanelNewEventColours(t *testing.T) {
 		!strings.Contains(sweep, "2 suspended") {
 		t.Fatalf("sweep type not drawn dim:\n%s", sweep)
 	}
-	if started == "" || !strings.Contains(started, `g-ok" data-id="events">ci job 3609 started`) {
+	// The start line's word "runner" draws ok, beside the subject (the id
+	// style) and the ok tail.
+	if started == "" || !strings.Contains(started, `g-ok" data-id="events">runner`) {
 		t.Fatalf("ci job start type not drawn ok:\n%s", started)
 	}
-	if !strings.Contains(started, `g-ok" data-id="events">ci job 3609 started · lease abcdef0123`) {
-		t.Fatalf("the whole type phrase (the line's text) is not in the page:\n%s", started)
+	if !strings.Contains(started, `g-ok" data-id="events">ci job 3609 started`) {
+		t.Fatalf("the job's start phrase is not in the page:\n%s", started)
 	}
 }
 
