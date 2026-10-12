@@ -48,7 +48,7 @@ If `SHELLY_BINARY_URL`/`LLM_GATEWAY_URL` are omitted, the gateway now
 derives them from `HOST_GUEST_SERVICE_ADDR:PORT` (default
 `127.0.0.1:8891`), so vm2 must set `HOST_GUEST_SERVICE_ADDR`.
 
-## /etc/spoond-runner.env (runner unit)
+## /etc/spoond/runner.env (runner unit)
 
 ```ini
 # Forgejo instance base URL: no default any more, required.

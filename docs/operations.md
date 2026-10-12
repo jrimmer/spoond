@@ -125,10 +125,10 @@ the same (`set: true`, value `(hidden, from file)`, no path), so the
 running-backend comparison stays honest. A value file readable by group
 or others is warned about: the backend logs it once at startup,
 `spoond doctor` flags it, and the file's mode should read `600`
-(`stat -c '%a' <path>`). `spoond doctor` checks the env files under
-`/etc/spoond` only; the runner's and the gateway's env files
-(`/etc/spoond-runner.env`, `/etc/spoond-gateway.env`) are checked by
-those processes at their own startup. The env file itself keeps
+(`stat -c '%a' <path>`). `spoond doctor` checks the env files under `/etc/spoond` only —
+that now includes `/etc/spoond/runner.env`; the gateway's env file
+(`/etc/spoond-gateway.env`) is checked by that process at its own
+startup. The env file itself keeps
 only the path, so it may move to whatever revision control the rest of
 the deployment's configuration already trusts.
 

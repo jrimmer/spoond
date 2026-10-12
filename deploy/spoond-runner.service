@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/opt/spoond/spoond runner
-EnvironmentFile=/etc/spoond-runner.env
+EnvironmentFile=/etc/spoond/runner.env
 # Persistent runner: stays registered across jobs and restarts.
 # State file (RUNNER_STATE_FILE) preserves Forgejo UUID/token between restarts.
 Restart=always
