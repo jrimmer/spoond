@@ -108,11 +108,10 @@ func loadConfig() bool {
 	// MixedDomain keeps a public default, which needs no LAN.
 	cfg.MixedPrivate = os.Getenv("CONFORMANCE_MIXED_PRIVATE")
 	cfg.MixedDomain = envOr("CONFORMANCE_MIXED_DOMAIN", "example.com")
-	// Guest DNS: the LAN address of the deployment's wildcard zone.
+	// Guest DNS: the LAN address the API's host name resolves to.
 	// No default, like the mixed-allowlist LAN knobs: TestN10 and
 	// TestN12 skip when unset rather than probe an assumed address.
 	cfg.LANDNS = os.Getenv("CONFORMANCE_LAN_DNS")
-	cfg.LanDNSZone = envOr("CONFORMANCE_LAN_DNS_ZONE", "example.com")
 	cfg.MixedBlockedPrivate = os.Getenv("CONFORMANCE_MIXED_BLOCKED_PRIVATE")
 	cfg.MixedPrivateDomain = os.Getenv("CONFORMANCE_MIXED_PRIVATE_DOMAIN")
 	cfg.MixedPrivatePort = 443

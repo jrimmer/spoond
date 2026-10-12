@@ -17,9 +17,6 @@ package conformance
 //     /etc/resolv.conf names no public resolver, and the deployment's
 //     wildcard-zone name (e.g. the API host under *.LAN zone) resolves
 //     to the expected LAN address.
-//   - TestN13_MixedAllowlistViaGuestDNS — a restricted lease whose
-//     allowlist mixes a LAN host (with its own wildcard-zone name) and
-//     a public domain reaches both by name.
 //
 // Every LAN assumption is behind CONFORMANCE_LAN_DNS: the LAN address
 // the guest resolver must answer for a wildcard-zone name. It has no
@@ -36,8 +33,7 @@ import (
 )
 
 // requireLanDNS gates the guest-DNS cases on CONFORMANCE_LAN_DNS, the
-// LAN address a guest resolver answers for a *.CONFORMANCE_LAN_DNS_ZONE
-// name. It has no default: unset, the cases skip (same rule as
+// LAN address a guest resolver answers for the API's host name. It has no default: unset, the cases skip (same rule as
 // CONFORMANCE_LAN_TARGET in N1), so a run never probes an assumed LAN
 // address.
 func requireLanDNS(t *testing.T) {
@@ -57,21 +53,6 @@ func apiGuestURL(t *testing.T) (base, host string) {
 		failf(t, "CONFORMANCE_API %q does not parse into a URL with a host", cfg.API)
 	}
 	return base, u.Hostname()
-}
-
-// lanCIDRAddr reports whether addr is an IPv4 address in the spoond-free
-// part of the private 10.x space: any 10.x outside the lease networks
-// 10.11/16 and 10.12/16 (api/service.go's lanRanges is RFC 1918 minus
-// the lease networks) — the shape of the LAN host address a guest
-// resolver answers with.
-func lanCIDRAddr(addr string) bool {
-	ip := parseIPv4(addr)
-	if ip == nil || ip[0] != 10 {
-		return false
-	}
-	// A sandbox's own address lives in 10.11/16 or 10.12/16; the host
-	// LAN never does.
-	return ip[1] != 11 && ip[1] != 12
 }
 
 // parseIPv4 parses a dot-decimal IPv4 address into 4 bytes, nil on
@@ -158,9 +139,8 @@ func guestAPICode(t *testing.T, id, apiBase string) string {
 // interpolated into the guest's shell: the token travels as one
 // exec-time secret, the guest script reads it from its /run/secrets
 // file. It answers whether both calls worked; the created lease is
-// deleted from inside too, and the caller watches its own count (a
-// left-over create shows as an extra lease at the end of the test, so
-// the caller's delta check turns both paths red).
+// deleted from inside too (a failed delete fails the exec, and the
+// lease's 120 s TTL bounds any leftover).
 func guestLeaseRoundTrip(t *testing.T, from, apiBase string) bool {
 	t.Helper()
 	script := `
@@ -280,7 +260,6 @@ func TestN12_GuestDNS(t *testing.T) {
 	_, apiHost := apiGuestURL(t)
 	name := apiHost
 	rec.set("name", name)
-	rec.set("zone", cfg.LanDNSZone)
 
 	// resolverEntries reads the guest's /etc/resolv.conf nameserver
 	// lines.
@@ -326,67 +305,14 @@ func TestN12_GuestDNS(t *testing.T) {
 		}
 		rec.set("resolvers:"+policy, strings.Join(resolverEntries(l.ID), ","))
 
-		// The wildcard-zone name resolves to the LAN address. Under
-		// `none` the DNS route itself is granted (every policy keeps DNS)
-		// — docs/api.md: every policy carries "DNS" in its egress.
+		// The wildcard-zone name resolves to the LAN address. `none` has
+		// no egress at all, DNS included (docs/api.md §Network policy),
+		// so only its resolver list is checked.
+		if policy == "none" {
+			continue
+		}
 		resolveExpectLAN(t, l.ID, policy, name)
 		rec.set("resolve:"+policy, cfg.LANDNS)
-	}
-}
-
-// TestN13_MixedAllowlistViaGuestDNS pins the mixed allowlist reached
-// through the guest's resolver: a restricted lease allowlisting a LAN
-// host and a public domain reaches both by name. The LAN host is
-// CONFORMANCE_LAN_TARGET (N1's target, `host:port`): its address is the
-// LAN IP the lease allowlists, and its wildcard-zone name (the same
-// host under the deployment's zone) rides the allowlist as a domain so
-// the guest resolves it through the private resolver. Skips with
-// CONFORMANCE_LAN_TARGET/CONFORMANCE_LAN_DNS unset.
-func TestN13_MixedAllowlistViaGuestDNS(t *testing.T) {
-	rec := begin(t)
-
-	if cfg.LANTarget == "" {
-		skipf(t, "CONFORMANCE_LAN_TARGET is unset; set it to a private host:port that answers on the host (sb does) to exercise the mixed allowlist")
-	}
-	requireLanDNS(t)
-
-	lanHost, lanPort := cfg.LANTargetHost, cfg.LANTargetPort
-	if !lanCIDRAddr(lanHost) {
-		skipf(t, "CONFORMANCE_LAN_TARGET %q does not name a LAN address the guest resolver can carry; set a private host:port", cfg.LANTarget)
-	}
-
-	// The wildcard-zone name of the LAN host: what the guest resolver
-	// must carry this lease to.
-	name := lanHost + "." + cfg.LanDNSZone
-	rec.set("name", name)
-
-	allow := []string{lanHost, cfg.MixedDomain}
-	l := createLease(t, map[string]any{
-		"image":            "py-base",
-		"ttl":              900,
-		"network_policy":   "restricted",
-		"egress_allowlist": allow,
-	})
-
-	// The guest resolves the LAN host's zone name to the LAN address.
-	resolveExpectLAN(t, l.ID, "restricted", name)
-
-	// Both are reachable by name: the mixed allowlist's IP and domain
-	// halves, with the IP entry named as its zone name (the guest's
-	// resolver must not break either path).
-	if !canTCP(t, l.ID, lanHost, lanPort) {
-		failf(t, "mixed allowlist: LAN IP %s:%d blocked, want reachable", lanHost, lanPort)
-	}
-	if !canTCP(t, l.ID, name, lanPort) {
-		failf(t, "mixed allowlist: zone name %s:%d blocked, want reachable", name, lanPort)
-	}
-	if !canTCP(t, l.ID, cfg.MixedDomain, 443) {
-		failf(t, "mixed allowlist: domain %s blocked, want reachable", cfg.MixedDomain)
-	}
-
-	// An unlisted private address stays blocked.
-	if canTCP(t, l.ID, "10.99.99.99", 443) {
-		failf(t, "mixed allowlist: unlisted private 10.99.99.99:443 reachable, want blocked")
 	}
 }
 

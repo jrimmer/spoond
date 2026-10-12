@@ -43,7 +43,6 @@ var Known = []string{
 	"CONFORMANCE_IDLE_IMAGE",
 	"CONFORMANCE_IMAGES",
 	"CONFORMANCE_LAN_DNS",
-	"CONFORMANCE_LAN_DNS_ZONE",
 	"CONFORMANCE_LAN_TARGET",
 	"CONFORMANCE_MIXED_BLOCKED_PRIVATE",
 	"CONFORMANCE_MIXED_DOMAIN",
@@ -363,7 +362,6 @@ var Specs = []Spec{
 	{"CONFORMANCE_IDLE_IMAGE", TypeString, Conformance, false},
 	{"CONFORMANCE_IMAGES", TypeList, Conformance, false},
 	{"CONFORMANCE_LAN_DNS", TypeString, Conformance, false},               // a LAN IP the guest resolver answers with (no default)
-	{"CONFORMANCE_LAN_DNS_ZONE", TypeString, Conformance, false},          // the wildcard zone the guest resolver resolves
 	{"CONFORMANCE_LAN_TARGET", TypeAddr, Conformance, false},              // host:port (parseLANTarget)
 	{"CONFORMANCE_MIXED_BLOCKED_PRIVATE", TypeString, Conformance, false}, // bare host or IP, probed with its own port setting
 	{"CONFORMANCE_MIXED_DOMAIN", TypeString, Conformance, false},

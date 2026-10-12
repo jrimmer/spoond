@@ -43,16 +43,12 @@ type config struct {
 	ProxySuffix  string
 	GuestService string
 	// LANDNS is the LAN address a guest's /etc/resolv.conf resolver
-	// answers for a *.LanDNSZone name (TestN12, spoond-ndh): the host's
+	// answers for the API's host name (TestN10, TestN12, spoond-ndh): the host's
 	// own address (e.g. 10.1.0.11, the one the API and the guest service
 	// are reachable on). It has no default: TestN10 and TestN12 skip when
 	// unset, so a run never probes an assumed LAN address. Set it as
 	// CONFORMANCE_LAN_DNS (e.g. 10.1.0.11 on sb).
 	LANDNS string
-	// LanDNSZone is the domain the guest resolver answers from the LAN
-	// (TestN12): the deployment's wildcard zone. Defaults to
-	// example.com; set CONFORMANCE_LAN_DNS_ZONE (e.g. lacy.casa on sb).
-	LanDNSZone string
 	// LANTarget is a private (LAN) host:port that answers on the host
 	// from a lease under the internet and lan policies (TestN1). It has
 	// no default: CONFORMANCE_LAN_TARGET sets it and N1 skips when it is
