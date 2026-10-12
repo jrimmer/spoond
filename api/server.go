@@ -1095,8 +1095,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// itself (#132): the runner sends its job label
 		// ("forgejo job <id> <url>", runner/executor.go) with the create,
 		// so the lease and its `created` event name the job from the first
-		// moment. The comment route's own cap applies (512; longer is a
-		// bad request).
+		// moment. The comment route's whole validity applies (the shared
+		// validator in api/comment.go: 512 bytes, no control characters;
+		// a violation is a bad request).
 		Comment string `json:"comment"`
 		// Pinned pins the new lease (FS5): spoond never pauses or deletes
 		// it before its own expiry. A persistent pinned lease stays until

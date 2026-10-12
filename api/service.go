@@ -2497,8 +2497,10 @@ type leaseRequest struct {
 	// (#132): the runner sends its job label ("forgejo job <id> <url>")
 	// with the create, so the lease and its `created` event name the job
 	// from the first moment — no separate comment call after the answer
-	// (which would leave the event silent). Capped by the comment route's
-	// validity: longer is refused like that route's.
+	// (which would leave the event silent). Held to the comment route's
+	// whole validity: Handler runs the shared comment validator
+	// (api/comment.go) on it before grantLease, so a create and a later
+	// set accept exactly the same text.
 	comment string
 	// pinned asks spoond never to pause or delete the new lease before
 	// its own expiry (FS5). The holder labels never pin.
