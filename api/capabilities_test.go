@@ -367,3 +367,86 @@ func TestCapabilitiesImagesNoSecondSource(t *testing.T) {
 		}
 	}
 }
+
+// TestCapabilitiesCIRunnerSurface: IMAGE_MAP ("label=image,...") when
+// set appears as the ci_runner surface with the same pairs; broken
+// pairs are skipped. This is the same spec spoond-runner's Executor
+// gets its labels from, so the document cannot name labels the runner
+// would not serve.
+func TestCapabilitiesCIRunnerSurface(t *testing.T) {
+	t.Setenv("IMAGE_MAP", "ubuntu-latest=py-base, go=go-base, broken, =empty, empty=")
+	ts, _ := newTestServer(t)
+	resp, body := doReq(t, "GET", ts.URL+"/api/capabilities", "token-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	raw, _ := json.Marshal(body["surfaces"])
+	var surfaces struct {
+		CIRunner []struct {
+			Label string `json:"label"`
+			Image string `json:"image"`
+		} `json:"ci_runner"`
+	}
+	if err := json.Unmarshal(raw, &surfaces); err != nil {
+		t.Fatalf("decode surfaces: %v", err)
+	}
+	if len(surfaces.CIRunner) != 2 {
+		t.Fatalf("ci_runner = %+v, want 2 pairs (broken and empty ones skipped)", surfaces.CIRunner)
+	}
+	if surfaces.CIRunner[0].Label != "ubuntu-latest" || surfaces.CIRunner[0].Image != "py-base" {
+		t.Errorf("ci_runner[0] = %+v", surfaces.CIRunner[0])
+	}
+	if surfaces.CIRunner[1].Label != "go" || surfaces.CIRunner[1].Image != "go-base" {
+		t.Errorf("ci_runner[1] = %+v", surfaces.CIRunner[1])
+	}
+}
+
+// TestCapabilitiesAuthLineDocumentsAdmin: the api.auth line states the
+// /api/admin/* grant ("admin users and ADMIN_TOKEN"), the ticket's
+// requirement that the auth model ride the document.
+func TestCapabilitiesAuthLineDocumentsAdmin(t *testing.T) {
+	ts, _ := newTestServer(t)
+	_, body := doReq(t, "GET", ts.URL+"/api/capabilities", "token-a", nil)
+	apiBlock, _ := body["api"].(map[string]any)
+	auth, _ := apiBlock["auth"].(string)
+	for _, want := range []string{"Bearer", "ADMIN_TOKEN", "/api/admin/*"} {
+		if !strings.Contains(auth, want) {
+			t.Errorf("api.auth lacks %q: %q", want, auth)
+		}
+	}
+}
+
+// TestCapabilitiesSummaryLinesMatchDocHeadings spot-checks that a few
+// table summaries carry the wording their docs/api.md headings use, so
+// the "summary from the docs heading" rule does not rot.
+func TestCapabilitiesSummaryLinesMatchDocHeadings(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "docs", "api.md"))
+	if err != nil {
+		t.Skipf("docs/api.md not readable: %v", err)
+	}
+	doc := string(src)
+	// Heading text -> a substring the table row's summary must carry.
+	cases := map[string]string{
+		"### `POST /api/leases` — create a lease":                           "create a lease",
+		"### `GET /api/names/{name}` — resolve by name":                     "resolve by name",
+		"### `POST /api/leases/{id}/keepalive` — extend a persistent lease": "extend a persistent lease",
+		"### `POST /api/leases/{id}/suspend` — snapshot + stop":             "snapshot + stop",
+	}
+	for heading := range cases {
+		if !strings.Contains(doc, heading) {
+			t.Errorf("docs/api.md lost the heading %q — update the summary and this test together", heading)
+		}
+	}
+	for _, want := range cases {
+		found := false
+		for _, row := range endpointTable {
+			if strings.Contains(row.Summary, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no endpoint table summary contains %q, as its docs/api.md heading words it", want)
+		}
+	}
+}
