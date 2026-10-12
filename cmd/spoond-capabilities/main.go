@@ -32,6 +32,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/jrimmer/spoond/v3/settings"
 )
 
 // doc is the capability document's shape (api/capabilities.go); field
@@ -100,18 +102,31 @@ func Main(args []string) int {
 	}
 
 	baseURL := strings.TrimRight(*urlFlag, "/")
-	if baseURL == "" {
-		baseURL = strings.TrimRight(os.Getenv("SPOOND_URL"), "/")
+	if u, uerr := settings.Get("SPOOND_URL", os.Getenv, os.ReadFile); uerr != nil {
+		fmt.Fprintf(os.Stderr, "spoond capabilities: SPOOND_URL: %v\n", uerr)
+		return 2
+	} else if baseURL == "" {
+		baseURL = strings.TrimRight(strings.TrimSpace(u), "/")
 	}
 	if baseURL == "" {
 		baseURL = defaultBaseURL()
 	}
+	doctok, derr := settings.Get("TOKEN", os.Getenv, os.ReadFile)
+	if derr != nil {
+		fmt.Fprintf(os.Stderr, "spoond capabilities: TOKEN: %v\n", derr)
+		return 2
+	}
+	consumers, cerr := settings.Get("CONSUMER_TOKENS", os.Getenv, os.ReadFile)
+	if cerr != nil {
+		fmt.Fprintf(os.Stderr, "spoond capabilities: CONSUMER_TOKENS: %v\n", cerr)
+		return 2
+	}
 	token := strings.TrimSpace(*tokenFlag)
 	if token == "" {
-		token = strings.TrimSpace(os.Getenv("TOKEN"))
+		token = strings.TrimSpace(doctok)
 	}
 	if token == "" {
-		token = firstConsumerToken()
+		token = firstConsumerToken(consumers)
 	}
 	if token == "" {
 		fmt.Fprintln(os.Stderr, "spoond capabilities: no token — set TOKEN or CONSUMER_TOKENS (token=consumer), or pass --token")
@@ -174,12 +189,12 @@ func Main(args []string) int {
 // the same reflection `spoond doctor` probes with.
 func defaultBaseURL() string {
 	scheme := "http"
-	if firstTLSCert() != "" {
+	if cert, cerr := settings.Get("TLS_CERT", os.Getenv, os.ReadFile); cerr == nil && strings.TrimSpace(cert) != "" {
 		scheme = "https"
 	}
-	bind := strings.TrimSpace(os.Getenv("BIND_ADDR"))
-	if bind == "" {
-		bind = "127.0.0.1:8890"
+	bind := "127.0.0.1:8890"
+	if bindEnv, _ := settings.Get("BIND_ADDR", os.Getenv, os.ReadFile); strings.TrimSpace(bindEnv) != "" {
+		bind = strings.TrimSpace(bindEnv)
 	}
 	if _, port, err := splitHostPort(bind); err == nil && port != "" {
 		return scheme + "://" + bind
@@ -198,10 +213,10 @@ func splitHostPort(addr string) (string, string, error) {
 }
 
 // firstConsumerToken takes the token (left) side of the first
-// token=consumer pair in CONSUMER_TOKENS.
-func firstConsumerToken() string {
-	raw := os.Getenv("CONSUMER_TOKENS")
-	for _, pair := range strings.Split(raw, ",") {
+// token=consumer pair in the CONSUMER_TOKENS value settings.Get resolved
+// (env or its _FILE form).
+func firstConsumerToken(consumers string) string {
+	for _, pair := range strings.Split(consumers, ",") {
 		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
 		if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" {
 			return strings.TrimSpace(parts[0])
@@ -210,15 +225,19 @@ func firstConsumerToken() string {
 	return ""
 }
 
-// firstTLSCert is the first cert file listed in TLS_CERT, or "" when
-// TLS is off (the same reading the doctor does).
+// firstTLSCert is the first cert file listed in TLS_CERT (through
+// settings.Get, so its <NAME>_FILE form works), or "" when TLS is off
+// (the same reading the doctor does).
 func firstTLSCert() string {
-	v := strings.TrimSpace(os.Getenv("TLS_CERT"))
+	v, err := settings.Get("TLS_CERT", os.Getenv, os.ReadFile)
+	if err != nil {
+		return ""
+	}
+	v = strings.TrimSpace(v)
 	if v == "" {
 		return ""
 	}
-	cert := strings.Split(v, ",")[0]
-	return strings.TrimSpace(cert)
+	return strings.TrimSpace(strings.Split(v, ",")[0])
 }
 
 // x509PoolFromCert builds a root pool from the backend's own cert file
