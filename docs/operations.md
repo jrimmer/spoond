@@ -1113,12 +1113,13 @@ journalctl -u spoond-backend | grep 'op=release' | tail -20
 
 `spoond-runner` (the `runner` subcommand) runs Forgejo Actions jobs in
 sandboxes leased from the backend. Each job lease is labelled with its
-job (#119): the runner sets the lease's comment to
-`forgejo job <id> <job URL>` while its create waits for admission, and
-the `created` event's detail carries the label — so the dashboard's
-events panel draws the job's lease as `ci job N started · lease <short
-id>` (2.6, #132) rather than a plain lease-create line. The lease is
-deliberately **unpinned**:
+job (#119): the runner sends the lease's comment
+(`forgejo job <id> <job URL>`) in the create body itself, so the lease
+and its `created` event's detail name the job from the first moment —
+the dashboard's events panel draws the job's lease with the type word
+`runner`, the short lease id and the subject `ci job N started` (2.6,
+#132), not a plain lease-create line. The lease is deliberately
+**unpinned**:
 an unpinned lease is reclaimed by the TTL sweep when it is taken back,
 and since 2.3 a holder label no
 longer brings periodic checkpointing with it anyway (a lease is
@@ -1512,14 +1513,14 @@ the backend's lease event stream (`/api/leases/events`, resuming by
 the last 50 events; the events panel shows the newest 5 — `HH:MM:SS`,
 the type, the lease id and the holder (else the comment, else the
 owner), lost events highlighted, releases dim. A CI job lease's
-`created` line is re-labelled from the lease's comment (#119): `ci job
-N started · lease <short id>` with the job id in the subject column and
-the lease id in the text, not the id column — the runner's job starting
-instead of a plain lease-create line. The idle-sweep pass summary (one
-`sweep` event per pass that suspended leases) draws
+`created` line is re-labelled from the lease's comment (#119): its type
+word is `runner` in the ok green, the short lease id sits in the id
+column and the subject reads `ci job N started` — the runner's job
+starting instead of a plain lease-create line. The idle-sweep pass
+summary (one `sweep` event per pass that suspended leases) draws
 `idle sweep · N suspended`, dim, its subject spoond — the news is on
-the per-lease `idle_suspended` lines beside it. Without
-the token the panel says `events need DASH_EVENTS_TOKEN` instead.
+the per-lease `idle_suspended` lines beside it. Without the token the
+panel says `events need DASH_EVENTS_TOKEN` instead.
 Configuration lives in `cmd/spoond-dash/dash.go`; the notable
 variables:
 
