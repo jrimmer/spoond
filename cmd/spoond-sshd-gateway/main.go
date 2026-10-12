@@ -141,18 +141,21 @@ var logExit = os.Exit
 
 // gatewayToken resolves Main's backend token from the environment when
 // --backend-token is not provided: the environment's SPOOND_GATEWAY_TOKEN,
-// or the content of SPOOND_GATEWAY_TOKEN_FILE with one trailing newline
+// or the content of SPOOND_GATEWAY_TOKEN_FILE with trailing newlines
 // trimmed (#137 C2, resolved through settings.Get). Both forms set, or an
 // unreadable file, is a startup error — the exit fires here, after flags
 // have parsed, so even `spoond-sshd-gateway --help` works with a broken
 // secret in the environment. Returns "" for the unset case, so the
 // required check keeps its message.
 func gatewayToken() string {
-	v, err := settings.Get("SPOOND_GATEWAY_TOKEN", os.Getenv, os.ReadFile)
+	v, warn, err := settings.Resolve("SPOOND_GATEWAY_TOKEN")
 	if err != nil {
 		log.Printf("%s: %v", ErrGatewayToken, err)
 		logExit(1)
 		return "" // unreachable in production (logExit is os.Exit)
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
 	}
 	return v
 }

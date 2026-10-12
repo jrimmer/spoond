@@ -688,9 +688,10 @@ func SecretFileOf(name string) string {
 // Get resolves one setting's value the C2 way (2026-10-11
 // validated-config design item 2): the environment's NAME is the value;
 // otherwise NAME_FILE names a file whose contents are the value, with
-// one trailing newline trimmed (a secret saved with a closing echo or
-// editor newline stays byte-equal to the env spelling); setting both
-// forms is an error, and an unreadable file is an error. An unset NAME
+// trailing newlines and carriage returns trimmed (a secret saved with a
+// closing echo, editor or CRLF newline stays byte-equal to the env
+// spelling); setting both forms is an error, an unreadable file is an
+// error, and a file with nothing but whitespace is an error. An unset NAME
 // with an unset NAME_FILE returns ("", nil) — the reader's own default
 // stands, exactly as when only NAME exists and is empty.
 //
@@ -708,7 +709,7 @@ func Get(name string, get func(string) string, readFile func(string) ([]byte, er
 	envV, fileV := get(name), get(file) // get(nil-name) is "" for every injected map
 	switch {
 	case envV != "" && fileV != "":
-		return "", fmt.Errorf("%s and %s are both set: give the value once (set NAME= or %s=/path, not both)", name, file, name)
+		return "", fmt.Errorf("%s and %s are both set: give the value once (set %s= or %s=/path, not both)", name, file, name, file)
 	case envV != "":
 		return envV, nil
 	case fileV != "":
@@ -716,9 +717,33 @@ func Get(name string, get func(string) string, readFile func(string) ([]byte, er
 		if err != nil {
 			return "", fmt.Errorf("%s: read %s: %v", name, fileV, err)
 		}
-		return strings.TrimSuffix(string(b), "\n"), nil
+		v := strings.TrimRight(string(b), "\r\n")
+		if strings.TrimSpace(v) == "" {
+			// An empty secret would mean "unset" to its reader, and for
+			// some (BOOTSTRAP_TOKEN) unset means open: a truncated or
+			// never-written file must fail closed, not quietly unset.
+			return "", fmt.Errorf("%s: %s is empty", name, fileV)
+		}
+		return v, nil
 	}
 	return "", nil
+}
+
+// Resolve is Get against the process environment and filesystem, plus
+// FileModeWarning for the value file when the value came from one: the
+// one call every binary makes for a secret, so the startup warning is
+// the same in all of them. warn is "" when there is nothing to say.
+func Resolve(name string) (value, warn string, err error) {
+	value, err = Get(name, os.Getenv, os.ReadFile)
+	if err != nil || os.Getenv(name) != "" {
+		return value, "", err
+	}
+	if f := SecretFileOf(name); f != "" {
+		if p := os.Getenv(f); p != "" {
+			warn = FileModeWarning(p)
+		}
+	}
+	return value, warn, nil
 }
 
 // FileModeWarning returns a warning line for a path whose file mode is

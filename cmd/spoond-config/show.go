@@ -278,8 +278,13 @@ func maskForDisplay(name, value string) string {
 	if _, isFile := strings.CutSuffix(name, "_FILE"); isFile && settings.IsKnown(name) {
 		// A <SECRET>_FILE row for a known secret: its value is the
 		// resolved path (never the secret's content) or one of the
-		// decorations — display it verbatim.
-		return value
+		// decorations — display it verbatim. A value that is no
+		// absolute path may be the secret itself pasted in by mistake
+		// (ADMIN_TOKEN_FILE=<the token>): hidden like one.
+		if value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "(") || refDecorated(value) {
+			return value
+		}
+		return "(hidden)"
 	}
 	if value == settings.HiddenFromFile || refDecorated(value) {
 		return value

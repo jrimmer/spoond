@@ -136,20 +136,29 @@ func configFromEnv() (Config, error) {
 		return def
 	}
 	// The secrets (#137 C2) resolve through settings.Get: NAME= in the
-	// environment, or NAME_FILE= naming a value file whose content (one
-	// trailing newline trimmed) is the value; both set, or an unreadable
+	// environment, or NAME_FILE= naming a value file whose content (trailing
+	// newlines trimmed) is the value; both set, or an unreadable
 	// file, is the dashboard's startup error.
-	passwordHash, err := settings.Get("DASH_PASSWORD_HASH", os.Getenv, os.ReadFile)
+	passwordHash, warn, err := settings.Resolve("DASH_PASSWORD_HASH")
 	if err != nil {
 		return Config{}, err
 	}
-	metricsToken, err := settings.Get("METRICS_TOKEN", os.Getenv, os.ReadFile)
+	if warn != "" {
+		log.Printf("warning: %s", warn)
+	}
+	metricsToken, warn, err := settings.Resolve("METRICS_TOKEN")
 	if err != nil {
 		return Config{}, err
 	}
-	eventsToken, err := settings.Get("DASH_EVENTS_TOKEN", os.Getenv, os.ReadFile)
+	if warn != "" {
+		log.Printf("warning: %s", warn)
+	}
+	eventsToken, warn, err := settings.Resolve("DASH_EVENTS_TOKEN")
 	if err != nil {
 		return Config{}, err
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
 	}
 	c := Config{
 		Addr:              env("DASH_ADDR", "0.0.0.0:8893"),

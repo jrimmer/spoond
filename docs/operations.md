@@ -99,9 +99,12 @@ the runner's `RUNNER_TOKEN`, `LEASE_TOKEN`, `FORGEJO_ADMIN_TOKEN`, the
 gateway's `SPOOND_GATEWAY_TOKEN` (#137 C2) — may be given as a file
 reference instead of a value: replace `NAME=value` with
 `NAME_FILE=/path/to/file`, and the process reads the file's content as
-the value at startup (one trailing newline is trimmed, so
-`echo -n` is not required; `echo` is fine). Setting both forms fails
-startup, as does an unreadable file — nothing comes up half-configured.
+the value at startup (trailing newlines and carriage returns are
+trimmed, so `echo -n` is not required; `echo` is fine). Setting both
+forms fails startup, as does an unreadable file or one holding nothing
+but whitespace (an empty secret would read as unset, and an unset
+`BOOTSTRAP_TOKEN` leaves first-user creation open) — nothing comes up
+half-configured.
 
 ```bash
 install -m 600 /dev/null /etc/spoond/secrets/admin-token   # create empty, owner-only
@@ -109,7 +112,7 @@ printf '%s\n' 'the-token' > /etc/spoond/secrets/admin-token
 chown root:root /etc/spoond/secrets/admin-token            # the unit's User must be able to read it
 # in /etc/spoond/backend.env, replace ADMIN_TOKEN=... with:
 #   ADMIN_TOKEN_FILE=/etc/spoond/secrets/admin-token
-/opt/spoond/spoond doctor                                 # checks the file exists and is 0600 (WARN otherwise)
+/opt/spoond/spoond doctor                                 # checks the file reads, is not empty, is 0600, and NAME= is gone
 systemctl restart spoond-backend
 /opt/spoond/spoond config show                            # ADMIN_TOKEN_FILE shows the path, ADMIN_TOKEN "(hidden, from file)"
 ```
@@ -122,7 +125,10 @@ the same (`set: true`, value `(hidden, from file)`, no path), so the
 running-backend comparison stays honest. A value file readable by group
 or others is warned about: the backend logs it once at startup,
 `spoond doctor` flags it, and the file's mode should read `600`
-(`stat -c '%a' <path>`). The env file itself keeps
+(`stat -c '%a' <path>`). `spoond doctor` checks the env files under
+`/etc/spoond` only; the runner's and the gateway's env files
+(`/etc/spoond-runner.env`, `/etc/spoond-gateway.env`) are checked by
+those processes at their own startup. The env file itself keeps
 only the path, so it may move to whatever revision control the rest of
 the deployment's configuration already trusts.
 

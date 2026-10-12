@@ -47,7 +47,7 @@ func TestSpecsMatchKnown(t *testing.T) {
 // including the secret() closure the backend wraps settings.Get in and
 // the dash's sec() (#137 C2; their NAME_FILE spellings are never a
 // match: Get builds those names from the spec).
-var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|envDuration|envDurationOr|envDurationOrZero|envBoolOr|pct|limit|get|envInt|envBool|getenv|mustEnv|envFloat|env|envPct|secret|settings\.Get)\("([A-Z][A-Z0-9_]{2,})"`)
+var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|envDuration|envDurationOr|envDurationOrZero|envBoolOr|pct|limit|get|envInt|envBool|getenv|mustEnv|envFloat|env|envPct|secret|settings\.Get|settings\.Resolve)\("([A-Z][A-Z0-9_]{2,})"`)
 
 // envTable matches a setting named in a {"NAME", &dst} table, the way
 // the conformance harness lists its required variables.
@@ -569,18 +569,28 @@ func TestGetResolvesSecret(t *testing.T) {
 		t.Fatalf("file only: (%q, %v), want (filetok, nil)", v, err)
 	}
 
-	// Exactly one trailing newline is trimmed: several would NOT all go
-	// (a value may itself end in a newline), and a file without one is
-	// untouched.
-	p2 := write("several", "multitok\n\n\n")
+	// Every trailing newline and carriage return is trimmed (an echo,
+	// an editor or a CRLF file), and a file holding nothing else is an
+	// error, never an empty value: for BOOTSTRAP_TOKEN empty means open.
+	p2 := write("several", "multitok\r\n\n")
 	v, err = Get("METRICS_TOKEN", func(k string) string {
 		if k == "METRICS_TOKEN_FILE" {
 			return p2
 		}
 		return ""
 	}, file)
-	if err != nil || v != "multitok\n\n" {
-		t.Fatalf("file with several trailing newlines: (%q, %v), want (\"multitok\\n\\n\", nil) — one newline trimmed, exactly", v, err)
+	if err != nil || v != "multitok" {
+		t.Fatalf("file with trailing CR/LFs: (%q, %v), want (multitok, nil)", v, err)
+	}
+	pe := write("empty", "\n \n")
+	v, err = Get("BOOTSTRAP_TOKEN", func(k string) string {
+		if k == "BOOTSTRAP_TOKEN_FILE" {
+			return pe
+		}
+		return ""
+	}, file)
+	if err == nil || v != "" || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("whitespace-only file: (%q, %v), want an \"is empty\" error", v, err)
 	}
 	p2 = write("bare", "baretok")
 	v, err = Get("METRICS_TOKEN", func(k string) string {
@@ -742,5 +752,49 @@ func TestFileModeWarning(t *testing.T) {
 	}
 	if got := FileModeWarning(filepath.Join(dir, "gone")); got != "" {
 		t.Errorf("missing file: %q, want \"\"", got)
+	}
+}
+
+// TestSecretsNotReadFromEnv (#137 C2): no binary reads a secret setting
+// with os.Getenv/os.LookupEnv — that would skip its NAME_FILE form. Every
+// secret goes through Get or Resolve.
+func TestSecretsNotReadFromEnv(t *testing.T) {
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct := regexp.MustCompile(`\bos\.(?:Getenv|LookupEnv)\("([A-Z][A-Z0-9_]{2,})"`)
+	var bad []string
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		if d.IsDir() {
+			switch rel {
+			case ".claude", ".git", "tests", "node_modules", "settings", "conformance":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, m := range direct.FindAllSubmatch(b, -1) {
+			if IsSecret(string(m[1])) {
+				bad = append(bad, rel+": "+string(m[1]))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("secrets read straight from the environment (use settings.Get/Resolve): %v", bad)
 	}
 }

@@ -345,7 +345,7 @@ func TestCheckFileSecrets(t *testing.T) {
 		"METRICS_TOKEN_FILE=" + loose,        // group-readable: WARN
 		"EVENTS_TOKEN_FILE=" + dir + "/gone", // missing: FAIL
 		"BIND_ADDR_FILE=" + good,             // not a secret's file: ignored here
-		"ADMIN_TOKEN=inline",                 // plain spelling: not this check's
+		"LLM_UPSTREAM_KEY=inline",            // plain spelling alone: not this check's
 		"# comment",
 		"export POOL_SIZE=2",
 	}, "\n") + "\n"
@@ -358,6 +358,18 @@ func TestCheckFileSecrets(t *testing.T) {
 	}
 	if !strings.Contains(notes[1], "EVENTS_TOKEN_FILE") || !strings.Contains(notes[1], "missing or unreadable") || !strings.Contains(notes[1], "refuses to start") {
 		t.Fatalf("missing note = %q", notes[1])
+	}
+
+	// Both spellings of one secret in a file, and a value file with
+	// nothing in it: each a start refusal, noted without any value.
+	empty := filepath.Join(dir, "empty-token")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notes = checkFileSecrets("ADMIN_TOKEN=inline\nADMIN_TOKEN_FILE=" + good + "\nBOOTSTRAP_TOKEN_FILE=" + empty + "\n")
+	if len(notes) != 2 || !strings.Contains(notes[0], "BOOTSTRAP_TOKEN_FILE") || !strings.Contains(notes[0], "is empty") ||
+		!strings.Contains(notes[1], "ADMIN_TOKEN and ADMIN_TOKEN_FILE are both set") || strings.Contains(strings.Join(notes, " "), "inline") {
+		t.Fatalf("both-set/empty notes = %v", notes)
 	}
 
 	// An empty path and a value file with a trailing-newline-only value

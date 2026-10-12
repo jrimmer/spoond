@@ -17,10 +17,9 @@ summarised from README "Status".
   `BOOTSTRAP_TOKEN`, `LLM_UPSTREAM_KEY`, `PROXY_AUTH_SECRET`,
   `DASH_PASSWORD_HASH`, `DASH_EVENTS_TOKEN`, `RUNNER_TOKEN`,
   `LEASE_TOKEN`, `FORGEJO_ADMIN_TOKEN`, `SPOOND_GATEWAY_TOKEN`) may be
-  given as `<NAME>_FILE=/path` (a 0600 file whose content — one
-  trailing newline trimmed — is the value): the processes read it once
-  at startup. Setting both forms, or naming an unreadable file, refuses
-  startup; a file readable by group or others logs a warning and
+  given as `<NAME>_FILE=/path` (a 0600 file whose content — trailing newlines trimmed — is the
+  value): the processes read it once at startup. Setting both forms, or
+  naming an unreadable or empty file, refuses startup; a file readable by group or others logs a warning and
   `spoond doctor` flags it. `spoond config show` keeps the file
   spelling as its own row (the path shown, the content never) beside
   the secret's row (`(hidden, from file)`, source the env file), and

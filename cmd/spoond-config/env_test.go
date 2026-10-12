@@ -1036,3 +1036,14 @@ func TestResolveFileSecretsDecoratesEnvSetBase(t *testing.T) {
 		t.Fatalf("unknown row touched: %+v", got)
 	}
 }
+
+// TestMaskFileRow (#137 C2): a <SECRET>_FILE row shows its path, but a
+// value that is no path — the secret pasted in by mistake — is hidden.
+func TestMaskFileRow(t *testing.T) {
+	if got := maskForDisplay("ADMIN_TOKEN_FILE", "/etc/spoond/secrets/admin"); got != "/etc/spoond/secrets/admin" {
+		t.Fatalf("path row = %q, want the path", got)
+	}
+	if got := maskForDisplay("ADMIN_TOKEN_FILE", "s3cr3t-token"); got != "(hidden)" {
+		t.Fatalf("pasted-token row = %q, want (hidden)", got)
+	}
+}

@@ -117,27 +117,36 @@ func Main(args []string) int {
 	}
 	// The runner's secrets (#137 C2) resolve through settings.Get:
 	// NAME= in the environment, or NAME_FILE= naming a value file (0600,
-	// content with one trailing newline trimmed). Both forms set, or an
+	// content with trailing newlines trimmed). Both forms set, or an
 	// unreadable file, is the startup error, like a missing token.
-	token, err := settings.Get("RUNNER_TOKEN", os.Getenv, os.ReadFile)
+	token, warn, err := settings.Resolve("RUNNER_TOKEN")
 	if err != nil {
 		log.Fatal(err)
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
 	}
 	if token == "" {
 		log.Fatal("RUNNER_TOKEN is required (or RUNNER_TOKEN_FILE)")
 	}
-	leaseToken, err := settings.Get("LEASE_TOKEN", os.Getenv, os.ReadFile)
+	leaseToken, warn, err := settings.Resolve("LEASE_TOKEN")
 	if err != nil {
 		log.Fatal(err)
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
 	}
 	if leaseToken == "" {
 		log.Fatal("LEASE_TOKEN is required (or LEASE_TOKEN_FILE)")
 	}
 	// The Forgejo admin token is optional (the adaptive pool's admin
 	// surface); it takes the file form too (#137 C2).
-	adminToken, err := settings.Get("FORGEJO_ADMIN_TOKEN", os.Getenv, os.ReadFile)
+	adminToken, warn, err := settings.Resolve("FORGEJO_ADMIN_TOKEN")
 	if err != nil {
 		log.Fatal(err)
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
 	}
 	name := envOr("RUNNER_NAME", "spoond-runner")
 	labels := strings.Split(envOr("RUNNER_LABELS", "ubuntu-latest"), ",")

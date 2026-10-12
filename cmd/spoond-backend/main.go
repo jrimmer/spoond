@@ -51,8 +51,8 @@
 //	                  CONSUMER_TOKENS, GATEWAY_TOKEN, BOOTSTRAP_TOKEN,
 //	                  LLM_UPSTREAM_KEY, PROXY_AUTH_SECRET) may carry its
 //	                  value in a file instead of the environment (#137
-//	                  C2): NAME_FILE=/path is read at startup, one
-//	                  trailing newline trimmed. Setting both NAME and
+//	                  C2): NAME_FILE=/path is read at startup, trailing
+//	                  newlines trimmed. Setting both NAME and
 //	                  NAME_FILE fails startup, as does an unreadable
 //	                  file; a file readable by group or others is warned
 //	                  about. See docs/operations.md,
@@ -537,7 +537,7 @@ func (s metricsSink) Notification(webhook, severity, result string) {
 
 // newMainSecretReader builds Main's secret closure (#137 C2): the value
 // comes from settings.Get — NAME= in the environment, or NAME_FILE=
-// naming a value file whose content, one trailing newline trimmed, is
+// naming a value file whose content, trailing newlines trimmed, is
 // the value — and a failure (both forms set, unreadable file) goes to
 // fatal, failing startup like the type check. A file-resolved secret is
 // recorded in fileFrom (GET /api/admin/config reports it set with the
@@ -581,7 +581,7 @@ func Main(args []string) int {
 	}
 	// Secrets from files (#137 C2): every secret setting resolves through
 	// settings.Get — NAME= in the environment, or NAME_FILE= naming a
-	// value file (0600) whose content, one trailing newline trimmed, is
+	// value file (0600) whose content, trailing newlines trimmed, is
 	// the value. Both forms set, or an unreadable file, fails startup
 	// like the type check above; a file readable by group or others is
 	// warned about once. fileFrom records which secrets came from files,
