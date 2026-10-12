@@ -300,6 +300,7 @@ set -a; . /etc/spoond/backend.env; set +a
 | `config: <env file>` | WARN on a key no spoond binary reads, or one set twice (the last wins); the `<SECRET>_FILE=` lines are checked directly: a missing value file warns (the backend will refuse to start — that is where the failure shows), so does a file readable by group or others — see [Moving a secret to a file](#moving-a-secret-to-a-file) |
 | `orchestrator: /health` | `GET http://$E2B_GRPC_ADDR/health` must answer `"status":"healthy"` |
 | `orchestrator: node info` | status, running sandboxes and free hugepages; WARN when the status is not `healthy` or free hugepage memory is below 4 GiB |
+| `orchestrator: unit state` | reads the `e2b-orchestrator` unit's `ActiveState`/`SubState` (`systemctl show`); PASS when `active`/`running`, WARN when `activating` (start-post's `drain --start` still running — do not restart or stop the orchestrator now, the drain would be skipped and running leases killed; see [Restarting the orchestrator](#restarting-the-orchestrator-planned)), FAIL when the unit is `failed`/`inactive` or `systemctl` does not answer |
 | `registry: /v2/` | the local registry answers `200` |
 | `token seed: file` | `/etc/spoond/e2b-token-seed` exists, mode 0600, at least 32 bytes |
 | `store: database` | the SQLite file opens read-only and its migration version is ≥ 4 |
