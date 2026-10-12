@@ -10,6 +10,24 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-10-12
+
+3.6.1 fixes file writes into sticky directories such as `/tmp` on images
+whose kernel setting `fs.protected_regular` is on (systemd's default, so
+Arch-based images): `PUT /api/leases/{id}/files/…` there answered `502`
+and left an empty file. No breaking changes and no schema change.
+
+### Fixed
+
+- **File writes land via a private upload directory and a rename.** The
+  body is uploaded under a fresh name in a `0700` directory beside the
+  target, then one step applies the mode and renames it into place. A
+  secret is still never readable by others while it lands, readers never
+  see a partial file, and an existing file is replaced rather than
+  truncated. A directory in the way now answers `409` as documented. The
+  pre-checkpoint secrets scrub also removes an upload directory a write
+  cut off mid-upload left behind.
+
 ### Added (tests)
 
 - **Conformance: the lease API from guests and guest DNS (spoond-ndh).**

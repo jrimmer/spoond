@@ -206,7 +206,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.6.0 (2026-10-11) · GitHub` — with the
+line — `Spoond v3.6.1 (2026-10-12) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -281,6 +281,12 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.6.1: file writes on Arch images.** `PUT /api/leases/{id}/files/…`
+into a sticky directory such as `/tmp` works on images with
+`fs.protected_regular` on: the body lands in a private upload directory
+and is renamed into place. Adds the `rust-qt-base` image (Rust + Qt 6 on
+Arch) and guest-networking conformance (N10, N12). No breaking changes.
 
 **v3.6: secrets from files.** Every secret setting may be given as
 `<NAME>_FILE=/path` (a 0600 file holding the value) instead of a value
