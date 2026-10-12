@@ -109,22 +109,6 @@ and left an empty file. No breaking changes and no schema change.
 
 ### Added (tests)
 
-- **Conformance: the capabilities document and the create-time comment
-  (spoond-35u2).** `conformance/capabilities_test.go`, group A, always
-  on: A20 reads `GET /api/capabilities` with the test token and pins
-  the document's shape — non-empty `endpoints` carrying `GET
-  /api/images` and `POST /api/sandboxes`, every `GET /api/images` name
-  in `images`, non-empty `sizes.presets`, the four egress classes in
-  `network_policies` — and once, on a separate client, that the route
-  answers `401` without a token. A21 sends the create body's `comment`
-  (#132): the lease's GET carries it, a comment over 512 characters is
-  a `400` that starts nothing, and the `created` event's detail ends
-  with ` · conformance comment 1` — read off the caller's event stream
-  like the idle-suspend watch reads its, skipped with a clear message
-  when the stream does not answer for the test token (e.g. an
-  events-only `EVENTS_TOKEN`). The same assertions run on any developer
-  machine as `api` package tests (`api/conformance_case_test.go`), on
-  an httptest server with the fake substrate.
 - **Conformance: the lease API from guests and guest DNS (spoond-ndh).**
   `conformance/guest_dns_test.go`: N10 checks that an `internet` and a
   `lan` lease reach `GET /healthz` on the API's base URL and round-trip
