@@ -10,6 +10,15 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.7.1] - 2026-10-12
+
+3.7.1 keeps the host's root disk in view and in check. `/readyz` now
+also fails when the root filesystem passes 90 % used, so an uptime
+monitor hears about it; image builds prune both docker builders' cache,
+by age and with a size cap (`IMAGE_BUILD_CACHE_KEEP`, default 10 GB).
+Lease comments refuse control characters. No breaking changes and no
+schema change.
+
 ### Added
 
 - **`/readyz` watches the host's root filesystem too (replaces the

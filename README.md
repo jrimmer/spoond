@@ -206,7 +206,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.7.0 (2026-10-12) · GitHub` — with the
+line — `Spoond v3.7.1 (2026-10-12) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -281,6 +281,10 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.7.1: root disk in view.** `/readyz` also watches the root
+filesystem; image builds prune both docker builders' cache with a size
+cap; lease comments refuse control characters. No breaking changes.
 
 **v3.7: self-description and better signals.** `GET /api/capabilities`
 and `spoond capabilities` list everything this spoond offers. Released
