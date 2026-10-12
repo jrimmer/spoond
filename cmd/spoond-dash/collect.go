@@ -460,16 +460,16 @@ func newCollector(cfg Config) *collector {
 }
 
 // eventsURL is the lease events stream URL: the metrics URL's scheme
-// and host (the same backend), /api/leases/events on the path, with
-// an empty lease_id so lease-less events (gc, sweep, box_full)
-// flow too.
+// and host (the same backend), /api/leases/events on the path. No query:
+// a lease-less stream (no lease_id) already carries the lease-less
+// events (gc, sweep, box_full) beside the leased ones.
 func eventsURL(metricsURL string) string {
 	u, err := url.Parse(metricsURL)
 	if err != nil || u.Host == "" {
-		return "https://127.0.0.1:8890/api/leases/events?lease_id="
+		return "https://127.0.0.1:8890/api/leases/events"
 	}
 	u.Path = "/api/leases/events"
-	u.RawQuery, u.Fragment = "lease_id=", ""
+	u.RawQuery, u.Fragment = "", ""
 	return u.String()
 }
 

@@ -152,10 +152,10 @@ func TestStreamEventsBadTokenBacksOff(t *testing.T) {
 // TestEventsURL: the stream URL is the metrics URL with the events path.
 func TestEventsURL(t *testing.T) {
 	cases := map[string]string{
-		"https://127.0.0.1:8890/metrics":            "https://127.0.0.1:8890/api/leases/events?lease_id=",
-		"http://backend.internal:8890/metrics":      "http://backend.internal:8890/api/leases/events?lease_id=",
-		"https://vm.example.com:8890/metrics?x=1":   "https://vm.example.com:8890/api/leases/events?lease_id=",
-		"https://vm.example.com/api/leases/events/": "https://vm.example.com/api/leases/events?lease_id=",
+		"https://127.0.0.1:8890/metrics":            "https://127.0.0.1:8890/api/leases/events",
+		"http://backend.internal:8890/metrics":      "http://backend.internal:8890/api/leases/events",
+		"https://vm.example.com:8890/metrics?x=1":   "https://vm.example.com:8890/api/leases/events",
+		"https://vm.example.com/api/leases/events/": "https://vm.example.com/api/leases/events",
 	}
 	for in, want := range cases {
 		if got := eventsURL(in); got != want {
