@@ -94,16 +94,13 @@ func fsPathsShareDevice(t *testing.T, a, b string) bool {
 }
 
 // A healthy backend is ready: 200, status ok, and every named check
-// passing. No bearer token is sent — the endpoint is auth-exempt.
+// passing. No bearer token is sent — the endpoint is auth-exempt. The
+// root-disk check's own verdicts have their tests (healthy on another
+// filesystem in TestReadyzRootDiskOwnPath, dropped on the same device
+// in TestReadyzRootDiskSameDeviceOneCheck): whichever shape this host
+// takes, the core checks must still pass.
 func TestReadyzHealthy(t *testing.T) {
-	ts, svc, _ := newReadyzServer(t)
-	// For the root check to appear at all, its path must sit on another
-	// filesystem than the snapshot store's — the same-device rule would
-	// merge them (TestReadyzRootDiskSameDeviceOneCheck). Pin both
-	// explicitly so the shape does not depend on where the host puts
-	// /tmp: the root check stats the found directory, the fake
-	// diskCapacity answers for every path, and no real disk is trusted.
-	svc.cfg.RootFSPath = otherFilesystemDir(t, svc.cfg.TemplateStoragePath)
+	ts, _, _ := newReadyzServer(t)
 
 	resp, r := getReadyz(t, ts, http.StatusOK)
 	if resp.StatusCode != http.StatusOK {
@@ -117,14 +114,6 @@ func TestReadyzHealthy(t *testing.T) {
 		if !c.OK {
 			t.Errorf("check %q failed: %s", c.Name, c.Detail)
 		}
-	}
-	// The root disk's check sits beside the snapshot disk's whenever
-	// the two paths can be put on separate filesystems here; the
-	// skip-with-reason below covers the rare single-filesystem machine
-	// (and the same-device rule has its own test).
-	root := checkByName(t, r, rootDiskName)
-	if !root.OK {
-		t.Errorf("check %q failed: %s", root.Name, root.Detail)
 	}
 }
 
