@@ -3,6 +3,8 @@ package e2b
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -21,24 +24,128 @@ import (
 )
 
 // WriteFile writes data to path via envd's HTTP POST /files (multipart).
-// envd sets no mode, so the file is first created empty with the requested
-// mode (and any missing parents, 0755) by an exec install; the upload then
-// fills it, and a chmod afterwards re-applies the mode in case the upload
-// replaced the file rather than truncating it.
+//
+// envd sets no mode and opens an existing file with O_CREAT as root after
+// chowning it to the guest user. In a sticky world-writable directory
+// (/tmp) under fs.protected_regular=1 — systemd's default, so Arch-based
+// images — the kernel refuses root that open of another user's file, so
+// the upload can never land on a file that already exists there. So the
+// upload goes to a fresh name in a private 0700 directory beside the
+// target (envd creates it new; a secret is never readable by others while
+// its contents land), and one exec then sets the mode and renames it into
+// place: rename is atomic and is not subject to protected_regular. All
+// execs pass the paths as positional arguments, never interpolated.
 func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, data []byte, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0o644
 	}
-	if err := c.precreate(ctx, sandboxID, path, mode); err != nil {
+	dir, base := splitPath(path)
+	if base == "" {
+		return fmt.Errorf("e2b: write %s: %w", path, substrate.ErrInvalidOp)
+	}
+	tmpDir, err := uploadDir(dir)
+	if err != nil {
+		return fmt.Errorf("e2b: write %s: %w", path, err)
+	}
+	tmp := joinPath(tmpDir, base)
+	if err := c.shExec(ctx, sandboxID, "stage "+path, writeStageScript, path, dir, tmpDir); err != nil {
 		return err
 	}
-	if err := uploadFile(ctx, c.envdClient(sandboxID, ""), c.cfg.ProxyURL, path, data); err != nil {
+	if err := uploadFile(ctx, c.envdClient(sandboxID, ""), c.cfg.ProxyURL, tmp, data); err != nil {
+		// A gone or unreachable sandbox has nothing to clean up (and a
+		// cleanup exec would only repeat the orchestrator probe).
 		if serr := c.sandboxListed(ctx, sandboxID); serr != nil {
 			return fmt.Errorf("%w: %v", serr, err)
 		}
+		c.discard(ctx, sandboxID, tmpDir)
 		return err
 	}
-	return c.chmod(ctx, sandboxID, path, mode)
+	if err := c.shExec(ctx, sandboxID, "place "+path, writePlaceScript, strconv.FormatUint(uint64(mode.Perm()), 8), tmp, path, tmpDir); err != nil {
+		c.discard(ctx, sandboxID, tmpDir)
+		return err
+	}
+	return nil
+}
+
+// errIsDirExit is the stage and place scripts' exit status for a target
+// that is a directory: WriteFile answers it as substrate.ErrInvalidOp.
+const errIsDirExit = 3
+
+// writeStageScript refuses a directory target, creates the target's
+// missing parents (0755) and the private upload directory (0700).
+// $1 target, $2 its directory, $3 the upload directory.
+const writeStageScript = `set -e
+[ ! -d "$1" ] || { echo "$1: is a directory" >&2; exit 3; }
+mkdir -p -- "$2"
+mkdir -m 700 -- "$3"`
+
+// writePlaceScript applies the mode, renames the upload over the target
+// (replacing the file, not truncating it: hard links and open handles keep
+// the old content) and removes the upload directory. A target that became
+// a directory since the stage is refused, not written into. $1 mode, $2
+// upload, $3 target, $4 the upload directory.
+const writePlaceScript = `set -e
+chmod "$1" -- "$2"
+[ ! -d "$3" ] || { echo "$3: is a directory" >&2; exit 3; }
+mv -f -- "$2" "$3"
+rmdir -- "$4"`
+
+// shExec runs a fixed /bin/sh script with args as its positional
+// parameters ($1…): the script is a constant, so no path ever reaches the
+// shell as code.
+func (c *Client) shExec(ctx context.Context, sandboxID, what, script string, args ...string) error {
+	r, err := c.Exec(ctx, sandboxID, substrate.ExecRequest{
+		Args: append([]string{"/bin/sh", "-c", script, "sh"}, args...),
+	})
+	if err != nil {
+		return err
+	}
+	if r.ExitCode == errIsDirExit {
+		return fmt.Errorf("e2b: %s %s: %s: %w", what, sandboxID, strings.TrimSpace(r.Stderr), substrate.ErrInvalidOp)
+	}
+	if r.ExitCode != 0 {
+		return fmt.Errorf("e2b: %s %s: exit %d: %s", what, sandboxID, r.ExitCode, strings.TrimSpace(r.Stderr))
+	}
+	return nil
+}
+
+// discard removes a failed write's upload directory, best effort: the
+// write's own error is what the caller reports.
+// It runs detached from ctx: a client that hung up mid-upload cancels the
+// request, and the half-written upload directory must still go.
+func (c *Client) discard(ctx context.Context, sandboxID, tmpDir string) {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_, _ = c.Exec(dctx, sandboxID, substrate.ExecRequest{Args: []string{"/bin/rm", "-rf", "--", tmpDir}})
+}
+
+// uploadDir names a fresh private upload directory inside dir.
+func uploadDir(dir string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return joinPath(dir, ".spoond-upload-"+hex.EncodeToString(b[:])), nil
+}
+
+// splitPath splits an absolute guest path into its directory and base
+// name ("/f" is "/" and "f"; a trailing slash leaves an empty base).
+func splitPath(path string) (dir, base string) {
+	i := strings.LastIndexByte(path, '/')
+	if i < 0 {
+		return ".", path
+	}
+	if i == 0 {
+		return "/", path[1:]
+	}
+	return path[:i], path[i+1:]
+}
+
+func joinPath(dir, name string) string {
+	if strings.HasSuffix(dir, "/") {
+		return dir + name
+	}
+	return dir + "/" + name
 }
 
 // ReadFile downloads path via envd's HTTP GET /files; the error wraps
@@ -238,22 +345,6 @@ func (c *Client) chmod(ctx context.Context, sandboxID, path string, mode os.File
 	}
 	if r.ExitCode != 0 {
 		return fmt.Errorf("e2b: chmod %s %s: exit %d: %s", sandboxID, path, r.ExitCode, strings.TrimSpace(r.Stderr))
-	}
-	return nil
-}
-
-// precreate creates path empty with mode, plus any missing parent
-// directories, before the upload: secrets written 0600 are never readable
-// by others while the contents land. install refuses a directory path.
-func (c *Client) precreate(ctx context.Context, sandboxID, path string, mode os.FileMode) error {
-	r, err := c.Exec(ctx, sandboxID, substrate.ExecRequest{
-		Args: []string{"/usr/bin/install", "-D", "-m", strconv.FormatUint(uint64(mode.Perm()), 8), "--", "/dev/null", path},
-	})
-	if err != nil {
-		return err
-	}
-	if r.ExitCode != 0 {
-		return fmt.Errorf("e2b: create %s %s: exit %d: %s", sandboxID, path, r.ExitCode, strings.TrimSpace(r.Stderr))
 	}
 	return nil
 }

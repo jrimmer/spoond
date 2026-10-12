@@ -71,10 +71,13 @@ const secretMountScript = `grep -q ' /run/secrets tmpfs ' /proc/mounts || ` +
 // an error: a lease that never had secrets must save (R1). The wildcards
 // cover dotfiles and dotdot-prefixed names (`..x`). The listing before
 // =LEFT= lets the backend report how many files it removed that it did
-// not know about (R4).
+// not know about (R4). A write cut off mid-upload can leave its private
+// .spoond-upload-* directory (substrate/e2b WriteFile): that alone is
+// removed recursively; any other subdirectory still aborts the save.
 const secretsScrubScript = `[ -d /run/secrets ] || exit 0
 ls -A /run/secrets 2>/dev/null
 rm -f /run/secrets/* /run/secrets/.[!.]* /run/secrets/..?* 2>/dev/null
+rm -rf /run/secrets/.spoond-upload-* 2>/dev/null
 echo =LEFT=
 ls -A /run/secrets 2>/dev/null`
 
