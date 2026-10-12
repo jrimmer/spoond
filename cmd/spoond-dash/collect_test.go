@@ -362,6 +362,70 @@ func TestEventLinesGC(t *testing.T) {
 	}
 }
 
+// TestEventLinesCIJobStart: a created event whose lease's comment is the
+// runner's job label ("forgejo job <id> <url>", executor.go) is
+// re-labelled as the job's start (2.6, #132): "ci job N started · lease
+// <short id>" instead of the plain lease-create line, with the green
+// ok style, the subject column naming the job and the lease-id column
+// left empty (the id is in the text). A created event for any other
+// lease stays a plain created line.
+func TestEventLinesCIJobStart(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.lastRow = []LeaseRow{{ID: "abcdef0123", Comment: "forgejo job 3609 https://code.example.com/site/actions/runs/91/jobs/3609"}}
+	c.events.add(dashEvent{At: at, Type: "created", LeaseID: "abcdef0123", Subject: "ci",
+		Detail: "granted from image py-base in 61 ms"})
+	lines := c.eventLines(at)
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	l := lines[0]
+	want := "04:15:59  ci job 3609 started · lease abcdef0123              ci job 3609  granted from image py-base in 61 ms"
+	if l.Text != want {
+		t.Fatalf("ci job start line =\n%q\nwant\n%q", l.Text, want)
+	}
+	if l.Style != "ok" {
+		t.Fatalf("ci job start style = %q, want ok", l.Style)
+	}
+
+	// The id column is empty: the short id is already in the text, so
+	// the line does not name the lease twice.
+	if strings.Contains(l.Text, "  abcdef0123  ") {
+		t.Fatalf("the id column repeats the lease id: %q", l.Text)
+	}
+
+	// A created event for any other lease stays a plain created line,
+	// text-styled, id column filled.
+	c.events.add(dashEvent{At: at, Type: "created", LeaseID: "abcdef9999", Subject: "jason",
+		Detail: "granted from image py-base in 2 ms"})
+	plain := c.eventLines(at)[0]
+	if !strings.Contains(plain.Text, "created") || !strings.Contains(plain.Text, "abcdef9999") || plain.Style != "text" {
+		t.Fatalf("plain created line broken: %+v", plain)
+	}
+}
+
+// TestEventLinesSweepSummary: one sweep event (the backend's #132
+// summary of an idle-sweep pass that suspended leases) draws
+// "idle sweep · N suspended", lease-less, subject spoond, its type word
+// and line dim — the news is the per-lease idle_suspended lines.
+func TestEventLinesSweepSummary(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.events.add(dashEvent{At: at, Type: "sweep", Detail: "2 suspended"})
+	lines := c.eventLines(at)
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	l := lines[0]
+	if !strings.Contains(l.Text, "sweep") || !strings.Contains(l.Text, "spoond") ||
+		!strings.Contains(l.Text, "2 suspended") {
+		t.Fatalf("sweep line = %+v, want type, spoond subject and detail", l)
+	}
+	if l.Style != "dim" {
+		t.Fatalf("sweep line style = %q, want dim", l.Style)
+	}
+}
+
 // TestEventLinesLeaseLessPlaceholder: the box_full and admin_unpin
 // events carry the placeholder lease id "-"; the events panel still
 // names spoond as their subject, not the placeholder (spoond-k0uz L10).

@@ -1321,7 +1321,9 @@ func TestEventsPanelColumns(t *testing.T) {
 // TestEventsPanelTypeColour: the type word takes its kind's colour — a
 // lost event bad, a created event in the title cyan, a suspended one
 // warn, and the lease id cyan (the id style) on every line; the tail
-// keeps the event's own style.
+// keeps the event's own style. A re-labelled CI job start line's type
+// word ("ci job N started · lease <id>") draws ok, and the sweep
+// summary's dim, both with their tails in their own style (#132).
 func TestEventsPanelTypeColour(t *testing.T) {
 	cases := []struct{ typ, want string }{
 		{"lost", "bad"},
@@ -1342,6 +1344,8 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		{"user_deleted", "warn"},
 		{"gc", "ok"},
 		{"holder_set", "dim"},
+		{"sweep", "dim"},
+		{"ci job 3609 started · lease abcdef0123", "ok"},
 	}
 	for _, tc := range cases {
 		line := "07:19:02  " + tc.typ + "  abcdef0123  jason"
@@ -1361,6 +1365,40 @@ func TestEventsPanelTypeColour(t *testing.T) {
 		if idSeg == nil || idSeg.Style != "id" {
 			t.Fatalf("%s: id style = %v, want id (segs %+v)", tc.typ, idSeg, segs)
 		}
+	}
+}
+
+// TestEventsPanelNewEventColours draws the events panel with the two
+// #132 lines and checks the type words reach the page with their kind's
+// class, beside their tail's own style: the re-labelled CI job start
+// green (ok), the idle-sweep summary dim.
+func TestEventsPanelNewEventColours(t *testing.T) {
+	s := healthySnapshot()
+	s.Events = []EventLine{
+		{Text: "07:19:02  sweep                                  spoond  2 suspended", Style: "dim"},
+		{Text: "07:18:44  ci job 3609 started · lease abcdef0123              ci job 3609  granted from image py-base in 61 ms", Style: "ok"},
+	}
+	rows := strings.Split(Draw(s, DefaultWidth, fixedNow, "h").HTML(), "\n")
+	var sweep, started string
+	for _, r := range rows {
+		if strings.Contains(r, "sweep") && strings.Contains(r, "suspended") {
+			sweep = r
+		}
+		if strings.Contains(r, "ci job 3609 started") {
+			started = r
+		}
+	}
+	// The sweep's dim type run merges with the dim time before it (same
+	// style, unlike lost's bad): the span carries both, then the subject
+	// (the id style) and the dim tail.
+	if sweep == "" || !strings.Contains(sweep, `g-dim" data-id="events">07:19:02  sweep`) {
+		t.Fatalf("sweep type not drawn dim:\n%s", sweep)
+	}
+	if started == "" || !strings.Contains(started, `g-ok" data-id="events">ci job 3609 started`) {
+		t.Fatalf("ci job start type not drawn ok:\n%s", started)
+	}
+	if !strings.Contains(started, `g-ok" data-id="events">ci job 3609 started · lease abcdef0123`) {
+		t.Fatalf("the whole type phrase (the line's text) is not in the page:\n%s", started)
 	}
 }
 

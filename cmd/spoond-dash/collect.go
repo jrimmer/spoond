@@ -197,13 +197,21 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 	return out
 }
 
-// eventStyle is the grid style an event is drawn with: warn for lost,
-// held-lease actions and idle suspensions, and for a release or gc pass
-// whose detail names a failure (the CI runner's "✗", the GC's stale-build
-// failure); ok for a gc pass that deleted something (spoond's own
-// maintenance); dim for releases, text for the rest.
+// eventStyle is the grid style an event is drawn with: dim for the
+// idle-sweep pass summary (the news is the per-lease idle_suspended
+// lines, #132), warn for lost, held-lease actions and idle suspensions,
+// and for a release or gc pass whose detail names a failure (the CI
+// runner's "✗", the GC's stale-build failure); ok for a gc pass that
+// deleted something (spoond's own maintenance); dim for releases, text
+// for the rest. A created event re-labelled as a CI job's start line
+// (ciJobStartLabel, #132) draws green: its type word is the line's
+// "ci job N started · lease <id>", the ok role like the gc maintenance.
 func eventStyle(ev dashEvent) string {
 	switch ev.Type {
+	case "sweep":
+		// The idle-sweep pass summary (#132): the news lives on the
+		// per-lease idle_suspended lines, so the summary draws dim.
+		return "dim"
 	case "lost", "held_action", "job_lost", "idle_suspended", "user_deleted":
 		return "warn"
 	case "gc":
@@ -219,8 +227,33 @@ func eventStyle(ev dashEvent) string {
 		}
 		return "dim"
 	default:
+		if _, ok := ciJobStartText(ev.Type); ok {
+			return "ok"
+		}
 		return "text"
 	}
+}
+
+// ciJobStartLabel rewrites one created event as a CI job's start line: a
+// lease whose comment starts with the runner's job label
+// ("<JobLabelPrefix><jobID> <url>", runner/executor.go) is the CI job
+// that lease was granted for, so the line reads
+// "ci job N started · lease <short id>" — the event is a CI job's
+// start, not a plain lease create (#132). The dashboard re-labels the
+// existing `created` event from the lease's comment; the comment rides
+// in from the same tick's lease table the subject lookup already reads
+// (no new backend event).
+var ciJobLabelRe = regexp.MustCompile(`^forgejo job (\d+) `)
+
+func ciJobStartLabel(ev *dashEvent, comment string) (string, bool) {
+	if ev.Type != "created" || comment == "" {
+		return "", false
+	}
+	m := ciJobLabelRe.FindStringSubmatch(comment)
+	if m == nil {
+		return "", false
+	}
+	return "ci job " + m[1] + " started · lease " + shortID(ev.LeaseID), true
 }
 
 // jobExitedStyle picks the job_exited line's style: a non-zero exit is
@@ -240,8 +273,15 @@ func jobExitedStyle(detail string) string {
 // are the live lease table the same tick built; a lease that has left
 // it (released) falls through to the event's owner.
 func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string {
-	// A lease-less event (the catalog gc, box_full, admin_unpin) carries
-	// no lease id or the placeholder "-", so it names spoond.
+	// A re-labelled CI job start (#132) names the job in its type word
+	// already; its subject repeats just the job id, which the re-labelling
+	// took off the id column.
+	if text, ok := ciJobStartText(ev.Type); ok {
+		return "ci job " + text
+	}
+	// A lease-less event (the catalog gc, box_full, admin_unpin, the
+	// idle-sweep summary) carries no lease id or the placeholder "-", so
+	// it names spoond.
 	if ev.LeaseID == "" || ev.LeaseID == "-" {
 		return "spoond"
 	}
@@ -251,6 +291,14 @@ func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string
 				return r.Holder
 			}
 			if r.Comment != "" {
+				// A runner job lease's comment ("forgejo job <id>
+				// <url>", executor.go) is the job it runs: the created
+				// line is re-labelled from it (#132), so the long URL
+				// stays out of the subject too and the column keeps its
+				// room for a real holder or note.
+				if job, ok := ciJobLabelComment(r.Comment); ok {
+					return "ci job " + job
+				}
 				return r.Comment
 			}
 			break
@@ -262,6 +310,45 @@ func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string
 		return n
 	}
 	return ev.Subject
+}
+
+// ciJobStartText is the job id a re-labelled CI job start's type word
+// ("ci job N started · lease <id>") names: the digits after the
+// runner's job-label prefix. ok is false for any other type word.
+func ciJobStartText(typ string) (string, bool) {
+	if !strings.HasPrefix(typ, "ci job ") || !strings.Contains(typ, " started · lease ") {
+		return "", false
+	}
+	inner := strings.TrimPrefix(typ, "ci job ")
+	id := inner[:strings.Index(inner, " ")]
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// leaseComment is lease id's comment from the last tick's lease rows:
+// "" when the lease is not in the table any more (released, gone) or
+// has none. The events panel's CI-job re-labelling reads it.
+func leaseComment(rows []LeaseRow, id string) string {
+	for _, r := range rows {
+		if r.ID == id {
+			return r.Comment
+		}
+	}
+	return ""
+}
+
+// ciJobLabelComment reports whether a comment marks a runner job lease
+// and, when it does, returns the job id it names: the comment the
+// runner sets before the lease is created is
+// "forgejo job <id> <url>".
+func ciJobLabelComment(comment string) (string, bool) {
+	m := ciJobLabelRe.FindStringSubmatch(comment)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
 }
 
 // Service is a systemd unit and its state.
@@ -837,6 +924,18 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 	lines := make([]EventLine, 0, len(evs))
 	rows := c.lastRows()
 	names := c.userNames()
+	// A CI job lease's created event is re-labelled as the job's start
+	// line (#132): the lease's comment, looked up from the same tick's
+	// rows, names the job. Applied before the column widths are taken,
+	// so the re-labelled line's type sizes the column like every other's.
+	for i := range evs {
+		if text, ok := ciJobStartLabel(&evs[i], leaseComment(rows, evs[i].LeaseID)); ok {
+			evs[i].Type = text
+			// The short lease id is already in the text: leave the id
+			// column empty rather than naming the lease twice.
+			evs[i].LeaseID = ""
+		}
+	}
 	// The type and subject columns are as wide as the events shown need
 	// (the subject at most eventSubjectMax, cut with …), so the detail —
 	// the part that varies most — gets the rest of the row.

@@ -2085,7 +2085,9 @@ func (l *layout) writeRow(g *grid.Grid, x, y int, segs []grid.Seg) {
 // restarted, restored, checkpointed, recovered), warn for a lease put
 // aside or retried (suspended, taken_back, idle_suspended, queued,
 // recovery_retry, rootfs_dead), bad for one lost or timed out, ok for
-// spoond's own catalog gc, dim for anything else.
+// spoond's own catalog gc and a re-labelled CI job start ("ci job N
+// started · lease <id>", #132), dim for anything else — the idle-sweep
+// summary among it, whose news the per-lease idle_suspended lines carry.
 func eventTypeStyle(t string) string {
 	switch t {
 	case "created", "released", "resumed", "restarted", "restored", "checkpointed", "recovered":
@@ -2096,7 +2098,19 @@ func eventTypeStyle(t string) string {
 		return "bad"
 	case "gc":
 		return "ok"
+	case "sweep":
+		// The idle-sweep summary is the per-lease idle_suspended events'
+		// bookkeeping (#132): the news is on those lines, so the summary
+		// stays dim.
+		return "dim"
 	default:
+		// A CI job lease's created event, re-labelled "ci job N started ·
+		// lease <id>" (collect.go, #132): the type word is that whole
+		// phrase, drawn in the ok green — the runner's own work starting,
+		// like the gc pass above.
+		if _, ok := ciJobStartText(t); ok {
+			return "ok"
+		}
 		return "dim"
 	}
 }
