@@ -23,13 +23,20 @@
 //	                     can reach DASH_ADDR — only for a private network)
 //	DASH_USER            basic-auth user (required while DASH_AUTH is on)
 //	DASH_PASSWORD_HASH   bcrypt hash of the password (required while
-//	                     DASH_AUTH is on)
+//	                     DASH_AUTH is on; DASH_PASSWORD_HASH_FILE names a
+//	                     0600 file carrying it instead, #137 C2)
 //	METRICS_URL          spoond /metrics (default https://127.0.0.1:8890/metrics)
 //	METRICS_SERVER_NAME  TLS server name for METRICS_URL (default: METRICS_URL host)
-//	METRICS_TOKEN        spoond's scrape-only token (required)
+//	METRICS_TOKEN        spoond's scrape-only token (required;
+//	                     METRICS_TOKEN_FILE names a 0600 file carrying
+//	                     it instead, #137 C2)
 //	DASH_EVENTS_TOKEN    the backend's events-only EVENTS_TOKEN; the
 //	                     lease events panel's source. Without it the
 //	                     panel says so instead of streaming.
+//	                     DASH_EVENTS_TOKEN_FILE names a 0600 file
+//	                     carrying it instead (#137 C2). For every
+//	                     secret: setting both forms fails startup, as
+//	                     does an unreadable file.
 //	SPOOND_DB_PATH       catalog database (default /var/lib/spoond/spoond.db)
 //	USERS_FILE           identity store (default /var/lib/spoond/users.json)
 //	E2B_TEMPLATE_STORAGE_PATH  disk to report (default /forkdcache/e2b/storage/templates)
@@ -69,6 +76,7 @@ import (
 
 	"github.com/jrimmer/spoond/v3/grid"
 	"github.com/jrimmer/spoond/v3/internal/tlsfiles"
+	"github.com/jrimmer/spoond/v3/settings"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -127,25 +135,50 @@ func configFromEnv() (Config, error) {
 		}
 		return def
 	}
+	// The secrets (#137 C2) resolve through settings.Get: NAME= in the
+	// environment, or NAME_FILE= naming a value file whose content (trailing
+	// newlines trimmed) is the value; both set, or an unreadable
+	// file, is the dashboard's startup error.
+	passwordHash, warn, err := settings.Resolve("DASH_PASSWORD_HASH")
+	if err != nil {
+		return Config{}, err
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
+	}
+	metricsToken, warn, err := settings.Resolve("METRICS_TOKEN")
+	if err != nil {
+		return Config{}, err
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
+	}
+	eventsToken, warn, err := settings.Resolve("DASH_EVENTS_TOKEN")
+	if err != nil {
+		return Config{}, err
+	}
+	if warn != "" {
+		log.Printf("warning: %s", warn)
+	}
 	c := Config{
 		Addr:              env("DASH_ADDR", "0.0.0.0:8893"),
 		TLSCert:           os.Getenv("DASH_TLS_CERT"),
 		TLSKey:            os.Getenv("DASH_TLS_KEY"),
 		User:              os.Getenv("DASH_USER"),
-		PasswordHash:      os.Getenv("DASH_PASSWORD_HASH"),
+		PasswordHash:      passwordHash,
 		MetricsURL:        env("METRICS_URL", "https://127.0.0.1:8890/metrics"),
 		MetricsServerName: env("METRICS_SERVER_NAME", ""),
-		MetricsToken:      os.Getenv("METRICS_TOKEN"),
+		MetricsToken:      metricsToken,
 		DBPath:            env("SPOOND_DB_PATH", "/var/lib/spoond/spoond.db"),
 		UsersFile:         env("USERS_FILE", "/var/lib/spoond/users.json"),
 		StoragePath:       env("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates"),
 		DiskDevice:        os.Getenv("DASH_DISK_DEVICE"),
 		Services: strings.Split(env("DASH_SERVICES",
 			"spoond-backend,spoond-runner,spoond-sshd-gateway,e2b-orchestrator,e2b-guard,otelcol,spoond-netwatch"), ","),
-		EventsToken: os.Getenv("DASH_EVENTS_TOKEN"),
+		EventsToken: eventsToken,
 		NoAuth:      !authOn(os.Getenv("DASH_AUTH")),
 	}
-	var err error
+
 	if c.Interval, err = time.ParseDuration(env("DASH_INTERVAL", "2s")); err != nil || c.Interval < time.Second {
 		return c, fmt.Errorf("DASH_INTERVAL: want a duration of at least 1s")
 	}

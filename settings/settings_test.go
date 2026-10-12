@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -42,8 +43,11 @@ func TestSpecsMatchKnown(t *testing.T) {
 	}
 }
 
-// envRead matches the ways spoond code reads a setting by name.
-var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|envDuration|envDurationOr|envDurationOrZero|envBoolOr|pct|limit|get|envInt|envBool|getenv|mustEnv|envFloat|env|envPct)\("([A-Z][A-Z0-9_]{2,})"`)
+// envRead matches the ways spoond code reads a setting by name —
+// including the secret() closure the backend wraps settings.Get in and
+// the dash's sec() (#137 C2; their NAME_FILE spellings are never a
+// match: Get builds those names from the spec).
+var envRead = regexp.MustCompile(`\b(os\.Getenv|os\.LookupEnv|envIntOr|envOr|envDuration|envDurationOr|envDurationOrZero|envBoolOr|pct|limit|get|envInt|envBool|getenv|mustEnv|envFloat|env|envPct|secret|settings\.Get|settings\.Resolve)\("([A-Z][A-Z0-9_]{2,})"`)
 
 // envTable matches a setting named in a {"NAME", &dst} table, the way
 // the conformance harness lists its required variables.
@@ -472,5 +476,325 @@ func TestTypeDerivation(t *testing.T) {
 		if s.Type.String() == "unknown" || s.Binary.String() == "unknown" || s.Binary == Other {
 			t.Errorf("%s carries type %v binary %v", s.Name, s.Type, s.Binary)
 		}
+	}
+}
+
+// TestSpecSecretsMatchHideRule (#137 C2): every spec flagged Secret is
+// one whose upper-case name carries TOKEN, KEY, SECRET, PASSWORD or
+// HASH — the same names HideIfSecret masks — except the paths: a value
+// that is a path to a credential (E2B_TOKEN_SEED_FILE, the TLS cert/key
+// lists, the drain hook's token file list, the conformance suite's ssh
+// key) locates the secret rather than being it, the file's own mode
+// protects it, and a <NAME>_FILE form beside it would read as two
+// nested file references. The two notions cannot drift: a flag whose
+// name HideIfSecret would pass through shows a secret by value, and a
+// masked name without a flag is one the Get machinery never applies to.
+func TestSpecSecretsMatchHideRule(t *testing.T) {
+	markers := []string{"TOKEN", "KEY", "SECRET", "PASSWORD", "HASH", "SEED"}
+	pathValued := map[string]bool{ // the value is a path, not the credential itself
+		"E2B_TOKEN_SEED_FILE":     true,
+		"SPOOND_ADMIN_TOKEN_FILE": true, // the drain hook's token file paths (paired with SPOOND_DRAIN_URL)
+		"TLS_CERT":                true,
+		"TLS_KEY":                 true,
+		"DASH_TLS_CERT":           true,
+		"DASH_TLS_KEY":            true,
+		"CONFORMANCE_SSH_KEY":     true,
+	}
+	for _, s := range Specs {
+		upper := strings.ToUpper(s.Name)
+		says := false
+		for _, m := range markers {
+			if strings.Contains(upper, m) {
+				says = true
+				break
+			}
+		}
+		want := says && !pathValued[s.Name]
+		if s.Secret != want {
+			t.Errorf("%s: Secret = %v, want %v (name says secret: %v; path-valued: %v)", s.Name, s.Secret, want, says, pathValued[s.Name])
+		}
+	}
+	// The design's named secrets are all flagged (the list the C2
+	// design spells out; the conformance suite's own tokens belong
+	// to the test harness, the drain's token path is a path).
+	for _, name := range []string{
+		"ADMIN_TOKEN", "METRICS_TOKEN", "EVENTS_TOKEN", "CONSUMER_TOKENS",
+		"GATEWAY_TOKEN", "BOOTSTRAP_TOKEN", "LLM_UPSTREAM_KEY",
+		"PROXY_AUTH_SECRET", "DASH_PASSWORD_HASH", "RUNNER_TOKEN",
+		"LEASE_TOKEN", "SPOOND_GATEWAY_TOKEN", "FORGEJO_ADMIN_TOKEN",
+		"DASH_EVENTS_TOKEN",
+	} {
+		if !IsSecret(name) {
+			t.Errorf("%s is not flagged Secret", name)
+		}
+	}
+}
+
+// TestGetResolvesSecret (#137 C2): settings.Get reads a secret through
+// its three shapes — NAME= in the environment, NAME_FILE= pointing at a
+// file, and neither — and refuses the shapes combined or broken.
+func TestGetResolvesSecret(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	empty := func(string) string { return "" }
+	file := func(path string) ([]byte, error) { return os.ReadFile(path) }
+
+	// NAME= wins alone.
+	v, err := Get("ADMIN_TOKEN", func(k string) string {
+		if k == "ADMIN_TOKEN" {
+			return "sekrit"
+		}
+		return ""
+	}, file)
+	if err != nil || v != "sekrit" {
+		t.Fatalf("env only: (%q, %v), want (sekrit, nil)", v, err)
+	}
+
+	// NAME_FILE= alone reads the file, one trailing newline trimmed.
+	p := write("tok-file", "filetok\n")
+	v, err = Get("ADMIN_TOKEN", func(k string) string {
+		if k == "ADMIN_TOKEN_FILE" {
+			return p
+		}
+		return ""
+	}, file)
+	if err != nil || v != "filetok" {
+		t.Fatalf("file only: (%q, %v), want (filetok, nil)", v, err)
+	}
+
+	// Every trailing newline and carriage return is trimmed (an echo,
+	// an editor or a CRLF file), and a file holding nothing else is an
+	// error, never an empty value: for BOOTSTRAP_TOKEN empty means open.
+	p2 := write("several", "multitok\r\n\n")
+	v, err = Get("METRICS_TOKEN", func(k string) string {
+		if k == "METRICS_TOKEN_FILE" {
+			return p2
+		}
+		return ""
+	}, file)
+	if err != nil || v != "multitok" {
+		t.Fatalf("file with trailing CR/LFs: (%q, %v), want (multitok, nil)", v, err)
+	}
+	pe := write("empty", "\n \n")
+	v, err = Get("BOOTSTRAP_TOKEN", func(k string) string {
+		if k == "BOOTSTRAP_TOKEN_FILE" {
+			return pe
+		}
+		return ""
+	}, file)
+	if err == nil || v != "" || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("whitespace-only file: (%q, %v), want an \"is empty\" error", v, err)
+	}
+	p2 = write("bare", "baretok")
+	v, err = Get("METRICS_TOKEN", func(k string) string {
+		if k == "METRICS_TOKEN_FILE" {
+			return p2
+		}
+		return ""
+	}, file)
+	if err != nil || v != "baretok" {
+		t.Fatalf("file without newline: (%q, %v), want (baretok, nil)", v, err)
+	}
+
+	// Both set: an error naming both names and no value.
+	both := func(k string) string {
+		switch k {
+		case "EVENTS_TOKEN":
+			return "envtok"
+		case "EVENTS_TOKEN_FILE":
+			return "/run/tok"
+		}
+		return ""
+	}
+	v, err = Get("EVENTS_TOKEN", both, file)
+	if err == nil || v != "" {
+		t.Fatalf("both set: (%q, %v), want an error", v, err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "EVENTS_TOKEN and EVENTS_TOKEN_FILE") || strings.Contains(msg, "envtok") {
+		t.Fatalf("both-set error = %q, want both names named and no value leaked", msg)
+	}
+
+	// An unreadable file is an error (the file name in it, not a silent
+	// empty secret — the process would come up with no credentials).
+	v, err = Get("METRICS_TOKEN", func(k string) string {
+		if k == "METRICS_TOKEN_FILE" {
+			return filepath.Join(dir, "gone")
+		}
+		return ""
+	}, file)
+	if err == nil || v != "" {
+		t.Fatalf("missing file: (%q, %v), want an error", v, err)
+	}
+
+	// An empty NAME= still falls back to NAME_FILE: "" is unset, so the
+	// two shapes disagree only when the env form is non-empty.
+	p3 := write("empty-env", "fallthrough-tok")
+	v, err = Get("METRICS_TOKEN", func(k string) string {
+		switch k {
+		case "METRICS_TOKEN":
+			return ""
+		case "METRICS_TOKEN_FILE":
+			return p3
+		}
+		return ""
+	}, file)
+	if err != nil || v != "fallthrough-tok" {
+		t.Fatalf("empty env + file: (%q, %v), want the file's value", v, err)
+	}
+
+	// Neither set: ("", nil) — the reader's default stands.
+	if v, err := Get("ADMIN_TOKEN", empty, file); v != "" || err != nil {
+		t.Fatalf("unset: (%q, %v), want \"\", nil", v, err)
+	}
+
+	// A non-existent file name with a real file's path (unreadable for
+	// real reasons — a directory) errors with the reason.
+	v, err = Get("METRICS_TOKEN", func(k string) string {
+		if k == "METRICS_TOKEN_FILE" {
+			return dir
+		}
+		return ""
+	}, file)
+	if err == nil || v != "" {
+		t.Fatalf("directory as file: (%q, %v), want an error", v, err)
+	}
+}
+
+// TestGetListSecrets: a list-typed secret (CONSUMER_TOKENS) resolves
+// through Get the same as a string one — the file's whole content is
+// the list, and the reader splits it after.
+func TestGetListSecrets(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "consumers")
+	if err := os.WriteFile(p, []byte("tok1=forgejo,tok2=pi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v, err := Get("CONSUMER_TOKENS", func(k string) string {
+		if k == "CONSUMER_TOKENS_FILE" {
+			return p
+		}
+		return ""
+	}, os.ReadFile)
+	if err != nil || v != "tok1=forgejo,tok2=pi" {
+		t.Fatalf("Get(CONSUMER_TOKENS from file) = (%q, %v)", v, err)
+	}
+}
+
+// TestGetUnknownName: Get on a name with no spec returns ("", nil)
+// whatever the environment holds — the file form belongs to the secret
+// specs, and the readers keep reading such a name verbatim.
+func TestGetUnknownName(t *testing.T) {
+	v, err := Get("NOT-A-SETTING", func(string) string { return "" }, os.ReadFile)
+	if v != "" || err != nil {
+		t.Fatalf("Get(not-a-setting) = (%q, %v), want \"\", nil", v, err)
+	}
+}
+
+// TestIsKnownSecretFiles: IsKnown answers true for a secret's
+// <NAME>_FILE (the name stands in real env files; no reader Getenv's
+// it, Get builds it from the spec) and false for a NON-secret's _FILE
+// (BIND_ADDR_FILE is the typo, not a setting) and for a secret-typed
+// file name with no spec.
+func TestIsKnownSecretFiles(t *testing.T) {
+	for _, name := range []string{"ADMIN_TOKEN_FILE", "METRICS_TOKEN_FILE", "CONSUMER_TOKENS_FILE", "SPOOND_GATEWAY_TOKEN_FILE", "RUNNER_TOKEN_FILE", "DASH_PASSWORD_HASH_FILE"} {
+		if !IsKnown(name) {
+			t.Errorf("IsKnown(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"BIND_ADDR_FILE", "POOL_SIZE_FILE", "CONFORMANCE_TOKEN_FILE_GONE"} {
+		if IsKnown(name) {
+			t.Errorf("IsKnown(%q) = true, want false", name)
+		}
+	}
+	// The base names stay known through the plain map.
+	if !IsKnown("ADMIN_TOKEN") || IsKnown("TOTALLY_BOGUS") {
+		t.Fatal("plain names broken")
+	}
+	// SecretFileOf returns the pair only for a known secret.
+	if got := SecretFileOf("ADMIN_TOKEN"); got != "ADMIN_TOKEN_FILE" {
+		t.Errorf("SecretFileOf(ADMIN_TOKEN) = %q", got)
+	}
+	if got := SecretFileOf("BIND_ADDR"); got != "" {
+		t.Errorf("SecretFileOf(BIND_ADDR) = %q, want \"\"", got)
+	}
+}
+
+// TestFileModeWarning: a file readable by group or others warns with
+// the mode and the path; 0600 or stricter is clean (""); a missing file
+// is not this check's business (the reader errors, doctor checks it).
+func TestFileModeWarning(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(mode os.FileMode) string {
+		t.Helper()
+		p := filepath.Join(dir, fmt.Sprintf("f%04o", mode))
+		if err := os.WriteFile(p, []byte("x"), mode); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if got := FileModeWarning(mk(0o600)); got != "" {
+		t.Errorf("0600: %q, want \"\"", got)
+	}
+	if got := FileModeWarning(mk(0o400)); got != "" {
+		t.Errorf("0400 (stricter): %q, want \"\"", got)
+	}
+	for _, mode := range []os.FileMode{0o640, 0o644, 0o666} {
+		if got := FileModeWarning(mk(mode)); got == "" {
+			t.Errorf("%o: no warning, want one", mode)
+		}
+	}
+	if got := FileModeWarning(filepath.Join(dir, "gone")); got != "" {
+		t.Errorf("missing file: %q, want \"\"", got)
+	}
+}
+
+// TestSecretsNotReadFromEnv (#137 C2): no binary reads a secret setting
+// with os.Getenv/os.LookupEnv — that would skip its NAME_FILE form. Every
+// secret goes through Get or Resolve.
+func TestSecretsNotReadFromEnv(t *testing.T) {
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct := regexp.MustCompile(`\bos\.(?:Getenv|LookupEnv)\("([A-Z][A-Z0-9_]{2,})"`)
+	var bad []string
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		if d.IsDir() {
+			switch rel {
+			case ".claude", ".git", "tests", "node_modules", "settings", "conformance":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, m := range direct.FindAllSubmatch(b, -1) {
+			if IsSecret(string(m[1])) {
+				bad = append(bad, rel+": "+string(m[1]))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("secrets read straight from the environment (use settings.Get/Resolve): %v", bad)
 	}
 }

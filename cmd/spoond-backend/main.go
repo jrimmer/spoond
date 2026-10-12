@@ -46,6 +46,17 @@
 //	                  versions of a name survive a save (2.7, #83;
 //	                  default 3).
 //	ADMIN_TOKEN       bearer token for /api/admin/* (empty disables)
+//	<SECRET>_FILE     (a 0600 file path) — every secret setting
+//	                  (ADMIN_TOKEN, METRICS_TOKEN, EVENTS_TOKEN,
+//	                  CONSUMER_TOKENS, GATEWAY_TOKEN, BOOTSTRAP_TOKEN,
+//	                  LLM_UPSTREAM_KEY, PROXY_AUTH_SECRET) may carry its
+//	                  value in a file instead of the environment (#137
+//	                  C2): NAME_FILE=/path is read at startup, trailing
+//	                  newlines trimmed. Setting both NAME and
+//	                  NAME_FILE fails startup, as does an unreadable
+//	                  file; a file readable by group or others is warned
+//	                  about. See docs/operations.md,
+//	                  "Moving a secret to a file".
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
 //	                  (default /forkdcache/e2b/storage/templates)
 //	SPOOND_BUILD_TIMEOUT  how long a template build may run before the
@@ -524,6 +535,35 @@ func (s metricsSink) Notification(webhook, severity, result string) {
 	s.m.Notifications.WithLabelValues(webhook, severity, result).Inc()
 }
 
+// newMainSecretReader builds Main's secret closure (#137 C2): the value
+// comes from settings.Get — NAME= in the environment, or NAME_FILE=
+// naming a value file whose content, trailing newlines trimmed, is
+// the value — and a failure (both forms set, unreadable file) goes to
+// fatal, failing startup like the type check. A file-resolved secret is
+// recorded in fileFrom (GET /api/admin/config reports it set with the
+// hidden-from-file constant) and its file's mode is warned about once
+// per name through settings.FileModeWarning. printf and fatal are
+// injected (log.Printf and log.Fatal in production) so tests can pin
+// the behavior without killing the process.
+func newMainSecretReader(fileFrom map[string]string, warned map[string]bool, printf func(string, ...any), fatal func(...any)) func(string) string {
+	return func(name string) string {
+		v, err := settings.Get(name, os.Getenv, os.ReadFile)
+		if err != nil {
+			fatal(err)
+		}
+		if file := settings.SecretFileOf(name); file != "" && os.Getenv(name) == "" && os.Getenv(file) != "" {
+			fileFrom[name] = os.Getenv(file)
+			if !warned[name] {
+				warned[name] = true
+				if w := settings.FileModeWarning(os.Getenv(file)); w != "" {
+					printf("warning: %s", w)
+				}
+			}
+		}
+		return v
+	}
+}
+
 func Main(args []string) int {
 	// Typed settings, checked before anything else (2026-10-11
 	// validated-config design item 1): every backend setting that is set
@@ -539,6 +579,27 @@ func Main(args []string) int {
 		}
 		log.Fatalf("%s", strings.Join(msgs, "; "))
 	}
+	// Secrets from files (#137 C2): every secret setting resolves through
+	// settings.Get — NAME= in the environment, or NAME_FILE= naming a
+	// value file (0600) whose content, trailing newlines trimmed, is
+	// the value. Both forms set, or an unreadable file, fails startup
+	// like the type check above; a file readable by group or others is
+	// warned about once. fileFrom records which secrets came from files,
+	// so GET /api/admin/config reports them set ("(hidden, from file)").
+	fileFrom := map[string]string{}
+	warned := map[string]bool{} // names whose file mode already warned (once per name)
+	secret := newMainSecretReader(fileFrom, warned, log.Printf, log.Fatal)
+	// Every secret resolves here, before anything else runs — a broken
+	// one (both forms, unreadable file) fails startup like the type
+	// check, and the mode warnings land before any listener opens.
+	consumerTokens := secret("CONSUMER_TOKENS")
+	metricsToken := secret("METRICS_TOKEN")
+	eventsToken := secret("EVENTS_TOKEN")
+	gatewayToken := secret("GATEWAY_TOKEN")
+	llmUpstreamKey := secret("LLM_UPSTREAM_KEY")
+	proxyAuthSecret := secret("PROXY_AUTH_SECRET")
+	bootstrapToken := secret("BOOTSTRAP_TOKEN")
+	adminToken := secret("ADMIN_TOKEN")
 	bindAddr := envOr("BIND_ADDR", "127.0.0.1:8890")
 	proxyAddr := envOr("PROXY_ADDR", "") // e.g. 0.0.0.0:8891 (Caddy wildcard front)
 	// TLS_CERT and TLS_KEY may list several pairs (comma-separated, paired by
@@ -640,7 +701,7 @@ func Main(args []string) int {
 
 	// Parse consumer tokens: "abc=forgejo,def=pi"
 	tokens := map[string]string{}
-	for _, pair := range strings.Split(os.Getenv("CONSUMER_TOKENS"), ",") {
+	for _, pair := range strings.Split(consumerTokens, ",") {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			continue
@@ -704,8 +765,8 @@ func Main(args []string) int {
 		GuestDNSAddr:              guestDNSAddr,
 		ProxyHostSuffix:           proxyHostSuffix,
 		HostAPIPort:               hostAPIPort,
-		MetricsToken:              os.Getenv("METRICS_TOKEN"),
-		EventsToken:               os.Getenv("EVENTS_TOKEN"),
+		MetricsToken:              metricsToken,
+		EventsToken:               eventsToken,
 		ProxyURL:                  cfg.ProxyURL,
 		CheckpointIntervalDefault: int64(checkpointDefault / time.Second),
 		IdleSuspendDefault:        idleSuspendDefault,
@@ -788,13 +849,13 @@ func Main(args []string) int {
 	}
 	// Trusted gateway impersonation (U6/T5): the SSH gateway's service
 	// token, used to act as the SSH-authenticated user on ctl calls.
-	if gt := os.Getenv("GATEWAY_TOKEN"); gt != "" {
+	if gt := gatewayToken; gt != "" {
 		svc.SetGatewayToken(gt)
 		log.Printf("gateway token: trusted impersonation enabled")
 	}
 
 	reg := api.NewImageRegistry(db)
-	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), os.Getenv("LLM_UPSTREAM_KEY"), os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
+	srv := api.NewServerWithLLM(svc, reg, os.Getenv("LLM_UPSTREAM_URL"), llmUpstreamKey, os.Getenv("LLM_DEFAULT_MODEL"), llmModelMap)
 	// Per-user LLM gateway concurrency cap (U8/T8): 0 = unlimited.
 	if n := envIntOr("LLM_MAX_CONCURRENT_PER_USER", 0); n > 0 {
 		srv.SetLLMMaxConcurrent(n)
@@ -807,15 +868,16 @@ func Main(args []string) int {
 	// forward-auth = require X-Proxy-Auth secret + Remote-User identity
 	// on every hostname-routed proxy request. The secret is shared with
 	// the Caddy forward-auth block (never exposed to guests).
-	srv.SetProxyAuth(os.Getenv("PROXY_AUTH_MODE"), os.Getenv("PROXY_AUTH_SECRET"), os.Getenv("PROXY_AUTH_TRUSTED_PEERS"))
+	srv.SetProxyAuth(os.Getenv("PROXY_AUTH_MODE"), proxyAuthSecret, os.Getenv("PROXY_AUTH_TRUSTED_PEERS"))
 	// First-user bootstrap gate (security review #37 H3/M4). Unset keeps
 	// the legacy open-bootstrap for single-operator setups; set it on
 	// multi-user deployments so a leaked consumer token can't claim
 	// admin on a fresh store.
-	srv.SetBootstrapToken(os.Getenv("BOOTSTRAP_TOKEN"))
+	srv.SetBootstrapToken(bootstrapToken)
 	// Admin API (U10): /api/admin/drain, /undrain, /reconcile. The token
 	// is not a consumer token; empty disables the admin routes.
-	srv.SetAdminToken(os.Getenv("ADMIN_TOKEN"))
+	srv.SetAdminToken(adminToken)
+	srv.SetFileSecrets(fileFrom)
 
 	// Static assets (shelley binary etc.) served to guests on the proxy
 	// listener at /assets/<file> (default off; set ASSETS_DIR to enable).

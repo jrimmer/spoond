@@ -1,6 +1,7 @@
 package spoondconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -42,6 +44,17 @@ func fileMap(files map[string]string) reader {
 		}
 		return "", fmt.Errorf("no such file: %s", path)
 	}
+}
+
+// writeFileSecret creates dir's secret value file at path with content
+// and returns the path.
+func writeFileSecret(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // okFetch answers the admin config endpoint.
@@ -663,5 +676,374 @@ func TestRunShowsOnlySetOrDrifting(t *testing.T) {
 	}
 	if strings.Contains(got, "DASH_ADDR") || strings.Contains(got, "CONFORMANCE_API") {
 		t.Fatalf("unset, matching settings listed without --all:\n%s", got)
+	}
+}
+
+// TestResolveFileSecrets (#137 C2): a <SECRET>_FILE= line in the unit
+// env stays its own row — value = the path as the env file wrote it
+// (never the file's content), source the env file the spelling came
+// from — and the base name's row (synthesized beside it when no NAME=
+// stands) carries settings.HiddenFromFile with the same source; a
+// non-secret's _FILE (BIND_ADDR_FILE) stays its own row; a _FILE name
+// that is not a secret (no base spec) is kept verbatim.
+func TestResolveFileSecrets(t *testing.T) {
+	env := []entry{
+		{name: "BIND_ADDR", value: "127.0.0.1:8890", source: "/etc/spoond/backend.env"},
+		{name: "ADMIN_TOKEN_FILE", value: "/etc/spoond/secrets/admin-token", source: "/etc/spoond/secrets.env"},
+		{name: "POOL_SIZE", value: "2", source: "/etc/spoond/backend.env"},
+		{name: "BIND_ADDR_FILE", value: "/x", source: "/etc/spoond/backend.env"},
+	}
+	got := resolveFileSecrets(env)
+	want := []string{"BIND_ADDR", "ADMIN_TOKEN_FILE", "ADMIN_TOKEN", "POOL_SIZE", "BIND_ADDR_FILE"}
+	var names []string
+	for _, e := range got {
+		names = append(names, e.name)
+	}
+	if !slices.Equal(names, want) {
+		t.Fatalf("names = %v, want %v (the _FILE row keeps the path, the base row is synthesized beside it)", names, want)
+	}
+	fp, a := got[1], got[2]
+	if fp.value != "/etc/spoond/secrets/admin-token" || fp.source != "/etc/spoond/secrets.env" {
+		t.Fatalf("ADMIN_TOKEN_FILE row = %+v, want the path (never the content) from the env file", fp)
+	}
+	if a.value != settings.HiddenFromFile || a.source != "/etc/spoond/secrets.env" {
+		t.Fatalf("ADMIN_TOKEN row = %+v, want the hidden-from-file value with the _FILE spelling's source", a)
+	}
+	// The non-secret's _FILE stays as-is (unknown elsewhere).
+	if got[4].value != "/x" {
+		t.Fatalf("BIND_ADDR_FILE row = %+v, want it kept verbatim", got[4])
+	}
+
+	// Both forms set: the _FILE row names the both-set refusal (no value
+	// in it), the base row keeps the env value (masked at print time —
+	// the "from file" constant would lie about a secret Get refuses to
+	// resolve).
+	both := []entry{
+		{name: "ADMIN_TOKEN", value: "env-tok", source: "/etc/spoond/backend.env"},
+		{name: "ADMIN_TOKEN_FILE", value: "/etc/spoond/secrets/admin-token", source: "/etc/spoond/secrets.env"},
+	}
+	got = resolveFileSecrets(both)
+	if len(got) != 2 || got[0].name != "ADMIN_TOKEN" || got[0].value != "env-tok" || got[1].name != "ADMIN_TOKEN_FILE" || !strings.HasPrefix(got[1].value, refBothPrefix) || !strings.Contains(got[1].value, "ADMIN_TOKEN_FILE") {
+		t.Fatalf("both forms = %+v, want the base row's env value kept and the _FILE row naming both spellings", got)
+	}
+	if got[0].value == settings.HiddenFromFile {
+		t.Fatalf("the both-set base row claims \"from file\": %+v", got[0])
+	}
+	if strings.Contains(got[1].value, "env-tok") {
+		t.Fatalf("_FILE row leaks the env value: %+v", got[1])
+	}
+
+	// An empty path: the _FILE row says so (a folded constant would
+	// claim a file that is not there); the empty spelling synthesizes no
+	// base row — settings.Get resolves the spelling to unset.
+	empty := []entry{{name: "METRICS_TOKEN_FILE", value: "", source: "/etc/spoond/backend.env"}}
+	got = resolveFileSecrets(empty)
+	if len(got) != 1 || got[0].name != "METRICS_TOKEN_FILE" || got[0].value != refUnsetMarker {
+		t.Fatalf("empty path = %+v, want the unset marker, no synthesized row", got)
+	}
+
+	// No _FILE line: the env passes through unchanged.
+	plain := []entry{{name: "POOL_SIZE", value: "2", source: "f"}}
+	if got := resolveFileSecrets(plain); len(got) != 1 || got[0].name != "POOL_SIZE" || got[0].value != "2" {
+		t.Fatalf("plain env changed: %+v", got)
+	}
+}
+
+// TestFileSecretRowEndToEnd (#137 C2): a unit env carrying
+// ADMIN_TOKEN_FILE shows the _FILE row (its path) and the base row
+// ((hidden, from file)) in the table, the admin call authenticates with
+// the file-backed token (resolved through settings.Get over the raw
+// merge, never the display rows), and the running backend's
+// "(hidden, from file)" classifies the base row same.
+func TestFileSecretRowEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "admin-token", "file-admin-tok\n")
+	files := map[string]string{
+		envFile: "ADMIN_TOKEN_FILE=" + tokPath + "\nBIND_ADDR=127.0.0.1:8890\n",
+		tokPath: "file-admin-tok\n",
+	}
+	rc := running("ADMIN_TOKEN="+settings.HiddenFromFile, "BIND_ADDR=127.0.0.1:8890")
+	var gotTok, gotURL string
+	fetch := func(url, token string) (runningConfig, error) {
+		gotTok, gotURL = token, url
+		return rc, nil
+	}
+	_ = gotURL
+	var out strings.Builder
+	code := run("spoond-backend", "", false, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), fetch)
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(gotTok, "file-admin-tok") {
+		t.Fatalf("admin token presented = %q, want the file's content (the backend resolves it the same way)", gotTok)
+	}
+	got := out.String()
+	if strings.Contains(got, "sekrit") || strings.Contains(got, "admin-token-content") {
+		t.Fatalf("output leaks a secret value:\n%s", got)
+	}
+	// The _FILE row's VALUE is the path (never the content); the base
+	// row beside it shows the hidden-from-file constant.
+	if !strings.Contains(got, "ADMIN_TOKEN_FILE") || !strings.Contains(got, tokPath) || !strings.Contains(got, settings.HiddenFromFile) {
+		t.Fatalf("_FILE path row or hidden base row missing:\n%s", got)
+	}
+	if strings.Count(got, settings.HiddenFromFile) < 1 {
+		t.Fatalf("base row constant missing:\n%s", got)
+	}
+	// RUNNING agrees (the endpoint answered the same constant): no drift
+	// for the base row; the _FILE path row is never reported and not drift.
+	if !strings.Contains(got, "every setting matches the running backend") {
+		t.Fatalf("expected the all-match footer:\n%s", got)
+	}
+}
+
+// TestFileSecretRowUnreached: with the backend unreachable, the _FILE
+// row still shows its path, the base row the hidden-from-file value,
+// every RUNNING cell "?".
+func TestFileSecretRowUnreached(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "admin-token", "file-admin-tok\n")
+	files := map[string]string{envFile: "ADMIN_TOKEN_FILE=" + tokPath + "\n", tokPath: "file-admin-tok\n"}
+	showAll = true
+	t.Cleanup(func() { showAll = false })
+	var out strings.Builder
+	code := run("spoond-backend", "", false, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), errFetch("refused"))
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, tokPath) || !strings.Contains(got, settings.HiddenFromFile) {
+		t.Fatalf("_FILE path row or hidden base row missing while unreached:\n%s", got)
+	}
+}
+
+// TestFileSecretJSON (#137 C2): the --json document carries both the
+// ADMIN_TOKEN_FILE row (set:true, value the path, its env-file source —
+// the design's "the path for a _FILE setting, never the content") and
+// the base ADMIN_TOKEN row (set:true, hidden-from-file, same source) —
+// no folding.
+func TestFileSecretJSON(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "admin-token", "file-admin-tok\n")
+	files := map[string]string{envFile: "ADMIN_TOKEN_FILE=" + tokPath + "\n", tokPath: "file-admin-tok\n"}
+	var out strings.Builder
+	code := run("spoond-backend", "", true, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), okFetch(running()))
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var doc struct {
+		Settings []struct {
+			Name   string `json:"name"`
+			Set    bool   `json:"set"`
+			Value  string `json:"value"`
+			Source string `json:"source"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &doc); err != nil {
+		t.Fatalf("json decode: %v\n%s", err, out.String())
+	}
+	var gotFile, gotBase bool
+	for _, s := range doc.Settings {
+		switch s.Name {
+		case "ADMIN_TOKEN_FILE":
+			gotFile = true
+			if !s.Set || s.Value != tokPath || s.Source != envFile {
+				t.Fatalf("ADMIN_TOKEN_FILE = %+v, want set, the path (never the content), from %s", s, envFile)
+			}
+			if strings.Contains(s.Value, "file-admin-tok") {
+				t.Fatalf("the json document leaks the secret through the path: %+v", s)
+			}
+		case "ADMIN_TOKEN":
+			gotBase = true
+			if !s.Set || s.Value != settings.HiddenFromFile || s.Source != envFile {
+				t.Fatalf("ADMIN_TOKEN = %+v, want set, hidden-from-file, from %s", s, envFile)
+			}
+		}
+	}
+	if !gotFile || !gotBase {
+		t.Fatalf("ADMIN_TOKEN_FILE and ADMIN_TOKEN rows both missing:\n%s", out.String())
+	}
+}
+
+// TestFileSecretBothFormsFailsUpFront (#137 C2 review): a unit env
+// spelling both ADMIN_TOKEN= and ADMIN_TOKEN_FILE= fails the command
+// with settings.Get's both-set error — the refusal never rides a row's
+// value into the admin call's bearer token (a guaranteed 401 against a
+// running backend).
+func TestFileSecretBothFormsFailsUpFront(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "admin-token", "file-admin-tok\n")
+	files := map[string]string{
+		envFile: "ADMIN_TOKEN=env-tok\nADMIN_TOKEN_FILE=" + tokPath + "\nBIND_ADDR=127.0.0.1:8890\n",
+		tokPath: "file-admin-tok\n",
+	}
+	called := false
+	errFetchCalled := func(string, string) (runningConfig, error) {
+		called = true
+		return runningConfig{}, nil
+	}
+	var out bytes.Buffer
+	// run's refusals go to stderr; capture it through a real file (the
+	// os.Stderr swap keeps fmt.Fprintf's target type honest) and read it
+	// back after the run.
+	errFile, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	origErr := os.Stderr
+	os.Stderr = errFile
+	t.Cleanup(func() {
+		os.Stderr = origErr
+		errFile.Close()
+	})
+	code := run("spoond-backend", "", false, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), errFetchCalled)
+	// run does not fetch: the both-set error exits 1 to stderr.
+	if code != 1 || called {
+		t.Fatalf("exit = %d, fetched = %v, want exit 1 with no fetch", code, called)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", out.String())
+	}
+	b, _ := os.ReadFile(errFile.Name())
+	msg := string(b)
+	if !strings.Contains(msg, "both are set") && !strings.Contains(msg, "both set") {
+		t.Fatalf("stderr = %q, want the both-set refusal", msg)
+	}
+	if strings.Contains(msg, "env-tok") || strings.Contains(msg, "file-admin-tok") || strings.Contains(out.String(), "env-tok") {
+		t.Fatalf("the refusal leaked a secret value:\nstdout:\n%s\nstderr:\n%s", out.String(), msg)
+	}
+	if strings.Contains(out.String(), settings.HiddenFromFile) || strings.Contains(out.String(), refBothPrefix) {
+		t.Fatalf("stdout still carried table rows:\n%s", out.String())
+	}
+}
+
+// TestFileSecretEmptyPathRow (#137 C2): an empty ADMIN_TOKEN_FILE=
+// shows the unset marker on the _FILE row, synthesizes no base row, and
+// the admin call is not decorated with a phantom set secret.
+func TestFileSecretEmptyPathRow(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	files := map[string]string{envFile: "ADMIN_TOKEN_FILE=\nBIND_ADDR=127.0.0.1:8890\n"}
+	rc := running("BIND_ADDR=127.0.0.1:8890")
+	var gotTok string
+	fetch := func(url, token string) (runningConfig, error) {
+		gotTok = token
+		return rc, nil
+	}
+	showAll = true
+	t.Cleanup(func() { showAll = false })
+	var out strings.Builder
+	if code := run("spoond-backend", "", false, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), fetch); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, refUnsetMarker) {
+		t.Fatalf("empty-path row missing its marker:\n%s", got)
+	}
+	if strings.Contains(got, settings.HiddenFromFile) {
+		t.Fatalf("a synthesized base row claimed a secret that resolves unset:\n%s", got)
+	}
+	// The unset secret is reported unset: exactly one METRICS-style
+	// bearer fetch with an empty token, and the ADMIN_TOKEN row (all-rows
+	// mode) shows the plain unset shape, not the file constant.
+	if gotTok != "" {
+		t.Fatalf("bearer token = %q, want empty (the secret resolves unset)", gotTok)
+	}
+}
+
+// TestFileSecretJSONPathRow: the --json document carries the
+// ADMIN_TOKEN_FILE row (set:true, value the path) beside the base
+// ADMIN_TOKEN row, and the base only — an env-set, env-resolved secret's
+// masked classification — when the file spelling appears with the env
+// one absent.
+func TestFileSecretJSONPathRow(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "backend.env")
+	tokPath := writeFileSecret(t, dir, "metrics-token", "mtok\n")
+	files := map[string]string{envFile: "METRICS_TOKEN_FILE=" + tokPath + "\nBIND_ADDR=127.0.0.1:8890\n"}
+	var out strings.Builder
+	code := run("spoond-backend", "", true, &out, fakeProps(
+		"EnvironmentFiles="+envFile+" (ignore_errors=no)",
+		"Environment=",
+	), fileMap(files), okFetch(running("BIND_ADDR=127.0.0.1:8890")))
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	var doc struct {
+		Settings []struct {
+			Name   string `json:"name"`
+			Set    bool   `json:"set"`
+			Value  string `json:"value"`
+			Source string `json:"source"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &doc); err != nil {
+		t.Fatalf("json decode: %v\n%s", err, out.String())
+	}
+	var gotFile, gotBase bool
+	for _, s := range doc.Settings {
+		switch s.Name {
+		case "METRICS_TOKEN_FILE":
+			gotFile = true
+			if !s.Set || s.Value != tokPath || s.Source != envFile {
+				t.Fatalf("METRICS_TOKEN_FILE = %+v, want set, the path, from %s", s, envFile)
+			}
+		case "METRICS_TOKEN":
+			gotBase = true
+			if !s.Set || s.Value != settings.HiddenFromFile {
+				t.Fatalf("METRICS_TOKEN = %+v, want set with the hidden-from-file constant", s)
+			}
+		}
+	}
+	if !gotFile || !gotBase {
+		t.Fatalf("the _FILE and base rows both missing:\n%s", out.String())
+	}
+}
+
+// TestResolveFileSecretsDecoratesEnvSetBase (#137 C2): a secret the env
+// sets directly (no _FILE anywhere) keeps its own row verbatim — the
+// decoration machinery must not touch a plain env-set secret's row.
+func TestResolveFileSecretsDecoratesEnvSetBase(t *testing.T) {
+	env := []entry{
+		{name: "METRICS_TOKEN", value: "mtok-raw", source: "/etc/spoond/backend.env"},
+		{name: "POOL_SIZE", value: "2", source: "/etc/spoond/backend.env"},
+	}
+	got := resolveFileSecrets(env)
+	if len(got) != 2 || got[0].name != "METRICS_TOKEN" || got[0].value != "mtok-raw" {
+		t.Fatalf("plain env touched: %+v", got)
+	}
+	// An unknown (non-secret) name keeps its row too.
+	env = []entry{{name: "TOTALLY_BOGUS", value: "1", source: "f"}}
+	if got := resolveFileSecrets(env); len(got) != 1 || got[0].name != "TOTALLY_BOGUS" || got[0].value != "1" {
+		t.Fatalf("unknown row touched: %+v", got)
+	}
+}
+
+// TestMaskFileRow (#137 C2): a <SECRET>_FILE row shows its path, but a
+// value that is no path — the secret pasted in by mistake — is hidden.
+func TestMaskFileRow(t *testing.T) {
+	if got := maskForDisplay("ADMIN_TOKEN_FILE", "/etc/spoond/secrets/admin"); got != "/etc/spoond/secrets/admin" {
+		t.Fatalf("path row = %q, want the path", got)
+	}
+	if got := maskForDisplay("ADMIN_TOKEN_FILE", "s3cr3t-token"); got != "(hidden)" {
+		t.Fatalf("pasted-token row = %q, want (hidden)", got)
 	}
 }

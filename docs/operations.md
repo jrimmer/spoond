@@ -69,10 +69,15 @@ name carrying `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `HASH` or `SEED`,
 `(hidden)`, and prints NAME / VALUE / SOURCE / RUNNING. SOURCE is the
 file (or `unit Environment=`, or `default`) the value came from;
 RUNNING compares against the running backend's `GET /api/admin/config`,
-fetched with the merged env's own `ADMIN_TOKEN` and `BIND_ADDR` (not
-the caller's shell, so it authenticates against the exact backend those
-files start): `same`, `differs — restart to apply`, `not set in running
-backend`, `?` when the API is unreachable, `n/a` for a known name. An
+fetched with the merged env's own `ADMIN_TOKEN` — itself resolved
+through the `_FILE` spelling when the env files carry one (#137 C2) —
+and `BIND_ADDR` (not the caller's shell, so it authenticates against
+the exact backend those files start): `same`, `differs — restart to
+apply`, `not set in running backend`, `?` when the API is unreachable,
+`n/a` for a known name. A secret moved to a file shows two rows: the
+`<NAME>_FILE` row's VALUE is the file's path (never the content) and
+the base setting's row beside it shows `(hidden, from file)`; see
+[Moving a secret to a file](#moving-a-secret-to-a-file). An
 unknown key from the unit env still prints, trailing "(unknown
 setting)" (a typo; the same class `spoond doctor` warns about). A
 restart note at the bottom counts the drift. `--json` prints the raw
@@ -83,6 +88,49 @@ with the table, 1 when the unit env cannot be resolved.
 ```bash
 /opt/spoond/spoond config show          # what the unit sets, and any drift; --all for every known setting; --json for the raw answer
 ```
+
+## Moving a secret to a file
+
+Every secret setting — `ADMIN_TOKEN`, `METRICS_TOKEN`, `EVENTS_TOKEN`,
+`CONSUMER_TOKENS`, `GATEWAY_TOKEN`, `BOOTSTRAP_TOKEN`,
+`LLM_UPSTREAM_KEY`, `PROXY_AUTH_SECRET` in the backend's env file, the
+dashboard's `METRICS_TOKEN`, `DASH_PASSWORD_HASH`, `DASH_EVENTS_TOKEN`,
+the runner's `RUNNER_TOKEN`, `LEASE_TOKEN`, `FORGEJO_ADMIN_TOKEN`, the
+gateway's `SPOOND_GATEWAY_TOKEN` (#137 C2) — may be given as a file
+reference instead of a value: replace `NAME=value` with
+`NAME_FILE=/path/to/file`, and the process reads the file's content as
+the value at startup (trailing newlines and carriage returns are
+trimmed, so `echo -n` is not required; `echo` is fine). Setting both
+forms fails startup, as does an unreadable file or one holding nothing
+but whitespace (an empty secret would read as unset, and an unset
+`BOOTSTRAP_TOKEN` leaves first-user creation open) — nothing comes up
+half-configured.
+
+```bash
+install -m 600 /dev/null /etc/spoond/secrets/admin-token   # create empty, owner-only
+printf '%s\n' 'the-token' > /etc/spoond/secrets/admin-token
+chown root:root /etc/spoond/secrets/admin-token            # the unit's User must be able to read it
+# in /etc/spoond/backend.env, replace ADMIN_TOKEN=... with:
+#   ADMIN_TOKEN_FILE=/etc/spoond/secrets/admin-token
+/opt/spoond/spoond doctor                                 # checks the file reads, is not empty, is 0600, and NAME= is gone
+systemctl restart spoond-backend
+/opt/spoond/spoond config show                            # ADMIN_TOKEN_FILE shows the path, ADMIN_TOKEN "(hidden, from file)"
+```
+
+`spoond config show` never shows a file secret's content — the
+`<NAME>_FILE` line keeps its own row showing the path (never the
+content) with the env file as the source, and the base setting's row
+beside it shows `(hidden, from file)`. `GET /api/admin/config` reports
+the same (`set: true`, value `(hidden, from file)`, no path), so the
+running-backend comparison stays honest. A value file readable by group
+or others is warned about: the backend logs it once at startup,
+`spoond doctor` flags it, and the file's mode should read `600`
+(`stat -c '%a' <path>`). `spoond doctor` checks the env files under
+`/etc/spoond` only; the runner's and the gateway's env files
+(`/etc/spoond-runner.env`, `/etc/spoond-gateway.env`) are checked by
+those processes at their own startup. The env file itself keeps
+only the path, so it may move to whatever revision control the rest of
+the deployment's configuration already trusts.
 
 ## Uptime monitoring (Gatus)
 
@@ -249,6 +297,7 @@ set -a; . /etc/spoond/backend.env; set +a
 |---|---|
 | `config: CONSUMER_TOKENS` | FAIL when unset (the backend refuses to start) |
 | `config: BIND_ADDR` | WARN when unset (defaults to `127.0.0.1:8890`) |
+| `config: <env file>` | WARN on a key no spoond binary reads, or one set twice (the last wins); the `<SECRET>_FILE=` lines are checked directly: a missing value file warns (the backend will refuse to start — that is where the failure shows), so does a file readable by group or others — see [Moving a secret to a file](#moving-a-secret-to-a-file) |
 | `orchestrator: /health` | `GET http://$E2B_GRPC_ADDR/health` must answer `"status":"healthy"` |
 | `orchestrator: node info` | status, running sandboxes and free hugepages; WARN when the status is not `healthy` or free hugepage memory is below 4 GiB |
 | `registry: /v2/` | the local registry answers `200` |

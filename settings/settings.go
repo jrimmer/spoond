@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -323,188 +324,198 @@ func (b Binary) String() string {
 }
 
 // Spec is one setting's shape: its name, the kind of value the reading
-// code parses it as, and the binary whose environment it is read from.
+// code parses it as, the binary whose environment it is read from, and
+// whether the value is a secret (C2, 2026-10-11 validated-config design:
+// a secret may be given as <NAME>_FILE instead).
 type Spec struct {
 	Name   string
 	Type   Type
 	Binary Binary
+	// Secret marks a setting whose whole value is a credential: a leak
+	// grants access. The backend reads it through Get, so the env file
+	// may carry <NAME>_FILE=/path (0600) instead of NAME=value, and the
+	// display helpers report set-ness the same either way.
+	Secret bool
 }
 
 // Specs is every known setting with its type and owner binary, in the
-// same order as Known (sorted by name).
+// same order as Known (sorted by name). Secret is true exactly when
+// HideIfSecret's name rule would mask the value (every <name> whose
+// upper case carries TOKEN, KEY, SECRET, PASSWORD or HASH) — the C2
+// design's secret list, derived from how the readers use the value.
 var Specs = []Spec{
-	{"ADMIN_TOKEN", TypeString, Backend},
-	{"ASSETS_DIR", TypeString, Backend}, // bare path: the proxy listener serves /assets/<file> from it
-	{"BACKUP_MAX_AGE_SECS", TypeInt, Backend},
-	{"BIND_ADDR", TypeAddr, Backend},
-	{"BOOTSTRAP_TOKEN", TypeString, Backend},
-	{"CHECKPOINT_INTERVAL_MINS", TypeInt, Backend},
-	{"COLUMNS", TypeInt, Dash},
-	{"CONFORMANCE_API", TypeURL, Conformance},
-	{"CONFORMANCE_BACKEND_UNIT", TypeString, Conformance}, // systemctl unit name
-	{"CONFORMANCE_CAPACITY", TypeBool, Conformance},
-	{"CONFORMANCE_CAPACITY_IMAGE", TypeString, Conformance},
-	{"CONFORMANCE_CRASH_TEST", TypeBool, Conformance},
-	{"CONFORMANCE_DESTRUCTIVE", TypeBool, Conformance},
-	{"CONFORMANCE_GUEST_SERVICE", TypeAddr, Conformance}, // host:port the suite probes from a lease
-	{"CONFORMANCE_IDLE_IMAGE", TypeString, Conformance},
-	{"CONFORMANCE_IMAGES", TypeList, Conformance},
-	{"CONFORMANCE_LAN_TARGET", TypeAddr, Conformance},              // host:port (parseLANTarget)
-	{"CONFORMANCE_MIXED_BLOCKED_PRIVATE", TypeString, Conformance}, // bare host or IP, probed with its own port setting
-	{"CONFORMANCE_MIXED_DOMAIN", TypeString, Conformance},
-	{"CONFORMANCE_MIXED_PRIVATE", TypeString, Conformance}, // bare host or IP, probed with its own port setting
-	{"CONFORMANCE_MIXED_PRIVATE_DOMAIN", TypeString, Conformance},
-	{"CONFORMANCE_MIXED_PRIVATE_PORT", TypeInt, Conformance},
-	{"CONFORMANCE_MIXED_SSH_PORT", TypeInt, Conformance},
-	{"CONFORMANCE_PROXY_SECRET", TypeString, Conformance},
-	{"CONFORMANCE_PROXY_SUFFIX", TypeString, Conformance},
-	{"CONFORMANCE_PROXY_URL", TypeURL, Conformance},
-	{"CONFORMANCE_SECOND_TOKEN", TypeString, Conformance},
-	{"CONFORMANCE_SSH", TypeString, Conformance},       // an ssh destination, or "local"
-	{"CONFORMANCE_SSH_GATEWAY", TypeAddr, Conformance}, // ssh.Dial target host:port
-	{"CONFORMANCE_SSH_KEY", TypeString, Conformance},   // private key file path
-	{"CONFORMANCE_SUBSTRATE", TypeString, Conformance},
-	{"CONFORMANCE_TOKEN", TypeString, Conformance},
-	{"CONFORMANCE_USER", TypeString, Conformance},
-	{"CONFORMANCE_USER_ID", TypeString, Conformance},
-	{"CONSUMER_TOKENS", TypeList, Backend}, // token=consumer pairs
-	{"CRASH_TEST", TypeBool, Backend},
-	{"DASH_ADDR", TypeAddr, Dash},
-	{"DASH_AUTH", TypeBool, Dash},
-	{"DASH_DISK_DEVICE", TypeString, Dash},
-	{"DASH_EVENTS_TOKEN", TypeString, Dash},
-	{"DASH_HISTORY", TypeInt, Dash},
-	{"DASH_HOST", TypeString, Dash},
-	{"DASH_INTERVAL", TypeDuration, Dash}, // the only duration read as a Go duration only (no bare seconds)
-	{"DASH_IO_FULL_BAD_PCT", TypePercent, Dash},
-	{"DASH_IO_FULL_WARN_PCT", TypePercent, Dash},
-	{"DASH_PASSWORD_HASH", TypeString, Dash},
-	{"DASH_PROJECT_URL", TypeString, Dash}, // a schemeless value is accepted: the code prepends https://
-	{"DASH_SERVICES", TypeList, Dash},
-	{"DASH_TLS_CERT", TypeList, Dash}, // certificate paths, paired with DASH_TLS_KEY
-	{"DASH_TLS_KEY", TypeList, Dash},  // key paths, paired with DASH_TLS_CERT
-	{"DASH_USER", TypeString, Dash},
-	{"DASH_WIDTH", TypeInt, Dash},
-	{"DEFAULT_IMAGE", TypeString, Runner},
-	{"DEFAULT_TTL_SECS", TypeInt, Backend},
-	{"DISK_RESERVE_PCT", TypePercent, Backend}, // the code clamps 0..50; still a share of the disk
-	{"DRAIN_MAX_SECS", TypeInt, Backend},
-	{"DRAIN_RESUME_MAX_AGE", TypeDuration, Backend},
-	{"DRAIN_SNAPSHOT_CONCURRENCY", TypeInt, Backend},
-	{"E2B_CHECKPOINT_TIMEOUT", TypeDuration, Backend},
-	{"E2B_CONTROL_TIMEOUT", TypeDuration, Backend},
-	{"E2B_CREATE_TIMEOUT", TypeDuration, Backend},
-	{"E2B_DELETE_TIMEOUT", TypeDuration, Backend},
-	{"E2B_ENVD_VERSION", TypeString, Backend},
-	{"E2B_FIRECRACKER_VERSION", TypeString, Backend},
-	{"E2B_GRPC_ADDR", TypeAddr, Backend},
-	{"E2B_NODEINFO_TIMEOUT", TypeDuration, Backend},
-	{"E2B_PAUSE_TIMEOUT", TypeDuration, Backend},
-	{"E2B_PROXY_URL", TypeURL, Backend},
-	{"E2B_TEAM_ID", TypeString, Backend}, // a UUID, read verbatim
-	{"E2B_TEMPLATE_STORAGE_PATH", TypeString, Backend},
-	{"E2B_TOKEN_SEED_FILE", TypeString, Backend}, // seed file path
-	{"EVENTS_TOKEN", TypeString, Backend},
-	{"EXEC_TIMEOUT_SECS", TypeInt, Runner},
-	{"FORGEJO_ADMIN_TOKEN", TypeString, Runner},
-	{"FORGEJO_URL", TypeURL, Runner},
-	{"GATEWAY_ADDR", TypeAddr, Doctor},
-	{"GATEWAY_IMAGE_ALIASES", TypeList, Gateway}, // short=full pairs
-	{"GATEWAY_METRICS_LISTEN", TypeAddr, Gateway},
-	{"GATEWAY_SSH_IMAGES", TypeList, Gateway},
-	{"GATEWAY_TOKEN", TypeString, Backend},
-	{"GC_DELETE", TypeBool, Backend},
-	{"GC_LOST_GRACE", TypeDuration, Backend},
-	{"GC_LOST_GRACE_PERSISTENT", TypeDuration, Backend},
-	{"HOST_API_PORT", TypeInt, Backend},
-	{"HOST_GUEST_SERVICE_ADDR", TypeString, Backend}, // a bare host or IP: the code builds <addr>/32 CIDRs from it
-	{"HOST_GUEST_SERVICE_PORT", TypeInt, Backend},
-	{"IDLE_SUSPEND_DEFAULT_SECS", TypeInt, Backend},
-	{"IMAGE_MAP", TypeList, Runner}, // label=image pairs
-	{"IMAGE_REGISTRY", TypeString, Images},
-	{"JOB_MAX_RUNTIME", TypeDuration, Backend},
-	{"JOB_RECORD_DIR", TypeString, Runner},
-	{"JOB_RETENTION_SECS", TypeInt, Backend},
-	{"KEPT_DISK_WARN_PCT", TypePercent, Backend},
-	{"LEASE_NETPOL", TypeString, Runner}, // none|lan|internet|restricted
-	{"LEASE_NET_ALLOW", TypeList, Runner},
-	{"LEASE_TOKEN", TypeString, Runner},
-	{"LEASE_TTL", TypeInt, Runner},
-	{"LEASE_URL", TypeURL, Runner},
-	{"LLM_DEFAULT_MODEL", TypeString, Backend},
-	{"LLM_GATEWAY_URL", TypeURL, Gateway},
-	{"LLM_MAX_CONCURRENT_PER_USER", TypeInt, Backend},
-	{"LLM_MODEL_MAP", TypeList, Backend},   // pattern=model pairs
-	{"LLM_OPEN_LEGACY", TypeBool, Backend}, // any non-empty value turns it on: no spelling is wrong, so Validate passes every spelling
-	{"LLM_UPSTREAM_KEY", TypeString, Backend},
-	{"LLM_UPSTREAM_URL", TypeURL, Backend},
-	{"MAX_ADMIT_WAIT_SECS", TypeInt, Backend},
-	{"MAX_EXEC_BODY_BYTES", TypeInt, Backend},
-	{"MAX_EXEC_TIMEOUT_SECS", TypeInt, Backend},
-	{"MAX_KEPT_PER_LEASE", TypeInt, Backend},
-	{"MAX_LEASE_MEMORY_MB", TypeInt, Backend},
-	{"MAX_LEASE_VCPU", TypeInt, Backend},
-	{"MAX_NAMED_SNAPSHOTS", TypeInt, Backend},
-	{"MAX_RUNNING_JOBS_PER_LEASE", TypeInt, Backend},
-	{"MAX_TTL_SECS", TypeInt, Backend},
-	{"METRICS_LISTEN", TypeAddr, Runner},
-	{"METRICS_SERVER_NAME", TypeString, Dash},
-	{"METRICS_TOKEN", TypeString, Backend},
-	{"METRICS_URL", TypeURL, Dash},
-	{"NOTIFY_STATE_FILE", TypeString, Backend},
-	{"NOTIFY_UNITS", TypeList, Backend},      // "none" watches nothing
-	{"NOTIFY_WEBHOOKS", TypeString, Backend}, // a JSON list, validated by notify.ParseWebhooks
-	{"ORPHAN_MIN_AGE_SECS", TypeInt, Backend},
-	{"ORPHAN_QUARANTINE_SECS", TypeInt, Backend},
-	{"ORPHAN_REAP", TypeString, Backend}, // off|dryrun|quarantine
-	{"OTEL_PROM_URL", TypeURL, Backend},
-	{"PAUSED_RELEASE_DAYS", TypeInt, Backend},
-	{"PINNED_IDLE_NOTICE_DAYS", TypeInt, Backend},
-	{"POOL_SIZE", TypeInt, Backend},
-	{"PROXY_ADDR", TypeAddr, Backend},
-	{"PROXY_AUTH_MODE", TypeString, Backend}, // off|forward-auth
-	{"PROXY_AUTH_SECRET", TypeString, Backend},
-	{"PROXY_AUTH_TRUSTED_PEERS", TypeList, Backend}, // IPs and CIDRs
-	{"RECOVERY_RETRY_ATTEMPTS", TypeInt, Backend},
-	{"RECOVERY_RETRY_WINDOW", TypeDuration, Backend},
-	{"REPO_BASE_URL", TypeURL, Runner},
-	{"ROOTFS_PROBE_SECS", TypeInt, Backend},
-	{"RUNNER_ADMIT_WAIT_SECS", TypeInt, Runner},
-	{"RUNNER_FLOOR", TypeInt, Runner},
-	{"RUNNER_LABELS", TypeList, Runner},
-	{"RUNNER_MAX", TypeInt, Runner},
-	{"RUNNER_NAME", TypeString, Runner},
-	{"RUNNER_SCALE_STEP", TypeInt, Runner},
-	{"RUNNER_STATE_FILE", TypeString, Runner},
-	{"RUNNER_TOKEN", TypeString, Runner},
-	{"SANDBOX_PROBE", TypeBool, Backend},
-	{"SANDBOX_PROBE_TIMEOUT_SECS", TypeInt, Backend},
-	{"SATURATION_CPU_SOME_PCT", TypePercent, Backend},
-	{"SATURATION_IO_FULL_PCT", TypePercent, Backend},
-	{"SERVICE_RESULT", TypeString, Drain}, // systemd's own variable, read verbatim
-	{"SHELLY_BINARY_URL", TypeURL, Gateway},
-	{"SIZE_PRESETS", TypeString, Backend}, // name=vcpu:memory_mb spec; sizes.Parse fails startup on a malformed value
-	{"SNAPSHOT_KEEP_VERSIONS", TypeInt, Backend},
-	{"SNAPSHOT_WRITE_CONCURRENCY", TypeInt, Backend},
-	{"SPOOND_ADMIN_TOKEN_FILE", TypeList, Drain}, // token file paths, paired with SPOOND_DRAIN_URL
-	{"SPOOND_BACKUP_DIR", TypeString, Backend},
-	{"SPOOND_BUILD_TIMEOUT", TypeDuration, Backend},
-	{"SPOOND_DB_PATH", TypeString, Backend},
-	{"SPOOND_DRAIN_INSECURE", TypeBool, Drain},
-	{"SPOOND_DRAIN_URL", TypeList, Drain}, // backend URLs, paired with SPOOND_ADMIN_TOKEN_FILE
-	{"SPOOND_ENV_DIR", TypeString, Doctor},
-	{"SPOOND_GATEWAY_TOKEN", TypeString, Gateway},
-	{"SPOOND_GUEST_DNS_ADDR", TypeList, Backend}, // bare IPs; parseGuestDNS fails startup on a non-IP
-	{"SPOOND_PROXY_HOST_SUFFIX", TypeString, Backend},
-	{"SPOOND_SSH_CONNECTION_ADDR", TypeString, Gateway}, // the bare host reported in SSH_CONNECTION
-	{"SWEEP_TIMEOUT", TypeDuration, Backend},
-	{"TLS_CERT", TypeList, Backend}, // certificate paths, paired with TLS_KEY
-	{"TLS_KEY", TypeList, Backend},  // key paths, paired with TLS_CERT
-	{"UNDRAIN_CONCURRENCY", TypeInt, Backend},
-	{"UNDRAIN_READY_TIMEOUT", TypeDuration, Backend},
-	{"UNDRAIN_RESUME_RETRIES", TypeInt, Backend},
-	{"UNDRAIN_RESUME_WINDOW", TypeDuration, Backend},
-	{"USERS_FILE", TypeString, Backend}, // identity store path
+	{"ADMIN_TOKEN", TypeString, Backend, true},
+	{"ASSETS_DIR", TypeString, Backend, false}, // bare path: the proxy listener serves /assets/<file> from it
+	{"BACKUP_MAX_AGE_SECS", TypeInt, Backend, false},
+	{"BIND_ADDR", TypeAddr, Backend, false},
+	{"BOOTSTRAP_TOKEN", TypeString, Backend, true},
+	{"CHECKPOINT_INTERVAL_MINS", TypeInt, Backend, false},
+	{"COLUMNS", TypeInt, Dash, false},
+	{"CONFORMANCE_API", TypeURL, Conformance, false},
+	{"CONFORMANCE_BACKEND_UNIT", TypeString, Conformance, false}, // systemctl unit name
+	{"CONFORMANCE_CAPACITY", TypeBool, Conformance, false},
+	{"CONFORMANCE_CAPACITY_IMAGE", TypeString, Conformance, false},
+	{"CONFORMANCE_CRASH_TEST", TypeBool, Conformance, false},
+	{"CONFORMANCE_DESTRUCTIVE", TypeBool, Conformance, false},
+	{"CONFORMANCE_GUEST_SERVICE", TypeAddr, Conformance, false}, // host:port the suite probes from a lease
+	{"CONFORMANCE_IDLE_IMAGE", TypeString, Conformance, false},
+	{"CONFORMANCE_IMAGES", TypeList, Conformance, false},
+	{"CONFORMANCE_LAN_TARGET", TypeAddr, Conformance, false},              // host:port (parseLANTarget)
+	{"CONFORMANCE_MIXED_BLOCKED_PRIVATE", TypeString, Conformance, false}, // bare host or IP, probed with its own port setting
+	{"CONFORMANCE_MIXED_DOMAIN", TypeString, Conformance, false},
+	{"CONFORMANCE_MIXED_PRIVATE", TypeString, Conformance, false}, // bare host or IP, probed with its own port setting
+	{"CONFORMANCE_MIXED_PRIVATE_DOMAIN", TypeString, Conformance, false},
+	{"CONFORMANCE_MIXED_PRIVATE_PORT", TypeInt, Conformance, false},
+	{"CONFORMANCE_MIXED_SSH_PORT", TypeInt, Conformance, false},
+	{"CONFORMANCE_PROXY_SECRET", TypeString, Conformance, true},
+	{"CONFORMANCE_PROXY_SUFFIX", TypeString, Conformance, false},
+	{"CONFORMANCE_PROXY_URL", TypeURL, Conformance, false},
+	{"CONFORMANCE_SECOND_TOKEN", TypeString, Conformance, true},
+	{"CONFORMANCE_SSH", TypeString, Conformance, false},       // an ssh destination, or "local"
+	{"CONFORMANCE_SSH_GATEWAY", TypeAddr, Conformance, false}, // ssh.Dial target host:port
+	{"CONFORMANCE_SSH_KEY", TypeString, Conformance, false},   // private key file path
+	{"CONFORMANCE_SUBSTRATE", TypeString, Conformance, false},
+	{"CONFORMANCE_TOKEN", TypeString, Conformance, true},
+	{"CONFORMANCE_USER", TypeString, Conformance, false},
+	{"CONFORMANCE_USER_ID", TypeString, Conformance, false},
+	{"CONSUMER_TOKENS", TypeList, Backend, true}, // token=consumer pairs
+	{"CRASH_TEST", TypeBool, Backend, false},
+	{"DASH_ADDR", TypeAddr, Dash, false},
+	{"DASH_AUTH", TypeBool, Dash, false},
+	{"DASH_DISK_DEVICE", TypeString, Dash, false},
+	{"DASH_EVENTS_TOKEN", TypeString, Dash, true},
+	{"DASH_HISTORY", TypeInt, Dash, false},
+	{"DASH_HOST", TypeString, Dash, false},
+	{"DASH_INTERVAL", TypeDuration, Dash, false}, // the only duration read as a Go duration only (no bare seconds)
+	{"DASH_IO_FULL_BAD_PCT", TypePercent, Dash, false},
+	{"DASH_IO_FULL_WARN_PCT", TypePercent, Dash, false},
+	{"DASH_PASSWORD_HASH", TypeString, Dash, true},
+	{"DASH_PROJECT_URL", TypeString, Dash, false}, // a schemeless value is accepted: the code prepends https://
+	{"DASH_SERVICES", TypeList, Dash, false},
+	{"DASH_TLS_CERT", TypeList, Dash, false}, // certificate paths, paired with DASH_TLS_KEY
+	{"DASH_TLS_KEY", TypeList, Dash, false},  // key paths, paired with DASH_TLS_CERT
+	{"DASH_USER", TypeString, Dash, false},
+	{"DASH_WIDTH", TypeInt, Dash, false},
+	{"DEFAULT_IMAGE", TypeString, Runner, false},
+	{"DEFAULT_TTL_SECS", TypeInt, Backend, false},
+	{"DISK_RESERVE_PCT", TypePercent, Backend, false}, // the code clamps 0..50; still a share of the disk
+	{"DRAIN_MAX_SECS", TypeInt, Backend, false},
+	{"DRAIN_RESUME_MAX_AGE", TypeDuration, Backend, false},
+	{"DRAIN_SNAPSHOT_CONCURRENCY", TypeInt, Backend, false},
+	{"E2B_CHECKPOINT_TIMEOUT", TypeDuration, Backend, false},
+	{"E2B_CONTROL_TIMEOUT", TypeDuration, Backend, false},
+	{"E2B_CREATE_TIMEOUT", TypeDuration, Backend, false},
+	{"E2B_DELETE_TIMEOUT", TypeDuration, Backend, false},
+	{"E2B_ENVD_VERSION", TypeString, Backend, false},
+	{"E2B_FIRECRACKER_VERSION", TypeString, Backend, false},
+	{"E2B_GRPC_ADDR", TypeAddr, Backend, false},
+	{"E2B_NODEINFO_TIMEOUT", TypeDuration, Backend, false},
+	{"E2B_PAUSE_TIMEOUT", TypeDuration, Backend, false},
+	{"E2B_PROXY_URL", TypeURL, Backend, false},
+	{"E2B_TEAM_ID", TypeString, Backend, false}, // a UUID, read verbatim
+	{"E2B_TEMPLATE_STORAGE_PATH", TypeString, Backend, false},
+	{"E2B_TOKEN_SEED_FILE", TypeString, Backend, false}, // seed file path: a path, not the secret itself
+	{"EVENTS_TOKEN", TypeString, Backend, true},
+	{"EXEC_TIMEOUT_SECS", TypeInt, Runner, false},
+	{"FORGEJO_ADMIN_TOKEN", TypeString, Runner, true},
+	{"FORGEJO_URL", TypeURL, Runner, false},
+	{"GATEWAY_ADDR", TypeAddr, Doctor, false},
+	{"GATEWAY_IMAGE_ALIASES", TypeList, Gateway, false}, // short=full pairs
+	{"GATEWAY_METRICS_LISTEN", TypeAddr, Gateway, false},
+	{"GATEWAY_SSH_IMAGES", TypeList, Gateway, false},
+	{"GATEWAY_TOKEN", TypeString, Backend, true},
+	{"GC_DELETE", TypeBool, Backend, false},
+	{"GC_LOST_GRACE", TypeDuration, Backend, false},
+	{"GC_LOST_GRACE_PERSISTENT", TypeDuration, Backend, false},
+	{"HOST_API_PORT", TypeInt, Backend, false},
+	{"HOST_GUEST_SERVICE_ADDR", TypeString, Backend, false}, // a bare host or IP: the code builds <addr>/32 CIDRs from it
+	{"HOST_GUEST_SERVICE_PORT", TypeInt, Backend, false},
+	{"IDLE_SUSPEND_DEFAULT_SECS", TypeInt, Backend, false},
+	{"IMAGE_MAP", TypeList, Runner, false}, // label=image pairs
+	{"IMAGE_REGISTRY", TypeString, Images, false},
+	{"JOB_MAX_RUNTIME", TypeDuration, Backend, false},
+	{"JOB_RECORD_DIR", TypeString, Runner, false},
+	{"JOB_RETENTION_SECS", TypeInt, Backend, false},
+	{"KEPT_DISK_WARN_PCT", TypePercent, Backend, false},
+	{"LEASE_NETPOL", TypeString, Runner, false}, // none|lan|internet|restricted
+	{"LEASE_NET_ALLOW", TypeList, Runner, false},
+	{"LEASE_TOKEN", TypeString, Runner, true},
+	{"LEASE_TTL", TypeInt, Runner, false},
+	{"LEASE_URL", TypeURL, Runner, false},
+	{"LLM_DEFAULT_MODEL", TypeString, Backend, false},
+	{"LLM_GATEWAY_URL", TypeURL, Gateway, false},
+	{"LLM_MAX_CONCURRENT_PER_USER", TypeInt, Backend, false},
+	{"LLM_MODEL_MAP", TypeList, Backend, false},   // pattern=model pairs
+	{"LLM_OPEN_LEGACY", TypeBool, Backend, false}, // any non-empty value turns it on: no spelling is wrong, so Validate passes every spelling
+	{"LLM_UPSTREAM_KEY", TypeString, Backend, true},
+	{"LLM_UPSTREAM_URL", TypeURL, Backend, false},
+	{"MAX_ADMIT_WAIT_SECS", TypeInt, Backend, false},
+	{"MAX_EXEC_BODY_BYTES", TypeInt, Backend, false},
+	{"MAX_EXEC_TIMEOUT_SECS", TypeInt, Backend, false},
+	{"MAX_KEPT_PER_LEASE", TypeInt, Backend, false},
+	{"MAX_LEASE_MEMORY_MB", TypeInt, Backend, false},
+	{"MAX_LEASE_VCPU", TypeInt, Backend, false},
+	{"MAX_NAMED_SNAPSHOTS", TypeInt, Backend, false},
+	{"MAX_RUNNING_JOBS_PER_LEASE", TypeInt, Backend, false},
+	{"MAX_TTL_SECS", TypeInt, Backend, false},
+	{"METRICS_LISTEN", TypeAddr, Runner, false},
+	{"METRICS_SERVER_NAME", TypeString, Dash, false},
+	{"METRICS_TOKEN", TypeString, Backend, true},
+	{"METRICS_URL", TypeURL, Dash, false},
+	{"NOTIFY_STATE_FILE", TypeString, Backend, false},
+	{"NOTIFY_UNITS", TypeList, Backend, false},      // "none" watches nothing
+	{"NOTIFY_WEBHOOKS", TypeString, Backend, false}, // a JSON list, validated by notify.ParseWebhooks; a path is never its credential, the receiver URL is
+	{"ORPHAN_MIN_AGE_SECS", TypeInt, Backend, false},
+	{"ORPHAN_QUARANTINE_SECS", TypeInt, Backend, false},
+	{"ORPHAN_REAP", TypeString, Backend, false}, // off|dryrun|quarantine
+	{"OTEL_PROM_URL", TypeURL, Backend, false},
+	{"PAUSED_RELEASE_DAYS", TypeInt, Backend, false},
+	{"PINNED_IDLE_NOTICE_DAYS", TypeInt, Backend, false},
+	{"POOL_SIZE", TypeInt, Backend, false},
+	{"PROXY_ADDR", TypeAddr, Backend, false},
+	{"PROXY_AUTH_MODE", TypeString, Backend, false}, // off|forward-auth
+	{"PROXY_AUTH_SECRET", TypeString, Backend, true},
+	{"PROXY_AUTH_TRUSTED_PEERS", TypeList, Backend, false}, // IPs and CIDRs
+	{"RECOVERY_RETRY_ATTEMPTS", TypeInt, Backend, false},
+	{"RECOVERY_RETRY_WINDOW", TypeDuration, Backend, false},
+	{"REPO_BASE_URL", TypeURL, Runner, false},
+	{"ROOTFS_PROBE_SECS", TypeInt, Backend, false},
+	{"RUNNER_ADMIT_WAIT_SECS", TypeInt, Runner, false},
+	{"RUNNER_FLOOR", TypeInt, Runner, false},
+	{"RUNNER_LABELS", TypeList, Runner, false},
+	{"RUNNER_MAX", TypeInt, Runner, false},
+	{"RUNNER_NAME", TypeString, Runner, false},
+	{"RUNNER_SCALE_STEP", TypeInt, Runner, false},
+	{"RUNNER_STATE_FILE", TypeString, Runner, false},
+	{"RUNNER_TOKEN", TypeString, Runner, true},
+	{"SANDBOX_PROBE", TypeBool, Backend, false},
+	{"SANDBOX_PROBE_TIMEOUT_SECS", TypeInt, Backend, false},
+	{"SATURATION_CPU_SOME_PCT", TypePercent, Backend, false},
+	{"SATURATION_IO_FULL_PCT", TypePercent, Backend, false},
+	{"SERVICE_RESULT", TypeString, Drain, false}, // systemd's own variable, read verbatim
+	{"SHELLY_BINARY_URL", TypeURL, Gateway, false},
+	{"SIZE_PRESETS", TypeString, Backend, false}, // name=vcpu:memory_mb spec; sizes.Parse fails startup on a malformed value
+	{"SNAPSHOT_KEEP_VERSIONS", TypeInt, Backend, false},
+	{"SNAPSHOT_WRITE_CONCURRENCY", TypeInt, Backend, false},
+	{"SPOOND_ADMIN_TOKEN_FILE", TypeList, Drain, false}, // token file paths, paired with SPOOND_DRAIN_URL
+	{"SPOOND_BACKUP_DIR", TypeString, Backend, false},
+	{"SPOOND_BUILD_TIMEOUT", TypeDuration, Backend, false},
+	{"SPOOND_DB_PATH", TypeString, Backend, false},
+	{"SPOOND_DRAIN_INSECURE", TypeBool, Drain, false},
+	{"SPOOND_DRAIN_URL", TypeList, Drain, false}, // backend URLs, paired with SPOOND_ADMIN_TOKEN_FILE
+	{"SPOOND_ENV_DIR", TypeString, Doctor, false},
+	{"SPOOND_GATEWAY_TOKEN", TypeString, Gateway, true},
+	{"SPOOND_GUEST_DNS_ADDR", TypeList, Backend, false}, // bare IPs; parseGuestDNS fails startup on a non-IP
+	{"SPOOND_PROXY_HOST_SUFFIX", TypeString, Backend, false},
+	{"SPOOND_SSH_CONNECTION_ADDR", TypeString, Gateway, false}, // the bare host reported in SSH_CONNECTION
+	{"SWEEP_TIMEOUT", TypeDuration, Backend, false},
+	{"TLS_CERT", TypeList, Backend, false}, // certificate paths, paired with TLS_KEY
+	{"TLS_KEY", TypeList, Backend, false},  // key paths, paired with TLS_CERT
+	{"UNDRAIN_CONCURRENCY", TypeInt, Backend, false},
+	{"UNDRAIN_READY_TIMEOUT", TypeDuration, Backend, false},
+	{"UNDRAIN_RESUME_RETRIES", TypeInt, Backend, false},
+	{"UNDRAIN_RESUME_WINDOW", TypeDuration, Backend, false},
+	{"USERS_FILE", TypeString, Backend, false}, // identity store path
 }
 
 var specByName = func() map[string]Spec {
@@ -646,8 +657,123 @@ func validateOne(s Spec, v string) error {
 	return nil
 }
 
-// IsKnown reports whether some spoond binary reads key.
-func IsKnown(key string) bool { return known[key] }
+// HiddenFromFile is the VALUE both display surfaces use for a secret
+// resolved from a <NAME>_FILE value file (#137 C2): reported set,
+// hidden, with the source named. GET /api/admin/config (api) sends it
+// and `spoond config show` (cmd/spoond-config) prints and compares it —
+// one constant so the two cannot drift out of step. A secret's actual
+// content never appears in either surface.
+const HiddenFromFile = "(hidden, from file)"
+
+// IsSecret reports whether name names a spec whose value is a secret
+// (SpecOf's Secret flag) — HideIfSecret's name rule, as data. The C2
+// design's secret list: every name whose upper case carries TOKEN, KEY,
+// SECRET, PASSWORD or HASH among the known settings.
+func IsSecret(name string) bool {
+	s, ok := specByName[name]
+	return ok && s.Secret
+}
+
+// SecretFileOf returns NAME_FILE for a secret setting name, or "" when
+// name is not a known secret. Only secret specs take the _FILE form: a
+// name that is not a secret has no file form (a <NAME>_FILE environment
+// variable beside a non-secret NAME is the typo CheckEnvFile reports).
+func SecretFileOf(name string) string {
+	if !IsSecret(name) {
+		return ""
+	}
+	return name + "_FILE"
+}
+
+// Get resolves one setting's value the C2 way (2026-10-11
+// validated-config design item 2): the environment's NAME is the value;
+// otherwise NAME_FILE names a file whose contents are the value, with
+// trailing newlines and carriage returns trimmed (a secret saved with a
+// closing echo, editor or CRLF newline stays byte-equal to the env
+// spelling); setting both forms is an error, an unreadable file is an
+// error, and a file with nothing but whitespace is an error. An unset NAME
+// with an unset NAME_FILE returns ("", nil) — the reader's own default
+// stands, exactly as when only NAME exists and is empty.
+//
+// get reads the environment (os.Getenv in production, a fake in tests);
+// readFile reads a value file (os.ReadFile in production, a fake in
+// tests). Only a non-empty NAME wins: an empty NAME= falls back to
+// NAME_FILE, so the two spellings cannot argue about what unset means.
+// A name with no spec (not a known secret) resolves through the
+// environment only — the file form belongs to the secret specs.
+func Get(name string, get func(string) string, readFile func(string) ([]byte, error)) (string, error) {
+	var file string
+	if s, ok := specByName[name]; ok && s.Secret {
+		file = name + "_FILE"
+	}
+	envV, fileV := get(name), get(file) // get(nil-name) is "" for every injected map
+	switch {
+	case envV != "" && fileV != "":
+		return "", fmt.Errorf("%s and %s are both set: give the value once (set %s= or %s=/path, not both)", name, file, name, file)
+	case envV != "":
+		return envV, nil
+	case fileV != "":
+		b, err := readFile(fileV)
+		if err != nil {
+			return "", fmt.Errorf("%s: read %s: %v", name, fileV, err)
+		}
+		v := strings.TrimRight(string(b), "\r\n")
+		if strings.TrimSpace(v) == "" {
+			// An empty secret would mean "unset" to its reader, and for
+			// some (BOOTSTRAP_TOKEN) unset means open: a truncated or
+			// never-written file must fail closed, not quietly unset.
+			return "", fmt.Errorf("%s: %s is empty", name, fileV)
+		}
+		return v, nil
+	}
+	return "", nil
+}
+
+// Resolve is Get against the process environment and filesystem, plus
+// FileModeWarning for the value file when the value came from one: the
+// one call every binary makes for a secret, so the startup warning is
+// the same in all of them. warn is "" when there is nothing to say.
+func Resolve(name string) (value, warn string, err error) {
+	value, err = Get(name, os.Getenv, os.ReadFile)
+	if err != nil || os.Getenv(name) != "" {
+		return value, "", err
+	}
+	if f := SecretFileOf(name); f != "" {
+		if p := os.Getenv(f); p != "" {
+			warn = FileModeWarning(p)
+		}
+	}
+	return value, warn, nil
+}
+
+// FileModeWarning returns a warning line for a path whose file mode is
+// readable by group or others (mode 0600 or stricter is clean), or ""
+// when the mode is fine or cannot be checked (an unreadable file is
+// Get's own startup error; a missing one the operator has not created
+// yet is doctor's check).
+func FileModeWarning(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Sprintf("%s: mode %.4o, want 600 (readable by group or others)", path, perm)
+	}
+	return ""
+}
+
+// IsKnown reports whether some spoond binary reads key. A secret's
+// <NAME>_FILE name is known too: the readers take the secret through
+// Get, which builds the file name from the spec, so no os.Getenv names
+// it, but the name is a real setting (config show and doctor read the
+// env files against this list) and must not be flagged unknown.
+func IsKnown(key string) bool {
+	if known[key] {
+		return true
+	}
+	name, ok := strings.CutSuffix(key, "_FILE")
+	return ok && IsSecret(name)
+}
 
 // HideIfSecret is the masking rule for showing a setting's value
 // (#137): a name carrying TOKEN, KEY, SECRET, PASSWORD, HASH or SEED
@@ -702,7 +828,9 @@ func urlCarriesSecret(value string) bool {
 
 // CheckEnvFile reads a systemd EnvironmentFile and returns, sorted, the
 // keys no spoond binary reads and the keys set more than once (where
-// the last one silently wins). Values are never returned.
+// the last one silently wins). Values are never returned. A known
+// secret's <NAME>_FILE spelling counts as known (IsKnown's rule): the
+// env files carry it and Get resolves it, though no os.Getenv names it.
 func CheckEnvFile(content string) (unknown, duplicate []string) {
 	seen := map[string]int{}
 	sc := bufio.NewScanner(strings.NewReader(content))
@@ -719,7 +847,7 @@ func CheckEnvFile(content string) (unknown, duplicate []string) {
 		seen[strings.TrimSpace(key)]++
 	}
 	for k, n := range seen {
-		if !known[k] {
+		if !IsKnown(k) {
 			unknown = append(unknown, k)
 		}
 		if n > 1 {

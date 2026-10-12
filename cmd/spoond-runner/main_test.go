@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"gitea.dev/actions-proto-go/runner/v1/runnerv1connect"
 
 	"github.com/jrimmer/spoond/v3/runner"
+	"github.com/jrimmer/spoond/v3/settings"
 )
 
 // The fake backend pair here stands in for Forgejo and the spoond lease
@@ -421,5 +424,64 @@ func TestDefaultJobTimeout(t *testing.T) {
 		if got := jobTimeoutFromEnv(); got != c.want {
 			t.Errorf("jobTimeoutFromEnv() with RUNNER_JOB_TIMEOUT=%q = %s, want %s", c.val, got, c.want)
 		}
+	}
+}
+
+// TestSecretsFromFileOrEnv (#137 C2): the runner's secrets resolve
+// through settings.Get — RUNNER_TOKEN, LEASE_TOKEN and
+// FORGEJO_ADMIN_TOKEN each take a <NAME>_FILE value file (one trailing
+// newline trimmed), both forms set is the startup error, and an
+// unreadable file is too. Main itself log.Fatal's, so the resolution is
+// pinned through settings.Get on exactly those names plus Main's
+// required-message change (a missing RUNNER_TOKEN now says
+// "or RUNNER_TOKEN_FILE").
+func TestSecretsFromFileOrEnv(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	tokenFile := write("runner-token", "reg-from-file\n")
+	leaseFile := write("lease-token", "lease-from-file")
+	adminFile := write("forgejo-token", "admin-from-file\n")
+
+	t.Setenv("RUNNER_TOKEN", "")
+	t.Setenv("LEASE_TOKEN", "")
+	t.Setenv("FORGEJO_ADMIN_TOKEN", "")
+	t.Setenv("RUNNER_TOKEN_FILE", tokenFile)
+	t.Setenv("LEASE_TOKEN_FILE", leaseFile)
+	t.Setenv("FORGEJO_ADMIN_TOKEN_FILE", adminFile)
+	v, err := settings.Get("RUNNER_TOKEN", os.Getenv, os.ReadFile)
+	if err != nil || v != "reg-from-file" {
+		t.Fatalf("RUNNER_TOKEN from file: (%q, %v)", v, err)
+	}
+	v, err = settings.Get("LEASE_TOKEN", os.Getenv, os.ReadFile)
+	if err != nil || v != "lease-from-file" {
+		t.Fatalf("LEASE_TOKEN from file: (%q, %v)", v, err)
+	}
+	v, err = settings.Get("FORGEJO_ADMIN_TOKEN", os.Getenv, os.ReadFile)
+	if err != nil || v != "admin-from-file" {
+		t.Fatalf("FORGEJO_ADMIN_TOKEN from file: (%q, %v)", v, err)
+	}
+
+	// Both forms set refuses.
+	t.Setenv("RUNNER_TOKEN", "env-token")
+	if _, err := settings.Get("RUNNER_TOKEN", os.Getenv, os.ReadFile); err == nil || !strings.Contains(err.Error(), "RUNNER_TOKEN and RUNNER_TOKEN_FILE") {
+		t.Fatalf("both forms: err = %v, want the both-set error", err)
+	}
+	// An unreadable file refuses.
+	t.Setenv("RUNNER_TOKEN", "")
+	t.Setenv("RUNNER_TOKEN_FILE", filepath.Join(dir, "gone"))
+	if _, err := settings.Get("RUNNER_TOKEN", os.Getenv, os.ReadFile); err == nil || !strings.Contains(err.Error(), "RUNNER_TOKEN: read ") {
+		t.Fatalf("missing file: err = %v, want the read error", err)
+	}
+	// The names are known settings through their _FILE spellings (config
+	// show and doctor must not flag them).
+	if !settings.IsKnown("RUNNER_TOKEN_FILE") || !settings.IsKnown("LEASE_TOKEN_FILE") {
+		t.Fatal("the runner's _FILE names are not known")
 	}
 }

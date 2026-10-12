@@ -573,3 +573,55 @@ func TestMemGaugesExcludePoolAndCountReserved(t *testing.T) {
 		t.Errorf("hugepages = %v GiB free (%v%%), want 23.9 GiB (44.3%%)", s.HugeFreeGiB, s.HugeUsedPct)
 	}
 }
+
+// TestConfigFromFileSecrets (#137 C2): the dashboard reads its secrets
+// from <NAME>_FILE value files — the hash, the scrape token and the
+// events token each resolve through settings.Get (one trailing newline
+// trimmed), both forms set is the startup error, and an unreadable file
+// is too.
+func TestConfigFromFileSecrets(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	hashFile := write("dash-hash", "$2y$10$filehash\n")
+	tokFile := write("metrics-token", "scrape-from-file")
+	eventsFile := write("events-token", "evt-from-file\n")
+	t.Setenv("DASH_PASSWORD_HASH_FILE", hashFile)
+	t.Setenv("METRICS_TOKEN_FILE", tokFile)
+	t.Setenv("DASH_EVENTS_TOKEN_FILE", eventsFile)
+	t.Setenv("DASH_ADDR", "127.0.0.1:0")
+	t.Setenv("DASH_USER", "op")
+	t.Setenv("DASH_AUTH", "1")
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if cfg.PasswordHash != "$2y$10$filehash" {
+		t.Fatalf("PasswordHash = %q, want the file's trimmed hash", cfg.PasswordHash)
+	}
+	if cfg.MetricsToken != "scrape-from-file" {
+		t.Fatalf("MetricsToken = %q, want the file's value", cfg.MetricsToken)
+	}
+	if cfg.EventsToken != "evt-from-file" {
+		t.Fatalf("EventsToken = %q, want the file's trimmed value", cfg.EventsToken)
+	}
+
+	// Both forms set: the settings.Get error, naming both variable names.
+	t.Setenv("METRICS_TOKEN", "env-scrape")
+	if _, err := configFromEnv(); err == nil || !strings.Contains(err.Error(), "METRICS_TOKEN and METRICS_TOKEN_FILE") {
+		t.Fatalf("both forms: err = %v, want the both-set error", err)
+	}
+
+	// An unreadable file: the read error.
+	t.Setenv("METRICS_TOKEN", "")
+	t.Setenv("METRICS_TOKEN_FILE", filepath.Join(dir, "gone"))
+	if _, err := configFromEnv(); err == nil || !strings.Contains(err.Error(), "METRICS_TOKEN: read ") {
+		t.Fatalf("missing file: err = %v, want the read error", err)
+	}
+}

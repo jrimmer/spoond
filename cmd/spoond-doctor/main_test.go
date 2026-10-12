@@ -321,3 +321,92 @@ func TestCheckEnvFiles(t *testing.T) {
 		t.Fatalf("dash.env = %+v", d)
 	}
 }
+
+// TestCheckFileSecrets (#137 C2): every <SECRET>_FILE= line in an env
+// file is checked against the file it names — present, owner-only
+// (0600 or stricter). A group-readable value file is a WARN naming the
+// variable and path (never a value); a missing or unreadable one notes
+// the backend's start refusal and WARNs too (the task's severity for
+// this check; the backend's own startup is the hard failure); a
+// non-secret's _FILE name is left to the unknown-key check; a clean
+// file keeps the PASS.
+func TestCheckFileSecrets(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good-token")
+	if err := os.WriteFile(good, []byte("shh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loose := filepath.Join(dir, "loose-token")
+	if err := os.WriteFile(loose, []byte("shh\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	envContent := strings.Join([]string{
+		"ADMIN_TOKEN_FILE=" + good,           // clean
+		"METRICS_TOKEN_FILE=" + loose,        // group-readable: WARN
+		"EVENTS_TOKEN_FILE=" + dir + "/gone", // missing: FAIL
+		"BIND_ADDR_FILE=" + good,             // not a secret's file: ignored here
+		"LLM_UPSTREAM_KEY=inline",            // plain spelling alone: not this check's
+		"# comment",
+		"export POOL_SIZE=2",
+	}, "\n") + "\n"
+	notes := checkFileSecrets(envContent)
+	if len(notes) != 2 {
+		t.Fatalf("notes = %v, want the loose and the missing file only", notes)
+	}
+	if !strings.Contains(notes[0], "METRICS_TOKEN_FILE") || !strings.Contains(notes[0], "mode 0640") || strings.Contains(notes[0], "shh") {
+		t.Fatalf("loose note = %q", notes[0])
+	}
+	if !strings.Contains(notes[1], "EVENTS_TOKEN_FILE") || !strings.Contains(notes[1], "missing or unreadable") || !strings.Contains(notes[1], "refuses to start") {
+		t.Fatalf("missing note = %q", notes[1])
+	}
+
+	// Both spellings of one secret in a file, and a value file with
+	// nothing in it: each a start refusal, noted without any value.
+	empty := filepath.Join(dir, "empty-token")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notes = checkFileSecrets("ADMIN_TOKEN=inline\nADMIN_TOKEN_FILE=" + good + "\nBOOTSTRAP_TOKEN_FILE=" + empty + "\n")
+	if len(notes) != 2 || !strings.Contains(notes[0], "BOOTSTRAP_TOKEN_FILE") || !strings.Contains(notes[0], "is empty") ||
+		!strings.Contains(notes[1], "ADMIN_TOKEN and ADMIN_TOKEN_FILE are both set") || strings.Contains(strings.Join(notes, " "), "inline") {
+		t.Fatalf("both-set/empty notes = %v", notes)
+	}
+
+	// An empty path and a value file with a trailing-newline-only value
+	// (still readable) are noted on their own.
+	notes = checkFileSecrets("BOOTSTRAP_TOKEN_FILE=\n")
+	if len(notes) != 1 || !strings.Contains(notes[0], "empty path") {
+		t.Fatalf("empty-path notes = %v", notes)
+	}
+
+	// A quoted path (systemd EnvironmentFile values may be quoted) stats
+	// the real file: no spurious cannot-be-read note for a valid, 0600
+	// file, and the loose file inside quotes still warns.
+	quoted := "ADMIN_TOKEN_FILE=\"" + good + "\"\nMETRICS_TOKEN_FILE='" + loose + "'\n"
+	notes = checkFileSecrets(quoted)
+	if len(notes) != 1 || !strings.Contains(notes[0], "METRICS_TOKEN_FILE") || !strings.Contains(notes[0], "mode 0640") {
+		t.Fatalf("quoted-path notes = %v, want only the loose mode warning", notes)
+	}
+
+	// Through checkEnvFiles: the missing file and the loose mode both
+	// WARN (the task's severity for this check), and a clean one stays
+	// PASS.
+	goodEnv := filepath.Join(dir, "good.env")
+	if err := os.WriteFile(goodEnv, []byte("ADMIN_TOKEN_FILE="+good+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badEnv := filepath.Join(dir, "bad.env")
+	if err := os.WriteFile(badEnv, []byte("EVENTS_TOKEN_FILE="+dir+"/gone\nMETRICS_TOKEN_FILE="+loose+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]checkResult{}
+	for _, r := range checkEnvFiles(dir) {
+		got[r.name] = r
+	}
+	if g := got["config: good.env"]; g.status != "PASS" {
+		t.Fatalf("good.env = %+v, want PASS", g)
+	}
+	if b := got["config: bad.env"]; b.status != "WARN" || !strings.Contains(b.detail, "missing or unreadable") || !strings.Contains(b.detail, "mode 0640") {
+		t.Fatalf("bad.env = %+v, want WARN naming both files", b)
+	}
+}

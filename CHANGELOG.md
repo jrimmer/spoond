@@ -10,6 +10,24 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Secrets from files (#137 C2).** Every secret setting (`ADMIN_TOKEN`,
+  `METRICS_TOKEN`, `EVENTS_TOKEN`, `CONSUMER_TOKENS`, `GATEWAY_TOKEN`,
+  `BOOTSTRAP_TOKEN`, `LLM_UPSTREAM_KEY`, `PROXY_AUTH_SECRET`,
+  `DASH_PASSWORD_HASH`, `DASH_EVENTS_TOKEN`, `RUNNER_TOKEN`,
+  `LEASE_TOKEN`, `FORGEJO_ADMIN_TOKEN`, `SPOOND_GATEWAY_TOKEN`) may be
+  given as `<NAME>_FILE=/path` (a 0600 file whose content, trailing
+  newlines trimmed, is the value): the processes read it once at
+  startup. Setting both forms, or naming an unreadable or empty file,
+  refuses startup; a file readable by group or others logs a warning
+  and `spoond doctor` flags it. `spoond config show` keeps the file
+  spelling as its own row (the path shown, the content never) beside
+  the secret's row (`(hidden, from file)`, source the env file), and
+  `GET /api/admin/config` reports such a secret set, so the two
+  surfaces still agree. The procedure is docs/operations.md, "Moving a
+  secret to a file".
+
 ### Fixed
 
 - **`size_hint` never names a preset with fewer vCPUs than the lease runs** (a 2-vCPU lease was told `small`, 1 vCPU), and a lease also reports `memory_hint_mb`: the memory that holds its measured peak with the same 25 % margin, for a create that keeps its vCPUs.
@@ -38,7 +56,6 @@ and `policy`. No breaking changes and no schema change.
   The settings package (`settings.Specs`, `settings.Validate`) holds
   the per-setting type and owner binary behind the same
   `settings.Known` list `spoond doctor` checks env files against.
-
 ### Changed
 
 - **The dashboard's `access` column is headed `policy`**: it shows the network policy today, and more lease policy is coming.
