@@ -59,6 +59,9 @@
 //	                  "Moving a secret to a file".
 //	E2B_TEMPLATE_STORAGE_PATH  build storage root, for disk accounting
 //	                  (default /forkdcache/e2b/storage/templates)
+//	E2B_ROOT_FS_PATH  path the /readyz root-disk check stats (default
+//	                  "/" — the host's root filesystem); overridable
+//	                  only for tests (spoond-c8q6)
 //	SPOOND_BUILD_TIMEOUT  how long a template build may run before the
 //	                  GC treats a still-`building` row as stale and fails
 //	                  it; a Go duration or seconds (spoond-4yl). The same
@@ -645,6 +648,10 @@ func Main(args []string) int {
 	// overrides it. Kept in seconds (not a duration) like the lease field.
 	idleSuspendDefault := int64(envIntOr("IDLE_SUSPEND_DEFAULT_SECS", 0))
 	storagePath := envOr("E2B_TEMPLATE_STORAGE_PATH", "/forkdcache/e2b/storage/templates")
+	// The readyz root-disk check's path (spoond-c8q6): the host's root
+	// filesystem by default, overridable only for tests. Read once here
+	// into the service config.
+	rootFSPath := strings.TrimSpace(os.Getenv("E2B_ROOT_FS_PATH"))
 	// Template build timeout (spoond-4yl): the GC fails a build still
 	// `building` for longer than twice this. SPOOND_BUILD_TIMEOUT (a Go
 	// duration or seconds) is read here from the backend's own
@@ -771,6 +778,7 @@ func Main(args []string) int {
 		CheckpointIntervalDefault: int64(checkpointDefault / time.Second),
 		IdleSuspendDefault:        idleSuspendDefault,
 		TemplateStoragePath:       storagePath,
+		RootFSPath:                rootFSPath,
 		BuildTimeout:              buildTimeout,
 		LostGracePersistent:       lostGracePersistent,
 		LostGrace:                 lostGrace,

@@ -369,6 +369,7 @@ func newID() string {
 }
 
 // ServiceConfig carries the constructor tunables.
+// ServiceConfig carries the env-derived settings NewService needs.
 type ServiceConfig struct {
 	PoolSize      int
 	DefaultTTL    time.Duration
@@ -398,7 +399,13 @@ type ServiceConfig struct {
 	// own idle_suspend is -1 ("the host default"). 0 = never.
 	// IDLE_SUSPEND_DEFAULT_SECS.
 	IdleSuspendDefault  int64
-	TemplateStoragePath string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11)
+	TemplateStoragePath string // E2B_TEMPLATE_STORAGE_PATH: build storage root, for disk accounting (U11); the readyz disk check's path; E2B_ROOT_FS_PATH gives the readyz root-disk check its own path
+	// RootFSPath is E2B_ROOT_FS_PATH (spoond-c8q6): the path the readyz
+	// root-disk check stats — the host's root filesystem in every real
+	// deployment (the default "/"); a test overrides it, and the backend
+	// reads it once at startup into cfg, so a running process never
+	// re-reads it.
+	RootFSPath string
 	// BuildTimeout is how long a template build may run before the GC
 	// treats a row still `building` as stale and fails it (spoond-4yl).
 	// The GC fails a building row older than twice this, logged. Zero
@@ -553,6 +560,25 @@ type ServiceConfig struct {
 	// config has no gate.
 	SaturationIOFullPct  float64
 	SaturationCPUSomePct float64
+}
+
+// rootDiskPath is the path the readiness root-disk check stats. It is
+// the host's root filesystem ("/") in every real deployment; a host
+// may point it elsewhere with E2B_ROOT_FS_PATH, but only tests actually
+// do (they pin it to a temp directory and inject a fake diskCapacity,
+// so no test depends on the machine it runs on — the same way tests
+// override TemplateStoragePath for the snapshot disk). cfg.RootFSPath
+// is set when the backend read E2B_ROOT_FS_PATH at startup; the env
+// fallback behind it keeps hand-built Services (and tests of the env
+// path itself) working.
+func rootDiskPath(cfg ServiceConfig) string {
+	if cfg.RootFSPath != "" {
+		return cfg.RootFSPath
+	}
+	if p := strings.TrimSpace(os.Getenv("E2B_ROOT_FS_PATH")); p != "" {
+		return p
+	}
+	return "/"
 }
 
 // Service is the lease API backend.
