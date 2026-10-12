@@ -21,6 +21,14 @@ summarised from README "Status".
   release lease journal line gains `peak_mib=N` between `memory_mib`
   and `reason`. A release with no measurement (no `OTEL_PROM_URL`, or a
   lease that never got a sample) adds nothing on either line.
+- **`spoond doctor` warns when the orchestrator is still activating.**
+  A new `orchestrator: unit state` check reads the `e2b-orchestrator`
+  unit's `ActiveState`/`SubState`: PASS when active/running, WARN when
+  `activating` (start-post's `drain --start` still running — restarting
+  or stopping the unit then skips `ExecStop`, so running leases are
+  killed, not paused; see Restarting the orchestrator), FAIL when the
+  unit is `failed`/`inactive`. Prompted by the 2026-10-12 03:08 PT
+  restart-during-activating loss.
 
 ## [3.6.1] - 2026-10-12
 

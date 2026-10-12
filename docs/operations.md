@@ -300,6 +300,7 @@ set -a; . /etc/spoond/backend.env; set +a
 | `config: <env file>` | WARN on a key no spoond binary reads, or one set twice (the last wins); the `<SECRET>_FILE=` lines are checked directly: a missing value file warns (the backend will refuse to start — that is where the failure shows), so does a file readable by group or others — see [Moving a secret to a file](#moving-a-secret-to-a-file) |
 | `orchestrator: /health` | `GET http://$E2B_GRPC_ADDR/health` must answer `"status":"healthy"` |
 | `orchestrator: node info` | status, running sandboxes and free hugepages; WARN when the status is not `healthy` or free hugepage memory is below 4 GiB |
+| `orchestrator: unit state` | reads the `e2b-orchestrator` unit's `ActiveState`/`SubState` (`systemctl show`); PASS when `active`/`running`, WARN when `activating` (start-post's `drain --start` still running — do not restart or stop the orchestrator now, the drain would be skipped and running leases killed; see [Restarting the orchestrator](#restarting-the-orchestrator-planned)), FAIL when the unit is `failed`/`inactive` or `systemctl` does not answer |
 | `registry: /v2/` | the local registry answers `200` |
 | `token seed: file` | `/etc/spoond/e2b-token-seed` exists, mode 0600, at least 32 bytes |
 | `store: database` | the SQLite file opens read-only and its migration version is ≥ 4 |
@@ -547,6 +548,17 @@ throttle as every other route (`429`).
 
 `systemctl restart e2b-orchestrator` is safe: the unit's drain hooks make
 it lossless. Do not stop the backend first.
+
+**Only restart or stop it while it is `active/running`.** While the
+`ExecStartPost` undrain is still running (`systemctl show
+e2b-orchestrator -p ActiveState -p SubState` says `activating` /
+`start-post`), the unit has not finished starting, and systemd skips
+`ExecStop` for it: `spoond drain --stop` never runs, and every running
+lease is killed instead of paused — a lease with no checkpoint is then
+`lost` (2026-10-12 incident). Wait for the undrain to finish: it gives
+up on a lease after its retries and leaves it suspended for
+resume-on-use (step 3), so waiting never loses anything. `spoond doctor`
+warns while the unit is in this state.
 
 1. systemd runs `ExecStop=/opt/spoond/spoond drain --stop` **before**
    sending SIGTERM.

@@ -355,8 +355,45 @@ func checkOrchestrator(cfg e2b.Config, cfgErr error) []checkResult {
 	} else {
 		out = append(out, checkResult{"orchestrator: node info", "PASS", detail})
 	}
-	return out
+	return append(out, checkOrchestratorUnit()...)
 }
+
+// checkOrchestratorUnit reads the e2b-orchestrator unit's state from
+// systemd and reports where in its start-or-stop cycle it is — the
+// 2026-10-12 03:08 PT incident restarted the unit while it was still
+// activating (its ExecStartPost `spoond drain --start` still retrying
+// resumes), systemd skipped ExecStop, so `spoond drain --stop` never ran
+// and running leases were killed with no checkpoint. A unit in
+// activating is the one state from which a restart or stop loses
+// leases, so doctor flags it: PASS when active/running, WARN when
+// activating — the detail says not to restart or stop it now, the drain
+// would be skipped (docs/operations.md, Restarting the orchestrator) —
+// and FAIL when the unit is failed/inactive or systemd does not answer
+// (a failed orchestrator is what every connectivity check above
+// already reports, but through the unit it is named as the cause).
+func checkOrchestratorUnit() []checkResult {
+	const name = "orchestrator: unit state"
+	const activatingDetail = "start-post still running (undrain); do not restart or stop it now — the drain would be skipped"
+	props, err := systemctlShow(e2bOrchestratorUnit, "ActiveState", "SubState")
+	if err != nil {
+		return []checkResult{{name, "FAIL", fmt.Sprintf("systemctl show %s: %v", e2bOrchestratorUnit, err)}}
+	}
+	state, sub := props["ActiveState"], props["SubState"]
+	switch state {
+	case "active":
+		return []checkResult{{name, "PASS", fmt.Sprintf("active (%s)", sub)}}
+	case "activating":
+		return []checkResult{{name, "WARN", activatingDetail}}
+	case "failed", "inactive":
+		return []checkResult{{name, "FAIL", fmt.Sprintf("%s (%s) — the orchestrator is down; every create and lease call fails", state, sub)}}
+	default:
+		return []checkResult{{name, "WARN", fmt.Sprintf("unreported unit state %q (%q)", state, sub)}}
+	}
+}
+
+// e2bOrchestratorUnit is the unit doctor reads the state of. Replaced
+// in tests alongside systemctlShow.
+var e2bOrchestratorUnit = "e2b-orchestrator"
 
 // checkRegistry verifies the local container registry answers.
 func checkRegistry() []checkResult {
