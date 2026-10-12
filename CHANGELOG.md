@@ -10,6 +10,24 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added (tests)
+
+- **Conformance: the lease API from guests, guest DNS, and a mixed
+  allowlist reached by name (spoond-ndh).** Three cases beside group N
+  (`conformance/guest_dns_test.go`): N10 exercises
+  [docs/api.md](docs/api.md)'s lease-API grant from inside — an
+  `internet` and a `lan` lease reach `GET /healthz` on the API's base
+  URL and round-trip create+delete with the test token (which rides an
+  exec-time secret file, never env or argv), while a `restricted` lease
+  is unreachable — N12 pins the guest's resolver under **every**
+  policy (`none`, `restricted`, `lan`, `internet`): no public resolver
+  in `/etc/resolv.conf`, and the wildcard-zone name resolving to the
+  expected LAN address, and N13 mixes N1's LAN target with a public
+  domain in one restricted allowlist and reaches both by name. Every
+  LAN assumption rides the new `CONFORMANCE_LAN_DNS` (no default; the
+  cases skip when unset, like N1's `CONFORMANCE_LAN_TARGET`) and the
+  wildcard zone is `CONFORMANCE_LAN_DNS_ZONE` (default `example.com`).
+
 ## [3.6.0] - 2026-10-11
 
 3.6 keeps secrets out of the environment: every secret setting may name
