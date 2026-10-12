@@ -134,7 +134,6 @@ type fakeLeaseAPI struct {
 
 	creates []map[string]any
 	deleted []string
-	comment string // the label set on the job lease
 
 	execInFlight  chan struct{} // closed when the job's exec arrives
 	execCtxDone   chan struct{} // closed when the exec's request ctx dies
@@ -193,13 +192,6 @@ func (f *fakeLeaseAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-f.releaseAll:
 		}
 		close(f.execCtxDone)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/leases/sb-job/comment":
-		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
-		f.mu.Lock()
-		f.comment = body["comment"]
-		f.mu.Unlock()
-		w.Write([]byte(`{"id":"sb-job","ok":true}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/api/leases":
 		close(f.sweepArrived)
 		w.Header().Set("Content-Type", "application/json")
@@ -295,9 +287,11 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 		t.Fatal("job's exec never reached the sandbox")
 	}
 
-	// The lease the job runs in is labelled with the job (#119) — its
-	// comment is "forgejo job 42 <job URL>" — and is not held (no
-	// holder fields: held leases join the periodic checkpoint pass).
+	// The lease the job runs in is labelled with the job (#119, #132):
+	// the create body carries the label as its comment — the lease is
+	// born with it (the `created` event names the job) and no comment
+	// call follows the create — and is not held (no holder fields: held
+	// leases join the periodic checkpoint pass).
 	waitFor(t, "the lease create", func() bool { return len(lease.createBodies()) > 0 })
 	create := lease.createBodies()[0]
 	for _, k := range []string{"holder", "holder_url", "hold_ttl"} {
@@ -311,16 +305,9 @@ func TestMainSIGTERMGraceThenCancel(t *testing.T) {
 	if got, ok := create["wait"].(float64); !ok || int(got) != runner.DefaultAdmitWaitSecs {
 		t.Fatalf("create wait = %v, want %d", create["wait"], runner.DefaultAdmitWaitSecs)
 	}
-	waitFor(t, "the lease label", func() bool {
-		lease.mu.Lock()
-		defer lease.mu.Unlock()
-		return lease.comment != ""
-	})
-	lease.mu.Lock()
-	label := lease.comment
-	lease.mu.Unlock()
+	label, _ := create["comment"].(string)
 	if want := "forgejo job 42 " + forgejo.srv.URL + "/actions/runs/42/jobs/42"; label != want {
-		t.Fatalf("label = %q, want %q", label, want)
+		t.Fatalf("create body comment = %q, want %q", label, want)
 	}
 
 	// SIGTERM. systemd's stop signal starts the drain.
