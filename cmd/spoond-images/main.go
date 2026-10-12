@@ -433,12 +433,34 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	if err := runCmd(ctx, stdout, "docker", "image", "prune", "-f"); err != nil {
 		fmt.Fprintf(stdout, "warning: docker image prune: %v\n", err)
 	}
-	// Build cache older than three days goes too: every image build adds
-	// layers to it and nothing else removes them (on 2026-10-11 it had
-	// filled the host's root filesystem with 22 GB). Recent cache stays,
-	// so a rebuild soon after is still fast. Best effort, like above.
-	if err := runCmd(ctx, stdout, "docker", "builder", "prune", "-f", "--filter", "until=72h"); err != nil {
-		fmt.Fprintf(stdout, "warning: docker builder prune: %v\n", err)
+	// Build cache goes too: every image build adds layers to it and
+	// nothing else removes them (on 2026-10-11 it had filled the host's
+	// root filesystem with 22 GB, and on 2026-10-12 a day of builds left
+	// the root disk at 80 % because everything newer than three days
+	// survived). Two rules, on two builders: the age rule keeps recent
+	// cache, so a rebuild soon after is still fast, and the size cap
+	// (IMAGE_BUILD_CACHE_KEEP, default 10 GB) bounds what it can hold.
+	// `docker builder prune` reaches only dockerd's default builder; the
+	// docker-container builder the host builds with keeps its own cache,
+	// pruned through `docker buildx prune` with no --builder flag, so the
+	// current builder in `docker buildx ls` is the one pruned. A host
+	// without the buildx plugin fails that command ("docker: 'buildx' is
+	// not a docker command"); that is the normal case and is skipped
+	// silently. Best effort, like above: a failed prune never fails the
+	// build.
+	keep := envOr("IMAGE_BUILD_CACHE_KEEP", "10GB")
+	for _, args := range [][]string{
+		{"builder", "prune", "-f", "--filter", "until=72h"},
+		{"builder", "prune", "-f", "--keep-storage", keep},
+		{"buildx", "prune", "-f", "--filter", "until=72h"},
+		{"buildx", "prune", "-f", "--keep-storage", keep},
+	} {
+		// buildx runs without a warning: a missing plugin must not sound
+		// like a build problem on every image build.
+		warn := strings.HasPrefix(args[0], "builder")
+		if err := runCmd(ctx, stdout, "docker", args...); err != nil && warn {
+			fmt.Fprintf(stdout, "warning: docker %s prune: %v\n", args[0], err)
+		}
 	}
 
 	// The image row (and its template id) is created before the first

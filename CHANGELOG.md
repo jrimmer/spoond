@@ -60,6 +60,28 @@ summarised from README "Status".
   PRODUCTION-ENV-2.7.md, images/README.md, the runner env.example's
   header) now agree with the units.
 
+### Fixed
+
+- **`spoond images build` prunes the build cache on both builders, by
+  age and by a size cap (spoond-vdoq).** The 2026-10-11 prune ran
+  `docker builder prune -f --filter until=72h`, which clears only
+  dockerd's default builder and only cache older than 72 h — on
+  2026-10-12, after 11 image builds in one afternoon, the host's root
+  disk still reached 80 %: 14 GB of cache younger than three days
+  survived the age filter, and the `docker-container` buildx builder
+  the host actually builds with (the current one in `docker buildx
+  ls`) kept 8 GB of its own that nothing pruned. After every build the
+  pipeline now runs all four prunes best effort (a failed prune never
+  fails the build): the default builder's `docker builder prune -f
+  --filter until=72h` plus a size cap `docker builder prune -f
+  --keep-storage IMAGE_BUILD_CACHE_KEEP`, and the current buildx
+  builder's `docker buildx prune -f --filter until=72h` plus
+  `docker buildx prune -f --keep-storage IMAGE_BUILD_CACHE_KEEP` (no
+  `--builder` flag), with the same two rules. The new
+  `IMAGE_BUILD_CACHE_KEEP` setting (TypeString, owner `images`;
+  default `10GB`) holds docker's size spelling (`10GB`, `1024MiB`);
+  a host without the buildx plugin skips its two prunes silently.
+
 ## [3.7.0] - 2026-10-12
 
 3.7 makes spoond describe itself and report more of what it sees.

@@ -115,6 +115,7 @@ var Known = []string{
 	"HOST_GUEST_SERVICE_ADDR",
 	"HOST_GUEST_SERVICE_PORT",
 	"IDLE_SUSPEND_DEFAULT_SECS",
+	"IMAGE_BUILD_CACHE_KEEP",
 	"IMAGE_MAP",
 	"IMAGE_REGISTRY",
 	"JOB_MAX_RUNTIME",
@@ -437,7 +438,8 @@ var Specs = []Spec{
 	{"HOST_GUEST_SERVICE_ADDR", TypeString, Backend, false}, // a bare host or IP: the code builds <addr>/32 CIDRs from it
 	{"HOST_GUEST_SERVICE_PORT", TypeInt, Backend, false},
 	{"IDLE_SUSPEND_DEFAULT_SECS", TypeInt, Backend, false},
-	{"IMAGE_MAP", TypeList, Runner, false}, // label=image pairs
+	{"IMAGE_BUILD_CACHE_KEEP", TypeString, Images, false}, // a docker size (10GB, 1024MiB) passed plainly to --keep-storage; read verbatim
+	{"IMAGE_MAP", TypeList, Runner, false},                // label=image pairs
 	{"IMAGE_REGISTRY", TypeString, Images, false},
 	{"JOB_MAX_RUNTIME", TypeDuration, Backend, false},
 	{"JOB_RECORD_DIR", TypeString, Runner, false},

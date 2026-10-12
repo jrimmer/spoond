@@ -1666,3 +1666,18 @@ report includes a `root disk` check against those levels (see "Uptime
 monitoring (Gatus)" above), so an external monitor pages on it instead
 of waiting up to a day for the timer. The timer remains for the doctor
 and lost-lease counts it alone keeps.
+
+That cache is what `spoond images build` prunes after every image
+build, best effort (a failed prune never fails the build): dangling
+images first, then the build cache by age and by size —
+`docker builder prune -f --filter until=72h` and
+`docker builder prune -f --keep-storage IMAGE_BUILD_CACHE_KEEP`
+(default `10GB`) for dockerd's default builder, and the same two rules
+via `docker buildx prune -f …` (no `--builder` flag: the current
+builder in `docker buildx ls`, usually the `docker-container` one the
+host actually builds with, whose cache nothing else prunes) with the
+cap from the same setting. A host without the buildx plugin skips
+those silently. The age rule alone proved not enough on 2026-10-12:
+after 11 builds in an afternoon the root disk sat at 80 % — 14 GB of
+cache younger than three days survived, plus 8 GB the buildx builder
+held on its own.
