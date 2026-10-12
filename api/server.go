@@ -728,8 +728,11 @@ func isHexPath(p string) bool {
 // or user token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// originalPath is the path the client asked for, before any
-		// rewrite: the alias deprecation keys on the requested spelling.
+		// originalPath is the path as it reaches the middleware: Handler
+		// has already rewritten /api/leases onto /api/sandboxes above, so
+		// an alias request and a rewritten primary one look alike here;
+		// the apiRewrittenKey marker is what distinguishes them — the
+		// alias deprecation below counts only a request without it.
 		originalPath := r.URL.Path
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" ||
 			strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, llmGatewayPrefix) {
