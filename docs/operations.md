@@ -549,6 +549,17 @@ throttle as every other route (`429`).
 `systemctl restart e2b-orchestrator` is safe: the unit's drain hooks make
 it lossless. Do not stop the backend first.
 
+**Only restart or stop it while it is `active/running`.** While the
+`ExecStartPost` undrain is still running (`systemctl show
+e2b-orchestrator -p ActiveState -p SubState` says `activating` /
+`start-post`), the unit has not finished starting, and systemd skips
+`ExecStop` for it: `spoond drain --stop` never runs, and every running
+lease is killed instead of paused — a lease with no checkpoint is then
+`lost` (2026-10-12 incident). Wait for the undrain to finish: it gives
+up on a lease after its retries and leaves it suspended for
+resume-on-use (step 3), so waiting never loses anything. `spoond doctor`
+warns while the unit is in this state.
+
 1. systemd runs `ExecStop=/opt/spoond/spoond drain --stop` **before**
    sending SIGTERM.
 2. That calls `POST /api/admin/drain`, which sets the node draining (the
