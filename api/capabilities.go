@@ -249,10 +249,24 @@ var endpointTable = []endpointSpec{
 	ep("GET", "/api/sizes", "size presets and per-lease limits"),
 }
 
-// versionFunc produces the binary's version string. cmd/spoond sets it
-// at init with the same version its `spoond version` prints, so the
-// two never disagree.
+// VersionFunc builds the version string the capability document
+// reports. SetVersion installs it; cmd/spoond's init wires the same
+// rendering `spoond version` prints, so the endpoint and the CLI agree.
 var versionFunc = func() string { return "dev" }
+
+// SetVersion replaces the version producer (called once from the
+// command wiring; a nil or empty render keeps "dev").
+func SetVersion(f func() string) {
+	if f == nil {
+		return
+	}
+	versionFunc = func() string {
+		if v := f(); strings.TrimSpace(v) != "" {
+			return v
+		}
+		return "dev"
+	}
+}
 
 // Version reports the binary's version string. cmd/spoond sets
 // versionFunc at init with the same version its `spoond version`

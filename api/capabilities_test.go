@@ -101,6 +101,32 @@ func TestCapabilitiesTableMatchesMux(t *testing.T) {
 	}
 }
 
+// TestCapabilitiesVersionReportsSetVersion: SetVersion wires the
+// binary's rendering (cmd/spoond init); nil keeps the fallback and an
+// empty render falls back to "dev" like `spoond version` does.
+func TestCapabilitiesVersionReportsSetVersion(t *testing.T) {
+	orig := versionFunc
+	t.Cleanup(func() { versionFunc = orig })
+	SetVersion(func() string { return "v9.9.9-test" })
+	if got := Version(); got != "v9.9.9-test" {
+		t.Errorf("Version() = %q, want v9.9.9-test", got)
+	}
+	SetVersion(func() string { return "   " })
+	if got := Version(); got != "dev" {
+		t.Errorf("Version() = %q, want the dev fallback", got)
+	}
+	SetVersion(nil)
+	if got := Version(); got != "dev" {
+		t.Errorf("SetVersion(nil) changed the producer: %q", got)
+	}
+	versionFunc = orig
+	ts, _ := newTestServer(t)
+	_, body := doReq(t, "GET", ts.URL+"/api/capabilities", "token-a", nil)
+	if body["version"] != "dev" {
+		t.Errorf("document version = %v, want dev while unset", body["version"])
+	}
+}
+
 // registeredSet keys registrations by "METHOD /path".
 func registeredSet(routes []endpointSpec) map[string]endpointSpec {
 	out := map[string]endpointSpec{}
