@@ -1,8 +1,8 @@
 // Released leases report what their VM actually held (#130 step 1):
 // the released event's detail appends "· peak N MiB"
 // (the sampler's measured high-water mark, whole MiB) after the
-// release reason, and the release journal line adds peak_mib=N next
-// to memory_mib. A lease with no sample gains neither. The peak is
+// release reason, and the release journal line adds peak_mib=N between
+// memory_mib and reason. A lease with no sample gains neither. The peak is
 // read before the sampler forgets the lease, so a leak here shows up
 // as a missing suffix, never as a wrong one.
 package api
@@ -81,8 +81,9 @@ func releasePeakTestService(t *testing.T, peakMiB float64) (*Service, *Lease, *s
 
 // TestReleasedEventCarriesPeak drives a release with a recorded peak:
 // the event's detail gains the suffix after the reason and the journal
-// line gains peak_mib=N, and the sampler has forgotten the lease when
-// the release returns.
+// line gains peak_mib=N between memory_mib and reason (the suite's
+// field-order test pins the position), and the sampler has forgotten
+// the lease when the release returns.
 func TestReleasedEventCarriesPeak(t *testing.T) {
 	// 412.9 MiB: the ceil must show 413, not the peak's floor.
 	svc, l, buf := releasePeakTestService(t, 412.9)
