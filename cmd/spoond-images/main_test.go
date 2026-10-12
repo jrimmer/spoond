@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +117,9 @@ func TestBuildOneSuccess(t *testing.T) {
 		"docker push localhost:5000/py-base:latest",
 		"docker image prune -f",
 		"docker builder prune -f --filter until=72h",
+		"docker builder prune -f --keep-storage 10GB",
+		"docker buildx prune -f --filter until=72h",
+		"docker buildx prune -f --keep-storage 10GB",
 	}
 	if len(cmdLog) != len(wantCmds) {
 		t.Fatalf("docker commands = %v", cmdLog)
@@ -396,6 +400,73 @@ func TestResolveBaseGuestDNS(t *testing.T) {
 		t.Fatalf("resolveBase: %v", err)
 	} else if !has(flags, "SPOOND_GUEST_DNS_ADDR=192.0.2.53") || has(flags, "SPOOND_GUEST_DNS_ADDR=10.0.0.2") {
 		t.Fatalf("manifest build_arg must win, flags = %v", flags)
+	}
+}
+
+// TestBuildOnePruneCommands: after a build both dockerd's default
+// builder and the current buildx builder are pruned, by age and by the
+// IMAGE_BUILD_CACHE_KEEP size cap (spoond-vdoq: the age rule alone let
+// a day of builds keep 14 GB of fresh cache). Mutation: drop a prune
+// command, or pass no --keep-storage.
+func TestBuildOnePruneCommands(t *testing.T) {
+	sub := &stubSubstrate{}
+	db := setup(t, sub)
+	t.Setenv("IMAGE_BUILD_CACHE_KEEP", "4GB")
+
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	var prunes []string
+	for _, c := range cmdLog {
+		if strings.Contains(c, "prune") {
+			prunes = append(prunes, c)
+		}
+	}
+	want := []string{
+		"docker image prune -f",
+		"docker builder prune -f --filter until=72h",
+		"docker builder prune -f --keep-storage 4GB",
+		"docker buildx prune -f --filter until=72h",
+		"docker buildx prune -f --keep-storage 4GB",
+	}
+	if !slices.Equal(prunes, want) {
+		t.Fatalf("prune commands = %v, want %v", prunes, want)
+	}
+}
+
+// TestBuildOnePruneFailureBestEffort: every prune failing (a broken
+// docker, say) must not fail the build; the default builder's prunes
+// warn on stdout, the buildx prunes stay silent (a missing buildx
+// plugin is the normal case, not a build problem).
+func TestBuildOnePruneFailureBestEffort(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	runCmd = func(ctx context.Context, stdout io.Writer, name string, args ...string) error {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		for _, a := range args {
+			if a == "prune" {
+				return errors.New("no such command")
+			}
+		}
+		return nil
+	}
+
+	out := &bytes.Buffer{}
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", out); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	if n := len(cmdLog); n != 7 {
+		t.Fatalf("docker commands = %d, want all 7 (build, push, inspect and 4 prunes)", n)
+	}
+	if len(sub.reqs) != 1 {
+		t.Fatalf("BuildTemplate calls = %d, want 1", len(sub.reqs))
+	}
+	if !strings.Contains(out.String(), "warning: docker image prune") ||
+		!strings.Contains(out.String(), "warning: docker builder prune") {
+		t.Fatalf("stdout %q misses the image/builder prune warnings", out.String())
+	}
+	if strings.Contains(out.String(), "buildx") {
+		t.Fatalf("stdout %q warns on the buildx prunes, want silent skip", out.String())
 	}
 }
 
