@@ -236,13 +236,13 @@ func eventStyle(ev dashEvent) string {
 
 // ciJobStartLabel rewrites one created event as a CI job's start line: a
 // lease whose comment starts with the runner's job label
-// ("<JobLabelPrefix><jobID> <url>", runner/executor.go) is the CI job
-// that lease was granted for, so the line reads
-// "ci job N started · lease <short id>" — the event is a CI job's
-// start, not a plain lease create (#132). The dashboard re-labels the
-// existing `created` event from the lease's comment; the comment rides
-// in from the same tick's lease table the subject lookup already reads
-// (no new backend event).
+// (JobLabelPrefix = "forgejo job ", then "<jobID> <url>" —
+// runner/executor.go) is the CI job that lease was granted for, so the
+// line reads "ci job N started · lease <short id>" — the event is a CI
+// job's start, not a plain lease create (#132). The dashboard
+// re-labels the existing `created` event from the lease's comment; the
+// comment rides in from the same tick's lease table the subject lookup
+// already reads (no new backend event).
 var ciJobLabelRe = regexp.MustCompile(`^forgejo job (\d+) `)
 
 func ciJobStartLabel(ev *dashEvent, comment string) (string, bool) {

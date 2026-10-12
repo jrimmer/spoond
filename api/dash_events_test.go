@@ -119,9 +119,8 @@ func TestCreatedEventCarriesJobLabel(t *testing.T) {
 	seedImage(t, db, "py-base", 2048)
 	ctx := context.Background()
 
-	// Label while the first create's admission is in flight, as the
-	// runner does; the fake substrate's admission is synchronous, so the
-	// call replays the WithLabel-before-Create sequence.
+	// A stale label, bound to no admitting create ("pending" is a lease
+	// id the service did not hand out): it must land on neither create.
 	all := svc.Subscribe(EventFilter{})
 	svc.setAdmittingLeaseID("pending") // no create yet: the label binds to nothing
 	svc.WithLabel("forgejo job 42 https://code.example.com/site/actions/runs/9/jobs/42")
