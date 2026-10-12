@@ -95,6 +95,7 @@ var Known = []string{
 	"E2B_NODEINFO_TIMEOUT",
 	"E2B_PAUSE_TIMEOUT",
 	"E2B_PROXY_URL",
+	"E2B_ROOT_FS_PATH",
 	"E2B_TEAM_ID",
 	"E2B_TEMPLATE_STORAGE_PATH",
 	"E2B_TOKEN_SEED_FILE",
@@ -416,7 +417,8 @@ var Specs = []Spec{
 	{"E2B_NODEINFO_TIMEOUT", TypeDuration, Backend, false},
 	{"E2B_PAUSE_TIMEOUT", TypeDuration, Backend, false},
 	{"E2B_PROXY_URL", TypeURL, Backend, false},
-	{"E2B_TEAM_ID", TypeString, Backend, false}, // a UUID, read verbatim
+	{"E2B_ROOT_FS_PATH", TypeString, Backend, false}, // the readyz root-disk check's path; tests only
+	{"E2B_TEAM_ID", TypeString, Backend, false},      // a UUID, read verbatim
 	{"E2B_TEMPLATE_STORAGE_PATH", TypeString, Backend, false},
 	{"E2B_TOKEN_SEED_FILE", TypeString, Backend, false}, // seed file path: a path, not the secret itself
 	{"EVENTS_TOKEN", TypeString, Backend, true},
