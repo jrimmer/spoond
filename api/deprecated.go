@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -87,9 +88,12 @@ func setDeprecatedHeaders(w http.ResponseWriter, successorPath string) {
 }
 
 // aliasSuccessorPath maps a /api/sandboxes path onto its /api/leases
-// twin for the successor Link (the inverse of rewriteLeasePath).
+// twin for the successor Link (the inverse of rewriteLeasePath). The
+// result is percent-escaped: it goes into a header before auth, and a
+// raw `>` from the request path would close the <…> and let the caller
+// add Link entries of their own.
 func aliasSuccessorPath(p string) string {
-	return apiLeasePathPrefix + strings.TrimPrefix(p, apiSandboxPathPrefix)
+	return (&url.URL{Path: apiLeasePathPrefix + strings.TrimPrefix(p, apiSandboxPathPrefix)}).EscapedPath()
 }
 
 // markDeprecatedAliasHeaders sets the RFC 8594 headers on a request
@@ -123,7 +127,7 @@ func callerLabel(u *identity.User, owner string) string {
 func (s *Server) noteDeprecatedAlias(r *http.Request, u *identity.User, owner string) {
 	s.metrics.DeprecatedReqs.WithLabelValues(depKindsandboxesAlias).Inc()
 	if s.depLog.allow(owner, time.Now()) {
-		s.svc.log.Printf("deprecated /api/sandboxes request (removed in 4.0); use %s: caller=%s path=%s", aliasSuccessorPath(r.URL.Path), callerLabel(u, owner), r.URL.Path)
+		s.svc.log.Printf("deprecated /api/sandboxes request (removed in 4.0); use %s: caller=%s path=%q", aliasSuccessorPath(r.URL.Path), callerLabel(u, owner), r.URL.Path)
 	}
 }
 

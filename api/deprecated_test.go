@@ -404,3 +404,16 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// TestDeprecatedLinkEscapesPath: the successor Link is built from the
+// request path before auth, so a `>` (or space, quote) in it is escaped
+// and can never close the <…> to inject Link entries.
+func TestDeprecatedLinkEscapesPath(t *testing.T) {
+	got := aliasSuccessorPath(`/api/sandboxes/x>; rel="preload"`)
+	if strings.ContainsAny(got, `> "`) {
+		t.Fatalf("aliasSuccessorPath left a raw delimiter: %q", got)
+	}
+	if !strings.HasPrefix(got, "/api/leases/x") {
+		t.Fatalf("aliasSuccessorPath = %q, want the /api/leases twin", got)
+	}
+}
