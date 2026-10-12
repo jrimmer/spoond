@@ -1181,10 +1181,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// The comment rides the create (#132); the comment route's cap
-	// applies to it like to any later set.
-	if len(req.Comment) > 512 {
-		writeError(w, http.StatusBadRequest, "comment must be <= 512 chars")
+	// The comment rides the create (#132); the comment route's whole
+	// validity applies to it like to any later set — one shared
+	// validator (api/comment.go) answers for both routes.
+	if err := validateComment(req.Comment); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.HoldTTL != nil {
@@ -1971,7 +1972,9 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleComment sets or clears the free-text annotation on a lease.
-// An empty comment clears it.
+// An empty comment clears it. The create body's `comment` field answers
+// to the same validator (api/comment.go), so the two routes never
+// disagree on what a comment is.
 func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	owner := ownerFrom(r.Context())
 	id := r.PathValue("id")
@@ -1980,6 +1983,10 @@ func (s *Server) handleComment(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := validateComment(req.Comment); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	lease, err := s.svc.setComment(owner, id, req.Comment)
