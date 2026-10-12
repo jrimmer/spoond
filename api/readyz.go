@@ -3,6 +3,10 @@
 // check passes, and 503 {"status":"fail","checks":[…]} with a per-check
 // breakdown otherwise — the difference between "the process is up"
 // (/healthz, liveness) and "this backend can serve leases" (readiness).
+// Two disk checks run beside the rest: the snapshot store's, and the
+// host's root filesystem's (which replaced the forkd-era
+// spoond-soak.timer's root-disk watch) — unless both paths share one
+// filesystem, when only the snapshot disk is reported.
 package api
 
 import (
@@ -11,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jrimmer/spoond/v3/substrate"
@@ -24,8 +29,9 @@ const (
 	readyzCheckTimeout = 2 * time.Second
 	readyzCacheFor     = 5 * time.Second
 	// The dashboard's danger thresholds (cmd/spoond-dash/render.go):
-	// the snapshot disk is in danger at ≥ 90 % used and the hugepage
-	// pool at ≥ 92 % used. Readiness fails past them, like the panel.
+	// the snapshot disk and the host's root filesystem are in danger at
+	// ≥ 90 % used and the hugepage pool at ≥ 92 % used. Readiness fails
+	// past them, like the panel.
 	readyzDiskUsedDangerPct = 90.0
 	readyzHugeUsedDangerPct = 92.0
 )
@@ -35,6 +41,11 @@ type readyCheck struct {
 	Name   string `json:"name"`
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail"`
+	// skip is never in the JSON body: it marks the root-disk check's
+	// "same filesystem as the snapshot disk" outcome, which runReadyz
+	// drops from the response (one filesystem must not be counted
+	// twice).
+	skip bool `json:"-"`
 }
 
 // readyzResult is the /readyz response body.
@@ -130,7 +141,7 @@ func (s *Service) runReadyz() readyzResult {
 			return f(ctx)
 		}
 	}
-	var node, hp, db, disk readyCheck
+	var node, hp, db, disk, root readyCheck
 	var wg sync.WaitGroup
 	for _, run := range []func(){
 		func() {
@@ -141,12 +152,20 @@ func (s *Service) runReadyz() readyzResult {
 		},
 		func() { db = bounded(s.databaseReady)() },
 		func() { disk = bounded(s.diskReady)() },
+		func() { root = bounded(s.rootDiskReady)() },
 	} {
 		wg.Add(1)
 		go func() { defer wg.Done(); run() }()
 	}
 	wg.Wait()
-	checks := []readyCheck{node, db, disk, hp, s.drainingCheck()}
+	checks := []readyCheck{node, db, disk}
+	if !root.skip {
+		// The root-disk check sits beside the snapshot disk's — unless
+		// the two paths share one filesystem, when it reports itself out
+		// of existence so a filesystem is never counted twice.
+		checks = append(checks, root)
+	}
+	checks = append(checks, hp, s.drainingCheck())
 	status := "ok"
 	for _, c := range checks {
 		if !c.OK {
@@ -195,36 +214,87 @@ func (s *Service) databaseReady(ctx context.Context) readyCheck {
 	return passCheck(c, "ok")
 }
 
+// rootDiskDevice reports path's filesystem device id (st_dev), ok
+// false when stat fails. Two paths with the same device share one
+// filesystem: the root-disk check then drops itself rather than count
+// a filesystem twice (the snapshot-disk check already watches it).
+func rootDiskDevice(path string) (uint64, bool) {
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return 0, false
+	}
+	return uint64(st.Dev), true
+}
+
 // diskReady reports the snapshot store's used percentage against the
 // dashboard's danger level (90 %). A store path that cannot be read
 // fails readiness: the disk rules treat that as "stay off", but a
-// monitor must hear about it. The statfs runs on its own goroutine so a
-// wedged filesystem surfaces as a timeout, not a hung scrape.
+// monitor must hear about it.
 func (s *Service) diskReady(ctx context.Context) readyCheck {
 	c := readyCheck{Name: "disk"}
 	if s.cfg.TemplateStoragePath == "" {
 		return failCheck(c, "E2B_TEMPLATE_STORAGE_PATH is not set")
 	}
+	return s.diskReadyOn(c, s.cfg.TemplateStoragePath, ctx)
+}
+
+// diskReadyOn fills one disk check in for one path; the snapshot disk
+// (diskReady) and the root disk pass their own. The statfs runs on its
+// own goroutine so a wedged filesystem surfaces as a timeout, not a
+// hung scrape.
+func (s *Service) diskReadyOn(c readyCheck, path string, ctx context.Context) readyCheck {
 	done := make(chan struct{})
 	var freePct float64
 	var ok bool
 	go func() {
 		defer close(done)
-		freePct, ok = s.freePercent(s.cfg.TemplateStoragePath)
+		freePct, ok = s.freePercent(path)
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
-		return failCheck(c, "timeout reading "+s.cfg.TemplateStoragePath)
+		return failCheck(c, "timeout reading "+path)
 	}
 	if !ok {
-		return failCheck(c, "cannot stat "+s.cfg.TemplateStoragePath)
+		return failCheck(c, "cannot stat "+path)
 	}
 	usedPct := 100 - freePct
 	if usedPct >= readyzDiskUsedDangerPct {
 		return failCheck(c, fmt.Sprintf("%.0f%% used, danger level %.0f%%", usedPct, readyzDiskUsedDangerPct))
 	}
 	return passCheck(c, fmt.Sprintf("%.0f%% used", usedPct))
+}
+
+// rootDiskReady reports the host's root filesystem against the same
+// danger level as the snapshot disk. It replaces the forkd-era
+// spoond-soak.timer's watch: the only catch that timer still owned was
+// the root disk reaching 94 % on 2026-10-11 when docker's image-build
+// cache filled it, and /readyz owns that watch now. The default path
+// is "/"; tests override it the way they override the snapshot disk's.
+func (s *Service) rootDiskReady(ctx context.Context) readyCheck {
+	c := readyCheck{Name: "root disk"}
+	dev, ok := rootDiskDevice(rootDiskPath(s.cfg))
+	snapDev, snapOK := rootDiskDevice(s.cfg.TemplateStoragePath)
+	if ok && snapOK && dev == snapDev {
+		// One filesystem, already watched by the snapshot disk's check:
+		// the root check drops itself rather than report the same disk
+		// twice.
+		return skipCheck(c, skipSameFilesystemDetail)
+	}
+	return s.diskReadyOn(c, rootDiskPath(s.cfg), ctx)
+}
+
+// skipSameFilesystemDetail is the detail the root-disk check carries
+// when its path shares the snapshot disk's filesystem; the check is
+// left out of the response body — one filesystem, one verdict.
+const skipSameFilesystemDetail = "same filesystem as the snapshot disk"
+
+// skipCheck marks a check's result as intentionally absent — so far
+// only the root disk's same-filesystem outcome — so runReadyz drops it
+// from the response.
+func skipCheck(c readyCheck, detail string) readyCheck {
+	c.skip, c.Detail = true, detail
+	return c
 }
 
 // hugepagesCheck reports the hugepage pool against the dashboard's

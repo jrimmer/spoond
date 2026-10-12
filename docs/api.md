@@ -2278,10 +2278,16 @@ a healthy one.
 No auth. Readiness for an external uptime monitor: `200
 {"status":"ok"}` only when every check passes — the orchestrator's
 node info reports the node healthy, the catalog answers a trivial
-query, and the snapshot disk and hugepage pool sit below the
-dashboard's danger levels (90 % / 92 % used). Otherwise `503` with
+query, and the snapshot disk, the host's root filesystem and the
+hugepage pool sit below the dashboard's danger levels (90 % / 90 % /
+92 % used). Otherwise `503` with
 `{"status":"fail","checks":[{"name","ok","detail"}…]}` naming each
-failing check. A `draining` check names the admin drain state; it never
+failing check. Two disk checks watch two filesystems: `disk` the
+snapshot store's, and `root disk` the host's root filesystem (`/`;
+`E2B_ROOT_FS_PATH` overrides the path only for tests). When both
+paths sit on one filesystem (same st_dev) only the snapshot disk's
+check is reported, so a filesystem is never counted twice. A
+`draining` check names the admin drain state; it never
 fails readiness (the create route's 503 draining is the refusal).
 Every check is bounded to 2 s and the answer is cached for 5 s. See
 [operations.md](operations.md) for a Gatus example; the dashboard

@@ -60,17 +60,32 @@ func getReadyz(t *testing.T, ts *httptest.Server, want int) (*http.Response, rea
 // checkByName returns the named check from a result.
 func checkByName(t *testing.T, r readyzResult, name string) readyCheck {
 	t.Helper()
+	c, ok := findCheck(r, name)
+	if !ok {
+		t.Fatalf("no %q check in %+v", name, r.Checks)
+	}
+	return c
+}
+
+// findCheck returns the named check without failing when it is absent;
+// only the root disk's check may legally be missing (its
+// same-filesystem drop), so every other caller goes through
+// checkByName.
+func findCheck(r readyzResult, name string) (readyCheck, bool) {
 	for _, c := range r.Checks {
 		if c.Name == name {
-			return c
+			return c, true
 		}
 	}
-	t.Fatalf("no %q check in %+v", name, r.Checks)
-	return readyCheck{}
+	return readyCheck{}, false
 }
 
 // A healthy backend is ready: 200, status ok, and every named check
-// passing. No bearer token is sent — the endpoint is auth-exempt.
+// passing. No bearer token is sent — the endpoint is auth-exempt. The
+// root-disk check's own verdicts have their tests (healthy on another
+// filesystem in TestReadyzRootDiskOwnPath, dropped on the same device
+// in TestReadyzRootDiskSameDeviceOneCheck): whichever shape this host
+// takes, the core checks must still pass.
 func TestReadyzHealthy(t *testing.T) {
 	ts, _, _ := newReadyzServer(t)
 
@@ -86,6 +101,64 @@ func TestReadyzHealthy(t *testing.T) {
 		if !c.OK {
 			t.Errorf("check %q failed: %s", c.Name, c.Detail)
 		}
+	}
+}
+
+// rootDiskName is the readyz check's name for the host's root
+// filesystem, kept beside the check so the tests cannot drift from it.
+const rootDiskName = "root disk"
+
+// otherFilesystemDir returns an existing directory whose filesystem
+// device differs from dir's, so a test can hold the readyz root disk
+// and the snapshot disk on two real filesystems whatever the host mounts
+// where. The candidates are mounts every Linux host and container
+// carries (statting them needs no privileges); a machine that offers
+// none of them on another device gets a skip, not a false pass.
+func otherFilesystemDir(t *testing.T, dir string) string {
+	t.Helper()
+	own, ok := rootDiskDevice(dir)
+	if !ok {
+		t.Fatalf("stat %q failed: cannot compare filesystem devices", dir)
+	}
+	for _, cand := range []string{"/", "/dev/shm", "/run", "/proc", "/sys"} {
+		dev, ok := rootDiskDevice(cand)
+		if ok && dev != own {
+			return cand
+		}
+	}
+	t.Skipf("no directory on a second filesystem (/ /dev/shm /run /proc /sys all stat on the same device as %s); cannot separate the readyz disk checks here", dir)
+	return ""
+}
+
+// TestReadyzRootDiskOwnPath: the healthy backend stays ready with the
+// root check's path overriding the default "/" — the override works
+// even when it would otherwise merge with the snapshot store's
+// filesystem, and the check reads the real path it was given.
+func TestReadyzRootDiskOwnPath(t *testing.T) {
+	ts, svc, _ := newReadyzServer(t)
+	svc.cfg.RootFSPath = otherFilesystemDir(t, svc.cfg.TemplateStoragePath)
+	findRoot := func(r readyzResult) readyCheck {
+		t.Helper()
+		c, ok := findCheck(r, rootDiskName)
+		if !ok {
+			t.Fatalf("no %q check in %+v", rootDiskName, r.Checks)
+		}
+		return c
+	}
+	deadline := time.Now().Add(readyzCacheFor + 2*time.Second)
+	for {
+		resp, r := getReadyz(t, ts, http.StatusOK)
+		c := findRoot(r)
+		if c.OK {
+			if resp.StatusCode != http.StatusOK || r.Status != "ok" {
+				t.Fatalf("healthy backend with the root check on its own path: %d %+v", resp.StatusCode, r)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the root disk check never passed: %s", c.Detail)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -133,6 +206,25 @@ func TestReadyzEachFailingCheck(t *testing.T) {
 		assertNotReady(t, ts, "disk")
 	})
 
+	t.Run("root disk past danger level", func(t *testing.T) {
+		ts, svc, _ := newReadyzServer(t)
+		// The root check's path sits on another filesystem than the
+		// snapshot store's — on a one-device host (t.TempDir() and "/" on
+		// the same disk) the same-device rule would drop the check before
+		// its verdict could be seen. One injected reader feeds both disk
+		// checks 95 %.
+		svc.cfg.RootFSPath = otherFilesystemDir(t, svc.cfg.TemplateStoragePath)
+		svc.diskCapacity = func(string) (uint64, uint64, error) { return 100, 5, nil } // 95 % used
+		assertNotReady(t, ts, "root disk")
+	})
+
+	t.Run("root disk unreadable", func(t *testing.T) {
+		ts, svc, _ := newReadyzServer(t)
+		svc.cfg.RootFSPath = filepath.Join(t.TempDir(), "missing", "root")
+		svc.diskCapacity = statfsCapacity // the real statfs: the path does not exist
+		assertNotReady(t, ts, "root disk")
+	})
+
 	t.Run("hugepages past danger level", func(t *testing.T) {
 		ts, _, sub := newReadyzServer(t)
 		sub.SetNodeInfo(substrate.NodeInfo{
@@ -176,6 +268,35 @@ func assertNotReady(t *testing.T, ts *httptest.Server, name string) {
 		if c.Name != name && !c.OK && c.Detail == "" {
 			t.Errorf("check %q also failed but carries no detail", c.Name)
 		}
+	}
+}
+
+// TestReadyzRootDiskSameDeviceOneCheck: when the root-disk path shares
+// one filesystem with the snapshot store (same st_dev), the response
+// keeps a single disk check. One filesystem must not be counted twice.
+// The condition is forced: the root path is set to the snapshot store's
+// own directory, whatever filesystems the host mounts. The one check
+// must be passing (the fake reader reports room); if something else
+// fails the verdict, every failing check must name its reason.
+func TestReadyzRootDiskSameDeviceOneCheck(t *testing.T) {
+	ts, svc, _ := newReadyzServer(t)
+	// The root check's path is forced onto the snapshot store's
+	// filesystem: same directory, so the same st_dev, on any host.
+	svc.cfg.RootFSPath = svc.cfg.TemplateStoragePath
+
+	resp, r := getReadyz(t, ts, http.StatusOK)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200: %+v", resp.StatusCode, r)
+	}
+	if _, ok := findCheck(r, rootDiskName); ok {
+		t.Errorf("a %q check is listed beside the snapshot disk's on one filesystem: %+v", rootDiskName, r.Checks)
+	}
+	disk := checkByName(t, r, "disk")
+	if !disk.OK {
+		t.Errorf("the one disk check failed: %s", disk.Detail)
+	}
+	if r.Status != "ok" {
+		t.Errorf("status %q: every failing check must name its reason: %+v", r.Status, r.Checks)
 	}
 }
 
