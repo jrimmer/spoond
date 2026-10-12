@@ -109,6 +109,73 @@ and ignores them; see
 
 ---
 
+## Self-description
+
+### `GET /api/capabilities` — what this spoond offers
+
+Any authenticated caller (the same grant as [`GET /api/images`](#get-apiimages)):
+one document an agent or person that only knows the API URL can read to
+learn everything this deployment offers. Stable field names; the answer
+never carries a secret value or another user's data:
+
+- `version` — the binary's version string (`spoond version`).
+- `api` — `base` (`"/api"`), `primary`/`alias` (the lease paths
+  `/api/leases` and its pre-2.0 twin `/api/sandboxes`), and `auth`: the
+  auth model — a bearer user token on the lease, images, snapshots,
+  users, usage and sizes routes; admin users and `ADMIN_TOKEN` reach
+  `/api/admin/*` and the admin user routes; `/healthz` and `/readyz`
+  need no token; `/metrics` takes `METRICS_TOKEN`; the lease id in the
+  path is the capability on `/llm/{lease-id}/`, the proxy hostname and
+  the guest heartbeat.
+- `endpoints` — every route the backend registers, one row per
+  registration: `method`, `path`, `summary` (the route's one-liner,
+  the heading text of its section in this document) and `admin` for the
+  routes an ordinary user token cannot reach alone. A test reads
+  `api/server.go`'s `HandleFunc` registrations and fails the build when
+  a registered route has no row here or a row survives an unregistered
+  route, so the document cannot silently drift from the mux.
+- `images` — the catalog's entries with a current build: `name`,
+  `capability` and `description` (the manifest's fields for the name,
+  absent for images built outside it), the default `vcpu`, `memory_mb`
+  and `disk_mb`, the effective `min_memory_mb`, and `warm_sizes` — the
+  same values [`GET /api/images?detail=1`](#get-apiimages) reports,
+  from the same catalog rows.
+- `sizes` — the size presets and the per-lease limits, the same
+  [`GET /api/sizes`](#get-apisizes--size-presets-and-limits) block.
+- `network_policies` — the four egress classes and their one-line
+  meanings:
+
+  | Policy | Meaning |
+  |---|---|
+  | `none` | nothing at all |
+  | `lan` | the LAN ranges (RFC 1918 minus the lease networks), host services, DNS, and every exposing peer's published ports |
+  | `internet` | everything public, plus the LAN ranges, host services, DNS, and every exposing peer's published ports |
+  | `restricted` *(default)* | host services, DNS, the allowlist, and the published ports of the peers the allowlist names |
+
+- `surfaces` — the other ways into a sandbox, each named only when this
+  host configures it: `ssh_gateway` (the address
+  `ssh <lease>@<addr>` reaches, `GATEWAY_ADDR`), `llm_gateway` (the
+  path prefix `/llm/{lease-id}/`; only when the backend built the
+  gateway, `LLM_UPSTREAM_URL` set), `mcp` (`binary` `spoond-dev-mcp`,
+  stdio, with the `tools` names the MCP server registers) and
+  `ci_runner` (the runner's `label`→`image` table, `IMAGE_MAP`;
+  present only when the backend knows it).
+
+`spoond capabilities` reads this endpoint and prints the summary (or
+`--json` for the raw document):
+
+```bash
+spoond capabilities            # summary
+spoond capabilities --json     # the raw document
+```
+
+The subcommand resolves the backend like `spoond doctor` probes it:
+`SPOOND_URL` (else `https://127.0.0.1:8890`, or `http` when `TLS_CERT`
+is unset) and the token from `--token`, `TOKEN`, or the first
+`CONSUMER_TOKENS` pair.
+
+---
+
 ## Leases
 
 ### `POST /api/leases` — create a lease

@@ -455,7 +455,7 @@ go build -tags 'nobackend,nomcp,norunner' -o spoond ./cmd/spoond  # subset
 ```
 
 Exclusion tags: `nobackend`, `nogateway`, `nomcp`, `norunner`,
-`noctl`, `noimages`, `nodoctor`, `nodrain`, `nodash` (excludes `dash`
+`noctl`, `noimages`, `nocapabilities`, `nodoctor`, `nodrain`, `nodash` (excludes `dash`
 and `top` together), `nonotify`.
 
 ```bash
@@ -465,6 +465,7 @@ and `top` together), `nonotify`.
 ./spoond runner     # Forgejo Actions runner
 ./spoond ctl        # control-plane CLI
 ./spoond images     # build images into E2B templates; list the catalog
+./spoond capabilities # what this spoond offers: images, sizes, policies, routes, surfaces
 ./spoond drain      # pause sandboxes before an orchestrator restart, resume after
 ./spoond doctor     # health checks (below)
 ./spoond dash       # read-only dashboard (browser)
