@@ -2493,6 +2493,13 @@ type leaseRequest struct {
 	netPolicy         string
 	netAllow          []string
 	holder, holderURL string
+	// comment is the free-text annotation the create body may carry
+	// (#132): the runner sends its job label ("forgejo job <id> <url>")
+	// with the create, so the lease and its `created` event name the job
+	// from the first moment — no separate comment call after the answer
+	// (which would leave the event silent). Capped by the comment route's
+	// validity: longer is refused like that route's.
+	comment string
 	// pinned asks spoond never to pause or delete the new lease before
 	// its own expiry (FS5). The holder labels never pin.
 	pinned        bool
@@ -2711,6 +2718,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		ExposePorts: req.exposePorts,
 		Holder:      req.holder,
 		HolderUrl:   req.holderURL,
+		Comment:     req.comment,
 		Pinned:      req.pinned,
 		State:       "running",
 		// The lease's MiB charge (#128): the very number reserveQuota
@@ -3012,6 +3020,12 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	detail := fmt.Sprintf("granted from image %s in %s", image, eventDuration(time.Since(start)))
 	if snap != nil {
 		detail = fmt.Sprintf("started from snapshot %s@%d in %s", snap.row.Name, snap.row.Version, eventDuration(time.Since(start)))
+	}
+	// A create that came with a comment (#132, the runner's job label)
+	// names it on the event too, cut to keep the line short: the lease
+	// row already carries the full comment.
+	if req.comment != "" {
+		detail += " · " + cutDetail(req.comment, createdDetailCommentCap)
 	}
 	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, detail)
 	createReason := "new"

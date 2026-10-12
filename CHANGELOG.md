@@ -61,6 +61,21 @@ summarised from README "Status".
   killed, not paused; see Restarting the orchestrator), FAIL when the
   unit is `failed`/`inactive`. Prompted by the 2026-10-12 03:08 PT
   restart-during-activating loss.
+- **The dashboard's last two events (#132).** A CI job lease's `created`
+  line is re-labelled as the job's start: the runner sends the job's
+  comment (`forgejo job <id> <job URL>`, #119) in the create body, the
+  backend lands it on the lease and cuts it into the `created` event's
+  detail (at most 120 characters), and the events panel draws the line
+  with the type word `runner` in the green ok role, the short lease id
+  in the id column and the subject `ci job N started` — no new backend
+  event. An idle-sweep pass that suspended at least one lease emits one
+  lease-less `sweep` event next to the pass's per-lease
+  `idle_suspended` events, detail `N suspended`; a pass that suspended
+  nothing emits nothing. The panel draws it `idle sweep · N suspended`
+  with the type word dim, its subject `spoond`. `POST /api/leases`
+  (and its `/api/sandboxes` alias) gains the create-body `comment`
+  field with the comment route's own 512-character cap. No schema
+  change.
 
 ## [3.6.1] - 2026-10-12
 

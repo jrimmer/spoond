@@ -162,6 +162,14 @@ const (
 	// paused leases. Spoond's own maintenance, not a lease's: it carries
 	// no lease id and no owner.
 	LeaseDiskCleanup LeaseEventType = "disk_cleanup"
+	// LeaseSweep marks one idle-sweep pass that suspended at least one
+	// lease (#132 part 2): the per-lease `idle_suspended` events name the
+	// leases, this one summarizes the pass. Like `gc` it is spoond's own
+	// maintenance, not a lease's lifecycle: no lease id, no owner, so a
+	// per-lease stream never matches it and only the all-leases stream
+	// (and the events-only token) carries it. The detail is "N
+	// suspended"; a pass that suspended nothing emits nothing.
+	LeaseSweep LeaseEventType = "sweep"
 )
 
 // LeaseEvent is one lease lifecycle change. Reason, PolicyStep and
@@ -522,6 +530,21 @@ func (s *Service) emitTakeBackSuspendEvent(leaseID, owner, buildID string, ratio
 func (s *Service) emitGCEvent(detail string) {
 	s.bus.emit("", "", LeaseGC, detail)
 }
+
+// emitSweepEvent records one idle-sweep summary event: a pass that
+// suspended at least one lease (#132 part 2). Like the gc event it is
+// spoond's own maintenance, not a lease's: the event carries no lease
+// id and no owner, so a per-lease subscription never receives it and
+// only the all-leases stream (and the events-only token) does. A pass
+// that suspended nothing never calls this.
+func (s *Service) emitSweepEvent(detail string) {
+	s.bus.emit("", "", LeaseSweep, detail)
+}
+
+// createdDetailCommentCap cuts a created event's appended comment (#132)
+// at: long enough for a full CI job label, short enough that the detail
+// stays one dashboard line.
+const createdDetailCommentCap = 120
 
 // Lease-event detail formats (2.5, #132 part 2). The units stay in the
 // event text rather than a machine field: the dashboard draws the detail

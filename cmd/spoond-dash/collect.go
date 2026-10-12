@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jrimmer/spoond/v3/runner"
+
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
@@ -197,13 +199,25 @@ func (b *eventBuffer) newest(n int) []dashEvent {
 	return out
 }
 
-// eventStyle is the grid style an event is drawn with: warn for lost,
-// held-lease actions and idle suspensions, and for a release or gc pass
-// whose detail names a failure (the CI runner's "✗", the GC's stale-build
-// failure); ok for a gc pass that deleted something (spoond's own
-// maintenance); dim for releases, text for the rest.
+// eventStyle is the grid style an event is drawn with: ok for a CI job
+// start (the runner's own work, like the gc maintenance) and for a gc
+// pass that deleted something, dim for the idle-sweep pass summary (the
+// news is the per-lease idle_suspended lines), warn for lost, held-lease
+// actions and idle suspensions, and for a release or gc pass whose
+// detail names a failure (the CI runner's "✗", the GC's stale-build
+// failure); dim for releases, text for the rest.
 func eventStyle(ev dashEvent) string {
+	// A CI job's start line (#132) — a created event re-labelled to the
+	// word "runner" (the row's own word after the relabelling), or the
+	// still-unlabelled create — draws as the runner's work, in ok.
+	if ev.Type == "runner" || ciJobStartRelabel(ev, nil) {
+		return "ok"
+	}
 	switch ev.Type {
+	case "sweep":
+		// The idle-sweep pass summary (#132): the news lives on the
+		// per-lease idle_suspended lines, so the summary draws dim.
+		return "dim"
 	case "lost", "held_action", "job_lost", "idle_suspended", "user_deleted":
 		return "warn"
 	case "gc":
@@ -223,6 +237,60 @@ func eventStyle(ev dashEvent) string {
 	}
 }
 
+// ciJobLabelRe recognises the comment the runner puts on every lease it
+// grants: runner.JobLabelPrefix ("forgejo job "), then "<jobID> <url>"
+// (runner/executor.go). The comment is what names the lease's CI job.
+var ciJobLabelRe = regexp.MustCompile(`^` + regexp.QuoteMeta(runner.JobLabelPrefix) + `(\d+) `)
+
+// ciJobLabelComment reports whether a comment marks a runner job lease
+// and, when it does, returns the job id it names.
+func ciJobLabelComment(comment string) (int64, bool) {
+	m := ciJobLabelRe.FindStringSubmatch(comment)
+	if m == nil {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
+// ciJobStartRelabel reports whether an event is drawn as a CI job's
+// start line: a created event whose lease the rows show carrying the
+// runner's job comment (#132), re-labelled to the word "runner".
+func ciJobStartRelabel(ev dashEvent, rows []LeaseRow) bool {
+	return lookupRelabelled(ev, rows) != nil
+}
+
+// relabelledEvent is one re-labelled event (a CI job start, #132): the
+// word drawn in the type column ("runner"), the job id it names and the
+// short lease id it was granted for. Nil for an event that is drawn as
+// it arrived.
+type relabelledEvent struct {
+	Word  string
+	Job   int64
+	Lease string
+}
+
+// lookupRelabelled is relabelEvent with the lease rows the relabelling
+// reads; the caller passes the tick's rows.
+func lookupRelabelled(ev dashEvent, rows []LeaseRow) *relabelledEvent {
+	if ev.Type != "created" {
+		return nil
+	}
+	comment := leaseComment(rows, ev.LeaseID)
+	if comment == "" {
+		// Not in the table (or no comment): the plain created line.
+		return nil
+	}
+	job, ok := ciJobLabelComment(comment)
+	if !ok {
+		return nil
+	}
+	return &relabelledEvent{Word: "runner", Job: job, Lease: shortID(ev.LeaseID)}
+}
+
 // jobExitedStyle picks the job_exited line's style: a non-zero exit is
 // drawn in the warning colour (2.6, #135), a zero exit like any other
 // event.
@@ -240,8 +308,14 @@ func jobExitedStyle(detail string) string {
 // are the live lease table the same tick built; a lease that has left
 // it (released) falls through to the event's owner.
 func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string {
-	// A lease-less event (the catalog gc, box_full, admin_unpin) carries
-	// no lease id or the placeholder "-", so it names spoond.
+	// A re-labelled CI job start's subject was set by the relabelling
+	// ("ci job N started", the line the word "runner" fronts, #132).
+	if ev.Type == "runner" {
+		return ev.Subject
+	}
+	// A lease-less event (the catalog gc, box_full, admin_unpin, the
+	// idle-sweep summary) carries no lease id or the placeholder "-", so
+	// it names spoond.
 	if ev.LeaseID == "" || ev.LeaseID == "-" {
 		return "spoond"
 	}
@@ -251,6 +325,13 @@ func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string
 				return r.Holder
 			}
 			if r.Comment != "" {
+				// A runner job lease's comment ("forgejo job <id>
+				// <url>", executor.go) is the job it runs: the long URL
+				// stays out of the subject and the column keeps its
+				// room for a real holder or note.
+				if job, ok := ciJobLabelComment(r.Comment); ok {
+					return "ci job " + strconv.FormatInt(job, 10)
+				}
 				return r.Comment
 			}
 			break
@@ -262,6 +343,18 @@ func eventSubject(ev dashEvent, rows []LeaseRow, names map[string]string) string
 		return n
 	}
 	return ev.Subject
+}
+
+// leaseComment is lease id's comment from the last tick's lease rows:
+// "" when the lease is not in the table any more (released, gone) or
+// has none. The events panel's CI-job re-labelling reads it.
+func leaseComment(rows []LeaseRow, id string) string {
+	for _, r := range rows {
+		if r.ID == id {
+			return r.Comment
+		}
+	}
+	return ""
 }
 
 // Service is a systemd unit and its state.
@@ -367,7 +460,9 @@ func newCollector(cfg Config) *collector {
 }
 
 // eventsURL is the lease events stream URL: the metrics URL's scheme
-// and host (the same backend), /api/leases/events on the path.
+// and host (the same backend), /api/leases/events on the path. No query:
+// a lease-less stream (no lease_id) already carries the lease-less
+// events (gc, sweep, box_full) beside the leased ones.
 func eventsURL(metricsURL string) string {
 	u, err := url.Parse(metricsURL)
 	if err != nil || u.Host == "" {
@@ -837,6 +932,19 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 	lines := make([]EventLine, 0, len(evs))
 	rows := c.lastRows()
 	names := c.userNames()
+	// A CI job lease's created event is re-labelled as the job's start
+	// line (#132): the type word becomes "runner", the job's id is what
+	// the subject names, and the short lease id stays in the id column.
+	// The lease's comment, looked up from the same tick's rows, names the
+	// job. Applied before the column widths are taken, so the word sizes
+	// the column like every other's.
+	for i := range evs {
+		if rel := lookupRelabelled(evs[i], rows); rel != nil {
+			evs[i].Type = rel.Word
+			evs[i].Subject = "ci job " + strconv.FormatInt(rel.Job, 10) + " started"
+			evs[i].LeaseID = rel.Lease
+		}
+	}
 	// The type and subject columns are as wide as the events shown need
 	// (the subject at most eventSubjectMax, cut with …), so the detail —
 	// the part that varies most — gets the rest of the row.
@@ -845,7 +953,11 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 		if ev.Type == "gap" {
 			continue
 		}
-		typeW = max(typeW, len([]rune(ev.Type)))
+		typ := ev.Type
+		if ev.Type == "sweep" {
+			typ = "idle sweep" // the drawn word, as below
+		}
+		typeW = max(typeW, len([]rune(typ)))
 		subjW = max(subjW, len([]rune(eventSubject(ev, rows, names))))
 	}
 	subjW = min(subjW, eventSubjectMax)
@@ -858,7 +970,13 @@ func (c *collector) eventLines(now time.Time) []EventLine {
 			lines = append(lines, EventLine{Text: at + "  ┄ events missed while reconnecting", Style: "warn"})
 			continue
 		}
-		text := strings.TrimRight(fmt.Sprintf("%s  %-*s  %-10s  %-*s  %s", at, typeW, ev.Type, ev.LeaseID,
+		typ := ev.Type
+		if ev.Type == "sweep" {
+			// The idle-sweep pass summary: its word on the line is the
+			// full "idle sweep" (#132), not the bus's bare "sweep".
+			typ = "idle sweep"
+		}
+		text := strings.TrimRight(fmt.Sprintf("%s  %-*s  %-10s  %-*s  %s", at, typeW, typ, ev.LeaseID,
 			subjW, ellipsize(eventSubject(ev, rows, names), subjW), shortBuildIDs(ev.Detail)), " ")
 		style := eventStyle(ev)
 		if ev.Type == "job_exited" {

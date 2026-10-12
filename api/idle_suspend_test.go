@@ -477,6 +477,86 @@ func TestIdleSuspendEmitsEvent(t *testing.T) {
 	}
 }
 
+// TestSweepEventPerSuspendingPass: a sweep pass that suspended at least
+// one lease emits exactly ONE lease-less `sweep` event next to the
+// per-lease `idle_suspended` events (#132), with the count as its
+// detail; it reaches the all-leases stream but never a per-lease
+// subscription, and no event at all when nothing was suspended.
+func TestSweepEventPerSuspendingPass(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	ctx := context.Background()
+
+	base := time.Now()
+	svc.now = func() time.Time { return base }
+	l1, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	l2, err := svc.grant(ctx, "c", "py-base", time.Hour, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant 2: %v", err)
+	}
+	for _, l := range []*Lease{l1, l2} {
+		if _, err := svc.setIdlePolicy(l, 60); err != nil {
+			t.Fatalf("setIdlePolicy: %v", err)
+		}
+		svc.store.mu.Lock()
+		l.LastActive = base
+		svc.store.mu.Unlock()
+	}
+
+	// A pass below both thresholds suspends nothing and emits nothing.
+	all := svc.Subscribe(EventFilter{})
+	svc.suspendIdleLeases(ctx, base.Add(59*time.Second))
+	all.Close()
+	if got := collectEvents(all.C); len(got) != 0 {
+		t.Fatalf("a pass that suspended nothing emitted %v, want nothing", eventTypes(got))
+	}
+
+	// One pass past both thresholds: exactly one sweep event, "2
+	// suspended", without lease id or owner.
+	all = svc.Subscribe(EventFilter{})
+	perLease1 := svc.Subscribe(EventFilter{LeaseID: l1.ID})
+	svc.suspendIdleLeases(ctx, base.Add(2*time.Minute))
+	all.Close()
+	perLease1.Close()
+
+	events := collectEvents(all.C)
+	var sweep []LeaseEvent
+	for _, ev := range events {
+		if ev.Type == LeaseSweep {
+			sweep = append(sweep, ev)
+		}
+	}
+	if len(sweep) != 1 {
+		t.Fatalf("got %d sweep events (%v), want 1", len(sweep), eventTypes(events))
+	}
+	if d := sweep[0].Detail; d != "2 suspended" {
+		t.Fatalf("sweep detail = %q, want \"2 suspended\"", d)
+	}
+	if sweep[0].LeaseID != "" || sweep[0].Owner != "" {
+		t.Fatalf("sweep event has a lease or owner: %+v", sweep[0])
+	}
+	// The summary's count matches the idle_suspended events on the same
+	// stream: the pass suspended both leases.
+	idle := 0
+	for _, ev := range events {
+		if ev.Type == LeaseIdleSuspended {
+			idle++
+		}
+	}
+	if idle != 2 {
+		t.Fatalf("got %d idle_suspended events, want 2", idle)
+	}
+	// A per-lease subscription never sees the summary.
+	for _, ev := range collectEvents(perLease1.C) {
+		if ev.Type == LeaseSweep {
+			t.Fatalf("per-lease subscription saw the sweep event: %+v", ev)
+		}
+	}
+}
+
 // TestIdleSuspendZeroNeverSwept: idle_suspend 0 (or a 0 host default)
 // never suspends on the idle sweep.
 func TestIdleSuspendZeroNeverSwept(t *testing.T) {

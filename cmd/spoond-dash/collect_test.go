@@ -362,6 +362,75 @@ func TestEventLinesGC(t *testing.T) {
 	}
 }
 
+// TestEventLinesCIJobStart: a created event whose lease's comment is the
+// runner's job label ("forgejo job <id> <url>", executor.go) is
+// re-labelled as the job's start (2.6, #132): the type word "runner" in
+// the green ok style, the short lease id in its own column, the subject
+// naming the job ("ci job N started"). A created event for any other
+// lease stays a plain created line.
+func TestEventLinesCIJobStart(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.lastRow = []LeaseRow{{ID: "abcdef0123", Comment: "forgejo job 3609 https://code.example.com/site/actions/runs/91/jobs/3609"}}
+	c.events.add(dashEvent{At: at, Type: "created", LeaseID: "abcdef0123", Subject: "ci",
+		Detail: "granted from image py-base in 61 ms"})
+	lines := c.eventLines(at)
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	l := lines[0]
+	want := "04:15:59  runner  abcdef0123  ci job 3609 started  granted from image py-base in 61 ms"
+	if l.Text != want {
+		t.Fatalf("ci job start line =\n%q\nwant\n%q", l.Text, want)
+	}
+	if l.Style != "ok" {
+		t.Fatalf("ci job start style = %q, want ok", l.Style)
+	}
+
+	// A created event for any other lease stays a plain created line,
+	// text-styled, id column filled.
+	c.events.add(dashEvent{At: at, Type: "created", LeaseID: "abcdef9999", Subject: "jason",
+		Detail: "granted from image py-base in 2 ms"})
+	plain := c.eventLines(at)[0]
+	if !strings.Contains(plain.Text, "created") || !strings.Contains(plain.Text, "abcdef9999") || plain.Style != "text" {
+		t.Fatalf("plain created line broken: %+v", plain)
+	}
+}
+
+// TestEventLinesSweepSummary: one sweep event (the backend's #132
+// summary of an idle-sweep pass that suspended leases) draws
+// "idle sweep · N suspended" (the drawn word, not the bus's bare
+// "sweep"), lease-less, subject spoond, its type word and line dim — the
+// news is the per-lease idle_suspended lines. The idle sweep's
+// suspension column is the detail, and the drawn type word sizes the
+// type column ("idle sweep", 10 runes) for the other lines too.
+func TestEventLinesSweepSummary(t *testing.T) {
+	c := newCollector(Config{EventsToken: "t"})
+	at := time.Date(2026, 10, 5, 4, 15, 59, 0, time.UTC)
+	c.events.add(dashEvent{At: at, Type: "sweep", Detail: "2 suspended"})
+	lines := c.eventLines(at)
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	l := lines[0]
+	want := "04:15:59  idle sweep              spoond  2 suspended"
+	if l.Text != want {
+		t.Fatalf("sweep line =\n%q\nwant\n%q", l.Text, want)
+	}
+	if l.Style != "dim" {
+		t.Fatalf("sweep line style = %q, want dim", l.Style)
+	}
+
+	// The lease id column is empty for the lease-less summary, like the
+	// gc line's (TestEventLinesGC): the padded empty id column leaves one
+	// 2-space gap around a 10-space id field between the columns.
+	i := strings.Index(l.Text, "idle sweep")
+	j := strings.Index(l.Text, "spoond")
+	if i < 0 || j < 0 || j-i-10 != 14 {
+		t.Fatalf("the lease id column is not collapsed for a lease-less sweep: %q", l.Text)
+	}
+}
+
 // TestEventLinesLeaseLessPlaceholder: the box_full and admin_unpin
 // events carry the placeholder lease id "-"; the events panel still
 // names spoond as their subject, not the placeholder (spoond-k0uz L10).

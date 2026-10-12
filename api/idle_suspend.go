@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -98,6 +99,14 @@ func (s *Service) suspendIdleLeases(ctx context.Context, now time.Time) {
 		s.recordIdleSuspend(l, lastActive, now)
 		suspended++
 		time.Sleep(500 * time.Millisecond)
+	}
+	// One summary event per sweep pass that suspended something (#132):
+	// the per-lease `idle_suspended` events name the leases; after the
+	// sweep's own staggered pauses have all landed, one lease-less
+	// `sweep` event says how much this pass took. A pass that suspended
+	// nothing emits nothing.
+	if suspended > 0 {
+		s.emitSweepEvent(fmt.Sprintf("%d suspended", suspended))
 	}
 }
 

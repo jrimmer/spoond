@@ -201,6 +201,7 @@ Request:
 | `expose_ports` | []int | *(none)* | guest TCP ports published for peer leases. Max 8; port 49983 (envd) is refused; duplicates and out-of-range ports are refused |
 | `holder` | string | `""` | a plain label naming what holds the lease (a CI job, an orchestrator's flight, a person's scratch work), at most 128 printable characters. **No lifecycle effect since v3.0:** it never pins, never keeps the lease past its TTL and never protects it from take-back. Use `pinned` for that |
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
+| `comment` | string | `""` | the lease's free-text annotation set at create time rather than through the comment route after the answer (#132): the CI runner sends its job label `forgejo job <id> <job URL>`, so the lease and its `created` event name the job from the first moment. Same validity as the comment route (at most 512 characters; longer is `400`) |
 | `hold_ttl` | int | *(removed)* | **removed in v3.0** (pins replace holds): accepted and ignored for one release, with a `Deprecation` header |
 | `pinned` | bool | `false` | pin the new lease: spoond never pauses or deletes it before its own expiry. The TTL still applies; a pinned persistent lease stays until the owner releases it. `holder`/`holder_url` never pin. See [Pins and the paused-release clock](#pins-and-the-paused-release-clock) |
 | `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
@@ -1702,7 +1703,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 
 | `event` | emitted when | `detail` names |
 |---|---|---|
-| `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`) |
+| `created` | a lease is granted, forked or cloned | the source image and how long the grant took, e.g. `granted from image py-base in 61 ms` (forks: the source lease and build; clones: the source lease and checkpoint build; a create from a named snapshot: `started from snapshot spoond/warm@3 in 410 ms`). A create that came with a `comment` (#132, e.g. the CI runner's job label) carries it after a ` · `, e.g. ` · forgejo job 3609 https://…/jobs/3609`, cut to 120 characters |
 | `released` | the lease is deleted (TTL sweep, `DELETE`, the one paused-release clock, a lost lease's grace period lapse) | why: the caller's `DELETE` reason when given (the runner sends e.g. `ci job 3609 ✓ 11m02s` or `ci job 3604 ✗ 4m10s`), else `deleted through the API`, `TTL expired`, `paused_expired` (the one clock released a paused lease 30 d after its pause date), `lost_expired` (the GC released a lost lease whose grace period lapsed), or `lease released`; when the backend had measured the lease (`OTEL_PROM_URL` set) the detail adds `· peak N MiB` — the lease's measured high-water mark in whole MiB — and nothing is added without a measurement |
 | `suspended` | the sandbox is paused into a build (suspend, drain, the lease's own idle_suspend, take-back) | the pause build id; the structured `reason`, `policy_step` and `build_id` fields name why (see [Wire format](#wire-format)) |
 | `take_back` | the lease was paused by memory take-back so another owner's request could fit; it always follows the lease's `suspended` event with reason `take_back`, and the lease resumes on its holder's next work call | `for <owner>: owner <ratio> over their slice; it resumes on the holder's next work call` |
@@ -1730,6 +1731,7 @@ every 15 s thereafter, so proxies do not close an idle stream.
 | `checkpoint_policy` | the lease's checkpoint interval changed on `PUT /api/leases/{id}/checkpoint-policy` | the new effective `checkpoint_interval` seconds |
 | `idle_policy` | the lease's idle threshold changed on `PUT /api/leases/{id}/idle-policy` | the new effective `idle_suspend` seconds |
 | `idle_suspended` | the idle sweep suspended the lease through the pause path | `idle for <duration>` |
+| `sweep` | an idle-sweep pass suspended at least one lease (spoond's own maintenance, not a lease's — one summary next to the pass's per-lease `idle_suspended` events); a pass that suspended nothing emits nothing | `N suspended`, e.g. `2 suspended` |
 | `gc` | a catalog GC pass deleted builds or failed a stale `building` row (spoond's own maintenance, not a lease's) | `N builds deleted · X GiB freed`, e.g. `1 build deleted · 512.0 MiB freed`; or `stale build <id> failed · build timed out` |
 | `drain_failed` | the admin drain could not pause the lease: it ran on into the orchestrator stop (spoond-52c) | the pause error |
 | `drain_deferred` | an undrain (or the drain self-heal loop) could not resume the drained lease yet: an admission refusal, a capacity answer, an indeterminate orchestrator error, or a bounded context (spoond-52c, spoond-638d) | `after N attempt(s): <error>`; the lease stays `drained` for a retry |
@@ -1755,8 +1757,11 @@ the stale-building sweep does emit one per row it fails even in dry-run
 mode, because a template build has no owner and never appears in
 `/api/snapshots`, so the event is where its failure is visible.
 `drain_healed` is lease-less the same way, and so is `user_deleted`
-(it carries the removed owner); `drain_failed` and `drain_deferred`
-name their lease (and owner), so they reach the per-lease stream too.
+(it carries the removed owner); `sweep` is lease-less like `gc` (one
+summary per idle-sweep pass that suspended something, the news on the
+pass's per-lease `idle_suspended` lines); `drain_failed` and
+`drain_deferred` name their lease (and owner), so they reach the
+per-lease stream too.
 
 ### Resume and gaps
 

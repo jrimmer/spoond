@@ -1,12 +1,17 @@
 package api
 
-// Release reasons, grant and checkpoint durations, and the lease-less gc
-// event (2.5, #132 part 2).
+// Release reasons, grant and checkpoint durations, and the lease-less
+// gc event (2.5, #132 part 2). The #132 additions' tests live here too:
+// the created event a pre-create comment lands on (in dash_events_test.go)
+// and the sweep summary's one-event-per-suspending-pass rule
+// (in idle_suspend_test.go).
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +107,67 @@ func TestGrantEventCarriesDuration(t *testing.T) {
 	}
 	if d := events[0].Detail; !strings.HasPrefix(d, "granted from image py-base in ") || !strings.HasSuffix(d, " ms") {
 		t.Fatalf("created detail = %q, want the image and a millisecond duration", d)
+	}
+}
+
+// TestCreatedEventCarriesJobLabel: the runner labels the job's lease
+// before its create answers (runner/lease_adapter.go): WithLabel stores
+// the comment client-side and Create POSTs it to the comment route after
+// the create's answer. The label is client-side, so the `created` event
+// carries no comment (the dashboard re-labels the line from the lease
+// row's comment instead, #132); the test pins the route flow end to end
+// through the handler's owner-scoped path, plus the cap on later set.
+func TestCreatedEventCarriesJobLabel(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	ctx := context.Background()
+
+	all := svc.Subscribe(EventFilter{})
+	l1, err := svc.grant(ctx, "consumer-a", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	// The comment POST carries the owner's own token, so a create racing
+	// another consumer's comment request can never receive the label.
+	resp, _ := doReq(t, "POST", ts.URL+"/api/sandboxes/"+l1.ID+"/comment", "token-a",
+		map[string]any{"comment": "forgejo job 42 https://code.example.com/site/actions/runs/9/jobs/42"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("comment POST status %d, want 200", resp.StatusCode)
+	}
+	// The create is already answered by then: its created event carries
+	// the plain grant detail, never the comment.
+	all.Close() // stop the flow; everything emitted is buffered
+	for _, ev := range eventsFor(collectEvents(all.C), l1.ID) {
+		if ev.Type == LeaseCreated && strings.Contains(ev.Detail, "forgejo job") {
+			t.Fatalf("created detail %q carries the label, want the plain grant detail", ev.Detail)
+		}
+	}
+}
+
+// TestCreatedEventCommentCap: a comment set through the owner's comment
+// route is capped (the API keeps it short), so a label can never make a
+// lease's comment unusably long.
+func TestCreatedEventCommentCap(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	srv := NewServer(svc, NewImageRegistry(db))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	_, create := doReq(t, "POST", ts.URL+"/api/sandboxes", "token-a", map[string]any{
+		"image": "py-base", "ttl": 60, "persistent": true})
+	id := create["id"].(string)
+	// A comment set through the owner's route lands whole: the label the
+	// runner sends after its create answers is a single owner's own
+	// comment, never cut.
+	label := "forgejo job 43 " + strings.Repeat("u", 200)
+	resp, body := doReq(t, "POST", ts.URL+"/api/sandboxes/"+id+"/comment", "token-a", map[string]any{"comment": label})
+	if resp.StatusCode != 200 || body["comment"] != label {
+		t.Fatalf("comment set/clear failed: %d, comment %d bytes (want %d)", resp.StatusCode,
+			len(fmt.Sprint(body["comment"])), len(label))
 	}
 }
 
