@@ -132,7 +132,9 @@ func (s *Server) noteDeprecatedAlias(r *http.Request, u *identity.User, owner st
 // throttled log line. The gateway carries no owner token, so the
 // identity is the lease's owner id.
 func (g *llmGateway) noteDeprecatedKeylessLLM(leaseID, owner string) {
-	g.metrics.DeprecatedReqs.WithLabelValues(depKindLLMKeyless).Inc()
+	if g.metrics != nil {
+		g.metrics.DeprecatedReqs.WithLabelValues(depKindLLMKeyless).Inc()
+	}
 	if g.depLog.allow(owner, time.Now()) {
 		g.log.Printf("deprecated keyless LLM access under LLM_OPEN_LEGACY (removed in 4.0); the lease owner must configure an LLM key: caller=%s lease=%s", owner, leaseID)
 	}
