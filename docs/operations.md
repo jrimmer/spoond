@@ -1621,6 +1621,7 @@ marker. The substrate-specific series:
 | `spoond_snapshot_disk_reserved_bytes` | snapshot disk reserved for the running leases (their whole `disk_mb`; FS3b) |
 | `spoond_snapshot_disk_usable_bytes` | snapshot disk a new request may use: free − reserved − the `DISK_RESERVE_PCT` floor − pending + freeing; negative means short (FS3b) |
 | `spoond_box_full_total` | requests refused `box_full`: a request needed room and take-back could free none — every candidate was pinned, or the requester was itself the biggest borrower (v3.0 FS5, FS2b) |
+| `spoond_deprecated_requests_total{kind}` | requests served through a surface 4.0 removes (#139 groundwork): `sandboxes_alias` — an authenticated call on the `/api/sandboxes` spelling of the lease API (which also answers with `Deprecation`/`Link` headers) — or `llm_keyless` — an LLM-gateway request served only because `LLM_OPEN_LEGACY=1` kept a keyless owner open. Read it to decide whether removing either in 4.0 would break callers |
 | `spoond_take_backs_total` | leases paused by memory take-back so another owner's request could fit (v3.0 FS2a) |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |

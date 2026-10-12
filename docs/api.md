@@ -5,6 +5,8 @@ set, plain HTTP otherwise). The resource is the **lease**; every route
 lives under `/api/leases/…`. `/api/sandboxes/…` is a permanent alias for
 the same routes — identical behavior, auth and responses — kept for
 every client written before 2.0; new code should use `/api/leases/…`.
+See [Deprecated in 3.x, removed in 4.0](#deprecated-in-3x-removed-in-40)
+below for the alias's deprecation headers.
 All endpoints except `/healthz`, `/readyz`, the
 `/api/admin/*` routes (which carry their own `ADMIN_TOKEN`, or an admin
 user's token — see [Admin API](#admin-api)) and the
@@ -2325,6 +2327,34 @@ identity store present, keyless identity users are then denied outright
 `LLM_OPEN_LEGACY=1` to restore the pre-2.0 open behavior. The user key is
 replaced by the server-side upstream key before forwarding, so it never
 reaches the provider.
+
+## Deprecated in 3.x, removed in 4.0
+
+Two long-lived conveniences go away with the next major release
+(4.0); nothing changes behavior today, but every use is measured so the
+removal is decided on data (#139 groundwork). Move off both now:
+
+- **The `/api/sandboxes/…` path alias of the lease API.** Every
+  request still sent to a `/api/sandboxes/…` route — one not rewritten
+  from `/api/leases` — answers with the response headers
+  `Deprecation: true` and `Link: </api/leases…>; rel="successor-version"`
+  naming the same route on the primary path (RFC 8594), bumps
+  `spoond_deprecated_requests_total{kind="sandboxes_alias"}` and logs
+  at most once per caller per hour (the user/consumer id and the path,
+  never a token). The headers ride even a refused request, so a broken
+  client can find its way too.
+- **Keyless LLM-gateway access under `LLM_OPEN_LEGACY=1`.** A request
+  the gateway serves only because `LLM_OPEN_LEGACY=1` kept a keyless
+  identity-user owner open bumps
+  `spoond_deprecated_requests_total{kind="llm_keyless"}`, with the
+  same once-per-owner-per-hour log line. In 4.0 a lease owner without
+  an LLM key will always answer `401`: configure every LLM-using
+  identity user a key (`POST /api/users/{id}/llm-key`). Legacy
+  consumer-owned leases (no identity store) keep the capability model
+  and are not deprecated.
+
+Both counters sit in the metrics table in
+[operations.md](operations.md#metrics).
 
 ## Guest-service endpoints (port `HOST_GUEST_SERVICE_PORT`)
 
