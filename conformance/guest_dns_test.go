@@ -128,9 +128,12 @@ func resolveExpectLAN(t *testing.T, id, policy, host string) {
 
 // guestAPICode runs one guest-side HTTP probe of the API's /healthz and
 // returns the HTTP code curl reports ("000" when the egress path or the
-// connect fails).
+// connect fails). curl exits non-zero on a refused path (35 when the
+// egress proxy drops a restricted guest's handshake, 7 on a refused
+// connect), which is the expected answer under restricted, so the exec
+// itself must not fail on it.
 func guestAPICode(t *testing.T, id, apiBase string) string {
-	script := "curl -sk --max-time 8 -o /dev/null -w '%{http_code}' " + apiBase + "/healthz 2>/dev/null"
+	script := "curl -sk --max-time 8 -o /dev/null -w '%{http_code}' " + apiBase + "/healthz 2>/dev/null || true"
 	return strings.TrimSpace(execOK(t, id, script))
 }
 
