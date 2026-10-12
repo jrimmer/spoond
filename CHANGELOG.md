@@ -10,6 +10,19 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-10-12
+
+3.7 makes spoond describe itself and report more of what it sees.
+`GET /api/capabilities` (and `spoond capabilities`) returns every route,
+image, size, network policy and other way in. A released lease's event
+names its measured peak memory; a create may carry a `comment` that its
+`created` event shows, which the CI runner uses for its job label; idle
+sweeps report a summary event. The `/api/sandboxes` alias and keyless LLM
+access, both removed in 4.0, now answer with `Deprecation` headers and
+are counted, and spoond's own clients use `/api/leases`. `spoond doctor`
+warns while the orchestrator is still starting. No breaking changes and
+no schema change.
+
 ### Added
 
 - **Deprecation signals for the surfaces 4.0 removes (#139
