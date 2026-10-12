@@ -227,26 +227,6 @@ func (c *HTTPLeaseClient) waitForRetry(ctx context.Context, d time.Duration) err
 	}
 }
 
-// comment sets the lease's comment (POST /api/leases/{id}/comment).
-func (c *HTTPLeaseClient) comment(ctx context.Context, id, text string) error {
-	body, _ := json.Marshal(map[string]string{"comment": text})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/leases/"+id+"/comment", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("comment: status %d", resp.StatusCode)
-	}
-	return nil
-}
-
 // Exec runs a command in a sandbox. It retries transient backend errors
 // (500/502/503) up to 2 times with 1s/2s backoff. Permanent errors (410
 // Gone — sandbox no longer exists in the controller) and client errors
