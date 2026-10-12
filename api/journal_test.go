@@ -111,6 +111,11 @@ func TestJournalLineFormat(t *testing.T) {
 	if len(f) != len(want) {
 		t.Errorf("journal has %d fields, want %d (line: %s)", len(f), len(want), line)
 	}
+	// A release without a measured peak (#130) writes no peak_mib here
+	// and stays exactly this six-field shape.
+	if strings.Contains(line, "peak_mib") {
+		t.Errorf("peak-less release wrote a peak_mib (line: %s)", line)
+	}
 }
 
 // TestJournalLifecyclePaths drives create, suspend and release through
@@ -219,6 +224,93 @@ func TestJournalSuspendReason(t *testing.T) {
 			t.Errorf("journalSuspendReason(%+v, %v) = %q, want %q", c.pol, c.drained, got, c.want)
 		}
 	}
+}
+
+// TestJournalReleasePeakFieldOrder pins the parse order the docs
+// promise (operations.md): peak_mib sits between memory_mib and reason
+// on a release line — memory_mib is its left neighbour, reason its
+// right — and a release without a measurement has no peak_mib field at
+// all. Written against the field order, not just the field set, so a
+// writer that lets peak_mib drift after reason fails here.
+func TestJournalReleasePeakFieldOrder(t *testing.T) {
+	svc, db, _ := newTestService(t)
+	seedImage(t, db, "py-base", 2048)
+	l, err := svc.grant(context.Background(), "owner-1", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+
+	var buf strings.Builder
+	svc.log = log.New(&buf, "", 0)
+	svc.journalLeaseRelease(l, "ci job 3609 ✓ 11m02s", 413, true)
+
+	line := strings.TrimSpace(buf.String())
+	order := journalFieldOrder(t, line)
+	wantFrom, wantTo := "memory_mib", "reason"
+	for i, k := range order {
+		if k != "peak_mib" {
+			continue
+		}
+		if i == 0 || order[i-1] != wantFrom {
+			t.Errorf("peak_mib's left neighbor is %q, want %q (line: %s)",
+				leftName(order, i), wantFrom, line)
+		}
+		if i == len(order)-1 || order[i+1] != wantTo {
+			t.Errorf("peak_mib's right neighbor is %q, want %q (line: %s)",
+				rightName(t, order, i), wantTo, line)
+		}
+	}
+	f := journalFields(t, line)
+	if f["peak_mib"] != "413" {
+		t.Errorf("peak_mib = %q, want 413 (line: %s)", f["peak_mib"], line)
+	}
+	if f["reason"] != "ci job 3609 ✓ 11m02s" {
+		t.Errorf("reason = %q, want the verbatim CI reason (line: %s)", f["reason"], line)
+	}
+
+	// Without a measurement: no field, and the reason still last.
+	buf.Reset()
+	svc.journalLeaseRelease(l, "ttl", 0, false)
+	line = strings.TrimSpace(buf.String())
+	f = journalFields(t, line)
+	if _, ok := f["peak_mib"]; ok {
+		t.Errorf("peak-less release wrote peak_mib (line: %s)", line)
+	}
+	if f["reason"] != "ttl" {
+		t.Errorf("reason = %q, want ttl, still last (line: %s)", f["reason"], line)
+	}
+	if order := journalFieldOrder(t, line); order[len(order)-1] != "reason" {
+		t.Errorf("reason is not the last field without a peak (line: %s)", line)
+	}
+}
+
+// journalFieldOrder returns the line's field names in output order.
+func journalFieldOrder(t *testing.T, line string) []string {
+	t.Helper()
+	var order []string
+	for _, tok := range splitJournalFields(strings.TrimPrefix(line, "lease journal: ")) {
+		k, _, ok := strings.Cut(tok, "=")
+		if !ok {
+			t.Fatalf("journal token %q is not key=value", tok)
+		}
+		order = append(order, k)
+	}
+	return order
+}
+
+func leftName(order []string, i int) string {
+	if i == 0 {
+		return ""
+	}
+	return order[i-1]
+}
+
+func rightName(t *testing.T, order []string, i int) string {
+	t.Helper()
+	if i >= len(order)-1 {
+		return "<end>"
+	}
+	return order[i+1]
 }
 
 // TestJournalValueQuoting pins that a value with a space, quote, equals

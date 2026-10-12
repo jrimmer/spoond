@@ -18,9 +18,9 @@ summarised from README "Status".
   the VM actually held: the `released` event's detail appends
   `· peak N MiB` after the release reason (the runner's
   `ci job 3609 ✓ 11m02s · peak 412 MiB`), whole MiB rounded up, and the
-  release lease journal line gains `peak_mib=N` beside `memory_mib`. A
-  release with no measurement (no `OTEL_PROM_URL`, or a lease that
-  never got a sample) adds nothing on either line.
+  release lease journal line gains `peak_mib=N` between `memory_mib`
+  and `reason`. A release with no measurement (no `OTEL_PROM_URL`, or a
+  lease that never got a sample) adds nothing on either line.
 
 ## [3.6.1] - 2026-10-12
 

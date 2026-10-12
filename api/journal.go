@@ -13,8 +13,9 @@
 //
 //	lease journal: op=<op> lease_id=<id> owner=<owner> sandbox=<sandbox> image=<image> memory_mib=<n> [peak_mib=<n>] reason=<reason>
 //
-// The peak_mib field rides only the release line (#130 step 1): the
-// measured peak the lease's VM held, when it was measured at all.
+// The peak_mib field rides only the release line (#130 step 1), between
+// memory_mib and reason: the measured peak the lease's VM held, when it
+// was measured at all.
 //
 // A value with a space, quote, equals sign or control character is
 // quoted with Go's %q so the fields stay parseable; the reason is the
@@ -41,27 +42,40 @@ const (
 // names the lease as it stood: the sandbox id is present even when the
 // release or loss is about to delete the sandbox. A nil lease writes
 // nothing.
-//
-// peakMib, when set, adds the release line's measured-memory field
-// (#130 step 1): the lease's measured peak in whole MiB, read before the
-// sampler dropped the entry. The field is ` peak_mib=<n>`, whole MiB
-// (ceil — the same rendering the lease row's memory_peak_mb uses), so a
-// journal reader sees what the VM actually held. Not set — every other
-// op, or a release with no sample (the sampler off, no OTEL_PROM_URL,
-// a lease that never got one) — leaves the line exactly as it reads
-// without the field.
-func (s *Service) journalLease(op string, l *Lease, reason string, peakMib ...int) {
+func (s *Service) journalLease(op string, l *Lease, reason string) {
 	if s == nil || s.log == nil || l == nil {
 		return
 	}
+	s.journalPrint(op, l, reason, "")
+}
+
+// journalLeaseRelease writes the release line, the one op that carries
+// the measured-memory field (#130 step 1): peakMib is the lease's
+// measured peak in whole MiB (ceil — the same rendering the lease row's
+// memory_peak_mb uses), read before the sampler dropped the entry, and
+// hasPeak gates the field, written between memory_mib and reason so the
+// documented parse order (operations.md) holds. Without a measurement
+// (the sampler off — no OTEL_PROM_URL — or a lease that never got a
+// sample) hasPeak is false and the line reads exactly as before.
+func (s *Service) journalLeaseRelease(l *Lease, reason string, peakMib int, hasPeak bool) {
 	peakField := ""
-	if len(peakMib) > 0 {
-		peakField = fmt.Sprintf(" peak_mib=%d", peakMib[0])
+	if hasPeak {
+		peakField = fmt.Sprintf("peak_mib=%d ", peakMib)
 	}
-	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s memory_mib=%d reason=%s%s",
+	s.journalPrint(journalOpRelease, l, reason, peakField)
+}
+
+// journalPrint prints one lease journal line. peakField is empty, or
+// the `peak_mib=<n>` field with its trailing space, which is why it
+// lands between memory_mib and reason.
+func (s *Service) journalPrint(op string, l *Lease, reason, peakField string) {
+	if s == nil || s.log == nil || l == nil {
+		return
+	}
+	s.log.Printf("lease journal: op=%s lease_id=%s owner=%s sandbox=%s image=%s memory_mib=%d %sreason=%s",
 		journalValue(op), journalValue(l.ID), journalValue(l.Owner),
 		journalValue(l.SandboxID), journalValue(l.Image), l.MemoryMB,
-		journalValue(reason), peakField)
+		peakField, journalValue(reason))
 }
 
 // journalValue renders one journal field: bare when it is a simple
