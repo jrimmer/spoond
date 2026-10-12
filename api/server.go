@@ -1088,6 +1088,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Holder    string `json:"holder"`
 		HolderURL string `json:"holder_url"`
 		HoldTTL   *int   `json:"hold_ttl"`
+		// Comment is the lease's free-text annotation on the create
+		// itself (#132): the runner sends its job label
+		// ("forgejo job <id> <url>", runner/executor.go) with the create,
+		// so the lease and its `created` event name the job from the first
+		// moment. The comment route's own cap applies (512; longer is a
+		// bad request).
+		Comment string `json:"comment"`
 		// Pinned pins the new lease (FS5): spoond never pauses or deletes
 		// it before its own expiry. A persistent pinned lease stays until
 		// the owner releases it.
@@ -1172,6 +1179,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateHolder(req.Holder, req.HolderURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// The comment rides the create (#132); the comment route's cap
+	// applies to it like to any later set.
+	if len(req.Comment) > 512 {
+		writeError(w, http.StatusBadRequest, "comment must be <= 512 chars")
 		return
 	}
 	if req.HoldTTL != nil {
@@ -1269,6 +1282,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	leaseReq := leaseRequest{
 		owner: ownerFrom(r.Context()), image: req.Image, ttl: ttl, persistent: req.Persistent,
 		netPolicy: req.NetPolicy, netAllow: req.NetAllow, holder: req.Holder, holderURL: req.HolderURL,
+		comment:       req.Comment,
 		pinned:        req.Pinned,
 		createSecrets: secrets, exposePorts: expose,
 		snapshot: start,

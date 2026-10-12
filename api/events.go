@@ -541,8 +541,8 @@ func (s *Service) emitSweepEvent(detail string) {
 	s.bus.emit("", "", LeaseSweep, detail)
 }
 
-// createdDetailCommentCap cuts a created event's appended comment at:
-// long enough for a full CI job label, short enough that the detail
+// createdDetailCommentCap cuts a created event's appended comment (#132)
+// at: long enough for a full CI job label, short enough that the detail
 // stays one dashboard line.
 const createdDetailCommentCap = 120
 
