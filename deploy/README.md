@@ -119,7 +119,9 @@ into the dir + restart, or `ssh-key add` via the ctl plane.
 The backend credential lives in `/etc/spoond-gateway.env` (mode 0600) as
 `SPOOND_GATEWAY_TOKEN` — never in `ExecStart`, so `/proc/<pid>/cmdline`
 cannot expose it (it is admin-equivalent: the gateway impersonates the
-authenticated SSH user via `X-Spoond-User-Id`).
+authenticated SSH user via `X-Spoond-User-Id`). This is the one env
+file left outside `/etc/spoond/`, matching the unit's single
+`EnvironmentFile=` line.
 
 ### Verify
 
