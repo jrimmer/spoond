@@ -562,6 +562,15 @@ type Service struct {
 	// (U05/U08). Required.
 	db    *store.DB
 	store *Store
+	// nextLabel and nextLabelText carry the pending lease label (the
+	// runner's WithLabel, the CI job's "forgejo job <id> <url>", #119):
+	// WithLabel's admission hook sets both under the store lock once its
+	// create has a lease id, and the grant reads them under it when the
+	// lease commits — the comment lands on that lease and on its
+	// `created` event's detail, never on the next lease (#132). ""
+	// names no pending label.
+	nextLabel     string
+	nextLabelText string
 	// tokens maps a consumer token to its consumer id (legacy mode).
 	tokens map[string]string
 	// ownerDeleteMu guards deletedOwners (spoond-q4j): the owners whose
@@ -2967,6 +2976,14 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	}
 
 	s.store.mu.Lock()
+	// The pending label's create is committing: the label hook (admitted
+	// while this create was waiting for room, #119) names a comment for
+	// exactly this lease, so it lands on the lease now and on its
+	// `created` event's detail — never on the next lease (#132).
+	if s.nextLabel != "" && s.nextLabel == lease.ID {
+		lease.Comment = s.nextLabelText
+		s.nextLabel, s.nextLabelText = "", ""
+	}
 	// Final guard against a delete that raced this grant (spoond-q4j). A
 	// grant that passed reserveQuota before the owner was marked deleted
 	// holds the store lock across its commit, and deleteUserData sets the
@@ -3012,6 +3029,12 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	detail := fmt.Sprintf("granted from image %s in %s", image, eventDuration(time.Since(start)))
 	if snap != nil {
 		detail = fmt.Sprintf("started from snapshot %s@%d in %s", snap.row.Name, snap.row.Version, eventDuration(time.Since(start)))
+	}
+	// The just-labelled lease's comment rides the created detail (#132):
+	// the dashboard reads the CI job a created lease runs from the event
+	// itself, no separate comment read.
+	if lease.Comment != "" {
+		detail += " · " + cutDetail(lease.Comment, createdDetailCommentCap)
 	}
 	s.emitLeaseEvent(lease.ID, owner, LeaseCreated, detail)
 	createReason := "new"
