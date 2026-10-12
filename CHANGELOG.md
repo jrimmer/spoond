@@ -12,6 +12,20 @@ summarised from README "Status".
 
 ### Added
 
+- **Deprecation signals for the surfaces 4.0 removes (#139
+  groundwork).** Nothing changes behavior; the two removal candidates
+  now report their use so the removal is decided on data. Every request
+  still sent to the `/api/sandboxes` alias of the lease API answers with
+  `Deprecation: true` and a `Link: </api/leases…>;
+  rel="successor-version"` header (RFC 8594), bumps the new
+  `spoond_deprecated_requests_total{kind="sandboxes_alias"}` counter and
+  logs at most once per caller per hour (the user/consumer id and the
+  path, never a token) until the caller moves to `/api/leases`. Every
+  LLM-gateway request served only because `LLM_OPEN_LEGACY=1` kept a
+  keyless owner open bumps
+  `spoond_deprecated_requests_total{kind="llm_keyless"}`, with the same
+  once-per-owner-per-hour log line. Both counters and headers are
+  described in docs/api.md and docs/operations.md.
 - **`GET /api/capabilities` self-description (#52).** One endpoint
   where any valid user token (the same grant as `GET /api/images`)
   reads what this spoond offers: the binary `version`, the `api` block
