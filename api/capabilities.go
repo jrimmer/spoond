@@ -121,18 +121,12 @@ type endpointSpec struct {
 	Admin bool `json:"admin,omitempty"`
 }
 
-// endpointSpec{method, path, summary} and, when the route's ordinary
-// grant is an admin user or the ADMIN_TOKEN, endpointRowAdmin.
-var (
-	_ = endpointSpec{}
-)
+// endpointSpec{method, path, summary} (ep) and, when the route's
+// ordinary grant is an admin user or the ADMIN_TOKEN,
+// endpointSpec{method, path, summary, admin:true} (epAdmin) keep the
+// table one line per route.
+var _ = endpointSpec{}
 
-// endpointRowAdmin is the fourth positional field of endpointTable's
-// rows: an Admin flag for a route any user token cannot reach alone.
-// Positional literals keep the table one line per route.
-func endpointRow(admin bool) bool { return admin }
-
-// endpointSpec{method, path, summary, admin} shorthand constructors.
 func ep(method, path, summary string) endpointSpec {
 	return endpointSpec{Method: method, Path: path, Summary: summary}
 }
@@ -381,7 +375,7 @@ type imageMeta struct {
 // imageMetaTable is that data, one row per manifest image, name-keyed.
 var imageMetaTable = map[string]imageMeta{
 	"py-base":        {"python", "Python 3.12 slim base for Python build/test/CI jobs"},
-	"go-base":        {"golang", "Go 1.25.12 toolchain (go/gofmt symlinked into /usr/local/bin) + git for Go build/test/CI jobs"},
+	"go-base":        {"golang", "Go 1.25 toolchain (go/gofmt) + git for Go build/test/CI jobs"},
 	"dev-base":       {"interactive-dev", "Interactive dev environment: tmux + sshd + git + python3 + build tools"},
 	"elixir-base":    {"elixir", "Elixir/Erlang OTP toolchain + git for Elixir build/test/CI jobs"},
 	"elixir-release": {"elixir-release", "Elixir/OTP + Rust + Node/pnpm + kaniko for full Phoenix+NIF release builds"},
