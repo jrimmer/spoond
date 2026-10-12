@@ -201,7 +201,7 @@ Request:
 | `expose_ports` | []int | *(none)* | guest TCP ports published for peer leases. Max 8; port 49983 (envd) is refused; duplicates and out-of-range ports are refused |
 | `holder` | string | `""` | a plain label naming what holds the lease (a CI job, an orchestrator's flight, a person's scratch work), at most 128 printable characters. **No lifecycle effect since v3.0:** it never pins, never keeps the lease past its TTL and never protects it from take-back. Use `pinned` for that |
 | `holder_url` | string | `""` | link to the holder; empty or an absolute `http(s)` URL of at most 512 characters |
-| `comment` | string | `""` | the lease's free-text annotation set at create time rather than through the comment route after the answer (#132): the CI runner sends its job label `forgejo job <id> <job URL>`, so the lease and its `created` event name the job from the first moment. Same validity as the comment route (at most 512 characters; longer is `400`) |
+| `comment` | string | `""` | the lease's free-text annotation set at create time rather than through the comment route after the answer (#132): the CI runner sends its job label `forgejo job <id> <job URL>`, so the lease and its `created` event name the job from the first moment. Same validity as the comment route (at most 512 bytes; no control characters — anything below `0x20`, a newline included, and `0x7F` is `400 comment must not contain control characters`; longer is `400`) |
 | `hold_ttl` | int | *(removed)* | **removed in v3.0** (pins replace holds): accepted and ignored for one release, with a `Deprecation` header |
 | `pinned` | bool | `false` | pin the new lease: spoond never pauses or deletes it before its own expiry. The TTL still applies; a pinned persistent lease stays until the owner releases it. `holder`/`holder_url` never pin. See [Pins and the paused-release clock](#pins-and-the-paused-release-clock) |
 | `checkpoint_interval` | int | host default | the lease's own periodic checkpoint interval in seconds: `0` = never checkpointed by the loop; `60`–`604800` = seconds between periodic checkpoints. Omitted = the host default (`CHECKPOINT_INTERVAL_MINS`, itself `0` = never — see [Checkpoints](#checkpoints)). Anything else is `400` |
@@ -1558,6 +1558,13 @@ Request `{"name": "<unique-per-owner-name>"}`. Response
 ### `POST /api/leases/{id}/comment` — annotate
 
 Request `{"comment": "…"}`. Response `{"id":"…","comment":"…","ok":true}`.
+The comment is at most 512 bytes and holds no control characters:
+anything below `0x20` (a newline included) and `0x7F` is
+`400 comment must not contain control characters`; non-ASCII printable
+text (`é ✓`) is fine. An empty comment clears it. The create body's
+`comment` field (same cap, same control-character rule) answers to the
+same validator, so a comment a create accepts is exactly one this
+route accepts.
 
 ### `PUT /api/leases/{id}/holder` — set or clear the holder label
 

@@ -12,6 +12,18 @@ summarised from README "Status".
 
 ### Changed
 
+- **Lease comments refuse control characters (3.7 review nit).** The
+  create body's `comment` field and `POST /api/leases/{id}/comment`
+  now answer a comment carrying a control character — anything below
+  `0x20`, a newline included, and `0x7F` — with `400 comment must not
+  contain control characters`, so a terminal escape cannot ride a
+  comment into the dashboard's lease line or a notifier's message.
+  Both surfaces now read one shared validator (api/comment.go)
+  instead of each carrying its own copy of the 512 cap, so they
+  cannot drift apart; plain and non-ASCII printable text (`é ✓`)
+  still passes, and an empty comment still clears through the comment
+  route. No behaviour change for valid input.
+
 - **The deploy units point at the real env-file paths
   (spoond-uzs prerequisite, review finding B8).**
   `deploy/spoond-runner.service` reads
