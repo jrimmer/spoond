@@ -3,6 +3,7 @@ package spoonddoctor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -210,6 +211,40 @@ func TestCheckDrainUnit(t *testing.T) {
 	drainEnvPath = filepath.Join(dir, "missing.env")
 	if r := checkDrainUnit(); r[0].status != "FAIL" || !strings.Contains(r[0].detail, "missing.env") {
 		t.Errorf("missing drain.env: got %+v", r)
+	}
+}
+
+// TestCheckOrchestratorUnit: active/running passes, activating warns
+// with the do-not-restart detail (ExecStop would be skipped), and
+// failed/inactive fail. The props come from the injected
+// systemctlShow, like TestCheckDrainUnit's.
+func TestCheckOrchestratorUnit(t *testing.T) {
+	oldShow, oldUnit := systemctlShow, e2bOrchestratorUnit
+	t.Cleanup(func() { systemctlShow, e2bOrchestratorUnit = oldShow, oldUnit })
+	cases := []struct {
+		name   string
+		props  map[string]string
+		status string
+		want   string
+	}{
+		{"running", map[string]string{"ActiveState": "active", "SubState": "running"}, "PASS", "active (running)"},
+		{"activating", map[string]string{"ActiveState": "activating", "SubState": "start-post"}, "WARN", "do not restart or stop it now"},
+		{"failed", map[string]string{"ActiveState": "failed", "SubState": "exit-code"}, "FAIL", "failed (exit-code)"},
+		{"inactive", map[string]string{"ActiveState": "inactive", "SubState": "dead"}, "FAIL", "inactive (dead)"},
+	}
+	for _, c := range cases {
+		systemctlShow = func(string, ...string) (map[string]string, error) { return c.props, nil }
+		r := checkOrchestratorUnit()
+		if len(r) != 1 || r[0].status != c.status || !strings.Contains(r[0].detail, c.want) {
+			t.Errorf("%s: got %+v, want %s containing %q", c.name, r, c.status, c.want)
+		}
+	}
+	e2bOrchestratorUnit = "spoond-does-not-exist"
+	systemctlShow = func(string, ...string) (map[string]string, error) {
+		return nil, errors.New("no such unit")
+	}
+	if r := checkOrchestratorUnit(); r[0].status != "FAIL" || !strings.Contains(r[0].detail, "spoond-does-not-exist") {
+		t.Errorf("systemctl error: got %+v, want FAIL naming the unit", r)
 	}
 }
 
