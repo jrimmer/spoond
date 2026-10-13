@@ -115,6 +115,7 @@ func TestBuildOneSuccess(t *testing.T) {
 	wantCmds := []string{
 		"docker build --pull -f images/py-base.dockerfile -t localhost:5000/py-base:latest images",
 		"docker push localhost:5000/py-base:latest",
+		"docker image rm localhost:5000/py-base:latest",
 		"docker image prune -f",
 		"docker builder prune -f --filter until=72h",
 		"docker builder prune -f --keep-storage 10GB",
@@ -434,6 +435,78 @@ func TestBuildOnePruneCommands(t *testing.T) {
 	}
 }
 
+// TestBuildOnePushedRefRemoved: after the digest is read the exact ref
+// just pushed is removed locally (spoond-07fn: the tagged local copy
+// filled the root disk otherwise), before the prunes. Mutation: move
+// the rm before the inspect, drop it, or swap the order with a prune.
+func TestBuildOnePushedRefRemoved(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	// Log the digest read too, so the order can be asserted.
+	runOut = func(ctx context.Context, name string, args ...string) (string, error) {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		return wantDigest, nil
+	}
+	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", &bytes.Buffer{}); err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	var got []string
+	for i, c := range cmdLog {
+		switch {
+		case strings.HasSuffix(c, "push localhost:5000/py-base:latest"),
+			strings.HasPrefix(c, "docker inspect"),
+			strings.HasPrefix(c, "docker image rm"),
+			strings.Contains(c, "prune"):
+			got = append(got, fmt.Sprintf("%d: %s", i, c))
+		}
+	}
+	want := []string{
+		"1: docker push localhost:5000/py-base:latest",
+		"2: docker inspect --format {{index .RepoDigests 0}} localhost:5000/py-base:latest",
+		"3: docker image rm localhost:5000/py-base:latest",
+		"4: docker image prune -f",
+		"5: docker builder prune -f --filter until=72h",
+		"6: docker builder prune -f --keep-storage 10GB",
+		"7: docker buildx prune -f --filter until=72h",
+		"8: docker buildx prune -f --keep-storage 10GB",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("post-build steps = %v, want %v (rm of the pushed ref after push/inspect, before the prunes)", got, want)
+	}
+}
+
+// TestBuildOneRmFailureBestEffort: a failing `docker image rm` never
+// fails the build; it warns like the prunes do.
+func TestBuildOneRmFailureBestEffort(t *testing.T) {
+	sub := &stubSubstrate{res: substrate.BuildResult{DiskSizeMB: 5000}}
+	db := setup(t, sub)
+	// The inspect (runOut above) answers a digest, only the rm fails.
+	runCmd = func(ctx context.Context, stdout io.Writer, name string, args ...string) error {
+		cmdLog = append(cmdLog, name+" "+strings.Join(args, " "))
+		if len(args) == 3 && args[0] == "image" && args[1] == "rm" {
+			return errors.New("image is referenced in one or more repositories")
+		}
+		return nil
+	}
+	// The digest read succeeds (runOut above answers a digest), only the
+	// rm fails.
+	out := &bytes.Buffer{}
+	err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", out)
+	if err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	if !strings.Contains(out.String(), "warning: docker image rm") {
+		t.Fatalf("stdout %q misses the image rm warning", out.String())
+	}
+	row, err := db.GetImage(context.Background(), testImage.Name)
+	if err != nil {
+		t.Fatalf("GetImage: %v", err)
+	}
+	if row.Digest != wantDigest || row.CurrentBuildID == "" {
+		t.Fatalf("image row = %+v", row)
+	}
+}
+
 // TestBuildOnePruneFailureBestEffort: every prune failing (a broken
 // docker, say) must not fail the build; the default builder's prunes
 // warn on stdout, the buildx prunes stay silent (a missing buildx
@@ -455,8 +528,8 @@ func TestBuildOnePruneFailureBestEffort(t *testing.T) {
 	if err := buildOne(context.Background(), db, sub, testImage, sizes.Default(), "localhost:5000", "images", out); err != nil {
 		t.Fatalf("buildOne: %v", err)
 	}
-	if n := len(cmdLog); n != 7 {
-		t.Fatalf("docker commands = %d, want all 7 (build, push, inspect and 4 prunes)", n)
+	if n := len(cmdLog); n != 8 {
+		t.Fatalf("docker commands = %d, want all 8 (build, push, inspect, image rm and 4 prunes)", n)
 	}
 	if len(sub.reqs) != 1 {
 		t.Fatalf("BuildTemplate calls = %d, want 1", len(sub.reqs))

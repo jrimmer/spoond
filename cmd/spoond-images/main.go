@@ -426,6 +426,18 @@ func buildOne(ctx context.Context, db *store.DB, sub substrate.Substrate, img ma
 	if digest == "" {
 		return errors.New("docker inspect: empty digest")
 	}
+	// The push leaves the local tagged copy (<registry>/<name>:latest —
+	// the only ref this build tags) in dockerd, where nothing removes it
+	// (spoond-07fn: on 2026-10-13 three builds took the root disk from
+	// 47 % to 62 %, 7 GB of it tagged local images the dangling-only
+	// `docker image prune` below never touches). The registry holds the
+	// canonical copy — template builds pull from it — so drop the exact
+	// ref just pushed. Never a blanket `docker image prune -a`: other
+	// images on the host (the registry's own, the buildkit container's)
+	// must stay. Best effort: a failed rm never fails the build.
+	if err := runCmd(ctx, stdout, "docker", "image", "rm", ref); err != nil {
+		fmt.Fprintf(stdout, "warning: docker image rm: %v\n", err)
+	}
 	// Re-tagging :latest leaves the previous build's image dangling; the
 	// registry holds the canonical copy, so drop dangling images (only
 	// those: nothing a container or another tag uses). Best effort: a
