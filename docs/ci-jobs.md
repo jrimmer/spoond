@@ -67,9 +67,10 @@ Two constraints inherited from the substrate:
   NixOS.** E2B's provisioning rejects RHEL-family images (that is why
   `scylla` is built from Debian 12 with ScyllaDB's apt repository rather
   than the upstream RHEL UBI image).
-- **`memory_mb` is fixed per image** and every sandbox of that image gets
-  exactly it; `memory_mib` on a create is `0` or that value. Size the
-  manifest entry, not the job.
+- **`memory_mb` is the image's default size.** A job always runs at it
+  (jobs take no size); a lease may ask for another size on create
+  (3.1, #151), which cold-boots unless the image has a warm build at
+  that size. Size the manifest entry for jobs.
 
 The common Dockerfile tail (`images/guest/spoond-guest-init`) is what
 runs at template-build time and ends up in every sandbox's restored

@@ -153,9 +153,10 @@ root runs belongs in a root-owned `0755` path all the way up to `/`.
   owner-scoped). Legacy single-user deployments keep friendly names.
 - **F5 by-key oracle** — `GET /api/users/by-key` returns only id + name
   (was the full user view: admin flag, fingerprints, quotas).
-- **F6 memory cap** — superseded by the substrate rule: `memory_mib` on
-  create must be `0` or exactly the image's fixed `memory_mb`, otherwise
-  `400`. There is nothing to clamp.
+- **F6 memory cap** — a create's `memory_mb` (or `vcpu`, or preset) is
+  checked against the image's minimum and `MAX_LEASE_MEMORY_MB` (3.1,
+  #151) and refused with `400 invalid_size` outside them; nothing is
+  clamped.
 - **F7 bootstrap token** — the SSH gateway does not forward
   `X-Bootstrap-Token` (replaying it on the most exposed surface recreated
   the fresh-store admin race); bootstrap is an operator action via a

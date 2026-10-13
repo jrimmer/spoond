@@ -86,9 +86,11 @@ Two properties drive the design:
   that is what `clone` and `fork` are, and it is why a dev sandbox
   resumes with its tmux session intact.
 
-Memory is **fixed per image** (a snapshot restores with its build's RAM),
-so `memory_mib` on create must be `0` or exactly the image's `memory_mb`
-(see [api.md](api.md)). E2B builds every template with 2 MiB hugepages,
+A lease's size is chosen per create (3.1, #151): a preset or an explicit
+`vcpu`/`memory_mb`, defaulting to the image's. A snapshot restores with
+its build's RAM, so a size the image has a warm build for (its
+`warm_sizes`) starts from a memory snapshot and any other size
+cold-boots (see [api.md](api.md)). E2B builds every template with 2 MiB hugepages,
 so spoond always requests them and admits a create only when enough free
 hugepage memory exists; running out surfaces as `503 capacity`, never as
 an overcommitted host.
