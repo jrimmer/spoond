@@ -10,6 +10,13 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.7.2] - 2026-10-13
+
+3.7.2 stops image builds from filling the host's root disk: after a
+successful push, `spoond images build` removes the local tagged copy it
+just pushed (the registry keeps the canonical one). No breaking changes
+and no schema change.
+
 ### Fixed
 
 - **`spoond images build` removes its local tagged image after a
