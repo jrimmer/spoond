@@ -10,6 +10,22 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spoond images build` removes its local tagged image after a
+  successful push (spoond-07fn).** The build's push left
+  `<registry>/<name>:latest` (the build's only local ref) in dockerd,
+  where the dangling-only `docker image prune -f` after it never
+  reached it — on 2026-10-13 three template-build rounds took the
+  host's root disk from 47 % to 62 %, 7 GB of it tagged local images.
+  After the digest is read and before the prunes, the build now runs
+  `docker image rm` on exactly the ref it just pushed (best effort, a
+  failed rm warns like the prunes and never fails the build). The
+  registry holds the canonical copy and template builds pull from it,
+  so the local copy is not needed after a successful push. Deliberately
+  no blanket `docker image prune -a`, which would take out images other
+  containers use (the registry's own, the buildkit container's).
+
 ## [3.7.1] - 2026-10-12
 
 3.7.1 keeps the host's root disk in view and in check. `/readyz` now
