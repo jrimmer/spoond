@@ -82,17 +82,25 @@ images:
 
   - name: elixir-base
     capability: elixir
-    labels: [elixir]
-    description: "Elixir 1.17 / Erlang OTP 27 toolchain + git for Elixir build/test/CI jobs"
+    labels: [elixir, postgres]
+    description: "Elixir 1.19.6 / Erlang OTP 28.5.0.7 + git, build-essential, Python 3, and a PostgreSQL 17 server running on 127.0.0.1:5432 (user postgres, password postgres) for Elixir build/test/CI jobs"
     baked: true
     dockerfile: elixir-base.dockerfile
     vcpu: 2
-    memory_mb: 2048
-    disk_mb: 6144
+    memory_mb: 4096
+    disk_mb: 8192
     env:
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
       LANG: C.UTF-8
-    notes: "Baked 2026-08-08 from elixir:1.17 with --size-mib 3072 (needs >1536 MiB). elixir/mix/erl already in /usr/local/bin."
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    notes: |
+      Rebuilt 2026-10-13 from hexpm/elixir:1.19.6-erlang-28.5.0.7-debian-trixie-20261005
+      (was elixir:1.17.3-otp-27). Postgres starts from /etc/spoond/init.d/50-postgres
+      (images/elixir-base-postgres-hook.sh); a bake snapshots it serving. Larger sizes
+      (memory_mb 8192 for an umbrella compile + suite) cold-boot and start it the same way.
 
   - name: elixir-release
     capability: elixir-release

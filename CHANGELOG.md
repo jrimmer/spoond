@@ -10,6 +10,17 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Changed
+
+- **`elixir-base` moves to Elixir 1.19.6 / Erlang OTP 28.5.0.7 and runs
+  PostgreSQL 17.** Built from the exact hexpm tag, so repos pinning those
+  versions match. A Postgres server starts at guest boot on
+  127.0.0.1:5432 (user `postgres`, password `postgres`, exported as
+  `POSTGRES_HOST`/`POSTGRES_PORT`/`POSTGRES_USER`/`POSTGRES_PASSWORD`),
+  for Ecto suites that create and migrate their own databases. Python 3
+  (stdlib) is included for build-time generators. The default size is
+  now 4 GiB and 8 GiB disk; ask for more per lease with `memory_mb`.
+
 ## [3.7.2] - 2026-10-13
 
 3.7.2 stops image builds from filling the host's root disk: after a
