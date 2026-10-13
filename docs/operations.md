@@ -1681,3 +1681,15 @@ those silently. The age rule alone proved not enough on 2026-10-12:
 after 11 builds in an afternoon the root disk sat at 80 % — 14 GB of
 cache younger than three days survived, plus 8 GB the buildx builder
 held on its own.
+
+The tag the build pushes (`<registry>/<name>:latest`, the only local
+ref an image build creates) is removed as well, right after the
+post-push digest read and before those prunes:
+`docker image rm <ref>` for exactly the ref just pushed — best
+effort, a failed rm never fails the build. The registry (on the big
+disk) holds the canonical copy, and template builds pull from it, so
+the local copy only filled dockerd where the dangling-only
+`docker image prune` above never reached it (on 2026-10-13 three
+builds took the root disk from 47 % to 62 %, 7 GB of it tagged local
+images). This is no blanket `docker image prune -a`: other images on
+the host — the registry's own, the buildkit container's — must stay.
