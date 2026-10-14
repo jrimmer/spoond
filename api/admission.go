@@ -54,8 +54,11 @@ func (s *Service) debitNodeInfoLocked(memoryMB int) {
 }
 
 // admit checks that the node can host a sandbox of memoryMB MiB: enough
-// free hugepages (D12) and a healthy node. Otherwise it returns
-// substrate.ErrCapacity, which the handlers map to HTTP 503
+// free hugepages (D12), a healthy node, and — with the floor on
+// (MEMORY_FLOOR_MIB, round 2) — the floor free on top of the request,
+// the same headroom take-back stops on, so the final capacity check
+// cannot grant what admission's take-back refused to free. Otherwise it
+// returns substrate.ErrCapacity, which the handlers map to HTTP 503
 // {"error":"capacity: <reason>"}. Every refusal is counted (U11).
 func (s *Service) admit(ctx context.Context, memoryMB int) error {
 	if err := s.admitCapacity(ctx, memoryMB); err != nil {
@@ -76,9 +79,9 @@ func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 	if info.Status != "healthy" {
 		return fmt.Errorf("%w: node status %s", substrate.ErrCapacity, info.Status)
 	}
-	need := uint64(memoryMB) * 1024 * 1024
-	if free < need {
-		return fmt.Errorf("%w: %d bytes of hugepage memory free, need %d", substrate.ErrCapacity, free, need)
+	needBytes := uint64(memoryMB+s.cfg.MemoryFloorMiB) * 1024 * 1024
+	if free < needBytes {
+		return fmt.Errorf("%w: %d bytes of hugepage memory free, need %d", substrate.ErrCapacity, free, needBytes)
 	}
 	return nil
 }

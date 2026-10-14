@@ -37,6 +37,8 @@ func newPressureService(t *testing.T) (*Service, *testSub, context.Context) {
 	onlyIdentityOwners(svc)
 	seedImage(t, db, "mid", 1024)
 	seedImage(t, db, "big", 8192)
+	seedImage(t, db, "big6", 6144)
+	seedImage(t, db, "big4", 4096)
 	// Huge initially, so grants admit without pressure.
 	sub.SetNodeInfo(substrate.NodeInfo{
 		Status:            "healthy",
@@ -646,5 +648,66 @@ func TestPressurePauseSurvivesCancelledLoopContext(t *testing.T) {
 	}
 	if !saw {
 		t.Fatal("no Pause call reached the substrate")
+	}
+}
+// TestAdmitFloorHeadroom: with MEMORY_FLOOR_MIB=2048 on an 8 GiB pool
+// with 6 GiB free, admission keeps the floor as headroom: a 6 GiB
+// request (free 6 GiB > need 6 GiB, but 6 - 2 < 6) takes back or
+// refuses, a 4 GiB request (6 - 2 >= 4) is granted. With the floor at
+// 0 the same 6 GiB request passes: the old behaviour.
+func TestAdmitFloorHeadroom(t *testing.T) {
+	svc, sub, ctx := newPressureService(t)
+	alice := preemptOwner(t, svc, "alice")
+	bob := preemptOwner(t, svc, "bob")
+	// The floor sits at the round-2 default 2048.
+	svc.cfg.MemoryFloorMiB = 2048
+
+	// An 8 GiB pool (4096 2 MiB pages) with 2 GiB used by work outside
+	// spoond: free reads 3072 pages = 6144 MiB. The static fake node is
+	// warmed into the admission cache (warmFairShares), because the
+	// cache's own lazy TTL would race the first admission.
+	sub.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    4096,
+		HugepagesUsed:     1024,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	warmFairShares(svc, ctx)
+
+	// 6 GiB request: free (6144) covers memoryMB (6144) alone, but not
+	// memoryHeadroom (8192): fits is false, take-back finds no victim
+	// (nobody holds a lease), and the ordinary capacity check answers:
+	// the grant is refused.
+	_, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "big6", ttl: time.Hour, persistent: true})
+	if err == nil {
+		t.Fatal("6 GiB request granted without floor headroom")
+	}
+	if !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("6 GiB request error = %v, want a capacity refusal", err)
+	}
+	// 4 GiB request: 6144 - 2048 >= 4096 — granted, and the sandbox is
+	// really created.
+	l, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "big4", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("4 GiB request refused: %v", err)
+	}
+	if l.State != "running" {
+		t.Fatalf("4 GiB lease state = %q, want running", l.State)
+	}
+
+	// Floor off (0): the same 6 GiB request is the plain free-vs-need
+	// comparison again and passes (old behaviour).
+	svc2, sub2, ctx2 := newPressureService(t)
+	alice2 := preemptOwner(t, svc2, "alice")
+	svc2.cfg.MemoryFloorMiB = 0
+	sub2.SetNodeInfo(substrate.NodeInfo{
+		Status:            "healthy",
+		HugepagesTotal:    4096,
+		HugepagesUsed:     1024,
+		HugepageSizeBytes: 2 << 20,
+	}, nil)
+	warmFairShares(svc2, ctx2)
+	if _, err := svc2.grantLease(ctx2, leaseRequest{owner: alice2, image: "big6", ttl: time.Hour, persistent: true}); err != nil {
+		t.Fatalf("floor off: 6 GiB request refused: %v", err)
 	}
 }
