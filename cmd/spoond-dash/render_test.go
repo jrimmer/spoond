@@ -491,9 +491,6 @@ func TestNoticeTriggers(t *testing.T) {
 		{"unit down", func(s *Snapshot) {
 			s.Services = []Service{{Name: "spoond-runner", State: "failed"}}
 		}, "unit:spoond-runner", "bad", "unit spoond-runner is failed"},
-		{"hugepages danger", func(s *Snapshot) {
-			s.HugeUsedPct, s.HugeFreeGiB = 95.0, 1.2
-		}, "hugepages", "bad", "hugepages"},
 		{"snapshot disk danger", func(s *Snapshot) {
 			s.DiskUsedPct = 93.0
 		}, "disk", "bad", "snapshot disk"},
@@ -588,7 +585,7 @@ func TestNoticeIDsAreStable(t *testing.T) {
 func TestNoticePanelDrawn(t *testing.T) {
 	s := healthySnapshot()
 	s.Services = []Service{{Name: "spoond-runner", State: "failed"}}
-	s.HugeUsedPct, s.HugeFreeGiB = 95.0, 1.2
+	s.DiskUsedPct = 93.0
 	g := Draw(s, DefaultWidth, fixedNow, "h")
 	plain := g.Plain()
 	if !strings.Contains(plain, "┌─ Notifications ") {
@@ -599,7 +596,7 @@ func TestNoticePanelDrawn(t *testing.T) {
 	if !strings.Contains(rows[headerRows()], "┌─ Notifications ") {
 		t.Fatalf("panel not the first thing under the header:\n%s", strings.Join(rows[:6], "\n"))
 	}
-	var panel, byUnit, huge bool
+	var panel, byUnit, disk bool
 	for _, r := range strings.Split(g.HTML(), "\n") {
 		if strings.Contains(r, `data-id="notifications"`) {
 			panel = true
@@ -607,12 +604,12 @@ func TestNoticePanelDrawn(t *testing.T) {
 		if strings.Contains(r, `data-id="notice:unit:spoond-runner"`) {
 			byUnit = true
 		}
-		if strings.Contains(r, `data-id="notice:hugepages"`) {
-			huge = true
+		if strings.Contains(r, `data-id="notice:disk"`) {
+			disk = true
 		}
 	}
-	if !panel || !byUnit || !huge {
-		t.Fatalf("panel/row ids missing: panel=%v unit=%v huge=%v", panel, byUnit, huge)
+	if !panel || !byUnit || !disk {
+		t.Fatalf("panel/row ids missing: panel=%v unit=%v disk=%v", panel, byUnit, disk)
 	}
 }
 
@@ -2295,5 +2292,18 @@ func TestIOPressureNotice(t *testing.T) {
 	s.IOFull60 = 6
 	if rows := notices(s); len(rows) != 1 || rows[0].ID != "io-pressure" {
 		t.Fatalf("custom bad level 5: notices = %+v", rows)
+	}
+}
+
+// TestNoHugepagesNotice: low free hugepages is not a notification (owner,
+// 2026-10-14): spoond takes memory back itself, and a request it cannot
+// serve raises its own box_full alert.
+func TestNoHugepagesNotice(t *testing.T) {
+	var s Snapshot
+	s.HugeUsedPct, s.HugeFreeGiB = 99.0, 0.4
+	for _, n := range notices(s) {
+		if n.ID == "hugepages" {
+			t.Fatalf("hugepages notice still raised: %q", n.Text)
+		}
 	}
 }

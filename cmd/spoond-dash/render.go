@@ -158,15 +158,16 @@ type Notice struct {
 // drawn). Triggers:
 //
 //   - a systemd unit not active,
-//   - free hugepages or snapshot disk past the danger level,
+//   - snapshot disk past the danger level (low free hugepages is not a
+//     message: spoond takes memory back itself, and a request it cannot
+//     serve raises its own box_full alert),
 //   - the snapshot disk's I/O stall past DASH_IO_FULL_BAD_PCT,
 //   - kept checkpoints past KEPT_DISK_WARN_PCT of the snapshot disk
 //     (#126),
 //   - pinned leases past PINNED_IDLE_NOTICE_DAYS, as one aggregate
 //     message (FS5, visibility only).
 //
-// Each message's ID comes from its trigger ("unit:<name>", "hugepages",
-// "disk", "io-pressure", "kept-disk", "pinned-idle"), so a viewer's
+// Each message's ID comes from its trigger ("unit:<name>", "disk", "io-pressure", "kept-disk", "pinned-idle"), so a viewer's
 // dismissal can
 // follow one trigger across refreshes. The leases table still shows a
 // lost lease (■ lost) and a taken-back lease; those
@@ -178,10 +179,6 @@ func notices(s Snapshot) []Notice {
 			out = append(out, Notice{ID: "unit:" + svc.Name, Severity: "bad",
 				Text: fmt.Sprintf("unit %s is %s", svc.Name, svc.State)})
 		}
-	}
-	if s.HugeFreeGiB > 0 && s.HugeUsedPct >= 92 {
-		out = append(out, Notice{ID: "hugepages", Severity: "bad",
-			Text: fmt.Sprintf("hugepages only %.1f GiB free - past the danger level", s.HugeFreeGiB)})
 	}
 	if s.DiskUsedPct >= 90 {
 		out = append(out, Notice{ID: "disk", Severity: "bad",
