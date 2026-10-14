@@ -1,0 +1,51 @@
+SPOOND · spoond.example.com                                                              up 9m, 12:00:00
+                                                                                                        
+┌─ capacity ──────────────────────────────────────┐  ┌─ host ──────────────────────────────────────────┐
+│ running       █░░░░░░░░░░░╎░░░          3 / 64  │  │ cpu           ██████░░░░░░╎░░░  38% · load 1.4  │
+│ 3 leases · 2 running · 1 susp · 1 taken back    │  │ i/o stall     ░░░░░░░░░░░░╎░░░    0.0% stalled  │
+│ 0 lost                                          │  │ nvme0n1 busy  ██░░░░░░░░░░╎░░░ 18% · 12 MB/s w  │
+│ queued 1 · granted 1,234 · swept 17             │  │ memory        ███████░░░░░╎░░░ 9.7 of 19.7 GiB  │
+│ shares 2 · users 7 · builds busy 1              │  │ hugepages     ███████░░░░░╎░░░   23.9 GiB free  │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │  │ snapshot disk █████████░░░╎░░░  121.5 GiB free  │
+│ go-base        ███······             1 running  │  │ root disk     ██████░░░░░░╎░░░   30.2 GiB free  │
+│ py-base        ███······             1 running  │  │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ │
+│                                                 │  │ vcpu alloc 11 / 16 · mem alloc 19.5 GiB         │
+│                                                 │  │ gc dry-run                                      │
+└─────────────────────────────────────────────────┘  └─────────────────────────────────────────────────┘
+┌─ throughput · last 1 min ────────────────────────────────────────────────────────────────────────────┐
+│ running leases        3  requests / s       12.3  creates / min         4  egress conns          9   │
+│ ▃▅▇▅█▇                   ▅▇█▆██                   ▁▃▁▅██                   ▅▆█▇██                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─ leases ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│ id         image   size    owner state policy     age    left holder                                 │
+│ abcdef0123 go-base 2G/2V   jason ▶     internet   5m     10m  -                                      │
+│ 1234567890 py-base 1.5G/1V ci    ▶◆    restricted 2h31m  ∞    forgejo/job-42                         │
+│ fedcba0987 go-base -       agent ‖     lan        1d     due  nightly                                │
+│ ▶ running ‖ suspended ⭘ recovered ■ lost ◆ pinned                                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─ images ──────────────────────────────────────────────────┐  ┌─ services ────────────────────────────┐
+│ image            vcpu  mem      live  uses   baked        │  │ spoond-backend        ✓ active        │
+│ go-base          2     2 GiB    2     51     2d ago       │  │ spoond-runner         ✓ active        │
+│ py-base          1     1 GiB    1     7      9h ago       │  │ e2b-orchestrator      ✓ active        │
+│ total                           3     58                  │  │ e2b-guard             ✓ active        │
+│                                                           │  │ spoond-sshd-gateway   ✓ active        │
+│                                                           │  │ otelcol               ✓ active        │
+│                                                           │  │                                       │
+└───────────────────────────────────────────────────────────┘  └───────────────────────────────────────┘
+┌─ records ────────────────────────────────────────────────────────────────────────────────────────────┐
+│ busiest       4 at once · 10/11 10:30a            busiest day   4 leases · 10/9                      │
+│ one image     honey-go-worker ×4 · 10/11 10:30a   biggest fleet honey · 4 at once · 10/11 10:30a     │
+│ longest run   21h 19m · honey-go-worker · 10/10   most memory   3.9 GiB · honey-go-worker · 10/13    │
+│ shortest run  2s · py-base · 10/9 4:00p           no losses for 2 days · last 10/12 3:15a            │
+│ top owner     honey · 13 leases                   longest nap   5h 0m · honey-go-worker              │
+│ lifetime      13 leases · 96 h · 113.9 GiB·h      fastest start 41 ms · honey-go-worker · 10/13      │
+│                                                                 since 10/9 · test leases not counted │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─ refusals and failures ──────────────────────────────────────────────────────────────────────────────┐
+│ auth 2  throttled 0  capacity 3  build fails 1  lost leases 0  create 250 ms  resume 4.1 s           │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─ events ─────────────────────────────────────────────────────────────────────────────────────────────┐
+│ 07:19:02  held_action  fedcba0987  nightly                                                           │
+│ 07:18:44  released    abcdef0123  jason                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                           Spoond dev · GitHub                                          

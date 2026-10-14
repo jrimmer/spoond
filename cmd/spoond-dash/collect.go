@@ -135,6 +135,12 @@ type Snapshot struct {
 	PinnedIdle        int            `json:"pinnedIdle"`
 	PinnedIdleByOwner map[string]int `json:"-"`
 
+	// Records is the records panel's cached computation: all-time stats
+	// over lease_history plus the live leases, recomputed at most once a
+	// minute and reused by every refresh in between. Rendered on the
+	// grid, not sent as signals.
+	Records records `json:"-"`
+
 	// Rendered as HTML element patches, not sent as signals.
 	Services []Service   `json:"-"`
 	Rows     []LeaseRow  `json:"-"`
@@ -431,6 +437,15 @@ type collector struct {
 
 	rowsMu  sync.Mutex
 	lastRow []LeaseRow // the lease table of the last collect tick
+
+	// recMu guards the cached records computation (recordsTTL, the
+	// records panel): rec is the last result, recAvail whether a
+	// lease_history table existed when it was computed, recAt when the
+	// last attempt ran.
+	recMu    sync.Mutex
+	rec      records
+	recAvail bool
+	recAt    time.Time
 }
 
 // lastRows returns the rows set by the last fromDB: the holder and name
@@ -491,6 +506,7 @@ func (c *collector) collect(ctx context.Context) Snapshot {
 	if err := c.fromDB(&s, now); err != nil {
 		errs = append(errs, "db: "+err.Error())
 	}
+	s.Records = c.recordsFor(ctx, now)
 	s.Services = c.services(ctx)
 	for _, svc := range s.Services {
 		if svc.State != "active" {

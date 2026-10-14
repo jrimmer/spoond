@@ -74,6 +74,7 @@ var Known = []string{
 	"DASH_IO_FULL_WARN_PCT",
 	"DASH_PASSWORD_HASH",
 	"DASH_PROJECT_URL",
+	"DASH_RECORDS_EXCLUDE",
 	"DASH_SERVICES",
 	"DASH_TLS_CERT",
 	"DASH_TLS_KEY",
@@ -397,6 +398,7 @@ var Specs = []Spec{
 	{"DASH_IO_FULL_WARN_PCT", TypePercent, Dash, false},
 	{"DASH_PASSWORD_HASH", TypeString, Dash, true},
 	{"DASH_PROJECT_URL", TypeString, Dash, false}, // a schemeless value is accepted: the code prepends https://
+	{"DASH_RECORDS_EXCLUDE", TypeList, Dash, false},
 	{"DASH_SERVICES", TypeList, Dash, false},
 	{"DASH_TLS_CERT", TypeList, Dash, false}, // certificate paths, paired with DASH_TLS_KEY
 	{"DASH_TLS_KEY", TypeList, Dash, false},  // key paths, paired with DASH_TLS_CERT
