@@ -212,7 +212,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.8.1 (2026-10-14) · GitHub` — with the
+line — `Spoond v3.9.0 (2026-10-14) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -287,6 +287,17 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.9: spoond keeps itself out of memory trouble.** Every 15 s the
+backend checks free hugepages; below `MEMORY_FLOOR_MIB` (default 2048)
+it pauses one lease of the owner furthest over their fair share,
+passing over pinned and busy leases, and the lease resumes on its next
+use. Admission keeps the floor free on top of each new lease. Fair
+shares now split the box among active owners only (those holding a
+running or paused lease), and every owner's `/api/fair-shares` row
+says whether it is `active`. A `box_full` refusal for the biggest
+borrower lists that owner's own running leases (`own_leases`), so it
+can see what holds its memory. No breaking changes.
 
 **v3.8.1: no lending of memory a VM may want back.** Admission caps the
 memory promised to live leases at `MEMORY_OVERCOMMIT` x the hugepage

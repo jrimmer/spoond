@@ -10,6 +10,8 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-10-14
+
 ### Added
 
 - **Low-memory floor (`MEMORY_FLOOR_MIB`, spoond-l3lq).** Every 15 s
