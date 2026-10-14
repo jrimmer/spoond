@@ -144,6 +144,7 @@ var Known = []string{
 	"MAX_NAMED_SNAPSHOTS",
 	"MAX_RUNNING_JOBS_PER_LEASE",
 	"MAX_TTL_SECS",
+	"MEMORY_OVERCOMMIT",
 	"METRICS_LISTEN",
 	"METRICS_SERVER_NAME",
 	"METRICS_TOKEN",
@@ -468,6 +469,8 @@ var Specs = []Spec{
 	{"MAX_NAMED_SNAPSHOTS", TypeInt, Backend, false},
 	{"MAX_RUNNING_JOBS_PER_LEASE", TypeInt, Backend, false},
 	{"MAX_TTL_SECS", TypeInt, Backend, false},
+	// A float >= 1.0, refused at startup otherwise (TypeString: no float type).
+	{"MEMORY_OVERCOMMIT", TypeString, Backend, false},
 	{"METRICS_LISTEN", TypeAddr, Runner, false},
 	{"METRICS_SERVER_NAME", TypeString, Dash, false},
 	{"METRICS_TOKEN", TypeString, Backend, true},

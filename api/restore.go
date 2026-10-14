@@ -94,12 +94,8 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	// undo gives the memory back (a failed restore never took the
 	// hugepages).
 	ok := false
-	undo := func() {}
-	defer func() {
-		if !ok {
-			undo()
-		}
-	}()
+	undo := func(bool) {}
+	defer func() { undo(!ok) }()
 	if l.Suspended {
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; restoring it brings a running sandbox back, and

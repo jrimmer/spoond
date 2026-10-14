@@ -183,6 +183,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -703,6 +704,17 @@ func Main(args []string) int {
 	// (default 7, visibility only).
 	pausedReleaseDays := envIntOr("PAUSED_RELEASE_DAYS", api.DefaultPausedReleaseDays)
 	pinnedIdleNoticeDays := envIntOr("PINNED_IDLE_NOTICE_DAYS", api.DefaultPinnedIdleNoticeDays)
+	// MEMORY_OVERCOMMIT (owner, 2026-10-14): lease memory may total this
+	// multiple of the hugepage pool; free-page reporting lends freed guest
+	// memory out, and a VM that faults it back on an empty pool crashes.
+	memoryOvercommit := api.DefaultMemoryOvercommit
+	if v := os.Getenv("MEMORY_OVERCOMMIT"); v != "" {
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 1.0 || f > 10 {
+			log.Fatalf("MEMORY_OVERCOMMIT=%q: want a number from 1.0 to 10 (1.0 = never promise more than the hugepage pool)", v)
+		}
+		memoryOvercommit = f
+	}
 	// Removed hold/idle variables (FS5): warn once at startup and ignore.
 	warnRemovedEnv(log.Default(), os.Getenv)
 
@@ -783,6 +795,7 @@ func Main(args []string) int {
 		LostGracePersistent:       lostGracePersistent,
 		LostGrace:                 lostGrace,
 		PausedReleaseDays:         pausedReleaseDays,
+		MemoryOvercommit:          memoryOvercommit,
 		PinnedIdleNoticeDays:      pinnedIdleNoticeDays,
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),
