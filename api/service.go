@@ -5611,6 +5611,10 @@ func (s *Service) deleteLeaseLocked(id string) {
 		return
 	}
 	delete(s.store.accounted, id)
+	// The lost-fall invalidation mark (fair shares) goes too: nothing of
+	// this lease is remembered, so a lease under the same id starts with
+	// an empty slate.
+	delete(s.store.lostInvalidated, id)
 	s.invalidateFairShares()
 }
 
