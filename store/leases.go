@@ -197,6 +197,30 @@ func (db *DB) InsertLeaseHistory(ctx context.Context, h LeaseHistoryRow) (bool, 
 	return n > 0, nil
 }
 
+// ListLeaseHistory returns every lease_history row, oldest end first.
+// The records panel's shape is the dashboard's business; this exists for
+// tests and an operator's count of what the table holds.
+func (db *DB) ListLeaseHistory(ctx context.Context) ([]LeaseHistoryRow, error) {
+	rows, err := db.r.QueryContext(ctx,
+		`SELECT `+leaseHistoryColumns+` FROM lease_history ORDER BY ended_at, lease_id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list lease history: %w", err)
+	}
+	defer rows.Close()
+	var out []LeaseHistoryRow
+	for rows.Next() {
+		h, err := scanLeaseHistory(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("store: list lease history: %w", err)
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list lease history: %w", err)
+	}
+	return out, nil
+}
+
 // GetLeaseHistory returns one lease_history row by lease id
 // (store.ErrNotFound when unknown).
 func (db *DB) GetLeaseHistory(ctx context.Context, leaseID string) (LeaseHistoryRow, error) {

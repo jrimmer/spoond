@@ -3584,7 +3584,7 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	// before the column existed) changes nothing; a lease released while
 	// suspended keeps its stamp instead, so that final sleep is never
 	// counted.
-	napEnd := time.Now()
+	napEnd := s.now()
 	if !l.NapSince.IsZero() {
 		nap := int64(napEnd.Sub(l.NapSince).Round(time.Second).Seconds())
 		if nap < 0 {
