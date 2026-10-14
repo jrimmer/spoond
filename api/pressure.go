@@ -206,19 +206,19 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 // dropOnePoolSandbox removes ONE warm-pool sandbox — the newest stocked
 // member of any image (#41tk): each image's list is ordered oldest
 // first, so the last entry is the newest — deletes it on the substrate
-// and clears its rows and maps exactly as the drain's
-// pool trim does. It answers the freed MiB (the poolMiB entry it took)
-// and ok=false on an empty pool. Call without s.store.mu: the delete
-// must run outside it. A pool sandbox is never a lease, so the low-memory
-// loop shedding it pauses nobody.
+// and clears its rows and maps exactly as the drain's pool trim does.
+// It answers the freed MiB (the poolMiB entry it took) and ok=false on
+// an empty pool. Call without s.store.mu: the delete must run outside
+// it. A pool sandbox is never a lease, so the low-memory loop shedding
+// it pauses nobody.
 //
 // The accounting is bookkeeping, not a claim: the pool row, the
 // poolMiB entry and the sandboxes row are dropped before the substrate
 // delete, like the drain's trim, so a crashed delete surfaces in the
 // substrate's own listing rather than as phantom pool memory. A create
 // the pool handed out keeps its rows (they move to the lease), and an
-// in-flight pooled grant already popped its entry, so a id the trim
-// picks is genuinely stocked.
+// in-flight pooled grant has already popped its entry, so an id the
+// trim picks is genuinely stocked.
 func (s *Service) dropOnePoolSandbox(ctx context.Context) (freedMiB int, ok bool) {
 	s.store.mu.Lock()
 	img, id := "", ""
