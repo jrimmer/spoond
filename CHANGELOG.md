@@ -34,6 +34,18 @@ summarised from README "Status".
   back for raises the new `memory_floor` event at most once per 10
   minutes. New metrics `spoond_memory_committed_mib` (set every tick,
   even with the floor off) and `spoond_memory_pressure_takebacks_total`.
+- **`box_full` lists the requester's own leases (`own_leases`).** The
+  memory `box_full` refusal for a requester that is itself the biggest
+  borrower (over its fair slice after the request, with no other owner
+  further over) now carries the requester's **own running leases, least
+  recently used first** under `own_leases`, so the caller can see what
+  holds its memory and pause one itself. Each row carries `id`, `name`
+  (omitted when untagged), `memory_mb`, `last_active`, `pinned` and
+  `busy`. No policy change: nothing new is paused — the pinned/disk
+  `box_full` (only pinned leases in the way) answers without the key,
+  as before, and the listing is the refusal's only effect. The same
+  body shape on every re-admission path (create, suspend, restart,
+  clone, fork, checkpoint, resume, restore).
 
 ## [3.8.1] - 2026-10-14
 

@@ -49,7 +49,7 @@ particular means two different things depending on the code:
 | `409` | `not_secret_free` | a named-snapshot version saved from a lease that had a secret, on a grant or a start through a grant; re-save it from a lease that never had one (see [Snapshot grants](#snapshot-grants)) |
 | `409` | `kept_budget` | the owner's kept checkpoints and named snapshots would pass their fair disk slice (3.0; was `max_kept_bytes`) |
 | `410` | `lease_lost` | the substrate lost the lease's sandbox; see [Lost leases](#lost-leases) |
-| `429` | `box_full` | a request needed room and take-back can free none for it: every candidate is pinned (v3.0 FS5), or the requester is itself the biggest borrower — over its fair slice after the request with no other owner further over (FS2b); nothing was paused or released — unpin or release leases to make room. Answers a create, and (since the round-3 fix) any re-admission: resume, resume-on-use, restart, clone, fork, restore |
+| `429` | `box_full` | a request needed room and take-back can free none for it: every candidate is pinned (v3.0 FS5), or the requester is itself the biggest borrower — over its fair slice after the request with no other owner further over (FS2b); nothing was paused or released — unpin or release leases to make room. The biggest-borrower body adds `own_leases`, the requester's own running leases least recently used first (see [Memory take-back](#memory-take-back)), so it can see what holds its memory and pause one itself. Answers a create, and (since the round-3 fix) any re-admission: resume, resume-on-use, restart, clone, fork, restore |
 | `503` | `substrate_unavailable` | the substrate could not confirm the sandbox's state (the orchestrator was unreachable); retry; see [Substrate unavailable](#substrate-unavailable) |
 | `500` | `scrub_failed` | a named-snapshot save could not scrub `/run/secrets` |
 | `500` | `internal` | an internal failure |
@@ -78,7 +78,7 @@ Everything that refuses a request in 3.0:
 | `409` | `kept_budget` | a keep or named save would push the owner's kept + named bytes past their fair disk slice |
 | `409` | `lease_suspended` | a suspended lease on a path that cannot resume it (stat probe, fork, crash test, guest heartbeat) |
 | `410` | `lease_lost` | the substrate lost the lease's sandbox |
-| `429` | `box_full` | a request needed room and take-back can free none: every candidate is pinned, or the requester is itself the biggest borrower; nothing was paused or released |
+| `429` | `box_full` | a request needed room and take-back can free none: every candidate is pinned, or the requester is itself the biggest borrower; nothing was paused or released. The biggest-borrower body adds `own_leases` (the requester's own running leases, LRU first) |
 | `503` | | `draining`: a planned restart is draining the node; `Retry-After` says when to come back |
 | `503` | `capacity_wait` | no room yet (hugepages, snapshot disk, orchestrator capacity) and take-back cannot close the gap now; carries `Retry-After: 30`; a wait, never a loss. The same shape on every path (create, resume, restart, clone, fork, restore, checkpoint, named save, files); a create can wait it out with `wait` |
 | `503` | `substrate_unavailable` | the orchestrator could not confirm the sandbox's state; carries `Retry-After: 5` |
@@ -296,7 +296,8 @@ cannot_start` when the snapshot's build cannot start on this host (the
 body is `snapshot <name>@<v> cannot start on this host (<cause>); save
 it again`, and there is no retry loop),
 `429 box_full` when take-back can free nothing (see
-[Memory take-back](#memory-take-back)), `503 capacity_wait` with
+[Memory take-back](#memory-take-back); the biggest-borrower refusal's
+body adds `own_leases`), `503 capacity_wait` with
 `Retry-After: 30` (not enough free hugepage memory for the image, or the
 node is not healthy). When the lease's hugepages do not fit, take-back
 runs first (see [Memory take-back](#memory-take-back)). The lease's root disk must fit in
@@ -332,6 +333,31 @@ Two refusals tell the caller what is in the way:
   borrower.
 - `503` `capacity_wait` with `Retry-After: 30` — a structural shortfall
   that take-back cannot close.
+
+The biggest-borrower refusal carries `own_leases`: **the requester's own
+running leases, least recently used first**, so the caller can see what
+holds its memory and pause one itself (with `POST
+/api/leases/{id}/suspend`). Nothing new is paused by the refusal, no
+other owner's lease is ever listed, and the pinned/disk box_full (only
+pinned leases in the way) carries no `own_leases` key at all:
+
+```json
+HTTP/1.1 429
+{
+  "error": "box_full: owner \"u-…\" would use 5120 MiB of a 2560 MiB memory slice with this 1024 MiB request, and no other owner borrows more",
+  "code": "box_full",
+  "own_leases": [
+    {"id": "l-old…", "name": "ci-run", "memory_mb": 1024, "last_active": "2026-10-14T09:12:00Z", "pinned": false, "busy": false},
+    {"id": "l-mid…", "memory_mb": 1024, "last_active": "2026-10-14T10:40:00Z", "pinned": true, "busy": false},
+    {"id": "l-new…", "memory_mb": 1024, "last_active": "2026-10-14T11:58:00Z", "pinned": false, "busy": true}
+  ]
+}
+```
+
+A row carries the lease `id`, its `name` tag (omitted when untagged),
+`memory_mb`, `last_active`, and whether it is `pinned` or `busy` with an
+in-flight operation or a running job — the same view take-back itself
+picks from, so "pause the first row" is always safe.
 
 The create fields `burst` and `priority` and the lease field `class` no
 longer exist (a create that sends them has them ignored). The lease
