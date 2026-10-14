@@ -121,6 +121,20 @@ type LeaseRow struct {
 	SuspendPolicyStep string
 	SuspendBuildID    string
 	SuspendedAt       time.Time
+	// StartMS is the create-to-grant latency in milliseconds, stamped
+	// when the lease was granted (the value the LeaseGrantDur histogram
+	// observes). 0 = unknown (leases granted before the column existed).
+	StartMS int64
+	// NapSince is when the lease's current sleep (suspend) began, stamped
+	// by every suspend path. A successful resume raises MaxNapSecs to the
+	// larger of itself and now − NapSince and clears NapSince, so a lease
+	// released while suspended never counts that final sleep as a nap.
+	// Zero = not suspended (or suspended before the column existed).
+	NapSince time.Time
+	// MaxNapSecs is the longest completed suspend→resume of the lease, in
+	// whole seconds; a later release's history row carries it. 0 = none
+	// yet (or unknown).
+	MaxNapSecs int64
 }
 
 // leaseColumns is the leases table's column list in row order. It must
@@ -135,7 +149,123 @@ const leaseColumns = `id, owner, image, sandbox_id, address, created_at, expires
 	holder, holder_url,
 	last_action, last_action_at, generation, checkpoint_interval, idle_suspend,
 	memory_mb, disk_mb, class, priority, preempted_at, snapshot_build_id,
-	suspend_reason, suspend_policy_step, suspend_build_id, suspended_at, vcpu, sized, had_secrets`
+	suspend_reason, suspend_policy_step, suspend_build_id, suspended_at, vcpu, sized, had_secrets,
+	start_ms, nap_since, max_nap_secs`
+
+// leaseHistoryColumns is the lease_history table's column list in row
+// order (InsertLeaseHistory passes one value per name).
+const leaseHistoryColumns = `lease_id, owner, image, memory_mb,
+	created_at, ended_at, outcome, reason, peak_mib,
+	start_ms, start_kind, max_nap_secs`
+
+// LeaseHistoryRow is one row of the lease_history table: one ended
+// lease. peak_mib 0 = never measured; start_ms 0 and start_kind "" =
+// unknown; max_nap_secs 0 = no completed suspend→resume.
+type LeaseHistoryRow struct {
+	LeaseID    string
+	Owner      string
+	Image      string
+	MemoryMB   int
+	CreatedAt  time.Time
+	EndedAt    time.Time
+	Outcome    string // released|lost
+	Reason     string
+	PeakMiB    int
+	StartMS    int64
+	StartKind  string
+	MaxNapSecs int64
+}
+
+// InsertLeaseHistory writes one lease_history row. INSERT OR IGNORE: a
+// lease whose id is already recorded (a lost lease the GC later
+// released) keeps its first outcome; the caller reports the skip. Use
+// GetLeaseHistory for the round-trip; there is no update path.
+func (db *DB) InsertLeaseHistory(ctx context.Context, h LeaseHistoryRow) (bool, error) {
+	res, err := db.w.ExecContext(ctx,
+		`INSERT OR IGNORE INTO lease_history (`+leaseHistoryColumns+`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		h.LeaseID, h.Owner, h.Image, h.MemoryMB,
+		formatTime(h.CreatedAt), formatTime(h.EndedAt), h.Outcome, h.Reason, h.PeakMiB,
+		h.StartMS, h.StartKind, h.MaxNapSecs)
+	if err != nil {
+		return false, fmt.Errorf("store: insert lease history %s: %w", h.LeaseID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: insert lease history %s: %w", h.LeaseID, err)
+	}
+	return n > 0, nil
+}
+
+// GetLeaseHistory returns one lease_history row by lease id
+// (store.ErrNotFound when unknown).
+func (db *DB) GetLeaseHistory(ctx context.Context, leaseID string) (LeaseHistoryRow, error) {
+	row, err := scanLeaseHistory(db.r.QueryRowContext(ctx,
+		`SELECT `+leaseHistoryColumns+` FROM lease_history WHERE lease_id = ?`, leaseID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LeaseHistoryRow{}, ErrNotFound
+	}
+	if err != nil {
+		return LeaseHistoryRow{}, fmt.Errorf("store: get lease history %s: %w", leaseID, err)
+	}
+	return row, nil
+}
+
+// scanLeaseHistory scans one lease_history row (in
+// leaseHistoryColumns order) into a LeaseHistoryRow.
+func scanLeaseHistory(scan func(dest ...any) error) (LeaseHistoryRow, error) {
+	var h LeaseHistoryRow
+	var createdAt, endedAt string
+	err := scan(&h.LeaseID, &h.Owner, &h.Image, &h.MemoryMB,
+		&createdAt, &endedAt, &h.Outcome, &h.Reason, &h.PeakMiB,
+		&h.StartMS, &h.StartKind, &h.MaxNapSecs)
+	if errors.Is(err, sql.ErrNoRows) {
+		return LeaseHistoryRow{}, ErrNotFound
+	}
+	if err != nil {
+		return LeaseHistoryRow{}, err
+	}
+	h.CreatedAt = parseTime(createdAt)
+	h.EndedAt = parseTime(endedAt)
+	return h, nil
+}
+
+// SetLeaseStartMS stamps one lease row's create-to-grant latency
+// (records A) without touching any other column. A missing row is not
+// an error: the lease ended before the stamp landed.
+func (db *DB) SetLeaseStartMS(ctx context.Context, id string, startMS int64) error {
+	_, err := db.w.ExecContext(ctx,
+		`UPDATE leases SET start_ms = ? WHERE id = ?`, startMS, id)
+	if err != nil {
+		return fmt.Errorf("store: set start_ms %s: %w", id, err)
+	}
+	return nil
+}
+
+// SuspendNap stamps when the lease's current sleep began, on every
+// suspend path (records A). A missing row is not an error: the lease
+// was released while its pause was in flight.
+func (db *DB) SuspendNap(ctx context.Context, id string, at time.Time) error {
+	_, err := db.w.ExecContext(ctx,
+		`UPDATE leases SET nap_since = ? WHERE id = ?`, formatTime(at), id)
+	if err != nil {
+		return fmt.Errorf("store: suspend nap %s: %w", id, err)
+	}
+	return nil
+}
+
+// ResumeNap closes the lease's current sleep: max_nap_secs becomes the
+// larger of itself and now − napSince, and nap_since is cleared. The
+// computed value is passed in by the caller (the api service reads the
+// old stamp under the store lock); a missing row is not an error.
+func (db *DB) ResumeNap(ctx context.Context, id string, maxNapSecs int64) error {
+	_, err := db.w.ExecContext(ctx,
+		`UPDATE leases SET max_nap_secs = ?, nap_since = '' WHERE id = ?`, maxNapSecs, id)
+	if err != nil {
+		return fmt.Errorf("store: resume nap %s: %w", id, err)
+	}
+	return nil
+}
 
 // UpsertLease inserts the lease row, or updates every column of the
 // existing row when the id already exists.
@@ -158,7 +288,8 @@ INSERT INTO leases (`+leaseColumns+`) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?
+  ?, ?, ?, ?,
+  ?, ?, ?
 )
 ON CONFLICT(id) DO UPDATE SET
   owner=excluded.owner,
@@ -208,7 +339,10 @@ ON CONFLICT(id) DO UPDATE SET
   suspended_at=excluded.suspended_at,
   vcpu=excluded.vcpu,
   sized=excluded.sized,
-  had_secrets=excluded.had_secrets`,
+  had_secrets=excluded.had_secrets,
+  start_ms=excluded.start_ms,
+  nap_since=excluded.nap_since,
+  max_nap_secs=excluded.max_nap_secs`,
 		l.ID, l.Owner, l.Image, l.SandboxID, l.Address,
 		formatTime(l.CreatedAt), formatTime(l.ExpiresAt), l.Persistent,
 		formatTime(l.LastActive), l.Workspace, l.Suspended, l.Name,
@@ -222,7 +356,8 @@ ON CONFLICT(id) DO UPDATE SET
 		l.CheckpointInterval, l.IdleSuspend, l.MemoryMB, l.DiskMB, l.Class, l.Priority,
 		formatTime(l.PreemptedAt), l.SnapshotBuildID,
 		l.SuspendReason, l.SuspendPolicyStep, l.SuspendBuildID,
-		formatTime(l.SuspendedAt), l.VCPU, l.Sized, l.HadSecrets)
+		formatTime(l.SuspendedAt), l.VCPU, l.Sized, l.HadSecrets,
+		l.StartMS, formatTime(l.NapSince), l.MaxNapSecs)
 	if err != nil {
 		return fmt.Errorf("store: upsert lease %s: %w", l.ID, err)
 	}
@@ -345,7 +480,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	var r LeaseRow
 	var createdAt, expiresAt, lastActive, lastCheckpointAt, recoveredFrom, lostAt string
 	var pausedAt, pinnedIdleSince, lastActionAt, preemptedAt string
-	var suspendedAt string
+	var suspendedAt, napSince string
 	var netAllow, exposePorts string
 	err := scan(&r.ID, &r.Owner, &r.Image, &r.SandboxID, &r.Address,
 		&createdAt, &expiresAt, &r.Persistent, &lastActive, &r.Workspace,
@@ -357,7 +492,8 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 		&r.LastAction, &lastActionAt, &r.Generation, &r.CheckpointInterval,
 		&r.IdleSuspend, &r.MemoryMB, &r.DiskMB, &r.Class, &r.Priority, &preemptedAt,
 		&r.SnapshotBuildID, &r.SuspendReason, &r.SuspendPolicyStep,
-		&r.SuspendBuildID, &suspendedAt, &r.VCPU, &r.Sized, &r.HadSecrets)
+		&r.SuspendBuildID, &suspendedAt, &r.VCPU, &r.Sized, &r.HadSecrets,
+		&r.StartMS, &napSince, &r.MaxNapSecs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LeaseRow{}, ErrNotFound
 	}
@@ -375,6 +511,7 @@ func scanLease(scan func(dest ...any) error) (LeaseRow, error) {
 	r.LastActionAt = parseTime(lastActionAt)
 	r.PreemptedAt = parseTime(preemptedAt)
 	r.SuspendedAt = parseTime(suspendedAt)
+	r.NapSince = parseTime(napSince)
 	if err := json.Unmarshal([]byte(netAllow), &r.NetAllow); err != nil {
 		return LeaseRow{}, fmt.Errorf("store: lease %s: net_allow: %w", r.ID, err)
 	}
