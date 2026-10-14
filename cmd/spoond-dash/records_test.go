@@ -261,8 +261,9 @@ func TestRecLifetime(t *testing.T) {
 	}
 }
 
-// diff reports whether got is outside ±1e-9 of want.
-func diff(got, want float64) bool { return got < want-1e-9 || got > want+1e-9 }
+// diff reports whether got is outside ±0.01 of want (the lifetime
+// totals are decimal expectations, not exact floats).
+func diff(got, want float64) bool { return got < want-0.01 || got > want+0.01 }
 
 // TestRecBusiestDay: the most leases created on one Pacific calendar
 // day — UTC evenings are the next day in Pacific, so the zone matters.

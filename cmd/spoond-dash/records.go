@@ -330,6 +330,22 @@ func liveLeases(ctx context.Context, db *sql.DB, names map[string]string, now ti
 	return out
 }
 
+// excludeOwners drops the excluded owners (DASH_RECORDS_EXCLUDE) from
+// a lease list. Excluded leases count nowhere in the panel.
+func excludeOwners(leases []recLease) []recLease {
+	exclude := make(map[string]bool)
+	for _, name := range recordsExcludeNames() {
+		exclude[name] = true
+	}
+	out := make([]recLease, 0, len(leases))
+	for _, l := range leases {
+		if !exclude[l.Owner] {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // collectRecords is the records collector's one computation: history
 // plus live leases, excluded owners dropped, the records worked. ok is
 // false when the catalog could not be read (the panel keeps its last
@@ -344,28 +360,16 @@ func (c *collector) collectRecords(ctx context.Context, now time.Time) (rec reco
 	if err != nil {
 		return c.rec, c.recAvail, false
 	}
-	exclude := make(map[string]bool)
-	for _, name := range recordsExcludeNames() {
-		exclude[name] = true
-	}
 	names := c.userNames()
-	var leases []recLease
-	for _, l := range hist {
-		// Owner ids map to names; a name unknown to the identity store
-		// (or a legacy consumer name) stands as it is.
-		if owner := names[l.Owner]; owner != "" {
-			l.Owner = owner
-		}
-		if exclude[l.Owner] {
-			continue
-		}
-		leases = append(leases, l)
-	}
-	for _, l := range liveLeases(ctx, db, names, now) {
-		if !exclude[l.Owner] {
-			leases = append(leases, l)
+	// Owner ids map to names; a name unknown to the identity store (or
+	// a legacy consumer name) stands as it is.
+	for i := range hist {
+		if owner := names[hist[i].Owner]; owner != "" {
+			hist[i].Owner = owner
 		}
 	}
+	leases := excludeOwners(hist)
+	leases = append(leases, excludeOwners(liveLeases(ctx, db, names, now))...)
 	return computeRecords(leases, now), avail, true
 }
 

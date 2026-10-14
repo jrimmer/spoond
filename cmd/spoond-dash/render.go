@@ -2102,27 +2102,36 @@ func serviceState(state string) grid.Seg {
 	}
 }
 
-// recLabelW is the records panel's label column: the longest label
-// ("shortest run", "no losses for") plus its separator cell.
-const recLabelW = 13
+// The records panel's column layout, from the approved render: the
+// label column is 14 cells ("shortest run " plus its separator, and
+// "no losses for " fits the same), the left value 32, then two cells of
+// gap put the right label at 51 and its value at 65, running to the
+// inner right edge — the value columns both cut with … when longer.
+const (
+	recLabelW   = 14
+	recLeftValW = 32
+	recGapW     = 2
+)
 
 // recNoHistory is the panel's one line when the catalog has no
 // lease_history table yet (an older backend): the durable record has
 // to exist before there is anything to total.
 const recNoHistory = "no history yet"
 
-// recordsH is the records panel's height: title, one row per record
-// (two records at a wide frame, one per row below), a footer line and
-// the frame; without history, title, one state line and the frame.
+// recordsH is the records panel's height: title, one row per pair of
+// records (one per record below) and the frame; at a narrow frame the
+// footer takes one more row after the twelve records. Without history,
+// title, one state line and the frame.
 func (l *layout) recordsH() int {
 	if !l.s.Records.Avail {
 		return 3
 	}
 	rows := (len(recordValues(l.s.Records)) + 1) / 2
-	if !l.wide() {
-		rows = len(recordValues(l.s.Records)) * 2
+	if l.wide() {
+		return 3 + rows // title, six record rows (the footer the last), the frame
 	}
-	return 2 + rows + 2
+	// Narrow: the twelve records one per row, then the footer row.
+	return 3 + len(recordValues(l.s.Records))*2 + 1
 }
 
 // drawRecords draws the records panel at (x, y) in w cells and returns
@@ -2142,37 +2151,52 @@ func (l *layout) drawRecords(g *grid.Grid, x, y, w, h int) int {
 		return y
 	}
 	rows := recordValues(rec)
-	twoCol := l.wide() && w >= 2*(recLabelW+1+34)+4
 	inner := w - 4
-	if twoCol {
-		colW := w / 2
-		for i, pair := range rows {
+	if l.wide() {
+		// Two columns laid out like the approved render: left label at
+		// +2, left value 32 cells, right label at 51, right value to the
+		// inner right edge. The sixth pair's right cell is the footer's:
+		// only the first five pairs draw records.
+		rx := x + 2 + recLabelW + recLeftValW + recGapW
+		rvW := inner - (rx - x) - recLabelW
+		for i, pair := range rows[:5] {
 			yy := top + 1 + i
-			lx := x + 2
-			g.Text(lx, yy, pair[0].label, "dim", recLabelW)
-			g.Text(lx+recLabelW, yy, ellipsize(sanitize(pair[0].value), colW-recLabelW-4), "text", colW-recLabelW-4)
-			rx := x + 2 + colW
+			g.Text(x+2, yy, pair[0].label, "dim", recLabelW)
+			g.Text(x+2+recLabelW, yy, ellipsize(sanitize(pair[0].value), recLeftValW), "text", recLeftValW)
 			g.Text(rx, yy, pair[1].label, "dim", recLabelW)
-			g.Text(rx+recLabelW, yy, ellipsize(sanitize(pair[1].value), w-4-(rx-x)-recLabelW-2), "text", w-4-(rx-x)-recLabelW-2)
+			g.Text(rx+recLabelW, yy, ellipsize(sanitize(pair[1].value), rvW), "text", rvW)
 		}
-	} else {
-		for i, pair := range rows {
-			for j, rec := range pair {
-				yy := top + 1 + i*2 + j
-				g.Text(x+2, yy, rec.label, "dim", recLabelW)
-				g.Text(x+2+recLabelW, yy, ellipsize(sanitize(rec.value), inner-recLabelW-2), "text", inner-recLabelW-2)
-			}
+		// The footer, on the sixth row: "since <first created M/D>" and,
+		// while the exclude list is not empty, " · test leases not
+		// counted" — right-aligned, one column clear of the border.
+		foot := recFooter(rec, l.recordsExclude())
+		g.Right(x+w-3, top+6, []grid.Seg{{Text: foot, Style: "dim"}})
+		return y
+	}
+	// One column: the six left records, then the six right ones, then
+	// the footer on its own row.
+	n := 0
+	for _, pair := range rows {
+		for _, rec := range pair {
+			g.Text(x+2, top+1+n, rec.label, "dim", recLabelW)
+			g.Text(x+2+recLabelW, top+1+n, ellipsize(sanitize(rec.value), inner-recLabelW-2), "text", inner-recLabelW-2)
+			n++
 		}
 	}
-	// The footer: "since <first created M/D>" and, while the exclude
-	// list is not empty, " · test leases not counted". Right-aligned,
-	// one column clear of the border.
+	g.Right(x+w-3, top+1+n, []grid.Seg{{Text: recFooter(rec, l.recordsExclude()), Style: "dim"}})
+	return y
+}
+
+// recFooter is the records panel's footer: "since <first created M/D>"
+// and, while the exclude list is not empty, " · test leases not
+// counted" (dropped when the list is empty — nothing is excluded, so
+// nothing needs the caveat).
+func recFooter(rec records, exclude []string) string {
 	foot := "since " + recDay(rec.FirstCreated)
-	if len(l.recordsExclude()) > 0 {
+	if len(exclude) > 0 {
 		foot += " · test leases not counted"
 	}
-	g.Right(x+w-3, top+h-2, []grid.Seg{{Text: foot, Style: "dim"}})
-	return y
+	return foot
 }
 
 // records draws the records panel full width at (0, y), between the
