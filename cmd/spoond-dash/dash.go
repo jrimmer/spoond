@@ -7,10 +7,12 @@
 // viewer shares that loop: each page holds one SSE stream that receives
 // the snapshot as Datastar signal patches (the numbers) and the frame as
 // element patches (one per changed row of the character grid, the whole
-// <pre> when the row count changed). `spoond top` renders the same
-// snapshot as the same grid with ANSI styles in the terminal. The server
-// keeps DASH_HISTORY points of history so a new page starts with trends,
-// not empty sparklines.
+// <pre> when the row count changed). Two pages share the handlers: the
+// dashboard at /, and /images drawing the images panel alone, uncapped
+// (the stream picks the frame by its view parameter). `spoond top`
+// renders the dashboard's snapshot as the same grid with ANSI styles in
+// the terminal. The server keeps DASH_HISTORY points of history so a
+// new page starts with trends, not empty sparklines.
 //
 // Environment:
 //
