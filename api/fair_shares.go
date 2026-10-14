@@ -34,9 +34,8 @@ import (
 // capacity or no active owners). An INACTIVE owner's ratio reads 0: its
 // usage buckets stay listed in the view, but no ratio is computed over
 // its would-be slice, so it is never ranked the heaviest borrower. This
-// task only computes and reports
-// the shares; the take-back policy that acts on them is a
-// later unit.
+// task only computes and reports the shares; the take-back policy that
+// acts on them is a later unit.
 //
 // The disk slice basis is the snapshot volume's **usable** bytes: the
 // statfs free-to-unprivileged bytes plus the snapshot bytes spoond
