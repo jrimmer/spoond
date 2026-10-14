@@ -42,6 +42,7 @@ func poolSeeded(t *testing.T, svc *Service, db *store.DB, sub *testSub, image, b
 		}
 		svc.store.mu.Lock()
 		svc.store.pool[image] = append(svc.store.pool[image], id)
+		svc.store.poolMiB[id] = int(sb.MemoryMB)
 		svc.store.mu.Unlock()
 	}
 }
