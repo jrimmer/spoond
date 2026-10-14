@@ -196,6 +196,13 @@ func TestTakeBackOrderOwnerRatioThenLRU(t *testing.T) {
 
 	overA := preemptOwner(t, svc, "aaa") // sorts before zzz: tied ratios go to it first
 	overB := preemptOwner(t, svc, "zzz")
+	// Two idle identities and a running lease for the legacy-token owner:
+	// the 1/N slice needs five box owners — the two borrowers here plus
+	// three more active ones — so eight 1024 MiB leases put each at
+	// ratio 2.5, far enough over that take-back must run.
+	preemptOwner(t, svc, "mmm")
+	preemptOwner(t, svc, "rrr")
+	addRunningLease(svc, "legacy-active", "legacy-consumer", 1)
 	old := burstLease(t, svc, ctx, overA, "mid")
 	newest := burstLease(t, svc, ctx, overA, "mid")
 	fillA := burstLease(t, svc, ctx, overA, "mid")
