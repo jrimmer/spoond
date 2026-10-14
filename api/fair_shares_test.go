@@ -1634,6 +1634,18 @@ func TestFairSharesLostFormerlyPausedDoesNotCount(t *testing.T) {
 	if got := by[runner.ID].Memory.SliceMiB; got != 1024 {
 		t.Fatalf("runner slice after the loss = %d, want 1024 (the whole pool)", got)
 	}
+
+	// The invalidation is once per loss: a later save of the same lost
+	// lease (a pause-clock touch, a repair) repeats nothing — the
+	// accounted signature and the lost fall are both already recorded.
+	later := svc.fairShares(context.Background())
+	svc.store.mu.Lock()
+	lostLease.LastActive = lostLease.LastActive.Add(time.Second)
+	svc.saveLeaseLocked(lostLease)
+	svc.store.mu.Unlock()
+	if got := svc.fairShares(context.Background()); got != later {
+		t.Fatal("a later save of the same lost lease dropped the (unchanged) snapshot")
+	}
 }
 
 // TestFairSharesLostFormerlyPausedInvalidatesCache: the same real loss
