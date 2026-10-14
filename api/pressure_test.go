@@ -433,41 +433,57 @@ func TestPressureTickSkippedWhileDraining(t *testing.T) {
 	}
 }
 
-// TestPressureTickSkippedWhileAnyLeaseDrained: an undrain pending (a
-// live lease still marked Drained) skips the tick the way draining
-// does, even though s.draining is false again.
-func TestPressureTickSkippedWhileAnyLeaseDrained(t *testing.T) {
+// TestPressureSparesDrainedLease: a live lease still marked Drained (an
+// undrain pending on it) is never the victim — but, unlike s.draining,
+// it does not skip the tick: the loop pauses a healthy lease instead,
+// so a lease stuck Drained cannot switch the floor off for good.
+func TestPressureSparesDrainedLease(t *testing.T) {
 	svc, sub, ctx := newPressureService(t)
 	alice := preemptOwner(t, svc, "alice")
 	bob := preemptOwner(t, svc, "bob")
+	// Five 1024 MiB leases over alice's share, and bob's single lease —
+	// the box's LRU — inside his slice.
+	leases := make([]*Lease, 0, 5)
 	for i := 0; i < 5; i++ {
-		if _, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true}); err != nil {
+		l, err := svc.grantLease(ctx, leaseRequest{owner: alice, image: "mid", ttl: time.Hour, persistent: true})
+		if err != nil {
 			t.Fatalf("grant alice %d: %v", i, err)
 		}
+		leases = append(leases, l)
 	}
-	if _, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true}); err != nil {
+	bobL, err := svc.grantLease(ctx, leaseRequest{owner: bob, image: "mid", ttl: time.Hour, persistent: true})
+	if err != nil {
 		t.Fatalf("grant bob: %v", err)
 	}
-	installDynamicNode(t, svc, sub, 4096, 512, 512) // free = 1024 MiB
+	base := time.Unix(1_000_000, 0)
+	svc.store.mu.Lock()
+	for i, l := range leases {
+		l.LastActive = base.Add(-time.Duration(len(leases)-i) * time.Hour) // leases[0] is alice's LRU
+	}
+	bobL.LastActive = base.Add(-48 * time.Hour) // the box's LRU overall, but inside bob's slice
+	svc.store.mu.Unlock()
+
+	// 6 live sandboxes at 512 pages hold 3072 of the 4096 pages,
+	// baseUsed 512: used 3584 of 4096 pages, free = 1024 MiB, below the
+	// 4096 MiB floor by one lease.
+	installDynamicNode(t, svc, sub, 4096, 512, 512)
 	svc.cfg.MemoryFloorMiB = 4096
 	warmFairShares(svc, ctx)
-	// An undrain in flight: one live lease holds the Drained flag (as a
-	// drain whose undrain deferred leaves it), s.draining false.
-	svc.store.mu.Lock()
-	for _, l := range svc.store.leases {
-		l.Drained = true
-		break
-	}
-	svc.store.mu.Unlock()
-	nCalls := len(sub.CallLog())
+	// An undrain in flight: alice's LRU lease holds the Drained flag (as
+	// a drain whose undrain deferred leaves it), s.draining false.
+	leases[0].Drained = true
 
 	svc.pressureCheck(ctx)
 
-	if susp := suspendedLeases(svc); len(susp) != 0 {
-		t.Fatalf("while a lease is Drained suspended = %v, want none", susp)
+	susp := suspendedLeases(svc)
+	if susp[leases[0].ID] {
+		t.Fatalf("the Drained lease %s was paused", leases[0].ID)
 	}
-	if got := len(sub.CallLog()); got != nCalls {
-		t.Fatalf("tick with a Drained lease made %d substrate calls, want 0", got-nCalls)
+	if len(susp) != 1 || !susp[leases[1].ID] {
+		t.Fatalf("suspended = %v, want exactly alice's next LRU lease %s (the tick is not skipped for a Drained lease)", susp, leases[1].ID)
+	}
+	if bobL.Suspended {
+		t.Fatal("bob's inside-slice lease was paused")
 	}
 }
 
@@ -650,6 +666,7 @@ func TestPressurePauseSurvivesCancelledLoopContext(t *testing.T) {
 		t.Fatal("no Pause call reached the substrate")
 	}
 }
+
 // TestAdmitFloorHeadroom: with MEMORY_FLOOR_MIB=2048 on an 8 GiB pool
 // with 6 GiB free, admission keeps the floor as headroom: a 6 GiB
 // request (free 6 GiB > need 6 GiB, but 6 - 2 < 6) takes back or

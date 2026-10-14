@@ -22,8 +22,10 @@ import (
 // Anti-cycling (round 2): admission keeps the floor as headroom, so a
 // lease the loop paused resumes only with the floor free on top of its
 // own memory and is not paused again at once. The loop stands down
-// while draining or while an undrain is pending (a lease still marked
-// Drained), on bad readings, and while the node is not healthy.
+// while draining, on bad readings, and while the node is not healthy.
+// A lease still marked Drained (an undrain pending on it) is never
+// picked, so a lease stuck Drained cannot switch the floor off for
+// good — the loop keeps taking back around it.
 
 const (
 	// DefaultMemoryFloorMiB is MEMORY_FLOOR_MIB when unset: keep 2 GiB
@@ -67,28 +69,26 @@ func (s *Service) committedMiB() int {
 	return s.runningMemoryMiB()
 }
 
-// pressureSkip reports why a tick must not take anything back, before
-// any node read (the committed gauge has already moved): the floor is
-// off, or the drain is in charge of the leases (draining, or an
-// undrain pending — a lease still marked Drained belongs to the
-// undrain's self-heal loop, and a floor pause would fight the resume
-// for the same lease).
+// pressureSkip reports why a tick must not take anything back at all,
+// before any node read (the committed gauge has already moved): the
+// floor is off, or the drain is in charge of the leases. A lease still
+// marked Drained is NOT a tick skip (a lease stuck Drained would
+// switch the floor off for good): pressureVictim just never picks it,
+// the way it never picks a pinned lease, and the floor keeps taking
+// back from the rest of the box.
 func (s *Service) pressureSkip(floor int) bool {
 	if floor == 0 {
 		return true // the floor is off (the gauge has already moved)
 	}
-	if s.draining.Load() {
-		return true
-	}
-	// An undrain still pending: a lease marked Drained belongs to the
-	// undrain's self-heal loop until its resume is settled.
-	return s.hasDrainedLeases()
+	return s.draining.Load()
 }
 
 // pressureCheck is one tick of the low-memory loop: read the node
 // fresh, and below the floor pause one lease — pressureVictim's pick:
 // the least recently used unpinned lease of the owner furthest over
-// their fair slice, non-busy before busy.
+// their fair slice, non-busy before busy. Leases still marked Drained
+// are skipped like pinned ones (an undrain owns their resume), so a
+// lease stuck Drained cannot switch the floor off for good.
 func (s *Service) pressureCheck(ctx context.Context) {
 	// What the box has promised to live VMs, for the gauge. The store
 	// read needs no node round trip, so the gauge moves every tick —
@@ -174,7 +174,8 @@ func (s *Service) pressureCheck(ctx context.Context) {
 
 // pressureFloorAlert raises the low-memory loop's alert when nothing
 // can be taken back for the floor: short MiB of hugepages are missing
-// and every candidate is pinned or no owner is over their slice. It is
+// and every candidate is pinned, Drained or busy — or no owner is over
+// their slice. It is
 // its own event kind, memory_floor — not box_full, which names an
 // admission's refused requester — and notifies like one (a person must
 // unpin or release leases to free room; nothing was paused).

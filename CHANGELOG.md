@@ -26,12 +26,14 @@ summarised from README "Status".
   (`MEMORY_OVERCOMMIT`) keeps admission from lending memory out; the
   floor is the running counterpart that sheds load when the free
   pages sit low without a request needing room. The tick stands down
-  while draining, while an undrain is pending, and on bad node
-  readings; a pause survives a shutdown in flight (the pause's snapshot
-  write is never cut in half). A floor nothing can be taken back for
-  raises the new `memory_floor` event at most once per 10 minutes. New
-  metrics `spoond_memory_committed_mib` (set every tick, even with the
-  floor off) and `spoond_memory_pressure_takebacks_total`.
+  while draining and on bad node readings; a lease still marked
+  `Drained` (an undrain pending on it) is never picked, but the tick
+  itself runs on, so a lease stuck `Drained` cannot switch the floor
+  off for good. A pause survives a shutdown in flight (the pause's
+  snapshot write is never cut in half). A floor nothing can be taken
+  back for raises the new `memory_floor` event at most once per 10
+  minutes. New metrics `spoond_memory_committed_mib` (set every tick,
+  even with the floor off) and `spoond_memory_pressure_takebacks_total`.
 
 ## [3.8.1] - 2026-10-14
 

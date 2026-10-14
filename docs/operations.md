@@ -1030,16 +1030,20 @@ owners over their slice, and inside that owner the least recently used
 unpinned lease, non-busy before busy — so a single-lease owner over
 their slice IS a candidate, pinned leases and owners inside their
 slice are never touched, and an all-pinned top owner is passed over
-for the next owner down. The lease resumes on its holder's next work
+for the next owner down. A lease still marked `Drained` (an undrain
+pending on it) is never picked either, but unlike `draining` it does
+not skip the tick: the floor keeps taking back around it, since a
+lease stuck `Drained` would otherwise switch the floor off for good.
+The lease resumes on its holder's next work
 call like any take-back; admission counts the floor as headroom in
 every free-vs-request comparison, so a paused lease resumes only with
 the floor free on top of its own memory and is not paused again at
-once. The tick stands down while the node is draining, while an
-undrain is still pending (a lease marked `Drained`), on bad node
+once. The tick stands down while the node is draining and on bad node
 readings (a status other than `healthy`, or no pages reported) and —
 for the pause itself — the loop's context is abandoned: a shutdown
 cannot cut a snapshot write in half. A floor nothing can be taken back
-for (every candidate pinned, or no owner over their slice) raises the
+for (every candidate pinned, `Drained` or busy, or no owner over their
+slice) raises the
 `memory_floor` alert (a `lease.memory_floor` event, notifications
 critical, "spoond memory below floor") at most once per 10 minutes
 instead of every tick.
