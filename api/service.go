@@ -2242,6 +2242,14 @@ func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool)
 	defer s.store.mu.Unlock()
 	s.store.pending[owner] += n
 	s.store.pendingMiB[owner] += n * memoryMB
+	// pendingMiB is part of the fair-share view twice over: it is the
+	// owner's in-flight usage and the mark that makes the owner ACTIVE
+	// (counted in N) while its first lease is still admitting. Crossing
+	// 0 in either direction moves both, so the snapshot is dropped here
+	// for every pendingMiB change — the store lock order matches
+	// computeFairShares and deleteLeaseLocked, so a concurrent compute
+	// never caches the pre-reservation state for the TTL.
+	s.invalidateFairShares()
 	return nil
 }
 
@@ -2330,6 +2338,10 @@ func (s *Service) leaseCounts(owner string) LeaseCounts {
 }
 
 // releaseQuotaReservation drops n reservations made by reserveQuota.
+// Any pendingMiB change also invalidates the fair-share snapshot: the
+// owner's in-flight usage moved, and a fall to 0 may make the owner
+// inactive (N drops). Under the store lock, after the update, like
+// reserveQuota.
 func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	if s.identities == nil {
 		return
@@ -2346,6 +2358,7 @@ func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	} else {
 		s.store.pendingMiB[owner] -= n * memoryMB
 	}
+	s.invalidateFairShares()
 }
 
 // sizedStart picks the build a restart's fresh guest for lease l boots
