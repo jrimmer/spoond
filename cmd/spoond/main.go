@@ -11,6 +11,8 @@
 //	                  readable summary, or --json for the raw document
 //	spoond doctor     dependency/connectivity checks (orchestrator, registry, LLM, listeners, catalog)
 //	spoond drain      orchestrator drain/undrain hook (U10)
+//	spoond history    lease-history tools (`spoond history import` reads
+//	                  journalctl lines on stdin into the lease_history table)
 //	spoond config     show unit env settings per name: value, source,
 //	                  and whether the running backend has it
 //	spoond dash       read-only live dashboard (basic auth)
@@ -30,7 +32,7 @@
 //
 // Supported exclusion tags: nobackend, nogateway, nomcp, norunner,
 // noctl, noimages, nocapabilities, nodoctor, nodrain, noconfig, nodash (dash and top
-// together).
+// together), nonotify, nohistory.
 package main
 
 import (
@@ -73,10 +75,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, "spoond — isolated ephemeral compute for people and agents (microVM lease service)\n\nusage:\n  spoond <command> [args...]\n\ncommands:\n")
-	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "capabilities", "doctor", "drain", "config", "dash", "top", "notify", "version"} {
+	for _, name := range []string{"backend", "gateway", "mcp", "runner", "ctl", "images", "capabilities", "doctor", "drain", "history", "config", "dash", "top", "notify", "version"} {
 		if c, ok := commands[name]; ok {
 			fmt.Fprintf(os.Stderr, "  %-9s %s\n", c.name, c.desc)
 		}
 	}
-	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nocapabilities, nodoctor, nodrain, noconfig, nodash, nonotify\n")
+	fmt.Fprint(os.Stderr, "\nbuild tags (exclude modules): nobackend, nogateway, nomcp, norunner, noctl, noimages, nocapabilities, nodoctor, nodrain, noconfig, nodash, nonotify, nohistory\n")
 }

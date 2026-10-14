@@ -70,6 +70,15 @@ func TestLeaseHistoryRoundTrip(t *testing.T) {
 	if _, err := db.GetLeaseHistory(ctx, "l-missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing id err = %v, want ErrNotFound", err)
 	}
+
+	// ListLeaseHistory returns every row, oldest end first.
+	all, err := db.ListLeaseHistory(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all) != 1 || all[0].LeaseID != "l-1" || all[0].Outcome != "released" {
+		t.Fatalf("list = %+v, want the one released row for l-1", all)
+	}
 }
 
 // TestLeaseStartMSStamp: SetLeaseStartMS writes the latency on the live
