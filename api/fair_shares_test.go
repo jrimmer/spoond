@@ -1293,3 +1293,196 @@ func TestFairSharesCancelledRequestContextDetached(t *testing.T) {
 		t.Fatal("ok snapshot from a cancelled request was not cached")
 	}
 }
+
+// addPausedLease inserts a suspended (paused) lease with a memory
+// charge held, as a paused lease keeps its hugepages booked.
+func addPausedLease(svc *Service, id, owner string, memMiB int) {
+	svc.store.mu.Lock()
+	svc.store.leases[id] = &Lease{
+		ID: id, Owner: owner, State: "suspended", Suspended: true, MemoryMB: memMiB,
+	}
+	svc.store.mu.Unlock()
+}
+
+// markLeaseLost flips the in-memory lease to lost, the state a node
+// crash leaves behind.
+func markLeaseLost(svc *Service, id string) {
+	svc.store.mu.Lock()
+	svc.store.leases[id].setState("lost")
+	svc.store.mu.Unlock()
+}
+
+// markLeaseReleased clears the lease from the in-memory store the way
+// release does (rows drop out entirely).
+func markLeaseReleased(svc *Service, id string) {
+	svc.store.mu.Lock()
+	delete(svc.store.leases, id)
+	svc.store.mu.Unlock()
+}
+
+// addPendingAdmission books an in-flight admission for owner directly
+// (reserveQuota runs under the HTTP handlers; direct-service tests
+// stamp the store themselves).
+func addPendingAdmission(svc *Service, owner string, memMiB int) {
+	svc.store.mu.Lock()
+	svc.store.pending[owner]++
+	svc.store.pendingMiB[owner] = memMiB
+	svc.store.mu.Unlock()
+}
+
+// clearPendingAdmission drops owner's in-flight reservation again.
+func clearPendingAdmission(svc *Service, owner string) {
+	svc.store.mu.Lock()
+	delete(svc.store.pending, owner)
+	delete(svc.store.pendingMiB, owner)
+	svc.store.mu.Unlock()
+}
+
+// TestFairSharesPausedLeaseCounts: a paused lease keeps its hugepages
+// booked, so its owner is ACTIVE for N and shows a 1/N slice (N=2 with
+// a second active owner means 512 MiB, not the idle would-have 341).
+func TestFairSharesPausedLeaseCounts(t *testing.T) {
+	svc, _, _, ids := newFairShareService(t)
+	paused := addIdentityUser(t, ids, "paused")
+	runner := addIdentityUser(t, ids, "runner")
+	addPausedLease(svc, "pause-1", paused.ID, 256)
+	addRunningLease(svc, "run-1", runner.ID, 100)
+	svc.invalidateFairShares()
+
+	snap := svc.fairShares(context.Background())
+	if snap.ownersN != 2 {
+		t.Fatalf("ownersN = %d, want 2 (the paused lease counts as active)", snap.ownersN)
+	}
+	by := shareByOwner(snap)
+	if !by[paused.ID].Active {
+		t.Fatal("owner of a paused lease reported inactive")
+	}
+	if by[paused.ID].Memory.SliceMiB != 512 || by[runner.ID].Memory.SliceMiB != 512 {
+		t.Fatalf("slices = %d / %d, want 512 / 512", by[paused.ID].Memory.SliceMiB, by[runner.ID].Memory.SliceMiB)
+	}
+	if by[paused.ID].Memory.UsedMiB != 0 {
+		t.Fatalf("paused lease counted as used memory: %d, want 0 (no hugepages held)", by[paused.ID].Memory.UsedMiB)
+	}
+}
+
+// TestFairSharesLostAndReleasedDoNotCount: a lost lease (hugepages
+// gone) and a released one leave their owner idle — not in N, slice
+// total/(N+1).
+func TestFairSharesLostAndReleasedDoNotCount(t *testing.T) {
+	svc, _, _, ids := newFairShareService(t)
+	lost := addIdentityUser(t, ids, "lost")
+	releasedOwner := addIdentityUser(t, ids, "parted")
+	runner := addIdentityUser(t, ids, "runner")
+	addRunningLease(svc, "run-lost", lost.ID, 256)
+	addRunningLease(svc, "run-released", releasedOwner.ID, 256)
+	addRunningLease(svc, "run-1", runner.ID, 100)
+	svc.invalidateFairShares()
+	if got := svc.fairShares(context.Background()).ownersN; got != 3 {
+		t.Fatalf("ownersN = %d, want 3 before the flips", got)
+	}
+
+	markLeaseLost(svc, "run-lost")
+	markLeaseReleased(svc, "run-released")
+	svc.invalidateFairShares()
+
+	snap := svc.fairShares(context.Background())
+	if snap.ownersN != 1 {
+		t.Fatalf("ownersN = %d, want 1 (lost and released owners are idle)", snap.ownersN)
+	}
+	by := shareByOwner(snap)
+	for _, owner := range []string{lost.ID, releasedOwner.ID} {
+		if by[owner].Active {
+			t.Fatalf("%s reported active on a %s lease", owner, func() string {
+				if owner == lost.ID {
+					return "lost"
+				}
+				return "released"
+			}())
+		}
+		if by[owner].Memory.SliceMiB != 512 || by[owner].SlicePct != 50 {
+			t.Fatalf("%s idle slice = %d MiB / %v%%, want 512 MiB / 50%% (total/(N+1))",
+				owner, by[owner].Memory.SliceMiB, by[owner].SlicePct)
+		}
+	}
+	if !by[runner.ID].Active || by[runner.ID].Memory.SliceMiB != 1024 {
+		t.Fatalf("runner slice = %d MiB, want 1024 (the whole pool)", by[runner.ID].Memory.SliceMiB)
+	}
+}
+
+// TestFairSharesPendingOnlyOwnerCounts: an admission in flight books
+// its owner as ACTIVE before any lease exists; when the admission
+// settles (reservation released), the owner goes idle again.
+func TestFairSharesPendingOnlyOwnerCounts(t *testing.T) {
+	svc, _, _, ids := newFairShareService(t)
+	req := addIdentityUser(t, ids, "requester")
+	addPendingAdmission(svc, req.ID, 256)
+	svc.invalidateFairShares()
+
+	snap := svc.fairShares(context.Background())
+	if snap.ownersN != 1 {
+		t.Fatalf("ownersN = %d, want 1 (an in-flight admission counts)", snap.ownersN)
+	}
+	by := shareByOwner(snap)
+	if !by[req.ID].Active || by[req.ID].Memory.SliceMiB != 1024 {
+		t.Fatalf("pending-only owner: active=%v slice=%d, want active with the whole pool",
+			by[req.ID].Active, by[req.ID].Memory.SliceMiB)
+	}
+
+	clearPendingAdmission(svc, req.ID)
+	svc.invalidateFairShares()
+	snap = svc.fairShares(context.Background())
+	if snap.ownersN != 0 {
+		t.Fatalf("ownersN = %d after the reservation cleared, want 0", snap.ownersN)
+	}
+	if shareByOwner(snap)[req.ID].Active {
+		t.Fatal("owner still active after its reservation cleared")
+	}
+}
+
+// TestFairSharesActiveGetsPoolWhileIdleListed: two identity users, one
+// active ⇒ the box lists BOTH and the active one owns the whole pool;
+// the idle one shows the slice it would get on starting (total/(N+1) =
+// the entire box when it is the only idle one, N=1).
+func TestFairSharesIdleIdentityNotInN(t *testing.T) {
+	svc, _, _, ids := newFairShareService(t)
+	active := addIdentityUser(t, ids, "active")
+	idle := addIdentityUser(t, ids, "idle")
+	addRunningLease(svc, "run-1", active.ID, 256)
+	svc.invalidateFairShares()
+
+	snap := svc.fairShares(context.Background())
+	if snap.ownersN != 1 {
+		t.Fatalf("ownersN = %d, want 1 (the idle identity does not count)", snap.ownersN)
+	}
+	if len(snap.owners) != 2 {
+		t.Fatalf("listed %d owners, want both identities", len(snap.owners))
+	}
+	by := shareByOwner(snap)
+	a, in := by[active.ID]
+	if !in {
+		t.Fatal("active owner missing from the snapshot")
+	}
+	d, in := by[idle.ID]
+	if !in {
+		t.Fatal("idle owner missing from the snapshot")
+	}
+	if !a.Active || d.Active {
+		t.Fatalf("active=%v idle=%v, want true/false", a.Active, d.Active)
+	}
+	if a.Memory.SliceMiB != 1024 || a.SlicePct != 100 {
+		t.Fatalf("active slice = %d MiB / %v%%, want the whole pool", a.Memory.SliceMiB, a.SlicePct)
+	}
+	if d.Memory.SliceMiB != 512 || d.SlicePct != 50 {
+		t.Fatalf("idle slice = %d MiB / %v%%, want 512 MiB / 50%% = total/(N+1)",
+			d.Memory.SliceMiB, d.SlicePct)
+	}
+	if d.Memory.UsedMiB != 0 || d.Disk.UsedBytes != 0 {
+		t.Fatalf("idle owner shows usage: mem=%d disk=%d, want 0", d.Memory.UsedMiB, d.Disk.UsedBytes)
+	}
+	if d.Ratio != 0 {
+		t.Fatalf("idle ratio = %v, want 0", d.Ratio)
+	}
+	if a.Ratio != 0.25 {
+		t.Fatalf("active owner ratio = %v, want 0.25 (256 MiB over the 1024 MiB pool)", a.Ratio)
+	}
+}
