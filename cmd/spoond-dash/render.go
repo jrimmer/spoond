@@ -563,6 +563,10 @@ type layout struct {
 	notices []Notice
 	host    string
 	s       Snapshot
+	// imagesPage marks the /images page's view: the images panel drawn
+	// alone, full width, every image row uncapped, and the panel's
+	// "+N more" text a link back to that page.
+	imagesPage bool
 	// histFn serves the sparkline series; Draw leaves it nil (the
 	// sparklines then draw empty) and the page/top fill it from the
 	// collector's history.
@@ -940,14 +944,14 @@ func (l *layout) imageRows() int {
 	return n
 }
 
-// maxImageRows is the most per-image rows the capacity panel shows
-// before it folds the rest into a "+N more" row.
-const maxImageRows = 6
+// maxCapacityImageRows is the most per-image rows the capacity panel
+// shows before it folds the rest into a "+N more" row.
+const maxCapacityImageRows = 6
 
-// imageRoom is how many image rows fit: bounded by maxImageRows, less
-// the shared row the counts block needs at the minimum height.
+// imageRoom is how many image rows fit: bounded by maxCapacityImageRows,
+// less the shared row the counts block needs at the minimum height.
 func (l *layout) imageRoom() int {
-	room := maxImageRows - max(0, len(l.capacityRows())-capacityMinRows+1)
+	room := maxCapacityImageRows - max(0, len(l.capacityRows())-capacityMinRows+1)
 	if room < 1 {
 		room = 1
 	}
@@ -1946,20 +1950,48 @@ func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
 
 // images panel: the catalog — name, shape, live leases, lifetime uses,
 // baked-at — beside the services panel at a wide frame, stacked below it,
-// with a total row under the images (live and uses summed). The empty
-// panel keeps a row for "no images" instead of writing over its bottom
-// border.
+// with a total row under the images (live and uses summed). The panel
+// caps its rows (maxImageRows), folding the rest into one "+N more" row
+// whose live and uses cells sum what was folded. The empty panel keeps
+// a row for "no images" instead of writing over its bottom border.
 func (l *layout) imagesH() int {
 	if len(l.s.Images) == 0 {
 		return 4
 	}
-	return 4 + len(l.s.Images)
+	shown, folded := l.imageRowsShown()
+	return 4 + shown + boolInt(folded > 0)
 }
 
 // maxServiceRows is the most unit rows the services panel shows before
 // it folds the rest into a "+N more" row — the images panel's cap, so
 // a host with many units cannot stretch the whole band.
 const maxServiceRows = 6
+
+// maxImageRows is the most image rows the images panel shows — eight
+// image rows, then one "+N more" row when the catalog runs longer. The
+// /images page draws the whole catalog uncapped.
+const maxImageRows = 8
+
+// imageRowsShown is the panel's image rows and the fold: all of them
+// when the catalog fits maxImageRows; otherwise the cap's rows and the
+// count past it, drawn as one "+N more" row. The cap is off when the
+// layout draws for the /images page (linkMore marks that view; see
+// drawImages' "+N more" row).
+func (l *layout) imageRowsShown() (shown, folded int) {
+	if n := len(l.s.Images); n <= l.imageCap() {
+		return n, 0
+	}
+	return l.imageCap(), len(l.s.Images) - l.imageCap()
+}
+
+// imageCap is the layout's image row cap: none (all rows) on the
+// /images page, maxImageRows everywhere else.
+func (l *layout) imageCap() int {
+	if l.imagesPage {
+		return math.MaxInt
+	}
+	return maxImageRows
+}
 
 // servicesH is the services panel's own height: title, one row per unit
 // up to maxServiceRows ("no units configured" when none), a final
@@ -2008,24 +2040,34 @@ type imageCol struct {
 }
 
 // imageCols lays the images panel's columns out: image, mem/vcpu (the
-// leases panel's size form, "8G/2V"), live, uses, baked.
+// leases panel's size form, "8G/2V"), live, uses, baked. The name
+// column is wide (23 cells) — the catalog's names run long — and the
+// baked column takes the rest of the panel's inner width, so "12d ago"
+// fits at the 61-cell panel.
 func imageCols(w int) []imageCol {
-	cols := []imageCol{{2, 17}, {19, 10}, {29, 6}, {35, 7}}
-	cols = append(cols, imageCol{42, w - 4 - 42 + 1}) // baked, to the inner right edge
+	cols := []imageCol{{2, 23}, {25, 10}, {35, 6}, {41, 7}}
+	cols = append(cols, imageCol{48, w - 4 - 48 + 1}) // baked, to the inner right edge
 	return cols
 }
 
 // drawImages draws the images panel at (x, y) in w cells and returns
-// the row past its bottom edge: a header row, then one row per image.
+// the row past its bottom edge: a header row, one row per image up to
+// maxImageRows (one more for "+N more" when the catalog runs longer;
+// all rows on the /images page, cap off), then the total row.
 func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 	top := y
-	y = l.panel(g, x, y, w, h, "images", "images")
+	y = l.panel(g, x, y, w, h, l.imagesTitle(), "images")
 	cols := imageCols(w)
 	labels := []string{"image", "mem/vcpu", "live", "uses", "baked"}
 	for i, c := range cols {
 		g.Text(x+c.off, top+1, labels[i], "dim", c.w)
 	}
-	for i, im := range l.s.Images {
+	if len(l.s.Images) == 0 {
+		g.Text(x+2, top+2, "no images", "dim", w-4)
+		return y
+	}
+	shown, folded := l.imageRowsShown()
+	for i, im := range l.s.Images[:shown] {
 		yy := top + 2 + i
 		vals := []string{
 			ellipsize(sanitize(im.Name), cols[0].w),
@@ -2038,20 +2080,41 @@ func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 			g.Text(x+c.off, yy, vals[j], "text", c.w)
 		}
 	}
-	if len(l.s.Images) == 0 {
-		g.Text(x+2, top+2, "no images", "dim", w-4)
-		return y
+	if folded > 0 {
+		// One dim row for the images past the cap, their live and uses
+		// summed into its cells. On the page the text is a link to
+		// /images; in the terminal the row names where the list lives.
+		live, uses := 0, 0
+		for _, im := range l.s.Images[shown:] {
+			live += im.Live
+			uses += im.Uses
+		}
+		yy := top + 2 + shown
+		text := fmt.Sprintf("+%d more", folded)
+		if l.imagesPage {
+			g.Segs(x+cols[0].off, yy, []grid.Seg{{Text: ellipsize(text, cols[0].w), Style: "link"}}, cols[0].w)
+		} else {
+			g.Text(x+cols[0].off, yy, ellipsize(text+" · spoond images list", cols[0].w), "dim", cols[0].w)
+		}
+		g.Text(x+cols[2].off, yy, fmt.Sprint(live), "dim", cols[2].w)
+		g.Text(x+cols[3].off, yy, fmt.Sprint(uses), "dim", cols[3].w)
 	}
 	live, uses := 0, 0
 	for _, im := range l.s.Images {
 		live += im.Live
 		uses += im.Uses
 	}
-	yy := top + 2 + len(l.s.Images)
+	yy := top + 2 + shown + boolInt(folded > 0)
 	g.Text(x+cols[0].off, yy, "total", "dim", cols[0].w)
 	g.Text(x+cols[2].off, yy, fmt.Sprint(live), "dim", cols[2].w)
 	g.Text(x+cols[3].off, yy, fmt.Sprint(uses), "dim", cols[3].w)
 	return y
+}
+
+// imagesTitle is the panel's title: the image count and the order —
+// "images · 12 · by use".
+func (l *layout) imagesTitle() string {
+	return fmt.Sprintf("images · %d · by use", len(l.s.Images))
 }
 
 // drawServices draws the services panel at (x, y) in w cells and

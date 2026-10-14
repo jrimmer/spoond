@@ -35,11 +35,11 @@ SPOOND · spoond.example.com                              up 9m, 12:00:00
 │ fedcba go-base -     agent ‖     lan    1d     due  nightly          │
 │ ▶ running ‖ suspended ⭘ recovered ■ lost ◆ pinned                    │
 └──────────────────────────────────────────────────────────────────────┘
-┌─ images ─────────────────────────────────────────────────────────────┐
-│ image            mem/vcpu  live  uses   baked                        │
-│ go-base          2G/2V     2     51     2d ago                       │
-│ py-base          1G/1V     1     7      9h ago                       │
-│ total                      3     58                                  │
+┌─ images · 2 · by use ────────────────────────────────────────────────┐
+│ image                  mem/vcpu  live  uses   baked                  │
+│ go-base                2G/2V     2     51     2d ago                 │
+│ py-base                1G/1V     1     7      9h ago                 │
+│ total                            3     58                            │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ services ───────────────────────────────────────────────────────────┐
 │ spoond-backend        ✓ active                                       │

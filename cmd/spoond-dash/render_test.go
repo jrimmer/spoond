@@ -1617,8 +1617,10 @@ func TestServicesFillTallerPanel(t *testing.T) {
 		s.Images = append(s.Images, ImageRow{Name: fmt.Sprintf("img-%d", i)})
 	}
 	p := Draw(s, DefaultWidth, fixedNow, "h").Plain()
-	if strings.Contains(p, "more") || !strings.Contains(p, fmt.Sprintf("unit-%d", maxServiceRows)) {
-		t.Fatalf("all units should show beside a taller images panel:\n%s", p)
+	for i := 0; i <= maxServiceRows; i++ {
+		if !strings.Contains(p, fmt.Sprintf("unit-%d ", i)) {
+			t.Fatalf("all units should show beside a taller images panel:\n%s", p)
+		}
 	}
 	// With a short images panel the services panel keeps its own cap.
 	s.Images = s.Images[:1]
