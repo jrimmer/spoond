@@ -453,6 +453,14 @@ type ServiceConfig struct {
 	// pool; 0 = no cap (only code sets it, e.g. tests).
 	MemoryOvercommit     float64
 	PinnedIdleNoticeDays int
+	// MemoryFloorMiB is MEMORY_FLOOR_MIB (spoond-l3lq): the free hugepage
+	// memory the backend keeps on the box, checked every 15 s by the
+	// low-memory loop (api/pressure.go). Below the floor it pauses one
+	// lease through the ordinary take-back rules (memVictims over the
+	// fair-share views — pinned leases and owners inside their slice are
+	// never touched) and repeats on the next tick. The backend passes
+	// DefaultMemoryFloorMiB when unset; 0 disables the check.
+	MemoryFloorMiB int
 	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
 	// keep on a lease already holding this many kept builds answers 409
 	// and takes nothing. 0 = no cap. MAX_KEPT_PER_LEASE, default
@@ -698,6 +706,10 @@ type Service struct {
 	// lost or released, catching a lost path's bounded delete that still
 	// failed. Defaults to defaultOrphanSweepInterval; tests shorten it.
 	orphanSweepInterval time.Duration
+	// pressureCheckInterval is how often the low-memory take-back loop
+	// checks MEMORY_FLOOR_MIB (api/pressure.go). A field so tests can
+	// shrink it.
+	pressureCheckInterval time.Duration
 	// orphanMu guards orphanSandboxIDs: sandbox ids a lost or released
 	// lease's substrate Delete could not stop, kept so the periodic orphan
 	// sweep retries them. A released lease's row and in-memory entry are
@@ -783,6 +795,12 @@ type Service struct {
 	// drainHealBackoffMax rather than every pass (spoond-52c NIT). Guarded
 	// by drainHealMu.
 	drainNodeInfoLogAt time.Time
+	// pressureAlertAt is when the low-memory loop last raised its
+	// "below the floor and nothing can be taken back" alert: a standing
+	// condition repeats at most once per pressureAlertEvery (10 min)
+	// instead of every tick. Written only by pressureCheck, which the
+	// loop calls alone (no other goroutine reads or writes it).
+	pressureAlertAt time.Time
 	// drainGate serialises the admin drain with the rootfs probe's
 	// recovery (spoond-5ca). drain takes the write side around
 	// SetDraining and draining.Store(true); recoverDeadRootfs holds the
@@ -1047,6 +1065,7 @@ func NewService(sub substrate.Substrate, db *store.DB, tokens map[string]string,
 		undrainBackoffMax:         undrainRetryBackoffMax,
 		undrainReadyPoll:          time.Second,
 		orphanSweepInterval:       defaultOrphanSweepInterval,
+		pressureCheckInterval:     pressureInterval,
 		orphanSandboxIDs:          map[string]struct{}{},
 		orphanSweep:               newOrphanSweepState(),
 		usageSampleInterval:       defaultUsageSampleInterval,
@@ -1844,6 +1863,10 @@ func (s *Service) Start(ctx context.Context) {
 	// Usage history (#140 U4): one usage_samples row per owner every
 	// sample interval, old rows pruned past the retention window.
 	go s.runUsageHistoryLoop(ctx)
+	// Low-memory take-back (MEMORY_FLOOR_MIB, spoond-l3lq): every 15 s
+	// keep the free hugepages at or above the floor by pausing one lease
+	// through the ordinary take-back rules.
+	go s.pressureLoop(ctx)
 	// Measured lease memory (#130 R1): every 30 s, when OTEL_PROM_URL is
 	// set, read the orchestrator's per-sandbox ram gauges for the live
 	// leases and keep latest/peak in memory.

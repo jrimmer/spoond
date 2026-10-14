@@ -147,6 +147,11 @@ type BackendMetrics struct {
 	// Memory take-back (FS2a): the biggest borrower's leases suspended
 	// so a requester's admission fits (spoond-pxsn).
 	TakeBacksTotal prometheus.Counter // cumulative take-back pauses
+	// Low-memory loop (MEMORY_FLOOR_MIB, spoond-l3lq): the lease memory
+	// the box has committed to live VMs, and the leases the loop paused
+	// to hold the free hugepages at the floor.
+	MemoryCommittedMiB           prometheus.Gauge   // live-lease memory, set each tick
+	MemoryPressureTakebacksTotal prometheus.Counter // cumulative floor take-backs
 
 	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
 	// the idle sweep through the pause path; the next call resumes them.
@@ -503,6 +508,15 @@ func NewBackendMetrics() *BackendMetrics {
 		Namespace: "spoond", Name: "take_backs_total",
 		Help: "Leases suspended by the fair-shares memory take-back.",
 	})
+	// Low-memory loop (MEMORY_FLOOR_MIB, spoond-l3lq).
+	m.MemoryCommittedMiB = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "spoond", Name: "memory_committed_mib",
+		Help: "Memory promised to live leases (running and recovered), in MiB, as the low-memory loop last measured it.",
+	})
+	m.MemoryPressureTakebacksTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "spoond", Name: "memory_pressure_takebacks_total",
+		Help: "Leases paused by the low-memory loop to hold the free hugepages at MEMORY_FLOOR_MIB.",
+	})
 
 	// Idle suspension (2.5, #129 part 2): persistent leases suspended by
 	// the idle sweep. The next call resumes them.
@@ -605,6 +619,7 @@ func NewBackendMetrics() *BackendMetrics {
 		m.PauseChainDepth, m.PauseChainBytes,
 		m.NamedSnapshots, m.NamedSnapshotBytes,
 		m.BoxFullTotal, m.TakeBacksTotal, m.HostPressure, m.SaturationRefusals,
+		m.MemoryCommittedMiB, m.MemoryPressureTakebacksTotal,
 		m.SnapshotDiskReserved, m.SnapshotDiskUsable,
 		m.IdleSuspendsTotal,
 		m.GuestDialsActive, m.GuestDialsTotal,

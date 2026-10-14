@@ -715,6 +715,17 @@ func Main(args []string) int {
 		}
 		memoryOvercommit = f
 	}
+	// MEMORY_FLOOR_MIB (spoond-l3lq): the free hugepage memory the
+	// backend keeps on the box; below it the low-memory loop (every 15 s)
+	// pauses one lease through the ordinary take-back rules. 0 disables.
+	memoryFloorMiB := api.DefaultMemoryFloorMiB
+	if v := os.Getenv("MEMORY_FLOOR_MIB"); v != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || n < 0 {
+			log.Fatalf("MEMORY_FLOOR_MIB=%q: want a whole number of MiB (0 disables the floor)", v)
+		}
+		memoryFloorMiB = n
+	}
 	// Removed hold/idle variables (FS5): warn once at startup and ignore.
 	warnRemovedEnv(log.Default(), os.Getenv)
 
@@ -796,6 +807,7 @@ func Main(args []string) int {
 		LostGrace:                 lostGrace,
 		PausedReleaseDays:         pausedReleaseDays,
 		MemoryOvercommit:          memoryOvercommit,
+		MemoryFloorMiB:            memoryFloorMiB,
 		PinnedIdleNoticeDays:      pinnedIdleNoticeDays,
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),
