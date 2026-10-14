@@ -2637,8 +2637,8 @@ Request `{"max_ttl": S}` — the user's lease TTL ceiling in seconds
 `{"user": {…}}` as `GET /api/users`.
 
 **Deprecated fields.** `max_leases`, `guaranteed_mib`, `max_mib` and
-`max_kept_bytes` were removed in 3.0 (fair shares): every owner gets an
-equal slice instead, and the kept budget is the owner's disk slice. A
+`max_kept_bytes` were removed in 3.0 (fair shares): every active owner
+gets an equal slice instead, and the kept budget is the owner's disk slice. A
 request may still send them — any value is accepted (no `400`, and the
 old `guaranteed_mib <= max_mib` rule is gone) and ignored. When any of
 them is set to a non-zero value, the `200` carries:
@@ -2765,12 +2765,17 @@ uses its service token).
 
 ## Fair shares
 
-Every owner gets an **equal floating slice** of the box: `1/N` of the
-hugepage memory pool and of the snapshot volume's **usable** bytes,
-where `N` is the number of owners that exist — every identity user,
-plus the legacy consumer token as one owner. There are no per-owner
-weights or settings; the slice is recomputed when an owner is added or
-deleted (`POST /api/users`, `DELETE /api/users/{id}`).
+Every active owner gets an **equal floating slice** of the box: `1/N` of
+the hugepage memory pool and of the snapshot volume's **usable** bytes,
+where `N` is the number of **active** owners — the owners holding a
+running or paused (suspended) lease, plus anyone with an admission in
+flight (the legacy consumer token counts as one owner once it holds a
+lease); identities that are merely registered do not count. An owner's
+slice shrinks to `1/(N+1)` as soon as they take their first lease.
+There are no per-owner weights or settings; the slice is recomputed
+when the active set moves (a lease starts, pauses, is released or
+lost, an admission is booked) or an owner is added or deleted (`POST
+/api/users`, `DELETE /api/users/{id}`).
 
 The same fraction applies to both resources. Usage is measured from
 recorded state, never a filesystem walk per request:
@@ -2806,6 +2811,7 @@ The share object is:
   "name": "jason",
   "slice_pct": 33.33,
   "capacity_known": true,
+  "active": true,
   "memory": {"slice_mib": 341, "used_mib": 0},
   "disk": {"slice_bytes": 357913941, "used_bytes": 0,
            "paused_bytes": 0, "kept_bytes": 0, "named_bytes": 0},
@@ -2815,7 +2821,8 @@ The share object is:
 
 `ratio` is `usage/slice`, the larger of the memory and disk ratios; an
 owner inside their slice is below `1`. When the box has no capacity (or
-no owners exist) every slice and ratio is `0` — no division by zero.
+no active owners exist) every slice and ratio is `0` — no division by
+zero.
 
 `capacity_known` reports whether the box totals behind the slice were
 readable. `false` means the slices are **not computed yet** — the
@@ -2837,11 +2844,16 @@ request retries.
 
 `403` for non-admin callers. Read-only:
 `{"capacity_known": true|false, "owners": [{owner, name?,
-capacity_known, slice_pct, memory {slice_mib, used_mib}, disk
+capacity_known, active, slice_pct, memory {slice_mib, used_mib}, disk
 {slice_bytes, used_bytes, paused_bytes, kept_bytes, named_bytes},
 ratio}], "disk": {…}}`, sorted by `ratio` descending — the owner
-furthest over their slice first. Ties sort by owner id. This is the
-view the take-back policy reads; this version only reports it.
+furthest over their slice first. Ties sort by owner id. Every owner is
+listed (identities and legacy tokens alike); `active` reports whether
+the owner counts toward `N` — it holds a running or paused lease or
+has an admission in flight. An inactive owner shows the slice it would
+get on starting, `total/(N+1)`, and never a ratio above the active
+ones (its usage is idle-zero). This is the view the take-back policy
+reads; this version only reports it.
 
 When the snapshot disk can be read, the response also carries a `disk`
 object — the room the take-back policy decides with, every size in

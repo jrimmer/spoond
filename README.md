@@ -98,15 +98,16 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
     [operations.md](docs/operations.md#pins-and-the-paused-release-clock).
 - **Multi-user tenancy**: people and agents are first-class identities,
   with per-user SSH keys, per-user tokens, a per-user `max_ttl`, an
-  equal fair share of memory and snapshot disk per owner (no per-owner
-  caps since 3.0), admin roles, lease sharing with expiry,
+  equal fair share of memory and snapshot disk among active owners (no
+  per-owner caps since 3.0), admin roles, lease sharing with expiry,
   per-user LLM gateway keys, and per-user proxy hostnames
   (`<label>.<user>.sandbox.example`). See
   [docs/security.md](docs/security.md) and the [Users & identity API
   section](docs/api.md#users--identity).
-- **Fair shares**: every owner gets an equal, floating 1/N slice of
-  memory and snapshot disk; an owner may borrow past it while the box
-  has room. When a request does not fit, spoond takes room back from
+- **Fair shares**: every owner holding a running or paused lease gets
+  an equal, floating 1/N slice of memory and snapshot disk (N counts
+  active owners only — an identity that never took a lease does not
+  split the box); an owner may borrow past it while the box has room. When a request does not fit, spoond takes room back from
   the biggest borrower (highest usage over slice): memory take-back
   pauses that owner's least recently used unpinned lease, and disk
   take-back releases their oldest unpinned paused lease. A shortage
