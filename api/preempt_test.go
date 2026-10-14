@@ -480,13 +480,13 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 	events := svc.Subscribe(EventFilter{LeaseID: victim.ID})
 	defer events.Close()
 
-	// consumer-a fills the 3072 MiB pool exactly. Three more owners are
-	// active (two idle identities plus the legacy-token owner), so the
-	// slice is 614 MiB: ratio 3 after all three leases. The guaranteed
-	// lease takes the LRU lease; the event detail reports the 4.00
-	// over-slice ratio — the owner's usage at the moment of the pick
-	// (before the picked lease was given up), 2457 over the 614 MiB
-	// slice.
+	// consumer-a fills the 3072 MiB pool exactly. The seeded active
+	// set plus the guaranteed requester itself (its in-flight admission
+	// makes it active for its own first lease) slice the pool into 512
+	// MiB. The guaranteed lease takes the LRU lease; the event detail
+	// reports the 5.00 over-slice ratio — the owner's usage at the
+	// moment of the pick (before the picked lease was given up) over
+	// that slice.
 	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 1536, 0, 512)
 	warmFairShares(svc, ctx)
@@ -513,8 +513,8 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 		select {
 		case ev := <-events.C:
 			if ev.Type == LeaseTakeBack {
-				if !strings.Contains(ev.Detail, "for guaranteed") || !strings.Contains(ev.Detail, "4.00") {
-					t.Fatalf("take-back detail = %q, want the requester and the 4.00 ratio", ev.Detail)
+				if !strings.Contains(ev.Detail, "for guaranteed") || !strings.Contains(ev.Detail, "5.00") {
+					t.Fatalf("take-back detail = %q, want the requester and the 5.00 ratio", ev.Detail)
 				}
 				return
 			}

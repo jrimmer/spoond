@@ -59,8 +59,9 @@ summarised from README "Status".
 - **Fair shares split the box among active owners only (owner decision
   2026-10-14).** N in the `1/N` slice is no longer the number of
   identities that exist: it counts owners holding a running or paused
-  (suspended) lease, plus anyone with an admission in flight — the
-  legacy consumer token as one owner once it holds a lease. A
+  (suspended) lease, plus anyone with an admission in flight — a
+  legacy consumer token included, so a requester counts for its own
+  first lease. A
   registered identity that never took a lease splits nothing, and an
   owner's slice shrinks to `1/(N+1)` on their first lease. `GET
   /api/fair-shares` and the self-scoped share payloads now carry an

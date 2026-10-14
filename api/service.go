@@ -2253,19 +2253,18 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 // re-scan (the commit holds the store lock, and the mark is set before
 // the re-scan, so the two are ordered).
 func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool) error {
-	if s.identities == nil {
-		return nil
+	if s.identities != nil {
+		s.ownerDeleteMu.Lock()
+		deleted := s.deletedOwners[owner]
+		s.ownerDeleteMu.Unlock()
+		if deleted {
+			return errOwnerGone
+		}
 	}
-	s.ownerDeleteMu.Lock()
-	deleted := s.deletedOwners[owner]
-	s.ownerDeleteMu.Unlock()
-	if deleted {
-		return errOwnerGone
-	}
-	u := s.identities.UserByID(owner)
-	if u == nil {
-		return nil
-	}
+	// Every owner books its in-flight admission, legacy-token owners and
+	// identity-less deployments included: the reservation is what makes
+	// a requester ACTIVE for its own first lease (fair shares count it
+	// in N), and take-back reads it as in-flight usage.
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	// The crossing lives in reserveQuotaLocked; see there for why it is
@@ -2389,9 +2388,6 @@ func (s *Service) leaseCounts(owner string) LeaseCounts {
 // snapshot is left warm. Under the store lock, after the update, like
 // reserveQuota.
 func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
-	if s.identities == nil {
-		return
-	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
 	s.releaseQuotaReservationLocked(owner, n, memoryMB)
