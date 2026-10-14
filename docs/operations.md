@@ -1496,7 +1496,9 @@ The **records** panel sits below the images/services band and above
 `lease_history` table plus the live leases (a live lease's end is now),
 recomputed at most once a minute and cached between refreshes — the 2 s
 tick reuses the cached result. Two columns at a wide frame (six records
-a side, the footer on the last row), one column below. The records:
+a side, the footer on its own row below), one column at a narrow frame
+(the six left records, then the six right ones, then the footer). The
+records:
 
 | Record | Meaning |
 |---|---|
