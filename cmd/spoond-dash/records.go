@@ -46,6 +46,7 @@ func recordsExcludeNames() []string {
 // recLease is one lease for the records: a history row, or a live one.
 // A live lease's Ended is the frame's now (its end is now).
 type recLease struct {
+	ID             string // lease id, to drop a live lease that already has a history row
 	Owner, Image   string
 	MemoryMB       int
 	Created, Ended time.Time
@@ -268,7 +269,7 @@ func mustPacific() *time.Location {
 // first. ok is false when the table does not exist yet (an older
 // backend): "no history yet", not an error.
 func historyLeases(ctx context.Context, db *sql.DB) (out []recLease, ok bool, err error) {
-	rows, err := db.QueryContext(ctx, `SELECT owner, image, memory_mb, created_at, ended_at,
+	rows, err := db.QueryContext(ctx, `SELECT lease_id, owner, image, memory_mb, created_at, ended_at,
 		outcome, peak_mib, start_ms, max_nap_secs FROM lease_history ORDER BY created_at`)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
@@ -281,7 +282,7 @@ func historyLeases(ctx context.Context, db *sql.DB) (out []recLease, ok bool, er
 		var l recLease
 		var created, ended, outcome string
 		var memory, peak, startMs, nap int64
-		if err := rows.Scan(&l.Owner, &l.Image, &memory, &created, &ended, &outcome, &peak, &startMs, &nap); err != nil {
+		if err := rows.Scan(&l.ID, &l.Owner, &l.Image, &memory, &created, &ended, &outcome, &peak, &startMs, &nap); err != nil {
 			return nil, false, err
 		}
 		// RFC 3339 UTC, as the store writes it. A row whose clock could
@@ -308,7 +309,7 @@ func historyLeases(ctx context.Context, db *sql.DB) (out []recLease, ok bool, er
 // beside it: one lightweight read on the collector's read-only
 // connection.
 func liveLeases(ctx context.Context, db *sql.DB, names map[string]string, now time.Time) []recLease {
-	rows, err := db.QueryContext(ctx, `SELECT image, owner, state, memory_mb, created_at
+	rows, err := db.QueryContext(ctx, `SELECT id, image, owner, state, memory_mb, created_at
 		FROM leases WHERE state IN ('running','suspended','recovered') ORDER BY created_at`)
 	if err != nil {
 		return nil
@@ -319,7 +320,7 @@ func liveLeases(ctx context.Context, db *sql.DB, names map[string]string, now ti
 		var l recLease
 		var owner, state, created string
 		var memory int64
-		if err := rows.Scan(&l.Image, &owner, &state, &memory, &created); err != nil {
+		if err := rows.Scan(&l.ID, &l.Image, &owner, &state, &memory, &created); err != nil {
 			continue
 		}
 		if l.Created, err = time.Parse(time.RFC3339Nano, created); err != nil {
@@ -374,7 +375,18 @@ func (c *collector) collectRecords(ctx context.Context, now time.Time) (rec reco
 		}
 	}
 	leases := excludeOwners(hist)
-	leases = append(leases, excludeOwners(liveLeases(ctx, db, names, now))...)
+	// A lease marked lost has its history row already; if it was then
+	// recovered it is live again under the same id. Count it once (the
+	// history row, which carries the loss).
+	ended := make(map[string]bool, len(hist))
+	for _, l := range hist {
+		ended[l.ID] = true
+	}
+	for _, l := range excludeOwners(liveLeases(ctx, db, names, now)) {
+		if !ended[l.ID] {
+			leases = append(leases, l)
+		}
+	}
 	return computeRecords(leases, now), avail, true
 }
 

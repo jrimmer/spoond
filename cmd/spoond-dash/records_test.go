@@ -498,3 +498,21 @@ func TestRecLostLiveRowsSkipped(t *testing.T) {
 		t.Fatalf("lifetime = %d, want 1 (the running lease)", r.LifetimeN)
 	}
 }
+
+// TestRecRecoveredLeaseCountsOnce: a lease marked lost gets its history
+// row then; if it was recovered it is live again under the same id. It
+// counts once — the history row, which carries the loss.
+func TestRecRecoveredLeaseCountsOnce(t *testing.T) {
+	f := newRecFixture(t)
+	created := f.now.Add(-3 * time.Hour)
+	lostAt := f.now.Add(-2 * time.Hour)
+	f.addHist(t, "rec-1", "u-honey", "go-base", 512, created, lostAt, "lost", 0, 0, 0)
+	f.addLive(t, "rec-1", "u-honey", "go-base", "recovered", 512, created)
+	r := f.computed(t)
+	if r.LifetimeN != 1 {
+		t.Fatalf("lifetime = %d, want 1 (the recovered lease once)", r.LifetimeN)
+	}
+	if !r.LastLoss.Equal(lostAt) {
+		t.Fatalf("last loss = %v, want the history row's %v", r.LastLoss, lostAt)
+	}
+}
