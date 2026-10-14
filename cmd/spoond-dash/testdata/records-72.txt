@@ -52,19 +52,18 @@ SPOOND · spoond.example.com                              up 9m, 12:00:00
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ records ────────────────────────────────────────────────────────────┐
 │ busiest       4 at once · 10/11 10:30a                               │
-│ busiest day   4 leases · 10/9                                        │
 │ one image     honey-go-worker ×4 · 10/11 10:30a                      │
-│ biggest fleet honey · 4 at once · 10/11 10:30a                       │
-│ longest run   21h 19m · honey-go-worker · 10/11                      │
-│ most memory   3.9 GiB · honey-go-worker · 10/13                      │
+│ longest run   21h 19m · honey-go-worker · 10/10                      │
 │ shortest run  2s · py-base · 10/9                                    │
-│ no losses for 2 days · last 10/12 3:15a                              │
 │ top owner     honey · 13 leases                                      │
-│ longest nap   5h 0m · honey-go-worker                                │
 │ lifetime      13 leases · 96 h · 113.9 GiB·h                         │
+│ busiest day   4 leases · 10/9                                        │
+│ biggest fleet honey · 4 at once · 10/11 10:30a                       │
+│ most memory   3.9 GiB · honey-go-worker · 10/13                      │
+│ no losses for 2 days · last 10/12 3:15a                              │
+│ longest nap   5h 0m · honey-go-worker                                │
 │ fastest start 41 ms · honey-go-worker · 10/13                        │
 │                                 since 10/9 · test leases not counted │
-│                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ┌─ refusals and failures ──────────────────────────────────────────────┐
 │ auth 2  throttled 0  capacity 3  build fails 1  lost leases 0        │

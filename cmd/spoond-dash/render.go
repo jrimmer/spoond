@@ -422,6 +422,10 @@ type recordLine struct {
 // recDash is the value a record with no data draws.
 const recDash = "—"
 
+// recNoLossYet is the "no losses for" record's value while the history
+// holds no lost row.
+const recNoLossYet = "no losses yet"
+
 // recordValues computes the twelve records' drawn values from the
 // snapshot's cached records.
 func recordValues(r records) [][2]recordLine {
@@ -431,24 +435,23 @@ func recordValues(r records) [][2]recordLine {
 		}
 		return s
 	}
-	row := func(label, value string) string {
-		if value == "" {
-			return recDash
-		}
-		return value
-	}
-	// longest run: duration · image · start date; shortest likewise.
-	run := func(dur time.Duration, img string, end time.Time) string {
+	// Longest and shortest run: duration · image · start date, as the
+	// approved render draws them.
+	run := func(dur time.Duration, img string, created, end time.Time) string {
 		if img == "" {
 			return ""
 		}
-		return fmt.Sprintf("%s · %s · %s", recDur(dur), img, recDay(end))
+		at := created
+		if at.IsZero() {
+			at = end
+		}
+		return fmt.Sprintf("%s · %s · %s", recDur(dur), img, recDay(at))
 	}
 	mostMem := ""
 	if r.MostMemMiB > 0 {
 		mostMem = fmt.Sprintf("%.1f GiB · %s · %s", float64(r.MostMemMiB)/(1<<10), r.MostMemImg, recDay(r.MostMemEnd))
 	}
-	noLoss := recDash
+	noLoss := recNoLossYet
 	if !r.LastLoss.IsZero() {
 		noLoss = fmt.Sprintf("%d day%s · last %s", r.NoLossDays, plural(r.NoLossDays), recTime(r.LastLoss))
 	}
@@ -461,17 +464,17 @@ func recordValues(r records) [][2]recordLine {
 		start = fmt.Sprintf("%d ms · %s · %s", r.FastestMs, r.FastestImg, recDay(r.FastestEnd))
 	}
 	left := [][2]string{
-		{"busiest", row("busiest", fmt.Sprintf("%d at once · %s", r.BusiestN, recTime(r.BusiestAt)))},
-		{"one image", row("one image", fmt.Sprintf("%s ×%d · %s", r.OneImageImg, r.OneImageN, recTime(r.OneImageAt)))},
-		{"longest run", row("longest run", run(r.LongestDur, r.LongestImg, r.LongestEnd))},
-		{"shortest run", row("shortest run", run(r.ShortestDur, r.ShortestImg, r.ShortestEnd))},
-		{"top owner", row("top owner", fmt.Sprintf("%s · %s leases", r.TopOwner, recThousands(r.TopOwnerN)))},
-		{"lifetime", row("lifetime", fmt.Sprintf("%s leases · %s · %s", recThousands(r.LifetimeN), recHours(r.LifetimeHrs), recGiBH(r.LifetimeGiBH)))},
+		{"busiest", dash3(fmt.Sprintf("%d at once · %s", r.BusiestN, recTime(r.BusiestAt)))},
+		{"one image", dash3(fmt.Sprintf("%s ×%d · %s", r.OneImageImg, r.OneImageN, recTime(r.OneImageAt)))},
+		{"longest run", dash3(run(r.LongestDur, r.LongestImg, r.LongestCreated, r.LongestEnd))},
+		{"shortest run", dash3(run(r.ShortestDur, r.ShortestImg, r.ShortestCreated, r.ShortestEnd))},
+		{"top owner", dash3(fmt.Sprintf("%s · %s leases", r.TopOwner, recThousands(r.TopOwnerN)))},
+		{"lifetime", dash3(fmt.Sprintf("%s leases · %s · %s", recThousands(r.LifetimeN), recHours(r.LifetimeHrs), recGiBH(r.LifetimeGiBH)))},
 	}
 	right := [][2]string{
-		{"busiest day", row("busiest day", fmt.Sprintf("%d leases · %s", r.BusyDayN, recDay(r.BusyDay)))},
-		{"biggest fleet", row("biggest fleet", fmt.Sprintf("%s · %d at once · %s", r.FleetOwner, r.FleetN, recTime(r.FleetAt)))},
-		{"most memory", row("most memory", mostMem)},
+		{"busiest day", dash3(fmt.Sprintf("%d leases · %s", r.BusyDayN, recDay(r.BusyDay)))},
+		{"biggest fleet", dash3(fmt.Sprintf("%s · %d at once · %s", r.FleetOwner, r.FleetN, recTime(r.FleetAt)))},
+		{"most memory", dash3(mostMem)},
 		{"no losses for", noLoss},
 		{"longest nap", nap},
 		{"fastest start", start},
@@ -2104,12 +2107,12 @@ func serviceState(state string) grid.Seg {
 
 // The records panel's column layout, from the approved render: the
 // label column is 14 cells ("shortest run " plus its separator, and
-// "no losses for " fits the same), the left value 32, then two cells of
-// gap put the right label at 51 and its value at 65, running to the
+// "no losses for " fits the same), the left value 34, then two cells of
+// gap put the right label at 52 and its value at 66, running to the
 // inner right edge — the value columns both cut with … when longer.
 const (
 	recLabelW   = 14
-	recLeftValW = 32
+	recLeftValW = 34
 	recGapW     = 2
 )
 
@@ -2118,20 +2121,19 @@ const (
 // to exist before there is anything to total.
 const recNoHistory = "no history yet"
 
-// recordsH is the records panel's height: title, one row per pair of
-// records (one per record below) and the frame; at a narrow frame the
-// footer takes one more row after the twelve records. Without history,
-// title, one state line and the frame.
+// recordsH is the records panel's height: title, one row per record
+// (two per row at a wide frame), the footer row and the frame. Without
+// history, title, one state line and the frame.
 func (l *layout) recordsH() int {
 	if !l.s.Records.Avail {
 		return 3
 	}
-	rows := (len(recordValues(l.s.Records)) + 1) / 2
+	rows := len(recordValues(l.s.Records))
 	if l.wide() {
-		return 3 + rows // title, six record rows (the footer the last), the frame
+		return 3 + rows // title, six record rows, the footer row, the frame
 	}
 	// Narrow: the twelve records one per row, then the footer row.
-	return 3 + len(recordValues(l.s.Records))*2 + 1
+	return 3 + rows*2
 }
 
 // drawRecords draws the records panel at (x, y) in w cells and returns
@@ -2152,38 +2154,39 @@ func (l *layout) drawRecords(g *grid.Grid, x, y, w, h int) int {
 	}
 	rows := recordValues(rec)
 	inner := w - 4
+	foot := recFooter(rec, l.recordsExclude())
 	if l.wide() {
 		// Two columns laid out like the approved render: left label at
-		// +2, left value 32 cells, right label at 51, right value to the
-		// inner right edge. The sixth pair's right cell is the footer's:
-		// only the first five pairs draw records.
+		// +2, left value 34 cells, right label at 52, right value to the
+		// inner right edge — every pair drawn, then the footer on its
+		// own row, right-aligned one column clear of the border.
 		rx := x + 2 + recLabelW + recLeftValW + recGapW
 		rvW := inner - (rx - x) - recLabelW
-		for i, pair := range rows[:5] {
+		for i, pair := range rows {
 			yy := top + 1 + i
 			g.Text(x+2, yy, pair[0].label, "dim", recLabelW)
 			g.Text(x+2+recLabelW, yy, ellipsize(sanitize(pair[0].value), recLeftValW), "text", recLeftValW)
 			g.Text(rx, yy, pair[1].label, "dim", recLabelW)
 			g.Text(rx+recLabelW, yy, ellipsize(sanitize(pair[1].value), rvW), "text", rvW)
 		}
-		// The footer, on the sixth row: "since <first created M/D>" and,
+		// The footer, on its own row: "since <first created M/D>" and,
 		// while the exclude list is not empty, " · test leases not
-		// counted" — right-aligned, one column clear of the border.
-		foot := recFooter(rec, l.recordsExclude())
-		g.Right(x+w-3, top+6, []grid.Seg{{Text: foot, Style: "dim"}})
+		// counted".
+		g.Right(x+w-3, top+1+len(rows), []grid.Seg{{Text: foot, Style: "dim"}})
 		return y
 	}
 	// One column: the six left records, then the six right ones, then
 	// the footer on its own row.
 	n := 0
-	for _, pair := range rows {
-		for _, rec := range pair {
+	for side := 0; side < 2; side++ {
+		for _, pair := range rows {
+			rec := pair[side]
 			g.Text(x+2, top+1+n, rec.label, "dim", recLabelW)
 			g.Text(x+2+recLabelW, top+1+n, ellipsize(sanitize(rec.value), inner-recLabelW-2), "text", inner-recLabelW-2)
 			n++
 		}
 	}
-	g.Right(x+w-3, top+1+n, []grid.Seg{{Text: recFooter(rec, l.recordsExclude()), Style: "dim"}})
+	g.Right(x+w-3, top+1+n, []grid.Seg{{Text: foot, Style: "dim"}})
 	return y
 }
 

@@ -391,11 +391,6 @@ type LeaseRow struct {
 	LastAction                                     string
 	LastActionAt                                   time.Time
 	Age, Left                                      string
-	// OwnerID is the raw owner value (an identity id or a legacy
-	// consumer name); Owner is the display name. CreatedAt is the row's
-	// RFC 3339 created_at. Neither is drawn; the records panel reads
-	// them.
-	OwnerID, CreatedAt string
 }
 
 // ImageRow is one catalog image for the table.
@@ -1205,8 +1200,6 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 			return err
 		}
 		r.Comment = comment
-		r.OwnerID = owner
-		r.CreatedAt = created
 		r.Owner = names[owner]
 		if r.Owner == "" {
 			r.Owner = owner

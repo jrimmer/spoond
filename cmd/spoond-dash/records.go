@@ -76,13 +76,16 @@ type records struct {
 	OneImageImg string
 	OneImageN   int
 	OneImageAt  time.Time
-	// Longest / shortest run.
-	LongestDur  time.Duration
-	LongestImg  string
-	LongestEnd  time.Time
-	ShortestDur time.Duration
-	ShortestImg string
-	ShortestEnd time.Time
+	// Longest / shortest run: the duration, the image, when the lease
+	// started (the drawn date) and when it ended.
+	LongestDur      time.Duration
+	LongestImg      string
+	LongestCreated  time.Time
+	LongestEnd      time.Time
+	ShortestDur     time.Duration
+	ShortestImg     string
+	ShortestCreated time.Time
+	ShortestEnd     time.Time
 	// TopOwner: the owner with the most leases.
 	TopOwner  string
 	TopOwnerN int
@@ -125,7 +128,7 @@ func computeRecords(leases []recLease, now time.Time) records {
 
 	// The "at once" sweeps: one start (+1) and end (−1) point per
 	// lease, overall and grouped by image and by owner.
-	all := map[string][]recPoint{"": nil}
+	all := make([]recPoint, 0, 2*len(leases))
 	byImage := map[string][]recPoint{}
 	byOwner := map[string][]recPoint{}
 	for _, l := range leases {
@@ -133,11 +136,11 @@ func computeRecords(leases []recLease, now time.Time) records {
 		if end.Before(l.Created) {
 			end = now
 		}
-		all[""] = append(all[""], recPoint{at: l.Created, delta: 1}, recPoint{at: end, delta: -1})
+		all = append(all, recPoint{at: l.Created, delta: 1}, recPoint{at: end, delta: -1})
 		byImage[l.Image] = append(byImage[l.Image], recPoint{at: l.Created, delta: 1}, recPoint{at: end, delta: -1})
 		byOwner[l.Owner] = append(byOwner[l.Owner], recPoint{at: l.Created, delta: 1}, recPoint{at: end, delta: -1})
 	}
-	r.BusiestN, r.BusiestAt = sweepOnce(sortPoints(all[""]))
+	r.BusiestN, r.BusiestAt = sweepOnce(sortPoints(all))
 	r.OneImageImg, r.OneImageN, r.OneImageAt = sweepBest(byImage)
 	r.FleetOwner, r.FleetN, r.FleetAt = sweepBest(byOwner)
 
@@ -147,10 +150,12 @@ func computeRecords(leases []recLease, now time.Time) records {
 	for _, l := range leases {
 		dur := l.Ended.Sub(l.Created)
 		if dur > r.LongestDur {
-			r.LongestDur, r.LongestImg, r.LongestEnd = dur, l.Image, l.Ended
+			r.LongestDur, r.LongestImg = dur, l.Image
+			r.LongestCreated, r.LongestEnd = l.Created, l.Ended
 		}
 		if !l.Lost && dur >= time.Second && (r.ShortestImg == "" || dur < r.ShortestDur) {
-			r.ShortestDur, r.ShortestImg, r.ShortestEnd = dur, l.Image, l.Ended
+			r.ShortestDur, r.ShortestImg = dur, l.Image
+			r.ShortestCreated, r.ShortestEnd = l.Created, l.Ended
 		}
 		if l.PeakMiB > r.MostMemMiB {
 			r.MostMemMiB, r.MostMemImg, r.MostMemEnd = l.PeakMiB, l.Image, l.Ended
