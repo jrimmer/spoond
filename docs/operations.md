@@ -1482,11 +1482,13 @@ spoond-backend | grep idle_suspend` and `spoond_idle_suspends_total`.
 - **Quotas:** only `max_ttl` is left per user (`POST
   /api/users/{id}/quota`). The per-owner caps `max_leases`,
   `guaranteed_mib`, `max_mib` and `max_kept_bytes` were removed in 3.0:
-  every owner gets an equal fair slice of memory and snapshot disk
-  instead, admission takes back from the biggest borrower, and the kept
-  budget is the owner's disk slice. The quota route still accepts the
-  removed fields, ignores them and answers with `Deprecation: true` and
-  a `Warning` header; values already in the users file are ignored on
+  every owner holding a running or paused lease gets an equal fair
+  slice of memory and snapshot disk (N counts active owners only — a
+  registered identity without a lease does not split the box),
+  admission takes back from the biggest borrower, and the kept budget
+  is the owner's disk slice. The quota route still accepts the removed
+  fields, ignores them and answers with `Deprecation: true` and a
+  `Warning` header; values already in the users file are ignored on
   load and dropped on the next save. Watch a user's memory charge as
   `used_mib` on `GET /api/users/me` (and `charged_mib` on the lease
   detail), and their slice and ratio on `GET /api/fair-shares`.

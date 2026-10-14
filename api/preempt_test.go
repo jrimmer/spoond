@@ -62,6 +62,21 @@ func dropNodeCache(svc *Service) {
 // fair-shares take-back selector sees the lease (a lease owner that is
 // neither an identity user nor a token owner is not a box owner and can
 // never be over its slice).
+
+func seedActiveSet(t *testing.T, svc *Service) {
+	t.Helper()
+	preemptOwner(t, svc, "mmm")
+	hhh := preemptOwner(t, svc, "hhh")
+	if svc.identities.UserByToken("legacy-tok") == nil {
+		if _, err := svc.identities.AddUser("legacy", identity.KindPerson, nil, "legacy-tok"); err != nil {
+			t.Fatalf("legacy identity: %v", err)
+		}
+	}
+	addRunningLease(svc, "mmm-active", hhh, 1)
+	addRunningLease(svc, "hhh-active", preemptOwner(t, svc, "ppp"), 1)
+	addRunningLease(svc, "legacy-active", "legacy-consumer", 1)
+}
+
 func preemptOwner(t *testing.T, svc *Service, name string) string {
 	t.Helper()
 	if svc.identities == nil {
@@ -206,6 +221,13 @@ func TestTakeBackOrderOwnerRatioThenLRU(t *testing.T) {
 
 	overA := preemptOwner(t, svc, "aaa") // sorts before zzz: tied ratios go to it first
 	overB := preemptOwner(t, svc, "zzz")
+	// Two idle identities and a running lease for the legacy-token owner:
+	// the 1/N slice needs five box owners — the two borrowers here plus
+	// three more active ones — so eight 1024 MiB leases put each at
+	// ratio 2.5, far enough over that take-back must run.
+	preemptOwner(t, svc, "mmm")
+	preemptOwner(t, svc, "rrr")
+	addRunningLease(svc, "legacy-active", "legacy-consumer", 1)
 	old := burstLease(t, svc, ctx, overA, "mid")
 	newest := burstLease(t, svc, ctx, overA, "mid")
 	fillA := burstLease(t, svc, ctx, overA, "mid")
@@ -281,12 +303,14 @@ func TestPreemptionFreesEnoughAndNoMore(t *testing.T) {
 	svc.saveLeaseLocked(c)
 	svc.store.mu.Unlock()
 
-	// The owner runs 3072 MiB on a box with three other owners and a
-	// 3072 MiB pool (slice 768 MiB each): ratio 4, far over, and the
-	// three leases fill it exactly. One 1024 MiB guaranteed lease needs
-	// one lease paused; the selector takes the least recently used and
-	// stops (giving more would push the owner toward the requester, and
-	// the room is already there).
+	// The owner runs 3072 MiB. Three other owners are active too (two
+	// idle identities with one lease each, plus the legacy-token owner)
+	// and the pool is 3072 MiB, so the four slices are 768 MiB each:
+	// ratio 4, far over, and the three leases fill the pool exactly. One
+	// 1024 MiB guaranteed lease needs one lease paused; the selector
+	// takes the least recently used and stops (giving more would push
+	// the owner toward the requester, and the room is already there).
+	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 1536, 0, 512)
 	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
@@ -332,10 +356,12 @@ func TestPreemptionResumeOnUse(t *testing.T) {
 	svc.store.mu.Unlock()
 
 	// consumer-a runs three leases (3072 MiB) and fills the 3072 MiB
-	// pool exactly (three box owners, slice 1024 MiB each): ratio 3. A
-	// 1024 MiB guaranteed lease takes the owner's least recently used
-	// lease — the holder execs it through token-a below — while the
-	// owner stays above the requester's post-request ratio.
+	// pool exactly. Three more owners are active, so the slice is
+	// 614 MiB: ratio 3 after the three leases. A 1024 MiB guaranteed
+	// lease takes the owner's least recently used lease — the holder
+	// execs it through token-a below — while the owner stays above the
+	// requester's post-request ratio.
+	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 1536, 0, 512)
 	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
@@ -454,8 +480,14 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 	events := svc.Subscribe(EventFilter{LeaseID: victim.ID})
 	defer events.Close()
 
-	// consumer-a fills the 3072 MiB pool exactly (three box owners,
-	// slice 1024): ratio 3. The guaranteed lease takes the LRU lease.
+	// consumer-a fills the 3072 MiB pool exactly. Three more owners are
+	// active (two idle identities plus the legacy-token owner), so the
+	// slice is 614 MiB: ratio 3 after all three leases. The guaranteed
+	// lease takes the LRU lease; the event detail reports the 4.00
+	// over-slice ratio — the owner's usage at the moment of the pick
+	// (before the picked lease was given up), 2457 over the 614 MiB
+	// slice.
+	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 1536, 0, 512)
 	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
@@ -481,8 +513,8 @@ func TestPreemptionAPIReportsTakenBack(t *testing.T) {
 		select {
 		case ev := <-events.C:
 			if ev.Type == LeaseTakeBack {
-				if !strings.Contains(ev.Detail, "for guaranteed") || !strings.Contains(ev.Detail, "3.00") {
-					t.Fatalf("take-back detail = %q, want the requester and the 3.00 ratio", ev.Detail)
+				if !strings.Contains(ev.Detail, "for guaranteed") || !strings.Contains(ev.Detail, "4.00") {
+					t.Fatalf("take-back detail = %q, want the requester and the 4.00 ratio", ev.Detail)
 				}
 				return
 			}
@@ -513,10 +545,14 @@ func TestPreemptionUnfulfillableTakesNothing(t *testing.T) {
 }
 
 // preemptOne takes back a single burst lease of consumer-a for a
-// guaranteed create and returns the victim.
+// guaranteed create and returns the victim. The active set is shaped
+// first: three more identities hold leases, so consumer-a's slice is —
+// with the four 1024 MiB leases on the 3072 MiB pool — ratio 3 far over
+// 614 MiB, the shape take-back acts on.
 func preemptOne(t *testing.T, svc *Service, sub *testSub, ctx context.Context) *Lease {
 	t.Helper()
 	installDynamicNode(t, svc, sub, 4096, 0, 512)
+	seedActiveSet(t, svc)
 	victim := burstLease(t, svc, ctx, "consumer-a", "mid")
 	burstLease(t, svc, ctx, "consumer-a", "mid")
 	burstLease(t, svc, ctx, "consumer-a", "mid")
@@ -591,8 +627,11 @@ func TestPreemptionNeverPausesPinned(t *testing.T) {
 		t.Fatalf("pin: %v", err)
 	}
 
-	// The owner fills the 3072 MiB pool (slice 1024, ratio 3); a 1024
-	// MiB guaranteed lease takes the least recently used UNPINNED lease.
+	// The owner fills the 3072 MiB pool. Three more owners are active
+	// (two idle identities plus the legacy-token owner), so the slice is
+	// 614 MiB: ratio 3 after the three leases. A 1024 MiB guaranteed
+	// lease takes the least recently used UNPINNED lease.
+	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 1536, 0, 512)
 	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
@@ -671,12 +710,14 @@ func TestPreemptionTakesOnlyTheShortfall(t *testing.T) {
 
 	// 512 MiB free (2816 total pages − 1536 base pages − two leases at
 	// 512 pages each = 256 free pages): a 1024 MiB guaranteed lease is
-	// 512 MiB short. The owner runs 1536 MiB; on the 5632 MiB pool with
-	// four box owners that is over the 1408 MiB slice, and giving up the
-	// 512 MiB lease leaves 1024/1408 — above the requester (not a box
-	// owner, after-request ratio 0), so the lease can go. Giving up the
-	// 1024 filler instead would drop the owner inside their slice:
+	// 512 MiB short. The owner runs 1536 MiB; two more identities hold
+	// leases, so the box has six owners and the 5632 MiB pool slices to
+	// 938 MiB each. That puts the owner over the slice, and giving up
+	// the 512 MiB lease leaves 1024/938 — above the requester (not a
+	// box owner, after-request ratio 0), so the lease can go. Giving up
+	// the 1024 filler instead would drop the owner inside their slice:
 	// never.
+	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 2816, 1536, 512)
 	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {
@@ -738,9 +779,11 @@ func TestPreemptionPinMidPauseReplans(t *testing.T) {
 
 	// 2432 pages of 2 MiB, 512 pages (1 GiB) per sandbox: the four
 	// sandboxes leave 768 MiB free, so the 1024 MiB request is 256
-	// short. The four box owners slice the 4864 MiB pool into 1216 MiB;
-	// heavy runs 2304 MiB — far over, and every give-up stays above the
-	// requester (a non-box owner, after-request ratio 0).
+	// short. Three more owners are active, so the box has seven and the
+	// 4864 MiB pool slices to 694 MiB each; heavy runs 2304 MiB — far
+	// over, and every give-up stays above the requester (a non-box
+	// owner, after-request ratio 0).
+	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 2432, 0, 512)
 	warmFairShares(svc, ctx)
 	svc.pauseBeforeSuspend = func(l *Lease) {
@@ -844,11 +887,15 @@ func TestFitsAdmitsWithoutTakingBack(t *testing.T) {
 		t.Fatal("a create that fit took a lease back")
 	}
 
-	// Full node (base + the five leases + grant1's sandbox = exactly
-	// the 16 GiB pool): the next guaranteed lease does take one of the
-	// owner's five leases (5120 MiB over a 4096 MiB slice; giving one
-	// leaves the owner strictly above the requester), and the paused
-	// lease's room admits the new sandbox.
+	// Two idle identities take leases so the box has SEVEN owners — the
+	// heavy one, the guaranteed requester, and five more actives — that
+	// slice the 16 GiB pool into 2340 MiB each: the heavy owner's five
+	// leases sit 5120 MiB over that slice, so a full node's guaranteed
+	// create takes one LRU lease back (giving one leaves the owner
+	// strictly above the requester) and the paused lease's room admits
+	// the new sandbox.
+	addRunningLease(svc, "peer-1", preemptOwner(t, svc, "mmm"), 1)
+	addRunningLease(svc, "peer-2", preemptOwner(t, svc, "hhh"), 1)
 	installDynamicNode(t, svc, sub, 8192, 8192-6*512, 512)
 	warmFairShares(svc, ctx)
 	if _, err := svc.grantLease(ctx, leaseRequest{owner: "guaranteed", image: "mid", ttl: time.Hour}); err != nil {

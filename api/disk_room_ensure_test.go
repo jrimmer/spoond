@@ -16,10 +16,14 @@ import (
 
 // seedFatBorrower makes consumer-b the biggest borrower: a running lease
 // whose old 14 GiB pause build still counts for it, plus one suspended
-// 2 GiB lease (vict-1, older) and a newer 1 GiB one (vict-2).
+// 2 GiB lease (vict-1, older) and a newer 1 GiB one (vict-2). A small
+// running lease goes to consumer-a too: the fair snapshot's slices and
+// the selector's ratio bar are per-ACTIVE-owner, and every test here
+// reads consumer-a as one of the box's three owners.
 func (h *diskTBHarness) seedFatBorrower(t *testing.T) {
 	t.Helper()
 	now := time.Now()
+	h.seedRunningLease(t, "a-run", "consumer-a", 0)
 	if err := h.db.InsertBuild(context.Background(), store.BuildRow{
 		BuildID: "pause-fat", Kind: "pause", ParentBuildID: "fat-run", Owner: "consumer-b",
 		State: "ready", SizeBytes: 14 << 30, CreatedAt: now, UpdatedAt: now,

@@ -6,8 +6,10 @@ The full contract is in [api.md](api.md); the history is in the
 
 ## What changed
 
-Every owner now gets an equal, floating 1/N slice of the box (memory and
-snapshot disk). There are no per-owner caps any more. When a request does
+Every owner with a running or paused lease (and every in-flight
+admission) gets an equal, floating 1/N slice of the box (memory and
+snapshot disk); N counts those active owners only, and a lost lease
+never counts. There are no per-owner caps any more. When a request does
 not fit, spoond takes room back from the biggest borrower (the owner
 furthest over its slice) by pausing that owner's least recently used
 unpinned lease. A pin replaces a hold: a pinned lease is never paused or
@@ -69,7 +71,9 @@ resumes by itself on the next work call.
   used_bytes, paused_bytes, kept_bytes, named_bytes}` and `ratio`.
   `capacity_known: false` means the slices are not computed yet (not zero).
 - `GET /api/fair-shares` (admin) lists every owner by ratio, highest
-  first. `GET /api/shares` is unchanged: it still lists lease grants.
+  first (the share object carries an `active` flag: whether the owner
+  counts toward N — an inactive owner's own ratio reads `0`).
+  `GET /api/shares` is unchanged: it still lists lease grants.
 - A ratio above 1 means the owner borrows; those leases are taken first.
 
 ## Status codes per path

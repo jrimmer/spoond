@@ -330,8 +330,10 @@ ssh ctl@sandbox.example.com "ssh-key ls"
 curl -s -X POST https://sandbox.example.com/api/users/<alice-id>/quota \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"max_ttl": 7200}'
-# There are no per-user memory or lease caps since 3.0: every owner gets
-# an equal fair share (GET /api/users/me shows used_mib and the share).
+# There are no per-user memory or lease caps since 3.0: every owner with
+# a running or paused lease gets an equal fair share (idle identities
+# split nothing and a lost lease never counts); GET /api/users/me shows
+# used_mib and the share.
 
 # 4. Everyone uses their own key; leases are ownership-scoped
 ssh alice@sandbox.example.com            # fresh lease, owned by alice

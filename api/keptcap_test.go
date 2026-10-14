@@ -142,10 +142,25 @@ func TestKeptCapUnpinFreesSlot(t *testing.T) {
 // (capacity unreadable) or the box has fewer than two owners: the
 // budget tests size builds against the slice, and the slice grows by
 // size/N as kept bytes are accounted, so N >= 2 keeps a 0.7-slice
-// build's second keep over it.
+// build's second keep over it. N counts ACTIVE owners here, so the
+// helper also keeps one other lease running for the whole test: the
+// box always holds a second platform user whose slice the budget math
+// needs.
+var keptBudgetOtherOwner = "kept-budget-peer"
+
 func keptBudgetSetup(t *testing.T, svc *Service) func(owner string) int64 {
 	t.Helper()
 	roomyDisk(svc)
+	// A second active owner: without one the slice would be the whole
+	// basis and every build would fit inside it.
+	addRunningLease(svc, "kept-budget-peer-run", keptBudgetOtherOwner, 1)
+	t.Cleanup(func() {
+		svc.store.mu.Lock()
+		delete(svc.store.leases, "kept-budget-peer-run")
+		svc.store.mu.Unlock()
+		svc.invalidateFairShares()
+	})
+	svc.invalidateFairShares()
 	return func(owner string) int64 {
 		t.Helper()
 		svc.updateNodeMetrics(context.Background()) // warm the node-info cache the view reads

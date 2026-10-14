@@ -63,6 +63,14 @@ func TestBoxFullHTTP429(t *testing.T) {
 	ts, svc, sub, ctx := newPreemptServer(t)
 	installDynamicNode(t, svc, sub, 512, 0, 512)
 
+	// Two idle identities hold running leases, so the box's ACTIVE set
+	// is the four here (five minus the idle legacy token would-be): the
+	// pinned burst lease fills the node and sits exactly on its own
+	// 1024 MiB slice, and the requester's create would put it over a
+	// 1024 MiB slice too — the biggest-borrower case box_full exists for.
+	preemptOwner(t, svc, "mmm")
+	addRunningLease(svc, "mmm-active", preemptOwner(t, svc, "hhh"), 1)
+	addRunningLease(svc, "legacy-active", "legacy-consumer", 1)
 	// A pinned burst lease fills the node.
 	pinned, err := svc.grantLease(ctx, leaseRequest{owner: "consumer-b", image: "mid", ttl: time.Hour})
 	if err != nil {
@@ -119,8 +127,13 @@ func TestHolderLabelNeverPins(t *testing.T) {
 	// Take-back: the holder-labelled lease is the only thing on a full
 	// node, and a guaranteed admission takes its room by pausing it. A
 	// holder label is a plain label: it must neither pin the lease nor
-	// shield it. consumer-a runs three leases on the 3072 MiB pool
-	// (three box owners, slice 1024): ratio 3, the biggest borrower.
+	// shield it. consumer-a runs three leases. Five owners are active —
+	// a third idle identity plus the legacy-token owner hold leases, so
+	// consumer-a's slice is 614 MiB and ratio 5: the biggest borrower,
+	// far over, exactly the shape take-back can act on.
+	preemptOwner(t, svc, "hhh")
+	addRunningLease(svc, "legacy-active", "legacy-consumer", 1)
+	addRunningLease(svc, "hhh-active", preemptOwner(t, svc, "mmm"), 1)
 	burstLease(t, svc, ctx, "consumer-a", "mid")
 	burstLease(t, svc, ctx, "consumer-a", "mid")
 	installDynamicNode(t, svc, sub, 1536, 0, 512)

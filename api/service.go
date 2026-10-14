@@ -342,7 +342,7 @@ type Store struct {
 	// store round trip.
 	runningJobs map[string]int
 	// accounted caches the last-saved accounted signature of each lease
-	// (owner, running state, memory charge). saveLeaseLocked invalidates
+	// (owner, active state, memory charge). saveLeaseLocked invalidates
 	// the fair-share view only when a lease's signature changes, so an
 	// activity-only save (LastActive, ExpiresAt, holder) does not churn
 	// the cache (#145 FS1 R5-3).
@@ -350,17 +350,20 @@ type Store struct {
 }
 
 // leaseAccounted is the part of a lease that feeds the fair-share usage
-// view: its owner, whether it is running (memory charged) and its memory
+// view: its owner, whether the lease makes its owner ACTIVE (running,
+// recovered or paused — not lost or released; the same test the N count
+// uses, so a suspended→lost fall is a change here), and its memory
 // charge. Disk usage moves through the build/keep/named paths, which
 // invalidate explicitly.
 type leaseAccounted struct {
 	owner    string
 	live     bool
+	active   bool
 	memoryMB int
 }
 
 func leaseAccountedOf(l *Lease) leaseAccounted {
-	return leaseAccounted{owner: l.Owner, live: l.live(), memoryMB: l.MemoryMB}
+	return leaseAccounted{owner: l.Owner, live: l.live(), active: leaseActive(l), memoryMB: l.MemoryMB}
 }
 
 func newStore() *Store {
@@ -2265,9 +2268,34 @@ func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool)
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
+	// The crossing lives in reserveQuotaLocked; see there for why it is
+	// judged on the pre-reservation count and when the snapshot is left
+	// warm.
+	s.reserveQuotaLocked(owner, n, memoryMB)
+	return nil
+}
+
+// reserveQuotaLocked books the reservation and runs the fair-share
+// pendingMiB crossing (requirement 3): the 0 -> >0 crossing is judged
+// on the PRE-reservation count — the before value is read first, a
+// count read after the += would never see it — and a reservation
+// stacked on top of an existing one never crosses, so the snapshot is
+// left warm. The crossing may invalidate, so the caller must hold the
+// store lock: the order matches computeFairShares and
+// deleteLeaseLocked, so a concurrent compute never caches the
+// pre-reservation state for the TTL.
+func (s *Service) reserveQuotaLocked(owner string, n int, memoryMB int) {
+	// pendingMiB is part of the fair-share view twice over: it is the
+	// owner's in-flight usage and the mark that makes the owner ACTIVE
+	// (counted in N) while its first lease is still admitting. Crossing
+	// 0 in either direction moves both, so the snapshot is dropped only
+	// on those crossings.
+	before := s.store.pendingMiB[owner]
 	s.store.pending[owner] += n
 	s.store.pendingMiB[owner] += n * memoryMB
-	return nil
+	if before <= 0 {
+		s.invalidateFairShares()
+	}
 }
 
 // usedMiB reports the owner's current memory charge (#128): the sum of
@@ -2355,21 +2383,39 @@ func (s *Service) leaseCounts(owner string) LeaseCounts {
 }
 
 // releaseQuotaReservation drops n reservations made by reserveQuota.
+// A pendingMiB fall to 0 invalidates the fair-share snapshot: it may
+// make the owner inactive (N drops). Reservations released on top of
+// remaining ones change neither N nor the 0-based crossing; the
+// snapshot is left warm. Under the store lock, after the update, like
+// reserveQuota.
 func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	if s.identities == nil {
 		return
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
+	s.releaseQuotaReservationLocked(owner, n, memoryMB)
+}
+
+// releaseQuotaReservationLocked drops n reservations and runs the
+// fair-share pendingMiB crossing: the >0 -> 0 fall invalidates the
+// snapshot (it may make the owner inactive, N drops). A release leaving
+// other reservations in place never crosses, so the snapshot is left
+// warm. Caller holds the store lock.
+func (s *Service) releaseQuotaReservationLocked(owner string, n int, memoryMB int) {
 	if s.store.pending[owner] <= n {
 		delete(s.store.pending, owner)
 	} else {
 		s.store.pending[owner] -= n
 	}
+	before := s.store.pendingMiB[owner]
 	if s.store.pendingMiB[owner] <= n*memoryMB {
 		delete(s.store.pendingMiB, owner)
 	} else {
 		s.store.pendingMiB[owner] -= n * memoryMB
+	}
+	if before > 0 && s.store.pendingMiB[owner] <= 0 {
+		s.invalidateFairShares()
 	}
 }
 
@@ -5445,6 +5491,11 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 	if acc := leaseAccountedOf(l); acc != s.store.accounted[l.ID] {
 		s.store.accounted[l.ID] = acc
 		s.invalidateFairShares()
+		// The signature misses nothing else: the owner, the active state
+		// (a suspended→lost fall moves it — paused counts as active, lost
+		// never does, fair shares 2026-10-14 — so a paused-only owner
+		// whose lease is lost drops out of N right away) and the memory
+		// charge are all in it.
 	}
 }
 

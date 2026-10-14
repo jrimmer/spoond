@@ -35,6 +35,22 @@ summarised from README "Status".
   minutes. New metrics `spoond_memory_committed_mib` (set every tick,
   even with the floor off) and `spoond_memory_pressure_takebacks_total`.
 
+### Changed
+
+- **Fair shares split the box among active owners only (owner decision
+  2026-10-14).** N in the `1/N` slice is no longer the number of
+  identities that exist: it counts owners holding a running or paused
+  (suspended) lease, plus anyone with an admission in flight — the
+  legacy consumer token as one owner once it holds a lease. A
+  registered identity that never took a lease splits nothing, and an
+  owner's slice shrinks to `1/(N+1)` on their first lease. `GET
+  /api/fair-shares` and the self-scoped share payloads now carry an
+  `active` boolean per owner: every owner is still listed, an inactive
+  one shows the slice it would get on starting (`total/(N+1)`) and its
+  `ratio` reads `0`, so an idle owner with a stale snapshot is never
+  ranked the heaviest borrower. A lost lease never counts, however it
+  was suspended before the loss.
+
 ## [3.8.1] - 2026-10-14
 
 3.8.1 stops admission from lending out memory a running VM may fault
