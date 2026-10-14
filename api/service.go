@@ -2159,6 +2159,7 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased,
 		releasePeakDetail(reason, hasPeak, releasePeak))
 	s.journalLeaseRelease(l, journalReleaseReason(l, reason), peakMiB, hasPeak)
+	s.writeLeaseHistory(l, "released", journalReleaseReason(l, reason), peakMiB)
 	s.creditNodeInfo(freedMiB)
 	// A release frees hugepages and quota: retry waiting creates (#129).
 	s.wakeAdmissionQueue()
