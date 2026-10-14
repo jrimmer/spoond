@@ -203,10 +203,10 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	return true
 }
 
-// dropOnePoolSandbox removes ONE warm-pool sandbox — the newest of the
-// image whose pool holds the most MiB (#41tk): each image's list is
-// ordered oldest first, so the last entry is the newest — deletes it on
-// the substrate and clears its rows and maps exactly as the drain's
+// dropOnePoolSandbox removes ONE warm-pool sandbox — the newest stocked
+// member of any image (#41tk): each image's list is ordered oldest
+// first, so the last entry is the newest — deletes it on the substrate
+// and clears its rows and maps exactly as the drain's
 // pool trim does. It answers the freed MiB (the poolMiB entry it took)
 // and ok=false on an empty pool. Call without s.store.mu: the delete
 // must run outside it. A pool sandbox is never a lease, so the low-memory

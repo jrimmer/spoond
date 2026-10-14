@@ -5301,15 +5301,19 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		// pausing leases, is the pool's answer to a short box — and are
 		// retried by the next refill tick once leases have freed room.
 		// The free-memory check reads the admission cache (the cap's own
-		// view, untouched by this fill: nothing below debits it); the
-		// floor there is the same standing 2 GiB headroom admission
-		// keeps.
+		// view, untouched by this fill: nothing below debits it). The
+		// floor it keeps is the standing 2 GiB headroom (poolFloorMiB)
+		// whether or not the box-level floor loop is enabled: an
+		// admission may skip the floor (a resuming lease passes through
+		// and holds no VM, while it waits), but a stock parks a VM that
+		// holds its hugepages for good — letting it sink the box under
+		// 2 GiB free must not wait for the loop's tick.
 		if short := s.overcommitShortfall(memMiB); short > 0 {
 			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: one more %d MiB VM would sit %d MiB over the overcommit cap (MEMORY_OVERCOMMIT)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), memMiB, short)
 			return
 		}
-		if free, err := s.cachedFreeHugepageMiB(ctx); err == nil && free < uint64(memMiB+s.cfg.MemoryFloorMiB) {
-			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: %d MiB free, want %d (memory + floor)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), free, memMiB+s.cfg.MemoryFloorMiB)
+		if free, err := s.cachedFreeHugepageMiB(ctx); err == nil && free < uint64(memMiB+s.poolFloorMiB()) {
+			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: %d MiB free, want %d (memory + floor)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), free, memMiB+s.poolFloorMiB())
 			return
 		}
 		sb, err := s.createSandbox(ctx, img, b, false, "", placeholder)
@@ -5330,6 +5334,20 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
 	}
+}
+
+// poolFloorMiB is the headroom a warm-pool fill keeps on top of the
+// VMs it stocks: the configured floor (MEMORY_FLOOR_MIB), or the
+// default (2 GiB) when the box-level floor is off. An admission may
+// skip the floor — a resuming lease passes through and holds no VM
+// while it waits — but a stock parks a VM holding its hugepages for
+// good, so a fill always keeps the headroom rather than let the box
+// sink under 2 GiB free.
+func (s *Service) poolFloorMiB() int {
+	if s.cfg.MemoryFloorMiB > 0 {
+		return s.cfg.MemoryFloorMiB
+	}
+	return DefaultMemoryFloorMiB
 }
 
 // leaseToRow maps an in-memory lease to its store row. An empty State

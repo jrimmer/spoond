@@ -81,6 +81,11 @@ func TestWarmPoolStopsAtOvercommitCap(t *testing.T) {
 	dropNodeCache(svc)
 	svc.updateNodeMetrics(ctx) // the fill reads the cache; leases warmed it
 	svc.cfg.PoolSize = 1
+	// The fill may add no create at all — and, since every earlier
+	// grant on this 8 GiB node was a 1 GiB create of its own, the whole
+	// call log must gain none: the stock stops at the cap without
+	// touching the orchestrator.
+	createsBefore := calls(sub.Fake, "Create")
 
 	svc.warmPool(ctx, img)
 
@@ -90,8 +95,8 @@ func TestWarmPoolStopsAtOvercommitCap(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("warm pool stocked %d sandbox(es) past the overcommit cap, want 0", n)
 	}
-	if got := calls(sub.Fake, "Create"); got != 0 {
-		t.Fatalf("warm pool made %d create(s) past the cap, want 0", got)
+	if got := calls(sub.Fake, "Create"); got != createsBefore {
+		t.Fatalf("warm pool made %d create(s) past the cap, want %d extra (the log already holds every grant's create)", got-createsBefore, 0)
 	}
 	for _, c := range sub.CallLog() {
 		if c == "Pause" || (len(c) > 6 && c[:6] == "Pause ") {
@@ -111,29 +116,37 @@ func TestWarmPoolStopsAtOvercommitCap(t *testing.T) {
 	}
 }
 
-// TestWarmPoolStopsBelowFreeFloor: an 8 GiB cache reading with 2.5 GiB
-// free carries the floor (2048 MiB); a 1024 MiB pool VM fits. A
-// reading with 2 GiB free does not: the fill stops with no create.
+// TestWarmPoolStopsBelowFreeFloor: an 8 GiB cache reading with 3 GiB
+// free carries the floor headroom (2048 MiB); a 1024 MiB pool VM fits
+// exactly at the edge (5172 > 2048 would overshoot). A reading with
+// 2 GiB free does not: the fill stops with no create. The fill must not
+// depend on the service's configured floor: the headroom it parks VMs
+// for good against is the default too when the floor loop is off.
 func TestWarmPoolStopsBelowFreeFloor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		freeB   uint64
+		floor   int
+		freeMiB uint64
 		wantN   int
 		wantCre int
 	}{
-		{"fits above the floor with headroom exact", uint64(3072) << 20, 1, 1},
-		{"stops at the free-memory floor", uint64(2048) << 20, 0, 0},
+		{"fits above the floor with headroom exact", 0, 3072, 1, 1},
+		{"stops at the free-memory floor", 0, 2048, 0, 0},
+		{"with the floor loop on, the floor stays in the headroom", DefaultMemoryFloorMiB, 2048, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, db, sub := newTestService(t)
 			img := seedImage(t, db, "py-base", 1024)
-			sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 8192, HugepageSizeBytes: 2 << 20, HugepagesUsed: 8192*2048/1024/1024 - tc.freeB/(2<<20)}, nil)
+			// The fake's 2 MiB pages: free MiB = freePages x 2.
+			freePages := tc.freeMiB / 2
+			sub.SetNodeInfo(substrate.NodeInfo{Status: "healthy", HugepagesTotal: 8192, HugepageSizeBytes: 2 << 20, HugepagesUsed: 8192 - freePages}, nil)
 			dropNodeCache(svc)
 			svc.updateNodeMetrics(context.Background())
 			svc.cfg.PoolSize = 1
 			dropNodeCache(svc)
 			svc.updateNodeMetrics(context.Background()) // warm the fill's free-memory cache
 
+			svc.cfg.MemoryFloorMiB = tc.floor
 			svc.warmPool(context.Background(), img)
 
 			svc.store.mu.Lock()
@@ -214,6 +227,7 @@ func TestDropOnePoolSandbox(t *testing.T) {
 // its pages back — takes the lease, as the empty pool falls through.
 func TestPressureTickDropsPoolBeforeLeases(t *testing.T) {
 	svc, sub, ctx := newPressureService(t)
+	db := svc.db
 	alice := preemptOwner(t, svc, "alice")
 	bob := preemptOwner(t, svc, "bob")
 	// Two owners share the 8192 MiB pool below: a 4096 MiB slice each.
@@ -238,7 +252,7 @@ func TestPressureTickDropsPoolBeforeLeases(t *testing.T) {
 	svc.store.mu.Unlock()
 	svc.cfg.PoolSize = 1
 	svc.probeEnabled = false
-	img := midImage()
+	img := midImage(t, db)
 	svc.warmPool(ctx, img)
 
 	// 6 live sandboxes at 512 pages hold 3072 of the 4096 pages,
@@ -281,7 +295,7 @@ func TestPressureTickDropsPoolBeforeLeases(t *testing.T) {
 // for ever, and the orphan sweep owns the leftover.
 func TestPressureTickDropsPoolSurvivesDeleteFailure(t *testing.T) {
 	svc, sub, ctx := newPressureService(t)
-	img := midImage()
+	img := midImage(t, svc.db)
 	svc.cfg.PoolSize = 1
 	svc.probeEnabled = false
 	svc.warmPool(ctx, img)
@@ -311,10 +325,16 @@ func TestPressureTickDropsPoolSurvivesDeleteFailure(t *testing.T) {
 	sub.deleteFn = nil
 }
 
-// midImage returns the "mid" image row the pressure fixtures seed:
-// warmPool only reads MemoryMB (CurrentBuildID is looked up by name).
-func midImage() store.ImageRow {
-	return store.ImageRow{Name: "mid", MemoryMB: 1024}
+// midImage reads the "mid" image row the pressure fixtures seed, with
+// its real CurrentBuildID — warmPool loads that build, so the stub row
+// must carry it.
+func midImage(t *testing.T, db *store.DB) store.ImageRow {
+	t.Helper()
+	img, err := db.GetImage(context.Background(), "mid")
+	if err != nil {
+		t.Fatalf("load seeded image mid: %v", err)
+	}
+	return img
 }
 
 // sandboxesLiveIDs lists the sandbox ids the test substrate still
