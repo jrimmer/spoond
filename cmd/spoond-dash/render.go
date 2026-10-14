@@ -346,6 +346,143 @@ func Draw(s Snapshot, w int, now time.Time, host string) *grid.Grid {
 	return g
 }
 
+// recTime is a records timestamp in the panel's format: M/D h:mma
+// (10/12 1:28a) in America/Los_Angeles, the operator's own wall clock.
+func recTime(t time.Time) string {
+	t = t.In(pacific)
+	h := t.Hour() % 12
+	if h == 0 {
+		h = 12
+	}
+	return fmt.Sprintf("%d/%d %d:%02d%s", int(t.Month()), t.Day(), h, t.Minute(),
+		map[bool]string{true: "a", false: "p"}[t.Hour() < 12])
+}
+
+// recDay is a records date alone: M/D (10/9) in America/Los_Angeles.
+func recDay(t time.Time) string {
+	t = t.In(pacific)
+	return fmt.Sprintf("%d/%d", int(t.Month()), t.Day())
+}
+
+// recDur is a records duration: N ms below a second, Ns below a
+// minute, Nm Ns below an hour, Nh Nm below a day, else Nd Nh.
+func recDur(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return fmt.Sprintf("%d ms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd %dh", int(d.Hours()/24), int(d.Hours())%24)
+	}
+}
+
+// recThousands is the records panel's count format: k for thousands
+// (589, 1.6k), plain otherwise.
+func recThousands(n int) string {
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
+
+// recHours is a lease-hours total: whole hours below a thousand (618 h),
+// k for thousands (1.6k h).
+func recHours(h float64) string {
+	if h < 1000 {
+		return fmt.Sprintf("%d h", int(h))
+	}
+	return fmt.Sprintf("%.1fk h", h/1000)
+}
+
+// recGiBH is a memory GiB-hours total, k for thousands (1.6k GiB·h).
+func recGiBH(v float64) string {
+	if v < 1000 {
+		return fmt.Sprintf("%.1f GiB·h", v)
+	}
+	return fmt.Sprintf("%.1fk GiB·h", v/1000)
+}
+
+// countingText is the place-holder the two latency records draw while
+// nothing qualifies yet: start_ms and max_nap_secs exist only from
+// spoond 3.8.
+const countingText = "— (counting from 3.8)"
+
+// recordLines is the records panel's rows: label and value, the six
+// left-column records first, then the six right ones. The panel draws
+// them in this order, two columns at a wide frame, one column below.
+type recordLine struct {
+	label, value string
+}
+
+// recDash is the value a record with no data draws.
+const recDash = "—"
+
+// recordValues computes the twelve records' drawn values from the
+// snapshot's cached records.
+func recordValues(r records) [][2]recordLine {
+	dash3 := func(s string) string {
+		if s == "" {
+			return recDash
+		}
+		return s
+	}
+	row := func(label, value string) string {
+		if value == "" {
+			return recDash
+		}
+		return value
+	}
+	// longest run: duration · image · start date; shortest likewise.
+	run := func(dur time.Duration, img string, end time.Time) string {
+		if img == "" {
+			return ""
+		}
+		return fmt.Sprintf("%s · %s · %s", recDur(dur), img, recDay(end))
+	}
+	mostMem := ""
+	if r.MostMemMiB > 0 {
+		mostMem = fmt.Sprintf("%.1f GiB · %s · %s", float64(r.MostMemMiB)/(1<<10), r.MostMemImg, recDay(r.MostMemEnd))
+	}
+	noLoss := recDash
+	if !r.LastLoss.IsZero() {
+		noLoss = fmt.Sprintf("%d day%s · last %s", r.NoLossDays, plural(r.NoLossDays), recTime(r.LastLoss))
+	}
+	nap := countingText
+	if r.LongestNap > 0 {
+		nap = fmt.Sprintf("%s · %s", recDur(r.LongestNap), dash3(r.LongestNapImg))
+	}
+	start := countingText
+	if r.FastestMs > 0 {
+		start = fmt.Sprintf("%d ms · %s · %s", r.FastestMs, r.FastestImg, recDay(r.FastestEnd))
+	}
+	left := [][2]string{
+		{"busiest", row("busiest", fmt.Sprintf("%d at once · %s", r.BusiestN, recTime(r.BusiestAt)))},
+		{"one image", row("one image", fmt.Sprintf("%s ×%d · %s", r.OneImageImg, r.OneImageN, recTime(r.OneImageAt)))},
+		{"longest run", row("longest run", run(r.LongestDur, r.LongestImg, r.LongestEnd))},
+		{"shortest run", row("shortest run", run(r.ShortestDur, r.ShortestImg, r.ShortestEnd))},
+		{"top owner", row("top owner", fmt.Sprintf("%s · %s leases", r.TopOwner, recThousands(r.TopOwnerN)))},
+		{"lifetime", row("lifetime", fmt.Sprintf("%s leases · %s · %s", recThousands(r.LifetimeN), recHours(r.LifetimeHrs), recGiBH(r.LifetimeGiBH)))},
+	}
+	right := [][2]string{
+		{"busiest day", row("busiest day", fmt.Sprintf("%d leases · %s", r.BusyDayN, recDay(r.BusyDay)))},
+		{"biggest fleet", row("biggest fleet", fmt.Sprintf("%s · %d at once · %s", r.FleetOwner, r.FleetN, recTime(r.FleetAt)))},
+		{"most memory", row("most memory", mostMem)},
+		{"no losses for", noLoss},
+		{"longest nap", nap},
+		{"fastest start", start},
+	}
+	out := make([][2]recordLine, len(left))
+	for i := range left {
+		out[i] = [2]recordLine{{left[i][0], left[i][1]}, {right[i][0], right[i][1]}}
+	}
+	return out
+}
+
 // histVals is one sparkline series, empty when there is no history.
 func (l *layout) histVals(key string) []float64 {
 	if l.histFn == nil {
@@ -443,7 +580,7 @@ func (l *layout) assemble() *grid.Grid {
 	h := headerRows() +
 		l.noticesH() +
 		l.panelsH() + l.throughputH() + l.leasesH() +
-		l.imagesServicesH() + l.refusalsH() + l.eventsH() +
+		l.imagesServicesH() + l.recordsH() + l.refusalsH() + l.eventsH() +
 		1 // the footer line
 
 	g := grid.New(l.w, h)
@@ -455,6 +592,7 @@ func (l *layout) assemble() *grid.Grid {
 	y = l.throughput(g, y)
 	y = l.leases(g, y)
 	y = l.imagesServices(g, y)
+	y = l.records(g, y)
 	y = l.refusals(g, y)
 	y = l.events(g, y)
 	l.footer(g, y)
@@ -1957,6 +2095,89 @@ func serviceState(state string) grid.Seg {
 	default:
 		return grid.Seg{Text: "✗ " + state, Style: "bad"}
 	}
+}
+
+// recLabelW is the records panel's label column: the longest label
+// ("shortest run", "no losses for") plus its separator cell.
+const recLabelW = 13
+
+// recNoHistory is the panel's one line when the catalog has no
+// lease_history table yet (an older backend): the durable record has
+// to exist before there is anything to total.
+const recNoHistory = "no history yet"
+
+// recordsH is the records panel's height: title, one row per record
+// (two records at a wide frame, one per row below), a footer line and
+// the frame; without history, title, one state line and the frame.
+func (l *layout) recordsH() int {
+	if !l.s.Records.Avail {
+		return 3
+	}
+	rows := (len(recordValues(l.s.Records)) + 1) / 2
+	if !l.wide() {
+		rows = len(recordValues(l.s.Records)) * 2
+	}
+	return 2 + rows + 2
+}
+
+// drawRecords draws the records panel at (x, y) in w cells and returns
+// the row past its bottom edge. Two columns at a wide frame (the
+// approved render's left six records then the right six, label column
+// fixed, values cut with …), one record per row below; the footer
+// "since <first created M/D> · test leases not counted" right-aligned
+// on the last row (the second clause drops when the exclude list is
+// empty). Without a lease_history table the panel says "no history
+// yet".
+func (l *layout) drawRecords(g *grid.Grid, x, y, w, h int) int {
+	top := y
+	y = l.panel(g, x, y, w, h, "records", "records")
+	rec := l.s.Records
+	if !rec.Avail {
+		g.Text(x+2, top+1, recNoHistory, "dim", w-4)
+		return y
+	}
+	rows := recordValues(rec)
+	twoCol := l.wide() && w >= 2*(recLabelW+1+34)+4
+	inner := w - 4
+	if twoCol {
+		colW := w / 2
+		for i, pair := range rows {
+			yy := top + 1 + i
+			lx := x + 2
+			g.Text(lx, yy, pair[0].label, "dim", recLabelW)
+			g.Text(lx+recLabelW, yy, ellipsize(sanitize(pair[0].value), colW-recLabelW-4), "text", colW-recLabelW-4)
+			rx := x + 2 + colW
+			g.Text(rx, yy, pair[1].label, "dim", recLabelW)
+			g.Text(rx+recLabelW, yy, ellipsize(sanitize(pair[1].value), w-4-(rx-x)-recLabelW-2), "text", w-4-(rx-x)-recLabelW-2)
+		}
+	} else {
+		for i, pair := range rows {
+			for j, rec := range pair {
+				yy := top + 1 + i*2 + j
+				g.Text(x+2, yy, rec.label, "dim", recLabelW)
+				g.Text(x+2+recLabelW, yy, ellipsize(sanitize(rec.value), inner-recLabelW-2), "text", inner-recLabelW-2)
+			}
+		}
+	}
+	// The footer: "since <first created M/D>" and, while the exclude
+	// list is not empty, " · test leases not counted". Right-aligned,
+	// one column clear of the border.
+	foot := "since " + recDay(rec.FirstCreated)
+	if len(recordsExclude()) > 0 {
+		foot += " · test leases not counted"
+	}
+	g.Right(x+w-3, top+h-2, []grid.Seg{{Text: foot, Style: "dim"}})
+	return y
+}
+
+// records draws the records panel full width at (0, y), between the
+// images/services band and the refusals panel.
+func (l *layout) records(g *grid.Grid, y int) int {
+	if l.wide() {
+		return l.drawRecords(g, 0, y, l.w, l.recordsH())
+	}
+	g.Mark(0, y, l.w, l.recordsH(), "records")
+	return l.drawRecords(g, 0, y, l.w, l.recordsH())
 }
 
 // refusals panel: the refusal and failure counters on one row, then
