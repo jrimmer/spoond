@@ -1,0 +1,22 @@
+SPOOND · spoond.example.com                                                              up 9m, 12:00:00
+                                                                                                        
+┌─ images · 15 · by use ───────────────────────────────────────────────────────────────────────────────┐
+│ image                  mem/vcpu  live  uses   baked                                                  │
+│ img-00                 2G/2V     0     0      3d ago                                                 │
+│ img-01                 2G/2V     1     2      3d ago                                                 │
+│ img-02                 2G/2V     2     4      3d ago                                                 │
+│ img-03                 2G/2V     3     6      3d ago                                                 │
+│ img-04                 2G/2V     4     8      3d ago                                                 │
+│ img-05                 2G/2V     5     10     3d ago                                                 │
+│ img-06                 2G/2V     6     12     3d ago                                                 │
+│ img-07                 2G/2V     7     14     3d ago                                                 │
+│ img-08                 2G/2V     8     16     3d ago                                                 │
+│ img-09                 2G/2V     9     18     3d ago                                                 │
+│ img-10                 2G/2V     10    20     3d ago                                                 │
+│ img-11                 2G/2V     11    22     3d ago                                                 │
+│ img-12                 2G/2V     12    24     3d ago                                                 │
+│ img-13                 2G/2V     13    26     3d ago                                                 │
+│ img-14                 2G/2V     14    28     3d ago                                                 │
+│ total                            105   210                                                           │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                      Spoond dev · images · GitHub                                      

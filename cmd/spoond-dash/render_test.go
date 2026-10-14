@@ -126,6 +126,37 @@ func TestGoldenPlain(t *testing.T) {
 	}
 }
 
+// TestGoldenImagesPage compares the /images page's frame against its
+// golden file at the default width (go test -update rewrites). The
+// fixture's fifteen images exceed the dashboard's cap, so the golden
+// pins the uncapped panel: every row, no fold, the total row.
+func TestGoldenImagesPage(t *testing.T) {
+	s := capSnapshot(15)
+	g, err := drawFrame(s, sampleHist(), DefaultWidth, "spoond.example.com", fixedNow, dashInterval, viewImages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := g.Plain()
+	path := filepath.Join("testdata", "images-104.txt")
+	if update {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatalf("rewrite %s: %v", path, err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden %s (run go test ./cmd/spoond-dash -update to write it): %v", path, err)
+	}
+	if string(want) != text {
+		t.Errorf("%s differs; run go test ./cmd/spoond-dash -update after checking the diff\n--- golden ---\n%s\n--- got ---\n%s",
+			path, want, text)
+	}
+}
+
 // TestGoldenCheck runs grid.Check with the dashboard's glyph set on both
 // golden frames — and through the same drawFrame path every renderer
 // uses, so a rune missing from Extra fails here, not in spoond top.
@@ -134,6 +165,9 @@ func TestGoldenCheck(t *testing.T) {
 		if _, err := drawFrame(sampleSnapshot(), sampleHist(), w, "spoond.example.com", fixedNow, dashInterval, viewDashboard); err != nil {
 			t.Fatalf("width %d: %v", w, err)
 		}
+	}
+	if _, err := drawFrame(capSnapshot(15), sampleHist(), DefaultWidth, "spoond.example.com", fixedNow, dashInterval, viewImages); err != nil {
+		t.Fatalf("images view: %v", err)
 	}
 }
 
