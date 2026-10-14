@@ -54,7 +54,7 @@ SPOOND · spoond.example.com                              up 9m, 12:00:00
 │ busiest       4 at once · 10/11 10:30a                               │
 │ one image     honey-go-worker ×4 · 10/11 10:30a                      │
 │ longest run   21h 19m · honey-go-worker · 10/10                      │
-│ shortest run  2s · py-base · 10/9                                    │
+│ shortest run  2s · py-base · 10/9 4:00p                              │
 │ top owner     honey · 13 leases                                      │
 │ lifetime      13 leases · 96 h · 113.9 GiB·h                         │
 │ busiest day   4 leases · 10/9                                        │

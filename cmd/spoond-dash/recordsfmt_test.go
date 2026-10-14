@@ -172,7 +172,7 @@ func TestRecordValuesFull(t *testing.T) {
 		{"busiest", "11 at once · 10/12 1:28a", "busiest day", "164 leases · 10/9"},
 		{"one image", "honey-go-worker ×8 · 10/9 11:15p", "biggest fleet", "honey · 6 at once · 10/12 12:26a"},
 		{"longest run", "21h 19m · honey-go-worker · 10/10", "most memory", "3.9 GiB · honey-go-worker · 10/13"},
-		{"shortest run", "2s · honey-go-worker · 10/9", "no losses for", "1 day · last 10/12 3:15a"},
+		{"shortest run", "2s · honey-go-worker · 10/9 4:31p", "no losses for", "1 day · last 10/12 3:15a"},
 		{"top owner", "honey-svc · 468 leases", "longest nap", "5h 0m · honey-go-worker"},
 		{"lifetime", "589 leases · 618 h · 1.6k GiB·h", "fastest start", "41 ms · honey-go-worker · 10/13"},
 	}

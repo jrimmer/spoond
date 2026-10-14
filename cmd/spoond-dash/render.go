@@ -435,9 +435,10 @@ func recordValues(r records) [][2]recordLine {
 		}
 		return s
 	}
-	// Longest and shortest run: duration · image · start date, as the
-	// approved render draws them.
-	run := func(dur time.Duration, img string, created, end time.Time) string {
+	// Longest and shortest run: duration · image · the lease's start —
+	// the date alone for the longest run, the full time for the
+	// shortest, as the approved render draws them.
+	run := func(dur time.Duration, img string, created, end time.Time, withTime bool) string {
 		if img == "" {
 			return ""
 		}
@@ -445,7 +446,11 @@ func recordValues(r records) [][2]recordLine {
 		if at.IsZero() {
 			at = end
 		}
-		return fmt.Sprintf("%s · %s · %s", recDur(dur), img, recDay(at))
+		when := recDay(at)
+		if withTime {
+			when = recTime(at)
+		}
+		return fmt.Sprintf("%s · %s · %s", recDur(dur), img, when)
 	}
 	// The at-once records' values, or the dash at N = 0 (a history
 	// with no lease at all draws —, not "0 at once").
@@ -474,8 +479,8 @@ func recordValues(r records) [][2]recordLine {
 	left := [][2]string{
 		{"busiest", count(r.BusiestN, fmt.Sprintf("%d at once · %s", r.BusiestN, recTime(r.BusiestAt)))},
 		{"one image", count(r.OneImageN, fmt.Sprintf("%s ×%d · %s", r.OneImageImg, r.OneImageN, recTime(r.OneImageAt)))},
-		{"longest run", dash3(run(r.LongestDur, r.LongestImg, r.LongestCreated, r.LongestEnd))},
-		{"shortest run", dash3(run(r.ShortestDur, r.ShortestImg, r.ShortestCreated, r.ShortestEnd))},
+		{"longest run", dash3(run(r.LongestDur, r.LongestImg, r.LongestCreated, r.LongestEnd, false))},
+		{"shortest run", dash3(run(r.ShortestDur, r.ShortestImg, r.ShortestCreated, r.ShortestEnd, true))},
 		{"top owner", count(r.TopOwnerN, fmt.Sprintf("%s · %s leases", r.TopOwner, recThousands(r.TopOwnerN)))},
 		{"lifetime", count(r.LifetimeN, fmt.Sprintf("%s leases · %s · %s", recThousands(r.LifetimeN), recHours(r.LifetimeHrs), recGiBH(r.LifetimeGiBH)))},
 	}
