@@ -89,9 +89,11 @@ func (s *Service) pressureSkip(floor int) bool {
 	return s.draining.Load()
 }
 
-// pressureCheck is one tick of the low-memory loop (true when it paused
-// a lease): read the node
-// fresh, and below the floor pause one lease — pressureVictim's pick:
+// pressureCheck is one tick of the low-memory loop (true when it took
+// something back): read the node fresh, and below the floor take back
+// one thing — a warm-pool sandbox first (dropOnePoolSandbox: a pool VM
+// is nobody's lease, so shedding it pauses no work, and its whole
+// memory comes back at once), then one lease — pressureVictim's pick:
 // the least recently used unpinned lease of the owner furthest over
 // their fair slice, non-busy before busy. Leases still marked Drained
 // are skipped like pinned ones (an undrain owns their resume), so a
@@ -140,6 +142,18 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 		return false
 	}
 
+	// Shrink the warm pool before touching any lease (#41tk): below the
+	// floor a stocked pool VM is the one chunk of memory nobody is
+	// working in, so drop the newest one and let the next tick re-read
+	// free memory and judge the result — the same one-take-per-tick
+	// pacing as a lease pause. Only an EMPTY pool falls through to
+	// pressureVictim. A pool VM is never a lease, so nobody loses work,
+	// and the refill tops the pool back up once the pressure clears.
+	if freed, ok := s.dropOnePoolSandbox(ctx); ok {
+		s.log.Printf("memory floor: %d MiB free of a %d MiB floor: dropped a warm-pool sandbox (%d MiB freed); next tick re-reads free memory", free, floor, freed)
+		return true
+	}
+
 	// The slices come from the fair-share snapshot: while it is unknown
 	// (a cold node cache just after a start, a failed store read) every
 	// slice reads 0 and nothing would look takeable, so wait for the
@@ -147,6 +161,7 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	if !s.fairShares(ctx).capacityKnown {
 		return false
 	}
+
 	owners := s.takeBackOwners(ctx)
 	v, ok := pressureVictim(owners)
 	if !ok {
@@ -186,6 +201,58 @@ func (s *Service) pressureCheck(ctx context.Context) bool {
 	s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back lease %s (%d MiB, owner ratio %.2f)",
 		free, floor, v.LeaseID, v.MemoryMiB, v.Ratio)
 	return true
+}
+
+// dropOnePoolSandbox removes ONE warm-pool sandbox — the newest of the
+// image whose pool holds the most MiB (#41tk): each image's list is
+// ordered oldest first, so the last entry is the newest — deletes it on
+// the substrate and clears its rows and maps exactly as the drain's
+// pool trim does. It answers the freed MiB (the poolMiB entry it took)
+// and ok=false on an empty pool. Call without s.store.mu: the delete
+// must run outside it. A pool sandbox is never a lease, so the low-memory
+// loop shedding it pauses nobody.
+//
+// The accounting is bookkeeping, not a claim: the pool row, the
+// poolMiB entry and the sandboxes row are dropped before the substrate
+// delete, like the drain's trim, so a crashed delete surfaces in the
+// substrate's own listing rather than as phantom pool memory. A create
+// the pool handed out keeps its rows (they move to the lease), and an
+// in-flight pooled grant already popped its entry, so a id the trim
+// picks is genuinely stocked.
+func (s *Service) dropOnePoolSandbox(ctx context.Context) (freedMiB int, ok bool) {
+	s.store.mu.Lock()
+	img, id := "", ""
+	for name, ids := range s.store.pool {
+		if len(ids) == 0 {
+			continue // a stocked image always has a list
+		}
+		newest := ids[len(ids)-1]
+		if id == "" || s.store.poolMiB[newest] > s.store.poolMiB[id] {
+			img, id = name, newest
+		}
+	}
+	if id == "" {
+		s.store.mu.Unlock()
+		return 0, false
+	}
+	ids := s.store.pool[img]
+	kept := ids[:len(ids)-1]
+	if len(kept) == 0 {
+		delete(s.store.pool, img)
+	} else {
+		s.store.pool[img] = kept
+	}
+	freedMiB = s.store.poolMiB[id]
+	s.removePoolLocked(id)
+	s.store.mu.Unlock()
+
+	if err := s.sub.Delete(ctx, id); err != nil {
+		// Logged and left: the pool entry is already gone, so the orphan
+		// sweep's List-and-claim pass deletes what is left of the guest.
+		s.log.Printf("memory floor: delete pooled sandbox %s (%s): %v", id, img, err)
+	}
+	s.deleteSandboxRow(id)
+	return freedMiB, true
 }
 
 // pressureFloorAlert raises the low-memory loop's alert when nothing
