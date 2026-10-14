@@ -60,8 +60,8 @@ func tbRatio(used, slice int) float64 {
 // memVictims does not exist here (the loop is nobody's fairness case),
 // so unlike memVictims there is no after-pick ratio floor: only the
 // owners' own over-slice condition decides. ok is false when no owner
-// is over their slice or every lease of every candidate is pinned,
-// Drained or busy.
+// is over their slice or every lease of every over-slice owner is
+// pinned or Drained — a busy lease is still takeable, only ranked last.
 func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 	// Rank the over-slice owners by ratio, highest first (stable, so a
 	// tie keeps the view's owner order); then walk down the ranking and

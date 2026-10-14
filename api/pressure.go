@@ -22,7 +22,8 @@ import (
 // Anti-cycling (round 2): admission keeps the floor as headroom, so a
 // lease the loop paused resumes only with the floor free on top of its
 // own memory and is not paused again at once. The loop stands down
-// while draining, on bad readings, and while the node is not healthy.
+// while draining and on bad readings (a node that is not healthy or
+// reports no pages is no usable reading).
 // A lease still marked Drained (an undrain pending on it) is never
 // picked, so a lease stuck Drained cannot switch the floor off for
 // good — the loop keeps taking back around it.
@@ -121,11 +122,12 @@ func (s *Service) pressureCheck(ctx context.Context) {
 	}
 	short := floor - free
 
-	// One take-back at a time box-wide (the same lock admission holds):
-	// a floor pause and a concurrent admission must not each pause a
-	// different lease for themselves. Draining may have started since
-	// the skip above: re-check here, where admission and the drain also
-	// serialise (drain takes this lock around its pause loop).
+	// One take-back at a time box-wide (the same lock admission holds
+	// while it takes back): a floor pause and a concurrent admission must
+	// not each pause a different lease for themselves. Draining may have
+	// started since the skip above: re-check here, under the lock — the
+	// drain itself pauses through pauseLease without taking preemptMu, so
+	// this re-check is what keeps the two apart.
 	s.preemptMu.Lock()
 	defer s.preemptMu.Unlock()
 	if s.draining.Load() {
@@ -174,8 +176,8 @@ func (s *Service) pressureCheck(ctx context.Context) {
 
 // pressureFloorAlert raises the low-memory loop's alert when nothing
 // can be taken back for the floor: short MiB of hugepages are missing
-// and every candidate is pinned, Drained or busy — or no owner is over
-// their slice. It is
+// and every candidate is pinned or Drained — or no owner is over their
+// slice (a busy lease is still takeable, only ranked last). It is
 // its own event kind, memory_floor — not box_full, which names an
 // admission's refused requester — and notifies like one (a person must
 // unpin or release leases to free room; nothing was paused).

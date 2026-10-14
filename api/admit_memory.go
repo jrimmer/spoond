@@ -115,10 +115,15 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	}
 	// The floor is part of every need from here on (round 2): take-back
 	// frees the request AND the floor, so a floor-paused lease's memory
-	// is not resumed into a fresh breach.
+	// is not resumed into a fresh breach. The head stays only in need
+	// and shortfall: takeBackOwnersFor and memVictims get the plain
+	// request (round 3), because the floor is box headroom and not the
+	// requester's usage — counting it into their views would understate
+	// the requester's own pending reservation and inflate the fairness
+	// bar other owners must stay above.
 	head := s.memoryHeadroom(memoryMB)
 	need := uint64(head)
-	owners := s.takeBackOwnersFor(ctx, owner, head)
+	owners := s.takeBackOwnersFor(ctx, owner, memoryMB)
 	takeable, pinned := takeBackPool(owners, owner)
 	// Over the overcommit cap, take-back must also free capShort MiB of
 	// running lease memory, whatever the free hugepages say.
@@ -149,11 +154,11 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	// may have changed (and a taken-back lease must never be picked
 	// again — it is suspended and leaves the running-lease views). The
 	// need it stops on is the SHORTFALL against the headroom (head
-	// minus what is free now — the request plus the floor). The
-	// requester's after-request ratio is still computed for the whole
-	// head inside memVictims, so the fairness bar includes the floor: a
-	// resume that would itself breach the floor cannot push an owner
-	// below its own after-resume ratio. A pass in which every
+	// minus what is free now — the request plus the floor). The head
+	// stays only in need and shortfall, because memVictims' fairness
+	// bar is the requester's ratio after their PLAIN request: the floor
+	// is headroom for the box, not the requester's usage (round 3). A
+	// pass in which every
 	// candidate is refused (a pin or an exec won each one) re-plans on
 	// fresh views and fresh free memory. Only refused rounds count
 	// against the bound: a round that pauses something made progress,
@@ -177,8 +182,8 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 		if shortfall <= 0 {
 			return nil
 		}
-		owners = s.takeBackOwnersFor(ctx, owner, head)
-		victims := memVictims(owners, owner, shortfall, head)
+		owners = s.takeBackOwnersFor(ctx, owner, memoryMB)
+		victims := memVictims(owners, owner, shortfall, memoryMB)
 		if len(victims) == 0 {
 			// Take-back can free nothing. When the requester would be
 			// over its own slice and no other owner borrows more, the
