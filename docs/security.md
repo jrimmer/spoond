@@ -203,8 +203,9 @@ Known/accepted residuals:
 - **Quotas are reservation-based** (`reserveQuota` under the store lock +
   release on completion): concurrent creates cannot exceed `max_leases`
   (TOCTOU closed). `fork` reserves for every child before creating any.
-  Since 3.0 the caps are gone; the reservation stays, so fair-share
-  usage counts an in-flight lease exactly once.
+  Since 3.0 the caps are gone; the reservation stays, so the fair-share
+  view (split among ACTIVE owners only: a running or paused lease, or an
+  admission in flight) counts an in-flight lease exactly once.
 - **Bootstrap**: set `BOOTSTRAP_TOKEN` on the backend so the first-user
   creation requires `X-Bootstrap-Token`; without it, any token holder
   could claim admin on a fresh store.

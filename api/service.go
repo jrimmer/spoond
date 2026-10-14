@@ -2246,24 +2246,46 @@ func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool)
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
+	// The crossing lives in reserveQuotaLocked; see there for why it is
+	// judged on the pre-reservation count and when the snapshot is left
+	// warm.
+	s.reserveQuotaLocked(owner, n, memoryMB)
+	return nil
+}
+
+// reserveQuotaLocked books the reservation and runs the fair-share
+// pendingMiB crossing (requirement 3): the 0 -> >0 crossing is judged
+// on the PRE-reservation count — the before value is read first, a
+// count read after the += would never see it — and a reservation
+// stacked on top of an existing one never crosses, so the snapshot is
+// left warm. The crossing may invalidate, so the caller must hold the
+// store lock: the order matches computeFairShares and
+// deleteLeaseLocked, so a concurrent compute never caches the
+// pre-reservation state for the TTL.
+func (s *Service) reserveQuotaLocked(owner string, n int, memoryMB int) {
 	// pendingMiB is part of the fair-share view twice over: it is the
 	// owner's in-flight usage and the mark that makes the owner ACTIVE
 	// (counted in N) while its first lease is still admitting. Crossing
 	// 0 in either direction moves both, so the snapshot is dropped only
-	// on those crossings; a reservation stacked on top of an existing
-	// or one released while other tickets stay leaves the view
-	// unchanged. Read the BEFORE value first: the 0 -> >0 crossing
-	// (requirement 3) is judged on the pre-reservation count, and a
-	// count read after the += would never see it. The store lock order
-	// matches computeFairShares and deleteLeaseLocked, so a concurrent
-	// compute never caches the pre-reservation state for the TTL.
+	// on those crossings.
 	before := s.store.pendingMiB[owner]
 	s.store.pending[owner] += n
 	s.store.pendingMiB[owner] += n * memoryMB
 	if before <= 0 {
 		s.invalidateFairShares()
 	}
-	return nil
+}
+
+// reserveQuotaNoIdentities books an in-flight admission for a service
+// without an identity store (the legacy-token-only deployment).
+// reserveQuota short-circuits there, but the legacy owner is an active
+// fair-share owner all the same, so the create path books through this
+// variant — the same store lock and the same pendingMiB crossing as
+// reserveQuota.
+func (s *Service) reserveQuotaNoIdentities(owner string, n int, memoryMB int) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.reserveQuotaLocked(owner, n, memoryMB)
 }
 
 // usedMiB reports the owner's current memory charge (#128): the sum of
@@ -2362,6 +2384,15 @@ func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
+	s.releaseQuotaReservationLocked(owner, n, memoryMB)
+}
+
+// releaseQuotaReservationLocked drops n reservations and runs the
+// fair-share pendingMiB crossing: the >0 -> 0 fall invalidates the
+// snapshot (it may make the owner inactive, N drops). A release leaving
+// other reservations in place never crosses, so the snapshot is left
+// warm. Caller holds the store lock.
+func (s *Service) releaseQuotaReservationLocked(owner string, n int, memoryMB int) {
 	if s.store.pending[owner] <= n {
 		delete(s.store.pending, owner)
 	} else {
@@ -2376,6 +2407,15 @@ func (s *Service) releaseQuotaReservation(owner string, n int, memoryMB int) {
 	if before > 0 && s.store.pendingMiB[owner] <= 0 {
 		s.invalidateFairShares()
 	}
+}
+
+// releaseQuotaReservationNoIdentities releases a reservation booked by
+// reserveQuotaNoIdentities. Same store lock and crossing as
+// releaseQuotaReservation.
+func (s *Service) releaseQuotaReservationNoIdentities(owner string, n int, memoryMB int) {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	s.releaseQuotaReservationLocked(owner, n, memoryMB)
 }
 
 // sizedStart picks the build a restart's fresh guest for lease l boots
