@@ -12,6 +12,20 @@ summarised from README "Status".
 
 ### Added
 
+- **The dashboard's `/images` page (spoond-p5s9).** `GET /images` serves
+  the dashboard's page shell drawing only the images panel — full frame
+  width, every image row uncapped (same sort, no fold), with the total
+  row — live-updating over the same SSE stream (`GET
+  /stream?view=images`; any other view, or none, is the dashboard). The
+  images panel caps its rows at eight: a longer catalog folds into one
+  `+N more` row whose live and uses cells sum the hidden images, before
+  the total row over every image. The panel sorts by use — live leases
+  first, then most recent use (the newest `lease_history` end, a live
+  lease counting as now), then lifetime uses, then name — and its title
+  reads `images · N · by use`. On the page the `+N more` text is an
+  anchor to `/images` and the `/images` page's title links back; in the
+  terminal the fold row reads `+N more · spoond images list` (cut to
+  fit) and the `/images` footer carries `· images`.
 - **Lease history (spoond-15a5).** Each ended lease leaves one row in a
   new `lease_history` table (migration 29): owner, image, size, start and
   end, outcome (released or lost), reason, measured peak, create-to-grant
