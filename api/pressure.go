@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -11,27 +12,32 @@ import (
 // than the running VMs may fault back in; the floor is the running
 // counterpart: every 15 s the backend reads the node's free hugepages
 // fresh and, when they sit under the floor, takes back exactly one
-// lease through the ordinary take-back rules (memVictims over the
-// fair-share views, takeBackPause). One lease per tick: the pause's
-// snapshot write is what frees the pages, so the next tick — not this
-// one — judges the result, and a floor breach sheds load a lease at a
-// time instead of pausing a stack at once.
+// lease (pressureVictim: the least recently used unpinned lease of the
+// owner furthest over their fair slice, non-busy before busy). One
+// lease per tick: the pause's snapshot write is what frees the pages,
+// so the next tick — not this one — judges the result, and a floor
+// breach sheds load a lease at a time instead of pausing a stack at
+// once.
 //
-// The loop is admission's backstop, not a second policy: it never
-// touches pinned leases or owners inside their slice (memVictims skips
-// both), a lease paused here resumes on its holder's next work call
-// like any take-back, and a floor nothing can be taken back for alerts
-// at most once per 10 min instead of every tick.
+// Anti-cycling (round 2): admission keeps the floor as headroom, so a
+// lease the loop paused resumes only with the floor free on top of its
+// own memory and is not paused again at once. The loop stands down
+// while draining or while an undrain is pending (a lease still marked
+// Drained), on bad readings, and while the node is not healthy.
 
 const (
-	// DefaultMemoryFloorMiB is MEMORY_FLOOR_MIB when unset: keep 4 GiB
+	// DefaultMemoryFloorMiB is MEMORY_FLOOR_MIB when unset: keep 2 GiB
 	// of hugepage memory free.
-	DefaultMemoryFloorMiB = 4096
+	DefaultMemoryFloorMiB = 2048
 	// pressureInterval is how often the loop checks the floor.
 	pressureInterval = 15 * time.Second
 	// pressureAlertEvery is how often a floor that cannot be met may
-	// repeat its box_full alert.
+	// repeat its alert.
 	pressureAlertEvery = 10 * time.Minute
+	// pressurePauseTimeout bounds one floor pause: a snapshot write runs
+	// about 9 s for a 4 GiB lease on sb and up to 35 s under I/O load,
+	// so 2 min is the bound of a bounded operation, not a guess.
+	pressurePauseTimeout = 2 * time.Minute
 	// pressureRequester is the requester name the loop pauses with: it
 	// names the loop in the lease's take-back stamp and the suspended /
 	// take_back events. It is never an owner id, so takeBackPause's
@@ -61,26 +67,38 @@ func (s *Service) committedMiB() int {
 	return s.runningMemoryMiB()
 }
 
+// pressureSkip reports why a tick must not take anything back, before
+// any node or store read: the floor is off, or the drain is in charge
+// of the leases (draining, or an undrain pending — a lease still marked
+// Drained belongs to the undrain's self-heal loop, and a floor pause
+// would fight the resume for the same lease).
+func (s *Service) pressureSkip(floor int) bool {
+	if floor == 0 {
+		return true // the floor is off (the gauge has already moved)
+	}
+	if s.draining.Load() {
+		return true
+	}
+	// An undrain still pending: a lease marked Drained belongs to the
+	// undrain's self-heal loop until its resume is settled.
+	return s.hasDrainedLeases()
+}
+
 // pressureCheck is one tick of the low-memory loop: read the node
 // fresh, and below the floor pause one lease — the least recently used
 // unpinned lease of the owner furthest over their fair slice, the same
 // choice admission's take-back makes.
 func (s *Service) pressureCheck(ctx context.Context) {
-	floor := s.cfg.MemoryFloorMiB
-	if floor == 0 {
-		return // the floor is off
-	}
-	// Draining pauses every lease and undrain resumes it (U10): the
-	// floor must not fight the drain for the same leases.
-	if s.draining.Load() {
-		return
-	}
 	// What the box has promised to live VMs, for the gauge. The store
-	// read needs no node round trip, so the gauge moves every tick even
-	// while the orchestrator is unreachable.
-	committed := s.committedMiB()
+	// read needs no node round trip, so the gauge moves every tick —
+	// with the floor off, while draining, and while the orchestrator is
+	// unreachable alike.
 	if s.metrics != nil {
-		s.metrics.MemoryCommittedMiB.Set(float64(committed))
+		s.metrics.MemoryCommittedMiB.Set(float64(s.committedMiB()))
+	}
+	floor := s.cfg.MemoryFloorMiB
+	if s.pressureSkip(floor) {
+		return
 	}
 	// A fresh reading, not the admission cache: the floor is a standing
 	// condition, and the credits and debits inside the cache's TTL would
@@ -88,6 +106,12 @@ func (s *Service) pressureCheck(ctx context.Context) {
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
 		s.log.Printf("memory floor: node info: %v", err)
+		return
+	}
+	// Bad readings are not a floor breach (round 2): an orchestrator
+	// still booting or wedged reports no pages (or lies with a draining
+	// status), and taking back on that would pause leases for nothing.
+	if info.Status != "healthy" || info.HugepagesTotal == 0 {
 		return
 	}
 	free := int(info.FreeHugepageBytes() / (1024 * 1024))
@@ -98,31 +122,41 @@ func (s *Service) pressureCheck(ctx context.Context) {
 
 	// One take-back at a time box-wide (the same lock admission holds):
 	// a floor pause and a concurrent admission must not each pause a
-	// different lease for themselves.
+	// different lease for themselves. Draining may have started since
+	// the skip above: re-check here, where admission and the drain also
+	// serialise (drain takes this lock around its pause loop).
 	s.preemptMu.Lock()
 	defer s.preemptMu.Unlock()
+	if s.draining.Load() {
+		return
+	}
 
 	owners := s.takeBackOwners(ctx)
-	victims := memVictims(owners, "", short, short)
-	if len(victims) == 0 {
+	v, ok := pressureVictim(owners)
+	if !ok {
 		// Nothing can be taken back (every candidate pinned, or no owner
 		// over their slice): say so, but at most once per 10 min — a
-		// standing condition must not flood the event stream.
+		// standing condition must not flood the event stream. The alert
+		// is its own event kind so a floor breach is not misread as an
+		// admission's box_full refusal (which names a requester).
 		now := s.now()
 		if s.pressureAlertAt.IsZero() || now.Sub(s.pressureAlertAt) >= pressureAlertEvery {
 			s.pressureAlertAt = now
-			s.boxFullAlert("", short, "memory below floor; nothing can be taken back")
+			s.pressureFloorAlert(short)
 		}
 		return
 	}
-	// The first victim only: the pause itself frees the pages, and the
-	// next tick re-reads free memory before deciding again.
-	v := victims[0]
 	l := s.lookupAny(v.LeaseID)
 	if l == nil {
 		return // released between the views and the pause
 	}
-	if err := s.takeBackPause(ctx, l, pressureRequester, v.Ratio); err != nil {
+	// The pause must not die with a shutdown that cancels ctx
+	// mid-snapshot: a half-written snapshot would be the one state the
+	// resume cannot repair. Detach from the loop's cancel and bound the
+	// pause with a timeout instead (a snapshot write is bounded work).
+	pauseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pressurePauseTimeout)
+	defer cancel()
+	if err := s.takeBackPause(pauseCtx, l, pressureRequester, v.Ratio); err != nil {
 		if !errors.Is(err, errLeaseBusy) && !errors.Is(err, errLeaseReleased) {
 			s.log.Printf("memory floor: lease %s: %v", v.LeaseID, err)
 		}
@@ -135,4 +169,16 @@ func (s *Service) pressureCheck(ctx context.Context) {
 	}
 	s.log.Printf("memory floor: %d MiB free of a %d MiB floor: took back lease %s (%d MiB, owner ratio %.2f)",
 		free, floor, v.LeaseID, v.MemoryMiB, v.Ratio)
+}
+
+// pressureFloorAlert raises the low-memory loop's alert when nothing
+// can be taken back for the floor: short MiB of hugepages are missing
+// and every candidate is pinned or no owner is over their slice. It is
+// its own event kind, memory_floor — not box_full, which names an
+// admission's refused requester — and notifies like one (a person must
+// unpinned or release leases to free room; nothing was paused).
+func (s *Service) pressureFloorAlert(short int) {
+	s.log.Printf("memory_floor: %d MiB below the floor; nothing can be taken back (every candidate pinned, or no owner over their slice); nothing was paused or released", short)
+	s.emitLeaseEvent("", "", LeaseMemoryFloor,
+		fmt.Sprintf("%d MiB below the memory floor; nothing can be taken back: every candidate is pinned, or no owner is over their slice", short))
 }

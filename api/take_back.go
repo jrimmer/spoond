@@ -44,6 +44,44 @@ func tbRatio(used, slice int) float64 {
 	return float64(used) / float64(slice)
 }
 
+// pressureVictim picks the one lease the low-memory loop pauses
+// (MEMORY_FLOOR_MIB, no requester in mind): the owner with the highest
+// used/slice ratio among owners over their slice (used > slice, slice >
+// 0 — a zero slice has no ratio and an owner at or under it is never
+// touched), and inside that owner the least recently used unpinned
+// lease, non-busy before busy (tbPickLease). A single-lease owner over
+// its slice IS a candidate: that lease is the one that goes. The
+// requester argument of memVictims does not exist here (the loop is
+// nobody's fairness case), so unlike memVictims there is no
+// after-pick ratio floor: only the owners' own over-slice condition
+// decides. ok is false when no owner is over their slice or every
+// candidate is pinned.
+func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
+	bestOwner, bestLease := -1, -1
+	bestRatio := 0.0
+	for i := range owners {
+		o := &owners[i]
+		if o.SliceMiB <= 0 || o.UsedMiB <= o.SliceMiB {
+			continue
+		}
+		r := tbRatio(o.UsedMiB, o.SliceMiB)
+		if bestOwner >= 0 && r <= bestRatio {
+			continue
+		}
+		li := tbPickLease(o.Leases)
+		if li < 0 {
+			continue // every lease of the owner pinned
+		}
+		bestOwner, bestLease, bestRatio = i, li, r
+	}
+	if bestOwner < 0 {
+		return takeBackVictim{}, false
+	}
+	o := &owners[bestOwner]
+	l := o.Leases[bestLease]
+	return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: bestRatio, MemoryMiB: l.MemoryMiB}, true
+}
+
 // memVictims picks the leases to pause so requester can have needMiB.
 //
 // It repeats: take the owner with the highest used/slice ratio who is

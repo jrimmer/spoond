@@ -18,17 +18,25 @@ import (
 // the caller may try take-back; if nothing can be taken the plain
 // capacity check still answers.
 func (s *Service) fits(ctx context.Context, memoryMB int) (bool, error) {
-	running := s.runningMemoryMiB()
-	s.nodeInfoMu.Lock()
-	defer s.nodeInfoMu.Unlock()
-	freeMiB, err := s.freeHugepageMiBLocked(ctx)
+	freeMiB, running, err := s.fitsFree(ctx)
 	if err != nil {
 		return false, err
 	}
 	if s.nodeInfoCache.Status != "healthy" {
 		return true, nil
 	}
-	return freeMiB >= uint64(memoryMB) && s.overcommitShortfallLocked(running, memoryMB) <= 0, nil
+	need := memoryMB + s.cfg.MemoryFloorMiB
+	return freeMiB >= uint64(need) && s.overcommitShortfallLocked(running, memoryMB) <= 0, nil
+}
+
+// fitsFree is fits' shared read path: the cached free hugepage memory
+// in MiB and the running-lease memory (runningMemoryMiB).
+func (s *Service) fitsFree(ctx context.Context) (uint64, int, error) {
+	freeMiB, err := s.cachedFreeHugepageMiB(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return freeMiB, s.runningMemoryMiB(), nil
 }
 
 // DefaultMemoryOvercommit is MEMORY_OVERCOMMIT when unset: lease memory

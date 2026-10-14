@@ -718,7 +718,7 @@ func Main(args []string) int {
 	// MEMORY_FLOOR_MIB (spoond-l3lq): the free hugepage memory the
 	// backend keeps on the box; below it the low-memory loop (every 15 s)
 	// pauses one lease through the ordinary take-back rules. 0 disables.
-	memoryFloorMiB := api.DefaultMemoryFloorMiB
+	memoryFloorMiB := api.DefaultMemoryFloorMiB // 2048
 	if v := os.Getenv("MEMORY_FLOOR_MIB"); v != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil || n < 0 {
