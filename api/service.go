@@ -5292,13 +5292,18 @@ func (s *Service) warmPool(ctx context.Context, img store.ImageRow) {
 		// Do not overfill (#41tk, self-healing: spoond must never let
 		// itself crash): a pool VM holds its hugepages for good, so each
 		// fill stops when the VM would put the box over the overcommit
-		// cap or leave less than the floor (2 GiB) free. Warm-pool fills
-		// never trigger take-back — stopping, not pausing leases, is the
-		// pool's answer to a short box — and are retried by the next
-		// refill tick once leases have freed room. The free-memory check
-		// reads the admission cache (the cap's own view, already net of
-		// this refill's earlier creates); the floor there is the same
-		// standing 2 GiB headroom admission keeps.
+		// cap or leave less than the floor (2 GiB) free. It must NOT run
+		// admitMemory here: the pool entry is already part of
+		// runningMemoryMiB (the cap's own running view), so a second
+		// debit would double-count the VM — and admitMemory may take
+		// leases back, which a cache-warming fill must never do.
+		// Warm-pool fills never trigger take-back — stopping, not
+		// pausing leases, is the pool's answer to a short box — and are
+		// retried by the next refill tick once leases have freed room.
+		// The free-memory check reads the admission cache (the cap's own
+		// view, untouched by this fill: nothing below debits it); the
+		// floor there is the same standing 2 GiB headroom admission
+		// keeps.
 		if short := s.overcommitShortfall(memMiB); short > 0 {
 			s.log.Printf("warmPool: %s: stopping at %d of %d sandboxes: one more %d MiB VM would sit %d MiB over the overcommit cap (MEMORY_OVERCOMMIT)", img.Name, i-cur, s.cfg.PoolSize-(i-cur), memMiB, short)
 			return

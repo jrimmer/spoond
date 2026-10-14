@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrimmer/spoond/v3/store"
 	"github.com/jrimmer/spoond/v3/substrate"
 )
 
@@ -75,6 +76,8 @@ func TestWarmPoolStopsAtOvercommitCap(t *testing.T) {
 		}
 	}
 	fullFreeNode(t, svc, sub) // every page reads free; the cap is full
+	dropNodeCache(svc)
+	svc.updateNodeMetrics(ctx) // the fill reads the cache; leases warmed it
 	svc.cfg.PoolSize = 1
 
 	svc.warmPool(ctx, img)
@@ -126,6 +129,8 @@ func TestWarmPoolStopsBelowFreeFloor(t *testing.T) {
 			dropNodeCache(svc)
 			svc.updateNodeMetrics(context.Background())
 			svc.cfg.PoolSize = 1
+			dropNodeCache(svc)
+			svc.updateNodeMetrics(context.Background()) // warm the fill's free-memory cache
 
 			svc.warmPool(context.Background(), img)
 
@@ -164,7 +169,9 @@ func TestDropOnePoolSandbox(t *testing.T) {
 	svc.store.mu.Lock()
 	svc.store.pool["small"] = []string{"small-a"}
 	svc.store.poolMiB["small-a"] = 1024
+	ids := append([]string(nil), svc.store.pool["py-base"]...)
 	svc.store.mu.Unlock()
+	droppedID := ids[len(ids)-1] // the 2048 MiB image's newest member
 	svc.db.AddPool(ctx, "small-a", "small")
 	svc.db.UpsertSandbox(ctx, storeSandboxRowFor("small-a", img2.CurrentBuildID, "", 1024))
 
@@ -178,7 +185,7 @@ func TestDropOnePoolSandbox(t *testing.T) {
 	svc.store.mu.Lock()
 	n1, n2 := len(svc.store.pool["py-base"]), len(svc.store.pool["small"])
 	_, mi1 := svc.store.poolMiB[svc.store.pool["py-base"][0]], svc.store.poolMiB["small-a"]
-	_, gone := svc.store.poolMiB[svc.poolNewest(t, "py-base")]
+	_, gone := svc.store.poolMiB[droppedID]
 	svc.store.mu.Unlock()
 	if n1 != 1 || n2 != 1 {
 		t.Fatalf("pool sizes after the drop: py-base %d, small %d; want 1 and 1 (small untouched)", n1, n2)
@@ -187,7 +194,10 @@ func TestDropOnePoolSandbox(t *testing.T) {
 		t.Fatal("the dropped pool entry's poolMiB was kept")
 	}
 	_ = mi1
-	if got := calls(sub.Fake, "Delete "+svc.poolNewest(t, "py-base")); got != 0 {
+	svc.store.mu.Lock()
+	keptIDs := append([]string(nil), svc.store.pool["py-base"]...)
+	svc.store.mu.Unlock()
+	if got := calls(sub.Fake, "Delete "+keptIDs[0]); got != 0 {
 		t.Fatalf("a non-dropped pooled sandbox was deleted %d time(s)", got)
 	}
 	if row, err := svc.db.GetSandbox(ctx, "small-a"); err != nil || row.SandboxID != "small-a" {
@@ -296,5 +306,34 @@ func TestPressureTickDropsPoolSurvivesDeleteFailure(t *testing.T) {
 	sub.deleteFn = nil
 }
 
-// midImage returns the "mid" image row the pressure fixtures seed.
-func midImage() storeImageRow { panic("placeholder") }
+// midImage returns the "mid" image row the pressure fixtures seed:
+// warmPool only reads MemoryMB (CurrentBuildID is looked up by name).
+func midImage() store.ImageRow {
+	return store.ImageRow{Name: "mid", MemoryMB: 1024}
+}
+
+// sandboxesLiveIDs lists the sandbox ids the test substrate still
+// holds.
+func (svc *Service) sandboxesLiveIDs(t *testing.T) []string {
+	t.Helper()
+	return svc.sub.(*testSub).sandboxesLive(t)
+}
+
+// svcStoreLeases returns every lease currently in the store, in map-
+// random order (the callers need only one lease id, order aside).
+func svcStoreLeases(t *testing.T, svc *Service) []*Lease {
+	t.Helper()
+	svc.store.mu.Lock()
+	defer svc.store.mu.Unlock()
+	out := make([]*Lease, 0, len(svc.store.leases))
+	for _, l := range svc.store.leases {
+		out = append(out, l)
+	}
+	return out
+}
+
+// storeSandboxRowFor builds a sandboxes row for id on buildID with the
+// given memory, as the pool fixtures need.
+func storeSandboxRowFor(id, buildID string, _ string, memoryMB int) store.SandboxRow {
+	return store.SandboxRow{SandboxID: id, BuildID: buildID, MemoryMB: memoryMB}
+}
