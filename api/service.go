@@ -347,6 +347,11 @@ type Store struct {
 	// activity-only save (LastActive, ExpiresAt, holder) does not churn
 	// the cache (#145 FS1 R5-3).
 	accounted map[string]leaseAccounted
+	// lostInvalidated records whether the suspended→lost fair-share
+	// invalidation (paused counts, lost does not) has already run for a
+	// lease id, so later saves of the same lost lease (a pause-clock
+	// touch, a repair) do not repeat it.
+	lostInvalidated map[string]bool
 }
 
 // leaseAccounted is the part of a lease that feeds the fair-share usage
@@ -373,6 +378,7 @@ func newStore() *Store {
 		lastActiveDirty: make(map[string]time.Time),
 		runningJobs:     make(map[string]int),
 		accounted:       make(map[string]leaseAccounted),
+		lostInvalidated: make(map[string]bool),
 	}
 }
 
@@ -2240,18 +2246,20 @@ func (s *Service) reserveQuota(owner string, n int, memoryMB int, newLease bool)
 	}
 	s.store.mu.Lock()
 	defer s.store.mu.Unlock()
-	s.store.pending[owner] += n
-	s.store.pendingMiB[owner] += n * memoryMB
 	// pendingMiB is part of the fair-share view twice over: it is the
 	// owner's in-flight usage and the mark that makes the owner ACTIVE
 	// (counted in N) while its first lease is still admitting. Crossing
 	// 0 in either direction moves both, so the snapshot is dropped only
 	// on those crossings; a reservation stacked on top of an existing
 	// or one released while other tickets stay leaves the view
-	// unchanged. The store lock order matches computeFairShares and
-	// deleteLeaseLocked, so a concurrent compute never caches the
-	// pre-reservation state for the TTL.
+	// unchanged. Read the BEFORE value first: the 0 -> >0 crossing
+	// (requirement 3) is judged on the pre-reservation count, and a
+	// count read after the += would never see it. The store lock order
+	// matches computeFairShares and deleteLeaseLocked, so a concurrent
+	// compute never caches the pre-reservation state for the TTL.
 	before := s.store.pendingMiB[owner]
+	s.store.pending[owner] += n
+	s.store.pendingMiB[owner] += n * memoryMB
 	if before <= 0 {
 		s.invalidateFairShares()
 	}
@@ -5451,10 +5459,14 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 	// A paused-only owner whose lease is lost must not keep its cached
 	// 1/N slice for the snapshot TTL, so a lost lease still carrying the
 	// stale Suspended flag (markLost, the only lost-state writer, does
-	// not clear it) invalidates too. Rare: once per loss, and a flagless
-	// lost lease (or a restored one) skips this — the fair-share view
-	// itself tests the State, not the flag.
-	if l.State == "lost" && l.Suspended {
+	// not clear it) invalidates too. The flagless-lost-lease case (or a
+	// restored one) needs no invalidation, and the invalidating case
+	// runs once per fall: later saves of the same lost lease (a pause
+	// clock touch, a repair) repeat nothing — once is enough, it is
+	// only an epoch bump, and the state test is already over the
+	// accounted change above.
+	if l.State == "lost" && l.Suspended && !s.store.lostInvalidated[l.ID] {
+		s.store.lostInvalidated[l.ID] = true
 		s.invalidateFairShares()
 	}
 }

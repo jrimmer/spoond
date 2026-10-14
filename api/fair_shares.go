@@ -168,15 +168,6 @@ func leaseActive(l *Lease) bool {
 	return !l.released && (l.live() || l.State == "suspended")
 }
 
-// leaseChargeable reports whether lease l charges its owner: the lease
-// is unreleased and live (running or recovered). A suspended lease holds
-// no hugepages and a lost one cannot be taken back; the charge moves
-// only through setState paths and every setState save that changes live
-// invalidates the snapshot, so a recomputed report is never stale.
-func leaseChargeable(l *Lease) bool {
-	return !l.released && l.live()
-}
-
 // ownerDisplayName resolves an owner id to a username when one exists;
 // "" for a legacy consumer-token owner.
 func (s *Service) ownerDisplayName(owner string) string {
@@ -362,13 +353,14 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 		o.Disk.UsedBytes = u.Used
 		// Ratio is usage over the owner's own displayed slice, so an
 		// active owner reads against 1/N. An inactive owner's ratio is
-		// ZERO by definition: its hugepages are released and its
-		// snapshots are gone (anything it left behind is pruned), so it
-		// is never ranked the heaviest borrower — the snapshot
-		// ordering and the admission queue's fair-share order both
-		// sort by this ratio. Its usage buckets stay listed for the
-		// complete view, but no ratio is computed over the would-be
-		// slice, so a stale named row can never top it above an active
+		// ZERO by policy: a paused lease that falls to lost, or a
+		// suspension whose reservation settled before the lease landed,
+		// can leave rows behind in every usage bucket, so the view does
+		// not judge an idle owner over its would-be slice either way —
+		// it is simply never ranked the heaviest borrower (the snapshot
+		// ordering and the admission queue's fair-share order both sort
+		// by this ratio). Its usage buckets stay listed for the complete
+		// view; a stale named row alone can never top it above an active
 		// borrower.
 		o.Ratio = 0
 		if isActive {

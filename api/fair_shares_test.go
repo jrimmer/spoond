@@ -1327,24 +1327,6 @@ func markLeaseReleased(svc *Service, id string) {
 	svc.store.mu.Unlock()
 }
 
-// addPendingAdmission books an in-flight admission for owner directly
-// (reserveQuota runs under the HTTP handlers; direct-service tests
-// stamp the store themselves).
-func addPendingAdmission(svc *Service, owner string, memMiB int) {
-	svc.store.mu.Lock()
-	svc.store.pending[owner]++
-	svc.store.pendingMiB[owner] = memMiB
-	svc.store.mu.Unlock()
-}
-
-// clearPendingAdmission drops owner's in-flight reservation again.
-func clearPendingAdmission(svc *Service, owner string) {
-	svc.store.mu.Lock()
-	delete(svc.store.pending, owner)
-	delete(svc.store.pendingMiB, owner)
-	svc.store.mu.Unlock()
-}
-
 // TestFairSharesPausedLeaseCounts: a paused lease keeps its hugepages
 // booked, so its owner is ACTIVE for N and shows a 1/N slice (N=2 with
 // a second active owner means 512 MiB, not the idle would-have 341).
@@ -1418,14 +1400,31 @@ func TestFairSharesLostAndReleasedDoNotCount(t *testing.T) {
 
 // TestFairSharesPendingOnlyOwnerCounts: an admission in flight books
 // its owner as ACTIVE before any lease exists; when the admission
-// settles (reservation released), the owner goes idle again.
+// settles (reservation released), the owner goes idle again. The test
+// drives the real writer, reserveQuota / releaseQuotaReservation, so the
+// 0 -> >0 and >0 -> 0 crossings (fair shares requirement 3) must
+// invalidate the cache themselves: freshAfter reads a frozen clock that
+// never expires the TTL, so a warm snapshot would never refresh on its
+// own and any read would keep serving the pre-reservation view.
 func TestFairSharesPendingOnlyOwnerCounts(t *testing.T) {
 	svc, _, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
 	req := addIdentityUser(t, ids, "requester")
-	addPendingAdmission(svc, req.ID, 256)
-	svc.invalidateFairShares()
+	second := addIdentityUser(t, ids, "second")
 
-	snap := svc.fairShares(context.Background())
+	// Baseline: nobody active. Warm the cached snapshot.
+	before := svc.fairShares(context.Background())
+	if before.ownersN != 0 {
+		t.Fatalf("ownersN = %d, want 0 on an empty box", before.ownersN)
+	}
+
+	// First reservation: the requester's own create in flight. The
+	// 0 -> >0 crossing in reserveQuota must drop the cached snapshot, so
+	// the next read recomputes and counts the requester in N.
+	if err := svc.reserveQuota(req.ID, 1, 256, true); err != nil {
+		t.Fatalf("reserveQuota: %v", err)
+	}
+	snap := freshAfter(t, svc, before)
 	if snap.ownersN != 1 {
 		t.Fatalf("ownersN = %d, want 1 (an in-flight admission counts)", snap.ownersN)
 	}
@@ -1435,14 +1434,70 @@ func TestFairSharesPendingOnlyOwnerCounts(t *testing.T) {
 			by[req.ID].Active, by[req.ID].Memory.SliceMiB)
 	}
 
-	clearPendingAdmission(svc, req.ID)
-	svc.invalidateFairShares()
-	snap = svc.fairShares(context.Background())
-	if snap.ownersN != 0 {
-		t.Fatalf("ownersN = %d after the reservation cleared, want 0", snap.ownersN)
+	// A stacked reservation for the SAME owner leaves the crossing
+	// unused: pendingMiB moves >0 to >0, N does not move, so the view
+	// keeps serving the same warm snapshot.
+	stacked := svc.fairShares(context.Background())
+	if err := svc.reserveQuota(req.ID, 1, 128, true); err != nil {
+		t.Fatalf("stacked reserveQuota: %v", err)
 	}
-	if shareByOwner(snap)[req.ID].Active {
-		t.Fatal("owner still active after its reservation cleared")
+	if got := svc.fairShares(context.Background()); got != stacked {
+		t.Fatal("stacked same-owner reservation dropped the snapshot, want the warm cache kept")
+	}
+
+	// A second owner's own first reservation is its own 0 -> >0
+	// crossing: N moves 1 -> 2 against the warm cache and both slices
+	// re-split to 1/2 the pool.
+	before = svc.fairShares(context.Background())
+	if err := svc.reserveQuota(second.ID, 1, 128, true); err != nil {
+		t.Fatalf("second reserveQuota: %v", err)
+	}
+	snap = freshAfter(t, svc, before)
+	if snap.ownersN != 2 {
+		t.Fatalf("ownersN = %d, want 2 (both admissions in flight)", snap.ownersN)
+	}
+	by = shareByOwner(snap)
+	for _, o := range []string{req.ID, second.ID} {
+		if !by[o].Active || by[o].Memory.SliceMiB != 512 {
+			t.Fatalf("%s: active=%v slice=%d, want active with 512 MiB",
+				o, by[o].Active, by[o].Memory.SliceMiB)
+		}
+	}
+
+	// The settle path: releasing one of two stacked reservations leaves
+	// the owner pending, so no crossing fires and the cache stays warm.
+	svc.releaseQuotaReservation(req.ID, 1, 256)
+	if got := svc.fairShares(context.Background()); got != snap {
+		t.Fatal("partial release dropped the snapshot, want the warm cache kept")
+	}
+
+	// Releasing the rest is the > 0 -> 0 crossing: the owner goes idle
+	// at once (N drops to 1) and the snapshot is invalidated.
+	before = svc.fairShares(context.Background())
+	svc.releaseQuotaReservation(req.ID, 1, 128)
+	snap = freshAfter(t, svc, before)
+	if snap.ownersN != 1 {
+		t.Fatalf("ownersN = %d after the first owner settled, want 1", snap.ownersN)
+	}
+	by = shareByOwner(snap)
+	if by[req.ID].Active {
+		t.Fatal("owner still active after its reservations settled")
+	}
+	if by[req.ID].Memory.SliceMiB != 512 || by[second.ID].Memory.SliceMiB != 1024 {
+		t.Fatalf("slices = %d / %d, want idle 512 (total/(N+1)) / active 1024",
+			by[req.ID].Memory.SliceMiB, by[second.ID].Memory.SliceMiB)
+	}
+
+	// The last reservation settling is the same crossing for the other
+	// owner: nobody is active afterwards.
+	before = svc.fairShares(context.Background())
+	svc.releaseQuotaReservation(second.ID, 1, 128)
+	snap = freshAfter(t, svc, before)
+	if snap.ownersN != 0 {
+		t.Fatalf("ownersN = %d after every reservation settled, want 0", snap.ownersN)
+	}
+	if shareByOwner(snap)[second.ID].Active {
+		t.Fatal("second owner still active after its reservation settled")
 	}
 }
 
