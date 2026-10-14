@@ -550,6 +550,10 @@ type pageData struct {
 	Snapshot
 	Hist  map[string][]float64
 	Width int
+	// StreamURL is the SSE endpoint the page subscribes to: /stream for
+	// the dashboard, /stream?view=images for the /images page — the view
+	// the page loaded is the view its stream keeps drawing.
+	StreamURL string
 	// Grid is the grid's rows as HTML; already escaped by grid.HTML, so
 	// the template must not escape it again.
 	Grid template.HTML
@@ -574,7 +578,11 @@ func (d *dash) servePage(w http.ResponseWriter, path string) {
 	d.mu.Unlock()
 	g, links := d.gridFor(view, s, hist, time.Now())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	data := pageData{Snapshot: s, Hist: hist, Width: g.Cols(), Grid: template.HTML(pageGrid(g, links))}
+	stream := "/stream"
+	if view == viewImages {
+		stream += "?view=images"
+	}
+	data := pageData{Snapshot: s, Hist: hist, Width: g.Cols(), StreamURL: stream, Grid: template.HTML(pageGrid(g, links))}
 	if err := d.page.Execute(w, data); err != nil {
 		log.Printf("spoond dash: render: %v", err)
 	}

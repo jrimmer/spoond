@@ -671,6 +671,10 @@ func TestImagesPageAndStream(t *testing.T) {
 	if !strings.Contains(body, `<a class="g-link" href="/"`) {
 		t.Fatal("/images page lacks the back link")
 	}
+	// The page's stream subscription carries the view it loaded.
+	if !strings.Contains(body, `@get('/stream?view=images')`) {
+		t.Fatal("/images page does not subscribe to the images stream")
+	}
 
 	// The dashboard page still folds and links the fold to /images; it
 	// has no back link.
@@ -681,6 +685,9 @@ func TestImagesPageAndStream(t *testing.T) {
 	}
 	if strings.Contains(body, `href="/"`) {
 		t.Fatal("/ page must not carry the back link")
+	}
+	if !strings.Contains(body, `@get('/stream')`) || strings.Contains(body, `view=images`) {
+		t.Fatal("/ page must subscribe to the plain dashboard stream")
 	}
 
 	// Unknown paths stay 404.
