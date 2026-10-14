@@ -2951,6 +2951,19 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 				id = pool[0]
 				s.store.pool[image] = pool[1:]
 				s.removePoolLocked(id)
+				// The pool VM's hugepages were part of runningMemoryMiB
+				// (spoond-41tk), so the admission above must not keep a
+				// debit for them: credit the memory back now — with
+				// nodeInfoMu taken after dropping the store lock, the
+				// two locks never nest — while the pool entry is gone
+				// from runningMemoryMiB and the lease's own stamp is not
+				// live yet. The pooled case's `undo(true)` below then
+				// only drops the in-flight-admission counter. undo is
+				// once-safe, so the deferred call on a later failure is
+				// a no-op.
+				s.store.mu.Unlock()
+				s.creditNodeInfoLockedWrapper(memoryMB)
+				s.store.mu.Lock()
 				// The pool entry is gone before the lease row names the
 				// sandbox: hold it in flight, in the same critical
 				// section, so the orphan sweep never sees it unclaimed
@@ -3016,8 +3029,13 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	}
 	// A pooled sandbox was created (and its hugepages debited) by an
 	// earlier warm-pool grant, so this grant must not hold a second
-	// debit for the same memory: give the admission's debit back now.
-	// undo is once-safe, so a later failure's deferred call is a no-op.
+	// debit for the same memory: the pop inside the pool loop above
+	// already credited that debit back under nodeInfoMu (spoond-41tk:
+	// by then the pool entry is gone from runningMemoryMiB and the
+	// lease's own stamp is not live yet, so something must carry the
+	// memory across that seam). undo here only drops the in-flight
+	// counter. undo is once-safe, so a later failure's deferred call is
+	// a no-op.
 	if lease.pooled {
 		undo(true)
 	}
@@ -5666,6 +5684,18 @@ func (s *Service) addPoolLocked(id, image string, memMiB int) {
 // the lease's own charge takes over) or gone from the substrate, and
 // either way the cap must not count it twice or count a ghost. Call
 // with s.store.mu held.
+// creditNodeInfoLockedWrapper takes nodeInfoMu and calls
+// creditNodeInfoLocked on it. It exists only for the pooled grant's
+// pop path inside grantLease, which holds the store lock and cannot
+// call creditNodeInfo (a plain nodeInfoMu take) directly without
+// dropping the store lock first; the wrapper keeps that odd shape out
+// of preempt.go. No-op when nothing is cached.
+func (s *Service) creditNodeInfoLockedWrapper(memoryMB int) {
+	s.nodeInfoMu.Lock()
+	s.creditNodeInfoLocked(memoryMB)
+	s.nodeInfoMu.Unlock()
+}
+
 func (s *Service) removePoolLocked(id string) {
 	delete(s.store.poolMiB, id)
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
