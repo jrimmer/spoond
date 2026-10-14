@@ -274,40 +274,58 @@ func historyLeases(ctx context.Context, db *sql.DB) (out []recLease, ok bool, er
 	defer rows.Close()
 	for rows.Next() {
 		var l recLease
+		var created, ended, outcome string
 		var memory, peak, startMs, nap int64
-		if err := rows.Scan(&l.Owner, &l.Image, &memory, &l.Created, &l.Ended, &l.Lost, &peak, &startMs, &nap); err != nil {
+		if err := rows.Scan(&l.Owner, &l.Image, &memory, &created, &ended, &outcome, &peak, &startMs, &nap); err != nil {
 			return nil, false, err
 		}
+		// RFC 3339 UTC, as the store writes it. A row whose clock could
+		// not be parsed (a hand-mangled row) is skipped rather than
+		// poisoning the whole panel.
+		if l.Created, err = time.Parse(time.RFC3339Nano, created); err != nil {
+			continue
+		}
+		if l.Ended, err = time.Parse(time.RFC3339Nano, ended); err != nil {
+			continue
+		}
 		l.MemoryMB = int(memory)
+		l.Lost = outcome == "lost"
 		l.PeakMiB, l.StartMs, l.MaxNapSecs = peak, startMs, nap
 		out = append(out, l)
 	}
 	return out, true, rows.Err()
 }
 
-// liveLeases turns the live lease rows into recLeases, a lease's end
-// being the frame's now. Only leases holding a sandbox count (running,
-// suspended, recovered): a lost row is already at its end.
-func liveLeases(rows []LeaseRow, names map[string]string, now time.Time) []recLease {
+// liveLeases reads the live leases table into recLeases, a lease's
+// end being the frame's now. Only leases holding a sandbox count
+// (running, suspended, recovered): a lost row is already at its end and
+// a queued one has not started its run. Read like the image_uses query
+// beside it: one lightweight read on the collector's read-only
+// connection.
+func liveLeases(ctx context.Context, db *sql.DB, names map[string]string, now time.Time) []recLease {
+	rows, err := db.QueryContext(ctx, `SELECT image, owner, state, memory_mb, created_at
+		FROM leases WHERE state IN ('running','suspended','recovered') ORDER BY created_at`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
 	var out []recLease
-	for _, r := range rows {
-		switch r.State {
-		case "running", "suspended", "recovered":
-		default:
+	for rows.Next() {
+		var l recLease
+		var owner, state, created string
+		var memory int64
+		if err := rows.Scan(&l.Image, &owner, &state, &memory, &created); err != nil {
 			continue
 		}
-		created, err := time.Parse(time.RFC3339Nano, r.CreatedAt)
-		if err != nil {
+		if l.Created, err = time.Parse(time.RFC3339Nano, created); err != nil {
 			continue
 		}
-		owner := names[r.OwnerID]
-		if owner == "" {
-			owner = r.OwnerID
+		l.MemoryMB = int(memory)
+		if l.Owner = names[owner]; l.Owner == "" {
+			l.Owner = owner
 		}
-		out = append(out, recLease{
-			Owner: owner, Image: r.Image, MemoryMB: r.MemoryMB,
-			Created: created, Ended: now,
-		})
+		l.Ended = now
+		out = append(out, l)
 	}
 	return out
 }
@@ -343,7 +361,7 @@ func (c *collector) collectRecords(ctx context.Context, now time.Time) (rec reco
 		}
 		leases = append(leases, l)
 	}
-	for _, l := range liveLeases(c.lastRows(), names, now) {
+	for _, l := range liveLeases(ctx, db, names, now) {
 		if !exclude[l.Owner] {
 			leases = append(leases, l)
 		}
