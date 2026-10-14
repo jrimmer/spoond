@@ -1552,8 +1552,9 @@ func TestFairSharesIdleIdentityNotInN(t *testing.T) {
 // markLeaseLostViaSave flips the lease to lost through the real writer
 // (markLost): setState stamps the state and saveLeaseLocked persists the
 // row and runs the accounted-signature invalidation. A suspended lease
-// keeps its Suspended flag across this fall — live is false on both
-// sides, the accounted signature does not move on its own.
+// keeps its Suspended flag across this fall — but the signature's
+// active bit flips (paused counts as active, lost never does), so the
+// signature change alone drops the snapshot.
 func markLeaseLostViaSave(svc *Service, id string) {
 	svc.store.mu.Lock()
 	defer svc.store.mu.Unlock()
@@ -1565,6 +1566,7 @@ func markLeaseLostViaSave(svc *Service, id string) {
 	setLostReason(l, "recovery failed")
 	l.setState("lost")
 	svc.saveLeaseLocked(l)
+	svc.store.accounted[id] = leaseAccountedOf(l)
 }
 
 // TestFairSharesLostFormerlyPausedDoesNotCount: a suspended lease that
@@ -1604,7 +1606,10 @@ func TestFairSharesLostFormerlyPausedDoesNotCount(t *testing.T) {
 	}
 
 	// The real loss path leaves Suspended true on a lost lease; the
-	// invalidation must still come out of saveLeaseLocked.
+	// invalidation must still come out of saveLeaseLocked: the active
+	// bit of the accounted signature flips on the suspended→lost fall
+	// (paused counts as active, lost never does), so the signature
+	// change itself drops the snapshot.
 	markLeaseLostViaSave(svc, lg.ID)
 
 	svc.store.mu.Lock()
@@ -1635,9 +1640,10 @@ func TestFairSharesLostFormerlyPausedDoesNotCount(t *testing.T) {
 		t.Fatalf("runner slice after the loss = %d, want 1024 (the whole pool)", got)
 	}
 
-	// The invalidation is once per loss: a later save of the same lost
-	// lease (a pause-clock touch, a repair) repeats nothing — the
-	// accounted signature and the lost fall are both already recorded.
+	// A later save of the same lost lease (a pause-clock touch, a
+	// repair) changes the accounted signature only when an accounted
+	// quantity moves: LastActive is not one of them, so the cache stays
+	// warm.
 	later := svc.fairShares(context.Background())
 	svc.store.mu.Lock()
 	lostLease.LastActive = lostLease.LastActive.Add(time.Second)
@@ -1649,10 +1655,7 @@ func TestFairSharesLostFormerlyPausedDoesNotCount(t *testing.T) {
 }
 
 // TestFairSharesLostFormerlyPausedInvalidatesCache: the same real loss
-// with a cached snapshot taken (and never evicted by TTL) before it. The
-// accounted signature does not move across the suspended→lost fall, so
-// saveLeaseLocked needs the explicit lost-row invalidation or the read
-// after the loss serves the pre-loss N.
+// with a cached snapshot taken (and never evicted by TTL) before it.
 func TestFairSharesLostFormerlyPausedInvalidatesCache(t *testing.T) {
 	svc, db, _, ids := newFairShareService(t)
 	freezeFairShareClock(svc, time.Now())
@@ -1673,6 +1676,10 @@ func TestFairSharesLostFormerlyPausedInvalidatesCache(t *testing.T) {
 		t.Fatalf("ownersN before the loss = %d, want 2", before.ownersN)
 	}
 
+	// markLeaseLostViaSave runs saveLeaseLocked: the active bit of the
+	// accounted signature flips across the suspended→lost fall (paused
+	// counts as active, lost never does), so the signature change itself
+	// invalidates and the read after the loss serves the new N.
 	markLeaseLostViaSave(svc, "pause-1")
 
 	after := freshAfter(t, svc, before)

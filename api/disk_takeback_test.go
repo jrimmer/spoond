@@ -539,12 +539,17 @@ func TestDiskTakeBackShortfallSizing(t *testing.T) {
 	// The requester's own create is in flight, which is what makes
 	// consumer-a an ACTIVE owner with a real 1/N slice — the view the
 	// take-back judges the requester by. The harness has no identity
-	// store, so the reservation runs through the no-identity variant of
-	// reserveQuota (reserveQuota itself short-circuits without
-	// identities): the same pendingMiB crossing, whose 0 -> >0 invalidates
-	// the fair-share snapshot itself.
-	h.svc.reserveQuotaNoIdentities("consumer-a", 1, 2048)
-	defer h.svc.releaseQuotaReservationNoIdentities("consumer-a", 1, 2048)
+	// store, so reserveQuota itself short-circuits; the reservation goes
+	// through reserveQuotaLocked (the same store lock and pendingMiB
+	// crossing) directly, which is all the identity variants add.
+	h.svc.store.mu.Lock()
+	h.svc.reserveQuotaLocked("consumer-a", 1, 2048)
+	h.svc.store.mu.Unlock()
+	defer func() {
+		h.svc.store.mu.Lock()
+		h.svc.releaseQuotaReservationLocked("consumer-a", 1, 2048)
+		h.svc.store.mu.Unlock()
+	}()
 
 	freed, err := h.svc.diskTakeBack(context.Background(), 10<<30, "consumer-a")
 	if err != nil {
