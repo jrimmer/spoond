@@ -22,6 +22,7 @@ func TestRunningMemoryMiBCountsPool(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	img := seedImage(t, db, "py-base", 2048)
 	svc.cfg.PoolSize = 2
+	svc.probeEnabled = false
 	ctx := context.Background()
 
 	svc.warmPool(ctx, img)
@@ -65,6 +66,7 @@ func TestWarmPoolStopsAtOvercommitCap(t *testing.T) {
 	svc, db, sub, ids := newFairShareService(t)
 	svc.cfg.MemoryOvercommit = 1.0
 	alice := addIdentityUser(t, ids, "alice")
+	svc.probeEnabled = false
 	ctx := context.Background()
 	img := seedImage(t, db, "one", 1024)
 	roomyDisk(svc)
@@ -155,6 +157,7 @@ func TestDropOnePoolSandbox(t *testing.T) {
 	svc, db, sub := newTestService(t)
 	img := seedImage(t, db, "py-base", 2048)
 	img2 := seedImage(t, db, "small", 1024)
+	svc.probeEnabled = false
 	ctx := context.Background()
 
 	if freed, ok := svc.dropOnePoolSandbox(ctx); ok || freed != 0 {
@@ -234,6 +237,7 @@ func TestPressureTickDropsPoolBeforeLeases(t *testing.T) {
 	}
 	svc.store.mu.Unlock()
 	svc.cfg.PoolSize = 1
+	svc.probeEnabled = false
 	img := midImage()
 	svc.warmPool(ctx, img)
 
@@ -279,6 +283,7 @@ func TestPressureTickDropsPoolSurvivesDeleteFailure(t *testing.T) {
 	svc, sub, ctx := newPressureService(t)
 	img := midImage()
 	svc.cfg.PoolSize = 1
+	svc.probeEnabled = false
 	svc.warmPool(ctx, img)
 	svc.store.mu.Lock()
 	id := svc.store.pool["mid"][0]
