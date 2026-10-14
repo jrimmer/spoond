@@ -108,8 +108,9 @@ and every change is in [CHANGELOG.md](CHANGELOG.md).
   an equal, floating 1/N slice of memory and snapshot disk (N counts
   active owners only — an identity that never took a lease does not
   split the box, and a lost lease never counts); an owner may borrow
-  past it while the box has room. When a request does not fit, spoond takes room back from
-  the biggest borrower (highest usage over slice): memory take-back
+  past it while the box has room. When a request does not fit, spoond
+  takes room back from the biggest borrower (highest usage over
+  slice): memory take-back
   pauses that owner's least recently used unpinned lease, and disk
   take-back releases their oldest unpinned paused lease. A shortage
   answers `503 capacity_wait` with `Retry-After`; a request take-back
