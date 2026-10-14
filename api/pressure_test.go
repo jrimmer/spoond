@@ -803,4 +803,17 @@ func TestAdmitCapacityWithoutFloor(t *testing.T) {
 	if err := svc.admitCapacity(withoutFloor(ctx), 6144); err != nil {
 		t.Fatalf("returning 6 GiB lease refused: %v", err)
 	}
+	// Take-back's view honours the same flag: fits (and the need it
+	// works to) drop the floor for a returning lease, so an undrain does
+	// not take back other owners' leases to win floor headroom.
+	warmFairShares(svc, ctx)
+	if ok, err := svc.fits(ctx, 6144); err != nil || ok {
+		t.Fatalf("fits(new 6 GiB) = %v, %v; want false (floor not free on top)", ok, err)
+	}
+	if ok, err := svc.fits(withoutFloor(ctx), 6144); err != nil || !ok {
+		t.Fatalf("fits(returning 6 GiB) = %v, %v; want true", ok, err)
+	}
+	if got := svc.memoryHeadroom(withoutFloor(ctx), 6144); got != 6144 {
+		t.Fatalf("headroom for a returning lease = %d, want 6144", got)
+	}
 }

@@ -28,7 +28,7 @@ func (s *Service) fits(ctx context.Context, memoryMB int) (bool, error) {
 	if s.nodeInfoCache.Status != "healthy" {
 		return true, nil
 	}
-	return freeMiB >= uint64(memoryMB+s.cfg.MemoryFloorMiB) && s.overcommitShortfallLocked(running, memoryMB) <= 0, nil
+	return freeMiB >= uint64(memoryMB+s.floorFor(ctx)) && s.overcommitShortfallLocked(running, memoryMB) <= 0, nil
 }
 
 // DefaultMemoryOvercommit is MEMORY_OVERCOMMIT when unset: lease memory

@@ -91,8 +91,8 @@ func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) (
 // own request plus the floor it must leave free (MEMORY_FLOOR_MIB, the
 // low-memory loop's standing condition), so a resume does not undo a
 // floor pause at once. 0 with the floor off.
-func (s *Service) memoryHeadroom(memoryMB int) int {
-	return memoryMB + s.cfg.MemoryFloorMiB
+func (s *Service) memoryHeadroom(ctx context.Context, memoryMB int) int {
+	return memoryMB + s.floorFor(ctx)
 }
 
 // takeBackForAdmission is the take-back loop of admitMemory. The caller
@@ -123,7 +123,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	// requester's usage — counting it into their views would understate
 	// the requester's own pending reservation and inflate the fairness
 	// bar other owners must stay above.
-	head := s.memoryHeadroom(memoryMB)
+	head := s.memoryHeadroom(ctx, memoryMB)
 	need := uint64(head)
 	owners := s.takeBackOwnersFor(ctx, owner, memoryMB)
 	takeable, pinned := takeBackPool(owners, owner)

@@ -80,6 +80,17 @@ func withoutFloor(ctx context.Context) context.Context {
 	return context.WithValue(ctx, noFloorKey{}, true)
 }
 
+// floorFor is the low-memory floor an admission on ctx keeps free on top
+// of its request: MEMORY_FLOOR_MIB, or 0 for a lease returning to what
+// the box already held (withoutFloor). Every admission step — fits,
+// take-back's need and the final capacity check — reads it here.
+func (s *Service) floorFor(ctx context.Context) int {
+	if ctx.Value(noFloorKey{}) != nil {
+		return 0
+	}
+	return s.cfg.MemoryFloorMiB
+}
+
 func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 	info, err := s.sub.NodeInfo(ctx)
 	if err != nil {
@@ -89,10 +100,7 @@ func (s *Service) admitCapacity(ctx context.Context, memoryMB int) error {
 	if info.Status != "healthy" {
 		return fmt.Errorf("%w: node status %s", substrate.ErrCapacity, info.Status)
 	}
-	floor := s.cfg.MemoryFloorMiB
-	if ctx.Value(noFloorKey{}) != nil {
-		floor = 0
-	}
+	floor := s.floorFor(ctx)
 	needBytes := uint64(memoryMB+floor) * 1024 * 1024
 	if free < needBytes {
 		return fmt.Errorf("%w: %d bytes of hugepage memory free, need %d", substrate.ErrCapacity, free, needBytes)
