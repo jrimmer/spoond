@@ -12,11 +12,9 @@ import (
 	"github.com/jrimmer/spoond/v3/store"
 )
 
-// recordsFixtureDB creates a catalog with the lease_history table and
-// the leases columns the records panel reads, as the plan's Part A
-// migration will. Part A is a separate change, so the fixture applies
-// its SQL by hand; the panel must treat an older backend's DB (no
-// lease_history) as "no history yet".
+// recordsFixtureDB creates a catalog through store.Open, whose
+// migrations (29) create the lease_history table and the leases columns
+// the records panel reads, and returns a raw handle for inserting rows.
 func recordsFixtureDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := store.Open(path)
@@ -31,32 +29,6 @@ func recordsFixtureDB(t *testing.T, path string) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { raw.Close() })
-	for _, q := range []string{
-		// From the plan's 0029_lease_history.sql.
-		`CREATE TABLE lease_history (
-			lease_id     TEXT PRIMARY KEY,
-			owner        TEXT NOT NULL,
-			image        TEXT NOT NULL,
-			memory_mb    INTEGER NOT NULL DEFAULT 0,
-			created_at   TEXT NOT NULL,
-			ended_at     TEXT NOT NULL,
-			outcome      TEXT NOT NULL CHECK (outcome IN ('released','lost')),
-			reason       TEXT NOT NULL DEFAULT '',
-			peak_mib     INTEGER NOT NULL DEFAULT 0,
-			start_ms     INTEGER NOT NULL DEFAULT 0,
-			start_kind   TEXT NOT NULL DEFAULT '',
-			max_nap_secs INTEGER NOT NULL DEFAULT 0
-		)`,
-		`CREATE INDEX lease_history_ended ON lease_history(ended_at)`,
-		// start_ms and max_nap_secs are new with the plan's migration;
-		// suspended_at already arrived with 0021_lease_suspend.
-		`ALTER TABLE leases ADD COLUMN start_ms INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE leases ADD COLUMN max_nap_secs INTEGER NOT NULL DEFAULT 0`,
-	} {
-		if _, err := raw.Exec(q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
 	return raw
 }
 
@@ -127,11 +99,12 @@ func (f *recFixture) computed(t *testing.T) records {
 func TestRecHistoryTableMissing(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{DBPath: filepath.Join(dir, "spoond.db"), UsersFile: filepath.Join(dir, "users.json"), StoragePath: dir}
-	db, err := store.Open(cfg.DBPath)
-	if err != nil {
+	// An older backend's catalog: the migrations ran, but this one's
+	// lease_history table is not there.
+	raw := recordsFixtureDB(t, cfg.DBPath)
+	if _, err := raw.Exec(`DROP TABLE lease_history`); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
 	c := newCollector(cfg)
 	_, avail, ok := c.collectRecords(context.Background(), time.Now())
 	if !ok || avail {
