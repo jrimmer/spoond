@@ -29,6 +29,8 @@ summarised from README "Status".
 
 ### Changed
 
+- **Dashboard images panel: one `mem/vcpu` column** in the leases panel's size form (`8G/2V`), in place of separate `vcpu` and `mem` columns, and a total row summing live leases and lifetime uses.
+
 - **`elixir-base` moves to Elixir 1.19.6 / Erlang OTP 28.5.0.7 and runs
   PostgreSQL 17.** Built from the exact hexpm tag, so repos pinning those
   versions match. A Postgres server starts at guest boot on

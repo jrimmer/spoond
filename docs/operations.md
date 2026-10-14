@@ -1443,8 +1443,8 @@ link; the table's fixed columns are sized to the values actually shown
 leave no blank run and the freed width goes to the owner then the
 holder, and one dim legend under the table — `▶ running ‖ suspended
 ⭘ recovered ■ lost ◆ pinned` — spells the glyphs out whenever rows are
-shown), the image catalog (shape, live leases, lifetime
-uses, baked-at) beside the systemd units, a **records** panel of
+shown), the image catalog (default size as mem/vcpu, e.g. `8G/2V`, live leases, lifetime
+uses with a total row, baked-at) beside the systemd units, a **records** panel of
 all-time stats (below), a refusals-and-failures row
 (auth, throttled, capacity, build fails, lost leases — non-zero
 counts highlighted — with the mean create and resume latencies), and

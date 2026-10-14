@@ -2010,11 +2010,11 @@ type imageCol struct {
 	off, w int
 }
 
-// imageCols lays the images panel's columns out: image, vcpu, mem,
-// live, uses, baked.
+// imageCols lays the images panel's columns out: image, mem/vcpu (the
+// leases panel's size form, "8G/2V"), live, uses, baked.
 func imageCols(w int) []imageCol {
-	cols := []imageCol{{2, 17}, {19, 6}, {25, 9}, {34, 6}, {40, 7}}
-	cols = append(cols, imageCol{47, w - 4 - 47 + 1}) // baked, to the inner right edge
+	cols := []imageCol{{2, 17}, {19, 10}, {29, 6}, {35, 7}}
+	cols = append(cols, imageCol{42, w - 4 - 42 + 1}) // baked, to the inner right edge
 	return cols
 }
 
@@ -2024,7 +2024,7 @@ func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 	top := y
 	y = l.panel(g, x, y, w, h, "images", "images")
 	cols := imageCols(w)
-	labels := []string{"image", "vcpu", "mem", "live", "uses", "baked"}
+	labels := []string{"image", "mem/vcpu", "live", "uses", "baked"}
 	for i, c := range cols {
 		g.Text(x+c.off, top+1, labels[i], "dim", c.w)
 	}
@@ -2032,8 +2032,7 @@ func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 		yy := top + 2 + i
 		vals := []string{
 			ellipsize(sanitize(im.Name), cols[0].w),
-			fmt.Sprint(im.VCPU),
-			memLabel(im.MemMB),
+			sizeWords(LeaseRow{MemoryMB: im.MemMB, VCPU: im.VCPU})[0],
 			fmt.Sprint(im.Live),
 			fmt.Sprint(im.Uses),
 			im.Updated,
@@ -2053,17 +2052,9 @@ func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 	}
 	yy := top + 2 + len(l.s.Images)
 	g.Text(x+cols[0].off, yy, "total", "dim", cols[0].w)
-	g.Text(x+cols[3].off, yy, fmt.Sprint(live), "dim", cols[3].w)
-	g.Text(x+cols[4].off, yy, fmt.Sprint(uses), "dim", cols[4].w)
+	g.Text(x+cols[2].off, yy, fmt.Sprint(live), "dim", cols[2].w)
+	g.Text(x+cols[3].off, yy, fmt.Sprint(uses), "dim", cols[3].w)
 	return y
-}
-
-// memLabel is an image's memory: "2 GiB", "512 MiB".
-func memLabel(mb int) string {
-	if mb >= 1024 {
-		return fmt.Sprintf("%d GiB", mb/1024)
-	}
-	return fmt.Sprintf("%d MiB", mb)
 }
 
 // drawServices draws the services panel at (x, y) in w cells and

@@ -24,10 +24,10 @@ SPOOND · spoond.example.com                                                    
 │ ▶ running ‖ suspended ⭘ recovered ■ lost ◆ pinned                                                    │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ images ──────────────────────────────────────────────────┐  ┌─ services ────────────────────────────┐
-│ image            vcpu  mem      live  uses   baked        │  │ spoond-backend        ✓ active        │
-│ go-base          2     2 GiB    2     51     2d ago       │  │ spoond-runner         ✓ active        │
-│ py-base          1     1 GiB    1     7      9h ago       │  │ e2b-orchestrator      ✓ active        │
-│ total                           3     58                  │  │ e2b-guard             ✓ active        │
+│ image            mem/vcpu  live  uses   baked             │  │ spoond-backend        ✓ active        │
+│ go-base          2G/2V     2     51     2d ago            │  │ spoond-runner         ✓ active        │
+│ py-base          1G/1V     1     7      9h ago            │  │ e2b-orchestrator      ✓ active        │
+│ total                      3     58                       │  │ e2b-guard             ✓ active        │
 │                                                           │  │ spoond-sshd-gateway   ✓ active        │
 │                                                           │  │ otelcol               ✓ active        │
 │                                                           │  │                                       │
