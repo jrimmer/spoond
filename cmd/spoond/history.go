@@ -79,14 +79,14 @@ func envOr(key, def string) string {
 // historyEntry is one lease the import reconstructs from a create line
 // and its release or lost line.
 type historyEntry struct {
-	id        string
-	endedAt   time.Time
-	outcome   string // released|lost
-	reason    string
-	owner     string
-	image     string
-	memoryMB  int
-	peakMiB   int
+	id       string
+	endedAt  time.Time
+	outcome  string // released|lost
+	reason   string
+	owner    string
+	image    string
+	memoryMB int
+	peakMiB  int
 }
 
 // importHistory reads `journalctl -o short-iso-precise` lines on r and
