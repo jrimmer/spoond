@@ -1778,14 +1778,15 @@ func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
 }
 
 // images panel: the catalog — name, shape, live leases, lifetime uses,
-// baked-at — beside the services panel at a wide frame, stacked below it.
-// The empty panel keeps a row for "no images" instead of writing over
-// its bottom border.
+// baked-at — beside the services panel at a wide frame, stacked below it,
+// with a total row under the images (live and uses summed). The empty
+// panel keeps a row for "no images" instead of writing over its bottom
+// border.
 func (l *layout) imagesH() int {
 	if len(l.s.Images) == 0 {
 		return 4
 	}
-	return 3 + len(l.s.Images)
+	return 4 + len(l.s.Images)
 }
 
 // maxServiceRows is the most unit rows the services panel shows before
@@ -1873,7 +1874,17 @@ func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 	}
 	if len(l.s.Images) == 0 {
 		g.Text(x+2, top+2, "no images", "dim", w-4)
+		return y
 	}
+	live, uses := 0, 0
+	for _, im := range l.s.Images {
+		live += im.Live
+		uses += im.Uses
+	}
+	yy := top + 2 + len(l.s.Images)
+	g.Text(x+cols[0].off, yy, "total", "dim", cols[0].w)
+	g.Text(x+cols[3].off, yy, fmt.Sprint(live), "dim", cols[3].w)
+	g.Text(x+cols[4].off, yy, fmt.Sprint(uses), "dim", cols[4].w)
 	return y
 }
 
