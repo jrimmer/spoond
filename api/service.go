@@ -2181,11 +2181,9 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 		releasePeakDetail(reason, hasPeak, releasePeak))
 	journalReason := journalReleaseReason(l, reason)
 	s.journalLeaseRelease(l, journalReason, peakMiB, hasPeak)
-	// The history row is written BEFORE the lease row goes (records A):
-	// it reads the row's start_ms / max_nap_secs stamps, so a write after
-	// the delete would always see them as gone and stamp every release
-	// row unknown. The captured copies above are what it names. Best
-	// effort: a failed write is logged and never fails the release.
+	// The history row (records A) names the start_ms / max_nap_secs
+	// stamps captured above under the lock; the lease row is gone by now.
+	// Best effort: a failed write is logged and never fails the release.
 	s.writeLeaseHistoryStamps(l, "released", journalReason, peakMiB, startMS, maxNapSecs)
 	s.creditNodeInfo(freedMiB)
 	// A release frees hugepages and quota: retry waiting creates (#129).
@@ -5394,7 +5392,11 @@ func (s *Service) storeError(op, id string, err error) {
 // fails the grant. Call without s.store.mu held (the store's writer
 // needs it).
 func (s *Service) stampLeaseStart(l *Lease, grantMS int64) {
+	// The lease is already published: set the field under the lock its
+	// readers (release, markLost) hold.
+	s.store.mu.Lock()
 	l.StartMS = grantMS
+	s.store.mu.Unlock()
 	ctx, cancel := s.detachStoreCtx()
 	defer cancel()
 	if err := s.db.SetLeaseStartMS(ctx, l.ID, grantMS); err != nil {

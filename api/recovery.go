@@ -123,17 +123,13 @@ func writeLeaseLostErr(w http.ResponseWriter, err error) bool {
 // outcome lost) and returns that reason. A released lease is left
 // alone: a release and a recovery race, and losing an already-released
 // lease would resurrect it with a stale row and a spurious lost event
-// (spoond-775) — and the release already wrote the row's released
-// history first, which the loss must not overwrite (INSERT OR IGNORE).
-// The history write runs while the lease row still exists: the release
-// that later ends the lost grace deletes it. The write is best effort
-// (logged, never fails the loss) and must not hold s.store.mu (the
-// store's writer needs it), so the stamps the history row carries are
-// captured under the lock and the write runs across a release-and-
-// reacquire of it — a release that wins that race deletes the row
-// first, and the write goes ahead on the captured copies (see
-// writeLeaseHistoryStamps). Call with s.store.mu held; it is released
-// across the history write.
+// (spoond-775) — the release already wrote the released history row,
+// which the loss must not overwrite (INSERT OR IGNORE). Call with
+// s.store.mu held; the history write takes no lock. A lost lease must
+// mean a stopped guest (spoond-63a): after dropping the lock, every
+// caller that did mark the lease lost calls stopLostSandbox, which
+// deletes the lease's sandbox (and the half-started one a failed create
+// or resume left under the same id).
 func (s *Service) markLost(l *Lease, reason string) string {
 	if l.released {
 		return reason
@@ -142,10 +138,7 @@ func (s *Service) markLost(l *Lease, reason string) string {
 	l.setState("lost")
 	s.saveLeaseLocked(l)
 	s.journalLease(journalOpLost, l, reason)
-	startMS, maxNapSecs := l.StartMS, l.MaxNapSecs
-	s.store.mu.Unlock()
-	s.writeLeaseHistoryStamps(l, "lost", reason, 0, startMS, maxNapSecs)
-	s.store.mu.Lock()
+	s.writeLeaseHistoryStamps(l, "lost", reason, 0, l.StartMS, l.MaxNapSecs)
 	return reason
 }
 

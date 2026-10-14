@@ -130,10 +130,16 @@ func importHistory(ctx context.Context, db *store.DB, r io.Reader) (imported, sk
 			// same id: the earlier end (the loss) is the one the backend
 			// recorded, and the release's peak (the loss line has none)
 			// still rides along.
+			// The table's outcome is "released" or "lost"; the journal's
+			// op is "release" or "lost".
+			outcome := "lost"
+			if fields["op"] == "release" {
+				outcome = "released"
+			}
 			e := historyEntry{
 				id:       id,
 				endedAt:  stamp,
-				outcome:  fields["op"],
+				outcome:  outcome,
 				reason:   fields["reason"],
 				owner:    fields["owner"],
 				image:    fields["image"],

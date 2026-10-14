@@ -176,14 +176,18 @@ type LeaseHistoryRow struct {
 	MaxNapSecs int64
 }
 
-// InsertLeaseHistory writes one lease_history row. INSERT OR IGNORE: a
+// InsertLeaseHistory writes one lease_history row. insert-if-absent (ON CONFLICT DO NOTHING): a
 // lease whose id is already recorded (a lost lease the GC later
 // released) keeps its first outcome; the caller reports the skip. Use
 // GetLeaseHistory for the round-trip; there is no update path.
 func (db *DB) InsertLeaseHistory(ctx context.Context, h LeaseHistoryRow) (bool, error) {
 	res, err := db.w.ExecContext(ctx,
-		`INSERT OR IGNORE INTO lease_history (`+leaseHistoryColumns+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		// ON CONFLICT on the key only, not OR IGNORE: OR IGNORE also
+		// swallows CHECK and NOT NULL violations, so a bad row (an
+		// outcome spelled wrong) would vanish without an error.
+		`INSERT INTO lease_history (`+leaseHistoryColumns+`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(lease_id) DO NOTHING`,
 		h.LeaseID, h.Owner, h.Image, h.MemoryMB,
 		formatTime(h.CreatedAt), formatTime(h.EndedAt), h.Outcome, h.Reason, h.PeakMiB,
 		h.StartMS, h.StartKind, h.MaxNapSecs)

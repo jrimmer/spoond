@@ -235,3 +235,18 @@ func TestMigration29LeaseHistoryOnV28Database(t *testing.T) {
 		t.Fatalf("history for v28 lease err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestInsertLeaseHistoryBadOutcomeErrors: only a repeated lease id is
+// skipped; a row that breaks the table's CHECK (an outcome spelled
+// "release") is an error, not a silent skip.
+func TestInsertLeaseHistoryBadOutcomeErrors(t *testing.T) {
+	db, _ := openTestDB(t)
+	now := time.Now().UTC()
+	inserted, err := db.InsertLeaseHistory(context.Background(), LeaseHistoryRow{
+		LeaseID: "bad-1", Owner: "u-x", Image: "py-base",
+		CreatedAt: now.Add(-time.Minute), EndedAt: now, Outcome: "release",
+	})
+	if err == nil || inserted {
+		t.Fatalf("insert with outcome %q = (%v, %v), want an error", "release", inserted, err)
+	}
+}

@@ -11,24 +11,17 @@
 // failed write is logged and counted like any other store error without
 // failing the release or the loss.
 //
-// Locking: the callers hold s.store.mu (both mark the lease ended under
-// it), so these helpers must not take it — s.store.mu is a plain
-// sync.Mutex and a nested Lock would deadlock. The lease's start_ms and
-// max_nap_secs stamps are therefore named by the caller, read from the
-// in-memory lease inside its own locked section; the only store calls
-// here (GetLease, InsertLeaseHistory) run with the lock released, so a
-// release can still race in between. The GetLease then answers
-// ErrNotFound — the row is gone because the release deleted it — and the
-// write goes ahead on the captured copies alone: that is exactly the
-// race the captured copies exist for. A GetLease failure other than
-// ErrNotFound skips the write: it is logged, and the next lease must not
-// be blocked by this one.
+// Locking: the write takes no lock and reads nothing back, so it runs
+// the same whether or not the caller holds s.store.mu (markLost holds
+// it, the release path has dropped it). The lease's start_ms and
+// max_nap_secs stamps are the in-memory values the caller captured
+// under the lock; the lease row is never re-read (the release may
+// already have deleted it).
 
 package api
 
 import (
 	"context"
-	"errors"
 
 	"github.com/jrimmer/spoond/v3/store"
 )
@@ -37,22 +30,11 @@ import (
 // table. outcome is "released" or "lost"; reason is the journal reason
 // for the same op; peakMiB is the release's measured peak (0 = none,
 // the only value a loss passes). startMS and maxNapSecs are the stamps
-// the caller captured from the in-memory lease under the store lock —
-// the same section that read the release's peak, before it deletes the
-// row — so a release that races this read of the row still writes the
-// real values. The row keeps the lease's Start (warm/cold/…) as
-// start_kind. A lease released while suspended keeps that final sleep
-// uncounted: ResumeNap's guard never counted it, so maxNapSecs holds
-// only earlier completed naps.
-//
-// The write must run while the lease row still exists (the release
-// deletes it under the store lock afterwards). A missing row — this
-// write raced the release that beat it, or the GC is releasing a lease
-// whose row a crash already lost — is not an error: the captured stamps
-// stand in for the row's. Any other read failure, and a failed insert,
-// is logged (storeError) and never fails the release or the loss.
-//
-// Call with s.store.mu NOT held: the store calls below need the writer.
+// the caller captured from the in-memory lease under the store lock. The
+// row keeps the lease's Start (warm/cold/…) as start_kind. A lease
+// released while suspended keeps that final sleep uncounted: only a
+// completed resume raises maxNapSecs. A failed insert is logged
+// (storeError) and never fails the release or the loss.
 func (s *Service) writeLeaseHistoryStamps(l *Lease, outcome, reason string, peakMiB int, startMS, maxNapSecs int64) {
 	if s == nil || s.db == nil || l == nil {
 		return
@@ -62,26 +44,9 @@ func (s *Service) writeLeaseHistoryStamps(l *Lease, outcome, reason string, peak
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeWriteTimeout)
 	defer cancel()
-	row, err := s.db.GetLease(ctx, l.ID)
-	switch {
-	case err == nil:
-		// The row is still there and can carry fresher stamps than the
-		// caller's copies (a caller that read before a stamp write
-		// landed): prefer whichever names a value.
-		if startMS == 0 {
-			startMS = row.StartMS
-		}
-		if maxNapSecs == 0 {
-			maxNapSecs = row.MaxNapSecs
-		}
-	case errors.Is(err, store.ErrNotFound):
-		// The lease row is already gone (a loss raced its release): the
-		// caller's captured copies are all there is.
-	default:
-		s.storeError("get_lease_history_source", l.ID, err)
-		return
-	}
-	inserted, err := s.db.InsertLeaseHistory(ctx, store.LeaseHistoryRow{
+	// A skip (false, nil) is normal: a lost lease the GC later released
+	// keeps its lost row (INSERT OR IGNORE).
+	if _, err := s.db.InsertLeaseHistory(ctx, store.LeaseHistoryRow{
 		LeaseID:    l.ID,
 		Owner:      l.Owner,
 		Image:      l.Image,
@@ -94,11 +59,7 @@ func (s *Service) writeLeaseHistoryStamps(l *Lease, outcome, reason string, peak
 		StartMS:    startMS,
 		StartKind:  l.Start,
 		MaxNapSecs: maxNapSecs,
-	})
-	if err != nil {
+	}); err != nil {
 		s.storeError("insert_lease_history_"+outcome, l.ID, err)
 	}
-	// A skip (false, nil) is normal: a lost lease the GC later released
-	// keeps its lost row (INSERT OR IGNORE).
-	_ = inserted
 }
