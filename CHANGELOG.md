@@ -10,6 +10,22 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Added
+
+- **Low-memory floor (`MEMORY_FLOOR_MIB`, spoond-l3lq).** Every 15 s
+  the backend reads the node's free hugepages fresh and, below the
+  floor (default 4096 MiB; 0 disables the check), pauses exactly one
+  lease through the ordinary take-back rules — the least recently used
+  unpinned lease of the owner furthest over their fair slice; pinned
+  leases and owners inside their slice are never touched, and the lease
+  resumes on its holder's next work call. The overcommit cap
+  (`MEMORY_OVERCOMMIT`) keeps admission from lending memory out; the
+  floor is the running counterpart that sheds load when the free
+  pages sit low without a request needing room. A floor nothing can be
+  taken back for raises the `box_full` alert at most once per 10
+  minutes. New metrics `spoond_memory_committed_mib` and
+  `spoond_memory_pressure_takebacks_total`.
+
 ## [3.8.1] - 2026-10-14
 
 3.8.1 stops admission from lending out memory a running VM may fault

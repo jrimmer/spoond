@@ -1018,6 +1018,25 @@ running and recovered leases plus admissions whose leases are not live
 yet. Warm-pool sandboxes are not counted yet (the pool is empty unless
 `POOL_SIZE` is set).
 
+**Low-memory floor** (`MEMORY_FLOOR_MIB`, spoond-l3lq). The overcommit
+cap guards admission; the floor is the running counterpart: every 15 s
+the backend reads the node's free hugepages fresh (never the admission
+cache, whose credits and debits blur a standing condition) and, below
+the floor, pauses exactly one lease — repeating on the next tick, after
+the pause's snapshot write has actually freed the pages. Default
+`4096` (MiB); `0` disables the check. The victim is the same one
+admission's take-back would choose: the least recently used unpinned
+lease of the owner furthest over their fair slice, so pinned leases and
+owners inside their slice are never touched, and the lease resumes on
+its holder's next work call like any take-back. While the node is
+draining the loop stands down (the drain pauses everything and undrain
+resumes it). A floor nothing can be taken back for (every candidate
+pinned, or no owner over their slice) raises the `box_full` alert at
+most once per 10 minutes instead of every tick.
+`spoond_memory_committed_mib` shows the memory promised to live leases
+as the loop last measured it and `spoond_memory_pressure_takebacks_total`
+counts its pauses.
+
 **Saturation gate** (#136 stage 2): spoond admits by memory, but a box
 can be saturated with memory to spare — parallel snapshot work pins the
 disk, and CPU-heavy guests overcommit the cores. While the host's I/O
@@ -1750,6 +1769,8 @@ marker. The substrate-specific series:
 | `spoond_box_full_total` | requests refused `box_full`: a request needed room and take-back could free none — every candidate was pinned, or the requester was itself the biggest borrower (v3.0 FS5, FS2b) |
 | `spoond_deprecated_requests_total{kind}` | requests served through a surface 4.0 removes (#139 groundwork): `sandboxes_alias` — an authenticated call on the `/api/sandboxes` spelling of the lease API (which also answers with `Deprecation`/`Link` headers) — or `llm_keyless` — an LLM-gateway request served only because `LLM_OPEN_LEGACY=1` kept a keyless owner open. Read it to decide whether removing either in 4.0 would break callers |
 | `spoond_take_backs_total` | leases paused by memory take-back so another owner's request could fit (v3.0 FS2a) |
+| `spoond_memory_committed_mib` | memory promised to live leases (running and recovered), in MiB, as the low-memory loop (`MEMORY_FLOOR_MIB`, spoond-l3lq) last measured it |
+| `spoond_memory_pressure_takebacks_total` | leases paused by the low-memory loop to hold the free hugepages at `MEMORY_FLOOR_MIB` (spoond-l3lq) |
 | `spoond_guest_dials_active` | open guest port dials (WebSocket→guest TCP bridges) |
 | `spoond_guest_dials_total{result}` | guest port dial attempts: `ok`, `refused` (the per-owner 16-dial cap) or `error` (the guest dial failed) |
 | `spoond_jobs_running` | background exec jobs currently running (2.6, #135) |
