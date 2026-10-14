@@ -3069,11 +3069,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// via the save above) so its history row can name how long the grant
 	// took. Best effort: a failed stamp is logged and never fails the
 	// grant.
-	grantMS := time.Since(start).Milliseconds()
-	lease.StartMS = grantMS
-	if err := s.db.SetLeaseStartMS(ctx, lease.ID, grantMS); err != nil {
-		s.storeError("set_lease_start_ms", lease.ID, err)
-	}
+	s.stampLeaseStart(lease, time.Since(start).Milliseconds())
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -3325,10 +3321,6 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	l.setState("suspended")
 	l.Suspended = true
 	l.ResumeBuildID = buildID
-	// The nap clock opens here (records A): the stamp is set inside the
-	// same locked section that saves, so the persisted row names when
-	// this sleep began.
-	l.NapSince = l.LastActionAt
 	if drained {
 		l.Drained = true
 	}
@@ -3349,10 +3341,24 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	// later; resumeClock clears it.
 	s.pauseClock(l, l.LastActionAt)
 	// The nap clock (records A): every pause opens a sleep, whatever
-	// paused it. A successful resume closes it and raises max_nap_secs;
-	// a lease released while suspended keeps the stamp, so that final
-	// sleep is never counted.
-	s.pauseClock(l, l.LastActionAt)
+	// paused it, so the stamp is set after this pause's own LastActionAt
+	// above — it names when THIS sleep began, not the previous action.
+	// A successful resume closes it and raises max_nap_secs; a lease
+	// released while suspended keeps the stamp, so that final sleep is
+	// never counted.
+	l.NapSince = l.LastActionAt
+	// The durable stamp rides the save below (the whole-row write carries
+	// nap_since); the explicit write beside it keeps the stamp on the row
+	// even when the save is dropped for a lease released mid-pause —
+	// harmless there, since that release deletes the row. Its own bounded,
+	// detached context (saveLeaseLocked's pattern): a pause whose caller
+	// is going away (the drain hook gave up) still leaves its stamp.
+	// Best effort: a failed write is logged and never fails the pause.
+	napCtx, napCancel := s.detachStoreCtx()
+	defer napCancel()
+	if err := s.db.SuspendNap(napCtx, l.ID, l.NapSince); err != nil {
+		s.storeError("suspend_nap", l.ID, err)
+	}
 	// The structured suspension facts (#145 D6): the reason
 	// (idle_suspend|preempt|resume_failed), the pressure
 	// order's step, the pause build it wrote and when describe an
@@ -4085,6 +4091,7 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 // is looked up by image name); the clone expires after maxTTL. The
 // request's optional tag is accepted and ignored (A1 §17 item 5).
 func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, string, error) {
+	cloneStart := time.Now()
 	s.store.mu.Lock()
 	src := s.store.leases[srcID]
 	if src == nil || src.Owner != owner || src.released {
@@ -4218,6 +4225,9 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
 	s.endCreatingSandbox(sb.ID)
+	// The clone's create-to-grant latency (records A): the clock the
+	// shared create path observes, from before the source's checkpoint.
+	s.stampLeaseStart(lease, time.Since(cloneStart).Milliseconds())
 	if len(lease.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
@@ -4233,6 +4243,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 // created in this call is deleted, the reservations are released, and
 // the error is returned. The source keeps running (item 18 bookkeeping).
 func (s *Service) fork(ctx context.Context, owner, srcID string, count int, persistent bool, ttl time.Duration, holder, holderURL string) ([]*Lease, string, error) {
+	forkStart := time.Now()
 	s.store.mu.Lock()
 	src := s.store.leases[srcID]
 	if src == nil || src.Owner != owner || src.released {
@@ -4415,6 +4426,10 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
 		s.endAppliedEgress(lease.ID)
+		// This child's create-to-grant latency (records A): the clock the
+		// shared create path observes, from before the source's
+		// checkpoint; each child is stamped as it commits.
+		s.stampLeaseStart(lease, time.Since(forkStart).Milliseconds())
 		s.emitLeaseEvent(lease.ID, owner, LeaseCreated, fmt.Sprintf("forked from %s (build %s)", srcID, b.BuildID))
 		s.journalLease(journalOpCreate, lease, journalCreateReason("", "", srcID))
 		created = append(created, lease)
@@ -5368,6 +5383,32 @@ func (s *Service) storeError(op, id string, err error) {
 	if s.metrics != nil {
 		s.metrics.StoreErrors.WithLabelValues(op).Inc()
 	}
+}
+
+// stampLeaseStart stamps a just-granted lease's create-to-grant latency
+// (records A): the value the LeaseGrantDur histogram observes, kept on
+// the lease and written to its row so the release's history row can name
+// how long the grant took. The save in the grant path already carried it
+// only if it ran after this stamp, so the row write here is what pins it
+// for every caller. Best effort: a failed write is logged and never
+// fails the grant. Call without s.store.mu held (the store's writer
+// needs it).
+func (s *Service) stampLeaseStart(l *Lease, grantMS int64) {
+	l.StartMS = grantMS
+	ctx, cancel := s.detachStoreCtx()
+	defer cancel()
+	if err := s.db.SetLeaseStartMS(ctx, l.ID, grantMS); err != nil {
+		s.storeError("set_lease_start_ms", l.ID, err)
+	}
+}
+
+// detachStoreCtx is the bounded, detached context the store helpers
+// write through: detached, so a caller going away (an HTTP client that
+// gave up, a cancelled drain hook) still leaves its stamp behind, and
+// bounded, so a wedged writer cannot hold a helper forever
+// (saveLeaseLocked's pattern, named once for the callers outside it).
+func (s *Service) detachStoreCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), storeWriteTimeout)
 }
 
 // The store helpers below are called with s.store.mu held (the sandbox

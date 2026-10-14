@@ -992,6 +992,20 @@ func (s *Service) markResumeFailed(l *Lease) bool {
 	if l.SuspendedAt.IsZero() {
 		l.SuspendedAt = s.now()
 	}
+	// The nap clock opens here too (records A): this path leaves the
+	// lease suspended without running pauseLeaseBody, so without this
+	// stamp the sleep the failed resume left it in would never count.
+	// The self-heal loop retries the same lease every interval; an
+	// already-open sleep is not reopened (the stamp keeps its first
+	// moment).
+	if l.NapSince.IsZero() {
+		l.NapSince = l.SuspendedAt
+		napCtx, napCancel := s.detachStoreCtx()
+		defer napCancel()
+		if err := s.db.SuspendNap(napCtx, l.ID, l.NapSince); err != nil {
+			s.storeError("suspend_nap", l.ID, err)
+		}
+	}
 	s.saveLeaseLocked(l)
 	if !changed {
 		// Already stamped by an earlier retry: the lease stays suspended
