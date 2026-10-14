@@ -1024,18 +1024,28 @@ the backend reads the node's free hugepages fresh (never the admission
 cache, whose credits and debits blur a standing condition) and, below
 the floor, pauses exactly one lease — repeating on the next tick, after
 the pause's snapshot write has actually freed the pages. Default
-`4096` (MiB); `0` disables the check. The victim is the same one
-admission's take-back would choose: the least recently used unpinned
-lease of the owner furthest over their fair slice, so pinned leases and
-owners inside their slice are never touched, and the lease resumes on
-its holder's next work call like any take-back. While the node is
-draining the loop stands down (the drain pauses everything and undrain
-resumes it). A floor nothing can be taken back for (every candidate
-pinned, or no owner over their slice) raises the `box_full` alert at
-most once per 10 minutes instead of every tick.
+`2048` (MiB); `0` disables the check. The victim is the lease
+pressureVictim picks: the owner with the highest used/slice among the
+owners over their slice, and inside that owner the least recently used
+unpinned lease, non-busy before busy — so a single-lease owner over
+their slice IS a candidate, pinned leases and owners inside their
+slice are never touched, and an all-pinned top owner is passed over
+for the next owner down. The lease resumes on its holder's next work
+call like any take-back; admission counts the floor as headroom in
+every free-vs-request comparison, so a paused lease resumes only with
+the floor free on top of its own memory and is not paused again at
+once. The tick stands down while the node is draining, while an
+undrain is still pending (a lease marked `Drained`), on bad node
+readings (a status other than `healthy`, or no pages reported) and —
+for the pause itself — the loop's context is abandoned: a shutdown
+cannot cut a snapshot write in half. A floor nothing can be taken back
+for (every candidate pinned, or no owner over their slice) raises the
+`memory_floor` alert (a `lease.memory_floor` event, notifications
+critical, "spoond memory below floor") at most once per 10 minutes
+instead of every tick.
 `spoond_memory_committed_mib` shows the memory promised to live leases
-as the loop last measured it and `spoond_memory_pressure_takebacks_total`
-counts its pauses.
+as the loop last measured it (every tick, with the floor off too) and
+`spoond_memory_pressure_takebacks_total` counts its pauses.
 
 **Saturation gate** (#136 stage 2): spoond admits by memory, but a box
 can be saturated with memory to spare — parallel snapshot work pins the
@@ -1303,7 +1313,9 @@ guest activity) is older than `PINNED_IDLE_NOTICE_DAYS` (default `7`)
 **Take-back touches only unpinned leases.** If nothing unpinned can be
 taken for a request, the request answers `429` with code `box_full` and
 an alert (`lease.box_full`, critical). Nothing is paused or released by
-a refused request.
+a refused request. The low-memory floor's own variant (a floor breach
+with no refused request) is its own kind, `lease.memory_floor`, at most
+once per 10 min (see [Low-memory floor](#low-memory-floor-memory_floor_mib-spoond-l3lq)).
 
 | Variable | Default | Meaning |
 |---|---|---|
