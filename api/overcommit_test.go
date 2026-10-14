@@ -44,7 +44,7 @@ func TestOvercommitShortfallMath(t *testing.T) {
 	if got := svc.overcommitShortfallLocked(9216, 2048); got != 1024 {
 		t.Fatalf("1 GiB over: shortfall %d, want 1024", got)
 	}
-	svc.debitSinceRefreshMiB = 1024 // an admission whose lease is not running yet
+	svc.inflightAdmitMiB = 1024 // an admission whose lease is not running yet
 	if got := svc.overcommitShortfallLocked(8192, 1024); got != 0 {
 		t.Fatalf("with the in-flight admission, at the cap: shortfall %d, want 0", got)
 	}
@@ -132,5 +132,59 @@ func TestOvercommitTakeBackClearsCapShortfall(t *testing.T) {
 	svc.store.mu.Unlock()
 	if running != 7 {
 		t.Fatalf("alice has %d running leases, want 7 (one taken back for bob)", running)
+	}
+}
+
+// TestOvercommitInflightEndsWithEachAdmission: the in-flight figure is
+// back to zero once each admission's lease is live — after grants, a
+// resume and a fork — so it never leaks into the cap; and a NodeInfo
+// refresh does not reset an admission still in flight.
+func TestOvercommitInflightEndsWithEachAdmission(t *testing.T) {
+	svc, db, sub, ids := newFairShareService(t)
+	svc.cfg.MemoryOvercommit = DefaultMemoryOvercommit
+	alice := addIdentityUser(t, ids, "alice")
+	ctx := context.Background()
+	seedImage(t, db, "one", 1024)
+	roomyDisk(svc)
+	fullFreeNode(t, svc, sub)
+	inflight := func() int {
+		svc.nodeInfoMu.Lock()
+		defer svc.nodeInfoMu.Unlock()
+		return svc.inflightAdmitMiB
+	}
+	a, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "one", ttl: time.Hour, persistent: true})
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if got := inflight(); got != 0 {
+		t.Fatalf("after a grant: in flight %d MiB, want 0", got)
+	}
+	if _, err := svc.suspend(ctx, alice.ID, a.ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if _, err := svc.resume(ctx, alice.ID, a.ID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := inflight(); got != 0 {
+		t.Fatalf("after a resume: in flight %d MiB, want 0", got)
+	}
+	if _, _, err := svc.fork(ctx, alice.ID, a.ID, 2, false, time.Hour, "", ""); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	if got := inflight(); got != 0 {
+		t.Fatalf("after a fork: in flight %d MiB, want 0", got)
+	}
+	// An admission still in flight survives a cache refresh.
+	undo, err := svc.admitMemory(ctx, alice.ID, 1024)
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	svc.updateNodeMetrics(ctx)
+	if got := inflight(); got != 1024 {
+		t.Fatalf("after a refresh: in flight %d MiB, want 1024", got)
+	}
+	undo(true)
+	if got := inflight(); got != 0 {
+		t.Fatalf("after a failed admission's undo: in flight %d MiB, want 0", got)
 	}
 }

@@ -1011,10 +1011,12 @@ memory again on an empty pool would crash (`uffdio copy: cannot
 allocate memory`) and its lease would be lost. Admission therefore also
 caps the memory promised to live leases at `MEMORY_OVERCOMMIT` x the
 hugepage pool (default `1.25`; `1.0` never promises more than the pool;
-below `1.0` refuses to start). A request over the cap takes back from
+a value outside 1.0–10, or not a number, refuses to start). A request over the cap takes back from
 the biggest borrower like any other shortfall; if nothing can be taken
 it waits (`503 capacity_wait`, or the admission queue). The cap counts
-running and recovered leases plus admissions not yet running.
+running and recovered leases plus admissions whose leases are not live
+yet. Warm-pool sandboxes are not counted yet (the pool is empty unless
+`POOL_SIZE` is set).
 
 **Saturation gate** (#136 stage 2): spoond admits by memory, but a box
 can be saturated with memory to spare — parallel snapshot work pins the

@@ -71,7 +71,7 @@ func (s *Service) overcommitShortfallLocked(runningMiB, memoryMB int) int {
 	}
 	poolMiB := int(info.HugepagesTotal * info.HugepageSizeBytes / (1024 * 1024))
 	capMiB := int(ratio * float64(poolMiB))
-	return runningMiB + s.debitSinceRefreshMiB + memoryMB - capMiB
+	return runningMiB + s.inflightAdmitMiB + memoryMB - capMiB
 }
 
 // overcommitShortfall is overcommitShortfallLocked with the locks taken
@@ -114,7 +114,6 @@ func (s *Service) creditNodeInfoLocked(memoryMB int) {
 	} else {
 		info.HugepagesUsed -= pages
 	}
-	s.debitSinceRefreshMiB = max(s.debitSinceRefreshMiB-memoryMB, 0)
 }
 
 // boxFullAlert logs and announces the box_full refusal (FS5, FS2b): a

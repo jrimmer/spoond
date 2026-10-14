@@ -183,6 +183,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -706,9 +707,13 @@ func Main(args []string) int {
 	// MEMORY_OVERCOMMIT (owner, 2026-10-14): lease memory may total this
 	// multiple of the hugepage pool; free-page reporting lends freed guest
 	// memory out, and a VM that faults it back on an empty pool crashes.
-	memoryOvercommit := envFloatOr("MEMORY_OVERCOMMIT", api.DefaultMemoryOvercommit)
-	if memoryOvercommit < 1.0 {
-		log.Fatalf("MEMORY_OVERCOMMIT=%v: want 1.0 or more (1.0 = never promise more than the hugepage pool)", memoryOvercommit)
+	memoryOvercommit := api.DefaultMemoryOvercommit
+	if v := os.Getenv("MEMORY_OVERCOMMIT"); v != "" {
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 1.0 || f > 10 {
+			log.Fatalf("MEMORY_OVERCOMMIT=%q: want a number from 1.0 to 10 (1.0 = never promise more than the hugepage pool)", v)
+		}
+		memoryOvercommit = f
 	}
 	// Removed hold/idle variables (FS5): warn once at startup and ignore.
 	warnRemovedEnv(log.Default(), os.Getenv)

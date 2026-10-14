@@ -30,7 +30,6 @@ func (s *Service) freeHugepageMiBLocked(ctx context.Context) (uint64, error) {
 		if info, err := s.sub.NodeInfo(ctx); err == nil {
 			s.nodeInfoCache = info
 			s.nodeInfoAt = s.now()
-			s.debitSinceRefreshMiB = 0
 		} else if s.nodeInfoAt.IsZero() {
 			return 0, fmt.Errorf("node info: %w", err)
 		}
@@ -52,7 +51,6 @@ func (s *Service) debitNodeInfoLocked(memoryMB int) {
 	}
 	bytes := uint64(memoryMB) * 1024 * 1024
 	info.HugepagesUsed += (bytes + info.HugepageSizeBytes - 1) / info.HugepageSizeBytes
-	s.debitSinceRefreshMiB += memoryMB
 }
 
 // admit checks that the node can host a sandbox of memoryMB MiB: enough

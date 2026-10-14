@@ -230,7 +230,7 @@ func TestTakeBackCountsInFlightMemory(t *testing.T) {
 
 	undo, err := svc.admitMemory(ctx, alice.ID, 1024)
 	if err == nil {
-		undo()
+		undo(true)
 	}
 	for _, l := range bl {
 		if l.Suspended {

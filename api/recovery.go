@@ -500,12 +500,8 @@ func (s *Service) recoverFromCheckpoint(ctx context.Context, l *Lease) error {
 	// undo gives the memory back (a failed recovery never took the
 	// hugepages).
 	ok := false
-	undo := func() {}
-	defer func() {
-		if !ok {
-			undo()
-		}
-	}()
+	undo := func(bool) {}
+	defer func() { undo(!ok) }()
 	if !l.live() {
 		// A suspended lease is uncharged (no hugepages), so turning its
 		// sandbox back on here passes the memory check like any resume

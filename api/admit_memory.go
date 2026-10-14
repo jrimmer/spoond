@@ -42,11 +42,11 @@ import (
 // memory that is free. undo credits exactly the admitted memoryMB and
 // is safe to call more than once (only the first call credits). On
 // error it returns a no-op undo, so a caller can always defer it.
-func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) (undo func(), err error) {
+func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) (undo func(failed bool), err error) {
 	s.preemptMu.Lock()
 	defer s.preemptMu.Unlock()
 	if err := s.takeBackForAdmission(ctx, owner, memoryMB); err != nil {
-		return func() {}, err
+		return func(bool) {}, err
 	}
 	// The overcommit cap (MEMORY_OVERCOMMIT): take-back above made what
 	// room it could; a request still over the cap waits (503
@@ -57,12 +57,22 @@ func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) (
 	s.nodeInfoMu.Lock()
 	if short := s.overcommitShortfallLocked(running, memoryMB); short > 0 {
 		s.nodeInfoMu.Unlock()
-		return func() {}, fmt.Errorf("%w: lease memory would be %d MiB over the overcommit cap (MEMORY_OVERCOMMIT)", substrate.ErrCapacity, short)
+		return func(bool) {}, fmt.Errorf("%w: lease memory would be %d MiB over the overcommit cap (MEMORY_OVERCOMMIT)", substrate.ErrCapacity, short)
 	}
 	s.debitNodeInfoLocked(memoryMB)
+	s.inflightAdmitMiB += memoryMB
 	s.nodeInfoMu.Unlock()
 	var once sync.Once
-	return func() { once.Do(func() { s.creditNodeInfo(memoryMB) }) }, nil
+	return func(failed bool) {
+		once.Do(func() {
+			if failed {
+				s.creditNodeInfo(memoryMB)
+			}
+			s.nodeInfoMu.Lock()
+			s.inflightAdmitMiB = max(s.inflightAdmitMiB-memoryMB, 0)
+			s.nodeInfoMu.Unlock()
+		})
+	}, nil
 }
 
 // takeBackForAdmission is the take-back loop of admitMemory. The caller

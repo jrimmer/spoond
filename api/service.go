@@ -818,13 +818,14 @@ type Service struct {
 	nodeInfoMu    sync.Mutex
 	nodeInfoCache substrate.NodeInfo
 	nodeInfoAt    time.Time
-	// debitSinceRefreshMiB is the memory admitted (debited) since the
-	// cache was last refreshed, net of credits: the admissions whose
-	// leases may not be running in the store yet. The overcommit cap
-	// counts it beside the running leases (it may double-count a lease
-	// that became running inside the window, which only makes the cap
-	// stricter until the next refresh). Guarded by nodeInfoMu.
-	debitSinceRefreshMiB int
+	// inflightAdmitMiB is the memory admitted (admitMemory) whose lease
+	// is not live yet: added at the admission's debit, removed when the
+	// admission ends — its lease is live (the caller's deferred
+	// undo(false)) or it failed (undo(true)). Never reset by a NodeInfo
+	// refresh and never touched by pause or release credits: those say
+	// nothing about admissions still starting. The overcommit cap counts
+	// it beside the live leases. Guarded by nodeInfoMu.
+	inflightAdmitMiB int
 
 	// fairShares caches the per-owner slice and usage view (#145 FS1).
 	// It is invalidated on every lease state change and every owner
@@ -1887,7 +1888,6 @@ func (s *Service) updateNodeMetrics(ctx context.Context) {
 	s.nodeInfoMu.Lock()
 	s.nodeInfoCache = info
 	s.nodeInfoAt = s.now()
-	s.debitSinceRefreshMiB = 0
 	s.nodeInfoMu.Unlock()
 	if s.metrics == nil {
 		return
@@ -2851,11 +2851,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if !ok {
-			undo()
-		}
-	}()
+	defer func() { undo(!ok) }()
 	// Hold the lease's egress memo in flight from before any sandbox is
 	// created until it is registered in the store (or the grant fails and
 	// cleans up). createSandbox records the memo before the lease row
@@ -2949,7 +2945,7 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 	// debit for the same memory: give the admission's debit back now.
 	// undo is once-safe, so a later failure's deferred call is a no-op.
 	if lease.pooled {
-		undo()
+		undo(true)
 	}
 
 	if lease.SandboxID == "" {
@@ -3504,11 +3500,7 @@ func (s *Service) resumeLease(ctx context.Context, l *Lease) (*Lease, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if !ok {
-			undo()
-		}
-	}()
+	defer func() { undo(!ok) }()
 	if _, err := s.resumeLeaseBody(ctx, l); err != nil {
 		return nil, err
 	}
@@ -3658,12 +3650,8 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	// restartCold, which owns its own guard.
 	ok := false
 	var err error
-	undo := func() {}
-	defer func() {
-		if !ok {
-			undo()
-		}
-	}()
+	undo := func(bool) {}
+	defer func() { undo(!ok) }()
 
 	if mode == "cold" {
 		return s.restartCold(ctx, owner, l)
@@ -3815,12 +3803,8 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	// failed cold restart never took the hugepages). A running lease
 	// admits nothing, so undo stays a no-op.
 	ok := false
-	undo := func() {}
-	defer func() {
-		if !ok {
-			undo()
-		}
-	}()
+	undo := func(bool) {}
+	defer func() { undo(!ok) }()
 	if l.Suspended {
 		// A suspended lease holds no hugepages, so its charge was freed
 		// at suspend; the fresh guest needs it back, so the cold restart
@@ -4101,12 +4085,8 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 	// success return, the deferred undo gives the memory back (a failed
 	// clone never took the hugepages).
 	ok := false
-	undo := func() {}
-	defer func() {
-		if !ok {
-			undo()
-		}
-	}()
+	undo := func(bool) {}
+	defer func() { undo(!ok) }()
 
 	// The clone runs the source's size (#151 Z1) and costs its memory
 	// like any create (#128).
@@ -4313,7 +4293,7 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 
 	var created []*Lease
 	rollback := func(err error) ([]*Lease, string, error) {
-		undo()
+		undo(true)
 		for _, l := range created {
 			_ = s.sub.Delete(ctx, l.SandboxID)
 			s.deleteSandboxRow(l.SandboxID)
@@ -4418,6 +4398,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 	if len(src.ExposePorts) > 0 {
 		s.refreshPeersAsync(ctx)
 	}
+	// The children are live: the admission ends (the in-flight memory
+	// is now counted by the live leases).
+	undo(false)
 	return created, b.BuildID, nil
 }
 

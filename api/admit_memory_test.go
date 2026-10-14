@@ -74,8 +74,8 @@ func TestAdmitMemoryUndoCreditsOnce(t *testing.T) {
 	if got := cachedFreeMiB(t, svc, ctx); got != before-1024 {
 		t.Fatalf("cached free memory after admission = %d MiB, want %d MiB", got, before-1024)
 	}
-	undo()
-	undo()
+	undo(true)
+	undo(true)
 	if got := cachedFreeMiB(t, svc, ctx); got != before {
 		t.Fatalf("cached free memory after undo twice = %d MiB, want %d MiB (undo credited more than once)", got, before)
 	}
