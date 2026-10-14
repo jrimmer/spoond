@@ -347,6 +347,39 @@ tar czf /backup/spoond-$(date +%F).tar.gz \
 - The build store under `E2B_TEMPLATE_STORAGE_PATH` is reproducible
   (`spoond images build --all`) and is normally left to the GC.
 
+## Lease history
+
+The backend writes one `lease_history` row per ended lease (3.8,
+migration 29), so all-time figures survive the lease row's deletion and
+the journal's rotation. The dashboard's records panel reads it.
+
+- **When:** at release (outcome `released`, with the release's measured
+  peak and reason) and when a lease is marked lost (outcome `lost`). A
+  lost lease's later release keeps the `lost` row.
+- **Columns:** lease id, owner id, image, memory_mb, created_at,
+  ended_at, outcome, reason, peak_mib, start_ms (create-to-grant
+  latency), start_kind (warm/cold/…) and max_nap_secs (the longest
+  suspend-to-running sleep: resume, restart or restore; a lease released
+  while suspended does not count its last sleep). 0 or empty means
+  unknown.
+- **Writes are best effort:** a failed insert is logged and never fails
+  the release or the loss.
+
+**Backfill from the journal.** `spoond history import` reads journal
+lines on stdin and writes a row for each lease whose create line and
+release or lost line are both present. Older leases, and fields the
+journal never carried (start_ms, start_kind, max_nap_secs), stay
+missing. It is safe to run twice:
+
+```sh
+journalctl -u spoond-backend -o short-iso-precise | \
+  SPOOND_DB_PATH=/var/lib/spoond/spoond.db spoond history import
+# imported N, skipped M
+```
+
+Run it after the backend has been upgraded: the import opens the
+database through the store, which applies any pending migrations itself.
+
 ## Snapshot catalog GC
 
 Every pause, checkpoint and template build is a directory under

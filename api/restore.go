@@ -183,6 +183,7 @@ func (s *Service) restore(ctx context.Context, l *Lease, b store.BuildRow) error
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
+	s.closeNapLocked(l, s.now())
 	// The restored sandbox runs the checkpoint build's size, which the
 	// build copied from the lease's own running build (#151 Z1): stamp
 	// it, the charge it was admitted with (#128).

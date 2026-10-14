@@ -93,6 +93,13 @@ func TestSweepExpiredSparesMigratedPinnedTLLLease(t *testing.T) {
 			`DROP TABLE IF EXISTS usage_samples`,
 			`DROP TABLE IF EXISTS image_sizes`,
 			`ALTER TABLE images DROP COLUMN min_memory_mb`,
+			// 0029 objects (records A): the fresh open's migrations already
+			// created them, and the rewind must make 'DELETE FROM
+			// schema_migrations WHERE version >= 22' rerun 0029 too.
+			`DROP TABLE IF EXISTS lease_history`,
+			`ALTER TABLE leases DROP COLUMN start_ms`,
+			`ALTER TABLE leases DROP COLUMN nap_since`,
+			`ALTER TABLE leases DROP COLUMN max_nap_secs`,
 			`DELETE FROM schema_migrations WHERE version >= 22`,
 		} {
 			if _, err := db21.Exec(stmt); err != nil {

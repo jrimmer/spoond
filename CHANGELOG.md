@@ -12,6 +12,11 @@ summarised from README "Status".
 
 ### Added
 
+- **Lease history (spoond-15a5).** Each ended lease leaves one row in a
+  new `lease_history` table (migration 29): owner, image, size, start and
+  end, outcome (released or lost), reason, measured peak, create-to-grant
+  latency and its longest nap. `spoond history import` backfills it from
+  the backend journal. The records panel reads it.
 - **The dashboard's records panel (spoond-y5by).** `spoond dash` gains a
   panel of twelve all-time records — busiest hour, one image at once,
   longest and shortest run, top owner, lifetime lease/hours/GiB-hours

@@ -92,6 +92,16 @@ type Lease struct {
 	// a paused lease PAUSED_RELEASE_DAYS after this instant; resuming
 	// clears it. Zero = not paused. Reported as "paused_at".
 	PausedAt time.Time `json:"paused_at,omitempty"`
+	// NapSince is when the lease's current sleep began (records A):
+	// stamped by every pause path, cleared only by a completed resume,
+	// which raises MaxNapSecs first. A lease released while suspended
+	// keeps the stamp, so its final sleep is never counted as a nap.
+	// Zero = not suspended.
+	NapSince time.Time `json:"-"`
+	// MaxNapSecs is the longest completed suspend→resume of this lease,
+	// in whole seconds (records A). A later release's history row
+	// carries it. 0 = none yet.
+	MaxNapSecs int64 `json:"-"`
 	// PinnedIdleSince is when a pinned lease's LastActive first passed
 	// PINNED_IDLE_NOTICE_DAYS (FS5): visibility only — GET returns it as
 	// "pinned_idle_since", a lease.pinned_idle event fires once per
@@ -162,6 +172,11 @@ type Lease struct {
 	// filesystem at a size no warm build has). In memory only: "" after
 	// a backend restart until the next start.
 	Start string `json:"-"`
+	// StartMS is the lease's create-to-grant latency in whole
+	// milliseconds (records A): the value the LeaseGrantDur histogram
+	// observed at grant, stamped on the lease and its row so its history
+	// row can name it. 0 = unknown (granted before the stamp existed).
+	StartMS int64 `json:"-"`
 	// DiskMB is the lease's whole disk allowance in MiB, from the
 	// image's disk_mb, stamped beside MemoryMB (#145 FS3a): summed over
 	// the RUNNING leases it is the snapshot disk's running reservation —
@@ -2099,6 +2114,12 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	if peakBytes, ok := s.memSamples.peakRelease(l.ID); ok {
 		releasePeak, peakMiB, hasPeak = peakBytes, mibCeil(peakBytes), true
 	}
+	// The lease-history stamps ride the row the release is about to
+	// delete (records A): read them here, in the same lock section, so
+	// the history row below carries the create-to-grant latency and the
+	// longest completed nap the live row held.
+	var startMS, maxNapSecs int64
+	startMS, maxNapSecs = l.StartMS, l.MaxNapSecs
 	// A running lease's hugepages come back with the release; a
 	// suspended one holds none.
 	freedMiB := 0
@@ -2158,7 +2179,12 @@ func (s *Service) releaseBecauseIf(ctx context.Context, l *Lease, reason string,
 	}
 	s.emitLeaseEvent(l.ID, l.Owner, LeaseReleased,
 		releasePeakDetail(reason, hasPeak, releasePeak))
-	s.journalLeaseRelease(l, journalReleaseReason(l, reason), peakMiB, hasPeak)
+	journalReason := journalReleaseReason(l, reason)
+	s.journalLeaseRelease(l, journalReason, peakMiB, hasPeak)
+	// The history row (records A) names the start_ms / max_nap_secs
+	// stamps captured above under the lock; the lease row is gone by now.
+	// Best effort: a failed write is logged and never fails the release.
+	s.writeLeaseHistoryStamps(l, "released", journalReason, peakMiB, startMS, maxNapSecs)
 	s.creditNodeInfo(freedMiB)
 	// A release frees hugepages and quota: retry waiting creates (#129).
 	s.wakeAdmissionQueue()
@@ -3030,6 +3056,9 @@ func (s *Service) grantLease(ctx context.Context, req leaseRequest) (*Lease, err
 		return nil, errOwnerGone
 	}
 	s.store.leases[lease.ID] = lease
+	// The create-to-grant latency (records A), stamped before the commit's
+	// save so the row (and a release racing in) carries it.
+	lease.StartMS = time.Since(start).Milliseconds()
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
 	// The lease now claims the sandbox: the orphan sweep may see it as
@@ -3306,6 +3335,13 @@ func (s *Service) pauseLeaseBody(ctx context.Context, l *Lease, drained bool, po
 	// it. releasePausedLeases releases the lease PAUSED_RELEASE_DAYS
 	// later; resumeClock clears it.
 	s.pauseClock(l, l.LastActionAt)
+	// The nap clock (records A): every pause opens a sleep, whatever
+	// paused it, so the stamp is set after this pause's own LastActionAt
+	// above — it names when THIS sleep began, not the previous action.
+	// A successful resume closes it and raises max_nap_secs; a lease
+	// released while suspended keeps the stamp, so that final sleep is
+	// never counted.
+	l.NapSince = l.LastActionAt // the whole-row save below carries it
 	// The structured suspension facts (#145 D6): the reason
 	// (idle_suspend|preempt|resume_failed), the pressure
 	// order's step, the pause build it wrote and when describe an
@@ -3525,13 +3561,15 @@ func (s *Service) resumeLeaseBody(ctx context.Context, l *Lease) (*Lease, error)
 	preempted := !l.PreemptedAt.IsZero()
 	l.setState("running")
 	l.Suspended = false
+	napEnd := s.now()
+	s.closeNapLocked(l, napEnd)
 	// The drain paused this lease into its pause build; an owner's own
 	// resume (or any other resume) brings it back running, so the flag
 	// must not linger — otherwise it stays disabled for resume-on-next-
 	// call and a later undrain would resume a lease the owner suspended
 	// by hand (spoond-52c L4).
 	l.Drained = false
-	l.LastActive = time.Now()
+	l.LastActive = napEnd
 	s.saveLeaseLocked(l)
 	s.store.mu.Unlock()
 	s.endCreatingSandbox(sb.ID)
@@ -3710,6 +3748,7 @@ func (s *Service) restart(ctx context.Context, owner, id, mode string) (*Lease, 
 	l.DiskMB = diskMB
 	l.setState("running")
 	l.Suspended = false
+	s.closeNapLocked(l, s.now())
 	l.LastActive = time.Now()
 	s.bumpGenerationLocked(l)
 	s.saveLeaseLocked(l)
@@ -3829,6 +3868,7 @@ func (s *Service) restartCold(ctx context.Context, owner string, l *Lease) (*Lea
 	l.BuildID = b.BuildID
 	l.setState("running")
 	l.Suspended = false
+	s.closeNapLocked(l, s.now())
 	// The lease keeps its own size (#151 Z4); an unstamped one takes the
 	// build's — the number the check above was admitted with.
 	l.MemoryMB = memoryMB
@@ -4016,6 +4056,7 @@ func (s *Service) afterCheckpoint(ctx context.Context, src *Lease, buildID strin
 // is looked up by image name); the clone expires after maxTTL. The
 // request's optional tag is accepted and ignored (A1 §17 item 5).
 func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, string, error) {
+	cloneStart := time.Now()
 	s.store.mu.Lock()
 	src := s.store.leases[srcID]
 	if src == nil || src.Owner != owner || src.released {
@@ -4146,6 +4187,9 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 		return nil, "", errOwnerGone
 	}
 	s.store.leases[lease.ID] = lease
+	// The clone's create-to-grant latency (records A), from before the
+	// source's checkpoint, stamped before the commit's save.
+	lease.StartMS = time.Since(cloneStart).Milliseconds()
 	s.saveLeaseLocked(lease)
 	s.store.mu.Unlock()
 	s.endCreatingSandbox(sb.ID)
@@ -4164,6 +4208,7 @@ func (s *Service) clone(ctx context.Context, owner, srcID string) (*Lease, strin
 // created in this call is deleted, the reservations are released, and
 // the error is returned. The source keeps running (item 18 bookkeeping).
 func (s *Service) fork(ctx context.Context, owner, srcID string, count int, persistent bool, ttl time.Duration, holder, holderURL string) ([]*Lease, string, error) {
+	forkStart := time.Now()
 	s.store.mu.Lock()
 	src := s.store.leases[srcID]
 	if src == nil || src.Owner != owner || src.released {
@@ -4342,6 +4387,9 @@ func (s *Service) fork(ctx context.Context, owner, srcID string, count int, pers
 			return rollback(errOwnerGone)
 		}
 		s.store.leases[lease.ID] = lease
+		// This child's create-to-grant latency (records A), from before
+		// the source's checkpoint, stamped before its commit's save.
+		lease.StartMS = time.Since(forkStart).Milliseconds()
 		s.saveLeaseLocked(lease)
 		s.store.mu.Unlock()
 		s.endCreatingSandbox(sb.ID)
@@ -5226,6 +5274,9 @@ func leaseToRow(l *Lease) store.LeaseRow {
 		SuspendPolicyStep:     l.SuspendPolicyStep,
 		SuspendBuildID:        l.SuspendBuildID,
 		SuspendedAt:           l.SuspendedAt,
+		StartMS:               l.StartMS,
+		NapSince:              l.NapSince,
+		MaxNapSecs:            l.MaxNapSecs,
 	}
 }
 
@@ -5279,6 +5330,9 @@ func rowToLease(r store.LeaseRow) *Lease {
 		SuspendPolicyStep:     r.SuspendPolicyStep,
 		SuspendBuildID:        r.SuspendBuildID,
 		SuspendedAt:           r.SuspendedAt,
+		StartMS:               r.StartMS,
+		NapSince:              r.NapSince,
+		MaxNapSecs:            r.MaxNapSecs,
 	}
 }
 
@@ -5293,6 +5347,22 @@ func (s *Service) storeError(op, id string, err error) {
 	if s.metrics != nil {
 		s.metrics.StoreErrors.WithLabelValues(op).Inc()
 	}
+}
+
+// closeNapLocked ends a lease's open sleep (records A) on every path
+// that takes a suspended lease back to running — resume, warm and cold
+// restart, restore: it raises MaxNapSecs to the sleep just ended and
+// clears NapSince. A lease with no open sleep changes nothing; a lease
+// released while suspended never reaches here, so its final sleep is
+// not counted. The caller's whole-row save carries both fields. Call
+// with s.store.mu held.
+func (s *Service) closeNapLocked(l *Lease, now time.Time) {
+	if l.NapSince.IsZero() {
+		return
+	}
+	nap := int64(now.Sub(l.NapSince).Round(time.Second).Seconds())
+	l.MaxNapSecs = max(l.MaxNapSecs, max(nap, 0))
+	l.NapSince = time.Time{}
 }
 
 // The store helpers below are called with s.store.mu held (the sandbox
