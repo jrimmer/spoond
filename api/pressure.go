@@ -54,6 +54,13 @@ func (s *Service) pressureLoop(ctx context.Context) {
 	}
 }
 
+// committedMiB is the memory the box has committed to live VMs: the
+// running and recovered leases' memory (runningMemoryMiB). What the
+// gauge spoond_memory_committed_mib reports each tick.
+func (s *Service) committedMiB() int {
+	return s.runningMemoryMiB()
+}
+
 // pressureCheck is one tick of the low-memory loop: read the node
 // fresh, and below the floor pause one lease — the least recently used
 // unpinned lease of the owner furthest over their fair slice, the same
@@ -71,7 +78,7 @@ func (s *Service) pressureCheck(ctx context.Context) {
 	// What the box has promised to live VMs, for the gauge. The store
 	// read needs no node round trip, so the gauge moves every tick even
 	// while the orchestrator is unreachable.
-	committed := s.runningMemoryMiB()
+	committed := s.committedMiB()
 	if s.metrics != nil {
 		s.metrics.MemoryCommittedMiB.Set(float64(committed))
 	}
