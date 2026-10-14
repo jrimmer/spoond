@@ -50,36 +50,40 @@ func tbRatio(used, slice int) float64 {
 // 0 — a zero slice has no ratio and an owner at or under it is never
 // touched), and inside that owner the least recently used unpinned
 // lease, non-busy before busy (tbPickLease). A single-lease owner over
-// its slice IS a candidate: that lease is the one that goes. The
-// requester argument of memVictims does not exist here (the loop is
-// nobody's fairness case), so unlike memVictims there is no
-// after-pick ratio floor: only the owners' own over-slice condition
-// decides. ok is false when no owner is over their slice or every
-// candidate is pinned.
+// its slice IS a candidate: that lease is the one that goes. When the
+// top owner has no unpinned lease (every lease pinned), the next owner
+// down the ranking is tried, and so on. The requester argument of
+// memVictims does not exist here (the loop is nobody's fairness case),
+// so unlike memVictims there is no after-pick ratio floor: only the
+// owners' own over-slice condition decides. ok is false when no owner
+// is over their slice or every candidate is pinned.
 func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
-	bestOwner, bestLease := -1, -1
-	bestRatio := 0.0
+	// Rank the over-slice owners by ratio, highest first (stable, so a
+	// tie keeps the view's owner order); then walk down the ranking and
+	// take the first owner that still has an unpinned lease.
+	type cand struct {
+		idx   int
+		ratio float64
+	}
+	var ranked []cand
 	for i := range owners {
 		o := &owners[i]
 		if o.SliceMiB <= 0 || o.UsedMiB <= o.SliceMiB {
 			continue
 		}
-		r := tbRatio(o.UsedMiB, o.SliceMiB)
-		if bestOwner >= 0 && r <= bestRatio {
-			continue
-		}
+		ranked = append(ranked, cand{idx: i, ratio: tbRatio(o.UsedMiB, o.SliceMiB)})
+	}
+	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].ratio > ranked[b].ratio })
+	for _, c := range ranked {
+		o := &owners[c.idx]
 		li := tbPickLease(o.Leases)
 		if li < 0 {
-			continue // every lease of the owner pinned
+			continue // every lease of the owner is pinned
 		}
-		bestOwner, bestLease, bestRatio = i, li, r
+		l := o.Leases[li]
+		return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: c.ratio, MemoryMiB: l.MemoryMiB}, true
 	}
-	if bestOwner < 0 {
-		return takeBackVictim{}, false
-	}
-	o := &owners[bestOwner]
-	l := o.Leases[bestLease]
-	return takeBackVictim{Owner: o.Owner, LeaseID: l.ID, Ratio: bestRatio, MemoryMiB: l.MemoryMiB}, true
+	return takeBackVictim{}, false
 }
 
 // memVictims picks the leases to pause so requester can have needMiB.

@@ -87,6 +87,16 @@ func warmFairShares(svc *Service, ctx context.Context) {
 	svc.invalidateFairShares()
 }
 
+// onlyIdentityOwners drops the legacy token owners newTestService
+// installs, so the fair slice is split over exactly the test's identity
+// users (a legacy token owner holds no leases here, so the only effect
+// of keeping them is a thinner slice for everyone). Call before
+// warmFairShares.
+func onlyIdentityOwners(svc *Service) {
+	svc.tokens = map[string]string{}
+	svc.invalidateFairShares()
+}
+
 // newPreemptService builds a service over a fake and an image "mid" of
 // 1024 MiB, with the burst reserve off (so the preemption math is the
 // only thing under test) and no disk floor unless a test sets one.
