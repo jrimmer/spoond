@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/jrimmer/spoond/v3/substrate"
 )
 
 // admitMemory admits memoryMB of guest memory for owner against the one
@@ -46,7 +48,17 @@ func (s *Service) admitMemory(ctx context.Context, owner string, memoryMB int) (
 	if err := s.takeBackForAdmission(ctx, owner, memoryMB); err != nil {
 		return func() {}, err
 	}
+	// The overcommit cap (MEMORY_OVERCOMMIT): take-back above made what
+	// room it could; a request still over the cap waits (503
+	// capacity_wait, the admission queue) instead of being lent memory a
+	// running VM may fault back in. Checked and debited under one
+	// nodeInfoMu section so two admissions cannot both pass one reading.
+	running := s.runningMemoryMiB()
 	s.nodeInfoMu.Lock()
+	if short := s.overcommitShortfallLocked(running, memoryMB); short > 0 {
+		s.nodeInfoMu.Unlock()
+		return func() {}, fmt.Errorf("%w: lease memory would be %d MiB over the overcommit cap (MEMORY_OVERCOMMIT)", substrate.ErrCapacity, short)
+	}
 	s.debitNodeInfoLocked(memoryMB)
 	s.nodeInfoMu.Unlock()
 	var once sync.Once
@@ -76,11 +88,14 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	need := uint64(memoryMB)
 	owners := s.takeBackOwnersFor(ctx, owner, memoryMB)
 	takeable, pinned := takeBackPool(owners, owner)
-	if freeMiB+takeable < need {
+	// Over the overcommit cap, take-back must also free capShort MiB of
+	// running lease memory, whatever the free hugepages say.
+	capShort := uint64(max(s.overcommitShortfall(memoryMB), 0))
+	if freeMiB+takeable < need || takeable < capShort {
 		// Pinned leases are not take-back victims (FS5). If the pinned
 		// leases of the owners over their slice would free enough, the
 		// request is box_full: nothing unpinned can be taken for it.
-		if freeMiB+takeable+pinned >= need {
+		if freeMiB+takeable+pinned >= need && takeable+pinned >= capShort {
 			s.boxFullAlert(owner, memoryMB, "every take-back candidate is pinned")
 			return errBoxFull
 		}
@@ -123,7 +138,7 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 			s.log.Printf("preempt: node info: %v", err)
 			return nil
 		}
-		shortfall := memoryMB - int(freeMiB)
+		shortfall := max(memoryMB-int(freeMiB), s.overcommitShortfall(memoryMB))
 		if shortfall <= 0 {
 			return nil
 		}

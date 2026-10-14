@@ -18,6 +18,7 @@ import (
 // the caller may try take-back; if nothing can be taken the plain
 // capacity check still answers.
 func (s *Service) fits(ctx context.Context, memoryMB int) (bool, error) {
+	running := s.runningMemoryMiB()
 	s.nodeInfoMu.Lock()
 	defer s.nodeInfoMu.Unlock()
 	freeMiB, err := s.freeHugepageMiBLocked(ctx)
@@ -27,7 +28,59 @@ func (s *Service) fits(ctx context.Context, memoryMB int) (bool, error) {
 	if s.nodeInfoCache.Status != "healthy" {
 		return true, nil
 	}
-	return freeMiB >= uint64(memoryMB), nil
+	return freeMiB >= uint64(memoryMB) && s.overcommitShortfallLocked(running, memoryMB) <= 0, nil
+}
+
+// DefaultMemoryOvercommit is MEMORY_OVERCOMMIT when unset: lease memory
+// may total 1.25 x the hugepage pool (owner, 2026-10-14).
+const DefaultMemoryOvercommit = 1.25
+
+// runningMemoryMiB sums the memory of the live leases (running or
+// recovered; a suspended lease holds no hugepages): what spoond has promised to VMs that may
+// fault it in at any moment. Takes s.store.mu; call it without
+// nodeInfoMu (lock order: never store.mu inside nodeInfoMu).
+func (s *Service) runningMemoryMiB() int {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	total := 0
+	for _, l := range s.store.leases {
+		// Fair shares' rule (computeFairShares): a live lease (running or
+		// recovered) holds its memory; ownerless leases count too here,
+		// since their VMs fault hugepages all the same.
+		if !l.released && l.live() {
+			total += l.MemoryMB
+		}
+	}
+	return total
+}
+
+// overcommitShortfallLocked is how many MiB a request of memoryMB would
+// put the box over its overcommit cap: running lease memory plus the
+// admissions since the last refresh plus the request, minus
+// MEMORY_OVERCOMMIT x the hugepage pool. <= 0 means it fits the cap; a
+// zero MemoryOvercommit (the cap off, as in tests) or an unknown pool (cold cache, or no hugepage size) never refuses here —
+// the plain free check still answers. The caller holds nodeInfoMu.
+func (s *Service) overcommitShortfallLocked(runningMiB, memoryMB int) int {
+	info := s.nodeInfoCache
+	if s.nodeInfoAt.IsZero() || info.HugepageSizeBytes == 0 || info.HugepagesTotal == 0 {
+		return 0
+	}
+	ratio := s.cfg.MemoryOvercommit
+	if ratio <= 0 {
+		return 0 // cap off: only code sets 0 (the backend always passes >= 1.0)
+	}
+	poolMiB := int(info.HugepagesTotal * info.HugepageSizeBytes / (1024 * 1024))
+	capMiB := int(ratio * float64(poolMiB))
+	return runningMiB + s.debitSinceRefreshMiB + memoryMB - capMiB
+}
+
+// overcommitShortfall is overcommitShortfallLocked with the locks taken
+// in order.
+func (s *Service) overcommitShortfall(memoryMB int) int {
+	running := s.runningMemoryMiB()
+	s.nodeInfoMu.Lock()
+	defer s.nodeInfoMu.Unlock()
+	return s.overcommitShortfallLocked(running, memoryMB)
 }
 
 // creditNodeInfoLocked returns memoryMB MiB of hugepages to the cached
@@ -61,6 +114,7 @@ func (s *Service) creditNodeInfoLocked(memoryMB int) {
 	} else {
 		info.HugepagesUsed -= pages
 	}
+	s.debitSinceRefreshMiB = max(s.debitSinceRefreshMiB-memoryMB, 0)
 }
 
 // boxFullAlert logs and announces the box_full refusal (FS5, FS2b): a

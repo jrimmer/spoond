@@ -443,7 +443,15 @@ type ServiceConfig struct {
 	// how many days a pinned lease's last API activity flags it
 	// (visibility only; 0 = the 7-day default). Every automatic hold and
 	// disk rule is removed; take-back touches only unpinned leases.
-	PausedReleaseDays    int
+	PausedReleaseDays int
+	// MemoryOvercommit is MEMORY_OVERCOMMIT (owner, 2026-10-14): the most
+	// lease memory spoond promises, as a multiple of the hugepage pool.
+	// Free-page reporting lets a VM hand back memory its guest freed;
+	// admission must not lend that memory out beyond this bound, or a VM
+	// that faults it back on an empty pool crashes. The backend passes
+	// DefaultMemoryOvercommit when unset; 1.0 = never promise more than the
+	// pool; 0 = no cap (only code sets it, e.g. tests).
+	MemoryOvercommit     float64
 	PinnedIdleNoticeDays int
 	// MaxKeptPerLease is the per-lease kept-checkpoint cap (#126): a
 	// keep on a lease already holding this many kept builds answers 409
@@ -810,6 +818,13 @@ type Service struct {
 	nodeInfoMu    sync.Mutex
 	nodeInfoCache substrate.NodeInfo
 	nodeInfoAt    time.Time
+	// debitSinceRefreshMiB is the memory admitted (debited) since the
+	// cache was last refreshed, net of credits: the admissions whose
+	// leases may not be running in the store yet. The overcommit cap
+	// counts it beside the running leases (it may double-count a lease
+	// that became running inside the window, which only makes the cap
+	// stricter until the next refresh). Guarded by nodeInfoMu.
+	debitSinceRefreshMiB int
 
 	// fairShares caches the per-owner slice and usage view (#145 FS1).
 	// It is invalidated on every lease state change and every owner
@@ -1872,6 +1887,7 @@ func (s *Service) updateNodeMetrics(ctx context.Context) {
 	s.nodeInfoMu.Lock()
 	s.nodeInfoCache = info
 	s.nodeInfoAt = s.now()
+	s.debitSinceRefreshMiB = 0
 	s.nodeInfoMu.Unlock()
 	if s.metrics == nil {
 		return

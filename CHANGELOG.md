@@ -10,6 +10,19 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+### Fixed
+
+- **Admission no longer lends out memory a running VM may fault back
+  in (`MEMORY_OVERCOMMIT`, spoond-ybzf).** With free-page reporting a
+  VM returns memory its guest freed, and admission counted that memory
+  as free, so a full host could crash a VM when it touched its own
+  memory again (`uffdio copy: cannot allocate memory`), losing the
+  lease. Admission now also caps the memory promised to live leases at
+  `MEMORY_OVERCOMMIT` x the hugepage pool (default 1.25; 1.0 means
+  never more than the pool). Over the cap, take-back makes room from
+  the biggest borrower as usual, and otherwise the request waits
+  (`503 capacity_wait`).
+
 ## [3.8.0] - 2026-10-14
 
 3.8.0 keeps a durable history of every lease and shows it: a new

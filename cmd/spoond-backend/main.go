@@ -703,6 +703,13 @@ func Main(args []string) int {
 	// (default 7, visibility only).
 	pausedReleaseDays := envIntOr("PAUSED_RELEASE_DAYS", api.DefaultPausedReleaseDays)
 	pinnedIdleNoticeDays := envIntOr("PINNED_IDLE_NOTICE_DAYS", api.DefaultPinnedIdleNoticeDays)
+	// MEMORY_OVERCOMMIT (owner, 2026-10-14): lease memory may total this
+	// multiple of the hugepage pool; free-page reporting lends freed guest
+	// memory out, and a VM that faults it back on an empty pool crashes.
+	memoryOvercommit := envFloatOr("MEMORY_OVERCOMMIT", api.DefaultMemoryOvercommit)
+	if memoryOvercommit < 1.0 {
+		log.Fatalf("MEMORY_OVERCOMMIT=%v: want 1.0 or more (1.0 = never promise more than the hugepage pool)", memoryOvercommit)
+	}
 	// Removed hold/idle variables (FS5): warn once at startup and ignore.
 	warnRemovedEnv(log.Default(), os.Getenv)
 
@@ -783,6 +790,7 @@ func Main(args []string) int {
 		LostGracePersistent:       lostGracePersistent,
 		LostGrace:                 lostGrace,
 		PausedReleaseDays:         pausedReleaseDays,
+		MemoryOvercommit:          memoryOvercommit,
 		PinnedIdleNoticeDays:      pinnedIdleNoticeDays,
 		MaxKeptPerLease:           envIntOr("MAX_KEPT_PER_LEASE", api.DefaultMaxKeptPerLease),
 		MaxNamedSnapshots:         envIntOr("MAX_NAMED_SNAPSHOTS", api.DefaultMaxNamedSnapshots),
