@@ -676,6 +676,7 @@ func TestSharesListJSONShape(t *testing.T) {
 			NamedBytes  int64 `json:"named_bytes"`
 		} `json:"disk"`
 		Ratio         float64 `json:"ratio"`
+		Active        bool    `json:"active"`
 		CapacityKnown bool    `json:"capacity_known"`
 	}
 	var got struct {

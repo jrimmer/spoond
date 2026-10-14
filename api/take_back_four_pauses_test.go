@@ -32,6 +32,12 @@ func TestPreemptionTakesFourPausesWhenNeeded(t *testing.T) {
 		l.LastActive = time.Now().Add(-time.Duration(10-i) * time.Hour)
 	}
 	svc.store.mu.Unlock()
+	// The owner runs 4096 MiB. Three idle identities hold a lease each,
+	// so the box has five owners and the 4096 MiB pool slices to 818 MiB
+	// each: the owner sits far over, and its leases are the only
+	// take-back candidates. The 2048 MiB request then needs four 512 MiB
+	// pauses to admit.
+	seedActiveSet(t, svc)
 	installDynamicNode(t, svc, sub, 2048, 0, 256) // full: 8 x 256 pages
 	warmFairShares(svc, ctx)
 	t.Logf("views: %+v", svc.takeBackOwners(ctx))

@@ -177,6 +177,7 @@ func (s *Service) activeOwners() map[string]struct{} {
 	s.store.mu.Unlock()
 	return active
 }
+
 // ownerDisplayName resolves an owner id to a username when one exists;
 // "" for a legacy consumer-token owner.
 func (s *Service) ownerDisplayName(owner string) string {
