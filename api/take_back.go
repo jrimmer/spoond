@@ -15,6 +15,7 @@ import (
 // takeBackLease is one running lease as the selector sees it.
 type takeBackLease struct {
 	ID         string
+	Name       string // the lease's tag, echoed in the box_full own_leases body
 	MemoryMiB  int
 	Pinned     bool      // a pinned lease is never taken
 	Busy       bool      // a running job (or in-flight operation); taken last
@@ -111,12 +112,13 @@ func pressureVictim(owners []takeBackOwner) (takeBackVictim, bool) {
 // request, even when only the needMiB shortfall is still missing). The
 // point is to never push an owner below the requester, only to even
 // them out. Within the owner the candidate is the least recently used
-// unpinned lease; leases that are busy rank after every non-busy one;
-// pinned leases are never taken. The owner's used is reduced after each
-// pick. It stops as soon as the freed total reaches needMiB and returns
-// nil when the need cannot be met (nothing is partially returned). A
-// zero or negative slice has no ratio and is never a source. The
-// requester is never its own victim.
+// unpinned lease. Note the own_leases listing in the box_full refusal
+// takes the same rows without the selector's skipping. Leases that are
+// busy rank after every non-busy one; pinned leases are never taken.
+// The owner's used is reduced after each pick. It stops as soon as the
+// freed total reaches needMiB and returns nil when the need cannot be
+// met (nothing is partially returned). A zero or negative slice has no
+// ratio and is never a source. The requester is never its own victim.
 func memVictims(owners []takeBackOwner, requester string, needMiB, requestMiB int) []takeBackVictim {
 	if needMiB <= 0 {
 		return nil
@@ -427,6 +429,7 @@ func (s *Service) takeBackOwners(ctx context.Context) []takeBackOwner {
 		v := &out[i]
 		v.Leases = append(v.Leases, takeBackLease{
 			ID:         l.ID,
+			Name:       l.Name,
 			MemoryMiB:  l.MemoryMB,
 			Pinned:     l.Pinned,
 			Busy:       l.busy || s.hasRunningJobLocked(l.ID),

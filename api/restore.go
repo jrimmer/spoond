@@ -312,7 +312,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			// A restore's class re-admission is box_full when every
 			// take-back candidate is pinned (FS5): 429 like create, not a
 			// 500 (spoond-k0uz R3-2). The lease stays as it was.
-			writeErrorCode(w, http.StatusTooManyRequests, "box_full", err.Error())
+			writeBoxFull(w, err, 0)
 		case errors.Is(err, substrate.ErrCapacity):
 			writeErrorCodeAfter(w, http.StatusServiceUnavailable, capacityRetryAfterSecs, "capacity_wait", "capacity: "+err.Error())
 		case errors.Is(err, errOwnerGone):

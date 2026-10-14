@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/jrimmer/spoond/v3/substrate"
 )
@@ -236,14 +238,30 @@ func (s *Service) takeBackForAdmission(ctx context.Context, owner string, memory
 	return nil
 }
 
+// BoxFullLease is one running lease of the refused requester, listed in
+// the box_full body under own_leases so the caller can see what holds its
+// memory and pause one itself. Nothing new is paused: the listing is the
+// only effect.
+type BoxFullLease struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name,omitempty"`
+	MemoryMB   int       `json:"memory_mb"`
+	LastActive time.Time `json:"last_active"`
+	Pinned     bool      `json:"pinned"`
+	Busy       bool      `json:"busy"`
+}
+
 // memBoxFullError is the memory box_full refusal for a requester that is
 // itself the biggest borrower: its usage after the request is over its
 // slice and no other owner's ratio is higher, so take-back has no one to
-// take from. It unwraps to errBoxFull (429 box_full).
+// take from. Leases lists the requester's own running leases, least
+// recently used first, so the body can carry them (own_leases). It
+// unwraps to errBoxFull (429 box_full).
 type memBoxFullError struct {
 	Owner             string
 	UsedMiB, SliceMiB int
 	RequestMiB        int
+	Leases            []BoxFullLease
 }
 
 func (e *memBoxFullError) Error() string {
@@ -284,7 +302,28 @@ func biggestBorrowerRefusal(owners []takeBackOwner, requester string, requestMiB
 			return nil
 		}
 	}
-	return &memBoxFullError{Owner: requester, UsedMiB: req.UsedMiB, SliceMiB: req.SliceMiB, RequestMiB: requestMiB}
+	return &memBoxFullError{Owner: requester, UsedMiB: req.UsedMiB, SliceMiB: req.SliceMiB, RequestMiB: requestMiB, Leases: ownLeasesLRU(req.Leases)}
+}
+
+// ownLeasesLRU copies the requester's running leases for the box_full
+// body, least recently used first (ID breaks ties, the selector's
+// order), so the caller sees what holds its memory and can pause one
+// itself. Only the requester's own leases are ever listed.
+func ownLeasesLRU(ls []takeBackLease) []BoxFullLease {
+	order := make([]takeBackLease, len(ls))
+	copy(order, ls)
+	sort.SliceStable(order, func(a, b int) bool {
+		x, y := order[a], order[b]
+		if !x.LastActive.Equal(y.LastActive) {
+			return x.LastActive.Before(y.LastActive)
+		}
+		return x.ID < y.ID
+	})
+	out := make([]BoxFullLease, len(order))
+	for i, l := range order {
+		out[i] = BoxFullLease{ID: l.ID, Name: l.Name, MemoryMB: l.MemoryMiB, LastActive: l.LastActive, Pinned: l.Pinned, Busy: l.Busy}
+	}
+	return out
 }
 
 // takeBackPool sums the memory of the leases take-back could ever reach
