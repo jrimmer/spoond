@@ -14,7 +14,7 @@ import (
 // floating slice of the box — 1/N of the hugepage memory pool and of
 // the snapshot volume's usable bytes, where N is the number of ACTIVE
 // owners, not every identity: an owner is ACTIVE when it holds an
-// unreleased lease whose state is running, recovered or suspended
+// unreleased lease whose STATE is running, recovered or suspended
 // (paused) — not lost — or when it has an admission in flight, so a
 // requester counts for its own first lease. "Definitely only fair share
 // amongst actual platform users and not potential users": an idle
@@ -31,8 +31,12 @@ import (
 //	disk   = the owner's pause snapshots + kept checkpoints + named snapshots
 //
 // ratio = usage / slice (0 when the slice is 0, e.g. a box with no
-// capacity or no active owners). This task only computes and reports
-// the shares; the take-back policy that acts on them is a later unit.
+// capacity or no active owners). An INACTIVE owner's ratio reads 0: its
+// usage buckets stay listed in the view, but no ratio is computed over
+// its would-be slice, so it is never ranked the heaviest borrower. This
+// task only computes and reports
+// the shares; the take-back policy that acts on them is a
+// later unit.
 //
 // The disk slice basis is the snapshot volume's **usable** bytes: the
 // statfs free-to-unprivileged bytes plus the snapshot bytes spoond
@@ -62,7 +66,9 @@ type FairShareOwner struct {
 	} `json:"disk"`
 	// Ratio is usage/slice, the larger of the memory and disk ratios. An
 	// owner inside their slice is below 1; the owner furthest over is
-	// taken from first.
+	// taken from first. An inactive owner's ratio is always 0: it is
+	// never ranked the heaviest borrower while idle (its usage buckets
+	// are still listed in the snapshot, the ratio just reads 0).
 	Ratio float64 `json:"ratio"`
 	// Active reports whether this owner counts toward N: it holds an
 	// unreleased running or paused lease or has an admission in
@@ -152,30 +158,24 @@ func (s *Service) ownersOfBox() []string {
 	return out
 }
 
-// activeOwners reports which owners are ACTIVE — they count toward N —
-// reading s.store.mu exactly once. An owner is active when it holds an
-// unreleased lease whose state is running, recovered or suspended
-// (paused) — not lost, whose memory cannot be taken back and whose
-// hugepages were lost — or when it has an admission in flight, so a
-// requester counts for its own first lease.
-func (s *Service) activeOwners() map[string]struct{} {
-	active := map[string]struct{}{}
-	s.store.mu.Lock()
-	for _, l := range s.store.leases {
-		if l.released || l.Owner == "" {
-			continue
-		}
-		if l.live() || l.Suspended {
-			active[l.Owner] = struct{}{}
-		}
-	}
-	for owner, n := range s.store.pendingMiB {
-		if n > 0 && owner != "" {
-			active[owner] = struct{}{}
-		}
-	}
-	s.store.mu.Unlock()
-	return active
+// leaseActive reports whether lease l makes its owner ACTIVE, counting
+// toward N: the lease is unreleased and its STATE is running, recovered
+// or suspended (paused) — not lost. The state test is deliberately on
+// State and not the Suspended flag: Suspended is a stale flag a lost
+// lease can keep (markLost enters the lost state without clearing it),
+// and a lost lease is exactly what must not count — its memory cannot
+// be taken back and its hugepages were lost.
+func leaseActive(l *Lease) bool {
+	return !l.released && (l.live() || l.State == "suspended")
+}
+
+// leaseChargeable reports whether lease l charges its owner: the lease
+// is unreleased and live (running or recovered). A suspended lease holds
+// no hugepages and a lost one cannot be taken back; the charge moves
+// only through setState paths and every setState save that changes live
+// invalidates the snapshot, so a recomputed report is never stale.
+func leaseChargeable(l *Lease) bool {
+	return !l.released && l.live()
 }
 
 // ownerDisplayName resolves an owner id to a username when one exists;
@@ -281,32 +281,8 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 	owners := s.ownersOfBox()
 	// N counts the ACTIVE owners only — a running or paused lease, or an
 	// admission in flight — not every identity (2026-10-14 owner
-	// decision). store.mu is read once (here) and the whole active set
-	// and memory view are built under it, so no second acquisition can
-	// interleave between them.
-	s.store.mu.Lock()
-	active := map[string]struct{}{}
-	memUsed := map[string]int{}
-	for _, l := range s.store.leases {
-		if l.released || l.Owner == "" {
-			continue
-		}
-		if l.live() || l.Suspended {
-			active[l.Owner] = struct{}{}
-		}
-		// The memory charge stays the running leases only: a suspended
-		// lease holds no hugepages and a lost one cannot be taken back.
-		if l.live() {
-			memUsed[l.Owner] += l.MemoryMB
-		}
-	}
-	for owner, n := range s.store.pendingMiB {
-		if owner == "" || n <= 0 {
-			continue
-		}
-		active[owner] = struct{}{}
-	}
-	s.store.mu.Unlock()
+	// decision).
+	active, memUsed := s.ownersActiveFor()
 	n := len(active)
 
 	capacityKnown := true
@@ -386,11 +362,19 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 		o.Disk.NamedBytes = u.Named
 		o.Disk.UsedBytes = u.Used
 		// Ratio is usage over the owner's own displayed slice, so an
-		// active owner reads against 1/N and an inactive one (whose
-		// usage is 0 even when it has a stale named snapshot) reads
-		// 0. Passing the owner's own slice values keeps the ratio
-		// consistent with the slice fields above it.
-		o.Ratio = ratioOf(o, o.Memory.SliceMiB, o.Disk.SliceBytes)
+		// active owner reads against 1/N. An inactive owner's ratio is
+		// ZERO by definition: its hugepages are released and its
+		// snapshots are gone (anything it left behind is pruned), so it
+		// is never ranked the heaviest borrower — the snapshot
+		// ordering and the admission queue's fair-share order both
+		// sort by this ratio. Its usage buckets stay listed for the
+		// complete view, but no ratio is computed over the would-be
+		// slice, so a stale named row can never top it above an active
+		// borrower.
+		o.Ratio = 0
+		if isActive {
+			o.Ratio = ratioOf(o, o.Memory.SliceMiB, o.Disk.SliceBytes)
+		}
 		snap.owners = append(snap.owners, o)
 		snap.byID[owner] = o
 	}
@@ -400,9 +384,44 @@ func (s *Service) computeFairShares(ctx context.Context) *fairShareSnapshot {
 	return snap
 }
 
+// ownersActiveFor builds, under one store lock, the whole fair-share
+// active set and the per-owner running-memory view. The lock is taken
+// once for both, so no second acquisition can interleave the active
+// owners and the memory usage between them.
+func (s *Service) ownersActiveFor() (map[string]struct{}, map[string]int) {
+	active := map[string]struct{}{}
+	memUsed := map[string]int{}
+	s.store.mu.Lock()
+	for _, l := range s.store.leases {
+		if l.released || l.Owner == "" {
+			continue
+		}
+		if leaseActive(l) {
+			active[l.Owner] = struct{}{}
+		}
+		// The memory charge stays the running leases only: a suspended
+		// lease holds no hugepages and a lost one cannot be taken back.
+		if l.live() {
+			memUsed[l.Owner] += l.MemoryMB
+		}
+	}
+	for owner, n := range s.store.pendingMiB {
+		if owner == "" || n <= 0 {
+			continue
+		}
+		active[owner] = struct{}{}
+	}
+	s.store.mu.Unlock()
+	return active, memUsed
+}
+
 // ratioOf is usage/slice across memory and disk: the larger of the two
 // per-resource ratios. A zero slice contributes no ratio, so a box with
-// no capacity (or no owners) reports a ratio of 0 for everyone.
+// no capacity (or no owners) reports a ratio of 0 for everyone. An
+// inactive owner's ratio is not computed here at all: computeFairShares
+// zeroes it before calling, so whatever a stale snapshot row holds it
+// is never ranked the heaviest borrower by either the snapshot sort or
+// the admission queue's fair-share order.
 func ratioOf(o *FairShareOwner, memSliceMiB int, diskSliceBytes int64) float64 {
 	var ratio float64
 	if memSliceMiB > 0 {
@@ -420,7 +439,8 @@ func ratioOf(o *FairShareOwner, memSliceMiB int, diskSliceBytes int64) float64 {
 // get on starting, total/(N+1), since N is the active owners and it is
 // not among them. N=0 shows the whole box: nothing is divided while no
 // one is active, and starting would take the pool entire. With unknown
-// capacity no slice is computed and everything stays 0.
+// capacity no slice is computed and everything stays 0. An inactive
+// owner reads a 0 ratio: no ratio is computed over the would-be slice.
 func idleSlice(memTotalMiB int, diskTotalBytes int64, n int, capacityKnown bool) (float64, int, int64) {
 	if !capacityKnown {
 		return 0, 0, 0

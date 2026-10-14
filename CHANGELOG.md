@@ -21,7 +21,10 @@ summarised from README "Status".
   owner's slice shrinks to `1/(N+1)` on their first lease. `GET
   /api/fair-shares` and the self-scoped share payloads now carry an
   `active` boolean per owner: every owner is still listed, an inactive
-  one shows the slice it would get on starting (`total/(N+1)`).
+  one shows the slice it would get on starting (`total/(N+1)`) and its
+  `ratio` reads `0`, so an idle owner with a stale snapshot is never
+  ranked the heaviest borrower. A lost lease never counts, however it
+  was suspended before the loss.
 
 ## [3.8.1] - 2026-10-14
 

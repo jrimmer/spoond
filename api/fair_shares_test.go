@@ -1486,3 +1486,154 @@ func TestFairSharesIdleIdentityNotInN(t *testing.T) {
 		t.Fatalf("active owner ratio = %v, want 0.25 (256 MiB over the 1024 MiB pool)", a.Ratio)
 	}
 }
+
+// markLeaseLostViaSave flips the lease to lost through the real writer
+// (markLost): setState stamps the state and saveLeaseLocked persists the
+// row and runs the accounted-signature invalidation. A suspended lease
+// keeps its Suspended flag across this fall — live is false on both
+// sides, the accounted signature does not move on its own.
+func markLeaseLostViaSave(svc *Service, id string) {
+	svc.store.mu.Lock()
+	defer svc.store.mu.Unlock()
+	l := svc.store.leases[id]
+	if l == nil {
+		return
+	}
+	l.Suspended = true
+	setLostReason(l, "recovery failed")
+	l.setState("lost")
+	svc.saveLeaseLocked(l)
+}
+
+// TestFairSharesLostFormerlyPausedDoesNotCount: a suspended lease that
+// is really lost (recovery.go markLost) must NOT make its owner active.
+// A naive check of the Suspended flag classifies this owner active —
+// Suspended survives the lost fall — so the fair-share view tests the
+// State, not the flag.
+func TestFairSharesLostFormerlyPausedDoesNotCount(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
+	pausedOwner := addIdentityUser(t, ids, "paused-then-lost")
+	runner := addIdentityUser(t, ids, "runner")
+
+	// A paused lease through the real pause path: grant a running lease,
+	// then pauseLeaseBody it, then point the guest's lease at the row
+	// the store now has (the pause stamps Suspended under the real
+	// writer). A hand-written lease struct would not run the real
+	// suspendLeaseLocked path and so proves nothing about the flag.
+	seedImage(t, db, "py-base", 256)
+	roomyDisk(svc) // the grant and the pause build must fit (FS3b)
+	lg, err := svc.grant(context.Background(), pausedOwner.ID, "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if _, err := svc.pauseLeaseWith(context.Background(), lg, false, suspendPolicy{}); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	addRunningLease(svc, "run-1", runner.ID, 100)
+	svc.invalidateFairShares()
+
+	runnerShare := func() *FairShareOwner { s := svc.fairShares(context.Background()); return shareByOwner(s)[runner.ID] }
+	if n := svc.fairShares(context.Background()).ownersN; n != 2 {
+		t.Fatalf("ownersN before the loss = %d, want 2 (paused counts)", n)
+	}
+	if got := runnerShare().Memory.SliceMiB; got != 512 {
+		t.Fatalf("runner slice before the loss = %d, want 512 (1/2 the pool)", got)
+	}
+
+	// The real loss path leaves Suspended true on a lost lease; the
+	// invalidation must still come out of saveLeaseLocked.
+	markLeaseLostViaSave(svc, lg.ID)
+
+	svc.store.mu.Lock()
+	lostLease := svc.store.leases[lg.ID]
+	svc.store.mu.Unlock()
+	if lostLease == nil || lostLease.State != "lost" || !lostLease.Suspended {
+		t.Fatalf("setup: lease state = %v suspended = %v, want lost with a stale Suspended flag",
+			lostLease.State, lostLease.Suspended)
+	}
+
+	// No invalidation call here: saveLeaseLocked must have dropped the
+	// frozen-clock snapshot or the next read returns the stale one.
+	snap := svc.fairShares(context.Background())
+	if snap.ownersN != 1 {
+		t.Fatalf("ownersN after the loss = %d, want 1 (a lost lease never counts)", snap.ownersN)
+	}
+	by := shareByOwner(snap)
+	if by[pausedOwner.ID].Active {
+		t.Fatal("owner of a lost-but-formerly-paused lease reported active")
+	}
+	if got := by[pausedOwner.ID].Memory.SliceMiB; got != 512 {
+		t.Fatalf("lost owner's slice = %d, want 512 (total/(N+1))", got)
+	}
+	if got := by[pausedOwner.ID].Ratio; got != 0 {
+		t.Fatalf("lost owner's ratio = %v, want 0", got)
+	}
+	if got := by[runner.ID].Memory.SliceMiB; got != 1024 {
+		t.Fatalf("runner slice after the loss = %d, want 1024 (the whole pool)", got)
+	}
+}
+
+// TestFairSharesLostFormerlyPausedInvalidatesCache: the same real loss
+// with a cached snapshot taken (and never evicted by TTL) before it. The
+// accounted signature does not move across the suspended→lost fall, so
+// saveLeaseLocked needs the explicit lost-row invalidation or the read
+// after the loss serves the pre-loss N.
+func TestFairSharesLostFormerlyPausedInvalidatesCache(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	freezeFairShareClock(svc, time.Now())
+	pausedOwner := addIdentityUser(t, ids, "paused-then-lost")
+	runner := addIdentityUser(t, ids, "runner")
+	addRunningLease(svc, "run-1", runner.ID, 100)
+	seedPauseBuild(t, db, "pause-1", pausedOwner.ID, 8<<20)
+	svc.store.mu.Lock()
+	svc.store.leases["pause-1"] = &Lease{
+		ID: "pause-1", Owner: pausedOwner.ID, State: "suspended", Suspended: true,
+		MemoryMB: 256, ResumeBuildID: "pause-pause-1",
+	}
+	svc.store.accounted["pause-1"] = leaseAccountedOf(svc.store.leases["pause-1"])
+	svc.store.mu.Unlock()
+
+	before := svc.fairShares(context.Background())
+	if before.ownersN != 2 {
+		t.Fatalf("ownersN before the loss = %d, want 2", before.ownersN)
+	}
+
+	markLeaseLostViaSave(svc, "pause-1")
+
+	after := freshAfter(t, svc, before)
+	if after.ownersN != 1 {
+		t.Fatalf("ownersN after the loss = %d, want 1 (cached pre-loss snapshot served)", after.ownersN)
+	}
+}
+
+// TestFairSharesInactiveOwnerRatioZero: an inactive owner with a stale
+// named snapshot reads a 0 ratio — never ranked the heaviest borrower
+// (whose slice the admission queue ranks by this ratio).
+func TestFairSharesInactiveOwnerRatioZero(t *testing.T) {
+	svc, db, _, ids := newFairShareService(t)
+	idle := addIdentityUser(t, ids, "idle-stale")
+	active := addIdentityUser(t, ids, "active")
+	addRunningLease(svc, "run-1", active.ID, 256)
+	seedNamedSnapshot(t, db, idle.ID, "stale", 800<<20)
+	svc.invalidateFairShares()
+
+	snap := svc.fairShares(context.Background())
+	if snap.ownersN != 1 {
+		t.Fatalf("ownersN = %d, want 1", snap.ownersN)
+	}
+	by := shareByOwner(snap)
+	i, a := by[idle.ID], by[active.ID]
+	if i.Active || !a.Active {
+		t.Fatalf("active=%v idle=%v, want false/true", a.Active, i.Active)
+	}
+	if i.Memory.SliceMiB != 512 {
+		t.Fatalf("idle slice = %d, want 512 (total/(N+1))", i.Memory.SliceMiB)
+	}
+	if i.Ratio != 0 {
+		t.Fatalf("inactive owner's ratio = %v, want 0 (never ranked the heaviest borrower)", i.Ratio)
+	}
+	if a.Ratio <= 0 {
+		t.Fatalf("active owner's ratio = %v, want > 0", a.Ratio)
+	}
+}

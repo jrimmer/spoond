@@ -2820,9 +2820,10 @@ The share object is:
 ```
 
 `ratio` is `usage/slice`, the larger of the memory and disk ratios; an
-owner inside their slice is below `1`. When the box has no capacity (or
-no active owners exist) every slice and ratio is `0` — no division by
-zero.
+owner inside their slice is below `1`. An inactive owner's `ratio` is
+always `0` (no ratio is computed over the would-be slice). When the box
+has no capacity (or no active owners exist) every slice and ratio is
+`0` — no division by zero.
 
 `capacity_known` reports whether the box totals behind the slice were
 readable. `false` means the slices are **not computed yet** — the
@@ -2849,11 +2850,12 @@ capacity_known, active, slice_pct, memory {slice_mib, used_mib}, disk
 ratio}], "disk": {…}}`, sorted by `ratio` descending — the owner
 furthest over their slice first. Ties sort by owner id. Every owner is
 listed (identities and legacy tokens alike); `active` reports whether
-the owner counts toward `N` — it holds a running or paused lease or
+the owner counts toward `N` — it holds a running or paused lease (and
+not a lost one, even a stale pause flag that the loss left behind) or
 has an admission in flight. An inactive owner shows the slice it would
-get on starting, `total/(N+1)`, and never a ratio above the active
-ones (its usage is idle-zero). This is the view the take-back policy
-reads; this version only reports it.
+get on starting, `total/(N+1)`, and its `ratio` reads `0` — it is
+never ranked the heaviest borrower while idle. This is the view the
+take-back policy reads; this version only reports it.
 
 When the snapshot disk can be read, the response also carries a `disk`
 object — the room the take-back policy decides with, every size in

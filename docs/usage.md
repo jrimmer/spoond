@@ -332,7 +332,8 @@ curl -s -X POST https://sandbox.example.com/api/users/<alice-id>/quota \
   -d '{"max_ttl": 7200}'
 # There are no per-user memory or lease caps since 3.0: every owner with
 # a running or paused lease gets an equal fair share (idle identities
-# split nothing); GET /api/users/me shows used_mib and the share.
+# split nothing and a lost lease never counts); GET /api/users/me shows
+# used_mib and the share.
 
 # 4. Everyone uses their own key; leases are ownership-scoped
 ssh alice@sandbox.example.com            # fresh lease, owned by alice
