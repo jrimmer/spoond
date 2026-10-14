@@ -374,9 +374,16 @@ func TestFairSharesRatioOrdering(t *testing.T) {
 	light := addIdentityUser(t, ids, "light")
 	svc.tokens = map[string]string{}
 
-	// Two owners → 512 MiB disk slice each.
+	// Both owners active (a running lease each), so N=2 and each reads a
+	// real ratio: heavy 700/921.6 MiB of disk ≈ 0.76, light ≈ 0.11 — a
+	// deterministic order. Owners with no active lease read ratio 0 and
+	// tie; those (the admin here, whose id is random) must not be the
+	// assertion's subject.
+	addRunningLease(svc, "run-heavy", heavy.ID, 10)
+	addRunningLease(svc, "run-light", light.ID, 10)
 	seedNamedSnapshot(t, db, heavy.ID, "big", 700<<20)
 	seedNamedSnapshot(t, db, light.ID, "small", 100<<20)
+	svc.invalidateFairShares()
 
 	rec, body := doUsersReq(t, srv.Handler(), "GET", "/api/fair-shares", adminTok, "")
 	if rec.Code != http.StatusOK {
