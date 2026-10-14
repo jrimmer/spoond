@@ -1484,7 +1484,8 @@ counts highlighted — with the mean create and resume latencies), and
 the events panel (the backend's lease event stream) — plus
 a **Notifications** panel below the header (only when there is a
 message): spoond's own system messages, one row each — a unit not
-active, free hugepages or snapshot disk past the danger level, kept
+active, snapshot disk past the danger level (low free hugepages is not a
+message: spoond takes memory back itself), kept
 checkpoints past `KEPT_DISK_WARN_PCT` of the snapshot disk (#126), or
 the snapshot disk's I/O stall pressure past `DASH_IO_FULL_BAD_PCT`
 (`disk i/o stalled N% of the last 60 s`, cleared when the

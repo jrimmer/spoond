@@ -34,6 +34,9 @@ summarised from README "Status".
 
 ### Changed
 
+- **Dashboard: no "hugepages past the danger level" notification.** Low free
+  hugepages is not something to act on: spoond takes memory back itself, and a
+  request it cannot serve raises its own box_full alert.
 - **Dashboard images panel: one `mem/vcpu` column** in the leases panel's size form (`8G/2V`), in place of separate `vcpu` and `mem` columns, and a total row summing live leases and lifetime uses.
 
 - **`elixir-base` moves to Elixir 1.19.6 / Erlang OTP 28.5.0.7 and runs
