@@ -342,30 +342,28 @@ type Store struct {
 	// store round trip.
 	runningJobs map[string]int
 	// accounted caches the last-saved accounted signature of each lease
-	// (owner, running state, memory charge). saveLeaseLocked invalidates
+	// (owner, active state, memory charge). saveLeaseLocked invalidates
 	// the fair-share view only when a lease's signature changes, so an
 	// activity-only save (LastActive, ExpiresAt, holder) does not churn
 	// the cache (#145 FS1 R5-3).
 	accounted map[string]leaseAccounted
-	// lostInvalidated records whether the suspended→lost fair-share
-	// invalidation (paused counts, lost does not) has already run for a
-	// lease id, so later saves of the same lost lease (a pause-clock
-	// touch, a repair) do not repeat it.
-	lostInvalidated map[string]bool
 }
 
 // leaseAccounted is the part of a lease that feeds the fair-share usage
-// view: its owner, whether it is running (memory charged) and its memory
+// view: its owner, whether the lease makes its owner ACTIVE (running,
+// recovered or paused — not lost or released; the same test the N count
+// uses, so a suspended→lost fall is a change here), and its memory
 // charge. Disk usage moves through the build/keep/named paths, which
 // invalidate explicitly.
 type leaseAccounted struct {
 	owner    string
 	live     bool
+	active   bool
 	memoryMB int
 }
 
 func leaseAccountedOf(l *Lease) leaseAccounted {
-	return leaseAccounted{owner: l.Owner, live: l.live(), memoryMB: l.MemoryMB}
+	return leaseAccounted{owner: l.Owner, live: l.live(), active: leaseActive(l), memoryMB: l.MemoryMB}
 }
 
 func newStore() *Store {
@@ -378,7 +376,6 @@ func newStore() *Store {
 		lastActiveDirty: make(map[string]time.Time),
 		runningJobs:     make(map[string]int),
 		accounted:       make(map[string]leaseAccounted),
-		lostInvalidated: make(map[string]bool),
 	}
 }
 
@@ -2276,18 +2273,6 @@ func (s *Service) reserveQuotaLocked(owner string, n int, memoryMB int) {
 	}
 }
 
-// reserveQuotaNoIdentities books an in-flight admission for a service
-// without an identity store (the legacy-token-only deployment).
-// reserveQuota short-circuits there, but the legacy owner is an active
-// fair-share owner all the same, so the create path books through this
-// variant — the same store lock and the same pendingMiB crossing as
-// reserveQuota.
-func (s *Service) reserveQuotaNoIdentities(owner string, n int, memoryMB int) {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	s.reserveQuotaLocked(owner, n, memoryMB)
-}
-
 // usedMiB reports the owner's current memory charge (#128): the sum of
 // the leases' stamped memory_mb over the owner's RUNNING leases
 // (suspended ones hold no hugepages and are not charged), plus any MiB
@@ -2407,15 +2392,6 @@ func (s *Service) releaseQuotaReservationLocked(owner string, n int, memoryMB in
 	if before > 0 && s.store.pendingMiB[owner] <= 0 {
 		s.invalidateFairShares()
 	}
-}
-
-// releaseQuotaReservationNoIdentities releases a reservation booked by
-// reserveQuotaNoIdentities. Same store lock and crossing as
-// releaseQuotaReservation.
-func (s *Service) releaseQuotaReservationNoIdentities(owner string, n int, memoryMB int) {
-	s.store.mu.Lock()
-	defer s.store.mu.Unlock()
-	s.releaseQuotaReservationLocked(owner, n, memoryMB)
 }
 
 // sizedStart picks the build a restart's fresh guest for lease l boots
@@ -5490,24 +5466,11 @@ func (s *Service) saveLeaseLocked(l *Lease) {
 	if acc := leaseAccountedOf(l); acc != s.store.accounted[l.ID] {
 		s.store.accounted[l.ID] = acc
 		s.invalidateFairShares()
-		// The accounted signature misses nothing else: the owner, the
-		// running state and the memory charge are all in it.
-	}
-	// A suspended→lost fall moves none of those (live is false on both
-	// sides, same owner and charge), but it still moves the fair-share N:
-	// paused counts as active, lost never does (fair shares 2026-10-14).
-	// A paused-only owner whose lease is lost must not keep its cached
-	// 1/N slice for the snapshot TTL, so a lost lease still carrying the
-	// stale Suspended flag (markLost, the only lost-state writer, does
-	// not clear it) invalidates too. The flagless-lost-lease case (or a
-	// restored one) needs no invalidation, and the invalidating case
-	// runs once per fall: later saves of the same lost lease (a pause
-	// clock touch, a repair) repeat nothing — once is enough, it is
-	// only an epoch bump, and the state test is already over the
-	// accounted change above.
-	if l.State == "lost" && l.Suspended && !s.store.lostInvalidated[l.ID] {
-		s.store.lostInvalidated[l.ID] = true
-		s.invalidateFairShares()
+		// The signature misses nothing else: the owner, the active state
+		// (a suspended→lost fall moves it — paused counts as active, lost
+		// never does, fair shares 2026-10-14 — so a paused-only owner
+		// whose lease is lost drops out of N right away) and the memory
+		// charge are all in it.
 	}
 }
 
@@ -5611,10 +5574,6 @@ func (s *Service) deleteLeaseLocked(id string) {
 		return
 	}
 	delete(s.store.accounted, id)
-	// The lost-fall invalidation mark (fair shares) goes too: nothing of
-	// this lease is remembered, so a lease under the same id starts with
-	// an empty slate.
-	delete(s.store.lostInvalidated, id)
 	s.invalidateFairShares()
 }
 
