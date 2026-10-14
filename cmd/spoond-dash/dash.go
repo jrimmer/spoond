@@ -7,10 +7,12 @@
 // viewer shares that loop: each page holds one SSE stream that receives
 // the snapshot as Datastar signal patches (the numbers) and the frame as
 // element patches (one per changed row of the character grid, the whole
-// <pre> when the row count changed). `spoond top` renders the same
-// snapshot as the same grid with ANSI styles in the terminal. The server
-// keeps DASH_HISTORY points of history so a new page starts with trends,
-// not empty sparklines.
+// <pre> when the row count changed). Two pages share the handlers: the
+// dashboard at /, and /images drawing the images panel alone, uncapped
+// (the stream picks the frame by its view parameter). `spoond top`
+// renders the dashboard's snapshot as the same grid with ANSI styles in
+// the terminal. The server keeps DASH_HISTORY points of history so a
+// new page starts with trends, not empty sparklines.
 //
 // Environment:
 //
@@ -397,6 +399,7 @@ func (d *dash) handler() http.Handler {
 	static, _ := fs.Sub(assets, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", cacheFor(http.FileServerFS(static))))
 	mux.HandleFunc("GET /{$}", d.handlePage)
+	mux.HandleFunc("GET /images", d.handlePage)
 	mux.HandleFunc("GET /stream", d.handleStream)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
 	// Readiness (issue #81): 200 only when every source the dashboard
@@ -547,28 +550,62 @@ type pageData struct {
 	Snapshot
 	Hist  map[string][]float64
 	Width int
+	// StreamURL is the SSE endpoint the page subscribes to: /stream for
+	// the dashboard, /stream?view=images for the /images page — the view
+	// the page loaded is the view its stream keeps drawing.
+	StreamURL string
 	// Grid is the grid's rows as HTML; already escaped by grid.HTML, so
 	// the template must not escape it again.
 	Grid template.HTML
 }
 
 func (d *dash) handlePage(w http.ResponseWriter, r *http.Request) {
+	d.servePage(w, r.URL.Path)
+}
+
+// servePage renders one page view: the dashboard at /, the uncapped
+// images list at /images. The stream carries the same view parameter,
+// so a page keeps drawing what it loaded.
+func (d *dash) servePage(w http.ResponseWriter, path string) {
+	view, ok := pageView(path)
+	if !ok {
+		http.NotFound(w, nil)
+		return
+	}
 	hist := d.history()
 	d.mu.Lock()
 	s := d.last
 	d.mu.Unlock()
-	g, links := d.gridFor(s, hist, time.Now())
+	g, links := d.gridFor(view, s, hist, time.Now())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	data := pageData{Snapshot: s, Hist: hist, Width: g.Cols(), Grid: template.HTML(pageGrid(g, links))}
+	stream := "/stream"
+	if view == viewImages {
+		stream += "?view=images"
+	}
+	data := pageData{Snapshot: s, Hist: hist, Width: g.Cols(), StreamURL: stream, Grid: template.HTML(pageGrid(g, links))}
 	if err := d.page.Execute(w, data); err != nil {
 		log.Printf("spoond dash: render: %v", err)
 	}
 }
 
-// gridFor renders a snapshot plus history into a grid and the holder
-// links found in it (row → URL), for both the page and the stream.
-func (d *dash) gridFor(s Snapshot, hist map[string][]float64, now time.Time) (*grid.Grid, []linkAt) {
-	g, err := drawFrame(s, hist, d.width, d.cfg.Host, now, d.cfg.Interval)
+// pageView maps a page path to its frame view; false when the path is
+// neither page.
+func pageView(path string) (string, bool) {
+	switch path {
+	case "/":
+		return viewDashboard, true
+	case "/images":
+		return viewImages, true
+	}
+	return "", false
+}
+
+// gridFor renders a snapshot plus history into a grid and the links
+// found in it (row → URL), for both the page and the stream. The view
+// picks the frame: the whole dashboard, or the /images page's images
+// panel alone.
+func (d *dash) gridFor(view string, s Snapshot, hist map[string][]float64, now time.Time) (*grid.Grid, []linkAt) {
+	g, err := drawFrame(s, hist, d.width, d.cfg.Host, now, d.cfg.Interval, view)
 	if err != nil {
 		// Check is a rendered invariant, not a data condition: nothing a
 		// snapshot contains should trip it. Report and fall back to an
@@ -576,7 +613,11 @@ func (d *dash) gridFor(s Snapshot, hist map[string][]float64, now time.Time) (*g
 		log.Printf("spoond dash: %v", err)
 		g = grid.New(clamp(d.width, minW, maxW), 1)
 	}
-	return g, holderLinks(s, d.width, now)
+	links := append(holderLinks(s, d.width, now), moreLink(s, d.width, now)...)
+	if view == viewImages {
+		links = append(links, backLink()...)
+	}
+	return g, links
 }
 
 // history returns a copy of the sparkline series.
@@ -593,8 +634,14 @@ func (d *dash) history() map[string][]float64 {
 // handleStream is one viewer's SSE stream: the full state (with history)
 // at once, then a frame per collector tick until the page goes away.
 // Each stream owns a streamState, so the rows it diffs against are the
-// rows it actually sent — two open pages never cross-contaminate.
+// rows it actually sent — two open pages never cross-contaminate. The
+// view query parameter picks the frame ("images" for the /images page;
+// anything else is the dashboard).
 func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
+	view := r.URL.Query().Get("view")
+	if view != viewImages {
+		view = viewDashboard
+	}
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -623,7 +670,7 @@ func (d *dash) handleStream(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		s := d.last
 		d.mu.Unlock()
-		if err := d.writeFrame(w, st, s, hist); err != nil {
+		if err := d.writeFrame(w, st, s, hist, view); err != nil {
 			return
 		}
 		fl.Flush()
@@ -650,7 +697,7 @@ type streamState struct {
 // the <pre> itself with bare rows lost its class, and the rows then
 // ran together and wrapped. A page that loads drawn keeps its rows; the rest are dropped
 // and the next frame's <pre> patch recreates them.
-func (d *dash) writeFrame(w http.ResponseWriter, st *streamState, s Snapshot, hist map[string][]float64) error {
+func (d *dash) writeFrame(w http.ResponseWriter, st *streamState, s Snapshot, hist map[string][]float64, view string) error {
 	sig := map[string]any{"_s": s}
 	if hist != nil {
 		sig["_h"] = hist
@@ -662,7 +709,7 @@ func (d *dash) writeFrame(w http.ResponseWriter, st *streamState, s Snapshot, hi
 	if _, err := fmt.Fprintf(w, "event: datastar-patch-signals\ndata: signals %s\n\n", b); err != nil {
 		return err
 	}
-	g, links := d.gridFor(s, hist, time.Now())
+	g, links := d.gridFor(view, s, hist, time.Now())
 	lines := pageLines(g, links)
 	d.mu.Lock()
 	sent := st.rows

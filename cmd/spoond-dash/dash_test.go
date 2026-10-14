@@ -625,3 +625,104 @@ func TestConfigFromFileSecrets(t *testing.T) {
 		t.Fatalf("missing file: err = %v, want the read error", err)
 	}
 }
+
+// TestImagesPageAndStream: GET /images serves the page shell drawing
+// only the images panel — full width, uncapped, with the back link —
+// and its stream (the same SSE endpoint, a view parameter) patches that
+// view's rows; / keeps drawing the whole dashboard with its fold row.
+func TestImagesPageAndStream(t *testing.T) {
+	srv := metricsServer(t, "scrape", []string{frame(1, 1, "1")})
+	d, err := newDash(testConfig(t, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sampleSnapshot()
+	s.Images = nil
+	for i := 0; i < 12; i++ {
+		s.Images = append(s.Images, ImageRow{Name: fmt.Sprintf("img-%02d", i)})
+	}
+	d.mu.Lock()
+	d.last = s
+	d.mu.Unlock()
+	h := d.handler()
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", path, nil)
+		req.SetBasicAuth("watch", "pw")
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := get("/images")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `id="grid"`) {
+		t.Fatalf("/images: %d\n%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `images · 12 · by use`) {
+		t.Fatal("/images page lacks the uncapped panel's title")
+	}
+	if strings.Contains(body, "+4 more") {
+		t.Fatal("/images page must never fold")
+	}
+	if strings.Contains(body, `<a class="g-link" href="/images"`) {
+		t.Fatal("/images page must not carry the fold link")
+	}
+	if !strings.Contains(body, `<a class="g-link" href="/"`) {
+		t.Fatal("/images page lacks the back link")
+	}
+	// The page's stream subscription carries the view it loaded.
+	if !strings.Contains(body, `@get('/stream?view=images')`) {
+		t.Fatal("/images page does not subscribe to the images stream")
+	}
+
+	// The dashboard page still folds and links the fold to /images; it
+	// has no back link.
+	rec = get("/")
+	body = rec.Body.String()
+	if !strings.Contains(body, "+4 more") || !strings.Contains(body, `<a class="g-link" href="/images"`) {
+		t.Fatalf("/ page lost the fold and its link:\n%s", body)
+	}
+	if strings.Contains(body, `href="/"`) {
+		t.Fatal("/ page must not carry the back link")
+	}
+	if !strings.Contains(body, `@get('/stream')`) || strings.Contains(body, `view=images`) {
+		t.Fatal("/ page must subscribe to the plain dashboard stream")
+	}
+
+	// Unknown paths stay 404.
+	if rec := get("/nope"); rec.Code != 404 {
+		t.Fatalf("GET /nope: %d, want 404", rec.Code)
+	}
+
+	// The stream serves both views; each page's rows are its own.
+	stream := func(view string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/stream?view="+view, nil).WithContext(ctx)
+		req.SetBasicAuth("watch", "pw")
+		h.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+	img := stream("images")
+	for _, want := range []string{"images · 12 · by use", `href="/"`, "img-11"} {
+		if !strings.Contains(img, want) {
+			t.Fatalf("images stream lacks %q:\n%s", want, img)
+		}
+	}
+	if strings.Contains(img, "+4 more") {
+		t.Fatalf("images stream must never fold:\n%s", img)
+	}
+	dash := stream("dashboard")
+	if !strings.Contains(dash, "+4 more") || !strings.Contains(dash, `href="/images"`) {
+		t.Fatalf("dashboard stream lost the fold and its link:\n%s", dash)
+	}
+	if strings.Contains(dash, `href="/"`) {
+		t.Fatal("dashboard stream must not carry the back link")
+	}
+	// A view the page never served is the dashboard's.
+	if got := stream(""); !strings.Contains(got, "+4 more") {
+		t.Fatal("default stream view is not the dashboard")
+	}
+}

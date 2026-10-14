@@ -131,7 +131,7 @@ func TestGoldenRecords(t *testing.T) {
 		{DefaultWidth, filepath.Join("testdata", "records-104.txt")},
 		{minW, filepath.Join("testdata", "records-72.txt")},
 	} {
-		got, err := drawFrame(goldenRecordsSnapshot(), sampleHist(), tc.w, "spoond.example.com", fixedNow, dashInterval)
+		got, err := drawFrame(goldenRecordsSnapshot(), sampleHist(), tc.w, "spoond.example.com", fixedNow, dashInterval, viewDashboard)
 		if err != nil {
 			t.Fatalf("width %d: %v", tc.w, err)
 		}

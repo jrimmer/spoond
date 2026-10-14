@@ -85,7 +85,7 @@ func Top(args []string) int {
 	draw := func() {
 		s := col.collect(ctx)
 		appendHist(hist, s, cfg.History)
-		g, err := drawFrame(s, hist, width, cfg.Host, time.Now(), cfg.Interval)
+		g, err := drawFrame(s, hist, width, cfg.Host, time.Now(), cfg.Interval, viewDashboard)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "spoond top:", err)
 			return

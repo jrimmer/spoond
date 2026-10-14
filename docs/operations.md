@@ -1476,7 +1476,13 @@ link; the table's fixed columns are sized to the values actually shown
 leave no blank run and the freed width goes to the owner then the
 holder, and one dim legend under the table — `▶ running ‖ suspended
 ⭘ recovered ■ lost ◆ pinned` — spells the glyphs out whenever rows are
-shown), the image catalog (default size as mem/vcpu, e.g. `8G/2V`, live leases, lifetime
+shown), the image catalog (sorted by use — live leases first, then most
+recent use, the newest `lease_history` end with a live lease counting as
+now, then lifetime uses, then name — at most eight rows, a longer
+catalog folded into one `+N more` row whose live and uses cells sum the
+hidden images, its text linking to `/images` on the page, the total row
+over every image; the title reads `images · N · by use`; the default
+size as mem/vcpu, e.g. `8G/2V`, live leases, lifetime
 uses with a total row, baked-at) beside the systemd units, a **records** panel of
 all-time stats (below), a refusals-and-failures row
 (auth, throttled, capacity, build fails, lost leases — non-zero
@@ -1514,7 +1520,18 @@ browser page
 is the grid in a `<pre>` (Datastar
 patching changed rows); `spoond top` draws the same grid with ANSI
 styles in the terminal, at the terminal's width (COLUMNS, else 104),
-redrawn every 2 seconds until interrupted. It runs as its own service on **:8893** behind
+redrawn every 2 seconds until interrupted.
+
+**The `/images` page** serves the same page shell and the same stream
+drawing only the images panel — full frame width, every image row
+uncapped (same sort, no `+N more`), with the total row — for a catalog
+longer than the dashboard's panel can show. `GET /stream?view=images`
+live-updates it (any other view, or none, is the dashboard). The page's
+`SPOOND` title links back to the dashboard, the dashboard's `+N more`
+row links to `/images`, and its footer carries `· images` — the
+terminal's one pointer back, where no link exists.
+
+It runs as its own service on **:8893** behind
 **basic auth** — set `DASH_USER` and
 `DASH_PASSWORD_HASH` (a bcrypt hash; `spoond dash hash <password>` prints
 one) — and serves HTTPS when `DASH_TLS_CERT`/`DASH_TLS_KEY` are set.

@@ -334,13 +334,7 @@ func envPct(key string, def float64) float64 {
 // sparklines draw empty and the throughput title carries no window.
 // Goldens that need them call drawFrame directly.
 func Draw(s Snapshot, w int, now time.Time, host string) *grid.Grid {
-	g, err := drawFrame(s, nil, w, host, now, 0)
-	if err != nil {
-		// Callers of Draw (tests, one-off renders) pass fixed snapshots;
-		// a Check failure is a programming error worth panicking on.
-		panic(err)
-	}
-	return g
+	return drawView(s, nil, w, host, now, 0, viewDashboard)
 }
 
 // recTime is a records timestamp in the panel's format: M/D h:mma
@@ -532,23 +526,46 @@ func (l *layout) histMinutes() int {
 // spoond top. host names the node in the header; now is the frame's
 // timestamp, carried by the snapshot's own ages and clock rather than
 // read here; interval is the scrape interval the history points are
-// spaced by (the throughput title's window; 0 when there is none). It
+// spaced by (the throughput title's window; 0 when there is none).
+// view picks the frame: viewDashboard (the whole dashboard) or
+// viewImages (the /images page: the images panel alone, uncapped). It
 // fails only when grid.Check rejects the finished frame (a rune no
 // renderer can draw) — the terminal path reports it instead of printing
 // a broken frame.
-func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration) (*grid.Grid, error) {
+func drawFrame(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration,
+	view string) (*grid.Grid, error) {
 	l := &layout{w: clamp(w, minW, maxW), host: host, s: s,
-		notices:  notices(s),
-		histFn:   func(k string) []float64 { return hist[k] },
-		histN:    len(hist["running"]),
-		interval: interval,
-		exclude:  recordsExcludeNames(),
+		notices:    notices(s),
+		histFn:     func(k string) []float64 { return hist[k] },
+		histN:      len(hist["running"]),
+		interval:   interval,
+		exclude:    recordsExcludeNames(),
+		imagesPage: view == viewImages,
 	}
 	g := l.assemble()
 	if err := g.Check(glyphs()); err != nil {
 		return nil, err
 	}
 	return g, nil
+}
+
+// The frame views: the whole dashboard, and the /images page's images
+// panel alone.
+const (
+	viewDashboard = "dashboard"
+	viewImages    = "images"
+)
+
+// drawView renders one frame view at width w; the dashboard's default
+// view for Draw and every caller that has not named one.
+func drawView(s Snapshot, hist map[string][]float64, w int, host string, now time.Time, interval time.Duration, view string) *grid.Grid {
+	g, err := drawFrame(s, hist, w, host, now, interval, view)
+	if err != nil {
+		// Callers of Draw (tests, one-off renders) pass fixed snapshots;
+		// a Check failure is a programming error worth panicking on.
+		panic(err)
+	}
+	return g
 }
 
 // dashInterval is the scrape interval the tests space their history
@@ -563,6 +580,10 @@ type layout struct {
 	notices []Notice
 	host    string
 	s       Snapshot
+	// imagesPage marks the /images page's view: the images panel drawn
+	// alone, full width, every image row uncapped, and the panel's
+	// "+N more" text a link back to that page.
+	imagesPage bool
 	// histFn serves the sparkline series; Draw leaves it nil (the
 	// sparklines then draw empty) and the page/top fill it from the
 	// collector's history.
@@ -606,6 +627,9 @@ func (l *layout) drawPanels(g *grid.Grid, y int) int {
 }
 
 func (l *layout) assemble() *grid.Grid {
+	if l.imagesPage {
+		return l.assembleImages()
+	}
 	h := headerRows() +
 		l.noticesH() +
 		l.panelsH() + l.throughputH() + l.leasesH() +
@@ -625,6 +649,23 @@ func (l *layout) assemble() *grid.Grid {
 	y = l.refusals(g, y)
 	y = l.events(g, y)
 	l.footer(g, y)
+	return g
+}
+
+// assembleImages draws the /images page's frame: the shared header and
+// footer, and between them only the images panel — full width, every
+// image row (the panel's cap reads imagesPage, set here for the whole
+// assembly so the height math, the drawing and the footer's "· images"
+// clause cannot drift apart). The header title carries the link style:
+// the page swaps that span for an anchor back to the dashboard
+// (backLink).
+func (l *layout) assembleImages() *grid.Grid {
+	l.imagesPage = true
+	h := headerRows() + l.imagesH() + 1 // the panel, then the footer line
+	g := grid.New(l.w, h)
+	l.header(g, 0)
+	l.drawImages(g, 0, headerRows(), l.w, l.imagesH())
+	l.footer(g, h-1)
 	return g
 }
 
@@ -672,42 +713,58 @@ func releaseDateFrom(settings []debug.BuildSetting) string {
 }
 
 // footerParts is the footer line's parts: the dashboard binary's version
-// and its release date (empty for a dev build).
+// and its release date (empty for a dev build), and whether the footer
+// carries the "· images" clause (the /images page's way back).
 type footerParts struct {
 	version, date string
+	images        bool
 }
 
 // footerPartsFor builds the line's parts from the dashboard build. The
-// release date is omitted when the build has no vcs.time.
-func footerPartsFor() footerParts {
-	return footerParts{version: versionLabel(dashVersion), date: releaseDate()}
+// release date is omitted when the build has no vcs.time; images asks
+// for the "· images" clause (drawFrame's view).
+func footerPartsFor(images bool) footerParts {
+	return footerParts{version: versionLabel(dashVersion), date: releaseDate(), images: images}
 }
 
 // footerSegs renders the footer parts as one dim, centred line:
-// "Spoond <version> (<date>) · GitHub". The GitHub mark is plain text in
-// the terminal grid; the page swaps the span for the mark's SVG
-// (applyProjectLink). On a frame too narrow for the whole line the date
-// is dropped first; the version and the mark always stay.
+// "Spoond <version> (<date>) · GitHub", or "… · images · GitHub" on the
+// /images page — the only link out of the page a terminal shows, so
+// the way back to the dashboard is one that works without a browser.
+// The GitHub mark is plain text in the terminal grid; the page swaps
+// the span for the mark's SVG (applyProjectLink). On a frame too
+// narrow for the whole line the date is dropped first; the version and
+// the mark always stay.
 func footerSegs(f footerParts, w int) []grid.Seg {
 	sep := grid.Seg{Text: " · ", Style: "dim"}
 	ver := grid.Seg{Text: "Spoond " + f.version, Style: "dim"}
 	logo := grid.Seg{Text: "GitHub", Style: "ghmark"}
+	var out []grid.Seg
 	if f.date != "" {
-		full := []grid.Seg{ver, {Text: " (" + f.date + ")", Style: "dim"}, sep, logo}
-		if segWidth(full) <= w {
-			return full
+		out = []grid.Seg{ver, {Text: " (" + f.date + ")", Style: "dim"}}
+		if f.images {
+			out = append(out, sep, grid.Seg{Text: "images", Style: "dim"})
+		}
+		out = append(out, sep, logo)
+		if segWidth(out) <= w {
+			return out
 		}
 	}
-	return []grid.Seg{ver, sep, logo}
+	out = []grid.Seg{ver}
+	if f.images {
+		out = append(out, sep, grid.Seg{Text: "images", Style: "dim"})
+	}
+	return append(out, sep, logo)
 }
 
 // footer draws the frame's last row: one dim, centred line naming the
 // project — "Spoond <version> (<date>) · GitHub". On a narrow frame the
 // date drops first. The GitHub mark span carries the ghmark style: dim
 // text in the terminal, swapped for the mark's SVG by the page
-// (applyProjectLink).
+// (applyProjectLink). The /images page's footer carries "· images": the
+// terminal's one pointer back to the dashboard.
 func (l *layout) footer(g *grid.Grid, y int) {
-	g.Center(l.w/2, y, footerSegs(footerPartsFor(), l.w))
+	g.Center(l.w/2, y, footerSegs(footerPartsFor(l.imagesPage), l.w))
 }
 func boolInt(b bool) int {
 	if b {
@@ -728,8 +785,15 @@ func boolInt(b bool) int {
 // dropped before the time, and the time is dropped rather than overlap
 // the title.
 func (l *layout) header(g *grid.Grid, y int) {
+	// On the /images page the title carries the link style: the page
+	// swaps that span for an anchor back to the dashboard (backLink). A
+	// terminal draws the style as colour and no link.
+	head := "head"
+	if l.imagesPage {
+		head = "link"
+	}
 	title := []grid.Seg{
-		{Text: "SPOOND", Style: "head"},
+		{Text: "SPOOND", Style: head},
 		{Text: " · ", Style: "dim"},
 		{Text: l.host, Style: "text"},
 	}
@@ -890,6 +954,39 @@ func holderLinks(s Snapshot, w int, now time.Time) []linkAt {
 	return out
 }
 
+// moreImagesHref is where the images panel's "+N more" links: the full,
+// uncapped images list. dashboardHref is where the /images page's title
+// links: back to the dashboard.
+const (
+	moreImagesHref = "/images"
+	dashboardHref  = "/"
+)
+
+// backLink is the /images page's way back: the header title's
+// link-styled "SPOOND" span, which the page swaps for an anchor to the
+// dashboard. The title is the frame's first row.
+func backLink() []linkAt {
+	return []linkAt{{row: 0, text: "SPOOND", url: dashboardHref}}
+}
+
+// moreLink is the images panel's "+N more" row as a page link: the page
+// swaps the row's link-styled span for an anchor to /images, the
+// uncapped list. Nil when nothing was folded — the terminal draws no
+// fold row either. The row math must match assemble: the panels above
+// the images band, then the panel's title row, its header row and the
+// image rows.
+func moreLink(s Snapshot, w int, now time.Time) []linkAt {
+	l := &layout{w: clamp(w, minW, maxW), s: s,
+		notices: notices(s)}
+	shown, folded := l.imageRowsShown()
+	if folded == 0 {
+		return nil
+	}
+	row := headerRows() + l.noticesH() + l.panelsH() + l.throughputH() + l.leasesH() +
+		2 + shown // the title row, the header row, then the image rows
+	return []linkAt{{row: row, text: fmt.Sprintf("+%d more", folded), url: moreImagesHref}}
+}
+
 // headerRows is the header's row count: the centred title line, the
 // ═ rule under it and the legend.
 func headerRows() int { return 2 } // the title and a blank gutter row
@@ -940,14 +1037,14 @@ func (l *layout) imageRows() int {
 	return n
 }
 
-// maxImageRows is the most per-image rows the capacity panel shows
-// before it folds the rest into a "+N more" row.
-const maxImageRows = 6
+// maxCapacityImageRows is the most per-image rows the capacity panel
+// shows before it folds the rest into a "+N more" row.
+const maxCapacityImageRows = 6
 
-// imageRoom is how many image rows fit: bounded by maxImageRows, less
-// the shared row the counts block needs at the minimum height.
+// imageRoom is how many image rows fit: bounded by maxCapacityImageRows,
+// less the shared row the counts block needs at the minimum height.
 func (l *layout) imageRoom() int {
-	room := maxImageRows - max(0, len(l.capacityRows())-capacityMinRows+1)
+	room := maxCapacityImageRows - max(0, len(l.capacityRows())-capacityMinRows+1)
 	if room < 1 {
 		room = 1
 	}
@@ -1946,20 +2043,48 @@ func (l *layout) holder(g *grid.Grid, c leaseCols, yy int, r LeaseRow) {
 
 // images panel: the catalog — name, shape, live leases, lifetime uses,
 // baked-at — beside the services panel at a wide frame, stacked below it,
-// with a total row under the images (live and uses summed). The empty
-// panel keeps a row for "no images" instead of writing over its bottom
-// border.
+// with a total row under the images (live and uses summed). The panel
+// caps its rows (maxImageRows), folding the rest into one "+N more" row
+// whose live and uses cells sum what was folded. The empty panel keeps
+// a row for "no images" instead of writing over its bottom border.
 func (l *layout) imagesH() int {
 	if len(l.s.Images) == 0 {
 		return 4
 	}
-	return 4 + len(l.s.Images)
+	shown, folded := l.imageRowsShown()
+	return 4 + shown + boolInt(folded > 0)
 }
 
 // maxServiceRows is the most unit rows the services panel shows before
 // it folds the rest into a "+N more" row — the images panel's cap, so
 // a host with many units cannot stretch the whole band.
 const maxServiceRows = 6
+
+// maxImageRows is the most image rows the images panel shows — eight
+// image rows, then one "+N more" row when the catalog runs longer. The
+// /images page draws the whole catalog uncapped.
+const maxImageRows = 8
+
+// imageRowsShown is the panel's image rows and the fold: all of them
+// when the catalog fits maxImageRows; otherwise the cap's rows and the
+// count past it, drawn as one "+N more" row. The cap is off when the
+// layout draws for the /images page (linkMore marks that view; see
+// drawImages' "+N more" row).
+func (l *layout) imageRowsShown() (shown, folded int) {
+	if n := len(l.s.Images); n <= l.imageCap() {
+		return n, 0
+	}
+	return l.imageCap(), len(l.s.Images) - l.imageCap()
+}
+
+// imageCap is the layout's image row cap: none (all rows) on the
+// /images page, maxImageRows everywhere else.
+func (l *layout) imageCap() int {
+	if l.imagesPage {
+		return math.MaxInt
+	}
+	return maxImageRows
+}
 
 // servicesH is the services panel's own height: title, one row per unit
 // up to maxServiceRows ("no units configured" when none), a final
@@ -2008,24 +2133,34 @@ type imageCol struct {
 }
 
 // imageCols lays the images panel's columns out: image, mem/vcpu (the
-// leases panel's size form, "8G/2V"), live, uses, baked.
+// leases panel's size form, "8G/2V"), live, uses, baked. The name
+// column is wide (23 cells) — the catalog's names run long — and the
+// baked column takes the rest of the panel's inner width, so "12d ago"
+// fits at the 61-cell panel.
 func imageCols(w int) []imageCol {
-	cols := []imageCol{{2, 17}, {19, 10}, {29, 6}, {35, 7}}
-	cols = append(cols, imageCol{42, w - 4 - 42 + 1}) // baked, to the inner right edge
+	cols := []imageCol{{2, 23}, {25, 10}, {35, 6}, {41, 7}}
+	cols = append(cols, imageCol{48, w - 4 - 48 + 1}) // baked, to the inner right edge
 	return cols
 }
 
 // drawImages draws the images panel at (x, y) in w cells and returns
-// the row past its bottom edge: a header row, then one row per image.
+// the row past its bottom edge: a header row, one row per image up to
+// maxImageRows (one more for "+N more" when the catalog runs longer;
+// all rows on the /images page, cap off), then the total row.
 func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 	top := y
-	y = l.panel(g, x, y, w, h, "images", "images")
+	y = l.panel(g, x, y, w, h, l.imagesTitle(), "images")
 	cols := imageCols(w)
 	labels := []string{"image", "mem/vcpu", "live", "uses", "baked"}
 	for i, c := range cols {
 		g.Text(x+c.off, top+1, labels[i], "dim", c.w)
 	}
-	for i, im := range l.s.Images {
+	if len(l.s.Images) == 0 {
+		g.Text(x+2, top+2, "no images", "dim", w-4)
+		return y
+	}
+	shown, folded := l.imageRowsShown()
+	for i, im := range l.s.Images[:shown] {
 		yy := top + 2 + i
 		vals := []string{
 			ellipsize(sanitize(im.Name), cols[0].w),
@@ -2038,20 +2173,43 @@ func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 			g.Text(x+c.off, yy, vals[j], "text", c.w)
 		}
 	}
-	if len(l.s.Images) == 0 {
-		g.Text(x+2, top+2, "no images", "dim", w-4)
-		return y
+	if folded > 0 {
+		// One row for the images past the cap, their live and uses
+		// summed into its cells. The "+N more" text carries the link
+		// style: the page swaps that span for an anchor to /images
+		// (moreLink); a terminal draws the style as colour and no link,
+		// so the tail names where the uncapped list lives — cut to the
+		// free width before the fold row's own live cell.
+		live, uses := 0, 0
+		for _, im := range l.s.Images[shown:] {
+			live += im.Live
+			uses += im.Uses
+		}
+		yy := top + 2 + shown
+		room := cols[2].off - cols[0].off - 1
+		g.Segs(x+cols[0].off, yy, []grid.Seg{
+			{Text: fmt.Sprintf("+%d more", folded), Style: "link"},
+			{Text: " · spoond images list", Style: "dim"},
+		}, room)
+		g.Text(x+cols[2].off, yy, fmt.Sprint(live), "dim", cols[2].w)
+		g.Text(x+cols[3].off, yy, fmt.Sprint(uses), "dim", cols[3].w)
 	}
 	live, uses := 0, 0
 	for _, im := range l.s.Images {
 		live += im.Live
 		uses += im.Uses
 	}
-	yy := top + 2 + len(l.s.Images)
+	yy := top + 2 + shown + boolInt(folded > 0)
 	g.Text(x+cols[0].off, yy, "total", "dim", cols[0].w)
 	g.Text(x+cols[2].off, yy, fmt.Sprint(live), "dim", cols[2].w)
 	g.Text(x+cols[3].off, yy, fmt.Sprint(uses), "dim", cols[3].w)
 	return y
+}
+
+// imagesTitle is the panel's title: the image count and the order —
+// "images · 12 · by use".
+func (l *layout) imagesTitle() string {
+	return fmt.Sprintf("images · %d · by use", len(l.s.Images))
 }
 
 // drawServices draws the services panel at (x, y) in w cells and

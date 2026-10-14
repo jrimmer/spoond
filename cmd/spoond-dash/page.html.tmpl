@@ -30,7 +30,7 @@ html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
 <script type="module" src="/static/vendor/datastar-rocket.js"></script>
 <script defer src="/static/js/notifications.js"></script>
 </head>
-<body data-webtui-theme="dark" data-signals="{{signals .}}" data-init="@get('/stream')">
+<body data-webtui-theme="dark" data-signals="{{signals .}}" data-init="@get('{{.StreamURL}}')">
 <main>
 <pre id="grid" class="grid" data-webtui-theme="dark">{{.Grid}}</pre>
 </main>

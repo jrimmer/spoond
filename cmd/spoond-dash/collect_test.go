@@ -2,6 +2,7 @@ package spoonddash
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jrimmer/spoond/v3/store"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -634,5 +637,176 @@ func TestBlockDevicePartition(t *testing.T) {
 	}
 	if got := blockDevice(sys, 8, 0); got != "" {
 		t.Errorf("unresolvable = %q, want empty", got)
+	}
+}
+
+// imagesFixture is an images-panel sort test's fixture: a catalog DB
+// with the full schema (image_uses, lease_history from migration 29),
+// and a collector pointing at it.
+type imagesFixture struct {
+	c   *collector
+	raw *sql.DB
+	now time.Time
+}
+
+// newImagesFixture builds the fixture in a temp dir, clock fixed at
+// 2026-10-14 12:00 UTC.
+func newImagesFixture(t *testing.T) *imagesFixture {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := Config{DBPath: filepath.Join(dir, "spoond.db"), UsersFile: filepath.Join(dir, "users.json"), StoragePath: dir}
+	db, err := store.Open(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	return &imagesFixture{raw: raw, now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC), c: newCollector(cfg)}
+}
+
+// addImage inserts one built image (current_build_id set, so the panel
+// lists it).
+func (f *imagesFixture) addImage(t *testing.T, name string, vcpu, memMiB int) {
+	t.Helper()
+	_, err := f.raw.Exec(`INSERT INTO images (name, template_id, current_build_id, vcpu, memory_mb, disk_mb, updated_at)
+		VALUES (?, 't', 'b', ?, ?, 1024, ?)`,
+		name, vcpu, memMiB, f.now.Add(-24*time.Hour).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setUses writes an image's lifetime grant count.
+func (f *imagesFixture) setUses(t *testing.T, image string, n int) {
+	t.Helper()
+	if _, err := f.raw.Exec(`INSERT INTO image_uses (image, uses) VALUES (?, ?)
+		ON CONFLICT(image) DO UPDATE SET uses = excluded.uses`, image, n); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// addHist inserts one lease_history row.
+func (f *imagesFixture) addHist(t *testing.T, leaseID, image string, ended time.Time) {
+	t.Helper()
+	if _, err := f.raw.Exec(`INSERT INTO lease_history (lease_id, owner, image, memory_mb, created_at, ended_at, outcome)
+		VALUES (?, 'u-1', ?, 1024, ?, ?, 'released')`,
+		leaseID, image, ended.Add(-time.Hour).Format(time.RFC3339Nano), ended.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// addLive inserts one live lease on an image.
+func (f *imagesFixture) addLive(t *testing.T, id, image, state string) {
+	t.Helper()
+	if _, err := f.raw.Exec(`INSERT INTO leases (id, owner, image, created_at, expires_at, last_active, state)
+		VALUES (?, 'u-1', ?, ?, ?, ?, ?)`,
+		id, image, f.now.Add(-time.Minute).Format(time.RFC3339Nano),
+		f.now.Add(time.Hour).Format(time.RFC3339Nano), f.now.Format(time.RFC3339Nano), state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// images runs one fromDB and returns the panel's image order.
+func (f *imagesFixture) images(t *testing.T) []ImageRow {
+	t.Helper()
+	var s Snapshot
+	if err := f.c.fromDB(&s, f.now); err != nil {
+		t.Fatal(err)
+	}
+	return s.Images
+}
+
+// TestImagesSortByUse pins the images panel's order: live leases lead,
+// then most recent use — the newest lease_history end, a live lease
+// counting as in use now — then lifetime uses, then name.
+func TestImagesSortByUse(t *testing.T) {
+	f := newImagesFixture(t)
+	// live-now: a live lease, so its last use is the frame's now.
+	f.addImage(t, "live-now", 2, 2048)
+	f.addLive(t, "l1", "live-now", "running")
+	// old-live: two live leases, so it leads live-now (live first).
+	f.addImage(t, "old-live", 2, 2048)
+	f.addLive(t, "l2", "old-live", "suspended")
+	f.addLive(t, "l3", "old-live", "suspended")
+	// fresh: no live lease, the newest history end.
+	f.addImage(t, "fresh", 2, 2048)
+	f.addHist(t, "h1", "fresh", f.now.Add(-2*time.Hour))
+	// stale: no live lease, an older history end.
+	f.addImage(t, "stale", 2, 2048)
+	f.addHist(t, "h2", "stale", f.now.Add(-3*24*time.Hour))
+	// by-uses: no live lease, no history; more lifetime uses wins.
+	f.addImage(t, "by-uses", 2, 2048)
+	f.setUses(t, "by-uses", 9)
+	// by-name: nothing at all; the name breaks the tie.
+	f.addImage(t, "zeta", 2, 2048)
+	f.addImage(t, "alpha", 2, 2048)
+
+	got := f.images(t)
+	var names []string
+	for _, im := range got {
+		names = append(names, im.Name)
+	}
+	want := []string{"old-live", "live-now", "fresh", "stale", "by-uses", "alpha", "zeta"}
+	if fmt.Sprint(names) != fmt.Sprint(want) {
+		t.Fatalf("order = %v, want %v", names, want)
+	}
+	// A live lease counts its last use as the frame's now, history or
+	// not; an ended-only image's last use is its newest end.
+	for _, im := range got {
+		switch im.Name {
+		case "live-now", "old-live":
+			if !im.LastUsed.Equal(f.now) {
+				t.Errorf("%s: LastUsed = %v, want the frame's now", im.Name, im.LastUsed)
+			}
+		case "fresh":
+			if !im.LastUsed.Equal(f.now.Add(-2 * time.Hour)) {
+				t.Errorf("fresh: LastUsed = %v, want the newest history end", im.LastUsed)
+			}
+		}
+	}
+}
+
+// TestImagesSortMissingHistoryTable: a catalog without lease_history yet
+// (an older backend) sorts on live, then uses, then name — the missing
+// table is no history, not an error.
+func TestImagesSortMissingHistoryTable(t *testing.T) {
+	f := newImagesFixture(t)
+	if _, err := f.raw.Exec(`DROP TABLE lease_history`); err != nil {
+		t.Fatal(err)
+	}
+	f.addImage(t, "quiet", 2, 2048)
+	f.addImage(t, "busy", 2, 2048)
+	f.setUses(t, "busy", 5)
+	f.addImage(t, "held", 2, 2048)
+	f.addLive(t, "l1", "held", "running")
+	got := f.images(t)
+	if len(got) != 3 || got[0].Name != "held" || got[1].Name != "busy" || got[2].Name != "quiet" {
+		t.Fatalf("order = %v", got)
+	}
+}
+
+// TestSortImages pins sortImages' comparisons directly, history or no
+// history: an empty LastUsed (no rows at all yet) sorts last among its
+// live tier.
+func TestSortImages(t *testing.T) {
+	now := fixedNow
+	imgs := []ImageRow{
+		{Name: "b-live", Live: 1, LastUsed: now.Add(-time.Hour)},
+		{Name: "a-dead", Uses: 1},
+		{Name: "a-live", Live: 1, LastUsed: now},
+		{Name: "z-dead", Uses: 2},
+	}
+	sortImages(imgs)
+	want := []string{"a-live", "b-live", "z-dead", "a-dead"}
+	for i, w := range want {
+		if imgs[i].Name != w {
+			t.Fatalf("order = %v, want %v", imgs, want)
+		}
 	}
 }

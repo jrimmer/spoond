@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -399,6 +400,10 @@ type ImageRow struct {
 	VCPU, MemMB   int
 	Live          int
 	Uses          int // lifetime lease grants
+	// LastUsed is when the image was last in use: the newest
+	// lease_history end for the image, or the frame's now while a lease
+	// holds it. The panel's sort key, not drawn.
+	LastUsed time.Time
 }
 
 type collector struct {
@@ -1305,11 +1310,27 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 	}
 	idleRows.Close()
 
-	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != '' ORDER BY name`)
+	imgs, err := db.Query(`SELECT name, vcpu, memory_mb, updated_at FROM images WHERE current_build_id != ''`)
 	if err != nil {
 		return err
 	}
 	defer imgs.Close()
+	// Most recent use per image, from the lease history (the backend's
+	// migration 29; read like image_uses above — no table yet, no
+	// history): the newest ended_at. A live lease means the image is in
+	// use right now, so its last use is this frame's now.
+	lastUse := map[string]time.Time{}
+	if h, err := db.Query(`SELECT image, MAX(ended_at) FROM lease_history GROUP BY image`); err == nil {
+		for h.Next() {
+			var image, ended string
+			if h.Scan(&image, &ended) == nil {
+				if t, err := time.Parse(time.RFC3339Nano, ended); err == nil {
+					lastUse[image] = t
+				}
+			}
+		}
+		h.Close()
+	}
 	for imgs.Next() {
 		var r ImageRow
 		var updated string
@@ -1319,9 +1340,37 @@ func (c *collector) fromDB(s *Snapshot, now time.Time) error {
 		r.Updated = since(now, updated) + " ago"
 		r.Live = live[r.Name]
 		r.Uses = uses[r.Name]
+		r.LastUsed = lastUse[r.Name]
+		if r.Live > 0 && now.After(r.LastUsed) {
+			r.LastUsed = now
+		}
 		s.Images = append(s.Images, r)
 	}
-	return imgs.Err()
+	if err := imgs.Err(); err != nil {
+		return err
+	}
+	sortImages(s.Images)
+	return nil
+}
+
+// sortImages orders the images panel's rows: most live leases first,
+// then the most recent use (the newest lease_history end, a live lease
+// counting as now), then lifetime uses, then name — what a person is
+// using at the top of the panel.
+func sortImages(imgs []ImageRow) {
+	sort.Slice(imgs, func(i, j int) bool {
+		a, b := imgs[i], imgs[j]
+		if a.Live != b.Live {
+			return a.Live > b.Live
+		}
+		if !a.LastUsed.Equal(b.LastUsed) {
+			return a.LastUsed.After(b.LastUsed)
+		}
+		if a.Uses != b.Uses {
+			return a.Uses > b.Uses
+		}
+		return a.Name < b.Name
+	})
 }
 
 // userNames maps user ids to names from the identity store. Only id and
