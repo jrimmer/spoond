@@ -2178,17 +2178,19 @@ func (l *layout) drawImages(g *grid.Grid, x, y, w, h int) int {
 		// summed into its cells. The "+N more" text carries the link
 		// style: the page swaps that span for an anchor to /images
 		// (moreLink); a terminal draws the style as colour and no link,
-		// so the tail names where the uncapped list lives.
+		// so the tail names where the uncapped list lives — cut to the
+		// free width before the fold row's own live cell.
 		live, uses := 0, 0
 		for _, im := range l.s.Images[shown:] {
 			live += im.Live
 			uses += im.Uses
 		}
 		yy := top + 2 + shown
+		room := cols[2].off - cols[0].off - 1
 		g.Segs(x+cols[0].off, yy, []grid.Seg{
 			{Text: fmt.Sprintf("+%d more", folded), Style: "link"},
 			{Text: " · spoond images list", Style: "dim"},
-		}, cols[0].w)
+		}, room)
 		g.Text(x+cols[2].off, yy, fmt.Sprint(live), "dim", cols[2].w)
 		g.Text(x+cols[3].off, yy, fmt.Sprint(uses), "dim", cols[3].w)
 	}

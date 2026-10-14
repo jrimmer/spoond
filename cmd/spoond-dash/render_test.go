@@ -2410,9 +2410,9 @@ func TestImagesPanelCap(t *testing.T) {
 		if !strings.Contains(panel[0], fmt.Sprintf("images · %d · by use", n)) {
 			t.Fatalf("%d images: title wrong: %q", n, panel[0])
 		}
-		// The terminal's fold row names the list; the tail cuts to fit
-		// the name column ("+N more · spoond images" at 23 cells).
-		foldText := fmt.Sprintf("+%d more · spoond images", fold)
+		// The terminal's fold row names the list; the whole tail fits
+		// the wide frame (it cuts before the live cell on a narrow one).
+		foldText := fmt.Sprintf("+%d more · spoond images list", fold)
 		if fold > 0 && !strings.Contains(p, foldText) {
 			t.Fatalf("%d images: fold row %q missing:\n%s", n, foldText, p)
 		}
