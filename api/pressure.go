@@ -68,10 +68,11 @@ func (s *Service) committedMiB() int {
 }
 
 // pressureSkip reports why a tick must not take anything back, before
-// any node or store read: the floor is off, or the drain is in charge
-// of the leases (draining, or an undrain pending — a lease still marked
-// Drained belongs to the undrain's self-heal loop, and a floor pause
-// would fight the resume for the same lease).
+// any node read (the committed gauge has already moved): the floor is
+// off, or the drain is in charge of the leases (draining, or an
+// undrain pending — a lease still marked Drained belongs to the
+// undrain's self-heal loop, and a floor pause would fight the resume
+// for the same lease).
 func (s *Service) pressureSkip(floor int) bool {
 	if floor == 0 {
 		return true // the floor is off (the gauge has already moved)
@@ -85,9 +86,9 @@ func (s *Service) pressureSkip(floor int) bool {
 }
 
 // pressureCheck is one tick of the low-memory loop: read the node
-// fresh, and below the floor pause one lease — the least recently used
-// unpinned lease of the owner furthest over their fair slice, the same
-// choice admission's take-back makes.
+// fresh, and below the floor pause one lease — pressureVictim's pick:
+// the least recently used unpinned lease of the owner furthest over
+// their fair slice, non-busy before busy.
 func (s *Service) pressureCheck(ctx context.Context) {
 	// What the box has promised to live VMs, for the gauge. The store
 	// read needs no node round trip, so the gauge moves every tick —
@@ -176,7 +177,7 @@ func (s *Service) pressureCheck(ctx context.Context) {
 // and every candidate is pinned or no owner is over their slice. It is
 // its own event kind, memory_floor — not box_full, which names an
 // admission's refused requester — and notifies like one (a person must
-// unpinned or release leases to free room; nothing was paused).
+// unpin or release leases to free room; nothing was paused).
 func (s *Service) pressureFloorAlert(short int) {
 	s.log.Printf("memory_floor: %d MiB below the floor; nothing can be taken back (every candidate pinned, or no owner over their slice); nothing was paused or released", short)
 	s.emitLeaseEvent("", "", LeaseMemoryFloor,
