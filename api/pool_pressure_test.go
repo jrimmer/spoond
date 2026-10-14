@@ -221,6 +221,93 @@ func TestDropOnePoolSandbox(t *testing.T) {
 	}
 }
 
+// TestPooledGrantAdmitsNoNewDebit: a grant the pool serves adds no
+// committed memory, so admission neither debits the cache nor credits
+// anything back — a second credit would invent up to a TTL's worth of
+// free memory the box does not have.
+func TestPooledGrantAdmitsNoNewDebit(t *testing.T) {
+	svc, db, sub := newTestService(t)
+	img := seedImage(t, db, "py-base", 2048)
+	svc.cfg.PoolSize = 1
+	svc.probeEnabled = false
+	ctx := context.Background()
+	svc.warmPool(ctx, img)
+	if got := calls(sub.Fake, "Create"); got != 1 {
+		t.Fatalf("setup: the pool made %d create(s), want 1", got)
+	}
+	cachedNode(t, svc, substrate.NodeInfo{Status: "healthy", HugepagesTotal: 4096, HugepageSizeBytes: 2 << 20, HugepagesUsed: 1024})
+
+	l, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if !l.pooled {
+		t.Fatal("the grant did not come from the pool")
+	}
+	if got := calls(sub.Fake, "Create"); got != 1 {
+		t.Fatalf("the pooled grant made %d extra create(s), want none", got-1)
+	}
+	if got := cachedUsedPages(svc); got != 1024 {
+		t.Fatalf("after the pooled grant the cache reads %d pages used, want 1024 (no debit, no double credit)", got)
+	}
+	if got := svc.runningMemoryMiB(); got != 2048 {
+		t.Fatalf("runningMemoryMiB = %d, want 2048 (the same VM counted once, as the lease)", got)
+	}
+}
+
+// TestPooledGrantServedAtOvercommitCap: the box sits at its cap — three
+// live 2048 MiB leases of an 8192 MiB pool at ratio 1.0 plus the 2048
+// MiB pool VM — and a grant that takes over that VM (no new committed
+// memory) is still served, where a cold create would wait on the
+// admission queue.
+func TestPooledGrantServedAtOvercommitCap(t *testing.T) {
+	svc, db, sub, ids := newFairShareService(t)
+	svc.cfg.MemoryOvercommit = 1.0
+	alice := addIdentityUser(t, ids, "alice")
+	svc.probeEnabled = false
+	ctx := context.Background()
+	img := seedImage(t, db, "py-base", 2048)
+	roomyDisk(svc)
+	// Fill the cap with four 2 GiB leases (8 GiB pool at ratio 1.0).
+	for i := 0; i < 4; i++ {
+		fullFreeNode(t, svc, sub)
+		if _, err := svc.grantLease(ctx, leaseRequest{owner: alice.ID, image: "py-base", ttl: time.Hour, persistent: true}); err != nil {
+			t.Fatalf("lease %d of 4: %v", i+1, err)
+		}
+	}
+	// Make exact room for one pool VM by suspending one lease, and stock it.
+	l := svcStoreLeases(t, svc)
+	if _, err := svc.suspend(ctx, alice.ID, l[0].ID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	fullFreeNode(t, svc, sub)
+	svc.cfg.PoolSize = 1
+	svc.warmPool(ctx, img)
+	svc.store.mu.Lock()
+	n := len(svc.store.pool["py-base"])
+	svc.store.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("setup: pool stocked %d sandbox(es), want 1", n)
+	}
+	if got := svc.runningMemoryMiB(); got != 8192 {
+		t.Fatalf("setup: running %d MiB, want 8192 (three live leases + the pool VM) at the cap", got)
+	}
+	fullFreeNode(t, svc, sub)
+	dropNodeCache(svc)
+	svc.updateNodeMetrics(ctx)
+
+	granted, err := svc.grant(ctx, "c", "py-base", time.Minute, true, "", nil, "", "", nil)
+	if err != nil {
+		t.Fatalf("pooled grant on a box at the cap: %v", err)
+	}
+	if !granted.pooled {
+		t.Fatal("the grant at the cap did not come from the pool")
+	}
+	if got := svc.runningMemoryMiB(); got != 8192 {
+		t.Fatalf("after the pooled grant running = %d MiB, want 8192 (the pool VM became the lease)", got)
+	}
+}
+
 // TestPressureTickDropsPoolBeforeLeases: below the floor with a
 // stocked pool AND a takeable over-slice lease, the tick drops the
 // pool sandbox and pauses NO lease; the next tick — the pool gone and
@@ -335,6 +422,23 @@ func midImage(t *testing.T, db *store.DB) store.ImageRow {
 		t.Fatalf("load seeded image mid: %v", err)
 	}
 	return img
+}
+
+// cachedNode replaces the service's NodeInfo cache wholesale (the
+// pooled-grant tests need a fixed reading the grant's own admissions do
+// not refresh), and cachedUsedPages reads the cached HugepagesUsed back.
+func cachedNode(t *testing.T, svc *Service, info substrate.NodeInfo) {
+	t.Helper()
+	svc.nodeInfoMu.Lock()
+	defer svc.nodeInfoMu.Unlock()
+	svc.nodeInfoCache = info
+	svc.nodeInfoAt = time.Now()
+}
+
+func cachedUsedPages(svc *Service) uint64 {
+	svc.nodeInfoMu.Lock()
+	defer svc.nodeInfoMu.Unlock()
+	return svc.nodeInfoCache.HugepagesUsed
 }
 
 // sandboxesLiveIDs lists the sandbox ids the test substrate still
