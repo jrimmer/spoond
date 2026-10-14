@@ -10,6 +10,11 @@ summarised from README "Status".
 
 ## [Unreleased]
 
+## [3.8.1] - 2026-10-14
+
+3.8.1 stops admission from lending out memory a running VM may fault
+back in. No breaking changes, no schema change.
+
 ### Fixed
 
 - **Admission no longer lends out memory a running VM may fault back

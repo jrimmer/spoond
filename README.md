@@ -209,7 +209,7 @@ times, and the newest lease events (from the lease event stream,
 through a read-only `EVENTS_TOKEN`). The header draws `SPOOND ·
 <host>` at the left margin and right-aligns spoond's uptime and the
 frame's clock as `up <dur>, <time>`; the footer is one dim, centred
-line — `Spoond v3.8.0 (2026-10-14) · GitHub` — with the
+line — `Spoond v3.8.1 (2026-10-14) · GitHub` — with the
 dashboard binary's version and its release date, and the GitHub mark
 linking to the project URL (`DASH_PROJECT_URL`), dropping the date on a
 narrow frame. `DASH_SERVICES` includes `spoond-netwatch` by default.
@@ -284,6 +284,11 @@ stack does not exist yet.
 | [Changelog](CHANGELOG.md) | what changed in each release |
 
 ## Status
+
+**v3.8.1: no lending of memory a VM may want back.** Admission caps the
+memory promised to live leases at `MEMORY_OVERCOMMIT` x the hugepage
+pool (default 1.25), so free-page reporting can no longer lead to a VM
+crashing on a full host. No breaking changes.
 
 **v3.8: lease history and records.** Every ended lease leaves a row in
 a new `lease_history` table (with its size, outcome, peak memory,
